@@ -238,7 +238,7 @@ The core innovations above make FrankenGit a correct, economical forge. The same
 
 ### Verifiable reads, not just verifiable writes
 
-Every FrankenGit read already derives from an authenticated `RepositoryAuthorityHead`. The verified-read protocol goes all the way: any ref, object-membership, PR-state, or policy answer can be served with a Merkle inclusion proof connecting it to a head the client verifies independently. A verifying client trusts only the head chain — not the serving cell, mirror, or CDN. That makes FrankenGit the first forge with trustless read serving: mirrors and caches become cryptographically incapable of lying, because a wrong answer fails proof verification instead of being believed. The authenticated roots already exist in the head schema; this is an API surface, not new truth machinery. (Plan §18.7, backlog FG-037.)
+Every FrankenGit read already derives from an authenticated `RepositoryAuthorityHead`. The verified-read protocol goes all the way: any ref, object-membership, PR-state, or outcome answer can be served with a Merkle inclusion proof connecting it to a head the client verifies independently. A verifying client trusts only the head chain — not the serving cell, mirror, or CDN. That makes FrankenGit the first forge with trustless read serving: to verifying clients, mirrors and caches become cryptographically incapable of lying, because a wrong answer fails proof verification instead of being believed. The authenticated roots already exist in the head schema; this is an API surface, not new truth machinery. (Plan §18.7, backlog FG-037.)
 
 ### Time travel as a product primitive
 

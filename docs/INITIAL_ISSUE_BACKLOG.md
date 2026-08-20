@@ -63,8 +63,10 @@ FG-028 (+ named prerequisites per issue)
   ├─ FG-037 verified-read inclusion proofs      (also needs FG-009)
   ├─ FG-038 decision-addressed forge snapshots  (also needs FG-029)
   ├─ FG-039 portable cross-org evidence exchange (also needs FG-030)
-  ├─ FG-040 deterministic build-output reuse     (also needs FG-034)
-  └─ FG-041 mechanized proof of the ordered residue (needs FG-003, FG-009)
+  └─ FG-040 deterministic build-output reuse     (also needs FG-034)
+
+FG-003 + FG-009
+  └─ FG-041 mechanized proof of the ordered residue
 ```
 
 ---
@@ -255,11 +257,12 @@ Pin the exact Asupersync capabilities used by gateways, transfers, publication, 
 **Areas:** runtime, effects, CALM  
 **Risk:** critical
 
-Use reserve/commit/abort obligations for object staging, head publication, outbox delivery, package/release upload, and agent effects.
+Use reserve/commit/abort obligations — plus explicit acknowledgement for externally observed effects — for object staging, head publication, outbox delivery, package/release upload, and agent effects.
 
 **Acceptance:**
 
 - every reserved effect reaches committed/aborted/terminally quarantined state before region close;
+- committed externally observed effects carry a distinct acknowledged state: post-commit retry is idempotent, and region close either records the acknowledgement or leaves an explicit unacknowledged-effect record, never silence;
 - cancellation cannot silently drop a committed effect or publish half an effect;
 - external APIs with weak idempotency use an explicit reconciliation state machine;
 - obligation ledger is replayable and linked to `TxId`/Intent Run;

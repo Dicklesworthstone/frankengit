@@ -126,9 +126,13 @@ trait Obligation {
     fn abort(self, receipt: Self::AbortReceipt) -> SettledObligation;
 }
 
-impl<A> CommittedObligation<A> {
-    fn acknowledge(self, evidence: A) -> SettledObligation;
+trait Acknowledge {
+    type AckEvidence;
+
+    fn acknowledge(self, evidence: Self::AckEvidence) -> SettledObligation;
 }
+
+// CommittedObligation<A> implements Acknowledge with AckEvidence = A.
 ```
 
 Effects with no external observer (for example a local placement write) acknowledge trivially at commit. Effects with an external recipient (webhooks, CI dispatch, billing) remain `Committed` until the acknowledgement evidence arrives; retry after commit is idempotent and cannot duplicate the canonical effect.

@@ -85,9 +85,10 @@ Must check every first-party Rust target and Cargo manifest for:
 - no production subprocess invocation of `git` or another VCS engine;
 - no banned dependency/runtime/native class;
 - one `Cargo.lock` and dated nightly;
-- dependency registry approval and version-universe consistency;
-- build-script/proc-macro/transitive-unsafe evidence;
-- no empty engine crate or placeholder durable abstraction.
+- dependency registry approval, including the resolved Cargo.lock transitive graph;
+- version-universe consistency, build-script/proc-macro policy, and transitive-unsafe evidence (the closed-world name check and build-script/proc-macro refusals run today; version-universe and transitive-unsafe evidence join the lane as that machinery lands);
+- no empty engine crate or placeholder durable abstraction (a review obligation until crate-graph checks exist);
+- exactly one root `Cargo.lock` (nested lockfiles are refused).
 
 ### 5.3 Local execution lane
 
@@ -342,7 +343,7 @@ For each operation row:
 
 ### 15.2 Obligations
 
-Fault/cancel every reserve/commit/abort/transfer/drain boundary for:
+Fault/cancel every reserve/commit/acknowledge/abort/transfer/drain boundary — including the committed-but-unacknowledged window, where retry must be idempotent and region close must leave an explicit unacknowledged-effect record — for:
 
 - object/segment writes;
 - authority CAS;

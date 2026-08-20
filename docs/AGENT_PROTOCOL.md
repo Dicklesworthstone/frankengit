@@ -316,7 +316,7 @@ Coverage claims are typed, for example:
 - all protected policy files;
 - sampled history, not exhaustive history.
 
-Approximate retrieval says approximate. Every packet lists deliberate and budget-induced omissions. No mixed-generation packet is valid without a declared join receipt that names every contributing generation and the join policy; for cross-time queries the receipt names each exact position and labels the packet as a cross-time join rather than a single-position view. This is the same rule as `GRAPH_INTELLIGENCE_ARCHITECTURE.md` §joins and normative invariant 20.
+Approximate retrieval says approximate. Every packet lists deliberate and budget-induced omissions. No mixed-generation packet is valid without a declared join receipt that names every contributing generation and the join policy; for cross-time queries the receipt names each exact position and labels the packet as a cross-time join rather than a single-position view. This is the same rule as `GRAPH_INTELLIGENCE_ARCHITECTURE.md` §2 and normative invariant 20.
 
 ### 7.3 Deterministic ranking receipts
 

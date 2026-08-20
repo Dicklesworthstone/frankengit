@@ -145,7 +145,7 @@ The v3 design now makes the deepest reusable mechanisms structural.
 
 **Problem:** It specified authority-domain writers and a single-node commit store before the new AuthorityStore/decision-head model, and omitted ATP-Git, TreeFS, graph witnesses, local release, and witness refinement.
 
-**Correction:** Replace with a 36-slice G0–G3 dependency graph covering constitutions, reference model, authority profiles, pure-Rust Git, object fabric, concurrency, ATP, TreeFS, forge, agents, graphs/search, repair/GC, CI, DSR, and distributed failover.
+**Correction:** Replace with a 36-slice G0–G3 dependency graph (since extended to a 41-slice G0–G4 graph by the ambition-extension wave) covering constitutions, reference model, authority profiles, pure-Rust Git, object fabric, concurrency, ATP, TreeFS, forge, agents, graphs/search, repair/GC, CI, DSR, and distributed failover.
 
 ### D-020 — Verification tooling could admit arbitrary dependencies
 

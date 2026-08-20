@@ -1594,16 +1594,16 @@ Import/export operates through the pure-Rust engine and verifies round trips aga
 
 ### 18.7 Verified reads and trustless serving (proposal)
 
-Every FrankenGit read already derives from an authenticated `RepositoryAuthorityHead`. The verified-read protocol exposes that fact to clients: any ref, object-membership, forge-position, outcome, or policy answer MAY be served with a Merkle inclusion proof connecting the answer to a named head whose authenticity the client verifies independently. A verifying client then needs to trust only the head chain — not the serving cell, mirror, or CDN.
+Every FrankenGit read already derives from an authenticated `RepositoryAuthorityHead`. The verified-read protocol exposes that fact to clients: any ref, object-membership, forge-position, or outcome answer MAY be served with a Merkle inclusion proof connecting the answer to a named head whose authenticity the client verifies independently. A verifying client then needs to trust only the head chain — not the serving cell, mirror, or CDN.
 
 Consequences:
 
-- mirrors and caches become cryptographically incapable of lying about served state; a wrong answer fails proof verification instead of being silently believed;
+- to a verifying client, mirrors and caches become cryptographically incapable of lying about served state: a wrong answer fails proof verification instead of being silently believed (clients that skip verification keep today's trust model);
 - read serving can be delegated to untrusted infrastructure with no correctness loss, changing the economics of geo-distribution;
 - `fg` and agent clients can pin a head and audit every subsequent answer against it;
 - bounded-stale and snapshot read modes (§22.5) carry proofs against their named older head, making staleness verifiable rather than asserted.
 
-Rules: proofs are an optional response envelope negotiated by capability; proof generation is bounded and cacheable per head/root; authorization still precedes disclosure — a proof of absence must not become an existence oracle across authorization boundaries; and unproven responses remain valid for clients that do not request verification. This is a proposal-class surface: the authenticated roots already exist in the head schema, and the work is proof generation, response framing, and client verification, not new truth machinery.
+Policy answers are excluded until policy snapshots gain their own authenticated proof root: the head binds only a `policy_epoch`, not a policy Merkle root, and claiming proofs over it would overstate the schema. Rules: proofs are an optional response envelope negotiated by capability; proof generation is bounded and cacheable per head/root; authorization still precedes disclosure — a proof of absence must not become an existence oracle across authorization boundaries; and unproven responses remain valid for clients that do not request verification. This is a proposal-class surface: the authenticated roots already exist in the head schema, and the work is proof generation, response framing, and client verification, not new truth machinery.
 
 ---
 
