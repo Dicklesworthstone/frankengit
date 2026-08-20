@@ -1,0 +1,36 @@
+name: Implementation slice
+description: Define one final-abstraction vertical implementation slice.
+title: "slice: "
+labels: ["implementation"]
+body:
+  - type: textarea
+    id: user_value
+    attributes:
+      label: User-visible capability
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Owned invariants
+      description: List invariant IDs and the module/crate that enforces each one.
+    validations:
+      required: true
+  - type: textarea
+    id: refusal
+    attributes:
+      label: Typed refusal and cancellation behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Tests, fault campaigns, and evidence artifacts
+    validations:
+      required: true
+  - type: textarea
+    id: nonclaims
+    attributes:
+      label: Explicit non-claims and deferred work
+    validations:
+      required: true
