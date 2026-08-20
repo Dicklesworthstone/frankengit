@@ -1,6 +1,6 @@
 # FrankenGit Initial Public Issue Backlog
 
-**Status:** proposed G0–G4 dependency graph  
+**Status:** proposed G0–G5 dependency graph (granular truth: the bead graph in `.beads/`)  
 **Last updated:** 2026-08-20  
 **Rule:** an issue closes only with its named evidence artifact; source existence alone is not completion.
 
@@ -10,7 +10,7 @@ Suggested labels:
 
 - areas: `truth`, `git`, `object-fabric`, `concurrency`, `runtime`, `transport`, `workspace`, `forge`, `agent`, `graph`, `search`, `repair`, `security`, `verification`, `release`;
 - types: `spec`, `model`, `implementation`, `conformance`, `fault`, `benchmark`, `counterexample`;
-- gates: `G0`, `G1`, `G2`, `G3`, `G4`;
+- gates: `G0`, `G1`, `G2`, `G3`, `G4`, `G5`;
 - risk: `critical`, `high`, `medium`.
 
 ## Dependency map
@@ -749,6 +749,35 @@ Machine-check the core theorems of the seal/outcome/batch/head protocol against 
 - trace-refinement evidence connects implementation histories to the proved model per §40.5;
 - claims registry rows at `proof` rank link the proof artifacts and their assumptions;
 - gaps are explicit non-claims, never rounded up.
+
+## G5 — Product completion and platform waves
+
+A completeness audit of the comprehensive plan against gates G0-G4 found that the seed slices above cover the truth/transport/workspace/verification core but not the full v1 product and platform surface. The G5 slices below close that gap; their authoritative, fully elaborated definitions (background, acceptance, test plans, dependencies) live in the bead graph (`.beads/issues.jsonl`, slugs `fg042`..`fg065`), which is the granular planning truth. One-line summaries:
+
+- **FG-042** identity/authentication core: users, orgs, teams, tokens, deploy keys, principal snapshots, and the threat-model §7.5a account-takeover controls;
+- **FG-043** policy engine: PolicySnapshots, the deterministic policy language, the full protected-ref vocabulary, break glass, rollout modes;
+- **FG-044** pure-Rust diff/merge-base/three-way merge engine (a dependency FG-029 silently assumed; now explicit);
+- **FG-045** issues, discussions, labels, and notification projections, with a worked event-upcaster;
+- **FG-046** webhook delivery product over the transactional outbox (signatures, rotation, replay, SSRF controls, dead letter);
+- **FG-047** SSH transport service with typed command dispatch and deploy-key auth;
+- **FG-048** schema registry + multi-target codegen and the native REST API (no handwritten wire structs);
+- **FG-049** GitHub compatibility API and forge-state import with a machine-readable gap matrix;
+- **FG-050** server-rendered web UI per the §31.7 principles (a client of the public APIs, never a bypass);
+- **FG-051** full `fg` CLI surface and the §37.8 doctor verb family;
+- **FG-052** materialization accelerators: commit-graph, bitmaps, MIDX, bundles, archives, sparse/FUSE adapters (D7);
+- **FG-053** Git LFS over the artifact fabric;
+- **FG-054** identity-bound statistical policy framework (§33) that the adaptive controllers cite;
+- **FG-055** evidence envelopes, claims registry machinery, and generated status (fgit-claim/fgit-evidence);
+- **FG-056** resource governance, tenant quotas, admission outcomes, fairness, abuse controls (§36);
+- **FG-057** cryptography registry, key management, and encryption domains (ADR D8);
+- **FG-058** SHA-256 repository support (ADR D3);
+- **FG-059** repository incarnations, rename/delete lifecycle, and migration protocol (§11.1, §37.5);
+- **FG-060** artifact/release payload fabric and package phase 1 (§30);
+- **FG-061** open-decision ADR sweep: D5, D9, D10, D12, D13, D15;
+- **FG-062** license-model resolution (D14 — launch-blocking);
+- **FG-063** federation and local-first collaboration phase (§23);
+- **FG-064** context-assembly optimizer and reviewer/runner routing (§25.5, §27.6);
+- **FG-065** hosted multi-tenant operations: evacuation, capability readiness, incident-mode drills, mixed-version upgrades (§37).
 
 ## Backlog governance
 

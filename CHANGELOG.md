@@ -65,6 +65,7 @@ Five capabilities that reuse the existing truth machinery without adding any, ea
 ### Added
 
 - This changelog.
+- The bead graph (`.beads/`): the backlog converted into an executable, self-documenting task graph via beads_rust — first the FG-001..041 seed (137 beads), then a G5 completeness wave (FG-042..065, 32 more beads) closing the gaps a plan-vs-graph audit found: the diff/merge engine FG-029 silently assumed, identity/auth/policy, SSH, APIs/schema codegen, GitHub import, web UI, CLI/doctor, LFS, materialization accelerators, the statistical-policy and claims/evidence frameworks, quotas, crypto/keys, SHA-256 repos, incarnations/migration, packages, federation, hosted operations, and the unhoused open decisions including the launch-blocking license resolution (D14).
 
 ## v3 — 2026-08-20 — FrankenSuite deep-synthesis architecture
 
