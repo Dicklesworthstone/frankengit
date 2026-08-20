@@ -1,7 +1,7 @@
 # FrankenGit Initial Public Issue Backlog
 
-**Status:** proposed G0–G3 dependency graph  
-**Last updated:** 2026-08-19  
+**Status:** proposed G0–G4 dependency graph  
+**Last updated:** 2026-08-20  
 **Rule:** an issue closes only with its named evidence artifact; source existence alone is not completion.
 
 This backlog implements the v3 object-store decision-log architecture in final-abstraction vertical slices. It intentionally begins with identities, reference models, authority semantics, and pure-Rust Git conformance rather than UI scaffolding. Empty crates, placeholder traits disconnected from a runnable slice, and foreign-Git production fallbacks are prohibited by [`AGENTS.md`](../AGENTS.md).
@@ -10,7 +10,7 @@ Suggested labels:
 
 - areas: `truth`, `git`, `object-fabric`, `concurrency`, `runtime`, `transport`, `workspace`, `forge`, `agent`, `graph`, `search`, `repair`, `security`, `verification`, `release`;
 - types: `spec`, `model`, `implementation`, `conformance`, `fault`, `benchmark`, `counterexample`;
-- gates: `G0`, `G1`, `G2`, `G3`;
+- gates: `G0`, `G1`, `G2`, `G3`, `G4`;
 - risk: `critical`, `high`, `medium`.
 
 ## Dependency map
@@ -58,6 +58,13 @@ FG-028
 
 FG-029..035
   └─ FG-036 distributed object-store deployment and failover campaign
+
+FG-028 (+ named prerequisites per issue)
+  ├─ FG-037 verified-read inclusion proofs      (also needs FG-009)
+  ├─ FG-038 decision-addressed forge snapshots  (also needs FG-029)
+  ├─ FG-039 portable cross-org evidence exchange (also needs FG-030)
+  ├─ FG-040 deterministic build-output reuse     (also needs FG-034)
+  └─ FG-041 mechanized proof of the ordered residue (needs FG-003, FG-009)
 ```
 
 ---
@@ -284,7 +291,7 @@ Import FrankenSQLite’s per-core staging/combiner architecture for hot reposito
 
 **Acceptance:**
 
-- deterministic lane state machine (`Writable -> Sealed -> Combining -> Reusable` or refined equivalent);
+- deterministic lane state machine (`Writable -> Sealed -> Combining -> Retired -> Writable`, exactly as in the comprehensive plan §16.2);
 - object validation, intent evaluation, witness creation, and candidate effects remain parallel;
 - one bounded combiner builds a decision batch and attempts one head CAS;
 - overflow/fallback is explicit and cancel-correct;
@@ -655,6 +662,90 @@ Run the same logical protocol across multiple cells/regions without a home-cell 
 - failover requires no mutable Git directory transfer;
 - measured availability, tail latency, RPO/RTO, storage/egress amplification, and cost;
 - public SLO claims remain scoped to the exact deployment/evidence horizon.
+
+## G4 — Ambition extensions
+
+These slices are proposal-class product differentiators built entirely from machinery earlier gates already prove. None of them may introduce a second truth mechanism, and each advances claims only through its registered evidence.
+
+### FG-037 — Implement verified-read inclusion proofs
+
+**Areas:** truth, transport, security  
+**Risk:** high
+
+Serve Merkle inclusion proofs connecting any ref/object-membership/forge-position/outcome answer to a named authenticated head (comprehensive plan §18.7).
+
+**Acceptance:**
+
+- proof envelope is capability-negotiated and versioned; unproven responses remain valid;
+- an independent minimal verifier (no FrankenGit server code) validates proofs against a pinned head;
+- a tampering mirror/CDN corpus proves wrong answers fail verification instead of being believed;
+- absence proofs cannot become existence oracles across authorization boundaries;
+- bounded-stale and snapshot reads carry proofs against their named older head;
+- proof generation cost is bounded, cacheable per head/root, and measured.
+
+### FG-038 — Implement decision-addressed forge snapshots and forge bisection
+
+**Areas:** forge, product, evidence  
+**Risk:** medium
+
+Expose `fg at <decision|rcr|capsule>` read-only snapshots and decision-sequence bisection (comprehensive plan §31.8).
+
+**Acceptance:**
+
+- a snapshot binds one exact decision/RCR position and reports it in every answer;
+- refs, PR/review state, policy epoch, and check receipts render exactly as of that position;
+- bisection over a decision range locates a named forge-state transition deterministically;
+- disclosure uses current authorization while historical policy renders as data; revoked access is never resurrected;
+- snapshot projections are derived state: destroy-and-rebuild yields identical answers;
+- works against snapshots/exports without a hosted service.
+
+### FG-039 — Implement the cross-organization evidence-exchange profile
+
+**Areas:** evidence, federation, security  
+**Risk:** high
+
+Let evidence envelopes, check receipts, and Evidence-Carrying Changes travel between organizations with claims intact (comprehensive plan §34.8).
+
+**Acceptance:**
+
+- exchange schema binds origin trust domain, signer identity/key history, claim class, and replay-completeness grade;
+- imported claims never upgrade in transit; policy maps each grade to what it may satisfy;
+- imported evidence can tighten but never bypass locally required checks;
+- equivocation between exported and origin evidence becomes durable conflict evidence;
+- a dependency-update corpus proves an upstream evidence pack verifies locally end to end;
+- adversarial campaigns cover forged provenance, replayed packs, and trust-domain confusion.
+
+### FG-040 — Implement deterministic build-output reuse
+
+**Areas:** CI, cache, provenance  
+**Risk:** high
+
+Serve declared-deterministic workflow outputs from a trust-scoped content-addressed cache keyed by exact `BuildInputCapsule` identity (comprehensive plan §29.8).
+
+**Acceptance:**
+
+- reuse requires exact capsule-identity match; policy names which check classes accept reuse;
+- reuse receipts name the original producing run; provenance never claims a fresh execution;
+- trust-domain isolation passes the §29.5 cache-poisoning campaigns;
+- declared-nondeterministic steps are never reused; a failed spot-check reverifies the class and records negative evidence;
+- measured hit rate, latency, and compute-cost artifacts on a real workload;
+- reuse never substitutes for release-lane target-native verification.
+
+### FG-041 — Mechanize proofs for the ordered residue
+
+**Areas:** verification, truth, model  
+**Risk:** high
+
+Machine-check the core theorems of the seal/outcome/batch/head protocol against the executable reference model (comprehensive plan §40.8).
+
+**Acceptance:**
+
+- an ADR selects the proof toolchain under the dependency constitution and records alternatives;
+- machine-checked theorems: terminal-outcome uniqueness, head-chain continuity/monotonicity, atomic ref/forge visibility, no lost/fabricated decision under crash/retry/ambiguity, anti-rollback under interrupted publication;
+- the mechanized model and the executable reference model are kept equivalent by generated or differential artifacts;
+- trace-refinement evidence connects implementation histories to the proved model per §40.5;
+- claims registry rows at `proof` rank link the proof artifacts and their assumptions;
+- gaps are explicit non-claims, never rounded up.
 
 ## Backlog governance
 

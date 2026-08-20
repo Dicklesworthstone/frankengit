@@ -3,7 +3,7 @@
 **Document version:** 3.0 — FrankenSuite deep-synthesis architecture  
 **Document status:** public architecture draft  
 **Project status:** pre-implementation  
-**Last revised:** 2026-08-19  
+**Last revised:** 2026-08-20  
 **Project initiator:** Jeffrey Emanuel  
 **Repository:** `Dicklesworthstone/frankengit`  
 **Target service:** `FrankenGit.com`
@@ -1592,6 +1592,19 @@ The registry records present/partial/missing/unsupported behavior, oracle versio
 
 Import/export operates through the pure-Rust engine and verifies round trips against declared upstream Git versions. A migration can preserve Git objects/refs while translating forge state through typed adapters. Unknown or unsupported product semantics are surfaced as reports, not silently dropped.
 
+### 18.7 Verified reads and trustless serving (proposal)
+
+Every FrankenGit read already derives from an authenticated `RepositoryAuthorityHead`. The verified-read protocol exposes that fact to clients: any ref, object-membership, forge-position, outcome, or policy answer MAY be served with a Merkle inclusion proof connecting the answer to a named head whose authenticity the client verifies independently. A verifying client then needs to trust only the head chain — not the serving cell, mirror, or CDN.
+
+Consequences:
+
+- mirrors and caches become cryptographically incapable of lying about served state; a wrong answer fails proof verification instead of being silently believed;
+- read serving can be delegated to untrusted infrastructure with no correctness loss, changing the economics of geo-distribution;
+- `fg` and agent clients can pin a head and audit every subsequent answer against it;
+- bounded-stale and snapshot read modes (§22.5) carry proofs against their named older head, making staleness verifiable rather than asserted.
+
+Rules: proofs are an optional response envelope negotiated by capability; proof generation is bounded and cacheable per head/root; authorization still precedes disclosure — a proof of absence must not become an existence oracle across authorization boundaries; and unproven responses remain valid for clients that do not request verification. This is a proposal-class surface: the authenticated roots already exist in the head schema, and the work is proof generation, response framing, and client verification, not new truth machinery.
+
 ---
 
 ## 19. Garbage collection and retention
@@ -2298,6 +2311,17 @@ Doodlestein Self-Releaser owns the local target matrix, resume semantics, exact 
 
 Job/run cancellation requests drain, then containment. No child process, VM, secret lease, upload, network tunnel, cache write, or release credential may outlive its owning region without an explicit transferred obligation.
 
+### 29.8 Deterministic build-output reuse (proposal)
+
+A check receipt already binds an immutable `BuildInputCapsule` — exact source closure, dependency lock state, toolchain, command, and environment allowlist. When a workflow step declares itself deterministic, its outputs become content-addressed derived state keyed by that capsule identity, exactly like packs and indexes: computed once, shared by profile identity, and discardable without truth loss.
+
+- a build/test result may be served from the trust-scoped output cache when the requested capsule identity matches exactly; policy names which check classes accept reuse;
+- reuse receipts record the original producing run, so provenance never claims a fresh execution;
+- trust domains isolate reuse exactly as cache namespaces do (§29.5): untrusted forks cannot poison trusted reuse;
+- nondeterministic steps are declared, never guessed; a reused output that fails a spot-check reverifies the entire class and records negative evidence.
+
+This yields remote-build-cache economics (in the style of Bazel/Nix reuse) as a corollary of machinery the CI protocol already requires, rather than as a bolt-on service with separate trust rules. Proposal-class until capsule identity and receipt reuse pass conformance and cache-poisoning campaigns.
+
 ---
 
 ## 30. Artifacts, releases, and packages
@@ -2449,6 +2473,7 @@ fg auth
 fg repo
 fg clone
 fg capsule
+fg at
 fg workspace
 fg pr
 fg issue
@@ -2482,6 +2507,17 @@ Human UI principles:
 - mobile review and oversight supported.
 
 The UI is a client of public APIs, not a privileged bypass.
+
+### 31.8 Decision-addressed forge snapshots (proposal)
+
+Because canonical state is an immutable decision stream, “the entire forge at decision N” is a well-defined object, not a reconstruction heuristic. FrankenGit exposes that as a product primitive:
+
+- `fg at <decision|rcr|capsule>` opens a complete read-only forge snapshot — refs, PRs, reviews, policy epoch, check receipts, retention roots — exactly as they stood at that position;
+- forge-state bisection generalizes `git bisect`: binary-search the decision sequence for the transition that introduced a policy outcome, review state, or CI regression, not merely the commit that changed a file;
+- every snapshot answer names its position and may carry verified-read proofs (§18.7), so historical views are as trustworthy as current ones;
+- incident analysis, audit, and agent context can pin “the forge as the actor saw it,” eliminating the reconstruct-from-mutable-tables archaeology that incumbent forges require.
+
+Authorization is evaluated against current policy for disclosure while displaying the historical policy as data; time travel never resurrects access that has since been revoked. Proposal-class: the decision stream and projection machinery already define these semantics, and the work is snapshot projection and interface surface.
 
 ---
 
@@ -2701,6 +2737,17 @@ The append-only negative ledger records failed hypotheses, invalid abstractions,
 ### 34.7 Evidence durability
 
 Critical evidence packs are immutable, checksummed, signed where needed, and assigned retention/repair profiles. A missing evidence artifact weakens the claim and may block release; the system does not infer success from the absence of failure logs.
+
+### 34.8 Portable cross-organization evidence (proposal)
+
+Evidence envelopes, check receipts, and Evidence-Carrying Changes are content-addressed and self-describing, so they can travel between organizations without weakening their claims. The evidence-exchange profile makes the claim lattice a network protocol rather than an internal discipline:
+
+- a dependency update can arrive carrying its upstream’s evidence pack — replayable tests, conformance receipts, SBOM, provenance — verified locally against the same claim-class rules the local repository enforces;
+- imported evidence is always labeled with its origin trust domain and replay-completeness grade; an importing policy decides what each grade may satisfy, and imported evidence can tighten but never bypass local required checks;
+- federation (§23) exchanges evidence bundles with signed identity and equivocation detection, exactly like other federation classes;
+- claims never upgrade in transit: a foreign benchmark stays a benchmark, and a foreign statistical result keeps its population identity or degrades to audit-only.
+
+The compounding effect: organizations that publish strong evidence make their artifacts cheaper for everyone else to adopt safely, which rewards exactly the discipline the lattice encodes. Proposal-class until the exchange schema, trust-domain labeling, and downgrade rules pass adversarial conformance.
 
 ---
 
@@ -2999,9 +3046,9 @@ Latency, throughput, CPU, memory, storage amplification, egress, object requests
 
 For each repository:
 
-\[
-SA = \frac{canonical + repair + replica + retained\ derived}{logical\ reachable\ Git\ bytes}
-\]
+```text
+SA = (canonical + repair + replica + retained derived) / (logical reachable Git bytes)
+```
 
 Report by class. A single aggregate hides pathologies.
 
@@ -3127,6 +3174,17 @@ Algorithms used in authority-adjacent decisions have pinned tie-break policies, 
 ### 40.7 Crash matrices
 
 Every root-last protocol enumerates crash points before/after body write, checksum, sync, manifest, authority CAS, acknowledgement, and cleanup. Reopening must yield the old complete state or the new complete state, never a fabricated mixture; unresolved highest publication fails closed.
+
+### 40.8 Mechanized proof of the ordered residue (proposal)
+
+The design deliberately concentrates all trust into a tiny ordered core: seal creation, terminal-outcome uniqueness, batch normal-form admission, the head conditional replacement, and root-last publication. That core is small enough for actual machine-checked proof, not only bounded model checking:
+
+- target theorems: at most one terminal outcome per sealed `TxId`; head-chain continuity and monotone generation; atomic ref/forge effect visibility; no lost or fabricated decision under crash/retry/ambiguity; anti-rollback under interrupted publication;
+- the mechanization targets the same executable reference model that differential tests use, so the proof and the oracle cannot drift apart silently;
+- proof obligations connect to code through the trace-refinement discipline in §40.5 — a theorem about the model plus refinement evidence for the implementation, each labeled at its own claim class;
+- the claim lattice’s top ranks (`invariant`, `proof`) become occupied rather than merely defined, and README claims at those ranks link the proof artifacts.
+
+Scope discipline: mechanized proof is spent only on the ordered residue and its publication primitives — precisely because everything else was designed to not need it. Proposal-class until a proof toolchain decision (an ADR comparing embeddings and assistants under the dependency constitution) and the first machine-checked theorem land.
 
 ---
 

@@ -281,6 +281,16 @@ Repository-owned commands are authority. Workflow YAML is a local DSR/`act` adap
 
 The signed release manifest is published last after the entire requested matrix and exact assets verify. GitHub Releases is reconciled as a mirror.
 
+## 18a. Ambition extensions built on the same primitives
+
+Five proposal-class capabilities reuse this architecture without adding truth machinery (comprehensive plan §18.7, §29.8, §31.8, §34.8, §40.8; backlog FG-037..FG-041):
+
+- **verified reads:** Merkle inclusion proofs from any answer to a named authenticated head make mirrors/CDNs trustless;
+- **decision-addressed snapshots:** `fg at <decision>` opens the full forge exactly as of one decision, and bisection generalizes from commits to forge state;
+- **cross-organization evidence exchange:** content-addressed evidence packs travel between organizations with claim classes intact — tightening, never bypassing, local checks;
+- **deterministic build-output reuse:** declared-deterministic CI outputs become trust-scoped derived state keyed by exact `BuildInputCapsule` identity;
+- **mechanized proof of the ordered residue:** machine-checked theorems for seal/outcome/batch/head transitions occupy the top of the claim lattice.
+
 ## 19. Strict dependency DAG
 
 Foundation → protocol/storage primitives → canonical engines → derived intelligence/hostile-execution protocols → products/adapters.

@@ -232,6 +232,32 @@ See [`docs/LOCAL_VERIFICATION_AND_RELEASE_PIPELINE.md`](docs/LOCAL_VERIFICATION_
 
 ---
 
+## Beyond parity: what the architecture unlocks
+
+The core innovations above make FrankenGit a correct, economical forge. The same primitives — one authenticated head, an immutable decision stream, content-addressed evidence, and pinned build capsules — also unlock five capabilities no incumbent forge can copy without rebuilding its storage layer. All five are proposal-class designs (see the claim lattice); each has a comprehensive-plan section and a backlog slice.
+
+### Verifiable reads, not just verifiable writes
+
+Every FrankenGit read already derives from an authenticated `RepositoryAuthorityHead`. The verified-read protocol goes all the way: any ref, object-membership, PR-state, or policy answer can be served with a Merkle inclusion proof connecting it to a head the client verifies independently. A verifying client trusts only the head chain — not the serving cell, mirror, or CDN. That makes FrankenGit the first forge with trustless read serving: mirrors and caches become cryptographically incapable of lying, because a wrong answer fails proof verification instead of being believed. The authenticated roots already exist in the head schema; this is an API surface, not new truth machinery. (Plan §18.7, backlog FG-037.)
+
+### Time travel as a product primitive
+
+Because canonical state is an immutable decision stream, “the entire forge at decision N” is a well-defined object — not a reconstruction heuristic over mutable tables. `fg at <decision>` opens a complete read-only forge snapshot: refs, pull requests, reviews, the policy epoch, and CI receipts exactly as they stood. Bisection generalizes from commits to forge state — binary-search the decision sequence for the transition that changed a policy outcome, a review requirement, or a CI result. Incumbent forges cannot offer this without rebuilding storage around an immutable stream. (Plan §31.8, backlog FG-038.)
+
+### The evidence economy
+
+Evidence-Carrying Changes and check receipts are content-addressed and self-describing, so they can travel between organizations with their claims intact. A dependency bump can arrive carrying its upstream’s replayable test evidence and provenance, verified locally under the same claim-class rules the local repository enforces — imported evidence can tighten but never bypass local checks, and a claim never upgrades in transit. This turns the claim lattice from an internal discipline into a network protocol, and it compounds: organizations that publish strong evidence make their artifacts cheaper for everyone downstream to adopt safely. (Plan §34.8, backlog FG-039.)
+
+### Deterministic build outputs as derived state
+
+FrankenGit already treats packs and indexes as “compute once, share by profile identity.” CI outputs with fully pinned `BuildInputCapsule`s are the same shape: when a workflow step is declared deterministic, its outputs become trust-scoped, content-addressed derived state keyed by exact capsule identity. A global build cache — remote-build-cache economics in the style of Bazel — falls out of machinery the CI protocol already requires, with the same trust-domain isolation that protects ordinary caches from fork poisoning. (Plan §29.8, backlog FG-040.)
+
+### Formal verification of the tiny core
+
+The whole design concentrates trust into a deliberately small ordered residue: seals, terminal outcomes, batch admission, one head compare-and-swap, root-last publication. That core is small enough for actual mechanized proof, not just bounded model checking — theorems like terminal-outcome uniqueness, head-chain continuity, and anti-rollback under interrupted publication, machine-checked against the same executable reference model the differential tests use. The top of the claim lattice (`proof`, `invariant`) becomes occupied, not just defined. (Plan §40.8, backlog FG-041.)
+
+---
+
 ## Pure Rust and dependency constitution
 
 The production implementation is pure Rust on Rust 2024 with a dated current nightly pin.
@@ -381,7 +407,7 @@ See the full map in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md`](COMPR
 
 | Document | Purpose |
 |---|---|
-| [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md) | 52-section v3 product, system, and execution plan |
+| [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md) | 53-section v3 product, system, and execution plan |
 | [`docs/NORMATIVE_PROTOCOL_CONTRACTS.md`](docs/NORMATIVE_PROTOCOL_CONTRACTS.md) | Authoritative identity, authority, transaction, repair, and release laws |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Compact component and data-flow map |
 | [`docs/OBJECT_STORE_DECISION_LOG.md`](docs/OBJECT_STORE_DECISION_LOG.md) | Immutable decision batches and conditional authority head |
