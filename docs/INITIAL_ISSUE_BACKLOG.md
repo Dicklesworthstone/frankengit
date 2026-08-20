@@ -1,6 +1,6 @@
 # FrankenGit Initial Public Issue Backlog
 
-**Status:** proposed G0–G5 dependency graph (granular truth: the bead graph in `.beads/`)  
+**Status:** proposed G0–G6 dependency graph (granular truth: the bead graph in `.beads/`)  
 **Last updated:** 2026-08-20  
 **Rule:** an issue closes only with its named evidence artifact; source existence alone is not completion.
 
@@ -10,7 +10,7 @@ Suggested labels:
 
 - areas: `truth`, `git`, `object-fabric`, `concurrency`, `runtime`, `transport`, `workspace`, `forge`, `agent`, `graph`, `search`, `repair`, `security`, `verification`, `release`;
 - types: `spec`, `model`, `implementation`, `conformance`, `fault`, `benchmark`, `counterexample`;
-- gates: `G0`, `G1`, `G2`, `G3`, `G4`, `G5`;
+- gates: `G0`, `G1`, `G2`, `G3`, `G4`, `G5`, `G6`;
 - risk: `critical`, `high`, `medium`.
 
 ## Dependency map
@@ -778,6 +778,32 @@ A completeness audit of the comprehensive plan against gates G0-G4 found that th
 - **FG-063** federation and local-first collaboration phase (§23);
 - **FG-064** context-assembly optimizer and reviewer/runner routing (§25.5, §27.6);
 - **FG-065** hosted multi-tenant operations: evacuation, capability readiness, incident-mode drills, mixed-version upgrades (§37).
+
+## G6 — Doc-derived completion (normative machinery from the full doc set)
+
+A second audit swept the full supporting doc set (NORMATIVE_PROTOCOL_CONTRACTS, VERIFY_SPEC, SECURITY_THREAT_MODEL, AGENT_PROTOCOL, ATP_GIT_PROFILE, GIT_TREE_FS, CALM_AND_OBLIGATIONS, GRAPH_INTELLIGENCE_ARCHITECTURE, RAPTORQ_PERMEATION_MAP, OBJECT_STORE_DECISION_LOG, GIT_COMPATIBILITY_MATRIX, and all registries) against the bead graph and found normative machinery, conformance obligations, and required-v1 rows not owned by any G0-G5 bead. The G6 slices close those; authoritative definitions live in the bead graph (`.beads/`, slugs `fg066`..`fg086`). Summaries:
+
+- **FG-066** cross-cutting security/adversarial program (VERIFY §22): attack-matrix lane + resource-ceiling enforcement + the orphan attack rows (token rollback/forgery, tenant/key confusion, poisoning, operator/DSR compromise);
+- **FG-067** benchmark evidence harness (VERIFY §23 / §38.4 proof contract) the perf beads presuppose;
+- **FG-068** toolchain-refresh lane executing the D15 nightly-advancement policy;
+- **FG-069** build-script/proc-macro enumeration + golden-expansion audit for authority-sensitive generated code;
+- **FG-070** CALM registry load-bearing conformance lane (prove every row is enforced);
+- **FG-071** cross-tenant isolation/existence-oracle campaign (normative invariant 17, release-blocking);
+- **FG-072** verifier-independence classification + enforcement (AGENT_PROTOCOL §independence);
+- **FG-073** effect-broker ledger + external-effect reconciliation ('maybe it happened' is not terminal);
+- **FG-074** SubIntent delegation, attenuation-ancestry proof, bounded fan-out;
+- **FG-075** trust-scoped ATP transfer cache with grants + poisoning quarantine;
+- **FG-076** TreeFS 11-point crash/cancellation interruption matrix (the doc's own gated corpus);
+- **FG-077** RaptorQ permeation for the remaining MUST-encode durable classes (fg024 was the first class only);
+- **FG-078** scrub scheduler + durability health ledger (the repair machine's continuous trigger — 'scrub' was in zero beads);
+- **FG-079** decision-log/segment compaction protocol (OSDL §12: compaction as an ordinary decision);
+- **FG-080** temporal graph query modes + cross-time join receipts (GRAPH §7 — 'temporal' was in zero beads);
+- **FG-081** advisory architecture-analysis graph products (feedback sets, transitive reduction, k-core, shard proposals, drift);
+- **FG-082** graph algorithm set wave 2 (min-cost flow, k-shortest paths, centrality family) that fg064 depended on but no bead built;
+- **FG-083** merge queue engine (required-v1; existed only as a policy predicate before);
+- **FG-084** git-notes conformance + policy controls (required-v1);
+- **FG-085** submodule gitlink preservation + non-delegation (required-v1);
+- **FG-086** external head-continuity witness profile (optional high-value anti-rollback, OSDL §15).
 
 ## Backlog governance
 
