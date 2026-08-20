@@ -1,0 +1,4 @@
+23303a793f8b12f294afd286964491f8adb4184f8384d204336065207823bfc6  /mnt/data/frankengit-initial-source.zip
+6ca65bd12d00eb50eb9d165c1fae0c80e0a81dc34b52f88934619d63b873c2f9  /mnt/data/frankengit-initial-source.tar.gz
+fea09128221cd57af53bb3274d21e65b31d9f72467653bda6b33a7cfa8620b45  /mnt/data/frankengit-initial.bundle
+d3773c2d79f4a5e2831493b4e25cc1104287ed34aa208e4637793e6ad963b97e  /mnt/data/frankengit-initial-repo.tar.gz
