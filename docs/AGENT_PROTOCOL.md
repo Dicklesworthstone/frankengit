@@ -1,310 +1,710 @@
-# FrankenGit Agent Protocol
+# FrankenGit Agent Collaboration Protocol
 
-**Status:** Normative specialization of the agent surface. Canonical mutation, transaction sealing, cancellation, terminal outcomes, and verifier-independence semantics inherit from [`NORMATIVE_PROTOCOL_CONTRACTS.md`](NORMATIVE_PROTOCOL_CONTRACTS.md).
+**Status:** proposed normative companion  
+**Scope:** software agents operating through FrankenGit  
+**Last updated:** 2026-08-19
 
-FrankenGit treats coding agents as first-class principals without pretending they are ordinary human users with faster keyboards. An agent consumes large amounts of context, may run untrusted tools, can generate many speculative mutations, and often acts through a sponsor whose authority must be narrowed rather than copied.
+FrankenGit treats software agents as first-class collaborators, never as ambiently trusted shell sessions. The protocol makes an agent’s sponsor, identity, intent, authority, canonical base, supplied context, workspace state, effects, evidence, resource use, delegation, and terminal outcomes explicit enough that humans and other agents can inspect the change without trusting a conversational transcript.
+
+The protocol is model- and harness-neutral. A local CLI agent, hosted coding agent, deterministic bot, review agent, migration worker, or human-driven automation client uses the same control objects and capability boundaries.
+
+This document refines the general rules in [`NORMATIVE_PROTOCOL_CONTRACTS.md`](NORMATIVE_PROTOCOL_CONTRACTS.md). Canonical publication still occurs through the ordinary transaction seal, decision batch, and repository authority head. The Agent Protocol does not create a second mutation mechanism.
+
+---
 
 ## 1. Design goals
 
-The protocol must let an agent:
+The protocol MUST provide:
 
-- discover relevant repository state without cloning or reading everything;
-- request only the authority needed for one intent;
-- operate in a sparse, reproducible workspace;
-- produce changes and evidence as separate typed outputs;
-- delegate verification without laundering self-review as independence;
-- survive retries and disconnects without duplicate effects;
-- cancel work through quiescence while preserving canonical transaction truth;
-- expose enough provenance for a human or another agent to audit what happened.
+1. **Attribution:** identify sponsor, delegator, agent principal, execution instance, harness, declared model/runtime, and capability issuer.
+2. **Intent integrity:** preserve the exact authorized task independently of repository text, tool output, and later conversation.
+3. **Least authority:** grant only required repositories, refs, paths, operations, secrets, destinations, time, compute, storage, and spend.
+4. **Canonical-base integrity:** pin every read/work/publication attempt to an authenticated authority receipt and exact source generations.
+5. **Workspace isolation:** provide a sparse Git TreeFS copy-on-write environment with explicit process, network, secret, and effect powers.
+6. **Evidence:** bind claims to immutable commands, inputs, outputs, traces, diffs, benchmarks, and verifier attestations.
+7. **Cancellation safety:** close through quiescence without orphaned tasks, credentials, prepared writes, unknown external effects, or hidden budget use.
+8. **Reviewability:** expose equivalent human-readable and machine-compact views from the same canonical records.
+9. **Delegation without amplification:** allow sub-agents while preserving authority ancestry, provenance, budgets, and output contracts.
+10. **Economic accountability:** meter resource use and reserve before expensive or external effects.
+11. **Ordinary Git escape:** publish ordinary Git objects/refs; agent metadata enriches the forge but never traps source history.
 
-It must prevent:
+---
 
-- ambient reuse of a sponsor’s full credential;
-- prompt-injected repository content from granting capabilities;
-- secret access merely because a file ranked highly in search;
-- hidden network, package, or deployment effects;
-- orphan tasks retaining credentials after a run closes;
-- “tests passed” claims without immutable receipts;
-- ambiguous push results after cancellation or connection loss;
-- multiple cooperating agents silently becoming one unaccountable identity.
+## 2. Threat assumptions
 
-## 2. Identities
+The protocol assumes:
 
-The protocol distinguishes:
+- repository files, issues, comments, diffs, webpages, package metadata, test output, and tool responses may contain prompt injection;
+- an agent may misunderstand intent, hallucinate state, fabricate evidence, select the wrong tool, or omit critical context;
+- a model, harness, plugin, verifier, or workspace image may be compromised;
+- producer and verifier may collude or share hidden state;
+- retries, cancellation, crash, process pause, and partitions may occur after effects begin;
+- external services may lack idempotency or return ambiguous failures;
+- secrets may be requested through malicious content;
+- agents may broaden scope, recurse indefinitely, or consume excessive resources;
+- a fully authorized patch may still be incorrect or malicious.
 
-- `SponsorId`: human or service principal that authorizes the run;
-- `AgentPrincipalId`: principal representing one configured agent identity;
-- `HarnessId`: executable/orchestrator identity, version, and build digest;
-- `ModelClaim`: optional declared model/provider/version; it is provenance, not authentication;
-- `IntentRunId`: stable identity of one sponsored run;
-- `AttemptId`: one execution attempt inside the run;
-- `WorkspaceId`: one sparse copy-on-write materialization;
-- `ContextPacketId`: immutable identity of one supplied context packet;
-- `EvidenceBundleId`: immutable identity of collected evidence;
-- `TxId`: canonical mutation identity defined by the repository protocol, not by the agent harness.
+Correctness therefore comes from capability enforcement, typed state machines, canonical publication, obligation settlement, and evidence verification—not from asking an agent to behave.
 
-A run may have several attempts and workspaces. Retries do not silently become a new sponsored intent. A new intent, expanded authority, changed base state, or materially different requested effect requires a new run or an explicit amendment record.
+---
 
-## 3. Intent Run
+## 3. Identities and roles
 
-```rust
-struct IntentRun {
-    intent_run_id: IntentRunId,
-    sponsor: SponsorSnapshot,
-    agent_principal: AgentPrincipalSnapshot,
-    harness: HarnessIdentity,
-    model_claim: Option<ModelClaim>,
+### 3.1 Sponsor
 
-    tenant_id: TenantId,
-    repository_id: RepositoryId,
-    base_repository_commit: RepositoryCommitId,
-    optional_base_capsule: Option<RepositoryCapsuleId>,
+A `SponsorId` is the human or organizational principal accountable for authorizing an Intent Run. Sponsorship records who granted authority; it does not imply authorship of every line.
 
-    human_intent: String,
-    machine_intent: CanonicalIntent,
-    capabilities: CapabilitySet,
-    budgets: BudgetEnvelope,
-    disclosure_policy: DisclosurePolicy,
-    required_evidence: EvidencePolicy,
-    required_verifiers: VerifierPolicy,
+### 3.2 Agent principal
 
-    issued_at: LogicalTime,
-    expires_at: TimeConstraint,
-    revocation_handle: RevocationHandle,
+```text
+AgentPrincipal {
+  principal_id,
+  display_name,
+  owner_or_operator,
+  public_keys,
+  allowed_harness_classes,
+  reputation_scope,
+  created_at,
+  revoked_at?
 }
 ```
 
-The human description is preserved but does not define authority. `CanonicalIntent`, capabilities, budgets, and policy fields do.
+A logical principal may persist across runs. It has no authority without an Intent Run and capability chain.
 
-### 3.1 Capability attenuation
+### 3.3 Agent instance
 
-Capabilities are explicit and composable:
+An `AgentInstanceId` identifies one execution and binds:
 
-- repository read at a pinned canonical position;
-- path/semantic-class read filters;
-- search and graph query budgets;
-- create sparse workspace;
-- execute approved tools/images;
-- access named package mirrors;
-- access named secret handles for a named effect;
-- create commits or refs under allowed namespaces;
-- open/update an issue or pull request;
-- request CI checks;
-- request deployment to a named environment;
-- spend bounded compute, storage, network, or money;
-- ask for human escalation.
+- principal;
+- harness and version;
+- declared model/provider/runtime or deterministic implementation;
+- executable/container/environment commitment where available;
+- sponsor and delegating parent;
+- attestation domain;
+- start, expiry, and revocation handle.
 
-A sponsor token is never placed in the workspace. The capability service mints short-lived, audience-bound, run-bound credentials. Delegation can only attenuate authority unless an authorized sponsor records an amendment.
+Model identity is provenance, not a security guarantee. The system remains correct when the declaration is absent or false.
 
-### 3.2 Budgets
+### 3.4 Capability issuer
 
-A `BudgetEnvelope` includes hard ceilings and soft objectives:
+The issuer evaluates organization/repository policy and creates attenuated audience-bound capabilities. It may be a self-hosted repository, organization authority, or managed FrankenGit service.
 
-- wall-clock deadline and active CPU time;
-- maximum tasks/processes and concurrency;
-- bytes read, written, uploaded, and downloaded;
-- search queries and context tokens;
-- package downloads and external requests;
-- CI minutes and runner classes;
-- monetary spend;
-- number/rate of ref or forge mutations;
-- secret uses and effect invocations.
+### 3.5 Independent verifier
 
-Budget exhaustion is a typed outcome. It does not grant permission to skip required verification or silently widen scope.
+A verifier is a separately identified principal or deterministic service. Independence is a typed evidence class, not self-declaration. Dimensions include:
 
-## 4. Context Packets
+- mutable workspace;
+- credentials and effect authority;
+- model/harness implementation;
+- supplied context and hidden state;
+- oracle/toolchain;
+- operator/organization;
+- human oversight.
 
-A Context Packet is a content-addressed, provenance-preserving view over one pinned repository state.
+Policy states which dimensions must differ for each risk class.
 
-```rust
-struct ContextPacket {
-    packet_id: ContextPacketId,
-    repository_id: RepositoryId,
-    repository_commit_id: RepositoryCommitId,
-    query_intent_digest: Digest,
-    policy_epoch: PolicyEpoch,
-    entries: Vec<ContextEntry>,
-    omissions: Vec<OmissionReceipt>,
-    retrieval_receipt: RetrievalReceipt,
-    byte_count: u64,
-    token_estimate: u64,
+### 3.6 Child agent
+
+A child receives a `SubIntent`, attenuated capabilities, bounded budget, exact inputs, output schema, and evidence requirements. The parent cannot delegate authority or budget it does not possess.
+
+---
+
+## 4. Canonical base and authority receipts
+
+### 4.1 `AuthorityReadReceipt`
+
+Every run begins from a verified authority read:
+
+```text
+AuthorityReadReceipt {
+  repository_id,
+  authority_head_id,
+  authority_head_generation,
+  backend_version_token,
+  latest_decision_batch_id,
+  latest_repository_sequence,
+  latest_repository_commit_id,
+  ref_root,
+  forge_position_root,
+  retention_root,
+  policy_epoch,
+  format_epoch,
+  verified_at_logical_time,
+  verifier_profile,
 }
 ```
 
-Each entry records:
+The receipt proves what the agent was allowed to treat as current at workspace creation. A backend ETag/version without an authenticated head-body check is insufficient.
 
-- source object/path/span and native Git object ID;
-- canonical repository position;
-- retrieval channels and ranks;
-- transformations such as parsing, chunking, or rendering;
-- integrity digest of supplied bytes;
-- authorization class;
-- relationship to other entries.
+### 4.2 Checkpoint relationship
 
-An omission receipt states what was deliberately excluded: binary objects, generated files, oversized history, inaccessible paths, low-ranked candidates, secret-bearing content, or budget-truncated results. The packet never implies completeness unless a policy-defined completeness proof accompanies it.
+A run MAY also name a repository capsule/checkpoint used to accelerate materialization or restore. The checkpoint is not current-state authority. The AuthorityReadReceipt names the current head and any suffix replayed beyond the checkpoint.
 
-Search and graph results remain candidates. Retrieval cannot override access control. Prompt text in repository files is untrusted data and cannot mint capabilities or modify the Intent Run.
+### 4.3 Refresh
 
-## 5. Sparse copy-on-write workspace
+A workspace never silently floats. Refresh creates a new receipt and one explicit relation:
 
-An agent workspace is derived from a pinned RCR/capsule plus explicit Context Packets and lazy object promises. It has:
+- `FastForwarded`;
+- `RebasedByIntentReplay`;
+- `RebasedByStructuredPatch`;
+- `MergedByDeclaredProof`;
+- `ConflictRefused`.
 
-- immutable base layers;
-- a run-owned copy-on-write overlay;
-- descriptor-relative/path-safe file access;
-- deterministic workspace manifest;
-- bounded lazy fetches through the capability gateway;
-- no ambient host filesystem, cloud metadata, or credential store;
-- separately mounted input, output, cache, and secret/effect channels;
-- lifecycle ownership by one structured-concurrency region.
+The evidence record distinguishes checks performed before and after refresh.
 
-Closing the run cancels and drains child tasks, revokes capabilities, seals evidence, and destroys or retains the workspace according to policy. A workspace may be retained as an immutable debugging artifact, but retained bytes do not retain live credentials.
+---
 
-## 6. Effects
+## 5. Intent Run
 
-Tools do not receive arbitrary network or host authority. Effects are brokered:
+The **Intent Run** is the authoritative agent control object. Natural language may explain the goal; machine fields enforce scope.
 
-```rust
-struct EffectRequest {
-    intent_run_id: IntentRunId,
-    attempt_id: AttemptId,
-    capability_id: CapabilityId,
-    effect_kind: EffectKind,
-    canonical_parameters: Bytes,
-    input_root: Digest,
-    idempotency_key: IdempotencyKey,
-    budget_reservation: BudgetReservation,
+```text
+IntentRun {
+  schema_version,
+  run_id,
+  sponsor_id,
+  agent_principal_id,
+  agent_instance_constraints,
+  parent_run_id?,
+  repository_id,
+  base_authority_receipt,
+  optional_checkpoint_id?,
+  target_refs,
+  objective,
+  acceptance_contract,
+  allowed_path_patterns,
+  denied_path_patterns,
+  allowed_operation_classes,
+  required_evidence,
+  verifier_policy,
+  publication_policy,
+  resource_budget,
+  secret_policy,
+  network_policy,
+  delegation_policy,
+  retention_and_disclosure_policy,
+  expiry,
+  request_commitment,
+  sponsor_authorization,
 }
 ```
 
-The broker produces an immutable receipt with decision, exact parameters, redactions, result digest, resource usage, and canonical transaction identity where applicable.
+### 5.1 Objective and acceptance contract
 
-Effects are classified:
+`objective` is explanatory and cannot widen machine scope. The acceptance contract lists observable requirements: tests, compatibility cases, benchmarks, paths, migrations, security checks, documentation, and allowed uncertainty. Every requirement receives a terminal disposition.
 
-1. **pure/local:** parsing, formatting, static analysis;
-2. **sandboxed execution:** tests/builds with declared image and inputs;
-3. **retrieval:** repository objects, packages, external documents;
-4. **forge mutation:** commits, refs, issues, reviews, labels;
-5. **external side effect:** webhooks, deployments, email, payments, cloud changes.
+### 5.2 Identity
 
-Higher classes require stronger policy, idempotency, and evidence. An agent may prepare an effect request it lacks authority to execute; the system presents it for approval rather than pretending success.
+The canonical Intent Run bytes are committed into `run_id` under a versioned domain. Reusing a run ID with different bytes is a terminal protocol violation.
 
-## 7. Evidence-Carrying Change
+### 5.3 Repository text is not control metadata
 
-```rust
-struct EvidenceCarryingChange {
-    change_id: ChangeId,
-    intent_run_id: IntentRunId,
-    base_repository_commit: RepositoryCommitId,
-    proposed_object_closure_root: Digest,
-    proposed_ref_delta: RefDelta,
+Files, comments, issues, tool output, and external pages are untrusted data. They cannot alter the Intent Run, capabilities, verifier policy, publication policy, or budgets.
 
-    context_packet_ids: Vec<ContextPacketId>,
-    workspace_manifest: WorkspaceManifestId,
-    tool_receipts: Vec<EffectReceiptId>,
-    check_receipts: Vec<CheckReceiptId>,
-    claimed_invariants: Vec<InvariantClaim>,
-    explicit_non_claims: Vec<NonClaim>,
-    known_omissions: Vec<OmissionReceipt>,
-    verifier_attestations: Vec<VerifierAttestation>,
+---
+
+## 6. Capability model
+
+Capabilities are unforgeable, audience-bound authorizations checked by the service performing the operation.
+
+```text
+Capability {
+  capability_id,
+  issuer,
+  subject_agent_instance,
+  tenant_id,
+  repository_id?,
+  operation,
+  resource_selector,
+  ref_selector?,
+  path_selector?,
+  secret_class?,
+  network_destination_class?,
+  max_calls?,
+  max_bytes?,
+  max_cost?,
+  not_before,
+  expires_at,
+  parent_capability?,
+  intent_run_id,
+  tx_or_effect_binding?,
+  audience,
+  caveats,
+  issuer_authenticator,
 }
 ```
 
-Evidence is not collapsed into one “confidence” number. Policy can require specific evidence classes: unit, differential, model, fuzz, deterministic schedule, fault injection, benchmark, security review, or human approval.
+### 6.1 Initial operation classes
 
-A claim names its scope and supporting artifact. Failed, skipped, flaky, quarantined, or budget-truncated checks remain visible. A tool’s exit code alone is not a proof artifact; the receipt binds executable identity, inputs, environment, outputs, and resource limits.
+- read canonical object/body;
+- read authorized derived generation;
+- create/read/modify TreeFS workspace;
+- execute sandboxed process;
+- access named network destination/class;
+- request purpose-bound secret handle;
+- invoke external integration;
+- create immutable candidate object;
+- prepare publication transaction;
+- submit review/check/evidence;
+- mutate issue/comment/forge entity;
+- delegate sub-intent;
+- consume compute/model/storage/network budget.
 
-## 8. Verifier independence
+A broad `repo_write` or inherited sponsor token is forbidden.
 
-Verifier policy classifies independence dimensions:
+### 6.2 Attenuation
 
-- separate agent principal;
-- separate model/harness family;
-- fresh context packet generation;
-- immutable clean workspace;
-- no write capability to the proposed branch;
-- separate credentials and secret scope;
-- independent test oracle or implementation;
-- no shared hidden conversation state;
-- human reviewer.
+Delegation may only intersect selectors, reduce quotas, shorten expiry, narrow operations, bind additional identities, and add caveats. A verifier checks the complete ancestry. Missing ancestry or amplification is refused.
 
-A proposer running the same test twice is useful repeatability evidence but not independent review. Independence is policy-defined and machine-recorded, never inferred from a self-description.
+### 6.3 Revocation and freshness
 
-## 9. Canonical mutation and cancellation
+High-value tools validate revocation/freshness at effect time, not only workspace creation. Revocation is interpreted at a named canonical position. Cached capability decisions have explicit maximum age and invalidation.
 
-The agent submits a sealed mutation request under the same repository transaction protocol as every other client.
+---
 
-- Before transaction sealing, cancellation may remove the request without canonical effect.
-- After sealing, cancellation requests cooperative drain but cannot assert that the mutation did not commit.
-- After metadata linearization, cancellation affects response delivery and downstream work only.
-- Ambiguous disconnects are resolved by querying `TxnOutcomeRecord` using `TxId`.
+## 7. Context Packet
 
-The Intent Run may close while a repository transaction has a terminal committed/refused result. The run record links that result. No harness status such as `cancelled` or `timed_out` overrides canonical repository truth.
+A **Context Packet** is a bounded, provenance-preserving retrieval product. It is not an unstructured prompt dump and never claims completeness without a closure proof.
 
-## 10. Multi-agent collaboration
+```text
+ContextPacket {
+  packet_id,
+  repository_id,
+  authority_read_receipt,
+  source_generation_set,
+  request_intent,
+  authorization_scope,
+  retrieval_budget,
+  sources[],
+  relationships[],
+  omissions[],
+  coverage_claims[],
+  ranking_and_fusion_identity,
+  decision_witnesses[],
+  packet_commitment,
+}
+```
 
-Agents collaborate through immutable messages and artifact identities, not shared mutable memory by default. A delegation record names:
+Each source entry records:
 
-- delegator and delegatee;
-- narrowed intent and capabilities;
-- input artifact roots;
-- expected output schema;
-- budgets/deadline;
-- disclosure and verifier policy.
+- immutable object/forge identity;
+- path/ref/commit context;
+- byte/AST/diff span;
+- exact source generation and canonical position;
+- retrieval channel: exact, lexical, symbol, structural, semantic, graph, history, ownership, test, policy;
+- score/calibration metadata where meaningful;
+- authorization receipt;
+- transform/summarization lineage;
+- freshness and invalidation conditions.
 
-Results are returned as artifacts plus receipts. Concurrent proposals target explicit base states. Merge/rebase is a new typed operation with its own evidence; silently editing another agent’s workspace is prohibited.
+### 7.1 Control versus source channels
 
-## 11. Secret handling
+Context has two structurally distinct channels:
 
-Secrets are handles, not context bytes. Policy grants a handle for one audience and effect. The broker injects it only at the effect boundary and redacts it from logs, packets, model input, diffs, and evidence payloads.
+1. authenticated control metadata generated under the Intent Run;
+2. visibly delimited untrusted source content.
 
-The system scans proposed objects and artifacts for likely credentials before publication, but scanning is defense in depth, not permission to expose secrets upstream. Forks and pull requests from less-trusted principals receive no privileged secret handles unless an explicit reviewed policy grants them.
+Human, API, and compact agent renderings preserve the separation. A source file cannot masquerade as a capability or system instruction.
 
-## 12. Prompt injection and untrusted content
+### 7.2 Coverage and omissions
 
-Repository text, issues, reviews, build logs, package metadata, generated documentation, and external web content are untrusted. They may contain instructions directed at agents. The harness renders provenance and trust class, keeps system/sponsor policy out of writable workspaces, and routes all effects through capability checks.
+Coverage claims are typed, for example:
 
-No textual instruction can:
+- exhaustive authorized paths matching pattern P at authority head H;
+- all direct reverse dependencies in graph generation G;
+- top-k semantic candidates under model/index identity M;
+- all protected policy files;
+- sampled history, not exhaustive history.
 
-- widen capabilities;
-- reveal a secret;
-- alter the base RCR;
-- suppress required evidence;
-- mark itself trusted;
-- approve its own change;
-- change disclosure policy.
+Approximate retrieval says approximate. Every packet lists deliberate and budget-induced omissions. No mixed-generation packet is valid unless a declared join receipt proves a common source position.
 
-## 13. Human experience
+### 7.3 Deterministic ranking receipts
 
-Humans receive a concise but inspectable run view:
+Any graph/search operation whose ordering affects context selection names a closed tie-break policy and emits a decision-path/complexity witness. Statistical ranking remains advisory and identity-bound; deterministic exact channels remain available as fallback.
 
-- intent and sponsor;
-- base state and current drift;
-- capabilities/budgets used;
-- context supplied and omitted;
-- proposed changes;
-- checks and failures;
-- external effects;
-- verifier independence;
-- canonical transaction outcome;
-- replay/debug artifacts subject to retention policy.
+---
 
-The interface distinguishes agent narrative from machine receipts. Explanations are useful; receipts are authoritative about recorded effects.
+## 8. Git TreeFS workspace
 
-## 14. Minimum release-blocking invariants
+An agent workspace is a disposable Git TreeFS materialization identified by `WorkspaceId`.
 
-1. No agent can exercise a capability absent from its Intent Run or amendment.
-2. Delegation never widens authority.
-3. Workspace closure leaves no live child task or credential.
-4. Context retrieval cannot bypass repository authorization.
-5. Every supplied byte has source provenance or is labeled generated/untrusted.
-6. Omissions caused by policy or budget are inspectable.
-7. Secret handles do not enter model context or committed objects.
-8. Every external effect has a stable idempotency key and receipt.
-9. Agent cancellation cannot create an ambiguous second repository outcome.
-10. Proposer and verifier independence classes are machine-enforced.
-11. A stale base cannot merge without revalidation under current policy.
-12. Failed/skipped checks cannot be rendered as passed.
-13. Prompt-injected content cannot alter capabilities or evidence requirements.
-14. The human sponsor can revoke future effects without rewriting committed history.
-15. Run replay states exactly which external effects are modeled, recorded, or non-replayable.
+```text
+WorkspaceManifest {
+  workspace_id,
+  intent_run_id,
+  base_authority_receipt,
+  optional_checkpoint_id?,
+  sparse_path_set,
+  base_tree_roots,
+  overlay_root,
+  intent_log_root,
+  process_profile,
+  network_profile,
+  secret_handle_ids,
+  budget_profile,
+  staged_epoch,
+  visible_epoch,
+  durable_epoch,
+  manifest_commitment,
+}
+```
+
+### 8.1 Creation
+
+Workspace creation resolves:
+
+- current authority receipt and optional checkpoint+suffix;
+- authorized sparse path set;
+- immutable base tree/blob objects;
+- writable COW overlay;
+- descriptor-relative path root;
+- process/network/secret/effect capabilities;
+- CPU, memory, disk, process, time, and output budgets.
+
+### 8.2 Path safety
+
+All path resolution is relative to an opened capability root. The host rejects traversal, symlink/reparse/hardlink escape, device nodes, alternate streams, case-fold ambiguity, reserved names, and platform-specific aliasing according to the workspace profile. Lazy fetch rechecks authorization at object resolution.
+
+### 8.3 Intent log and snapshot
+
+Overlay mutation produces an append-only intent log. Snapshots use root-last publication and explicit staged/visible/durable epochs. Crash replay reconstructs the overlay or refuses; it never exposes a partially published snapshot as complete.
+
+### 8.4 Process isolation
+
+Subprocesses receive only explicit handles, environment, filesystem roots, network routes, secret handles, budgets, and child-task ownership. No cloud metadata, sponsor credential, host home directory, Docker socket, or ambient repository token is inherited.
+
+### 8.5 Diff and object closure
+
+Publication derives a deterministic net-effect normal form, ordinary Git object closure, and source-spanned diff. Generated and ignored files remain visible to evidence policy; “ignored” is not “nonexistent.”
+
+---
+
+## 9. Effect broker and obligation ledger
+
+Every consequential operation uses an Asupersync-owned obligation and produces a ledger record.
+
+```text
+EffectRecord {
+  effect_id,
+  run_id,
+  agent_instance_id,
+  parent_effect_id?,
+  capability_id,
+  operation,
+  canonical_input_commitment,
+  source_authority_receipt?,
+  budget_reserved,
+  external_idempotency_key?,
+  obligation_state,
+  terminal_outcome?,
+  output_commitments[],
+  budget_consumed,
+  reconciliation_evidence?,
+}
+```
+
+Obligation states are typed reserve/commit/abort/finalize transitions. Region closure requires every obligation to be settled or terminally quarantined.
+
+The ledger distinguishes:
+
+- pure canonical reads;
+- derived local writes;
+- immutable candidate creation;
+- prepared canonical mutation;
+- committed/refused canonical mutation;
+- external effects such as email, deployment, package publication, cloud resource change, or billing reservation.
+
+At-least-once retries use stable effect identities. An external API without idempotency support is wrapped by an effect-specific reconciliation protocol. “Maybe it happened” is not a valid terminal state for a registered effect.
+
+---
+
+## 10. Evidence-Carrying Change
+
+```text
+EvidenceCarryingChange {
+  change_id,
+  intent_run_id,
+  base_authority_receipt,
+  refreshed_authority_receipt?,
+  reconciliation_record?,
+  proposed_git_object_closure,
+  proposed_commits[],
+  workspace_manifest,
+  net_effect_root,
+  diff_commitment,
+  context_packet_ids[],
+  requirement_dispositions[],
+  evidence_records[],
+  known_limitations[],
+  negative_evidence_refs[],
+  risk_classification,
+  requested_publication,
+  producer_attestation,
+}
+```
+
+### 10.1 Evidence record
+
+Each record states:
+
+- claim supported and claim class;
+- exact implementation/toolchain/command;
+- inputs, environment, source position, and budgets;
+- output artifact identity;
+- pass/fail/refused/indeterminate outcome;
+- scope, assumptions, and exclusions;
+- replay completeness class;
+- verifier identity/independence class;
+- freshness/invalidation conditions.
+
+“All tests pass” is a summary, not evidence.
+
+### 10.2 Requirement disposition
+
+Each acceptance requirement is exactly one of:
+
+- satisfied with evidence;
+- partially satisfied with explicit boundary;
+- not applicable with reason;
+- blocked by typed refusal;
+- unsatisfied.
+
+Missing requirements cannot disappear from a generated summary.
+
+### 10.3 Known limitations and negative evidence
+
+Agents are rewarded for disclosing uncertainty, stale context, untested platforms, flaky evidence, performance noise, migration risk, and semantic assumptions. Failed hypotheses link the negative-evidence ledger so later agents do not repeat them as novel ideas.
+
+---
+
+## 11. Verification and review
+
+### 11.1 Deterministic verification
+
+Schema, formatting, identity, path policy, dependency constitution, required checks, evidence signatures, decision replay, and source-span consistency are deterministic services.
+
+### 11.2 Independent agent review
+
+A review agent receives the Intent Run, proposed closure/diff, evidence, relevant Context Packets, and a distinct review capability. It does not receive producer hidden state or unrestricted secrets unless policy deliberately classifies that weaker evidence. Findings include severity, location, invariant, evidence, confidence, proposed disposition, and decision witness.
+
+### 11.3 Human review
+
+The human view shows:
+
+- sponsor/agent/delegation lineage;
+- canonical base and refresh relation;
+- changed paths/risk classes;
+- evidence graph and stale/failed checks;
+- exact capabilities and external effects;
+- resource cost;
+- omissions and unresolved uncertainty;
+- publication transaction to authorize.
+
+Human approval is a signed/authorized canonical forge event under a named policy snapshot. It is not inferred from conversational wording or a reaction emoji.
+
+### 11.4 Example policies
+
+Repositories may require:
+
+- human approval for every agent-authored change;
+- independent agent plus human review for auth/crypto/workflow/release paths;
+- multiple native builds for release code;
+- no production-secret access;
+- changed-line, dependency, capability, or cost ceilings;
+- mandatory refresh and rerun after target movement;
+- automatic merge only for low-risk generated updates with complete deterministic evidence.
+
+---
+
+## 12. Publication protocol
+
+An agent never directly sets a ref. It submits a publication proposal that becomes the ordinary sealed repository mutation.
+
+Publication binds:
+
+- target refs and expected values;
+- proposed Git object closure and net effects;
+- current/permitted authority receipt;
+- Intent Run, Context Packet, evidence, and verifier identities;
+- approvals/checks and policy snapshot;
+- actor/capability;
+- stable idempotency key.
+
+If the authority head changed, policy may:
+
+- refuse with a conflict certificate;
+- require new context and reconciliation;
+- replay declared intents;
+- apply a structured patch/merge proof;
+- enter a deterministic merge queue;
+- accept only if refined witnesses prove all relevant reads/invariants remain valid.
+
+A successful head CAS publishes one decision batch containing the RCR and returns the immutable transaction outcome plus new AuthorityReadReceipt. It does not return a newly minted capsule unless a checkpoint was independently created for that exact RCR. A timeout is resolved by `TxId` lookup.
+
+---
+
+## 13. Delegation protocol
+
+```text
+SubIntent {
+  child_run_id,
+  parent_run_id,
+  objective,
+  input_commitments,
+  output_schema,
+  attenuated_capabilities,
+  budget,
+  deadline,
+  required_evidence,
+  disclosure_policy,
+}
+```
+
+The child returns an immutable result bundle. The parent validates schema, commitments, evidence, and authority ancestry before use. Child prose is untrusted data. Recursion depth, fan-out, aggregate budget, context duplication, and wall-clock are bounded.
+
+Delegation lineage and cost remain visible in the final Evidence-Carrying Change.
+
+---
+
+## 14. Cancellation, failure, and quiescence
+
+### 14.1 Causes
+
+Sponsor request, policy revocation, timeout, budget exhaustion, superseded run, security quarantine, operator shutdown, parent failure, or repository deletion may request cancellation.
+
+### 14.2 Canonical mutation boundary
+
+- before transaction sealing: cancellation may leave no canonical transaction;
+- after sealing but before head publication: work drains/aborts safely; later retry uses the same sealed identity;
+- after successful head publication: canonical result remains; only response/outbox/derived work may cancel.
+
+Cancellation never asserts non-commit.
+
+### 14.3 Quiescence
+
+A run is `Quiescent` only after:
+
+- child tasks and agents are joined or terminally quarantined;
+- processes and network sessions stop;
+- temporary capabilities/secrets are revoked or expire;
+- prepared candidate writes are aborted, retained under policy, or resolved;
+- canonical/external effects are reconciled by stable identity;
+- workspace retention/deletion is decided;
+- logs/evidence are sealed;
+- budget accounting is final;
+- no unresolved obligation remains.
+
+---
+
+## 15. Budgets and economics
+
+An Intent Run may bound:
+
+- model/tool tokens or monetary cost;
+- CPU/GPU time;
+- memory and TreeFS storage;
+- object bytes/requests;
+- network ingress/egress and destinations;
+- wall-clock duration;
+- process count;
+- context/retrieval bytes;
+- external API calls;
+- changed files/bytes/lines;
+- delegated depth/fan-out;
+- publication attempts and witness-refinement budget.
+
+Expensive operations reserve before execution. Settlement uses measured consumption. Budget exhaustion requests cancellation and returns a typed outcome; repository text cannot raise its own budget.
+
+---
+
+## 16. Privacy and retention
+
+- Conversational transcripts are derived data, not automatically canonical repository history.
+- Policy may retain none, redacted, encrypted, or full transcripts.
+- Evidence necessary for protected mutation remains verifiable for the configured audit period even when conversational text is removed.
+- Context Packets, embeddings, graph generations, logs, and evidence inherit source authorization and retention.
+- Hosted FrankenGit must not use private source/context/transcripts/evidence for model training without separate explicit authorization.
+- Deletion claims distinguish logical invisibility, scheduled physical deletion, backup expiry, and cryptographic erasure.
+
+---
+
+## 17. Typed refusal taxonomy
+
+Initial refusals include:
+
+- `IntentExpired`
+- `IntentBytesConflict`
+- `SponsorUnauthorized`
+- `AgentIdentityRevoked`
+- `AuthorityReceiptInvalid`
+- `AuthorityReceiptStale`
+- `CapabilityMissing`
+- `CapabilityExpired`
+- `CapabilityAudienceMismatch`
+- `CapabilityScopeViolation`
+- `DelegationAmplifiesAuthority`
+- `ContextGenerationMixed`
+- `ContextCoverageUnsupported`
+- `WorkspaceBaseUnavailable`
+- `WorkspacePolicyViolation`
+- `PathOutsideScope`
+- `NetworkDestinationDenied`
+- `SecretPurposeDenied`
+- `BudgetInsufficient`
+- `EvidenceMissing`
+- `EvidenceInvalid`
+- `EvidenceStale`
+- `IndependentVerificationRequired`
+- `TargetRefMoved`
+- `WitnessRefinementInsufficient`
+- `PublicationPolicyRefused`
+- `CancellationInProgress`
+- `ObligationsOutstanding`
+- `ExternalEffectIndeterminate`
+- `SchemaUnsupported`
+
+Refusals are inspectable protocol outcomes, not generic internal errors.
+
+---
+
+## 18. Conformance requirements
+
+An implementation cannot claim Agent Protocol conformance until it passes:
+
+1. capability attenuation, ancestry, audience, expiry, and replay property tests;
+2. repository-content prompt-injection red-team corpus;
+3. secret-exfiltration attempts across tool, process, log, context, evidence, and output surfaces;
+4. TreeFS path/symlink/reparse/hardlink escape corpus;
+5. cancellation at every task/effect/publication yield point;
+6. duplicate, delayed, reordered, and fabricated tool results;
+7. child recursion, budget, context duplication, and authority amplification;
+8. producer/verifier trust-domain classification tests;
+9. stale authority receipt and target-ref movement publication tests;
+10. exact external-effect reconciliation after crash and retry;
+11. human/API/compact rendering equivalence;
+12. evidence fabrication, stale evidence, and mixed-generation context rejection;
+13. cross-tenant workspace/index/cache isolation;
+14. quiescence proof with no orphan task, credential, process, or obligation;
+15. ordinary Git export of the committed result.
+
+Claims and evidence levels are governed by [`VERIFY_SPEC.md`](../VERIFY_SPEC.md).
+
+---
+
+## 19. Minimal viable protocol slice
+
+The first implementation supports one repository and one local agent harness with:
+
+- authorized Intent Run;
+- verified AuthorityReadReceipt;
+- read/TreeFS/process/network/effect capabilities;
+- bounded Context Packet with omissions;
+- sparse COW TreeFS workspace and intent log;
+- effect obligations and ledger;
+- content-addressed logs/check evidence;
+- Evidence-Carrying Change;
+- independent deterministic verification;
+- publication proposal through the ordinary sealed transaction/head CAS;
+- cancellation to quiescence.
+
+It should not begin with agent chat, reputation, marketplaces, autonomous issue selection, multi-agent swarms, or model routing. Those become safe only after the control protocol works.

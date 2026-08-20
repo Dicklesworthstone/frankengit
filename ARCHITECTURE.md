@@ -1,165 +1,321 @@
 # FrankenGit Architecture
 
-This is a condensed topology and ownership map. Canonical mutation and recovery semantics are defined by [`docs/NORMATIVE_PROTOCOL_CONTRACTS.md`](docs/NORMATIVE_PROTOCOL_CONTRACTS.md); evidence requirements are defined by [`VERIFY_SPEC.md`](VERIFY_SPEC.md).
+**Status:** pre-implementation architecture summary  
+**Normative source:** [`docs/NORMATIVE_PROTOCOL_CONTRACTS.md`](docs/NORMATIVE_PROTOCOL_CONTRACTS.md)  
+**Full plan:** [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md)
 
-## 1. Architectural rule
+This document is the compact map of FrankenGit’s v3 architecture. It intentionally omits product detail and repeats only the contracts necessary to understand component ownership and data flow.
 
-FrankenGit separates three categories that conventional forges often blur:
+## 1. Architectural objective
 
-1. **Canonical truth:** immutable objects/events plus the ordered metadata state machine that determines current refs, forge positions, policy, outcomes, and retention roots.
-2. **Materializations:** disposable Git repositories, packs, worktrees, indexes, CI checkouts, and caches derived from canonical truth.
-3. **Projections/intelligence:** web views, search, graph, notifications, analytics, and agent context derived from canonical truth and carrying explicit source positions.
+Preserve ordinary Git at the edge while making canonical repository and forge state:
 
-A materialization or projection may be stale, incomplete, corrupt, or unavailable without becoming an alternative source of truth.
+- independent of a mutable bare repository;
+- published through one narrow conditional authority primitive;
+- immutable, replayable, and independently recoverable;
+- cheap to materialize near demand;
+- efficient for large populations of agents and CI jobs;
+- strictly pure Rust and memory-safe in first-party code;
+- observable without letting projections, graphs, models, or repair paths become authority.
 
-## 2. Component topology
+## 2. Constitutional invariants
+
+1. **Pure Rust:** production never links or invokes C Git, `libgit2`, JGit, Dulwich, or another Git engine.
+2. **Safe first-party code:** every crate uses `#![forbid(unsafe_code)]`.
+3. **One runtime:** Asupersync owns async execution, cancellation, capabilities, obligations, ATP, and deterministic lab behavior.
+4. **One repository authority:** only successful conditional replacement of the exact `RepositoryAuthorityHead` predecessor publishes repository state.
+5. **Immutable canonical history:** seals, decisions, RCRs, batches, events, evidence, manifests, generations, and capsules are immutable.
+6. **Atomic source/forge effects:** a merge/ref update and its forge transition are one `RepositoryCommitRecord`.
+7. **No ambiguous cancellation:** disconnect/cancel never proves non-commit; outcome is queried by stable transaction identity.
+8. **Staged/visible/durable are distinct:** a body can exist before authority selects it and before full durability obligations close.
+9. **Repair uses normal authority:** verified reconstruction cannot overwrite newer or deleted state.
+10. **Derived state is receipted:** every materialization/projection/generation names the canonical position it represents.
+11. **Exact/statistical types are separate:** models and graphs cannot silently authorize, delete, or redefine truth.
+12. **Local release authority:** repository-owned DSR lanes and signed root-last manifests, not hosted workflow status, define releases.
+
+## 3. System topology
 
 ```text
-Humans / Git clients / agents / CI / mirrors
-                     |
-        SSH + smart HTTP + REST/webhooks
-                     |
-      authentication + coarse admission
-                     |
-      capability and budget enforcement
-                     |
-  Git upload-pack / receive-pack gateways
-                     |
-     quarantine + object graph validation
-                     |
-   per-repository fenced mutation sequencer
-                     |
-    pinned snapshot + deterministic policy
-                     |
-       serializable metadata transaction
-          /                         \
- RCR/outcome/roots/outbox      immutable staged bytes
-          \                         /
-       canonical object/event storage
-                     |
-     capsules + backups + repair registry
-                     |
- materializers / event projections / search / graph
-                     |
- Git views, web UX, merge queue, CI, agent packets
+                         +-------------------------+
+                         | Git / API / agent users |
+                         +------------+------------+
+                                      |
+                         +------------v------------+
+                         | pure-Rust gateways      |
+                         | SSH / smart HTTP / API  |
+                         +------------+------------+
+                                      |
+              +-----------------------v-----------------------+
+              | stateless execution cells                    |
+              |                                               |
+              | validation  policy  graph/search  TreeFS     |
+              | local FrankenSQLite projections/caches        |
+              | per-core preparation lanes + batch combiner   |
+              +-----------+-------------------+---------------+
+                          |                   |
+             immutable puts/reads             | exact CAS
+                          |                   |
+               +----------v---------+   +-----v----------------+
+               | object/segment     |   | AuthorityStore       |
+               | decision/evidence  |   | repository head key  |
+               | fabric             |   +-----+----------------+
+               +----------+---------+         |
+                          +-------------------+
+                                      |
+                    canonical decision stream/head
+                                      |
+          +---------------------------+---------------------------+
+          |                           |                           |
+ +--------v---------+       +---------v---------+       +---------v---------+
+ | materializers    |       | forge/search/     |       | repair/checkpoint |
+ | Git/TreeFS/packs |       | graph projections |       | GC/archive        |
+ +------------------+       +-------------------+       +-------------------+
 ```
 
-## 3. Canonical mutation ownership
+A cell may be preferred for a repository through rendezvous hashing, but it is not an authority owner. Any eligible cell can reread the head and attempt publication. Gossip is a freshness/cache hint only.
 
-The canonical mutation kernel owns:
+## 4. Canonical object model
 
-- one `TxId` identity derivation;
-- transaction seals and key-reuse mismatch refusal;
-- immutable `TxnOutcomeRecord` values;
-- writer epoch fencing;
-- one pinned repository snapshot per attempt;
-- expected-old ref validation and force semantics;
-- deterministic policy input/decision records;
-- RCR parent/epoch/sequence continuity;
-- atomic ref and forge-event roots;
-- transactional outbox publication;
-- canonical retention-root updates.
+### 4.1 Transaction seal
 
-The mutation linearizes at one serializable metadata commit. Immutable bodies may be staged beforehand but are not canonical roots until referenced by that commit.
+Created once with strong put-if-absent. Binds repository/tenant, principal snapshot, idempotency digest, canonical request digest, schema/capability/policy identity, and logical admission time. Identical retry is idempotent; different body is key-reuse rejection.
 
-## 4. Git compatibility boundary
+### 4.2 Prepared transaction capsule
 
-The Git gateway is split by actual Git services:
+Immutable reusable output of expensive preparation against one basis head:
 
-- upload-pack for clone/fetch, including protocol v2 commands where negotiated;
-- receive-pack for push;
-- SSH and smart-HTTP transports;
-- native SHA-1/SHA-256 typed object identities;
-- pack/delta/object validation under strict resource budgets;
-- atomic push, expected old refs, push options, hidden refs, signatures;
-- shallow/partial clone and promisor semantics;
-- LFS as a separate content API and retention domain.
+- normalized intents and net effect;
+- Git object closure;
+- read/write/invariant witnesses;
+- deterministic policy inputs/decision;
+- resource/verifier/dependency receipts;
+- required durability profile.
 
-Git subprocesses may serve as early oracles/adapters, but they do not own canonical repository state.
+It is advisory until a decision batch containing its effect wins the head CAS.
 
-## 5. Storage layers
+### 4.3 Repository decision
 
-### Immutable object/event layer
+One terminal outcome for one sealed transaction:
 
-Stores native Git objects or canonical immutable envelopes, forge events, evidence, manifests, index generations, artifacts, package blobs, and backup blocks. Placement is content-addressed and idempotent.
+- `Committed { repository_commit_id }`; or
+- `Refused { code, refusal_record_id }`.
 
-### Metadata layer
+Refusals advance decision audit order but not committed source sequence.
 
-Stores current repository head/RCR pointer, seals, outcomes, writer epochs, policy pointers, authenticated root pointers, outbox cursors, quotas, memberships, legal-hold activation, and other mutable current state. It requires transactional replication and fencing.
+### 4.4 RepositoryCommitRecord
 
-### Materialization cache
+Binds the exact committed effects of one transaction:
 
-Stores rebuildable packs, indexes, bare repositories, workspaces, commit graphs, bitmaps, and projection shards. Cache eviction and corruption cannot delete canonical truth.
+- basis, actor, request, and transaction identity;
+- ref delta/result root;
+- admitted object closure;
+- forge event batch/result position root;
+- policy/evidence/conflict/verifier/resource roots;
+- retention and outbox effects.
 
-## 6. Capsules and recovery
+### 4.5 RepositoryDecisionBatch
 
-A repository capsule is a signed root-last checkpoint for one exact RCR. Its unsigned body binds ref, forge-position, object-manifest, segment-manifest, retention, policy, and registry roots. Signatures and placement attestations are outside the capsule identity.
+Immutable ordered group of terminal decisions and committed RCRs against one exact predecessor head. Carries resulting authenticated roots. The batch may be staged by many contenders; only the winner selected by authority becomes canonical.
 
-Recovery starts from a trusted capsule/RCR and replays later RCRs/events. A stale capsule is still a valid historical checkpoint but never current-state authority.
+### 4.6 RepositoryAuthorityHead
 
-## 7. RaptorQ boundary
+Small canonical state root containing predecessor/generation, decision tail/sequence, latest committed RCR/repository sequence, ref/forge/outcome/retention/outbox/configuration roots, policy/format epochs, and checkpoint pointer.
 
-RaptorQ protects registered immutable byte classes only. Decode occurs in quarantine and reconstructed bytes must pass the original digest, Merkle, Git-OID, length, and structural checks. Mutable metadata correctness never depends on fountain-code reconstruction.
+The store’s exact predecessor version token plus monotone head generation prevents stale writers and ABA.
 
-## 8. Forge/event model
+## 5. Mutation path
 
-Issues, pull requests, reviews, protections, queue transitions, releases, and policy changes are immutable canonical events. Deterministic projections build UI/read models. An RCR can bind a forge-event batch to a ref mutation, eliminating split commit states.
+```text
+request
+  -> framing/auth/coarse admission
+  -> canonicalize and derive stable logical identity
+  -> terminal-outcome lookup
+  -> seal put-if-absent
+  -> read exact authority head
+  -> validate Git quarantine/object closure
+  -> evaluate intents/policy against one basis
+  -> emit PreparedTxnCapsule
+  -> append to per-core preparation lane
+  -> combiner builds conflict graph and deterministic order
+  -> finalize net-effect normal forms against scratch state
+  -> stage decisions/RCRs/batch/candidate head
+  -> conditional replace exact predecessor head
+       won  -> all batch decisions terminal and visible
+       lost -> reread, reuse/refine/rebase/reprepare, retry same seal
+  -> transfer outbox/materialization obligations
+  -> return immutable terminal outcome
+```
 
-The outbox drives webhooks, CI, indexing, notifications, and billing at least once with stable delivery identities. Projection or delivery failure does not roll back canonical history.
+No canonical effect is visible before the head CAS. Object bodies may be staged earlier but are unreachable and garbage-collectable until selected by roots.
 
-## 9. Agent plane
+## 6. Concurrency architecture
 
-Intent Runs provide attenuated capabilities and hard budgets. Context Packets are source-position-pinned and provenance preserving. Sparse workspaces have immutable bases and COW overlays. External effects go through a broker with idempotency and receipts. Evidence-Carrying Changes preserve tests, tools, omissions, claims, non-claims, and verifier independence.
+### 6.1 Per-core preparation lanes
 
-## 10. Scale strategy
+Each lane follows `Writable -> Sealed -> Combining -> Retired -> Writable`. Preparation is append-only and bounded. Overflow/backpressure is explicit. Lane assignment and batch cuts are receipted.
 
-The design scales independent work before weakening semantics:
+### 6.2 Conflict witnesses
 
-- repositories shard naturally;
-- upload, pack validation, immutable object writes, materialization, search, graph, and CI parallelize;
-- hot objects and packs cache regionally;
-- large immutable records segment and stream;
-- background compaction/checkpoint/repair are budgeted;
-- one logical sequencer per repository remains the correctness oracle.
+Conservative keys cover repository/config/policy, refs, forge aggregates, merge queue, quotas, retention/legal holds, paths/symbols, status evidence, and object visibility. Finer witnesses may prove independence.
 
-A future parallel canonical path must prove observational equivalence for overlapping invariant keys; it is not assumed from disjoint ref names.
+### 6.3 Value-of-information refinement
 
-## 11. Failure model
+Refinement runs only when expected saved retry/abort cost exceeds bounded CPU/I/O/latency plus risk margin. Failure to refine preserves correctness and only reduces concurrency.
 
-The architecture explicitly handles:
+### 6.4 Semantic rebase
 
-- duplicate/retried requests and ambiguous disconnects;
-- process/node crash at every publication phase;
-- stale writer after failover;
-- object-store timeout/partial write/listing lag;
-- corrupted/missing immutable placement;
-- projection lag and rebuild;
-- cancellation during validation, commit, materialization, and effects;
-- slow/malicious Git clients and pack bombs;
-- compromised CI jobs and prompt-injected agent context;
-- quota exhaustion and noisy neighbors;
-- rolling upgrades and mixed format versions.
+Allowed ladder:
 
-Each subsystem publishes typed refusals and evidence rather than relying on panic or implicit retry.
+1. unchanged witness reuse;
+2. deterministic intent replay;
+3. structured ref/forge/path patch;
+4. registered append/range/bitmap merge certificate;
+5. typed retry/refusal/manual merge.
 
-## 12. Initial crate/service boundaries
+No raw byte/XOR source merge and no silent change to a sealed request.
 
-Names are provisional until first final-abstraction slices land:
+## 7. Authority and storage profiles
 
-- foundation types/canonical codec/crypto registry;
-- Git object and pack core;
-- Git protocol gateway;
-- transaction/reference model;
-- metadata sequencer;
-- immutable object/event store;
-- policy engine and evidence records;
-- materializer;
-- capsule/backup/repair;
-- forge events/projections;
-- search/graph;
-- agent protocol/workspace/effect broker;
-- CI execution boundary;
-- hosted control plane;
-- conformance/fault laboratory.
+### Embedded
 
-No empty crate should be created merely to match this list. A crate appears with its first complete vertical slice and evidence.
+FrankenSQLite provides the head compare-and-swap and local MVCC projections. Immutable bodies live in the local object fabric. Export uses the same canonical records as clustered deployments.
+
+### Object-store cluster
+
+A minimal pure-Rust adapter uses a backend that proves strong create/read/conditional replacement, ABA-safe version tokens, and failure semantics. Provider listing is not used for recovery.
+
+### Future `fgit-authorityd`
+
+A small pure-Rust replicated state machine may implement the exact `AuthorityStore` trait for operators without a suitable conditional object store. It does not introduce alternate transaction semantics.
+
+## 8. Immutable object fabric
+
+Owns typed immutable puts, exact/range reads, deterministic segments/manifests, placements/failure domains, encryption domains, lifecycle/retention evidence, and bounded streaming. Mutable location/scrub records do not alter logical object identity.
+
+Logical object identities survive physical compaction/re-encoding. Compaction writes new immutable segments and publishes new manifests root-last.
+
+## 9. Git engine
+
+Production owns pure-Rust implementations of native object formats, hash domains, packs/deltas/DEFLATE, pkt-line/sideband, upload-pack, receive-pack, partial/promisor behavior, refs, commit graph/bitmap/MIDX/bundle materialization, diff/merge proposals, tags/notes/submodules/LFS adapters, and compatibility refusals.
+
+Upstream Git is only a pinned external differential oracle. Unsupported operations fail visibly; there is no subprocess fallback.
+
+## 10. ATP-Git
+
+Native/internal transfer over Asupersync ATP provides:
+
+- exact/probabilistic receiver have summaries;
+- object/segment/pack delta planning;
+- unique-payload dedupe and deterministic reconstruction;
+- typed path graph and multipath racing;
+- swarm rarity/endgame scheduling;
+- adaptive RaptorQ/pacing within hard bounds;
+- trust-scoped caches and peer evidence;
+- budget/cancellation/replay receipts.
+
+Ordinary Git remains the compatibility path. ATP-Git is an optimization/profile, not a different repository semantics.
+
+## 11. TreeFS
+
+A workspace is an immutable Git-tree base plus sparse semantic COW overlay. Reads require path/object capabilities and fetch lazily. Writes become typed intents with source-span lineage. Export constructs exact Git objects and a proposed transaction.
+
+Adapters include direct Rust API, sparse directory, optional FrankenFS/FUSE mount, standard bare/worktree materialization, and archive streams. Every adapter is derived and receipted.
+
+## 12. Forge events and projections
+
+Canonical issues, PRs, reviews, protections, queue entries, releases, packages, agent runs, and audit events are immutable aggregates admitted by RCRs. Relational/API/UI/search/counter views are projections with exact source positions.
+
+Outbox entries cover derived/external effects only. At-least-once delivery with stable IDs never duplicates canonical events.
+
+## 13. Search and graph generations
+
+Generations are immutable, predecessor-linked, monotone, anti-rollback, and root-last. Queries pin one generation vector. Mixed-generation results are refused or explicitly partial.
+
+Graphs are typed as exact, deterministic-derived, or statistical. Stable external IDs and order coexist with dense integer adjacency for hot algorithms. Any user/operation-affecting algorithm declares tie-break and emits complexity/decision-path witness.
+
+## 14. Agent and CI architecture
+
+### Intent Run
+
+Binds sponsor/agent/harness, exact base, objective, attenuated capabilities, budgets, evidence/verifier policy, expiry/revocation/disclosure.
+
+### Context Packet
+
+Content-addressed authorized source spans plus transformations, ranking/graph evidence, position, and omissions.
+
+### Effect broker
+
+Non-textual capability boundary for network, secret, CI, publication, package, billing, and external-service effects. Every accepted effect creates an obligation and receipt.
+
+### Runner
+
+Receives immutable `BuildInputCapsule`, isolated execution profile, bounded resources/egress/secrets/cache, cancellation/reaping, and exact check/artifact receipts.
+
+## 15. Repair, checkpoint, and GC
+
+Repair:
+
+```text
+detect -> quarantine -> gather -> decode -> verify original commitments
+       -> reread authority/retention -> commit placement effect or discard
+       -> attest
+```
+
+Checkpoint/capsule and derived-generation publication are body-first/root-last with anti-rollback. GC snapshots authenticated root classes, emits tombstones, waits safety horizons, revalidates current authority, commits deletion authorization, and sweeps placements idempotently.
+
+## 16. CALM and obligations
+
+Monotone immutable data/evidence can propagate without authority ordering. Bounded commutative state must expose merge/conflict laws. Refs, permissions, retention, queue positions, billing, and destructive state are coordinated through canonical authority.
+
+Object writes, CAS attempts, outbox delivery, repair, secrets, runners, workspaces, context, and billing reservations are typed obligations. Region close must resolve or report every obligation.
+
+## 17. Statistical policy
+
+Every conformal/e-process/no-regret/OPE/change-point/Lyapunov artifact binds metric, population, selection, exact sequence window, regime, candidate/fallback policy, assumptions, implementation/toolchain/numeric fingerprint, and retained evidence.
+
+Statistical policy can tune bounded operational choices. It cannot decide identity, authorization, ref order, retention roots, current truth, or irreversible sanctions.
+
+## 18. Local verification and release
+
+Repository-owned commands are authority. Workflow YAML is a local DSR/`act` adapter. Target builds have stable run/attempt identities and exact input manifests. Verified completed targets may be resumed only when all identity fields match.
+
+The signed release manifest is published last after the entire requested matrix and exact assets verify. GitHub Releases is reconciled as a mirror.
+
+## 19. Strict dependency DAG
+
+Foundation → protocol/storage primitives → canonical engines → derived intelligence/hostile-execution protocols → products/adapters.
+
+L3 siblings cannot reach into each other’s internals; L4 orchestrates public contracts. Crates appear only with real final-abstraction slices. The registry checker rejects banned dependencies, first-party unsafe/FFI/subprocess Git, layer violations, empty scaffolds, and unpinned local workflow actions.
+
+## 20. Degradation matrix
+
+| Failure | Safe behavior |
+|---|---|
+| Authority unavailable | verified snapshot/bounded-stale reads by policy; no canonical mutation |
+| CAS loss | no visibility; deterministic revalidation/retry same seal |
+| Cell/local disk lost | rebuild from head/object fabric; no canonical loss |
+| Gossip lost | slower head/cache discovery; verify authority directly |
+| Object placement corrupt | quarantine/repair/refuse according to durability state |
+| Projection/generation lost | rebuild from canonical sources; freshness receipt degrades |
+| ATP unavailable | fall back to ordinary Git/object transfer |
+| Semantic refinement unavailable | conservative conflict/retry; correctness unchanged |
+| Model/statistical evidence unavailable | deterministic fallback policy |
+| Runner compromised | contain/revoke; receipts/artifacts untrusted; authority unaffected |
+| Release host unavailable | target incomplete; no release manifest |
+| Higher acknowledged root unresolved | fail closed; never silently roll back |
+
+## 21. Architectural acceptance
+
+The architecture is acceptable only when implementation evidence demonstrates:
+
+- one terminal outcome per sealed transaction under duplicate/lost-response/cancel races;
+- exact head predecessor/generation continuity and atomic ref/forge roots;
+- pure-Rust Git compatibility for the declared matrix;
+- safe resource bounds for hostile objects/packs/documents/workflows/packages;
+- reference-equivalent per-core batching/rebase;
+- TreeFS path/capability/export/crash semantics;
+- repair-through-authority and GC root safety;
+- generation anti-rollback and graph decision witnesses;
+- obligation quiescence for sessions, agents, runners, repair, and release;
+- complete local DSR release without hosted Actions;
+- claims no stronger than their immutable evidence.

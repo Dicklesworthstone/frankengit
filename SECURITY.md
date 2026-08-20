@@ -1,6 +1,6 @@
 # Security Policy
 
-FrankenGit is currently a pre-implementation architecture project. Security reports may still concern documentation defects that would produce an unsafe implementation, repository automation, or future code.
+FrankenGit is currently a pre-implementation architecture and constitutional bootstrap project. Security reports may concern documentation defects that would produce an unsafe implementation, repository verification/release automation, or future code.
 
 ## Reporting a vulnerability
 
@@ -8,32 +8,34 @@ Use GitHub's private security-advisory flow for this repository. Do not open a p
 
 Include:
 
-- affected document, commit, component, or protocol version;
+- affected document, commit, component, protocol/format version, or registry row;
 - threat actor and required access;
-- exact invariant or trust boundary violated;
-- reproduction steps or a minimal model/trace;
-- impact and whether it crosses tenants/repositories;
+- exact invariant, capability, trust boundary, or authority primitive violated;
+- reproduction steps, minimal model, packet/object corpus, or deterministic trace;
+- impact and whether it crosses tenants, repositories, regions, or release hosts;
 - suggested mitigation, if known;
-- any disclosure constraints.
+- disclosure constraints.
 
-## Scope priorities
+## Highest-priority areas
 
-Highest priority areas include:
-
-- Git pack/object parsing and resource exhaustion;
-- ref/forge transaction atomicity and idempotency;
-- writer fencing and failover;
-- authentication, authorization, token attenuation, and revocation;
-- hidden/private ref or fork disclosure;
-- CI runner isolation, cache poisoning, and secret exposure;
-- agent prompt injection and effect-broker bypass;
-- webhook SSRF/signature/replay issues;
-- archive/rendering path traversal or active-content injection;
-- package/LFS/artifact cross-tenant access;
-- GC, legal hold, backup, and deletion-root failures;
-- RaptorQ decode acceptance without original commitments;
-- projection lag being used as current authorization state.
+- pure-Rust Git object, pack, pkt-line, archive, diff, and signature parsing;
+- authority-head compare-and-exchange, ABA prevention, transaction seals, terminal outcomes, and decision-batch replay;
+- ref plus forge-event atomicity and policy-snapshot TOCTOU;
+- object-store conditional semantics and stale/malicious backend receipts;
+- authentication, capability attenuation, revocation, and confused-deputy attacks;
+- hidden/private refs, forks, LFS, packages, artifacts, indexes, and Context Packet disclosure;
+- TreeFS path resolution, symlink/reparse/hardlink escape, and workspace secret isolation;
+- Asupersync cancellation, obligation leaks, and orphaned external effects;
+- ATP-Git peer/path spoofing, symbol mixing, resource amplification, and cache-trust confusion;
+- CI runner escape, cache poisoning, provenance forgery, and fork secret exposure;
+- webhooks/importers SSRF, replay, redirect, decompression, and archive traversal;
+- Markdown/SVG/rendered active content and source-span confusion;
+- graph/search mixed-generation authorization or unreceipted decision ordering;
+- RaptorQ decode acceptance without original commitments or repair overwriting newer state;
+- GC, legal hold, active seal, migration, restore, and deletion-root omission;
+- local DSR release resume, symlink/path collision, target substitution, signing, SBOM, and root-last manifest errors;
+- dependency-policy, transitive unsafe, build-script, proc-macro, and supply-chain violations.
 
 ## Non-claims
 
-No security-support window or production SLA exists before an implementation release. The full architecture threat model is in `SECURITY_THREAT_MODEL.md`; canonical semantics are in `docs/NORMATIVE_PROTOCOL_CONTRACTS.md`.
+No production support window or security SLA exists before an implementation release. Canonical semantics are defined in [`docs/NORMATIVE_PROTOCOL_CONTRACTS.md`](docs/NORMATIVE_PROTOCOL_CONTRACTS.md), and the full threat model is [`SECURITY_THREAT_MODEL.md`](SECURITY_THREAT_MODEL.md).

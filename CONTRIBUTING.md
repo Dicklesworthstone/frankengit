@@ -1,15 +1,56 @@
 # Contributing to FrankenGit
 
-FrankenGit is currently in a spec-first phase. Contributions should reduce ambiguity, supply executable evidence, or implement a complete vertical slice. Empty crate scaffolds and broad placeholder APIs are not accepted.
+FrankenGit is in a spec-first, pre-implementation phase. Contributions should remove ambiguity, add executable evidence, or deliver one complete final-abstraction vertical slice. Empty crate scaffolds, placeholder APIs, foreign-Git fallbacks, and performance claims without replay artifacts are not accepted.
 
-Before opening a change:
+## Read before changing anything
 
-1. Read `AGENTS.md`, `docs/NORMATIVE_PROTOCOL_CONTRACTS.md`, `VERIFY_SPEC.md`, and `SECURITY_THREAT_MODEL.md`.
-2. Run `python3 scripts/verify_docs.py`.
-3. Identify the invariant owner, canonical identity, failure modes, and evidence artifact for the change.
-4. Preserve Git compatibility unless an explicit registry row records and tests an intentional divergence.
-5. Never strengthen a public claim beyond its checked-in evidence.
+Read, in this order:
 
-Implementation changes must include tests for success, refusal, cancellation, retry, crash/recovery, and resource exhaustion where applicable. Security-sensitive format or protocol changes require a threat-model update.
+1. [`AGENTS.md`](AGENTS.md)
+2. [`docs/NORMATIVE_PROTOCOL_CONTRACTS.md`](docs/NORMATIVE_PROTOCOL_CONTRACTS.md)
+3. [`docs/DEPENDENCY_AND_MEMORY_SAFETY_CONSTITUTION.md`](docs/DEPENDENCY_AND_MEMORY_SAFETY_CONSTITUTION.md)
+4. [`ARCHITECTURE.md`](ARCHITECTURE.md)
+5. [`VERIFY_SPEC.md`](VERIFY_SPEC.md)
+6. [`SECURITY_THREAT_MODEL.md`](SECURITY_THREAT_MODEL.md)
+7. the focused design document for the subsystem being changed
 
-The current custom license is provisional; see `docs/LICENSING_DECISION.md` before contributing code or assuming conventional open-source inbound terms.
+## Required change shape
+
+Every nontrivial change identifies:
+
+- the owned invariant or claim;
+- canonical identities and exact byte encodings affected;
+- intent, effect, and publication boundaries;
+- success, refusal, retry, cancellation, crash, and recovery behavior;
+- resource bounds and adversarial inputs;
+- compatibility oracle and accepted divergence, where relevant;
+- evidence artifacts and replay command;
+- dependency, memory-safety, and layer effects;
+- negative evidence or superseded design disposition.
+
+Implementation changes must add success and failure evidence at the same time. A fast path must retain a scalar/reference oracle. A statistical or graph-derived controller must retain a deterministic safe fallback and may not acquire canonical authority.
+
+## Local verification
+
+GitHub-hosted Actions are not a project dependency. Run repository-owned lanes locally:
+
+```bash
+./scripts/verify.sh docs
+./scripts/verify.sh constitution
+./scripts/verify.sh fast
+```
+
+`full` and `release` intentionally refuse while their implementation-era gates are dormant. Doodlestein Self-Releaser will execute the same repository-owned commands across registered native hosts when release artifacts exist.
+
+## Dependency and implementation rules
+
+- Production is clean-room pure Rust on the pinned dated nightly.
+- First-party crates use `#![forbid(unsafe_code)]`.
+- Asupersync is the sole runtime.
+- Production never links or invokes C Git, `libgit2`, JGit, Dulwich, another Git engine, or a C/C++ runtime library.
+- New dependencies require an explicit `registries/dependency_policy.tsv` row and evidence under the dependency constitution.
+- Crates enter the workspace only with a real vertical slice; no empty architecture cosplay.
+
+## Licensing
+
+The current custom rider is provisional and source-available, not OSI-approved open source. Read [`docs/LICENSING_DECISION.md`](docs/LICENSING_DECISION.md) before contributing code or assuming conventional inbound terms.

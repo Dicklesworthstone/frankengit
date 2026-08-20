@@ -1,0 +1,11 @@
+# franken-registry-v1
+id	authority_class	source	builder	allowed_decisions	forbidden_decisions	status
+GRAPH-001	canonical_exact	Git commit objects	pure Rust commit parser	ancestry, merge-base, reachability	statistical edge invention	specified
+GRAPH-002	canonical_exact	Git object and ref roots	object closure builder	retention and closure proof	GC from incomplete projection	specified
+GRAPH-003	canonical_exact	repository decision log	authority replay	outcome and provenance lineage	last-writer conflict resolution	specified
+GRAPH-004	deterministic_derived	canonical blobs and parser profiles	symbol graph builder	context, impact, build evidence	authorization without policy revalidation	specified
+GRAPH-005	deterministic_derived	forge events	review and ownership projector	reviewer candidates and explanations	centrality-based authority grant	specified
+GRAPH-006	deterministic_derived	workflow and build receipts	build graph projector	scheduling and provenance	trusting undeclared observed input as canonical	specified
+GRAPH-007	deterministic_derived	Intent Runs, tasks, leases, effects	agent coordination projector	task assignment and deadlock evidence	self-declared verifier independence	specified
+GRAPH-008	deterministic_derived	segment placement and repair receipts	placement projector	failure-domain and repair planning	accepting unverified placement	specified
+GRAPH-009	statistical_inferred	change and history features	calibrated risk model	priority and bounded review escalation	guilt, punishment, or merge authorization	specified

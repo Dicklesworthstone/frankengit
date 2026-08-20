@@ -1,0 +1,7 @@
+# franken-registry-v1
+id	command	execution	artifacts	release_blocking	status
+LANE-001	./scripts/verify.sh docs	local_or_dsr_act	docs_and_registry_report	yes	active
+LANE-002	./scripts/verify.sh constitution	local_or_dsr_act	dependency_layer_unsafe_claim_report	yes	active
+LANE-003	./scripts/verify.sh fast	local_or_dsr_act	fmt_check_unit_model_report	yes	active
+LANE-004	./scripts/verify.sh full	local_dsr_native_matrix	conformance_lab_fault_evidence	yes	specified
+LANE-005	./scripts/verify.sh release	local_dsr_native_matrix	signed_root_last_release_manifest	yes	specified

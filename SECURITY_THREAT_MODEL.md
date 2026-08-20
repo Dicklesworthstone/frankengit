@@ -1,486 +1,671 @@
 # FrankenGit Security Threat Model
 
-**Status:** Pre-implementation architecture threat model  
-**Canonical semantics:** [`docs/NORMATIVE_PROTOCOL_CONTRACTS.md`](docs/NORMATIVE_PROTOCOL_CONTRACTS.md)
+**Status:** architecture draft; no implementation or audit claim  
+**Architecture version:** 3.0  
+**Applies to:** embedded, self-hosted cluster, FrankenGit.com, agents, CI, federation, and release tooling
 
-A security control that depends on a projection, materialization, search result, model output, or statistical alarm must revalidate against canonical state before authorizing an effect.
+FrankenGit combines a source-of-truth service, identity/policy system, hostile-input protocol/parser stack, immutable storage fabric, build platform, graph/search engine, agent capability broker, and software release pipeline. The design assumes malformed bytes, malicious repositories, compromised collaborators, prompt-injected agents, hostile runners, faulty storage, stale caches, malicious repair symbols, operator mistakes, dependency/toolchain compromise, and remote-service failure will all occur.
+
+Security cannot depend on one parser, local repository, cloud provider, model, graph, runner, operator, workflow badge, or decoder behaving perfectly.
 
 ## 1. Security objectives
 
-FrankenGit must protect:
-
-- confidentiality of private repositories, hidden refs, issues, artifacts, packages, logs, secrets, and agent context;
-- integrity and ordering of Git refs, canonical forge events, policies, outcomes, retention roots, and audit evidence;
-- availability under malicious Git clients, oversized repositories, agent swarms, runner abuse, and infrastructure failures;
-- tenant isolation in storage, caches, search/graph, CI, billing, support, and repair;
-- provenance of commits, checks, artifacts, packages, releases, agent effects, and administrator overrides;
-- recoverability without accepting forged/corrupt reconstructed bytes;
-- truthful deletion/retention behavior;
-- deterministic and inspectable authorization decisions.
-
-## 2. Explicit non-objectives and non-claims
-
-The architecture does not claim that:
-
-- content addressing proves authorship or safety;
-- signed commits/tags make their content trustworthy;
-- object-store durability proves end-to-end restoration;
-- RaptorQ supplies cryptographic integrity, consensus, freshness, or authorization;
-- deterministic replay reproduces external effects that were not recorded/modeled;
-- a green CI check proves code is safe outside the named environment/check;
-- an LLM explanation or confidence score is security evidence;
-- branch protection prevents a compromised administrator/control plane from using bypass powers;
-- public source under the current rider is OSI open source.
-
-## 3. Assets
-
-### Canonical assets
+### 1.1 Canonical integrity and non-equivocation
 
-- native Git objects and their typed OIDs;
-- sealed mutation requests and terminal outcomes;
-- RCR chain, head pointer, writer epochs;
-- ref/forge/object/policy/retention roots;
-- canonical forge events;
-- policy and membership state;
-- legal holds/deletion state;
-- transactional outbox;
-- capsule/backup manifests and keys;
-- audit/override evidence.
+- A repository state is canonical only if reachable from the verified `RepositoryAuthorityHead` selected by an exact predecessor conditional replacement.
+- One sealed logical transaction has at most one terminal decision.
+- Ref and forge transitions belonging to one operation publish atomically in one RCR.
+- No unpublished object, candidate batch, local row, cache, gossip message, or materialization may be reported as committed.
+- Head predecessor/generation, decision sequence, repository sequence, and authenticated roots cannot roll back or fork silently.
+- A higher acknowledged unresolved root fails closed rather than falling back quietly.
 
-### Sensitive derived assets
+### 1.2 Git and immutable-byte integrity
 
-- bare repositories and packs;
-- search/vector/graph generations;
-- web projections and notifications;
-- Context Packets and workspaces;
-- CI logs/artifacts/caches;
-- LFS/package/release bytes;
-- billing/usage/support data;
-- operational telemetry.
+- Native Git object identity and format are preserved exactly.
+- SHA-1 and SHA-256 are separate typed domains.
+- Pack/delta/DEFLATE/wire parsing is bounded and rejects ambiguity, overflow, recursion, expansion, and malformed structure.
+- Internal objects, segments, manifests, evidence, generations, and capsules verify canonical identity/length/structure.
+- Repair reproduces exact committed bytes or fails closed.
 
-### Secrets and credentials
+### 1.3 Authorization integrity
 
-- user sessions, SSH keys, PATs, OAuth/OIDC tokens;
-- service and repository writer credentials;
-- signing keys, KMS/DEK/KEK material;
-- webhook secrets;
-- CI/deployment secrets;
-- agent effect capability tokens;
-- backup/replication credentials.
+- Every authority attempt binds an authenticated principal snapshot and effective capability root.
+- Capabilities are scoped by tenant/repository/ref/path/object/effect/secret/network/time/budget and revocable handle.
+- Delegation can only narrow authority.
+- Canonical policy uses one exact input root and does not consult mutable projections, wall clock, network calls, or unversioned model output.
+- Stale/replayed/confused-deputy/cross-tenant capabilities fail deterministically.
 
-## 4. Threat actors
+### 1.4 Confidentiality and privacy
 
-- unauthenticated Internet attacker;
-- authenticated low-privilege user;
-- malicious repository collaborator;
-- compromised user/agent token;
-- malicious fork/PR contributor;
-- prompt-injected repository/external content;
-- malicious package/artifact/import producer;
-- compromised CI job or runner image;
-- tenant attempting cross-tenant access/resource theft;
-- malicious/compromised operator or support account;
-- stale/partitioned infrastructure node;
-- compromised object store, cache, mirror, or repair-symbol source;
-- dependency/supply-chain attacker;
-- external service receiving webhooks/effects;
-- accidental administrator or software bug.
+- Private source, refs, metadata, graph/search/vector data, context, logs, evidence, artifacts, repair symbols, and secrets remain inside authorization/encryption domains.
+- Dedup, caches, timing, range requests, embeddings, and error messages do not become cross-tenant existence or membership oracles.
+- Secrets are brokered, least privilege, short lived, redacted, and absent from prompts/context/logs unless explicitly authorized.
+- Training/external model use is separate opt-in authority, never inferred from hosting or indexing permission.
 
-## 5. Trust boundaries
+### 1.5 Availability and bounded work
 
-1. Internet ↔ SSH/smart-HTTP/API gateway.
-2. Gateway ↔ authentication/capability service.
-3. Git protocol parsing/quarantine ↔ canonical mutation kernel.
-4. Mutation kernel ↔ transactional metadata substrate.
-5. Mutation kernel ↔ immutable object/event storage.
-6. Canonical truth ↔ materializers and caches.
-7. Canonical events ↔ projections/search/graph.
-8. Forge ↔ CI runners and package/build network.
-9. Agent harness/workspace ↔ capability/effect broker.
-10. Service ↔ secret/KMS/signing systems.
-11. Service ↔ webhook/import/export/external APIs.
-12. Primary service ↔ backup/replication/repair infrastructure.
-13. Tenant data plane ↔ operator/support/admin plane.
-14. Hosted control plane ↔ billing/abuse systems.
+- Every untrusted parser/algorithm/protocol has CPU, memory, bytes, objects, recursion/depth, expansion, fanout, peers/paths, wall time, and output limits.
+- Authority contention, ATP, graph/search expansion, TreeFS pages, CI, agent work, repair, GC, outbox, and release attempts are quota/budget governed.
+- Cancellation has a route to quiescence or explicit containment failure; no orphan task/process/VM/tunnel/upload/secret/credential/obligation remains invisible.
 
-Every crossing has typed authentication, authorization, input limits, versioning, observability, and failure behavior.
+### 1.6 Auditability and recoverability
 
-## 6. Canonical transaction threats
+- Seals, prepared evidence, decisions, RCRs, outbox, repairs, deletions, overrides, policy epochs, and releases emit immutable evidence.
+- Replay completeness is explicit.
+- Backups/capsules/restores use the same commitments as normal reads.
+- Security incidents can reconstruct actor/capability/input/basis/decision/publication/effect history subject to confidentiality policy.
 
-### T-CAN-1 Duplicate mutation through retry
+## 2. Explicit non-objectives
 
-**Attack/failure:** response is lost; client retries; two commits occur.
+The architecture alone does not promise to:
 
-**Controls:** one canonical `TxId`; durable seal; compare-and-set terminal outcome; outcome lookup; idempotent immutable staging/outbox delivery IDs.
+- prevent an authorized maintainer from intentionally accepting malicious code;
+- prove source correctness or vulnerability absence;
+- protect plaintext after an authorized endpoint receives it;
+- make a compromised endpoint or release host trustworthy;
+- guarantee anonymity against operator/provider traffic analysis;
+- recover keys destroyed without an authorized recovery policy;
+- make legacy Git SHA-1 semantics disappear;
+- infer malicious intent from anomaly scores;
+- withstand an arbitrarily large upstream volumetric attack;
+- turn signatures into proof of trustworthy code;
+- turn memory-safe Rust into proof of correct logic, cryptography, or resource use.
 
-**Evidence:** concurrent duplicate histories, crash/lost-response matrix, linearizability checker.
+Product and incident language must state these limits instead of hiding behind “immutable,” “verified,” “zero trust,” or “self-healing.”
 
-### T-CAN-2 Idempotency-key confusion
+## 3. Protected assets
 
-**Attack:** reuse same key with different request body to retrieve/overwrite another outcome.
+| Asset | Compromise impact |
+|---|---|
+| Authority head/version tokens | forged, rolled-back, or equivocated repository truth |
+| Seals/decisions/RCRs/batches | duplicate/lost/fabricated transaction outcomes |
+| Git objects/refs/pack material | source/history corruption or malicious substitution |
+| Forge events/projections | false approvals, PR/issue/release/policy history |
+| Policy/capability/identity state | unauthorized access or confused deputy |
+| Tenant encryption/signing keys | disclosure, forgery, or permanent loss |
+| Object/segment manifests and placements | missing/corrupt/unrecoverable data or existence leakage |
+| RaptorQ symbols/repair evidence | corruption amplification or stale resurrection |
+| TreeFS workspaces/build inputs | path escape, source substitution, secret theft |
+| Search/graph/vector/context generations | private-code leakage or stale/misleading decisions |
+| Runner/build/release credentials | supply-chain compromise |
+| Artifacts/packages/releases/SBOM/provenance | downstream dependency substitution |
+| Audit/evidence/negative evidence | incident opacity or claim laundering |
+| Local DSR manifests and release assets | malicious update distribution |
+| Operator/admin configuration | systemic bypass or destructive outage |
+
+## 4. Adversaries and assumed capabilities
+
+### 4.1 External low-privilege attacker
+
+Can create accounts/public repositories/forks/PRs/issues, invoke Git/API/webhook/package surfaces, send malformed streams, measure timing/cache behavior, and attempt resource exhaustion.
 
-**Controls:** TxId/request seal binds canonical request digest and authenticated principal/repository; mismatch typed refusal.
+### 4.2 Malicious or compromised collaborator
 
-### T-CAN-3 Stale writer publication
+May hold legitimate write/review/package/runner/admin capability. The system limits blast radius and preserves attribution but cannot prove an action explicitly allowed by policy is benevolent.
 
-**Attack/failure:** partitioned old leader continues committing.
-
-**Controls:** consensus/lease-backed repository epoch; every metadata commit compares current epoch; failover advances epoch; object staging has no canonical authority.
-
-### T-CAN-4 Mixed-snapshot policy TOCTOU
-
-**Attack:** protection/review/status/membership changes while push/merge policy reads inconsistent projections.
-
-**Controls:** one pinned canonical repository snapshot; deterministic policy input root; serializable compare-and-commit; retry/refuse on drift.
-
-### T-CAN-5 Ref/forge split commit
-
-**Failure:** branch moves without PR merge event, or UI merge event without branch move.
-
-**Controls:** one RCR binds both roots/event batch; one metadata linearization point; projections derive afterward.
-
-### T-CAN-6 Cancellation ambiguity
-
-**Attack/failure:** client sees cancellation and assumes no commit, then performs conflicting action.
-
-**Controls:** post-seal cancellation cannot claim non-commit; query `TxnOutcomeRecord`; response status distinguishes local cancellation from canonical outcome.
-
-### T-CAN-7 Outcome overwrite/fork
-
-**Attack:** compromised node writes conflicting committed/refused outcome.
-
-**Controls:** linearizable absent→one CAS, immutable record identity, RCR existence/TxId binding, audit alarm; metadata consensus/fencing.
-
-## 7. Git protocol/object threats
-
-### T-GIT-1 Pack/decompression/delta bomb
-
-**Controls:** request/pack/object/expanded byte ceilings; compression ratio; delta depth/fan-out/aggregate work; reserved memory/CPU; cancellation checkpoints; tenant concurrency quotas; parser fuzzing.
-
-### T-GIT-2 Malformed object/path confusion
-
-Trees can contain dangerous names/modes/bytes; archives/checkouts can traverse via symlink or normalization mismatch.
-
-**Controls:** exact Git parsing; typed raw names; no unsafe path materialization; descriptor-relative access; checkout/archive policy for absolute, `..`, NUL, reserved Windows names, Unicode/case collisions, symlink/hardlink/submodule semantics.
-
-### T-GIT-3 Hidden/private ref disclosure
-
-**Controls:** advertisement authorization before names/OIDs; no shared cache key lacking tenant/auth scope; reachability checks for wants; negative tests for OID guessing; projection/search authorization.
-
-### T-GIT-4 SHA/type confusion and collision
-
-**Controls:** typed `(algorithm,digest)`; repository-format binding; stronger internal envelope digest/length/type; explicit collision-defense policy; no silent translation.
-
-### T-GIT-5 Quarantine escape
-
-**Attack:** uploaded object becomes reachable/retained before policy/ref commit.
-
-**Controls:** transaction namespace; no canonical location/retention root until RCR; promotion by verified identity; orphan expiry; object store credentials scoped to staging paths where possible.
-
-### T-GIT-6 Signed-object overtrust
-
-**Controls:** signature verification produces evidence with key/trust/policy epoch; signatures never bypass content/policy/check requirements automatically.
-
-### T-GIT-7 Partial-clone promisor abuse
-
-**Controls:** authenticated typed promises; canonical retention still complete; lazy fetch authorization; filter/work bounds; no client promise treated as durable source.
-
-## 8. Authentication, authorization, and capability threats
-
-### T-AUTH-1 Token audience/scope confusion
-
-**Controls:** audience, tenant, repository, run, effect, expiry, nonce/session binding as appropriate; short-lived tokens; revocation; no bearer reuse across services.
-
-### T-AUTH-2 Privilege escalation through delegation
-
-**Controls:** attenuation-only capability algebra; sponsor-authorized amendment for widening; machine-checkable subset relation; immutable delegation receipts.
-
-### T-AUTH-3 Stale membership/protection projection
-
-**Controls:** canonical snapshot for commit policy; read projections display freshness; security-sensitive reads revalidate.
-
-### T-AUTH-4 Administrator bypass abuse
-
-**Controls:** least privilege; step-up auth; explicit reason/ticket; immutable override event/evidence; dual control for high-risk actions; alerting; no audit deletion by same action.
-
-### T-AUTH-5 SSH command injection
-
-**Controls:** fixed command parser; repository ID lookup rather than shell path concatenation; no shell evaluation; strict key/principal mapping; environment allowlist.
-
-## 9. Agent threats
-
-### T-AG-1 Prompt injection
-
-Repository files/issues/logs/web content instruct agent to reveal secrets or perform effects.
-
-**Controls:** untrusted provenance labels; system/sponsor policy outside writable context; effects behind non-textual capabilities; secret handles not bytes; approval/evidence requirements immutable within run.
-
-### T-AG-2 Ambient sponsor authority
-
-**Controls:** never mount sponsor token; mint attenuated run/effect credentials; hard budgets; separate read/write/secret/network capabilities.
-
-### T-AG-3 Context leakage
-
-**Controls:** authorization before retrieval/embedding/snippet; tenant-scoped caches/indexes; Context Packet source labels; no inaccessible neighbor expansion; audit query/result identities.
-
-### T-AG-4 Orphan task/credential
-
-**Controls:** structured-concurrency ownership; cancellation drain/finalize; process/network cleanup; token expiry/revocation; workspace destruction/retention scrubbing; invariant probes.
-
-### T-AG-5 Self-review laundering
-
-**Controls:** verifier independence dimensions enforced by policy; separate clean workspace/credentials/context/oracle; proposer cannot self-assert class.
-
-### T-AG-6 Effect duplication
-
-**Controls:** stable effect idempotency keys, reservations, receipts, terminal lookup, transactional outbox for forge effects.
-
-### T-AG-7 Agent-generated evidence forgery
-
-**Controls:** broker/runner signs or content-addresses receipts; executable/input/environment binding; narrative separate; failed/skipped states immutable.
-
-## 10. CI runner threats
-
-### T-CI-1 Sandbox escape/host compromise
-
-**Controls:** strong VM/microVM/container boundary selected by threat model; no privileged sockets/devices; patched minimal images; per-job identity; egress restrictions; host rotation; red-team tests.
-
-### T-CI-2 Secret theft from untrusted fork
-
-**Controls:** trust classification; no privileged secrets by default; explicit environment approval; secret broker/audience; output redaction; protected deployment rules.
-
-### T-CI-3 Cache poisoning
-
-**Controls:** trust-domain/tenant/repository/toolchain/source keyed caches; immutable content digest; writers/readers separated; untrusted cache not promoted to trusted; provenance.
-
-### T-CI-4 Forged check status
-
-**Controls:** check receipt signed/bound to exact RCR/object closure, runner/image/toolchain/policy; canonical policy validates receipt issuer/class/currentness.
-
-### T-CI-5 Artifact/log active content/path attack
-
-**Controls:** inert storage, safe rendering/download headers, archive path validation, size/decompression limits, redaction, malware policy hooks.
-
-### T-CI-6 Orphan workload/crypto mining
-
-**Controls:** hard CPU/memory/disk/network/time budgets; process-tree/cgroup/VM teardown; cancellation acknowledgement; host-level watchdog; billing anomaly review.
-
-## 11. Web, rendering, import, webhook threats
-
-### T-WEB-1 XSS/active Markdown/SVG
-
-**Controls:** safe Markdown AST/rendering; raw HTML policy; URL sanitization; SVG sanitization or rasterization; CSP; separate origins for untrusted content; download disposition.
-
-### T-WEB-2 CSRF/session fixation/open redirect
-
-**Controls:** SameSite/CSRF tokens, origin checks, session rotation, allowlisted return targets, step-up auth.
-
-### T-WEB-3 SSRF via webhooks/import/avatar/remote image
-
-**Controls:** scheme/port policy; DNS resolution and IP-range checks before each connection/redirect; block metadata/private/control networks; proxy with egress ACL; response size/time limits; no credential forwarding.
-
-### T-WEB-4 Webhook replay/forgery
-
-**Controls:** per-hook secret/signature, timestamp/delivery ID, retries with same ID, rotation, TLS, audit; consumers advised idempotency.
-
-### T-WEB-5 Import archive/path/credential leak
-
-**Controls:** streaming limits; archive traversal/symlink checks; separate quarantine; remote URL credential stripping; explicit private-source auth; importer process isolation; canonical validation before publication.
-
-## 12. Storage, repair, backup, and deletion threats
-
-### T-STO-1 Object substitution/corruption
-
-**Controls:** verify typed digest/length/codec on read and before canonical use; encrypted/authenticated transport/storage as policy; scrub; independent replicas/repair symbols.
-
-### T-STO-2 Malicious RaptorQ symbols
-
-**Controls:** authenticated envelope/source ID/profile; symbol dedup/limits; quarantine decode; original digest/Merkle/Git/codec verification; no mutable metadata dependence.
-
-### T-STO-3 False placement durability
-
-**Controls:** failure-domain-aware policy; attested placement receipts; independent probes; restore drills; no durability claim from raw replica/symbol count.
-
-### T-STO-4 Capsule rollback/fork
-
-**Controls:** exact repository/RCR/epoch binding; trusted key/registry policy; head/sequence comparison; old capsule labeled historical; signatures outside stable ID; root-last pointer.
-
-### T-STO-5 Backup exfiltration
-
-**Controls:** separate credentials/accounts, encryption, access logs, least privilege, offline/immutable options, restore access controls, secret/key handling, retention/deletion policy.
-
-### T-STO-6 GC root omission
-
-**Controls:** authenticated root catalog; reference and incremental reachability equivalence; legal holds/PR/queue/release/artifact/backup/migration roots; grace/revalidation; property/fault tests.
-
-### T-STO-7 Misleading deletion
-
-**Controls:** user/API states for logical hidden, queued, swept primary, backup expiry, crypto erasure; evidence and policy; no instantaneous claim when backups/replicas persist.
-
-## 13. Search/graph/projection threats
-
-### T-PROJ-1 Stale authorization
-
-**Controls:** position receipts; canonical revalidation for effect; security-sensitive permission change invalidation; fail closed where freshness bound exceeded.
-
-### T-PROJ-2 Cross-tenant embedding/snippet leak
-
-**Controls:** tenant/security-domain partitioning; authorization-aware indexing; no global ANN graph exposing neighbors; deletion/revocation propagation tests.
-
-### T-PROJ-3 Poisoned ranking/context
-
-**Controls:** provenance/explanations; diverse lexical/semantic signals; prompt-injection labels; budgets; no ranking-based authority; abuse detection only reversible.
-
-### T-PROJ-4 Malformed code parser exhaustion
-
-**Controls:** parser isolation, byte/depth/time limits, fallback plain text, fuzzing, cancellation.
-
-## 14. Package, LFS, release, and artifact threats
-
-- digest confusion/media-type mismatch;
-- mutable tag/version overwrite;
-- typosquatting/dependency confusion;
-- malware/provenance forgery;
-- quota bypass/dedup side channels;
-- cross-tenant object access;
-- retention/GC root loss;
-- oversized/range/decompression abuse.
-
-Controls include native typed digests, immutable blob storage, evented tag/version policy, namespace authorization, quotas, provenance/signature evidence, package proxy policy, optional review/scanning, tenant-safe dedup, and complete retention roots.
-
-## 15. Multi-tenant and economic abuse threats
-
-### T-TEN-1 Cross-tenant access
-
-Every key/cache/index/artifact/effect includes tenant/security domain. Negative tests attempt ID guessing, shared digest access, cache side channels, search leakage, billing/support/admin confusion, and restore mix-up.
-
-### T-TEN-2 Noisy neighbor/resource exhaustion
-
-Hierarchical reservations/quotas for ingress, pack validation, metadata, object bytes, egress, materialization, search, CI, agents, repair, and webhooks. Fair queues and load shedding preserve canonical metadata/recovery operations.
-
-### T-TEN-3 Billing manipulation
-
-Transactional usage records tied to operation/outbox identities; reconciliation; duplicate suppression; signed meter configuration; disputes expose evidence. Statistical estimates do not directly charge.
-
-### T-TEN-4 Abuse/spam/malware
-
-Rate/reputation/review systems may throttle/quarantine reversibly; appeals/admin evidence; public hosting policy; no irreversible accusation from one model/detector.
-
-## 16. Supply-chain threats
-
-- compromised dependencies/toolchains/actions/images/models;
-- tag moving in CI;
-- malicious build scripts/proc macros;
-- unsigned release artifacts;
-- dependency license conflict;
-- model artifact substitution.
-
-Controls:
-
-- exact lockfiles and immutable Git/Action/image/model pins;
-- checksum/signature/provenance manifests;
-- dependency allow/deny/advisory/license gates;
-- minimal dependencies and feature graphs;
-- reproducible/independent release builds where feasible;
-- SBOM and source/toolchain identity;
-- no network in canonical builds unless explicitly provisioned;
-- protected release signing and key rotation;
-- scalar/reference implementations for critical optimized paths.
-
-## 17. Operator and insider threats
-
-- unauthorized data access/support tooling;
-- policy/retention override;
-- key theft;
-- audit suppression;
-- destructive migration/restore;
-- covert cross-tenant query;
-- emergency bypass abuse.
-
-Controls: least privilege, just-in-time access, dual control, step-up auth, immutable audit, query purpose/ticket, customer-visible logs where appropriate, separation of duties, key isolation, canary/honey access, periodic access review, and break-glass expiry.
-
-The architecture cannot fully prevent a sufficiently privileged owner from changing code/policy; it can make privileged actions explicit, attributable, and harder to conceal.
-
-## 18. Availability threats
-
-Prioritize canonical mutation/outcome lookup and recovery over derived work under overload. Controls:
-
-- admission and per-stage budgets;
-- backpressure rather than unbounded queues;
-- circuit breakers and deterministic degradation;
-- cached/read-only service where safe;
-- regional materialization rebuild;
-- metadata consensus/fencing;
-- object placement and backups;
-- repair/scrub scheduling with emergency reserves;
-- chaos/failover/restore exercises;
-- bounded dependency timeouts/cancellation;
-- no outbox/projection failure blocking canonical commit beyond durable enqueue.
-
-## 19. Cryptography and key management
-
-- algorithms/parameters/key purposes are registry-versioned;
-- domain separation for every signed/hashed object;
-- keys have owner, environment, purpose, activation/revocation, and rotation;
-- tenant/customer-managed key options are a later explicit product decision;
-- envelope encryption separates data keys and wrapping keys;
-- signature verification binds trust policy epoch;
-- random number generation comes from approved OS/crypto sources, not deterministic test RNG;
-- secret zeroization is used where meaningful but not advertised as complete forensic erasure;
-- key compromise has re-sign/re-encrypt/revoke/migration playbooks.
-
-## 20. Logging and privacy
-
-Logs use IDs/positions rather than source/secrets by default. Structured fields have sensitivity classes and retention. Redaction happens before broad sinks. Debug artifacts require explicit authorization and expiry. Agent prompts/context and private code are not silently retained for model training or analytics; hosted terms must state any data use precisely.
-
-## 21. Security release gates
-
-Before public developer preview:
-
-- object/pack/parser fuzz/resource gates;
-- transaction/outcome/RCR fault model;
-- auth/capability negatives;
-- no-secret fixtures;
-- dependency/action pinning;
-- safe rendering/import/webhook basics;
-- backup/export path.
-
-Before hosted alpha:
-
-- tenant isolation matrix;
-- CI boundary if CI is offered;
-- operator access controls;
-- key/secret management;
-- webhook SSRF/replay;
-- GC/retention/legal hold;
-- restore rehearsal;
-- external security review of exposed surfaces.
-
-Before production security claim:
-
-- sustained patch/update process;
-- incident response and security contact;
-- penetration/red-team results with remediation;
-- failover/restore evidence;
-- release provenance/SBOM;
-- supported-version policy;
-- hosted privacy/deletion/data-residency commitments;
-- no critical unresolved threat-model rows for shipped features.
-
-## 22. Review questions for every change
-
-1. Which trust boundary changes?
-2. What new attacker-controlled bytes/state enter?
-3. Which canonical identity and owner apply?
-4. Can stale/derived state authorize?
-5. Can retry/cancellation duplicate or hide an effect?
-6. What is the linearization/publication point?
-7. Are CPU/memory/disk/network/depth bounded?
-8. Can tenant/private data enter a shared cache/index/log?
-9. Can an agent/CI job obtain ambient credentials/network?
-10. Do signatures/attestations create circular identity?
-11. Does repair verify the original commitment?
-12. Can GC/delete omit a root or overstate erasure?
-13. Can an administrator override invisibly?
-14. Is the control tested negatively and under crash/race?
-15. Is the public claim no stronger than the evidence?
+### 4.3 Compromised agent
+
+May be prompt-injected, induced to request secrets/effects, fabricate evidence, recursively delegate, exceed budgets, or misunderstand base/identity. Model text is untrusted; only capabilities and receipts govern effects.
+
+### 4.4 Malicious repository/artifact
+
+May contain parser/decompression/delta bombs, path/symlink/submodule/case/Unicode tricks, huge graphs, active Markdown/SVG/images, hostile workflows/packages, generated files that manipulate reviewers, and content designed to poison context/embeddings.
+
+### 4.5 Compromised runner/workspace/cache/materializer
+
+May steal credentials, retain tenant data, fabricate checks, poison caches, serve stale/corrupt files, or tamper with artifacts. These workers are disposable and non-authoritative.
+
+### 4.6 Faulty/malicious storage or network
+
+May lose, corrupt, truncate, replay, delay, duplicate, reorder, ambiguously acknowledge, throttle, misroute across tenants/endpoints, or resurrect versioned/lifecycle objects. Gossip and listings may be incomplete or stale.
+
+### 4.7 Malicious federation peer
+
+May replay/equivocate, advertise unavailable/corrupt objects, withhold symbols, flood gossip, exploit schema skew, impersonate identities, or spam social state.
+
+### 4.8 Operator/provider/toolchain attacker
+
+May misuse privilege or compromise KMS, authority/object endpoints, compiler, dependency, build script, proc macro, local DSR host, SSH channel, installer, signing key, package registry, or release mirror.
+
+## 5. Trust zones
+
+1. Untrusted Internet/client edge.
+2. Pure-Rust protocol termination and bounded decoding.
+3. Authentication/capability issuance.
+4. Canonical transaction/policy/reference model.
+5. AuthorityStore client and repository head key.
+6. Immutable object/segment/decision/evidence fabric.
+7. Local FrankenSQLite projections/caches/materializers.
+8. TreeFS workspaces and adapters.
+9. Search/graph/document generation pipeline.
+10. Agent context/effect broker.
+11. CI runners/build hosts/package proxy.
+12. Repair/checkpoint/GC/archive infrastructure.
+13. Operator/key/billing/control plane.
+14. Local DSR/signing/release distribution plane.
+15. Federation peers and remote integrations.
+
+Data crossing zones carries typed identity, authorization/confidentiality, integrity, budget, source position, and replay class where applicable.
+
+## 6. Release-blocking security invariants
+
+1. Only an exact-version conditional head replacement publishes repository state.
+2. Head predecessor/generation and decision/RCR sequences cannot fork/rollback silently.
+3. One seal identity cannot own two semantic requests or terminal outcomes.
+4. Client cancellation/lost response cannot create duplicate or unknown canonical effects.
+5. Policy basis and actor capability are immutable inputs to a decision.
+6. No staged/quarantined bytes become canonical retention roots before commit.
+7. No committed closure is absent from authenticated retention roots.
+8. Pure-Rust production contains no foreign-Git/FFI/subprocess fallback or first-party unsafe.
+9. Untrusted parsing/expansion is bounded before or during allocation/work.
+10. Derived projections/graphs/models cannot grant authority or disclose beyond canonical authorization.
+11. Repair verifies original commitments and current authority before placement publication.
+12. GC cannot sweep authenticated or grace-period roots.
+13. Agent/runner/workspace effects are capability-bounded and obligation-owned.
+14. Secrets are non-ambient and revocable.
+15. Generation/checkpoint/release root publication is anti-rollback and root-last.
+16. Local signed release manifest, not hosted workflow/remote asset state, defines an official release.
+17. Cross-tenant dedup/cache/search/repair cannot become an existence/disclosure oracle.
+18. Admin overrides and break-glass actions are explicit immutable events with scope and evidence.
+
+## 7. Threat analysis and required controls
+
+### 7.1 Git object, pack, delta, and wire attacks
+
+**Threats**
+
+- integer overflow, malformed pkt-line/sideband/pack/trailer;
+- DEFLATE bomb, delta cycle/depth/fanout/aggregate amplification;
+- thin-pack base confusion or missing-object smuggling;
+- tree ordering/mode/name/path edge cases;
+- commit/tag header/encoding abuse;
+- SHA-1 collision tricks and hash-format confusion;
+- hidden-ref probing and capability downgrade;
+- non-atomic/atomic push semantic confusion;
+- resource exhaustion by object count/graph closure.
+
+**Controls**
+
+- clean-room pure-Rust codecs/state machines with checked arithmetic;
+- quarantine before reachability/retention;
+- declared byte/object/depth/fanout/work/memory/time limits;
+- native typed hash domains and collision-defense profile;
+- exact hidden-ref authorization and advertisement policy;
+- protocol/service/capability matrix; no fictional protocol-v2 push assumption;
+- fuzz/source-derived/adversarial differential corpus;
+- no shell command/path construction from repository data.
+
+### 7.2 Authority-head, retry, and stale-publication attacks
+
+**Threats**
+
+- forged/stale version token;
+- ABA through byte-identical restored head;
+- two contenders both believe they committed;
+- ambiguous timeout after server-side CAS success;
+- proxy/gateway caches stale head reads;
+- lifecycle/versioning resurrects retired head;
+- candidate batch/local row/gossip mistaken for canonical;
+- idempotency-key reuse with different request;
+- policy TOCTOU across retries.
+
+**Controls**
+
+- backend conformance for strong create/read/CAS and ABA-safe tokens;
+- canonical predecessor-linked monotone head body;
+- exact-key authority reads before sensitive operations;
+- seal put-if-absent and immutable outcome index;
+- lost-response resolution by rereading head/outcome;
+- no local projection or notification authority;
+- prepared-capsule witness revalidation and deterministic policy basis;
+- fail closed on inconsistent authority responses.
+
+### 7.3 Immutable storage attacks
+
+**Threats**
+
+- wrong tenant/object returned under valid locator;
+- truncation/bit flip/range splicing;
+- stale manifest/location/catalog;
+- deletion/lifecycle/restore resurrection;
+- untrusted endpoint/redirect;
+- cross-tenant dedup existence oracle;
+- encrypted object copied into wrong key domain;
+- listing incompleteness causes recovery omission.
+
+**Controls**
+
+- verify exact identity/length/type/tenant/encryption on every read;
+- follow known authenticated roots, never listing for correctness;
+- minimal owned storage adapters and endpoint allowlists;
+- separate logical identity from mutable placement records;
+- tenant-scoped dedup/encryption by default;
+- lifecycle/versioning conformance and tombstone evidence;
+- obligations for replication/archive/repair debt;
+- independent archive profiles for high-value data.
+
+### 7.4 Materialization and TreeFS attacks
+
+**Threats**
+
+- poisoned bare repository/pack/index/cache;
+- stale materialization served as current;
+- path traversal, symlink/hardlink/mount escape;
+- case-folding/Unicode normalization collision;
+- submodule or archive escape;
+- workspace overlay leaks across run/tenant;
+- local file existence mistaken for publication;
+- cancelled tool leaves output/credential/process.
+
+**Controls**
+
+- immutable source receipts and currentness modes;
+- quarantine/rebuild corrupt derived state;
+- descriptor-relative path capabilities and platform profiles;
+- explicit symlink/submodule/case/Unicode rules;
+- isolated overlay/cache namespaces;
+- semantic intents/export; local files have no authority;
+- staged/visible/durable output epochs;
+- Asupersync obligation/quiescence checks and forced containment.
+
+### 7.5 Authentication, capability, and confused-deputy attacks
+
+**Threats**
+
+- token substitution across tenant/repo/ref/effect;
+- delegation widens scope;
+- stale revocation/expiry;
+- service or agent uses sponsor/admin ambient token;
+- weak auth used for high-impact override;
+- replayed signed request;
+- capability serialized into logs/context/cache.
+
+**Controls**
+
+- typed audience/scope/operation/budget/expiry/revocation handles;
+- delegation attenuation proof;
+- principal/auth-strength snapshot in canonical policy input;
+- brokered secrets/effects; no ambient sponsor token/cloud metadata;
+- idempotency/nonces according to protocol;
+- redaction and secret-taint tests;
+- high-impact dual/independent approval policy and immutable overrides.
+
+### 7.6 Agent prompt injection and tool abuse
+
+**Threats**
+
+- repository/web/package text instructs secret disclosure or capability widening;
+- tool output injects commands/evidence;
+- agent edits policy/workflow/security files outside intent;
+- recursive agents exceed budget or evade verifier independence;
+- fabricated test/review/explanation;
+- context retrieval leaks inaccessible neighbors/embeddings.
+
+**Controls**
+
+- text/data structurally separated from capability/control channels;
+- exact Intent Run and non-textual effect broker;
+- path/effect/secret/network/budget scopes;
+- Context Packets with authorization, provenance, transforms, omissions;
+- Evidence-Carrying Change with tool/effect/check receipts;
+- verifier independence classification/enforcement;
+- sensitive-file policy and explicit publication review;
+- red-team prompt/tool/context suites;
+- canonical revalidation of any agent proposal.
+
+### 7.7 CI runner, workflow, cache, and supply-chain execution attacks
+
+**Threats**
+
+- runner/VM escape or cloud-metadata access;
+- fork obtains protected secrets;
+- cache poisoning across trust domains;
+- workflow expression/injection or incompatible lowering;
+- fabricated green check/artifact/log;
+- orphan process/tunnel/credential after cancellation;
+- package proxy/dependency substitution;
+- malicious artifact published as release.
+
+**Controls**
+
+- immutable BuildInputCapsule and pinned runner image/toolchain;
+- VM/sandbox profile, no metadata, explicit egress/proxy;
+- short-lived brokered secrets under fork/trust policy;
+- immutable trust-domain cache keys and verification;
+- typed workflow lowering and unsupported-expression refusal;
+- check/artifact receipts with source/toolchain/host/output/resource identity;
+- cancellation/reaping/containment campaign;
+- artifact/provenance/signature policy before canonical check/publication.
+
+### 7.8 ATP-Git and peer/cache attacks
+
+**Threats**
+
+- false have summary causes missing bytes;
+- malicious delta basis or reconstruction map;
+- path/relay/tunnel privacy downgrade;
+- peer lies about pieces/availability or sends corrupt data;
+- swarm amplification/endgame DoS;
+- trust-scoped cache poisoning;
+- adaptive controller chooses unsafe overhead/path;
+- RaptorQ decoder bomb.
+
+**Controls**
+
+- final closure and native object identity verification;
+- authenticated profile/manifest/basis identity;
+- typed path security/privacy/budget constraints;
+- bounded paths/peers/pieces/duplicates/memory/work;
+- peer/cache trust ledgers and quarantine;
+- deterministic fallback to ordinary transfer;
+- identity-bound policy/regime/hard floors/ceilings;
+- original commitment verification and decoder limits;
+- loser cancellation/drain obligations.
+
+### 7.9 Webhooks, integrations, imports, and SSRF
+
+**Threats**
+
+- callback reaches loopback/private/link-local/metadata/admin endpoints;
+- DNS rebinding/redirect/IPv6 encoding bypass;
+- signature/replay/confused tenant;
+- unbounded retries/fanout/payload;
+- imported forge state bypasses policy or drops semantics;
+- integration token overbroad or leaked.
+
+**Controls**
+
+- URL canonicalization, DNS/IP revalidation, redirect caps, restricted-range policy;
+- signed stable delivery IDs, timestamps/nonces, at-least-once idempotency;
+- egress capabilities and network budgets;
+- bounded queues/backoff/dead letter/evidence;
+- migration adapters produce explicit unsupported/loss reports;
+- narrow integration tokens and immutable audit.
+
+### 7.10 Markdown, diff, image, SVG, and document attacks
+
+**Threats**
+
+- script/active content/XSS;
+- malicious links/images/data URIs/remote fetch;
+- parser/layout/font/image/decompression resource exhaustion;
+- source-span/review-anchor misattachment;
+- renderer differs across human/API/agent surfaces;
+- generated content hides security-relevant text.
+
+**Controls**
+
+- one safe source-spanned AST lineage;
+- raw active content escaped/disabled by default;
+- host-brokered remote assets and policy;
+- strict bytes/nesting/table/code/font/image/layout/output budgets;
+- deterministic rendering/goldens;
+- exact/remapped/ambiguous/outdated review-anchor states;
+- no renderer/network/file ambient authority.
+
+### 7.11 Search, graph, vector, and Context Packet attacks
+
+**Threats**
+
+- unauthorized content leaks through snippet/embedding/neighbor/aggregate;
+- mixed or stale generation influences security decision;
+- graph edge/model hallucination treated as exact;
+- adversarial repository poisons ranking/context;
+- query fanout/graph traversal DoS;
+- cache/view revision confusion;
+- tie-break nondeterminism changes reviewer/context choice.
+
+**Controls**
+
+- authorization before candidate disclosure and inherited labels;
+- immutable predecessor-linked anti-rollback generations;
+- query pins one generation vector;
+- exact/deterministic/statistical edge types;
+- canonical revalidation for authority-sensitive operations;
+- bounded candidate/fanout/depth/token budgets;
+- closed tie-break policy and decision-path/complexity witness;
+- source spans/provenance/omissions in Context Packets;
+- deterministic fallback when models unavailable.
+
+### 7.12 RaptorQ, repair, checkpoint, and GC attacks
+
+**Threats**
+
+- wrong-source/malicious/stale symbols;
+- decoder resource attack;
+- valid old bytes overwrite newer placement;
+- repair resurrects deleted/expired data;
+- scrub/repair loop causes DoS;
+- capsule/checkpoint signature or root rollback;
+- GC omits PR/legal-hold/migration/backup/in-flight root;
+- approximate filter false negative authorizes deletion.
+
+**Controls**
+
+- authenticated source/profile/symbol identity and strict decoder budgets;
+- verify all original commitments/codec/tenant;
+- reread authority/retention before placement commit;
+- repair as normal authority-governed effect with obligation/evidence;
+- rate/debt/governor/kill switch;
+- body-first/root-last and highest-ack anti-rollback;
+- root registry, exact reachability, tombstone/grace/revalidation;
+- model/property/fault/clean-restore campaigns;
+- approximate structures only as accelerators.
+
+### 7.13 Federation and local-first attacks
+
+**Threats**
+
+- signed peer equivocation/replay/key rollback;
+- CRDT last-writer-wins applied to protected refs;
+- spam/moderation abuse;
+- remote object advertisement without availability;
+- offline proposal assumes stale policy/base still valid;
+- schema skew or unknown required event.
+
+**Controls**
+
+- signed key history, domain/version/sequence, equivocation evidence;
+- operation-class CALM registry; protected refs remain local coordinated admission;
+- observations/proposals/mirror namespaces rather than remote authority;
+- local policy/moderation and rate limits;
+- availability/repair evidence distinct from identity;
+- offline bundle revalidation against current head/policy;
+- unknown required version fails closed.
+
+### 7.14 Operator, key, dependency, and release compromise
+
+**Threats**
+
+- admin edits local repository/SQLite/bucket/root manually;
+- signing/KMS/release key stolen;
+- dependency/compiler/build script/proc macro compromised;
+- local DSR host/SSH route/source checkout tampered;
+- partial/mismatched assets uploaded;
+- GitHub account or release page altered;
+- rollback to vulnerable binary/toolchain/configuration.
+
+**Controls**
+
+- all supported mutation/repair/migration through typed protocols;
+- break-glass capabilities, dual control where policy, immutable audit;
+- key purpose separation, rotation/revocation/threshold/archive recovery;
+- closed dependency registry, one lock/constellation, transitive unsafe/build evidence;
+- dated nightly and intentional advancement;
+- DSR exact source/host/toolchain/target attempt identities;
+- exact asset allowlist/checksums/SBOM/provenance/signatures/installer smoke;
+- local signed release manifest published last;
+- remote mirror reconciliation and update anti-rollback;
+- independent rebuild/verification for high assurance.
+
+## 8. Cryptographic architecture
+
+- Native Git identity uses repository hash format exactly.
+- Internal IDs are domain-separated, versioned, algorithm-typed canonical digests.
+- Signatures bind unsigned logical bodies; mutable placement/acknowledgements do not create circular identity.
+- AEAD/envelope encryption binds tenant/repository/object class/key purpose/version.
+- TLS/authenticated transport uses approved pure-Rust Asupersync/Rust ecosystem primitives under dependency policy.
+- Keys are separated for identity, authority/admin, capsule, evidence, package/release, webhook, tenant encryption, and recovery.
+- Rotation/revocation/mixed-version/algorithm deprecation are explicit formats and tested state machines.
+- Fundamental pure-Rust crypto dependencies are preferred over bespoke unreviewed primitive implementation.
+
+Content address proves byte identity, not authorship; signature proves key use, not benevolence; encryption does not replace authorization or deletion evidence.
+
+## 9. Privacy and data minimization
+
+- Tenant/repository/security/encryption/dedup domains are explicit.
+- Private content is excluded from telemetry by default; keyed digests replace raw content hashes when membership tests matter.
+- Context Packets minimize disclosed content and record authorization/omissions.
+- Logs/evidence use structured redaction and tenant-controlled encryption/selective disclosure.
+- Cross-tenant physical dedup is initially disfavored.
+- Deletion language distinguishes logical invisibility, grace/tombstone, physical placements, backups/repair material, and cryptographic erasure.
+- Hosted documentation discloses operator decryption capability per key profile.
+
+## 10. Security-critical state machines
+
+### 10.1 Object admission
+
+```text
+Received -> Quarantined -> BoundedParsed -> NativeIdentityVerified
+         -> Closure/PolicyAccepted -> Staged -> Visible -> DurabilitySatisfied
+```
+
+Failures are typed. Duplicate exact identity is idempotent. Staging does not imply visibility.
+
+### 10.2 Repository mutation
+
+```text
+Received -> Authenticated -> Canonicalized -> Sealed
+         -> BasisRead -> Prepared -> Batched -> CASAttempted
+         -> Committed | Refused | RetrySameSeal
+         -> Outbox/MaterializationDrain -> Response
+```
+
+Ambiguous response resolves through authority/outcome lookup.
+
+### 10.3 Agent Intent Run
+
+```text
+Draft -> Sponsored -> CapabilitiesIssued -> Context/TreeFSReady -> Running
+      -> EvidenceSubmitted -> Verification -> PublicationDecision
+      -> Quiescent | ContainedFailure
+```
+
+Cancel/budget/refusal do not become terminal until obligations resolve or containment is explicit.
+
+### 10.4 CI job
+
+```text
+Admitted -> BuildInputCapsuleVerified -> Isolated -> Running
+         -> OutputsSealed -> Attested -> PolicyAccepted -> Published
+         -> Quiescent
+```
+
+Unattested/debug outputs cannot satisfy protected checks.
+
+### 10.5 Repair
+
+```text
+Detected -> Quarantined -> SymbolsGathered -> Decoded -> CommitmentsVerified
+         -> Authority/RetentionRevalidated -> PlacementCommitted | Discarded
+         -> Attested
+```
+
+### 10.6 Release
+
+```text
+RunCreated -> TargetAttempts -> AssetsVerified -> Tests/Smoke/SBOM/Signatures
+           -> CompleteMatrix -> LocalManifestSigned/Published
+           -> RemoteMirrorsReconciled
+```
+
+No complete matrix means no authoritative release.
+
+## 11. Detection and adaptive controls
+
+E-processes/conformal/change-point/no-regret systems may monitor authorization denials/replays, force/ref conflict regimes, corruption/repair demand, cache/generation divergence, runner indicators, secret scanning, exfiltration volume, webhook/federation behavior, and rollout/resource regimes.
+
+Automatic actions are bounded/reversible: reduce budgets/concurrency, disable/quarantine cache or worker, stop rollout, increase sampling, require stronger review, or route to human incident handling.
+
+Every detector binds population/selection/window/regime/candidate/fallback/assumptions and maximum action. It cannot solely drive permanent identity sanction, public accusation, history mutation, deletion, access grant, or billing.
+
+## 12. Security verification program
+
+Required lanes include:
+
+1. constitutional dependency/unsafe/FFI/subprocess/runtime scans;
+2. Git/object/pack/wire/archive/document/workflow/package/webhook fuzzing and resource tests;
+3. authority/seal/outcome/head/CAS model and fault tests;
+4. differential Git and declared API/workflow compatibility;
+5. deterministic distributed/concurrency/cancellation/obligation simulation;
+6. storage corruption/endpoint/tenant/lifecycle/anti-rollback campaigns;
+7. TreeFS path/adapter/workspace isolation and materialization poisoning;
+8. ATP peer/path/cache/swarm/adaptive/decoder adversarial suites;
+9. repair/GC/checkpoint/restore and legal-hold races;
+10. agent prompt/tool/context/secret/capability/verifier red teams;
+11. runner escape/cache/fork-secret/egress/orphan campaigns;
+12. search/graph authorization, generation, tie-break, poisoning, and fanout tests;
+13. cryptographic vector/domain/key rotation/revocation failure tests;
+14. DSR host/source/SSH/asset/signature/SBOM/remote-reconciliation attacks;
+15. independent review before hosted production and after authority/key/runner/federation changes.
+
+See [`VERIFY_SPEC.md`](VERIFY_SPEC.md).
+
+## 13. Severity and response
+
+| Severity | Examples | Response |
+|---|---|---|
+| Critical | unauthorized head/ref mutation; cross-tenant private-code disclosure; release-signing/manifest compromise | stop affected publication/distribution, revoke/contain, preserve evidence, rotate/recover, notify under policy, public post-incident scope |
+| High | runner escape with credential access; authority rollback ambiguity; policy bypass; capsule equivocation | quarantine domains, revoke capabilities, determine full exposure window, repair/restore/validate |
+| Medium | bounded DoS; stale derived generation; durability below target without canonical loss | mitigate, narrow affected claims/SLO, clear debt, add regression |
+| Low | unreachable defense-in-depth defect | track and fix through normal evidence gates |
+
+Severity follows demonstrated capability/blast radius, not intent.
+
+## 14. Incident evidence and disclosure
+
+A private reporting channel and stable encrypted evidence identity are required before production code. Incident packs include, subject to confidentiality:
+
+- affected namespaces/cells/backends/hosts/time/sequence window;
+- exact head/RCR/capsule/policy/configuration/binary/toolchain/dependency identities;
+- actor/capability/secret/effect history;
+- detection, containment, repair, restore, and release timeline;
+- integrity/confidentiality/availability/claim impact;
+- replay completeness and missing artifact classes;
+- failed invariant/control/test assumption;
+- permanent fix, negative evidence, and new release gate.
+
+“Human error” is not a root cause; the analysis identifies why one mistake had that effect.
+
+## 15. Residual risks
+
+1. Full Git compatibility is a large semantic/parser surface.
+2. Authorized malicious changes remain possible.
+3. Legacy SHA-1 names remain legacy SHA-1 names.
+4. Host OS/hypervisor runner isolation is platform-specific and high risk.
+5. Agents/verifiers/tests can agree on wrong logic within their authority.
+6. Key/operator/binary control remains powerful despite audit/attenuation.
+7. New decision/ATP/TreeFS/repair protocols require long adversarial maturation.
+8. Aggregate economic denial of service can remain costly despite bounded operations.
+9. Signed federation proves origin, not truth or availability.
+10. Statistical governance can drift toward overreach under operational pressure.
+11. First-party safe Rust does not audit all transitive dependency unsafe or compiler defects.
+12. Object-store CAS guarantees can be invalidated by undocumented provider/gateway changes; continuous conformance is required.
+
+## 16. Security definition of done for production v1
+
+Production v1 requires:
+
+- release-blocking authority/transaction/repair/GC/capability invariants at E4 or stronger where specified;
+- declared pure-Rust Git conformance and hostile resource matrix;
+- no first-party unsafe/FFI/foreign-Git/runtime/dependency violation;
+- deterministic crash/partition/retry/cancel/obligation campaigns with no ambiguous canonical outcomes;
+- cross-tenant storage/cache/index/context/runner/log/repair isolation campaign;
+- independent review of authority, Git codec, capability, TreeFS, runner, key, repair/GC, and release boundaries;
+- signed root-last local DSR release with rollback/reconciliation protection;
+- clean independent capsule/object-fabric restore and measured scoped RPO/RTO;
+- tested key loss/rotation/compromise/break-glass and incident response;
+- no unbounded critical/high finding without explicit time-bounded owner exception and claim demotion;
+- product/security wording matching the exact tested deployment profile.
+
+Until then, security statements remain architecture proposals or scoped evidence claims.

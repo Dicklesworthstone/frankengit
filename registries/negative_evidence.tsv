@@ -1,0 +1,14 @@
+# franken-registry-v1
+id	class	hypothesis	disposition	evidence	revisit_condition	status
+NEG-001	architecture	external ref database plus object log can be co-authoritative	rejected in favor of one decision log and CAS head	docs/OBJECT_STORE_DECISION_LOG.md	new proof eliminates dual-truth recovery and operations cost	active
+NEG-002	dependency	production may shell out to C Git for complex operations	rejected by pure-Rust constitution	docs/DEPENDENCY_AND_MEMORY_SAFETY_CONSTITUTION.md	none for production; test oracle remains allowed	active
+NEG-003	concurrency	different ref names prove transaction independence	rejected because policy, forge, quota, retention, and queues overlap	docs/OBJECT_STORE_DECISION_LOG.md	exact witness proof for a narrower operation class	active
+NEG-004	repair	decoder success alone is sufficient repair	rejected; original commitments and current authority required	docs/RAPTORQ_PERMEATION_MAP.md	none	active
+NEG-005	release	GitHub Actions green status is release authority	rejected; local signed root-last manifest is authority	docs/LOCAL_VERIFICATION_AND_RELEASE_PIPELINE.md	none	active
+NEG-006	graph	centrality or model score may authorize merge/review	rejected; advisory evidence only	docs/GRAPH_INTELLIGENCE_ARCHITECTURE.md	exact deterministic graph constraint explicitly adopted by policy	active
+NEG-007	recovery	older valid checkpoint may silently replace corrupt newest acknowledged root	rejected; fail closed or explicit restore	docs/OBJECT_STORE_DECISION_LOG.md	none	active
+NEG-008	performance	unsafe or FFI shortcut is required for world-class Git performance	rejected; algorithm/layout evidence required	docs/DEPENDENCY_AND_MEMORY_SAFETY_CONSTITUTION.md	measured safe implementation cannot meet a hard requirement and a separately approved constitution change	active
+NEG-009	architecture	periodic repository capsule can serve as ordinary current-state pin	rejected; AuthorityReadReceipt plus optional checkpoint suffix is required	docs/AGENT_PROTOCOL.md	new checkpoint protocol proves zero-lag current-state semantics without authority receipt	active
+NEG-010	dependency	banning a few known crates is a closed dependency policy	rejected; every Cargo dependency must match an active allow row	docs/FRANKENSUITE_DEEP_AUDIT_2026-08-19.md	none	active
+NEG-011	graph	search, semantic and graph shards from different generations may be combined opportunistically	rejected; exact source positions and join receipts are required	docs/GRAPH_INTELLIGENCE_ARCHITECTURE.md	formal mixed-generation join protocol with explicit semantics	active
+NEG-012	verification	dormant full or release lane may return success with an explanatory message	rejected; dormant release-blocking lanes return typed refusal	docs/LOCAL_VERIFICATION_AND_RELEASE_PIPELINE.md	the named implementation-era evidence gates exist	active

@@ -1,0 +1,16 @@
+# franken-registry-v1
+id	crate_pattern	scope	decision	owner	rationale	feature_policy	unsafe_policy	ffi_policy	status
+DEP-000	std	all	allow	constitution	Rust standard library	compiler_selected	trusted_language_runtime	os_abi_only	active
+DEP-001	asupersync	production	allow	concurrency	sole runtime, capabilities, obligations, ATP, lab	pinned_minimal_no_tokio	ledgered_transitive	no_foreign_runtime	active
+DEP-002	franken-*	production	allow_by_pin	architecture	preferred FrankenSuite substrate	exact_constellation_features	must_match_sibling_contract	no_foreign_runtime	active
+DEP-003	serde*	production	allow_fundamental	codec	fundamental typed serialization only	minimal_no_unrelated_formats	ledgered_transitive	no_ffi	active
+DEP-004	pure-rust-crypto	production	allow_by_audit	crypto	standards cryptography is not reimplemented casually	exact_algorithm_features	ledgered_and_audited	no_native_provider	active
+DEP-005	tokio*	production	deny	concurrency	one runtime universe	all_features_denied	prohibited	prohibited	rejected
+DEP-006	libgit2*	production	deny	git-core	clean-room pure-Rust Git engine	all_features_denied	prohibited	prohibited	rejected
+DEP-007	git2*	production	deny	git-core	no libgit2 wrapper	all_features_denied	prohibited	prohibited	rejected
+DEP-008	gix*	production	deny_initially	git-core	FrankenGit owns Git semantics and hot path	all_features_denied	prohibited_as_runtime_shortcut	no_ffi	rejected
+DEP-009	rusqlite	production	deny	storage	use FrankenSQLite not C SQLite	all_features_denied	prohibited	prohibited	rejected
+DEP-010	cloud-sdk-*	production	deny_default	object-fabric	broad SDKs violate closed dependency and runtime policy	all_features_denied	unreviewed	may_pull_native_or_tokio	rejected
+DEP-011	nektos-act	tooling	external_tool	release	DSR workflow adapter only	not_linked	not_in_binary	external_process_tooling_only	active
+DEP-012	upstream-git	conformance	external_oracle	git-conformance	separate pinned differential oracle only	not_linked	not_in_binary	external_process_test_only	active
+DEP-013	fgit-*	production	allow_first_party	architecture	first-party FrankenGit workspace crate	workspace_pinned	must_forbid_first_party_unsafe	no_foreign_runtime	active

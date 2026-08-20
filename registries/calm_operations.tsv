@@ -1,0 +1,14 @@
+# franken-registry-v1
+id	operation	class	authority	proof	fallback	status
+CALM-001	put_verified_git_object	monotone_with_authentication	object_admission_capability	immutable identity union	refuse_invalid_or_over_budget	specified
+CALM-002	add_repair_symbol	monotone_with_authentication	repair_capability	adds independently verifiable recovery information	refuse_unverified_symbol	specified
+CALM-003	add_evidence_artifact	monotone_with_authentication	evidence_capability	append-only identity set	retain_as_unpromoted_candidate	specified
+CALM-004	cache_verified_pack	monotone_scoped	cache_grant	local authorized optimization only	discard_cache	specified
+CALM-005	advance_repository_head	head_cas_required	repository_authority	uniqueness, replacement, order, and absence matter	retry_same_txid	specified
+CALM-006	assign_terminal_outcome	head_cas_required	repository_authority	exactly one terminal decision	requery_authority	specified
+CALM-007	move_or_delete_ref	head_cas_required	repository_authority	expected-old and replacement semantics	refuse_or_rebase	specified
+CALM-008	remove_retention_root	head_cas_required	repository_authority	absence enables irreversible deletion	retain_root	specified
+CALM-009	activate_generation	ordered_projection	generation_authority	anti-rollback exact predecessor	keep_pinned_fallback	specified
+CALM-010	deliver_webhook	exclusive_external_effect	outbox_obligation	non-canonical external effect with stable idempotency	retry_or_terminal_failure	specified
+CALM-011	merge_bounded_telemetry	commutative_but_bounded	telemetry_profile	declared merge algebra and bounded window	reset_to_safe_default	specified
+CALM-012	rank_context_candidates	local_deterministic	context_planner	ordering does not change source truth	return_initial_results	specified

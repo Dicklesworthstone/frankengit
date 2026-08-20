@@ -1,0 +1,8 @@
+# franken-registry-v1
+id	rank	stronger_than	required_evidence	forbidden_upgrade	status
+CLAIM-001	6	CLAIM-002	machine-checked invariant or exhaustive proof within stated model	benchmark_or_single_trace_to_invariant	active
+CLAIM-002	5	CLAIM-003	formal proof artifact with assumptions and checker	statistical_to_proof	active
+CLAIM-003	4	CLAIM-004	bounded model exploration with complete bound and replay	stress_count_to_bounded_model	active
+CLAIM-004	3	CLAIM-005	identity-bound statistical method with assumptions and window	benchmark_to_statistical	active
+CLAIM-005	2	CLAIM-006	operational SLO corpus over named deployment and horizon	single_run_to_slo	active
+CLAIM-006	1	none	reproducible benchmark artifact over named configuration	benchmark_to_universal_claim	active

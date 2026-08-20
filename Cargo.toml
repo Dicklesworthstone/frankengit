@@ -1,0 +1,46 @@
+# FrankenGit constitutional bootstrap workspace.
+# Engine crates enter only with a real vertical slice; no placeholder crates.
+
+[workspace]
+resolver = "3"
+members = ["tools/registry-check"]
+default-members = ["tools/registry-check"]
+
+[workspace.package]
+edition = "2024"
+license-file = "LICENSE"
+repository = "https://github.com/Dicklesworthstone/frankengit"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+missing_errors_doc = { level = "allow", priority = 1 }
+missing_panics_doc = { level = "allow", priority = 1 }
+too_many_lines = { level = "allow", priority = 1 }
+items_after_statements = { level = "allow", priority = 1 }
+manual_let_else = { level = "allow", priority = 1 }
+map_unwrap_or = { level = "allow", priority = 1 }
+redundant_closure_for_method_calls = { level = "allow", priority = 1 }
+uninlined_format_args = { level = "allow", priority = 1 }
+needless_collect = { level = "allow", priority = 1 }
+needless_pass_by_value = { level = "allow", priority = 1 }
+explicit_iter_loop = { level = "allow", priority = 1 }
+format_collect = { level = "allow", priority = 1 }
+single_match_else = { level = "allow", priority = 1 }
+too_many_arguments = { level = "allow", priority = 1 }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.release-perf]
+inherits = "release"
+lto = "thin"
+debug = "line-tables-only"
+strip = false

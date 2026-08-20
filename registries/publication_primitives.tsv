@@ -1,0 +1,10 @@
+# franken-registry-v1
+id	object_class	body_store	authority_key	primitive	linearization	recovery	status
+PUB-001	repository_decision_batch	immutable_object_fabric	repository_authority_head	linearizable_compare_exchange	successful head CAS	follow authenticated predecessor chain and reconcile accelerators	specified
+PUB-002	transaction_seal	immutable_object_fabric	seal_by_txid	strong_put_if_absent	successful conditional create	byte-identical retry or key-reuse rejection	specified
+PUB-003	graph_generation	immutable_object_fabric	graph_generation_authority	anti_rollback_compare_exchange	successful generation activation	resolve pending attempt or retain predecessor	specified
+PUB-004	search_generation	immutable_object_fabric	search_generation_authority	anti_rollback_compare_exchange	successful generation activation	resolve pending attempt or retain predecessor	specified
+PUB-005	repository_capsule	immutable_object_fabric	repository_checkpoint_pointer	root_last_compare_exchange	exact-RCR capsule pointer publication	verify body, signature, closure, and placement	specified
+PUB-006	release_manifest	local_release_store	release_manifest_pointer	root_last_atomic_replace	signed manifest publication	resume target attempts; never publish partial matrix	specified
+PUB-007	workspace_snapshot	workspace_object_store	workspace_session_head	anti_rollback_compare_exchange	snapshot head publication	replay intent log and verify overlay root	specified
+PUB-008	repair_locator_update	immutable_object_fabric	repository_authority_head	linearizable_compare_exchange	repair intent included in decision batch	stale repair refuses or rebases	specified

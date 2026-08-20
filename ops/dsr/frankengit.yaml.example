@@ -1,0 +1,33 @@
+tool_name: frankengit
+repo: Dicklesworthstone/frankengit
+local_path: /data/projects/frankengit
+language: rust
+main_package: fgit-registry-check
+workflow: .github/workflows/docs-integrity.yml
+
+# Pre-implementation repository: only the docs lane is runnable through act.
+act_job_map:
+  linux/amd64: verify-docs
+
+checks:
+  - ./scripts/verify.sh docs
+  - ./scripts/verify.sh constitution
+  - ./scripts/verify.sh fast
+
+# `full` and `release` deliberately return exit 3 until real implementation
+# conformance/fault/native-artifact gates exist. DSR must not publish a release
+# manifest from this architecture-only repository.
+
+targets:
+  - linux/amd64
+
+include_files:
+  - README.md
+  - LICENSE
+  - SECURITY.md
+  - VERIFY_SPEC.md
+  - COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md
+
+# The eventual release contract will enumerate every exact primary asset,
+# checksum sidecar, signature, SBOM, provenance pack, installer smoke receipt,
+# source archive, and signed root-last manifest for the full native matrix.

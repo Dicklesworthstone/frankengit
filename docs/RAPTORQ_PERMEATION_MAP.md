@@ -1,159 +1,342 @@
 # FrankenGit RaptorQ Permeation Map
 
-**Status:** Required architecture registry; implementation status is initially `specified` for every row.
+**Status:** normative design registry draft  
+**Last updated:** 2026-08-19  
+**Executable companion:** [`../registries/durable_objects.tsv`](../registries/durable_objects.tsv)
 
-> RaptorQ is used only for registered immutable byte objects. Decode success is never acceptance: the original cryptographic identity and structural codec must verify. RaptorQ does not provide authorization, consensus, ordering, freshness, or mutable-metadata durability. See [`NORMATIVE_PROTOCOL_CONTRACTS.md`](NORMATIVE_PROTOCOL_CONTRACTS.md#8-raptorq-and-repair-boundaries).
+RaptorQ is a systematic fountain-code family used to reconstruct exact immutable source bytes from a sufficient suitable symbol set. In FrankenGit it is a durability, repair, and native-transfer mechanism for registered immutable byte structures. It is not a hash, signature, encryption scheme, authorization system, freshness oracle, ordering protocol, transaction log, compare-and-exchange primitive, consensus algorithm, or substitute for tested backups.
 
-## 1. Doctrine
+The phrase “RaptorQ-enabled” is forbidden unless it names an object class, profile, placement promise, decode budget, post-decode verification rule, evidence artifact, and non-claim.
 
-Every subsystem that persists, transfers, or archives a large immutable byte object must answer:
+Every durable or bulk-transferred byte structure declares one status:
 
-1. What are the canonical source bytes?
-2. What original identity authenticates them?
-3. Is RaptorQ useful for this object and failure model?
-4. What are the exact coding parameters and maximum decoder resources?
-5. Across which independent failure domains are source/repair symbols placed?
-6. What triggers decode, and who is allowed to publish repaired placement?
-7. Which original commitments and structural invariants must pass after decode?
-8. What typed failure is returned beyond the repair budget?
+- **MUST encode:** the declared managed durability profile requires a RaptorQ contract;
+- **POLICY:** an identity-bound policy selects encoding within deterministic floors/ceilings;
+- **MAY encode:** supported as an acceleration/recovery option but not required for correctness;
+- **EXEMPT:** deliberately protected by another named mechanism;
+- **DEFERRED:** blocked on measurement or an owning lower-layer contract.
 
-“RaptorQ everywhere” means every eligible durable immutable class is considered and registered. It does **not** mean every byte is coded or that mutable control state uses fountain codes.
+---
 
-## 2. Object registry
+## 1. Universal reconstruction contract
 
-| Key | Canonical source bytes | Original commitment | Intended use | Post-decode verification | Status |
-|---|---|---|---|---|---|
-| `git_loose_object_envelope` | typed Git object header plus uncompressed canonical body | native Git OID plus internal envelope ID | cold-object repair and transfer | length, type, native Git OID, envelope ID | specified |
-| `git_pack_segment` | immutable validated pack segment with manifest | cryptographic segment ID, pack/object manifest roots | bulk storage and regional replication | segment ID, pack checksum, index/object closure | specified |
-| `repository_object_segment` | sorted immutable object-envelope batch | segment ID and Merkle root | canonical object store compaction | canonical codec, every entry ID, Merkle root | specified |
-| `repository_capsule_body` | unsigned canonical capsule body | `RepositoryCapsuleId` | checkpoint recovery | body ID, referenced RCR and root closure | specified |
-| `capsule_manifest_segment` | immutable capsule dependency manifest | manifest ID/Merkle root | checkpoint distribution | canonical decode and every referenced ID | specified |
-| `forge_event_segment` | ordered canonical event envelopes | segment ID, stream-chain roots | event-history backup/replication | event IDs, ordering, chain links, stream root | specified |
-| `ref_snapshot_segment` | authenticated ref trie/radix segment | segment ID and resulting ref root | fast recovery/materialization | sorted canonical refs, node IDs, root recomputation | specified |
-| `object_location_segment` | object ID to immutable placement records | segment ID/root | rebuildable location index checkpoint | canonical ordering, placement syntax, source-object existence | specified |
-| `retention_root_segment` | legal hold, grace, backup, release, PR, and ref roots | retention manifest ID/root | GC safety checkpoint | canonical codec, policy epoch, root closure | specified |
-| `search_generation_segment` | immutable lexical/vector index generation bytes | generation manifest ID and file digests | cheap index repair, never canonical truth | format checks, file digests, source-position receipt | specified |
-| `graph_projection_segment` | immutable graph projection shard | generation ID and source-position root | repairable derived graph | schema/ID checks, source position, generation root | specified |
-| `ci_artifact_chunk` | immutable uploaded artifact chunk | artifact digest and chunk manifest | hosted artifact durability | chunk digest, full artifact digest, manifest | specified |
-| `ci_log_segment` | immutable sealed log bytes | log segment ID and run/evidence root | log durability/stream repair | digest, sequence, run binding, redaction policy | specified |
-| `release_asset_chunk` | immutable release asset bytes | asset digest/manifest | release distribution | chunk/full digest, release-event binding | specified |
-| `package_blob_chunk` | immutable OCI/package blob bytes | registry-native digest plus internal ID | package storage/replication | native digest, media type, manifest closure | specified |
-| `lfs_object_chunk` | Git LFS object bytes | LFS SHA-256 OID and manifest | LFS durability/transfer | LFS OID, length, manifest | specified |
-| `backup_stream_block` | canonical backup bundle block | backup manifest and block ID | offline/site-loss recovery | block ID, backup root, restore rehearsal | specified |
-| `bulk_transfer_frame` | immutable transport block | object/segment ID and frame commitment | lossy/high-RTT transfer | frame auth, reconstructed object commitment | specified |
+Every encoded class defines:
 
-## 3. Explicit exclusions
+1. **Canonical source bytes** — the exact immutable byte string being protected.
+2. **Typed identity** — tenant/namespace, object class, format/version, source length, digest algorithm/value, encryption and partition profiles.
+3. **Partitioning** — source-block boundaries, symbol size, padding, deterministic parameter derivation, and maximum source-block count.
+4. **Symbol identity** — source object, source block, encoding symbol ID, codec/profile version, payload length, and authenticated metadata.
+5. **Placement** — intended and observed failure domains, key dependencies, and rules against correlated loss.
+6. **Deterministic floor** — minimum source/repair availability promise that adaptation may never weaken.
+7. **Adaptive headroom** — optional bounded policy, exact evidence window/regime, fallback, and reset.
+8. **Repair trigger** — scrub failure, missing placement, restore, transfer loss, migration, or explicit destructive drill.
+9. **Decode budget** — maximum accepted symbols, bytes, memory, CPU, retries, wall-clock, and parallelism.
+10. **Post-decode verification** — every original cryptographic and structural commitment required before candidate acceptance.
+11. **Authority check** — current logical state, retention, deletion, and replacement version must be revalidated before publishing a repaired placement.
+12. **Evidence** — within/beyond/malicious-symbol fault corpus, replay command, cost/performance control, and production-shaped drill cadence.
+13. **Deletion interaction** — source/repair retirement and residual-symbol incident policy.
+14. **Encryption interaction** — encoding order and protection of key/nonce/profile metadata.
 
-These classes must use replicated transactional storage, consensus/fencing, checksums, backups, and ordinary recovery—not RaptorQ as a correctness dependency:
+A decoder returning bytes is only `CandidateReconstructed`. Success requires exact verification and an authority-mediated placement update. Repair uses the same publication authority as ordinary writes; it cannot overwrite newer state merely because reconstructed bytes are valid for an older manifest.
 
-| Excluded mutable/control state | Reason |
-|---|---|
-| repository head pointer | current ordering and linearization authority |
-| writer lease / epoch | freshness and stale-writer fencing |
-| transaction seal | idempotency authority |
-| `TxnOutcomeRecord` key/value | linearizable terminal result |
-| authorization membership / revocation | current security policy |
-| policy epoch pointer | current decision authority |
-| quota/billing counters | transactional accounting |
-| outbox delivery cursor | mutable delivery coordination |
-| merge-queue scheduler state | current ordering/admission |
-| legal-hold activation pointer | deletion safety authority |
+---
 
-Immutable snapshots or backups of those records may be encoded, but recovery must restore through the metadata system’s own consensus and validation protocol.
+## 2. Object-class registry
 
-## 4. Coding envelope
+| Object class | Status | Canonical source bytes | Post-decode verification | Authority/retention owner |
+|---|---|---|---|---|
+| Git loose/pack ingress representation | EXEMPT | untrusted client transport bytes | pure-Rust pack/object validation and native Git OID | transaction quarantine |
+| Admitted Git object microsegment | MUST encode in managed durable profile | deterministic sealed microsegment | segment digest, Merkle/index/footer, every record length/type/native OID/strong envelope digest | object manifest + object-closure root |
+| Large repository segment | MUST encode in managed durable profile | exact sealed segment bytes | digest, Merkle root, manifest, authenticated index, every referenced object | segment-manifest/retention roots |
+| Transaction seal body | EXEMPT | canonical immutable seal bytes | strong put-if-absent, exact request commitment, authority replay | seal namespace and decision stream |
+| Prepared transaction capsule | POLICY | exact immutable prepared-candidate bytes | digest, base head receipt, witnesses, object/effect roots, expiry | active-seal/preparation roots |
+| Repository Decision Batch record | EXEMPT at individual record layer | canonical batch bytes | digest, predecessor head/batch, sequences, RCR/refusal/effect roots | repository authority head |
+| Decision-log archive/checkpoint segment | MUST encode | sealed contiguous decision/checkpoint segment | digest, chain continuity, sequence/root replay equivalence | checkpoint/backup retention |
+| Repository Authority Head | EXEMPT | small authenticated mutable head body | linearizable exact-version CAS, monotone generation, body digest/signature profile | AuthorityStore |
+| Repository Capsule body | EXEMPT at individual record layer | unsigned canonical checkpoint body | digest, signatures, exact authority/RCR and closure roots | checkpoint pointer/root |
+| Capsule/backup export bundle | MUST encode | canonical encrypted export chunks/manifests | AEAD, digest, signatures, member roots, restore replay | backup policy/root |
+| Forge event record | EXEMPT at individual record layer | canonical event bytes | event identity, actor/authenticator, stream/aggregate position | decision stream |
+| Forge event/checkpoint segment | MUST encode | sealed canonical event/checkpoint bytes | digest, chain/aggregate roots, deterministic replay | checkpoint/backup root |
+| Policy/key/format-history checkpoint | MUST encode | encrypted canonical checkpoint bundle | AEAD, digest, signatures, semantic validation | policy/key retention |
+| Search generation | MAY encode | exact immutable index shards/manifest | generation digest, source authority position, shard/index checks | generation authority |
+| Graph generation | MAY encode | exact immutable graph shards/manifest | generation digest, schema, source position, vertex/edge/index roots | generation authority |
+| Embedding/vector generation | POLICY | immutable authorized generation | digest, model/tokenizer/index identity, authorization scope | generation authority |
+| Generated Git fetch pack | EXEMPT | disposable pure-Rust pack output | pack checksum and requested closure | transfer region/cache |
+| ATP-Git transfer block | POLICY, normally on large native transfers | exact manifest piece/object/segment block | piece/manifest commitment, length, ultimate object/segment identity | transfer actor/region |
+| Cross-region repository segment transfer | MUST encode for native ATP profile | exact sealed segment bytes | destination digest/Merkle/manifest and placement receipt | object fabric |
+| Ordinary Git wire stream | EXEMPT on wire | Git pkt-line/pack bytes | protocol, pack, object, reachability, and policy checks | Git gateway/transaction quarantine |
+| CI log segment | POLICY | exact sealed log bytes | digest, framing, redaction/provenance linkage | evidence/artifact retention |
+| CI artifact | POLICY, default above threshold | exact sealed artifact/envelope | typed digest, archive/media structure, provenance | artifact retention |
+| Release artifact | MUST encode in managed release class | exact signed asset/envelope | digest, signature, SBOM/provenance/manifest linkage | release manifest/root |
+| Package/OCI blob | POLICY | exact ecosystem blob/envelope | ecosystem digest, Franken digest, manifest/provenance | package retention |
+| TreeFS base/cache generation | MAY encode | immutable tree/blob/cache segment | digest, source authority receipt, manifest | workspace/cache policy |
+| TreeFS mutable overlay | EXEMPT | mutable uncommitted state | staged/visible/durable workspace epochs; snapshot before retention | workspace session |
+| Local bare repo/worktree/materialization | EXEMPT | disposable derived filesystem bytes | source authority receipt; discard/rebuild | materializer/cache |
+| Metrics/trace/evidence segment | POLICY | exact sealed telemetry/evidence segment | digest, schema, source/run identities | evidence/telemetry retention |
+| Secrets/encryption keys | EXEMPT | key material | KMS/HSM/threshold/escrow-specific controls | key authority |
+| FrankenSQLite pages/WAL | DEFERRED to FrankenSQLite profile | owning backend format | FrankenSQLite MVCC/durability/recovery contract; avoid double coding | embedded authority/projection owner |
+| In-memory queue/RPC frame | EXEMPT | transient bytes | transport auth/checksum, retry, obligation settlement | owning region |
 
-Each encoded object has a canonical envelope:
+The TSV registry is the executable source of class status. This table explains the rationale and must not diverge from it.
 
-```rust
-struct RqObjectEnvelope {
-    registry_key: DurableObjectKey,
-    registry_epoch: RegistryEpoch,
-    source_object_id: InternalObjectId,
-    source_length: u64,
-    source_digest: TypedDigest,
-    symbol_size: u32,
-    source_symbol_count: u32,
-    repair_profile: RepairProfileId,
-    object_specific_commitments: Vec<TypedCommitment>,
-}
+---
+
+## 3. Deterministic object and symbol identity
+
+Conceptually:
+
+```text
+RaptorObjectId = H(
+  domain = "frankengit/raptor-object/v1",
+  tenant_namespace,
+  object_class,
+  canonical_format_version,
+  source_length,
+  source_digest_algorithm_and_value,
+  encryption_profile,
+  partition_profile
+)
+
+SymbolId = H(
+  domain = "frankengit/raptor-symbol/v1",
+  RaptorObjectId,
+  source_block_index,
+  encoding_symbol_id,
+  symbol_length,
+  codec_profile_version
+)
 ```
 
-The envelope identity is authenticated independently of symbol payloads. Symbol identifiers include the source object ID, encoding symbol ID, profile, and envelope version. Implementations reject mixed source objects/profiles rather than handing attacker-selected symbol sets to an unbounded decoder.
+`H` is selected by the canonical crypto registry. A symbol from another tenant, class, object, source block, codec version, encryption profile, or source length cannot enter the decode set because superficial dimensions happen to match.
 
-## 5. Resource bounds
+Object identity excludes mutable storage locations and observed placement acknowledgements. Those are signed/authenticated receipts over the object/profile identity.
 
-Every profile publishes hard limits:
+---
 
-- maximum source length and symbol count;
-- symbol size range;
-- maximum accepted repair symbols;
-- duplicate-symbol handling;
-- maximum matrix/decode memory;
-- CPU/work-unit budget;
-- cancellation checkpoints;
-- maximum concurrent decodes per tenant/node;
-- spill-to-disk behavior;
-- malformed-symbol refusal codes.
+## 4. Encoding and encryption order
 
-Decode admission reserves resources before expensive work. A missing or corrupt object does not justify unbounded CPU or memory use.
+The default private-payload profile is:
 
-## 6. Placement
+1. construct deterministic canonical plaintext;
+2. compute semantic/plaintext commitments required by the object class;
+3. encrypt into a self-describing AEAD envelope using a versioned key/profile;
+4. treat the exact ciphertext envelope as source bytes;
+5. compute outer object identity and RaptorQ partition;
+6. place source and repair symbols across independent domains;
+7. reconstruct exact ciphertext;
+8. verify outer digest/length/profile;
+9. decrypt;
+10. verify inner semantic commitments and structural codec;
+11. publish a repaired placement only after current authority revalidation.
 
-Repair value depends on independent failures, not raw symbol count. Placement policy records domains such as:
+This permits untrusted storage/repair workers to manipulate symbols without plaintext. Convergent encryption and cross-tenant deduplication are disabled by default because they create equality/confirmation side channels and deletion/accounting ambiguity.
 
-- device;
-- host;
-- rack/availability zone;
-- object-store failure domain;
-- region;
-- provider/account where contractually allowed;
-- offline backup set.
+Public Git object segments may use a non-encrypted profile, but the profile remains identity material.
 
-Two symbols on the same doomed disk are not two durable copies. Placement receipts are attestations over an immutable object ID and policy epoch; they are excluded from the source object’s identity.
+---
 
-## 7. Repair protocol
+## 5. Source-block construction
 
-1. Detect missing/corrupt source or failed commitment verification.
-2. Pin the expected immutable source object ID and registry/profile epoch.
-3. Collect authenticated, de-duplicated symbols within admission budgets.
-4. Decode into a quarantine buffer.
-5. Verify expected length and source digest.
-6. Verify object-specific commitments: Git OID, Merkle root, codec, sequence, manifest closure, etc.
-7. Record a `DecodeProof`/repair evidence artifact containing inputs, profile, work, and checks.
-8. Publish repaired immutable placement idempotently.
-9. Update derived location indexes after source identity is proven.
-10. Escalate typed `InsufficientSymbols`, `CommitmentMismatch`, `MalformedEnvelope`, `BudgetExceeded`, or `RegistryUnsupported` when recovery cannot be accepted.
+### 5.1 Deterministic microsegments
 
-The repair path never mutates the logical object body. If decoded bytes do not match the original commitment, the system reports corruption or malicious input; it does not bless a new identity under the old name.
+Small Git/forge objects should not each pay independent coding overhead. A microsegment contains:
 
-## 8. Adaptive overhead
+- format/profile header;
+- canonical ordered record table;
+- object class/type/length/native OID/strong envelope digest;
+- exact payload bytes;
+- authenticated random-access index;
+- Merkle/footer and segment digest;
+- optional compression/encryption profile;
+- source-block partition metadata.
 
-A controller may choose repair overhead within deterministic minimum/maximum profiles using observed loss, durability, cost, and decode performance. Conformal bounds or e-process alarms may trigger reversible profile changes, but:
+Ordering cannot depend on arrival race, filesystem enumeration, process hash seed, wall clock, thread ID, or storage listing. If a builder receives noncanonical input order, it refuses or produces a separately identified normalization record; it does not hide nondeterminism.
 
-- the hard minimum for the object class remains enforced;
-- observations and controller state are replayable;
-- a regime change resets or widens uncertainty conservatively;
-- no controller can reduce already-promised retention below policy;
-- statistical evidence cannot waive post-decode commitments;
-- an offline deterministic profile is always available.
+### 5.2 Large objects and segments
 
-## 9. Required evidence
+Large blobs, artifacts, package layers, checkpoint segments, and backup chunks use independently repairable source blocks. Block sizing balances:
 
-A registry row cannot advance beyond `specified` without:
+- peak decode memory;
+- encoder/decoder throughput;
+- parallelism and cancellation responsiveness;
+- repair granularity;
+- object-store request/range economics;
+- symbol overhead and loss concentration;
+- ATP path bandwidth-delay product.
 
-- canonical encoding goldens;
-- independent encoder/decoder or RFC conformance vectors where applicable;
-- random and adversarial erasure campaigns;
-- bit-flip, truncation, duplication, and symbol-mix attacks;
-- resource-exhaustion tests;
-- cancellation and crash tests;
-- post-decode commitment-negative tests;
-- multi-domain placement simulations;
-- end-to-end restore/rebuild rehearsal;
-- benchmark artifacts for encode/decode overhead;
-- proof that the uncoded compatibility path remains available where required.
+### 5.3 Padding
 
-## 10. Non-claims
+Source length and padding rule are authenticated. Decoders truncate only to the verified source length after complete object verification.
 
-A row marked `verified` means the named evidence passed for the named profile and corpus. It does not prove permanent recoverability, Byzantine consensus, malicious-provider resistance beyond authenticated commitments, or universal economic superiority. Public durability claims must include profile, placement assumptions, repair horizon, evidence date, and restore command.
+---
+
+## 6. Redundancy and adaptation
+
+### 6.1 Deterministic floor
+
+Every managed durability class publishes a minimum independent source/repair availability and failure-domain placement promise. The floor is part of the storage acknowledgement and cannot be reduced by a statistical controller, cost spike, heat change, or missing telemetry.
+
+### 6.2 Identity-bound adaptive headroom
+
+Within hard floors/ceilings, a policy may add/retire repair symbols based on measured loss, repair demand, age/staleness, heat, region health, bandwidth/storage price, and decode margin.
+
+Its identity binds:
+
+- object population and class;
+- exact observation window/sequence;
+- selection/propensity rule;
+- regime epoch and detector;
+- candidate and deterministic fallback;
+- assumptions/support/ESS where applicable;
+- arithmetic/toolchain/math fingerprint;
+- action bounds, reset, and kill switch.
+
+Insufficient support, regime alarm, stale evidence, arithmetic bound failure, or policy mismatch selects fallback. Adaptation may improve economics; it never defines whether durability promises are satisfied.
+
+---
+
+## 7. Placement and trust
+
+Repair symbols matter only when their failure correlation differs from the sources. Placement policy considers:
+
+- device, process, node, rack, zone, region, provider;
+- storage class/lifecycle;
+- administrative and software version domain;
+- encryption key and control-plane dependency;
+- network path;
+- legal residency;
+- tenant boundary;
+- correlated format/implementation bugs.
+
+Storing all symbols beside the source on one filesystem does not satisfy a multi-domain claim. Cache/peer trust is scoped: verified local cache, same-tenant peer, cross-region replica, federation peer, and anonymous transfer source are distinct classes with different required checks and budgets.
+
+---
+
+## 8. Repair state machine
+
+```text
+Healthy
+  -> Suspect(reason, evidence)
+  -> InventoryAndAuthorityRead
+  -> DecodePlan(symbol_set, profile, budget)
+  -> DecodingInQuarantine
+  -> CandidateReconstructed
+  -> OriginalCommitmentsVerified
+  -> CurrentAuthorityRevalidated
+  -> RepairIntentPrepared
+  -> AuthorityHeadCAS
+  -> PlacementAndManifestReconciled
+  -> Healthy
+```
+
+Typed terminal/refusal outcomes include:
+
+- `InsufficientIndependentSymbols`;
+- `DecodeBudgetExceeded`;
+- `SymbolIdentityMismatch`;
+- `CandidateDigestMismatch`;
+- `StructuralVerificationFailed`;
+- `KeyUnavailable`;
+- `PlacementUnsatisfied`;
+- `AuthorityReceiptStale`;
+- `NewerLogicalVersionExists`;
+- `ObjectLogicallyDeleted`;
+- `RetentionPolicyChanged`;
+- `OperatorQuarantine`.
+
+A failed decode or lost head CAS does not overwrite the last known-good placement or mutate current manifests. Candidate bytes remain quarantined until explicitly retained or destroyed. A valid reconstruction of an old object is not authority to resurrect a logically deleted object.
+
+---
+
+## 9. Staged, visible, and durable states
+
+For every encoded object/publication pipeline:
+
+- **staged:** bytes/symbols exist but are not reachable from an accepted canonical root;
+- **visible:** an authority decision references the object/placement for reads;
+- **durable:** required profile and failure-domain receipts have been verified.
+
+The owning profile declares the transition graph; there is no universal inequality. Managed canonical source objects use `Absent -> Staged -> DurabilitySatisfied -> Visible`. Lower-value derived objects may use `Absent -> Staged -> Visible(with DurabilityObligation) -> Durable`. Acknowledgements name the exact state/profile and unresolved obligation. Upload completion proves neither visibility nor durability.
+
+---
+
+## 10. Garbage collection and deletion
+
+Deletion is root/manifest-driven, never inferred from bucket listing.
+
+Before source or repair symbols retire, GC proves:
+
+- no ref/object closure, PR/merge queue, active seal/preparation, checkpoint/backup, legal hold, release/package/artifact, migration/restore, grace tombstone, or transfer obligation needs them;
+- deletion and replica/backup grace horizons elapsed;
+- current authority still matches the proof basis;
+- remaining placements meet declared recoverability;
+- residual symbols do not defeat cryptographic-erasure claims;
+- actions are idempotent and evidenced.
+
+Repair automation cannot make a deleted object reachable. Discovering residual recoverable symbols after an erasure claim is a security/compliance incident.
+
+---
+
+## 11. Verification matrix
+
+Every `MUST encode` profile requires:
+
+1. canonical source/partition/symbol golden vectors;
+2. deterministic parameter derivation across platforms;
+3. symbol-order independence;
+4. arbitrary admitted erasure patterns;
+5. one-beyond-bound fail-closed drills;
+6. duplicate, corrupt, mixed-object, forged-metadata, truncated, and excessive-symbol tests;
+7. cancellation at every encode/decode/fetch/verify/place/CAS point;
+8. exact cryptographic and structural post-decode verification;
+9. peak CPU/memory/time/input-count budget enforcement;
+10. correlated placement failure simulation;
+11. repair racing newer write/deletion/policy change;
+12. backup/restore or transfer integration;
+13. replication-only and fixed-erasure controls;
+14. production-shaped destructive reconstruction drill;
+15. signed replay artifact with source/toolchain/profile/failure seed.
+
+An encode-throughput benchmark without destructive reconstruction and authority-race evidence is not durability evidence.
+
+---
+
+## 12. Required metrics and evidence
+
+By object class/profile/policy epoch:
+
+- source/repair bytes and amplification;
+- independent availability margin by failure domain;
+- encode/decode CPU, peak memory, latency, cancellation delay;
+- repair trigger, refusal, success, and failure causes;
+- bytes/requests/egress per repair;
+- placement-policy violations;
+- scrub lag and last destructive drill;
+- post-decode commitment failures;
+- authority revalidation/CAS conflicts;
+- newer-version/deletion races;
+- storage/egress cost versus controls;
+- adaptive action, fallback, reset, and rollback rate.
+
+Metrics must not expose cross-tenant membership or plaintext digest confirmation.
+
+---
+
+## 13. Open experiments
+
+- microsegment size/sealing/locality policy;
+- source-block/symbol sizes by object and ATP path class;
+- compression-before-encryption profiles;
+- deterministic redundancy floors by promised failure domains;
+- fixed replication versus RaptorQ crossover;
+- hot full replicas plus repair symbols;
+- Asupersync encoder/decoder cancellation granularity;
+- SIMD-safe scalar/vector implementation strategy;
+- browser/WASM recovery-bundle decode;
+- cross-provider placement economics;
+- very-large-object partitioning;
+- Git pack/delta locality interaction;
+- malicious-symbol and format-version isolation;
+- repair versus cryptographic-erasure operational procedure.
+
+Every experiment retains exact correctness, names assumptions, includes a simple control, and records negative results.

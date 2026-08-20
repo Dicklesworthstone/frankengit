@@ -1,193 +1,665 @@
-# FrankenGit Initial Implementation Backlog
+# FrankenGit Initial Public Issue Backlog
+
+**Status:** proposed G0–G3 dependency graph  
+**Last updated:** 2026-08-19  
+**Rule:** an issue closes only with its named evidence artifact; source existence alone is not completion.
+
+This backlog implements the v3 object-store decision-log architecture in final-abstraction vertical slices. It intentionally begins with identities, reference models, authority semantics, and pure-Rust Git conformance rather than UI scaffolding. Empty crates, placeholder traits disconnected from a runnable slice, and foreign-Git production fallbacks are prohibited by [`AGENTS.md`](../AGENTS.md).
+
+Suggested labels:
+
+- areas: `truth`, `git`, `object-fabric`, `concurrency`, `runtime`, `transport`, `workspace`, `forge`, `agent`, `graph`, `search`, `repair`, `security`, `verification`, `release`;
+- types: `spec`, `model`, `implementation`, `conformance`, `fault`, `benchmark`, `counterexample`;
+- gates: `G0`, `G1`, `G2`, `G3`;
+- risk: `critical`, `high`, `medium`.
+
+## Dependency map
+
+```text
+FG-001 constitution + registries
+  ├─ FG-002 canonical codec and IDs
+  │    ├─ FG-003 reference state machine
+  │    ├─ FG-004 AuthorityStore contract
+  │    │    ├─ FG-005 embedded FrankenSQLite authority profile
+  │    │    └─ FG-006 object-store authority conformance profile
+  │    ├─ FG-007 transaction seal/outcome
+  │    ├─ FG-008 intent/effect normal form
+  │    ├─ FG-009 decision batch + authority head
+  │    └─ FG-010 checkpoint/capsule formats
+  ├─ FG-011 Asupersync kernel profile
+  │    ├─ FG-012 obligation/effect primitives
+  │    ├─ FG-013 deterministic Lab + DPOR harness
+  │    └─ FG-014 per-core preparation + flat combiner
+  ├─ FG-015 pure-Rust Git object core
+  │    ├─ FG-016 pure-Rust pack reader
+  │    ├─ FG-017 pure-Rust pack writer
+  │    ├─ FG-018 upload-pack
+  │    └─ FG-019 receive-pack/quarantine
+  ├─ FG-020 object envelope + microsegment
+  │    ├─ FG-021 object fabric/location/retention
+  │    ├─ FG-022 ATP-Git delta/dedupe profile
+  │    ├─ FG-023 ATP-Git path/swarm profile
+  │    └─ FG-024 first RaptorQ durability class
+  ├─ FG-025 witness refinement/conflict certificates
+  ├─ FG-026 TreeFS workspace core
+  └─ FG-027 source-spanned document/diff core
 
-**Status:** Architecture backlog, not evidence of implementation. Every slice must cite the normative invariant(s) it owns and the evidence gate that closes them. Empty scaffolding is prohibited.
+FG-003 + FG-004..010 + FG-014 + FG-019 + FG-021 + FG-025
+  └─ FG-028 one-node end-to-end clone/fetch/push slice
 
-## Sequencing doctrine
+FG-028
+  ├─ FG-029 canonical forge events + atomic PR merge
+  ├─ FG-030 agent Intent Run/effect/evidence slice
+  ├─ FG-031 graph fabric + deterministic witnesses
+  ├─ FG-032 progressive search/generation authority
+  ├─ FG-033 checkpoint/restore/repair/GC slice
+  ├─ FG-034 hostile CI receipt slice
+  └─ FG-035 local DSR release evidence
 
-A slice is complete only when it provides a final-abstraction vertical capability with typed refusals, cancellation/retry semantics, tests, evidence artifacts, and honest public status. Dependency order is intentional: later product surfaces must not invent their own identity, storage, or mutation semantics.
+FG-029..035
+  └─ FG-036 distributed object-store deployment and failover campaign
+```
 
-## G0 — Constitutional and reference foundations
+---
 
-### FG-001 — Canonical encoding and typed identity registry
+## G0 — Constitution, identity, and executable semantics
 
-Deliver versioned canonical codecs and typed identities for repository, tenant, principals, native Git OIDs, internal object IDs, `TxId`, RCR, events, roots, outcomes, refusals, and capsules.
+### FG-001 — Make the constitutional registries executable
 
-**Evidence:** golden bytes; round-trip/property tests; algorithm/type confusion negatives; cross-platform determinism.
+**Areas:** verification, dependency, claims  
+**Risk:** critical
 
-### FG-002 — Pure repository state-machine reference model
+Implement and validate the checked-in dependency, invariant, publication, CALM, durable-object, graph-view, claim-class, verification-lane, and negative-evidence registries.
 
-Implement an in-memory deterministic model of seals, outcomes, RCR chain, refs, forge positions, policy epochs, writer epochs, outbox, and retention roots.
+**Acceptance:**
 
-**Evidence:** model invariants; generated command sequences; deterministic replay; mutation testing.
+- zero-dependency `fgit-registry-check` compiles on the pinned nightly;
+- registries reject duplicate/unsorted IDs, bad schemas, unknown statuses, broken references, and unregistered dependencies;
+- first-party unsafe/FFI/foreign-Git/Tokio/build-script/proc-macro violations fail closed;
+- Markdown links/fences, sole `TxId` formula, workflow delegation, and source-available wording are mechanically checked;
+- local replay artifact records source tree, toolchain, command, exit code, and report digest.
 
-### FG-003 — Documentation/registry checker
+### FG-002 — Freeze canonical codec, crypto registry, and typed identities
 
-Turn protocol, claim, durable-object, compatibility, refusal, and evidence registries into machine-checked inputs.
+**Areas:** truth, codec, crypto  
+**Risk:** critical
 
-**Evidence:** negative fixtures for missing owners, duplicate IDs, contradictory status, unpinned formats, and broken links.
+Define one canonical encoding profile for immutable FrankenGit bodies and typed algorithm-agile identities without rewriting native Git OIDs.
 
-## G1 — Git object and wire correctness
+**Acceptance:**
 
-### FG-004 — Safe Git object and pack core
+- domain/version/length framing and unknown-field rules;
+- unsigned-body versus signature/attestation envelope convention;
+- no floats, maps with ambiguous order, platform integers, locale, or wall-clock identity inputs;
+- SHA-1/SHA-256 Git OIDs remain distinct types from internal IDs;
+- golden valid/invalid vectors and independent minimal verifier;
+- algorithm registry and migration/mixed-version semantics;
+- mutation corpus proving noncanonical encodings do not share an identity.
 
-Parse and validate loose objects, pack/index formats, deltas, trees, commits, and tags with strict resource budgets and native SHA-1/SHA-256 typed identities.
+### FG-003 — Build the pure deterministic repository reference model
 
-**Evidence:** Git corpus differential tests; fuzzing; delta/decompression bombs; malformed object suites; memory/CPU caps.
+**Areas:** truth, model, verification  
+**Risk:** critical
 
-### FG-005 — Upload-pack reference service
+Implement the smallest complete semantic oracle for seals, decisions, refs, forge aggregates, outcomes, retention roots, and authority heads.
 
-Implement smart-HTTP/SSH fetch paths, v0/v1 compatibility and v2 `ls-refs`/`fetch`, shallow/partial clone, sideband, filters, and promisor receipts.
+**Acceptance:**
 
-**Evidence:** matrix of real Git clients; packet transcript goldens; failure compatibility; cancellation and slow-client tests.
+- no I/O, ambient time, randomized hash order, or runtime dependency;
+- operations consume an explicit snapshot and produce typed intents/effects/refusals;
+- replay from genesis/head yields byte-stable roots;
+- exhaustive small-state tests cover duplicate, reorder, refusal, cancellation, CAS loss, and crash points;
+- model state can be serialized into golden traces;
+- implementation paths must differential-test against this oracle.
 
-### FG-006 — Receive-pack quarantine service
+### FG-004 — Specify and test the `AuthorityStore` contract
 
-Implement push framing, quarantine, thin-pack completion, object closure, expected-old refs, deletes, force, atomic capability, push options, report-status, and signed-push hooks.
+**Areas:** truth, storage  
+**Risk:** critical
 
-**Evidence:** real client differential corpus; malicious pack cases; atomic multi-ref races; duplicate/retry tests; no fictional protocol-v2 push path.
+Define the backend-neutral primitive set used for seals, immutable bodies, authority-head reads, and conditional replacement.
 
-## G2 — Canonical mutation kernel
+**Acceptance:**
 
-### FG-007 — One-node sealed transaction/outcome store
+- strong put-if-absent, read-after-write, authenticated read receipt, exact-version CAS, monotone generation, and ABA protection;
+- no correctness dependence on listing, notifications, clocks, or lease expiry;
+- linearizability history schema and checker;
+- fault suite for stale reads, duplicated responses, lost acknowledgements, reordered retries, partial backend failure, and malicious receipt substitution;
+- explicit refusal for backends that cannot prove the contract.
 
-Implement stable `TxId`, seal mismatch refusal, terminal `TxnOutcomeRecord`, and lookup after ambiguous disconnect.
+### FG-005 — Implement the embedded FrankenSQLite authority profile
 
-**Evidence:** concurrent duplicate attempts; commit/refusal race; cancellation at every checkpoint; crash before/after terminal publication.
+**Areas:** truth, FrankenSQLite, self-hosting  
+**Risk:** critical
 
-### FG-008 — Repository Commit Record sequencer
+Use FrankenSQLite to implement the same `AuthorityStore` semantics for a one-node deployment and local development.
 
-Implement fenced writer epoch, pinned snapshot, policy decision input root, RCR chain, resulting ref/forge roots, and serializable linearization.
+**Acceptance:**
 
-**Evidence:** stale writer; expected-old race; ref/forge atomicity; sequence/parent continuity; deterministic refusal evidence.
+- no C SQLite/rusqlite dependency;
+- compare-and-exchange and immutable-body transactions match the reference model;
+- crash matrix around body write, sync, head CAS, outcome accelerator, and restart;
+- per-core staging uses FrankenSQLite MVCC without creating a second truth universe;
+- export/import to the canonical object/decision format;
+- performance artifact compares the embedded path with a filesystem baseline.
 
-### FG-009 — Immutable staging, promotion, and location map
+### FG-006 — Implement an object-store authority conformance adapter
 
-Stage incoming objects/events before commit, make canonical reachability only through admitted RCR/roots, and promote placement idempotently.
+**Areas:** truth, object store, hosted  
+**Risk:** critical
 
-**Evidence:** crash between every stage; orphan collection; committed closure never missing; malicious location/index corruption.
+Implement one provider-neutral adapter over an object-store API that exposes the exact `AuthorityStore` contract.
 
-### FG-010 — Transactional outbox
+**Acceptance:**
 
-Publish webhook/CI/index/billing effects atomically with the RCR, deliver at least once with stable delivery identities, and repair cursors by replay.
+- provider SDK is not a broad unregistered dependency; adapter uses a small Franken/approved HTTP and signing surface;
+- version/ETag/conditional semantics are independently verified, not assumed from product naming;
+- backend capability receipt records exact API/region/configuration;
+- Jepsen-style concurrent histories pass the local checker over injected faults;
+- unsupported semantics refuse startup rather than degrade silently;
+- no bucket listing participates in current truth or recovery.
 
-**Evidence:** duplicate delivery, crash/restart, poison consumer, reordering, projection rebuild.
+### FG-007 — Implement transaction seal, stable `TxId`, and terminal outcome lookup
 
-## G3 — Materialization and recovery
+**Areas:** truth, idempotency  
+**Risk:** critical
 
-### FG-011 — Disposable Git materializer
+Implement the sole normative transaction identity and permanent semantic request seal.
 
-Build bare/sparse Git views from canonical state; report source RCR/capsule; detect and discard stale/corrupt materializations.
+**Acceptance:**
 
-**Evidence:** delete/rebuild drills; byte/behavior equivalence; concurrent readers; bounded startup; partial object availability.
+- same principal/repository/idempotency key/body maps to one `TxId` across retries;
+- same key with different body is a typed conflict;
+- pre-seal rejection is distinguished from post-seal canonical refusal;
+- client cancellation/disconnect never claims non-commit;
+- outcome lookup works after crash and accelerator loss by replaying the decision stream;
+- concurrent commit/refusal races can publish at most one terminal decision.
 
-### FG-012 — Root-last repository capsule
+### FG-008 — Implement intent evaluation and net-effect normal form
 
-Implement unsigned capsule identity, signatures, exact RCR binding, dependency manifests, placement evidence, and root-last publication.
+**Areas:** truth, policy, GraphDB inheritance  
+**Risk:** critical
 
-**Evidence:** signature rotation without ID drift; missing dependency; stale capsule; crash at every publication step; restore rehearsal.
+Separate evaluation-order intents from target-disjoint canonical effects, following FrankenGraphDB’s normal-form discipline.
 
-### FG-013 — Registered RaptorQ repair for one segment class
+**Acceptance:**
 
-Start with one immutable repository segment class; implement bounded encode/decode, independent placement, post-decode commitments, and repair evidence.
+- before/after workspace diff produces deterministic target-disjoint effects;
+- every source intent maps to one surviving effect or explicit no-op reason;
+- create/delete and repeated edits fold correctly;
+- effect order is canonical and independent of map/hash/process order;
+- policy evaluates one pinned snapshot and exact candidate effect root;
+- apply(normal form, basis) equals evaluator workspace for the reference corpus.
 
-**Evidence:** RFC/independent vectors; erasure/bitflip/mixed-symbol attacks; budget exhaustion; restore from damaged placement.
+### FG-009 — Implement `RepositoryDecisionBatch` and `RepositoryAuthorityHead`
 
-### FG-014 — GC, retention, and deletion protocol
+**Areas:** truth, publication  
+**Risk:** critical
 
-Build authenticated root catalog, mark/prove/grace/sweep phases, legal holds, PR/queue/release/artifact roots, and deletion evidence.
+Create the immutable ordered decision batch and the one authenticated CAS-published head.
 
-**Evidence:** no-live-root sweep property; replica lag/grace races; legal hold activation; backup expiration; interrupted sweep recovery.
+**Acceptance:**
 
-## G4 — Forge semantics
+- batch binds predecessor, contiguous repository sequences, RCRs/refusals, resulting roots, evidence, and outbox obligations;
+- head binds exact predecessor head, monotone generation, batch identity, latest sequence, ref/forge/retention/policy roots;
+- body-first/head-last crash matrix;
+- CAS loss exposes no canonical candidate effects;
+- replay verifies every link and reconstructs current state;
+- two-slot or equivalent anti-rollback recovery refuses ambiguous newest state.
 
-### FG-015 — Event-sourced issues, pull requests, reviews, and projections
+### FG-010 — Freeze checkpoint, capsule, backup, and restore bodies
 
-Implement immutable events and deterministic projections with explicit canonical positions.
+**Areas:** truth, recovery  
+**Risk:** critical
 
-**Evidence:** replay equivalence; projection lag; schema evolution; stable IDs; authorization revalidation.
+Define root-last checkpoints over an exact authority head/RCR without confusing checkpoint cadence with current state.
 
-### FG-016 — Branch protection and merge queue
+**Acceptance:**
 
-Evaluate one pinned snapshot, bind review/status/CODEOWNERS evidence, use synthetic queue refs, and invalidate stale results.
+- unsigned body identity excludes signatures, placement, and mutable acknowledgements;
+- checkpoint binds exact authority head, decision suffix boundary, ref/forge/object/retention/policy/format roots;
+- body/manifest/segment staging precedes pointer activation;
+- older valid checkpoint cannot masquerade as current acknowledged head;
+- restore report proves suffix replay and rebuilt materializations;
+- destructive drill fixtures cover missing/corrupt source and repair objects.
 
-**Evidence:** target movement races; bypass evidence; batched queue failure; flaky/retried checks; merge/ref/PR atomicity.
+---
 
-### FG-017 — Webhook and GitHub API compatibility subset
+## G1 — Runtime, concurrency, pure-Rust Git, and object fabric
 
-Implement the registered REST/webhook subset with stable pagination, errors, signatures, delivery IDs, and documented divergences.
+### FG-011 — Define the FrankenGit Asupersync runtime profile
 
-**Evidence:** contract fixtures against GitHub behavior where legally/technically applicable; replayable endpoint corpus; abuse limits.
+**Areas:** runtime, dependency  
+**Risk:** critical
 
-### FG-018 — Git LFS service
+Pin the exact Asupersync capabilities used by gateways, transfers, publication, repair, projections, agents, and shutdown.
 
-Implement batch upload/download/verify, resumability, quotas, retention roots, and optional locks.
+**Acceptance:**
 
-**Evidence:** official clients; interrupted transfer; digest mismatch; dedup/tenant isolation; GC safety.
+- one runtime/feature universe, no Tokio compatibility in production;
+- explicit `Cx`, budget, deadline, cancellation, RNG, and effect capabilities;
+- region tree and task ownership for every long-lived service;
+- runtime profile identity is attached to evidence artifacts;
+- deterministic Lab and production profiles share typed protocol behavior;
+- foreign reactor/runtime dependencies fail the constitution gate.
 
-## G5 — Agent-native system
+### FG-012 — Implement obligation-typed canonical and external effects
 
-### FG-019 — Intent Run and capability broker
+**Areas:** runtime, effects, CALM  
+**Risk:** critical
 
-Implement sponsor/agent identities, attenuated capabilities, amendments, revocation, and hard budgets.
+Use reserve/commit/abort obligations for object staging, head publication, outbox delivery, package/release upload, and agent effects.
 
-**Evidence:** privilege-widening negatives; expiry/revocation races; audience confusion; budget exhaustion; audit receipts.
+**Acceptance:**
 
-### FG-020 — Context Packet service
+- every reserved effect reaches committed/aborted/terminally quarantined state before region close;
+- cancellation cannot silently drop a committed effect or publish half an effect;
+- external APIs with weak idempotency use an explicit reconciliation state machine;
+- obligation ledger is replayable and linked to `TxId`/Intent Run;
+- CALM registry class determines where coordination is required;
+- quiescence oracle detects orphan tasks, credentials, and unresolved effects.
 
-Produce provenance-preserving, position-pinned sparse context with explicit omissions and authorization-safe progressive retrieval.
+### FG-013 — Build deterministic Lab, DPOR, and crash-point exploration
 
-**Evidence:** no unauthorized result; deterministic generation under fixed inputs; source span integrity; budget truncation receipts.
+**Areas:** runtime, verification  
+**Risk:** critical
 
-### FG-021 — Sparse COW agent workspace
+Create a reusable deterministic harness for authority, transfer, repair, workspace, generation, and effect protocols.
 
-Materialize immutable base plus run-owned overlay with lazy authorized fetch and structured-concurrency lifecycle.
+**Acceptance:**
 
-**Evidence:** no host escape; no credential residue; cancellation through quiescence; reproducible manifest; destructive tool containment.
+- virtual time, deterministic RNG, failpoints, packet/object-store fault injection;
+- vector-clock/Mazurkiewicz trace identity and DPOR reduction;
+- schedule coverage receipt names explored equivalence classes and bounds;
+- cancellation/crash can occur at every declared yield/publication point;
+- minimized counterexample replay command;
+- no raw stress count may substitute for schedule coverage.
 
-### FG-022 — Evidence-Carrying Change and verifier policy
+### FG-014 — Implement per-core preparation lanes and flat combining
 
-Bind proposals, contexts, tools, checks, omissions, claims, non-claims, and machine-enforced independence classes.
+**Areas:** concurrency, performance  
+**Risk:** high
 
-**Evidence:** forged receipt negatives; shared-state verifier downgrade; stale-base revalidation; failed/skipped check preservation.
+Import FrankenSQLite’s per-core staging/combiner architecture for hot repository publication.
 
-## G6 — Search, graph, CI, and hosted service
+**Acceptance:**
 
-### FG-023 — Progressive code/forge search
+- deterministic lane state machine (`Writable -> Sealed -> Combining -> Reusable` or refined equivalent);
+- object validation, intent evaluation, witness creation, and candidate effects remain parallel;
+- one bounded combiner builds a decision batch and attempts one head CAS;
+- overflow/fallback is explicit and cancel-correct;
+- reference-model equivalence for all batch sizes and interleavings;
+- same-binary A/A and A/B artifacts include tail latency, fairness, aborts, CPU, and memory.
 
-Implement lexical first results, semantic/graph refinement, source position receipts, deterministic ordering, and graceful degradation.
+### FG-015 — Implement exact pure-Rust Git object core
 
-**Evidence:** relevance corpus; latency/quality artifacts; stale generation behavior; authorization filtering; explanation fidelity.
+**Areas:** git, memory safety  
+**Risk:** critical
 
-### FG-024 — Repository/ownership/dependency graph projection
+Parse, validate, hash, and emit blob/tree/commit/tag objects exactly in safe Rust.
 
-Build immutable generation shards from canonical events/objects and expose position-aware queries.
+**Acceptance:**
 
-**Evidence:** replay/rebuild; edge provenance; incremental/full equivalence; malformed-language input limits.
+- streaming checked-arithmetic parsers with object/header/depth budgets;
+- exact tree ordering/mode/name and commit/tag header behavior;
+- typed SHA-1/SHA-256 OIDs;
+- no FFI, C Git, libgit2, gix, or subprocess fallback;
+- differential corpus against pinned upstream Git executables as external oracles;
+- malformed/adversarial/fuzz corpus and stable typed refusals.
 
-### FG-025 — CI execution trust boundary
+### FG-016 — Implement safe pure-Rust pack reader and delta resolver
 
-Implement runner identity, sandboxing, immutable inputs, secret broker, cache trust domains, artifact provenance, and cancellation.
+**Areas:** git, security, performance  
+**Risk:** critical
 
-**Evidence:** escape/metadata/secret attacks; cache poisoning; untrusted fork policy; reproducible receipt; kill/restart.
+Implement pack v2 ingestion, indexes, OFS/REF deltas, thin packs, and bounded reconstruction.
 
-### FG-026 — Hosted multitenancy and quota accounting
+**Acceptance:**
 
-Implement tenant isolation, per-resource quotas, abuse controls, billing evidence, noisy-neighbor protection, and operator override logs.
+- checksum/trailer and object-count validation;
+- depth/fan-out/expanded-byte/ratio/memory/time budgets;
+- cycle/missing-base/duplicate/truncation/ref-mismatch refusals;
+- scalar reference resolver plus optimized bounded path;
+- quarantine never creates retention reachability;
+- differential, fuzz, mutation, and decompression-bomb evidence.
 
-**Evidence:** cross-tenant probes; quota races; billing reconciliation; admission under overload; reversible statistical controls.
+### FG-017 — Implement deterministic pure-Rust pack planning and writing
 
-### FG-027 — Multi-node metadata replication and failover
+**Areas:** git, performance  
+**Risk:** high
 
-Move the reference mutation kernel onto the selected consensus/transactional substrate with repository epoch fencing.
+Generate compatible packs from canonical objects without relying on upstream Git.
 
-**Evidence:** partitions, pauses, clock anomalies, stale leaders, rolling upgrade, backup restore, bounded RPO/RTO artifacts.
+**Acceptance:**
 
-### FG-028 — Import/export and migration
+- deterministic baseline profile and explicit non-deterministic optimization profile if ever needed;
+- reachability closure, object order, delta candidate/tie-break policy, and bitmap/commit-graph inputs are receipted;
+- output validates through independent parser and pinned Git clients;
+- cancellation produces no valid partial publication;
+- benchmark against upstream Git on representative histories with byte-equivalence/non-equivalence classifications;
+- optimization proof binds output semantics to the scalar/reference planner.
 
-Import Git/GitHub-compatible source, prove object/ref/forge closure, support incremental cutover and reversible export.
+### FG-018 — Implement `git-upload-pack` and partial clone
 
-**Evidence:** large/rewrite-heavy fixtures; LFS/releases/issues/PR mappings; dual-run comparison; rollback.
+**Areas:** git, protocol  
+**Risk:** critical
 
-## Release gates
+Implement smart-HTTP/SSH upload-pack, v0/v1 and v2 fetch commands, shallow and promisor behavior.
 
-No public alpha until FG-001 through FG-012 and the core portions of FG-014 pass their fault and differential evidence. No “GitHub replacement” claim until the supported rows of `GIT_COMPATIBILITY_MATRIX.md` are implemented and versioned. No “self-healing” claim until at least one registered object class completes an end-to-end corruption/restore lane. No “open source” claim until the license decision is completed.
+**Acceptance:**
+
+- pkt-line/capability/state-machine goldens;
+- have/want negotiation and reachability against pure reference closure;
+- shallow/deepen/unshallow and filter/promisor corpus;
+- hidden-ref authorization at advertisement and object disclosure;
+- streaming cancellation, backpressure, and deterministic error behavior;
+- packet transcript differential evidence across pinned client versions.
+
+### FG-019 — Implement `git-receive-pack`, quarantine, and atomic publication
+
+**Areas:** git, truth, security  
+**Risk:** critical
+
+Implement push negotiation and admission through the decision-log protocol.
+
+**Acceptance:**
+
+- create/update/delete/force, report-status, sideband, push options, atomic and non-atomic semantics;
+- transaction-scoped quarantine and pure-Rust pack validation;
+- expected-old refs, hidden refs, protections, quotas, signatures, and object closure use one pinned authority read;
+- atomic push maps to one RCR/decision; non-atomic mapping is explicit and replayable;
+- response loss resolves by `TxId` lookup;
+- no standardized “protocol v2 push” fiction.
+
+### FG-020 — Implement immutable object envelope and deterministic microsegment
+
+**Areas:** object fabric, repair  
+**Risk:** critical
+
+Define and implement the final storage abstraction for small admitted objects.
+
+**Acceptance:**
+
+- exact embedded Git bytes plus native OID, strong internal digest, length/type, namespace, format, encryption/compression profile;
+- deterministic ordered records, authenticated index, Merkle footer, and segment digest;
+- encoder refuses noncanonical input order rather than silently sorting intent;
+- random-access lookup and full verification;
+- truncation, transplant, duplicate, mixed-namespace, and nondeterministic-builder tests;
+- measured size/locality comparison with loose objects and packs.
+
+### FG-021 — Implement object fabric, location manifests, and retention roots
+
+**Areas:** object fabric, storage, GC  
+**Risk:** critical
+
+Implement immutable put/get/range, verified placements, segment manifests, rebuildable locators, and authenticated retention roots.
+
+**Acceptance:**
+
+- storage listing is never authority;
+- locator/index loss rebuilds from manifests/segments;
+- placement receipts name failure domains and encryption dependencies;
+- staged/visible/durable states are explicit;
+- no object becomes canonical or retained before decision publication;
+- range/read/corruption/failure-domain fault suite and economic metrics.
+
+### FG-022 — Implement ATP-Git have-summary, delta, and reconstruction profile
+
+**Areas:** transport, ATP  
+**Risk:** high
+
+Specialize Asupersync ATP for canonical object/segment/manifest transfer.
+
+**Acceptance:**
+
+- authenticated peer capability and inventory summary;
+- `AlreadyInSync`, delta, unique-content, and full-transfer plans;
+- false-positive summaries affect efficiency only;
+- deterministic reconstruction order and exact manifest/object verification;
+- trust-scoped cache keys and bounded memory;
+- ordinary pure-Rust Git pack fallback when capability/evidence is absent.
+
+### FG-023 — Implement ATP-Git path graph, racing, swarm, and transfer actor
+
+**Areas:** transport, runtime  
+**Risk:** high
+
+Add typed multi-path transfer and verified piece scheduling.
+
+**Acceptance:**
+
+- typed direct/LAN/IPv6/tunnel/relay/mailbox path candidates with security/privacy/cost attributes;
+- bounded path racing with deterministic policy receipt and loser drain;
+- verified/unverified piece states, rarity, peer availability, endgame duplication, and adversarial peer penalties;
+- one transfer actor owns discovery through final verification/quiescence;
+- path-controller adaptivity is identity-bound and falls back deterministically;
+- fault/partition/loss/duplication/reorder/cancellation corpus.
+
+### FG-024 — Implement first RaptorQ-protected durable class
+
+**Areas:** repair, object fabric  
+**Risk:** critical
+
+Protect one immutable repository segment class end to end.
+
+**Acceptance:**
+
+- registered canonical source bytes, source-block/symbol profile, deterministic floor, placement policy, and decode budgets;
+- corruption/erasure/mixed-object/malicious-symbol campaigns within and beyond promise;
+- decoder output accepted only after original digest/Merkle/object/codec checks;
+- repair candidate publishes through current authority and cannot overwrite newer state;
+- destructive reconstruction drill and replication-only control;
+- no blanket “self-healing” claim beyond this class/profile.
+
+### FG-025 — Implement conflict witnesses and value-of-information refinement
+
+**Areas:** concurrency, policy  
+**Risk:** critical
+
+Permit high concurrency without using different ref names as a false independence proof.
+
+**Acceptance:**
+
+- conservative witness families for refs, paths, symbols, policy inputs, forge entities, quota/retention/queue keys;
+- optional sketches estimate overlap but cannot prove absence;
+- refinement spends bounded CPU/bytes only when expected saved abort cost exceeds cost;
+- refined witnesses may remove false conflicts but never a reference-model true conflict;
+- deterministic semantic rebase ladder and conflict certificate;
+- starvation/fairness/retry policy with regime reset and escalation.
+
+### FG-026 — Implement Git TreeFS workspace core
+
+**Areas:** workspace, filesystem, agent  
+**Risk:** critical
+
+Provide an immutable-tree plus copy-on-write workspace without requiring a full mutable checkout.
+
+**Acceptance:**
+
+- descriptor-relative/capability-rooted path API;
+- lazy authorized blob fetch, sparse path set, overlay intent log, snapshot root, and deterministic materialization;
+- symlink/reparse/hardlink/device/path traversal corpus across platforms;
+- staged/visible/durable workspace epochs and crash replay;
+- no ambient sponsor token, host metadata, or unrestricted network;
+- export to ordinary worktree and Git object closure with exact source receipt.
+
+### FG-027 — Implement one source-spanned document/diff lineage
+
+**Areas:** forge, rendering, review  
+**Risk:** high
+
+Use one canonical parsed/source-span lineage for Markdown, comments, reviews, diffs, search spans, APIs, and agent context.
+
+**Acceptance:**
+
+- safe pure-Rust parser/AST/render profiles with exact source spans;
+- stable review anchors and explicit outdated/remap outcomes;
+- human HTML, compact machine, and API representations derive from one AST;
+- resource bounds and active-content policy;
+- staged multi-output publication with rollback;
+- golden cross-surface equivalence and malicious Markdown/SVG corpus.
+
+---
+
+## G2 — End-to-end forge, agent, graph, search, recovery, CI, and release
+
+### FG-028 — Deliver one-node end-to-end clone/fetch/push vertical slice
+
+**Areas:** integration, truth, git  
+**Risk:** critical
+
+Combine the embedded authority profile, object fabric, pure-Rust Git services, and decision publication into a runnable one-repository server.
+
+**Acceptance:**
+
+- initialize/import, clone, fetch, push, delete, force, atomic push, restart, and export;
+- no external Git/database/runtime process in production path;
+- lost response, duplicate request, crash at every publication point, and materialization deletion recover correctly;
+- refs/object closure/outcomes match pinned Git clients and reference model;
+- complete replay/evidence bundle and installation/doctor path;
+- performance baseline names hardware, corpus, cold/warm state, and correctness checks.
+
+### FG-029 — Implement canonical forge events and atomic pull-request merge
+
+**Areas:** forge, truth  
+**Risk:** critical
+
+Implement issues/PR/reviews/protections/checks/merge attempt sufficient for one atomic PR merge.
+
+**Acceptance:**
+
+- immutable events and deterministic aggregate roots;
+- PR open/synchronize/review/check/merge transitions;
+- source/target movement and policy snapshot semantics;
+- merge ref update and merged forge event share one RCR;
+- outbox delivery cannot duplicate canonical events;
+- projection loss/rebuild and mixed-generation authorization negatives.
+
+### FG-030 — Implement minimal Agent Protocol vertical slice
+
+**Areas:** agent, workspace, effects  
+**Risk:** critical
+
+Support one local agent harness from signed/authorized intent through evidence-carrying publication.
+
+**Acceptance:**
+
+- Intent Run, attenuated capability chain, AuthorityReadReceipt, Context Packet, TreeFS workspace, effect obligations, evidence records, and Evidence-Carrying Change;
+- repository text cannot widen authority;
+- producer/verifier independence class is machine-checked;
+- cancellation drains tasks, processes, secrets, prepared transactions, and external effects;
+- publication uses ordinary sealed `RefTxn` semantics;
+- budget, prompt-injection, secret, stale-base, duplicate-effect, and fabricated-evidence corpus.
+
+### FG-031 — Implement typed repository graph fabric and decision witnesses
+
+**Areas:** graph, NetworkX/GraphDB inheritance  
+**Risk:** high
+
+Build commit, object, dependency, ownership/review, build, agent, provenance, and placement graph generations.
+
+**Acceptance:**
+
+- each graph view has authority class, source position, schema, builder, and activation receipt;
+- stable external IDs/order plus dense integer adjacency hot path;
+- closed tie-break policies and per-execution decision-path/complexity witnesses;
+- exact algorithms for ancestry/SCC/dominators/bridges/cuts/matching/topology as selected by registry;
+- inferred/statistical edges are visibly separate and advisory;
+- no graph score or stale generation can grant authorization.
+
+### FG-032 — Implement progressive lexical/semantic/graph search generation
+
+**Areas:** search, context  
+**Risk:** high
+
+Deliver immediate exact/lexical/symbol results followed by optional semantic/graph refinement.
+
+**Acceptance:**
+
+- `Initial`, `Refined`, and `RefinementFailed` streaming states;
+- Quill-style immutable segments with merge-by-concat over disjoint absolute document IDs;
+- root-last anti-rollback generation authority and no mixed-generation read;
+- every result names exact source RCR/generation/span/authorization;
+- Context Packet lists omissions and coverage class;
+- deterministic fallback remains useful when models/refinement are unavailable.
+
+### FG-033 — Implement checkpoint, restore, repair, and garbage collection slice
+
+**Areas:** recovery, repair, GC  
+**Risk:** critical
+
+Prove that canonical truth survives total materialization/index loss and bounded immutable-object damage.
+
+**Acceptance:**
+
+- root-last repository capsule and backup export;
+- restore to clean embedded/object-store target with suffix replay;
+- registered RaptorQ repair through authority-mediated intent;
+- authenticated root catalog includes refs, PR/queue, seals, holds, migration, restore, artifacts, and grace tombstones;
+- mark/prove/grace/revalidate/sweep protocol;
+- repair-versus-newer-write, GC race, legal hold, cryptographic erasure, and residual-symbol incidents;
+- signed restore report with measured RPO/RTO.
+
+### FG-034 — Implement hostile CI execution receipt slice
+
+**Areas:** CI, security, evidence  
+**Risk:** critical
+
+Run one untrusted repository job as a separate hostile-compute product.
+
+**Acceptance:**
+
+- immutable runner image/toolchain identity and exact source closure;
+- bounded CPU/memory/disk/network/time/processes;
+- no cloud metadata or ambient host secrets;
+- fork/trust-scoped secret broker and cache namespaces;
+- cancellation/reaping leaves no orphan process/effect;
+- logs/artifacts/provenance/redaction receipts;
+- green means only the named evidence class, not universal safety.
+
+### FG-035 — Implement local DSR verification and release evidence
+
+**Areas:** release, supply chain  
+**Risk:** critical
+
+Make repository-owned commands and Doodlestein Self-Releaser the release path.
+
+**Acceptance:**
+
+- workflow YAML contains no unique logic and is executable locally through `act`/native hosts;
+- exact source, dirty-state, toolchain, dependency constellation, host, command, environment, and artifact identities;
+- one target attempt identity per native platform;
+- cancellation/resume reuses only byte-verified exact-input artifacts;
+- symlink, traversal, collision, target substitution, and unlisted asset tests;
+- checksums, signatures, SBOM, provenance, installer smoke, source archive, and root-last manifest;
+- GitHub Releases is a distribution adapter, never release truth.
+
+---
+
+## G3 — Distributed and hosted proof
+
+### FG-036 — Prove distributed authority, placement, and failover
+
+**Areas:** distributed, hosted, fault  
+**Risk:** critical
+
+Run the same logical protocol across multiple cells/regions without a home-cell correctness dependency.
+
+**Acceptance:**
+
+- any eligible cell may prepare/attempt publication;
+- rendezvous routing and gossip are hints only;
+- object placement spans declared failure domains;
+- stale/malicious cells cannot publish an older head or fabricated receipt;
+- concurrent CAS, partition, process pause, object-store degradation, region loss, clock anomaly, and rolling-upgrade campaigns;
+- failover requires no mutable Git directory transfer;
+- measured availability, tail latency, RPO/RTO, storage/egress amplification, and cost;
+- public SLO claims remain scoped to the exact deployment/evidence horizon.
+
+## Backlog governance
+
+- Issue IDs are stable and never silently reused.
+- Splitting an issue preserves a parent and dependency update.
+- Closing an issue records claim level, artifact IDs, replay command, and explicit non-claims.
+- Failed hypotheses enter [`docs/NEGATIVE_EVIDENCE_LEDGER.md`](NEGATIVE_EVIDENCE_LEDGER.md) and `registries/negative_evidence.tsv`.
+- A later optimization cannot bypass the reference model, authority contract, pure-Rust boundary, or evidence gate merely because it benchmarks well.

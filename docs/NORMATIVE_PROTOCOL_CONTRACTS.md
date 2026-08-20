@@ -1,59 +1,91 @@
 # FrankenGit Normative Protocol Contracts
 
-**Status:** Normative architecture contract for the pre-implementation phase  
-**Version:** 1.0  
+**Status:** normative architecture contract for the pre-implementation phase  
+**Version:** 2.0  
 **Last revised:** 2026-08-19  
-**Precedence:** When this document conflicts with a summary, diagram, example, backlog item, or older prose in the comprehensive plan, this document wins until the conflict is removed. `VERIFY_SPEC.md` governs the evidence needed to claim an implementation satisfies these contracts.
+**Precedence:** this document governs identity, admission, ordering, publication, recovery, retry, cancellation, Git compatibility, memory safety, agent authority, repair, generation activation, and release evidence. When a summary, diagram, backlog item, or older exploratory passage disagrees, this document wins until the conflict is removed.
 
-FrankenGit is intended to preserve ordinary Git behavior while replacing the conventional assumption that one mutable bare repository is the durable source of truth. That is only safe if identity, admission, ordering, atomicity, recovery, and retry semantics are unambiguous. This document fixes those boundaries before implementation begins.
+FrankenGit preserves ordinary Git behavior while making repository truth independent of one mutable bare repository, one C Git process, one external metadata database, or one elected materialization primary. The production implementation is pure Rust, uses Asupersync as its sole runtime, forbids first-party unsafe code, and never links or invokes another Git engine in production.
 
 ## 1. Normative vocabulary
 
 The words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** are normative.
 
-- **Git object** means a blob, tree, commit, or annotated tag represented exactly as Git defines it.
-- **Git object ID** means `(hash_algorithm, digest_bytes)`. SHA-1 and SHA-256 identities are distinct typed values, not interchangeable byte strings.
-- **Internal object ID** means a domain-separated digest of a FrankenGit canonical envelope. It never replaces or rewrites a Git object ID.
-- **repository epoch** is the monotonically increasing fencing epoch for one repository's canonical writer.
-- **repository sequence** is the gap-free logical sequence assigned to admitted repository commits inside one epoch. Epoch and sequence are compared lexicographically.
-- **forge position** is the authenticated logical position of each canonical forge stream, such as pull-request, issue, review, policy, and release streams.
-- **materialization** is a disposable Git-compatible representation derived from canonical truth. It is never authoritative merely because it is locally complete.
-- **request rejection** is a non-canonical response produced before transaction admission.
-- **transaction refusal** is a canonical terminal outcome produced after a transaction identity has been sealed.
-- **repository capsule** is a signed checkpoint. It is not the per-commit source of current forge-stream position.
+- **Git object** means a blob, tree, commit, or annotated tag encoded according to the repository’s declared Git object format.
+- **Git object ID** means `(hash_algorithm, digest_bytes)`. SHA-1 and SHA-256 domains are distinct typed values.
+- **internal object ID** means a domain-separated digest over one FrankenGit canonical body. It never replaces a Git OID.
+- **transaction seal** is the immutable object that binds one logical mutation identity to one exact semantic request.
+- **prepared transaction capsule** is reusable validation/policy/effect evidence against one authority-head basis.
+- **repository decision** is the immutable terminal `Committed` or `Refused` result for one sealed transaction.
+- **repository decision batch** is the immutable ordered publication body containing one or more terminal decisions and zero or more committed Repository Commit Records.
+- **Repository Commit Record (RCR)** is the canonical source/forge mutation record for one committed logical transaction.
+- **repository authority head** is the small authenticated root selected by one linearizable conditional write.
+- **authority version token** is an opaque backend conditional-write token obtained from a previously authenticated head read and protected against ABA by the head’s monotone generation/predecessor checks.
+- **decision sequence** orders every canonical terminal decision, including refusals.
+- **repository sequence** orders committed RCRs only.
+- **forge position** is the authenticated logical position of every canonical forge stream.
+- **materialization** is a disposable Git-compatible or workspace representation derived from canonical truth.
+- **generation authority** is an anti-rollback root that selects one immutable search, graph, compaction, policy, workspace, or release generation.
+- **request rejection** occurs before a transaction seal and is not repository history.
+- **transaction refusal** is a canonical terminal decision after sealing.
+- **staged, visible, and durable** are distinct publication epochs defined in §9.
 
-## 2. Identity domains
+## 2. Constitutional implementation boundary
 
-### 2.1 Git identities remain native
+### 2.1 Pure-Rust Git engine
 
-FrankenGit MUST preserve the repository's native Git object format. A SHA-1 repository continues to expose SHA-1 object IDs; a SHA-256 repository exposes SHA-256 object IDs. The server MUST NOT silently translate object IDs, synthesize cross-format IDs, or treat equal digest bytes under different algorithms as the same object.
+FrankenGit MUST implement in safe Rust:
 
-Every API carrying a Git object ID MUST include the algorithm. Textual APIs MAY use Git's conventional hexadecimal spelling only when repository context fixes the algorithm unambiguously.
+- Git object parsing and encoding;
+- native OID computation;
+- pack parsing/writing and delta resolution;
+- pack indexes, MIDX, bitmaps, and commit-graph materializations where supported;
+- pkt-line, sideband, upload-pack, and receive-pack behavior;
+- refs, symrefs, namespaces, atomic push, shallow/partial clone, tags, notes, and hidden refs;
+- diff/merge behavior promised by the compatibility registry;
+- quarantine, collision defense, reachability, and resource limits.
 
-### 2.2 Internal immutable identities
+A production feature MUST NOT link `libgit2`, C Git, JGit, Dulwich, or another Git engine; invoke `git` as a subprocess; or hide an external engine behind a fallback. The upstream Git executable MAY run as a separately pinned, sandboxed differential oracle in development/conformance lanes.
 
-Every FrankenGit immutable record uses a domain-separated canonical encoding:
+### 2.2 Runtime and unsafe code
+
+- Asupersync is the sole async runtime.
+- Every first-party crate declares `#![forbid(unsafe_code)]`.
+- No first-party production crate links foreign-language runtime code through FFI.
+- Optimized paths retain a safe scalar/reference oracle.
+- Dependency exceptions follow `DEPENDENCY_AND_MEMORY_SAFETY_CONSTITUTION.md` and the checked registry.
+
+## 3. Identity domains
+
+### 3.1 Native Git identity
+
+A repository has one declared object format. Every API that can cross repository context carries the hash algorithm explicitly. Equal digest bytes under different algorithms are not equal identities. FrankenGit MUST NOT silently translate SHA-1 to SHA-256 or expose an internal digest as a Git OID.
+
+An internal Git envelope MAY bind the native OID, type, length, exact canonical object bytes, and a stronger internal digest for collision/corruption defense. Native compatibility identity remains unchanged.
+
+### 3.2 Internal immutable identities
+
+Every immutable FrankenGit body uses a versioned domain-separated encoding:
 
 ```text
 InternalObjectId = H(
-    "frankengit/object/v1" ||
-    object_type ||
-    canonical_encoding_version ||
+    domain_tag ||
+    schema_id ||
     canonical_body_bytes
 )
 ```
 
-`H` is selected by a versioned cryptographic registry. The digest algorithm is part of the typed identity. Canonical body bytes exclude transport framing, storage location, mutable placement acknowledgements, and signatures unless a record explicitly defines otherwise.
+The typed identity includes algorithm and domain. Canonical body bytes exclude mutable placement, transport framing, store version tokens, and signatures unless the specific schema says otherwise.
 
-### 2.3 Request ID and transaction ID are different
+### 3.3 Request and transaction identities
 
-A `RequestId` identifies one network attempt and is useful for tracing. It has no idempotency authority.
+A `RequestId` traces one network attempt and has no idempotency authority.
 
-A `TxId` identifies one admitted logical mutation. There is exactly one normative derivation:
+There is exactly one normative derivation of the logical mutation identity:
 
 ```text
 TxId = H(
-    "frankengit/ref-txn/v1" ||
+    "frankengit/ref-txn/v2" ||
     tenant_id ||
     repository_id ||
     authenticated_principal_id ||
@@ -62,411 +94,616 @@ TxId = H(
 )
 ```
 
-The idempotency key is supplied by the caller or generated once by an ingress adapter and returned before mutation admission. The canonical request digest binds every semantically relevant field, including expected old refs, proposed new refs, force flags, push options, policy-visible metadata, and requested forge events. A reused idempotency key with a different canonical request digest is a typed `IdempotencyKeyReuse` rejection and MUST NOT alias the first transaction.
+The canonical request digest binds every client-visible semantic field: expected-old refs, proposed new native OIDs, force/atomic flags, push options, requested forge transitions, policy-visible metadata, path/effect scope, and schema version. Pack encoding, quarantine placement, derived object-closure manifest, retry count, receiving node, connection, wall-clock timestamp, random server nonce, and authority-head basis are excluded. Equivalent retries may supply different valid pack encodings for the same requested object identities; the validated closure belongs to prepared evidence, not logical request identity.
 
-A server nonce, retry count, wall-clock timestamp, connection ID, or receiving node MUST NOT participate in `TxId`; including any of those would destroy stable retry identity.
+Reusing an idempotency key with a different canonical request digest is a typed pre-decision rejection and MUST NOT alias the first request.
 
-## 3. Admission boundaries and terminal outcomes
+## 4. Authority-store contract
 
-### 3.1 Pre-admission request rejection
+Canonical publication requires an `AuthorityStore` implementation that proves:
 
-Authentication failure, malformed framing, unsupported protocol capability, request-size violation, tenant suspension, and ingress rate limiting MAY reject a request before `TxId` is sealed. Such a response is request-scoped and is not inserted into repository history.
+- strong `put_if_absent` for transaction seals;
+- read-after-write consistency for known keys;
+- linearizable compare-and-swap replacement of one repository head key;
+- no lost updates through gateways, proxies, failover, or replication;
+- monotone/ABA-safe version tokens or an equivalent body-generation check;
+- complete-or-absent immutable object puts;
+- bounded and typed errors;
+- authenticated endpoint/credential scope;
+- recovery from a known root without relying on object listing.
 
-A pre-admission rejection MUST NOT claim that a repository transaction was refused, committed, or cancelled. The caller may retry after correcting the request or satisfying policy.
+“S3-compatible” is not a proof. Each backend passes the authority conformance and fault suite. The embedded profile implements the same semantics with FrankenSQLite. A weaker backend cannot be used for canonical mutation merely because it stores bytes durably.
 
-### 3.2 Transaction sealing
+## 5. Sealing and admission
 
-Admission seals:
+### 5.1 Pre-seal request rejection
+
+Authentication failure, malformed framing, unsupported capability, request-size/resource violation, tenant suspension, and coarse ingress throttling MAY reject before a seal exists. Such a response MUST NOT claim `Committed`, `Refused`, or non-commit after an ambiguous attempt.
+
+### 5.2 Transaction seal
+
+The gateway canonicalizes the semantic request, derives `TxId`, and conditionally creates:
 
 ```rust
-struct SealedRefTxn {
+struct TransactionSealBody {
     tx_id: TxId,
     tenant_id: TenantId,
     repository_id: RepositoryId,
-    principal: PrincipalSnapshot,
-    canonical_request_digest: Digest,
+    authenticated_principal_id: PrincipalId,
     idempotency_key_digest: Digest,
-    admitted_epoch: RepositoryEpoch,
-    admission_policy_epoch: PolicyEpoch,
+    canonical_request_digest: Digest,
+    request_schema: SchemaId,
 }
 ```
 
-Sealing is itself durable enough that a retry can discover whether a terminal outcome already exists. Implementations MAY combine the seal and terminal record in one serializable metadata transaction when no asynchronous validation occurs; they MUST NOT expose a state in which two different canonical request bodies can win the same `TxId`.
+The deterministic seal key is scoped by tenant/repository/`TxId`.
 
-### 3.3 Exactly one terminal outcome after sealing
+- absent → create the stable request-identity body;
+- present with matching principal/request/idempotency/schema fields → retry continues using the existing seal;
+- present with any conflicting stable field → `IdempotencyKeyReuse` rejection.
 
-Every sealed transaction eventually has at most one immutable terminal record:
+Admission capability, policy epoch, issuer, and first-seen time are separate immutable admission receipts over the seal ID; they are not fields a retry must regenerate. Commit policy is reevaluated against the current pinned authority snapshot. A seal is durable identity, not a commit or ordering event. Request-scoped object staging may expire; the seal/request digest persists according to policy so a retry can safely re-upload equivalent missing bodies.
+
+### 5.3 Exactly one terminal decision
+
+A sealed transaction eventually appears at most once in the authenticated decision history as:
 
 ```rust
-struct TxnOutcomeRecord {
-    tx_id: TxId,
-    repository_id: RepositoryId,
-    sealed_request_digest: Digest,
-    outcome: TxnOutcome,
-    decided_at: LogicalTime,
-    deciding_epoch: RepositoryEpoch,
-    evidence_root: Digest,
-}
-
-enum TxnOutcome {
+enum DecisionOutcome {
     Committed { repository_commit_id: RepositoryCommitId },
-    Refused { code: RefusalCode, refusal_record_id: InternalObjectId },
+    Refused { code: RefusalCode, refusal_record_id: RefusalRecordId },
 }
 ```
 
-The storage key is `TxId`; insertion is compare-and-set from absent to exactly one value. `Committed` and `Refused` race through the same linearizable publication point. A second, byte-identical write is idempotent. A different second value is an invariant violation and a release-blocking failure.
+There is no canonical `Cancelled` terminal outcome. Infrastructure interruption before publication leaves the sealed transaction undecided and retryable. Client cancellation cannot erase or redefine a decision.
 
-Infrastructure failure before terminal publication leaves no terminal outcome and is retryable with the same `TxId`. Client disconnect or cancellation after sealing does not create a third terminal state and does not grant the client authority to erase the transaction. The server either completes validation to `Committed`/`Refused`, or safely abandons uncommitted work while retaining the seal for deterministic retry.
+## 6. Prepared transaction capsule
 
-### 3.4 Cancellation ownership
+Validation emits an immutable capsule against one authority-head basis:
 
-Cancellation has three boundaries:
+```rust
+struct PreparedTxnCapsule {
+    tx_id: TxId,
+    seal_id: TransactionSealId,
+    basis_head_id: RepositoryAuthorityHeadId,
+    basis_rcr_id: Option<RepositoryCommitId>,
+    normalized_intent_root: Digest,
+    net_effect_root: Digest,
+    object_closure_root: Digest,
+    read_witness_root: Digest,
+    write_witness_root: Digest,
+    policy_input_root: Digest,
+    policy_decision_root: Digest,
+    resource_receipt_root: Digest,
+    verifier_root: Digest,
+    preparation_profile: PreparationProfileId,
+}
+```
 
-1. **Before sealing:** the request may disappear without canonical effect.
-2. **After sealing but before the metadata commit:** cancellation requests cooperative drain. No partially visible canonical mutation is allowed. A later retry resumes or re-evaluates the same sealed request.
-3. **After the metadata commit linearizes:** cancellation affects only response delivery and downstream side effects. The committed result remains canonical.
+The capsule MUST bind all inputs needed to decide whether it remains reusable after a lost CAS. It cannot authorize publication by itself.
 
-No API may report `cancelled` as though it proved the mutation did not commit. On an ambiguous connection loss, the client queries by `TxId`.
+Preparation includes:
 
-## 4. Canonical repository state
+- full Git quarantine/object validation;
+- exact native OID and strong-digest checks;
+- object closure/reachability;
+- expected-old refs and force semantics;
+- candidate forge transitions;
+- one pinned policy/configuration snapshot;
+- capability and quota checks;
+- normalized intent/effect construction;
+- conflict/read/write witnesses;
+- deterministic decision evidence.
 
-### 4.1 Repository Commit Record
+## 7. Repository Commit Record
 
-A successful logical mutation publishes exactly one `RepositoryCommitRecord` (`RCR`):
+Each successful logical transaction emits one RCR:
 
 ```rust
 struct RepositoryCommitRecord {
     repository_id: RepositoryId,
-    epoch: RepositoryEpoch,
-    sequence: RepositorySequence,
-    parent: Option<RepositoryCommitId>,
+    repository_sequence: RepositorySequence,
+    parent_rcr_id: Option<RepositoryCommitId>,
     tx_id: TxId,
-    principal: PrincipalSnapshot,
+    principal_snapshot_id: PrincipalSnapshotId,
     canonical_request_digest: Digest,
-
     ref_delta_root: Digest,
     resulting_ref_root: Digest,
     object_closure_root: Digest,
-
     forge_event_batch_root: Digest,
     resulting_forge_position_root: Digest,
-
     policy_epoch: PolicyEpoch,
     policy_decision_root: Digest,
     invariant_evidence_root: Digest,
-    outbox_root: Digest,
-
-    optional_checkpoint_capsule: Option<RepositoryCapsuleId>,
+    outbox_effect_root: Digest,
+    retention_delta_root: Digest,
 }
 ```
 
-The record's immutable identity is the domain-separated hash of its unsigned canonical body. `tx_id` and `(epoch, sequence)` are unique within the repository. `parent` must equal the previously visible RCR, except for repository creation.
+The RCR identity hashes the unsigned canonical body. `parent_rcr_id` equals the previously committed RCR except repository creation. Source-control ref effects and associated forge transitions are one record. A PR merge cannot become visible without its target ref update, and an RCR classified as a PR merge cannot move the ref without the corresponding forge event batch.
 
-The RCR binds both source-control state and the exact forge-event batch admitted with it. A pull request cannot become merged without the associated target ref update, and a target ref update represented as a PR merge cannot become visible without the corresponding forge transition.
+## 8. Repository decision batch and authority head
 
-### 4.2 Forge position is current state; capsules are checkpoints
+### 8.1 Decision batch
 
-`resulting_forge_position_root` is mandatory on every RCR. It authenticates the current positions of canonical forge streams after the admitted event batch.
+```rust
+struct RepositoryDecisionBatchBody {
+    repository_id: RepositoryId,
+    predecessor_head_id: RepositoryAuthorityHeadId,
+    predecessor_head_generation: u64,
+    first_decision_sequence: DecisionSequence,
+    decisions: Vec<RepositoryDecision>,
+    committed_rcrs: Vec<RepositoryCommitRecord>,
+    resulting_ref_root: Digest,
+    resulting_forge_position_root: Digest,
+    resulting_outcome_index_root: Digest,
+    resulting_retention_root: Digest,
+    resulting_outbox_root: Digest,
+    resulting_policy_epoch: PolicyEpoch,
+    batch_evidence_root: Digest,
+}
+```
 
-A repository capsule is an occasional checkpoint over a known RCR and its roots. A carried-forward older capsule MUST NOT be interpreted as the current forge position. `optional_checkpoint_capsule` is either absent or points to a capsule generated for this exact RCR after all required checkpoint material has been durably staged.
+A decision sequence is gap-free across all terminal decisions. Repository sequence is gap-free across committed RCRs. Batch order is deterministic and each decision is evaluated with read-your-own-prior-decisions within the batch.
 
-### 4.3 Linearization point
+### 8.2 Authority head
 
-The mutation linearizes at the serializable metadata commit that atomically makes all of the following visible:
+```rust
+struct RepositoryAuthorityHeadBody {
+    repository_id: RepositoryId,
+    generation: u64,
+    predecessor_head_id: Option<RepositoryAuthorityHeadId>,
+    decision_tail_id: Option<RepositoryDecisionBatchId>,
+    latest_decision_sequence: DecisionSequence,
+    latest_committed_rcr_id: Option<RepositoryCommitId>,
+    latest_repository_sequence: RepositorySequence,
+    ref_root: Digest,
+    forge_position_root: Digest,
+    outcome_index_root: Digest,
+    retention_root: Digest,
+    outbox_root: Digest,
+    configuration_root: Digest,
+    policy_epoch: PolicyEpoch,
+    format_registry_epoch: RegistryEpoch,
+    last_checkpoint_id: Option<RepositoryCapsuleId>,
+}
+```
 
-- the new RCR at `(epoch, sequence)`;
-- the updated repository head pointer;
-- the `TxnOutcomeRecord::Committed` value for `TxId`;
-- the resulting ref-root pointer;
-- the resulting forge-position-root pointer;
-- the outbox entries whose preconditions are the committed RCR.
+### 8.3 Linearization point
 
-Object bytes and immutable event bodies may be written before this point into a content-addressed quarantine/staging namespace. They are unreachable and garbage-collectable until the metadata commit references them. External notifications, webhooks, CI dispatch, indexing, and billing occur after the linearization point through the transactional outbox.
+The mutation linearizes at the successful conditional replacement of the repository head from the exact predecessor authority version token to the new authenticated head bytes.
 
-A refusal linearizes at the metadata commit that publishes `TxnOutcomeRecord::Refused` and its immutable refusal evidence. It does not advance repository sequence or mutate refs/forge state.
+That successful conditional replacement of the repository head simultaneously makes canonical:
 
-## 5. Reference transaction algorithm
+- every terminal decision in the referenced batch;
+- each committed RCR in order;
+- resulting ref and forge-position roots;
+- outcome-index root;
+- retention and outbox roots;
+- policy/configuration position encoded in the head.
 
-The following order is normative. Variables are introduced before use, and all policy inputs come from one pinned snapshot.
+Bodies may be staged earlier but are unreachable canonically. External effects occur later through outbox obligations. Refusals consume decision sequence but do not advance repository sequence or source/forge roots.
+
+### 8.4 Outcome accelerators
+
+A direct `TxId` → decision pointer is a repairable accelerator, not a second truth. If missing after a crash, replay from the authority head reconstructs it. A conflicting accelerator fails closed.
+
+## 9. Publication epochs
+
+Every persistent pipeline distinguishes **staged**, **visible**, and **durable**, but FrankenGit does not impose one universal ordering that would contradict different acknowledgement profiles.
+
+- **staged:** immutable candidate bodies exist but no authority root references them;
+- **visible:** an authority or generation root references them and clients may observe them;
+- **durable:** the declared placement/repair/failure-domain predicate is satisfied.
+
+Allowed transition graphs are profile-versioned. The default canonical source-code profile is:
+
+```text
+Absent -> Staged -> DurabilitySatisfied -> Visible
+```
+
+A lower-value derived generation MAY use:
+
+```text
+Absent -> Staged -> Visible(with DurabilityObligation) -> Durable
+```
+
+A workspace MAY have a local-visible overlay before a root-last durable snapshot. Every acknowledgement names the exact state/profile and outstanding obligation. Upload completion never implies visibility or durability, and visibility never implies a stronger durability class unless the profile proves it.
+
+## 10. Canonical transaction algorithm
 
 ```text
 handle(request, authenticated_principal, request_context):
-  1. Perform request-level framing, size, protocol, and coarse admission checks.
+  1. Perform bounded framing/protocol/size/coarse authorization checks.
   2. Canonicalize the complete semantic request.
-  3. Derive TxId using the one formula in §2.3.
-  4. If a terminal TxnOutcomeRecord exists, return it.
-  5. Seal SealedRefTxn or verify the existing seal matches byte-for-byte.
-  6. Acquire repository writer authority for epoch E; reject stale E.
-  7. Read one pinned RepositorySnapshot S containing:
-       - current RCR/head, epoch, and sequence;
-       - current ref root and requested ref values;
-       - current forge-position root and relevant forge entities;
-       - policy epoch and policy inputs;
-       - retention/legal-hold state;
-       - repository configuration and hash format.
-  8. Validate expected-old ref values and force semantics against S.
-  9. Validate the quarantined Git object graph and compute object closure C.
- 10. Construct candidate ref delta D and candidate forge event batch F.
- 11. Evaluate authorization and policy P against (S, D, F, C, principal).
- 12. If P refuses, atomically publish one Refused outcome and return it.
- 13. Stage immutable event bodies, decision evidence, roots, and outbox body.
- 14. In one serializable metadata commit, compare that S is still current and:
-       - allocate sequence S.sequence + 1 under epoch E;
-       - publish the RCR and all resulting roots;
-       - publish Committed outcome for TxId;
-       - publish transactional outbox entries.
- 15. If the compare fails, discard the candidate metadata transaction and retry
-     from step 6 with the same TxId and sealed request.
- 16. After commit, asynchronously materialize Git views and drain outbox effects.
- 17. Return the immutable terminal outcome.
+  3. Derive the one TxId defined in §3.3.
+  4. Query the outcome accelerator and authenticated outcome index.
+  5. Conditionally create the stable TransactionSeal or verify the existing seal’s stable fields.
+  6. Reserve object/quota/preparation obligations.
+  7. Read one authenticated RepositoryAuthorityHead H and required immutable roots.
+  8. Validate quarantine/object graph and compute exact closure C.
+  9. Evaluate intents in source order against snapshot H with read-your-own-writes.
+ 10. Pin one policy/configuration epoch and evaluate deterministic policy.
+ 11. Produce target-disjoint net effects, witnesses, and PreparedTxnCapsule P.
+ 12. Publish P to a bounded per-core ready slot.
+ 13. A combiner rereads current head Hc and selects compatible ready capsules.
+ 14. Revalidate/refine witnesses and sequentially execute candidates on scratch state.
+ 15. Stage the RepositoryDecisionBatch B, RCR bodies, roots, and candidate head Hn.
+ 16. Attempt compare_exchange(head_key, Hc.version_token, canonical(Hn)).
+ 17. If CAS wins, settle publication obligations and return/query terminal outcome.
+ 18. If CAS loses, reread authority; if TxId is now terminal, return it.
+ 19. Otherwise deterministically preserve, refine, rebase, or re-evaluate the same sealed request.
+ 20. Drain outbox/materialization effects after commit under separate obligations.
 ```
 
-Policy is never evaluated against an uninitialized, mixed, or later snapshot. A retry may observe a newer snapshot and produce a refusal that the first attempt would not have produced, but it cannot change the sealed request or `TxId`. Implementations that need policy decisions stable across retries must explicitly pin and validate a policy epoch as part of the request contract.
+No step shells out to Git in production. No policy decision reads mutable external network state inside the publication boundary.
 
-## 6. Git transport and push compatibility
+## 11. Per-core preparation and microbatching
 
-### 6.1 Fetch and push are distinct services
+- A transaction remains owned by one preparation lane after parsing begins.
+- Lane-local buffers and object validators avoid shared hot-path mutation.
+- Ready-slot publication is reserve/commit/abort.
+- A combiner may batch multiple compatible decisions into one head CAS.
+- The deterministic selection/tie-break policy is versioned and receipted.
+- Interactive latency, bytes, decisions, witness work, and policy epochs bound a batch.
+- Two combiners may race; the head CAS, not combiner identity, establishes authority.
 
-FrankenGit MUST use precise Git terminology:
+Each logical transaction retains its own `TxId`, terminal outcome, and RCR. Batching never changes client atomicity.
+
+## 12. Conflict witnesses and value-of-information refinement
+
+Prepared transactions begin with conservative witnesses over:
+
+- exact or family-level refs;
+- forge entities/streams;
+- protection/CODEOWNERS/check policy;
+- quotas and billing reservations;
+- retention/legal-hold state;
+- merge-queue prefix;
+- object-closure assumptions;
+- graph/search generation inputs used by policy.
+
+After a lost CAS, exact changed roots are compared. If coarse witnesses collide, refinement MAY compute finer path, entity, symbol, subtree, or counter witnesses when expected saved abort/revalidation cost exceeds bounded refinement cost.
+
+Refinement obeys:
+
+1. it can only reduce a conservative false-conflict set;
+2. it cannot change the sealed request;
+3. it cannot waive policy or expected-old semantics;
+4. inconclusive/failed/over-budget refinement retains the coarse conflict;
+5. every refinement decision and input root is receipted.
+
+## 13. Intent/effect semantics
+
+Canonical commands are intents, not pre-baked effects. Evaluation is source-ordered and supports explicit mismatch policies:
+
+- `NoOp`;
+- `StatementError` where the transaction schema permits statement-local failure;
+- `TxnAbort`.
+
+Finalization folds intermediate intents/effects against basis and after-image into target-disjoint net-effect normal form. Every source intent maps to a surviving effect, identity/inverse/absorption no-op, statement error, or transaction abort. Sorting serialized effects MUST NOT alter semantic applicability.
+
+Git receive-pack atomic capability maps all commands to one transaction. Without atomic capability, the mapping from a session to independently terminal ref transactions is explicit and replayable.
+
+## 14. Cancellation and ambiguity
+
+1. **Before seal:** cancellation may leave no canonical trace.
+2. **After seal, before head CAS:** cancellation stops new work, drains effects, and may abandon staged candidates; the sealed request remains retryable and undecided.
+3. **After head CAS:** canonical decision remains; only response/outbox/materialization work may cancel.
+
+An API MUST NOT return `cancelled` in a form that proves non-commit after the CAS could have occurred. Ambiguous disconnects resolve by `TxId` lookup.
+
+Asupersync regions own every child task, socket, process, credential, reservation, and obligation. Region close ends in quiescence or an explicit non-cooperative containment failure.
+
+## 15. CALM and coordination
+
+Every operation is registered according to `CALM_AND_OBLIGATIONS.md`.
+
+Coordination-free after authentication:
+
+- immutable verified object/segment/symbol/evidence puts;
+- authorized cache warming;
+- candidate generation bodies;
+- replica/gossip hints.
+
+Head/generation authority required:
+
+- terminal outcomes;
+- ref movement/deletion;
+- forge state transitions;
+- policy/generation activation;
+- retention removal;
+- package/release uniqueness;
+- destructive GC publication.
+
+Non-canonical replicas use conflict-absorbing lattices. Canonical refs/order are never last-writer-wins CRDT state.
+
+## 16. Git transport and admission
+
+### 16.1 Service precision
 
 - clone/fetch negotiate with `git-upload-pack` over smart HTTP or SSH;
 - push negotiates with `git-receive-pack` over smart HTTP or SSH;
-- Git protocol v2 defines capability advertisement and commands used by fetch-oriented flows such as `ls-refs` and `fetch`;
-- FrankenGit MUST NOT claim that "protocol v2 push" is a compatibility requirement unless Git itself standardizes such a command and the registry is updated.
+- Git protocol v2 capability/commands apply where standardized, especially fetch-oriented `ls-refs` and `fetch`;
+- FrankenGit MUST NOT claim a standardized “protocol v2 push” command.
 
-The compatibility registry records transport (`ssh`, `smart-http`), service (`upload-pack`, `receive-pack`), negotiated protocol version where applicable, object format, and capability set independently.
+ATP-Git is a separate FrankenGit-native capability, not a reinterpretation of Git protocol v2.
 
-### 6.2 Push quarantine
+### 16.2 Quarantine
 
-Incoming pack data is untrusted. Before reference admission it MUST be held in a transaction-scoped quarantine and subjected to bounded validation:
+Incoming bytes remain transaction-scoped and non-retained until bounded validation covers:
 
-- pkt-line and sideband framing limits;
-- pack header, trailer, and checksum validation;
-- object decompression limits and expansion-ratio limits;
-- delta depth, delta fan-out, and aggregate reconstruction budgets;
-- object type and canonical header validation;
-- tree entry ordering, mode, and name validation;
-- commit/tag header and encoding limits;
-- object graph reachability and missing-object checks;
-- submodule entry handling without recursively trusting the target;
-- repository object-format consistency;
-- advertised and hidden-ref authorization;
-- expected-old ref and atomic-push semantics;
-- signed-push certificate verification when requested by policy.
+- pkt-line and sideband framing;
+- pack header/trailer/checksum;
+- decompression and expansion ratio;
+- delta depth/fan-out/aggregate work and cycles;
+- thin-pack bases;
+- object header/type/declared length;
+- tree ordering/mode/name rules;
+- commit/tag headers and encoding limits;
+- native hash format;
+- missing objects and exact reachability;
+- hidden/advertised ref authorization;
+- expected-old/force/atomic semantics;
+- signed-push certificate policy;
+- quotas, cancellation checkpoints, and wall/memory budgets.
 
-No quarantined object becomes a canonical retention root merely because bytes arrived. After an RCR commits, referenced objects are promoted by identity or made reachable through the canonical object-location map. Promotion is idempotent.
+Promotion is by verified identity and canonical retention root, never mutable directory rename as truth.
 
-### 6.3 Atomic push
+### 16.3 Fetch and partial clone
 
-When the client requests atomic push and the server advertises it, all requested ref commands are one `RefTxn`: either one RCR commits every command or one refusal commits none. Without atomic capability, the server may preserve Git's per-ref success/failure behavior, but the mapping from one receive-pack session to one or more sealed transactions must be explicit and replayable.
+Partial clone/promisor state is a transfer/materialization optimization. Canonical retention remains complete. Probabilistic have summaries may reduce first-round bytes but cannot prove closure; final exact verification requests missing objects.
 
-### 6.4 Partial clone and promisor safety
+## 17. Object fabric and segmentation
 
-Partial clone is a fetch optimization, not permission to lose canonical objects. Promisor declarations, filters, and omitted-object promises are typed and authenticated. A materialization may omit objects; canonical truth and retention accounting may not. Filters are resource-bounded and tested against Git's conformance corpus.
+Canonical Git objects preserve native OIDs and exact logical bytes. Internal envelopes may add strong digest/type/length. Object-aware segments provide:
 
-## 7. Repository capsules
+- deterministic object ordering/profile;
+- Merkle/index footer;
+- range reads;
+- content-addressed identity;
+- immutable compaction inputs/outputs;
+- RaptorQ profile where registered;
+- rebuildable OID-to-location indexes.
 
-A capsule consists of an unsigned body plus one or more signatures:
+Segment layout cannot alter logical object identity. Small-object, large-blob/LFS, hot/cold, and pack-view lanes are explicit profiles.
 
-```rust
-struct RepositoryCapsuleBody {
-    repository_id: RepositoryId,
-    epoch: RepositoryEpoch,
-    sequence: RepositorySequence,
-    repository_commit_id: RepositoryCommitId,
-    ref_root: Digest,
-    forge_position_root: Digest,
-    object_manifest_root: Digest,
-    segment_manifest_root: Digest,
-    retention_root: Digest,
-    policy_epoch: PolicyEpoch,
-    format_registry_epoch: RegistryEpoch,
-}
+## 18. ATP-Git
 
-RepositoryCapsuleId = H(
-    "frankengit/repository-capsule/v1" ||
-    canonical(RepositoryCapsuleBody)
-)
+FrankenGit-native transfer follows `ATP_GIT_PROFILE.md`:
+
+- object/segment manifests;
+- bounded exact/probabilistic have summaries;
+- unique-payload deduplication;
+- object/segment/pack delta plans and typed full fallback;
+- typed path graph and bounded race/loser drain;
+- swarm piece verification, rarity, and endgame caps;
+- trust-scoped caches;
+- RaptorQ transport with adaptive policy and hard bounds;
+- deterministic receipts and path-trace replay.
+
+Ordinary Git clients still receive standard Git streams.
+
+## 19. TreeFS workspaces
+
+`GIT_TREE_FS.md` is normative for sparse workspaces:
+
+- immutable base commit/tree plus COW overlay;
+- descriptor/capability-relative paths;
+- no host traversal through Git symlinks;
+- explicit case/Unicode/host representability behavior;
+- lazy authorized fetch;
+- source-ordered edit intents and total net-effect mapping;
+- hierarchical conflict witnesses and proof-ordered merge ladder;
+- staged/visible/durable workspace epochs;
+- FUSE/FrankenFS or deterministic sparse-directory adapters;
+- no ambient sponsor token or cloud metadata.
+
+A workspace snapshot is a derived identity and cannot move repository refs without a normal sealed transaction.
+
+## 20. Forge events and projections
+
+Canonical forge entities are immutable events included in RCR batches. Issues, PRs, reviews, protections, queues, releases, packages, and administrator overrides use stable entity IDs and stream sequences.
+
+Read models, counters, notifications, web views, search, and graphs are projections. Each records source RCR/forge position and may lag. A stale projection cannot authorize mutation without canonical revalidation.
+
+Outbox delivery is at least once unless a downstream protocol proves stronger semantics. Stable delivery IDs and obligations prevent canonical event duplication. A failed webhook never rolls back an RCR.
+
+## 21. Graph and search generations
+
+Graph/search generations follow anti-rollback activation and `GRAPH_INTELLIGENCE_ARCHITECTURE.md`.
+
+- Exact, deterministic-derived, and statistical graph classes remain distinct.
+- Every graph algorithm that affects ordering/selection emits a tie-break/complexity/decision-path witness.
+- Mixed-generation results are prohibited by default.
+- Context Packets name every source generation and omission class.
+- Centrality, semantic similarity, and inferred edges may rank/prioritize but cannot grant authorization, prove guilt, or justify deletion.
+- Exact reachability used for retention/GC retains scalar/reference verification.
+
+## 22. Generation publication
+
+Search, graph, compaction, policy, workspace, and release generations use immutable bodies plus an anti-rollback authority record:
+
+- exact predecessor;
+- monotone sequence/generation;
+- pending-attempt reconciliation;
+- body/manifest/closure verification;
+- fail closed on highest acknowledged generation corruption;
+- older generation only through explicit restore/demotion policy.
+
+A built directory is not active merely because it exists locally.
+
+## 23. Repository capsules, backup, and restore
+
+A capsule body binds exact authority head/RCR, decision-log position, ref/forge/object/segment/retention roots, policy/configuration/format epochs, and backup profile. Capsule ID hashes the unsigned body; signatures, placements, and repair-symbol locations attest to it but do not participate in identity.
+
+Publication is root-last:
+
+1. stage referenced immutable data/manifests;
+2. verify identities/closure;
+3. collect required durability evidence;
+4. hash unsigned body;
+5. sign according to deployment profile;
+6. publish exact-head capsule pointer through anti-rollback authority;
+7. only then consider superseded checkpoint material for retention review.
+
+Recovery MUST NOT silently fall back to an older valid capsule when the newest acknowledged root is structurally present but fails authentication/closure. Older-state recovery is an explicit audited restore that advances a new authority generation.
+
+## 24. RaptorQ and repair
+
+RaptorQ is an erasure-recovery mechanism for registered immutable byte objects. It is not a hash, signature, authorization system, ordering protocol, consensus algorithm, freshness oracle, or substitute for the authority head.
+
+Every encoded class declares source identity, symbol/profile parameters, placement domains, decode work/memory/input bounds, trigger/escalation, and post-decode checks. Candidate bytes are accepted only after original digest/OID/Merkle/canonical codec/length/type invariants pass.
+
+Repair then uses the same current mutation authority:
+
+1. decode in quarantine;
+2. verify original commitments;
+3. compare current placement/retention witness;
+4. put immutable repaired bytes idempotently;
+5. submit `RepairPlacementIntent`;
+6. publish through head CAS or refuse/rebase stale repair;
+7. record repair evidence.
+
+The mutable authority head and current authorization/legal-hold state are not fountain-code reconstructed. Individual seals and decisions are small immutable records whose current meaning comes from the authenticated decision stream/checkpoint, not an opportunistic decoder result.
+
+## 25. Garbage collection and retention
+
+Authenticated roots include:
+
+- current/protected/hidden refs;
+- open PR/merge-queue refs;
+- active seals/staging grace policy;
+- releases/packages/artifacts/provenance;
+- legal holds/admin pins;
+- capsules/backups;
+- migration/replication handoff;
+- active workspaces/CI/agent effects where promised;
+- grace tombstones.
+
+GC is mark → proof → grace/replica/backup horizon → revalidation against current head/policy → sweep → evidence. Local `git gc`, cache eviction, or incomplete graph projection never decides canonical deletion.
+
+## 26. Statistical adaptation and policy epochs
+
+Conformal predictors, e-processes/e-martingales, no-regret controllers, off-policy evaluation, regime detectors, and Lyapunov/progress certificates may adapt only registered operational targets such as:
+
+- batch/retry/path-race width;
+- cache/prefetch;
+- RaptorQ overhead and scrub priority within hard bounds;
+- search/rerank/context budgets;
+- canary escalation and reversible throttling;
+- placement/capacity proposals.
+
+Every adaptive artifact binds population, selection rule, exact sequence window, regime, candidate, pinned fallback, assumptions, action probabilities where relevant, numeric/toolchain/math fingerprint, and bounded retained evidence.
+
+Promotion uses an exact-predecessor policy epoch. Unsupported assumptions, regime shift, incomplete support, evidence gap, arithmetic/resource bound, or alarm retains/reverts to deterministic fallback.
+
+Statistical systems MUST NOT decide Git identity, head/RCR order, ref atomicity, authorization grants, signature validity, retention roots, committed existence, guilt, or irreversible punishment.
+
+## 27. Claim and replay classes
+
+Claims follow the checked lattice:
+
+```text
+invariant > proof > bounded_model > statistical > slo > benchmark
 ```
 
-Signatures, storage locations, repair-symbol placement, and replica acknowledgements are attestations over `RepositoryCapsuleId`; they are not included in its identity. This avoids circular identity and permits signature/key rotation without changing the checkpoint body.
+Weaker evidence cannot justify a stronger claim. Every artifact declares replay completeness:
 
-Capsule publication is root-last:
+- exact replay;
+- structural replay;
+- verifiable with named external artifacts;
+- audit-only.
 
-1. stage all referenced immutable manifests and segments;
-2. verify each identity and closure;
-3. collect the required durability/placement evidence;
-4. construct and hash the unsigned body;
-5. sign the body identity;
-6. atomically publish the capsule pointer for the exact RCR;
-7. only then allow older superseded checkpoint material to enter retention review.
+One trace, benchmark, or deployment does not become universal correctness or SLO evidence.
 
-A capsule does not create consensus, authorize a ref update, or override an RCR.
+## 28. Agent authority
 
-## 8. RaptorQ and repair boundaries
+An agent acts only through a sponsored `IntentRun` binding:
 
-RaptorQ is an erasure-recovery mechanism for registered immutable byte objects. It is not a cryptographic hash, signature, authorization system, ordering protocol, consensus algorithm, freshness oracle, or substitute for replicated metadata.
+- sponsor and agent/model/harness identities where available;
+- repository and verified base `AuthorityReadReceipt`, plus an optional checkpoint and replayed suffix;
+- allowed refs, paths, reads, effects, and secret classes;
+- compute/storage/network/money/time budgets;
+- expiration/revocation;
+- required verifier-independence classes;
+- disclosure/provenance policy.
 
-Every encoded object class has a registry row specifying:
+Context Packets are content-addressed, source-positioned, authorization-scoped, and omission-explicit. Repository text cannot widen capabilities or approve effects.
 
-- canonical source bytes and object identity;
-- symbol size and coding parameters;
-- authenticated metadata needed to select symbols;
-- maximum decode work, memory, and input count;
-- placement and failure-domain policy;
-- decode trigger and escalation path;
-- cryptographic and structural post-decode verification;
-- typed failure when recovery is impossible.
+An Evidence-Carrying Change binds proposed object/tree closure, base, TreeFS intent/effect map, Context Packets, tests/checks/tool receipts, resource use, claimed invariants, non-claims, omissions, and verifier attestations. Verifier independence is machine-classified over workspace, credentials, model/harness, context, oracle, sponsor, and human dimensions.
 
-Decoded bytes are accepted only after all applicable original commitments verify: internal object ID, Git object ID, cryptographic digest, Merkle inclusion, canonical codec, expected length, and type-specific invariants. A successful decoder return without those checks is corruption, not recovery.
+Intent-Run cancellation drains tasks, mounts, subprocesses, effect obligations, and secret leases. No orphan retains a push credential.
 
-Mutable metadata, leases, authorization state, transaction seals, terminal outcomes, and repository head pointers are protected by ordinary replicated transactional storage, checksums, backups, and consensus/fencing. They MUST NOT depend on fountain-code reconstruction for correctness or current truth.
+## 29. CI and hostile execution
 
-## 9. Writer fencing and multi-region operation
+CI is a separate hostile-compute plane. A job binds exact source/workspace input, runner image/toolchain, dependency locks, network/secret/cache policy, resources, logs/artifacts, and cancellation receipt. No cloud metadata or sponsor credential is ambient.
 
-Each repository has at most one canonical writer epoch at a time. Writer authority is a lease or consensus-backed token carrying `RepositoryEpoch`. Every RCR metadata commit compares the writer epoch. A stale writer cannot publish even if it still has network connectivity and complete local state.
+A green check means the named check produced a valid receipt in its evidence class. It does not prove universal safety.
 
-Failover advances the epoch. The first RCR in a new epoch points to the last committed RCR from the prior epoch and allocates sequence one (or continues a globally monotone sequence if the selected metadata design proves that invariant). The choice is registry-versioned; implementations MUST NOT sometimes reset and sometimes continue without encoding the rule.
+## 30. Local verification and release
 
-Materializers and readers may be active-active. Canonical mutation is not asynchronous multi-master. A future sharded or parallel mutation path is admissible only after executable refinement proves equivalence to the single-sequencer semantics for overlapping invariant keys, idempotency, forge/ref atomicity, and recovery.
+FrankenGit MUST NOT rely on GitHub-hosted Actions. `.github/workflows` are dispatch-only portable adapters that delegate to repository-owned commands and are intended for Doodlestein Self-Releaser/`act`. Deliberately enabled remote execution is non-authoritative and cannot replace any local evidence gate.
 
-## 10. Authorization and policy snapshot semantics
+The authoritative release process follows `LOCAL_VERIFICATION_AND_RELEASE_PIPELINE.md`:
 
-Authorization has two layers:
+- attempt-scoped native target builds;
+- resumable verified completed targets;
+- exact asset contract;
+- checksums, SBOM, provenance, signatures, installer/smoke tests;
+- authoritative manifest withheld until every requested target succeeds;
+- signed root-last local release manifest;
+- remote GitHub Release reconciliation as distribution, not build truth.
 
-- ingress authorization determines whether a principal may attempt the operation;
-- commit policy evaluates the exact candidate mutation against one pinned repository snapshot.
+A partial matrix cannot become an authoritative release.
 
-The commit policy input includes the principal snapshot, authentication strength, actor type, proposed ref delta, object closure summary, forge transitions, current protections, CODEOWNERS/review state, status-check evidence, merge-queue position, policy epoch, and any approved emergency override.
+## 31. Security and non-claims
 
-Policy code is deterministic for canonical decisions. It may consume signed evidence produced by non-deterministic systems, but the evidence identity and acceptance rule are explicit. Wall clock, network calls, mutable external databases, and unversioned model output MUST NOT be read inside the canonical metadata transaction.
+FrankenGit does not claim:
 
-A policy decision record explains every decisive rule and binds its input root. Statistical detectors may request additional review, reduce resource budgets, or open a reversible quarantine; they may not silently grant authorization or serve as the sole basis for irreversible punishment.
-
-## 11. Agent authority and evidence-carrying changes
-
-An agent acts through an `IntentRun` sponsored by a human or service principal. Its authority is attenuated, repository-scoped, time-bounded, budget-bounded, and operation-specific. An agent token never inherits all authority of its sponsor by default.
-
-An `IntentRun` binds:
-
-- sponsor and agent identities;
-- model/harness identity when supplied;
-- repository and base RCR/capsule;
-- allowed refs and path scopes;
-- allowed read classes and secret classes;
-- effect capabilities;
-- compute, storage, network, and monetary budgets;
-- expiration and revocation handle;
-- required independent verifier classes;
-- disclosure policy for generated provenance.
-
-A Context Packet is a content-addressed, provenance-preserving view over a pinned repository state. It lists included and deliberately omitted material. Search results are evidence-linked candidates, not authority to read inaccessible content.
-
-An Evidence-Carrying Change binds the proposed Git object closure, base state, tests/checks, tool receipts, materialized context identities, claimed invariants, known omissions, and verifier attestations. A verifier that shares the same mutable workspace, credentials, or hidden state as the proposing agent is not independent unless the policy explicitly accepts that weaker evidence class.
-
-Agent cancellation follows the transaction rules in §3.4. Workspace cancellation additionally drains or revokes spawned tasks and effect capabilities through structured-concurrency regions. No orphan task retains a push credential after the Intent Run closes.
-
-## 12. Forge events and projections
-
-Canonical forge entities are event-sourced. Event bodies are immutable and domain-separated. Read models, search indexes, notification feeds, counters, and web pages are projections and may lag.
-
-Every projection exposes or internally records the RCR/forge position through which it is complete. A stale projection cannot make an authorization decision without revalidation against canonical state. Projection repair replays canonical events; it does not invent missing events from the current UI state.
-
-Webhook and CI delivery is at-least-once through an outbox unless a downstream protocol proves stronger semantics. Delivery IDs are stable and consumers receive idempotency guidance. A failed webhook never rolls back the repository commit that produced it.
-
-## 13. Garbage collection, retention, and deletion
-
-Reachability is computed from an authenticated root set, including:
-
-- current refs and protected hidden refs;
-- open pull-request heads and merge-queue refs;
-- retained releases, packages, artifacts, and attestations;
-- legal holds and administrator retention pins;
-- unexpired repository capsules and backup manifests;
-- replication and migration handoff roots;
-- grace-period tombstones.
-
-Deletion is a multi-stage protocol: mark, prove root exclusion, wait the configured grace/replica horizon, sweep immutable storage, and record evidence. A materialization's local `git gc` never decides canonical deletion.
-
-User-visible deletion claims distinguish logical invisibility, scheduled physical deletion, backup expiration, and cryptographic erasure. Hosted-service policy must state which claim is being made.
-
-## 14. Statistical adaptation boundaries
-
-Conformal predictors, e-processes/e-martingales, bandits, and change detectors may adapt:
-
-- cache and prefetch budgets;
-- RaptorQ repair overhead within hard floors/ceilings;
-- scrub priority;
-- canary escalation;
-- queue admission and reversible throttling;
-- search/rerank budgets;
-- anomaly-review priority.
-
-They MUST NOT determine Git object identity, RCR order, ref atomicity, authorization, signature validity, retention roots, or whether committed data exists. Every adaptive controller has deterministic safe defaults, bounded actions, reset semantics, replayable observations, and a kill switch.
-
-Any statistical coverage or false-alarm claim states its assumptions, calibration population, exchangeability/stationarity limitations, and exact decision rule. Operational telemetry is evidence about a deployment, not proof of universal behavior.
-
-## 15. Security and non-claims
-
-The architecture does not claim that:
-
-- content addressing alone proves authorship;
-- RaptorQ alone detects malicious corruption;
+- content addressing proves authorship;
 - signed commits imply trustworthy code;
-- a successful CI job is safe to trust without runner and provenance policy;
-- deterministic replay reproduces unrecorded external effects;
-- object-store durability equals end-to-end recoverability;
-- branch protection prevents administrators or compromised control planes from abusing override powers;
-- an agent-generated explanation proves the change is correct.
+- object-store durability equals recoverability;
+- RaptorQ detects malicious corruption without commitments;
+- deterministic replay captures unrecorded external effects;
+- a green CI job or agent explanation proves correctness;
+- branch protection prevents privileged override abuse;
+- Rust’s type system eliminates logic, crypto, parser, or authorization bugs;
+- a graph/model score proves guilt or grants authority.
 
-Security-critical parsers run under strict resource budgets and, where appropriate, process or sandbox isolation. Hosted CI, package registries, webhooks, rendering, archive extraction, and repository import are separate untrusted-input threat surfaces, not incidental features.
+Untrusted surfaces include Git/pack parsers, archive/package/LFS import, Markdown/SVG/rendering, webhooks/URLs, CI, agent tools, object-store responses, backup/repair symbols, workflow parsing, and migration.
 
-## 16. Compatibility and evolution
+## 32. Minimum release-blocking invariants
 
-All externally visible formats and protocols are versioned. The registries distinguish:
+The mutation/storage core cannot be called complete until executable evidence covers at least:
 
-- implemented;
-- differentially verified;
-- experimentally available;
-- specified only;
-- explicitly unsupported.
+1. one canonical `TxId` derivation and key-reuse mismatch rejection;
+2. at most one terminal decision per sealed `TxId`;
+3. lost response/cancellation cannot create two outcomes;
+4. head generation/predecessor and decision/RCR sequence continuity;
+5. one head CAS publishes ref and forge effects atomically;
+6. CAS losers preserve the same sealed request;
+7. expected-old/force/atomic semantics under races;
+8. one pinned policy/configuration snapshot per attempt;
+9. witness refinement only removes false conflicts;
+10. no staged/quarantined object becomes a retention root before commit;
+11. committed closure is protected before acknowledgement according to profile;
+12. SHA-1 and SHA-256 cannot collide at the type boundary;
+13. production cannot invoke/link an external Git engine;
+14. every first-party crate forbids unsafe;
+15. replica conflict lattices do not hide contradictory terminals;
+16. generation activation is exact-predecessor and anti-rollback;
+17. carried-forward checkpoint cannot masquerade as current forge position;
+18. repaired bytes require original commitments and current-authority publication;
+19. projection/search/graph lag cannot authorize mutation or deletion;
+20. no mixed-generation Context Packet without explicit joined receipt;
+21. GC cannot sweep authenticated, held, active, or grace roots;
+22. outbox retry cannot duplicate canonical events;
+23. all effect obligations settle at region close;
+24. Git receive-pack conformance does not rely on fictional protocol-v2 push;
+25. verifier independence class is enforced, not self-declared;
+26. release manifest cannot publish a partial target matrix;
+27. every commit/refusal is explainable from immutable evidence roots;
+28. crash/replay at every staged/visible/durable boundary converges or fails closed.
 
-Unknown enum variants and record versions fail closed at canonical mutation boundaries. Read paths may preserve and forward unknown fields only when the format defines that behavior.
-
-A protocol change that alters identity, ordering, linearization, retention, authorization, or recovery requires:
-
-1. an ADR;
-2. migration and mixed-version semantics;
-3. golden canonical encodings;
-4. model/state-machine tests;
-5. crash and retry fault campaigns;
-6. compatibility evidence;
-7. rollback or forward-only recovery instructions;
-8. updated threat model and registry rows.
-
-## 17. Minimum release-blocking invariants
-
-An implementation cannot call its mutation core complete until executable evidence covers at least:
-
-1. one canonical `TxId` derivation and key-reuse mismatch refusal;
-2. at most one terminal outcome per sealed transaction;
-3. no client cancellation ambiguity can create two outcomes;
-4. RCR parent/epoch/sequence continuity;
-5. atomic ref plus forge-event publication;
-6. stale-writer fencing;
-7. expected-old ref enforcement under races;
-8. one pinned policy snapshot per attempt;
-9. no quarantined object becomes a retention root before commit;
-10. no committed object closure is omitted from canonical retention roots;
-11. capsule identity excludes signatures/placement and binds the exact RCR;
-12. carried-forward capsules cannot masquerade as current forge position;
-13. repair output is never accepted without original commitments;
-14. projection lag cannot authorize a mutation;
-15. outbox retries cannot duplicate canonical events;
-16. Git receive-pack conformance does not rely on a fictional protocol-v2 push command;
-17. SHA-1 and SHA-256 object identities cannot collide at the type boundary;
-18. GC cannot sweep any authenticated or grace-period root;
-19. verifier independence class is enforced, not self-declared;
-20. every refusal and commit is explainable from immutable evidence roots.
-
-These invariants are the contract. Performance optimizations, regional placement, sharding, caching, and agent conveniences are subordinate to them.
+These contracts dominate performance, sharding, cache locality, hosted convenience, and agent autonomy.

@@ -1,0 +1,18 @@
+# franken-registry-v1
+id	owner	statement	verification	release_blocking	status
+INV-001	authority	one sealed TxId has at most one terminal canonical outcome	state model, CAS race lab, recovery scan	yes	specified
+INV-002	authority	one head CAS publishes ref and forge effects atomically	model checking and crash matrix	yes	specified
+INV-003	authority	authority head generation and predecessor never silently roll back	anti-rollback recovery campaigns	yes	specified
+INV-004	git-core	SHA-1 and SHA-256 identities are distinct typed domains	type tests and differential corpus	yes	specified
+INV-005	git-core	production binaries never invoke or link an external Git engine	dependency, binary, and source scan	yes	specified
+INV-006	object-fabric	unverified or quarantined bytes never become canonical retention roots	fault injection and root audit	yes	specified
+INV-007	repair	decoded bytes are never accepted without original commitments	within/beyond/malicious-symbol campaigns	yes	specified
+INV-008	gc	no authenticated, held, active-seal, grace, migration, or restore root is swept	reachability model and crash race matrix	yes	specified
+INV-009	concurrency	lost CAS retries preserve sealed request identity	DPOR schedule exploration	yes	specified
+INV-010	concurrency	witness refinement can only remove false conflicts, never bypass a true conflict	property tests and reference model	yes	specified
+INV-011	obligations	region closure leaves no unsettled effect obligation	lab quiescence oracle	yes	specified
+INV-012	generation	search, graph, compaction, policy, and release activation is anti-rollback	generation authority recovery tests	yes	specified
+INV-013	context	one Context Packet names every source generation and omission class	goldens and mixed-generation negative tests	yes	specified
+INV-014	workspace	TreeFS never resolves a repository path outside its capability root	path adversarial corpus	yes	specified
+INV-015	release	no partial target matrix receives an authoritative release manifest	DSR cancel/resume/failure matrix	yes	specified
+INV-016	memory-safety	every first-party crate forbids unsafe and production has no foreign Git or database runtime	workspace and binary audit	yes	specified
