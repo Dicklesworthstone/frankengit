@@ -1,649 +1,463 @@
 # FrankenGit Verification Specification
 
-**Status:** proposed
-**Purpose:** define what evidence is required before FrankenGit may claim correctness, compatibility, repairability, performance, security, or readiness.
+**Status:** Normative evidence contract for architecture and future implementation.  
+**Protocol target:** [`docs/NORMATIVE_PROTOCOL_CONTRACTS.md`](docs/NORMATIVE_PROTOCOL_CONTRACTS.md)
 
-## 1. Verification doctrine
+Passing documentation checks is necessary but never sufficient evidence that a protocol or storage implementation is correct.
 
-FrankenGit is a distributed source-control and code-collaboration system. Its failures can be silent, delayed, cross-layer, and expensive. A passing unit test suite is necessary and radically insufficient.
+## 1. Evidence levels
 
-Verification follows five rules:
+A claim carries one of these statuses:
 
-1. **Claims are scoped.** “Git compatible,” “crash safe,” and “repairable” are invalid without versions, workloads, deployment profiles, and exclusions.
-2. **Failure is injected at protocol boundaries and instruction-level fault points.** Happy-path tests do not establish durability.
-3. **Reference behavior is compared, not remembered.** Supported Git behavior is executed against pinned reference versions.
-4. **Recovery is performed.** A backup, replica, or RaptorQ symbol set that has not reconstructed accepted state is unproved.
-5. **Evidence is addressable.** Reports bind code, configuration, corpus, hardware, seeds, and artifacts.
-
-## 2. Evidence levels
-
-| Level | Name | Minimum evidence |
+| Level | Meaning | Minimum evidence |
 |---|---|---|
-| E0 | Specified | invariant, assumptions, falsifier, owner |
-| E1 | Local | unit, golden, property, parser/codec, deterministic fixtures |
-| E2 | Simulated | deterministic concurrency/crash/cancellation/network/storage fault campaigns |
-| E3 | Conformant | differential/reference implementation and corpus evidence |
-| E4 | Distributed | real multi-process/node/store fault histories and recovery |
-| E5 | Operational | production canary, SLO, rollback, restore, and long-horizon evidence |
-
-A claim’s status is the minimum level across its critical subclaims.
-
-## 3. Claim registry
-
-Every public technical claim has a registry row.
-
-```yaml
-claim_id: FG-REF-IDEMPOTENT-001
-statement: Retrying a RefTxn cannot produce a second different effect.
-scope:
-  protocol: RefTxnV1
-  deployments: [single-node, clustered]
-  cancellation: all defined phases
-required_level: E4
-assumptions:
-  - cryptographic digest collision outside threat model
-  - configured durable store satisfies probed behavior contract
-falsifiers:
-  - two committed result capsules for one TxnId
-  - retry returns terminal refusal after the same transaction committed
-evidence:
-  - model/ref-idempotency.tla
-  - artifacts/property/ref-idempotency.json
-  - artifacts/sim/ref-idempotency-seeds.json
-  - artifacts/chaos/ref-idempotency-history.edn
-status: proposed
-owner: fg-ref
-```
-
-The registry validator rejects:
-
-- duplicate IDs;
-- missing owner/falsifier;
-- evidence files not present;
-- expired evidence;
-- scope broader than artifact metadata;
-- “verified” without required level.
-
-## 4. Core invariant suites
-
-### 4.1 Git object identity
-
-Properties:
-
-- exact object bytes produce the expected SHA-1/SHA-256 OID;
-- import/export preserves OIDs;
-- pack/delta layout changes preserve object bytes;
-- BLAKE3 envelope digest maps to exactly one Git OID/type/length in a domain;
-- corruption is detected;
-- SHA-1 collision-detection fixtures are rejected/handled like the declared reference profile;
-- object-format mappings round-trip where supported.
-
-Evidence:
-
-- official Git test vectors;
-- generated property corpus;
-- real repositories;
-- differential `git hash-object`, `cat-file`, `fsck`;
-- fuzzing.
-
-### 4.2 RefTxn
-
-Properties:
-
-- read-set preconditions hold at serialization point;
-- write set is atomic;
-- disjoint transactions commute;
-- conflicting transactions have a legal serial order;
-- stale cell/incarnation rejects;
-- transaction is idempotent;
-- cancellation before commit has no effect;
-- cancellation after commit reconciles exact result;
-- required objects and policy snapshot are bound;
-- force push retains displaced state under policy;
-- symbolic refs cannot form illegal cycles;
-- multi-ref push is all-or-nothing.
-
-Verification:
-
-- pure state-machine property tests;
-- model checking;
-- randomized histories;
-- linearizability checker;
-- deterministic fault injection;
-- real multi-node campaigns.
-
-### 4.3 Repository Capsule
-
-Properties:
-
-- capsule content hashes/signatures verify;
-- sequence/previous linkage is valid;
-- current pointer never references missing child roots;
-- root-last protocol survives crash at every step;
-- all declared ref/object/stream positions reconstruct;
-- stale capsule is detectable;
-- capsule pin prevents GC;
-- export from capsule matches ref/object roots.
-
-### 4.4 Object fabric
-
-Properties:
-
-- immutable put conflict is detected;
-- backend capability probe matches actual behavior;
-- range reads reconstruct exact records;
-- catalog never admits unverified placement;
-- bad cache/store bytes are detected;
-- one bad placement does not poison logical object when healthy copy exists;
-- encryption domains prevent unauthorized cross-tenant read;
-- compaction preserves logical object set;
-- tiering preserves durability profile.
-
-### 4.5 RaptorQ
-
-Properties:
-
-- canonical parameters reproduce symbols;
-- systematic source bytes are exact;
-- duplicate/reordered symbols do not count twice incorrectly;
-- random and adversarial admissible erasure patterns reconstruct within stated threshold;
-- insufficient symbols fail explicitly;
-- corrupt symbols cannot produce an admitted wrong object;
-- decoder resource limits hold;
-- reconstructed segment passes digest, structure, Merkle, and Git OID validation;
-- repair placement restores policy threshold.
-
-Required evidence includes full reconstruction. “Repair symbols generated” is not accepted.
-
-### 4.6 GC
-
-Properties:
-
-- every root class protects reachability;
-- new objects after mark snapshot are protected;
-- in-flight transaction pins required objects;
-- shared pool references survive repository deletion;
-- legal hold dominates normal deletion;
-- tombstone/grace/recheck catches races;
-- compaction old placements persist until replacement is admitted;
-- current and retained capsules verify after sweep;
-- restore works after GC.
-
-GC is not enabled for destructive production sweep until E4.
-
-### 4.7 Forge event streams
-
-Properties:
-
-- accepted command emits exactly one logical effect;
-- duplicate request is idempotent;
-- event encoding is canonical;
-- checkpoints plus suffix reconstruct aggregate;
-- projectors can rebuild to identical authoritative view;
-- outbox is not lost between canonical commit and delivery;
-- duplicate/out-of-order delivery is tolerated;
-- unknown required schema blocks authoritative projection.
-
-### 4.8 Capabilities and agents
-
-Properties:
-
-- scope cannot widen through delegation;
-- expired/revoked capability refuses;
-- repository content cannot mint authority;
-- path/ref/tool/network/secret/budget limits are independent;
-- cancellation revokes/reconciles grants;
-- proposer cannot satisfy independent verifier policy;
-- agent/sponsor identities persist through PR/RefTxn;
-- secret broker denies fork/untrusted contexts;
-- evidence binds exact capsule/head;
-- budget overshoot is bounded by declared granularity;
-- no child survives quiescence.
-
-## 5. Git conformance program
-
-### 5.1 Reference versions
-
-Maintain a versioned matrix of Git releases and platforms. Each FrankenGit release declares:
-
-- minimum/maximum tested clients;
-- object formats;
-- protocol versions/capabilities;
-- behavior tier;
-- known differences.
-
-Reference binaries are pinned by digest and provenance.
-
-### 5.2 Operation matrix
-
-- init/import/clone;
-- fetch;
-- push;
-- atomic push;
-- force/delete;
-- shallow clone/deepen/unshallow;
-- partial clone filters and demand fetch;
-- protocol v0/v1 where supported and v2;
-- packfile URIs;
-- bundles;
-- tags and signatures;
-- submodules;
-- notes/replace refs under declared tiers;
-- LFS;
-- mirrors;
-- hooks/push options;
-- unusual paths/modes;
-- SHA-1/SHA-256.
-
-### 5.3 Differential method
-
-For each case:
-
-1. generate or load corpus repository;
-2. execute operation against reference Git server/storage;
-3. execute against FrankenGit;
-4. compare protocol-visible status, refs, OIDs, object closure, outputs, and error class;
-5. normalize only documented nondeterminism;
-6. retain transcript and repository artifacts;
-7. minimize divergence.
-
-### 5.4 Corpus classes
-
-- tiny exhaustive repositories;
-- generated DAG shapes;
-- criss-cross merges;
-- long linear history;
-- wide trees;
-- deep trees;
-- giant blobs;
-- many refs;
-- monorepos;
-- fork networks;
-- signed histories;
-- malformed/adversarial packs;
-- historical real-world repositories;
-- platform path/Unicode edge cases.
-
-### 5.5 Upstream Git tests
-
-Port or adapt relevant Git test suite cases where licensing and harness fit. Maintain a mapping:
-
-```text
-upstream_test
- -> FrankenGit test
- -> compatibility tier
- -> divergences
- -> last upstream revision reviewed
-```
-
-Coverage is measured by behavior class, not raw test count.
-
-## 6. Deterministic simulation
-
-### 6.1 Controlled dimensions
-
-- scheduler;
-- clock;
-- RNG;
-- network;
-- storage;
-- process crash;
-- cancellation;
-- quota;
-- backend throttling;
-- corruption;
-- worker fencing;
-- upgrade version.
-
-### 6.2 Fault points
-
-Instrument before/after:
-
-- quarantine write;
-- object hash;
-- segment write;
-- placement verification;
-- catalog publish;
-- transaction prepare;
-- policy decision;
-- conditional commit;
-- capsule child write;
-- capsule pointer advance;
-- outbox write;
-- response send;
-- GC mark/tombstone/sweep;
-- repair decode/publish;
-- relocation epoch switch;
-- secret grant;
-- runner spawn/kill;
-- projection checkpoint.
-
-### 6.3 Schedule exploration
-
-Use:
-
-- exhaustive bounded interleavings for small models;
-- property-generated histories;
-- deterministic seeded random;
-- partial-order reduction;
-- failure-biased schedules;
-- regression seed corpus.
-
-Every failure prints a one-command replay.
-
-### 6.4 State oracle
-
-The oracle compares:
-
-- committed RefTxn model;
-- visible ref snapshot;
-- capsule roots;
-- admitted object availability;
-- canonical event aggregate;
-- obligations/quiescence;
-- audit/result map.
-
-No oracle reads mutable projection as truth.
-
-## 7. Cross-plane atomicity verification
-
-Operations that combine Git ref state and forge state—especially pull-request merge, release publication, protected deployment, and policy activation—must pass an atomic Repository Commit Record suite.
-
-Required properties:
-
-- a crash before the commit record exposes neither the ref delta nor the canonical event batch;
-- a crash after the commit record recovers both, even if no projector or physical event segment ran;
-- replay produces exactly one canonical event identity and one ref effect;
-- stale aggregate versions conflict deterministically beside stale ref read sets;
-- an outbox retry can duplicate delivery attempts but cannot duplicate canonical events;
-- a stale UI projection cannot cause a second merge or contradictory merge state;
-- combined multi-ref/multi-aggregate records are all-or-nothing;
-- capsule reconstruction includes the exact commit/event positions;
-- canonical event bytes and ref-delta roots are content-addressed children written before the linearization point.
-
-The test oracle reconstructs ref state and aggregate streams independently from Repository Commit Records and compares them with every live projection.
-
-## 8. Multi-node fault campaigns
-
-### 8.1 Cluster history
-
-Capture invocation and response times/IDs plus internal commit receipts. Use linearizability/serializability checking.
-
-### 8.2 Faults
-
-- kill -9;
-- machine reboot/loss;
-- disk full/read-only;
-- network partition/asymmetry;
-- packet loss/delay;
-- object-store proxy errors;
-- stale DNS/routing;
-- clock skew;
-- cell failover;
-- repeated retry;
-- cache loss;
-- key service outage;
-- rolling mixed-version upgrade;
-- repair/GC during foreground writes.
-
-### 8.3 Success criteria
-
-- safety invariants never violated;
-- acknowledged durability contract met;
-- typed refusals under unavailable prerequisites;
-- bounded recovery;
-- no leaked capabilities/obligations;
-- exact incident boundary in evidence.
-
-Availability targets may fail under faults outside profile; safety may not.
-
-## 9. Backup and recovery verification
-
-### 9.1 Required drills
-
-- clean account/region restore;
-- no cache/materialization;
-- missing source placements reconstructed from repair;
-- corrupted symbol ignored/identified;
-- rotated server version;
-- independent key recovery;
-- export to normal Git and `git fsck`;
-- rebuild forge projections;
-- verify PR/issues/reviews/evidence counts and roots;
-- restore shared fork pool;
-- restore legal hold.
-
-### 9.2 Sampling
-
-All repositories get metadata verification. Full/reconstruction drills use risk/value/age and deterministic sampling, with minimum frequencies by durability tier.
-
-### 9.3 Restore report
-
-- source capsule;
-- source materials;
-- missing/corrupt items;
-- repairs;
-- resulting capsule;
-- reference Git result;
-- forge aggregate checks;
-- duration/cost;
-- tool versions;
-- operator/service signatures.
-
-## 10. Security verification
-
-- threat-model traceability;
-- auth/capability property tests;
-- tenant isolation;
-- cross-tenant dedup oracle;
-- SSRF/egress;
-- parser/decompression bombs;
-- pack delta bombs;
-- Markdown XSS/link/image;
-- prompt injection;
-- secret exfiltration;
-- runner escape campaigns;
-- webhook signature/replay;
-- key rotation/revocation;
-- admin dual control;
-- supply-chain provenance;
-- fuzzing;
-- dependency audit;
-- external assessment before 1.0.
-
-Security tests never use production secrets.
-
-## 11. E-process and statistical verification
-
-For each monitor:
-
-- define data and filtration;
-- define null and action;
-- simulate calibration under null;
-- test optional stopping behavior;
-- test missingness and instrumentation changes;
-- test dependence/nonstationarity stress;
-- version/reset state;
-- compare with fixed hard guardrails;
-- verify action is bounded/reversible;
-- replay decisions.
-
-A monitor can be “mathematically valid under assumptions” and operationally useless. Both validity and decision utility are evaluated.
-
-## 12. Search, graph, and context verification
-
-### 12.1 Search
-
-- exact query correctness;
-- lexical corpus metrics;
-- symbol definition/reference;
-- historical query;
-- semantic relevance benchmark;
-- source attribution;
-- freshness;
-- latency/cost;
-- tenant isolation.
-
-### 12.2 Graph
-
-- edge source/evidence class;
-- deterministic rebuild;
-- stale watermark;
-- high-degree bounds;
-- provenance queries;
-- no heuristic edge represented as canonical.
-
-### 12.3 Context Packets
-
-Evaluate:
-
-- task success;
-- relevant-source recall;
-- irrelevant-byte/token rate;
-- source correctness;
-- stale detection;
-- omissions;
-- latency/cost;
-- prompt-injection containment.
-
-Human and agent evaluations use frozen tasks and blind comparisons where feasible.
-
-## 13. Performance verification
-
-### 13.1 Workloads
-
-- cached/cold ref reads;
-- small file/tree;
-- clone/fetch by repo size and haves;
-- push by object/ref shape;
-- many disjoint refs;
-- contended protected ref;
-- workspace warm/cold/sparse;
-- PR diff;
-- search/context;
-- CI cache/artifact;
-- scrub/repair;
-- restore;
-- GC/compaction interference.
-
-### 13.2 Baselines
-
-- ordinary local Git;
-- a conventional self-hosted forge where reproducible;
-- coarse repository lease implementation;
-- full-replica storage;
-- no-RaptorQ replication;
-- no-index/full-scan;
-- cold and warm cache.
-
-### 13.3 Reporting
-
-Report:
-
-- p50/p95/p99/p99.9;
-- throughput;
-- CPU/memory;
-- bytes/requests;
-- storage amplification;
-- cost;
-- correctness validation;
-- confidence/variation;
-- hardware and environment.
-
-No benchmark may omit failed/refused operations from denominator without saying so.
-
-## 14. Release gates
-
-### Design preview
-
-- E0 critical claims;
-- schemas and models;
-- no implementation language implying production.
+| `specified` | Normative contract exists | owner, identity, state machine, refusal/recovery, non-claims |
+| `implemented` | Code reaches the contract surface | build + focused tests; no compatibility/readiness implication |
+| `differentially_verified` | Named external/reference oracle agrees over a versioned corpus | corpus identity, oracle versions, raw results, accepted divergences |
+| `fault_validated` | Adversarial/crash/concurrency campaigns support the scoped invariants | seeds/traces, environment, fault matrix, artifact schema |
+| `operationally_validated` | Deployment evidence supports bounded production claims | config, workload, time window, raw telemetry, SLO rule, limitations |
+| `unsupported` | Intentionally unavailable | typed refusal and compatibility documentation |
+
+No test count promotes a subsystem automatically. A claim registry maps every public statement to one artifact and scope.
+
+## 2. Artifact requirements
+
+Every evidence artifact includes:
+
+- schema/version;
+- producing commit and dirty-state flag;
+- tool/executable identities;
+- platform/toolchain/configuration;
+- exact input/corpus identities;
+- random/deterministic seeds;
+- start/end logical and wall times where relevant;
+- resource limits;
+- result and all skips/refusals;
+- raw sample/trace references;
+- replay command;
+- assumptions and non-claims;
+- signature/content digest where required.
+
+Artifacts are immutable. Human summaries are projections over them.
+
+## 3. Documentation/architecture gate
+
+`python3 scripts/verify_docs.py` must pass. It verifies:
+
+- constitutional files and intended directories;
+- no flattened docs or transfer artifacts;
+- relative Markdown links and code fences;
+- immutable pins for third-party Actions;
+- explicit pre-implementation and source-available status;
+- one canonical `TxId` formula;
+- corrected upload-pack/receive-pack language;
+- mandatory outcome, forge-position, capsule, and RaptorQ boundaries.
+
+Architecture review additionally checks that every new format/protocol declares identity, owner, publication point, refusal, cancellation, retry, recovery, migration, and evidence.
+
+## 4. Canonical encoding and identity gates
+
+### V-ID-1 Canonical bytes
+
+For each record version:
+
+- golden byte fixtures;
+- decode/re-encode equality;
+- map/set ordering determinism;
+- Unicode/string normalization rule;
+- integer/length overflow negatives;
+- unknown-version/field behavior;
+- cross-platform/compiler determinism.
+
+### V-ID-2 Typed digest separation
+
+Tests must prove:
+
+- SHA-1 Git OID cannot be passed as SHA-256/internal ID;
+- same digest bytes under different domains/types are unequal;
+- repository/tenant/object type are bound where specified;
+- signatures bind intended body/version/domain;
+- signature rotation does not change unsigned object identity.
+
+### V-ID-3 Sole TxId derivation
+
+Generate requests varying each semantic field and each non-semantic attempt field. Semantic changes must change canonical request digest/TxId; retry count, transport connection, receiving node, and wall clock must not. Reused key/different request must refuse.
+
+## 5. Sealed transaction and terminal outcome gates
+
+Model and implementation must cover:
+
+- two simultaneous identical attempts;
+- identical retry after crash/disconnect;
+- idempotency-key body mismatch;
+- commit versus refusal race;
+- cancellation before seal, after seal, during validation, immediately before metadata commit, immediately after commit, and during response;
+- stale writer during attempt;
+- metadata timeout with unknown client result;
+- duplicate outcome publication;
+- outcome lookup after process/node failover.
+
+Release-blocking invariants:
+
+1. at most one seal body per `TxId`;
+2. at most one terminal outcome per seal;
+3. committed/refused outcomes cannot both exist;
+4. byte-identical republish is idempotent;
+5. no terminal record means retry—not implicit refusal;
+6. client cancellation cannot erase/contradict committed state;
+7. committed outcome references an existing valid RCR;
+8. refused outcome cannot mutate repository sequence/roots.
+
+Use a pure reference state machine, generated command sequences, linearizability history checking, deterministic scheduler exploration, and crash-point tests.
+
+## 6. RCR and canonical repository state gates
+
+### V-RCR-1 Chain continuity
+
+Verify repository ID, epoch/sequence rule, parent pointer, TxId uniqueness, and head pointer. Inject missing parent, duplicate sequence, epoch rollback, stale writer, and forked chain.
+
+### V-RCR-2 Atomic ref/forge publication
+
+For PR merge, branch deletion, protection change with mutation, merge-queue transition, and release/tag publication, crash/fault at every staging/metadata/outbox boundary. No observer may see only one half of the canonical transition.
+
+### V-RCR-3 Pinned policy snapshot
+
+Record policy input root. Race changes to refs, reviews, checks, CODEOWNERS, policy epoch, membership, quota, and legal hold. Attempt must commit only if the compared snapshot remains current or restart/refuse under explicit semantics.
+
+### V-RCR-4 Resulting roots
+
+Reference implementation recomputes ref, forge-position, object-closure, policy, retention, and outbox roots. Incremental implementation must match full rebuild.
+
+### V-RCR-5 Transactional outbox
+
+Crash/retry/duplicate delivery/poison consumer/cursor loss/rebuild tests. Canonical events occur once; downstream delivery may be repeated with stable IDs. Failed delivery cannot roll back RCR.
+
+## 7. Git object and pack gates
+
+### V-GIT-1 Object codec
+
+Differential corpus for blob/tree/commit/tag under supported object formats. Cover malformed headers, NULs, oversized lengths, duplicate/unsorted tree entries, invalid modes/names, encoding oddities, signatures, and collision-defense policy.
+
+### V-GIT-2 Pack/index/delta
+
+- official/source-derived pack fixtures;
+- thin packs and base completion;
+- OFS/REF deltas;
+- deep/wide delta graphs;
+- checksum/trailer corruption;
+- truncation/extra bytes;
+- decompression bombs and aggregate work limits;
+- duplicate objects;
+- cancellation/resource reservation;
+- index/multi-pack-index/bitmap consistency where supported.
+
+Fuzzers and property tests must enforce bounded memory/CPU and no panic/UB.
+
+### V-GIT-3 Upload-pack
+
+Named Git client matrix over SSH/smart HTTP:
+
+- v0/v1 and v2 `ls-refs`/`fetch`;
+- sideband/progress/error behavior;
+- wants/haves, tags, symrefs;
+- shallow/deepen/unshallow;
+- filters and promisor/lazy object fetch;
+- empty/unborn repositories;
+- interruptions/slow clients;
+- authentication/hidden refs.
+
+Capture normalized packet transcripts and final object/ref equivalence.
+
+### V-GIT-4 Receive-pack
+
+Named Git client matrix:
+
+- create/update/delete refs;
+- fast-forward/force/force-with-lease-like expected olds;
+- atomic multi-ref capability;
+- push options;
+- report-status/sideband errors;
+- signed push certificates when supported;
+- thin packs, missing objects, hidden refs;
+- duplicate/retried sessions;
+- quarantine cleanup/promotion;
+- policy refusal mapping.
+
+Do not create a “protocol v2 push” lane unless Git standardizes one.
+
+### V-GIT-5 SHA-1/SHA-256
+
+Separate repository fixtures and type-level tests. No implicit conversion. Imports/exports preserve native format. If SHA-256 support is gated, unsupported operations refuse explicitly.
+
+### V-GIT-6 LFS
+
+Official clients and protocol fixtures for batch upload/download/verify, resumability, range behavior, digest/length mismatch, quotas, authorization, locks, retention, interrupted transfers, and cross-tenant isolation.
+
+## 8. Materialization gates
+
+- build bare/pack/sparse view from canonical state;
+- compare refs/object closure and Git behavior against reference;
+- delete all local materialization and rebuild;
+- inject stale/corrupt/truncated packs/indexes;
+- source position receipt must match;
+- concurrent readers during refresh;
+- crash during generation and root-last switch;
+- bounded disk/memory/startup;
+- no materializer can mutate canonical truth directly;
+- cache eviction cannot remove canonical retention roots.
+
+## 9. Capsule, backup, and restore gates
+
+### V-CAP-1 Identity
+
+Unsigned body goldens; signatures/placement excluded; key/signature rotation keeps capsule ID; body changes alter ID.
+
+### V-CAP-2 Exact-state binding
+
+Capsule binds exact RCR/roots. Generate later RCRs and prove old capsule cannot be reported as current forge/ref state.
+
+### V-CAP-3 Root-last crash matrix
+
+Interrupt before/after each dependency write, durability receipt, body hash, signature, pointer publication, and retention transition. No incomplete capsule becomes visible.
+
+### V-CAP-4 Restore rehearsal
+
+From fresh infrastructure, restore metadata/object/event state, replay later RCRs, rebuild projections/materializations, and verify all roots. Report measured RPO/RTO and missing external effects.
+
+### V-CAP-5 Byzantine/malformed inputs
+
+Invalid signatures, wrong repository, downgrade registry, missing manifests, cyclic references, oversized/deep manifests, malicious placement claims, and split-brain capsules fail closed.
+
+## 10. RaptorQ gates
+
+For each registry row advancing beyond `specified`:
+
+- RFC/independent vectors where applicable;
+- deterministic canonical envelope goldens;
+- random and adversarial erasure patterns;
+- bit flips/truncation/duplicates;
+- symbols mixed across objects/profiles;
+- malformed encoding symbol IDs;
+- too many symbols/resource exhaustion;
+- cancellation and crash;
+- insufficient-symbol typed failure;
+- decoded-but-wrong commitment rejection;
+- independent failure-domain placement simulation;
+- end-to-end repaired placement and consumer read;
+- encode/decode benchmark with scalar/reference oracle.
+
+A test that only calls encode then decode in memory is insufficient for a self-healing claim.
+
+## 11. GC, retention, and deletion gates
+
+Property/model tests generate refs, hidden refs, PR heads, queue refs, releases, packages, artifacts, legal holds, backups/capsules, migrations, and tombstones while concurrent mutations occur.
+
+Invariants:
+
+- no authenticated/unexpired root is swept;
+- root snapshot/policy epoch is revalidated before sweep;
+- legal hold activation wins races according to explicit order;
+- grace horizon covers replica/projection/backup assumptions;
+- interrupted mark/sweep resumes safely;
+- stale materialization reachability cannot retain/delete canonical data by itself;
+- deletion status distinguishes logical/physical/backup/crypto stages;
+- audit evidence cannot be deleted by the operation it records unless policy explicitly schedules it later.
+
+## 12. Forge semantic gates
+
+### Issues/PR/reviews
+
+- event replay equals incremental projection;
+- duplicate event idempotency;
+- schema evolution/mixed versions;
+- stable identities/edit histories;
+- review anchor outdated/remap behavior;
+- authorization at canonical position;
+- import/export round trip.
+
+### Protection/merge queue
+
+- target movement at every check/merge phase;
+- review/status/CODEOWNERS changes;
+- policy epoch/bypass/admin races;
+- synthetic ref identity;
+- batch success/failure/split;
+- stale CI invalidation;
+- merge RCR atomically changes PR and target ref;
+- queue recovery after scheduler loss.
+
+### Webhooks/APIs
+
+- stable delivery IDs/signatures/retries;
+- SSRF-safe destinations and DNS/IP revalidation;
+- duplicate/out-of-order consumer guidance;
+- endpoint pagination/error/race fixtures;
+- rate/size limits;
+- versioned accepted divergences.
+
+## 13. Search and graph gates
+
+- immutable generation/root-last publication;
+- full rebuild equals incremental result for reference corpus;
+- canonical source position exposed;
+- authorization filtering before disclosure;
+- deletion/permission change propagation and stale-query behavior;
+- deterministic ties/order;
+- lexical initial result survives semantic/rerank failure;
+- embedding/model identity and fallback status;
+- source-linked explanation accuracy;
+- relevance corpus and raw metrics;
+- index corruption/rebuild;
+- adversarial code/text/resource limits.
+
+No search quality metric is a security or completeness proof.
+
+## 14. Agent-system gates
+
+### Capabilities/budgets
+
+- absent capability denied;
+- delegation cannot widen;
+- audience/run/repository/path/ref confusion negatives;
+- expiry/revocation races;
+- budget atomicity/exhaustion;
+- no sponsor credential in workspace.
+
+### Context Packet
+
+- every byte has provenance/transform/position;
+- explicit omission receipts;
+- unauthorized result impossible, including semantic/graph leakage;
+- deterministic packet under fixed inputs;
+- budget truncation honest;
+- prompt-injected content remains untrusted.
+
+### Workspace/effects
+
+- descriptor/path traversal and symlink attacks;
+- host/cloud metadata isolation;
+- no credential/task residue after cancellation;
+- lazy fetch authorization;
+- effect idempotency and receipt integrity;
+- external network/package/secret policy;
+- destructive tool containment;
+- reproducible workspace manifest.
+
+### Evidence/verifiers
+
+- forged/tampered receipt rejection;
+- failed/skipped/flaky checks preserved;
+- stale-base revalidation;
+- shared workspace/credential/context downgrades independence;
+- proposer cannot self-approve policy requiring independent verifier;
+- narrative cannot override machine receipt.
+
+## 15. CI runner gates
+
+Threat-driven red-team corpus:
+
+- sandbox escape attempts;
+- cloud metadata and host socket access;
+- secret exfiltration from fork/untrusted PR;
+- cache poisoning across trust/tenant/repository boundaries;
+- artifact/log path traversal and active content;
+- package proxy confusion;
+- orphan process/network after cancellation;
+- runner image/toolchain substitution;
+- forged check receipt;
+- resource-exhaustion/noisy-neighbor;
+- cleanup after crash/host loss.
+
+Receipts bind exact source RCR/object closure, image/toolchain, policy, secrets class, cache inputs, outputs, and resource use.
+
+## 16. Security gates
+
+- threat model updated per new surface;
+- authn/authz/capability negative matrix;
+- tenant isolation tests;
+- parser/render/import/archive/webhook fuzz and resource bounds;
+- dependency/advisory/license/supply-chain policy;
+- immutable Action pins;
+- secret scanning/redaction negative/positive fixtures;
+- admin override and audit tamper tests;
+- key rotation/revocation and backup recovery;
+- incident-disable/kill switches;
+- external penetration review before hosted production.
+
+## 17. Multi-node/failover gates
+
+Use deterministic simulation plus real multi-node fault campaigns:
+
+- network partition/asymmetric loss/reordering/duplication;
+- process pause/GC/CPU starvation;
+- stale leader/lease expiry/epoch advance;
+- metadata/object-store partial failure;
+- lost response after commit;
+- rolling upgrade/downgrade/mixed schema;
+- region loss and restore;
+- clock jump/skew where wall time is used operationally;
+- outbox/projection lag;
+- quota/billing reconciliation.
+
+Run linearizability checking against recorded operation histories. RPO/RTO/SLO claims require named topology/config and raw artifacts.
+
+## 18. Performance and economics gates
+
+Each benchmark artifact records dataset and workload digest, hardware/OS/toolchain, config, cold/warm state, samples, tail distributions, CPU/memory/disk/network, correctness checks, baseline versions, and replay command.
+
+Required workloads eventually include:
+
+- small and huge repo clone/fetch/push;
+- monorepo partial clone and sparse agent context;
+- many tiny concurrent refs/repositories;
+- huge pack/delta validation;
+- materialization cold rebuild/hot cache;
+- PR/merge queue contention;
+- search initial/refined latency and quality;
+- CI checkout/cache/artifact flow;
+- backup/restore/repair/GC;
+- tenant noisy-neighbor/admission;
+- storage/egress/compute cost per useful operation.
+
+Do not publish a multiplier without raw data and an honest comparable baseline.
+
+## 19. Release lanes
+
+### Documentation/spec release
+
+- docs verifier green;
+- normative contracts/ADRs consistent;
+- unresolved decisions explicit;
+- no implementation/readiness claims.
+
+### Developer preview
+
+- local reference model and Git object/protocol core;
+- supported matrix rows explicitly narrow;
+- destructive-data warning;
+- migration/export path;
+- fuzz/fault critical lanes green.
 
 ### Alpha
 
-- E2 core truth;
-- E3 basic Git;
-- successful full restore;
-- destructive GC disabled or conservative.
+Requires transaction kernel, materializer, backup/restore, GC roots, issues/PR/merge critical path, authentication/capabilities, and core Git differential lanes. No irreplaceable production-data recommendation.
 
 ### Beta
 
-- E4 RefTxn/cell;
-- E3 declared Git matrix;
-- security test closure;
-- recovery drills;
-- upgrade/rollback;
-- production canary.
+Requires multi-node/failover evidence, hosted tenant isolation, security review, CI boundary if offered, operational telemetry, upgrade/rollback, and measured recovery.
 
-### 1.0
+### Production claim
 
-- required E4/E5 claim matrix;
-- external security review;
-- external restore/migration;
-- SLO and cost evidence;
-- no unresolved critical invariant defect.
+Requires defined SLO/configuration, sustained evidence window, incident/restore drills, release artifact provenance, supported-version policy, and truthful license/product terms.
 
-## 15. Continuous verification
+## 20. Verification command registry
 
-CI lanes:
+Every lane receives a stable machine name, owner, prerequisites, timeout, resource class, artifact schema, and exact command. “Skipped” is a typed result with reason; required lanes cannot turn an unavailable dependency into green.
 
-- fast unit;
-- property;
-- golden/schema;
-- Git differential shard;
-- deterministic simulation shard;
-- fuzz smoke;
-- dependency/license;
-- unsafe ledger;
-- docs/claim registry;
-- performance smoke;
-- wasm/platform;
-- release provenance.
+The first command is:
 
-Scheduled lanes:
+```bash
+python3 scripts/verify_docs.py
+```
 
-- long simulation;
-- full Git corpus;
-- fuzzing;
-- chaos cluster;
-- restore;
-- RaptorQ reconstruction;
-- GC;
-- mixed-version upgrade;
-- security campaigns;
-- benchmark.
-
-## 16. Evidence retention
-
-Evidence artifacts are immutable and content-addressed. They include code/corpus/config digests and may themselves use repair/archive profiles.
-
-Private/security-sensitive evidence can be encrypted and access-controlled while publishing a commitment and sanitized summary.
-
-## 17. Failure disposition
-
-Every discovered failure is classified:
-
-- invariant violation;
-- compatibility divergence;
-- availability/SLO;
-- evidence/harness defect;
-- unsupported scope;
-- security;
-- performance/cost;
-- documentation claim.
-
-A failed test is never deleted because it is inconvenient. It is fixed, quarantined with an explicit release consequence, or used to narrow the claim.
-
-## 18. Verification completion criterion
-
-FrankenGit may call a feature complete only when someone other than its implementation author can:
-
-1. state the observable contract;
-2. run the evidence;
-3. inject the declared faults;
-4. reproduce the result;
-5. identify the scope and limitations;
-6. restore or roll back the feature’s state.
-
-That is the minimum standard for a forge intended to preserve humanity’s software.
+Future Rust gates are added only when the corresponding real slice exists.
