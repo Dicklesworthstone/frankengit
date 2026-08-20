@@ -1,17 +1,19 @@
 # franken-registry-v1
-id	object_class	canonical_identity	raptorq_profile	post_decode_verification	retention_owner	status
-DUR-001	git_object	native_oid_plus_strong_envelope_digest	segment_optional	expected_length, native Git OID, object type and parser	object_closure_root	specified
-DUR-002	repository_segment	domain_separated_segment_digest	adaptive_segment_v1	digest, Merkle footer, index, every referenced object identity	segment_manifest_root	specified
-DUR-003	repository_decision_batch	domain_separated_batch_digest	record_none_archive_segment_v1	digest, predecessor head/batch, sequences, RCR/refusal/effect roots	repository_authority_head	specified
-DUR-004	repository_capsule	domain_separated_unsigned_body_digest	record_none_checkpoint_bundle_v1	digest, signatures, exact authority head/RCR and all closure roots	checkpoint_retention_root	specified
-DUR-005	search_generation	domain_separated_generation_digest	generation_optional_v1	digest, source position, manifest, shard and index checks	generation_authority	specified
-DUR-006	graph_generation	domain_separated_generation_digest	generation_optional_v1	digest, schema, source position, vertices, edges and index roots	generation_authority	specified
-DUR-007	artifact_or_release_asset	typed_asset_digest	artifact_policy_v1	digest, length, media/archive structure, provenance and manifest	artifact_retention_root	specified
-DUR-008	atp_transfer_block	manifest_piece_identity	transport_adaptive_v1	manifest commitment, length, object or segment identity	transfer_region	specified
-DUR-009	mutable_authority_head	store_version_plus_authenticated_body	none	conditional-store version, monotone generation, predecessor and body digest	authority_backend	specified
-DUR-010	transaction_seal	domain_separated_seal_digest	none	strong put-if-absent and exact request commitment	seal_namespace	specified
-DUR-011	prepared_transaction_capsule	domain_separated_prepared_capsule_digest	policy_optional_v1	digest, base authority receipt, witnesses, object and effect roots	active_seal_and_preparation_roots	specified
-DUR-012	forge_event_checkpoint_segment	domain_separated_event_segment_digest	checkpoint_segment_v1	digest, stream or aggregate roots and deterministic replay	checkpoint_and_backup_roots	specified
-DUR-013	backup_export_bundle	domain_separated_encrypted_bundle_digest	backup_bundle_v1	AEAD, digest, signatures, member roots and restore replay	backup_retention_root	specified
-DUR-014	policy_key_format_checkpoint	domain_separated_encrypted_checkpoint_digest	checkpoint_segment_v1	AEAD, digest, signatures and semantic interpretation	policy_key_retention_roots	specified
-DUR-015	treefs_snapshot	domain_separated_workspace_snapshot_digest	workspace_snapshot_optional_v1	digest, base authority receipt, overlay root, intent log and path profile	workspace_retention_policy	specified
+id	object_class	canonical_identity	raptorq_profile	encoding_class	post_decode_verification	retention_owner	status
+DUR-001	git_object	native_oid_plus_strong_envelope_digest	segment_optional	exempt	expected_length, native Git OID, object type and parser	object_closure_root	specified
+DUR-002	repository_segment	domain_separated_segment_digest	adaptive_segment_v1	must	digest, Merkle footer, index, every referenced object identity	segment_manifest_root	specified
+DUR-003	repository_decision_batch	domain_separated_batch_digest	record_none_archive_segment_v1	exempt	digest, predecessor head/batch, sequences, RCR/refusal/effect roots	repository_authority_head	specified
+DUR-004	repository_capsule	domain_separated_unsigned_body_digest	record_none_checkpoint_bundle_v1	exempt	digest, signatures, exact authority head/RCR and all closure roots	checkpoint_retention_root	specified
+DUR-005	search_generation	domain_separated_generation_digest	generation_optional_v1	may	digest, source position, manifest, shard and index checks	generation_authority	specified
+DUR-006	graph_generation	domain_separated_generation_digest	generation_optional_v1	may	digest, schema, source position, vertices, edges and index roots	generation_authority	specified
+DUR-007	ci_artifact_or_log	typed_asset_digest	artifact_policy_v1	policy	digest, length, media/archive structure, provenance and manifest	artifact_retention_root	specified
+DUR-008	atp_transfer_block	manifest_piece_identity	transport_adaptive_v1	policy	manifest commitment, length, object or segment identity	transfer_region	specified
+DUR-009	mutable_authority_head	store_version_plus_authenticated_body	none	exempt	conditional-store version, monotone generation, predecessor and body digest	authority_backend	specified
+DUR-010	transaction_seal	domain_separated_seal_digest	none	exempt	strong put-if-absent and exact request commitment	seal_namespace	specified
+DUR-011	prepared_transaction_capsule	domain_separated_prepared_capsule_digest	policy_optional_v1	policy	digest, base authority receipt, witnesses, object and effect roots	active_seal_and_preparation_roots	specified
+DUR-012	forge_event_checkpoint_segment	domain_separated_event_segment_digest	checkpoint_segment_v1	must	digest, stream or aggregate roots and deterministic replay	checkpoint_and_backup_roots	specified
+DUR-013	backup_export_bundle	domain_separated_encrypted_bundle_digest	backup_bundle_v1	must	AEAD, digest, signatures, member roots and restore replay	backup_retention_root	specified
+DUR-014	policy_key_format_checkpoint	domain_separated_encrypted_checkpoint_digest	checkpoint_segment_v1	must	AEAD, digest, signatures and semantic interpretation	policy_key_retention_roots	specified
+DUR-015	treefs_snapshot	domain_separated_workspace_snapshot_digest	workspace_snapshot_optional_v1	may	digest, base authority receipt, overlay root, intent log and path profile	workspace_retention_policy	specified
+DUR-016	git_object_microsegment	domain_separated_microsegment_digest	microsegment_v1	must	segment digest, Merkle/index/footer, every record length/type/OID/envelope digest	object_manifest_and_closure_roots	specified
+DUR-017	release_asset	typed_signed_asset_digest	release_asset_v1	must	digest, signature, SBOM/provenance and release manifest linkage	release_manifest_root	specified

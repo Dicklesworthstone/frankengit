@@ -32,11 +32,11 @@ impl CheckSet {
     }
 
     const fn includes_docs(self) -> bool {
-        matches!(self, Self::All | Self::Docs | Self::Constitution)
+        matches!(self, Self::All | Self::Docs)
     }
 
     const fn includes_registries(self) -> bool {
-        matches!(self, Self::All | Self::Registries | Self::Constitution)
+        matches!(self, Self::All | Self::Docs | Self::Registries)
     }
 
     const fn includes_constitution(self) -> bool {
@@ -237,6 +237,7 @@ fn registry_schemas() -> BTreeMap<&'static str, &'static [&'static str]> {
                 "object_class",
                 "canonical_identity",
                 "raptorq_profile",
+                "encoding_class",
                 "post_decode_verification",
                 "retention_owner",
                 "status",
@@ -451,7 +452,7 @@ fn check_markdown(root: &Path, report: &mut Report) {
         check_links(root, &root_canonical, path, &display, &text, report);
 
         for (line_number, line) in text.lines().enumerate() {
-            if line.contains("TxId = H(") {
+            if contains_txid_formula(line) {
                 tx_formula_locations.push(format!("{display}:{}", line_number + 1));
             }
             let lowered = line.to_ascii_lowercase();
@@ -464,7 +465,7 @@ fn check_markdown(root: &Path, report: &mut Report) {
                     "does not",
                 ]
                 .iter()
-                .any(|guard| lowered.contains(guard))
+                .any(|guard| contains_guard(&lowered, guard))
             {
                 report.error(format!(
                     "positive/ambiguous `protocol v2 push` claim at {display}:{}",
@@ -479,6 +480,48 @@ fn check_markdown(root: &Path, report: &mut Report) {
             "expected exactly one canonical TxId formula, observed {tx_formula_locations:?}"
         ));
     }
+}
+
+/// Matches `TxId`, optional whitespace, `=`, optional whitespace, `H`,
+/// optional whitespace, `(` — so a competing formula cannot hide behind
+/// spacing differences.
+fn contains_txid_formula(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut search = 0;
+    while let Some(pos) = line[search..].find("TxId") {
+        let start = search + pos;
+        search = start + 4;
+        if start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+            continue;
+        }
+        let mut index = start + 4;
+        let expect = |target: u8, index: &mut usize| {
+            while *index < bytes.len() && bytes[*index].is_ascii_whitespace() {
+                *index += 1;
+            }
+            if *index < bytes.len() && bytes[*index] == target {
+                *index += 1;
+                true
+            } else {
+                false
+            }
+        };
+        if expect(b'=', &mut index) && expect(b'H', &mut index) && expect(b'(', &mut index) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Multi-word guards match as substrings; single-word guards require word
+/// boundaries so "not" cannot be satisfied by "nothing" or "annotation".
+fn contains_guard(lowered: &str, guard: &str) -> bool {
+    if guard.contains(' ') {
+        return lowered.contains(guard);
+    }
+    lowered
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|word| word == guard)
 }
 
 fn check_fences(display: &str, text: &str, report: &mut Report) {
@@ -514,52 +557,129 @@ fn check_links(
     text: &str,
     report: &mut Report,
 ) {
-    let bytes = text.as_bytes();
+    let mut fence_family: Option<char> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let family = if trimmed.starts_with("```") {
+            Some('`')
+        } else if trimmed.starts_with("~~~") {
+            Some('~')
+        } else {
+            None
+        };
+        if let Some(family) = family {
+            match fence_family {
+                None => fence_family = Some(family),
+                Some(current) if current == family => fence_family = None,
+                Some(_) => {}
+            }
+            continue;
+        }
+        if fence_family.is_some() {
+            continue;
+        }
+        for segment in outside_inline_code(line) {
+            check_line_links(root, root_canonical, path, display, &segment, report);
+            check_reference_definition(root, root_canonical, path, display, &segment, report);
+        }
+    }
+}
+
+/// Splitting on backticks, even-indexed segments are outside inline code.
+/// Markdown-escaped backticks (`\\` followed by a backtick) are literal text,
+/// not delimiters, so they are blanked before splitting. A line with
+/// unbalanced backticks falls back to being scanned whole.
+fn outside_inline_code(line: &str) -> Vec<String> {
+    let sanitized = line.replace("\\`", "  ");
+    let segments: Vec<&str> = sanitized.split('`').collect();
+    if segments.len().is_multiple_of(2) {
+        return vec![sanitized];
+    }
+    segments.into_iter().step_by(2).map(str::to_owned).collect()
+}
+
+fn check_line_links(
+    root: &Path,
+    root_canonical: &Path,
+    path: &Path,
+    display: &str,
+    line: &str,
+    report: &mut Report,
+) {
     let mut cursor = 0;
-    while cursor + 2 < bytes.len() {
-        let Some(close_offset) = text[cursor..].find("](") else {
-            break;
+    while let Some(offset) = line[cursor..].find("](") {
+        let start = cursor + offset + 2;
+        cursor = start;
+        let Some(end_offset) = line[start..].find(')') else {
+            continue;
         };
-        let start = cursor + close_offset + 2;
-        let Some(end_offset) = text[start..].find(')') else {
-            break;
-        };
-        let end = start + end_offset;
-        let raw = text[start..end].trim();
-        cursor = end + 1;
-        if raw.is_empty() || raw.starts_with('#') || raw.starts_with("mailto:") {
-            continue;
-        }
-        let target = raw
-            .trim_matches(|character| character == '<' || character == '>')
-            .split_whitespace()
-            .next()
-            .unwrap_or("");
-        if target.is_empty()
-            || target.starts_with("http://")
-            || target.starts_with("https://")
-            || target.starts_with("data:")
-            || target.starts_with("//")
-        {
-            continue;
-        }
-        let file_part = target.split('#').next().unwrap_or("");
-        if file_part.is_empty() {
-            continue;
-        }
-        let decoded = percent_decode(file_part);
-        let candidate = path.parent().unwrap_or(root).join(decoded);
-        if !candidate.exists() {
-            report.error(format!("broken relative link: {display} -> {target}"));
-            continue;
-        }
-        if let Ok(canonical) = fs::canonicalize(&candidate)
-            && !canonical.starts_with(root_canonical)
-        {
-            report.error(format!(
-                "relative link escapes repository: {display} -> {target}"
-            ));
-        }
+        let raw = line[start..start + end_offset].trim();
+        cursor = start + end_offset + 1;
+        validate_link_target(root, root_canonical, path, display, raw, report);
+    }
+}
+
+/// Validates reference-style definitions of the form `[label]: target`.
+fn check_reference_definition(
+    root: &Path,
+    root_canonical: &Path,
+    path: &Path,
+    display: &str,
+    line: &str,
+    report: &mut Report,
+) {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('[') {
+        return;
+    }
+    let Some(close) = trimmed.find("]:") else {
+        return;
+    };
+    let raw = trimmed[close + 2..].trim();
+    validate_link_target(root, root_canonical, path, display, raw, report);
+}
+
+fn validate_link_target(
+    root: &Path,
+    root_canonical: &Path,
+    path: &Path,
+    display: &str,
+    raw: &str,
+    report: &mut Report,
+) {
+    if raw.is_empty() || raw.starts_with('#') || raw.starts_with("mailto:") {
+        return;
+    }
+    let target = raw.strip_prefix('<').map_or_else(
+        || raw.split_whitespace().next().unwrap_or(""),
+        |rest| rest.split('>').next().unwrap_or(""),
+    );
+    if target.is_empty()
+        || target.starts_with('#')
+        || target.starts_with("http://")
+        || target.starts_with("https://")
+        || target.starts_with("mailto:")
+        || target.starts_with("data:")
+        || target.starts_with("//")
+    {
+        return;
+    }
+    let file_part = target.split('#').next().unwrap_or("");
+    if file_part.is_empty() {
+        return;
+    }
+    let decoded = percent_decode(file_part);
+    let candidate = path.parent().unwrap_or(root).join(decoded);
+    if !candidate.exists() {
+        report.error(format!("broken relative link: {display} -> {target}"));
+        return;
+    }
+    if let Ok(canonical) = fs::canonicalize(&candidate)
+        && !canonical.starts_with(root_canonical)
+    {
+        report.error(format!(
+            "relative link escapes repository: {display} -> {target}"
+        ));
     }
 }
 
@@ -613,20 +733,26 @@ fn check_workflows(root: &Path, report: &mut Report) {
                 "workflow {display} must delegate to repository-owned ./scripts/verify.sh"
             ));
         }
-        if !text.lines().any(|line| line.trim() == "workflow_dispatch:") {
+        if !text.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed == "workflow_dispatch:"
+                || (trimmed.starts_with("on:") && trimmed.contains("workflow_dispatch"))
+        }) {
             report.error(format!(
                 "workflow {display} must expose workflow_dispatch for local DSR/act execution"
             ));
         }
         for (line_number, line) in text.lines().enumerate() {
             let trimmed = line.trim();
-            if trimmed == "pull_request:" || trimmed == "push:" {
+            if is_hosted_trigger_line(trimmed) {
                 report.error(format!(
                     "workflow {display}:{} enables hosted automatic execution; FrankenGit workflows are local/dispatch manifests",
                     line_number + 1
                 ));
             }
-            let Some(action) = trimmed.strip_prefix("uses:") else {
+            // Normalize the YAML list form `- uses: ...` before matching.
+            let item = trimmed.strip_prefix("- ").map_or(trimmed, str::trim_start);
+            let Some(action) = item.strip_prefix("uses:") else {
                 continue;
             };
             let action = action.split('#').next().unwrap_or("").trim();
@@ -638,6 +764,31 @@ fn check_workflows(root: &Path, report: &mut Report) {
             }
         }
     }
+}
+
+/// Detects `push`/`pull_request` triggers in block form (`push:`), list form
+/// (`- push`), and inline form (`on: push`, `on: [push, pull_request]`,
+/// `on: {push: ...}`). Conservative: any of these anywhere in a workflow file
+/// is refused, because these workflows are dispatch-only manifests.
+fn is_hosted_trigger_line(trimmed: &str) -> bool {
+    const BANNED: [&str; 5] = [
+        "push",
+        "pull_request",
+        "schedule",
+        "workflow_run",
+        "repository_dispatch",
+    ];
+    for trigger in BANNED {
+        if trimmed == format!("{trigger}:") || trimmed == format!("- {trigger}") {
+            return true;
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("on:") {
+        return rest
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .any(|token| BANNED.contains(&token));
+    }
+    false
 }
 
 fn is_sha_pinned_action(value: &str) -> bool {
@@ -787,24 +938,32 @@ fn check_rust_sources(root: &Path, report: &mut Report) {
                 "first-party build script requires an explicit constitutional exception: {display}"
             ));
         }
-        if matches!(
+        let is_named_root = matches!(
             path.file_name().and_then(OsStr::to_str),
             Some("main.rs" | "lib.rs")
-        ) && !text
-            .lines()
-            .take(20)
-            .any(|line| line.contains("#![forbid(unsafe_code)]"))
+        );
+        let is_bin_root = path.parent().and_then(Path::file_name) == Some(OsStr::new("bin"))
+            && path
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                == Some(OsStr::new("src"));
+        if (is_named_root || is_bin_root)
+            && !text
+                .lines()
+                .take(20)
+                .any(|line| line.contains("#![forbid(unsafe_code)]"))
         {
             report.error(format!(
                 "crate root lacks #![forbid(unsafe_code)]: {display}"
             ));
         }
+        if let Some(token) = find_unsafe_construct(&text) {
+            report.error(format!("forbidden Rust construct `{token}` in {display}"));
+        }
         // Quote-free patterns are split with concat! so this checker's own
         // source does not contain the forbidden byte sequences it scans for.
         for forbidden in [
-            concat!("uns", "afe {"),
-            concat!("uns", "afe fn "),
-            concat!("uns", "afe impl "),
             concat!("#![allow(uns", "afe_code)]"),
             concat!("#[allow(uns", "afe_code)]"),
             "extern \"C\"",
@@ -818,6 +977,39 @@ fn check_rust_sources(root: &Path, report: &mut Report) {
             }
         }
     }
+}
+
+/// Whitespace-tolerant scan for the `unsafe` keyword introducing a block,
+/// function, impl, trait, or extern item. The needle is concat!-split so this
+/// file does not contain it; identifier continuations (as in the phrase
+/// checks above) are skipped via word-boundary tests.
+fn find_unsafe_construct(text: &str) -> Option<String> {
+    const NEEDLE: &str = concat!("uns", "afe");
+    let bytes = text.as_bytes();
+    let mut search = 0;
+    while let Some(pos) = text[search..].find(NEEDLE) {
+        let start = search + pos;
+        let end = start + NEEDLE.len();
+        search = end;
+        let prev_is_ident =
+            start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+        let next_is_ident =
+            end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
+        if prev_is_ident || next_is_ident {
+            continue;
+        }
+        let mut index = end;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let rest = &text[index..];
+        for follower in ["{", "fn", "impl", "trait", "extern"] {
+            if rest.starts_with(follower) {
+                return Some(format!("{NEEDLE} {follower}"));
+            }
+        }
+    }
+    None
 }
 
 fn check_manifests(root: &Path, report: &mut Report) {
@@ -846,6 +1038,15 @@ fn check_manifests(root: &Path, report: &mut Report) {
             ));
         }
 
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with("[patch") || line.starts_with("[replace") {
+                report.error(format!(
+                    "manifest {display} declares a [patch]/[replace] section, which bypasses the closed dependency universe"
+                ));
+            }
+        }
+
         for dependency in manifest_dependency_names(&text) {
             if !allowed
                 .iter()
@@ -855,6 +1056,40 @@ fn check_manifests(root: &Path, report: &mut Report) {
                     "unregistered Cargo dependency `{dependency}` in {display}; add an explicit active allow row to registries/dependency_policy.tsv"
                 ));
             }
+        }
+    }
+
+    check_lockfile(root, &allowed, report);
+}
+
+/// Closed-world check over the full resolved graph: every package in
+/// Cargo.lock — including transitive dependencies, which manifests alone
+/// cannot reveal — must match an active allow row.
+fn check_lockfile(root: &Path, allowed: &[String], report: &mut Report) {
+    let Ok(text) = fs::read_to_string(root.join("Cargo.lock")) else {
+        report.error("cannot read Cargo.lock for closed-world dependency verification");
+        return;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("name") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let name = rest.trim().trim_matches('"');
+        if name.is_empty() {
+            continue;
+        }
+        if !allowed
+            .iter()
+            .any(|pattern| dependency_pattern_matches(pattern, name))
+        {
+            report.error(format!(
+                "unregistered resolved dependency `{name}` in Cargo.lock; the closed dependency universe covers the transitive graph"
+            ));
         }
     }
 }
@@ -893,6 +1128,10 @@ fn dependency_pattern_matches(pattern: &str, dependency: &str) -> bool {
 fn manifest_dependency_names(text: &str) -> BTreeSet<String> {
     let mut dependencies = BTreeSet::new();
     let mut in_dependency_section = false;
+    // A `[dependencies.NAME]` table registers NAME, but a `package = "real"`
+    // key inside it renames the dependency; the real crate is what the
+    // closed-world policy must see, not the local alias.
+    let mut pending_table_alias: Option<String> = None;
 
     for raw_line in text.lines() {
         let line = raw_line.split('#').next().unwrap_or("").trim();
@@ -900,6 +1139,9 @@ fn manifest_dependency_names(text: &str) -> BTreeSet<String> {
             continue;
         }
         if line.starts_with('[') && line.ends_with(']') {
+            if let Some(name) = pending_table_alias.take() {
+                dependencies.insert(name);
+            }
             let section = &line[1..line.len() - 1];
             in_dependency_section = section == "dependencies"
                 || section == "dev-dependencies"
@@ -913,9 +1155,18 @@ fn manifest_dependency_names(text: &str) -> BTreeSet<String> {
                 if let Some(index) = section.rfind(marker) {
                     let name = section[index + marker.len()..].trim_matches('"');
                     if !name.is_empty() {
-                        dependencies.insert(name.to_owned());
+                        pending_table_alias = Some(name.to_owned());
                     }
                 }
+            }
+            continue;
+        }
+        if pending_table_alias.is_some() {
+            if let Some((key, value)) = line.split_once('=')
+                && key.trim().trim_matches('"') == "package"
+                && let Some(package) = extract_string_value(value)
+            {
+                pending_table_alias = Some(package);
             }
             continue;
         }
@@ -932,15 +1183,38 @@ fn manifest_dependency_names(text: &str) -> BTreeSet<String> {
             dependencies.insert(alias.to_owned());
         }
     }
+    if let Some(name) = pending_table_alias.take() {
+        dependencies.insert(name);
+    }
 
     dependencies
 }
 
 fn extract_inline_string_field(value: &str, field: &str) -> Option<String> {
-    let marker = format!("{field} =");
-    let start = value.find(&marker)? + marker.len();
-    let remainder = value[start..].trim_start();
-    let quoted = remainder.strip_prefix('"')?;
+    let bytes = value.as_bytes();
+    let mut search = 0;
+    while let Some(pos) = value[search..].find(field) {
+        let start = search + pos;
+        search = start + field.len();
+        let boundary_before = start == 0
+            || !(bytes[start - 1].is_ascii_alphanumeric()
+                || bytes[start - 1] == b'_'
+                || bytes[start - 1] == b'-');
+        if !boundary_before {
+            continue;
+        }
+        let after = value[start + field.len()..].trim_start();
+        if let Some(rest) = after.strip_prefix('=')
+            && let Some(found) = extract_string_value(rest)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn extract_string_value(value: &str) -> Option<String> {
+    let quoted = value.trim_start().strip_prefix('"')?;
     let end = quoted.find('"')?;
     Some(quoted[..end].to_owned())
 }
@@ -986,6 +1260,13 @@ fn collect_files(root: &Path, output: &mut Vec<PathBuf>) {
         let path = entry.path();
         let name = entry.file_name();
         if name == OsStr::new(".git") || name == OsStr::new("target") {
+            continue;
+        }
+        if entry
+            .file_type()
+            .map(|file_type| file_type.is_symlink())
+            .unwrap_or(true)
+        {
             continue;
         }
         if path.is_dir() {
