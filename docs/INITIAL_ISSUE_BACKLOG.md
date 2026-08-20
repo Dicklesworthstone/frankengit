@@ -805,6 +805,13 @@ A second audit swept the full supporting doc set (NORMATIVE_PROTOCOL_CONTRACTS, 
 - **FG-085** submodule gitlink preservation + non-delegation (required-v1);
 - **FG-086** external head-continuity witness profile (optional high-value anti-rollback, OSDL §15).
 
+Four further slices came from mining the remaining docs the earlier waves treated as historical/provenance (FRANKEN_SUITE_DEEP_DIVE_SYNTHESIS, RESEARCH_PROVENANCE, ARCHITECTURE, ADR-0001):
+
+- **FG-087** crate-layer (L0-L4) registry and layering-violation checker (ARCHITECTURE §19 / the last deferred constitution-lane check);
+- **FG-088** degradation-matrix conformance registry + fault-injection lane (ARCHITECTURE §20's 12-row failure-to-allowed-mode table, made load-bearing, embedded + hosted);
+- **FG-089** deterministic worker-budget calculator shared across render/index/graph/pack/repair/CI batches (franken_markdown inheritance; determinism-across-worker-count is a correctness property);
+- **FG-090** compatibility-ledger generator: generate the Git/API compatibility status and release claims FROM executable differential results (FrankenNetworkX differential-ledger pattern / plan §18.5), so the matrix stops being hand-maintained prose.
+
 ## Backlog governance
 
 - Issue IDs are stable and never silently reused.
