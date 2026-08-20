@@ -107,8 +107,8 @@ fn main() -> ExitCode {
         check_rust_sources(&root, &mut report);
         check_manifests(&root, &mut report);
         check_toolchain(&root, &mut report);
-        check_forbidden_artifacts(&root, &mut report);
     }
+    check_forbidden_artifacts(&root, &mut report);
 
     report.errors.sort();
     report.errors.dedup();
@@ -125,12 +125,29 @@ fn main() -> ExitCode {
     }
 }
 
+/// Resolves the repository root at runtime so a relocated binary can never
+/// silently validate the checkout it was built from: prefer Cargo's runtime
+/// manifest-dir variable, then walk upward from the current directory to the
+/// repository sentinels, and fail closed otherwise.
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("registry-check must live at tools/registry-check")
-        .to_path_buf()
+    if let Some(dir) = env::var_os("CARGO_MANIFEST_DIR")
+        && let Some(root) = Path::new(&dir).parent().and_then(Path::parent)
+        && root.join("registries").is_dir()
+    {
+        return root.to_path_buf();
+    }
+    let mut current = env::current_dir().expect("cannot read the current directory");
+    loop {
+        if current.join("registries/verification_lanes.tsv").is_file()
+            && current.join("VERIFY_SPEC.md").is_file()
+        {
+            return current;
+        }
+        assert!(
+            current.pop(),
+            "cannot locate the FrankenGit repository root from the current directory"
+        );
+    }
 }
 
 fn check_required_files(root: &Path, report: &mut Report) {
@@ -381,10 +398,13 @@ fn check_registries(root: &Path, report: &mut Report) {
             }
             let id = fields[id_index].to_owned();
             if !ids.insert(id.clone()) {
-                report.error(format!("duplicate registry id `{id}` in {display}"));
+                report.error(format!(
+                    "duplicate registry id `{id}` at {display}:{}",
+                    line_index + 1
+                ));
             }
             if let Some(previous) = &previous_id
-                && id <= *previous
+                && id < *previous
             {
                 report.error(format!(
                     "registry IDs are not strictly sorted at {display}:{}: `{id}` follows `{previous}`",
@@ -524,27 +544,55 @@ fn contains_guard(lowered: &str, guard: &str) -> bool {
         .any(|word| word == guard)
 }
 
-fn check_fences(display: &str, text: &str, report: &mut Report) {
-    let mut open: Option<(char, usize)> = None;
-    for (index, line) in text.lines().enumerate() {
-        let trimmed = line.trim_start();
-        let family = if trimmed.starts_with("```") {
-            Some('`')
-        } else if trimmed.starts_with("~~~") {
-            Some('~')
-        } else {
-            None
-        };
-        let Some(family) = family else {
-            continue;
-        };
-        match open {
-            None => open = Some((family, index + 1)),
-            Some((current, _)) if current == family => open = None,
-            Some(_) => {}
-        }
+/// Fence state shared by the fence-balance and link checks so the two can
+/// never disagree about what is code. Delimiters follow the `CommonMark` rules
+/// that matter here: a fence is three or more of one family indented at most
+/// three spaces, and a closing fence must be at least as long as its opener,
+/// so a three-backtick example inside a four-backtick fence stays content and
+/// a triple-backtick line inside a four-space-indented code block is not a
+/// delimiter.
+struct FenceTracker {
+    open: Option<(char, usize, usize)>,
+}
+
+impl FenceTracker {
+    const fn new() -> Self {
+        Self { open: None }
     }
-    if let Some((_, line)) = open {
+
+    /// Consumes one line; returns true when the line is fence content or a
+    /// fence delimiter (either way, content scanners must skip it).
+    fn consume(&mut self, line_number: usize, line: &str) -> bool {
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if indent <= 3
+            && let Some(family) = trimmed.chars().next().filter(|c| *c == '`' || *c == '~')
+        {
+            let run = trimmed.chars().take_while(|c| *c == family).count();
+            if run >= 3 {
+                match self.open {
+                    None => {
+                        self.open = Some((family, run, line_number));
+                        return true;
+                    }
+                    Some((current, length, _)) if current == family && run >= length => {
+                        self.open = None;
+                        return true;
+                    }
+                    Some(_) => return true,
+                }
+            }
+        }
+        self.open.is_some()
+    }
+}
+
+fn check_fences(display: &str, text: &str, report: &mut Report) {
+    let mut tracker = FenceTracker::new();
+    for (index, line) in text.lines().enumerate() {
+        tracker.consume(index + 1, line);
+    }
+    if let Some((_, _, line)) = tracker.open {
         report.error(format!("unbalanced code fence at {display}:{line}"));
     }
 }
@@ -557,25 +605,9 @@ fn check_links(
     text: &str,
     report: &mut Report,
 ) {
-    let mut fence_family: Option<char> = None;
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        let family = if trimmed.starts_with("```") {
-            Some('`')
-        } else if trimmed.starts_with("~~~") {
-            Some('~')
-        } else {
-            None
-        };
-        if let Some(family) = family {
-            match fence_family {
-                None => fence_family = Some(family),
-                Some(current) if current == family => fence_family = None,
-                Some(_) => {}
-            }
-            continue;
-        }
-        if fence_family.is_some() {
+    let mut tracker = FenceTracker::new();
+    for (index, line) in text.lines().enumerate() {
+        if tracker.consume(index + 1, line) {
             continue;
         }
         for segment in outside_inline_code(line) {
@@ -734,8 +766,10 @@ fn check_workflows(root: &Path, report: &mut Report) {
             ));
         }
         if !text.lines().any(|line| {
-            let trimmed = line.trim();
+            let trimmed = line.split('#').next().unwrap_or("").trim();
             trimmed == "workflow_dispatch:"
+                || trimmed == "workflow_dispatch"
+                || trimmed == "- workflow_dispatch"
                 || (trimmed.starts_with("on:") && trimmed.contains("workflow_dispatch"))
         }) {
             report.error(format!(
@@ -766,11 +800,14 @@ fn check_workflows(root: &Path, report: &mut Report) {
     }
 }
 
-/// Detects `push`/`pull_request` triggers in block form (`push:`), list form
-/// (`- push`), and inline form (`on: push`, `on: [push, pull_request]`,
-/// `on: {push: ...}`). Conservative: any of these anywhere in a workflow file
-/// is refused, because these workflows are dispatch-only manifests.
-fn is_hosted_trigger_line(trimmed: &str) -> bool {
+/// Detects hosted automatic triggers in block form (`push:`), bare-scalar and
+/// list forms (`push`, `- push`), and inline form (`on: push`,
+/// `on: [push, pull_request]`, `on: {push: ...}`). YAML comments are stripped
+/// first so `push: # disabled` cannot slip through and a comment mentioning
+/// `push` cannot false-positive. Conservative: any of these anywhere in a
+/// workflow file is refused, because these workflows are dispatch-only
+/// manifests.
+fn is_hosted_trigger_line(line: &str) -> bool {
     const BANNED: [&str; 5] = [
         "push",
         "pull_request",
@@ -778,8 +815,12 @@ fn is_hosted_trigger_line(trimmed: &str) -> bool {
         "workflow_run",
         "repository_dispatch",
     ];
+    let trimmed = line.split('#').next().unwrap_or("").trim();
     for trigger in BANNED {
-        if trimmed == format!("{trigger}:") || trimmed == format!("- {trigger}") {
+        if trimmed == trigger
+            || trimmed == format!("{trigger}:")
+            || trimmed == format!("- {trigger}")
+        {
             return true;
         }
     }
@@ -1221,11 +1262,25 @@ fn extract_string_value(value: &str) -> Option<String> {
 
 fn check_toolchain(root: &Path, report: &mut Report) {
     let text = fs::read_to_string(root.join("rust-toolchain.toml")).unwrap_or_default();
-    if !text.contains("channel = \"nightly-") {
+    let mut channel_pinned = false;
+    let mut components_line = String::new();
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if let Some(value) = line.strip_prefix("channel")
+            && let Some(value) = value.trim_start().strip_prefix('=')
+            && value.trim().starts_with("\"nightly-")
+        {
+            channel_pinned = true;
+        }
+        if line.starts_with("components") {
+            line.clone_into(&mut components_line);
+        }
+    }
+    if !channel_pinned {
         report.error("rust-toolchain.toml must pin a dated nightly channel");
     }
     for component in ["rustfmt", "clippy"] {
-        if !text.contains(component) {
+        if !components_line.contains(component) {
             report.error(format!("rust-toolchain.toml lacks component `{component}`"));
         }
     }
@@ -1245,6 +1300,11 @@ fn check_forbidden_artifacts(root: &Path, report: &mut Report) {
         }
         if display == "bootstrap_github_repo.sh" {
             report.error("bootstrap_github_repo.sh is a transfer artifact, not repository source");
+        }
+        if name == "Cargo.lock" && display != "Cargo.lock" {
+            report.error(format!(
+                "nested lockfile {display}: the workspace has exactly one root Cargo.lock"
+            ));
         }
     }
 }
