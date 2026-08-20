@@ -324,7 +324,7 @@ Mechanisms adopted: SQLModel-style derive-macro models, compile-time-checked que
 ### frankentui (ftui)
 Mechanisms adopted: a pure-Rust terminal-UI widget kernel (layout/render/style/text/a11y/i18n/pty) with an `asupersync-executor` feature and an in-tree WASM backend. FrankenGit application: the `fgit-tui` operator/agent terminal UI, and — via ftui's WASM backend — an OPTIONAL parallel terminal-style web surface. Boundary: ftui is NOT the primary web UI (that is a conventional GitHub-like Rust/WASM app); the demo/showcase crates and their transitive Tokio are excluded.
 
-The primary web UI is a familiar GitHub-like browser application compiled Rust->WASM (framework by open ADR), sharing the canonical codec types, franken_markdown-WASM rendering, and the verified-read WASM verifier with the other surfaces, while looking conventional.
+The primary web UI is a familiar GitHub-like DOM-oriented pure-Rust to WebAssembly application (Leptos or Dioxus, SSR + Tailwind, real DOM), with franken_markdown rendering and the verified-read verifier as native Rust in the same build; a generated TypeScript client and React reference remain the supported alternative.
 
 ## 13. Existing forge and local-first precedents
 
