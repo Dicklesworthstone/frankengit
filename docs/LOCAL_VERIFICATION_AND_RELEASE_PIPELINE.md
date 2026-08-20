@@ -29,9 +29,9 @@ The initial lanes are:
 ./scripts/verify.sh release
 ```
 
-- `docs`: links, fences, required status/contract phrases, registries, workflow portability.
-- `constitution`: dependency, unsafe/FFI, layer, crate-admission, license, and claim checks.
-- `fast`: fmt, check, focused unit/model tests, registry checker.
+- `docs`: Markdown links, fences, required status/contract phrases, registry schemas/rows, and workflow portability.
+- `constitution`: required files, first-party unsafe/FFI/foreign-Git source scan, manifest and Cargo.lock closed-world dependency checks, toolchain pin, and forbidden artifacts. Layering, license-compatibility, and claim-registry checks join this lane as the corresponding machinery lands; they are not implemented yet.
+- `fast`: the `docs` and `constitution` lanes plus `cargo fmt --check`, `cargo check`, full workspace tests, and `cargo clippy -D warnings`.
 - `full`: future workspace/conformance/deterministic-lab/fuzz/corpus/artifact gate.
 - `release`: future full lane plus target-native binaries, packaging, checksums, SBOM, signatures, installer smoke, reproducibility, and root-last manifest.
 

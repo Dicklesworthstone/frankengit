@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-lane="${1:-fast}"
+lane="${1:-}"
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 
 echo_step() { printf '\033[1;36m==> %s\033[0m\n' "$*" >&2; }
@@ -15,8 +15,8 @@ refuse_dormant() {
 }
 
 run_docs() {
-  echo_step "Checking FrankenGit documentation and constitutional registries"
-  cargo run --locked -p fgit-registry-check -- all
+  echo_step "Checking FrankenGit documentation and registries"
+  cargo run --locked -p fgit-registry-check -- docs
 }
 
 run_constitution() {
@@ -47,6 +47,11 @@ run_release() {
   run_fast
   refuse_dormant "No releasable FrankenGit binary or complete native target matrix exists yet"
 }
+
+if [ -z "$lane" ]; then
+  printf 'usage: %s {docs|constitution|fast|full|release}\n' "$0" >&2
+  exit 2
+fi
 
 case "$lane" in
   docs) run_docs ;;

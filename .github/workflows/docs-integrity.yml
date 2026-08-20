@@ -2,6 +2,11 @@ name: local-verification-manifest
 
 # Portable lane description for Doodlestein Self-Releaser / nektos/act.
 # FrankenGit does not rely on GitHub-hosted Actions for correctness or release.
+#
+# Execution requirements: hosted runners provide rustup, which auto-installs
+# the pinned toolchain from rust-toolchain.toml on first cargo invocation.
+# Under `act`, use a host-prepared image that already carries rustup; the lane
+# performs no network acquisition of its own beyond that toolchain bootstrap.
 on:
   workflow_dispatch:
 
@@ -13,5 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Check out repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
       - name: Run repository-owned verification lane
         run: ./scripts/verify.sh docs

@@ -1,6 +1,6 @@
 tool_name: frankengit
 repo: Dicklesworthstone/frankengit
-local_path: /data/projects/frankengit
+local_path: /path/to/frankengit  # set to your local clone of Dicklesworthstone/frankengit
 language: rust
 main_package: fgit-registry-check
 workflow: .github/workflows/docs-integrity.yml
