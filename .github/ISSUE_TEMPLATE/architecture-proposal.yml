@@ -1,0 +1,40 @@
+name: Architecture proposal
+description: Propose or revise a protocol, invariant, format, or subsystem boundary.
+title: "architecture: "
+labels: ["architecture"]
+body:
+  - type: markdown
+    attributes:
+      value: Read AGENTS.md and docs/NORMATIVE_PROTOCOL_CONTRACTS.md first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and failure mode
+      description: State the concrete problem, including what can go wrong if it remains unresolved.
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Proposed normative contract
+      description: Define identity, owner, linearization point, refusal behavior, cancellation, retry, and recovery.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Git/API compatibility impact
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Executable evidence and adversarial tests
+    validations:
+      required: true
+  - type: textarea
+    id: migration
+    attributes:
+      label: Mixed-version migration and rollback
+    validations:
+      required: true
