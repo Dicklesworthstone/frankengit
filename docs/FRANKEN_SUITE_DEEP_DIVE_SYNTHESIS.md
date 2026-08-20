@@ -394,6 +394,19 @@ Every target maps to one unique asset basename, checksum sidecar, optional signa
 
 FrankenGit’s local release lane binds commit, lockfile, constellation, nightly/compiler, target, build profile, binary/archive digests, checksums, minisign/cosign-style signature policy, SBOM, test receipts, and DSR run identity. GitHub Releases is a distribution adapter, not the source of build truth.
 
+## 8a. Product-surface stack: fastapi_rust, sqlmodel_rust, frankentui
+
+The forge is not only a truth engine; it needs a gateway, projections, and interfaces. Three sibling projects supply these on the sole runtime, keeping the whole stack in one Rust universe.
+
+### 8a.1 fastapi_rust -> gateway/API
+Pure-Rust, Asupersync-native web framework (typed routing, zero-copy parsing, deterministic testing, OpenAPI generation). It becomes `fgit-gateway`/`fgit-api`; its OpenAPI generation is unified with the schema registry so ONE schema source drives Rust types, validators, OpenAPI, and generated clients (no handwritten wire structs). No Tokio.
+
+### 8a.2 sqlmodel_rust -> projection read-models
+SQLModel-style typed models + compile-time-checked query builders, via the `sqlmodel-frankensqlite` backend (asupersync + fsqlite only). It becomes the substrate for DERIVED projection read-models over the mandated embedded engine. Hard boundary: projections only (never a second source of truth beside the decision log), and only the frankensqlite backend is admitted — the C-SQLite/Postgres/MySQL backends are excluded.
+
+### 8a.3 frankentui (ftui) -> terminal UI and an optional parallel web skin
+A mature pure-Rust terminal-UI kernel with an `asupersync-executor` feature and a WASM backend. It becomes `fgit-tui` (operator/agent/SSH console) and, optionally, a parallel terminal-style web surface. It is deliberately NOT the primary web UI — that is a conventional GitHub-like Rust/WASM app — because a terminal aesthetic would not resonate with most web users. What the surfaces share is the Rust substrate (canonical types, franken_markdown-WASM rendering, the verified-read verifier), not one look.
+
 ## 9. Cross-project synthesis: new FrankenGit mechanisms
 
 The deep dive produces several mechanisms that no single sibling project contains alone.

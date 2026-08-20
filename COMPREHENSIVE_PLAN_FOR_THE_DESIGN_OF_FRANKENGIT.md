@@ -2508,6 +2508,14 @@ Human UI principles:
 
 The UI is a client of public APIs, not a privileged bypass.
 
+The first-party UI is pure Rust rather than JavaScript, but it is deliberately NOT one visual style forced across surfaces. There are three parallel front-ends over the same public APIs:
+
+- the **primary web UI**: a familiar, GitHub-like browser experience with conventional web layout and components, compiled Rust to WebAssembly (a DOM-oriented Rust web framework — the exact framework is an open decision, and it is NOT the terminal-widget kernel). Most users see this;
+- the **terminal UI (TUI)**: an operator/agent/SSH console on the `frankentui` (ftui) widget kernel, for people working in the terminal;
+- an **optional parallel terminal-style web surface**: because ftui also ships a WASM backend, the ftui experience can additionally be served in the browser for those who prefer that aesthetic — an alternate, never the default.
+
+What all three SHARE is the Rust substrate, not a single look: the canonical `fgit-codec` types (no handwritten wire structs, §42.4), franken_markdown-WASM as the one source-spanned renderer (so text rendering and sanitization never drift, §5.1/§28.1), and the verified-read verifier (§18.7) compiled into the WASM builds — so the browser cryptographically checks Merkle inclusion proofs against a trusted head and a mirror or CDN cannot lie to the client. A generated TypeScript client (from the schema registry) is also supported for third-party and React front-ends, so nothing is lost; the first-party stack simply stays in one Rust universe while letting the web UI look conventional.
+
 ### 31.8 Decision-addressed forge snapshots (proposal)
 
 Because canonical state is an immutable decision stream, “the entire forge at decision N” is a well-defined object, not a reconstruction heuristic. FrankenGit exposes that as a product primitive:
@@ -3352,7 +3360,7 @@ A prospective final layering is:
 - `fgit-agent`: Intent Runs, Context Packets, Evidence-Carrying Changes;
 - `fgit-ci-protocol`: workflow DAG, runner/input/output/check receipts;
 - `fgit-package`: LFS/OCI/artifact/release schemas;
-- `fgit-projection`: local FrankenSQLite read models and queues.
+- `fgit-projection`: local FrankenSQLite read models and queues, built on the `sqlmodel-frankensqlite` type-safe substrate (projections only).
 
 **L4 — products/adapters**
 
@@ -3362,7 +3370,10 @@ A prospective final layering is:
 - `fgit-node`: self-hosted/hosted cell process;
 - `fgit-runner`: isolated job agent;
 - `fgit-ops`: scrub/restore/capacity/evidence tooling;
-- browser/WASM clients and admin UI adapters.
+- `fgit-gateway`/`fgit-api` are built on `fastapi_rust` (Asupersync-native routing + OpenAPI);
+- `fgit-tui`: the operator/agent terminal UI on the `frankentui` (ftui) kernel;
+- `fgit-web`: the PRIMARY browser UI — a familiar, GitHub-like Rust/WebAssembly application with conventional web components (a DOM-oriented Rust/WASM web framework, chosen by ADR; NOT ftui's terminal renderer), sharing the canonical codec types, franken_markdown-WASM rendering, and the verified-read WASM verifier;
+- ftui's WASM backend may additionally serve a parallel terminal-style web surface as an alternate; the generated TypeScript client remains a supported path for third-party/React front-ends.
 
 L3 siblings do not import one another to shortcut ownership; L4 orchestrates through public contracts. Dependency graph checks enforce the DAG.
 
@@ -3372,10 +3383,13 @@ L3 siblings do not import one another to shortcut ownership; L4 orchestrates thr
 - `frankensqlite`: embedded authority profile and local MVCC projections;
 - `frankensearch`: progressive retrieval/generation/durability primitives;
 - `franken_networkx` and `frankengraphdb`: stable factored graph/algorithm/storage/evidence surfaces;
-- `franken_markdown`: source-spanned safe rendering;
-- `frankenfs`: optional TreeFS/FUSE adapter and repair/epoch patterns.
+- `franken_markdown`: source-spanned safe rendering (native and WASM);
+- `frankenfs`: optional TreeFS/FUSE adapter and repair/epoch patterns;
+- `fastapi_rust`: the gateway/API framework — pure-Rust, Asupersync-native (no Tokio), with OpenAPI generation that feeds the schema registry;
+- `sqlmodel_rust` (the `sqlmodel-frankensqlite` backend and its core/query/schema/macros/session/pool crates ONLY): the type-safe substrate for DERIVED PROJECTION read-models over FrankenSQLite — projections only, never canonical authority (the head-CAS decision stream remains the sole source of truth). Its `sqlmodel-sqlite` (C `libsqlite3-sys`), `sqlmodel-postgres`, and `sqlmodel-mysql` backends are EXCLUDED by the closed dependency universe and must never enter the graph;
+- `frankentui` (ftui) kernel crates on the `asupersync-executor` feature: the widget kernel for the terminal TUI, and (via ftui's WASM backend) an OPTIONAL parallel terminal-style web surface — NOT the primary web UI, which is a conventional GitHub-like Rust/WASM app. The demo/showcase crates and their transitive Tokio are excluded.
 
-Dependencies are pinned to one compatible constellation. If a sibling’s required surface is not stable/consumable, FrankenGit ports the mechanism behind its own contract rather than taking an unpublished path dependency.
+Dependencies are pinned to one compatible constellation. The web/UI siblings introduce a version pin to reconcile: fastapi_rust and the ftui kernel target asupersync ~0.3.9 while sqlmodel_rust targets ~0.4.4; the constellation resolves these to one asupersync revision. If a sibling’s required surface is not stable/consumable, FrankenGit ports the mechanism behind its own contract rather than taking an unpublished path dependency.
 
 ### 43.4 External dependency policy
 
@@ -3688,6 +3702,15 @@ Prioritize Git LFS and OCI, then GitHub REST/GraphQL/Actions subsets using usage
 ### D13. Federation trust and moderation
 
 Define identity/key history, event classes, CRDT/coordination rules, spam/moderation, equivocation, and local admission. Protected refs remain locally coordinated.
+
+### D-WEB. Web and UI stack
+
+Resolved by adoption (recorded here and in the implementation beads):
+
+- **fastapi_rust** is the gateway/API framework — pure-Rust, Asupersync-native, OpenAPI generation feeding the schema registry. Alternative considered: a fully owned minimal HTTP surface; rejected because fastapi_rust already provides typed routing + OpenAPI on the sole runtime.
+- **sqlmodel_rust** (`sqlmodel-frankensqlite` backend only) is the projection read-model substrate — projections only, backend-feature-gated, with the C/Postgres/MySQL backends excluded.
+- **The first-party UI is Rust/WASM, not React, but not one forced look.** The PRIMARY web UI is a familiar GitHub-like browser app in a DOM-oriented Rust/WASM web framework (framework choice is an open ADR); the **frankentui (ftui)** kernel powers the terminal TUI and, optionally, a parallel terminal-style web surface for those who want it. All share the canonical codec types, franken_markdown-WASM rendering, and the client-side verified-read verifier. The generated TypeScript client is retained for third-party/React front-ends.
+- **Constitutional exception (bounded):** the wasm-bindgen browser boundary of the client-only WASM adapter carries generated unsafe; this is an explicit, client-target-only exception to `#![forbid(unsafe_code)]` for the L4 web adapter, never the server.
 
 ### D14. License model
 

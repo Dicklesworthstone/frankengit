@@ -311,6 +311,21 @@ Population, selection/propensity, exact sequence window/filtration, regime, cand
 
 Statistical evidence cannot decide object identity, signatures, authority order, authorization, retention roots, current truth, irreversible sanction, or billing without deterministic records.
 
+## 12a. Web, data, and UI stack (fastapi_rust, sqlmodel_rust, frankentui)
+
+Three further FrankenSuite siblings supply the product-surface stack, each verified pure-Rust and Asupersync-native (no Tokio in their lockfiles):
+
+### fastapi_rust
+Mechanisms adopted: FastAPI-inspired typed routing, zero-copy request parsing, deterministic testing, and OpenAPI generation (`fastapi-openapi`) — all on Asupersync. FrankenGit application: the `fgit-gateway`/`fgit-api` layer; its OpenAPI generation feeds the schema registry (one schema source, no handwritten wire structs). Non-imported: nothing runtime-foreign; it is already on the sole runtime.
+
+### sqlmodel_rust
+Mechanisms adopted: SQLModel-style derive-macro models, compile-time-checked query builders, and migrations — via the `sqlmodel-frankensqlite` backend (depends only on asupersync + the fsqlite family). FrankenGit application: the type-safe substrate for DERIVED PROJECTION read-models over FrankenSQLite. Boundary (critical): projections only, never canonical authority (the head-CAS decision stream is the sole source of truth); and ONLY the frankensqlite backend is admitted — the `sqlmodel-sqlite` (C `libsqlite3-sys`), `-postgres`, and `-mysql` backends are excluded by the closed dependency universe.
+
+### frankentui (ftui)
+Mechanisms adopted: a pure-Rust terminal-UI widget kernel (layout/render/style/text/a11y/i18n/pty) with an `asupersync-executor` feature and an in-tree WASM backend. FrankenGit application: the `fgit-tui` operator/agent terminal UI, and — via ftui's WASM backend — an OPTIONAL parallel terminal-style web surface. Boundary: ftui is NOT the primary web UI (that is a conventional GitHub-like Rust/WASM app); the demo/showcase crates and their transitive Tokio are excluded.
+
+The primary web UI is a familiar GitHub-like browser application compiled Rust->WASM (framework by open ADR), sharing the canonical codec types, franken_markdown-WASM rendering, and the verified-read WASM verifier with the other surfaces, while looking conventional.
+
 ## 13. Existing forge and local-first precedents
 
 ### GitLab/Gitaly/Praefect

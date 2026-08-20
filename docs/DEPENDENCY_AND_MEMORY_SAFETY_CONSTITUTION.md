@@ -37,6 +37,8 @@ The preferred dependency universe is:
 - franken_markdown for source-spanned parsing and safe deterministic rendering;
 - other FrankenSuite crates only through an explicit, pinned constellation.
 
+The admitted web/UI siblings and their guardrails: `fastapi_rust` (gateway/API; Asupersync-native, no Tokio); `sqlmodel_rust` restricted to its `sqlmodel-frankensqlite` backend plus core/query/schema/macros/session/pool crates for DERIVED projections only — its `sqlmodel-sqlite` (C `libsqlite3-sys`), `sqlmodel-postgres`, and `sqlmodel-mysql` crates are on the deny side and must never resolve; and `frankentui` (ftui) kernel crates on the `asupersync-executor` feature for the shared TUI/WASM UI, excluding the demo/showcase crates and their transitive Tokio. The client-only WASM UI adapter carries a bounded, explicit constitutional exception for wasm-bindgen-generated unsafe at the browser boundary (client target only; the server never links it).
+
 A sibling dependency is not automatically trusted because it is in the family. Before the first release-facing build that consumes a sibling, its exact revision, feature set, public contract, unsafe inventory, and claim level must be pinned in a checked-in `constellation.lock` evidence manifest and verified by the registry checker; no such manifest exists yet because no sibling dependency has been admitted.
 
 ### 2.2 Fundamental pure-Rust dependencies
