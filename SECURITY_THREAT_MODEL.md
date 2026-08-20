@@ -290,6 +290,29 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
 - redaction and secret-taint tests;
 - high-impact dual/independent approval policy and immutable overrides.
 
+### 7.5a Account takeover and interactive authentication lifecycle
+
+**Threats**
+
+- credential stuffing and password reuse against human accounts;
+- MFA enrollment, reset, and recovery-flow abuse;
+- session fixation, hijacking, and cookie theft;
+- OAuth/OIDC authorization-code interception and token theft;
+- phishing of maintainers and organization owners;
+- registration-flow abuse creating throwaway attack identities;
+- account takeover of a high-privilege maintainer as the cheapest path to every other control in this model.
+
+**Controls**
+
+- phishing-resistant authentication (WebAuthn/passkeys) available from v1 and requirable by organization policy for protected-ref and release capabilities;
+- rate-limited, breach-list-aware credential validation and bounded login attempts per identity/source class;
+- MFA recovery through named, audited, delay-and-notify flows; recovery can never silently downgrade authentication strength recorded in the principal snapshot;
+- session tokens bound to authentication strength and rotation policy; privilege elevation re-authenticates rather than reusing an old session;
+- OAuth/OIDC flows use PKCE, exact redirect-URI matching, and audience-bound short-lived tokens;
+- canonical policy input records authentication strength, so branch protection can require strong-auth principals and the decision is replayable;
+- new or downgraded authentication factors trigger notification events and a policy-configurable high-impact-action cooldown;
+- maintainer-account anomaly evidence (new factor, new geography class, dormant-account reactivation) can tighten required review through deterministic policy, never loosen it.
+
 ### 7.6 Agent prompt injection and tool abuse
 
 **Threats**

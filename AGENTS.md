@@ -46,7 +46,7 @@ If these disagree, stop and surface the contradiction. Do not implement the most
 - Do not add Tokio, async-std, smol, executor-lite, or an ecosystem dependency that brings an alternate runtime into production.
 - Long-lived work owns children through regions and closes to quiescence.
 - Cancellation is request → drain → finalize; dropping a future is not a complete protocol.
-- Effects that acquire responsibility use typed obligations and two-phase reserve/commit/abort where applicable.
+- Effects that acquire responsibility use typed obligations: reserve/commit/abort as the two-phase boundary, plus explicit acknowledgement for externally observed effects.
 
 ### 3.3 Closed dependency universe
 

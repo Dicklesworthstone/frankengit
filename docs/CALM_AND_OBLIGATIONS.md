@@ -1,8 +1,8 @@
 # CALM Coordination Registry and Obligation-Typed Effects
 
 **Status:** normative architecture profile  
-**Version:** 1.0  
-**Last revised:** 2026-08-19
+**Version:** 1.1  
+**Last revised:** 2026-08-20
 
 FrankenGit distinguishes operations that can converge safely without coordination from operations whose meaning depends on absence, replacement, uniqueness, ordering, or revocation. It also represents every effect that can be abandoned by cancellation as an explicit obligation with a terminal disposition.
 
@@ -15,16 +15,17 @@ These two ideas are mutually reinforcing:
 
 A monotone computation may proceed coordination-free when adding information cannot invalidate an earlier result. Non-monotone operations require an ordering or coordination boundary.
 
-FrankenGit does not use “eventual consistency” as a blanket architecture choice. Each operation has a checked-in classification in `registries/calm_operations.tsv`:
+FrankenGit does not use “eventual consistency” as a blanket architecture choice. Every operation named in this document’s tables has a checked-in classification in `registries/calm_operations.tsv`, and the closed class vocabulary is exactly:
 
-- `monotone_coordination_free`;
-- `monotone_with_authentication`;
-- `commutative_but_bounded`;
-- `ordered_projection`;
-- `head_cas_required`;
-- `exclusive_external_effect`.
+- `monotone_with_authentication`: grow-only information whose union cannot invalidate earlier results, admitted only after identity/authorization verification;
+- `monotone_scoped`: grow-only within one locally authorized scope (for example a verified cache); discardable without correctness loss;
+- `commutative_but_bounded`: algebraically mergeable state with declared bounds, overflow behavior, and reset/regime semantics; inherently retractable observations (such as availability) belong here, never in a monotone class;
+- `local_deterministic`: pure deterministic computation over pinned inputs; produces ordering or advice, never shared truth;
+- `ordered_projection`: publication through a subordinate monotone anti-rollback authority (for example generation activation);
+- `head_cas_required`: meaning depends on absence, replacement, uniqueness, or revocation; only the repository authority head can decide it;
+- `exclusive_external_effect`: one externally observable side effect owned by an outbox obligation with stable idempotency.
 
-The row names its proof argument, authority owner, replay semantics, and forbidden shortcuts.
+An operation classified in a class this vocabulary does not define is a registry defect. The row names its proof argument, authority owner, replay semantics, and forbidden shortcuts.
 
 ## 2. Coordination-free operations
 
@@ -37,11 +38,12 @@ Examples that are monotone after identity/authentication checks:
 - cache a verified object or pack view inside an already authorized scope;
 - publish a candidate search/graph generation body before activation;
 - add a Context Packet candidate before final bounded selection;
-- add peer availability hints;
 - add a direct `TxId` outcome pointer that exactly matches canonical decision history;
 - warm a materialization from an authenticated authority head.
 
 Authentication, quotas, and resource reservations still apply. “Coordination-free” means no global order is needed for the logical union; it does not mean anonymous writes are accepted.
+
+Peer and piece availability hints are deliberately **not** in this class: a peer departing or dropping a piece retracts earlier positive facts, so availability is `commutative_but_bounded` state with explicit reset/regime semantics (see §4), never a grow-only union.
 
 ## 3. Coordinated operations
 
@@ -112,19 +114,26 @@ The canonical repository head is not a CRDT. Lattices improve diagnosis and proj
 
 ## 6. Obligation model
 
-An obligation represents effect work that must end in exactly one terminal disposition:
+An obligation follows the normative lifecycle: `Reserved -> Committed -> Acknowledged`, or `Reserved -> Aborted` (reserve/commit remain the two-phase effect boundary; acknowledgement is the separate external-observation record). Commit makes the effect canonically owned; acknowledgement separately records that the external recipient observed it. A committed obligation may therefore outlive its region only as an explicit unacknowledged-effect record, never as silently dropped work:
 
 ```rust
 trait Obligation {
     type CommitReceipt;
     type AbortReceipt;
+    type AckEvidence;
 
-    fn commit(self, receipt: Self::CommitReceipt) -> SettledObligation;
+    fn commit(self, receipt: Self::CommitReceipt) -> CommittedObligation<Self::AckEvidence>;
     fn abort(self, receipt: Self::AbortReceipt) -> SettledObligation;
+}
+
+impl<A> CommittedObligation<A> {
+    fn acknowledge(self, evidence: A) -> SettledObligation;
 }
 ```
 
-Public obligation types are `#[must_use]`. Dropping one without an explicit transfer, commit, or abort is a correctness failure in lab/test profiles and a typed containment event in hardened production profiles.
+Effects with no external observer (for example a local placement write) acknowledge trivially at commit. Effects with an external recipient (webhooks, CI dispatch, billing) remain `Committed` until the acknowledgement evidence arrives; retry after commit is idempotent and cannot duplicate the canonical effect.
+
+Public obligation and committed-obligation types are `#[must_use]`. Dropping a reserved obligation without an explicit transfer, commit, or abort — or dropping a `CommittedObligation` without acknowledgement or an explicit unacknowledged-effect record — is a correctness failure in lab/test profiles and a typed containment event in hardened production profiles.
 
 ### 6.1 Resource algebra
 
@@ -245,20 +254,21 @@ Inherently partial I/O publishes its boundary. `write_all` over an arbitrary soc
 
 | Operation | Class | Why | Authority |
 |---|---|---|---|
-| Put verified Git object | monotone with authentication | adding immutable identity cannot invalidate prior objects | object admission capability |
-| Add repair symbol | monotone with authentication | enlarges recovery set | repair capability |
-| Cache verified pack | monotone, scoped | local optimization only | cache grant |
-| Add review comment event | head CAS required | entity sequence and permissions matter | repository decision log |
-| Move branch ref | head CAS required | replacement/expected-old semantics | repository authority head |
-| Activate search generation | ordered projection | old/new choice and anti-rollback | generation authority |
-| Remove legal hold | head CAS required | absence permits deletion | repository authority head |
-| Deliver webhook | exclusive external effect | external side effect; at-least-once/idempotency | outbox obligation |
-| Add telemetry observation | commutative bounded | mergeable but retained window is bounded | telemetry profile |
-| Rank Context candidates | local deterministic | ordering only, not truth | context planner |
+| Put verified Git object | `monotone_with_authentication` | adding immutable identity cannot invalidate prior objects | object admission capability |
+| Add repair symbol | `monotone_with_authentication` | enlarges recovery set | repair capability |
+| Cache verified pack | `monotone_scoped` | local optimization only | cache grant |
+| Add review comment event | `head_cas_required` | entity sequence and permissions matter | repository authority head |
+| Move branch ref | `head_cas_required` | replacement/expected-old semantics | repository authority head |
+| Activate search generation | `ordered_projection` | old/new choice and anti-rollback | generation authority |
+| Remove legal hold | `head_cas_required` | absence permits deletion | repository authority head |
+| Deliver webhook | `exclusive_external_effect` | external side effect; at-least-once/idempotency | outbox obligation |
+| Add telemetry observation | `commutative_but_bounded` | mergeable but retained window is bounded | telemetry profile |
+| Merge peer availability map | `commutative_but_bounded` | retractable observations need reset/regime semantics | availability profile |
+| Rank Context candidates | `local_deterministic` | ordering only, not truth | context planner |
 
 ## 11. Deterministic verification
 
-The lab verifies:
+The deterministic lab lane must verify, before any related claim advances past proposal:
 
 - every obligation settles;
 - loser races drain;

@@ -2,7 +2,7 @@
 
 **Status:** public mechanism-level research ledger  
 **Architecture version:** 3.0  
-**Last revised:** 2026-08-19
+**Last revised:** 2026-08-20
 
 This ledger records which concrete mechanisms informed FrankenGit, how they were adapted, which claims were deliberately not imported, and where the resulting design is original synthesis. Repository names alone are not provenance. Future revisions should pin exact source revisions/files and preserve the distinction among implemented source behavior, source design work, FrankenGit proposal, and FrankenGit evidence.
 

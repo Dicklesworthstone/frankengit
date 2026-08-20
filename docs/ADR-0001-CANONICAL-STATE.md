@@ -1,6 +1,6 @@
 # ADR-0001: Canonical Repository State Is an Immutable Decision Stream, Not a Mutable Git Directory
 
-- **Status:** proposed, v2 superseding the original draft
+- **Status:** proposed; revision 2 of this ADR, aligned with the v3 architecture (supersedes the original draft ADR text)
 - **Date:** 2026-08-19
 - **Decision owners:** FrankenGit architecture
 - **Scope:** repository truth, publication, recovery, materialization, and compatibility

@@ -1,8 +1,8 @@
 # Object-Store-Native Repository Decision Log
 
 **Status:** normative architecture extension  
-**Version:** 1.0  
-**Last revised:** 2026-08-19
+**Version:** 1.1  
+**Last revised:** 2026-08-20
 
 This document defines FrankenGit’s canonical publication substrate. It replaces the earlier assumption that a separate relational database or consensus-owned repository primary must be the source of truth.
 
@@ -87,13 +87,10 @@ struct TransactionSealBody {
     tx_id: TxId,
     tenant_id: TenantId,
     repository_id: RepositoryId,
-    principal_snapshot_id: PrincipalSnapshotId,
+    authenticated_principal_id: PrincipalId,
     idempotency_key_digest: Digest,
     canonical_request_digest: Digest,
     request_schema: SchemaId,
-    admitted_capability_root: Digest,
-    admission_policy_epoch: PolicyEpoch,
-    created_logical_time: LogicalTime,
 }
 ```
 
@@ -103,7 +100,9 @@ struct TransactionSealBody {
 - already present, byte-identical: idempotent retry;
 - already present, different: `IdempotencyKeyReuse` request rejection.
 
-A seal does not order or commit a mutation. It prevents two semantic requests from sharing one logical identity.
+Admission capability, policy epoch, issuer, and first-seen time are separate immutable admission receipts over the seal ID; they are not seal-body fields, so a legitimate retry never has to regenerate them and byte-identical retry matching remains sound.
+
+A seal does not order or commit a mutation. It prevents two semantic requests from sharing one logical identity. The field-level definition above is a copy of the authoritative schema in [`NORMATIVE_PROTOCOL_CONTRACTS.md`](NORMATIVE_PROTOCOL_CONTRACTS.md) §5.2; that document wins on any divergence.
 
 ### 4.2 Prepared transaction capsule
 
@@ -112,6 +111,7 @@ Validation produces an immutable `PreparedTxnCapsule`:
 ```rust
 struct PreparedTxnCapsule {
     tx_id: TxId,
+    seal_id: TransactionSealId,
     basis_head_id: RepositoryAuthorityHeadId,
     basis_rcr_id: Option<RepositoryCommitId>,
     normalized_intent_root: Digest,
@@ -162,7 +162,6 @@ struct RepositoryDecisionBatchBody {
     predecessor_head_generation: u64,
     first_decision_sequence: DecisionSequence,
     decisions: Vec<RepositoryDecision>,
-    first_committed_sequence: Option<RepositorySequence>,
     committed_rcrs: Vec<RepositoryCommitRecord>,
     resulting_ref_root: Digest,
     resulting_forge_position_root: Digest,

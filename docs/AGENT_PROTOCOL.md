@@ -1,8 +1,8 @@
 # FrankenGit Agent Collaboration Protocol
 
-**Status:** proposed normative companion  
+**Status:** normative architecture profile (its IntentRun, AuthorityReadReceipt, and Evidence-Carrying Change constructs are depended on by `NORMATIVE_PROTOCOL_CONTRACTS.md` §28, which wins on any conflict)  
 **Scope:** software agents operating through FrankenGit  
-**Last updated:** 2026-08-19
+**Last updated:** 2026-08-20
 
 FrankenGit treats software agents as first-class collaborators, never as ambiently trusted shell sessions. The protocol makes an agent’s sponsor, identity, intent, authority, canonical base, supplied context, workspace state, effects, evidence, resource use, delegation, and terminal outcomes explicit enough that humans and other agents can inspect the change without trusting a conversational transcript.
 
@@ -316,7 +316,7 @@ Coverage claims are typed, for example:
 - all protected policy files;
 - sampled history, not exhaustive history.
 
-Approximate retrieval says approximate. Every packet lists deliberate and budget-induced omissions. No mixed-generation packet is valid unless a declared join receipt proves a common source position.
+Approximate retrieval says approximate. Every packet lists deliberate and budget-induced omissions. No mixed-generation packet is valid without a declared join receipt that names every contributing generation and the join policy; for cross-time queries the receipt names each exact position and labels the packet as a cross-time join rather than a single-position view. This is the same rule as `GRAPH_INTELLIGENCE_ARCHITECTURE.md` §joins and normative invariant 20.
 
 ### 7.3 Deterministic ranking receipts
 
@@ -403,7 +403,7 @@ EffectRecord {
 }
 ```
 
-Obligation states are typed reserve/commit/abort/finalize transitions. Region closure requires every obligation to be settled or terminally quarantined.
+Obligation states follow the normative lifecycle: `Reserved -> Committed -> Acknowledged`, or `Reserved -> Aborted`, exactly as defined in `CALM_AND_OBLIGATIONS.md` §6. Region closure requires every obligation to be settled or terminally quarantined.
 
 The ledger distinguishes:
 

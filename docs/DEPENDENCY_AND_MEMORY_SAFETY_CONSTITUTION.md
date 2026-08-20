@@ -37,7 +37,7 @@ The preferred dependency universe is:
 - franken_markdown for source-spanned parsing and safe deterministic rendering;
 - other FrankenSuite crates only through an explicit, pinned constellation.
 
-A sibling dependency is not automatically trusted because it is in the family. The exact revision, feature set, public contract, unsafe inventory, and claim level are pinned in `constellation.lock` and checked before build.
+A sibling dependency is not automatically trusted because it is in the family. Before the first release-facing build that consumes a sibling, its exact revision, feature set, public contract, unsafe inventory, and claim level must be pinned in a checked-in `constellation.lock` evidence manifest and verified by the registry checker; no such manifest exists yet because no sibling dependency has been admitted.
 
 ### 2.2 Fundamental pure-Rust dependencies
 

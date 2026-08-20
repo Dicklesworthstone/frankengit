@@ -1,8 +1,8 @@
 # Git TreeFS: Sparse Copy-on-Write Workspaces for Humans, Agents, and CI
 
-**Status:** architecture profile  
-**Version:** 1.0  
-**Last revised:** 2026-08-19
+**Status:** normative architecture profile (bound as normative for sparse workspaces by `NORMATIVE_PROTOCOL_CONTRACTS.md`, which wins on any conflict)  
+**Version:** 1.1  
+**Last revised:** 2026-08-20
 
 Git TreeFS is FrankenGit’s virtual workspace model. It presents a repository tree as a safe, lazy, versioned filesystem view without requiring a full clone or checkout. The core is a pure Rust library over immutable Git trees and a copy-on-write overlay. Host adapters may materialize ordinary directories or expose FUSE-backed mounts through FrankenFS; the canonical workspace model does not depend on a kernel filesystem or mutable bare repository.
 
@@ -22,6 +22,7 @@ struct WorkspaceSnapshotBody {
     base_commit_oid: GitObjectId,
     base_tree_oid: GitObjectId,
     overlay_root: Digest,
+    staged_epoch: WorkspaceEpoch,
     visible_epoch: WorkspaceEpoch,
     durable_epoch: WorkspaceEpoch,
     authorization_root: Digest,
@@ -118,14 +119,20 @@ Every user/tool operation is recorded as a typed `TreeEditIntent` before final c
 
 ```rust
 enum TreeEditIntent {
-    Write { path, basis_digest, content_id, mode },
+    Write { path, basis_digest, content_id, mode, entry_class },
+    CreateSymlink { path, link_target, basis_entry },
+    CreateDirectory { path },
+    RemoveDirectory { path, basis_entry },
     Delete { path, basis_entry },
     Rename { from, to, basis_entry },
     Chmod { path, before, after },
     UpdateSubmodule { path, before_oid, after_oid },
+    RecordConflictMarkers { path, merge_inputs, marker_object },
     ApplyPatch { patch_id, expected_spans },
 }
 ```
+
+`entry_class` distinguishes ordinary content from generated outputs and carries their provenance, so every overlay entry kind in §3.2 — including symlinks, directory creation/removal, conflict-marker objects, and generated-output classes — is producible from at least one intent variant, so the totality map below has no unreachable entries.
 
 Evaluation occurs in source order with read-your-own-writes. Finalization folds basis and after-image into a target-disjoint `TreeNetEffect`:
 
@@ -225,7 +232,7 @@ Promotion/demotion decisions are answer-preserving physical policy. They bind de
 
 ## 14. Crash and cancellation matrix
 
-Tests cover interruption:
+The conformance corpus must cover interruption at every one of these points before any related claim advances past proposal:
 
 - before content reservation;
 - mid-stream write;
@@ -248,7 +255,7 @@ After restart, each intent is either absent, visible in the recovered overlay, o
 - Case and Unicode aliases are detected before materialization.
 - Generated archives are extracted through a separate bounded safe parser.
 - Watchers cannot escape the workspace root.
-- Workspace secrets are delivered through brokered handles, never checked into the overlay by default.
+- Workspace secrets are delivered through brokered handles and are never persisted into the overlay; secret material appearing in overlay content, net effects, or exported Git objects is a policy violation that the exfiltration conformance corpus must detect, and no configuration relaxes this.
 - Prompt text in repository files cannot widen a TreeCapability.
 - A tool’s access attempts are evidence and may trigger bounded review; they do not automatically prove malice.
 

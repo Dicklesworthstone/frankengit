@@ -1,7 +1,7 @@
 # FrankenGit RaptorQ Permeation Map
 
 **Status:** normative design registry draft  
-**Last updated:** 2026-08-19  
+**Last updated:** 2026-08-20  
 **Executable companion:** [`../registries/durable_objects.tsv`](../registries/durable_objects.tsv)
 
 RaptorQ is a systematic fountain-code family used to reconstruct exact immutable source bytes from a sufficient suitable symbol set. In FrankenGit it is a durability, repair, and native-transfer mechanism for registered immutable byte structures. It is not a hash, signature, encryption scheme, authorization system, freshness oracle, ordering protocol, transaction log, compare-and-exchange primitive, consensus algorithm, or substitute for tested backups.
@@ -77,7 +77,7 @@ A decoder returning bytes is only `CandidateReconstructed`. Success requires exa
 | FrankenSQLite pages/WAL | DEFERRED to FrankenSQLite profile | owning backend format | FrankenSQLite MVCC/durability/recovery contract; avoid double coding | embedded authority/projection owner |
 | In-memory queue/RPC frame | EXEMPT | transient bytes | transport auth/checksum, retry, obligation settlement | owning region |
 
-The TSV registry is the executable source of class status. This table explains the rationale and must not diverge from it.
+The executable registry is `registries/durable_objects.tsv`; its `encoding_class` column carries exactly this MUST/POLICY/MAY/EXEMPT/DEFERRED status for every registered durable class. Two granularity conventions reconcile the table and the registry: record-layer rows (individual Git objects, decision batch records, capsule bodies, seals) are `exempt` because their durability is owned by the containing microsegment, archive-segment, or bundle class, which carries the `must`; and the release class is registered separately (`release_asset`, `must`) from ordinary CI artifacts (`ci_artifact_or_log`, `policy`). This table additionally explains rationale and covers transient and wire classes that need no durable registry row. Any status disagreement for a class present in both is a release-blocking defect.
 
 ---
 

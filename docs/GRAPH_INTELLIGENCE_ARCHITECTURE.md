@@ -1,8 +1,8 @@
 # FrankenGit Graph Intelligence Architecture
 
-**Status:** architecture profile  
-**Version:** 1.0  
-**Last revised:** 2026-08-19
+**Status:** normative architecture profile (bound as normative for graph semantics by `NORMATIVE_PROTOCOL_CONTRACTS.md`, which wins on any conflict)  
+**Version:** 1.1  
+**Last revised:** 2026-08-20
 
 FrankenGit treats graph structure as a first-class systems substrate, not merely a semantic-search accessory. Git itself is a family of graphs: commit ancestry, tree/object reachability, refs, path history, dependencies, ownership, reviews, builds, provenance, agents, capabilities, placements, and failures. FrankenNetworkX supplies deterministic graph semantics and algorithm families; FrankenGraphDB supplies immutable temporal graph storage, time travel, incremental maintenance, query planning, and evidence-governed adaptive execution.
 
@@ -64,7 +64,7 @@ struct GraphGenerationBody {
 }
 ```
 
-Activation uses an anti-rollback authority record with exact predecessor linkage. An unresolved publication attempt is reconciled fail-closed. Readers select one generation per graph view; a query may intentionally join several views only when the receipt names every generation and the join policy.
+Activation uses an anti-rollback authority record with exact predecessor linkage. An unresolved publication attempt is reconciled fail-closed. Readers select one generation per graph view; a query may intentionally join several views only when the receipt names every contributing generation and the join policy. Cross-time joins additionally name each exact position and label the result as a cross-time join rather than a single-position view; this is the one join rule shared with `AGENT_PROTOCOL.md` §7.2 and normative invariant 20.
 
 ## 3. Storage model
 
@@ -115,7 +115,7 @@ struct GraphDecisionWitness {
 }
 ```
 
-Equal-score choices may never depend on hash-table iteration or thread schedule. Ordering policies are closed, named, and golden-tested.
+Equal-score choices may never depend on hash-table iteration or thread schedule. Ordering policies are closed and named; golden tests over them are a required conformance gate before any related claim advances past proposal.
 
 ## 5. Algorithm-to-system map
 
@@ -278,7 +278,7 @@ The packet records which graph paths caused inclusion and which budget boundary 
 
 ## 11. Verification
 
-Release gates cover:
+Release gates must cover, before any related claim advances past proposal:
 
 - insertion/order and tie-break parity;
 - stable external IDs with dense internal indices;
