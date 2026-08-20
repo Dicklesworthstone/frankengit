@@ -15,3 +15,6 @@ artifacts/
 *.bundle
 *.tar.gz
 *.zip
+
+# bv (beads viewer) local config and caches
+.bv/
