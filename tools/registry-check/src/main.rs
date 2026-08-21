@@ -185,6 +185,7 @@ fn main() -> ExitCode {
             check_workspace_crate_graph(&root, &mut report);
             check_manifests(&root, &mut report);
             check_constellation(&root, &mut report);
+            check_unsafe_ledger_policies(&root, &mut report);
             check_toolchain(&root, &mut report);
         }
         check_forbidden_artifacts(&root, &mut report);
@@ -2315,6 +2316,61 @@ fn generate_unsafe_ledger(
     Ok(output)
 }
 
+/// Treats unsafe-policy drift as a constitutional finding. The emitted ledger
+/// remains separately reviewable, while this gate makes an unacknowledged
+/// resolved package incapable of passing the constitution lane.
+fn check_unsafe_ledger_policies(root: &Path, report: &mut Report) {
+    let lock_text = match fs::read_to_string(root.join("Cargo.lock")) {
+        Ok(value) => value,
+        Err(error) => {
+            report.error(format!(
+                "cannot read Cargo.lock for unsafe ledger verification: {error}"
+            ));
+            return;
+        }
+    };
+    let packages = match parse_lock_packages(&lock_text) {
+        Ok(value) => value,
+        Err(error) => {
+            report.error(error);
+            return;
+        }
+    };
+    let metadata = match cargo_metadata(root) {
+        Ok(value) => value,
+        Err(error) => {
+            report.error(error);
+            return;
+        }
+    };
+    let policies = match load_active_dependency_policies(root) {
+        Ok(value) => value,
+        Err(error) => {
+            report.error(error);
+            return;
+        }
+    };
+    let rows = match unsafe_ledger_rows(&packages, &metadata, &policies) {
+        Ok(value) => value,
+        Err(error) => {
+            report.error(error);
+            return;
+        }
+    };
+    report_unsafe_ledger_policy_mismatches(&rows, report);
+}
+
+fn report_unsafe_ledger_policy_mismatches(rows: &[UnsafeLedgerRow], report: &mut Report) {
+    for row in rows {
+        if !unsafe_policy_matches(&row.expected_policy, &row.registry_policy) {
+            report.error(format!(
+                "unsafe ledger policy mismatch for resolved package `{} {}`: expected `{}`, registry declares `{}`",
+                row.name, row.version, row.expected_policy, row.registry_policy
+            ));
+        }
+    }
+}
+
 fn load_active_dependency_policies(root: &Path) -> Result<Vec<ActiveDependencyPolicy>, String> {
     let text = fs::read_to_string(root.join("registries/dependency_policy.tsv"))
         .map_err(|error| format!("cannot read dependency policy registry: {error}"))?;
@@ -4334,9 +4390,18 @@ mod tests {
         let rows = unsafe_ledger_rows(&[package], &metadata, &policies)
             .expect("render planted WASM ledger row");
         assert_eq!(rows[0].expected_policy, "proc_macro_transitive");
+        let mut mismatch_report = Report::new();
+        report_unsafe_ledger_policy_mismatches(&rows, &mut mismatch_report);
+        assert_error(&mismatch_report, "unsafe ledger policy mismatch");
+
+        let mut admitted_row = rows[0].clone();
+        admitted_row.registry_policy = admitted_row.expected_policy.clone();
+        let mut admitted_report = Report::new();
+        report_unsafe_ledger_policy_mismatches(&[admitted_row], &mut admitted_report);
         assert!(
-            !unsafe_policy_matches(&rows[0].expected_policy, &rows[0].registry_policy),
-            "generated WASM policy drift must be a typed mismatch"
+            admitted_report.errors.is_empty(),
+            "near-identical admitted package must proceed: {:?}",
+            admitted_report.errors
         );
     }
 
