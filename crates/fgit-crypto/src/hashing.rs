@@ -221,7 +221,11 @@ impl Sha1Hasher {
         Ok(digest)
     }
 
-    fn compress<O: BlockObserver>(&mut self, block: &[u8; BLOCK_BYTES], observer: &mut O) -> BlockVerdict {
+    fn compress<O: BlockObserver>(
+        &mut self,
+        block: &[u8; BLOCK_BYTES],
+        observer: &mut O,
+    ) -> BlockVerdict {
         let mut schedule = [0_u32; 80];
         for (word, source) in schedule.iter_mut().zip(block.chunks_exact(4)) {
             let bytes: [u8; 4] = source
@@ -260,7 +264,9 @@ impl Sha1Hasher {
                     SHA1_ROUND_CONSTANTS[1],
                 ),
                 40..=59 => (
-                    (working[1] & working[2]) | (working[1] & working[3]) | (working[2] & working[3]),
+                    (working[1] & working[2])
+                        | (working[1] & working[3])
+                        | (working[2] & working[3]),
                     SHA1_ROUND_CONSTANTS[2],
                 ),
                 _ => (
@@ -361,16 +367,18 @@ impl Sha256Hasher {
 
         let mut working = self.state;
         for (word, constant) in schedule.iter().zip(SHA256_ROUND_CONSTANTS.iter()) {
-            let sigma_one =
-                working[4].rotate_right(6) ^ working[4].rotate_right(11) ^ working[4].rotate_right(25);
+            let sigma_one = working[4].rotate_right(6)
+                ^ working[4].rotate_right(11)
+                ^ working[4].rotate_right(25);
             let choose = (working[4] & working[5]) ^ (!working[4] & working[6]);
             let first = working[7]
                 .wrapping_add(sigma_one)
                 .wrapping_add(choose)
                 .wrapping_add(*constant)
                 .wrapping_add(*word);
-            let sigma_zero =
-                working[0].rotate_right(2) ^ working[0].rotate_right(13) ^ working[0].rotate_right(22);
+            let sigma_zero = working[0].rotate_right(2)
+                ^ working[0].rotate_right(13)
+                ^ working[0].rotate_right(22);
             let majority =
                 (working[0] & working[1]) ^ (working[0] & working[2]) ^ (working[1] & working[2]);
             let second = sigma_zero.wrapping_add(majority);

@@ -196,8 +196,7 @@ pub trait NativeObjectIdentity: Copy + Eq + fmt::Debug + Sized {
     fn of_object(kind: GitObjectKind, content: &[u8]) -> Self {
         let length = u64::try_from(content.len())
             .expect("a slice length always fits in u64 on supported targets");
-        let mut hasher =
-            <<Self::Algorithm as GitHashAlgorithm>::Hasher as DigestHasher>::new();
+        let mut hasher = <<Self::Algorithm as GitHashAlgorithm>::Hasher as DigestHasher>::new();
         hasher.update(&object_header(kind, length));
         hasher.update(content);
         <Self::Algorithm as GitHashAlgorithm>::oid_from_digest(hasher.finish())
@@ -376,11 +375,7 @@ pub fn parse_git_oid<A: GitHashAlgorithm>(text: &str) -> Result<A::Oid, TypeRefu
 
 /// Compute a native identity when the object format is a runtime value.
 #[must_use]
-pub fn git_object_id(
-    format: GitObjectFormat,
-    kind: GitObjectKind,
-    content: &[u8],
-) -> AnyGitOid {
+pub fn git_object_id(format: GitObjectFormat, kind: GitObjectKind, content: &[u8]) -> AnyGitOid {
     match format {
         GitObjectFormat::Sha1 => GitOidSha1::of_object(kind, content).erase(),
         GitObjectFormat::Sha256 => GitOidSha256::of_object(kind, content).erase(),

@@ -1,0 +1,4 @@
+# franken-registry-v1
+id	name	digest_bytes	usage	status
+1	sha1	20	git_identity_only	active
+2	sha256	32	git_and_internal_identity	active

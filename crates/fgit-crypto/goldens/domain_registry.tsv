@@ -1,0 +1,27 @@
+# franken-registry-v1
+id	domain_tag	algorithm	durable_object_row	derived_identity	status
+1	frankengit/ref-txn/v2	sha256	-	TxId	active
+2	frankengit/txn-seal/v1	sha256	DUR-010	TransactionSealId	active
+3	frankengit/prepared-capsule/v1	sha256	DUR-011	PreparedTxnCapsuleId	active
+4	frankengit/rcr/v1	sha256	DUR-003	RepositoryCommitId	active
+5	frankengit/decision-batch/v1	sha256	DUR-003	RepositoryDecisionBatchId	active
+6	frankengit/authority-head/v1	sha256	DUR-009	RepositoryAuthorityHeadId	active
+7	frankengit/refusal-record/v1	sha256	DUR-003	RefusalRecordId	active
+8	frankengit/repository-capsule/v1	sha256	DUR-004	RepositoryCapsuleId	active
+9	frankengit/principal-snapshot/v1	sha256	-	PrincipalSnapshotId	active
+10	frankengit/object-envelope/v1	sha256	DUR-001	ObjectEnvelopeId	active
+11	frankengit/segment-manifest/v1	sha256	DUR-002	SegmentManifestId	active
+12	frankengit/forge-event/v1	sha256	DUR-012	ForgeEventId	active
+13	frankengit/evidence-record/v1	sha256	-	EvidenceRecordId	active
+14	frankengit/generation/v1	sha256	DUR-005	GenerationId	active
+15	frankengit/git-payload-commitment/v1	sha256	DUR-001	-	active
+16	frankengit/repository-segment/v1	sha256	DUR-002	-	active
+17	frankengit/git-object-microsegment/v1	sha256	DUR-016	-	active
+18	frankengit/forge-checkpoint/v1	sha256	DUR-012	-	active
+19	frankengit/policy-checkpoint/v1	sha256	DUR-014	-	active
+20	frankengit/claim-record/v1	sha256	-	-	active
+21	frankengit/treefs-snapshot/v1	sha256	DUR-015	-	active
+22	frankengit/backup-export-bundle/v1	sha256	DUR-013	-	active
+23	frankengit/release-asset/v1	sha256	DUR-017	-	active
+24	frankengit/atp-transfer-manifest/v1	sha256	DUR-008	-	active
+25	frankengit/ci-artifact/v1	sha256	DUR-007	-	active

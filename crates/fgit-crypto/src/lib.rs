@@ -128,7 +128,7 @@ pub use screened::{
 // `GitHashAlgorithm` is the type-level algorithm marker trait that consumers
 // write as a bound; importing both under one name would be ambiguous.
 pub use fgit_types::hash::{Digest, DigestAlgorithmId, DigestBytes};
-pub use fgit_types::identity::InternalObjectId;
+pub use fgit_types::identity::{DERIVED_ID_DOMAINS, InternalObjectId};
 pub use fgit_types::label::{DomainTag, SchemaFamily, SchemaId};
 pub use fgit_types::native::{
     GitHashAlgorithm as GitObjectFormat, GitOid as AnyGitOid, GitOidSha1, GitOidSha256,

@@ -19,7 +19,8 @@ pub const REGISTRY_MARKER: &str = "# franken-registry-v1";
 pub const ALGORITHM_HEADER: &str = "id\tname\tdigest_bytes\tusage\tstatus";
 
 /// Header row of the exported domain registry.
-pub const DOMAIN_HEADER: &str = "id\tdomain_tag\talgorithm\tdurable_object_row\tstatus";
+pub const DOMAIN_HEADER: &str =
+    "id\tdomain_tag\talgorithm\tdurable_object_row\tderived_identity\tstatus";
 
 /// Serialise the algorithm registry into golden-corpus rows.
 #[must_use]
@@ -32,7 +33,7 @@ pub fn export_algorithm_registry() -> String {
     for row in ALGORITHM_REGISTRY {
         text.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\n",
-            row.registry_id,
+            row.code_point,
             row.name,
             row.digest_len,
             row.usage.token(),
@@ -52,11 +53,12 @@ pub fn export_domain_registry() -> String {
     text.push('\n');
     for row in DOMAIN_REGISTRY {
         text.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
             row.registry_id,
             row.tag,
             row.algorithm.digest_algorithm().name(),
             row.durable_object_row.unwrap_or("-"),
+            row.derived_identity.unwrap_or("-"),
             row.status.token()
         ));
     }

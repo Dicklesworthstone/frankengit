@@ -146,9 +146,7 @@ pub fn internal_id_preimage(
         Vec::with_capacity(2 + tag.len() + family_bytes.len() + 4 + 8 + canonical_body.len());
     preimage.push(u8::try_from(tag.len()).expect("a registered domain tag fits the label bound"));
     preimage.extend_from_slice(tag);
-    preimage.push(
-        u8::try_from(family_bytes.len()).expect("a schema family fits the label bound"),
-    );
+    preimage.push(u8::try_from(family_bytes.len()).expect("a schema family fits the label bound"));
     preimage.extend_from_slice(family_bytes);
     preimage.extend_from_slice(&schema.major().to_be_bytes());
     preimage.extend_from_slice(&schema.minor().to_be_bytes());
