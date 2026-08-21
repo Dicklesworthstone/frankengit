@@ -71,10 +71,16 @@ AUTHORITY_TYPES="InternalObjectId DigestAlgorithmId CodecVersion DomainTag"
 fge_phase action
 
 expanded="$(fge_artifact_path expansion/fgit-types.expanded.rs)"
+# `|| true` is load-bearing. fge_capture returns the command's exit status, so
+# under `set -euo pipefail` a failed expansion killed this script before
+# expand_exit was read and before FG-069-EXPAND-001 could report it -- turning a
+# reportable failure into a truncated log with no failing assertion in it. The
+# same shape cost the treefs suite 14 of its 16 assertions when a peer's
+# transient workspace breakage stopped the crate compiling.
 fge_capture expand-fgit-types \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
   cargo rustc --manifest-path "$REPO_ROOT/Cargo.toml" -p fgit-types --lib -- \
-  -Zunpretty=expanded
+  -Zunpretty=expanded || true
 expand_exit=$FGE_LAST_EXIT
 cp "$FGE_LAST_STDOUT_FILE" "$expanded" 2>/dev/null || true
 fge_artifact expansion/fgit-types.expanded.rs rust-source

@@ -273,6 +273,12 @@ corpus_failures=""
 
 build_corpus() {
   local name work base_root expected_root
+  # Typed obligation, not decoration: the run directory holds eleven sandboxed
+  # repositories under the oracle root, and lib.sh treats an obligation still
+  # open at terminal as a containment failure rather than a warning. Without
+  # this the suite's obligations block was always 0/0/0, so its
+  # `obligations_outstanding: 0` was trivially true and asserted nothing.
+  fge_obligation_open oracle-run oracle-run-directory
   run_dir="$("$ORACLE" create-run "$PIN_ID" treefs-export)"
   fge_field oracle_run_directory "$run_dir"
 
@@ -354,6 +360,11 @@ build_corpus() {
     printf 'algorithm\tsha1\n'
     printf 'case_count\t%s\n' "$corpus_cases"
   } >|"$CORPUS/receipt.tsv"
+
+  # Closed only now: everything the corpus needs has been copied out, so the run
+  # directory is genuinely no longer required. Closing it at the top of the loop
+  # would have been a cheaper-looking lie.
+  fge_obligation_close oracle-run
 }
 
 fge_phase action
@@ -383,9 +394,20 @@ else
   fge_assert_eq FG-026D-DIFF-002 "$expected_cases" "$corpus_cases" \
     'every declared case is present in the corpus, so the differential is not vacuous'
 
+  # `|| true` is load-bearing, not sloppiness. fge_run RETURNS the command's
+  # exit status, so under `set -euo pipefail` a failing differential killed the
+  # script on this line -- before differential_exit was read and before
+  # FG-026D-DIFF-003 could record the failure. The run then reported 2
+  # assertions discovered instead of 16: the crash campaign, containment,
+  # overlap and obligation assertions never executed, and the evidence was
+  # truncated rather than damning. Observed for real when a peer's transient
+  # workspace breakage made the test fail to compile.
+  #
+  # Capturing the exit and asserting on it is the whole point; letting `set -e`
+  # pre-empt that turns a reportable failure into a missing report.
   fge_run FG-026D-DIFF-003-run \
     env RCH_CARGO_WRAPPER_BYPASS=1 FGIT_TREEFS_EXPORT_CORPUS="$CORPUS" \
-    cargo test --locked -p fgit-treefs --test export_differential -- --ignored --nocapture
+    cargo test --locked -p fgit-treefs --test export_differential -- --ignored --nocapture || true
   differential_exit=$FGE_LAST_EXIT
 
   fge_assert_eq FG-026D-DIFF-003 0 "$differential_exit" \
@@ -481,6 +503,7 @@ fge_assert_eq FG-026D-CRASH-004 '' "$crash_leaked" \
 # whole crash argument above has to be redone rather than silently becoming
 # wrong.
 # ---------------------------------------------------------------------------
+fge_obligation_open fs-probe probe-directory
 probe_dir="$(fge_tempdir treefs-fs-probe)"
 probe_out="$CRASH_DIR/probe.fingerprint"
 # The driver chdirs into $probe_dir itself. Launching cargo from there would not
@@ -503,6 +526,7 @@ fge_assert_eq FG-026D-CONTAIN-002 present "$probe_ran" \
 probe_residue="$(find "$probe_dir" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')"
 fge_assert_eq FG-026D-CONTAIN-001 0 "$probe_residue" \
   'exporting creates no file in its working directory; the crate performs no filesystem effect'
+fge_obligation_close fs-probe
 
 # ---------------------------------------------------------------------------
 # spec coverage ledger
@@ -548,3 +572,16 @@ fge_artifact fg076-overlap.tsv text
 
 fge_assert_file FG-026D-OVERLAP-001 "$overlap" \
   'the FG-076 overlap is machine-listed per assertion, as the bead requires'
+
+# Quiescence, asserted rather than implied. lib.sh already fails the run on an
+# outstanding obligation, but that is a terminal-record property; naming it as
+# an acceptance makes "every resource this suite acquired was released" a claim
+# with an id, which is what the bead's obligation-inventory line asks for.
+outstanding_obligations=0
+for _obl in "${!FGE_OBLIGATIONS[@]}"; do
+  if [ "${FGE_OBLIGATIONS[$_obl]}" = open ]; then
+    outstanding_obligations=$((outstanding_obligations + 1))
+  fi
+done
+fge_assert_eq FG-026D-OBLIG-001 0 "$outstanding_obligations" \
+  'every obligation this suite opened was closed; the run reaches quiescence'
