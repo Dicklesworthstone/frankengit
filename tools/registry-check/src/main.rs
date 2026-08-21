@@ -1573,25 +1573,45 @@ fn direct_parent_edges(
     parents
 }
 
-/// IDs for a deterministic generated admission block begin immediately after
-/// the hand-maintained policy rows, not after the block itself. This makes the
-/// generator idempotent and makes any resolved-closure addition a visible row
-/// insertion instead of silently moving every following policy ID.
+/// The generated runtime admission block retains its first assigned ID even if
+/// a later, unrelated policy row is appended. On a fresh registry it starts at
+/// the next free ID; once present it is identified by its exact decision,
+/// owner, and runtime-rooted rationale rather than by the registry tail.
 fn next_admission_policy_id(root: &Path) -> Result<usize, String> {
     let text = fs::read_to_string(root.join("registries/dependency_policy.tsv"))
         .map_err(|error| format!("cannot read dependency policy registry: {error}"))?;
+    let generated_start = text
+        .lines()
+        .filter_map(dependency_policy_fields)
+        .filter(|fields| {
+            fields[3] == "allow_transitive_admitted_runtime"
+                && fields[4] == "concurrency"
+                && fields[5].starts_with("asupersync_0.4.9_transitive_direct_parent_")
+        })
+        .filter_map(|fields| fields[0].strip_prefix("DEP-"))
+        .filter_map(|number| number.parse::<usize>().ok())
+        .min();
+    if let Some(start) = generated_start {
+        return Ok(start);
+    }
     let largest = text
         .lines()
-        .filter_map(|line| {
-            let fields = line.split('\t').collect::<Vec<_>>();
-            (fields.len() == 10 && fields[3] != "allow_transitive_admitted_runtime")
-                .then_some(fields[0])
-        })
-        .filter_map(|id| id.strip_prefix("DEP-"))
+        .filter_map(dependency_policy_fields)
+        .filter_map(|fields| fields[0].strip_prefix("DEP-"))
         .filter_map(|number| number.parse::<usize>().ok())
         .max()
         .unwrap_or(0);
     Ok(largest + 1)
+}
+
+fn dependency_policy_fields(line: &str) -> Option<[&str; 10]> {
+    let fields = line.split('\t').collect::<Vec<_>>();
+    (fields.len() == 10).then(|| {
+        [
+            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], fields[7],
+            fields[8], fields[9],
+        ]
+    })
 }
 
 fn resolved_feature_policy(packages: &[&LockPackage], metadata: &MetadataSnapshot) -> String {

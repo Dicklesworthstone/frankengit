@@ -566,6 +566,13 @@ fge__split_strings() {
       body+='"'
     done
     [[ $body =~ $FGE__STR_ERE ]] || return 1
+    # Tab, LF and CR are legal JSON whitespace BETWEEN tokens, so the up-front
+    # control-byte filter has to let them through -- but RFC 8259 still forbids
+    # them unescaped INSIDE a string. Re-check them here, per body. The grammar
+    # corpus caught a raw tab being accepted without this.
+    case $body in
+      *[$'\011'$'\012'$'\015']*) return 1 ;;
+    esac
     FGE__STRINGS+=("$body")
     out+=$'\001'
   done
