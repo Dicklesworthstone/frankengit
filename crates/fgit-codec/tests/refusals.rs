@@ -336,7 +336,8 @@ fn a_derived_identity_from_the_wrong_domain_is_refused_on_the_way_in() {
 fn a_signature_bound_to_another_schemas_body_cannot_be_attached() {
     let mut envelope = SignedEnvelopeBody::seal(&support::transaction_seal()).expect("seals");
     let foreign = DetachedSignature {
-        scheme: SignatureSchemeId::try_new(1).expect("nonzero"),
+        scheme: SignatureSchemeId::try_new(support::FIXTURE_SIGNATURE_SCHEME_CODE_POINT)
+            .expect("nonzero"),
         key_id: b"key-a".to_vec(),
         body_id: InternalObjectId::new(
             support::algorithm(),

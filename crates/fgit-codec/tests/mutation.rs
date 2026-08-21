@@ -452,7 +452,10 @@ fn a_reordered_collection_is_refused_rather_than_accepted_as_a_second_encoding()
         envelope
             .attach(
                 DetachedSignature {
-                    scheme: SignatureSchemeId::try_new(1).expect("nonzero"),
+                    scheme: SignatureSchemeId::try_new(
+                        support::FIXTURE_SIGNATURE_SCHEME_CODE_POINT,
+                    )
+                    .expect("nonzero"),
                     key_id: key.to_vec(),
                     body_id,
                     signature: vec![0xa0; 32],
@@ -470,7 +473,10 @@ fn a_reordered_collection_is_refused_rather_than_accepted_as_a_second_encoding()
         reversed
             .attach(
                 DetachedSignature {
-                    scheme: SignatureSchemeId::try_new(1).expect("nonzero"),
+                    scheme: SignatureSchemeId::try_new(
+                        support::FIXTURE_SIGNATURE_SCHEME_CODE_POINT,
+                    )
+                    .expect("nonzero"),
                     key_id: key.to_vec(),
                     body_id,
                     signature: vec![0xa0; 32],
@@ -541,7 +547,8 @@ fn a_duplicate_collection_element_has_no_encoding_and_no_decoding() {
     let seal = support::transaction_seal();
     let body_id = fgit_codec::body_id(&CryptoBodyIdentity, &seal).expect("identifies");
     let signature = DetachedSignature {
-        scheme: SignatureSchemeId::try_new(1).expect("nonzero"),
+        scheme: SignatureSchemeId::try_new(support::FIXTURE_SIGNATURE_SCHEME_CODE_POINT)
+            .expect("nonzero"),
         key_id: b"key-a".to_vec(),
         body_id,
         signature: vec![0xa0; 32],
@@ -567,7 +574,10 @@ fn a_duplicate_collection_element_has_no_encoding_and_no_decoding() {
         distinct
             .attach(
                 DetachedSignature {
-                    scheme: SignatureSchemeId::try_new(1).expect("nonzero"),
+                    scheme: SignatureSchemeId::try_new(
+                        support::FIXTURE_SIGNATURE_SCHEME_CODE_POINT,
+                    )
+                    .expect("nonzero"),
                     key_id: key.to_vec(),
                     body_id,
                     signature: vec![0xa0; 32],

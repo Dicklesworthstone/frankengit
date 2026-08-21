@@ -42,6 +42,21 @@ use fgit_types::{
 /// of the code-point space so it cannot collide with a production algorithm.
 pub const CORPUS_ALGORITHM_CODE_POINT: u16 = 0xfff1;
 
+/// Signature-scheme slot for corpus and fixture signatures.
+///
+/// Fixtures previously carried scheme code point 1 with a 64-byte payload.
+/// ADR-0003 Amendment 1 then allocated code point 1 to Ed25519, whose
+/// signatures are exactly 64 bytes, so those fixtures became *shaped* like
+/// real signatures: right scheme, right length, distinguishable only by an
+/// actual verification. `fgit-crypto` reserves `0xfff0..=0xffff` against
+/// exactly this, and this constant keeps every fixture inside it.
+///
+/// Nothing in this crate resolves a code point to a scheme — `fgit-codec`
+/// accepts any non-zero `SignatureSchemeId` — so this value is inert here and
+/// meaningful only to a reader or a registry-aware consumer, which is the
+/// point: a fixture must never be mistakable for a production signature.
+pub const FIXTURE_SIGNATURE_SCHEME_CODE_POINT: u16 = 0xfff1;
+
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 

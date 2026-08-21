@@ -138,7 +138,10 @@ fn a_signature_does_not_move_the_production_identity_either() {
     envelope
         .attach(
             fgit_codec::DetachedSignature {
-                scheme: fgit_codec::SignatureSchemeId::try_new(1).expect("nonzero"),
+                scheme: fgit_codec::SignatureSchemeId::try_new(
+                    support::FIXTURE_SIGNATURE_SCHEME_CODE_POINT,
+                )
+                .expect("nonzero"),
                 key_id: b"key-a".to_vec(),
                 body_id: direct,
                 signature: vec![0xa0; 64],
