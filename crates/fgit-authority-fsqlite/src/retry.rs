@@ -45,6 +45,25 @@ pub enum TransientClass {
     SerializationFailure,
     /// The page buffer filled; a retry from a fresh snapshot may fit.
     PageBufferCapacityExhausted,
+    /// The engine could not say whether the transaction applied.
+    ///
+    /// **Not retryable, and not a failure.** Retrying a transaction that may
+    /// have committed would double-apply it, and reporting it as a failure
+    /// would claim non-commit the engine explicitly refused to claim. It is an
+    /// ambiguity, and the only sound next step is an exact-key lookup.
+    ///
+    /// §3.4 does not name this case, because it enumerates what a retry *may*
+    /// absorb rather than what an engine can report. The engine does report it:
+    /// `FrankenError::DatabaseImagePublicationOutcomeIndeterminate` says in its
+    /// own documentation that publication "could not prove either an exact
+    /// rollback or a committed candidate", and the matching error class tells
+    /// callers to "reconcile from fresh, identity-bound handles before retrying
+    /// or deleting the candidate".
+    ///
+    /// Folding that into `Permanent` would be the single most damaging
+    /// conflation in this subsystem: the caller would conclude nothing happened
+    /// when something may have.
+    OutcomeIndeterminate,
     /// `SnapshotTooOld`: the caller must take a fresh snapshot, not retry here.
     ///
     /// Not retryable in place. §3.4 is explicit that this needs a fresh
@@ -93,6 +112,7 @@ impl TransientClass {
             Self::WriteConflict => "write_conflict",
             Self::SerializationFailure => "serialization_failure",
             Self::PageBufferCapacityExhausted => "page_buffer_capacity_exhausted",
+            Self::OutcomeIndeterminate => "outcome_indeterminate",
             Self::FreshSnapshotRequired => "fresh_snapshot_required",
             Self::Permanent => "permanent",
         }
@@ -272,6 +292,14 @@ pub enum RetryOutcome<T> {
         /// Attempts made before the stale snapshot was observed.
         attempts: u32,
     },
+    /// The engine could not say whether the transaction applied.
+    ///
+    /// Surfaced rather than absorbed or reported as failure: the caller must
+    /// resolve it by exact-key lookup.
+    OutcomeIndeterminate {
+        /// Attempts made before the indeterminate outcome.
+        attempts: u32,
+    },
     /// A class outside the transient family ended the operation.
     Permanent {
         /// Attempts made before the permanent failure.
@@ -309,6 +337,11 @@ where
             Ok(value) => return RetryOutcome::Completed(value),
             Err(TransientClass::FreshSnapshotRequired) => {
                 return RetryOutcome::FreshSnapshotRequired {
+                    attempts: attempt_number,
+                };
+            }
+            Err(TransientClass::OutcomeIndeterminate) => {
+                return RetryOutcome::OutcomeIndeterminate {
                     attempts: attempt_number,
                 };
             }
