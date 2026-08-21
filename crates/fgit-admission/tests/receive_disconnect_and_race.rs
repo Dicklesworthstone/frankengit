@@ -532,6 +532,7 @@ fn every_disconnect_at_every_phase_leaves_a_resolvable_transaction() {
     let validated = delete_main();
     let mut examined = 0_usize;
     let mut observed = BTreeSet::new();
+    let mut undelivered: Vec<String> = Vec::new();
 
     for member in adapters() {
         let tx_id = session_tx_id(&context, &validated, &member);
@@ -566,6 +567,22 @@ fn every_disconnect_at_every_phase_leaves_a_resolvable_transaction() {
                 // the store holds, not whether it is currently reachable.
                 store.restart();
 
+                // FAULT-DELIVERY WITNESS. Without this the matrix cannot tell
+                // "the fault fired and the transaction stayed resolvable" from
+                // "the fault never fired at all" — a directive that selected
+                // nothing would leave every admission clean, every cell
+                // non-stuck, and the whole matrix green while testing nothing.
+                //
+                // Every directive here is `FaultDirective::new`, which leaves
+                // `applies_to` as `None`: an UNFILTERED directive that must fire
+                // on whatever operation kind occupies its position. That is
+                // exactly the arm `FaultDirective::selects` handles by falling
+                // through its `is_some_and` guard, and the arm least exercised
+                // by suites that build directives with `only_for`.
+                if store.fault_log().is_empty() {
+                    undelivered.push(format!("{} / {name} at op {position}", member.label));
+                }
+
                 let standing = standing(&store, &context, tx_id);
                 assert_ne!(
                     standing,
@@ -595,6 +612,86 @@ fn every_disconnect_at_every_phase_leaves_a_resolvable_transaction() {
     assert!(
         observed.contains(&Standing::Retryable),
         "no cell was left retryable, so no injected fault actually interrupted a push: {observed:?}"
+    );
+    // Every position in the matrix is one a clean admission demonstrably
+    // reaches, so an unfiltered directive placed there must be delivered. A cell
+    // that recorded no fault means the directive selected nothing — the failure
+    // this witness exists to make loud rather than green.
+    assert!(
+        undelivered.is_empty(),
+        "{} of {examined} cells injected a directive that never fired, so those cells \
+         asserted resolvability of an UNFAULTED push: {undelivered:?}",
+        undelivered.len()
+    );
+}
+
+/// The fault-delivery witness can distinguish a delivered fault from an
+/// undelivered one.
+///
+/// The matrix above asserts that **every** cell delivered its directive. That
+/// is an absence assertion — "no cell went unfaulted" — and it is only worth
+/// something if `fault_log()` would actually come back empty when a directive
+/// selects nothing. This pairs the two cases over one session:
+///
+/// * an **unfiltered** directive (`applies_to == None`) at a position a clean
+///   admission demonstrably reaches must fire;
+/// * the same kind of directive parked past the end of the operation sequence
+///   must not.
+///
+/// The first half is the load-bearing one for `FaultDirective::selects`, whose
+/// `applies_to` guard falls through for `None`. Suites that build directives
+/// with `only_for` never exercise that arm; this corpus only ever builds
+/// unfiltered ones, so it is the arm it exercises most.
+#[test]
+fn an_unfiltered_directive_fires_where_it_lands_and_nowhere_else() {
+    let context = context(b"fg019c-fault-delivery");
+    let validated = delete_main();
+    let member = UnboundAdapter::with_main("commits", 0x20);
+    let span = clean_operation_span(&context, &validated, &member);
+    assert!(span > 1, "the span must be a real sequence, saw {span}");
+
+    // Reachable: an unfiltered directive on the first operation.
+    let delivered = {
+        let store = store_with_genesis(&context);
+        store.install_fault_plan(fgit_authority::FaultPlan::explicit(vec![
+            FaultDirective::new(OpIndex::from_raw(0), FaultKind::LoseResponse),
+        ]));
+        let _ = admit_validated_receive(
+            &store,
+            &context,
+            &validated,
+            AdmissionLimits::default(),
+            &member,
+        );
+        store.restart();
+        store.fault_log().len()
+    };
+    assert!(
+        delivered > 0,
+        "an unfiltered directive on operation 0 was never delivered, so \
+         FaultDirective::selects no longer fires for applies_to == None"
+    );
+
+    // Unreachable: the same directive parked well past the last operation.
+    let not_delivered = {
+        let store = store_with_genesis(&context);
+        store.install_fault_plan(fgit_authority::FaultPlan::explicit(vec![
+            FaultDirective::new(OpIndex::from_raw(span + 50), FaultKind::LoseResponse),
+        ]));
+        let _ = admit_validated_receive(
+            &store,
+            &context,
+            &validated,
+            AdmissionLimits::default(),
+            &member,
+        );
+        store.restart();
+        store.fault_log().len()
+    };
+    assert_eq!(
+        not_delivered, 0,
+        "a directive parked past the end of the sequence was delivered anyway, so an \
+         empty fault log does not mean what the matrix reads it to mean"
     );
 }
 
