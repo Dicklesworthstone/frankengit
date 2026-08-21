@@ -12,7 +12,14 @@ use std::cmp::Ordering;
 use std::error::Error;
 use std::fmt;
 
-use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, TypeRefusal};
+use fgit_crypto::{
+    DigestHasher as CryptoDigestHasher, GitObjectKind as CryptoObjectKind, IdentityDomain,
+    Sha256Hasher,
+};
+use fgit_types::{
+    CodecVersion, GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, SchemaFamily, SchemaId,
+    TypeRefusal,
+};
 
 const ENVELOPE_MAGIC: &[u8; 4] = b"FGEN";
 const SEGMENT_MAGIC: &[u8; 4] = b"FGMS";
@@ -22,6 +29,13 @@ const FORMAT_VERSION: u16 = 1;
 const COMMITMENT_BYTES: usize = 32;
 const FOOTER_BYTES: usize = 92;
 const FOOTER_CORE_BYTES: usize = FOOTER_BYTES - COMMITMENT_BYTES;
+const MICROSEGMENT_SCHEMA: SchemaId = SchemaId::new(
+    SchemaFamily::from_static("frankengit.git-object-microsegment"),
+    1,
+    0,
+);
+const MERKLE_LEAF_PREFIX: &[u8] = b"frankengit/microsegment-merkle-leaf/v1\0";
+const MERKLE_NODE_PREFIX: &[u8] = b"frankengit/microsegment-merkle-node/v1\0";
 
 /// Domain labels supplied to the adopted fgit-crypto registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,23 +56,123 @@ pub enum DigestDomain {
 pub trait DigestAlgorithm {
     type State;
 
-    fn begin(&self, domain: DigestDomain) -> Self::State;
+    fn begin(&self, domain: DigestDomain, content_len: usize) -> Result<Self::State, FabricError>;
 
     fn update(&self, state: &mut Self::State, bytes: &[u8]);
 
     fn finish(&self, state: Self::State) -> Commitment;
 
-    fn digest(&self, domain: DigestDomain, pieces: &[&[u8]]) -> Commitment {
-        let mut state = self.begin(domain);
+    fn digest(&self, domain: DigestDomain, pieces: &[&[u8]]) -> Result<Commitment, FabricError> {
+        let content_len = pieces.iter().try_fold(0usize, |total, piece| {
+            total
+                .checked_add(piece.len())
+                .ok_or(FabricError::LengthOverflow)
+        })?;
+        let mut state = self.begin(domain, content_len)?;
         for piece in pieces {
             self.update(&mut state, piece);
         }
-        self.finish(state)
+        Ok(self.finish(state))
+    }
+
+    fn payload_commitment(
+        &self,
+        _object_kind: ObjectKind,
+        payload: &[u8],
+    ) -> Result<Commitment, FabricError> {
+        self.digest(DigestDomain::Payload, &[payload])
     }
 }
 
 /// Canonical on-wire representation of an fgit-crypto digest commitment.
 pub type Commitment = [u8; COMMITMENT_BYTES];
+
+fn commitment_from_bytes(bytes: &[u8]) -> Result<Commitment, FabricError> {
+    if bytes.len() != COMMITMENT_BYTES {
+        return Err(FabricError::CryptoDigestWidthMismatch);
+    }
+    let mut commitment = [0; COMMITMENT_BYTES];
+    commitment.copy_from_slice(bytes);
+    Ok(commitment)
+}
+
+/// Production digest adapter bound to the `fgit-crypto` registry.
+///
+/// Payload commitments use its native-object commitment construction; the
+/// microsegment footer uses the registered `GitObjectMicrosegment` domain.
+/// Merkle leaves and nodes are domain-separated internal commitments, not
+/// standalone object identifiers.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CryptoDigest;
+
+/// Streaming SHA-256 state held by [`CryptoDigest`].
+#[derive(Debug, Clone)]
+pub struct CryptoDigestState(Sha256Hasher);
+
+impl DigestAlgorithm for CryptoDigest {
+    type State = CryptoDigestState;
+
+    fn begin(&self, domain: DigestDomain, content_len: usize) -> Result<Self::State, FabricError> {
+        let mut hasher = Sha256Hasher::new();
+        match domain {
+            DigestDomain::Payload => {
+                CryptoDigestHasher::update(&mut hasher, b"frankengit/microsegment/payload/v1\0");
+            }
+            DigestDomain::LogicalObject => {
+                CryptoDigestHasher::update(
+                    &mut hasher,
+                    b"frankengit/microsegment/logical-object/v1\0",
+                );
+            }
+            DigestDomain::MerkleLeaf => {
+                CryptoDigestHasher::update(&mut hasher, MERKLE_LEAF_PREFIX);
+            }
+            DigestDomain::MerkleNode => {
+                CryptoDigestHasher::update(&mut hasher, MERKLE_NODE_PREFIX);
+            }
+            DigestDomain::Segment => {
+                let preimage = fgit_crypto::internal_id_preimage(
+                    IdentityDomain::GitObjectMicrosegment,
+                    MICROSEGMENT_SCHEMA,
+                    &[],
+                );
+                let prefix_len = preimage
+                    .len()
+                    .checked_sub(std::mem::size_of::<u64>())
+                    .ok_or(FabricError::CryptoFramingInvalid)?;
+                CryptoDigestHasher::update(&mut hasher, &preimage[..prefix_len]);
+                let len = u64::try_from(content_len).map_err(|_| FabricError::LengthOverflow)?;
+                CryptoDigestHasher::update(&mut hasher, &len.to_be_bytes());
+            }
+        }
+        Ok(CryptoDigestState(hasher))
+    }
+
+    fn update(&self, state: &mut Self::State, bytes: &[u8]) {
+        CryptoDigestHasher::update(&mut state.0, bytes);
+    }
+
+    fn finish(&self, state: Self::State) -> Commitment {
+        CryptoDigestHasher::finish(state.0)
+    }
+
+    fn payload_commitment(
+        &self,
+        object_kind: ObjectKind,
+        payload: &[u8],
+    ) -> Result<Commitment, FabricError> {
+        let object_kind = match object_kind {
+            ObjectKind::Commit => CryptoObjectKind::Commit,
+            ObjectKind::Tree => CryptoObjectKind::Tree,
+            ObjectKind::Blob => CryptoObjectKind::Blob,
+            ObjectKind::Tag => CryptoObjectKind::Tag,
+            ObjectKind::Internal => return Err(FabricError::InternalObjectKindUnsupported),
+        };
+        let identity =
+            fgit_crypto::git_payload_commitment(object_kind, payload, CodecVersion::new(1, 0));
+        commitment_from_bytes(identity.digest().as_bytes())
+    }
+}
 
 /// Bounded decoding and construction limits for one microsegment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +247,9 @@ pub enum FabricError {
     LengthOverflow,
     PayloadLengthMismatch,
     PayloadCommitmentMismatch,
+    InternalObjectKindUnsupported,
+    CryptoDigestWidthMismatch,
+    CryptoFramingInvalid,
     MixedNamespace,
     NonCanonicalRecordOrder,
     DuplicateObjectIdentity,
@@ -168,6 +285,15 @@ impl fmt::Display for FabricError {
             Self::LengthOverflow => "wire length arithmetic overflowed",
             Self::PayloadLengthMismatch => "payload bytes do not match the declared length",
             Self::PayloadCommitmentMismatch => "payload bytes do not match the committed digest",
+            Self::InternalObjectKindUnsupported => {
+                "internal object kind has no native Git payload commitment"
+            }
+            Self::CryptoDigestWidthMismatch => {
+                "crypto registry returned a digest with an unexpected width"
+            }
+            Self::CryptoFramingInvalid => {
+                "crypto registry returned an invalid internal identity preimage"
+            }
             Self::MixedNamespace => "segment records use more than one namespace",
             Self::NonCanonicalRecordOrder => "record identities are not strictly canonical order",
             Self::DuplicateObjectIdentity => "segment contains a duplicate object identity",
@@ -413,7 +539,7 @@ impl<'a, H: DigestAlgorithm> MicrosegmentBuilder<'a, H> {
         }
         let computed_payload = self
             .hasher
-            .digest(DigestDomain::Payload, &[record.payload.as_slice()]);
+            .payload_commitment(record.envelope.object_kind(), &record.payload)?;
         if computed_payload != record.envelope.payload_commitment() {
             return Err(FabricError::PayloadCommitmentMismatch);
         }
@@ -513,7 +639,7 @@ impl<'a, H: DigestAlgorithm> MicrosegmentBuilder<'a, H> {
             }
             let leaf = self
                 .hasher
-                .digest(DigestDomain::MerkleLeaf, &[&bytes[start..end]]);
+                .digest(DigestDomain::MerkleLeaf, &[&bytes[start..end]])?;
             index_entries.push(BuildIndexEntry {
                 object_identity: record.envelope.object_identity(),
                 record_offset: u64::try_from(start).map_err(|_| FabricError::LengthOverflow)?,
@@ -556,7 +682,7 @@ impl<'a, H: DigestAlgorithm> MicrosegmentBuilder<'a, H> {
         bytes.extend_from_slice(&merkle_root);
         let segment_digest = self
             .hasher
-            .digest(DigestDomain::Segment, &[bytes.as_slice()]);
+            .digest(DigestDomain::Segment, &[bytes.as_slice()])?;
         bytes.extend_from_slice(&segment_digest);
         if bytes.len() > self.limits.max_segment_bytes {
             return Err(FabricError::SegmentTooLarge);
@@ -683,7 +809,9 @@ impl<'a, H: DigestAlgorithm> MicrosegmentReader<'a, H> {
             if envelope.declared_length() != payload_len_u64 {
                 return Err(FabricError::PayloadLengthMismatch);
             }
-            if hasher.digest(DigestDomain::Payload, &[payload]) != envelope.payload_commitment() {
+            if hasher.payload_commitment(envelope.object_kind(), payload)?
+                != envelope.payload_commitment()
+            {
                 return Err(FabricError::PayloadCommitmentMismatch);
             }
             let absolute_start = records_start
@@ -701,7 +829,7 @@ impl<'a, H: DigestAlgorithm> MicrosegmentReader<'a, H> {
             let leaf = hasher.digest(
                 DigestDomain::MerkleLeaf,
                 &[&bytes[absolute_start..absolute_end]],
-            );
+            )?;
             if let Some(previous) = records.last() {
                 match previous
                     .envelope
@@ -740,7 +868,7 @@ impl<'a, H: DigestAlgorithm> MicrosegmentReader<'a, H> {
         let digest_end = footer_offset
             .checked_add(FOOTER_CORE_BYTES)
             .ok_or(FabricError::LengthOverflow)?;
-        let computed_digest = hasher.digest(DigestDomain::Segment, &[&bytes[..digest_end]]);
+        let computed_digest = hasher.digest(DigestDomain::Segment, &[&bytes[..digest_end]])?;
         if computed_digest != footer.segment_digest {
             return Err(FabricError::SegmentDigestMismatch);
         }
@@ -892,7 +1020,10 @@ pub fn verify_merkle_proof<H: DigestAlgorithm>(
         }
         let right = if index % 2 == 0 { *sibling } else { current };
         let left = if index % 2 == 0 { current } else { *sibling };
-        current = hasher.digest(DigestDomain::MerkleNode, &[&left, &right]);
+        let Ok(next) = hasher.digest(DigestDomain::MerkleNode, &[&left, &right]) else {
+            return false;
+        };
+        current = next;
         index /= 2;
         width = width.div_ceil(2);
     }
@@ -929,7 +1060,7 @@ impl<'a, H: DigestAlgorithm> StreamingSegmentVerifier<'a, H> {
             .ok_or(FabricError::Truncated)?;
         Ok(Self {
             hasher,
-            state: Some(hasher.begin(DigestDomain::Segment)),
+            state: Some(hasher.begin(DigestDomain::Segment, digest_offset)?),
             total_len,
             digest_offset,
             received: 0,
@@ -1081,7 +1212,7 @@ fn next_merkle_level<H: DigestAlgorithm>(
     for pair in level.chunks(2) {
         let left = pair[0];
         let right = pair.get(1).copied().unwrap_or(left);
-        next.push(hasher.digest(DigestDomain::MerkleNode, &[&left, &right]));
+        next.push(hasher.digest(DigestDomain::MerkleNode, &[&left, &right])?);
     }
     Ok(next)
 }
@@ -1269,8 +1400,12 @@ mod tests {
     impl DigestAlgorithm for FixtureDigest {
         type State = FixtureState;
 
-        fn begin(&self, domain: DigestDomain) -> Self::State {
-            FixtureState(domain)
+        fn begin(
+            &self,
+            domain: DigestDomain,
+            _content_len: usize,
+        ) -> Result<Self::State, FabricError> {
+            Ok(FixtureState(domain))
         }
 
         fn update(&self, _state: &mut Self::State, _bytes: &[u8]) {}
@@ -1363,6 +1498,73 @@ mod tests {
         }
         let rebuilt = builder.build().expect("rebuilt segment must be valid");
         assert_eq!(rebuilt.as_bytes(), segment.as_bytes());
+    }
+
+    #[test]
+    fn crypto_digest_binds_native_payload_and_registered_segment_identity() {
+        let digest = CryptoDigest;
+        let payload = b"native payload";
+        let payload_commitment = digest
+            .payload_commitment(ObjectKind::Blob, payload)
+            .expect("native blob payload must have a strong commitment");
+        let envelope = ObjectEnvelope::new(
+            vec![b'n'],
+            oid(b'z'),
+            ObjectKind::Blob,
+            u64::try_from(payload.len()).expect("fixture payload length must fit u64"),
+            payload_commitment,
+            vec![b'c'],
+            [7; COMMITMENT_BYTES],
+            None,
+            &limits(),
+        )
+        .expect("crypto fixture envelope must be valid");
+        let mut builder = MicrosegmentBuilder::new(&digest, limits());
+        builder
+            .push(SegmentRecordInput {
+                envelope,
+                payload: payload.to_vec(),
+            })
+            .expect("payload commitment must admit its matching native object");
+        let segment = builder.build().expect("crypto fixture segment must build");
+        let canonical_body = &segment.as_bytes()[..segment.as_bytes().len() - COMMITMENT_BYTES];
+        let identity = fgit_crypto::internal_object_id(
+            IdentityDomain::GitObjectMicrosegment,
+            MICROSEGMENT_SCHEMA,
+            CodecVersion::new(1, 0),
+            canonical_body,
+        );
+        assert_eq!(
+            segment.segment_digest(),
+            commitment_from_bytes(identity.digest().as_bytes())
+                .expect("registered microsegment identity must use SHA-256")
+        );
+        assert_eq!(
+            fgit_crypto::verify_internal_object_id(
+                &identity,
+                IdentityDomain::GitObjectMicrosegment,
+                MICROSEGMENT_SCHEMA,
+                CodecVersion::new(1, 0),
+                canonical_body,
+            ),
+            Ok(())
+        );
+        let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, &limits())
+            .expect("crypto segment must be structurally and cryptographically valid");
+        assert_eq!(
+            reader.record(0).expect("record must exist").payload,
+            payload
+        );
+    }
+
+    #[test]
+    fn crypto_digest_refuses_internal_kind_but_accepts_native_kind() {
+        let digest = CryptoDigest;
+        assert!(digest.payload_commitment(ObjectKind::Blob, b"p").is_ok());
+        assert_eq!(
+            digest.payload_commitment(ObjectKind::Internal, b"p"),
+            Err(FabricError::InternalObjectKindUnsupported)
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+fgit-crypto.workspace = true
 fgit-types.workspace = true
 
 [lints]
