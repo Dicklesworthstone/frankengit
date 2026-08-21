@@ -146,7 +146,7 @@ impl<Operation, Response> History<Operation, Response> {
 
     fn validate(&self) -> Result<(), HistoryError> {
         let mut last_time_by_client = BTreeMap::new();
-        let mut operations = BTreeMap::new();
+        let mut operations: BTreeMap<OperationId, OperationLifecycle> = BTreeMap::new();
 
         for (event_index, event) in self.events.iter().enumerate() {
             if let Some(previous) = last_time_by_client.insert(event.client, event.logical_time)
