@@ -2226,9 +2226,12 @@ fn constellation_default_features(
     package: &LockPackage,
     dependencies: &[WorkspaceDependency],
 ) -> Result<String, String> {
-    let states = dependencies
+    let direct_dependencies = dependencies
         .iter()
         .filter(|dependency| dependency.package == package.name)
+        .collect::<Vec<_>>();
+    let states = direct_dependencies
+        .iter()
         .map(|dependency| dependency.default_features.as_str())
         .collect::<BTreeSet<_>>();
     match states.len() {
@@ -2238,8 +2241,19 @@ fn constellation_default_features(
             .map(|state| (*state).to_owned())
             .ok_or_else(|| "default-feature state collection unexpectedly empty".to_owned()),
         _ => Err(format!(
-            "constellation package `{}` has conflicting direct default-feature states: {:?}",
-            package.name, states
+            "constellation package `{}` has conflicting direct default-feature states: {:?}; declarations: {}",
+            package.name,
+            states,
+            direct_dependencies
+                .iter()
+                .map(|dependency| format!(
+                    "{}@{}={}",
+                    dependency.manifest,
+                    dependency.version.as_deref().unwrap_or("unversioned"),
+                    dependency.default_features
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
     }
 }
@@ -3359,6 +3373,15 @@ fn parse_manifest_package_name(text: &str) -> Option<String> {
 struct WorkspaceDependency {
     package: String,
     manifest: String,
+    version: Option<String>,
+    default_features: String,
+    declared_features: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceDependencyTemplate {
+    package: String,
+    version: Option<String>,
     default_features: String,
     declared_features: BTreeSet<String>,
 }
@@ -3459,6 +3482,7 @@ fn extract_workspace_string_list(text: &str, key: &str) -> Vec<String> {
 }
 
 fn workspace_dependencies(root: &Path, report: &mut Report) -> Vec<WorkspaceDependency> {
+    let root_dependencies = workspace_dependency_templates(root, report);
     let mut dependencies = Vec::new();
     for path in workspace_manifest_paths(root, report) {
         let display = relative(root, &path);
@@ -3466,12 +3490,66 @@ fn workspace_dependencies(root: &Path, report: &mut Report) -> Vec<WorkspaceDepe
             report.error(format!("cannot read workspace manifest {display}"));
             continue;
         };
-        dependencies.extend(parse_manifest_dependencies(&display, &text));
+        dependencies.extend(parse_manifest_dependencies(
+            &display,
+            &text,
+            &root_dependencies,
+            report,
+        ));
     }
     dependencies
 }
 
-fn parse_manifest_dependencies(display: &str, text: &str) -> Vec<WorkspaceDependency> {
+fn workspace_dependency_templates(
+    root: &Path,
+    report: &mut Report,
+) -> BTreeMap<String, WorkspaceDependencyTemplate> {
+    let path = root.join("Cargo.toml");
+    let Ok(text) = fs::read_to_string(&path) else {
+        report.error("cannot read root Cargo.toml for workspace dependency inheritance");
+        return BTreeMap::new();
+    };
+    parse_workspace_dependency_templates(&text, report)
+}
+
+fn parse_workspace_dependency_templates(
+    text: &str,
+    report: &mut Report,
+) -> BTreeMap<String, WorkspaceDependencyTemplate> {
+    let mut templates = BTreeMap::new();
+    let mut in_workspace_dependencies = false;
+    for raw_line in text.lines() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_workspace_dependencies = line == "[workspace.dependencies]";
+            continue;
+        }
+        if !in_workspace_dependencies || line.is_empty() {
+            continue;
+        }
+        let Some((raw_name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let name = raw_name.trim().trim_matches('"');
+        if name.is_empty() {
+            continue;
+        }
+        let template = dependency_template(name, value);
+        if templates.insert(name.to_owned(), template).is_some() {
+            report.error(format!(
+                "root [workspace.dependencies] declares `{name}` more than once"
+            ));
+        }
+    }
+    templates
+}
+
+fn parse_manifest_dependencies(
+    display: &str,
+    text: &str,
+    root_dependencies: &BTreeMap<String, WorkspaceDependencyTemplate>,
+    report: &mut Report,
+) -> Vec<WorkspaceDependency> {
     let mut dependencies = Vec::new();
     let mut in_dependencies = false;
     for raw_line in text.lines() {
@@ -3488,33 +3566,75 @@ fn parse_manifest_dependencies(display: &str, text: &str) -> Vec<WorkspaceDepend
             continue;
         };
         let raw_name = raw_name.trim().trim_matches('"');
-        let name = raw_name.strip_suffix(".workspace").unwrap_or(raw_name);
+        let (name, dotted_workspace) = match raw_name.strip_suffix(".workspace") {
+            Some(name) => (name, true),
+            None => (raw_name, false),
+        };
         if name.is_empty() {
             continue;
         }
-        let package =
-            extract_inline_string_field(value, "package").unwrap_or_else(|| name.to_owned());
-        let default_features = if value.contains("default-features = false") {
-            "disabled"
+        let inherited = dotted_workspace && extract_bool_value(value) == Some(true)
+            || extract_inline_bool_field(value, "workspace") == Some(true);
+        let template = if inherited {
+            match root_dependencies.get(name) {
+                Some(template) => template.clone(),
+                None => {
+                    report.error(format!(
+                        "workspace dependency `{name}` in {display} is absent from root [workspace.dependencies]"
+                    ));
+                    continue;
+                }
+            }
         } else {
-            "enabled"
+            dependency_template(name, value)
         };
+        let mut declared_features = template.declared_features;
+        if inherited {
+            declared_features.extend(extract_inline_string_list(value, "features"));
+        }
         dependencies.push(WorkspaceDependency {
-            package,
+            package: template.package,
             manifest: display.to_owned(),
-            default_features: default_features.to_owned(),
-            declared_features: extract_inline_string_list(value, "features"),
+            version: template.version,
+            default_features: template.default_features,
+            declared_features,
         });
     }
     dependencies
 }
 
+fn dependency_template(name: &str, value: &str) -> WorkspaceDependencyTemplate {
+    WorkspaceDependencyTemplate {
+        package: extract_inline_string_field(value, "package").unwrap_or_else(|| name.to_owned()),
+        version: extract_inline_string_field(value, "version")
+            .or_else(|| extract_string_value(value)),
+        default_features: if extract_inline_bool_field(value, "default-features") == Some(false) {
+            "disabled".to_owned()
+        } else {
+            "enabled".to_owned()
+        },
+        declared_features: extract_inline_string_list(value, "features"),
+    }
+}
+
+fn extract_bool_value(value: &str) -> Option<bool> {
+    match value.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn extract_inline_bool_field(value: &str, field: &str) -> Option<bool> {
+    let tail = inline_field_value(value, field)?;
+    extract_bool_value(
+        tail.split(|character: char| character == ',' || character == '}')
+            .next()?,
+    )
+}
+
 fn extract_inline_string_list(value: &str, field: &str) -> BTreeSet<String> {
-    let Some(position) = value.find(field) else {
-        return BTreeSet::new();
-    };
-    let tail = &value[position + field.len()..];
-    let Some(after_equals) = tail.trim_start().strip_prefix('=') else {
+    let Some(after_equals) = inline_field_value(value, field) else {
         return BTreeSet::new();
     };
     let Some(open) = after_equals.find('[') else {
@@ -4371,6 +4491,10 @@ fn manifest_dependency_names(text: &str) -> BTreeSet<String> {
 }
 
 fn extract_inline_string_field(value: &str, field: &str) -> Option<String> {
+    extract_string_value(inline_field_value(value, field)?)
+}
+
+fn inline_field_value<'a>(value: &'a str, field: &str) -> Option<&'a str> {
     let bytes = value.as_bytes();
     let mut search = 0;
     while let Some(pos) = value[search..].find(field) {
@@ -4384,10 +4508,8 @@ fn extract_inline_string_field(value: &str, field: &str) -> Option<String> {
             continue;
         }
         let after = value[start + field.len()..].trim_start();
-        if let Some(rest) = after.strip_prefix('=')
-            && let Some(found) = extract_string_value(rest)
-        {
-            return Some(found);
+        if let Some(rest) = after.strip_prefix('=') {
+            return Some(rest.trim_start());
         }
     }
     None
@@ -5294,6 +5416,7 @@ mod tests {
         let disabled = vec![WorkspaceDependency {
             package: "fsqlite".to_owned(),
             manifest: "crates/fgit-authority-fsqlite/Cargo.toml".to_owned(),
+            version: Some("0.3.7".to_owned()),
             default_features: "disabled".to_owned(),
             declared_features: BTreeSet::new(),
         }];
@@ -5309,12 +5432,72 @@ mod tests {
         conflicting.push(WorkspaceDependency {
             package: "fsqlite".to_owned(),
             manifest: "crates/another-adapter/Cargo.toml".to_owned(),
+            version: Some("0.3.7".to_owned()),
             default_features: "enabled".to_owned(),
             declared_features: BTreeSet::new(),
         });
         assert!(
             constellation_default_features(&fsqlite, &conflicting)
                 .expect_err("conflicting direct feature policy must fail closed")
+                .contains("conflicting direct default-feature states")
+        );
+    }
+
+    #[test]
+    fn workspace_inherited_dependency_uses_root_version_features_and_default_state() {
+        let workspace = fixture_workspace_in("workspace_inheritance", "inherited_disabled");
+        let mut report = Report::new();
+        let dependencies = workspace_dependencies(&workspace.root, &mut report);
+        assert!(
+            report.errors.is_empty(),
+            "workspace inheritance fixture had parser errors: {:?}",
+            report.errors
+        );
+        assert_eq!(dependencies.len(), 1);
+        let dependency = &dependencies[0];
+        assert_eq!(dependency.package, "asupersync");
+        assert_eq!(dependency.version.as_deref(), Some("0.4.9"));
+        assert_eq!(dependency.default_features, "disabled");
+        assert_eq!(
+            dependency.declared_features,
+            BTreeSet::from(["root-feature".to_owned()])
+        );
+
+        let asupersync = LockPackage {
+            name: "asupersync".to_owned(),
+            version: "0.4.9".to_owned(),
+            source: Some("registry+https://example.invalid/index".to_owned()),
+            checksum: Some("a".repeat(64)),
+            dependencies: Vec::new(),
+        };
+        assert_eq!(
+            constellation_default_features(&asupersync, &dependencies),
+            Ok("disabled".to_owned())
+        );
+    }
+
+    #[test]
+    fn direct_enabled_dependency_conflicts_with_inherited_disabled_root_policy() {
+        let workspace = fixture_workspace_in("workspace_inheritance", "direct_conflict");
+        let mut report = Report::new();
+        let dependencies = workspace_dependencies(&workspace.root, &mut report);
+        assert!(
+            report.errors.is_empty(),
+            "workspace inheritance fixture had parser errors: {:?}",
+            report.errors
+        );
+        let asupersync = LockPackage {
+            name: "asupersync".to_owned(),
+            version: "0.4.9".to_owned(),
+            source: Some("registry+https://example.invalid/index".to_owned()),
+            checksum: Some("a".repeat(64)),
+            dependencies: Vec::new(),
+        };
+        assert!(
+            constellation_default_features(&asupersync, &dependencies)
+                .expect_err(
+                    "a direct enabled declaration must conflict with root-disabled inheritance"
+                )
                 .contains("conflicting direct default-feature states")
         );
     }
