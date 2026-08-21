@@ -11,9 +11,11 @@
 //!   identity refuses to be built from a digest that belongs to another
 //!   schema, so a decision-batch identity can never be presented as a
 //!   transaction identity.
-//! * **Backend tokens** ([`AuthorityVersionToken`]) are opaque store state.
-//!   They are excluded from canonical body bytes: a token is evidence for a
-//!   conditional write, never part of an identity.
+//! * **Backend tokens** live in `fgit-authority`, not here. They are opaque
+//!   store state, excluded from canonical body bytes: a token is evidence
+//!   for a conditional write, never part of an identity. This crate used to
+//!   declare a second, unused token type; one normative concept keeps one
+//!   authoritative definition (AGENTS.md §10).
 //!
 //! The internal-identity rule is that a body's identity is the digest over its
 //! domain separation tag, its schema identifier, and its canonical body bytes;
@@ -31,9 +33,6 @@ use crate::numeric::CodecVersion;
 
 /// Length of an opaque assigned identity, in bytes.
 pub const OPAQUE_ID_LEN: usize = 16;
-
-/// Largest accepted authority version token, in bytes.
-pub const MAX_AUTHORITY_VERSION_TOKEN_LEN: usize = 512;
 
 /// Declares a 128-bit opaque assigned identity.
 macro_rules! opaque_id {
@@ -390,59 +389,6 @@ pub const DERIVED_ID_DOMAINS: &[&str] = &[
     AdmissionReceiptId::DOMAIN,
     DocumentAnchorId::DOMAIN,
 ];
-
-/// An opaque backend conditional-write token.
-///
-/// The token is obtained from a previously authenticated head read and is
-/// presented back to the store to make a replacement conditional. It is
-/// explicitly not part of any canonical body: identity must not change when a
-/// backend reissues a token, and a token must not be replayable as evidence of
-/// state. Protection against reuse of a recycled token comes from the head's
-/// monotone generation and predecessor checks, not from the token itself.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct AuthorityVersionToken(Vec<u8>);
-
-impl AuthorityVersionToken {
-    /// Builds a token, refusing an empty or oversized value.
-    pub fn try_new(source: &[u8]) -> Result<Self, TypeRefusal> {
-        if source.is_empty() || source.len() > MAX_AUTHORITY_VERSION_TOKEN_LEN {
-            return Err(TypeRefusal::LengthOutOfRange {
-                field: "AuthorityVersionToken",
-                observed: u32::try_from(source.len()).unwrap_or(u32::MAX),
-                minimum: 1,
-                maximum: 512,
-            });
-        }
-        Ok(Self(source.to_vec()))
-    }
-
-    /// The opaque token bytes.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-
-    /// Token length in bytes.
-    #[must_use]
-    pub const fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Always false: a token is never empty.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        false
-    }
-}
-
-impl fmt::Display for AuthorityVersionToken {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in &self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
 
 /// Name of one preparation profile.
 ///

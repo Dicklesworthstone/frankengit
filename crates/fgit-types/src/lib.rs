@@ -13,12 +13,11 @@ pub mod vocabulary;
 pub use error::TypeRefusal;
 pub use hash::{Digest, DigestAlgorithmId, DigestBytes, MAX_DIGEST_LEN, MIN_DIGEST_LEN};
 pub use identity::{
-    AuthorityVersionToken, DERIVED_ID_DOMAINS, EvidenceRecordId, ForgeEventId, GenerationId,
-    InternalObjectId, MAX_AUTHORITY_VERSION_TOKEN_LEN, OPAQUE_ID_LEN, ObjectEnvelopeId,
-    PreparationProfileId, PreparedTxnCapsuleId, PrincipalId, PrincipalSnapshotId, RefusalRecordId,
-    RepositoryAuthorityHeadId, RepositoryCapsuleId, RepositoryCommitId, RepositoryDecisionBatchId,
-    RepositoryId, RepositoryIncarnationId, RequestId, SegmentManifestId, TenantId,
-    TransactionSealId, TxId,
+    DERIVED_ID_DOMAINS, EvidenceRecordId, ForgeEventId, GenerationId, InternalObjectId,
+    OPAQUE_ID_LEN, ObjectEnvelopeId, PreparationProfileId, PreparedTxnCapsuleId, PrincipalId,
+    PrincipalSnapshotId, RefusalRecordId, RepositoryAuthorityHeadId, RepositoryCapsuleId,
+    RepositoryCommitId, RepositoryDecisionBatchId, RepositoryId, RepositoryIncarnationId,
+    RequestId, SegmentManifestId, TenantId, TransactionSealId, TxId,
 };
 pub use label::{AsciiSlug, DomainTag, MAX_LABEL_LEN, SchemaFamily, SchemaId};
 pub use native::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256};
