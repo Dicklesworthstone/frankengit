@@ -9,10 +9,10 @@
 //!
 //! It intentionally makes no assertion about [`PublicationEpoch::Durable`].
 //! The currently published authority surface neither drives nor reports the
-//! WAL-to-main durability predicate, so claiming that this test reached that
-//! epoch would be a vacuous observation rather than evidence.  A future
-//! durability-profile receipt can extend this test only after the surface
-//! exposes an observation bound to this publication.
+//! WAL-to-main durability predicate, so these inputs cannot establish that
+//! epoch. A separate test-owned connection can positively witness a checkpoint
+//! without widening the production statement surface; that evidence still does
+//! not turn this publication result into a durable acknowledgement.
 
 #![forbid(unsafe_code)]
 
@@ -88,7 +88,7 @@ fn generation(value: u64) -> HeadGeneration {
 ///
 /// A present candidate body with a head that still carries some other body is
 /// `Staged`.  Once a head read carries the exact candidate body, the authority
-/// root makes it `Visible`.  This helper deliberately has no `Durable` branch:
+/// root makes it `Visible`. This helper deliberately has no `Durable` branch:
 /// its inputs contain no durability-profile observation.
 fn observed_public_epoch(
     node: &NodeRuntime,
