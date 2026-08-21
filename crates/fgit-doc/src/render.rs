@@ -265,9 +265,7 @@ fn append_subtree_text(document: &Document, id: NodeId, out: &mut String) {
 }
 
 fn block_child(document: &Document, id: NodeId) -> bool {
-    document
-        .node(id)
-        .is_some_and(|node| node.kind().is_block())
+    document.node(id).is_some_and(|node| node.kind().is_block())
 }
 
 /// Collapses every run of whitespace to one space and trims the ends.

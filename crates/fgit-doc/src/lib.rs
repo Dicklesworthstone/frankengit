@@ -64,8 +64,8 @@ mod url;
 pub use anchors::{Anchor, AnchorId, RemapOutcome, RemapReport, SourceObjectId};
 pub use ast::{Document, Node, NodeId, NodeKind};
 pub use batch::{
-    BatchInput, BatchPlan, BatchReceipt, InputOutcome, VarianceClass, WorkloadProfile, render_batch,
-    worker_count,
+    BatchInput, BatchPlan, BatchReceipt, InputOutcome, VarianceClass, WorkloadProfile,
+    render_batch, worker_count,
 };
 pub use diagnostic::{Diagnostic, DiagnosticCode};
 pub use limits::{Limits, Refusal, RefusalKind, StructuralLimits};

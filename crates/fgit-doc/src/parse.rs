@@ -78,7 +78,7 @@ pub fn parse_with(source: &str, profile: ParseProfile) -> Result<ParseOutput, Re
 /// refusal, never a lossy replacement.
 pub fn parse_bytes(bytes: &[u8], profile: ParseProfile) -> Result<ParseOutput, Refusal> {
     profile.limits.check_input_len(bytes.len())?;
-    let source =
-        core::str::from_utf8(bytes).map_err(|_| Refusal::precondition(RefusalKind::SourceNotUtf8))?;
+    let source = core::str::from_utf8(bytes)
+        .map_err(|_| Refusal::precondition(RefusalKind::SourceNotUtf8))?;
     parse_with(source, profile)
 }

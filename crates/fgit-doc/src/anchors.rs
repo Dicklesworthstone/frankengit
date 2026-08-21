@@ -35,7 +35,15 @@ use crate::span::Span;
 const MAX_SOURCE_ID_BYTES: usize = 64;
 
 /// Domain tag prefixed to every canonical anchor encoding.
-const ANCHOR_DOMAIN: &[u8] = b"fgit-doc/anchor/v1\0";
+///
+/// The tag matches the domain requested from the types crate for the
+/// fixed-width `DocumentAnchorId` that a digest over
+/// [`AnchorId::canonical_bytes`] produces, so the preimage this crate emits and
+/// the identifier another crate derives from it agree on one domain.
+pub const ANCHOR_PREIMAGE_DOMAIN: &str = "frankengit/doc-anchor/v1";
+
+/// Domain tag prefixed to every canonical anchor encoding.
+const ANCHOR_DOMAIN: &[u8] = b"frankengit/doc-anchor/v1\0";
 
 /// An opaque host-supplied identity for the object the source came from.
 ///

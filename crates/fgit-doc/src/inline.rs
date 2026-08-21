@@ -569,7 +569,10 @@ impl Scanner<'_> {
         if inner.chars().any(char::is_whitespace) {
             return position + 1;
         }
-        let kind = if matches!(url::classify_autolink(inner), crate::ast::UrlVerdict::Allowed) {
+        let kind = if matches!(
+            url::classify_autolink(inner),
+            crate::ast::UrlVerdict::Allowed
+        ) {
             Some(AutolinkKind::Uri)
         } else if url::is_email_like(inner) {
             Some(AutolinkKind::Email)
@@ -578,7 +581,9 @@ impl Scanner<'_> {
         };
         if let Some(kind) = kind {
             self.flush_text(*text_start, position);
-            let node = self.chain.append(Piece::Autolink(kind), position, cursor + 1);
+            let node = self
+                .chain
+                .append(Piece::Autolink(kind), position, cursor + 1);
             if let Some(entry) = self.chain.nodes.get_mut(node) {
                 entry.link = Some(LinkData {
                     dest_start: position + 1,
@@ -809,7 +814,9 @@ impl Scanner<'_> {
             // rejected unless both lengths already are.
             let mixed = candidate.can_close || closer.can_open;
             let combined = candidate.original + closer.original;
-            if mixed && combined % 3 == 0 && (candidate.original % 3 != 0 || closer.original % 3 != 0)
+            if mixed
+                && combined % 3 == 0
+                && (candidate.original % 3 != 0 || closer.original % 3 != 0)
             {
                 continue;
             }
@@ -914,7 +921,12 @@ fn emit(
     Ok(())
 }
 
-fn node_kind(ctx: &mut Ctx<'_>, buffer: &Buffer, node: &InlineNode, span: Span) -> Option<NodeKind> {
+fn node_kind(
+    ctx: &mut Ctx<'_>,
+    buffer: &Buffer,
+    node: &InlineNode,
+    span: Span,
+) -> Option<NodeKind> {
     let kind = match node.piece {
         Piece::Text => NodeKind::Text,
         Piece::Escaped => NodeKind::Escaped,
@@ -929,9 +941,10 @@ fn node_kind(ctx: &mut Ctx<'_>, buffer: &Buffer, node: &InlineNode, span: Span) 
         }
         Piece::Autolink(autolink) => {
             let data = node.link?;
-            let destination = ctx
-                .chars
-                .span(buffer.map_start(data.dest_start), buffer.map_end(data.dest_end));
+            let destination = ctx.chars.span(
+                buffer.map_start(data.dest_start),
+                buffer.map_end(data.dest_end),
+            );
             let raw = buffer.slice(data.dest_start, data.dest_end);
             let verdict = if autolink == AutolinkKind::Email {
                 crate::ast::UrlVerdict::Allowed
@@ -949,13 +962,13 @@ fn node_kind(ctx: &mut Ctx<'_>, buffer: &Buffer, node: &InlineNode, span: Span) 
         }
         Piece::Link | Piece::Image => {
             let data = node.link?;
-            let destination = ctx
-                .chars
-                .span(buffer.map_start(data.dest_start), buffer.map_end(data.dest_end));
-            let title = data.title.map(|(start, end)| {
-                ctx.chars
-                    .span(buffer.map_start(start), buffer.map_end(end))
-            });
+            let destination = ctx.chars.span(
+                buffer.map_start(data.dest_start),
+                buffer.map_end(data.dest_end),
+            );
+            let title = data
+                .title
+                .map(|(start, end)| ctx.chars.span(buffer.map_start(start), buffer.map_end(end)));
             let decoded = decode_escapes(buffer.slice(data.dest_start, data.dest_end));
             let verdict = url::classify(&decoded);
             if !verdict.is_allowed() {
@@ -1000,11 +1013,13 @@ pub(crate) fn decode_escapes(raw: &str) -> String {
 // ---------------------------------------------------------------- classifiers
 
 fn char_before(text: &str, position: usize) -> Option<char> {
-    text.get(..position).and_then(|prefix| prefix.chars().next_back())
+    text.get(..position)
+        .and_then(|prefix| prefix.chars().next_back())
 }
 
 fn char_at(text: &str, position: usize) -> Option<char> {
-    text.get(position..).and_then(|suffix| suffix.chars().next())
+    text.get(position..)
+        .and_then(|suffix| suffix.chars().next())
 }
 
 fn is_punctuation(value: char) -> bool {
@@ -1032,7 +1047,9 @@ fn is_right_flanking(before: Option<char>, after: Option<char>) -> bool {
         return false;
     }
     match before {
-        Some(value) if is_punctuation(value) => is_space(after) || after.is_some_and(is_punctuation),
+        Some(value) if is_punctuation(value) => {
+            is_space(after) || after.is_some_and(is_punctuation)
+        }
         _ => true,
     }
 }

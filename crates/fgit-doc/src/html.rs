@@ -87,9 +87,7 @@ fn block(document: &Document, id: NodeId, sink: &mut Sink) -> Result<(), Refusal
             sink.write("</code></pre>\n")
         }
         NodeKind::RawHtmlBlock => {
-            sink.write(&format!(
-                "<pre {REJECTED_ATTR}=\"raw_markup\"><code>"
-            ))?;
+            sink.write(&format!("<pre {REJECTED_ATTR}=\"raw_markup\"><code>"))?;
             verbatim(document, id, sink)?;
             sink.write("</code></pre>\n")
         }
@@ -105,12 +103,7 @@ fn verbatim(document: &Document, id: NodeId, sink: &mut Sink) -> Result<(), Refu
     Ok(())
 }
 
-fn list(
-    document: &Document,
-    id: NodeId,
-    info: ListInfo,
-    sink: &mut Sink,
-) -> Result<(), Refusal> {
+fn list(document: &Document, id: NodeId, info: ListInfo, sink: &mut Sink) -> Result<(), Refusal> {
     let Some(node) = document.node(id) else {
         return Ok(());
     };
@@ -133,12 +126,7 @@ fn list(
     }
 }
 
-fn item(
-    document: &Document,
-    id: NodeId,
-    tight: bool,
-    sink: &mut Sink,
-) -> Result<(), Refusal> {
+fn item(document: &Document, id: NodeId, tight: bool, sink: &mut Sink) -> Result<(), Refusal> {
     let Some(node) = document.node(id) else {
         return Ok(());
     };
@@ -237,12 +225,7 @@ fn inline_node(document: &Document, id: NodeId, sink: &mut Sink) -> Result<(), R
     }
 }
 
-fn anchor(
-    document: &Document,
-    id: NodeId,
-    info: LinkInfo,
-    sink: &mut Sink,
-) -> Result<(), Refusal> {
+fn anchor(document: &Document, id: NodeId, info: LinkInfo, sink: &mut Sink) -> Result<(), Refusal> {
     let Some(node) = document.node(id) else {
         return Ok(());
     };
@@ -272,12 +255,7 @@ fn anchor(
     }
 }
 
-fn image(
-    document: &Document,
-    id: NodeId,
-    info: LinkInfo,
-    sink: &mut Sink,
-) -> Result<(), Refusal> {
+fn image(document: &Document, id: NodeId, info: LinkInfo, sink: &mut Sink) -> Result<(), Refusal> {
     let alternative = escape(&subtree_text(document, id));
     if info.verdict.is_allowed() {
         let target = decode_escapes(document.text(info.destination).unwrap_or(""));

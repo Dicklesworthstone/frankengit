@@ -61,7 +61,15 @@ fn parse_one_block(
         return atx_heading_block(ctx, line, content_start, heading, parent, depth);
     }
     if let Some(fence) = fence_open(rest) {
-        return fenced_code(ctx, lines, cursor, indent_columns, content_start, fence, parent);
+        return fenced_code(
+            ctx,
+            lines,
+            cursor,
+            indent_columns,
+            content_start,
+            fence,
+            parent,
+        );
     }
     if rest.starts_with('>') {
         return block_quote(ctx, lines, cursor, parent, depth);
@@ -226,7 +234,11 @@ fn list_marker(text: &str, indent_columns: usize, content_start: usize) -> Optio
     if spaces == 0 && !content_is_empty {
         return None;
     }
-    let width = if content_is_empty || spaces > 4 { 1 } else { spaces };
+    let width = if content_is_empty || spaces > 4 {
+        1
+    } else {
+        spaces
+    };
     Some(Marker {
         ordered,
         start,
@@ -600,7 +612,10 @@ fn list(
 
         let mut lookahead = scan.next;
         let mut skipped_blank = false;
-        while lines.get(lookahead).is_some_and(|entry| ctx.is_blank(*entry)) {
+        while lines
+            .get(lookahead)
+            .is_some_and(|entry| ctx.is_blank(*entry))
+        {
             skipped_blank = true;
             lookahead += 1;
         }
@@ -671,7 +686,10 @@ fn is_reference_definition(text: &str) -> bool {
     let Some(close) = rest.find(']') else {
         return false;
     };
-    close > 0 && rest.get(close + 1..).is_some_and(|tail| tail.starts_with(':'))
+    close > 0
+        && rest
+            .get(close + 1..)
+            .is_some_and(|tail| tail.starts_with(':'))
 }
 
 fn paragraph(
@@ -712,9 +730,7 @@ fn paragraph(
     if content.is_empty() {
         return Ok(cursor.saturating_add(1));
     }
-    let first_text = content
-        .first()
-        .map_or("", |line| ctx.line_text(*line));
+    let first_text = content.first().map_or("", |line| ctx.line_text(*line));
     let is_definition = is_reference_definition(first_text);
     let body_span = span_of_lines(ctx, &content);
     let (kind, span) = match (setext, body_span) {

@@ -111,7 +111,8 @@ pub fn worker_count(
     let scaled = workload
         .per_job_bytes
         .saturating_mul(workload.variance.headroom());
-    let memory_workers = u32::try_from(workload.memory_budget_bytes / scaled.max(1)).unwrap_or(u32::MAX);
+    let memory_workers =
+        u32::try_from(workload.memory_budget_bytes / scaled.max(1)).unwrap_or(u32::MAX);
     let workers = workload
         .cpu_cap
         .min(memory_workers)

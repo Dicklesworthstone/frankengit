@@ -20,7 +20,12 @@ pub struct Span {
 }
 
 impl Span {
-    pub(crate) const fn new(byte_start: u32, byte_end: u32, char_start: u32, char_end: u32) -> Self {
+    pub(crate) const fn new(
+        byte_start: u32,
+        byte_end: u32,
+        char_start: u32,
+        char_end: u32,
+    ) -> Self {
         Self {
             byte_start,
             byte_end,
