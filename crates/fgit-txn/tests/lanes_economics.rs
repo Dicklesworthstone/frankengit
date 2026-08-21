@@ -478,3 +478,65 @@ fn the_oracle_can_tell_two_different_transcripts_apart() {
         "the oracle must distinguish different order"
     );
 }
+
+#[test]
+fn the_latency_comparison_is_underpowered_and_this_artifact_claims_no_speedup() {
+    // The disproven half, and it is disproven in BOTH directions.
+    //
+    // decisions-per-CAS is a structural win: it is COUNTED, not timed, so it
+    // cannot be noise. Latency is a different matter, and measuring it here
+    // produced a negative result about the MEASUREMENT rather than about
+    // combining. Across six runs at MIN_SAMPLES_PER_VARIANT:
+    //
+    //     delta 107_281 ns   floor 613_409 ns
+    //     delta 146_875 ns   floor 126_367 ns
+    //     delta  52_568 ns   floor  50_955 ns
+    //     delta 70_838_847 ns floor 34_725 ns   <- scheduling outlier
+    //     delta  92_733 ns   floor  16_951 ns
+    //     delta 136_175 ns   floor 113_492 ns
+    //
+    // The A/A floor swings 36x and the delta 1348x, and the "clears the floor"
+    // verdict flips between runs. So at three samples this artifact supports
+    // NO latency claim in either direction -- "combining is faster" and
+    // "combining is not faster" are equally unsupported by it. My own first
+    // reading was the second of those, and it was wrong for the same reason a
+    // speedup claim would have been.
+    //
+    // Therefore this test asserts what a reader needs in order to judge, and
+    // deliberately asserts NOTHING about the latency direction. Asserting an
+    // inequality here would be flaky, and worse, it would be exactly the
+    // over-reading it is meant to prevent. Recorded as NEG-014-LANES.
+    let artifact = BenchmarkRunner::new(plan())
+        .expect("the benchmark plan validates")
+        .run(
+            &mut DirectPublication {
+                capsules: capsules(),
+            },
+            &mut CombinedPublication {
+                capsules: capsules(),
+            },
+        )
+        .expect("both workloads run");
+
+    // Raw observations for every phase, so a reader can recompute the tails
+    // and reach their own conclusion rather than trusting a summary.
+    assert_eq!(artifact.baseline.len(), MIN_SAMPLES_PER_VARIANT);
+    assert_eq!(artifact.candidate.len(), MIN_SAMPLES_PER_VARIANT);
+    assert_eq!(artifact.aa_control.len(), MIN_SAMPLES_PER_VARIANT);
+
+    // The A/A control must be present and non-degenerate. Its purpose is to
+    // let a reader see how unstable the instrument is -- which, on this
+    // workload, is the whole finding.
+    assert!(
+        artifact.aa_control_tails.p95_ns > 0,
+        "an A/A control that measured nothing cannot calibrate any latency reading"
+    );
+
+    // And the sample count is the harness minimum, which is the reason the
+    // comparison is underpowered. Pinned so that raising it becomes a
+    // deliberate act that also revisits NEG-014-LANES.
+    assert_eq!(
+        artifact.plan.samples_per_variant, MIN_SAMPLES_PER_VARIANT,
+        "if the sample count changed, the underpowered finding must be re-measured"
+    );
+}
