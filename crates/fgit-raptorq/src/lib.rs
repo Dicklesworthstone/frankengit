@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use asupersync::EncodingPipeline;
 use asupersync::config::EncodingConfig;
-use asupersync::decoding::{DecodingConfig, DecodingPipeline};
+use asupersync::decoding::{DecodingConfig, DecodingPipeline, RejectReason, SymbolAcceptResult};
 use asupersync::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use asupersync::types::resource::{PoolConfig, SymbolPool};
 use asupersync::types::{ObjectId, ObjectParams, Symbol};
@@ -407,12 +407,22 @@ pub fn reconstruct_microsegment(
         .map_err(|_| RaptorRefusal::DecodeFailed)?;
     for scoped in symbols {
         validate_symbol(expected, scoped, source_symbols)?;
-        decoder
+        let result = decoder
             .feed(AuthenticatedSymbol::from_parts(
                 scoped.symbol.clone(),
                 scoped.tag,
             ))
-            .map_err(|_| RaptorRefusal::AuthenticationRejected)?;
+            .map_err(|_| RaptorRefusal::DecodeFailed)?;
+        match result {
+            SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed) => {
+                return Err(RaptorRefusal::AuthenticationRejected);
+            }
+            SymbolAcceptResult::Rejected(_) => return Err(RaptorRefusal::DecodeFailed),
+            SymbolAcceptResult::Accepted { .. }
+            | SymbolAcceptResult::DecodingStarted { .. }
+            | SymbolAcceptResult::BlockComplete { .. }
+            | SymbolAcceptResult::Duplicate => {}
+        }
     }
     let bytes = decoder
         .into_data()
