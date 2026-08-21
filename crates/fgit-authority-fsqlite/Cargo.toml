@@ -1,0 +1,17 @@
+[package]
+name = "fgit-authority-fsqlite"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+# The `fsqlite` dependency is deliberately absent until its registry rows and
+# constellation entry land. See the crate documentation and the fg005a bead for
+# the measured closure this crate is waiting on.
+[dependencies]
+fgit-authority.workspace = true
+fgit-types.workspace = true
+
+[lints]
+workspace = true
