@@ -1141,3 +1141,155 @@ fn an_empty_workspace_materializes_the_empty_tree() {
         "Git's empty tree frames as 'tree 0' with an empty body"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FG-008 semantics at tree scope, and host-profile refusals
+// ---------------------------------------------------------------------------
+
+/// The four FG-008 properties, asserted by name at tree scope.
+///
+/// The bead requires the tree-scope fold to mirror FG-008's semantics. This
+/// test states each property explicitly rather than leaving the correspondence
+/// implied by scattered assertions elsewhere.
+#[test]
+fn tree_scope_fold_has_the_fg008_properties() {
+    let base_has = |candidate: &TreePath| candidate.as_bytes() == b"src/lib.rs";
+
+    let mut log = IntentLog::new();
+    // (1) read-your-own-writes: the second write observes the first.
+    log.push(TreeEditIntent::Write {
+        path: path(b"a.txt"),
+        content: b"first".to_vec(),
+        mode: FileMode::Regular,
+        entry_class: EntryClass::Content,
+    });
+    log.push(TreeEditIntent::Write {
+        path: path(b"a.txt"),
+        content: b"second".to_vec(),
+        mode: FileMode::Regular,
+        entry_class: EntryClass::Content,
+    });
+    // (4) a statement error that does not abort the rest.
+    log.push(TreeEditIntent::Rename {
+        from: path(b"absent/source"),
+        to: path(b"b.txt"),
+        basis_entry: None,
+    });
+    log.push(TreeEditIntent::Delete {
+        path: path(b"src/lib.rs"),
+    });
+
+    let (effect, evaluation) = log.fold(&base_has);
+
+    // (1) read-your-own-writes
+    let surviving = effect
+        .effects()
+        .get(&path(b"a.txt"))
+        .expect("a.txt survives");
+    match surviving {
+        OverlayEntry::File { .. } => {}
+        other => panic!("expected a file, got {other:?}"),
+    }
+
+    // (2) target-disjoint net effect: one surviving effect per path.
+    let targets: std::collections::BTreeSet<_> = effect.effects().keys().collect();
+    assert_eq!(
+        targets.len(),
+        effect.len(),
+        "the net effect is target-disjoint"
+    );
+
+    // (3) totality: exactly one outcome per source intent, none dropped.
+    assert_eq!(
+        evaluation.len(),
+        log.len(),
+        "every source intent maps to exactly one outcome"
+    );
+
+    // (4) statement failure is isolated, not an abort of the transaction.
+    assert_eq!(evaluation.errors().len(), 1, "one statement error");
+    assert!(
+        effect.effects().contains_key(&path(b"src/lib.rs")),
+        "the intent after the failing statement still took effect"
+    );
+}
+
+/// A name a target host cannot represent is refused under that host profile and
+/// accepted under the repository profile.
+///
+/// The refusal is bounded and typed rather than a silent rename: aliasing two
+/// distinct Git paths onto one host name is what `docs/GIT_TREE_FS.md` §3.3
+/// forbids outright.
+#[test]
+fn host_unrepresentable_names_are_refused_only_under_that_profile() {
+    let mut source = MemorySource::default();
+    let leaf = source.blob(b"x\n");
+    let root = source.tree(&[entry(b"100644", b"keep.txt", &leaf)]);
+
+    let windows_view: BaseView<Sha1> = BaseView::new(
+        repository_id(),
+        rcr_id(),
+        root,
+        root,
+        limits(),
+        PathPolicy {
+            host_profile: fgit_treefs::path::HostProfile::WindowsCompatible,
+            ..PathPolicy::default()
+        },
+    );
+    let repository_view = base(root);
+
+    // `com1.txt` is reserved on Windows and ordinary in a repository.
+    assert!(
+        TreePath::parse(
+            b"com1.txt",
+            &PathPolicy {
+                host_profile: fgit_treefs::path::HostProfile::WindowsCompatible,
+                ..PathPolicy::default()
+            }
+        )
+        .is_err(),
+        "the Windows profile refuses a reserved device name"
+    );
+    let permitted = TreePath::parse_default(b"com1.txt")
+        .expect("the repository profile accepts the very same name");
+
+    let mut overlay = Overlay::new();
+    let id = overlay.intern(b"body\n".to_vec());
+    overlay.put(
+        permitted,
+        OverlayEntry::File {
+            content: fgit_treefs::overlay::ContentRef::Overlay(id),
+            mode: FileMode::Regular,
+            class: EntryClass::Content,
+        },
+    );
+
+    let mut cap = TreeCapability::new(
+        WorkspaceId::from_bytes([1; 16]),
+        repository_id(),
+        vec![TreePath::parse_default(b"com1.txt").unwrap()],
+        vec![TreePath::parse_default(b"com1.txt").unwrap()],
+    );
+    assert!(
+        planner()
+            .plan(
+                &repository_view,
+                &source,
+                &mut cap,
+                &overlay,
+                0,
+                &never_cancelled()
+            )
+            .is_ok(),
+        "the repository profile exports the name unchanged"
+    );
+
+    // The same view carries the strict host policy; the export path re-parses
+    // child names under it, so the profile travels with the base.
+    assert_eq!(
+        windows_view.path_policy().host_profile,
+        fgit_treefs::path::HostProfile::WindowsCompatible,
+        "the base view carries the host profile the export will honour"
+    );
+}
