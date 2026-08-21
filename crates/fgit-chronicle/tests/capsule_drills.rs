@@ -419,3 +419,59 @@ fn retreating_to_the_older_capsule_requires_an_audited_generation_advance() {
     .expect("advancing past the abandoned position is a restore");
     assert_eq!(restore.restored_to(), older_id);
 }
+
+#[test]
+fn fail_closed_halts_automation_too_and_never_reports_verified() {
+    // The other half of the collapse, found by YellowLotus reviewing 37cbd31.
+    //
+    // `the_masquerade_drill...` pins RecoverableWithRepair -> HaltForAudit.
+    // Nothing pinned FailClosed. Today both share one match arm in
+    // `verification()`, so they cannot diverge by accident -- which is exactly
+    // why the gap was easy to miss. The moment someone splits that arm, or a
+    // fourth CapsuleVerification variant appears, nothing would catch a
+    // FailClosed that stopped halting. Failing closed is the entire point of
+    // the outcome, so it should be defended rather than merely true.
+    let older = capsule_with(3, None, BackupProfile::FullClosure);
+    let older_id = identity_of(&older);
+    let newer = capsule_with(7, Some(older_id), BackupProfile::FullClosure);
+    let newer_id = identity_of(&newer);
+    let pointer = CapsulePointer::genesis(older_id, &older)
+        .expect("a first capsule points")
+        .advance(newer_id, &newer)
+        .expect("the successor advances");
+    let halted = RecoveryPlan::HaltForAudit {
+        acknowledged: Some(newer_id),
+        reason: HaltReason::AcknowledgedRootUnverified,
+    };
+
+    // Reconstructible damage with no repair material to draw on.
+    let no_material = RestoreClassification::classify(&newer, &[missing_body()]);
+    assert_eq!(no_material.outcome(), RestoreOutcome::FailClosed);
+    assert_eq!(
+        no_material.verification(),
+        CapsuleVerification::PresentButUnverified,
+        "FailClosed must never report Verified"
+    );
+    assert_eq!(plan_recovery(&pointer, no_material.verification()), halted);
+
+    // And damage no repair could ever address reaches the same place.
+    let unrepairable = RestoreClassification::classify(&newer, &[stale_predecessor()]);
+    assert_eq!(unrepairable.outcome(), RestoreOutcome::FailClosed);
+    assert_eq!(
+        unrepairable.verification(),
+        CapsuleVerification::PresentButUnverified
+    );
+    assert_eq!(plan_recovery(&pointer, unrepairable.verification()), halted);
+
+    // Paired, so this is not a planner that halts unconditionally: the
+    // undamaged capsule still resumes.
+    let clean = RestoreClassification::classify(&newer, &[]);
+    assert_eq!(clean.verification(), CapsuleVerification::Verified);
+    assert_eq!(
+        plan_recovery(&pointer, clean.verification()),
+        RecoveryPlan::Resume {
+            capsule_id: newer_id,
+            head_generation: generation(7),
+        }
+    );
+}
