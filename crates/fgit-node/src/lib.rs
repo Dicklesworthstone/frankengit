@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! One-process FrankenGit node assembly.
+//! One-process `FrankenGit` node assembly.
 //!
 //! This crate composes published subsystem boundaries only.  It opens the
 //! admitted embedded `FrankenSQLite` authority profile on the node-owned
@@ -79,16 +79,16 @@ pub enum NodeRefusal {
     /// Authority initialization failed and its explicit worker cleanup failed too.
     AuthorityInitializationCleanup {
         /// The initialization failure observed before cleanup.
-        initialization: Box<NodeRefusal>,
+        initialization: Box<Self>,
         /// The failure while awaiting the authority worker's close.
-        cleanup: Box<NodeRefusal>,
+        cleanup: Box<Self>,
     },
     /// A non-initializing open failed and then could not prove clean teardown.
     ExistingOpenCleanup {
         /// The refusal observed while opening or authenticating the head.
-        opening: Box<NodeRefusal>,
+        opening: Box<Self>,
         /// The refusal while draining the partially opened node.
-        cleanup: Box<NodeRefusal>,
+        cleanup: Box<Self>,
     },
     /// The local immutable object fabric refused the requested operation.
     Fabric(StoreRefusal),
@@ -743,13 +743,10 @@ fn emit_pack_payload(
     } else {
         limits.max_packet_bytes
     };
-    loop {
-        let Some(chunk) = payload
-            .next_chunk(maximum_chunk_bytes)
-            .map_err(GitDaemonTransportRefusal::Wire)?
-        else {
-            break;
-        };
+    while let Some(chunk) = payload
+        .next_chunk(maximum_chunk_bytes)
+        .map_err(GitDaemonTransportRefusal::Wire)?
+    {
         if chunk.len() > maximum_chunk_bytes {
             return Err(GitDaemonTransportRefusal::Wire(
                 WireError::PackChunkTooLarge {
@@ -865,7 +862,7 @@ pub struct DoctorReport {
 
 /// Request-owned authority context for one node operation.
 ///
-/// The embedded authority binding requires FrankenSQLite's capability context,
+/// The embedded authority binding requires `FrankenSQLite`'s capability context,
 /// while node request cancellation and budget ownership come from the
 /// node-owned Asupersync runtime. This wrapper keeps that bridge alive for the
 /// whole request without storing it on [`FsqliteAuthorityStore`] or reusing a
@@ -880,7 +877,7 @@ pub struct NodeRequestContext {
 }
 
 impl NodeRequestContext {
-    fn authority(&self) -> &FsqliteCx {
+    const fn authority(&self) -> &FsqliteCx {
         &self.authority
     }
 }
@@ -1041,7 +1038,7 @@ impl OneNode {
 
     /// Mints the bounded authority context for one node request.
     ///
-    /// Each call creates a new FrankenSQLite context attached to a fresh
+    /// Each call creates a new `FrankenSQLite` context attached to a fresh
     /// `BudgetClass::Database` Asupersync context. The returned value must stay
     /// alive while its matching node operations are awaited; it is never saved
     /// in the authority store or shared with another request.
