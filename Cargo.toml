@@ -60,6 +60,7 @@ fgit-runtime = { path = "crates/fgit-runtime" }
 fgit-txn = { path = "crates/fgit-txn" }
 fgit-types = { path = "crates/fgit-types" }
 fgit-wire = { path = "crates/fgit-wire" }
+fgit-witness = { path = "crates/fgit-witness" }
 fgit-cli = { path = "crates/fgit-cli" }
 
 [workspace.lints.rust]
