@@ -429,7 +429,7 @@ impl LocalFilesystemFabric {
                 LocalCrashPoint::BeforeImmutablePublish
                 | LocalCrashPoint::AfterImmutablePublish => StorageOperation::PublishImmutableBody,
                 LocalCrashPoint::AfterPublishDirectorySync => StorageOperation::SyncDirectory,
-                LocalCrashPoint::BeforeStageCleanup => StorageOperation::PublishImmutableBody,
+                LocalCrashPoint::BeforeStageCleanup => StorageOperation::RemoveBody,
             };
             return Err(StoreRefusal::StorageIo {
                 operation,
@@ -667,42 +667,40 @@ impl ImmutableObjectFabric for LocalFilesystemFabric {
 }
 
 impl RuntimeImmutableObjectFabric for LocalFilesystemFabric {
-    fn open_verified_stream<'a>(
-        &'a self,
-        cx: &'a Cx,
+    async fn open_verified_stream(
+        &self,
+        cx: &Cx,
         identity: GitOid,
         budget: VerifiedStreamBudget,
-    ) -> impl std::future::Future<Output = Outcome<VerifiedObjectStream, StoreRefusal>> + 'a {
-        async move {
-            if let Some(outcome) = checkpoint_outcome(cx) {
-                return outcome;
+    ) -> Outcome<VerifiedObjectStream, StoreRefusal> {
+        if let Some(outcome) = checkpoint_outcome(cx) {
+            return outcome;
+        }
+        let fabric = self.clone();
+        let mut task = match cx.spawn_blocking(move |child_cx| {
+            if child_cx.checkpoint().is_err() {
+                return Err(StoreRefusal::RuntimeCheckpointRejected);
             }
-            let fabric = self.clone();
-            let mut task = match cx.spawn_blocking(move |child_cx| {
-                if child_cx.checkpoint().is_err() {
-                    return Err(StoreRefusal::RuntimeCheckpointRejected);
+            fabric.read_whole(identity)
+        }) {
+            Ok(task) => task,
+            Err(_) => return Outcome::Err(StoreRefusal::RuntimeSpawnUnavailable),
+        };
+        match task.join(cx).await {
+            Ok(Ok(whole)) => {
+                if let Some(outcome) = checkpoint_outcome(cx) {
+                    return outcome;
                 }
-                fabric.read_whole(identity)
-            }) {
-                Ok(task) => task,
-                Err(_) => return Outcome::Err(StoreRefusal::RuntimeSpawnUnavailable),
-            };
-            match task.join(cx).await {
-                Ok(Ok(whole)) => {
-                    if let Some(outcome) = checkpoint_outcome(cx) {
-                        return outcome;
-                    }
-                    match VerifiedObjectStream::new(whole, budget) {
-                        Ok(stream) => Outcome::Ok(stream),
-                        Err(error) => Outcome::Err(error),
-                    }
+                match VerifiedObjectStream::new(whole, budget) {
+                    Ok(stream) => Outcome::Ok(stream),
+                    Err(error) => Outcome::Err(error),
                 }
-                Ok(Err(error)) => Outcome::Err(error),
-                Err(JoinError::Cancelled(reason)) => Outcome::Cancelled(reason),
-                Err(JoinError::Panicked(payload)) => Outcome::Panicked(payload),
-                Err(JoinError::PolledAfterCompletion) => {
-                    Outcome::Err(StoreRefusal::RuntimeJoinConsumed)
-                }
+            }
+            Ok(Err(error)) => Outcome::Err(error),
+            Err(JoinError::Cancelled(reason)) => Outcome::Cancelled(reason),
+            Err(JoinError::Panicked(payload)) => Outcome::Panicked(payload),
+            Err(JoinError::PolledAfterCompletion) => {
+                Outcome::Err(StoreRefusal::RuntimeJoinConsumed)
             }
         }
     }
@@ -1136,13 +1134,21 @@ mod tests {
             let object = object(b"payload");
             let crashing = fabric_with_crash(root.path(), point);
             let ledger = ledger();
-            assert!(matches!(
-                crashing.put_if_absent(object.clone(), admission(&ledger, &object)),
-                Err(StoreRefusal::StorageIo {
-                    kind: std::io::ErrorKind::Interrupted,
-                    ..
-                })
-            ));
+            match crashing.put_if_absent(object.clone(), admission(&ledger, &object)) {
+                Err(StoreRefusal::StorageIo { operation, kind }) => {
+                    assert_eq!(kind, std::io::ErrorKind::Interrupted);
+                    if point == LocalCrashPoint::BeforeStageCleanup {
+                        assert_eq!(
+                            operation,
+                            StorageOperation::RemoveBody,
+                            "cleanup follows a durable publish and must never report publication failure"
+                        );
+                    }
+                }
+                other => panic!(
+                    "crash point {point:?} must return an interrupted storage error, got {other:?}"
+                ),
+            }
             assert_quiescent(ledger);
             let reopened = fabric(root.path());
             match reopened.read_whole(object.identity()) {
