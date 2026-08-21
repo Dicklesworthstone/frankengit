@@ -3506,6 +3506,171 @@ fn cancellation_never_reports_non_commit_in_any_phase() {
 // The net-effect normal form
 // ---------------------------------------------------------------------------
 
+/// NPC §13, ruled at `3e26ed2`: **identity at evaluation takes precedence over
+/// last-writer provenance.**
+///
+/// Two intents address one target and the *later* one requests the value the
+/// scratch state already holds. The ruling is that the later intent is the
+/// identity no-op and the **earlier** one is the surviving effect — because the
+/// earlier intent is what actually produced the transition, and crediting the
+/// later coincidental restatement would make the recorded provenance causally
+/// false.
+///
+/// This is worth a dedicated test because the ambiguity is **invisible to every
+/// other check in this file**. Both readings produce the same folded effect and
+/// the same total source map, so a normal-form equality assertion cannot tell
+/// them apart — which is exactly why §13 says it "must be fixed here rather than
+/// left to an implementation". It is also invisible to the golden traces: those
+/// encode roots and observed outcomes, and carry no intent disposition at all,
+/// so no `.fgtrace` can pin this no matter how many are added.
+///
+/// The neighbouring `a_ref_moved_and_moved_back_publishes_nothing` test asserts
+/// `InverseCancelled | IdentityEffect` across both mappings with an `|`, which
+/// would pass with the two dispositions swapped. That is fine for what it
+/// checks and insufficient for this; hence the positional assertions below.
+#[test]
+fn a_later_coincidental_restatement_absorbs_and_the_earlier_intent_survives() {
+    let mut fixture = Fixture::new(51);
+    let mut refs = BTreeMap::new();
+    refs.insert(name("refs/heads/main"), oid(1));
+    let forge = BTreeMap::new();
+    let retention = BTreeSet::new();
+    let outbox = BTreeMap::new();
+    let basis = FoldBasis {
+        refs: &refs,
+        forge_positions: &forge,
+        retention: &retention,
+        outbox: &outbox,
+    };
+
+    let request = fixture
+        .request(fixture.author, "k1")
+        .statement(
+            MismatchPolicy::TxnAbort,
+            vec![
+                // Produces the transition: main moves from oid(1) to oid(2).
+                update(
+                    "refs/heads/main",
+                    ExpectedRefState::Exact(oid(1)),
+                    oid(2),
+                    false,
+                ),
+                // Coincidental restatement: asks for the value scratch now
+                // holds. Not an overwrite — it requests the SAME after-state.
+                update(
+                    "refs/heads/main",
+                    ExpectedRefState::Exact(oid(2)),
+                    oid(2),
+                    false,
+                ),
+            ],
+        )
+        .build(&mut fixture.mint);
+
+    let report = ReferenceFolder.fold(basis, &request);
+    assert!(report.is_total_for(&request));
+    let effects = report.effects().expect("the fold did not abort");
+    assert_eq!(
+        effects.refs.get(&name("refs/heads/main")),
+        Some(&RefEffect::Set(oid(2))),
+        "the surviving effect is the transition itself"
+    );
+
+    let dispositions: Vec<&IntentDisposition> = report
+        .mappings
+        .iter()
+        .map(|mapping| &mapping.disposition)
+        .collect();
+
+    // The ruled direction. Swapping these two assertions is precisely the
+    // reading §13 forbids, and every other assertion in this file would still
+    // pass under it.
+    assert!(
+        matches!(dispositions[0], IntentDisposition::Surviving(_)),
+        "the EARLIER intent produced the transition and must survive; it was {:?}",
+        dispositions[0]
+    );
+    assert!(
+        matches!(
+            dispositions[1],
+            IntentDisposition::Absorbed(AbsorptionReason::IdentityEffect)
+        ),
+        "the LATER coincidental restatement must be the identity no-op; it was {:?}",
+        dispositions[1]
+    );
+}
+
+/// The contrast twin: a later intent requesting a **different** after-state is a
+/// real overwrite, and there the earlier intent is the absorbed one.
+///
+/// Paired with the test above so the boundary is asserted from both sides:
+/// "later wins" and "later absorbs" are each correct, and which applies turns
+/// only on whether the later intent requests a different value.
+#[test]
+fn a_later_intent_requesting_a_different_value_overwrites_instead_of_absorbing() {
+    let mut fixture = Fixture::new(52);
+    let mut refs = BTreeMap::new();
+    refs.insert(name("refs/heads/main"), oid(1));
+    let forge = BTreeMap::new();
+    let retention = BTreeSet::new();
+    let outbox = BTreeMap::new();
+    let basis = FoldBasis {
+        refs: &refs,
+        forge_positions: &forge,
+        retention: &retention,
+        outbox: &outbox,
+    };
+
+    let request = fixture
+        .request(fixture.author, "k1")
+        .statement(
+            MismatchPolicy::TxnAbort,
+            vec![
+                update(
+                    "refs/heads/main",
+                    ExpectedRefState::Exact(oid(1)),
+                    oid(2),
+                    false,
+                ),
+                update(
+                    "refs/heads/main",
+                    ExpectedRefState::Exact(oid(2)),
+                    oid(3),
+                    false,
+                ),
+            ],
+        )
+        .build(&mut fixture.mint);
+
+    let report = ReferenceFolder.fold(basis, &request);
+    assert!(report.is_total_for(&request));
+    let effects = report.effects().expect("the fold did not abort");
+    assert_eq!(
+        effects.refs.get(&name("refs/heads/main")),
+        Some(&RefEffect::Set(oid(3))),
+        "a genuine overwrite publishes the later value"
+    );
+
+    let dispositions: Vec<&IntentDisposition> = report
+        .mappings
+        .iter()
+        .map(|mapping| &mapping.disposition)
+        .collect();
+    assert!(
+        matches!(
+            dispositions[0],
+            IntentDisposition::Absorbed(AbsorptionReason::OverwrittenBySucceedingIntent)
+        ),
+        "the earlier intent was genuinely overwritten; it was {:?}",
+        dispositions[0]
+    );
+    assert!(
+        matches!(dispositions[1], IntentDisposition::Surviving(_)),
+        "the later intent produced the transition; it was {:?}",
+        dispositions[1]
+    );
+}
+
 #[test]
 fn every_source_intent_maps_to_exactly_one_disposition() {
     let mut fixture = Fixture::new(50);
