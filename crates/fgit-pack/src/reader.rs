@@ -477,6 +477,33 @@ mod tests {
     }
 
     #[test]
+    fn object_count_mismatches_refuse_before_a_quarantined_pack_is_returned() {
+        let mut too_many_declared = exact_pack(&pack_entry(3, b"blob"));
+        too_many_declared[11] = 2;
+        assert!(matches!(
+            parse_quarantined_pack(
+                &too_many_declared,
+                ObjectFormat::Sha1,
+                &limits(),
+                &mut always,
+            ),
+            Err(PackError::Truncated { .. })
+        ));
+
+        let mut too_many_actual = pack_entry(3, b"one");
+        too_many_actual.extend_from_slice(&pack_entry(3, b"two"));
+        assert_eq!(
+            parse_quarantined_pack(
+                &exact_pack(&too_many_actual),
+                ObjectFormat::Sha1,
+                &limits(),
+                &mut always,
+            ),
+            Err(PackError::TrailingPackData)
+        );
+    }
+
+    #[test]
     fn reader_refuses_total_expansion_and_inflate_work_bombs() {
         let mut total_limited = limits();
         total_limited.max_total_expanded_bytes = 2;
