@@ -178,7 +178,14 @@ for file in "${adr_files[@]}"; do
   case ${file##*/} in
     ADR-0001-* | ADR-0002-* | ADR-0003-*) continue ;;
   esac
-  if LC_ALL=C grep -qE '^- \*\*Status:\*\* *proposed' "$file"; then
+  # Emphasis around the status word is formatting, not meaning. The first
+  # version of this check matched only a bare `proposed` and therefore flagged
+  # ADR-0016, which was correctly proposed and said so in bold -- a false
+  # positive against an author who had done exactly the right thing, and one
+  # that reddened a shared lane for someone else's commit. A gate that cannot
+  # tell formatting from substance is worse than no gate on that axis, because
+  # its accusation is specific and wrong.
+  if LC_ALL=C grep -qE '^- \*\*Status:\*\* *[*_]*proposed' "$file"; then
     continue
   fi
   # Not proposed: it must be an acceptance citing an independent ruling.
@@ -220,6 +227,27 @@ adr_absent_rejected=0
 printf '%s\n' "$adr_rulings" | LC_ALL=C grep -qx "999999" || adr_absent_rejected=1
 fge_assert_eq fg061-absent-ruling-rejected 1 "$adr_absent_rejected" \
   "a citation of a comment that does not exist is not usable as an acceptance ruling"
+
+# The proposed-detector must accept the emphasised spelling, or it resumes
+# flagging correct ADRs. Both forms are checked against the real matcher.
+adr_bold_ok=0
+printf -- '- **Status:** **proposed** — reserved to a ruling\n' \
+  | LC_ALL=C grep -qE '^- \*\*Status:\*\* *[*_]*proposed' && adr_bold_ok=1
+fge_assert_eq fg061-proposed-detector-accepts-emphasis 1 "$adr_bold_ok" \
+  "an emphasised **proposed** is recognised as proposed, not as an unauthorised acceptance"
+
+adr_plain_ok=0
+printf -- '- **Status:** proposed\n' \
+  | LC_ALL=C grep -qE '^- \*\*Status:\*\* *[*_]*proposed' && adr_plain_ok=1
+fge_assert_eq fg061-proposed-detector-accepts-plain 1 "$adr_plain_ok" \
+  "the plain spelling is still recognised"
+
+# ...and it must still NOT accept an acceptance wearing the same emphasis.
+adr_accepted_slips=0
+printf -- '- **Status:** **accepted** by nobody\n' \
+  | LC_ALL=C grep -qE '^- \*\*Status:\*\* *[*_]*proposed' && adr_accepted_slips=1
+fge_assert_eq fg061-emphasis-does-not-launder-acceptance 0 "$adr_accepted_slips" \
+  "loosening for emphasis does not let an acceptance pass as proposed"
 
 fge_step binds-resolve
 # An ADR that binds a bead which does not exist is unattached prose.
