@@ -948,7 +948,7 @@ where
     /// can be written with PIA, but those two operations have no common
     /// linearization point in this adapter. Sending either request here could
     /// expose a head whose outcome records are absent, or durable outcomes that
-    /// no head ever makes canonical. `Unavailable` is returned before any
+    /// no head ever makes canonical. `OperationUnsupported` is returned before any
     /// transport request, so the refusal proves that no partial publication was
     /// attempted. An object-store profile that supplies an atomic compound
     /// primitive can implement this method without changing the ordinary CAS
@@ -962,7 +962,9 @@ where
         _new_body: &[u8],
         _outcomes: &[(ImmutableKey, Vec<u8>)],
     ) -> Result<CasOutcome, AuthorityFailure> {
-        Err(AuthorityFailure::Refused(AuthorityRefusal::Unavailable))
+        Err(AuthorityFailure::Refused(
+            AuthorityRefusal::OperationUnsupported,
+        ))
     }
 
     async fn authenticate_head_receipt(
@@ -1701,7 +1703,9 @@ mod tests {
                     &[(outcome.clone(), b"terminal-outcome".to_vec())],
                 )
             ),
-            Err(AuthorityFailure::Refused(AuthorityRefusal::Unavailable)),
+            Err(AuthorityFailure::Refused(
+                AuthorityRefusal::OperationUnsupported,
+            )),
             "the adapter must refuse instead of synthesizing a non-atomic publication"
         );
         assert_eq!(
