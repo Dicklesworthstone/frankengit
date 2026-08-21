@@ -15,7 +15,19 @@
 //! > the unchanged FG-004 suite passes against the fsqlite binding under a
 //! > synchronous harness
 //!
-//! and **not** "the binding is conformant under cancellation". The latter needs
+//! and it covers the **AC** suite only. `fgit-authority` ships two suites, and
+//! this runs one of them:
+//!
+//! * `run_authority_conformance` -- AC-01..AC-20. Run here, and passing.
+//! * `run_fault_conformance` -- AF-01..AF-08. **Not run, and not runnable
+//!   against this binding**: it is bound `S: FaultableAuthorityStore`, and
+//!   `FsqliteAuthorityStore` has no fault injection to implement it with.
+//!
+//! So deterministic fault behaviour -- ambiguity, duplication, lost request
+//! versus lost response -- is unproven for this backend, and a green run here
+//! must not be read as covering it.
+//!
+//! The claim is also **not** "the binding is conformant under cancellation". That needs
 //! a harness that can actually interleave a cancel with an in-flight operation,
 //! which is fg005b's crash and equivalence matrix. Writing the non-claim down
 //! here is deliberate: this file is exactly where a reader would otherwise
@@ -161,6 +173,12 @@ impl AuthorityStore for BlockingStore<'_> {
     }
 }
 
+/// How many checks `run_authority_conformance` records.
+///
+/// AC-01..AC-20, recorded unconditionally. Pinned so the guard below measures
+/// coverage rather than mere non-emptiness.
+const AC_CHECK_COUNT: usize = 20;
+
 fn deterministic_node() -> NodeRuntime {
     RuntimeProfile::deterministic()
         .build()
@@ -180,9 +198,18 @@ fn the_unchanged_fg004_conformance_suite_passes_against_the_engine() {
     let node = deterministic_node();
     let report = run_authority_conformance(|instance| BlockingStore::open(&node, instance));
 
+    // Non-vacuity with teeth. The original guard here was `!is_empty()`, which a
+    // single check satisfies -- so a suite that silently shrank to one check
+    // would still have let this test report a green conformance run, and this
+    // assertion is the only thing standing behind that claim. The AC suite
+    // records AC-01..AC-20 unconditionally (a failing check is still recorded),
+    // so a count below twenty means checks went missing, not that the backend
+    // got better.
     assert!(
-        !report.checks().is_empty(),
-        "a conformance run that executed no checks proves nothing; the suite must be non-empty"
+        report.checks().len() >= AC_CHECK_COUNT,
+        "the AC suite must record at least {AC_CHECK_COUNT} checks, got {}; a shrunken suite \
+         proves nothing about the backend",
+        report.checks().len()
     );
     assert!(
         report.failures().next().is_none(),
