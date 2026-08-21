@@ -683,6 +683,32 @@ pub enum PublicationOutcome {
     /// The batch is canonical and its terminal outcomes are observable.
     ///
     /// Both became true at the same instant: see [`publish_decisions`].
+    ///
+    /// # This establishes `Visible`, never `Durable`
+    ///
+    /// NPC §5.4 requires staged, visible and durable to stay distinct, and
+    /// forbids conflating object existence, canonical visibility, and
+    /// completion of the selected durability profile. **This outcome reports
+    /// the middle one.** The conditional replacement linearized, so the head
+    /// and its terminal outcomes are canonically visible to any reader.
+    ///
+    /// It says nothing about the durability profile having completed. For the
+    /// fsqlite backend the store runs on WAL — measured, not assumed, by
+    /// `fgit-authority-fsqlite`'s `journal_mode_probe` — so a published head
+    /// lives in the write-ahead log until a checkpoint transfers it, and that
+    /// checkpoint is neither driven nor observed from this surface.
+    ///
+    /// So a caller must not read this as an acknowledgement of durability.
+    /// Nothing in the tree does today, which is why the distinction is recorded
+    /// here rather than expressed as a third state on this enum: a
+    /// [`PublicationEpoch`]-shaped return with no consumer would be a surface
+    /// invented for a caller that does not exist.
+    ///
+    /// **Reopen condition:** a caller that needs durable-before-acknowledge.
+    /// That is a real consumer, and it makes the witness worth building; until
+    /// one exists this limit is the honest statement of what we can promise.
+    ///
+    /// [`PublicationEpoch`]: fgit_types::vocabulary::PublicationEpoch
     Published(Box<PublishedBatch>),
     /// The head moved before the conditional replacement landed.
     ///
