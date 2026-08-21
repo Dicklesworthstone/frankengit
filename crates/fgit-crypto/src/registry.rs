@@ -408,7 +408,7 @@ pub enum IdentityDomain {
     KeyLifecycleReceipt,
     /// One restore report body.
     ///
-    /// NORMATIVE_PROTOCOL_CONTRACTS section 23: *"Older-state recovery is an
+    /// `NORMATIVE_PROTOCOL_CONTRACTS.md` section 23: *"Older-state recovery is an
     /// explicit audited restore that advances a new authority generation."*
     /// An audited action that advances a generation needs a record, and a
     /// record with an identity is a body. The specification does not name the
