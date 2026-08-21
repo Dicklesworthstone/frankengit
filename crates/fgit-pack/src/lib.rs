@@ -9,6 +9,7 @@ mod delta;
 mod idx;
 mod pack;
 mod reader;
+mod verify;
 
 pub use delta::{
     DeltaBase, DeltaObject, ExternalBaseLookup, PackObject, ScalarResolver, apply_delta,
@@ -21,6 +22,7 @@ pub use pack::{
     split_pack_trailer, validate_object_count, validate_pack_trailer,
 };
 pub use reader::{QuarantinedEntry, QuarantinedPack, parse_quarantined_pack, read_verified_pack};
+pub use verify::{object_type_from_base_entry, verify_base_entry, verify_native_object};
 
 use std::error::Error;
 use std::fmt;
@@ -228,6 +230,13 @@ pub enum PackError {
         actual: usize,
     },
     Inflate(fgit_deflate::InflateRefusal),
+    ObjectParse(fgit_git_object::ObjectError),
+    ObjectFormatMismatch {
+        expected: ObjectFormat,
+        actual: ObjectFormat,
+    },
+    NativeObjectIdMismatch,
+    DeltaObjectTypeUnavailable,
     TrailingPackData,
     AllocationFailed {
         requested: usize,

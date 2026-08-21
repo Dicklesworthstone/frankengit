@@ -506,7 +506,9 @@ dependencies = [
 name = "fgit-pack"
 version = "0.0.1"
 dependencies = [
+ "fgit-crypto",
  "fgit-deflate",
+ "fgit-git-object",
  "fgit-types",
 ]
 
