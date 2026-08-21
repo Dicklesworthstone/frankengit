@@ -3086,19 +3086,9 @@ fn evaluate_crate_layers(root: &Path, report: &mut Report) -> LayerReport {
         ));
     }
 
-    let manifests_to_crates = workspace_crates
-        .iter()
-        .map(|(crate_name, manifest)| (manifest.as_str(), crate_name.as_str()))
-        .collect::<BTreeMap<_, _>>();
-    let mut edges = workspace_dependencies(root, report)
+    let mut edges = workspace_declared_dependency_edges(root, &workspace_crates, report)
         .into_iter()
-        .filter_map(|dependency| {
-            let source = manifests_to_crates.get(dependency.manifest.as_str())?;
-            registry
-                .entries
-                .contains_key(&dependency.package)
-                .then(|| ((*source).to_owned(), dependency.package))
-        })
+        .filter(|(_, dependency)| registry.entries.contains_key(dependency))
         .collect::<Vec<_>>();
     edges.sort();
     edges.dedup();
@@ -3146,6 +3136,27 @@ fn evaluate_crate_layers(root: &Path, report: &mut Report) -> LayerReport {
     }
 
     layer_report
+}
+
+fn workspace_declared_dependency_edges(
+    root: &Path,
+    workspace_crates: &BTreeMap<String, String>,
+    report: &mut Report,
+) -> Vec<(String, String)> {
+    let mut edges = Vec::new();
+    for (crate_name, manifest) in workspace_crates {
+        let path = root.join(manifest);
+        let Ok(text) = fs::read_to_string(&path) else {
+            report.error(format!("cannot read workspace manifest {manifest}"));
+            continue;
+        };
+        edges.extend(
+            manifest_dependency_names(&text)
+                .into_iter()
+                .map(|dependency| (crate_name.clone(), dependency)),
+        );
+    }
+    edges
 }
 
 fn load_crate_layer_registry(root: &Path, report: &mut Report) -> CrateLayerRegistry {
@@ -4344,7 +4355,8 @@ fn manifest_dependency_names(text: &str) -> BTreeSet<String> {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let alias = key.trim().trim_matches('"');
+        let raw_alias = key.trim().trim_matches('"');
+        let alias = raw_alias.strip_suffix(".workspace").unwrap_or(raw_alias);
         if let Some(package) = extract_inline_string_field(value, "package") {
             dependencies.insert(package);
         } else if !alias.is_empty() {
