@@ -340,8 +340,8 @@ fn scalar_widths_are_fixed_so_a_value_has_one_byte_string() {
     );
 }
 
-/// Builds a raw frame, for cases that must not go through [`encode_body`].
-pub fn raw_frame(
+// Builds a raw frame, for cases that must not go through `encode_body`.
+fn raw_frame(
     domain: DomainTag,
     family: SchemaFamily,
     schema_major: u16,

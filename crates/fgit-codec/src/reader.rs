@@ -151,6 +151,11 @@ impl<'a> Decoder<'a> {
         }
         // A collection cannot have more elements than there are bytes left to
         // hold them, so a huge count is refused before anything is reserved.
+        // This relies on every element occupying at least one byte, which
+        // holds for everything this codec can write: the shortest encoding of
+        // anything, an absent optional, is one tag byte. A schema with a
+        // genuinely zero-width element would make this bound reject a legal
+        // body, so the assumption is stated rather than left implicit.
         let available = u64::try_from(self.remaining()).unwrap_or(u64::MAX);
         if declared > available {
             return Err(CodecRefusal::CountBoundExceeded {
