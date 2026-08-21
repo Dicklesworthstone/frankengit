@@ -1135,7 +1135,7 @@ impl OneNode {
     /// Callers that obtain a node must use this before dropping it so a clean
     /// stop has an observed quiescence result instead of relying on the
     /// database driver's drop-time backstop.
-    pub fn shutdown(self) -> Result<(), NodeRefusal> {
+    pub fn shutdown(mut self) -> Result<(), NodeRefusal> {
         let shutdown_cx = self.authority_context();
         self.runtime
             .block_on(self.authority.close(&shutdown_cx))
