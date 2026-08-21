@@ -36,8 +36,16 @@ const MICROSEGMENT_SCHEMA: SchemaId = SchemaId::new(
     1,
     0,
 );
-const MERKLE_LEAF_PREFIX: &[u8] = b"frankengit/microsegment-merkle-leaf/v1\0";
-const MERKLE_NODE_PREFIX: &[u8] = b"frankengit/microsegment-merkle-node/v1\0";
+const ENVELOPE_SCHEMA: SchemaId = SchemaId::new(
+    SchemaFamily::from_static("frankengit.object-envelope"),
+    1,
+    0,
+);
+const MICROSEGMENT_MERKLE_SCHEMA: SchemaId = SchemaId::new(
+    SchemaFamily::from_static("frankengit.git-object-microsegment-merkle"),
+    1,
+    0,
+);
 
 /// Domain labels supplied to the adopted fgit-crypto registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,37 +124,10 @@ impl DigestAlgorithm for CryptoDigest {
 
     fn begin(&self, domain: DigestDomain, content_len: usize) -> Result<Self::State, FabricError> {
         let mut hasher = Sha256Hasher::new();
-        match domain {
-            DigestDomain::Payload => {
-                CryptoDigestHasher::update(&mut hasher, b"frankengit/microsegment/payload/v1\0");
-            }
-            DigestDomain::LogicalObject => {
-                CryptoDigestHasher::update(
-                    &mut hasher,
-                    b"frankengit/microsegment/logical-object/v1\0",
-                );
-            }
-            DigestDomain::MerkleLeaf => {
-                CryptoDigestHasher::update(&mut hasher, MERKLE_LEAF_PREFIX);
-            }
-            DigestDomain::MerkleNode => {
-                CryptoDigestHasher::update(&mut hasher, MERKLE_NODE_PREFIX);
-            }
-            DigestDomain::Segment => {
-                let preimage = fgit_crypto::internal_id_preimage(
-                    IdentityDomain::GitObjectMicrosegment,
-                    MICROSEGMENT_SCHEMA,
-                    &[],
-                );
-                let prefix_len = preimage
-                    .len()
-                    .checked_sub(std::mem::size_of::<u64>())
-                    .ok_or(FabricError::CryptoFramingInvalid)?;
-                CryptoDigestHasher::update(&mut hasher, &preimage[..prefix_len]);
-                let len = u64::try_from(content_len).map_err(|_| FabricError::LengthOverflow)?;
-                CryptoDigestHasher::update(&mut hasher, &len.to_be_bytes());
-            }
-        }
+        let (identity_domain, schema) = crypto_identity_parameters(domain)?;
+        let body_len = u64::try_from(content_len).map_err(|_| FabricError::LengthOverflow)?;
+        let header = fgit_crypto::internal_id_preimage_header(identity_domain, schema, body_len);
+        CryptoDigestHasher::update(&mut hasher, &header);
         Ok(CryptoDigestState(hasher))
     }
 
@@ -156,6 +137,12 @@ impl DigestAlgorithm for CryptoDigest {
 
     fn finish(&self, state: Self::State) -> Commitment {
         CryptoDigestHasher::finish(state.0)
+    }
+
+    fn digest(&self, domain: DigestDomain, pieces: &[&[u8]]) -> Result<Commitment, FabricError> {
+        let (identity_domain, schema) = crypto_identity_parameters(domain)?;
+        let digest = fgit_crypto::internal_digest_over_parts(identity_domain, schema, pieces);
+        commitment_from_bytes(digest.as_bytes())
     }
 
     fn payload_commitment(
@@ -173,6 +160,18 @@ impl DigestAlgorithm for CryptoDigest {
         let identity =
             fgit_crypto::git_payload_commitment(object_kind, payload, CodecVersion::new(1, 0));
         commitment_from_bytes(identity.digest().as_bytes())
+    }
+}
+
+fn crypto_identity_parameters(
+    domain: DigestDomain,
+) -> Result<(IdentityDomain, SchemaId), FabricError> {
+    match domain {
+        DigestDomain::Payload => Err(FabricError::PayloadObjectKindRequired),
+        DigestDomain::LogicalObject => Ok((IdentityDomain::ObjectEnvelope, ENVELOPE_SCHEMA)),
+        DigestDomain::MerkleLeaf => Ok((IdentityDomain::MerkleLeaf, MICROSEGMENT_MERKLE_SCHEMA)),
+        DigestDomain::MerkleNode => Ok((IdentityDomain::MerkleNode, MICROSEGMENT_MERKLE_SCHEMA)),
+        DigestDomain::Segment => Ok((IdentityDomain::GitObjectMicrosegment, MICROSEGMENT_SCHEMA)),
     }
 }
 
@@ -249,6 +248,7 @@ pub enum FabricError {
     LengthOverflow,
     PayloadLengthMismatch,
     PayloadCommitmentMismatch,
+    PayloadObjectKindRequired,
     InternalObjectKindUnsupported,
     CryptoDigestWidthMismatch,
     CryptoFramingInvalid,
@@ -287,6 +287,9 @@ impl fmt::Display for FabricError {
             Self::LengthOverflow => "wire length arithmetic overflowed",
             Self::PayloadLengthMismatch => "payload bytes do not match the declared length",
             Self::PayloadCommitmentMismatch => "payload bytes do not match the committed digest",
+            Self::PayloadObjectKindRequired => {
+                "native payload commitment requires the Git object kind"
+            }
             Self::InternalObjectKindUnsupported => {
                 "internal object kind has no native Git payload commitment"
             }
@@ -1591,6 +1594,32 @@ mod tests {
         assert_eq!(
             digest.payload_commitment(ObjectKind::Internal, b"p"),
             Err(FabricError::InternalObjectKindUnsupported)
+        );
+    }
+
+    #[test]
+    fn crypto_digest_uses_registered_merkle_domains() {
+        let digest = CryptoDigest;
+        let leaf = digest
+            .digest(DigestDomain::MerkleLeaf, &[b"record"])
+            .expect("registered Merkle leaf digest must succeed");
+        let expected_leaf = commitment_from_bytes(
+            fgit_crypto::internal_digest_over_parts(
+                IdentityDomain::MerkleLeaf,
+                MICROSEGMENT_MERKLE_SCHEMA,
+                &[b"record"],
+            )
+            .as_bytes(),
+        )
+        .expect("Merkle leaf registry construction must be SHA-256");
+        assert_eq!(leaf, expected_leaf);
+        let node = digest
+            .digest(DigestDomain::MerkleNode, &[&leaf, &leaf])
+            .expect("registered Merkle node digest must succeed");
+        assert_ne!(leaf, node);
+        assert_eq!(
+            digest.digest(DigestDomain::Payload, &[b"record"]),
+            Err(FabricError::PayloadObjectKindRequired)
         );
     }
 

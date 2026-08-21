@@ -984,7 +984,7 @@ mod tests {
     use super::*;
     use fgit_types::{DigestAlgorithmId, DigestBytes, GitOidSha1};
 
-    use crate::{MicrosegmentBuilder, SegmentLimits, SegmentRecordInput};
+    use crate::{MicrosegmentBuilder, SegmentLimits, SegmentRecordInput, verify_merkle_proof};
 
     fn manifest_limits() -> ManifestLimits {
         ManifestLimits {
@@ -1137,6 +1137,17 @@ mod tests {
         manifest
             .verify_segment_reality(&reader)
             .expect("matching manifest must verify against segment reality");
+        for index in 0..reader.len() {
+            let proof = reader
+                .merkle_proof(index, &digest)
+                .expect("verified crypto reader must produce each proof");
+            assert!(verify_merkle_proof(
+                &digest,
+                reader.records[index].leaf,
+                &proof,
+                reader.merkle_root(),
+            ));
+        }
         manifest.entries[0].record_length += 1;
         assert_eq!(
             manifest.verify_segment_reality(&reader),
