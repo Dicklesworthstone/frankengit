@@ -660,6 +660,39 @@ impl AsyncAuthorityStore for AsyncView {
         let outcome = self.0.authenticate_head_receipt(receipt);
         async move { outcome }
     }
+
+    /// Refused, loudly, because this view cannot honour the contract.
+    ///
+    /// The §5.2 ruling requires this operation to be all-or-nothing: if the new
+    /// head is observable then its terminal-outcome records necessarily are
+    /// too. `MemoryAuthorityStore` composes a head CAS and separate puts, so a
+    /// delegating implementation here would be NON-atomic while satisfying the
+    /// signature - a test backend that looks like it publishes atomically and
+    /// does not. That is worse than no implementation, because a future test
+    /// could pass against it and be read as evidence the window is closed.
+    ///
+    /// This view exists solely to drive `read_immutable` for the sync/async
+    /// pointer-advance equivalence test, so nothing legitimately reaches this
+    /// method. If something ever does, failing loudly is the honest outcome.
+    /// The real atomic implementation is the fsqlite backend's, which runs the
+    /// whole sequence inside one engine transaction.
+    fn publish_head_with_outcomes(
+        &self,
+        _cx: &(),
+        _key: &HeadKey,
+        _expected: AuthorityVersionToken,
+        _new_generation: HeadGeneration,
+        _new_body: &[u8],
+        _outcomes: &[(ImmutableKey, Vec<u8>)],
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        async {
+            panic!(
+                "AsyncView is a read-only equivalence fixture: it cannot publish \
+                 atomically over MemoryAuthorityStore, and a non-atomic stand-in \
+                 would misrepresent the FG-007b window as closed"
+            )
+        }
+    }
 }
 
 /// Minimal driver for futures that are ready on first poll.
