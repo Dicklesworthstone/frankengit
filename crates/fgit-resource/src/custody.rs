@@ -223,7 +223,7 @@ impl ObligationState {
     /// Every illegal pair is a typed [`LifecycleError::IllegalTransition`],
     /// including the planted negatives: committing twice, committing after an
     /// abort, and acknowledging something never committed.
-    pub fn apply(self, event: LifecycleEvent) -> Result<Self, LifecycleError> {
+    pub const fn apply(self, event: LifecycleEvent) -> Result<Self, LifecycleError> {
         let next = match (self, event) {
             (Self::Reserved, LifecycleEvent::Commit) => Self::Committed,
             (Self::Reserved, LifecycleEvent::Abort) => Self::Aborted,

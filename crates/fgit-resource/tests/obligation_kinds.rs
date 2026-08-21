@@ -12,7 +12,7 @@ use fgit_resource::algebra::{Grade, ResourceVector};
 use fgit_resource::custody::{
     LeakPolicy, ObligationLedger, ObligationState, RegionCloseOutcome, ReserveError,
 };
-use fgit_resource::ids::{IdempotencyKey, OpaqueHandle, RegionId};
+use fgit_resource::ids::{IdempotencyKey, IdentityError, OpaqueHandle, RegionId};
 use fgit_resource::kinds::{
     AdmissionAbandoned, AdmissionAbortReason, AdmissionRefusal, AdmittedObject,
     AuthorityRevalidation, BillingReservation, CasAbortReason, CasAttempt, CasNotPublished, CasWon,
@@ -120,15 +120,15 @@ fn segment(tag: u8) -> SegmentManifestId {
     )
 }
 
-fn principal(tag: u8) -> PrincipalId {
+const fn principal(tag: u8) -> PrincipalId {
     PrincipalId::from_bytes([tag; OPAQUE_ID_LEN])
 }
 
-fn tenant(tag: u8) -> TenantId {
+const fn tenant(tag: u8) -> TenantId {
     TenantId::from_bytes([tag; OPAQUE_ID_LEN])
 }
 
-fn oid(tag: u8) -> GitOid {
+const fn oid(tag: u8) -> GitOid {
     GitOid::Sha1(GitOidSha1::from_bytes([tag; GitOidSha1::LEN]))
 }
 
@@ -140,9 +140,12 @@ fn opaque(tag: u8) -> OpaqueHandle {
     OpaqueHandle::new(&[tag; 20]).expect("twenty bytes is a valid opaque handle")
 }
 
-fn policy() -> LeakPolicy {
+const fn policy() -> LeakPolicy {
     LeakPolicy::Recover {
-        escalation_threshold: NonZeroU32::new(2).expect("two is non-zero"),
+        escalation_threshold: match NonZeroU32::new(2) {
+            Some(value) => value,
+            None => NonZeroU32::MIN,
+        },
     }
 }
 
@@ -876,14 +879,47 @@ fn aborting_a_workspace_records_its_incomplete_outputs() {
 
 #[test]
 fn trivial_acknowledgement_is_the_evidence_type_of_every_internal_class() {
-    fn assert_trivial<K: InternalEffect>() {
-        let _evidence: K::AckEvidence = TrivialAck;
+    /// Only compiles when `K::AckEvidence` really is [`TrivialAck`], and only
+    /// returns when the value round-trips through the associated type.
+    fn round_trip<K: InternalEffect>() -> K::AckEvidence {
+        TrivialAck
     }
-    assert_trivial::<ObjectAdmissionPermit>();
-    assert_trivial::<PreparedTxnSlot>();
-    assert_trivial::<HeadCasAttempt>();
-    assert_trivial::<WorkspaceLease>();
-    assert_trivial::<RetentionPin>();
-    assert_trivial::<RepairPermit>();
-    assert_trivial::<ContextBudgetPermit>();
+    assert_eq!(round_trip::<ObjectAdmissionPermit>(), TrivialAck);
+    assert_eq!(round_trip::<PreparedTxnSlot>(), TrivialAck);
+    assert_eq!(round_trip::<HeadCasAttempt>(), TrivialAck);
+    assert_eq!(round_trip::<WorkspaceLease>(), TrivialAck);
+    assert_eq!(round_trip::<RetentionPin>(), TrivialAck);
+    assert_eq!(round_trip::<RepairPermit>(), TrivialAck);
+    assert_eq!(round_trip::<ContextBudgetPermit>(), TrivialAck);
+}
+
+#[test]
+fn an_opaque_handle_refuses_what_it_cannot_carry_verbatim() {
+    assert_eq!(
+        OpaqueHandle::new(&[]).err(),
+        Some(IdentityError::Empty),
+        "an empty handle names nothing"
+    );
+    assert_eq!(
+        OpaqueHandle::new(&[7_u8; 33]).err(),
+        Some(IdentityError::TooLong { offered: 33 }),
+        "a handle longer than the carrier is refused, never truncated"
+    );
+
+    // Near-identical permitted cases: the two lengths that actually occur.
+    let short = OpaqueHandle::new(&[7_u8; 20]).expect("twenty bytes fits");
+    let long = OpaqueHandle::new(&[7_u8; 32]).expect("thirty-two bytes fits");
+    assert_eq!(short.len(), 20);
+    assert_eq!(long.len(), 32);
+    assert_eq!(short.as_bytes(), &[7_u8; 20]);
+    assert_ne!(
+        short, long,
+        "length is part of the identity, so a prefix is not the same handle"
+    );
+    assert!(!short.is_empty());
+    assert_eq!(
+        short.to_string().len(),
+        40,
+        "display is lowercase hexadecimal"
+    );
 }

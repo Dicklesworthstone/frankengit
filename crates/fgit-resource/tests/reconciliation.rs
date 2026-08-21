@@ -39,7 +39,7 @@ fn rcr(tag: u8) -> RepositoryCommitId {
     )
 }
 
-fn principal(tag: u8) -> PrincipalId {
+const fn principal(tag: u8) -> PrincipalId {
     PrincipalId::from_bytes([tag; OPAQUE_ID_LEN])
 }
 
@@ -47,9 +47,12 @@ fn opaque(tag: u8) -> OpaqueHandle {
     OpaqueHandle::new(&[tag; 20]).expect("twenty bytes is a valid opaque handle")
 }
 
-fn policy() -> LeakPolicy {
+const fn policy() -> LeakPolicy {
     LeakPolicy::Recover {
-        escalation_threshold: NonZeroU32::new(2).expect("two is non-zero"),
+        escalation_threshold: match NonZeroU32::new(2) {
+            Some(value) => value,
+            None => NonZeroU32::MIN,
+        },
     }
 }
 
@@ -57,8 +60,11 @@ fn budget() -> ResourceVector {
     ResourceVector::single(Grade::EgressBytes, 256)
 }
 
-fn attempts(count: u32) -> ReconcilePolicy {
-    ReconcilePolicy::new(NonZeroU32::new(count).expect("attempt ceilings are non-zero"))
+const fn attempts(count: u32) -> ReconcilePolicy {
+    ReconcilePolicy::new(match NonZeroU32::new(count) {
+        Some(ceiling) => ceiling,
+        None => NonZeroU32::MIN,
+    })
 }
 
 /// A receiver whose duplicate suppression is bounded by a window.

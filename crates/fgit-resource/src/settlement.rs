@@ -219,7 +219,7 @@ pub struct ReconcilePlan {
 impl ReconcilePlan {
     /// Starts a plan for one idempotency key.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         key: IdempotencyKey,
         idempotency: DownstreamIdempotency,
         policy: ReconcilePolicy,
@@ -310,7 +310,7 @@ impl ReconcilePlan {
         self.state
     }
 
-    fn after_delivery(&self, attempt: u32, verdict: DeliveryVerdict) -> ReconcileState {
+    const fn after_delivery(&self, attempt: u32, verdict: DeliveryVerdict) -> ReconcileState {
         match verdict {
             DeliveryVerdict::Accepted | DeliveryVerdict::DuplicateSuppressed => {
                 ReconcileState::Delivered { attempt }
@@ -323,7 +323,7 @@ impl ReconcilePlan {
         }
     }
 
-    fn after_probe(&self, attempt: u32, verdict: ProbeVerdict) -> ReconcileState {
+    const fn after_probe(&self, attempt: u32, verdict: ProbeVerdict) -> ReconcileState {
         match verdict {
             ProbeVerdict::Delivered => ReconcileState::Delivered { attempt },
             ProbeVerdict::NotDelivered => self.next_attempt(attempt),
@@ -342,7 +342,7 @@ impl ReconcilePlan {
         }
     }
 
-    fn next_attempt(&self, attempt: u32) -> ReconcileState {
+    const fn next_attempt(&self, attempt: u32) -> ReconcileState {
         let next = attempt.saturating_add(1);
         if next > self.policy.max_attempts() {
             ReconcileState::Indeterminate {

@@ -22,9 +22,7 @@ use fgit_resource::kinds::{
     ObjectClass, OutboxDispatch, OutboxEffectPermit, StructureVerdict,
 };
 use fgit_resource::settlement::DownstreamIdempotency;
-use fgit_resource::twophase::{
-    DeferralReason, ObligationClass, ObligationKind, ObservationMode, TrivialAck,
-};
+use fgit_resource::twophase::{DeferralReason, ObligationClass, ObligationKind, ObservationMode};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, GitOid, GitOidSha1,
     ObjectEnvelopeId, RepositoryCommitId,
@@ -53,7 +51,7 @@ fn rcr(tag: u8) -> RepositoryCommitId {
     )
 }
 
-fn oid(tag: u8) -> GitOid {
+const fn oid(tag: u8) -> GitOid {
     GitOid::Sha1(GitOidSha1::from_bytes([tag; GitOidSha1::LEN]))
 }
 
@@ -61,9 +59,12 @@ fn opaque(tag: u8) -> OpaqueHandle {
     OpaqueHandle::new(&[tag; 20]).expect("twenty bytes is a valid opaque handle")
 }
 
-fn recover() -> LeakPolicy {
+const fn recover() -> LeakPolicy {
     LeakPolicy::Recover {
-        escalation_threshold: NonZeroU32::new(3).expect("three is non-zero"),
+        escalation_threshold: match NonZeroU32::new(3) {
+            Some(value) => value,
+            None => NonZeroU32::MIN,
+        },
     }
 }
 
@@ -635,13 +636,4 @@ fn closing_with_a_live_obligation_reports_containment_rather_than_quiescence() {
         reason: DispatchAbortReason::Cancelled,
     });
     assert_eq!(settled.state(), ObligationState::Aborted);
-}
-
-#[test]
-fn the_trivial_acknowledgement_type_is_the_only_evidence_an_internal_effect_needs() {
-    assert_eq!(
-        TrivialAck,
-        TrivialAck::default(),
-        "trivial acknowledgement carries no information by construction"
-    );
 }

@@ -30,7 +30,7 @@ impl Prng {
         Self(seed)
     }
 
-    fn next_u64(&mut self) -> u64 {
+    const fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -290,9 +290,12 @@ fn masking_partitions_an_amount_by_disposition() {
     assert_eq!(returnable.get(Grade::MoneyMicros), 0);
 }
 
-fn recover_policy() -> LeakPolicy {
+const fn recover_policy() -> LeakPolicy {
     LeakPolicy::Recover {
-        escalation_threshold: NonZeroU32::new(4).expect("four is non-zero"),
+        escalation_threshold: match NonZeroU32::new(4) {
+            Some(value) => value,
+            None => NonZeroU32::MIN,
+        },
     }
 }
 
