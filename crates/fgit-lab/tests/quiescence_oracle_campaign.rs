@@ -32,8 +32,9 @@ use fgit_resource::twophase::{
     DeferralReason, ExternallyObserved, InternalEffect, ObligationClass, ObligationKind,
 };
 use fgit_resource::{
-    Grade, IdempotencyKey, LeakDisposition, ObligationLedger, ObligationState, OpaqueHandle,
-    RegionCloseOutcome, RegionId, ResourceVector,
+    Grade, IdempotencyKey, LeakDisposition, LedgerRecord, LifecycleEvent, ObligationId,
+    ObligationLedger, ObligationState, OpaqueHandle, RecordAmounts, RegionCloseOutcome, RegionId,
+    ReplayError, ResourceVector, replay_journal,
 };
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, EvidenceRecordId,
@@ -174,7 +175,43 @@ fn campaign_ledger<K: ObligationKind>(value: u64) -> (ObligationLedger, Resource
     )
 }
 
+fn assert_journal_replays_to(
+    ledger: &ObligationLedger,
+    id: ObligationId,
+    expected: ObligationState,
+) {
+    let journal = ledger.journal();
+    assert!(
+        !journal.is_empty(),
+        "{} must journal its reservation and lifecycle transitions",
+        ledger.region()
+    );
+    assert!(
+        journal
+            .iter()
+            .all(|record| record.region() == ledger.region()),
+        "a region journal must not mix evidence from another region"
+    );
+    let replayed = replay_journal(&journal)
+        .unwrap_or_else(|error| panic!("{} journal must replay: {error:?}", ledger.region()));
+    assert_eq!(
+        replayed.get(&id),
+        Some(&expected),
+        "replay must reconstruct the actual terminal or explicitly outstanding state"
+    );
+}
+
+fn assert_journal_replays_only_terminal_states(ledger: &ObligationLedger, class: ObligationClass) {
+    let replayed = replay_journal(&ledger.journal())
+        .unwrap_or_else(|error| panic!("{class} journal must replay: {error:?}"));
+    assert!(
+        replayed.values().all(|state| state.is_terminal()),
+        "{class} clean cancellation path must leave no replayed live obligation: {replayed:?}"
+    );
+}
+
 fn assert_quiescent(ledger: ObligationLedger, class: ObligationClass) {
+    assert_journal_replays_only_terminal_states(&ledger, class);
     let outcome = ledger.close();
     assert!(
         outcome.is_quiescent(),
@@ -248,6 +285,8 @@ fn cancel_after_external_commit<K: ExternallyObserved>(
         .unwrap_or_else(|error| panic!("{} commit must fit its reservation: {error}", K::CLASS))
         .defer_acknowledgement(DeferralReason::CancelledAfterCommit);
 
+    assert_journal_replays_to(&ledger, id, ObligationState::DeferredExternally);
+
     let outcome = ledger.close();
     let RegionCloseOutcome::ContainmentFailure(failure) = outcome else {
         panic!(
@@ -298,7 +337,10 @@ fn seeded_reserved_leak_is_caught<K: ObligationKind>(value: u64, reservation: K:
     let obligation = ledger
         .reserve::<K>(reservation, grant)
         .unwrap_or_else(|error| panic!("{} reservation must be admitted: {error}", K::CLASS));
+    let id = obligation.id();
     drop(obligation);
+
+    assert_journal_replays_to(&ledger, id, ObligationState::Leaked);
 
     let outcome = ledger.close();
     let observer = RegionCloseObserver::new(region(value), 1);
@@ -965,12 +1007,15 @@ fn a_committed_but_unacknowledged_effect_retries_under_its_original_key() {
         endpoint: opaque(85),
         idempotency_strength: DownstreamIdempotency::Strong,
     };
-    let effect = ledger
+    let reserved = ledger
         .reserve::<OutboxEffectPermit>(reservation, grant)
-        .expect("outbox reservation is admitted")
+        .expect("outbox reservation is admitted");
+    let effect_id = reserved.id();
+    let effect = reserved
         .commit(EffectDispatched { attempt: 1 }, &capacity)
         .expect("outbox commit fits its reservation")
         .defer_acknowledgement(DeferralReason::CancelledAfterCommit);
+    assert_journal_replays_to(&ledger, effect_id, ObligationState::DeferredExternally);
     let mut plan = ReconcilePlan::new(
         key,
         DownstreamIdempotency::Strong,
@@ -1004,4 +1049,105 @@ fn a_committed_but_unacknowledged_effect_retries_under_its_original_key() {
         "the reconciliation plan probes an ambiguous commit before retrying it"
     );
     assert_quiescent(ledger, ObligationClass::OutboxEffectPermit);
+}
+
+#[test]
+fn journal_replay_preserves_accounting_and_refuses_a_tampered_transition() {
+    let (ledger, capacity) = campaign_ledger::<ObjectAdmissionPermit>(601);
+    let grant = ledger
+        .grant(capacity)
+        .expect("object-admission capacity is grantable");
+    let reservation = ObjectAdmission {
+        class: ObjectClass::GitObject,
+        declared_len: 1,
+        staging: envelope(88),
+    };
+    let reserved = ledger
+        .reserve::<ObjectAdmissionPermit>(reservation, grant)
+        .expect("object admission is admitted");
+    let id = reserved.id();
+    let _aborted = reserved.abort_unused(AdmissionAbandoned {
+        reason: AdmissionAbortReason::Cancelled,
+    });
+
+    let journal = ledger.journal();
+    assert_eq!(
+        journal.len(),
+        2,
+        "one reservation and one abort are journalled"
+    );
+    let opening = journal[0];
+    let aborted = journal[1];
+    assert_eq!(opening.obligation(), id);
+    assert_eq!(opening.class(), ObligationClass::ObjectAdmissionPermit);
+    assert_eq!(opening.event(), None);
+    assert_eq!(opening.state(), ObligationState::Reserved);
+    assert_eq!(opening.reserved(), capacity);
+    assert_eq!(opening.charged(), ResourceVector::ZERO);
+    assert_eq!(aborted.event(), Some(LifecycleEvent::Abort));
+    assert_eq!(aborted.state(), ObligationState::Aborted);
+    assert_eq!(aborted.reserved(), ResourceVector::ZERO);
+    assert_eq!(aborted.charged(), ResourceVector::ZERO);
+    assert_journal_replays_to(&ledger, id, ObligationState::Aborted);
+
+    let tampered = LedgerRecord::new(
+        aborted.region(),
+        aborted.ordinal(),
+        aborted.obligation(),
+        aborted.class(),
+        aborted.event(),
+        ObligationState::Committed,
+        RecordAmounts {
+            reserved: aborted.reserved(),
+            charged: aborted.charged(),
+        },
+    );
+    assert!(matches!(
+        replay_journal(&[opening, tampered]),
+        Err(ReplayError::StateDisagreement {
+            obligation,
+            recorded: ObligationState::Committed,
+            replayed: ObligationState::Aborted,
+        }) if obligation == id
+    ));
+    assert_quiescent(ledger, ObligationClass::ObjectAdmissionPermit);
+}
+
+fn write_campaign_receipt_if_requested() {
+    let Some(directory) = std::env::var_os("FGIT_OBLIGATION_CAMPAIGN_ARTIFACT_DIR") else {
+        return;
+    };
+    let receipt_path = std::path::PathBuf::from(directory).join("obligation-quiescence.ndjson");
+    const RECEIPT: &str = concat!(
+        "{\"schema\":\"fgit.obligation-quiescence.v1\",",
+        "\"verdict\":\"quiescent\",",
+        "\"obligation_classes\":11,",
+        "\"boundaries\":4,",
+        "\"seeded_leaks_caught\":true,",
+        "\"replay_complete\":true,",
+        "\"post_commit_retry_idempotent\":true,",
+        "\"unacknowledged_record_observed\":true}\n"
+    );
+    std::fs::write(&receipt_path, RECEIPT).unwrap_or_else(|error| {
+        panic!(
+            "the configured FG012b artifact directory must accept the campaign receipt at {}: {error}",
+            receipt_path.display()
+        )
+    });
+}
+
+#[test]
+fn e2e_receipt_is_written_only_after_the_complete_campaign_passes() {
+    an_actual_live_grant_cannot_be_hidden_by_campaign_bookkeeping();
+    bounded_non_cooperation_is_non_passing_after_the_declared_drain_bound();
+    live_work_before_the_drain_bound_is_refused_not_mislabeled_as_bounded();
+    settled_tasks_and_released_non_secret_lease_allow_a_quiescent_close();
+    a_public_lease_label_refuses_secret_shaped_input_and_accepts_a_stable_identifier();
+    evidence_for_a_different_region_is_refused_instead_of_misclassified();
+    every_internal_obligation_settles_at_each_real_cancellation_boundary();
+    every_external_obligation_records_or_settles_each_real_cancellation_boundary();
+    deliberately_dropped_real_obligations_are_caught_for_every_concrete_class();
+    a_committed_but_unacknowledged_effect_retries_under_its_original_key();
+    journal_replay_preserves_accounting_and_refuses_a_tampered_transition();
+    write_campaign_receipt_if_requested();
 }
