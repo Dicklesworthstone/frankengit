@@ -905,7 +905,7 @@ fn collect_content_keeps_referenced_bodies() {
     );
 }
 
-/// `FileMode` parses only the two modes TreeFS will create, and refuses the
+/// `FileMode` parses only the two modes `TreeFS` will create, and refuses the
 /// rest rather than coercing them.
 #[test]
 fn file_mode_parses_only_what_treefs_creates() {

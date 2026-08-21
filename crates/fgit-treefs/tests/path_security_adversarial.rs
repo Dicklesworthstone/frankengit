@@ -1,12 +1,12 @@
 //! Independent adversarial path and capability corpus for FG-026b.
 //!
-//! This file is intentionally a consumer of the public TreeFS API only. It
+//! This file is intentionally a consumer of the public `TreeFS` API only. It
 //! must never repair an implementation defect in place: every negative below
 //! is a path an untrusted repository, tool, or caller can actually present.
 //! The paired permitted cases prevent an all-refusal implementation from being
 //! counted as secure.
 //!
-//! The secret scanner is test evidence, not an enforcement boundary. TreeFS
+//! The secret scanner is test evidence, not an enforcement boundary. `TreeFS`
 //! currently has no brokered secret-handle type; until one exists, arbitrary
 //! bytes can enter an overlay. The seeded scanner test proves the detector can
 //! see such a leak and is deliberately explicit about that applicability limit.
@@ -34,7 +34,7 @@ fn path(bytes: &[u8]) -> TreePath {
     TreePath::parse_default(bytes).expect("adversarial fixture path parses")
 }
 
-fn repository_id() -> RepositoryId {
+const fn repository_id() -> RepositoryId {
     RepositoryId::from_bytes([0x26; 16])
 }
 
@@ -73,7 +73,7 @@ impl MemorySource {
         self.insert(GitObjectKind::Tree, body)
     }
 
-    fn reads(&self) -> usize {
+    const fn reads(&self) -> usize {
         self.reads.get()
     }
 }
@@ -343,7 +343,7 @@ fn plan_contains(plan: &fgit_treefs::export::ExportPlan<Sha1>, needle: &[u8]) ->
 
 /// Detector self-test: a planted secret reaches every current in-memory layer
 /// and the test-only detector catches it. This is negative evidence for the
-/// absent secret-handle broker, not a claim that raw TreeFS content is secret
+/// absent secret-handle broker, not a claim that raw `TreeFS` content is secret
 /// safe today.
 #[test]
 fn seeded_secret_detector_catches_overlay_effect_and_export_leaks() {

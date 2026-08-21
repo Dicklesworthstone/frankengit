@@ -274,6 +274,10 @@ impl FetchLedger {
         }
         guard.files = next_files;
         guard.bytes = next_bytes;
+        // Released before returning rather than at end of scope. The lock guards
+        // two counters that move together; holding it a moment longer than the
+        // update serialises every other charger against nothing.
+        drop(guard);
         Ok(())
     }
 }

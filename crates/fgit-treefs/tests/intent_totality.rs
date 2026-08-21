@@ -37,7 +37,7 @@ fn write(target: &[u8], body: &[u8]) -> TreeEditIntent {
 }
 
 /// Nothing exists in the base, so every effect here comes from the log itself.
-fn empty_base(_path: &TreePath) -> bool {
+const fn empty_base(_path: &TreePath) -> bool {
     false
 }
 

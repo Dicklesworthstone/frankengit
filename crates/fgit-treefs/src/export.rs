@@ -640,10 +640,11 @@ impl ExportPlanner {
                     //                      carried forward verbatim, which is
                     //                      what keeps untouched subtrees from
                     //                      being dropped.
-                    let resolved_oid = match rebuilt.get(&child) {
-                        Some(rebuilt_oid) => *rebuilt_oid,
-                        None => base_oid,
-                    };
+                    // `rebuilt` holds Option<GitOid>, so `copied()` keeps the
+                    // rebuilt-to-empty case (Some(None)) distinct from the
+                    // never-touched case (None) -- collapsing those two is what
+                    // caused the deletes-reverted defect this arm exists to fix.
+                    let resolved_oid = rebuilt.get(&child).copied().unwrap_or(base_oid);
                     match resolved_oid {
                         Some(oid) => TreeEntry {
                             mode: MODE_TREE.to_vec(),

@@ -5,7 +5,7 @@
 //! the code and in the test at the same time, because one person wrote both. This
 //! test removes that shared assumption: `scripts/e2e/suites/treefs/export_crash.sh`
 //! builds each case with the pinned sandboxed Git oracle, dumps every object Git
-//! itself wrote, and hands the corpus here through the environment. FrankenGit is
+//! itself wrote, and hands the corpus here through the environment. `FrankenGit` is
 //! then given the same base objects and the same edit list and must arrive at the
 //! same root tree identity and the same tree bytes.
 //!
@@ -248,7 +248,7 @@ fn push_with_ancestors(out: &mut Vec<TreePath>, rel: &str) {
 // case execution
 // ---------------------------------------------------------------------------
 
-fn repository_id() -> RepositoryId {
+const fn repository_id() -> RepositoryId {
     RepositoryId::from_bytes([7; 16])
 }
 
