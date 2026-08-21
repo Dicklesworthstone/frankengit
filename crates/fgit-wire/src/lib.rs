@@ -775,6 +775,11 @@ impl Capabilities {
     /// Parses whitespace-separated v0/v1 capability tokens.
     pub fn parse_v1(tokens: &[u8], limits: &WireLimits) -> Result<Self, WireError> {
         let mut capabilities = Self::default();
+        // receive-pack's NUL-separated capability suffix is emitted by Git
+        // with one leading space. It is a separator, not an empty capability;
+        // any further leading, interior, or trailing separator remains a
+        // typed malformed-token refusal below.
+        let tokens = tokens.strip_prefix(b" ").unwrap_or(tokens);
         for token in tokens.split(|byte| *byte == b' ') {
             if token.is_empty() {
                 return Err(WireError::EmptyCapability);
@@ -904,6 +909,24 @@ fn line_without_lf(line: &[u8]) -> Result<&[u8], WireError> {
     let Some((&b'\n', text)) = line.split_last() else {
         return Err(WireError::MissingLineFeed);
     };
+    if text.contains(&b'\n') || text.contains(&b'\r') || text.contains(&0) {
+        return Err(WireError::MalformedRequestLine {
+            line: line.to_vec(),
+        });
+    }
+    Ok(text)
+}
+
+/// Parses a client request pkt-line payload.
+///
+/// Git's server advertisements use LF-terminated records, but client request
+/// records are mixed: `want` and v2 command records may have LF while v2
+/// capabilities and several fetch controls are deliberately sent without it.
+/// Accepting either terminal form is therefore required for native Git
+/// clients. Embedded controls are still invalid, so this does not turn a
+/// pkt-line payload into a multi-record transport.
+fn request_line(line: &[u8]) -> Result<&[u8], WireError> {
+    let text = line.strip_suffix(b"\n").unwrap_or(line);
     if text.contains(&b'\n') || text.contains(&b'\r') || text.contains(&0) {
         return Err(WireError::MalformedRequestLine {
             line: line.to_vec(),
@@ -1650,6 +1673,7 @@ pub struct LegacyUploadPack {
     filter: Option<ObjectFilter>,
     ack_mode: AckMode,
     options: PackOptions,
+    no_done: bool,
     last_common: Option<AnyGitOid>,
     saw_want_capabilities: bool,
 }
@@ -1683,6 +1707,7 @@ impl LegacyUploadPack {
             filter: None,
             ack_mode: AckMode::None,
             options: PackOptions::NONE,
+            no_done: false,
             last_common: None,
             saw_want_capabilities: false,
         })
@@ -1752,7 +1777,7 @@ impl LegacyUploadPack {
         line: &[u8],
         repository: &impl UploadPackRepository,
     ) -> Result<Transition, WireError> {
-        let line = line_without_lf(line)?;
+        let line = request_line(line)?;
         if let Some(rest) = line.strip_prefix(b"want ") {
             return self.accept_want(rest, repository);
         }
@@ -1853,13 +1878,27 @@ impl LegacyUploadPack {
         packet: &Packet,
         repository: &impl UploadPackRepository,
     ) -> Result<Transition, WireError> {
+        if matches!(packet, Packet::Flush) {
+            if !self.no_done {
+                return Err(WireError::IllegalTransition {
+                    state: "legacy have phase",
+                    packet: packet_name(packet),
+                });
+            }
+            self.state = LegacyState::Complete;
+            let mut transition = self.final_ack_transition();
+            transition
+                .events
+                .push(WireEvent::PackRequested(self.pack_request()));
+            return Ok(transition);
+        }
         let Packet::Data(line) = packet else {
             return Err(WireError::IllegalTransition {
                 state: "legacy have phase",
                 packet: packet_name(packet),
             });
         };
-        let line = line_without_lf(line)?;
+        let line = request_line(line)?;
         if let Some(rest) = line.strip_prefix(b"have ") {
             let oid = parse_object_id(rest, repository.object_format())?;
             push_unique_oid("have", oid, &mut self.haves, self.limits.max_haves)?;
@@ -1904,6 +1943,7 @@ impl LegacyUploadPack {
                 b"include-tag" => self.options = self.options.with(PackOptions::INCLUDE_TAG),
                 b"ofs-delta" => self.options = self.options.with(PackOptions::OFS_DELTA),
                 b"no-progress" => self.options = self.options.with(PackOptions::NO_PROGRESS),
+                b"no-done" => self.no_done = true,
                 _ => {}
             }
         }
@@ -2110,7 +2150,7 @@ impl V2UploadPack {
                 packet: packet_name(packet),
             });
         };
-        let line = line_without_lf(line)?;
+        let line = request_line(line)?;
         let Some(command) = line.strip_prefix(b"command=") else {
             return Err(WireError::MalformedRequestLine {
                 line: line.to_vec(),
@@ -2145,7 +2185,7 @@ impl V2UploadPack {
     ) -> Result<Transition, WireError> {
         match packet {
             Packet::Data(line) => {
-                let token = line_without_lf(line)?;
+                let token = request_line(line)?;
                 let capability = Capability::parse_v2(token, &self.limits)?;
                 if !self.server_capabilities.contains(&capability.name) {
                     return Err(WireError::UnknownCapability {
@@ -2174,7 +2214,7 @@ impl V2UploadPack {
     ) -> Result<Transition, WireError> {
         match packet {
             Packet::Data(line) => {
-                let line = line_without_lf(line)?;
+                let line = request_line(line)?;
                 match command {
                     V2Command::LsRefs => self.accept_ls_refs_argument(line),
                     V2Command::Fetch => self.accept_fetch_argument(line, repository),

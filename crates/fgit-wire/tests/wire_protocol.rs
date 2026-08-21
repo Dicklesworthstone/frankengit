@@ -10,6 +10,7 @@ use fgit_wire::{
 
 const WANT: &str = "1111111111111111111111111111111111111111";
 const HAVE: &str = "2222222222222222222222222222222222222222";
+const ORACLE_WANT: &str = "ba6bb24deaace591e8936c9e8de324de298cedc6";
 
 #[derive(Clone, Debug)]
 struct Repository {
@@ -24,6 +25,15 @@ impl Repository {
         let common = AnyGitOid::from_hex(GitObjectFormat::Sha1, HAVE).expect("fixture SHA-1 have");
         let refs =
             vec![AdvertisedRef::new(want, b"refs/heads/main", &limits).expect("fixture ref")];
+        Self { refs, common }
+    }
+
+    fn with_want(want: AnyGitOid) -> Self {
+        let limits = WireLimits::default();
+        let common = AnyGitOid::from_hex(GitObjectFormat::Sha1, HAVE).expect("fixture SHA-1 have");
+        let refs = vec![
+            AdvertisedRef::new(want, b"refs/heads/master", &limits).expect("oracle fixture ref"),
+        ];
         Self { refs, common }
     }
 }
@@ -246,6 +256,57 @@ fn multi_ack_mode_emits_continue_for_each_common_have() {
 }
 
 #[test]
+fn legacy_terminal_flush_requires_no_done_and_accepts_the_negotiated_twin() {
+    let repository = Repository::sha1();
+    let limits = WireLimits::default();
+    let mut without_no_done = LegacyUploadPack::new(
+        UploadPackVersion::V0,
+        Capabilities::parse_v1(b"multi_ack", &limits).expect("capabilities"),
+        limits.clone(),
+    )
+    .expect("legacy request machine");
+    without_no_done
+        .push_packet(
+            &Packet::Data(format!("want {WANT} multi_ack").into_bytes()),
+            &repository,
+        )
+        .expect("want without line feed is permitted");
+    without_no_done
+        .push_packet(&Packet::Flush, &repository)
+        .expect("want flush");
+    assert_eq!(
+        without_no_done.push_packet(&Packet::Flush, &repository),
+        Err(WireError::IllegalTransition {
+            state: "legacy have phase",
+            packet: "flush",
+        })
+    );
+
+    let mut with_no_done = LegacyUploadPack::new(
+        UploadPackVersion::V0,
+        Capabilities::parse_v1(b"no-done", &limits).expect("no-done capability"),
+        limits,
+    )
+    .expect("legacy request machine");
+    with_no_done
+        .push_packet(
+            &Packet::Data(format!("want {WANT} no-done").into_bytes()),
+            &repository,
+        )
+        .expect("want with no-done is permitted");
+    with_no_done
+        .push_packet(&Packet::Flush, &repository)
+        .expect("want flush");
+    let transition = with_no_done
+        .push_packet(&Packet::Flush, &repository)
+        .expect("negotiated no-done permits terminal flush");
+    assert!(matches!(
+        transition.events.as_slice(),
+        [WireEvent::PackRequested(_)]
+    ));
+}
+
+#[test]
 fn v2_ls_refs_transcript_filters_advertisement() {
     let repository = Repository::sha1();
     let caps = Capabilities::parse_v1(b"ls-refs", &WireLimits::default()).expect("ls-refs cap");
@@ -263,6 +324,93 @@ fn v2_ls_refs_transcript_filters_advertisement() {
         transition.events.as_slice(),
         [WireEvent::LsRefs { .. }]
     ));
+}
+
+#[test]
+fn pinned_oracle_v2_ls_refs_request_accepts_lf_free_capabilities() {
+    let repository = Repository::sha1();
+    let caps = Capabilities::parse_v1(b"ls-refs agent object-format", &WireLimits::default())
+        .expect("advertised v2 capability names");
+    let mut machine = V2UploadPack::new(caps, WireLimits::default()).expect("v2 machine");
+    let transition = machine
+        .push_bytes(
+            fixture_bytes(include_bytes!("fixtures/oracle-v2-ls-refs-request.pkt")),
+            &repository,
+        )
+        .expect("pinned Git 2.54.0 ls-refs transcript");
+
+    assert!(matches!(
+        transition.events.as_slice(),
+        [WireEvent::LsRefs {
+            symrefs: true,
+            peel: true,
+            unborn: true,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn pinned_oracle_v0_no_done_depth_request_accepts_lf_free_deepen_and_two_flushes() {
+    let oracle_want =
+        AnyGitOid::from_hex(GitObjectFormat::Sha1, ORACLE_WANT).expect("oracle want OID");
+    let repository = Repository::with_want(oracle_want);
+    let caps = Capabilities::parse_v1(
+        b"multi_ack_detailed no-done side-band-64k no-progress ofs-delta deepen-since deepen-not agent shallow",
+        &WireLimits::default(),
+    )
+    .expect("oracle server capabilities");
+    let mut machine =
+        LegacyUploadPack::new(UploadPackVersion::V0, caps, WireLimits::default()).expect("machine");
+    let completed = machine
+        .push_bytes(
+            fixture_bytes(include_bytes!("fixtures/oracle-v0-depth-request.pkt")),
+            &repository,
+        )
+        .expect("pinned Git 2.54.0 depth transcript");
+    assert_eq!(completed.output.len(), 2);
+    assert!(
+        completed
+            .output
+            .iter()
+            .all(|packet| matches!(packet, Packet::Data(line) if line == b"NAK\n"))
+    );
+    let Some(WireEvent::PackRequested(request)) = completed.events.last() else {
+        panic!("no-done terminal flush requests a pack");
+    };
+    assert_eq!(request.deepen, Some(1));
+
+    let mut refusal = LegacyUploadPack::new(
+        UploadPackVersion::V0,
+        Capabilities::parse_v1(b"shallow", &WireLimits::default()).expect("shallow cap"),
+        WireLimits::default(),
+    )
+    .expect("refusal machine");
+    refusal
+        .push_packet(
+            &Packet::Data(format!("want {ORACLE_WANT}").into_bytes()),
+            &repository,
+        )
+        .expect("LF-free want is permitted");
+    assert_eq!(
+        refusal.push_packet(&Packet::Data(b"deepen -1".to_vec()), &repository),
+        Err(WireError::NegativeDepth)
+    );
+}
+
+#[test]
+fn receive_capability_prefix_accepts_one_git_separator_and_refuses_two() {
+    assert!(
+        Capabilities::parse_v1(
+            b" report-status-v2 side-band-64k object-format=sha1",
+            &WireLimits::default(),
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        Capabilities::parse_v1(b"  report-status-v2", &WireLimits::default()),
+        Err(WireError::EmptyCapability)
+    );
 }
 
 #[test]
