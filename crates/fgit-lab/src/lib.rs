@@ -60,6 +60,7 @@ pub mod journal;
 pub mod minimize;
 pub mod plan;
 pub mod probe;
+pub mod quiescence;
 pub mod receipt;
 pub mod refuse;
 pub mod rng;
@@ -82,6 +83,7 @@ pub use minimize::{
 };
 pub use plan::{LabSchedule, StepCursor, StepId};
 pub use probe::{CoverageReport, FailpointId, FailpointRegistry};
+pub use quiescence::{RegionCloseObserver, RegionVerdict};
 pub use receipt::{
     BuildIdentity, CoverageReceipt, DeclaredBounds, ExternalArtifact, RECEIPT_VERSION,
     ReplayCompleteness,

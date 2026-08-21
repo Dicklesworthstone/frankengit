@@ -127,6 +127,18 @@ pub enum LabRefusal {
         /// The signature the replay actually produced.
         observed: String,
     },
+    /// Close evidence was folded against a different region's observations.
+    ///
+    /// A verdict built from one region's ledger and another's lab observations
+    /// describes neither. This is the same class of error as a stale read or a
+    /// benchmark attributed to the wrong crate: a real measurement bound to
+    /// the wrong subject.
+    RegionEvidenceMismatch {
+        /// The region the observer watched.
+        expected: u64,
+        /// The region the close evidence describes.
+        observed: u64,
+    },
     /// A deterministic receipt was offered as evidence for a native class.
     ///
     /// Lab evidence is evidence about the model, not about parked workers, OS
@@ -159,6 +171,7 @@ impl LabRefusal {
             Self::StressIsNotCoverage { .. } => "lab.coverage.stress_is_not_coverage",
             Self::ReplayDrift { .. } => "lab.replay.drift",
             Self::CausalSignatureMismatch { .. } => "lab.replay.causal_signature_mismatch",
+            Self::RegionEvidenceMismatch { .. } => "lab.region.evidence_mismatch",
             Self::DeterministicEvidenceForNativeClass { .. } => {
                 "lab.evidence.deterministic_for_native_class"
             }
@@ -259,6 +272,11 @@ impl fmt::Display for LabRefusal {
                 f,
                 "replay reproduced a different failure: expected `{expected}`, observed \
                  `{observed}`"
+            ),
+            Self::RegionEvidenceMismatch { expected, observed } => write!(
+                f,
+                "region-close evidence mismatch: observer watched region {expected}, evidence \
+                 describes region {observed}"
             ),
             Self::DeterministicEvidenceForNativeClass { class } => write!(
                 f,
