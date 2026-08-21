@@ -11,6 +11,7 @@ publish = false
 # the measured closure this crate is waiting on.
 [dependencies]
 fgit-authority.workspace = true
+fgit-codec.workspace = true
 fgit-types.workspace = true
 
 [lints]

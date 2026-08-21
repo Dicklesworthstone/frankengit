@@ -51,12 +51,23 @@
 //! [`AuthorityStore`]: fgit_authority::AuthorityStore
 
 mod envelope;
+mod interpret;
+mod portable;
 mod retry;
 mod schema;
 mod token;
 
 pub use crate::envelope::{
     ConcurrencyEnvelope, EnvelopeRefusal, MAX_ADMITTED_AUTOCOMMIT_WRITERS, WriterTopology,
+};
+pub use crate::interpret::{
+    CasStep, DisambiguationRefusal, HeadInitStep, ObservedHead, PutStep, compare_stored_body,
+    disambiguate_compare_exchange, interpret_compare_exchange, interpret_head_create,
+    interpret_put_if_absent,
+};
+pub use crate::portable::{
+    BundleRefusal, ExportBundle, ExportedBody, ExportedHead, ExportedIssuance, MAX_EXPORT_BODIES,
+    MAX_EXPORT_ISSUANCE, bundle_head_generation, export_bundle, import_bundle,
 };
 pub use crate::retry::{
     BackoffPlan, MAX_TRANSIENT_ATTEMPTS, RetryBudget, RetryExhausted, RetryOutcome, TransientClass,
