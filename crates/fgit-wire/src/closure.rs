@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use fgit_crypto::sha256_digest;
+use fgit_crypto::{DigestHasher, Sha256Hasher};
 
 use crate::{AnyGitOid, GitObjectFormat, ObjectFilter, ObjectType, PackRequest};
 
@@ -712,24 +712,24 @@ const fn omission_reason_code(reason: OmissionReason) -> u8 {
 }
 
 fn omission_commitment(omissions: &[PromisorOmission]) -> [u8; 32] {
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"fgit-promisor-omissions-v1\0");
+    let mut hasher = Sha256Hasher::new();
+    hasher.update(b"fgit-promisor-omissions-v1\0");
     for omission in omissions {
-        bytes.extend_from_slice(&omission.oid.algorithm().code_point().to_be_bytes());
-        bytes.extend_from_slice(omission.oid.as_bytes());
-        bytes.push(object_type_code(omission.object_type));
+        hasher.update(&omission.oid.algorithm().code_point().to_be_bytes());
+        hasher.update(omission.oid.as_bytes());
+        hasher.update(&[object_type_code(omission.object_type)]);
         match omission.parent {
             Some(parent) => {
-                bytes.push(1);
-                bytes.extend_from_slice(&parent.algorithm().code_point().to_be_bytes());
-                bytes.extend_from_slice(parent.as_bytes());
+                hasher.update(&[1]);
+                hasher.update(&parent.algorithm().code_point().to_be_bytes());
+                hasher.update(parent.as_bytes());
             }
-            None => bytes.push(0),
+            None => hasher.update(&[0]),
         }
-        bytes.extend_from_slice(&omission.depth.to_be_bytes());
-        bytes.push(omission_reason_code(omission.reason));
+        hasher.update(&omission.depth.to_be_bytes());
+        hasher.update(&[omission_reason_code(omission.reason)]);
     }
-    sha256_digest(&bytes)
+    hasher.finish()
 }
 
 const fn limit_error(field: &'static str, limit: usize) -> ClosureError {

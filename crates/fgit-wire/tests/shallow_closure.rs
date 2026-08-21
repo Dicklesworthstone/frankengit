@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
+use fgit_crypto::sha256_digest;
 use fgit_wire::closure::{
     ClosureError, ClosureLimits, ClosureObject, ClosureObjectId, ClosureTreeEntry, CommitNode,
-    ObjectClosureRepository, compute_authenticated_lazy_fetch_closure, compute_pack_closure,
+    ObjectClosureRepository, OmissionReason, PromisorOmission,
+    compute_authenticated_lazy_fetch_closure, compute_pack_closure,
 };
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, ObjectFilter, ObjectType, PackOptions,
@@ -276,6 +278,60 @@ fn combined_filters_mark_authenticated_omissions_and_reject_leaks() {
             object_type: ObjectType::Blob,
         })
     );
+}
+
+#[test]
+fn promisor_manifest_commitment_matches_canonical_one_shot_encoding() {
+    let graph = FixtureGraph::with_filter_tree();
+    let mut request = request(vec![oid(TOP)]);
+    request.filter = Some(ObjectFilter::Combine(vec![
+        ObjectFilter::BlobNone,
+        ObjectFilter::TreeDepth(0),
+    ]));
+    let closure = compute_pack_closure(&graph, &request, &ClosureLimits::default())
+        .expect("filtered closure");
+
+    assert_eq!(
+        closure.promisor.commitment,
+        sha256_digest(&canonical_omission_encoding(&closure.promisor.omissions))
+    );
+}
+
+fn canonical_omission_encoding(omissions: &[PromisorOmission]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"fgit-promisor-omissions-v1\0");
+    for omission in omissions {
+        bytes.extend_from_slice(&omission.oid.algorithm().code_point().to_be_bytes());
+        bytes.extend_from_slice(omission.oid.as_bytes());
+        bytes.push(object_type_code(omission.object_type));
+        match omission.parent {
+            Some(parent) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&parent.algorithm().code_point().to_be_bytes());
+                bytes.extend_from_slice(parent.as_bytes());
+            }
+            None => bytes.push(0),
+        }
+        bytes.extend_from_slice(&omission.depth.to_be_bytes());
+        bytes.push(omission_reason_code(omission.reason));
+    }
+    bytes
+}
+
+const fn object_type_code(object_type: ObjectType) -> u8 {
+    match object_type {
+        ObjectType::Blob => 1,
+        ObjectType::Tree => 2,
+        ObjectType::Commit => 3,
+        ObjectType::Tag => 4,
+    }
+}
+
+const fn omission_reason_code(reason: OmissionReason) -> u8 {
+    match reason {
+        OmissionReason::BlobFilter => 1,
+        OmissionReason::TreeDepth => 2,
+    }
 }
 
 #[test]
