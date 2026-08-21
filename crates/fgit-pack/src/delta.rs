@@ -285,6 +285,247 @@ where
     }
 }
 
+/// A bounded cache over the scalar resolver. It preserves the scalar
+/// resolver's logical expansion/work charging, so a cache hit cannot turn a
+/// resource refusal into success; it only avoids recomputing already-proven
+/// delta bytes.
+pub struct CachedResolver<'objects, 'lookup, L> {
+    scalar: ScalarResolver<'objects, 'lookup, L>,
+    entries: Vec<CacheEntry>,
+    cached_bytes: usize,
+}
+
+struct CacheEntry {
+    offset: u64,
+    bytes: Vec<u8>,
+    logical_expanded: usize,
+    logical_work: usize,
+}
+
+impl<'objects, 'lookup, L> CachedResolver<'objects, 'lookup, L>
+where
+    L: ExternalBaseLookup,
+{
+    /// Builds an optimized resolver from exactly the scalar resolver's input
+    /// validation and immutable object graph.
+    pub fn new(
+        objects: &'objects [PackObject],
+        external_bases: &'lookup L,
+        limits: &'objects PackLimits,
+        deadline: &mut impl Deadline,
+    ) -> Result<Self, PackError> {
+        Ok(Self {
+            scalar: ScalarResolver::new(objects, external_bases, limits, deadline)?,
+            entries: Vec::new(),
+            cached_bytes: 0,
+        })
+    }
+
+    /// Resolves one offset with base-result caching while preserving scalar
+    /// output and budget semantics.
+    pub fn resolve_offset(
+        &mut self,
+        offset: u64,
+        deadline: &mut impl Deadline,
+    ) -> Result<Vec<u8>, PackError> {
+        let mut accounting = Accounting::default();
+        let object = self
+            .scalar
+            .find_by_offset(offset, &mut accounting, deadline)?
+            .ok_or(PackError::MissingDeltaBase)?;
+        let object = clone_pack_object(object, deadline)?;
+        let mut stack = Vec::new();
+        self.resolve_object(&object, 0, &mut stack, &mut accounting, deadline)
+    }
+
+    fn resolve_object(
+        &mut self,
+        object: &PackObject,
+        depth: usize,
+        stack: &mut Vec<u64>,
+        accounting: &mut Accounting,
+        deadline: &mut impl Deadline,
+    ) -> Result<Vec<u8>, PackError> {
+        checkpoint(deadline)?;
+        if let Some(cached) = self.cached(object.offset()) {
+            accounting.add_expanded(cached.logical_expanded, self.scalar.limits)?;
+            accounting.add_work(cached.logical_work, self.scalar.limits)?;
+            return copy_bytes(&cached.bytes, deadline);
+        }
+        let expanded_before = accounting.expanded;
+        let work_before = accounting.work;
+        if stack.contains(&object.offset()) {
+            return Err(PackError::DeltaCycle);
+        }
+        let result = match object {
+            PackObject::Base { data, .. } => {
+                self.scalar.limits.object_size(data.len())?;
+                accounting.add_expanded(data.len(), self.scalar.limits)?;
+                copy_bytes(data, deadline)
+            }
+            PackObject::Delta(delta) => {
+                self.scalar
+                    .validate_fanout(&delta.base, accounting, deadline)?;
+                let next_depth = depth.checked_add(1).ok_or(PackError::IntegerOverflow {
+                    context: "delta depth",
+                })?;
+                if next_depth > self.scalar.limits.max_delta_depth {
+                    return Err(PackError::DeltaDepthLimit {
+                        depth: next_depth,
+                        limit: self.scalar.limits.max_delta_depth,
+                    });
+                }
+                stack
+                    .try_reserve(1)
+                    .map_err(|_| PackError::AllocationFailed { requested: 1 })?;
+                stack.push(delta.offset);
+                let base = self.resolve_base(&delta.base, next_depth, stack, accounting, deadline);
+                let result = match base {
+                    Ok(bytes) => apply_delta_with_accounting(
+                        &bytes,
+                        &delta.program,
+                        self.scalar.limits,
+                        accounting,
+                        deadline,
+                    ),
+                    Err(error) => Err(error),
+                };
+                let popped = stack.pop();
+                debug_assert_eq!(popped, Some(delta.offset));
+                let result = result?;
+                accounting.add_expanded(result.len(), self.scalar.limits)?;
+                Ok(result)
+            }
+        }?;
+        let logical_expanded =
+            accounting
+                .expanded
+                .checked_sub(expanded_before)
+                .ok_or(PackError::IntegerOverflow {
+                    context: "cached delta expanded accounting",
+                })?;
+        let logical_work =
+            accounting
+                .work
+                .checked_sub(work_before)
+                .ok_or(PackError::IntegerOverflow {
+                    context: "cached delta work accounting",
+                })?;
+        self.cache(
+            object.offset(),
+            &result,
+            logical_expanded,
+            logical_work,
+            deadline,
+        )?;
+        Ok(result)
+    }
+
+    fn resolve_base(
+        &mut self,
+        base: &DeltaBase,
+        depth: usize,
+        stack: &mut Vec<u64>,
+        accounting: &mut Accounting,
+        deadline: &mut impl Deadline,
+    ) -> Result<Vec<u8>, PackError> {
+        match base {
+            DeltaBase::Ofs(offset) => {
+                let object = self
+                    .scalar
+                    .find_by_offset(*offset, accounting, deadline)?
+                    .ok_or(PackError::MissingDeltaBase)?;
+                let object = clone_pack_object(object, deadline)?;
+                self.resolve_object(&object, depth, stack, accounting, deadline)
+            }
+            DeltaBase::Ref(id) => {
+                if let Some(object) = self.scalar.find_by_id(id, accounting, deadline)? {
+                    let object = clone_pack_object(object, deadline)?;
+                    self.resolve_object(&object, depth, stack, accounting, deadline)
+                } else {
+                    checkpoint(deadline)?;
+                    let external = self
+                        .scalar
+                        .external_bases
+                        .lookup(id)
+                        .ok_or(PackError::MissingDeltaBase)?;
+                    self.scalar.limits.object_size(external.len())?;
+                    accounting.add_expanded(external.len(), self.scalar.limits)?;
+                    copy_bytes(external, deadline)
+                }
+            }
+        }
+    }
+
+    fn cached(&self, offset: u64) -> Option<&CacheEntry> {
+        self.entries
+            .binary_search_by_key(&offset, |entry| entry.offset)
+            .ok()
+            .and_then(|index| self.entries.get(index))
+    }
+
+    fn cache(
+        &mut self,
+        offset: u64,
+        bytes: &[u8],
+        logical_expanded: usize,
+        logical_work: usize,
+        deadline: &mut impl Deadline,
+    ) -> Result<(), PackError> {
+        let required =
+            self.cached_bytes
+                .checked_add(bytes.len())
+                .ok_or(PackError::IntegerOverflow {
+                    context: "delta cache bytes",
+                })?;
+        if required > self.scalar.limits.max_cached_bytes {
+            return Ok(());
+        }
+        checkpoint(deadline)?;
+        let insertion = match self
+            .entries
+            .binary_search_by_key(&offset, |entry| entry.offset)
+        {
+            Ok(_) => return Ok(()),
+            Err(index) => index,
+        };
+        self.entries
+            .try_reserve(1)
+            .map_err(|_| PackError::AllocationFailed { requested: 1 })?;
+        let copy = copy_bytes(bytes, deadline)?;
+        self.entries.insert(
+            insertion,
+            CacheEntry {
+                offset,
+                bytes: copy,
+                logical_expanded,
+                logical_work,
+            },
+        );
+        self.cached_bytes = required;
+        Ok(())
+    }
+}
+
+fn clone_pack_object(
+    object: &PackObject,
+    deadline: &mut impl Deadline,
+) -> Result<PackObject, PackError> {
+    match object {
+        PackObject::Base { offset, id, data } => Ok(PackObject::Base {
+            offset: *offset,
+            id: id.clone(),
+            data: copy_bytes(data, deadline)?,
+        }),
+        PackObject::Delta(delta) => Ok(PackObject::Delta(DeltaObject {
+            offset: delta.offset,
+            id: delta.id.clone(),
+            base: delta.base.clone(),
+            program: copy_bytes(&delta.program, deadline)?,
+        })),
+    }
+}
+
 fn has_same_delta_base(candidate: &PackObject, base: &DeltaBase) -> bool {
     let PackObject::Delta(delta) = candidate else {
         return false;
@@ -598,6 +839,7 @@ mod tests {
             max_expansion_ratio: 100_000,
             max_delta_work: 200_000,
             max_inflate_work: 200_000,
+            max_cached_bytes: 200_000,
             max_index_entries: 100,
         }
     }
@@ -784,6 +1026,50 @@ mod tests {
             resolver.resolve_offset(2, &mut always),
             Err(PackError::DeltaFanoutLimit { .. })
         ));
+    }
+
+    #[test]
+    fn cached_and_scalar_resolvers_agree_over_generated_delta_packs() {
+        for seed in 1_u8..=32 {
+            let length = usize::from(seed % 31 + 1);
+            let base = (0..length)
+                .map(|index| seed.wrapping_add(u8::try_from(index).expect("small fixture")))
+                .collect::<Vec<_>>();
+            let length_byte = u8::try_from(length).expect("small fixture");
+            let program = vec![length_byte, length_byte, 0x91, 0, length_byte];
+            let objects = [
+                PackObject::Base {
+                    offset: 12,
+                    id: None,
+                    data: base.clone(),
+                },
+                PackObject::Delta(DeltaObject {
+                    offset: 24,
+                    id: None,
+                    base: DeltaBase::Ofs(12),
+                    program: program.clone(),
+                }),
+                PackObject::Delta(DeltaObject {
+                    offset: 36,
+                    id: None,
+                    base: DeltaBase::Ofs(12),
+                    program,
+                }),
+            ];
+            let limits = unlimited();
+            let scalar = ScalarResolver::new(&objects, &(), &limits, &mut always)
+                .expect("generated scalar graph");
+            let mut cached = CachedResolver::new(&objects, &(), &limits, &mut always)
+                .expect("generated cached graph");
+            assert_eq!(
+                cached.resolve_offset(24, &mut always),
+                scalar.resolve_offset(24, &mut always)
+            );
+            assert_eq!(
+                cached.resolve_offset(36, &mut always),
+                scalar.resolve_offset(36, &mut always)
+            );
+        }
     }
 
     struct SingleBase {

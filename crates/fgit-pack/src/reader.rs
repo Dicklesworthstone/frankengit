@@ -322,6 +322,7 @@ mod tests {
             max_expansion_ratio: 100,
             max_delta_work: 1_000,
             max_inflate_work: 10_000,
+            max_cached_bytes: 1_000,
             max_index_entries: 10,
         }
     }

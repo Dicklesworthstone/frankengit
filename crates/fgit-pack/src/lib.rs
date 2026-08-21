@@ -12,7 +12,8 @@ mod reader;
 mod verify;
 
 pub use delta::{
-    DeltaBase, DeltaObject, ExternalBaseLookup, PackObject, ScalarResolver, apply_delta,
+    CachedResolver, DeltaBase, DeltaObject, ExternalBaseLookup, PackObject, ScalarResolver,
+    apply_delta,
 };
 pub use fgit_types::native::{GitHashAlgorithm as ObjectFormat, GitOid as ObjectId};
 pub use idx::{IdxChecksumVerifier, IdxEntry, IdxV2, validate_idx_checksum};
@@ -66,6 +67,7 @@ pub struct PackLimits {
     pub max_expansion_ratio: usize,
     pub max_delta_work: usize,
     pub max_inflate_work: u64,
+    pub max_cached_bytes: usize,
     pub max_index_entries: usize,
 }
 
@@ -81,6 +83,7 @@ impl Default for PackLimits {
             max_expansion_ratio: 128,
             max_delta_work: 256 * 1024 * 1024,
             max_inflate_work: 512 * 1024 * 1024,
+            max_cached_bytes: 128 * 1024 * 1024,
             max_index_entries: 1_000_000,
         }
     }
