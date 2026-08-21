@@ -50,7 +50,20 @@ main() {
   # the suite immediately and would discard the receipt and crashpack — exactly
   # the evidence this suite exists to inspect. Capturing the exit code lets
   # every assertion below still run against whatever the worker produced.
+  # RCH_CARGO_WRAPPER_BYPASS is not optional here (AGENTS.md §16.2). Without it
+  # the rch offload wrapper intercepts cargo, and the failure it produces is the
+  # nastiest kind: the worker reports success while its artifacts never appear
+  # locally, so this suite's assertions fail on a MISSING receipt rather than a
+  # wrong one — and the blame lands on whichever crate was last edited.
+  # ChartreuseHorizon lost real time to that shape before diagnosing it as a
+  # harness fault. Do not remove this without reading their write-up.
+  #
+  # The test that proves it, per ChartreuseHorizon: running this suite with the
+  # variable already exported proves nothing. Run
+  #   env -u RCH_CARGO_WRAPPER_BYPASS bash scripts/e2e/suites/lab/lab_selftest.sh
+  # which is the only form that exercises the unset case.
   fge_capture 'lab-coverage-worker' env \
+    "RCH_CARGO_WRAPPER_BYPASS=1" \
     "FGIT_LAB_CAMPAIGN_ARTIFACT_DIR=$artifacts" \
     "FGIT_LAB_SOURCE_DIGEST=${FGIT_LAB_SOURCE_DIGEST:-unset-source-digest}" \
     "FGIT_LAB_TOOLCHAIN=${FGIT_LAB_TOOLCHAIN:-unset-toolchain}" \
