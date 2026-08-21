@@ -821,7 +821,7 @@ impl Scanner<'_> {
             let combined = candidate.original + closer.original;
             if mixed
                 && combined.is_multiple_of(3)
-                && !(candidate.original.is_multiple_of(3) && closer.original.is_multiple_of(3))
+                && (!candidate.original.is_multiple_of(3) || !closer.original.is_multiple_of(3))
             {
                 continue;
             }

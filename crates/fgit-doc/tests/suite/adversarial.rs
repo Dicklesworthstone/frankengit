@@ -202,7 +202,7 @@ fn hostile_sources_produce_a_document_or_a_typed_refusal_but_never_a_panic() {
 struct Lcg(u64);
 
 impl Lcg {
-    fn next(&mut self) -> u64 {
+    fn step(&mut self) -> u64 {
         self.0 = self
             .0
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -216,10 +216,10 @@ fn generated_marker_soup_never_panics_and_keeps_its_spans_honest() {
     const ALPHABET: &[u8] = b"*_-+>#`[]()!<>\\\"' \t\n\r=~.0123456789ab";
     let mut generator = Lcg(0x5eed_1234_abcd_ef01);
     for iteration in 0..600_u32 {
-        let length = usize::try_from(generator.next() % 240).unwrap_or(0) + 1;
+        let length = usize::try_from(generator.step() % 240).unwrap_or(0) + 1;
         let mut bytes = Vec::with_capacity(length);
         for _ in 0..length {
-            let index = usize::try_from(generator.next()).unwrap_or(0) % ALPHABET.len();
+            let index = usize::try_from(generator.step()).unwrap_or(0) % ALPHABET.len();
             bytes.push(ALPHABET.get(index).copied().unwrap_or(b'a'));
         }
         let Ok(source) = core::str::from_utf8(&bytes) else {

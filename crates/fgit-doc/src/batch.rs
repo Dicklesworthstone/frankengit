@@ -340,9 +340,9 @@ pub fn render_batch(
     let outcomes = outcomes
         .into_iter()
         .map(|slot| {
-            slot.unwrap_or(InputOutcome::Refused(Refusal::precondition(
-                RefusalKind::WorkloadUnusable,
-            )))
+            slot.unwrap_or_else(|| {
+                InputOutcome::Refused(Refusal::precondition(RefusalKind::WorkloadUnusable))
+            })
         })
         .collect::<Vec<_>>();
     Ok(BatchReceipt { plan, outcomes })
