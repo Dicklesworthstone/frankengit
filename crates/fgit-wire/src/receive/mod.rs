@@ -21,14 +21,14 @@ use std::{
 };
 
 use fgit_pack::{
-    read_verified_pack, NativeChecksumVerifier, PackError, PackLimits, QuarantinedPack,
+    NativeChecksumVerifier, PackError, PackLimits, QuarantinedPack, read_verified_pack,
 };
 use fgit_types::RefName;
 
 use crate::{
-    add_output_packet, encode_sideband_64k, line_without_lf, packet_name, parse_object_id,
     AdvertisedRef, AnyGitOid, Capabilities, Capability, GitObjectFormat, Packet, PktLineDecoder,
-    SidebandBand, V1Advertisement, WireError, WireLimits,
+    SidebandBand, V1Advertisement, WireError, WireLimits, add_output_packet, encode_sideband_64k,
+    line_without_lf, packet_name, parse_object_id,
 };
 
 const EMPTY_REPOSITORY_CAPABILITY_REF: &[u8] = b"capabilities^{}";
