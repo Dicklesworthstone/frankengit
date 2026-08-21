@@ -25,11 +25,15 @@ fn put_if_absent_returns_three_typed_outcomes() {
         PutOutcome::Created
     );
     assert_eq!(
-        store.put_if_absent(&key, b"seal-body").expect("identical retry"),
+        store
+            .put_if_absent(&key, b"seal-body")
+            .expect("identical retry"),
         PutOutcome::IdenticalRetry
     );
     assert_eq!(
-        store.put_if_absent(&key, b"other-body").expect("conflicting put"),
+        store
+            .put_if_absent(&key, b"other-body")
+            .expect("conflicting put"),
         PutOutcome::Conflict
     );
 }
@@ -39,7 +43,9 @@ fn a_conflicting_put_never_replaces_the_stored_body() {
     let store = store();
     let key = immutable_key("seal/tx-1");
     store.put_if_absent(&key, b"original").expect("first put");
-    store.put_if_absent(&key, b"usurper").expect("conflicting put");
+    store
+        .put_if_absent(&key, b"usurper")
+        .expect("conflicting put");
 
     assert_eq!(
         store.read_immutable(&key).expect("read back"),
@@ -59,7 +65,9 @@ fn a_duplicated_delivery_is_idempotent() {
         },
     )]));
 
-    let outcome = store.put_if_absent(&key, b"seal-body").expect("duplicated put");
+    let outcome = store
+        .put_if_absent(&key, b"seal-body")
+        .expect("duplicated put");
     assert_eq!(
         outcome,
         PutOutcome::IdenticalRetry,
@@ -92,7 +100,10 @@ fn an_oversize_body_is_refused_and_a_body_at_the_bound_is_accepted() {
             limit
         })
     );
-    assert!(refused.proves_no_effect(), "a bound refusal applies no effect");
+    assert!(
+        refused.proves_no_effect(),
+        "a bound refusal applies no effect"
+    );
 
     assert_eq!(
         store
@@ -197,7 +208,9 @@ fn a_crashed_endpoint_refuses_and_a_restarted_one_proceeds() {
     store.restart();
     store.install_fault_plan(FaultPlan::none());
     assert_eq!(
-        store.put_if_absent(&key, b"seal-body").expect("after restart"),
+        store
+            .put_if_absent(&key, b"seal-body")
+            .expect("after restart"),
         PutOutcome::Created
     );
 }

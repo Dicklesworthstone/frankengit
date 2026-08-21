@@ -39,7 +39,11 @@ fn reference_profile_passes_every_fault_check() {
         report.failed_ids(),
         report.failures().collect::<Vec<_>>()
     );
-    assert_eq!(report.checks().len(), 8, "the fault suite lost or gained checks");
+    assert_eq!(
+        report.checks().len(),
+        8,
+        "the fault suite lost or gained checks"
+    );
 }
 
 #[test]

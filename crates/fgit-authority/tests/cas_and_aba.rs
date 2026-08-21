@@ -3,9 +3,9 @@
 
 use fgit_authority::{
     AuthorityClient, AuthorityFailure, AuthorityObserver, AuthorityOp, AuthorityRefusal,
-    AuthorityResponse, AuthorityStore, AuthorityVersionToken, CasOutcome, ClientId,
-    HeadGeneration, HeadInit, HeadKey, HeadRead, HeadReadReceipt, Interleaving,
-    MemoryAuthorityStore, StoreInstanceId, drive,
+    AuthorityResponse, AuthorityStore, AuthorityVersionToken, CasOutcome, ClientId, HeadGeneration,
+    HeadInit, HeadKey, HeadRead, HeadReadReceipt, Interleaving, MemoryAuthorityStore,
+    StoreInstanceId, drive,
 };
 
 fn store() -> MemoryAuthorityStore {
@@ -120,7 +120,12 @@ fn a_stale_generation_is_refused_and_a_strictly_increasing_one_is_accepted() {
     );
 
     let lower = store
-        .compare_exchange_head(&key, seventh.token(), HeadGeneration::from_raw(3), b"head-3")
+        .compare_exchange_head(
+            &key,
+            seventh.token(),
+            HeadGeneration::from_raw(3),
+            b"head-3",
+        )
         .expect_err("a lower generation must be refused");
     assert_eq!(
         lower,
@@ -227,9 +232,7 @@ impl Recorder {
         self.responses
             .iter()
             .filter_map(|(client, response)| match response {
-                AuthorityResponse::CompareExchangeHead(outcome) => {
-                    Some((*client, outcome.clone()))
-                }
+                AuthorityResponse::CompareExchangeHead(outcome) => Some((*client, outcome.clone())),
                 _ => None,
             })
             .collect()
@@ -272,7 +275,10 @@ fn exactly_one_of_eight_contenders_wins_the_head() {
         .iter()
         .filter(|(_, outcome)| matches!(outcome, CasOutcome::Committed(_)))
         .count();
-    assert_eq!(winners, 1, "the head CAS, not the schedule, elects the winner");
+    assert_eq!(
+        winners, 1,
+        "the head CAS, not the schedule, elects the winner"
+    );
 
     let HeadRead::Present(head) = store.read_head(&key).expect("head read") else {
         panic!("the head must still be published");

@@ -156,7 +156,9 @@ fn a_directive_can_be_restricted_to_one_operation_kind() {
 
     let key = immutable_key("seal/tx");
     assert_eq!(
-        store.put_if_absent(&key, b"a").expect("an unrelated kind is untouched"),
+        store
+            .put_if_absent(&key, b"a")
+            .expect("an unrelated kind is untouched"),
         PutOutcome::Created,
         "a directive restricted to another operation kind must not fire"
     );
@@ -193,7 +195,10 @@ fn the_effect_log_is_ground_truth_the_caller_cannot_see() {
         1,
         "but only one application changes state"
     );
-    assert_eq!(effects.records()[0].op_kind, AuthorityOpKind::InitializeHead);
+    assert_eq!(
+        effects.records()[0].op_kind,
+        AuthorityOpKind::InitializeHead
+    );
     assert_eq!(effects.records()[0].at, OpIndex::ZERO);
     assert_eq!(effects.records()[1].at, OpIndex::ZERO);
 }
@@ -230,11 +235,17 @@ fn the_schedule_generator_is_deterministic_and_bounded() {
     let other_stream: Vec<u64> = (0..64).map(|_| other.next_u64()).collect();
 
     assert_eq!(left_stream, right_stream, "one seed, one stream");
-    assert_ne!(left_stream, other_stream, "different seeds, different streams");
+    assert_ne!(
+        left_stream, other_stream,
+        "different seeds, different streams"
+    );
 
     let mut bounded = SplitMix64::new(7);
     for _ in 0..64 {
-        assert!(bounded.next_below(5) < 5, "next_below must respect its bound");
+        assert!(
+            bounded.next_below(5) < 5,
+            "next_below must respect its bound"
+        );
     }
     assert_eq!(
         SplitMix64::new(1).next_below(0),

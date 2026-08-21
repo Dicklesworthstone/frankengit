@@ -131,14 +131,16 @@ impl AuthorityStore for PlantedStore {
     ) -> Result<PutOutcome, AuthorityFailure> {
         self.check_body(body)?;
         let mut state = self.locked();
-        match state.immutable.get(key) {
-            Some(existing) if existing.as_slice() == body => Ok(PutOutcome::IdenticalRetry),
-            Some(_) => Ok(PutOutcome::Conflict),
+        let outcome = match state.immutable.get(key) {
+            Some(existing) if existing.as_slice() == body => PutOutcome::IdenticalRetry,
+            Some(_) => PutOutcome::Conflict,
             None => {
                 state.immutable.insert(key.clone(), body.to_vec());
-                Ok(PutOutcome::Created)
+                PutOutcome::Created
             }
-        }
+        };
+        drop(state);
+        Ok(outcome)
     }
 
     fn read_immutable(&self, key: &ImmutableKey) -> Result<ImmutableRead, AuthorityFailure> {
@@ -181,6 +183,7 @@ impl AuthorityStore for PlantedStore {
         );
         let receipt = receipt_for(key, &slot);
         state.heads.insert(key.clone(), slot);
+        drop(state);
         Ok(HeadInit::Created(receipt))
     }
 
@@ -204,8 +207,7 @@ impl AuthorityStore for PlantedStore {
         self.check_body(new_body)?;
         let mut state = self.locked();
 
-        if self.defect != Defect::AcceptsForgedToken
-            && self.defect != Defect::IgnoresExpectedToken
+        if self.defect != Defect::AcceptsForgedToken && self.defect != Defect::IgnoresExpectedToken
         {
             let Some(issued) = state.issuance.get(&expected) else {
                 return Err(AuthorityFailure::Refused(
@@ -213,7 +215,9 @@ impl AuthorityStore for PlantedStore {
                 ));
             };
             if &issued.key != key {
-                return Err(AuthorityFailure::Refused(AuthorityRefusal::TokenKeyMismatch));
+                return Err(AuthorityFailure::Refused(
+                    AuthorityRefusal::TokenKeyMismatch,
+                ));
             }
         }
 
@@ -259,6 +263,7 @@ impl AuthorityStore for PlantedStore {
         };
         let receipt = receipt_for(key, &slot);
         state.heads.insert(key.clone(), slot);
+        drop(state);
         Ok(CasOutcome::Committed(receipt))
     }
 
@@ -276,7 +281,9 @@ impl AuthorityStore for PlantedStore {
             ));
         };
         if &issued.key != receipt.key() {
-            return Err(AuthorityFailure::Refused(AuthorityRefusal::TokenKeyMismatch));
+            return Err(AuthorityFailure::Refused(
+                AuthorityRefusal::TokenKeyMismatch,
+            ));
         }
         if issued.generation != receipt.generation() {
             return Err(AuthorityFailure::Refused(
@@ -317,15 +324,20 @@ fn the_reference_profile_and_the_control_agree() {
 }
 
 #[test]
-fn content_derived_tokens_fail_the_aba_and_uniqueness_checks() {
+fn content_derived_tokens_fail_the_aba_check() {
     let failed = failures_for(Defect::ContentDerivedToken);
     assert!(
         failed.contains(&"AC-10"),
-        "a byte-identical restore must be caught by AC-10, failures were {failed:?}"
+        "a byte-identical restore resurrects the original token and must be caught by AC-10, \
+         failures were {failed:?}"
     );
+    // AC-09 writes three distinct bodies, so a content-derived token still looks
+    // unique there. That is precisely why AC-10 exists as a separate check: the
+    // defect is only observable across a restore, and a suite without AC-10
+    // would rate this backend conformant.
     assert!(
-        failed.contains(&"AC-09"),
-        "resurrecting a token must be caught by AC-09, failures were {failed:?}"
+        !failed.contains(&"AC-09"),
+        "AC-09 is not the check that catches this defect; AC-10 is"
     );
 }
 
