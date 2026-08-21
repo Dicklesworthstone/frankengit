@@ -296,6 +296,20 @@ pub struct TreeCapability {
     read_prefixes: Vec<TreePath>,
     write_prefixes: Vec<TreePath>,
     symlink_policy: SymlinkPolicy,
+    /// Fetch ceilings, shared across the delegation tree via `ledger`.
+    ///
+    /// UNBOUNDED BY DEFAULT, and that is a stated non-claim rather than an
+    /// oversight. `new` sets both to `u64::MAX`, so a capability nobody gave a
+    /// budget to charges forever and the tree-wide accounting below, while
+    /// correct, decides nothing. Setting a ceiling is opt-in through
+    /// `with_fetch_budget` / `with_file_budget`.
+    ///
+    /// Left unbounded deliberately: tightening the default is a behaviour change
+    /// for every existing holder, and picking a number here would be inventing a
+    /// resource policy that belongs to whoever mints capabilities, not to the
+    /// type. Recorded because the audit that found `RepositoryMismatch` also
+    /// flagged this, and an infinite default is indistinguishable from a
+    /// forgotten one unless it says which it is.
     max_fetch_bytes: u64,
     max_file_count: u64,
     expires_at: Option<u64>,
@@ -330,6 +344,7 @@ impl TreeCapability {
             read_prefixes,
             write_prefixes,
             symlink_policy: SymlinkPolicy::DataOnly,
+            // Unbounded until a caller opts in; see the field documentation.
             max_fetch_bytes: u64::MAX,
             max_file_count: u64::MAX,
             expires_at: None,
