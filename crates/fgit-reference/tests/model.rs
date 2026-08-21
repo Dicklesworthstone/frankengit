@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use fgit_reference::capsule::{PreparedVerdict, WitnessGranularity};
 use fgit_reference::decision::{DecisionBatchDraft, PublishedDecision};
 use fgit_reference::effect::{
-    AbsorptionReason, FoldBasis, IntentDisposition, NetEffectFolder, ReferenceFolder, RefEffect,
+    AbsorptionReason, FoldBasis, IntentDisposition, NetEffectFolder, RefEffect, ReferenceFolder,
 };
 use fgit_reference::harness::{IdentityMint, PublishReport, RequestBuilder, label, publish};
 use fgit_reference::intent::{
@@ -34,8 +34,8 @@ use fgit_reference::machine::{
 use fgit_reference::refs::ExpectedRefState;
 use fgit_reference::refusal::{MODEL_REFUSAL_SURFACE, RefusalClass};
 use fgit_reference::state::{
-    GenesisConfiguration, InvariantBreach, PolicySnapshot, PrincipalCapabilities, QuarantinedObject,
-    RepositoryState,
+    GenesisConfiguration, InvariantBreach, PolicySnapshot, PrincipalCapabilities,
+    QuarantinedObject, RepositoryState,
 };
 use fgit_reference::transition::{
     CasOutcome, CasRequest, ConfigurationOutcome, ConfigurationRequest, DecisionBodyIdentity,
@@ -69,23 +69,22 @@ struct Fixture {
     stranger: PrincipalId,
 }
 
-fn schema() -> SchemaId {
+const fn schema() -> SchemaId {
     SchemaId::new(SchemaFamily::from_static("fgit/ref-txn"), 2, 0)
 }
 
-fn unsupported_schema() -> SchemaId {
+const fn unsupported_schema() -> SchemaId {
     SchemaId::new(SchemaFamily::from_static("fgit/ref-txn"), 99, 0)
 }
 
-fn oid(seed: u8) -> GitOid {
+const fn oid(seed: u8) -> GitOid {
     GitOid::Sha1(GitOidSha1::from_bytes([seed; GitOidSha1::LEN]))
 }
 
-fn sha256_oid(seed: u8) -> GitOid {
-    GitOid::Sha256(fgit_types::native::GitOidSha256::from_bytes([
-        seed;
-        fgit_types::native::GitOidSha256::LEN
-    ]))
+const fn sha256_oid(seed: u8) -> GitOid {
+    GitOid::Sha256(fgit_types::native::GitOidSha256::from_bytes(
+        [seed; fgit_types::native::GitOidSha256::LEN],
+    ))
 }
 
 fn name(text: &str) -> RefName {
@@ -102,12 +101,16 @@ fn object(id: GitOid, parents: &[GitOid]) -> QuarantinedObject {
 }
 
 /// An object whose recomputed identity disagrees with the declared one.
-fn corrupt_object(declared: GitOid, recomputed: GitOid) -> QuarantinedObject {
+const fn corrupt_object(declared: GitOid, recomputed: GitOid) -> QuarantinedObject {
     QuarantinedObject {
         declared,
         recomputed,
         parents: Vec::new(),
     }
+}
+
+fn key_of(text: &str) -> IdempotencyKey {
+    IdempotencyKey::new(label(text))
 }
 
 fn update(target: &str, expected: ExpectedRefState, new: GitOid, force: bool) -> Intent {
@@ -140,7 +143,7 @@ impl Fixture {
         principals.insert(
             author,
             PrincipalCapabilities {
-                writable_scopes: [b"heads".to_vec(), b"tags".to_vec()].into_iter().collect(),
+                writable_scopes: BTreeSet::from([b"heads".to_vec(), b"tags".to_vec()]),
                 may_force: true,
                 may_publish_forge: true,
                 may_add_legal_hold: true,
@@ -149,7 +152,7 @@ impl Fixture {
         principals.insert(
             narrow,
             PrincipalCapabilities {
-                writable_scopes: [b"heads".to_vec()].into_iter().collect(),
+                writable_scopes: BTreeSet::from([b"heads".to_vec()]),
                 may_force: false,
                 may_publish_forge: false,
                 may_add_legal_hold: false,
@@ -162,13 +165,11 @@ impl Fixture {
             epoch: PolicyEpoch::FIRST,
             // `refs/tags` is protected and `refs/heads` is not, so every
             // protection denial has a permitted twin one namespace away.
-            protected_scopes: [b"tags".to_vec()].into_iter().collect(),
+            protected_scopes: BTreeSet::from([b"tags".to_vec()]),
             principals,
             max_intents_per_transaction: 8,
-            supported_schemas: [schema()].into_iter().collect(),
-            supported_durability: [DurabilityProfile::CanonicalSource]
-                .into_iter()
-                .collect(),
+            supported_schemas: BTreeSet::from([schema()]),
+            supported_durability: BTreeSet::from([DurabilityProfile::CanonicalSource]),
         };
 
         let state = RepositoryState::genesis(GenesisConfiguration {
@@ -191,17 +192,13 @@ impl Fixture {
         }
     }
 
-    fn key(&self, text: &str) -> IdempotencyKey {
-        IdempotencyKey::new(label(text))
-    }
-
     fn request(&self, principal: PrincipalId, key: &str) -> RequestBuilder {
         RequestBuilder::new(
             self.tenant,
             self.repository,
             principal,
             schema(),
-            self.key(key),
+            key_of(key),
         )
     }
 
@@ -267,7 +264,13 @@ fn observed_refusals() -> BTreeSet<RefusalCode> {
 #[test]
 fn a_first_commit_advances_both_sequences_and_one_head_generation() {
     let mut fixture = Fixture::new(1);
-    let report = fixture.commit_ref("k1", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    let report = fixture.commit_ref(
+        "k1",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
 
     assert!(matches!(report.seal, SealOutcome::Created(_)));
     assert!(report.is_committed(), "report was {report:?}");
@@ -283,7 +286,10 @@ fn a_first_commit_advances_both_sequences_and_one_head_generation() {
         head.body.latest_repository_sequence,
         Some(RepositorySequence::FIRST)
     );
-    assert_eq!(head.body.roots.refs.get(&name("refs/heads/main")), Some(&oid(1)));
+    assert_eq!(
+        head.body.roots.refs.get(&name("refs/heads/main")),
+        Some(&oid(1))
+    );
     assert_eq!(fixture.state.decisions().len(), 1);
     assert_eq!(fixture.state.commits().len(), 1);
     fixture.assert_structurally_sound();
@@ -335,7 +341,7 @@ fn nothing_is_canonical_until_the_head_compare_and_swap_wins() {
 
     // Preparing decided nothing: the ref is untouched and the transaction has
     // no outcome.
-    assert!(state.roots().refs.get(&target).is_none());
+    assert!(!state.roots().refs.contains_key(&target));
     assert_eq!(state.outcome_of(request.tx_id), None);
 
     let mut bodies = BTreeMap::new();
@@ -362,10 +368,10 @@ fn nothing_is_canonical_until_the_head_compare_and_swap_wins() {
     // references it, which is §9's staged epoch.
     assert!(state.staged(batch).is_some());
     assert!(state.batch(batch).is_none());
-    assert!(state.roots().refs.get(&target).is_none());
+    assert!(!state.roots().refs.contains_key(&target));
     assert_eq!(state.outcome_of(request.tx_id), None);
     assert_eq!(state.head().body.generation, HeadGeneration::FIRST);
-    assert!(state.decisions().is_empty());
+    assert_eq!(state.decisions(), &[]);
 
     // The compare-and-swap is the linearization point.
     let (state, outcome) = compare_and_swap(
@@ -484,7 +490,13 @@ fn a_refusal_consumes_decision_sequence_and_leaves_repository_sequence_alone() {
     let mut fixture = Fixture::new(5);
 
     // One commit, so both sequences have moved once.
-    fixture.commit_ref("k1", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    fixture.commit_ref(
+        "k1",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
     let after_commit = fixture.state.head().body.clone();
     assert_eq!(
         after_commit.latest_decision_sequence,
@@ -546,7 +558,13 @@ fn the_permitted_twin_of_that_refusal_advances_both_sequences() {
     // Identical to the test above except the expected-old value is the one the
     // basis actually holds.
     let mut fixture = Fixture::new(6);
-    fixture.commit_ref("k1", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    fixture.commit_ref(
+        "k1",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
 
     let request = fixture
         .request(fixture.author, "k2")
@@ -573,7 +591,10 @@ fn the_permitted_twin_of_that_refusal_advances_both_sequences() {
         head.body.latest_repository_sequence,
         Some(RepositorySequence::FIRST.next().unwrap())
     );
-    assert_eq!(head.body.roots.refs.get(&name("refs/heads/main")), Some(&oid(2)));
+    assert_eq!(
+        head.body.roots.refs.get(&name("refs/heads/main")),
+        Some(&oid(2))
+    );
     fixture.assert_structurally_sound();
 }
 
@@ -783,7 +804,13 @@ fn deciding_an_already_terminal_transaction_returns_the_existing_outcome() {
 #[test]
 fn one_transaction_appears_at_most_once_in_the_authenticated_decision_stream() {
     let mut fixture = Fixture::new(11);
-    fixture.commit_ref("k1", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    fixture.commit_ref(
+        "k1",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
     fixture.commit_ref(
         "k2",
         "refs/heads/dev",
@@ -827,7 +854,12 @@ fn a_compare_and_swap_from_a_stale_predecessor_head_loses() {
         .request(fixture.author, "k1")
         .statement(
             MismatchPolicy::TxnAbort,
-            vec![update("refs/heads/dev", ExpectedRefState::Absent, new, false)],
+            vec![update(
+                "refs/heads/dev",
+                ExpectedRefState::Absent,
+                new,
+                false,
+            )],
         )
         .promising(new)
         .build(&mut fixture.mint);
@@ -911,7 +943,7 @@ fn a_compare_and_swap_from_a_stale_predecessor_head_loses() {
     // batch is still merely staged.
     assert_eq!(after.outcome_of(request.tx_id), None);
     assert!(after.staged(batch).is_some());
-    assert!(after.roots().refs.get(&name("refs/heads/dev")).is_none());
+    assert!(!after.roots().refs.contains_key(&name("refs/heads/dev")));
     assert_eq!(after.head().id, fixture.state.head().id);
 }
 
@@ -1016,13 +1048,8 @@ fn every_head_names_its_exact_predecessor_across_many_generations() {
     for index in 0_u8..6 {
         let key = format!("k{index}");
         let target = format!("refs/heads/branch-{index}");
-        let report = fixture.commit_ref(
-            &key,
-            &target,
-            ExpectedRefState::Absent,
-            oid(index + 1),
-            &[],
-        );
+        let report =
+            fixture.commit_ref(&key, &target, ExpectedRefState::Absent, oid(index + 1), &[]);
         assert!(report.is_committed(), "step {index} report {report:?}");
 
         expected_generation = expected_generation.next().unwrap();
@@ -1042,7 +1069,13 @@ fn a_batch_staged_against_a_superseded_head_cannot_be_swapped_in_later() {
     // A batch that already won is no longer staged, so there is no second path
     // by which its decisions could be replayed into a later head.
     let mut fixture = Fixture::new(15);
-    fixture.commit_ref("k1", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    fixture.commit_ref(
+        "k1",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
     let published = *fixture
         .state
         .head()
@@ -1053,7 +1086,13 @@ fn a_batch_staged_against_a_superseded_head_cannot_be_swapped_in_later() {
     assert!(fixture.state.batch(published).is_some());
     assert!(fixture.state.staged(published).is_none());
 
-    fixture.commit_ref("k2", "refs/heads/dev", ExpectedRefState::Absent, oid(2), &[]);
+    fixture.commit_ref(
+        "k2",
+        "refs/heads/dev",
+        ExpectedRefState::Absent,
+        oid(2),
+        &[],
+    );
 
     let breach = compare_and_swap(
         &fixture.state,
@@ -1082,26 +1121,26 @@ fn a_batch_staged_against_a_superseded_head_cannot_be_swapped_in_later() {
 /// case that must proceed. Keeping them in one function is what lets the
 /// surface test below compare *observed* codes against the declared list.
 fn refusal_scenarios() -> Vec<RefusalCode> {
-    let mut observed = Vec::new();
-    observed.push(refusal_ref_name_invalid());
-    observed.push(refusal_schema_unsupported());
-    observed.push(refusal_hash_domain_mismatch());
-    observed.push(refusal_capability_scope_violation());
-    observed.push(refusal_expected_old_mismatch());
-    observed.push(refusal_non_fast_forward());
-    observed.push(refusal_force_not_permitted());
-    observed.push(refusal_protected_ref());
-    observed.push(refusal_object_closure_incomplete());
-    observed.push(refusal_native_object_id_mismatch());
-    observed.push(refusal_resource_budget());
-    observed.push(refusal_retention_hold());
-    observed.push(refusal_policy_epoch_superseded());
-    observed.push(refusal_basis_capsule_not_reusable());
-    observed.push(refusal_forge_transition_invalid());
-    observed.push(refusal_effect_idempotency_reuse());
-    observed.push(refusal_conflicting_semantic_effects());
-    observed.push(refusal_durability_profile_unavailable());
-    observed
+    vec![
+        refusal_ref_name_invalid(),
+        refusal_schema_unsupported(),
+        refusal_hash_domain_mismatch(),
+        refusal_capability_scope_violation(),
+        refusal_expected_old_mismatch(),
+        refusal_non_fast_forward(),
+        refusal_force_not_permitted(),
+        refusal_protected_ref(),
+        refusal_object_closure_incomplete(),
+        refusal_native_object_id_mismatch(),
+        refusal_resource_budget(),
+        refusal_retention_hold(),
+        refusal_policy_epoch_superseded(),
+        refusal_basis_capsule_not_reusable(),
+        refusal_forge_transition_invalid(),
+        refusal_effect_idempotency_reuse(),
+        refusal_conflicting_semantic_effects(),
+        refusal_durability_profile_unavailable(),
+    ]
 }
 
 fn refusal_ref_name_invalid() -> RefusalCode {
@@ -1223,7 +1262,11 @@ fn refusal_schema_unsupported() -> RefusalCode {
     )
     .expect("prepare");
     assert!(
-        permitted.capsule(capsule).expect("capsule").verdict.is_commit(),
+        permitted
+            .capsule(capsule)
+            .expect("capsule")
+            .verdict
+            .is_commit(),
         "a supported schema must reach a commit verdict"
     );
 
@@ -1339,7 +1382,12 @@ fn refusal_capability_scope_violation() -> RefusalCode {
         .request(fixture.stranger, "k3")
         .statement(
             MismatchPolicy::TxnAbort,
-            vec![update("refs/heads/dev", ExpectedRefState::Absent, oid(2), false)],
+            vec![update(
+                "refs/heads/dev",
+                ExpectedRefState::Absent,
+                oid(2),
+                false,
+            )],
         )
         .promising(oid(2))
         .build(&mut fixture.mint);
@@ -1354,7 +1402,13 @@ fn refusal_capability_scope_violation() -> RefusalCode {
 
 fn refusal_expected_old_mismatch() -> RefusalCode {
     let mut fixture = Fixture::new(106);
-    fixture.commit_ref("k1", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    fixture.commit_ref(
+        "k1",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
 
     let request = fixture
         .request(fixture.author, "k2")
@@ -1389,7 +1443,13 @@ fn refusal_expected_old_mismatch() -> RefusalCode {
 
 fn refusal_non_fast_forward() -> RefusalCode {
     let mut fixture = Fixture::new(107);
-    fixture.commit_ref("k1", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    fixture.commit_ref(
+        "k1",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
 
     // oid(9) has no ancestry to oid(1), so this rewinds history.
     let request = fixture
@@ -1440,7 +1500,11 @@ fn refusal_force_not_permitted() -> RefusalCode {
         )
         .promising(oid(1))
         .build(&mut fixture.mint);
-    assert!(fixture.publish(&first, &[object(oid(1), &[])]).is_committed());
+    assert!(
+        fixture
+            .publish(&first, &[object(oid(1), &[])])
+            .is_committed()
+    );
 
     let forced = fixture
         .request(fixture.narrow, "k2")
@@ -1483,13 +1547,7 @@ fn refusal_force_not_permitted() -> RefusalCode {
 
 fn refusal_protected_ref() -> RefusalCode {
     let mut fixture = Fixture::new(109);
-    let created = fixture.commit_ref(
-        "k1",
-        "refs/tags/v1",
-        ExpectedRefState::Absent,
-        oid(1),
-        &[],
-    );
+    let created = fixture.commit_ref("k1", "refs/tags/v1", ExpectedRefState::Absent, oid(1), &[]);
     assert!(created.is_committed(), "creating a tag must be permitted");
 
     let request = fixture
@@ -1518,18 +1576,20 @@ fn refusal_protected_ref() -> RefusalCode {
         .request(fixture.author, "k4")
         .statement(
             MismatchPolicy::TxnAbort,
-            vec![delete("refs/heads/scratch", ExpectedRefState::Exact(oid(2)))],
+            vec![delete(
+                "refs/heads/scratch",
+                ExpectedRefState::Exact(oid(2)),
+            )],
         )
         .build(&mut fixture.mint);
     let twin = fixture.publish(&permitted, &[]);
     assert!(twin.is_committed(), "permitted twin was {twin:?}");
     assert!(
-        fixture
+        !fixture
             .state
             .roots()
             .refs
-            .get(&name("refs/heads/scratch"))
-            .is_none(),
+            .contains_key(&name("refs/heads/scratch")),
         "the permitted deletion must actually delete"
     );
     code
@@ -1683,10 +1743,7 @@ fn refusal_retention_hold() -> RefusalCode {
         .promising(oid(1))
         .promising(oid(2))
         .build(&mut fixture.mint);
-    let setup_report = fixture.publish(
-        &setup,
-        &[object(oid(1), &[]), object(oid(2), &[])],
-    );
+    let setup_report = fixture.publish(&setup, &[object(oid(1), &[]), object(oid(2), &[])]);
     assert!(setup_report.is_committed(), "setup was {setup_report:?}");
 
     let request = fixture
@@ -1800,7 +1857,13 @@ fn refusal_policy_epoch_superseded() -> RefusalCode {
 
 fn refusal_basis_capsule_not_reusable() -> RefusalCode {
     let mut fixture = Fixture::new(115);
-    fixture.commit_ref("k0", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    fixture.commit_ref(
+        "k0",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
 
     // Prepare against the current head.
     let request = fixture
@@ -1836,7 +1899,7 @@ fn refusal_basis_capsule_not_reusable() -> RefusalCode {
         &state,
         &PrepareRequest {
             capsule_id: fixture.mint.capsule(),
-            request: request.clone(),
+            request,
             principal_snapshot: fixture.mint.principal_snapshot(),
             profile: IdentityMint::preparation_profile(),
             granularity: WitnessGranularity::Refined,
@@ -1846,7 +1909,7 @@ fn refusal_basis_capsule_not_reusable() -> RefusalCode {
 
     // Permitted twin: a concurrent commit that touches a *different* ref does
     // not invalidate a refined witness.
-    fixture.state = state.clone();
+    fixture.state = state;
     fixture.commit_ref(
         "k2",
         "refs/heads/other",
@@ -1880,7 +1943,13 @@ fn refusal_basis_capsule_not_reusable() -> RefusalCode {
 
 fn refusal_forge_transition_invalid() -> RefusalCode {
     let mut fixture = Fixture::new(116);
-    fixture.commit_ref("k0", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    fixture.commit_ref(
+        "k0",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
 
     let stream = ForgeStreamId::new(label("pulls"));
     let entity = ForgeEntityId::new(label("pr-1"));
@@ -2020,7 +2089,13 @@ fn refusal_effect_idempotency_reuse() -> RefusalCode {
 
 fn refusal_conflicting_semantic_effects() -> RefusalCode {
     let mut fixture = Fixture::new(118);
-    fixture.commit_ref("k0", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    fixture.commit_ref(
+        "k0",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
     let stream = ForgeStreamId::new(label("pulls"));
     let entity = ForgeEntityId::new(label("pr-1"));
 
@@ -2128,7 +2203,6 @@ fn refusal_durability_profile_unavailable() -> RefusalCode {
     code
 }
 
-
 // Each refusal scenario gets its own named test, so a failure names the
 // dimension rather than only "some refusal changed". The surface test above
 // runs the same scenarios again to compare observed codes against the declared
@@ -2170,12 +2244,18 @@ fn refuses_a_wrong_expected_old_value_and_permits_the_right_one() {
 
 #[test]
 fn refuses_a_non_fast_forward_and_permits_a_descendant() {
-    assert_eq!(refusal_non_fast_forward(), RefusalCode::NonFastForwardRefused);
+    assert_eq!(
+        refusal_non_fast_forward(),
+        RefusalCode::NonFastForwardRefused
+    );
 }
 
 #[test]
 fn refuses_a_force_without_the_capability_and_permits_one_with_it() {
-    assert_eq!(refusal_force_not_permitted(), RefusalCode::ForceNotPermitted);
+    assert_eq!(
+        refusal_force_not_permitted(),
+        RefusalCode::ForceNotPermitted
+    );
 }
 
 #[test]
@@ -2204,12 +2284,18 @@ fn refuses_an_object_whose_identity_does_not_match_its_bytes() {
 
 #[test]
 fn refuses_a_transaction_over_the_intent_bound_and_permits_one_at_it() {
-    assert_eq!(refusal_resource_budget(), RefusalCode::ResourceBudgetExceeded);
+    assert_eq!(
+        refusal_resource_budget(),
+        RefusalCode::ResourceBudgetExceeded
+    );
 }
 
 #[test]
 fn refuses_removing_a_legal_hold_and_permits_retiring_a_tombstone() {
-    assert_eq!(refusal_retention_hold(), RefusalCode::RetentionHoldViolation);
+    assert_eq!(
+        refusal_retention_hold(),
+        RefusalCode::RetentionHoldViolation
+    );
 }
 
 #[test]
@@ -2328,7 +2414,7 @@ fn an_idempotency_key_reused_with_a_different_digest_is_rejected_before_any_seal
         &fixture.state,
         &SealRequest {
             seal_id: fixture.mint.seal(),
-            request: first.clone(),
+            request: first,
         },
     )
     .expect("seal");
@@ -2340,7 +2426,12 @@ fn an_idempotency_key_reused_with_a_different_digest_is_rejected_before_any_seal
         .request(fixture.author, "shared-key")
         .statement(
             MismatchPolicy::TxnAbort,
-            vec![update("refs/heads/dev", ExpectedRefState::Absent, oid(2), false)],
+            vec![update(
+                "refs/heads/dev",
+                ExpectedRefState::Absent,
+                oid(2),
+                false,
+            )],
         )
         .promising(oid(2))
         .build(&mut fixture.mint);
@@ -2360,7 +2451,7 @@ fn an_idempotency_key_reused_with_a_different_digest_is_rejected_before_any_seal
     // A rejection is not repository history: no seal, no decision, no sequence.
     assert!(after.seal_of(second.tx_id).is_none());
     assert_eq!(after.outcome_of(second.tx_id), None);
-    assert!(after.decisions().is_empty());
+    assert_eq!(after.decisions(), &[]);
     assert_eq!(after.head().body.latest_decision_sequence, None);
     assert!(
         !after.is_terminal(second.tx_id),
@@ -2629,7 +2720,13 @@ fn no_transition_mutates_the_state_it_is_given() {
 fn the_same_input_sequence_always_produces_an_identical_state() {
     let run = |seed: u64| {
         let mut fixture = Fixture::new(seed);
-        fixture.commit_ref("k1", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+        fixture.commit_ref(
+            "k1",
+            "refs/heads/main",
+            ExpectedRefState::Absent,
+            oid(1),
+            &[],
+        );
         fixture.commit_ref(
             "k2",
             "refs/heads/dev",
@@ -2808,7 +2905,10 @@ fn cancellation_never_reports_non_commit_in_any_phase() {
         }
         other => panic!("expected a cancellation report, got {other:?}"),
     }
-    assert_eq!(before.next, fixture.state, "a pre-seal cancel changes nothing");
+    assert_eq!(
+        before.next, fixture.state,
+        "a pre-seal cancel changes nothing"
+    );
 
     // Phase 2: after sealing and preparing, before the compare-and-swap.
     let (state, _) = seal(
@@ -3052,7 +3152,13 @@ fn an_intent_and_its_inverse_cancel_to_a_named_absorption() {
 #[test]
 fn a_no_op_mismatch_policy_absorbs_where_an_abort_would_refuse() {
     let mut fixture = Fixture::new(52);
-    fixture.commit_ref("k1", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    fixture.commit_ref(
+        "k1",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
 
     // Under TxnAbort this is a refusal, as an earlier test shows. Under NoOp
     // the statement is absorbed and the transaction commits with no effect.
@@ -3089,7 +3195,13 @@ fn a_no_op_mismatch_policy_absorbs_where_an_abort_would_refuse() {
 #[test]
 fn a_statement_error_fails_locally_and_leaves_its_siblings_alone() {
     let mut fixture = Fixture::new(53);
-    fixture.commit_ref("k1", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    fixture.commit_ref(
+        "k1",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
 
     let request = fixture
         .request(fixture.author, "k2")
@@ -3104,15 +3216,17 @@ fn a_statement_error_fails_locally_and_leaves_its_siblings_alone() {
         )
         .statement(
             MismatchPolicy::TxnAbort,
-            vec![update("refs/heads/dev", ExpectedRefState::Absent, oid(3), false)],
+            vec![update(
+                "refs/heads/dev",
+                ExpectedRefState::Absent,
+                oid(3),
+                false,
+            )],
         )
         .promising(oid(2))
         .promising(oid(3))
         .build(&mut fixture.mint);
-    let report = fixture.publish(
-        &request,
-        &[object(oid(2), &[oid(1)]), object(oid(3), &[])],
-    );
+    let report = fixture.publish(&request, &[object(oid(2), &[oid(1)]), object(oid(3), &[])]);
 
     assert!(report.is_committed(), "report was {report:?}");
     assert_eq!(
@@ -3130,7 +3244,13 @@ fn a_statement_error_fails_locally_and_leaves_its_siblings_alone() {
 #[test]
 fn a_transaction_abort_publishes_nothing_at_all() {
     let mut fixture = Fixture::new(54);
-    fixture.commit_ref("k1", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    fixture.commit_ref(
+        "k1",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
 
     let request = fixture
         .request(fixture.author, "k2")
@@ -3149,17 +3269,18 @@ fn a_transaction_abort_publishes_nothing_at_all() {
         .promising(oid(2))
         .promising(oid(3))
         .build(&mut fixture.mint);
-    let report = fixture.publish(
-        &request,
-        &[object(oid(2), &[oid(1)]), object(oid(3), &[])],
-    );
+    let report = fixture.publish(&request, &[object(oid(2), &[oid(1)]), object(oid(3), &[])]);
 
     assert_eq!(
         report.refusal_code(),
         Some(RefusalCode::ExpectedOldRefMismatch)
     );
     assert!(
-        fixture.state.roots().refs.get(&name("refs/heads/dev")).is_none(),
+        !fixture
+            .state
+            .roots()
+            .refs
+            .contains_key(&name("refs/heads/dev")),
         "the earlier intent in an aborted transaction must publish nothing"
     );
 }
@@ -3175,7 +3296,13 @@ fn a_coarse_witness_that_reports_reusable_is_never_contradicted_by_the_refined_o
     // unchanged head generation, so this direction holds by construction — and
     // is asserted here so a future edit cannot quietly break it.
     let mut fixture = Fixture::new(60);
-    fixture.commit_ref("k0", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    fixture.commit_ref(
+        "k0",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
 
     let request = fixture
         .request(fixture.author, "k1")
@@ -3210,7 +3337,7 @@ fn a_coarse_witness_that_reports_reusable_is_never_contradicted_by_the_refined_o
         &state,
         &PrepareRequest {
             capsule_id: fixture.mint.capsule(),
-            request: request.clone(),
+            request,
             principal_snapshot: fixture.mint.principal_snapshot(),
             profile: IdentityMint::preparation_profile(),
             granularity: WitnessGranularity::Refined,
@@ -3333,7 +3460,13 @@ fn a_merge_moves_the_ref_and_advances_the_forge_stream_in_one_record() {
     // atomically. In this model they live in one `NetEffects` on one record, so
     // "or neither does" is structural.
     let mut fixture = Fixture::new(80);
-    fixture.commit_ref("k0", "refs/heads/main", ExpectedRefState::Absent, oid(1), &[]);
+    fixture.commit_ref(
+        "k0",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
     let stream = ForgeStreamId::new(label("pulls"));
     let entity = ForgeEntityId::new(label("pr-7"));
 
@@ -3415,10 +3548,7 @@ fn the_step_function_drives_the_same_transitions_as_calling_them_directly() {
 
     let stepped = step(
         &fixture.state,
-        &ModelInput::Seal(Box::new(SealRequest {
-            seal_id,
-            request: request.clone(),
-        })),
+        &ModelInput::Seal(Box::new(SealRequest { seal_id, request })),
     )
     .expect("step");
 
@@ -3531,6 +3661,6 @@ fn a_prepared_verdict_carries_no_sequence_and_cannot_publish_by_itself() {
     );
     // The capsule decided nothing on its own.
     assert_eq!(state.outcome_of(request.tx_id), None);
-    assert!(state.decisions().is_empty());
+    assert_eq!(state.decisions(), &[]);
     assert_eq!(state.head().body.generation, HeadGeneration::FIRST);
 }

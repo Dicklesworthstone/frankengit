@@ -301,10 +301,7 @@ impl PolicySnapshot {
     /// absence must not widen authority.
     #[must_use]
     pub fn capabilities_of(&self, principal: PrincipalId) -> PrincipalCapabilities {
-        self.principals
-            .get(&principal)
-            .cloned()
-            .unwrap_or_default()
+        self.principals.get(&principal).cloned().unwrap_or_default()
     }
 
     /// True when `scope` is protected.
@@ -400,9 +397,9 @@ impl AuthorityHeadBody {
         self.latest_repository_sequence.map_or_else(
             || Ok(RepositorySequence::FIRST),
             |latest| {
-                latest
-                    .next()
-                    .map_err(|_| Box::new(InvariantBreach::SequenceExhausted { kind: "repository" }))
+                latest.next().map_err(|_| {
+                    Box::new(InvariantBreach::SequenceExhausted { kind: "repository" })
+                })
             },
         )
     }
@@ -496,7 +493,7 @@ impl StagedBatch {
     /// `Absent -> Staged -> DurabilitySatisfied -> Visible`, so visibility
     /// before durability is not merely discouraged, it is a different profile.
     #[must_use]
-    pub fn may_become_visible(&self) -> bool {
+    pub const fn may_become_visible(&self) -> bool {
         !self
             .batch
             .durability()
@@ -569,18 +566,12 @@ impl IdentityLedger {
     }
 
     /// Records a head identity, refusing reuse.
-    pub fn introduce_head(
-        &mut self,
-        id: RepositoryAuthorityHeadId,
-    ) -> ModelResult<()> {
+    pub fn introduce_head(&mut self, id: RepositoryAuthorityHeadId) -> ModelResult<()> {
         introduce(&mut self.heads, id, "head")
     }
 
     /// Records a batch identity, refusing reuse.
-    pub fn introduce_batch(
-        &mut self,
-        id: RepositoryDecisionBatchId,
-    ) -> ModelResult<()> {
+    pub fn introduce_batch(&mut self, id: RepositoryDecisionBatchId) -> ModelResult<()> {
         introduce(&mut self.batches, id, "batch")
     }
 
@@ -600,11 +591,7 @@ impl IdentityLedger {
     }
 }
 
-fn introduce<T: Ord>(
-    set: &mut BTreeSet<T>,
-    id: T,
-    kind: &'static str,
-) -> ModelResult<()> {
+fn introduce<T: Ord>(set: &mut BTreeSet<T>, id: T, kind: &'static str) -> ModelResult<()> {
     if set.insert(id) {
         Ok(())
     } else {
@@ -674,7 +661,10 @@ impl RepositoryState {
         // introduction cannot collide. The result is still consumed rather
         // than unwrapped: the model does not panic on its own construction.
         let genesis_introduced = identities.introduce_head(configuration.genesis_head_id);
-        debug_assert!(genesis_introduced.is_ok(), "genesis head identity collided in a fresh ledger");
+        debug_assert!(
+            genesis_introduced.is_ok(),
+            "genesis head identity collided in a fresh ledger"
+        );
         let mut head_chain = BTreeMap::new();
         head_chain.insert(configuration.genesis_head_id, body.clone());
         Self {
@@ -891,11 +881,10 @@ impl RepositoryState {
                     declared: Some(predecessor),
                 }));
             };
-            let expected = body.generation.next().map_err(|_| {
-                Box::new(InvariantBreach::SequenceExhausted {
-                    kind: "generation",
-                })
-            })?;
+            let expected = body
+                .generation
+                .next()
+                .map_err(|_| Box::new(InvariantBreach::SequenceExhausted { kind: "generation" }))?;
             if expected != cursor.generation {
                 return Err(Box::new(InvariantBreach::HeadGenerationNotSuccessor {
                     current: body.generation,

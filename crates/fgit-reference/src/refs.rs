@@ -68,8 +68,7 @@ impl ExpectedRefState {
     #[must_use]
     pub fn is_satisfied_by(self, actual: Option<&GitOid>) -> bool {
         match (self, actual) {
-            (Self::Any, _) => true,
-            (Self::Absent, None) => true,
+            (Self::Any, _) | (Self::Absent, None) => true,
             (Self::Absent, Some(_)) | (Self::Exact(_), None) => false,
             (Self::Exact(expected), Some(found)) => expected == *found,
         }
@@ -77,9 +76,10 @@ impl ExpectedRefState {
 
     /// True when this expectation asserts nothing about the basis.
     ///
-    /// Only an unconditional expectation may accompany a forced
-    /// non-fast-forward update: a caller cannot both assert an exact
-    /// predecessor and ask to ignore it.
+    /// An unconditional expectation and a forced update are independent: a
+    /// caller may pair a force with an exact expected-old value, which is the
+    /// "force with lease" shape, and the model checks both. This predicate
+    /// exists so a caller can tell the two apart, not to forbid the pairing.
     #[must_use]
     pub const fn is_unconditional(self) -> bool {
         matches!(self, Self::Any)
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn ref_names_order_byte_lexicographically() {
-        let mut names = vec![
+        let mut names = [
             name("refs/tags/v1"),
             name("refs/heads/main"),
             name("refs/heads/dev"),

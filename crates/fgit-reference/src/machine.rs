@@ -166,7 +166,9 @@ pub fn step(state: &RepositoryState, input: &ModelInput) -> ModelResult<ModelSte
         }
         ModelInput::Decide { capsule } => {
             let Some(prepared) = state.capsule(*capsule) else {
-                return Err(Box::new(InvariantBreach::UnknownCapsule { capsule: *capsule }));
+                return Err(Box::new(InvariantBreach::UnknownCapsule {
+                    capsule: *capsule,
+                }));
             };
             let verdict = decide(state, prepared);
             // Deciding changes nothing: a decision becomes canonical only when
@@ -210,7 +212,10 @@ pub fn step(state: &RepositoryState, input: &ModelInput) -> ModelResult<ModelSte
 fn cancel(state: &RepositoryState, request: CancellationRequest) -> ModelStep {
     let outcome = state.outcome_of(request.tx_id);
     match request.phase {
-        CancellationPhase::BeforeSeal => ModelStep {
+        // Before the seal there is nothing to drain, and after the
+        // compare-and-swap there is nothing left to abandon: in both phases the
+        // state is untouched and only the report differs by what it observes.
+        CancellationPhase::BeforeSeal | CancellationPhase::AfterCas => ModelStep {
             next: state.clone(),
             output: ModelOutput::Cancelled(CancellationReport {
                 phase: request.phase,
@@ -235,13 +240,5 @@ fn cancel(state: &RepositoryState, request: CancellationRequest) -> ModelStep {
                 }),
             }
         }
-        CancellationPhase::AfterCas => ModelStep {
-            next: state.clone(),
-            output: ModelOutput::Cancelled(CancellationReport {
-                phase: request.phase,
-                seal_survives: state.seal_of(request.tx_id).is_some(),
-                outcome,
-            }),
-        },
     }
 }

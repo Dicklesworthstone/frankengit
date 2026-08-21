@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_types::hash::Digest;
 use fgit_types::identity::{
-    PreparedTxnCapsuleId, PreparationProfileId, PrincipalSnapshotId, RepositoryAuthorityHeadId,
+    PreparationProfileId, PreparedTxnCapsuleId, PrincipalSnapshotId, RepositoryAuthorityHeadId,
     RepositoryCommitId, TransactionSealId, TxId,
 };
 use fgit_types::native::GitOid;

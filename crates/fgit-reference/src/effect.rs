@@ -488,8 +488,7 @@ fn retire_absorbed(
         };
         if matches!(target, EffectTarget::ForgeStream(_)) {
             if !target_changed {
-                mapping.disposition =
-                    IntentDisposition::Absorbed(AbsorptionReason::IdentityEffect);
+                mapping.disposition = IntentDisposition::Absorbed(AbsorptionReason::IdentityEffect);
             }
             continue;
         }

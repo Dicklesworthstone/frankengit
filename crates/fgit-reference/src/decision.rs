@@ -37,8 +37,8 @@ use crate::effect::{NetEffects, RetentionEffect};
 use crate::intent::{
     DurabilityProfile, ForgeStreamId, ForgeStreamPosition, OutboxDeliveryKey, RetentionRoot,
 };
-use fgit_types::refs::RefName;
 use crate::state::{InvariantBreach, ModelResult, RepositoryRoots};
+use fgit_types::refs::RefName;
 
 /// One terminal decision with the decision sequence it consumed.
 ///
@@ -187,7 +187,9 @@ impl DecisionBatch {
     /// The decision sequence of the last decision in this batch.
     #[must_use]
     pub fn last_decision_sequence(&self) -> Option<DecisionSequence> {
-        self.decisions.last().map(|decision| decision.decision_sequence)
+        self.decisions
+            .last()
+            .map(|decision| decision.decision_sequence)
     }
 
     /// The last committed record's identity and sequence, when the batch
@@ -309,13 +311,13 @@ impl DecisionBatchDraft {
 
     /// How many decisions the draft holds.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.decisions.len()
     }
 
     /// True when the draft holds no decision.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.decisions.is_empty()
     }
 
@@ -345,10 +347,7 @@ impl DecisionBatchDraft {
     }
 
     /// Appends one commit, assigning both sequences and the parent link.
-    pub fn push_commit(
-        &mut self,
-        candidate: CommitCandidate,
-    ) -> ModelResult<SequenceAssignment> {
+    pub fn push_commit(&mut self, candidate: CommitCandidate) -> ModelResult<SequenceAssignment> {
         let tx_id = candidate.tx_id;
         let decision_sequence = self.reserve_decision_sequence(tx_id)?;
         let repository_sequence = self.next_repository_sequence;
@@ -398,7 +397,9 @@ impl DecisionBatchDraft {
         resulting_policy_epoch: PolicyEpoch,
     ) -> ModelResult<DecisionBatch> {
         if self.decisions.is_empty() {
-            return Err(Box::new(InvariantBreach::EmptyDecisionBatch { batch: self.id }));
+            return Err(Box::new(InvariantBreach::EmptyDecisionBatch {
+                batch: self.id,
+            }));
         }
         Ok(DecisionBatch {
             id: self.id,
@@ -414,10 +415,7 @@ impl DecisionBatchDraft {
         })
     }
 
-    fn reserve_decision_sequence(
-        &mut self,
-        tx_id: TxId,
-    ) -> ModelResult<DecisionSequence> {
+    fn reserve_decision_sequence(&mut self, tx_id: TxId) -> ModelResult<DecisionSequence> {
         if !self.seen.insert(tx_id) {
             return Err(Box::new(InvariantBreach::SecondDecisionInBatch { tx_id }));
         }

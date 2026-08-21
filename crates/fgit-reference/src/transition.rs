@@ -27,7 +27,7 @@ use fgit_types::vocabulary::{DecisionOutcome, RefusalCode, RequestRejectionCode}
 use crate::capsule::{ConflictWitness, PreparedTxnCapsule, PreparedVerdict, WitnessGranularity};
 use crate::decision::{CommitCandidate, DecisionBatch, DecisionBatchDraft};
 use crate::effect::{
-    FoldBasis, FoldOutcome, IntentMapping, NetEffectFolder, NetEffects, ReferenceFolder, RefEffect,
+    FoldBasis, FoldOutcome, IntentMapping, NetEffectFolder, NetEffects, RefEffect, ReferenceFolder,
     RetentionEffect,
 };
 use crate::intent::{
@@ -287,7 +287,7 @@ impl Evaluation {
     /// An empty map is honest here: plan §15.4's totality requirement is about
     /// intents that were *evaluated*, and an admission refusal happens before
     /// evaluation begins.
-    fn refused_before_fold(code: RefusalCode) -> Self {
+    const fn refused_before_fold(code: RefusalCode) -> Self {
         Self {
             verdict: PreparedVerdict::Refuse(code),
             intent_map: Vec::new(),
@@ -429,13 +429,12 @@ fn evaluate_policy(
         if !capabilities.may_write_scope(scope) {
             return Some(RefusalCode::CapabilityScopeViolation);
         }
-        let protected = policy.is_protected(scope);
+        // A protected scope forbids deletion outright and forbids any update
+        // that is not a fast-forward. A fast-forward, and the creation of a
+        // ref that did not exist, leave the loop before the protection check,
+        // which is what keeps protection from blocking ordinary progress.
         match effect {
-            RefEffect::Delete => {
-                if protected {
-                    return Some(RefusalCode::ProtectedRefTransitionDenied);
-                }
-            }
+            RefEffect::Delete => {}
             RefEffect::Set(new) => {
                 let Some(old) = roots.refs.get(name).copied() else {
                     // Creating a ref is always a fast-forward from nothing.
@@ -450,10 +449,10 @@ fn evaluate_policy(
                 if !capabilities.may_force {
                     return Some(RefusalCode::ForceNotPermitted);
                 }
-                if protected {
-                    return Some(RefusalCode::ProtectedRefTransitionDenied);
-                }
             }
+        }
+        if policy.is_protected(scope) {
+            return Some(RefusalCode::ProtectedRefTransitionDenied);
         }
     }
 
@@ -522,7 +521,7 @@ fn forced_refs(request: &TransactionRequest) -> BTreeSet<RefName> {
 }
 
 /// The ref an intent names, when it names one.
-fn named_ref(intent: &Intent) -> Option<&RefName> {
+const fn named_ref(intent: &Intent) -> Option<&RefName> {
     match intent {
         Intent::Ref(ref_intent) => Some(ref_intent.target()),
         Intent::Forge(forge) => match &forge.event {
@@ -626,8 +625,9 @@ fn build_witness(
                     refs.insert(target.clone(), observed_ref);
                 }
             }
-            Intent::Retention(RetentionIntent::AddRoot(root))
-            | Intent::Retention(RetentionIntent::RemoveRoot(root)) => {
+            Intent::Retention(
+                RetentionIntent::AddRoot(root) | RetentionIntent::RemoveRoot(root),
+            ) => {
                 if roots.retention.contains(root) {
                     retention_present.insert(*root);
                 } else {
@@ -1114,7 +1114,9 @@ pub fn compare_and_swap(
     input: CasRequest,
 ) -> ModelResult<(RepositoryState, CasOutcome)> {
     let Some(staged) = state.staged.get(&input.batch) else {
-        return Err(Box::new(InvariantBreach::UnstagedBatch { batch: input.batch }));
+        return Err(Box::new(InvariantBreach::UnstagedBatch {
+            batch: input.batch,
+        }));
     };
 
     // A lost compare-and-exchange is ordinary, not an invariant breach: two
@@ -1176,7 +1178,8 @@ pub fn compare_and_swap(
     next.head = staged.candidate_head;
     next.decisions
         .extend(staged.batch.decisions().iter().copied());
-    next.commits.extend(staged.batch.committed().iter().cloned());
+    next.commits
+        .extend(staged.batch.committed().iter().cloned());
 
     // §16.2: promotion out of quarantine follows the committed closure. A
     // refused transaction's staged bytes are dropped, never retained.

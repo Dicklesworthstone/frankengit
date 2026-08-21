@@ -40,9 +40,7 @@ use fgit_types::numeric::CodecVersion;
 use fgit_types::vocabulary::{DecisionOutcome, MismatchPolicy, RefusalCode};
 
 use crate::capsule::WitnessGranularity;
-use crate::intent::{
-    DurabilityProfile, IdempotencyKey, Intent, Statement, TransactionRequest,
-};
+use crate::intent::{DurabilityProfile, IdempotencyKey, Intent, Statement, TransactionRequest};
 use crate::state::{ModelResult, QuarantinedObject, RepositoryState};
 use crate::transition::{
     CasOutcome, CasRequest, DecisionBodyIdentity, PrepareRequest, QuarantineRequest, SealOutcome,
@@ -119,8 +117,8 @@ impl IdentityMint {
         let raw = self.next_raw();
         let algorithm = DigestAlgorithmId::try_new(HARNESS_ALGORITHM_CODE_POINT)
             .expect("the harness algorithm slot is a non-zero constant");
-        let bytes =
-            DigestBytes::try_new(&raw).expect("a 32-byte body is inside the accepted digest window");
+        let bytes = DigestBytes::try_new(&raw)
+            .expect("a 32-byte body is inside the accepted digest window");
         Digest::new(algorithm, bytes)
     }
 
@@ -247,7 +245,7 @@ pub struct RequestBuilder {
 impl RequestBuilder {
     /// Opens a builder for one principal acting on one repository.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         tenant: TenantId,
         repository: RepositoryId,
         principal: PrincipalId,
