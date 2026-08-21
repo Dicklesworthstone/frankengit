@@ -1,0 +1,14 @@
+[package]
+name = "fgit-runtime"
+version = "0.0.1"
+edition.workspace = true
+license-file = "../../LICENSE"
+repository = "https://github.com/Dicklesworthstone/frankengit"
+publish = false
+description = "FrankenGit Asupersync runtime profile: node topology, production context factory, budget and capability policy, and dependency-ordered shutdown."
+
+[dependencies]
+asupersync = { version = "0.4.9", default-features = false }
+
+[lints]
+workspace = true
