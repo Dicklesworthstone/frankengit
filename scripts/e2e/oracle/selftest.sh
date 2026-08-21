@@ -197,6 +197,16 @@ cp --preserve=mode -- "${TEST_ROOT}/valid-git" "${FAKE_GIT}"
 read -r FAKE_HASH _ < <(sha256sum "${FAKE_GIT}")
 write_fake_receipt "${FAKE_HASH}"
 
+mkdir -p "${TEST_ROOT}/no-bwrap-bin"
+for required_command in bash dirname sha256sum; do
+    required_path="$(command -v "${required_command}")"
+    ln -s "${required_path}" "${TEST_ROOT}/no-bwrap-bin/${required_command}"
+done
+export PATH="${TEST_ROOT}/no-bwrap-bin"
+expect_exit FG-000B-ORACLE-012 69 "missing Bubblewrap reports typed UNAVAILABLE without an unsandboxed fallback" \
+    "${ORACLE}" verify testgit
+export PATH="${TEST_ROOT}/bin:/usr/bin:/bin"
+
 RUN_DIRECTORY="$("${ORACLE}" create-run testgit reproducible)"
 expect_exit FG-000B-ORACLE-004 64 "sandbox path-steering argument is refused" \
     "${ORACLE}" capture testgit "${RUN_DIRECTORY}" . escape -- --git-dir=/etc
