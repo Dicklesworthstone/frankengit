@@ -136,7 +136,7 @@ impl LedgerService {
 
     /// The ledger this service writes to.
     #[must_use]
-    pub fn ledger(&self) -> &Arc<ServiceLedger> {
+    pub const fn ledger(&self) -> &Arc<ServiceLedger> {
         &self.ledger
     }
 
