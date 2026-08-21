@@ -87,9 +87,23 @@ Must check every first-party Rust target and Cargo manifest for:
 - one `Cargo.lock` and dated nightly;
 - dependency registry approval, including the resolved Cargo.lock transitive graph;
 - one explicit `crate_layers.tsv` row for every workspace `fgit-*` package, with every direct first-party edge restricted to its declared lower-or-equal dependency layers and no L3 sibling edge;
-- version-universe consistency, build-script/proc-macro policy, and transitive-unsafe evidence (the closed-world name check and build-script/proc-macro refusals run today; version-universe and transitive-unsafe evidence join the lane as that machinery lands);
+- version-universe consistency, build-script/proc-macro policy, and transitive-unsafe evidence (the closed-world name check and the first-party build-script/proc-macro refusals run today; version-universe and transitive-unsafe evidence join the lane as that machinery lands);
+- enumeration of the *enabled* build-script and proc-macro surface of the resolved graph, compared row-by-row with the dependency registry. Enabled means reachable from a workspace member over normal and build edges — development edges only from members themselves — after platform filtering, not merely present in `Cargo.lock`. The two are not the same number and the difference is not noise: at the time this clause was written the unfiltered lock listed 37 build scripts and 14 proc macros where the enabled set on `x86_64-unknown-linux-gnu` held 29 and 10, the remainder being Windows, wasm and macOS packages that never build here. A registry row records the state of the packages it wins under the registry's own precedence rule (exact pattern, then longest pattern, then lowest identifier), which is what allows a glob row and an exact row to describe the same package without contradicting each other. Drift in either direction is a refusal: an enabled build script or proc macro with no matching active row, and a row asserting a build script or proc macro the resolved graph does not have;
+- refusal when a build script emits `cargo:rustc-link-lib` or `cargo:rustc-link-search` for a package whose registry `ffi_policy` denies a foreign engine. Linking native object code is a property of the build, not of the manifest, so the manifest cannot be the oracle for it;
+- refusal when any first-party crate acquires a third-party derive macro. The check reads `[dependencies]`, `[dev-dependencies]` and `[build-dependencies]` in both inline and table form, because a derive macro reaches first-party code through a test fixture's dependency section before it ever reaches `src/`;
 - no empty engine crate or placeholder durable abstraction (a review obligation until crate-graph checks exist);
 - exactly one root `Cargo.lock` (nested lockfiles are refused).
+
+Status of the three clauses above covering enabled-surface enumeration, the `ffi_policy`
+link refusal, and the third-party derive refusal: specified here, not yet enforced by the
+lane. They are written first so the registry schema and the checker are built against a
+fixed obligation rather than the obligation being back-fitted to whatever the checker
+happens to do. Until the machinery lands they are review obligations, and this lane must
+not be described as enforcing them. Enumeration additionally has no present violation to
+find — every enabled build script and proc macro in the graph already matches an active
+registry row — so its value is drift refusal, not discovery, and reporting it as a catch
+would overstate the evidence. The `ffi_policy` clause is the one with a live violation
+behind it.
 
 ### 5.3 Local execution lane
 
