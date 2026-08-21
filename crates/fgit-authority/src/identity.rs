@@ -13,20 +13,23 @@
 //! [`TxIdPreimage`], so the derivation is exactly one canonical encoding
 //! followed by exactly one domain-separated digest.
 //!
-//! # Why a body-identity bridge lives here
+//! # Body identity
 //!
-//! `fgit_codec::body_id` takes an `impl BodyIdentity`, and the only
-//! implementation in the tree is a test-support one. A production bridge needs
-//! both `fgit-codec` (for canonical bytes) and `fgit-crypto` (for the digest),
-//! and neither depends on the other, so it lands in the first crate that needs
-//! both. [`canonical_body_id`] is that bridge, and it is stricter than the
-//! trait it replaces: the caller names the closed `IdentityDomain` enum rather
-//! than a free-form tag, and the tag is checked against the body's own domain,
-//! so one body's bytes can never be labelled with another body's domain.
+//! [`canonical_body_id`] is a thin call into `fgit_codec::body_id` with the
+//! workspace's single production `BodyIdentity`. It used to be a local bridge,
+//! written when no production implementation existed and the only one in the
+//! tree was test support. `fgit-codec` now owns that seam — it is the one crate
+//! that can see both the encoder and the digest — so keeping a second
+//! implementation here would be two implementations of one contract.
+//!
+//! The local version guarded against labelling one body's bytes with another
+//! body's domain. That guard is no longer needed rather than merely dropped:
+//! `body_id` takes the domain from `B::DOMAIN` instead of from the caller, so
+//! the mismatch it defended against is now unrepresentable.
 
 use fgit_codec::wire::{CanonicalBody, canonical_body_bytes};
-use fgit_codec::{CodecRefusal, Decoder, Encoder};
-use fgit_crypto::{IdentityDomain, internal_digest_value, internal_object_id};
+use fgit_codec::{CodecRefusal, CryptoBodyIdentity, Decoder, Encoder, body_id};
+use fgit_crypto::{IdentityDomain, internal_digest_value};
 use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::hash::Digest;
 use fgit_types::identity::{InternalObjectId, PrincipalId, RepositoryId, TenantId, TxId};
@@ -142,10 +145,13 @@ fn idempotency_key_schema() -> SchemaId {
     SchemaId::new(SchemaFamily::from_static("idempotency-key"), 1, 0)
 }
 
-/// The identity of one canonical body under one registered domain.
+/// The identity of one canonical body.
 ///
-/// Stricter than the free-form `BodyIdentity` hook: the domain is a member of
-/// the closed registry enumeration and must be the body's own domain.
+/// The `domain` argument is retained for call-site legibility and is checked
+/// against the body's own domain, but it no longer selects anything: the
+/// identity is computed by `fgit_codec::body_id`, which reads the domain from
+/// `B::DOMAIN`. A caller naming the wrong domain is refused rather than
+/// silently ignored, so the argument cannot become a lie.
 pub fn canonical_body_id<B: CanonicalBody>(
     domain: IdentityDomain,
     codec_version: CodecVersion,
@@ -157,13 +163,12 @@ pub fn canonical_body_id<B: CanonicalBody>(
             observed: domain.domain_tag(),
         });
     }
-    let payload = canonical_body_bytes(body)?;
-    Ok(internal_object_id(
-        domain,
-        B::schema_id(),
+    debug_assert_eq!(
         codec_version,
-        &payload,
-    ))
+        fgit_types::CANONICAL_CODEC_VERSION,
+        "the shared bridge stamps the canonical codec version"
+    );
+    Ok(body_id(&CryptoBodyIdentity, body)?)
 }
 
 /// The digest binding every client-visible semantic field of one request.

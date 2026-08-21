@@ -27,7 +27,7 @@ use fgit_codec::wire::{CanonicalBody, encode_body};
 use fgit_codec::{CodecRefusal, DecodeLimits, Decoder, Encoder, decode_body};
 use fgit_crypto::IdentityDomain;
 use fgit_types::CANONICAL_CODEC_VERSION;
-use fgit_types::identity::{InternalObjectId, PrincipalId, TransactionSealId};
+use fgit_types::identity::{AdmissionReceiptId, PrincipalId, TransactionSealId};
 use fgit_types::label::{AsciiSlug, DomainTag, SchemaFamily};
 use fgit_types::numeric::PolicyEpoch;
 
@@ -112,12 +112,21 @@ impl CanonicalBody for AdmissionReceiptBody {
 
 impl AdmissionReceiptBody {
     /// The receipt's own domain-pinned identity.
-    pub fn identity(&self) -> Result<InternalObjectId, SealFailure> {
-        Ok(canonical_body_id(
+    ///
+    /// Typed rather than a bare `InternalObjectId`: `AdmissionReceiptId`
+    /// refuses a digest carrying any other domain on the way in, so an
+    /// evidence record cannot arrive where an admission receipt belongs.
+    pub fn identity(&self) -> Result<AdmissionReceiptId, SealFailure> {
+        let id = canonical_body_id(
             IdentityDomain::AdmissionReceipt,
             CANONICAL_CODEC_VERSION,
             self,
-        )?)
+        )?;
+        AdmissionReceiptId::from_internal_object_id(id).map_err(|_| {
+            SealFailure::SlotContentUnexpected {
+                slot: "admission-receipt",
+            }
+        })
     }
 }
 

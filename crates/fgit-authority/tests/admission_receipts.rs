@@ -189,7 +189,7 @@ fn a_receipt_carries_the_admission_receipt_domain() {
     let body = receipt(seal_id, "push.write", 1, 0x44, 100);
     let identity = body.identity().expect("a derivable identity");
     assert_eq!(
-        identity.domain().as_str(),
+        identity.as_internal_object_id().domain().as_str(),
         "frankengit/admission-receipt/v1",
         "an admission receipt must not be forgeable as another domain's body"
     );
