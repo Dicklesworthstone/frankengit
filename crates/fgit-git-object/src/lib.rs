@@ -1208,6 +1208,43 @@ mod tests {
     }
 
     #[test]
+    fn configured_byte_and_structure_budgets_refuse_before_unbounded_work() {
+        let mut object_limited = limits();
+        object_limited.max_object_bytes = 0;
+        assert_eq!(
+            parse_loose_framed(b"blob 1\0x", object_limited),
+            Err(ObjectError::ObjectTooLarge { limit: 0 })
+        );
+
+        let mut header_limited = limits();
+        header_limited.max_loose_header_bytes = 5;
+        assert_eq!(
+            parse_loose_framed(b"blob 1\0x", header_limited),
+            Err(ObjectError::LooseHeaderTooLarge { limit: 5 })
+        );
+
+        let entry = TreeEntry {
+            mode: b"100644".to_vec(),
+            name: b"a".to_vec(),
+            object_id: oid(1, 20),
+        };
+        let mut tree_limited = limits();
+        tree_limited.max_tree_entries = 0;
+        assert_eq!(
+            emit_tree(&[entry], AcceptanceProfile::StrictCreate, &tree_limited),
+            Err(ObjectError::TooManyTreeEntries { limit: 0 })
+        );
+
+        let commit = b"tree 1111111111111111111111111111111111111111\nauthor A <a@x> 1 +0000\ncommitter C <c@x> 1 +0000\n\nmessage";
+        let mut headers_limited = limits();
+        headers_limited.max_header_lines = 2;
+        assert_eq!(
+            parse_commit(commit, AcceptanceProfile::StrictCreate, &headers_limited),
+            Err(ObjectError::HeaderLimitExceeded { limit: 2 })
+        );
+    }
+
+    #[test]
     fn checked_in_zlib_loose_blob_decodes_after_trailer_verification() {
         let compressed = decode_hex(include_str!("../tests/corpus/blob-hello.zlib.hex"));
         let object = parse_zlib_loose(&compressed, InflateLimits::GIT_OBJECT, limits())
