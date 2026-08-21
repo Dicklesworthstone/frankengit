@@ -642,6 +642,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-benchmark"
+version = "0.0.1"
+dependencies = [
+ "fgit-crypto",
+]
+
+[[package]]
 name = "fgit-chronicle"
 version = "0.0.1"
 dependencies = [

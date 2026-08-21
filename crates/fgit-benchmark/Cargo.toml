@@ -1,0 +1,13 @@
+[package]
+name = "fgit-benchmark"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+fgit-crypto.workspace = true
+
+[lints]
+workspace = true
