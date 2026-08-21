@@ -48,7 +48,7 @@ impl std::error::Error for KeyError {}
 /// derives longer keys must be refused identically by every profile.
 pub const MAX_KEY_BYTES: usize = 256;
 
-fn validate(bytes: &[u8]) -> Result<(), KeyError> {
+const fn validate(bytes: &[u8]) -> Result<(), KeyError> {
     if bytes.is_empty() {
         return Err(KeyError::Empty);
     }

@@ -225,7 +225,7 @@ impl FaultPlan {
 
     /// Whether the plan injects nothing.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.directives.is_empty()
     }
 
@@ -280,13 +280,13 @@ impl FaultLog {
 
     /// How many faults were injected.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.records.len()
     }
 
     /// Whether no fault was injected.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
 }
@@ -327,13 +327,13 @@ impl EffectLog {
 
     /// How many effects were reached.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.records.len()
     }
 
     /// Whether no effect was reached.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
 

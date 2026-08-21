@@ -253,7 +253,7 @@ pub struct HeadReadReceipt {
 impl HeadReadReceipt {
     /// Assemble a receipt.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         key: HeadKey,
         token: AuthorityVersionToken,
         generation: HeadGeneration,

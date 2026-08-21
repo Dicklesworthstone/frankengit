@@ -153,7 +153,7 @@ fn expect_refusal(
     }
 }
 
-fn forged_token(seed: u8) -> AuthorityVersionToken {
+const fn forged_token(seed: u8) -> AuthorityVersionToken {
     AuthorityVersionToken::from_opaque_bytes([seed; VERSION_TOKEN_BYTES])
 }
 

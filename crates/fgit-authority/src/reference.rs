@@ -306,7 +306,7 @@ impl MemoryAuthorityStore {
 
 /// Bodies are bounded server-side, inside the effect, so a body-size refusal is
 /// subject to exactly the same fault script as any other request.
-fn check_body(limits: AuthorityLimits, body: &[u8]) -> Result<(), AuthorityRefusal> {
+const fn check_body(limits: AuthorityLimits, body: &[u8]) -> Result<(), AuthorityRefusal> {
     if body.len() > limits.max_body_bytes {
         return Err(AuthorityRefusal::BodyTooLarge {
             len: body.len(),

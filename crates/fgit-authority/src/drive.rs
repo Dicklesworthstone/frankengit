@@ -118,13 +118,13 @@ impl Interleaving {
 
     /// How many turns are scheduled.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.order.len()
     }
 
     /// Whether no turn is scheduled.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.order.is_empty()
     }
 }
