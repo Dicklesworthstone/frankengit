@@ -1406,7 +1406,7 @@ pub trait CommitGraph {
     type Error;
 
     fn parents_of(&self, commit: &Self::CommitId)
-        -> Result<ParentSet<Self::CommitId>, Self::Error>;
+    -> Result<ParentSet<Self::CommitId>, Self::Error>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

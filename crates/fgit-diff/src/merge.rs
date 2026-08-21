@@ -11,8 +11,8 @@ use std::{
 };
 
 use crate::{
-    diff, merge_bases_all, CommitGraph, DiffError, DiffHunk, DiffOptions, DiffProfile, Edit,
-    MergeBaseError, MergeBaseLimits, MergeBaseResult, Span, TreeEntry, TreeMode,
+    CommitGraph, DiffError, DiffHunk, DiffOptions, DiffProfile, Edit, MergeBaseError,
+    MergeBaseLimits, MergeBaseResult, Span, TreeEntry, TreeMode, diff, merge_bases_all,
 };
 
 /// Versioned selection rules for a merge proposal.
