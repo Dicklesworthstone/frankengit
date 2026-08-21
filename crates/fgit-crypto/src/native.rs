@@ -1,58 +1,56 @@
-//! Native Git object identity, typed by hash algorithm.
+//! Native Git object identity: the hashing that produces the `fgit-types`
+//! identity types, typed by algorithm.
 //!
-//! NORMATIVE_PROTOCOL_CONTRACTS section 3.1 requires that equal digest bytes
-//! under different algorithms are not equal identities and that every API
-//! able to cross repository context carries the hash algorithm explicitly.
-//! `fgit-types` provides the erased shell `GitObjectId`, which is the right
-//! representation when the algorithm is genuinely a runtime value. This module
-//! provides the *typed* layer above it: [`GitOid<A>`] is parameterised by an
-//! algorithm marker, so a SHA-1 identity and a SHA-256 identity are different
-//! Rust types and confusing them is a compile error rather than a comparison
-//! that quietly answers `false`.
+//! `fgit-types` owns the native identity *values*: `GitOidSha1` and
+//! `GitOidSha256` are distinct nominal types with no conversion and no
+//! cross-type comparison, and `GitOid` is the erased form that carries the
+//! algorithm at runtime. This module deliberately defines no parallel
+//! identity type. What it adds is the algorithm as a *type parameter*, so a
+//! generic caller can be written once and still be unable to mix formats:
 //!
 //! ```
-//! use fgit_crypto::{GitObjectKind, GitOid, Sha1};
+//! use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1};
 //!
-//! // The empty blob's well-known SHA-1 identity.
-//! let oid = GitOid::<Sha1>::of_object(GitObjectKind::Blob, b"");
-//! assert_eq!(oid.to_hex(), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+//! // `GitOid<Sha1>` is exactly `fgit_types::GitOidSha1`, not a copy of it.
+//! let oid: GitOid<Sha1> = GitOid::<Sha1>::of_object(GitObjectKind::Blob, b"");
+//! assert_eq!(oid.to_string(), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
 //! ```
 //!
-//! Cross-format comparison does not compile:
+//! Comparing the two formats does not compile:
 //!
 //! ```compile_fail
-//! use fgit_crypto::{GitObjectKind, GitOid, Sha1, Sha256};
+//! use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1, Sha256};
 //!
 //! let narrow = GitOid::<Sha1>::of_object(GitObjectKind::Blob, b"");
 //! let wide = GitOid::<Sha256>::of_object(GitObjectKind::Blob, b"");
 //! let _ = narrow == wide;
 //! ```
 //!
-//! Neither does passing one where the other is expected:
+//! Neither does substituting one for the other:
 //!
 //! ```compile_fail
-//! use fgit_crypto::{GitObjectKind, GitOid, Sha1, Sha256};
+//! use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1, Sha256};
 //!
 //! fn requires_sha256(_oid: GitOid<Sha256>) {}
 //! requires_sha256(GitOid::<Sha1>::of_object(GitObjectKind::Blob, b""));
 //! ```
 //!
-//! Hex parsing always has an algorithm in scope; there is no untyped
-//! `parse_hex(&str)` that guesses from the input width:
+//! Hexadecimal parsing never guesses the algorithm from the input width; the
+//! typed entry point takes it as a type parameter, so this is ambiguous:
 //!
 //! ```compile_fail
-//! let _ = fgit_crypto::GitOid::parse_hex("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+//! let _ = fgit_crypto::parse_git_oid("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
 //! ```
 
 use core::fmt;
-use core::marker::PhantomData;
 
-use fgit_types::GitObjectId;
+use fgit_types::error::TypeRefusal;
+use fgit_types::native::{
+    GitHashAlgorithm as GitObjectFormat, GitOid as AnyGitOid, GitOidSha1, GitOidSha256,
+};
 
 use crate::hashing::{DigestHasher, Sha1Hasher, Sha256Hasher};
 use crate::registry::DigestAlgorithm;
-
-const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
 
 /// Sealing module for the closed algorithm set.
 #[doc(hidden)]
@@ -64,13 +62,15 @@ pub mod closed {
 /// A native Git hash algorithm, as a type.
 ///
 /// The trait is sealed: the algorithm set is closed, exactly like the
-/// [`DigestAlgorithm`] enumeration it mirrors. A downstream crate cannot add
-/// a third Git object format by implementing this trait.
+/// [`DigestAlgorithm`] enumeration it mirrors. A downstream crate cannot add a
+/// third Git object format by implementing this trait.
 pub trait GitHashAlgorithm:
     closed::AlgorithmMarker + Copy + Clone + fmt::Debug + Eq + Ord + core::hash::Hash
 {
-    /// The registry entry for this algorithm.
+    /// The registry entry for this construction.
     const ALGORITHM: DigestAlgorithm;
+    /// The declared repository object format that uses it.
+    const OBJECT_FORMAT: GitObjectFormat;
     /// Digest width in bytes.
     const DIGEST_LEN: usize;
     /// Digest width in lowercase hexadecimal characters.
@@ -80,68 +80,26 @@ pub trait GitHashAlgorithm:
     type Digest: Copy + Eq + Ord + core::hash::Hash + fmt::Debug + AsRef<[u8]>;
     /// Streaming hasher producing [`Self::Digest`].
     type Hasher: DigestHasher<Output = Self::Digest> + Clone + fmt::Debug;
+    /// The `fgit-types` identity value this algorithm produces.
+    type Oid: NativeObjectIdentity<Algorithm = Self>;
 
-    /// Build a digest from exactly [`Self::DIGEST_LEN`] bytes.
-    fn digest_from_slice(bytes: &[u8]) -> Option<Self::Digest>;
+    /// Wrap a raw digest as the identity value.
+    fn oid_from_digest(digest: Self::Digest) -> Self::Oid;
 
-    /// Erase a digest into the algorithm-tagged shell.
-    fn erase_digest(digest: &Self::Digest) -> GitObjectId;
-}
-
-/// Algorithm marker for SHA-1 Git object format.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Sha1;
-
-/// Algorithm marker for SHA-256 Git object format.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Sha256;
-
-impl closed::AlgorithmMarker for Sha1 {}
-impl closed::AlgorithmMarker for Sha256 {}
-
-impl GitHashAlgorithm for Sha1 {
-    const ALGORITHM: DigestAlgorithm = DigestAlgorithm::Sha1;
-    const DIGEST_LEN: usize = 20;
-    const HEX_LEN: usize = 40;
-
-    type Digest = [u8; 20];
-    type Hasher = Sha1Hasher;
-
-    fn digest_from_slice(bytes: &[u8]) -> Option<Self::Digest> {
-        bytes.try_into().ok()
-    }
-
-    fn erase_digest(digest: &Self::Digest) -> GitObjectId {
-        GitObjectId::Sha1(*digest)
-    }
-}
-
-impl GitHashAlgorithm for Sha256 {
-    const ALGORITHM: DigestAlgorithm = DigestAlgorithm::Sha256;
-    const DIGEST_LEN: usize = 32;
-    const HEX_LEN: usize = 64;
-
-    type Digest = [u8; 32];
-    type Hasher = Sha256Hasher;
-
-    fn digest_from_slice(bytes: &[u8]) -> Option<Self::Digest> {
-        bytes.try_into().ok()
-    }
-
-    fn erase_digest(digest: &Self::Digest) -> GitObjectId {
-        GitObjectId::Sha256(*digest)
-    }
+    /// Parse the canonical lowercase hexadecimal form in this algorithm's
+    /// domain, delegating to the `fgit-types` decoder.
+    fn parse_hex(text: &str) -> Result<Self::Oid, TypeRefusal>;
 }
 
 /// The four native Git object types.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum GitObjectKind {
-    /// File content.
-    Blob,
-    /// Directory listing.
-    Tree,
     /// Commit.
     Commit,
+    /// Directory listing.
+    Tree,
+    /// File content.
+    Blob,
     /// Annotated tag.
     Tag,
 }
@@ -154,10 +112,21 @@ impl GitObjectKind {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Blob => "blob",
-            Self::Tree => "tree",
             Self::Commit => "commit",
+            Self::Tree => "tree",
+            Self::Blob => "blob",
             Self::Tag => "tag",
+        }
+    }
+
+    /// Git's canonical numeric object type.
+    #[must_use]
+    pub const fn type_code(self) -> u8 {
+        match self {
+            Self::Commit => 1,
+            Self::Tree => 2,
+            Self::Blob => 3,
+            Self::Tag => 4,
         }
     }
 
@@ -174,50 +143,6 @@ impl fmt::Display for GitObjectKind {
     }
 }
 
-/// Refusal produced while parsing a hexadecimal object identity.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum OidParseError {
-    /// The input is not exactly the algorithm's hexadecimal width.
-    WrongLength {
-        /// Characters the algorithm requires.
-        expected: usize,
-        /// Characters supplied.
-        actual: usize,
-    },
-    /// The input contains a character that is not a hexadecimal digit.
-    NonHexDigit {
-        /// Byte offset of the offending character.
-        index: usize,
-    },
-    /// The input contains uppercase hexadecimal. Canonical Git identities are
-    /// lowercase; accepting both spellings would give one identity two
-    /// canonical forms, so normalising user input is the caller's job.
-    NonCanonicalUppercase {
-        /// Byte offset of the offending character.
-        index: usize,
-    },
-}
-
-impl fmt::Display for OidParseError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::WrongLength { expected, actual } => write!(
-                formatter,
-                "object identity must be {expected} hexadecimal characters, got {actual}"
-            ),
-            Self::NonHexDigit { index } => {
-                write!(formatter, "non-hexadecimal character at offset {index}")
-            }
-            Self::NonCanonicalUppercase { index } => write!(
-                formatter,
-                "uppercase hexadecimal at offset {index} is not a canonical object identity"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for OidParseError {}
-
 /// Refusal produced while hashing a framed Git object.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum GitHashError {
@@ -225,7 +150,7 @@ pub enum GitHashError {
     DeclaredLengthOverrun {
         /// Length committed into the object header.
         declared: u64,
-        /// Bytes the caller attempted to supply in total.
+        /// Total the caller attempted to supply.
         received: u64,
     },
     /// Less content was supplied than the header declared.
@@ -254,109 +179,121 @@ impl fmt::Display for GitHashError {
 
 impl std::error::Error for GitHashError {}
 
-/// A native Git object identity for one specific hash algorithm.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct GitOid<A: GitHashAlgorithm> {
-    digest: A::Digest,
-    algorithm: PhantomData<A>,
-}
-
-/// A SHA-1 native Git object identity.
-pub type Sha1Oid = GitOid<Sha1>;
-/// A SHA-256 native Git object identity.
-pub type Sha256Oid = GitOid<Sha256>;
-
-impl<A: GitHashAlgorithm> GitOid<A> {
-    /// The registry entry for this identity's algorithm.
-    #[must_use]
-    pub const fn algorithm() -> DigestAlgorithm {
-        A::ALGORITHM
-    }
-
-    /// Wrap an already-computed digest.
-    #[must_use]
-    pub const fn from_digest(digest: A::Digest) -> Self {
-        Self {
-            digest,
-            algorithm: PhantomData,
-        }
-    }
-
-    /// The digest in its fixed-width representation.
-    #[must_use]
-    pub const fn digest(&self) -> &A::Digest {
-        &self.digest
-    }
-
-    /// The digest as raw bytes.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        self.digest.as_ref()
-    }
-
-    /// The canonical lowercase hexadecimal spelling.
-    #[must_use]
-    pub fn to_hex(&self) -> String {
-        let bytes = self.as_bytes();
-        let mut text = String::with_capacity(bytes.len() * 2);
-        for &byte in bytes {
-            text.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
-            text.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
-        }
-        text
-    }
-
-    /// Parse the canonical lowercase hexadecimal spelling.
-    ///
-    /// The algorithm is the type parameter, so there is no way to call this
-    /// without having chosen one.
-    pub fn parse_hex(hex: &str) -> Result<Self, OidParseError> {
-        let bytes = decode_canonical_hex(hex, A::DIGEST_LEN)?;
-        let digest = A::digest_from_slice(&bytes).ok_or(OidParseError::WrongLength {
-            expected: A::HEX_LEN,
-            actual: hex.len(),
-        })?;
-        Ok(Self::from_digest(digest))
-    }
-
-    /// Erase into the algorithm-tagged shell used where the algorithm is a
-    /// runtime value.
-    #[must_use]
-    pub fn erase(&self) -> GitObjectId {
-        A::erase_digest(&self.digest)
-    }
+/// Native identity computation for one `fgit-types` object-identity type.
+///
+/// The trait is implemented on the `fgit-types` values themselves, so
+/// `GitOid::<A>::of_object(..)` reads as identity construction rather than as
+/// a conversion through a second identity type.
+pub trait NativeObjectIdentity: Copy + Eq + fmt::Debug + Sized {
+    /// The algorithm marker that produces this identity.
+    type Algorithm: GitHashAlgorithm<Oid = Self>;
 
     /// Compute the native identity of a complete Git object.
     ///
-    /// The preimage is exactly Git's: `<type> <length>\0<content>`.
+    /// The preimage is exactly Git's: type label, space, decimal content
+    /// length, a zero byte, then the content.
     #[must_use]
-    pub fn of_object(kind: GitObjectKind, content: &[u8]) -> Self {
+    fn of_object(kind: GitObjectKind, content: &[u8]) -> Self {
         let length = u64::try_from(content.len())
             .expect("a slice length always fits in u64 on supported targets");
-        let mut hasher = <A::Hasher as DigestHasher>::new();
+        let mut hasher =
+            <<Self::Algorithm as GitHashAlgorithm>::Hasher as DigestHasher>::new();
         hasher.update(&object_header(kind, length));
         hasher.update(content);
-        Self::from_digest(hasher.finish())
+        <Self::Algorithm as GitHashAlgorithm>::oid_from_digest(hasher.finish())
     }
 
     /// Start a streaming identity computation for an object whose length is
     /// known before its content is available.
     #[must_use]
-    pub fn object_hasher(kind: GitObjectKind, declared_len: u64) -> GitObjectHasher<A> {
+    fn object_hasher(kind: GitObjectKind, declared_len: u64) -> GitObjectHasher<Self::Algorithm> {
         GitObjectHasher::new(kind, declared_len)
+    }
+
+    /// The raw digest bytes.
+    fn digest_bytes(&self) -> &[u8];
+
+    /// Erase into the runtime-tagged form.
+    fn erase(self) -> AnyGitOid;
+}
+
+/// The identity type produced by algorithm `A`.
+///
+/// This is an alias, not a new type: `GitOid<Sha1>` *is*
+/// `fgit_types::GitOidSha1`.
+pub type GitOid<A> = <A as GitHashAlgorithm>::Oid;
+
+/// Algorithm marker for the SHA-1 Git object format.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Sha1;
+
+/// Algorithm marker for the SHA-256 Git object format.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Sha256;
+
+impl closed::AlgorithmMarker for Sha1 {}
+impl closed::AlgorithmMarker for Sha256 {}
+
+impl GitHashAlgorithm for Sha1 {
+    const ALGORITHM: DigestAlgorithm = DigestAlgorithm::Sha1;
+    const OBJECT_FORMAT: GitObjectFormat = GitObjectFormat::Sha1;
+    const DIGEST_LEN: usize = 20;
+    const HEX_LEN: usize = 40;
+
+    type Digest = [u8; 20];
+    type Hasher = Sha1Hasher;
+    type Oid = GitOidSha1;
+
+    fn oid_from_digest(digest: Self::Digest) -> Self::Oid {
+        GitOidSha1::from_bytes(digest)
+    }
+
+    fn parse_hex(text: &str) -> Result<Self::Oid, TypeRefusal> {
+        GitOidSha1::from_hex(text)
     }
 }
 
-/// The exact header Git writes before an object identity: type, space,
-/// decimal length, and a terminating zero byte.
-pub(crate) fn object_header(kind: GitObjectKind, length: u64) -> Vec<u8> {
-    let decimal = length.to_string();
-    let mut header = Vec::with_capacity(kind.label().len() + decimal.len() + 2);
-    header.extend_from_slice(kind.label().as_bytes());
-    header.push(b' ');
-    header.extend_from_slice(decimal.as_bytes());
-    header.push(0);
-    header
+impl GitHashAlgorithm for Sha256 {
+    const ALGORITHM: DigestAlgorithm = DigestAlgorithm::Sha256;
+    const OBJECT_FORMAT: GitObjectFormat = GitObjectFormat::Sha256;
+    const DIGEST_LEN: usize = 32;
+    const HEX_LEN: usize = 64;
+
+    type Digest = [u8; 32];
+    type Hasher = Sha256Hasher;
+    type Oid = GitOidSha256;
+
+    fn oid_from_digest(digest: Self::Digest) -> Self::Oid {
+        GitOidSha256::from_bytes(digest)
+    }
+
+    fn parse_hex(text: &str) -> Result<Self::Oid, TypeRefusal> {
+        GitOidSha256::from_hex(text)
+    }
+}
+
+impl NativeObjectIdentity for GitOidSha1 {
+    type Algorithm = Sha1;
+
+    fn digest_bytes(&self) -> &[u8] {
+        self.as_bytes().as_slice()
+    }
+
+    fn erase(self) -> AnyGitOid {
+        AnyGitOid::Sha1(self)
+    }
+}
+
+impl NativeObjectIdentity for GitOidSha256 {
+    type Algorithm = Sha256;
+
+    fn digest_bytes(&self) -> &[u8] {
+        self.as_bytes().as_slice()
+    }
+
+    fn erase(self) -> AnyGitOid {
+        AnyGitOid::Sha256(self)
+    }
 }
 
 /// Streaming native identity for one framed Git object.
@@ -399,10 +336,11 @@ impl<A: GitHashAlgorithm> GitObjectHasher<A> {
     /// Absorb the next content chunk.
     ///
     /// A chunk that would push the total past the declared length is refused
-    /// and not absorbed.
+    /// and not absorbed, so a refused hasher cannot later be finished into a
+    /// plausible-looking identity.
     pub fn update(&mut self, chunk: &[u8]) -> Result<(), GitHashError> {
-        let chunk_len =
-            u64::try_from(chunk.len()).expect("a slice length always fits in u64 on supported targets");
+        let chunk_len = u64::try_from(chunk.len())
+            .expect("a slice length always fits in u64 on supported targets");
         let total = self.received.saturating_add(chunk_len);
         if total > self.declared {
             return Err(GitHashError::DeclaredLengthOverrun {
@@ -416,65 +354,47 @@ impl<A: GitHashAlgorithm> GitObjectHasher<A> {
     }
 
     /// Finish and produce the identity, refusing a short object.
-    pub fn finish(self) -> Result<GitOid<A>, GitHashError> {
-        if self.received != self.declared {
-            return Err(GitHashError::DeclaredLengthShortfall {
+    pub fn finish(self) -> Result<A::Oid, GitHashError> {
+        if self.received == self.declared {
+            Ok(A::oid_from_digest(self.hasher.finish()))
+        } else {
+            Err(GitHashError::DeclaredLengthShortfall {
                 declared: self.declared,
                 received: self.received,
-            });
+            })
         }
-        Ok(GitOid::from_digest(self.hasher.finish()))
     }
 }
 
-/// Parse a hexadecimal object identity when the algorithm is a runtime value.
+/// Parse a canonical lowercase hexadecimal identity in a chosen algorithm.
 ///
-/// This is the erased counterpart of [`GitOid::parse_hex`]; the algorithm is a
-/// required argument, so there is no spelling of this call that omits it.
-pub fn parse_git_oid_hex(
-    algorithm: DigestAlgorithm,
-    hex: &str,
-) -> Result<GitObjectId, OidParseError> {
-    let bytes = decode_canonical_hex(hex, algorithm.digest_len())?;
-    match algorithm {
-        DigestAlgorithm::Sha1 => Sha1::digest_from_slice(&bytes)
-            .map(|digest| Sha1::erase_digest(&digest))
-            .ok_or(OidParseError::WrongLength {
-                expected: algorithm.hex_len(),
-                actual: hex.len(),
-            }),
-        DigestAlgorithm::Sha256 => Sha256::digest_from_slice(&bytes)
-            .map(|digest| Sha256::erase_digest(&digest))
-            .ok_or(OidParseError::WrongLength {
-                expected: algorithm.hex_len(),
-                actual: hex.len(),
-            }),
+/// The algorithm is the type parameter; there is no spelling of this call that
+/// leaves it to be inferred from the input width.
+pub fn parse_git_oid<A: GitHashAlgorithm>(text: &str) -> Result<A::Oid, TypeRefusal> {
+    A::parse_hex(text)
+}
+
+/// Compute a native identity when the object format is a runtime value.
+#[must_use]
+pub fn git_object_id(
+    format: GitObjectFormat,
+    kind: GitObjectKind,
+    content: &[u8],
+) -> AnyGitOid {
+    match format {
+        GitObjectFormat::Sha1 => GitOidSha1::of_object(kind, content).erase(),
+        GitObjectFormat::Sha256 => GitOidSha256::of_object(kind, content).erase(),
     }
 }
 
-fn decode_canonical_hex(hex: &str, digest_len: usize) -> Result<Vec<u8>, OidParseError> {
-    let expected = digest_len * 2;
-    if hex.len() != expected {
-        return Err(OidParseError::WrongLength {
-            expected,
-            actual: hex.len(),
-        });
-    }
-    let source = hex.as_bytes();
-    let mut bytes = Vec::with_capacity(digest_len);
-    for (index, pair) in source.chunks_exact(2).enumerate() {
-        let high = hex_value(pair[0], index * 2)?;
-        let low = hex_value(pair[1], index * 2 + 1)?;
-        bytes.push((high << 4) | low);
-    }
-    Ok(bytes)
-}
-
-fn hex_value(byte: u8, index: usize) -> Result<u8, OidParseError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Err(OidParseError::NonCanonicalUppercase { index }),
-        _ => Err(OidParseError::NonHexDigit { index }),
-    }
+/// The exact header Git writes before an object's content: type label, space,
+/// decimal length, and a terminating zero byte.
+pub(crate) fn object_header(kind: GitObjectKind, length: u64) -> Vec<u8> {
+    let decimal = length.to_string();
+    let mut header = Vec::with_capacity(kind.label().len() + decimal.len() + 2);
+    header.extend_from_slice(kind.label().as_bytes());
+    header.push(b' ');
+    header.extend_from_slice(decimal.as_bytes());
+    header.push(0);
+    header
 }

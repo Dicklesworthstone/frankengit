@@ -8,11 +8,13 @@
 //! detector reports the message clean; screening adds evidence, it never
 //! changes the visible identity.
 
+use fgit_types::native::GitOidSha1;
+
 use crate::defense::{
     BlockVerdict, CollisionDefenseError, CollisionVerdict, DetectorObserver, Sha1CollisionDetector,
 };
 use crate::hashing::Sha1Hasher;
-use crate::native::{GitObjectKind, GitOid, Sha1, object_header};
+use crate::native::{GitObjectKind, object_header};
 
 /// Which SHA-1 identity path a caller is asking for.
 ///
@@ -36,7 +38,7 @@ pub fn sha1_git_oid_with_profile(
     kind: GitObjectKind,
     content: &[u8],
     profile: Sha1IdentityProfile<'_>,
-) -> Result<GitOid<Sha1>, CollisionDefenseError> {
+) -> Result<GitOidSha1, CollisionDefenseError> {
     match profile {
         Sha1IdentityProfile::Unscreened => Err(CollisionDefenseError::DetectorUnavailable),
         Sha1IdentityProfile::Screened(detector) => screened_sha1_git_oid(kind, content, detector),
@@ -48,12 +50,12 @@ pub fn screened_sha1_git_oid(
     kind: GitObjectKind,
     content: &[u8],
     detector: &mut dyn Sha1CollisionDetector,
-) -> Result<GitOid<Sha1>, CollisionDefenseError> {
+) -> Result<GitOidSha1, CollisionDefenseError> {
     let length = u64::try_from(content.len())
         .expect("a slice length always fits in u64 on supported targets");
     let header = object_header(kind, length);
     let digest = screened_sha1_over_parts(&[&header, content], detector)?;
-    Ok(GitOid::from_digest(digest))
+    Ok(GitOidSha1::from_bytes(digest))
 }
 
 /// Compute a screened SHA-1 digest over a raw message.

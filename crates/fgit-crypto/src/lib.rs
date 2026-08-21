@@ -92,8 +92,9 @@ mod screened;
 pub mod testing;
 
 pub use body_identity::{
-    GIT_PAYLOAD_SCHEMA, InternalIdentityError, git_payload_body, git_payload_commitment,
-    git_payload_schema, internal_id_digest, internal_id_preimage, internal_object_id,
+    GIT_PAYLOAD_SCHEMA, GIT_PAYLOAD_SCHEMA_FAMILY, InternalIdentityError, git_payload_body,
+    git_payload_commitment, internal_algorithm_id, internal_digest, internal_digest_in_domain,
+    internal_domain_tag, internal_id_preimage, internal_object_id, lowercase_hex,
     verify_internal_object_id,
 };
 pub use corpus::{
@@ -106,12 +107,30 @@ pub use defense::{
 };
 pub use hashing::{DigestHasher, Sha1Hasher, Sha256Hasher, sha1_digest, sha256_digest};
 pub use native::{
-    GitHashAlgorithm, GitHashError, GitObjectHasher, GitObjectKind, GitOid, OidParseError, Sha1,
-    Sha1Oid, Sha256, Sha256Oid, parse_git_oid_hex,
+    GitHashAlgorithm, GitHashError, GitObjectHasher, GitObjectKind, GitOid, NativeObjectIdentity,
+    Sha1, Sha256, git_object_id, parse_git_oid,
 };
 pub use registry::{
     ALGORITHM_REGISTRY, AlgorithmRow, AlgorithmUsage, DOMAIN_REGISTRY, DigestAlgorithm, DomainRow,
     IdentityDomain, InternalDigestAlgorithm, RowStatus,
 };
-pub use screened::{Sha1IdentityProfile, screened_sha1_digest, screened_sha1_git_oid,
-    sha1_git_oid_with_profile};
+pub use screened::{
+    Sha1IdentityProfile, screened_sha1_digest, screened_sha1_git_oid, sha1_git_oid_with_profile,
+};
+
+// Identity *values* belong to `fgit-types`; they are re-exported here so a
+// consumer that already depends on this crate for hashing does not need a
+// second direct dependency to name the results. These are the same types, not
+// copies: `GitOid<Sha1>` is an alias for `GitOidSha1`.
+//
+// `fgit_types::GitHashAlgorithm` is the declared repository object format. It
+// is re-exported as `GitObjectFormat` because this crate's own
+// `GitHashAlgorithm` is the type-level algorithm marker trait that consumers
+// write as a bound; importing both under one name would be ambiguous.
+pub use fgit_types::hash::{Digest, DigestAlgorithmId, DigestBytes};
+pub use fgit_types::identity::InternalObjectId;
+pub use fgit_types::label::{DomainTag, SchemaFamily, SchemaId};
+pub use fgit_types::native::{
+    GitHashAlgorithm as GitObjectFormat, GitOid as AnyGitOid, GitOidSha1, GitOidSha256,
+};
+pub use fgit_types::numeric::CodecVersion;
