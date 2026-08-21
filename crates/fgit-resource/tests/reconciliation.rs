@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 
 use fgit_resource::algebra::{Grade, ResourceVector};
 use fgit_resource::custody::{LeakPolicy, ObligationLedger, ObligationState, RegionCloseOutcome};
-use fgit_resource::ids::{BoundIdentity, IdempotencyKey, RegionId};
+use fgit_resource::ids::{IdempotencyKey, OpaqueHandle, RegionId};
 use fgit_resource::kinds::{DownstreamAck, EffectDispatched, OutboxDispatch, OutboxEffectPermit};
 use fgit_resource::settlement::{
     DeliveryVerdict, DownstreamChannel, DownstreamIdempotency, Observation, ProbeVerdict,
@@ -19,9 +19,32 @@ use fgit_resource::settlement::{
 use fgit_resource::twophase::{
     DeferralReason, EscalationReason, TerminalFailureReason, UnacknowledgedEffect,
 };
+use fgit_types::{
+    CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, OPAQUE_ID_LEN, PrincipalId,
+    RepositoryCommitId,
+};
 
-fn identity(tag: u8) -> BoundIdentity {
-    BoundIdentity::new(&[tag; 32]).expect("thirty-two bytes is a valid identity")
+fn digest(tag: u8) -> Digest {
+    Digest::new(
+        DigestAlgorithmId::try_new(1).expect("code point one is a valid algorithm slot"),
+        DigestBytes::try_new(&[tag; 32]).expect("thirty-two bytes is a valid digest body"),
+    )
+}
+
+fn rcr(tag: u8) -> RepositoryCommitId {
+    RepositoryCommitId::from_digest(
+        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+    )
+}
+
+fn principal(tag: u8) -> PrincipalId {
+    PrincipalId::from_bytes([tag; OPAQUE_ID_LEN])
+}
+
+fn opaque(tag: u8) -> OpaqueHandle {
+    OpaqueHandle::new(&[tag; 20]).expect("twenty bytes is a valid opaque handle")
 }
 
 fn policy() -> LeakPolicy {
@@ -175,13 +198,13 @@ fn deferred_effect(region: u64, strength: DownstreamIdempotency) -> Scenario {
     let grant = ledger
         .grant(budget())
         .expect("capacity covers the dispatch");
-    let key = IdempotencyKey::new(identity(0x7A));
+    let key = IdempotencyKey::new(digest(0x7A));
     let obligation = ledger
         .reserve::<OutboxEffectPermit>(
             OutboxDispatch {
                 idempotency: key,
-                precondition_rcr: identity(0x7B),
-                endpoint: identity(0x7C),
+                precondition_rcr: rcr(0x7B),
+                endpoint: opaque(0x7C),
                 idempotency_strength: strength,
             },
             grant,
@@ -208,9 +231,9 @@ fn a_lost_acknowledgement_inside_the_window_reconciles_without_duplicating() {
         scenario.effect,
         &mut plan,
         &mut receiver,
-        identity(0x01),
+        principal(0x01),
         |attempt| DownstreamAck {
-            receipt: identity(0x02),
+            receipt: opaque(0x02),
             attempt,
         },
     );
@@ -277,15 +300,15 @@ fn a_weak_downstream_that_forgot_the_key_escalates_instead_of_resending() {
         scenario.effect,
         &mut plan,
         &mut receiver,
-        identity(0x03),
+        principal(0x03),
         |attempt| DownstreamAck {
-            receipt: identity(0x04),
+            receipt: opaque(0x04),
             attempt,
         },
     );
     match outcome {
         ReconcileOutcome::Escalated(receipt) => {
-            assert_eq!(receipt.owner(), identity(0x03));
+            assert_eq!(receipt.owner(), principal(0x03));
             assert_eq!(receipt.reason(), EscalationReason::IndeterminateDelivery);
             assert_eq!(receipt.commit_receipt().attempt, 1);
         }
@@ -336,9 +359,9 @@ fn the_same_sequence_against_a_strong_downstream_proceeds_without_a_human() {
         scenario.effect,
         &mut plan,
         &mut receiver,
-        identity(0x05),
+        principal(0x05),
         |attempt| DownstreamAck {
-            receipt: identity(0x06),
+            receipt: opaque(0x06),
             attempt,
         },
     );
@@ -363,9 +386,9 @@ fn a_definite_non_delivery_is_retried_under_the_same_key() {
         scenario.effect,
         &mut plan,
         &mut receiver,
-        identity(0x07),
+        principal(0x07),
         |attempt| DownstreamAck {
-            receipt: identity(0x08),
+            receipt: opaque(0x08),
             attempt,
         },
     );
@@ -399,9 +422,9 @@ fn a_permanent_rejection_fails_terminally_rather_than_retrying_forever() {
         scenario.effect,
         &mut plan,
         &mut receiver,
-        identity(0x09),
+        principal(0x09),
         |attempt| DownstreamAck {
-            receipt: identity(0x0A),
+            receipt: opaque(0x0A),
             attempt,
         },
     );
@@ -435,9 +458,9 @@ fn an_exhausted_retry_budget_escalates_instead_of_looping() {
         scenario.effect,
         &mut plan,
         &mut receiver,
-        identity(0x0B),
+        principal(0x0B),
         |attempt| DownstreamAck {
-            receipt: identity(0x0C),
+            receipt: opaque(0x0C),
             attempt,
         },
     );
@@ -468,9 +491,9 @@ fn a_strong_downstream_that_answers_unknown_is_a_contract_violation() {
         scenario.effect,
         &mut plan,
         &mut receiver,
-        identity(0x0D),
+        principal(0x0D),
         |attempt| DownstreamAck {
-            receipt: identity(0x0E),
+            receipt: opaque(0x0E),
             attempt,
         },
     );
@@ -514,7 +537,7 @@ fn a_plan_is_replayable_from_its_transition_list() {
     assert_eq!(plan.idempotency(), DownstreamIdempotency::Weak);
 
     let settled = scenario.effect.acknowledge(DownstreamAck {
-        receipt: identity(0x0F),
+        receipt: opaque(0x0F),
         attempt: 2,
     });
     assert_eq!(settled.state(), ObligationState::Acknowledged);

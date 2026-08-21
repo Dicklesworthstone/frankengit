@@ -18,8 +18,9 @@ use crate::algebra::{Grade, ResourceVector};
 use crate::custody::{
     LeakClass, LeakGuard, LedgerHandle, LifecycleError, LifecycleEvent, ObligationState,
 };
-use crate::ids::{BoundIdentity, ObligationId};
+use crate::ids::ObligationId;
 use core::fmt;
+use fgit_types::PrincipalId;
 
 /// Whether an effect has an external observer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -287,7 +288,7 @@ impl<K: ObligationKind> SettledObligation<K> {
 #[derive(Debug)]
 pub struct EscalationReceipt<K: ObligationKind> {
     id: ObligationId,
-    owner: BoundIdentity,
+    owner: PrincipalId,
     reason: EscalationReason,
     receipt: K::CommitReceipt,
 }
@@ -305,9 +306,9 @@ impl<K: ObligationKind> EscalationReceipt<K> {
         K::CLASS
     }
 
-    /// The owner now responsible for it.
+    /// The principal now responsible for it.
     #[must_use]
-    pub const fn owner(&self) -> BoundIdentity {
+    pub const fn owner(&self) -> PrincipalId {
         self.owner
     }
 
@@ -725,7 +726,7 @@ impl<K: ObligationKind> UnacknowledgedEffect<K> {
     /// The ledger keeps the obligation outstanding, so region close still
     /// reports a containment failure naming this owner. Escalation is an
     /// admission that automation stopped, never a settlement.
-    pub fn escalate(self, owner: BoundIdentity, reason: EscalationReason) -> EscalationReceipt<K> {
+    pub fn escalate(self, owner: PrincipalId, reason: EscalationReason) -> EscalationReceipt<K> {
         let Self {
             id,
             receipt,

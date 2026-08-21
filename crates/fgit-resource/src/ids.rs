@@ -1,16 +1,20 @@
-//! Opaque identity carriers recorded by obligation reservations and receipts.
+//! Region-scoped identifiers and the handle this crate carries verbatim.
 //!
-//! `fgit-resource` sits at layer L0 and deliberately does not interpret,
-//! derive, or domain-separate any identity. It records exactly what the
-//! reserving caller bound so that a receipt can be replayed and audited. The
-//! typed identity domains (native object identifiers, strong digests,
-//! transaction identifiers, authority version tokens) are owned by
-//! `fgit-types` and `fgit-crypto`; those crates convert into [`BoundIdentity`]
-//! at the boundary. Nothing here may be used to decide equality *of domain*:
-//! two identities from different domains that share bytes are still different
-//! facts, and that distinction lives in the owning crate.
+//! Every identity that `fgit-types` already types — object envelopes, native
+//! object identifiers, digests, transaction identities, decision batches,
+//! authority heads and their version tokens, principals, tenants, generations,
+//! evidence records, segment manifests — appears in an obligation payload as
+//! that exact type, so a receipt cannot confuse two domains that happen to
+//! share bytes.
+//!
+//! [`OpaqueHandle`] covers what is left: an identity whose domain type belongs
+//! to a system outside `FrankenGit` (a webhook endpoint, a secret delivery
+//! channel, a toolchain image, a payment processor receipt) or to a crate that
+//! has not been written yet. This crate records those bytes verbatim and never
+//! interprets, derives, or compares them across domains.
 
 use core::fmt;
+use fgit_types::Digest;
 
 /// Largest identity byte string this crate carries.
 ///
@@ -20,7 +24,7 @@ pub const MAX_IDENTITY_LEN: usize = 32;
 
 /// A byte identity recorded verbatim by a reservation or receipt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BoundIdentity {
+pub struct OpaqueHandle {
     bytes: [u8; MAX_IDENTITY_LEN],
     len: u8,
 }
@@ -50,7 +54,7 @@ impl fmt::Display for IdentityError {
 
 impl std::error::Error for IdentityError {}
 
-impl BoundIdentity {
+impl OpaqueHandle {
     /// Records `bytes` verbatim.
     pub fn new(bytes: &[u8]) -> Result<Self, IdentityError> {
         if bytes.is_empty() {
@@ -92,7 +96,7 @@ impl BoundIdentity {
     }
 }
 
-impl fmt::Display for BoundIdentity {
+impl fmt::Display for OpaqueHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for byte in self.as_bytes() {
             write!(f, "{byte:02x}")?;
@@ -103,21 +107,24 @@ impl fmt::Display for BoundIdentity {
 
 /// The idempotency key that makes one external effect replay-safe.
 ///
-/// Reusing a key with different canonical request bytes is a defect the owning
-/// protocol must reject; this crate only carries the key it was handed.
+/// The key is the canonical request digest the normative transaction contract
+/// derives, so it is a [`Digest`] rather than a free-form string. Reusing a key
+/// with different canonical request bytes is a defect the owning protocol must
+/// reject before it reaches an obligation; this crate carries the key it was
+/// handed and compares it only for equality.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct IdempotencyKey(BoundIdentity);
+pub struct IdempotencyKey(Digest);
 
 impl IdempotencyKey {
-    /// Wraps a recorded identity as an idempotency key.
+    /// Wraps a canonical request digest as an idempotency key.
     #[must_use]
-    pub const fn new(identity: BoundIdentity) -> Self {
-        Self(identity)
+    pub const fn new(digest: Digest) -> Self {
+        Self(digest)
     }
 
-    /// The underlying identity.
+    /// The underlying digest.
     #[must_use]
-    pub const fn identity(&self) -> BoundIdentity {
+    pub const fn digest(&self) -> Digest {
         self.0
     }
 }

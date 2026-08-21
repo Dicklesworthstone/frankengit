@@ -11,13 +11,18 @@
 //! "commit only after X" a property of the program rather than a review note.
 
 use crate::algebra::Grade;
-use crate::ids::{BoundIdentity, IdempotencyKey};
+use crate::ids::{IdempotencyKey, OpaqueHandle};
 use crate::settlement::DownstreamIdempotency;
 use crate::twophase::{
     ExternallyObserved, InternalEffect, ObligationClass, ObligationKind, ObservationMode,
     TrivialAck,
 };
 use core::fmt;
+use fgit_types::{
+    AuthorityVersionToken, Digest, EvidenceRecordId, GenerationId, GitOid, ObjectEnvelopeId,
+    PrincipalId, PrincipalSnapshotId, RepositoryAuthorityHeadId, RepositoryCommitId,
+    RepositoryDecisionBatchId, SegmentManifestId, TenantId, TxId,
+};
 
 // ---------------------------------------------------------------------------
 // 7.1 ObjectAdmissionPermit
@@ -47,8 +52,8 @@ pub struct ObjectAdmission {
     pub class: ObjectClass,
     /// Length the sender declared before any bytes were trusted.
     pub declared_len: u64,
-    /// The quarantine staging area holding the candidate bytes.
-    pub staging: BoundIdentity,
+    /// The quarantine envelope holding the candidate bytes.
+    pub staging: ObjectEnvelopeId,
 }
 
 /// The structural verdict produced by bounded validation.
@@ -115,8 +120,8 @@ impl std::error::Error for AdmissionRefusal {}
 /// structure verify" is enforced rather than merely documented.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdmittedObject {
-    native_oid: BoundIdentity,
-    strong_digest: BoundIdentity,
+    native_oid: GitOid,
+    strong_digest: Digest,
     verified_len: u64,
 }
 
@@ -124,8 +129,8 @@ impl AdmittedObject {
     /// Builds commit evidence, refusing anything unverified.
     pub fn verified(
         reservation: &ObjectAdmission,
-        native_oid: BoundIdentity,
-        strong_digest: BoundIdentity,
+        native_oid: GitOid,
+        strong_digest: Digest,
         verified_len: u64,
         structure: StructureVerdict,
     ) -> Result<Self, AdmissionRefusal> {
@@ -145,15 +150,15 @@ impl AdmittedObject {
         })
     }
 
-    /// The native object identifier, preserved exactly.
+    /// The native object identifier, preserved exactly in its hash domain.
     #[must_use]
-    pub const fn native_oid(&self) -> BoundIdentity {
+    pub const fn native_oid(&self) -> GitOid {
         self.native_oid
     }
 
     /// The internal strong digest.
     #[must_use]
-    pub const fn strong_digest(&self) -> BoundIdentity {
+    pub const fn strong_digest(&self) -> Digest {
         self.strong_digest
     }
 
@@ -197,14 +202,14 @@ pub struct LaneSlot {
     /// The per-core preparation lane that owns the transaction.
     pub lane: u16,
     /// The sealed transaction identity being prepared.
-    pub transaction: BoundIdentity,
+    pub transaction: TxId,
 }
 
 /// Commit evidence for a preparation slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlotHandedOff {
     /// The decision-batch attempt that took ownership of the candidate.
-    pub batch_attempt: BoundIdentity,
+    pub batch_attempt: RepositoryDecisionBatchId,
 }
 
 /// Why a preparation slot published no candidate.
@@ -248,37 +253,37 @@ impl InternalEffect for PreparedTxnSlot {}
 pub struct HeadCasAttempt;
 
 /// What the reserve phase binds for a head compare-and-set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CasAttempt {
     /// The exact predecessor version token the attempt replaces.
-    pub expected_version: BoundIdentity,
+    pub expected_version: AuthorityVersionToken,
     /// The candidate head being published.
-    pub candidate_head: BoundIdentity,
+    pub candidate_head: RepositoryAuthorityHeadId,
     /// The decision batch the candidate head commits.
-    pub decision_batch: BoundIdentity,
-    /// The credential authorizing the publication.
-    pub credential: BoundIdentity,
+    pub decision_batch: RepositoryDecisionBatchId,
+    /// The immutable principal and capability snapshot authorizing publication.
+    pub credential: PrincipalSnapshotId,
     /// The attempt deadline, in microseconds on the region's clock.
     pub deadline_micros: u64,
 }
 
 /// Commit evidence for a head compare-and-set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CasWon {
     /// The store's winning version token.
-    pub winning_version: BoundIdentity,
+    pub winning_version: AuthorityVersionToken,
 }
 
 /// Why a head compare-and-set published nothing.
 ///
 /// A lost race is ordinary control flow, not an exception: the loser reuses
 /// the same sealed request and may not leak candidate state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CasAbortReason {
     /// Another attempt replaced the expected predecessor first.
     LostRace {
         /// The version the store held instead.
-        observed_version: BoundIdentity,
+        observed_version: AuthorityVersionToken,
     },
     /// The deadline passed before the store answered.
     DeadlineExpired,
@@ -289,7 +294,7 @@ pub enum CasAbortReason {
 }
 
 /// Abort evidence for a head compare-and-set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CasNotPublished {
     /// Why no head advanced.
     pub reason: CasAbortReason,
@@ -335,10 +340,10 @@ pub struct OutboxEffectPermit;
 pub struct OutboxDispatch {
     /// The stable idempotency key that makes retry safe.
     pub idempotency: IdempotencyKey,
-    /// The repository change record this delivery is preconditioned on.
-    pub precondition_rcr: BoundIdentity,
-    /// The destination endpoint.
-    pub endpoint: BoundIdentity,
+    /// The repository commit record this delivery is preconditioned on.
+    pub precondition_rcr: RepositoryCommitId,
+    /// The destination endpoint, named by the receiving system.
+    pub endpoint: OpaqueHandle,
     /// What the downstream promises about duplicate suppression.
     pub idempotency_strength: DownstreamIdempotency,
 }
@@ -372,7 +377,7 @@ pub struct DispatchAbandoned {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DownstreamAck {
     /// The exact receipt the downstream returned.
-    pub receipt: BoundIdentity,
+    pub receipt: OpaqueHandle,
     /// Which attempt the downstream acknowledged.
     pub attempt: u32,
 }
@@ -417,10 +422,10 @@ pub enum SecretClass {
 pub struct SecretGrant {
     /// What kind of secret is being made reachable.
     pub class: SecretClass,
-    /// Who may use it.
-    pub consumer: BoundIdentity,
+    /// The authenticated principal that may use it.
+    pub consumer: PrincipalId,
     /// The delivery channel handle that must be drained on revocation.
-    pub delivery: BoundIdentity,
+    pub delivery: OpaqueHandle,
     /// The single effect class this secret may be used for.
     pub allowed_effect: ObligationClass,
     /// Expiry, in microseconds on the region's clock.
@@ -498,10 +503,10 @@ pub enum MaterializerProfile {
 /// What the reserve phase binds for a workspace lease.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkspaceRequest {
-    /// The overlay identity.
-    pub overlay: BoundIdentity,
+    /// The immutable workspace generation the overlay belongs to.
+    pub overlay: GenerationId,
     /// The immutable base tree the overlay sits on.
-    pub base_tree: BoundIdentity,
+    pub base_tree: GitOid,
     /// How the workspace is materialized.
     pub materializer: MaterializerProfile,
 }
@@ -509,10 +514,10 @@ pub struct WorkspaceRequest {
 /// Commit evidence for a workspace lease.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkspacePublished {
-    /// The final workspace snapshot identity.
-    pub snapshot: BoundIdentity,
-    /// The evidence body describing what the workspace produced.
-    pub evidence: BoundIdentity,
+    /// The final workspace snapshot generation.
+    pub snapshot: GenerationId,
+    /// The evidence record describing what the workspace produced.
+    pub evidence: EvidenceRecordId,
 }
 
 /// Why a workspace produced no snapshot.
@@ -582,12 +587,12 @@ pub enum NetworkPolicy {
 pub struct RunnerRequest {
     /// Isolation profile.
     pub sandbox: SandboxProfile,
-    /// The pinned toolchain identity.
-    pub toolchain: BoundIdentity,
+    /// The pinned toolchain or image identity, named by the sandbox provider.
+    pub toolchain: OpaqueHandle,
     /// Egress policy.
     pub network: NetworkPolicy,
     /// The cache namespace the job may read and write.
-    pub cache_namespace: BoundIdentity,
+    pub cache_namespace: OpaqueHandle,
 }
 
 /// How a runner finished.
@@ -610,8 +615,8 @@ pub struct RunnerFinished {
     pub exit_class: ExitClass,
     /// How many artifacts it published.
     pub artifacts: u32,
-    /// The log root identity.
-    pub log_root: BoundIdentity,
+    /// The evidence record rooting the job's logs.
+    pub log_root: EvidenceRecordId,
 }
 
 /// Why a runner never started.
@@ -704,8 +709,8 @@ pub enum RetentionCause {
 /// What the reserve phase binds for a retention pin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RetentionRequest {
-    /// The root whose closure must survive.
-    pub root: BoundIdentity,
+    /// The object envelope whose closure must survive.
+    pub root: ObjectEnvelopeId,
     /// Why it must survive.
     pub cause: RetentionCause,
 }
@@ -714,7 +719,7 @@ pub struct RetentionRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RetentionHeld {
     /// The authenticated head the pin was established against.
-    pub basis_head: BoundIdentity,
+    pub basis_head: RepositoryAuthorityHeadId,
 }
 
 /// Why a retention pin was not established.
@@ -758,8 +763,8 @@ pub struct RepairPermit;
 /// What the reserve phase binds for a repair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RepairRequest {
-    /// The object or segment being repaired.
-    pub target: BoundIdentity,
+    /// The segment manifest being repaired.
+    pub target: SegmentManifestId,
     /// How many symbols the decode budget allows.
     pub decode_budget_symbols: u32,
     /// How many source symbols were available at reserve time.
@@ -829,8 +834,8 @@ impl std::error::Error for RepairRefusal {}
 /// authority basis. Decoder success alone cannot commit the permit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RepairPublished {
-    placement: BoundIdentity,
-    authority_basis: BoundIdentity,
+    placement: SegmentManifestId,
+    authority_basis: RepositoryAuthorityHeadId,
 }
 
 impl RepairPublished {
@@ -839,8 +844,8 @@ impl RepairPublished {
         decode: DecodeOutcome,
         commitments: CommitmentCheck,
         authority: AuthorityRevalidation,
-        placement: BoundIdentity,
-        authority_basis: BoundIdentity,
+        placement: SegmentManifestId,
+        authority_basis: RepositoryAuthorityHeadId,
     ) -> Result<Self, RepairRefusal> {
         if decode != DecodeOutcome::Succeeded {
             return Err(RepairRefusal::DecodeIncomplete(decode));
@@ -859,13 +864,13 @@ impl RepairPublished {
 
     /// The published placement.
     #[must_use]
-    pub const fn placement(&self) -> BoundIdentity {
+    pub const fn placement(&self) -> SegmentManifestId {
         self.placement
     }
 
     /// The revalidated authority basis.
     #[must_use]
-    pub const fn authority_basis(&self) -> BoundIdentity {
+    pub const fn authority_basis(&self) -> RepositoryAuthorityHeadId {
         self.authority_basis
     }
 }
@@ -915,10 +920,11 @@ pub struct ContextBudgetPermit;
 /// What the reserve phase binds for a context packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContextRequest {
-    /// The packet identity.
-    pub packet: BoundIdentity,
-    /// The authorization scope every candidate was filtered through.
-    pub authorization_scope: BoundIdentity,
+    /// The packet identity, owned by the agent layer that assembles packets.
+    pub packet: OpaqueHandle,
+    /// The principal and capability snapshot every candidate was filtered
+    /// through before any text, embedding, or neighbour was disclosed.
+    pub authorization_scope: PrincipalSnapshotId,
     /// The token ceiling the packet may not exceed.
     pub token_ceiling: u64,
 }
@@ -1068,8 +1074,8 @@ pub enum EstimateBasis {
 /// What the reserve phase binds for a charge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChargeReservation {
-    /// The account to be charged.
-    pub account: BoundIdentity,
+    /// The tenant account to be charged.
+    pub account: TenantId,
     /// The maximum that may be charged, in millionths of the accounting unit.
     pub ceiling_micros: u64,
     /// How the ceiling was sized.
@@ -1138,8 +1144,8 @@ pub struct ChargeReleased {
 /// Acknowledgement evidence for a charge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChargeSettled {
-    /// The processor's receipt for the settled charge.
-    pub processor_receipt: BoundIdentity,
+    /// The payment processor's own receipt for the settled charge.
+    pub processor_receipt: OpaqueHandle,
 }
 
 impl ObligationKind for BillingReservation {

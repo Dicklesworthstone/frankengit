@@ -12,7 +12,7 @@ use fgit_resource::algebra::{Grade, ResourceVector};
 use fgit_resource::custody::{
     LeakPolicy, ObligationLedger, ObligationState, RegionCloseOutcome, ReserveError,
 };
-use fgit_resource::ids::{BoundIdentity, IdempotencyKey, RegionId};
+use fgit_resource::ids::{IdempotencyKey, OpaqueHandle, RegionId};
 use fgit_resource::kinds::{
     AdmissionAbandoned, AdmissionAbortReason, AdmissionRefusal, AdmittedObject,
     AuthorityRevalidation, BillingReservation, CasAbortReason, CasAttempt, CasNotPublished, CasWon,
@@ -34,9 +34,110 @@ use fgit_resource::settlement::DownstreamIdempotency;
 use fgit_resource::twophase::{
     ExternallyObserved, InternalEffect, ObligationClass, ObligationKind, TrivialAck,
 };
+use fgit_types::{
+    AuthorityVersionToken, CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes,
+    EvidenceRecordId, GenerationId, GitOid, GitOidSha1, OPAQUE_ID_LEN, ObjectEnvelopeId,
+    PrincipalId, PrincipalSnapshotId, RepositoryAuthorityHeadId, RepositoryCommitId,
+    RepositoryDecisionBatchId, SegmentManifestId, TenantId, TxId,
+};
 
-fn identity(tag: u8) -> BoundIdentity {
-    BoundIdentity::new(&[tag; 32]).expect("thirty-two bytes is a valid identity")
+fn digest(tag: u8) -> Digest {
+    Digest::new(
+        DigestAlgorithmId::try_new(1).expect("code point one is a valid algorithm slot"),
+        DigestBytes::try_new(&[tag; 32]).expect("thirty-two bytes is a valid digest body"),
+    )
+}
+
+fn envelope(tag: u8) -> ObjectEnvelopeId {
+    ObjectEnvelopeId::from_digest(
+        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+    )
+}
+
+fn head(tag: u8) -> RepositoryAuthorityHeadId {
+    RepositoryAuthorityHeadId::from_digest(
+        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+    )
+}
+
+fn batch(tag: u8) -> RepositoryDecisionBatchId {
+    RepositoryDecisionBatchId::from_digest(
+        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+    )
+}
+
+fn rcr(tag: u8) -> RepositoryCommitId {
+    RepositoryCommitId::from_digest(
+        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+    )
+}
+
+fn txid(tag: u8) -> TxId {
+    TxId::from_digest(
+        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+    )
+}
+
+fn principal_snapshot(tag: u8) -> PrincipalSnapshotId {
+    PrincipalSnapshotId::from_digest(
+        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+    )
+}
+
+fn generation(tag: u8) -> GenerationId {
+    GenerationId::from_digest(
+        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+    )
+}
+
+fn evidence_record(tag: u8) -> EvidenceRecordId {
+    EvidenceRecordId::from_digest(
+        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+    )
+}
+
+fn segment(tag: u8) -> SegmentManifestId {
+    SegmentManifestId::from_digest(
+        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+    )
+}
+
+fn principal(tag: u8) -> PrincipalId {
+    PrincipalId::from_bytes([tag; OPAQUE_ID_LEN])
+}
+
+fn tenant(tag: u8) -> TenantId {
+    TenantId::from_bytes([tag; OPAQUE_ID_LEN])
+}
+
+fn oid(tag: u8) -> GitOid {
+    GitOid::Sha1(GitOidSha1::from_bytes([tag; GitOidSha1::LEN]))
+}
+
+fn token(tag: u8) -> AuthorityVersionToken {
+    AuthorityVersionToken::try_new(&[tag; 16]).expect("sixteen bytes is a valid version token")
+}
+
+fn opaque(tag: u8) -> OpaqueHandle {
+    OpaqueHandle::new(&[tag; 20]).expect("twenty bytes is a valid opaque handle")
 }
 
 fn policy() -> LeakPolicy {
@@ -68,8 +169,8 @@ fn required_grades_are_load_bearing<K>(
     abort: K::AbortReceipt,
 ) where
     K: ObligationKind,
-    K::Reservation: Copy,
-    K::AbortReceipt: Copy,
+    K::Reservation: Clone,
+    K::AbortReceipt: Clone,
 {
     assert!(
         !K::REQUIRED_GRADES.is_empty(),
@@ -84,7 +185,7 @@ fn required_grades_are_load_bearing<K>(
             .grant(budget_missing::<K>(missing))
             .expect("a subset of capacity is always grantable");
         let error = ledger
-            .reserve::<K>(reservation, grant)
+            .reserve::<K>(reservation.clone(), grant)
             .err()
             .unwrap_or_else(|| panic!("{} must refuse a reservation with no {missing}", K::CLASS));
         assert_eq!(
@@ -184,7 +285,7 @@ fn every_class_enforces_its_required_grades() {
         ObjectAdmission {
             class: ObjectClass::GitObject,
             declared_len: 1,
-            staging: identity(1),
+            staging: envelope(1),
         },
         AdmissionAbandoned {
             reason: AdmissionAbortReason::Cancelled,
@@ -194,7 +295,7 @@ fn every_class_enforces_its_required_grades() {
         102,
         LaneSlot {
             lane: 3,
-            transaction: identity(2),
+            transaction: txid(2),
         },
         SlotAbandoned {
             reason: NoCandidateReason::Cancelled,
@@ -203,10 +304,10 @@ fn every_class_enforces_its_required_grades() {
     required_grades_are_load_bearing::<HeadCasAttempt>(
         103,
         CasAttempt {
-            expected_version: identity(3),
-            candidate_head: identity(4),
-            decision_batch: identity(5),
-            credential: identity(6),
+            expected_version: token(3),
+            candidate_head: head(4),
+            decision_batch: batch(5),
+            credential: principal_snapshot(6),
             deadline_micros: 10_000,
         },
         CasNotPublished {
@@ -216,9 +317,9 @@ fn every_class_enforces_its_required_grades() {
     required_grades_are_load_bearing::<OutboxEffectPermit>(
         104,
         OutboxDispatch {
-            idempotency: IdempotencyKey::new(identity(7)),
-            precondition_rcr: identity(8),
-            endpoint: identity(9),
+            idempotency: IdempotencyKey::new(digest(7)),
+            precondition_rcr: rcr(8),
+            endpoint: opaque(9),
             idempotency_strength: DownstreamIdempotency::Weak,
         },
         DispatchAbandoned {
@@ -229,8 +330,8 @@ fn every_class_enforces_its_required_grades() {
         105,
         SecretGrant {
             class: SecretClass::SigningKey,
-            consumer: identity(10),
-            delivery: identity(11),
+            consumer: principal(10),
+            delivery: opaque(11),
             allowed_effect: ObligationClass::OutboxEffectPermit,
             expires_micros: 60_000,
         },
@@ -241,8 +342,8 @@ fn every_class_enforces_its_required_grades() {
     required_grades_are_load_bearing::<WorkspaceLease>(
         106,
         WorkspaceRequest {
-            overlay: identity(12),
-            base_tree: identity(13),
+            overlay: generation(12),
+            base_tree: oid(13),
             materializer: MaterializerProfile::TreeViewOverlay,
         },
         WorkspaceTornDown {
@@ -254,9 +355,9 @@ fn every_class_enforces_its_required_grades() {
         107,
         RunnerRequest {
             sandbox: SandboxProfile::ProcessIsolated,
-            toolchain: identity(14),
+            toolchain: opaque(14),
             network: NetworkPolicy::Denied,
-            cache_namespace: identity(15),
+            cache_namespace: opaque(15),
         },
         RunnerNotStarted {
             reason: RunnerAbortReason::Cancelled,
@@ -265,7 +366,7 @@ fn every_class_enforces_its_required_grades() {
     required_grades_are_load_bearing::<RetentionPin>(
         108,
         RetentionRequest {
-            root: identity(16),
+            root: envelope(16),
             cause: RetentionCause::LegalHold,
         },
         RetentionNotTaken {
@@ -275,7 +376,7 @@ fn every_class_enforces_its_required_grades() {
     required_grades_are_load_bearing::<RepairPermit>(
         109,
         RepairRequest {
-            target: identity(17),
+            target: segment(17),
             decode_budget_symbols: 64,
             source_symbols: 32,
         },
@@ -286,8 +387,8 @@ fn every_class_enforces_its_required_grades() {
     required_grades_are_load_bearing::<ContextBudgetPermit>(
         110,
         ContextRequest {
-            packet: identity(18),
-            authorization_scope: identity(19),
+            packet: opaque(18),
+            authorization_scope: principal_snapshot(19),
             token_ceiling: 4_096,
         },
         PartialContextEvidence {
@@ -300,7 +401,7 @@ fn every_class_enforces_its_required_grades() {
     required_grades_are_load_bearing::<BillingReservation>(
         111,
         ChargeReservation {
-            account: identity(20),
+            account: tenant(20),
             ceiling_micros: 5_000,
             estimate_basis: EstimateBasis::Statistical,
         },
@@ -319,15 +420,15 @@ fn internal_classes_settle_at_commit() {
     let admission = ObjectAdmission {
         class: ObjectClass::Segment,
         declared_len: 1,
-        staging: identity(21),
+        staging: envelope(21),
     };
     internal_round_trip::<ObjectAdmissionPermit>(
         201,
         admission,
         AdmittedObject::verified(
             &admission,
-            identity(22),
-            identity(23),
+            oid(22),
+            digest(23),
             1,
             StructureVerdict::Verified,
         )
@@ -338,55 +439,55 @@ fn internal_classes_settle_at_commit() {
         202,
         LaneSlot {
             lane: 0,
-            transaction: identity(24),
+            transaction: txid(24),
         },
         SlotHandedOff {
-            batch_attempt: identity(25),
+            batch_attempt: batch(25),
         },
     );
 
     internal_round_trip::<HeadCasAttempt>(
         203,
         CasAttempt {
-            expected_version: identity(26),
-            candidate_head: identity(27),
-            decision_batch: identity(28),
-            credential: identity(29),
+            expected_version: token(26),
+            candidate_head: head(27),
+            decision_batch: batch(28),
+            credential: principal_snapshot(29),
             deadline_micros: 1_000,
         },
         CasWon {
-            winning_version: identity(30),
+            winning_version: token(30),
         },
     );
 
     internal_round_trip::<WorkspaceLease>(
         204,
         WorkspaceRequest {
-            overlay: identity(31),
-            base_tree: identity(32),
+            overlay: generation(31),
+            base_tree: oid(32),
             materializer: MaterializerProfile::SparseCheckout,
         },
         WorkspacePublished {
-            snapshot: identity(33),
-            evidence: identity(34),
+            snapshot: generation(33),
+            evidence: evidence_record(34),
         },
     );
 
     internal_round_trip::<RetentionPin>(
         205,
         RetentionRequest {
-            root: identity(35),
+            root: envelope(35),
             cause: RetentionCause::OpenPullRequest,
         },
         RetentionHeld {
-            basis_head: identity(36),
+            basis_head: head(36),
         },
     );
 
     internal_round_trip::<RepairPermit>(
         206,
         RepairRequest {
-            target: identity(37),
+            target: segment(37),
             decode_budget_symbols: 8,
             source_symbols: 8,
         },
@@ -394,8 +495,8 @@ fn internal_classes_settle_at_commit() {
             DecodeOutcome::Succeeded,
             CommitmentCheck::AllVerified,
             AuthorityRevalidation::StillCurrent,
-            identity(38),
-            identity(39),
+            segment(38),
+            head(39),
         )
         .expect("a fully verified repair"),
     );
@@ -403,8 +504,8 @@ fn internal_classes_settle_at_commit() {
     internal_round_trip::<ContextBudgetPermit>(
         207,
         ContextRequest {
-            packet: identity(40),
-            authorization_scope: identity(41),
+            packet: opaque(40),
+            authorization_scope: principal_snapshot(41),
             token_ceiling: 512,
         },
         ContextPacketComplete::complete(9, 4, 5).expect("complete accounting"),
@@ -420,14 +521,14 @@ fn externally_observed_classes_need_acknowledgement_evidence() {
     external_round_trip::<OutboxEffectPermit>(
         301,
         OutboxDispatch {
-            idempotency: IdempotencyKey::new(identity(42)),
-            precondition_rcr: identity(43),
-            endpoint: identity(44),
+            idempotency: IdempotencyKey::new(digest(42)),
+            precondition_rcr: rcr(43),
+            endpoint: opaque(44),
             idempotency_strength: DownstreamIdempotency::Strong,
         },
         EffectDispatched { attempt: 1 },
         DownstreamAck {
-            receipt: identity(45),
+            receipt: opaque(45),
             attempt: 1,
         },
     );
@@ -436,8 +537,8 @@ fn externally_observed_classes_need_acknowledgement_evidence() {
         302,
         SecretGrant {
             class: SecretClass::RunnerJoin,
-            consumer: identity(46),
-            delivery: identity(47),
+            consumer: principal(46),
+            delivery: opaque(47),
             allowed_effect: ObligationClass::RunnerSlot,
             expires_micros: 30_000,
         },
@@ -454,14 +555,14 @@ fn externally_observed_classes_need_acknowledgement_evidence() {
         303,
         RunnerRequest {
             sandbox: SandboxProfile::VirtualMachine,
-            toolchain: identity(48),
+            toolchain: opaque(48),
             network: NetworkPolicy::Allowlisted,
-            cache_namespace: identity(49),
+            cache_namespace: opaque(49),
         },
         RunnerFinished {
             exit_class: ExitClass::Succeeded,
             artifacts: 2,
-            log_root: identity(50),
+            log_root: evidence_record(50),
         },
         RunnerReaped {
             processes_reaped: 3,
@@ -472,13 +573,13 @@ fn externally_observed_classes_need_acknowledgement_evidence() {
     external_round_trip::<BillingReservation>(
         304,
         ChargeReservation {
-            account: identity(51),
+            account: tenant(51),
             ceiling_micros: 900,
             estimate_basis: EstimateBasis::Deterministic,
         },
         ChargeBound::within(
             &ChargeReservation {
-                account: identity(51),
+                account: tenant(51),
                 ceiling_micros: 900,
                 estimate_basis: EstimateBasis::Deterministic,
             },
@@ -486,7 +587,7 @@ fn externally_observed_classes_need_acknowledgement_evidence() {
         )
         .expect("a charge at its ceiling"),
         ChargeSettled {
-            processor_receipt: identity(52),
+            processor_receipt: opaque(52),
         },
     );
 }
@@ -500,14 +601,14 @@ fn an_admission_cannot_commit_without_full_verification() {
     let reservation = ObjectAdmission {
         class: ObjectClass::GitObject,
         declared_len: 64,
-        staging: identity(60),
+        staging: envelope(60),
     };
 
     assert_eq!(
         AdmittedObject::verified(
             &reservation,
-            identity(61),
-            identity(62),
+            oid(61),
+            digest(62),
             64,
             StructureVerdict::NotValidated,
         ),
@@ -519,8 +620,8 @@ fn an_admission_cannot_commit_without_full_verification() {
     assert_eq!(
         AdmittedObject::verified(
             &reservation,
-            identity(61),
-            identity(62),
+            oid(61),
+            digest(62),
             63,
             StructureVerdict::Verified,
         ),
@@ -534,15 +635,15 @@ fn an_admission_cannot_commit_without_full_verification() {
     // Near-identical permitted case: verified structure at the declared length.
     let receipt = AdmittedObject::verified(
         &reservation,
-        identity(61),
-        identity(62),
+        oid(61),
+        digest(62),
         64,
         StructureVerdict::Verified,
     )
     .expect("full verification produces commit evidence");
     assert_eq!(receipt.verified_len(), 64);
-    assert_eq!(receipt.native_oid(), identity(61));
-    assert_eq!(receipt.strong_digest(), identity(62));
+    assert_eq!(receipt.native_oid(), oid(61));
+    assert_eq!(receipt.strong_digest(), digest(62));
 }
 
 #[test]
@@ -552,8 +653,8 @@ fn decoder_success_alone_cannot_commit_a_repair() {
             DecodeOutcome::Succeeded,
             CommitmentCheck::NotChecked,
             AuthorityRevalidation::StillCurrent,
-            identity(70),
-            identity(71),
+            segment(70),
+            head(71),
         ),
         Err(RepairRefusal::CommitmentsUnverified(
             CommitmentCheck::NotChecked
@@ -565,8 +666,8 @@ fn decoder_success_alone_cannot_commit_a_repair() {
             DecodeOutcome::Succeeded,
             CommitmentCheck::AllVerified,
             AuthorityRevalidation::HeadMoved,
-            identity(70),
-            identity(71),
+            segment(70),
+            head(71),
         ),
         Err(RepairRefusal::AuthorityRejected(
             AuthorityRevalidation::HeadMoved
@@ -578,8 +679,8 @@ fn decoder_success_alone_cannot_commit_a_repair() {
             DecodeOutcome::Succeeded,
             CommitmentCheck::AllVerified,
             AuthorityRevalidation::RetentionExpired,
-            identity(70),
-            identity(71),
+            segment(70),
+            head(71),
         ),
         Err(RepairRefusal::AuthorityRejected(
             AuthorityRevalidation::RetentionExpired
@@ -591,8 +692,8 @@ fn decoder_success_alone_cannot_commit_a_repair() {
             DecodeOutcome::Failed,
             CommitmentCheck::AllVerified,
             AuthorityRevalidation::StillCurrent,
-            identity(70),
-            identity(71),
+            segment(70),
+            head(71),
         ),
         Err(RepairRefusal::DecodeIncomplete(DecodeOutcome::Failed)),
         "a failed decode cannot commit"
@@ -603,12 +704,12 @@ fn decoder_success_alone_cannot_commit_a_repair() {
         DecodeOutcome::Succeeded,
         CommitmentCheck::AllVerified,
         AuthorityRevalidation::StillCurrent,
-        identity(70),
-        identity(71),
+        segment(70),
+        head(71),
     )
     .expect("a fully verified repair commits");
-    assert_eq!(receipt.placement(), identity(70));
-    assert_eq!(receipt.authority_basis(), identity(71));
+    assert_eq!(receipt.placement(), segment(70));
+    assert_eq!(receipt.authority_basis(), head(71));
 }
 
 #[test]
@@ -648,7 +749,7 @@ fn a_context_packet_cannot_commit_with_partial_accounting() {
 #[test]
 fn a_statistical_estimate_cannot_bill_past_its_ceiling() {
     let reservation = ChargeReservation {
-        account: identity(80),
+        account: tenant(80),
         ceiling_micros: 1_000,
         estimate_basis: EstimateBasis::Statistical,
     };
@@ -676,10 +777,10 @@ fn a_lost_head_cas_race_is_ordinary_control_flow() {
     let obligation = ledger
         .reserve::<HeadCasAttempt>(
             CasAttempt {
-                expected_version: identity(91),
-                candidate_head: identity(92),
-                decision_batch: identity(93),
-                credential: identity(94),
+                expected_version: token(91),
+                candidate_head: head(92),
+                decision_batch: batch(93),
+                credential: principal_snapshot(94),
                 deadline_micros: 500,
             },
             grant,
@@ -688,7 +789,7 @@ fn a_lost_head_cas_race_is_ordinary_control_flow() {
 
     let lost = CasNotPublished {
         reason: CasAbortReason::LostRace {
-            observed_version: identity(95),
+            observed_version: token(95),
         },
     };
     assert!(lost.is_lost_race(), "a lost race is recognizable as such");
@@ -717,10 +818,10 @@ fn a_lost_head_cas_race_is_ordinary_control_flow() {
     let obligation = winner_ledger
         .reserve::<HeadCasAttempt>(
             CasAttempt {
-                expected_version: identity(91),
-                candidate_head: identity(92),
-                decision_batch: identity(93),
-                credential: identity(94),
+                expected_version: token(91),
+                candidate_head: head(92),
+                decision_batch: batch(93),
+                credential: principal_snapshot(94),
                 deadline_micros: 500,
             },
             grant,
@@ -729,7 +830,7 @@ fn a_lost_head_cas_race_is_ordinary_control_flow() {
     let settled = obligation
         .commit_internal(
             CasWon {
-                winning_version: identity(96),
+                winning_version: token(96),
             },
             &capacity,
         )
@@ -747,8 +848,8 @@ fn aborting_a_workspace_records_its_incomplete_outputs() {
     let obligation = ledger
         .reserve::<WorkspaceLease>(
             WorkspaceRequest {
-                overlay: identity(97),
-                base_tree: identity(98),
+                overlay: generation(97),
+                base_tree: oid(98),
                 materializer: MaterializerProfile::MountedView,
             },
             grant,

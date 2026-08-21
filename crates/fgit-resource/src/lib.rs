@@ -99,7 +99,7 @@ pub use custody::{
     LifecycleError, LifecycleEvent, ObligationLedger, ObligationState, OutstandingObligation,
     PoolSnapshot, QuiescenceReceipt, RegionCloseOutcome, ReserveError,
 };
-pub use ids::{BoundIdentity, GrantId, IdempotencyKey, IdentityError, ObligationId, RegionId};
+pub use ids::{GrantId, IdempotencyKey, IdentityError, ObligationId, OpaqueHandle, RegionId};
 pub use settlement::{
     DownstreamChannel, DownstreamIdempotency, ReconcileOutcome, ReconcilePlan, ReconcilePolicy,
     ReconcileState, reconcile,

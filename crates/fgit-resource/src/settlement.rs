@@ -34,13 +34,14 @@
 //! same key, the receiver suppresses or accepts exactly once, and the
 //! obligation acknowledges with no human in the loop.
 
-use crate::ids::{BoundIdentity, IdempotencyKey};
+use crate::ids::IdempotencyKey;
 use crate::twophase::{
     EscalationReason, EscalationReceipt, ObligationKind, SettledObligation, TerminalFailureReason,
     UnacknowledgedEffect,
 };
 use core::fmt;
 use core::num::NonZeroU32;
+use fgit_types::PrincipalId;
 
 /// What a downstream promises about duplicate suppression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -375,7 +376,7 @@ pub fn reconcile<K, C, E>(
     effect: UnacknowledgedEffect<K>,
     plan: &mut ReconcilePlan,
     channel: &mut C,
-    owner: BoundIdentity,
+    owner: PrincipalId,
     evidence: E,
 ) -> ReconcileOutcome<K>
 where

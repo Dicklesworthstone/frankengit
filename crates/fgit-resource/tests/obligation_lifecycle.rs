@@ -15,7 +15,7 @@ use fgit_resource::custody::{
     LeakClass, LeakPolicy, LedgerHandle, LifecycleError, LifecycleEvent, ObligationLedger,
     ObligationState, RegionCloseOutcome,
 };
-use fgit_resource::ids::{BoundIdentity, IdempotencyKey, RegionId};
+use fgit_resource::ids::{IdempotencyKey, OpaqueHandle, RegionId};
 use fgit_resource::kinds::{
     AdmissionAbandoned, AdmissionAbortReason, AdmittedObject, DispatchAbandoned,
     DispatchAbortReason, DownstreamAck, EffectDispatched, ObjectAdmission, ObjectAdmissionPermit,
@@ -25,9 +25,40 @@ use fgit_resource::settlement::DownstreamIdempotency;
 use fgit_resource::twophase::{
     DeferralReason, ObligationClass, ObligationKind, ObservationMode, TrivialAck,
 };
+use fgit_types::{
+    CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, GitOid, GitOidSha1,
+    ObjectEnvelopeId, RepositoryCommitId,
+};
 
-fn identity(tag: u8) -> BoundIdentity {
-    BoundIdentity::new(&[tag; 20]).expect("twenty bytes is a valid identity")
+fn digest(tag: u8) -> Digest {
+    Digest::new(
+        DigestAlgorithmId::try_new(1).expect("code point one is a valid algorithm slot"),
+        DigestBytes::try_new(&[tag; 32]).expect("thirty-two bytes is a valid digest body"),
+    )
+}
+
+fn envelope(tag: u8) -> ObjectEnvelopeId {
+    ObjectEnvelopeId::from_digest(
+        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+    )
+}
+
+fn rcr(tag: u8) -> RepositoryCommitId {
+    RepositoryCommitId::from_digest(
+        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+    )
+}
+
+fn oid(tag: u8) -> GitOid {
+    GitOid::Sha1(GitOidSha1::from_bytes([tag; GitOidSha1::LEN]))
+}
+
+fn opaque(tag: u8) -> OpaqueHandle {
+    OpaqueHandle::new(&[tag; 20]).expect("twenty bytes is a valid opaque handle")
 }
 
 fn recover() -> LeakPolicy {
@@ -40,15 +71,15 @@ fn admission_reservation() -> ObjectAdmission {
     ObjectAdmission {
         class: ObjectClass::GitObject,
         declared_len: 128,
-        staging: identity(0xA1),
+        staging: envelope(0xA1),
     }
 }
 
 fn admission_receipt(reservation: &ObjectAdmission) -> AdmittedObject {
     AdmittedObject::verified(
         reservation,
-        identity(0xB2),
-        identity(0xC3),
+        oid(0xB2),
+        digest(0xC3),
         reservation.declared_len,
         StructureVerdict::Verified,
     )
@@ -57,9 +88,9 @@ fn admission_receipt(reservation: &ObjectAdmission) -> AdmittedObject {
 
 fn outbox_reservation(strength: DownstreamIdempotency) -> OutboxDispatch {
     OutboxDispatch {
-        idempotency: IdempotencyKey::new(identity(0xD4)),
-        precondition_rcr: identity(0xE5),
-        endpoint: identity(0xF6),
+        idempotency: IdempotencyKey::new(digest(0xD4)),
+        precondition_rcr: rcr(0xE5),
+        endpoint: opaque(0xF6),
         idempotency_strength: strength,
     }
 }
@@ -275,7 +306,7 @@ fn the_external_path_stays_committed_until_acknowledgement() {
     );
 
     let settled = committed.acknowledge(DownstreamAck {
-        receipt: identity(0x11),
+        receipt: opaque(0x11),
         attempt: 1,
     });
     assert_eq!(settled.state(), ObligationState::Acknowledged);
@@ -495,7 +526,7 @@ fn dropping_an_unacknowledged_effect_record_is_a_typed_leak() {
         DeferralReason::AwaitingObservation
     );
     let settled = record.acknowledge(DownstreamAck {
-        receipt: identity(0x22),
+        receipt: opaque(0x22),
         attempt: 1,
     });
     assert_eq!(settled.state(), ObligationState::Acknowledged);
