@@ -254,13 +254,7 @@ impl PackPlanner {
         roots: &[ObjectId],
         deadline: &mut impl Deadline,
     ) -> Result<PackPlan, PackWriteError> {
-        if self.profile.max_delta_depth > self.limits.max_delta_depth {
-            return Err(PackError::DeltaDepthLimit {
-                depth: self.profile.max_delta_depth,
-                limit: self.limits.max_delta_depth,
-            }
-            .into());
-        }
+        self.validate_profile_depth()?;
         let mut pending = roots.to_vec();
         pending.sort_unstable();
         pending.dedup();
@@ -323,6 +317,113 @@ impl PackPlanner {
             objects.push(object);
         }
 
+        self.finish_plan(objects, total_object_bytes, deadline)
+    }
+
+    /// Plans exactly an authenticated caller-selected object set.
+    ///
+    /// This method deliberately does not traverse
+    /// [`CanonicalPackObject::references`]. The caller owns authorization and
+    /// closure/filter validation; this planner only verifies that every named
+    /// object is canonical, bounded, unique, and in the selected format before
+    /// applying the frozen deterministic ordering and delta policy.
+    pub fn plan_selected(
+        &self,
+        source: &impl CanonicalObjectSource,
+        selected: &[ObjectId],
+        deadline: &mut impl Deadline,
+    ) -> Result<PackPlan, PackWriteError> {
+        self.validate_profile_depth()?;
+        let selected_count =
+            u32::try_from(selected.len()).map_err(|_| PackError::EntryCountLimit {
+                actual: u32::MAX,
+                limit: self.limits.max_entries,
+            })?;
+        if selected_count > self.limits.max_entries {
+            return Err(PackError::EntryCountLimit {
+                actual: selected_count,
+                limit: self.limits.max_entries,
+            }
+            .into());
+        }
+
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(selected.len())
+            .map_err(|_| PackError::AllocationFailed {
+                requested: selected.len(),
+            })?;
+        for &id in selected {
+            checkpoint(deadline)?;
+            ensure_format(self.format, id)?;
+            ids.push(id);
+        }
+        ids.sort_unstable();
+        if let Some(&duplicate) = ids
+            .windows(2)
+            .find_map(|pair| (pair[0] == pair[1]).then_some(&pair[0]))
+        {
+            return Err(PackWriteError::DuplicateSelectedObject(duplicate));
+        }
+
+        let mut objects = Vec::new();
+        objects
+            .try_reserve_exact(ids.len())
+            .map_err(|_| PackError::AllocationFailed {
+                requested: ids.len(),
+            })?;
+        let mut total_object_bytes = 0_usize;
+        for id in ids {
+            checkpoint(deadline)?;
+            let object = source.load(&id)?;
+            if object.id != id {
+                return Err(PackWriteError::SourceIdentityMismatch {
+                    requested: id,
+                    returned: object.id,
+                });
+            }
+            self.limits.object_size(object.body.len())?;
+            total_object_bytes = total_object_bytes.checked_add(object.body.len()).ok_or(
+                PackError::IntegerOverflow {
+                    context: "selected pack plan total object bytes",
+                },
+            )?;
+            if total_object_bytes > self.limits.max_total_expanded_bytes {
+                return Err(PackError::TotalExpandedLimit {
+                    actual: total_object_bytes,
+                    limit: self.limits.max_total_expanded_bytes,
+                }
+                .into());
+            }
+            verify_native_object(
+                self.format,
+                object.object_type,
+                &object.body,
+                &object.id,
+                AcceptanceProfile::GitCompatibleImport,
+                &object_parse_limits(self.format, &self.limits),
+            )?;
+            objects.push(object);
+        }
+        self.finish_plan(objects, total_object_bytes, deadline)
+    }
+
+    fn validate_profile_depth(&self) -> Result<(), PackWriteError> {
+        if self.profile.max_delta_depth > self.limits.max_delta_depth {
+            return Err(PackError::DeltaDepthLimit {
+                depth: self.profile.max_delta_depth,
+                limit: self.limits.max_delta_depth,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn finish_plan(
+        &self,
+        mut objects: Vec<CanonicalPackObject>,
+        total_object_bytes: usize,
+        deadline: &mut impl Deadline,
+    ) -> Result<PackPlan, PackWriteError> {
         objects.sort_unstable_by(compare_pack_objects);
         let entries = select_deltas(
             &objects,
@@ -355,6 +456,8 @@ pub enum PackWriteError {
     },
     /// A requested edge in the canonical closure had no immutable object body.
     MissingCanonicalObject(ObjectId),
+    /// The caller-selected object list named one native object more than once.
+    DuplicateSelectedObject(ObjectId),
     /// A generated pack would exceed the caller's declared output budget.
     OutputLimit {
         /// Bytes that would have been emitted.
@@ -1325,6 +1428,52 @@ mod tests {
                 .iter()
                 .any(|entry| entry.object().id() == child.id())
         );
+    }
+
+    #[test]
+    fn selected_plan_preserves_an_authorized_filter_omission() {
+        let omitted = object(ObjectType::Blob, b"intentionally omitted", 1, 3);
+        let mut tree_body = b"100644 omitted\0".to_vec();
+        tree_body.extend_from_slice(omitted.id().as_bytes());
+        let tree_id = fgit_crypto::git_object_id(ObjectFormat::Sha1, ObjectType::Tree, &tree_body);
+        let tree = CanonicalPackObject::new(
+            tree_id,
+            ObjectType::Tree,
+            tree_body,
+            vec![omitted.id()],
+            2,
+            1,
+        );
+        let source = FixtureSource::with(vec![tree.clone()]);
+        let planner = PackPlanner::new(ObjectFormat::Sha1, PackWriteProfile::STORED_V1, limits());
+
+        let selected = planner
+            .plan_selected(&source, &[tree.id()], &mut always)
+            .expect("caller-authorized selected tree");
+        assert_eq!(selected.entries().len(), 1);
+        assert_eq!(selected.entries()[0].object().id(), tree.id());
+
+        assert!(matches!(
+            planner.plan(&source, &[tree.id()], &mut always),
+            Err(PackWriteError::MissingCanonicalObject(id)) if id == omitted.id()
+        ));
+    }
+
+    #[test]
+    fn selected_plan_refuses_duplicates_and_accepts_distinct_objects() {
+        let first = object(ObjectType::Blob, b"first selected", 2, 1);
+        let second = object(ObjectType::Blob, b"second selected", 1, 2);
+        let source = FixtureSource::with(vec![first.clone(), second.clone()]);
+        let planner = PackPlanner::new(ObjectFormat::Sha1, PackWriteProfile::STORED_V1, limits());
+
+        assert!(matches!(
+            planner.plan_selected(&source, &[first.id(), first.id()], &mut always),
+            Err(PackWriteError::DuplicateSelectedObject(id)) if id == first.id()
+        ));
+        let permitted = planner
+            .plan_selected(&source, &[second.id(), first.id()], &mut always)
+            .expect("distinct selected objects");
+        assert_eq!(permitted.entries().len(), 2);
     }
 
     #[test]
