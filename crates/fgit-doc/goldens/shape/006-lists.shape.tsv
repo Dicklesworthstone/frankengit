@@ -1,0 +1,32 @@
+depth	kind	bytes	chars	literal
+0	list	0..43	0..43	-
+1	list_item	0..12	0..12	-
+2	paragraph	2..12	2..12	-
+3	text	2..12	2..12	bullet one
+1	list_item	13..43	13..43	-
+2	paragraph	15..25	15..25	-
+3	text	15..25	15..25	bullet two
+2	list	28..43	28..43	-
+3	list_item	28..43	28..43	-
+4	paragraph	30..43	30..43	-
+5	text	30..43	30..43	nested bullet
+0	list	45..109	45..109	-
+1	list_item	45..59	45..59	-
+2	paragraph	48..59	48..59	-
+3	text	48..59	48..59	ordered one
+1	list_item	60..74	60..74	-
+2	paragraph	63..74	63..74	-
+3	text	63..74	63..74	ordered two
+1	list_item	76..96	76..96	-
+2	paragraph	79..96	79..96	-
+3	text	79..96	79..96	starting at seven
+1	list_item	97..109	97..109	-
+2	paragraph	100..109	100..109	-
+3	text	100..109	100..109	and eight
+0	list	111..135	111..135	-
+1	list_item	111..122	111..122	-
+2	paragraph	113..122	113..122	-
+3	text	113..122	113..122	loose one
+1	list_item	124..135	124..135	-
+2	paragraph	126..135	126..135	-
+3	text	126..135	126..135	loose two

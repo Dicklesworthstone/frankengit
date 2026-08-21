@@ -1,0 +1,4 @@
+path	kind	bytes	chars	occurrence	total	content_bytes	content_chars	id_bytes	content
+0	paragraph	0..82	0..82	0	1	30	30	179	A script link and a data link.
+1	paragraph	84..158	84..158	0	1	32	32	181	A vbscript link and a safe link.
+2	paragraph	160..237	160..237	0	1	45	45	194	An image with a script source alongside text.

@@ -1,0 +1,3 @@
+path	kind	bytes	chars	occurrence	total	content_bytes	content_chars	id_bytes	content
+0	raw_html_block	0..73	0..73	0	1	71	71	225	<div class="widget" onclick="steal()"> <script>alert(1)</script> </div>
+1	paragraph	75..163	75..163	0	1	88	88	237	Inline <b>bold</b> and <img src=x onerror=alert(1)> and <a href="javascript:x">link</a>.

@@ -1,0 +1,4 @@
+path	kind	bytes	chars	occurrence	total	content_bytes	content_chars	id_bytes	content
+0	paragraph	0..67	0..67	0	1	61	61	210	An inline code span and a double span with a ` backtick here.
+1	code_block	69..117	69..117	0	1	32	32	182	fn main() { println!("hello"); }
+2	code_block	119..149	119..149	0	1	22	22	172	an indented code block

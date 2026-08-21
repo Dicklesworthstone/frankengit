@@ -1,0 +1,18 @@
+path	kind	bytes	chars	occurrence	total	content_bytes	content_chars	id_bytes	content
+0	heading	0..15	0..15	0	1	13	13	160	Release notes
+1	paragraph	17..76	17..76	0	1	32	32	181	Some emphasis, a link, and code.
+2	block_quote	78..151	78..151	0	1	57	57	208	A quote with strong text. a bullet inside a quote another
+2.0	paragraph	80..109	80..109	0	1	25	25	174	A quote with strong text.
+2.1	list	114..151	114..151	0	1	31	31	175	a bullet inside a quote another
+2.1.0	list_item	114..139	114..139	0	1	23	23	172	a bullet inside a quote
+2.1.0.0	paragraph	116..139	116..139	0	1	23	23	172	a bullet inside a quote
+2.1.1	list_item	142..151	142..151	0	1	7	7	156	another
+2.1.1.0	paragraph	144..151	144..151	0	1	7	7	156	another
+3	code_block	153..173	153..173	0	1	10	10	160	echo hello
+4	list	175..193	175..193	0	1	12	12	156	first second
+4.0	list_item	175..183	175..183	0	1	5	5	154	first
+4.0.0	paragraph	178..183	178..183	0	1	5	5	154	first
+4.1	list_item	184..193	184..193	0	1	6	6	155	second
+4.1.0	paragraph	187..193	187..193	0	1	6	6	155	second
+5	thematic_break	195..198	195..198	0	1	0	0	154	
+6	paragraph	200..220	200..220	0	1	20	20	169	A closing paragraph.

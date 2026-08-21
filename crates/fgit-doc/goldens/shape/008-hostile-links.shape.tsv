@@ -1,0 +1,22 @@
+depth	kind	bytes	chars	literal
+0	paragraph	0..82	0..82	-
+1	text	0..2	0..2	A 
+1	link	2..44	2..44	-
+2	text	3..14	3..14	script link
+1	text	44..51	44..51	 and a 
+1	link	51..81	51..81	-
+2	text	52..61	52..61	data link
+1	text	81..82	81..82	.
+0	paragraph	84..158	84..158	-
+1	text	84..86	84..86	A 
+1	link	86..118	86..118	-
+2	text	87..100	87..100	vbscript link
+1	text	118..125	118..125	 and a 
+1	link	125..157	125..157	-
+2	text	126..135	126..135	safe link
+1	text	157..158	157..158	.
+0	paragraph	160..237	160..237	-
+1	text	160..163	160..163	An 
+1	image	163..221	163..221	-
+2	text	165..191	165..191	image with a script source
+1	text	221..237	221..237	 alongside text.

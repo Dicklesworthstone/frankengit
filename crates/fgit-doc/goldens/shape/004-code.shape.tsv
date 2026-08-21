@@ -1,0 +1,16 @@
+depth	kind	bytes	chars	literal
+0	paragraph	0..67	0..67	-
+1	text	0..10	0..10	An inline 
+1	code_span	10..21	10..21	-
+2	text	11..20	11..20	code span
+1	text	21..35	21..35	 and a double 
+1	code_span	35..61	35..61	-
+2	text	37..59	37..59	span with a ` backtick
+1	text	61..67	61..67	 here.
+0	code_block	69..117	69..117	-
+1	verbatim_line	77..88	77..88	fn main() {
+1	verbatim_line	89..111	89..111	    println!("hello");
+1	verbatim_line	112..113	112..113	}
+0	code_block	119..149	119..149	-
+1	verbatim_line	123..134	123..134	an indented
+1	verbatim_line	139..149	139..149	code block

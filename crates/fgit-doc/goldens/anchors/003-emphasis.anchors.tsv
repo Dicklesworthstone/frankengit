@@ -1,0 +1,4 @@
+path	kind	bytes	chars	occurrence	total	content_bytes	content_chars	id_bytes	content
+0	paragraph	0..56	0..56	0	1	44	44	193	Plain emphasis and strong and both together.
+1	paragraph	58..122	58..122	0	1	58	58	207	Underscores: emphasis, strong, and intra_word_underscores.
+2	paragraph	124..172	124..172	0	1	36	36	185	Nested: outer inner outer and a b c.

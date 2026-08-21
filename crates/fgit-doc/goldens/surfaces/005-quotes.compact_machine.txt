@@ -1,0 +1,9 @@
+quote
+  p A quoted paragraph across two lines.
+  p A second quoted paragraph.
+quote
+  p Outer quote
+  quote
+    p Inner quote
+quote
+  p A quote with lazy continuation text.

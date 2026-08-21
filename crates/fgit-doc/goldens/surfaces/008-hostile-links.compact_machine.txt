@@ -1,0 +1,3 @@
+p A script link and a data link.
+p A vbscript link and a safe link.
+p An image with a script source alongside text.

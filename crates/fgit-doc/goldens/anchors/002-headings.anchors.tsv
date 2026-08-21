@@ -1,0 +1,6 @@
+path	kind	bytes	chars	occurrence	total	content_bytes	content_chars	id_bytes	content
+0	heading	0..11	0..11	0	1	9	9	156	Level one
+1	paragraph	13..28	13..28	0	1	15	15	164	Body under one.
+2	heading	30..45	30..45	0	1	9	9	156	Level two
+3	heading	47..80	47..80	0	1	16	16	163	Setext level one
+4	heading	82..115	82..115	0	1	16	16	163	Setext level two

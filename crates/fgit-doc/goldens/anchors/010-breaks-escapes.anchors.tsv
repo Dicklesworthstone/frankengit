@@ -1,0 +1,5 @@
+path	kind	bytes	chars	occurrence	total	content_bytes	content_chars	id_bytes	content
+0	paragraph	0..49	0..49	0	1	47	47	196	A line ending in two spaces then the next line.
+1	paragraph	51..100	51..100	0	1	48	48	197	A line ending in a backslash then the next line.
+2	paragraph	102..160	102..160	0	1	53	53	202	Escapes: *not emphasis*, \\ a backslash, [not a link].
+3	paragraph	162..224	162..224	0	1	62	62	211	An ampersand & a less-than < and an entity &amp; stay literal.

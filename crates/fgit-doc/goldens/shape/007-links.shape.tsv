@@ -1,0 +1,23 @@
+depth	kind	bytes	chars	literal
+0	paragraph	0..89	0..89	-
+1	text	0..2	0..2	A 
+1	link	2..35	2..35	-
+2	text	3..13	3..13	plain link
+1	text	35..42	35..42	 and a 
+1	link	42..88	42..88	-
+2	text	43..54	43..54	titled link
+1	text	88..89	88..89	.
+0	paragraph	91..171	91..171	-
+1	text	91..93	91..93	A 
+1	image	93..128	93..128	-
+2	text	95..100	95..100	image
+1	text	128..135	128..135	 and a 
+1	link	135..160	135..160	-
+2	text	136..144	136..144	relative
+1	text	160..171	160..171	 reference.
+0	paragraph	173..236	173..236	-
+1	text	173..184	173..184	Autolinks: 
+1	autolink	184..210	184..210	<https://example.com/path>
+1	text	210..215	210..215	 and 
+1	autolink	215..235	215..235	<person@example.com>
+1	text	235..236	235..236	.

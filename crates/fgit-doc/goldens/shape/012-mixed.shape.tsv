@@ -1,0 +1,39 @@
+depth	kind	bytes	chars	literal
+0	heading	0..15	0..15	-
+1	text	2..15	2..15	Release notes
+0	paragraph	17..76	17..76	-
+1	text	17..22	17..22	Some 
+1	emphasis	22..32	22..32	-
+2	text	23..31	23..31	emphasis
+1	text	32..36	32..36	, a 
+1	link	36..63	36..63	-
+2	text	37..41	37..41	link
+1	text	63..69	63..69	, and 
+1	code_span	69..75	69..75	-
+2	text	70..74	70..74	code
+1	text	75..76	75..76	.
+0	block_quote	78..151	78..151	-
+1	paragraph	80..109	80..109	-
+2	text	80..93	80..93	A quote with 
+2	strong	93..103	93..103	-
+3	text	95..101	95..101	strong
+2	text	103..109	103..109	 text.
+1	list	114..151	114..151	-
+2	list_item	114..139	114..139	-
+3	paragraph	116..139	116..139	-
+4	text	116..139	116..139	a bullet inside a quote
+2	list_item	142..151	142..151	-
+3	paragraph	144..151	144..151	-
+4	text	144..151	144..151	another
+0	code_block	153..173	153..173	-
+1	verbatim_line	159..169	159..169	echo hello
+0	list	175..193	175..193	-
+1	list_item	175..183	175..183	-
+2	paragraph	178..183	178..183	-
+3	text	178..183	178..183	first
+1	list_item	184..193	184..193	-
+2	paragraph	187..193	187..193	-
+3	text	187..193	187..193	second
+0	thematic_break	195..198	195..198	---
+0	paragraph	200..220	200..220	-
+1	text	200..220	200..220	A closing paragraph.

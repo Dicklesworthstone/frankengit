@@ -1,0 +1,19 @@
+depth	kind	bytes	chars	literal
+0	block_quote	0..71	0..71	-
+1	paragraph	2..40	2..40	-
+2	text	2..20	2..20	A quoted paragraph
+2	soft_break	20..21	20..21	\n
+2	text	23..40	23..40	across two lines.
+1	paragraph	45..71	45..71	-
+2	text	45..71	45..71	A second quoted paragraph.
+0	block_quote	73..102	73..102	-
+1	paragraph	75..86	75..86	-
+2	text	75..86	75..86	Outer quote
+1	block_quote	89..102	89..102	-
+2	paragraph	91..102	91..102	-
+3	text	91..102	91..102	Inner quote
+0	block_quote	104..142	104..142	-
+1	paragraph	106..142	106..142	-
+2	text	106..123	106..123	A quote with lazy
+2	soft_break	123..124	123..124	\n
+2	text	124..142	124..142	continuation text.

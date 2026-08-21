@@ -1,0 +1,5 @@
+A script link and a data link.
+
+A vbscript link and a safe link.
+
+An image with a script source alongside text.

@@ -1,0 +1,11 @@
+depth	kind	bytes	chars	literal
+0	heading	0..11	0..11	-
+1	text	2..11	2..11	Level one
+0	paragraph	13..28	13..28	-
+1	text	13..28	13..28	Body under one.
+0	heading	30..45	30..45	-
+1	text	33..42	33..42	Level two
+0	heading	47..80	47..80	-
+1	text	47..63	47..63	Setext level one
+0	heading	82..115	82..115	-
+1	text	82..98	82..98	Setext level two

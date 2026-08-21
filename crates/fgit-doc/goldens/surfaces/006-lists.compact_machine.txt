@@ -1,0 +1,22 @@
+list ordered=false start=1 tight=true
+  item
+    p bullet one
+  item
+    p bullet two
+    list ordered=false start=1 tight=true
+      item
+        p nested bullet
+list ordered=true start=1 tight=false
+  item
+    p ordered one
+  item
+    p ordered two
+  item
+    p starting at seven
+  item
+    p and eight
+list ordered=false start=1 tight=false
+  item
+    p loose one
+  item
+    p loose two

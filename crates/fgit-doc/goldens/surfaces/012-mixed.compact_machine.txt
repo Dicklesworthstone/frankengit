@@ -1,0 +1,18 @@
+h1 Release notes
+p Some emphasis, a link, and code.
+quote
+  p A quote with strong text.
+  list ordered=false start=1 tight=true
+    item
+      p a bullet inside a quote
+    item
+      p another
+code fenced=true info=sh
+  | echo hello
+list ordered=true start=1 tight=true
+  item
+    p first
+  item
+    p second
+hr
+p A closing paragraph.

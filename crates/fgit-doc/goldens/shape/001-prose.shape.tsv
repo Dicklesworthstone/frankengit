@@ -1,0 +1,7 @@
+depth	kind	bytes	chars	literal
+0	paragraph	0..40	0..40	-
+1	text	0..40	0..40	A plain paragraph with no markup at all.
+0	paragraph	42..95	42..95	-
+1	text	42..70	42..70	A second paragraph that runs
+1	soft_break	70..71	70..71	\n
+1	text	71..95	71..95	across two source lines.

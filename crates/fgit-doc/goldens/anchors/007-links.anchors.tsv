@@ -1,0 +1,4 @@
+path	kind	bytes	chars	occurrence	total	content_bytes	content_chars	id_bytes	content
+0	paragraph	0..89	0..89	0	1	31	31	180	A plain link and a titled link.
+1	paragraph	91..171	91..171	0	1	33	33	182	A image and a relative reference.
+2	paragraph	173..236	173..236	0	1	59	59	208	Autolinks: https://example.com/path and person@example.com.

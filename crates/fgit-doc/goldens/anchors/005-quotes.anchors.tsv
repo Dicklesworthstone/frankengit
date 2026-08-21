@@ -1,0 +1,10 @@
+path	kind	bytes	chars	occurrence	total	content_bytes	content_chars	id_bytes	content
+0	block_quote	0..71	0..71	0	1	63	63	214	A quoted paragraph across two lines. A second quoted paragraph.
+0.0	paragraph	2..40	2..40	0	1	36	36	185	A quoted paragraph across two lines.
+0.1	paragraph	45..71	45..71	0	1	26	26	175	A second quoted paragraph.
+1	block_quote	73..102	73..102	0	1	23	23	174	Outer quote Inner quote
+1.0	paragraph	75..86	75..86	0	1	11	11	160	Outer quote
+1.1	block_quote	89..102	89..102	0	1	11	11	162	Inner quote
+1.1.0	paragraph	91..102	91..102	0	1	11	11	160	Inner quote
+2	block_quote	104..142	104..142	0	1	36	36	187	A quote with lazy continuation text.
+2.0	paragraph	106..142	106..142	0	1	36	36	185	A quote with lazy continuation text.

@@ -1,0 +1,13 @@
+depth	kind	bytes	chars	literal
+0	paragraph	0..68	0..56	-
+1	text	0..68	0..56	Accents: héllo wörld. Dashes: em — en –. Symbols: ✓ ✗ →.
+0	paragraph	70..121	58..107	-
+1	text	70..97	58..85	Emphasis around non-ASCII: 
+1	emphasis	97..108	85..95	-
+2	text	98..107	86..94	émphasis
+1	text	108..113	95..100	 and 
+1	code_span	113..120	100..106	-
+2	text	114..119	101..105	códe
+1	text	120..121	106..107	.
+0	paragraph	123..175	109..159	-
+1	text	123..175	109..159	A bidi override sneaks in here: a‮b and continues.

@@ -1,0 +1,23 @@
+path	kind	bytes	chars	occurrence	total	content_bytes	content_chars	id_bytes	content
+0	list	0..43	0..43	0	1	35	35	179	bullet one bullet two nested bullet
+0.0	list_item	0..12	0..12	0	1	10	10	159	bullet one
+0.0.0	paragraph	2..12	2..12	0	1	10	10	159	bullet one
+0.1	list_item	13..43	13..43	0	1	24	24	173	bullet two nested bullet
+0.1.0	paragraph	15..25	15..25	0	1	10	10	159	bullet two
+0.1.1	list	28..43	28..43	0	1	13	13	157	nested bullet
+0.1.1.0	list_item	28..43	28..43	0	1	13	13	162	nested bullet
+0.1.1.0.0	paragraph	30..43	30..43	0	1	13	13	162	nested bullet
+1	list	45..109	45..109	0	1	51	51	195	ordered one ordered two starting at seven and eight
+1.0	list_item	45..59	45..59	0	1	11	11	160	ordered one
+1.0.0	paragraph	48..59	48..59	0	1	11	11	160	ordered one
+1.1	list_item	60..74	60..74	0	1	11	11	160	ordered two
+1.1.0	paragraph	63..74	63..74	0	1	11	11	160	ordered two
+1.2	list_item	76..96	76..96	0	1	17	17	166	starting at seven
+1.2.0	paragraph	79..96	79..96	0	1	17	17	166	starting at seven
+1.3	list_item	97..109	97..109	0	1	9	9	158	and eight
+1.3.0	paragraph	100..109	100..109	0	1	9	9	158	and eight
+2	list	111..135	111..135	0	1	19	19	163	loose one loose two
+2.0	list_item	111..122	111..122	0	1	9	9	158	loose one
+2.0.0	paragraph	113..122	113..122	0	1	9	9	158	loose one
+2.1	list_item	124..135	124..135	0	1	9	9	158	loose two
+2.1.0	paragraph	126..135	126..135	0	1	9	9	158	loose two

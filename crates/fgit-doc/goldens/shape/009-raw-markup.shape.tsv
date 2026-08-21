@@ -1,0 +1,13 @@
+depth	kind	bytes	chars	literal
+0	raw_html_block	0..73	0..73	-
+1	verbatim_line	0..38	0..38	<div class="widget" onclick="steal()">
+1	verbatim_line	39..66	39..66	  <script>alert(1)</script>
+1	verbatim_line	67..73	67..73	</div>
+0	paragraph	75..163	75..163	-
+1	text	75..82	75..82	Inline 
+1	raw_html_inline	82..85	82..85	<b>
+1	text	85..89	85..89	bold
+1	raw_html_inline	89..93	89..93	</b>
+1	text	93..158	93..158	 and <img src=x onerror=alert(1)> and <a href="javascript:x">link
+1	raw_html_inline	158..162	158..162	</a>
+1	text	162..163	162..163	.

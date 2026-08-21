@@ -1,0 +1,3 @@
+p Accents: héllo wörld. Dashes: em — en –. Symbols: ✓ ✗ →.
+p Emphasis around non-ASCII: émphasis and códe.
+p A bidi override sneaks in here: a\u{202e}b and continues.

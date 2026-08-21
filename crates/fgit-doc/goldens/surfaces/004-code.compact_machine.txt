@@ -1,0 +1,8 @@
+p An inline code span and a double span with a ` backtick here.
+code fenced=true info=rust
+  | fn main() {
+  |     println!("hello");
+  | }
+code fenced=false info=
+  | an indented
+  | code block

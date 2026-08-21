@@ -1,0 +1,4 @@
+path	kind	bytes	chars	occurrence	total	content_bytes	content_chars	id_bytes	content
+0	paragraph	0..68	0..56	0	1	68	56	217	Accents: héllo wörld. Dashes: em — en –. Symbols: ✓ ✗ →.
+1	paragraph	70..121	58..107	0	1	47	45	196	Emphasis around non-ASCII: émphasis and códe.
+2	paragraph	123..175	109..159	0	1	52	50	201	A bidi override sneaks in here: a‮b and continues.
