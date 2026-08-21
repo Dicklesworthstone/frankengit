@@ -177,6 +177,213 @@ pub enum ObligationState {
     Leaked,
 }
 
+/// The accounting half of a [`LedgerRecord`].
+///
+/// Grouped rather than passed as two positional vectors: `reserved` and
+/// `charged` are the same type, so adjacent parameters could be swapped
+/// silently at every call site.
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordAmounts {
+    /// Resources still reserved after the record.
+    pub reserved: ResourceVector,
+    /// Resources charged as of the record.
+    pub charged: ResourceVector,
+}
+
+/// One ordered record in a region's obligation journal.
+///
+/// The journal exists so an independent verifier can REPLAY a region's
+/// obligation history rather than trust a snapshot of where it ended up.
+/// A snapshot cannot distinguish "never reserved" from "reserved and
+/// settled", and the properties worth checking are about the sequence.
+///
+/// Records are append-only and ordinal-ordered within one region. A record
+/// whose [`event`] is [`None`] is the reservation that opened the obligation;
+/// every later record for that obligation carries the event that produced
+/// its state.
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LedgerRecord {
+    region: RegionId,
+    ordinal: u64,
+    obligation: ObligationId,
+    class: ObligationClass,
+    event: Option<LifecycleEvent>,
+    state: ObligationState,
+    reserved: ResourceVector,
+    charged: ResourceVector,
+}
+
+impl LedgerRecord {
+    /// Reconstruct one record, for replaying a trace held elsewhere.
+    ///
+    /// A verifier that reads a journal from durable evidence rather than from a
+    /// live ledger must rebuild records before it can replay them, so this is
+    /// part of the API rather than a test affordance. Constructing a record
+    /// asserts nothing: `replay_journal` decides whether a sequence of them is a
+    /// history the lifecycle could actually have produced.
+    #[must_use]
+    pub const fn new(
+        region: RegionId,
+        ordinal: u64,
+        obligation: ObligationId,
+        class: ObligationClass,
+        event: Option<LifecycleEvent>,
+        state: ObligationState,
+        amounts: RecordAmounts,
+    ) -> Self {
+        Self {
+            region,
+            ordinal,
+            obligation,
+            class,
+            event,
+            state,
+            reserved: amounts.reserved,
+            charged: amounts.charged,
+        }
+    }
+
+    /// The region whose journal carries this record.
+    #[must_use]
+    pub const fn region(&self) -> RegionId {
+        self.region
+    }
+
+    /// Position within that region's journal, from zero.
+    #[must_use]
+    pub const fn ordinal(&self) -> u64 {
+        self.ordinal
+    }
+
+    /// The obligation this record concerns.
+    #[must_use]
+    pub const fn obligation(&self) -> ObligationId {
+        self.obligation
+    }
+
+    /// Its concrete class.
+    #[must_use]
+    pub const fn class(&self) -> ObligationClass {
+        self.class
+    }
+
+    /// The event applied, or `None` for the opening reservation.
+    #[must_use]
+    pub const fn event(&self) -> Option<LifecycleEvent> {
+        self.event
+    }
+
+    /// The state this record left the obligation in.
+    #[must_use]
+    pub const fn state(&self) -> ObligationState {
+        self.state
+    }
+
+    /// Resources still reserved after this record.
+    #[must_use]
+    pub const fn reserved(&self) -> ResourceVector {
+        self.reserved
+    }
+
+    /// Resources charged as of this record.
+    #[must_use]
+    pub const fn charged(&self) -> ResourceVector {
+        self.charged
+    }
+}
+
+/// Refusal from [`replay_journal`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayError {
+    /// A record other than the first for an obligation opened it again.
+    DuplicateReservation(ObligationId),
+    /// An event arrived for an obligation no earlier record reserved.
+    UnreservedObligation(ObligationId),
+    /// The transition itself is not one the lifecycle permits.
+    IllegalTransition(LifecycleError),
+    /// The transition is legal but the journal recorded a different result.
+    ///
+    /// This is the check that makes a replay a verification rather than a
+    /// transcript reader: the recorded state must equal what
+    /// [`ObligationState::apply`] produces from the previous one.
+    StateDisagreement {
+        /// The obligation whose recorded state disagreed.
+        obligation: ObligationId,
+        /// What the journal claims.
+        recorded: ObligationState,
+        /// What replaying the event produces.
+        replayed: ObligationState,
+    },
+    /// Records are out of order within a region.
+    NonMonotonicOrdinal {
+        /// The ordinal that went backwards.
+        observed: u64,
+        /// The ordinal it should have exceeded.
+        previous: u64,
+    },
+}
+
+/// Replay a region's journal, failing closed on any invalid trace.
+///
+/// The transition table is NOT reimplemented here: every step folds
+/// [`ObligationState::apply`], which is total and already fails closed on
+/// every unmodelled pair. A second table would be free to disagree with the
+/// one the ledger actually used, and a replay that disagrees with the thing
+/// it verifies is worse than no replay.
+///
+/// Returns the final state of every obligation the journal opened.
+pub fn replay_journal(
+    records: &[LedgerRecord],
+) -> Result<BTreeMap<ObligationId, ObligationState>, ReplayError> {
+    let mut states: BTreeMap<ObligationId, ObligationState> = BTreeMap::new();
+    let mut previous: Option<u64> = None;
+    for record in records {
+        if let Some(previous) = previous
+            && record.ordinal <= previous
+        {
+            return Err(ReplayError::NonMonotonicOrdinal {
+                observed: record.ordinal,
+                previous,
+            });
+        }
+        previous = Some(record.ordinal);
+        match record.event {
+            None => {
+                if states.contains_key(&record.obligation) {
+                    return Err(ReplayError::DuplicateReservation(record.obligation));
+                }
+                if record.state != ObligationState::Reserved {
+                    return Err(ReplayError::StateDisagreement {
+                        obligation: record.obligation,
+                        recorded: record.state,
+                        replayed: ObligationState::Reserved,
+                    });
+                }
+                states.insert(record.obligation, ObligationState::Reserved);
+            }
+            Some(event) => {
+                let current = *states
+                    .get(&record.obligation)
+                    .ok_or(ReplayError::UnreservedObligation(record.obligation))?;
+                let next = current
+                    .apply(event)
+                    .map_err(ReplayError::IllegalTransition)?;
+                if next != record.state {
+                    return Err(ReplayError::StateDisagreement {
+                        obligation: record.obligation,
+                        recorded: record.state,
+                        replayed: next,
+                    });
+                }
+                states.insert(record.obligation, next);
+            }
+        }
+    }
+    Ok(states)
+}
+
 /// An event applied to [`ObligationState`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LifecycleEvent {
@@ -598,6 +805,7 @@ struct LedgerState {
     grants: BTreeMap<GrantId, ResourceVector>,
     entries: BTreeMap<ObligationId, LedgerEntry>,
     leaks: Vec<LeakRecord>,
+    journal: Vec<LedgerRecord>,
     next_grant: u64,
     next_obligation: u64,
     leak_ordinal: u64,
@@ -644,6 +852,32 @@ impl LedgerState {
     /// counted rather than panicked because the caller is inside the ledger
     /// lock, and it is surfaced by [`PoolSnapshot::accounting_faults`] and by
     /// region close so that it can never pass as a clean settlement.
+    /// Append one record to this region's journal.
+    ///
+    /// Ordinal is the journal's own length, so it is monotonic by
+    /// construction and a verifier does not have to trust a counter kept
+    /// somewhere else.
+    fn record_journal(
+        &mut self,
+        obligation: ObligationId,
+        class: ObligationClass,
+        event: Option<LifecycleEvent>,
+        state: ObligationState,
+        reserved: ResourceVector,
+        charged: ResourceVector,
+    ) {
+        let ordinal = self.journal.len() as u64;
+        self.journal.push(LedgerRecord {
+            region: self.region,
+            ordinal,
+            obligation,
+            class,
+            event,
+            state,
+            reserved,
+            charged,
+        });
+    }
     const fn note_fault(&mut self) {
         self.accounting_faults = self.accounting_faults.saturating_add(1);
     }
@@ -723,14 +957,32 @@ impl LedgerState {
                 self.give_back(reclaimed);
             }
             LeakSubject::Obligation(id) => {
+                let mut recorded: Option<(ObligationClass, ObligationState, ResourceVector)> = None;
                 if let Some(entry) = self.entries.get_mut(&id) {
                     obligation = Some(entry.class);
                     reclaimed = entry.reserved;
                     entry.reserved = ResourceVector::ZERO;
                     match entry.state.apply(LifecycleEvent::Leak) {
-                        Ok(next) => entry.state = next,
+                        Ok(next) => {
+                            entry.state = next;
+                            recorded = Some((entry.class, next, entry.charged));
+                        }
+                        // A leak the lifecycle refuses is an accounting fault,
+                        // not a transition. Journalling it would put a record in
+                        // the trace that `ObligationState::apply` cannot
+                        // reproduce, which is exactly what replay must reject.
                         Err(_) => faulted = true,
                     }
+                }
+                if let Some((class, next, charged)) = recorded {
+                    self.record_journal(
+                        id,
+                        class,
+                        Some(LifecycleEvent::Leak),
+                        next,
+                        ResourceVector::ZERO,
+                        charged,
+                    );
                 }
                 self.give_back(reclaimed);
             }
@@ -759,6 +1011,7 @@ impl LedgerState {
             delegated: ResourceVector::ZERO,
             grants: BTreeMap::new(),
             entries: BTreeMap::new(),
+            journal: Vec::new(),
             leaks: Vec::new(),
             next_grant: 0,
             next_obligation: 0,
@@ -934,6 +1187,14 @@ impl LedgerHandle {
                 slot.charged = charged;
                 slot.reserved = ResourceVector::ZERO;
             }
+            state.record_journal(
+                id,
+                entry.class,
+                Some(event),
+                next,
+                ResourceVector::ZERO,
+                charged,
+            );
             Ok(next)
         })
     }
@@ -1116,6 +1377,16 @@ impl ObligationLedger {
         self.handle.snapshot()
     }
 
+    /// This region's obligation journal, in order.
+    ///
+    /// Ordered, append-only, and replayable by [`replay_journal`]. Returned as
+    /// an owned snapshot so a verifier never holds the ledger's lock while
+    /// walking it.
+    #[must_use]
+    pub fn journal(&self) -> Vec<LedgerRecord> {
+        self.handle.with_state(|state| state.journal.clone())
+    }
+
     /// Every leak recorded so far.
     #[must_use]
     pub fn leaks(&self) -> Vec<LeakRecord> {
@@ -1172,6 +1443,14 @@ impl ObligationLedger {
                     reserved: amount,
                     charged: ResourceVector::ZERO,
                 },
+            );
+            state.record_journal(
+                id,
+                K::CLASS,
+                None,
+                ObligationState::Reserved,
+                amount,
+                ResourceVector::ZERO,
             );
             id
         });

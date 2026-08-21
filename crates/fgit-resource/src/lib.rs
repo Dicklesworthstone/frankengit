@@ -118,8 +118,9 @@ pub use algebra::{
 };
 pub use custody::{
     ContainmentFailure, LeakClass, LeakDisposition, LeakRecord, LeakSubject, LedgerHandle,
-    LifecycleError, LifecycleEvent, ObligationLedger, ObligationState, OutstandingObligation,
-    PoolSnapshot, QuiescenceReceipt, RegionCloseOutcome, ReserveError,
+    LedgerRecord, LifecycleError, LifecycleEvent, ObligationLedger, ObligationState,
+    OutstandingObligation, PoolSnapshot, QuiescenceReceipt, RegionCloseOutcome, ReplayError,
+    ReserveError, replay_journal,
 };
 pub use ids::{GrantId, IdempotencyKey, IdentityError, ObligationId, OpaqueHandle, RegionId};
 pub use settlement::{
