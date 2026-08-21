@@ -227,18 +227,32 @@ lic_osi=$(LC_ALL=C grep '^<!-- fgit-license-osi:' "$DECISION" \
   | sed -E 's/^<!-- fgit-license-osi:[[:space:]]*([A-Za-z]+).*/\1/')
 fge_field osi_approved "$lic_osi"
 
+# The scan is a FUNCTION so the fixtures below drive the same code path the live
+# check uses. A fixture that exercised a reimplementation would prove only that
+# the reimplementation works, which is the fixture-only hazard this project
+# names outright.
+lic_scan_claims() {
+  local root="$1" osi="$2"
+  # An OSI-approved decision is allowed to say it is open source.
+  [ "$osi" = "yes" ] && return 0
+  # Scan relative to `root`, not by absolute substring. An absolute `/target/`
+  # filter also swallowed fixtures, because the harness allocates scratch dirs
+  # under target/e2e-artifacts -- so the check silently scanned nothing and
+  # reported clean. Relative exclusion drops the repository's own build output
+  # while leaving a fixture tree (which has no target/) fully visible.
+  ( cd "$root" 2>/dev/null || return 0
+    LC_ALL=C grep -rnEI "$lic_claim_re|$lic_badge_re" --include='*.md' . 2>/dev/null \
+      | grep -v '^\./target/' \
+      | grep -v '^\./scripts/e2e/suites/license/' \
+      | LC_ALL=C grep -viE 'not (an? )?(osi|open)|is not|never|until|intends?|would be|cannot' || true )
+}
+
 lic_claims=""
-if [ "$lic_osi" != "yes" ]; then
-  while IFS= read -r hit; do
-    [ -n "$hit" ] || continue
-    lic_claims="$lic_claims
+while IFS= read -r hit; do
+  [ -n "$hit" ] || continue
+  lic_claims="$lic_claims
     $hit"
-  done < <(LC_ALL=C grep -rnEI "$lic_claim_re|$lic_badge_re" \
-      --include='*.md' "$LIC_REPO" 2>/dev/null \
-    | grep -v '/target/' \
-    | grep -v 'scripts/e2e/suites/license/' \
-    | LC_ALL=C grep -viE 'not (an? )?(osi|open)|is not|never|until|intends?|would be|cannot' || true)
-fi
+done < <(lic_scan_claims "$LIC_REPO" "$lic_osi")
 
 if [ -n "$lic_claims" ]; then
   fge_fail fg062-no-premature-open-source-claim \
@@ -308,6 +322,52 @@ lic_osi_missing_exit=0
 (cd "$lic_osi_missing" && ./scripts/license_gate.sh) >/dev/null 2>&1 || lic_osi_missing_exit=$?
 fge_assert_eq fg062-osi-marker-required 3 "$lic_osi_missing_exit" \
   "a recorded decision that does not state whether it is OSI-approved is refused"
+
+# -----------------------------------------------------------------------------
+fge_phase assert
+fge_step option-e-non-osi-resolution-end-to-end
+# -----------------------------------------------------------------------------
+# The highest-stakes outcome, and until now the least covered. Options A-D are
+# OSI-approved and the claim rule relaxes for them. Option E (Business Source /
+# Functional Source) is a RESOLVED decision that is explicitly NOT open source,
+# so the repository must keep saying source-available for the whole restriction
+# period. That is the case where a stray "FrankenGit is open source" does the
+# most damage, and the branch-logic assertions above only prove the scan WOULD
+# run under it -- not that the whole pipeline catches a violation.
+#
+# These two fixtures differ ONLY in the osi marker, and both drive the same
+# lic_scan_claims used against the live tree.
+lic_bsl="$(fge_tempdir option-e)"
+mkdir -p "$lic_bsl/docs"
+printf 'FrankenGit is an open-source forge.\n' > "$lic_bsl/docs/marketing.md"
+
+lic_bsl_hits=$(lic_scan_claims "$lic_bsl" no | LC_ALL=C grep -c . || true)
+fge_assert_eq fg062-non-osi-resolution-still-policed 1 "$lic_bsl_hits" \
+  "a resolved but NON-OSI decision still catches an open-source claim"
+
+lic_osi_hits=$(lic_scan_claims "$lic_bsl" yes | LC_ALL=C grep -c . || true)
+fge_assert_eq fg062-osi-resolution-permits-the-claim 0 "$lic_osi_hits" \
+  "the same claim is permitted once the decision is recorded as OSI-approved"
+
+# And the gate itself must accept a non-OSI decision as a valid resolution:
+# option E is a legitimate outcome, not an error state.
+lic_bsl_gate="$(fge_tempdir option-e-gate)"
+cp -r "$lic_work"/. "$lic_bsl_gate"/
+{
+  echo "# FrankenGit Licensing Decision"
+  echo
+  echo "<!-- fgit-license-decision: BSL-1.1 -->"
+  echo "<!-- fgit-license-osi: no -->"
+} > "$lic_bsl_gate/docs/LICENSING_DECISION.md"
+for f in LICENSE README.md CONTRIBUTING.md; do
+  printf 'This project is licensed under BSL-1.1.\n' > "$lic_bsl_gate/$f"
+done
+printf '[workspace.package]\nlicense = "BSL-1.1"\n' > "$lic_bsl_gate/Cargo.toml"
+
+lic_bsl_exit=0
+(cd "$lic_bsl_gate" && ./scripts/license_gate.sh) >/dev/null 2>&1 || lic_bsl_exit=$?
+fge_assert_eq fg062-non-osi-decision-is-a-valid-resolution 0 "$lic_bsl_exit" \
+  "a consistently-stated non-OSI decision releases the gate; option E is an outcome, not an error"
 
 fge_phase teardown
 fge_note "this suite decides nothing about which license to adopt; D14 is the repository owner's call (FG-062)"
