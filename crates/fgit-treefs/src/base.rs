@@ -394,14 +394,12 @@ impl<A: GitHashAlgorithm> BaseView<A> {
             },
         };
 
-        let probe = scope.unwrap_or(TreePath::parse(
-            b".treefs-root",
-            &PathPolicy {
-                refuse_git_metadata: false,
-                ..self.path_policy
-            },
-        )?);
-        let grant = capability.authorize_read(&probe, now)?;
+        // The root has no path of its own, so it is authorised as the root
+        // rather than through a fabricated path.
+        let grant = match &scope {
+            Some(path) => capability.authorize_read(path, now)?,
+            None => capability.authorize_root(now)?,
+        };
         let body = self.read_object(source, &tree_oid, GitObjectKind::Tree, &grant)?;
         capability.charge_fetch(body.len() as u64)?;
         let entries = parse_tree(

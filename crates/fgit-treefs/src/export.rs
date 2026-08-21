@@ -300,8 +300,13 @@ enum Resolved<A: GitHashAlgorithm> {
     Symlink { oid: GitOid<A> },
     /// A gitlink.
     Gitlink { oid: GitOid<A> },
-    /// A subdirectory whose identity is resolved after its own rebuild.
-    Directory,
+    /// A subdirectory.
+    ///
+    /// `base_oid` is the identity the base already holds here, when the base
+    /// holds one. An untouched subtree keeps that identity verbatim; dropping
+    /// it instead deletes every file beneath it from the exported tree, which
+    /// is the data-destroying defect this field exists to make impossible.
+    Directory { base_oid: Option<GitOid<A>> },
 }
 
 /// The deterministic export planner.
@@ -500,7 +505,13 @@ impl ExportPlanner {
                     level.remove(&name);
                 }
                 OverlayEntry::Directory => {
-                    level.insert(name, Resolved::Directory);
+                    // An explicit directory intent must not erase the base
+                    // subtree that already sits here.
+                    let base_oid = match level.get(&name) {
+                        Some(Resolved::Directory { base_oid }) => *base_oid,
+                        _ => None,
+                    };
+                    level.insert(name, Resolved::Directory { base_oid });
                 }
                 OverlayEntry::File { content, mode, .. } => {
                     let oid = match content {
@@ -566,22 +577,25 @@ impl ExportPlanner {
                     name,
                     object_id: oid.digest_bytes().to_vec(),
                 },
-                Resolved::Directory => {
+                Resolved::Directory { base_oid } => {
                     let child = directory
                         .map_or_else(
                             || TreePath::parse(&name, base.path_policy()),
                             |here| here.join(&name, base.path_policy()),
                         )
                         .map_err(|refusal| ExportRefusal::Base(refusal.to_string()))?;
-                    match rebuilt.get(&child) {
+                    // Rebuilt subtree wins; otherwise the base identity is
+                    // carried forward unchanged. Only a directory that exists
+                    // in neither -- a newly created one that ended up empty --
+                    // is absent, because Git cannot represent an empty tree
+                    // entry.
+                    let resolved_oid = rebuilt.get(&child).copied().or(base_oid);
+                    match resolved_oid {
                         Some(oid) => TreeEntry {
                             mode: MODE_TREE.to_vec(),
                             name,
                             object_id: oid.digest_bytes().to_vec(),
                         },
-                        // Untouched subtree: it keeps its base identity and is
-                        // not re-emitted, so it contributes nothing here
-                        // whether or not the base can still list it.
                         None => continue,
                     }
                 }
@@ -625,7 +639,9 @@ fn resolved_from_base<A: GitHashAlgorithm>(entry: &BaseEntry<A>) -> Resolved<A> 
         },
         BaseEntry::Symlink { oid } => Resolved::Symlink { oid: *oid },
         BaseEntry::Submodule { oid } => Resolved::Gitlink { oid: *oid },
-        BaseEntry::Directory { .. } => Resolved::Directory,
+        BaseEntry::Directory { oid } => Resolved::Directory {
+            base_oid: Some(*oid),
+        },
     }
 }
 

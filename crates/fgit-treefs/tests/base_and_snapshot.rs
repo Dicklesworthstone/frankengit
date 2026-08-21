@@ -601,3 +601,137 @@ fn snapshot_reports_three_separate_epochs() {
     assert_eq!(snapshot.epochs().durable(), WorkspaceEpoch::ZERO);
     assert!(snapshot.epochs().invariant_holds());
 }
+
+// ---------------------------------------------------------------------------
+// externally pinned Git identities
+// ---------------------------------------------------------------------------
+
+/// Identities are checked against published Git constants, not against this
+/// crate's own output.
+///
+/// Every other identity assertion in this suite compares FrankenGit to
+/// FrankenGit, which cannot detect a systematically wrong hash preimage. These
+/// three values are published, widely cited Git SHA-1 identities that exist
+/// independently of this codebase: if the object header framing were wrong by
+/// even one byte, all three would differ.
+#[test]
+fn native_identities_match_published_git_constants() {
+    // `git hash-object -t tree /dev/null` — the empty tree.
+    assert_eq!(
+        hex(Oid::of_object(GitObjectKind::Tree, b"").digest_bytes()),
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "the empty tree identity is a published Git constant"
+    );
+    // `git hash-object -t blob /dev/null` — the empty blob.
+    assert_eq!(
+        hex(Oid::of_object(GitObjectKind::Blob, b"").digest_bytes()),
+        "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+        "the empty blob identity is a published Git constant"
+    );
+    // `printf 'hello\n' | git hash-object --stdin`.
+    assert_eq!(
+        hex(Oid::of_object(GitObjectKind::Blob, b"hello\n").digest_bytes()),
+        "ce013625030ba8dba906f756967f9e9ca394464a",
+        "a non-empty blob identity matches the published value"
+    );
+}
+
+/// Attenuation must not restore spent budget.
+///
+/// The regression guard for a real widening defect: `attenuate` used to reset
+/// `fetched_bytes`/`fetched_files` to zero, so a capability that had exhausted
+/// its allowance could mint unlimited full-allowance children — an operation
+/// that WIDENS authority while being named `attenuate`. The previous
+/// attenuation test only checked path scope and so never saw it.
+#[test]
+fn attenuation_does_not_restore_spent_budget() {
+    let mut parent = full_capability()
+        .with_fetch_budget(ByteCount::try_new("fetch budget", 100, u64::MAX).unwrap())
+        .with_file_budget(3);
+
+    parent.charge_fetch(90).expect("first fetch fits");
+    assert_eq!(parent.fetched_bytes(), 90);
+    assert_eq!(parent.fetched_files(), 1);
+
+    let mut child = parent
+        .attenuate(vec![path(b"src")], vec![path(b"src")])
+        .expect("narrowing to a sub-prefix is permitted");
+
+    assert_eq!(
+        child.fetched_bytes(),
+        90,
+        "the child inherits what the parent already spent"
+    );
+    assert_eq!(child.fetched_files(), 1, "file spend carries forward too");
+
+    // The child has 10 bytes left, exactly as the parent did.
+    assert!(
+        child.charge_fetch(10).is_ok(),
+        "the remaining allowance works"
+    );
+    assert!(
+        matches!(
+            child.charge_fetch(1),
+            Err(CapabilityRefusal::FetchBudgetExceeded { .. })
+        ),
+        "the child cannot spend past the parent's ceiling"
+    );
+
+    // And a chain of attenuations cannot launder the spend either.
+    let grandchild = child
+        .attenuate(vec![path(b"src")], vec![path(b"src")])
+        .expect("attenuating again is permitted");
+    assert_eq!(
+        grandchild.fetched_bytes(),
+        100,
+        "spend survives an attenuation chain"
+    );
+}
+
+/// A revoked or expired capability stays that way through attenuation.
+#[test]
+fn attenuation_does_not_restore_liveness() {
+    let mut parent = full_capability();
+    parent.revoke();
+    let child = parent
+        .attenuate(vec![path(b"src")], vec![path(b"src")])
+        .expect("attenuating a revoked capability is structurally allowed");
+    assert!(
+        matches!(
+            child.authorize_read(&path(b"src/lib.rs"), 0),
+            Err(CapabilityRefusal::Revoked)
+        ),
+        "revocation is inherited, not cleared by narrowing"
+    );
+}
+
+/// The root is authorised as the root, not through a fabricated path.
+#[test]
+fn root_listing_is_authorised_as_root_and_empty_capabilities_still_refuse() {
+    let (source, root) = fixture();
+    let view = base(root);
+    let mut cap = full_capability();
+
+    let entries = view
+        .list(&source, &mut cap, None, 0)
+        .expect("a capability with read scope may read the root tree");
+    let names: Vec<Vec<u8>> = entries.iter().map(|(name, _)| name.clone()).collect();
+    assert!(names.contains(&b"src".to_vec()));
+
+    // The vacuous case still fails closed.
+    let mut empty = TreeCapability::new(
+        WorkspaceId::from_bytes([1; 16]),
+        repository_id(),
+        vec![],
+        vec![],
+    );
+    assert!(
+        matches!(
+            view.list(&source, &mut empty, None, 0),
+            Err(BaseError::Capability(
+                CapabilityRefusal::ReadOutsideScope { .. }
+            ))
+        ),
+        "a capability granting nothing cannot read the root"
+    );
+}

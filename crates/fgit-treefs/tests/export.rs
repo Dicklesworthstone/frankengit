@@ -1293,3 +1293,148 @@ fn host_unrepresentable_names_are_refused_only_under_that_profile() {
         "the base view carries the host profile the export will honour"
     );
 }
+
+/// An untouched sibling subtree survives the export with its base identity.
+///
+/// The regression guard for a data-destroying defect: the planner used to drop
+/// a base subtree from its rebuilt parent whenever that subtree had not itself
+/// been rebuilt, silently deleting every file beneath it from the exported
+/// tree. Editing `docs/` must not remove `src/`.
+#[test]
+fn editing_one_subtree_preserves_its_untouched_siblings() {
+    let (source, root) = fixture();
+    let view = base(root);
+    let mut cap = capability();
+
+    // Capture the base identity of the sibling we are NOT touching.
+    let src_base_oid = match view
+        .resolve(&source, &mut cap, &path(b"src"), 0)
+        .expect("src resolves in the base")
+    {
+        fgit_treefs::base::BaseEntry::Directory { oid } => oid,
+        other => panic!("expected a directory, got {other:?}"),
+    };
+
+    let mut overlay = Overlay::new();
+    let id = overlay.intern(b"only docs changed\n".to_vec());
+    overlay.put(
+        path(b"docs/readme.md"),
+        OverlayEntry::File {
+            content: fgit_treefs::overlay::ContentRef::Overlay(id),
+            mode: FileMode::Regular,
+            class: EntryClass::Content,
+        },
+    );
+
+    let mut cap = capability();
+    let plan = planner()
+        .plan(&view, &source, &mut cap, &overlay, 0, &never_cancelled())
+        .expect("export succeeds");
+
+    let root_object = plan
+        .get(plan.root_tree())
+        .expect("root tree is in the plan");
+    let entries = parse_tree(
+        root_object.body(),
+        AcceptanceProfile::StrictCreate,
+        &limits(),
+    )
+    .expect("root parses");
+
+    let src = entries
+        .iter()
+        .find(|entry| entry.name == b"src")
+        .expect("the untouched src subtree must still be present");
+    assert_eq!(
+        src.object_id,
+        src_base_oid.digest_bytes().to_vec(),
+        "an untouched subtree keeps its exact base identity"
+    );
+    assert_eq!(src.mode, b"40000", "and is still a tree");
+
+    let vendor = entries
+        .iter()
+        .find(|entry| entry.name == b"vendor")
+        .expect("the untouched gitlink must still be present");
+    assert_eq!(vendor.mode, b"160000");
+
+    assert!(
+        entries.iter().any(|entry| entry.name == b"docs"),
+        "the edited subtree is present too"
+    );
+    assert_eq!(entries.len(), 3, "nothing was dropped and nothing invented");
+}
+
+/// Creating a directory alongside a base subtree of the same name does not
+/// erase the base subtree.
+#[test]
+fn an_explicit_directory_intent_does_not_erase_the_base_subtree() {
+    let (source, root) = fixture();
+    let view = base(root);
+    let mut cap = capability();
+
+    let src_base_oid = match view
+        .resolve(&source, &mut cap, &path(b"src"), 0)
+        .expect("src resolves")
+    {
+        fgit_treefs::base::BaseEntry::Directory { oid } => oid,
+        other => panic!("expected a directory, got {other:?}"),
+    };
+
+    let mut overlay = Overlay::new();
+    overlay.put(path(b"src"), OverlayEntry::Directory);
+
+    let mut cap = capability();
+    let plan = planner()
+        .plan(&view, &source, &mut cap, &overlay, 0, &never_cancelled())
+        .expect("export succeeds");
+
+    let root_object = plan.get(plan.root_tree()).expect("root in plan");
+    let entries = parse_tree(
+        root_object.body(),
+        AcceptanceProfile::StrictCreate,
+        &limits(),
+    )
+    .expect("root parses");
+    let src = entries
+        .iter()
+        .find(|entry| entry.name == b"src")
+        .expect("src survives an explicit directory intent");
+    assert_eq!(
+        src.object_id,
+        src_base_oid.digest_bytes().to_vec(),
+        "the base subtree identity is retained, not replaced by an empty tree"
+    );
+}
+
+/// The exported empty tree matches Git's published empty-tree identity.
+///
+/// An external anchor: this value comes from Git, not from this crate.
+#[test]
+fn exported_empty_tree_matches_the_published_git_identity() {
+    let mut source = MemorySource::default();
+    let root = source.tree(&[]);
+    let view = base(root);
+    let mut cap = capability();
+
+    let plan = planner()
+        .plan(
+            &view,
+            &source,
+            &mut cap,
+            &Overlay::new(),
+            0,
+            &never_cancelled(),
+        )
+        .expect("an empty workspace exports");
+
+    let mut rendered = String::new();
+    use std::fmt::Write as _;
+    for byte in plan.root_tree().digest_bytes() {
+        let _ = write!(rendered, "{byte:02x}");
+    }
+    assert_eq!(
+        rendered, "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "the exported empty tree is Git's published empty-tree identity"
+    );
+}

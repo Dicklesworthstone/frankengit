@@ -51,7 +51,8 @@ pub mod snapshot;
 
 pub use base::{BaseEntry, BaseError, BaseView, DirectoryListing, ObjectSource, ObjectSourceError};
 pub use capability::{
-    CapabilityRefusal, ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId, WriteGrant,
+    CapabilityRefusal, GrantScope, ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId,
+    WriteGrant,
 };
 pub use export::{ExportLimits, ExportPlan, ExportPlanner, ExportRefusal, ExportedObject};
 pub use intent::{

@@ -154,7 +154,23 @@ impl core::error::Error for CapabilityRefusal {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReadGrant {
     workspace_id: WorkspaceId,
-    path: TreePath,
+    scope: GrantScope,
+}
+
+/// What a read grant covers.
+///
+/// The repository root has no path of its own, so authorising a root listing
+/// cannot go through a path check. An earlier revision faked one by inventing a
+/// `.treefs-root` path and authorising *that*, which meant every root listing
+/// was refused unless a capability happened to name the fabricated path. That
+/// is why this is a typed scope rather than a `TreePath` with a magic value:
+/// the root is a different kind of subject, not a strangely-named path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GrantScope {
+    /// The repository root tree itself.
+    Root,
+    /// One exact path.
+    Path(TreePath),
 }
 
 impl ReadGrant {
@@ -164,10 +180,19 @@ impl ReadGrant {
         self.workspace_id
     }
 
-    /// The exact path this grant authorises.
+    /// What this grant covers.
     #[must_use]
-    pub const fn path(&self) -> &TreePath {
-        &self.path
+    pub const fn scope(&self) -> &GrantScope {
+        &self.scope
+    }
+
+    /// The exact path this grant authorises, or `None` for the root.
+    #[must_use]
+    pub const fn path(&self) -> Option<&TreePath> {
+        match &self.scope {
+            GrantScope::Root => None,
+            GrantScope::Path(path) => Some(path),
+        }
     }
 }
 
@@ -311,7 +336,34 @@ impl TreeCapability {
         }
         Ok(ReadGrant {
             workspace_id: self.workspace_id,
-            path: path.clone(),
+            scope: GrantScope::Path(path.clone()),
+        })
+    }
+
+    /// Authorises reading the repository root tree at tick `now`.
+    ///
+    /// The root is the container every authorised path is reached through, so a
+    /// capability that grants any read at all may read it. A capability with no
+    /// read prefix still authorises nothing, which keeps the vacuous case
+    /// failing closed.
+    ///
+    /// This does not authorise *disclosure* of every root entry. A caller that
+    /// lists the root still has to check each child before revealing it;
+    /// otherwise the listing becomes an existence oracle for top-level names
+    /// outside the capability. That filtering is the caller's, and is noted
+    /// here because the grant alone does not provide it.
+    pub fn authorize_root(&self, now: u64) -> Result<ReadGrant, CapabilityRefusal> {
+        self.check_live(now)?;
+        if self.read_prefixes.is_empty() {
+            return Err(CapabilityRefusal::ReadOutsideScope {
+                path: TreePath::parse_default(b"<root>").unwrap_or_else(|_| {
+                    unreachable!("the literal <root> is a valid single-component path")
+                }),
+            });
+        }
+        Ok(ReadGrant {
+            workspace_id: self.workspace_id,
+            scope: GrantScope::Root,
         })
     }
 
@@ -402,8 +454,14 @@ impl TreeCapability {
             max_file_count: self.max_file_count,
             expires_at: self.expires_at,
             revoked: self.revoked,
-            fetched_bytes: 0,
-            fetched_files: 0,
+            // Consumption carries forward. Resetting these to zero would hand
+            // the holder a fresh budget on every attenuation, so a capability
+            // that had spent its allowance could mint an unlimited number of
+            // full-allowance children -- an operation that WIDENS authority
+            // while wearing the name `attenuate`. Narrowing scope must never
+            // restore spend.
+            fetched_bytes: self.fetched_bytes,
+            fetched_files: self.fetched_files,
         })
     }
 
