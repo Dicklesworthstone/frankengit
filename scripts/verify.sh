@@ -57,12 +57,10 @@ run_fast() {
 }
 
 run_full() {
-  run_fast
   refuse_dormant "Full conformance/lab/fault/fuzz/corpus lane is not implemented yet"
 }
 
 run_release() {
-  run_fast
   refuse_dormant "No releasable FrankenGit binary or complete native target matrix exists yet"
 }
 

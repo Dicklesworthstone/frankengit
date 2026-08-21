@@ -69,16 +69,16 @@ set -e
 fge_assert_exit FG-001-PROBE-005 0 "${docs_exit}" "docs lane succeeds with replay evidence enabled"
 
 set +e
-fge_capture full-refusal env VERIFY_ARTIFACT_DIR="${full_root}" "${VERIFY}" full
+fge_capture full-refusal timeout 15 env VERIFY_ARTIFACT_DIR="${full_root}" "${VERIFY}" full
 full_exit=$?
 set -e
-fge_assert_exit FG-001-PROBE-020 3 "${full_exit}" "full lane retains its typed pre-implementation refusal"
+fge_assert_exit FG-001-PROBE-020 3 "${full_exit}" "full lane refuses before its 15-second execution budget"
 
 set +e
-fge_capture release-refusal env VERIFY_ARTIFACT_DIR="${release_root}" "${VERIFY}" release
+fge_capture release-refusal timeout 15 env VERIFY_ARTIFACT_DIR="${release_root}" "${VERIFY}" release
 release_exit=$?
 set -e
-fge_assert_exit FG-001-PROBE-021 3 "${release_exit}" "release lane retains its typed pre-implementation refusal"
+fge_assert_exit FG-001-PROBE-021 3 "${release_exit}" "release lane refuses before its 15-second execution budget"
 
 shopt -s nullglob
 normal_artifacts=("${normal_root}"/*.json)
