@@ -308,10 +308,16 @@ product.
   substantively complete (code + tests + bead-linked commit + every
   acceptance line mapped to a concrete test + no known defect).
 - Agents do NOT run `cargo test`, `cargo clippy`, `cargo build`, or
-  `./scripts/verify.sh`: the orchestrator runs one `verify.sh fast` per wave
-  over everyone's combined changes, returns failures to the same assignee as
+  `./scripts/verify.sh` during development, with two sanctioned exceptions:
+  (a) immediately before moving a bead to `batch_pending`, run
+  `cargo test -p <your crate> --all-targets` ONCE so the "no known defect"
+  claim is not blind; (b) a lint-drain pass explicitly granted by the
+  orchestrator may run `cargo clippy -p <your crate>`. The orchestrator runs
+  the union verification per wave, returns failures to the same assignee as
   `rework`, and alone records the `batch_verify` gate and closes beads with
-  revision-bound evidence. `.beads/policy.yaml` refuses every other close
+  revision-bound evidence. Any "pass"/"green"/"verified" written in a
+  comment, mail, or commit message MUST name the commit SHA it was observed
+  at; unbound claims are unsupported. `.beads/policy.yaml` refuses every other close
   path, self-closes, and stale gate results.
 - `batch_pending` earns no capability credit; it frees claim capacity.
   Commit rate is a saturation signal, never a KPI (SM-1/RH-4).
