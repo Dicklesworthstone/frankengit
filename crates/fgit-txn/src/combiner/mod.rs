@@ -21,6 +21,9 @@ use crate::lanes::{
 /// Wire revision for the decision-path hash preimage.
 pub const DECISION_PATH_FORMAT_VERSION: u16 = 1;
 
+/// Crate-local schema tag for the decision-path witness preimage.
+const DECISION_PATH_SCHEMA_TAG: &str = "fgit-txn/decision-path/v1";
+
 /// The closed, replayable order policy used by this flat combiner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TieBreakPolicy {
@@ -712,7 +715,12 @@ fn decision_path_hash(
     graph: &ConflictGraph,
 ) -> Result<DecisionPathHash, CombineRefusal> {
     let mut encoder = Encoder::new();
-    encoder.write_raw(b"frankengit/txn-decision-path/v1");
+    encoder
+        .write_bytes(
+            "decision_path_schema_tag",
+            DECISION_PATH_SCHEMA_TAG.as_bytes(),
+        )
+        .map_err(|_| CombineRefusal::CodecCountOverflow)?;
     encoder.write_scalar(DECISION_PATH_FORMAT_VERSION);
     encoder.write_raw_byte(tie_break.code());
     write_count(&mut encoder, entries.len())?;
