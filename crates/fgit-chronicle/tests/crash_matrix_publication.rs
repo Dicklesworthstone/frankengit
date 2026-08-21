@@ -233,13 +233,13 @@ fn current_head(store: &MemoryAuthorityStore) -> RepositoryAuthorityHeadBody {
 /// supposed to satisfy, so a mis-aimed fault reads as a pass.
 ///
 /// That is not hypothetical here. Every plan in this file addressed an
-/// absolute operation index until FIRST_HEAD_REPLACEMENT replaced it, and when
+/// absolute operation index until `FIRST_HEAD_REPLACEMENT` replaced it, and when
 /// the atomic publication shifted the operation sequence the directives fired
 /// NOWHERE - `only_for` filters rather than counts. Two tests went red and one
 /// stayed green while testing nothing. The red ones cost a diagnosis; the green
 /// one cost a false assurance nobody would have looked at.
 ///
-/// Mirrors `assert_cas_fault_reached` in fgit-txn's seal_races_authority, which
+/// Mirrors `assert_cas_fault_reached` in fgit-txn's `seal_races_authority`, which
 /// is what stopped the same silent miss from being invisible there.
 fn assert_fault_delivered(
     store: &MemoryAuthorityStore,

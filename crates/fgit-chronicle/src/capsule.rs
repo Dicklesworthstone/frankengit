@@ -451,7 +451,15 @@ pub async fn advance_pointer_root_last_async<S, I>(
 ) -> Result<CapsulePointer, ChronicleRefusal>
 where
     S: AsyncAuthorityStore + ?Sized,
-    I: BodyIdentity + ?Sized,
+    // `Sync` is the one bound the sync twin does not carry, and it is a
+    // transport requirement rather than a semantic one: `&I` is only `Send`
+    // when `I` is `Sync`, and a future that is not `Send` cannot be driven by
+    // the production runtime. Without it this function compiles and then
+    // cannot be used for the surface it exists to serve. It constrains the
+    // caller, never the decisions - the body below is unchanged, and
+    // `advance_pointer_async_matches_sync_exactly` still pins the two paths
+    // to the same behaviour.
+    I: BodyIdentity + ?Sized + Sync,
 {
     let capsule_id = capsule_identity(identity, capsule)?;
     let key = body_key(IdentityDomain::RepositoryCapsule, capsule)

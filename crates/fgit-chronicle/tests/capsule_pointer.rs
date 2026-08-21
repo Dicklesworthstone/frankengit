@@ -680,14 +680,8 @@ impl AsyncAuthorityStore for AsyncView {
 /// spinning, so this cannot quietly become the blocking bridge condition 4
 /// forbids. It serves the in-memory view above and nothing else.
 fn poll_ready<F: Future>(future: F) -> F::Output {
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
-    struct NoopWake;
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    use std::task::{Context, Poll, Waker};
+    let mut context = Context::from_waker(Waker::noop());
     let mut future = Box::pin(future);
     match future.as_mut().poll(&mut context) {
         Poll::Ready(value) => value,
