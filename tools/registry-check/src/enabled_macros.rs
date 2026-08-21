@@ -148,7 +148,115 @@ pub(crate) fn resolve_enabled_surface(root: &Path) -> Result<EnabledSurface, Str
     }
     let text = String::from_utf8(output.stdout)
         .map_err(|error| format!("cargo metadata emitted non-UTF-8 JSON: {error}"))?;
-    parse_enabled_surface(&text, triple)
+    let mut surface = parse_enabled_surface(&text, triple)?;
+    let (linkage, observed) = collect_native_linkage(&cargo_target_root(root));
+    surface.native_linkage = linkage;
+    surface.linkage_is_observed = observed;
+    Ok(surface)
+}
+
+/// Where cargo leaves build-script output for this workspace.
+fn cargo_target_root(root: &Path) -> std::path::PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => root.join("target"),
+    }
+}
+
+/// Harvest `cargo:rustc-link-lib` / `rustc-link-search` emissions from the
+/// build-script `output` files cargo writes under the target directory.
+///
+/// This is the only honest oracle available to a checker that must not build:
+/// whether a build script links native object code is decided when it RUNS, not
+/// by anything readable in its manifest. So the evidence exists exactly when
+/// someone has already built, and the second return value records whether any
+/// was found. Callers must not read an empty map as "nothing links".
+///
+/// Both cargo layouts are handled: `build/<pkg>-<hash>/output` and the newer
+/// `build/<pkg>/<hash>/output`.
+fn collect_native_linkage(target_root: &Path) -> (BTreeMap<String, BTreeSet<String>>, bool) {
+    let mut linkage: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut observed = false;
+    let Ok(profiles) = std::fs::read_dir(target_root) else {
+        return (linkage, observed);
+    };
+    for profile in profiles.flatten() {
+        let build = profile.path().join("build");
+        let Ok(entries) = std::fs::read_dir(&build) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(dir_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            // `build/<pkg>-<hash>/output`
+            let direct = path.join("output");
+            if direct.is_file() {
+                observed = true;
+                absorb_output(&direct, strip_build_hash(dir_name), &mut linkage);
+            }
+            // `build/<pkg>/<hash>/output`
+            if let Ok(nested) = std::fs::read_dir(&path) {
+                for hash_dir in nested.flatten() {
+                    let candidate = hash_dir.path().join("output");
+                    if candidate.is_file() {
+                        observed = true;
+                        absorb_output(&candidate, dir_name, &mut linkage);
+                    }
+                }
+            }
+        }
+    }
+    (linkage, observed)
+}
+
+/// `serde-1a2b3c4d5e6f7788` -> `serde`. The hash suffix is hex and fixed-width,
+/// while package names may themselves contain `-`, so trim only a trailing
+/// all-hex segment rather than splitting on the first dash.
+fn strip_build_hash(dir_name: &str) -> &str {
+    match dir_name.rsplit_once('-') {
+        Some((name, suffix))
+            if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            name
+        }
+        _ => dir_name,
+    }
+}
+
+fn absorb_output(path: &Path, package: &str, linkage: &mut BTreeMap<String, BTreeSet<String>>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for value in parse_linkage_lines(&text) {
+        linkage.entry(package.to_owned()).or_default().insert(value);
+    }
+}
+
+/// Cargo accepts both the `cargo:` and newer `cargo::` emission prefixes, and a
+/// build script may use either; blake3 mixes them in one file.
+pub(crate) fn parse_linkage_lines(text: &str) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    for line in text.lines() {
+        let line = line.trim();
+        for prefix in ["cargo::", "cargo:"] {
+            let Some(rest) = line.strip_prefix(prefix) else {
+                continue;
+            };
+            for key in ["rustc-link-lib=", "rustc-link-search="] {
+                if let Some(value) = rest.strip_prefix(key)
+                    && !value.is_empty()
+                {
+                    // `key` already ends with '='; trimming it here dropped the
+                    // separator and produced `rustc-link-libstatic=...`.
+                    found.insert(format!("{key}{value}"));
+                }
+            }
+            break;
+        }
+    }
+    found
 }
 
 /// Split out from the subprocess so the reachability walk is directly testable
@@ -464,6 +572,13 @@ pub(crate) fn check_macro_surface(root: &Path, report: &mut Report) {
 /// case produced the result.
 fn check_native_linkage_policy(surface: &EnabledSurface, rows: &[SurfaceRow], report: &mut Report) {
     if !surface.linkage_is_observed {
+        // Silence here would be indistinguishable from "nothing links native
+        // code", which is the exact overstatement this gate exists to prevent.
+        // Say so in lane output instead.
+        report.notes.push(format!(
+            "native-linkage policy not evaluated: no build-script output found under the target directory for {}; build once to make this gate effective",
+            surface.triple,
+        ));
         return;
     }
     for (package, libraries) in &surface.native_linkage {
@@ -853,6 +968,116 @@ fsqlite = { version = "0.3.7", default-features = false, features = ["native"] }
         let found = derive_acquisitions(manifest, &pm, &vendors, &fp);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, "zerocopy");
+    }
+
+    /// The emissions blake3 actually produced before the `pure` override was
+    /// pinned. Taken from a real build-script output file, mixed `cargo:` and
+    /// `cargo::` prefixes included, because that is what the parser must survive.
+    const REAL_BLAKE3_OUTPUT: &str = "\
+cargo::rustc-cfg=blake3_sse2_ffi
+cargo::rustc-cfg=blake3_sse41_ffi
+cargo:rustc-link-lib=static=blake3_sse2_sse41_avx2_assembly
+cargo:rustc-link-search=native=/tmp/out
+cargo::rustc-cfg=blake3_avx512_ffi
+cargo:rustc-link-lib=static=blake3_avx512_assembly
+";
+
+    #[test]
+    fn linkage_lines_are_parsed_under_both_cargo_prefixes() {
+        let found = parse_linkage_lines(REAL_BLAKE3_OUTPUT);
+        assert!(found.contains("rustc-link-lib=static=blake3_sse2_sse41_avx2_assembly"));
+        assert!(found.contains("rustc-link-lib=static=blake3_avx512_assembly"));
+        assert!(found.contains("rustc-link-search=native=/tmp/out"));
+        // cfg emissions are not linkage and must not be swept in.
+        assert_eq!(found.len(), 3, "{found:?}");
+    }
+
+    #[test]
+    fn a_build_script_that_links_nothing_yields_no_linkage() {
+        let found = parse_linkage_lines("cargo:rustc-cfg=foo\ncargo::rustc-check-cfg=cfg(bar)\n");
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn build_hash_suffixes_are_trimmed_but_dashed_names_survive() {
+        assert_eq!(strip_build_hash("serde-1a2b3c4d5e6f7788"), "serde");
+        // A package whose own name contains a dash must not be truncated at the
+        // first dash; only a trailing all-hex segment is a cargo hash.
+        assert_eq!(
+            strip_build_hash("bincode_derive-next"),
+            "bincode_derive-next"
+        );
+        assert_eq!(
+            strip_build_hash("crossbeam-utils-0011aabb"),
+            "crossbeam-utils"
+        );
+        assert_eq!(strip_build_hash("blake3"), "blake3");
+    }
+
+    /// The gate must REFUSE when observed linkage contradicts the registry.
+    #[test]
+    fn observed_linkage_against_a_no_ffi_row_is_refused() {
+        let rows = vec![SurfaceRow {
+            id: "DEP-181".to_owned(),
+            crate_pattern: "blake3".to_owned(),
+            ffi_policy: "no_foreign_engine_declared".to_owned(),
+            build_script: SurfaceState::Enabled,
+            proc_macro: SurfaceState::Absent,
+        }];
+        let mut surface = EnabledSurface {
+            triple: "x86_64-unknown-linux-gnu".to_owned(),
+            linkage_is_observed: true,
+            ..EnabledSurface::default()
+        };
+        surface
+            .native_linkage
+            .insert("blake3".to_owned(), parse_linkage_lines(REAL_BLAKE3_OUTPUT));
+        let mut report = Report::new();
+        check_native_linkage_policy(&surface, &rows, &mut report);
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert!(report.errors[0].contains("blake3"));
+        assert!(report.errors[0].contains("no_foreign_engine_declared"));
+    }
+
+    /// Absence of evidence must be VISIBLE, never a silent pass. This is the
+    /// defect the first landed version had: the check early-returned and the
+    /// lane looked clean.
+    #[test]
+    fn missing_linkage_evidence_is_reported_as_a_note_not_a_silent_pass() {
+        let rows = Vec::new();
+        let surface = EnabledSurface {
+            triple: "x86_64-unknown-linux-gnu".to_owned(),
+            linkage_is_observed: false,
+            ..EnabledSurface::default()
+        };
+        let mut report = Report::new();
+        check_native_linkage_policy(&surface, &rows, &mut report);
+        assert!(report.errors.is_empty());
+        assert_eq!(report.notes.len(), 1, "{:?}", report.notes);
+        assert!(report.notes[0].contains("not evaluated"));
+    }
+
+    /// A package that links native code but whose row permits it must pass.
+    #[test]
+    fn observed_linkage_against_a_permissive_row_is_allowed() {
+        let rows = vec![SurfaceRow {
+            id: "DEP-999".to_owned(),
+            crate_pattern: "blake3".to_owned(),
+            ffi_policy: "links_native_objects".to_owned(),
+            build_script: SurfaceState::Enabled,
+            proc_macro: SurfaceState::Absent,
+        }];
+        let mut surface = EnabledSurface {
+            triple: "t".to_owned(),
+            linkage_is_observed: true,
+            ..EnabledSurface::default()
+        };
+        surface
+            .native_linkage
+            .insert("blake3".to_owned(), parse_linkage_lines(REAL_BLAKE3_OUTPUT));
+        let mut report = Report::new();
+        check_native_linkage_policy(&surface, &rows, &mut report);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
     }
 
     #[test]
