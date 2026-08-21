@@ -259,6 +259,42 @@ purpose_marker!(
 // decision, not a convenience.
 impl MacCapable for Webhook {}
 
+/// A purpose whose keys may produce detached signatures.
+///
+/// The third capability trait, gating signing exactly as [`MacCapable`] gates
+/// authentication tags. A key whose purpose is not signing has no `sign`
+/// method at all, so producing one is not a refusal a caller can forget to
+/// check — it is a program that does not exist.
+///
+/// The membership below is a reading of the threat model's purposes, not a
+/// convenience list. Signing is granted to the four purposes whose whole
+/// reason to exist is attesting authorship: principal identity, authority
+/// administration, capsules, and package releases. It is withheld from
+/// evidence, webhook, tenant-encryption and recovery keys. `Evidence` is the
+/// interesting exclusion: evidence bodies are *identified* by a
+/// domain-separated digest and countersigned by whichever authority vouches
+/// for them, so an evidence key that could also sign would blur the line
+/// between "this evidence exists" and "this authority asserts it".
+pub trait SignatureCapable: KeyPurposeMarker {}
+
+impl SignatureCapable for Identity {}
+impl SignatureCapable for AuthorityAdmin {}
+impl SignatureCapable for Capsule {}
+impl SignatureCapable for PackageRelease {}
+
+/// A purpose whose keys may seal and open authenticated ciphertext.
+///
+/// Only tenant envelope encryption. `Recovery` is deliberately excluded even
+/// though archive recovery plausibly wants to decrypt: a recovery key that can
+/// open tenant ciphertext would make cryptographic erasure of a tenant key
+/// meaningless, because the data would still be reachable through a key the
+/// erasure did not touch. Plan section 19.4 treats erasure as a deletion state
+/// with evidence, and a second key that silently defeats it is the failure
+/// that state is meant to exclude.
+pub trait EncryptionCapable: KeyPurposeMarker {}
+
+impl EncryptionCapable for TenantEncryption {}
+
 /// A key rotation epoch.
 ///
 /// Gap-free and monotone: zero is reserved so a zeroed buffer is never a valid
@@ -480,6 +516,16 @@ impl<P: KeyPurposeMarker> SecretKey<P> {
     #[must_use]
     pub const fn purpose() -> KeyPurpose {
         P::PURPOSE
+    }
+
+    /// The raw key material, for sibling modules in this crate only.
+    ///
+    /// Deliberately `pub(crate)`: signing and sealing need the bytes, and no
+    /// caller outside this crate ever does. Every in-crate use derives a
+    /// further sub-key from it under its own label rather than using it
+    /// directly as a primitive's key.
+    pub(crate) const fn material(&self) -> &[u8; KEY_BYTES] {
+        &self.material
     }
 
     /// Serialize for storage, discarding the type parameter.
