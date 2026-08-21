@@ -208,6 +208,7 @@ fn main() -> ExitCode {
         if invocation.check_set.includes_constitution() {
             check_rust_sources(&root, &mut report);
             check_workspace_crate_graph(&root, &mut report);
+            let _ = evaluate_crate_layers(&root, &mut report);
             check_manifests(&root, &mut report);
             check_constellation(&root, &mut report);
             check_unsafe_ledger_policies(&root, &mut report);

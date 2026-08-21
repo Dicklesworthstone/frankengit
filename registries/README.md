@@ -16,9 +16,11 @@ constitutional workspace.
 
 The currently exceptional but deliberate placements are recorded in the
 registry rather than inferred from a crate name: the independent
-`fgit-codec-verify` is L0, `fgit-deflate` is the L1 pack primitive,
-`fgit-diff` and `fgit-witness` are L2 canonical-engine support, the embedded
-`fgit-authority-fsqlite` store is L1 beside the authority contract, and
-`fgit-admission` is an L4 receive-pack product adapter. `fgit-runtime` and
-`fgit-lab` are L2 because they provide execution of canonical engines rather
-than an alternate product runtime.
+`fgit-codec-verify` is L0, `fgit-deflate` is the L1 pack primitive, and
+`fgit-crypto` is L1 because it constitutionally owns identity hashes. Its
+consumer `fgit-codec`, plus the authority/object-fabric primitives that
+depend on canonical codec framing, are L2. `fgit-diff` and `fgit-witness` are
+L2 canonical-engine support, the embedded `fgit-authority-fsqlite` store is
+L2 beside the authority contract, and `fgit-admission` is an L4 receive-pack
+product adapter. `fgit-runtime` and `fgit-lab` are L2 because they provide
+execution of canonical engines rather than an alternate product runtime.

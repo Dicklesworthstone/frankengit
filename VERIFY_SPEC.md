@@ -86,6 +86,7 @@ Must check every first-party Rust target and Cargo manifest for:
 - no banned dependency/runtime/native class;
 - one `Cargo.lock` and dated nightly;
 - dependency registry approval, including the resolved Cargo.lock transitive graph;
+- one explicit `crate_layers.tsv` row for every workspace `fgit-*` package, with every direct first-party edge restricted to its declared lower-or-equal dependency layers and no L3 sibling edge;
 - version-universe consistency, build-script/proc-macro policy, and transitive-unsafe evidence (the closed-world name check and build-script/proc-macro refusals run today; version-universe and transitive-unsafe evidence join the lane as that machinery lands);
 - no empty engine crate or placeholder durable abstraction (a review obligation until crate-graph checks exist);
 - exactly one root `Cargo.lock` (nested lockfiles are refused).
