@@ -245,6 +245,35 @@ detect_git_subprocess "$permitted_git" && git_detector_quiet=no
 
 harness_script_count=${#harness_scripts[@]}
 
+# ---------------------------------------------------------------------------
+# set -u initialisation guard for run_all.sh's validator state
+#
+# A real defect motivated this: a `RA_V_TIMEOUTS` read was added without an
+# initializer, and under `set -u` that aborted run_all on EVERY script --
+# including the passing controls -- so the whole suite reported failures that
+# had nothing to do with the scripts under test. The failure mode is nasty
+# because it looks like twenty unrelated bugs instead of one missing line.
+#
+# Every RA_V_* must therefore be either a top-level scalar assignment or a
+# `declare -a` array. The detector is exercised against a planted copy with an
+# initializer removed, so it cannot rot into a no-op.
+# ---------------------------------------------------------------------------
+detect_uninitialised_state() {
+  local file=$1 n out=''
+  for n in $(grep -oE 'RA_V_[A-Z_]+' "$file" | sort -u); do
+    grep -qE "^${n}=" "$file" && continue
+    grep -qE "^declare -a .*\b${n}=\(\)" "$file" && continue
+    out+="$n "
+  done
+  printf '%s' "$out"
+}
+
+uninitialised_state=$(detect_uninitialised_state "$E2E_ROOT/run_all.sh")
+
+planted_uninit="$work/planted_uninit.sh"
+sed 's/^RA_V_TIMEOUTS=0$//' "$E2E_ROOT/run_all.sh" >"$planted_uninit"
+planted_uninit_found=$(detect_uninitialised_state "$planted_uninit")
+
 fge_phase assert
 
 # concurrency
@@ -308,6 +337,10 @@ fge_assert_cmd FG-000A-PORT-021 'the static checks covered a real file set' \
   test "$harness_script_count" -ge 10
 fge_assert_cmd FG-000A-PORT-028 'the tooling sweep covered every harness script but this one' \
   test "$swept" -eq "$((harness_script_count - 1))"
+fge_assert_eq FG-000A-PORT-029 '' "$uninitialised_state" \
+  'every RA_V_* in run_all.sh has an initializer, so set -u cannot abort the runner'
+fge_assert_eq FG-000A-PORT-030 'RA_V_TIMEOUTS ' "$planted_uninit_found" \
+  'the initialisation guard detects a removed initializer rather than passing vacuously'
 
 # environment identity is recorded rather than assumed
 fge_assert_match FG-000A-PORT-022 "$FGE_DIGEST_TOOL" '^(sha256sum|shasum|openssl)$' \
