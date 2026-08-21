@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
-//! Independent FG-066b boundary probe for the TreeFS object-construction cap.
+//! Independent FG-066b boundary probe for the `TreeFS` object-construction cap.
 //!
 //! `export_budgets.rs` already covers byte, tree-width, and base-object limits.
 //! It did not exercise `ExportLimits::max_objects`, so the cross-surface ceiling
 //! registry could not truthfully map that configured bound to a trip/pass case.
-//! This test drives only the public TreeFS API and keeps the two neighbors
+//! This test drives only the public `TreeFS` API and keeps the two neighbors
 //! identical apart from the ceiling: three candidate objects are admitted at
 //! three and refused at two.
 

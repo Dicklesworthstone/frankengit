@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! FG-085 regression: TreeFS treats a gitlink as data, never a foreign tree.
+//! FG-085 regression: `TreeFS` treats a gitlink as data, never a foreign tree.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -44,7 +44,7 @@ impl ObjectSource<Sha1> for RecordingSource {
     }
 }
 
-fn repository_id() -> RepositoryId {
+const fn repository_id() -> RepositoryId {
     RepositoryId::from_bytes([7; 16])
 }
 

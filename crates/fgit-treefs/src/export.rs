@@ -341,6 +341,10 @@ impl ExportPlanner {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<ExportPlan<A>, ExportRefusal> {
         let mut objects: BTreeMap<Vec<u8>, ExportedObject<A>> = BTreeMap::new();
+        // Running total of admitted body bytes. Kept alongside the map rather than
+        // summed at the end so the ceiling can refuse before the next allocation
+        // instead of describing one already made.
+        let mut admitted_bytes = 0_usize;
         let mut reused = 0_usize;
 
         // Blobs first: every staged body becomes a candidate blob, and every
@@ -362,7 +366,7 @@ impl ExportPlanner {
                         .body(entry)
                         .ok_or_else(|| ExportRefusal::MissingBody { path: path.clone() })?;
                     let object = ExportedObject::<A>::new(GitObjectKind::Blob, body.to_vec());
-                    objects.insert(object.oid.digest_bytes().to_vec(), object);
+                    admit_object(&mut objects, &mut admitted_bytes, &self.limits, object)?;
                 }
                 OverlayEntry::File {
                     content: ContentRef::Base { .. },
@@ -409,6 +413,7 @@ impl ExportPlanner {
                 Some(directory),
                 &rebuilt,
                 &mut objects,
+                &mut admitted_bytes,
                 now,
             )?;
             // Record the outcome either way. A directory that rebuilt to
@@ -421,38 +426,35 @@ impl ExportPlanner {
         if cancelled() {
             return Err(ExportRefusal::Cancelled);
         }
-        let root = self
-            .rebuild_directory(
-                base,
-                source,
-                capability,
-                overlay,
-                None,
-                &rebuilt,
-                &mut objects,
-                now,
-            )?
-            .unwrap_or_else(|| {
-                // An entirely empty workspace exports Git's empty tree.
+        let root = self.rebuild_directory(
+            base,
+            source,
+            capability,
+            overlay,
+            None,
+            &rebuilt,
+            &mut objects,
+            &mut admitted_bytes,
+            now,
+        )?;
+        let root = match root {
+            Some(oid) => oid,
+            None => {
+                // An entirely empty workspace exports Git's empty tree. Admitted
+                // like any other object rather than inserted directly, so the
+                // ceilings see it too -- a limit of zero objects must refuse even
+                // this one.
                 let object = ExportedObject::<A>::new(GitObjectKind::Tree, Vec::new());
                 let oid = object.oid;
-                objects.insert(object.oid.digest_bytes().to_vec(), object);
+                admit_object(&mut objects, &mut admitted_bytes, &self.limits, object)?;
                 oid
-            });
+            }
+        };
 
-        if objects.len() > self.limits.max_objects {
-            return Err(ExportRefusal::ObjectBudgetExceeded {
-                observed: objects.len(),
-                limit: self.limits.max_objects,
-            });
-        }
-        let total: usize = objects.values().map(|object| object.body.len()).sum();
-        if total > self.limits.max_total_bytes {
-            return Err(ExportRefusal::ByteBudgetExceeded {
-                observed: total,
-                limit: self.limits.max_total_bytes,
-            });
-        }
+        // No trailing bulk check: admit_object enforced both ceilings at every
+        // admission, so reaching here means the plan is within budget by
+        // construction. A final re-check would be dead code that reads like the
+        // real guard and would invite someone to delete the real one.
 
         Ok(ExportPlan {
             objects,
@@ -472,6 +474,7 @@ impl ExportPlanner {
         directory: Option<&TreePath>,
         rebuilt: &BTreeMap<TreePath, Option<GitOid<A>>>,
         objects: &mut BTreeMap<Vec<u8>, ExportedObject<A>>,
+        admitted_bytes: &mut usize,
         now: u64,
     ) -> Result<Option<GitOid<A>>, ExportRefusal> {
         // Start from what the base holds here. A directory absent from the base
@@ -681,9 +684,53 @@ impl ExportPlanner {
         )?;
         let object = ExportedObject::<A>::new(GitObjectKind::Tree, body);
         let oid = object.oid;
-        objects.insert(object.oid.digest_bytes().to_vec(), object);
+        admit_object(objects, admitted_bytes, &self.limits, object)?;
         Ok(Some(oid))
     }
+}
+
+/// Admits one constructed object against the export ceilings.
+///
+/// Checked BEFORE insertion, which is the whole point. Previously every
+/// candidate was built and inserted and the ceilings were evaluated at the end,
+/// so an adversarial overlay allocated everything it wanted and *then* got a
+/// typed refusal. That refusal was correct but it was not a bound; AGENTS.md §14
+/// asks for resource limits enforced before allocation and work, and reporting
+/// after the fact is the one thing that does not satisfy it.
+///
+/// Content addressing means re-admitting an identity already present is a no-op:
+/// the bytes are already counted and the map already holds them. Treating it as
+/// a new admission would charge the same object twice and refuse a legal export.
+fn admit_object<A: GitHashAlgorithm>(
+    objects: &mut BTreeMap<Vec<u8>, ExportedObject<A>>,
+    admitted_bytes: &mut usize,
+    limits: &ExportLimits,
+    object: ExportedObject<A>,
+) -> Result<(), ExportRefusal> {
+    let key = object.oid.digest_bytes().to_vec();
+    if objects.contains_key(&key) {
+        return Ok(());
+    }
+
+    let next_count = objects.len() + 1;
+    if next_count > limits.max_objects {
+        return Err(ExportRefusal::ObjectBudgetExceeded {
+            observed: next_count,
+            limit: limits.max_objects,
+        });
+    }
+
+    let next_bytes = admitted_bytes.saturating_add(object.body.len());
+    if next_bytes > limits.max_total_bytes {
+        return Err(ExportRefusal::ByteBudgetExceeded {
+            observed: next_bytes,
+            limit: limits.max_total_bytes,
+        });
+    }
+
+    *admitted_bytes = next_bytes;
+    objects.insert(key, object);
+    Ok(())
 }
 
 fn resolved_from_base<A: GitHashAlgorithm>(entry: &BaseEntry<A>) -> Resolved<A> {

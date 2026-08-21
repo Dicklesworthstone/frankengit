@@ -464,3 +464,111 @@ fn the_size_refusal_names_what_it_measured() {
         other => panic!("expected TooLarge, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// the ceilings must BOUND the work, not merely describe it afterwards
+// ---------------------------------------------------------------------------
+
+/// A refusal that arrives after every object was built is not a bound.
+///
+/// Reported by `ProudJaguar` while mapping FG-066b, and they were right: the
+/// planner used to construct and insert every candidate and only then compare
+/// against `max_objects`/`max_total_bytes`. The typed refusal was correct, so every
+/// existing test passed -- ordering is invisible to a test that only checks the
+/// outcome. AGENTS.md §14 asks for bounds enforced BEFORE allocation and work.
+///
+/// This distinguishes the two by counting how much the source was asked for. A
+/// planner that refuses up front stops reading once the ceiling is reached; one
+/// that refuses at the end reads everything first. Asserting only "it refuses"
+/// would pass against both, which is exactly how the defect survived.
+#[test]
+fn an_object_ceiling_stops_the_work_rather_than_reporting_on_it() {
+    let (source, root) = fixture();
+
+    // A workspace far wider than the ceiling it will be given.
+    let mut overlay = Overlay::new();
+    for index in 0..64_u32 {
+        file(
+            &mut overlay,
+            format!("src/f{index:03}.rs").as_bytes(),
+            format!("body {index}\n").as_bytes(),
+        );
+    }
+
+    let refused = plan_with(
+        ExportLimits {
+            max_objects: 4,
+            ..ExportLimits::default()
+        },
+        &source,
+        root,
+        &overlay,
+    );
+    match refused {
+        Err(ExportRefusal::ObjectBudgetExceeded { observed, limit }) => {
+            assert_eq!(limit, 4, "the refusal names the configured ceiling");
+            // The load-bearing assertion. Refusing at the moment the ceiling is
+            // crossed means `observed` is limit+1 -- not the 64+ objects a
+            // build-everything-then-check planner would have accumulated.
+            assert_eq!(
+                observed, 5,
+                "the ceiling must refuse at the crossing point; observed {observed} means \
+                 {} objects were built before anyone checked",
+                observed
+            );
+        }
+        other => panic!("expected ObjectBudgetExceeded, got {other:?}"),
+    }
+
+    // Permitted twin: the same 64-entry workspace under a ceiling that admits it.
+    let allowed = plan_with(ExportLimits::default(), &source, root, &overlay);
+    assert!(
+        allowed.is_ok(),
+        "the same overlay under the default ceiling exports; got {allowed:?}"
+    );
+}
+
+/// The byte ceiling bounds work the same way.
+#[test]
+fn a_byte_ceiling_stops_at_the_crossing_point() {
+    let (source, root) = fixture();
+    let mut overlay = Overlay::new();
+    // DISTINCT bodies, deliberately. My first version used 32 identical ones and
+    // content addressing collapsed them into a single blob -- so the object that
+    // crossed the ceiling was the wide src/ tree, not a body, and the observed
+    // total looked wrong for a reason that had nothing to do with ordering. Dedup
+    // is correct behaviour; a corpus that leans on it measures the wrong thing.
+    for index in 0..32_u32 {
+        let mut body = vec![b'x'; 512];
+        body.extend_from_slice(format!("{index:03}").as_bytes());
+        file(
+            &mut overlay,
+            format!("src/g{index:03}.rs").as_bytes(),
+            &body,
+        );
+    }
+
+    match plan_with(
+        ExportLimits {
+            max_total_bytes: 1024,
+            ..ExportLimits::default()
+        },
+        &source,
+        root,
+        &overlay,
+    ) {
+        Err(ExportRefusal::ByteBudgetExceeded { observed, limit }) => {
+            assert_eq!(limit, 1024, "the refusal names the configured ceiling");
+            // 32 distinct bodies of 515 bytes is ~16.5 KiB before any tree. A
+            // planner that builds everything and checks at the end would report a
+            // total in that range; refusing on crossing reports barely past the
+            // ceiling. The gap between those two is the property under test.
+            assert!(
+                observed <= limit + 515,
+                "the byte ceiling must refuse as it is crossed, not after building \
+                 everything; observed {observed} against limit {limit}"
+            );
+        }
+        other => panic!("expected ByteBudgetExceeded, got {other:?}"),
+    }
+}
