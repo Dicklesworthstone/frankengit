@@ -454,12 +454,12 @@ fn lost_cas_response_retries_to_the_same_replayed_terminal_outcome() {
     assert!(is_lost_authority_response(&failure));
     assert_cas_fault_reached(&store, FaultKind::LoseResponse);
 
-    // The error exits before accelerator indexing.  This is the recovery
-    // shape of a wiped/behind accelerator: absence is repairable, never proof
-    // of a non-commit.
+    // A lost response is caller ambiguity, not a partial publication: the
+    // terminal-outcome record becomes visible with the successor head.
     assert_eq!(
         indexed_outcome(&store, tenant(), repository(), admitted.tx_id()).expect("index lookup"),
-        OutcomeLookup::Undecided
+        expected_commit(1, 0x51),
+        "the atomic publication must not leave a visible head without its terminal outcome"
     );
     let recovered = resolve_outcome(
         &store,
@@ -505,7 +505,7 @@ fn lost_cas_response_retries_to_the_same_replayed_terminal_outcome() {
 }
 
 #[test]
-fn crash_after_cas_restarts_to_the_same_terminal_outcome_without_an_index_entry() {
+fn crash_after_cas_restarts_to_the_same_terminal_outcome() {
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7011));
     let request = attempt(b"crash-after-cas", 0xA1);
     let admitted = seal_request(&store, &request).expect("seal");
@@ -540,9 +540,9 @@ fn crash_after_cas_restarts_to_the_same_terminal_outcome_without_an_index_entry(
     store.install_fault_plan(FaultPlan::none());
     assert_eq!(
         indexed_outcome(&store, tenant(), repository(), admitted.tx_id())
-            .expect("behind index lookup"),
-        OutcomeLookup::Undecided,
-        "the crash leaves no accelerator entry to trust"
+            .expect("atomic outcome lookup"),
+        expected_commit(1, 0x51),
+        "a crash after the publication effect must not separate the head from its terminal outcome"
     );
     assert_eq!(
         resolve_outcome(
@@ -622,12 +622,12 @@ fn rejected_second_terminal_decision_never_becomes_canonical() {
 }
 
 #[test]
-fn missing_accelerator_after_a_lost_response_cannot_admit_a_second_terminal() {
-    // This is the race a derived-index precheck cannot close. Publisher B's
-    // CAS linearizes its decision, but its response is lost before the derived
-    // accelerator write.  Publisher A then sees B's new head and an absent
-    // accelerator; a non-atomic precheck would admit A's different decision
-    // and create a second terminal decision in authenticated history.
+fn lost_response_after_atomic_publication_cannot_admit_a_second_terminal() {
+    // Publisher B's response is lost after its atomic publication. Publisher
+    // A must still be refused, and the head and terminal outcome record must
+    // agree. A missing derived projection is a separate degradation state,
+    // covered below the publication surface by the authority recovery lane;
+    // it is not a reachable post-CAS state for this atomic terminal record.
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7016));
     let request = attempt(b"lost-response-then-duplicate", 0xA1);
     let admitted = seal_request(&store, &request).expect("seal");
@@ -663,9 +663,9 @@ fn missing_accelerator_after_a_lost_response_cannot_admit_a_second_terminal() {
     );
     assert_eq!(
         indexed_outcome(&store, tenant(), repository(), admitted.tx_id())
-            .expect("B's behind accelerator is readable"),
-        OutcomeLookup::Undecided,
-        "the precheck window is real: accelerator absence does not prove B did not commit"
+            .expect("B's atomic terminal outcome is readable"),
+        expected_commit(1, 0x51),
+        "a lost response must not separate B's visible head from its terminal outcome"
     );
 
     let duplicate_batch = batch(&first_head, admitted.tx_id(), 2, 0x52);
@@ -680,7 +680,7 @@ fn missing_accelerator_after_a_lost_response_cannot_admit_a_second_terminal() {
     );
     assert!(
         duplicate.is_err(),
-        "a missing derived accelerator must not admit a second terminal decision"
+        "a lost response must not admit a second terminal decision"
     );
     assert_eq!(
         replay_outcome(&store, &authority_head_key(), admitted.tx_id())
