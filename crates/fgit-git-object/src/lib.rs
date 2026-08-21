@@ -1439,6 +1439,31 @@ mod tests {
     }
 
     #[test]
+    fn incremental_hasher_commits_the_same_framed_native_object() {
+        let expected: GitOid<Sha1> = native_object_oid(ObjectType::Blob, b"hello");
+        let mut hasher = native_object_hasher::<Sha1>(ObjectType::Blob, 5)
+            .expect("a bounded usize fits the native length field");
+        hasher.update(b"he").expect("first chunk fits declaration");
+        hasher
+            .update(b"llo")
+            .expect("second chunk completes declaration");
+        assert_eq!(
+            hasher.finish().expect("exact length completes hashing"),
+            expected
+        );
+
+        let mut overrun = native_object_hasher::<Sha256>(ObjectType::Blob, 1)
+            .expect("small declaration is representable");
+        assert_eq!(
+            overrun.update(b"xy"),
+            Err(fgit_crypto::GitHashError::DeclaredLengthOverrun {
+                declared: 1,
+                received: 2,
+            })
+        );
+    }
+
+    #[test]
     fn checked_in_corpus_round_trips() {
         let limits = limits();
         let blob = b"checked-in blob\n";
