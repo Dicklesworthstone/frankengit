@@ -785,6 +785,84 @@ impl FsqliteAuthorityStore {
         }
     }
 
+    /// Publish terminal outcome entries and replace the head atomically.
+    ///
+    /// The atomicity is the engine's, not this crate's discipline: everything
+    /// below runs inside a single `BEGIN`/`COMMIT`, so a crash or a lost
+    /// response cannot leave the head advanced with outcome records missing.
+    /// That window is exactly the §5.2 defect this operation exists to close.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified engine failure, or the contract's refusal when an
+    /// outcome key already holds different bytes — in which case nothing is
+    /// written and the head does not move.
+    pub async fn publish_head_with_outcomes<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+        outcomes: &[(ImmutableKey, Vec<u8>)],
+    ) -> Result<CasOutcome, EngineError>
+    where
+        Caps: cap::SubsetOf<cap::All>,
+        cap::None: cap::SubsetOf<Caps>,
+    {
+        self.admit_body(new_body)?;
+        for (_, bytes) in outcomes {
+            self.admit_body(bytes)?;
+        }
+
+        self.begin(cx).await?;
+        match self
+            .publish_atomically(cx, key, expected, new_generation, new_body, outcomes)
+            .await
+        {
+            Ok(outcome) => {
+                self.commit(cx).await?;
+                Ok(outcome)
+            }
+            Err(cause) => Err(self.rollback_after(cx, cause).await),
+        }
+    }
+
+    /// The body of the atomic publication, inside the caller's transaction.
+    ///
+    /// Outcome entries are staged **before** the conditional head replacement,
+    /// mirroring body-first/head-last — but the ordering is belt-and-braces
+    /// here rather than load-bearing, because the whole sequence commits or
+    /// aborts as one. The head CAS remains the linearization point; what
+    /// changes is that the outcome records are part of what it makes durable.
+    async fn publish_atomically<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+        outcomes: &[(ImmutableKey, Vec<u8>)],
+    ) -> Result<CasOutcome, EngineError>
+    where
+        Caps: cap::SubsetOf<cap::All>,
+        cap::None: cap::SubsetOf<Caps>,
+    {
+        for (outcome_key, bytes) in outcomes {
+            match self.put_body(cx, outcome_key, bytes).await? {
+                PutOutcome::Created | PutOutcome::IdenticalRetry => {}
+                // A different terminal decision already recorded for this key.
+                // Fail closed and write nothing: a partially applied
+                // publication is the state this operation exists to prevent.
+                PutOutcome::Conflict => {
+                    return Err(EngineError::Contract(AuthorityRefusal::TokenBodyMismatch));
+                }
+            }
+        }
+        self.exchange_head(cx, key, expected, new_generation, new_body)
+            .await
+    }
+
     /// Confirm that this store issued `receipt` exactly as presented.
     ///
     /// Success proves authenticity, never currency: a genuine receipt for a
@@ -993,6 +1071,28 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         Self::compare_exchange_head(self, cx, key, expected, new_generation, new_body)
             .await
             .map_err(EngineError::into_failure)
+    }
+
+    async fn publish_head_with_outcomes(
+        &self,
+        cx: &Self::Context,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+        outcomes: &[(ImmutableKey, Vec<u8>)],
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        Self::publish_head_with_outcomes(
+            self,
+            cx,
+            key,
+            expected,
+            new_generation,
+            new_body,
+            outcomes,
+        )
+        .await
+        .map_err(EngineError::into_failure)
     }
 
     async fn authenticate_head_receipt(

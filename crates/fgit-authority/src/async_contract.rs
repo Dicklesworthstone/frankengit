@@ -127,6 +127,66 @@ pub trait AsyncAuthorityStore: Sync {
         new_body: &[u8],
     ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send;
 
+    /// Publish terminal outcome entries **and** replace the head in ONE
+    /// linearization point.
+    ///
+    /// This is the primitive GoldLotus's §5.2 atomicity ruling requires, and it
+    /// exists because the obvious composition of the other two operations is
+    /// unsound.
+    ///
+    /// # The defect this replaces
+    ///
+    /// Publishing by `compare_exchange_head` followed by `put_if_absent` for
+    /// each outcome leaves a window: the head moves first, so a publisher whose
+    /// response is lost after the CAS but before indexing leaves a transaction
+    /// **genuinely decided with no accelerator row**. A second publisher then
+    /// reads the new head, finds no accelerator entry, infers "undecided", and
+    /// publishes a *different* terminal decision for the same `TxId`. NPC §5.3
+    /// says a sealed transaction appears at most once in the authenticated
+    /// decision history; that composition cannot enforce it, and detects the
+    /// violation only after it is already canonical.
+    ///
+    /// # The contract
+    ///
+    /// All-or-nothing. Either every entry in `outcomes` is durable **and** the
+    /// head carries `new_body`, or neither is and the head still carries
+    /// `expected`. **If a caller can observe the new head, the outcome records
+    /// are necessarily observable** — that is the whole point, and it is what
+    /// makes the lost-response window unrepresentable rather than merely
+    /// narrow.
+    ///
+    /// A pre-existing outcome key holding **different** bytes aborts the entire
+    /// publication and leaves the head untouched. Failing closed here is
+    /// deliberate: a partially applied publication is precisely the state this
+    /// operation exists to make impossible.
+    ///
+    /// # What this operation is NOT for
+    ///
+    /// It does **not** perform duplicate detection. Per the ruling, whether a
+    /// `TxId` already has a terminal decision is answered from the
+    /// **authenticated decision stream** reachable from the current head, never
+    /// from an accelerator row's presence or absence — a missing row means
+    /// "resolve it authoritatively", never "no decision exists". That inference
+    /// is the TOCTOU, and treating a derived index as authority is the
+    /// constitutional category error (§5.1, §4) underneath the whole defect.
+    /// Callers detect duplicates upstream; this operation makes the winner's
+    /// publication indivisible.
+    ///
+    /// # Errors
+    ///
+    /// [`CasOutcome::PredecessorMismatch`] when the head no longer carries
+    /// `expected` — an ordinary lost race, with nothing written. Any refusal
+    /// leaves the store exactly as it was.
+    fn publish_head_with_outcomes(
+        &self,
+        cx: &Self::Context,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+        outcomes: &[(ImmutableKey, Vec<u8>)],
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send;
+
     /// Confirm that this store issued `receipt` exactly as presented.
     ///
     /// Success proves authenticity, never currency: a genuine receipt for a
