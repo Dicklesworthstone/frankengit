@@ -1218,6 +1218,18 @@ impl LedgerHandle {
                 .ok_or(LifecycleError::UnknownObligation(id))?;
             let next = entry.state.apply(event)?;
             entry.state = next;
+            let class = entry.class;
+            let reserved = entry.reserved;
+            let charged = entry.charged;
+            // Journalled under the SAME lock as the transition it records.
+            // `mark` carries defer, acknowledge, escalate and fail-terminally —
+            // four of the seven lifecycle events — so omitting it leaves a
+            // journal that replays an obligation as still Committed when it
+            // actually went on to be deferred and escalated. An incomplete
+            // trace does not merely lose detail: a verifier asserting over it
+            // finds no violation because the records that would show one were
+            // never written.
+            state.record_journal(id, class, Some(event), next, reserved, charged);
             Ok(next)
         })
     }
