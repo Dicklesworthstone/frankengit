@@ -514,3 +514,101 @@ fn a_head_naming_another_batch_is_refused_and_the_bound_twin_is_not() {
         "the plan computes the tail identity rather than accepting one"
     );
 }
+
+#[test]
+fn one_transaction_cannot_be_decided_twice_by_the_builder() {
+    // A sealed transaction has at most one terminal decision, ever. Two in one
+    // batch would publish both at the same instant, so there would not even be
+    // an ordering that let a reader prefer one.
+    let reused = derived!(TxId, 0xE0);
+
+    // Planted negative: refused, then committed, under one identity.
+    let mut plan = PublicationPlan::open(basis()).expect("genesis basis opens");
+    plan.refuse(
+        reused,
+        RefusalCode::QuotaExceeded,
+        derived!(RefusalRecordId, 0xE1),
+    );
+    let mut duplicate = record(0xE2);
+    duplicate.tx_id = reused;
+    plan.commit(derived!(RepositoryCommitId, 0xE3), duplicate);
+    assert_eq!(
+        plan.seal(&CryptoBodyIdentity, committed_roots()),
+        Err(ChronicleRefusal::DuplicateTransaction { index: 1 }),
+        "the second decision for one transaction is refused, naming its index"
+    );
+
+    // Planted negative: refused twice.
+    let mut plan = PublicationPlan::open(basis()).expect("genesis basis opens");
+    plan.refuse(
+        reused,
+        RefusalCode::QuotaExceeded,
+        derived!(RefusalRecordId, 0xE4),
+    );
+    plan.refuse(
+        reused,
+        RefusalCode::NonFastForwardRefused,
+        derived!(RefusalRecordId, 0xE5),
+    );
+    assert!(matches!(
+        plan.seal(&CryptoBodyIdentity, refusal_only_roots()),
+        Err(ChronicleRefusal::DuplicateTransaction { .. })
+    ));
+
+    // Near-identical permitted case: two DISTINCT transactions, same shapes.
+    let mut plan = PublicationPlan::open(basis()).expect("genesis basis opens");
+    plan.refuse(
+        derived!(TxId, 0xE6),
+        RefusalCode::QuotaExceeded,
+        derived!(RefusalRecordId, 0xE7),
+    );
+    let mut distinct = record(0xE8);
+    distinct.tx_id = derived!(TxId, 0xE9);
+    plan.commit(derived!(RepositoryCommitId, 0xEA), distinct);
+    let published = seal(plan, &committed_roots());
+    assert_eq!(published.batch().decisions.len(), 2);
+}
+
+#[test]
+fn a_duplicate_transaction_is_refused_in_a_pair_that_arrives_as_data() {
+    // The builder is not the only way to make a batch: one can be replayed,
+    // recovered, or built straight from fgit-codec, so the checker has to hold
+    // the same invariant independently.
+    let (basis, mut batch, head) = well_formed_pair();
+    let existing = batch
+        .decisions
+        .first()
+        .expect("the pair carries a decision")
+        .tx_id;
+    batch
+        .decisions
+        .push(fgit_codec::schema::RepositoryDecision {
+            tx_id: existing,
+            decision_sequence: DecisionSequence::try_new(2).expect("two is a valid position"),
+            outcome: DecisionOutcome::Refused {
+                code: RefusalCode::QuotaExceeded,
+                refusal_record_id: derived!(RefusalRecordId, 0xEB),
+            },
+        });
+    let mut head = head;
+    head.latest_decision_sequence =
+        Some(DecisionSequence::try_new(2).expect("two is a valid position"));
+    head.decision_tail_id =
+        Some(batch_identity(&CryptoBodyIdentity, &batch).expect("the batch has an identity"));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::DuplicateTransaction { index: 1 }),
+        "a second terminal decision for one transaction is refused on the data path too"
+    );
+
+    // Near-identical permitted case: the same appended refusal, distinct id.
+    if let Some(last) = batch.decisions.last_mut() {
+        last.tx_id = derived!(TxId, 0xEC);
+    }
+    head.decision_tail_id =
+        Some(batch_identity(&CryptoBodyIdentity, &batch).expect("the batch has an identity"));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
+}

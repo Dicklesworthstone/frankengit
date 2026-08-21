@@ -7,7 +7,7 @@
 
 use fgit_authority::{
     AuthorityStore, AuthorityVersionToken, HeadKey, HeadReadReceipt, OutcomeFailure, OutcomeLookup,
-    PublicationOutcome, TerminalOutcome, indexed_outcome, publish_decisions,
+    PublicationOutcome, TerminalOutcome, publish_decisions, resolve_outcome,
 };
 use fgit_types::{RepositoryDecisionBatchId, TenantId, TxId};
 
@@ -52,7 +52,11 @@ pub struct CanonicalBatchReceipt {
 #[must_use]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LostCandidate {
-    /// No transaction in the batch has a terminal decision yet.
+    /// No transaction in the batch has a terminal decision.
+    ///
+    /// Established by replaying the authenticated decision stream, not by an
+    /// accelerator miss, so it survives the crash window between a head
+    /// advancing and its accelerator entries being written.
     ///
     /// The sealed requests are still undecided, so the same requests may be
     /// replanned against the new head. The positions this batch chose are
@@ -109,20 +113,30 @@ where
         ))),
         PublicationOutcome::PredecessorMismatch => Ok(PublicationVerdict::Lost(classify_loss(
             store,
+            head_key,
             publication,
             tenant_id,
         )?)),
     }
 }
 
-/// Ask the accelerator whether any transaction in the candidate is decided.
+/// Ask the authority whether any transaction in the candidate is decided.
 ///
-/// The accelerator is a repairable projection, not a second truth, so a miss
-/// means "no decision indexed here", never "no decision exists". That is why a
-/// clean sweep yields [`LostCandidate::Replannable`] — permission to replan
-/// the same sealed requests — and never a claim that they were refused.
+/// This resolves through `resolve_outcome`, which replays the authenticated
+/// decision stream **and** consults the accelerator, rather than through the
+/// accelerator alone.
+///
+/// The distinction is not academic, and an earlier version of this function
+/// got it wrong. The accelerator is written *after* the head moves, so a crash
+/// in that window leaves a transaction genuinely decided with no accelerator
+/// entry. Asking only the accelerator reads that as undecided and hands back
+/// [`LostCandidate::Replannable`] — telling the caller to replan a transaction
+/// that already committed, which is exactly how one sealed transaction
+/// acquires two terminal decisions. Replay is authoritative precisely because
+/// it would give the same answer on a node whose index was wiped.
 fn classify_loss<S>(
     store: &S,
+    head_key: &HeadKey,
     publication: &VerifiedPublication,
     tenant_id: TenantId,
 ) -> Result<LostCandidate, OutcomeFailure>
@@ -133,7 +147,7 @@ where
     let mut decided = Vec::new();
     for decision in &publication.batch().decisions {
         if let OutcomeLookup::Decided(outcome) =
-            indexed_outcome(store, tenant_id, repository_id, decision.tx_id)?
+            resolve_outcome(store, head_key, tenant_id, repository_id, decision.tx_id)?
         {
             decided.push((decision.tx_id, outcome));
         }

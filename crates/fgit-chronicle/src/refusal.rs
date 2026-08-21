@@ -12,6 +12,15 @@ use fgit_types::{DecisionSequence, HeadGeneration, RepositorySequence};
 pub enum ChronicleRefusal {
     /// A batch with no decisions consumes no sequence and publishes nothing.
     EmptyBatch,
+    /// One sealed transaction was decided twice in the same batch.
+    ///
+    /// A sealed transaction has at most one terminal decision, ever. Two in
+    /// one batch would publish both at the same instant, so there would not
+    /// even be an ordering that let a reader prefer one.
+    DuplicateTransaction {
+        /// Zero-based index of the second decision for that transaction.
+        index: usize,
+    },
     /// The decision sequence skipped or repeated a position.
     ///
     /// Decision sequence is gap-free across *all* terminal decisions,
@@ -179,6 +188,10 @@ impl fmt::Display for ChronicleRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::EmptyBatch => f.write_str("a decision batch must carry at least one decision"),
+            Self::DuplicateTransaction { index } => write!(
+                f,
+                "decision {index} decides a transaction this batch already decided"
+            ),
             Self::DecisionSequenceNotContiguous {
                 index,
                 expected,

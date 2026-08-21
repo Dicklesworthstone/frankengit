@@ -7,7 +7,8 @@
 
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, HeadRead, ImmutableKey, ImmutableRead, MemoryAuthorityStore,
-    OutcomeLookup, StoreInstanceId, body_key, indexed_outcome, initialize_repository,
+    OutcomeLookup, StoreInstanceId, body_key, canonical_body_id, indexed_outcome,
+    initialize_repository,
 };
 use fgit_chronicle::{
     LostCandidate, PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots,
@@ -114,7 +115,20 @@ fn opened() -> (MemoryAuthorityStore, PublicationBasis) {
         HeadInit::Created(_) | HeadInit::IdenticalRetry(_) => {}
         HeadInit::Conflict => panic!("a fresh store cannot conflict on genesis"),
     }
-    let id = derived!(RepositoryAuthorityHeadId, 0x20);
+    // The basis id must be the head body's REAL identity, not a tag: replay
+    // walks the predecessor chain by identity, so a fabricated id makes the
+    // genesis body unfindable and the walk fails. The old accelerator-only
+    // classification never touched the chain, which is why this fixture looked
+    // fine until loss classification started replaying the stream.
+    let id = RepositoryAuthorityHeadId::from_internal_object_id(
+        canonical_body_id(
+            IdentityDomain::RepositoryAuthorityHead,
+            CANONICAL_CODEC_VERSION,
+            &head,
+        )
+        .expect("a head body has an identity"),
+    )
+    .expect("the identity carries the authority-head domain");
     (store, PublicationBasis::new(id, head))
 }
 

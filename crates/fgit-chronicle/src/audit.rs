@@ -3,8 +3,9 @@
 use fgit_codec::attest::{BodyIdentity, body_id};
 use fgit_codec::schema::{RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody};
 use fgit_types::{
-    DecisionOutcome, DecisionSequence, RepositoryDecisionBatchId, RepositorySequence,
+    DecisionOutcome, DecisionSequence, RepositoryDecisionBatchId, RepositorySequence, TxId,
 };
+use std::collections::BTreeSet;
 
 use crate::origin::PublicationBasis;
 use crate::refusal::ChronicleRefusal;
@@ -31,6 +32,7 @@ where
 {
     verify_identity(basis, batch, head)?;
     let tail = verify_decision_sequence(basis, batch)?;
+    verify_unique_transactions(batch)?;
     verify_commit_records(basis, batch)?;
     verify_successor(basis, batch, head, tail)?;
     verify_tail_binding(identity, batch, head)?;
@@ -131,6 +133,21 @@ fn verify_decision_sequence(
         }
     }
     Ok(last)
+}
+
+/// One sealed transaction has at most one terminal decision.
+///
+/// Checked here as well as in the builder because a pair can arrive as data
+/// — replayed, recovered, or built straight from `fgit-codec` — and never
+/// pass through the builder at all.
+fn verify_unique_transactions(batch: &RepositoryDecisionBatchBody) -> Result<(), ChronicleRefusal> {
+    let mut seen: BTreeSet<TxId> = BTreeSet::new();
+    for (index, decision) in batch.decisions.iter().enumerate() {
+        if !seen.insert(decision.tx_id) {
+            return Err(ChronicleRefusal::DuplicateTransaction { index });
+        }
+    }
+    Ok(())
 }
 
 fn verify_commit_records(

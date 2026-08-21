@@ -10,6 +10,8 @@ use fgit_types::{
     RepositorySequence, TxId,
 };
 
+use std::collections::BTreeSet;
+
 use crate::audit::{batch_identity, verify_pair};
 use crate::origin::{PublicationBasis, ResultingRoots};
 use crate::refusal::ChronicleRefusal;
@@ -28,7 +30,8 @@ pub struct PublicationPlan {
     next_decision: DecisionSequence,
     next_repository: RepositorySequence,
     parent_rcr: Option<RepositoryCommitId>,
-    exhausted: Option<ChronicleRefusal>,
+    decided: BTreeSet<TxId>,
+    deferred: Option<ChronicleRefusal>,
 }
 
 impl PublicationPlan {
@@ -44,7 +47,8 @@ impl PublicationPlan {
             next_decision,
             next_repository,
             parent_rcr,
-            exhausted: None,
+            decided: BTreeSet::new(),
+            deferred: None,
         })
     }
 
@@ -76,6 +80,7 @@ impl PublicationPlan {
         code: RefusalCode,
         refusal_record_id: RefusalRecordId,
     ) -> &mut Self {
+        self.claim(tx_id);
         let sequence = self.take_decision_sequence();
         self.decisions.push(RepositoryDecision {
             tx_id,
@@ -98,6 +103,7 @@ impl PublicationPlan {
         repository_commit_id: RepositoryCommitId,
         mut record: RepositoryCommitRecord,
     ) -> &mut Self {
+        self.claim(record.tx_id);
         let sequence = self.take_decision_sequence();
         let repository_sequence = self.take_repository_sequence();
         record.repository_sequence = repository_sequence;
@@ -133,7 +139,7 @@ impl PublicationPlan {
     where
         I: BodyIdentity + ?Sized,
     {
-        if let Some(refusal) = self.exhausted {
+        if let Some(refusal) = self.deferred {
             return Err(refusal);
         }
         if self.decisions.is_empty() {
@@ -199,12 +205,31 @@ impl PublicationPlan {
         })
     }
 
+    /// Records the first refusal seen while building; later ones do not
+    /// overwrite it, because the first is the one that explains the rest.
+    const fn note(&mut self, refusal: ChronicleRefusal) {
+        if self.deferred.is_none() {
+            self.deferred = Some(refusal);
+        }
+    }
+
+    /// Claims a transaction for this batch, refusing a second decision.
+    ///
+    /// Checked on the building path rather than only at seal so that the
+    /// index in the refusal names the decision that collided.
+    fn claim(&mut self, tx_id: TxId) {
+        if !self.decided.insert(tx_id) {
+            let index = self.decisions.len();
+            self.note(ChronicleRefusal::DuplicateTransaction { index });
+        }
+    }
+
     fn take_decision_sequence(&mut self) -> DecisionSequence {
         let current = self.next_decision;
         match current.next() {
             Ok(next) => self.next_decision = next,
             Err(_) => {
-                self.exhausted = Some(ChronicleRefusal::SequenceExhausted {
+                self.note(ChronicleRefusal::SequenceExhausted {
                     counter: "decision sequence",
                 });
             }
@@ -217,7 +242,7 @@ impl PublicationPlan {
         match current.next() {
             Ok(next) => self.next_repository = next,
             Err(_) => {
-                self.exhausted = Some(ChronicleRefusal::SequenceExhausted {
+                self.note(ChronicleRefusal::SequenceExhausted {
                     counter: "repository sequence",
                 });
             }
