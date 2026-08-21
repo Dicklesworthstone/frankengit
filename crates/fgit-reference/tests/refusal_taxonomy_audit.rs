@@ -1,11 +1,16 @@
 #![forbid(unsafe_code)]
 //! The refusal-enum audit, applied to this crate's own taxonomy.
 //!
-//! `SnowyFortress`'s method — look for enum variants that are **never
-//! constructed** and variants that are **never tested** — was adopted
-//! swarm-wide after it found a decorative repository binding in `fgit-treefs`.
-//! This applies it to `RefusalClass`, which is `fgit-reference`'s own surface
-//! and which I own, rather than only to other people's crates.
+//! The method — look for enum variants that are **never constructed** and
+//! variants that are **never tested** — was adopted swarm-wide after it found
+//! a decorative repository binding in `fgit-treefs`. This applies it to
+//! `RefusalClass`, which is `fgit-reference`'s own surface and which I own,
+//! rather than only to other people's crates.
+//!
+//! Attribution for the method is in this file's commit message and on the
+//! fg019c bead, not inline: backticking a person's name to satisfy
+//! `doc_markdown` asserts it is a code item, which is a worse doc than putting
+//! the credit where it is durable and does not decay when a pane is renamed.
 //!
 //! ## What the existing in-crate tests do and do not establish
 //!
