@@ -55,6 +55,7 @@ for sq_needle in \
   'Defect::SecondWinner' \
   'instance_id()' \
   'distinct_bases' \
+  'publish_decisions_async' \
   'open_descriptors' \
   'fn kill' \
   'std::env::temp_dir'; do
@@ -145,7 +146,7 @@ if [ "$sq_kills" -lt 12 ]; then
   fge_fail FG-005B-E2E-016 \
     "only $sq_kills kill/reopen sites; the crash matrix requires at least twelve"
 fi
-if [ "$sq_tests" -lt 17 ]; then
+if [ "$sq_tests" -lt 18 ]; then
   fge_fail FG-005B-E2E-017 \
     "only $sq_tests tests in the campaign; the dispatch names more scenarios than that"
 fi
@@ -209,12 +210,6 @@ while IFS= read -r sq_line; do
 done < "$SQ_REPO/crates/fgit-authority-fsqlite/src/engine.rs"
 fge_assert_eq FG-005B-E2E-023 '0' "$sq_stashed_context" \
   'the store holds no per-store context, so a per-request cancel can still reach an operation'
-
-# A FOURTH cell, found while re-checking whether the other reasons had gone
-# stale. It is the sharpest of the four: the operation whose stated purpose is
-# surviving a crash is the one this crash matrix cannot reach.
-fge_unsupported FG-005B-E2E-024 \
-  'publish_head_with_outcomes (the atomic head+outcomes publication closing the section 5.2 window) has no crash coverage here. The witness barrier is GONE -- fgit-authority::publish_decisions_async is public and mints the DuplicateAbsenceWitness internally via the duplicate walk, then calls the atomic op -- so this is no longer structurally impossible as first recorded. What remains is narrow: a crash fixture must build RepositoryAuthorityHeadBody and RepositoryDecisionBatchBody ids through canonical_body_id, which takes an IdentityDomain from fgit-crypto, and fgit-authority-fsqlite does not depend on fgit-crypto (nor does fgit-authority re-export IdentityDomain). One dev-dependency line in a crate I do not own stands between this cell and real coverage; requested by mail rather than taken'
 
 fge_unsupported FG-005B-E2E-022 \
   'checkpoint under load: FsqliteAuthorityStore publishes nine methods and none is a checkpoint operation, so this cell cannot be driven from outside the crate at all (the count was eight when first recorded; publish_head_with_outcomes has since landed, which is why it is stated as a count that must be re-checked rather than a bare claim)'

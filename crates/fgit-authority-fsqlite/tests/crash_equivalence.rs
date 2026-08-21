@@ -1179,3 +1179,235 @@ fn an_abandoned_store_releases_its_descriptors_too() {
          the system is already degraded"
     );
 }
+
+// ------------------------------------------- the atomic publication path
+//
+// `publish_decisions_async` mints the DuplicateAbsenceWitness internally via
+// the duplicate walk and then calls `publish_head_with_outcomes`, the operation
+// that writes outcome entries and replaces the head inside one BEGIN/COMMIT.
+// Its doc names the window it closes: "a crash or a lost response cannot leave
+// the head advanced with outcome records missing."
+//
+// The ids below are derived through `fgit_codec::body_id` with
+// `CryptoBodyIdentity`, which takes the domain from the body's own
+// `CanonicalBody::DOMAIN`. That matters beyond convenience: it is the same
+// derivation production uses, so these fixtures cannot encode a
+// domain/algorithm pairing the registry forbids -- the algorithm is not a
+// value a fixture author picks.
+
+use fgit_authority::{outcome_key, publish_decisions_async};
+use fgit_codec::RepositoryDecision;
+use fgit_codec::{
+    CryptoBodyIdentity, RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody, body_id,
+    encode_body,
+};
+use fgit_types::hash::DigestAlgorithmId;
+use fgit_types::identity::{
+    RefusalRecordId, RepositoryAuthorityHeadId, RepositoryDecisionBatchId, TxId,
+};
+use fgit_types::{
+    CANONICAL_CODEC_VERSION, DecisionOutcome, DecisionSequence, Digest, DigestBytes, OPAQUE_ID_LEN,
+    PolicyEpoch, RefusalCode, RegistryEpoch, RepositoryId, TenantId,
+};
+
+fn repository_id() -> RepositoryId {
+    RepositoryId::from_bytes([7; OPAQUE_ID_LEN])
+}
+
+fn tenant_id() -> TenantId {
+    TenantId::from_bytes([3; OPAQUE_ID_LEN])
+}
+
+fn head_body_id(head: &RepositoryAuthorityHeadBody) -> RepositoryAuthorityHeadId {
+    RepositoryAuthorityHeadId::from_internal_object_id(
+        body_id(&CryptoBodyIdentity, head).expect("a head body has an identity"),
+    )
+    .expect("the authority-head domain")
+}
+
+fn batch_body_id(batch: &RepositoryDecisionBatchBody) -> RepositoryDecisionBatchId {
+    RepositoryDecisionBatchId::from_internal_object_id(
+        body_id(&CryptoBodyIdentity, batch).expect("a batch body has an identity"),
+    )
+    .expect("the decision-batch domain")
+}
+
+/// A fixture digest.
+///
+/// Code point 2 is sha256 — `GitAndInternalIdentity`, 32 bytes — which is the
+/// length carried here. Code point 1 is sha1, whose registry usage is
+/// `GitIdentityOnly`: "never an internal body identity". A fixture pairing it
+/// with an internal id encodes a combination the registry forbids.
+fn digest_of(byte: u8) -> Digest {
+    Digest::new(
+        DigestAlgorithmId::try_new(2).expect("a nonzero algorithm slot"),
+        DigestBytes::try_new(&[byte; 32]).expect("a bounded digest"),
+    )
+}
+
+fn genesis_head_body() -> RepositoryAuthorityHeadBody {
+    RepositoryAuthorityHeadBody {
+        repository_id: repository_id(),
+        generation: HeadGeneration::FIRST,
+        predecessor_head_id: None,
+        decision_tail_id: None,
+        latest_decision_sequence: None,
+        latest_committed_rcr_id: None,
+        latest_repository_sequence: None,
+        ref_root: digest_of(0x10),
+        forge_position_root: digest_of(0x11),
+        outcome_index_root: digest_of(0x12),
+        retention_root: digest_of(0x13),
+        outbox_root: digest_of(0x14),
+        configuration_root: digest_of(0x15),
+        policy_epoch: PolicyEpoch::FIRST,
+        format_registry_epoch: RegistryEpoch::FIRST,
+        last_checkpoint_id: None,
+    }
+}
+
+fn tx_of(byte: u8) -> TxId {
+    TxId::from_digest(
+        DigestAlgorithmId::try_new(2).expect("a nonzero algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[byte; 32]).expect("a bounded digest"),
+    )
+}
+
+fn refusal_of(byte: u8) -> RefusalRecordId {
+    RefusalRecordId::from_digest(
+        DigestAlgorithmId::try_new(2).expect("a nonzero algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[byte; 32]).expect("a bounded digest"),
+    )
+}
+
+/// A refusal-only batch: no committed RCRs, so the fixture needs no commit
+/// records while still producing terminal decisions the atomic publication
+/// must write alongside the head.
+fn batch_for(predecessor: &RepositoryAuthorityHeadBody) -> RepositoryDecisionBatchBody {
+    RepositoryDecisionBatchBody {
+        repository_id: repository_id(),
+        predecessor_head_id: head_body_id(predecessor),
+        predecessor_head_generation: predecessor.generation,
+        first_decision_sequence: DecisionSequence::FIRST,
+        decisions: vec![RepositoryDecision {
+            tx_id: tx_of(0xd1),
+            decision_sequence: DecisionSequence::FIRST,
+            outcome: DecisionOutcome::Refused {
+                code: RefusalCode::ExpectedOldRefMismatch,
+                refusal_record_id: refusal_of(0xd1),
+            },
+        }],
+        committed_rcrs: Vec::new(),
+        resulting_ref_root: digest_of(0x10),
+        resulting_forge_position_root: digest_of(0x11),
+        resulting_outcome_index_root: digest_of(0x20),
+        resulting_retention_root: digest_of(0x13),
+        resulting_outbox_root: digest_of(0x14),
+        resulting_policy_epoch: PolicyEpoch::FIRST,
+        batch_evidence_root: digest_of(0x21),
+    }
+}
+
+fn successor_of(
+    predecessor: &RepositoryAuthorityHeadBody,
+    tail: RepositoryDecisionBatchId,
+) -> RepositoryAuthorityHeadBody {
+    RepositoryAuthorityHeadBody {
+        generation: HeadGeneration::try_new(predecessor.generation.get() + 1)
+            .expect("a small generation advances"),
+        predecessor_head_id: Some(head_body_id(predecessor)),
+        decision_tail_id: Some(tail),
+        latest_decision_sequence: Some(DecisionSequence::FIRST),
+        outcome_index_root: digest_of(0x20),
+        ..predecessor.clone()
+    }
+}
+
+#[test]
+fn a_kill_around_the_atomic_publication_leaves_head_and_outcomes_agreeing() {
+    // THE WINDOW THE OPERATION EXISTS TO CLOSE. `publish_head_with_outcomes`
+    // writes the outcome entries and replaces the head inside one
+    // BEGIN/COMMIT, so a crash must never leave the head advanced with the
+    // outcome records missing. That state is exactly what an accelerator-only
+    // reader would call "undecided" for a transaction that is in fact decided.
+    //
+    // Reached through `publish_decisions_async`, which performs the duplicate
+    // walk, mints the witness the atomic operation requires, and calls it.
+    // Nothing here mints a witness; that remains impossible by design.
+    let scratch = Scratch::new("atomic-publish-kill");
+    let node = node();
+    let key = head_key();
+
+    let genesis = genesis_head_body();
+    let genesis_bytes = encode_body(&genesis).expect("the genesis head encodes");
+    let store = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+    store.init_head(&key, HeadGeneration::FIRST, &genesis_bytes);
+    let token = store.token(&key);
+
+    let batch = batch_for(&genesis);
+    let next = successor_of(&genesis, batch_body_id(&batch));
+    let next_bytes = encode_body(&next).expect("the successor head encodes");
+
+    let published = node.block_on(publish_decisions_async(
+        &store.store,
+        &store.cx,
+        &key,
+        token,
+        &batch,
+        &next,
+        tenant_id(),
+    ));
+    // Non-vacuity. Both branches below are real, but only one of them asserts
+    // the atomicity property, and a publication that quietly stopped
+    // succeeding would send every run down the other one while still passing.
+    // A fresh store with the token just read must publish.
+    let advanced = published.is_ok();
+    assert!(
+        advanced,
+        "the publication must succeed against a fresh store holding the token just read; \
+         without it this test passes down the did-not-move branch and proves nothing about \
+         atomicity: {published:?}"
+    );
+    store.kill();
+
+    let reopened = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+    let receipt = match reopened.read_head(&key).expect("the head reads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("an initialized head must survive an unclean shutdown"),
+    };
+    let observed = receipt.body().to_vec();
+
+    assert!(
+        observed == genesis_bytes || observed == next_bytes,
+        "after a kill the head must be the predecessor or the successor whole, never a blend"
+    );
+
+    // The atomicity claim itself: if the head moved, the decision it published
+    // must be readable. A head at generation 2 with no outcome entry for the
+    // transaction it decided is precisely the torn state the single
+    // BEGIN/COMMIT exists to prevent.
+    let entry = outcome_key(tenant_id(), repository_id(), tx_of(0xd1)).expect("a key derives");
+    let stored = reopened.read_body(&entry).expect("the outcome slot reads");
+    if observed == next_bytes {
+        assert!(
+            matches!(stored, ImmutableRead::Present(_)),
+            "the head advanced, so the outcome entry for its decision must be present: a head \
+             ahead of its outcomes is the torn state the atomic publication forbids"
+        );
+    } else {
+        assert_eq!(
+            stored,
+            ImmutableRead::Absent,
+            "the head did not move, so nothing may have been published for it"
+        );
+    }
+
+    if advanced {
+        assert_eq!(
+            observed, next_bytes,
+            "an acknowledged publication must not be absent after reopen"
+        );
+    }
+}
