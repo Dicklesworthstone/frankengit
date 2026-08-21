@@ -62,9 +62,15 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use fgit_git_object::{ObjectType, Sha1, native_object_oid};
+use fgit_pack::{
+    CanonicalObjectSource, CanonicalPackObject, ObjectFormat, ObjectId, PackLimits, PackPlanner,
+    PackWriteError, PackWriteProfile, PackWriter,
+};
 use fgit_wire::receive::{
-    ReceiveCommandStatus, ReceiveContext, ReceiveEvent, ReceiveLimits, ReceivePack, ReceiveRequest,
-    SignedPushProfile, UnpackStatus, report_status,
+    QuarantineReceipt, ReceiveCancellation, ReceiveCommandStatus, ReceiveContext, ReceiveEvent,
+    ReceiveLimits, ReceivePack, ReceiveQuarantineHandoff, ReceiveRequest, SignedPushProfile,
+    UnpackStatus, report_status,
 };
 use fgit_wire::{Capabilities, GitObjectFormat, Packet, WireLimits, encode_packets};
 
@@ -85,6 +91,148 @@ const CAPS_WITHOUT_DELETE_REFS: &str = "report-status";
 /// The two cases, named the way the suite names their files.
 const ACCEPTED_REF: &str = "refs/heads/accepted";
 const REFUSED_REF: &str = "refs/heads/refused";
+
+/// The ref a pack-carrying push creates. It must not already exist.
+const CREATED_REF: &str = "refs/heads/created";
+
+// ---------------------------------------------------------------------------
+// A real Git object closure, and a pack carrying it
+// ---------------------------------------------------------------------------
+
+/// One corpus object with the closure edges the planner walks.
+#[derive(Clone)]
+struct Object {
+    id: ObjectId,
+    object_type: ObjectType,
+    body: Vec<u8>,
+    references: Vec<ObjectId>,
+}
+
+fn raw_oid_bytes(id: ObjectId) -> Vec<u8> {
+    match id {
+        ObjectId::Sha1(oid) => oid.as_bytes().to_vec(),
+        ObjectId::Sha256(oid) => oid.as_bytes().to_vec(),
+    }
+}
+
+fn hex_oid(id: ObjectId) -> String {
+    raw_oid_bytes(id)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn blob(content: &[u8]) -> Object {
+    let body = content.to_vec();
+    Object {
+        id: ObjectId::from(native_object_oid::<Sha1>(ObjectType::Blob, &body)),
+        object_type: ObjectType::Blob,
+        body,
+        references: Vec::new(),
+    }
+}
+
+/// A single-entry tree. Git requires entry ordering; one entry makes the
+/// ordering question vacuous, which is deliberate — tree ordering is
+/// fg017b's obligation and is not re-litigated here.
+fn tree(name: &str, blob_id: ObjectId) -> Object {
+    let mut body = Vec::new();
+    body.extend_from_slice(b"100644 ");
+    body.extend_from_slice(name.as_bytes());
+    body.push(0);
+    body.extend_from_slice(&raw_oid_bytes(blob_id));
+    Object {
+        id: ObjectId::from(native_object_oid::<Sha1>(ObjectType::Tree, &body)),
+        object_type: ObjectType::Tree,
+        body,
+        references: vec![blob_id],
+    }
+}
+
+/// A parentless commit with a fixed timestamp.
+///
+/// A clock here would make the pack bytes differ between runs, so the identity
+/// the suite pushes would change every time and the oracle transcript could
+/// never be compared against a stable expectation.
+fn commit(tree_id: ObjectId) -> Object {
+    let mut body = Vec::new();
+    body.extend_from_slice(b"tree ");
+    body.extend_from_slice(hex_oid(tree_id).as_bytes());
+    body.push(b'\n');
+    body.extend_from_slice(
+        b"author FrankenGit FG-019c <fg019c@invalid.example> 1700000000 +0000\n",
+    );
+    body.extend_from_slice(
+        b"committer FrankenGit FG-019c <fg019c@invalid.example> 1700000000 +0000\n",
+    );
+    body.push(b'\n');
+    body.extend_from_slice(b"fg019c push differential\n");
+    Object {
+        id: ObjectId::from(native_object_oid::<Sha1>(ObjectType::Commit, &body)),
+        object_type: ObjectType::Commit,
+        body,
+        references: vec![tree_id],
+    }
+}
+
+struct ClosureSource {
+    objects: Vec<Object>,
+}
+
+impl CanonicalObjectSource for ClosureSource {
+    fn load(&self, id: &ObjectId) -> Result<CanonicalPackObject, PackWriteError> {
+        let (index, object) = self
+            .objects
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.id == *id)
+            .unwrap_or_else(|| panic!("closure is missing an object it referenced: {id:?}"));
+        Ok(CanonicalPackObject::new(
+            object.id,
+            object.object_type,
+            object.body.clone(),
+            object.references.clone(),
+            u64::try_from(index).unwrap_or(u64::MAX),
+            u64::from(raw_oid_bytes(object.id).first().copied().unwrap_or(0)),
+        ))
+    }
+}
+
+/// The commit our push creates, and a pack carrying its full closure.
+///
+/// Written by `fgit-pack`'s own `PackWriter`, so a Git acceptance here is
+/// evidence about **our** pack bytes rather than about a fixture.
+fn closure_and_pack() -> (ObjectId, Vec<u8>) {
+    let file = blob(b"fg019c\n");
+    let root = tree("README", file.id);
+    let head = commit(root.id);
+    let head_id = head.id;
+
+    let source = ClosureSource {
+        objects: vec![file, root, head],
+    };
+    let planner = PackPlanner::new(
+        ObjectFormat::Sha1,
+        PackWriteProfile::STORED_V1,
+        PackLimits::default(),
+    );
+    let mut deadline = || true;
+    let plan = planner
+        .plan(&source, &[head_id], &mut deadline)
+        .unwrap_or_else(|error| panic!("planning the push closure failed: {error:?}"));
+    assert_eq!(
+        plan.entries().len(),
+        3,
+        "the pushed closure must carry the commit, its tree, and its blob"
+    );
+
+    let writer = PackWriter::new(PackLimits::default());
+    let mut deadline = || true;
+    let (bytes, _receipt) = writer
+        .write(&plan, &mut deadline)
+        .unwrap_or_else(|error| panic!("writing the push pack failed: {error:?}"));
+    (head_id, bytes)
+}
 
 // ---------------------------------------------------------------------------
 // Phase 1: emit the payloads
@@ -176,6 +324,16 @@ fn emit_push_payloads_for_the_oracle() {
     fs::write(corpus.join("push-refused.pkt"), &refused).expect("write refused payload");
     fs::write(corpus.join("push-unnegotiated.pkt"), &unnegotiated)
         .expect("write unnegotiated payload");
+
+    // A create carrying a real pack. Git needs one even when the object is
+    // already present, so this is the only shape that exercises the pack path
+    // end to end through a push.
+    let (head_id, pack) = closure_and_pack();
+    let mut created = command_packet(ZERO, &hex_oid(head_id), CREATED_REF, CAPS);
+    created.extend_from_slice(b"0000");
+    created.extend_from_slice(&pack);
+    fs::write(corpus.join("push-created.pkt"), &created).expect("write created payload");
+    fs::write(corpus.join("created-oid.txt"), hex_oid(head_id)).expect("write created oid");
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +445,80 @@ fn ours(payload: &[u8], status: ReceiveCommandStatus) -> Vec<Vec<u8>> {
     let bytes = encode_packets(&packets, &WireLimits::default()).expect("report-status packets");
     let (lines, _end) = read_until_flush(&bytes, 0);
     lines
+}
+
+/// Counts what the quarantine handed over, so a pack acceptance can be
+/// asserted on its contents rather than on a bare `Ok`.
+#[derive(Default)]
+struct CountingHandoff {
+    entries: usize,
+    saw_pack: bool,
+}
+
+impl ReceiveQuarantineHandoff for CountingHandoff {
+    fn handoff(
+        &mut self,
+        _request: &ReceiveRequest,
+        pack: Option<&fgit_pack::QuarantinedPack>,
+        _receipt: &QuarantineReceipt,
+    ) -> Result<(), fgit_wire::receive::ReceiveError> {
+        self.saw_pack = pack.is_some();
+        self.entries = pack.map_or(0, |pack| pack.entries().len());
+        Ok(())
+    }
+}
+
+struct NeverCancels;
+
+impl ReceiveCancellation for NeverCancels {
+    fn checkpoint(&mut self) -> bool {
+        true
+    }
+}
+
+/// Drives our receive machine over a complete push, pack bytes included.
+///
+/// Returns how many pack entries reached the quarantine handoff, or the reason
+/// our machine refused. This is what turns "Git accepted our pack" into a
+/// two-sided statement.
+fn drive_full_push(payload: &[u8]) -> Result<usize, String> {
+    let context = ReceiveContext::new(
+        GitObjectFormat::Sha1,
+        Capabilities::parse_v1(b"report-status delete-refs", &WireLimits::default())
+            .expect("server capabilities"),
+        ReceiveLimits::default(),
+        SignedPushProfile::Refuse,
+    )
+    .expect("receive context");
+    let mut machine = ReceivePack::new(context).expect("machine");
+
+    let (packets, after_flush) = read_until_flush(payload, 0);
+    for packet in packets {
+        machine
+            .push_packet(Packet::Data(packet))
+            .map_err(|error| format!("command refused: {error:?}"))?;
+    }
+    machine
+        .push_packet(Packet::Flush)
+        .map_err(|error| format!("command flush refused: {error:?}"))?;
+
+    // Everything after the command flush is the pack, delivered in chunks the
+    // way a client would deliver it.
+    for chunk in payload[after_flush..].chunks(64) {
+        machine
+            .push_bytes(chunk)
+            .map_err(|error| format!("pack byte refused: {error:?}"))?;
+    }
+
+    let mut handoff = CountingHandoff::default();
+    let mut cancellation = NeverCancels;
+    machine
+        .finish_with_handoff(&mut handoff, &mut cancellation)
+        .map_err(|error| format!("handoff refused: {error:?}"))?;
+    if !handoff.saw_pack {
+        return Err("the handoff received no pack".to_owned());
+    }
+    Ok(handoff.entries)
 }
 
 enum Verdict {
@@ -489,6 +721,57 @@ fn our_report_status_frames_what_git_frames() {
         },
     ));
 
+    // ---- the pack-carrying create ---------------------------------------
+    // Deletes prove the no-pack path. This is the only case that carries real
+    // objects, and it is the one that says something about interoperability
+    // rather than only about framing.
+    let created_payload = fs::read(corpus.join("push-created.pkt")).expect("created payload");
+    let created_response =
+        fs::read(corpus.join("oracle-created.bin")).expect("oracle created response");
+    let oracle_created = report_section(&created_response);
+
+    cells.push((
+        "git_accepts_a_pack_our_writer_produced",
+        match oracle_created.get(1) {
+            Some(line) if line.starts_with(b"ok ") => Verdict::Match,
+            Some(line) => Verdict::Defect(format!(
+                "pinned Git refused a pack fgit-pack wrote: {}",
+                show(line)
+            )),
+            None => Verdict::Defect(
+                "the oracle produced no command line for the pack-carrying push".to_owned(),
+            ),
+        },
+    ));
+
+    if oracle_created.len() == 2 {
+        let ours_created = ours(&created_payload, ReceiveCommandStatus::Ok);
+        cells.push((
+            "created_command_line",
+            compare_lines(&oracle_created[1], &ours_created[1], "created command line"),
+        ));
+    } else {
+        cells.push((
+            "created_command_line",
+            Verdict::Defect("the oracle transcript has no created command line".to_owned()),
+        ));
+    }
+
+    // The two-sided half: our own machine must accept the same bytes Git
+    // accepted, pack included, and surface the whole closure.
+    cells.push((
+        "our_machine_accepts_the_same_push",
+        match drive_full_push(&created_payload) {
+            Ok(3) => Verdict::Match,
+            Ok(count) => Verdict::Defect(format!(
+                "our quarantine surfaced {count} pack entries, not the 3 in the pushed closure"
+            )),
+            Err(reason) => Verdict::Defect(format!(
+                "Git accepted this push and our machine refused it: {reason}"
+            )),
+        },
+    ));
+
     write_verdict(&output, &cells);
 
     let defects: Vec<&str> = cells
@@ -501,7 +784,7 @@ fn our_report_status_frames_what_git_frames() {
         "report-status diverges from pinned Git in: {defects:?}"
     );
     assert!(
-        cells.len() >= 8,
+        cells.len() >= 11,
         "only {} cells were classified",
         cells.len()
     );

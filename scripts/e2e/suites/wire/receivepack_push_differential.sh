@@ -38,7 +38,7 @@ readonly ORACLE_ROOT="${FGIT_ORACLE_ROOT:-/data/tmp/frankengit-oracle}"
 readonly PIN_ID='git-2.54.0'
 readonly CORPUS_ENV='FGIT_PUSH_DIFF_CORPUS_DIR'
 readonly OUTPUT_ENV='FGIT_PUSH_DIFF_OUTPUT_DIR'
-readonly EXPECTED_CELLS=8
+readonly EXPECTED_CELLS=11
 
 RUN_DIRECTORY=''
 
@@ -115,6 +115,7 @@ main() {
   local work_root='' corpus='' output='' verdict=''
   local verify_exit=0 create_exit=0 prepare_exit=0 seed_exit=0
   local emit_exit=0 push_exit=0 compare_exit=0 cells=0
+  local created_oid='' landed_exit=0
   local first='' second=''
 
   fge_phase setup
@@ -176,7 +177,7 @@ main() {
     -- --ignored --exact emit_push_payloads_for_the_oracle || emit_exit=$?
   emit_exit=${emit_exit:-0}
   fge_assert_exit FG-019C-PUSH-006 0 "${emit_exit}" \
-    'the bridge writes three NUL-correct push payloads'
+    'the bridge writes four NUL-correct push payloads and a pack over a real object closure'
   if [[ "${emit_exit}" -ne 0 ]]; then
     fail_from FG-019C-PUSH-007
     return
@@ -185,9 +186,10 @@ main() {
   push_case "${corpus}" accepted || push_exit=$?
   push_case "${corpus}" refused || push_exit=$?
   push_case "${corpus}" unnegotiated || push_exit=$?
+  push_case "${corpus}" created || push_exit=$?
   push_exit=${push_exit:-0}
   fge_assert_exit FG-019C-PUSH-007 0 "${push_exit}" \
-    'the pinned oracle answers all three pushes over stdin'
+    'the pinned oracle answers all four pushes over stdin, including the pack-carrying create'
   if [[ "${push_exit}" -ne 0 ]]; then
     fail_from FG-019C-PUSH-008
     return
@@ -214,6 +216,27 @@ main() {
 
   fge_assert_cmd FG-019C-PUSH-010 'the stricter-than-Git delete-refs divergence is recorded with its rationale rather than silently accommodated' \
     grep -Fq 'delete_without_negotiated_capability=accepted-divergence-with-rationale:' "${verdict}"
+  fge_assert_cmd FG-019C-PUSH-013 'pinned Git accepts a pack fgit-pack wrote, pushed through receive-pack rather than only index-pack' \
+    grep -Fqx 'git_accepts_a_pack_our_writer_produced=match' "${verdict}"
+  fge_assert_cmd FG-019C-PUSH-014 'our own machine accepts the very push Git accepted, pack included' \
+    grep -Fqx 'our_machine_accepts_the_same_push=match' "${verdict}"
+
+  # `ok` is Git SAYING it updated the ref. This is Git's repository actually
+  # containing our commit afterwards, which is the difference between trusting
+  # a status line and observing the effect it claims. It also proves the pack
+  # was genuinely unpacked and connectivity-checked rather than merely framed.
+  created_oid="$(tr -d '\r\n' < "${corpus}/created-oid.txt")"
+  landed_exit=0
+  oracle_capture created-landed target.git rev-parse refs/heads/created || landed_exit=$?
+  landed_exit=${landed_exit:-0}
+  fge_assert_exit FG-019C-PUSH-015 0 "${landed_exit}" \
+    'the pushed ref resolves in the oracle repository after the push'
+  if [[ "${landed_exit}" -eq 0 ]]; then
+    fge_assert_eq FG-019C-PUSH-016 "${created_oid}" "$(transcript_text created-landed)" \
+      'the oracle repository now holds our commit at the ref we created, so the pack was really unpacked'
+  else
+    fge_fail FG-019C-PUSH-016 'the pushed ref did not resolve, so its oid could not be compared'
+  fi
   fge_assert_not_contains FG-019C-PUSH-011 "$(<"${verdict}")" '=defect' \
     'the classified verdict contains no unresolved defect'
 
@@ -225,6 +248,8 @@ main() {
   fge_artifact "${corpus}/oracle-accepted.bin" oracle-push-accepted
   fge_artifact "${corpus}/oracle-refused.bin" oracle-push-refused
   fge_artifact "${corpus}/oracle-unnegotiated.bin" oracle-push-unnegotiated
+  fge_artifact "${corpus}/oracle-created.bin" oracle-push-created
+  fge_artifact "${corpus}/push-created.pkt" fgit-push-created-payload
 }
 
 fge_init fg019c-receivepack-push-differential
@@ -235,5 +260,6 @@ fge_context method 'emit NUL-correct push payloads from the Rust bridge, pipe ea
 fge_context claim_boundary 'FRAMING, NOT DECISIONS. report_status encodes a verdict; it does not decide one. Deciding needs the authority stack and the still-absent head-bound projection. The verdicts here come from GIT precisely so no fixture of ours stages the outcome. This lane must NEVER be cited as evidence that fgit and Git agree about WHETHER a push should succeed'
 fge_context measured_divergence 'Git 2.54.0 accepts a delete whose client omitted delete-refs; fgit refuses DeleteRefsNotNegotiated. fgit is STRICTER. Recorded as an accepted divergence for the wire owner to rule on, NOT silently widened, and the cell flips to a DEFECT if our machine ever starts accepting it so the record cannot go stale'
 fge_context measured_git_behaviour 'a delete with an UNRESOLVABLE old oid is not an expected-old mismatch: Git answers ok with warning: allowing deletion of corrupt ref. Only a resolvable-but-wrong oid reaches the check and yields ng <ref> incorrect old value provided. The corpus uses the latter'
-fge_context non_claim 'delete path only; a push carrying a pack is not exercised. Agreement is with ONE pinned Git version, not the protocol'
+fge_context pack_carrying_push 'a CREATE carrying a real commit/tree/blob closure, planned and written by fgit-pack PackWriter, is pushed through the pinned receive-pack. Git accepting it is evidence about OUR pack bytes on the PUSH path, which index-pack --strict (fg017b) does not cover. The same bytes are then driven through our own ReceivePack and must surface all three closure objects, so the statement is two-sided'
+fge_context non_claim 'FRAMING for delete verdicts, plus object-level acceptance for the create. This lane still does not claim fgit and Git agree about WHETHER any given push should succeed. Agreement is with ONE pinned Git version, not the protocol'
 main
