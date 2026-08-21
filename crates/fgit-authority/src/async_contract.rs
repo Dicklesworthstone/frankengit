@@ -20,12 +20,12 @@
 //!
 //! # The context is an associated type, and it is per-call
 //!
-//! Two constraints learned the hard way while building the FrankenSQLite
+//! Two constraints learned the hard way while building the `FrankenSQLite`
 //! backend, recorded here so they are not rediscovered:
 //!
 //! **It must be associated, not concrete.** `fgit-authority` must never depend
 //! on `fsqlite`, so it cannot name `fsqlite_types::cx::Cx`. That type is also
-//! *not* asupersync's `Cx` — they are distinct types bridged by
+//! *not* `asupersync`'s `Cx` — they are distinct types bridged by
 //! `set_native_cx`, which has already surprised one consumer.
 //!
 //! **It must be per-call, never stored on the store.** A single context held
@@ -58,12 +58,17 @@ use fgit_types::HeadGeneration;
 /// The only additions are `Context` and the `async`.
 ///
 /// [`AuthorityStore`]: crate::AuthorityStore
-pub trait AsyncAuthorityStore {
+pub trait AsyncAuthorityStore: Sync {
     /// The runtime-owned context threaded through every operation.
     ///
     /// Deliberately associated: this crate cannot name any backend's context
     /// type without depending on that backend.
-    type Context: ?Sized;
+    ///
+    /// `Sync` because every operation borrows it and the resulting futures must
+    /// be `Send` — a production surface whose futures cannot cross threads
+    /// cannot be spawned on a multi-threaded runtime, which is most of the
+    /// point of being async at all.
+    type Context: Sync + ?Sized;
 
     /// Identity of this endpoint and credential scope.
     fn instance_id(&self) -> StoreInstanceId;
@@ -81,14 +86,14 @@ pub trait AsyncAuthorityStore {
         cx: &Self::Context,
         key: &ImmutableKey,
         body: &[u8],
-    ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>>;
+    ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send;
 
     /// Read one immutable body by exact key.
     fn read_immutable(
         &self,
         cx: &Self::Context,
         key: &ImmutableKey,
-    ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>>;
+    ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send;
 
     /// Create the repository head slot if and only if it is empty.
     fn initialize_head(
@@ -97,14 +102,14 @@ pub trait AsyncAuthorityStore {
         key: &HeadKey,
         generation: HeadGeneration,
         body: &[u8],
-    ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>>;
+    ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send;
 
     /// Read the current head, its token, and its generation.
     fn read_head(
         &self,
         cx: &Self::Context,
         key: &HeadKey,
-    ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>>;
+    ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send;
 
     /// Replace the head if and only if it still carries `expected`.
     ///
@@ -120,7 +125,7 @@ pub trait AsyncAuthorityStore {
         expected: AuthorityVersionToken,
         new_generation: HeadGeneration,
         new_body: &[u8],
-    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>>;
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send;
 
     /// Confirm that this store issued `receipt` exactly as presented.
     ///
@@ -130,5 +135,5 @@ pub trait AsyncAuthorityStore {
         &self,
         cx: &Self::Context,
         receipt: &HeadReadReceipt,
-    ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>>;
+    ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send;
 }
