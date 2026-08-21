@@ -428,12 +428,29 @@ impl ImmutableObjectFabric for LocalFilesystemFabric {
         object: VerifiedObject,
         admission: PlacementAdmission<'_>,
     ) -> Result<PutIfAbsent, StoreRefusal> {
+        // Take custody before any validation that can refuse.  A caller has
+        // already carved this grant from its region; returning it explicitly
+        // on every pre-reservation refusal keeps an invalid placement request
+        // from becoming a resource-accounting leak.
+        let (ledger, budget) = admission.into_parts();
         if object.envelope().namespace() != self.namespace {
+            let _released = budget.release();
             return Err(StoreRefusal::NamespaceMismatch);
         }
-        let placement_identity = self.object_envelope_id(&object)?;
-        let placement = self.placement_for(placement_identity)?;
-        let (ledger, budget) = admission.into_parts();
+        let placement_identity = match self.object_envelope_id(&object) {
+            Ok(identity) => identity,
+            Err(error) => {
+                let _released = budget.release();
+                return Err(error);
+            }
+        };
+        let placement = match self.placement_for(placement_identity) {
+            Ok(placement) => placement,
+            Err(error) => {
+                let _released = budget.release();
+                return Err(error);
+            }
+        };
         match self.load_object(object.identity()) {
             Ok(existing) => {
                 let _released = budget.release();
@@ -451,8 +468,13 @@ impl ImmutableObjectFabric for LocalFilesystemFabric {
                 return Err(error);
             }
         }
-        let declared_len =
-            u64::try_from(object.payload().len()).map_err(|_| StoreRefusal::LengthOverflow)?;
+        let declared_len = match u64::try_from(object.payload().len()) {
+            Ok(length) => length,
+            Err(_) => {
+                let _released = budget.release();
+                return Err(StoreRefusal::LengthOverflow);
+            }
+        };
         let actual =
             ResourceVector::from_grades(&[(Grade::Bytes, declared_len), (Grade::Objects, 1)]);
         if let Some(error) = budget.amount().first_deficit(&actual) {
