@@ -42,7 +42,7 @@ use fgit_types::identity::{
 use fgit_types::numeric::DecisionSequence;
 use fgit_types::vocabulary::{DecisionOutcome, RefusalCode};
 
-use crate::async_contract::AsyncAuthorityStore;
+use crate::async_contract::{AsyncAuthorityStore, DuplicateAbsenceWitness};
 use crate::contract::AuthorityStore;
 use crate::identity::canonical_body_id;
 use crate::keys::{HeadKey, ImmutableKey};
@@ -365,6 +365,93 @@ pub fn scan_batch_for(batch: &RepositoryDecisionBatchBody, tx_id: TxId) -> Optio
             decision_sequence: decision.decision_sequence,
             outcome: decision.outcome,
         })
+}
+
+/// What an authenticated duplicate scan found.
+///
+/// The two arms are the inputs to requirement 2's three-way verdict: `Absent`
+/// lets publication proceed, `Found` becomes `AlreadyDecided` naming the
+/// transactions and their existing terminal outcomes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DuplicateScan {
+    /// No transaction in the request has a prior terminal decision.
+    ///
+    /// Carries the witness bound to the head token the walk was performed
+    /// against — the only way to obtain one.
+    Absent(DuplicateAbsenceWitness),
+    /// At least one transaction is already terminal, with its decision.
+    Found(Vec<(TxId, TerminalOutcome)>),
+}
+
+/// Walk the authenticated decision stream for prior decisions on `tx_ids`.
+///
+/// This is requirement 2 of the §5.2 ruling: whether a transaction already has
+/// a terminal decision is answered **from the authenticated stream reachable
+/// from the current head**, never from an accelerator row's presence or
+/// absence. A missing accelerator row means "resolve it authoritatively", and
+/// reading it as "no decision exists" is the TOCTOU that produced the defect.
+///
+/// The returned witness is bound to the head token this walk observed, so the
+/// publication that consumes it is conditioned on the same state the check was
+/// performed against. That binding is what makes an upstream check sound; see
+/// [`AsyncAuthorityStore::publish_head_with_outcomes`].
+///
+/// # Errors
+///
+/// Propagates store failures and any decode refusal, and refuses a stream
+/// longer than [`MAX_REPLAY_BATCHES`].
+pub fn scan_for_existing_decisions<S>(
+    store: &S,
+    head_key: &HeadKey,
+    tx_ids: &[TxId],
+) -> Result<DuplicateScan, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let HeadRead::Present(receipt) = store.read_head(head_key)? else {
+        // No head at all: nothing can have been decided.
+        //
+        // The witness minted here binds to a zero token, which will not match
+        // any real `expected` the caller presents — so the primitive refuses.
+        // That is deliberate and it fails CLOSED: with no head there is nothing
+        // to conditionally replace, and publication goes through
+        // `initialize_head` rather than a CAS. A caller that reaches the atomic
+        // publish against an absent head has a bug, and gets a refusal rather
+        // than a witness that silently validates nothing.
+        return Ok(DuplicateScan::Absent(
+            DuplicateAbsenceWitness::minted_against(AuthorityVersionToken::from_opaque_bytes(
+                [0_u8; crate::tokens::VERSION_TOKEN_BYTES],
+            )),
+        ));
+    };
+    let observed = receipt.token();
+    let mut head: RepositoryAuthorityHeadBody = decode_body(receipt.body(), DecodeLimits::DEFAULT)?;
+    let mut walked = 0_usize;
+    let mut found: Vec<(TxId, TerminalOutcome)> = Vec::new();
+
+    loop {
+        let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? else {
+            break;
+        };
+        let batch = read_batch_body(store, batch_id)?;
+        for tx_id in tx_ids {
+            if let Some(outcome) = scan_batch_for(&batch, *tx_id) {
+                found.push((*tx_id, outcome));
+            }
+        }
+        let Some(previous) = read_predecessor(store, batch.predecessor_head_id)? else {
+            break;
+        };
+        head = previous;
+    }
+
+    if found.is_empty() {
+        Ok(DuplicateScan::Absent(
+            DuplicateAbsenceWitness::minted_against(observed),
+        ))
+    } else {
+        Ok(DuplicateScan::Found(found))
+    }
 }
 
 pub fn replay_outcome<S>(
