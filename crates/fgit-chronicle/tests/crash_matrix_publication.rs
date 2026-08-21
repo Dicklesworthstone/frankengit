@@ -30,9 +30,9 @@
 //! nothing.
 
 use fgit_authority::{
-    AuthorityOpKind, AuthorityStore, FaultDirective, FaultKind, FaultPlan, HeadInit, HeadKey,
-    HeadRead, MemoryAuthorityStore, OutcomeLookup, StoreInstanceId, canonical_body_id,
-    indexed_outcome, initialize_repository, replay_outcome, resolve_outcome,
+    AuthorityOpKind, AuthorityStore, FaultDirective, FaultKind, FaultPlan, FaultableAuthorityStore,
+    HeadInit, HeadKey, HeadRead, MemoryAuthorityStore, OutcomeLookup, StoreInstanceId,
+    canonical_body_id, indexed_outcome, initialize_repository, replay_outcome, resolve_outcome,
 };
 use fgit_chronicle::{
     LostCandidate, PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots,
@@ -225,6 +225,50 @@ fn current_head(store: &MemoryAuthorityStore) -> RepositoryAuthorityHeadBody {
 /// it happened and the caller never learned — while leaving the store
 /// readable, which is the difference between asserting on real state and
 /// asserting on nothing.
+/// Require that the planned fault actually landed, on the kind it named.
+///
+/// Without this a crash test cannot tell "the system survived the crash" from
+/// "no crash happened". Both look identical from the assertions: an
+/// uninterrupted publication satisfies most of what an interrupted one is
+/// supposed to satisfy, so a mis-aimed fault reads as a pass.
+///
+/// That is not hypothetical here. Every plan in this file addressed an
+/// absolute operation index until FIRST_HEAD_REPLACEMENT replaced it, and when
+/// the atomic publication shifted the operation sequence the directives fired
+/// NOWHERE - `only_for` filters rather than counts. Two tests went red and one
+/// stayed green while testing nothing. The red ones cost a diagnosis; the green
+/// one cost a false assurance nobody would have looked at.
+///
+/// Mirrors `assert_cas_fault_reached` in fgit-txn's seal_races_authority, which
+/// is what stopped the same silent miss from being invisible there.
+fn assert_fault_delivered(
+    store: &MemoryAuthorityStore,
+    op_kind: AuthorityOpKind,
+    expected: FaultKind,
+) {
+    let log = store.fault_log();
+    let mut matching = log
+        .records()
+        .iter()
+        .filter(|record| record.op_kind == op_kind);
+    let fault = matching.next().unwrap_or_else(|| {
+        panic!(
+            "the planned {expected:?} fault never fired on {op_kind:?}: this test \
+             exercised an UNINTERRUPTED publication and proved nothing. The plan \
+             addresses the wrong operation - re-derive it, do not relax the \
+             assertions. Fault log: {:?}",
+            log.records()
+        )
+    });
+    assert_eq!(
+        fault.kind, expected,
+        "a different fault fired than the one planned"
+    );
+    assert!(
+        matching.next().is_none(),
+        "one publication must inject at most one fault of a given kind"
+    );
+}
 fn armed(
     ordinal: u64,
     kind: AuthorityOpKind,
@@ -274,6 +318,11 @@ fn a_publication_whose_head_replacement_never_applies_publishes_nothing() {
     let tx = candidate.batch().decisions[0].tx_id;
 
     let outcome = publish(&store, &head_key(), token, &candidate, tenant());
+    assert_fault_delivered(
+        &store,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::LoseRequest,
+    );
     assert!(
         outcome.is_err(),
         "a lost head replacement is ambiguous and must never be reported as a publication"
@@ -329,6 +378,11 @@ fn a_head_that_moved_without_answering_still_makes_its_decision_canonical() {
     let tx = candidate.batch().decisions[0].tx_id;
 
     let answer = publish(&store, &head_key(), token, &candidate, tenant());
+    assert_fault_delivered(
+        &store,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::LoseResponse,
+    );
     assert!(
         answer.is_err(),
         "a lost response is ambiguous: the caller must not be told it published"
@@ -412,6 +466,11 @@ fn a_publication_interrupted_inside_the_accelerator_leaves_every_decision_canoni
         .expect("a refusal-only plan is well formed");
 
     let _ = publish(&store, &head_key(), token, &candidate, tenant());
+    assert_fault_delivered(
+        &store,
+        AuthorityOpKind::PutIfAbsent,
+        FaultKind::LoseResponse,
+    );
 
     let moved = current_head(&store).generation != HeadGeneration::FIRST;
     let indexed = [0xc1_u8, 0xc2]
@@ -527,6 +586,11 @@ fn an_interrupted_publication_resumes_without_deciding_twice() {
     let candidate = commit_candidate(&basis, 0xf1);
     let tx = candidate.batch().decisions[0].tx_id;
     let _ = publish(&store, &head_key(), token, &candidate, tenant());
+    assert_fault_delivered(
+        &store,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::LoseResponse,
+    );
 
     let after_crash = current_head(&store);
     let tail_after_crash = after_crash.decision_tail_id;
