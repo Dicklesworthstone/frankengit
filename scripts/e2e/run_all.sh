@@ -74,6 +74,20 @@ RA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 . "$RA_DIR/lib.sh"
 
+# Normalise collation before anything sorts.
+#
+# `lib.sh` does this inside `fge_init`, but the runner sources lib.sh and never
+# calls `fge_init` -- so without this line the runner inherited the ambient
+# locale and its discovery order became host-dependent. On a host whose
+# collation folds case, `a` sorts before `B` and the aggregation order changes
+# for reasons that have nothing to do with the suite. That is a real defect that
+# reached a closed bead, so the normalisation is explicit here and asserted by
+# FG-000A-PORT-013/031 rather than left to whatever `sort` happens to inherit.
+if [ -z "${FGE_KEEP_LOCALE:-}" ]; then
+  LC_ALL=C
+  export LC_ALL
+fi
+
 fge__detect_digest_tool || {
   printf 'run_all: unsupported: no sha-256 helper found\n' >&2
   exit 4

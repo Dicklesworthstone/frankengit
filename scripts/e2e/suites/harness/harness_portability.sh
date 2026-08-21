@@ -138,6 +138,20 @@ done
 list_one=$("$E2E_ROOT/run_all.sh" --dir "$order_dir" --list | cut -f1 | tr '\n' ' ')
 list_two=$("$E2E_ROOT/run_all.sh" --dir "$order_dir" --list | cut -f1 | tr '\n' ' ')
 
+# The regression guard for the reopen incident on this bead: discovery order
+# must not follow the ambient locale. A host whose collation folds case sorts
+# `a` before `B`, which silently reorders aggregation for reasons unrelated to
+# the suite. Run the same discovery under a case-folding locale, if the host has
+# one, and require the identical C-order answer.
+locale_probe=skipped
+for candidate in en_US.utf8 en_US.UTF-8 C.utf8; do
+  if locale -a 2>/dev/null | grep -qxF "$candidate"; then
+    locale_probe=$(LC_ALL="$candidate" LANG="$candidate" \
+      "$E2E_ROOT/run_all.sh" --dir "$order_dir" --list | cut -f1 | tr '\n' ' ')
+    break
+  fi
+done
+
 # ---------------------------------------------------------------------------
 # static and tooling constraints the harness claims for itself
 # ---------------------------------------------------------------------------
@@ -311,6 +325,16 @@ fge_assert_eq FG-000A-PORT-013 'B C a ' "$list_one" \
   'discovery order is a C-locale sort, not a locale-dependent one'
 fge_assert_eq FG-000A-PORT-014 "$list_one" "$list_two" \
   'discovery order is stable across runs'
+if [ "$locale_probe" = skipped ]; then
+  # No case-folding locale on this host, so the property cannot be observed
+  # here. Recorded as an explicit unsupported result rather than a silent pass:
+  # a guard that quietly does nothing is worse than a missing one.
+  fge_unsupported FG-000A-PORT-031 \
+    'no case-folding locale is installed, so locale-independence cannot be observed on this host'
+else
+  fge_assert_eq FG-000A-PORT-031 "$list_one" "$locale_probe" \
+    'discovery order is identical under a case-folding locale'
+fi
 
 # static and tooling
 fge_assert_eq FG-000A-PORT-015 '' "$syntax_failures" \
