@@ -306,7 +306,7 @@ fn a_token_this_store_never_issued_is_refused_rather_than_reported_as_a_lost_rac
     );
 
     // And a forged receipt does not authenticate.
-    let receipt = HeadReadReceipt::new(key.clone(), forged, generation(1), b"head-1".to_vec());
+    let receipt = HeadReadReceipt::new(key, forged, generation(1), b"head-1".to_vec());
     assert_eq!(
         store
             .authenticate_head_receipt(&receipt)

@@ -178,7 +178,7 @@ impl EngineError {
     /// effect occurred. Everything else here is a refusal, and a refusal is a
     /// promise that the store applied nothing.
     #[must_use]
-    pub fn into_failure(self) -> AuthorityFailure {
+    pub const fn into_failure(self) -> AuthorityFailure {
         match self {
             Self::Contract(refusal) => AuthorityFailure::Refused(refusal),
             Self::Disambiguation(DisambiguationRefusal::Contract(refusal)) => {
@@ -457,7 +457,7 @@ impl FsqliteAuthorityStore {
     }
 
     /// Reject a body the declared limits do not admit.
-    fn admit_body(&self, body: &[u8]) -> Result<(), EngineError> {
+    const fn admit_body(&self, body: &[u8]) -> Result<(), EngineError> {
         if body.len() > self.limits.body_bytes {
             return Err(EngineError::Contract(AuthorityRefusal::BodyTooLarge {
                 len: body.len(),

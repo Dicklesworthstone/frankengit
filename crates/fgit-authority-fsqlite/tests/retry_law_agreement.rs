@@ -35,11 +35,11 @@ fn poll_to_completion<F: Future>(future: F) -> F::Output {
     }
 }
 
-fn budget() -> RetryBudget {
+const fn budget() -> RetryBudget {
     RetryBudget::new(1_000_000, 5)
 }
 
-fn backoff() -> BackoffPlan {
+const fn backoff() -> BackoffPlan {
     BackoffPlan::new(2, 64, 0xABCD_1234)
 }
 
@@ -61,7 +61,7 @@ const EVERY_CLASS: [TransientClass; 10] = [
 ///
 /// The two drivers are generic over different value types, so the outcomes are
 /// compared by shape and attempt count rather than by equality.
-fn shape<T>(outcome: &RetryOutcome<T>) -> (&'static str, u32) {
+const fn shape<T>(outcome: &RetryOutcome<T>) -> (&'static str, u32) {
     match outcome {
         RetryOutcome::Completed(_) => ("completed", 0),
         RetryOutcome::FreshSnapshotRequired { attempts } => ("fresh-snapshot", *attempts),
