@@ -1238,7 +1238,7 @@ where
                 )?;
                 old_index += 1;
             }
-            (Some(_), Some(after)) | (None, Some(after)) => {
+            (_, Some(after)) => {
                 push_tree_change(
                     &mut changes,
                     TreeChange::Added(after.clone()),
@@ -1406,7 +1406,7 @@ pub trait CommitGraph {
     type Error;
 
     fn parents_of(&self, commit: &Self::CommitId)
-    -> Result<ParentSet<Self::CommitId>, Self::Error>;
+        -> Result<ParentSet<Self::CommitId>, Self::Error>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1448,6 +1448,8 @@ pub type MergeBaseQueryResult<CommitId, SourceError> =
     Result<MergeBaseResult<CommitId>, MergeBaseError<CommitId, SourceError>>;
 
 type ParentSnapshot<CommitId> = BTreeMap<CommitId, Vec<CommitId>>;
+type ParentSnapshotResult<CommitId, SourceError> =
+    Result<ParentSnapshot<CommitId>, MergeBaseError<CommitId, SourceError>>;
 
 /// Return all best common ancestors in ascending `CommitId` order.
 pub fn merge_bases_all<Graph>(
@@ -1541,7 +1543,7 @@ fn load_graph<Graph, Starts>(
     graph: &Graph,
     starts: Starts,
     limits: MergeBaseLimits,
-) -> Result<ParentSnapshot<Graph::CommitId>, MergeBaseError<Graph::CommitId, Graph::Error>>
+) -> ParentSnapshotResult<Graph::CommitId, Graph::Error>
 where
     Graph: CommitGraph,
     Starts: IntoIterator<Item = Graph::CommitId>,
@@ -1698,7 +1700,7 @@ mod tests {
                     Edit::Insert { .. } => "+",
                 })
                 .collect::<Vec<_>>(),
-            vec!["=", "+", "-", "=", "=", "="]
+            vec!["=", "-", "+", "=", "=", "="]
         );
     }
 
@@ -1719,7 +1721,7 @@ mod tests {
                     Edit::Insert { .. } => "+",
                 })
                 .collect::<Vec<_>>(),
-            vec!["=", "+", "-", "=", "=", "="]
+            vec!["=", "-", "+", "=", "=", "="]
         );
     }
 

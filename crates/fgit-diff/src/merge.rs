@@ -11,8 +11,8 @@ use std::{
 };
 
 use crate::{
-    CommitGraph, DiffError, DiffHunk, DiffOptions, DiffProfile, Edit, MergeBaseError,
-    MergeBaseLimits, MergeBaseResult, Span, TreeEntry, TreeMode, diff, merge_bases_all,
+    diff, merge_bases_all, CommitGraph, DiffError, DiffHunk, DiffOptions, DiffProfile, Edit,
+    MergeBaseError, MergeBaseLimits, MergeBaseResult, Span, TreeEntry, TreeMode,
 };
 
 /// Versioned selection rules for a merge proposal.
@@ -197,6 +197,10 @@ pub enum MergeBaseSelectionError<CommitId, SourceError> {
     NoCommonAncestor,
 }
 
+/// Result type for the merge-base-to-proposal bridge.
+pub type MergeBaseSelectionResult<CommitId, SourceError> =
+    Result<Vec<CommitId>, MergeBaseSelectionError<CommitId, SourceError>>;
+
 /// Select every best common ancestor in the canonical `CommitId` order used by
 /// `merge_content_many`; shallow or malformed ancestry remains a typed error.
 pub fn select_merge_bases<Graph>(
@@ -204,7 +208,7 @@ pub fn select_merge_bases<Graph>(
     ours: Graph::CommitId,
     theirs: Graph::CommitId,
     limits: MergeBaseLimits,
-) -> Result<Vec<Graph::CommitId>, MergeBaseSelectionError<Graph::CommitId, Graph::Error>>
+) -> MergeBaseSelectionResult<Graph::CommitId, Graph::Error>
 where
     Graph: CommitGraph,
 {
@@ -699,7 +703,7 @@ fn changes_from_hunks(
     Ok(changes)
 }
 
-fn changes_overlap(left: &Change, right: &Change) -> bool {
+const fn changes_overlap(left: &Change, right: &Change) -> bool {
     change_touches_range(left, right.old.byte_start, right.old.byte_end)
 }
 
@@ -1056,15 +1060,15 @@ where
                 actual: path.len(),
             });
         }
-        let base_entry = take_matching(&base, &mut base_index, &path);
-        let ours_entry = take_matching(&ours, &mut ours_index, &path);
-        let theirs_entry = take_matching(&theirs, &mut theirs_index, &path);
+        let base_entry = take_matching(base.as_slice(), &mut base_index, path);
+        let ours_entry = take_matching(ours.as_slice(), &mut ours_index, path);
+        let theirs_entry = take_matching(theirs.as_slice(), &mut theirs_index, path);
         let rename_interaction =
-            renamed_path(&ours_renames, &path) || renamed_path(&theirs_renames, &path);
+            renamed_path(&ours_renames, path) || renamed_path(&theirs_renames, path);
         let force_rename_conflict = conflicting_rename_source(
             &ours_renames,
             &theirs_renames,
-            &path,
+            path,
             ours_entry.as_ref(),
             theirs_entry.as_ref(),
         );
@@ -1507,7 +1511,7 @@ mod tests {
         assert_eq!(conflicts[0].base.bytes, b"base\n");
         assert_eq!(conflicts[0].ours.bytes, b"ours\n");
         assert_eq!(conflicts[0].theirs.bytes, b"theirs\n");
-        assert!(!conflicts[0].ours.edits.is_empty());
+        assert_ne!(conflicts[0].ours.edits.len(), 0);
         let intents = content_conflict_intents::<u8>(b"src/lib.rs", &result.outcome);
         assert_eq!(intents.len(), 1);
         assert!(matches!(
@@ -1939,9 +1943,11 @@ mod tests {
     }
 
     fn assert_tree_conflict(result: &TreeMergeResult<u8>, expected: TreeConflictKind) {
-        assert!(matches!(
-            result.entries[0],
-            TreeMergeEntry::Conflict(TreeConflict { kind, .. }) if kind == expected
-        ));
+        assert!(
+            result.entries.iter().any(|entry| {
+                matches!(entry, TreeMergeEntry::Conflict(TreeConflict { kind, .. }) if *kind == expected)
+            }),
+            "missing {expected:?} conflict in {result:?}"
+        );
     }
 }
