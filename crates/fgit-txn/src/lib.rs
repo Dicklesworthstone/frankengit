@@ -763,7 +763,7 @@ mod tests {
     use super::*;
 
     use fgit_reference::effect::ReferenceFolder;
-    use fgit_reference::harness::{IdentityMint, RequestBuilder, label};
+    use fgit_reference::harness::{label, IdentityMint, RequestBuilder};
     use fgit_reference::intent::{
         ForgeEntityId, ForgeIntent, IdempotencyKey, OutboxIntent, Statement,
     };
@@ -1012,13 +1012,90 @@ mod tests {
                 },
             }
         );
-        assert!(
-            report.mappings.iter().all(|mapping| matches!(
-                mapping.disposition,
-                IntentDisposition::TransactionAborted
-            ))
-        );
+        assert!(report
+            .mappings
+            .iter()
+            .all(|mapping| matches!(mapping.disposition, IntentDisposition::TransactionAborted)));
         assert!(report.is_total_for(&request));
+    }
+
+    #[test]
+    fn forge_position_mismatch_obeys_every_statement_policy() {
+        let stream = ForgeStreamId::new(label("forge-mismatch"));
+        let event = ForgeEventKind::PullRequestClosed {
+            pull_request: ForgeEntityId::new(label("pr-mismatch")),
+        };
+        for policy in MismatchPolicy::ALL {
+            let request = request(vec![Statement {
+                mismatch_policy: *policy,
+                intents: vec![Intent::Forge(ForgeIntent {
+                    stream,
+                    expected_position: ForgeStreamPosition::GENESIS,
+                    event: event.clone(),
+                })],
+            }]);
+            let (refs, mut forge, retention, outbox) = empty_basis();
+            forge.insert(stream, ForgeStreamPosition::new(1));
+            let report =
+                IntentEvaluator.evaluate(basis_of(&refs, &forge, &retention, &outbox), &request);
+
+            match policy {
+                MismatchPolicy::NoOp => assert_eq!(
+                    report.mappings[0].disposition,
+                    IntentDisposition::Absorbed(AbsorptionReason::PreconditionMismatchNoOp)
+                ),
+                MismatchPolicy::StatementError => assert_eq!(
+                    report.mappings[0].disposition,
+                    IntentDisposition::StatementError(RefusalCode::ForgeTransitionInvalid)
+                ),
+                MismatchPolicy::TxnAbort => assert!(matches!(
+                    report.outcome,
+                    FoldOutcome::Aborted {
+                        code: RefusalCode::ForgeTransitionInvalid,
+                        ..
+                    }
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn outbox_key_conflict_obeys_every_statement_policy() {
+        let key = OutboxDeliveryKey::new(label("outbox-mismatch"));
+        let mut mint = IdentityMint::new(72);
+        let first_parameters = mint.digest();
+        let replacement_parameters = mint.digest();
+        for policy in MismatchPolicy::ALL {
+            let request = request(vec![Statement {
+                mismatch_policy: *policy,
+                intents: vec![Intent::Outbox(OutboxIntent {
+                    delivery_key: key,
+                    parameters: replacement_parameters,
+                })],
+            }]);
+            let (refs, forge, retention, mut outbox) = empty_basis();
+            outbox.insert(key, first_parameters);
+            let report =
+                IntentEvaluator.evaluate(basis_of(&refs, &forge, &retention, &outbox), &request);
+
+            match policy {
+                MismatchPolicy::NoOp => assert_eq!(
+                    report.mappings[0].disposition,
+                    IntentDisposition::Absorbed(AbsorptionReason::PreconditionMismatchNoOp)
+                ),
+                MismatchPolicy::StatementError => assert_eq!(
+                    report.mappings[0].disposition,
+                    IntentDisposition::StatementError(RefusalCode::EffectIdempotencyKeyReuse)
+                ),
+                MismatchPolicy::TxnAbort => assert!(matches!(
+                    report.outcome,
+                    FoldOutcome::Aborted {
+                        code: RefusalCode::EffectIdempotencyKeyReuse,
+                        ..
+                    }
+                )),
+            }
+        }
     }
 
     #[test]
