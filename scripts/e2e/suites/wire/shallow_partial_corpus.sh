@@ -210,7 +210,7 @@ if [[ "${blob_clone_exit}" -eq 0 ]]; then
     'lazy fetch returns the requested promised blob bytes'
 
   oracle_capture blob-none-after blob-none rev-list --objects --missing=print HEAD || true
-  if [[ "$(<"${RUN_DIRECTORY}/transcripts/blob-none-after/stdout.bin")" != *'?'* ]]; then
+  if [[ "$(<"${RUN_DIRECTORY}/transcripts/blob-none-after/stdout.bin")" == *'?'* ]]; then
     blob_missing_after=true
   fi
 else
