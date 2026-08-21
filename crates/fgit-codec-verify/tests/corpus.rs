@@ -36,6 +36,16 @@ fn every_canonical_vector_re_derives_to_its_recorded_identity() {
     );
 }
 
+/// Floor on canonical vectors in the corpus.
+///
+/// A floor, not an equality: adding vectors is routine, losing them silently is
+/// the failure this guards. The corpus carried 9 valid and 54 planted defects
+/// when this was written.
+const MIN_CANONICAL_VECTORS: usize = 9;
+
+/// Floor on planted defects in the corpus.
+const MIN_PLANTED_DEFECTS: usize = 54;
+
 #[test]
 fn the_verifier_covers_one_hundred_percent_of_the_canonical_vectors() {
     // The acceptance line is "100% of goldens verified by the independent
@@ -43,6 +53,25 @@ fn the_verifier_covers_one_hundred_percent_of_the_canonical_vectors() {
     // have been confirmed, with none silently skipped.
     let records = load_corpus(&corpus_dir()).expect("the corpus loads");
     let valid = records.iter().filter(|record| record.is_valid()).count();
+
+    // Non-vacuity first, because the comparisons below are satisfied by 0 == 0.
+    // `load_corpus` on an empty or renamed directory returns Ok(vec![]), so
+    // without these floors a test literally named "covers one hundred percent
+    // of the canonical vectors" reports success having verified nothing. The
+    // bounds are floors rather than equalities: growing the corpus is normal,
+    // silently shrinking it is the failure being guarded.
+    assert!(
+        valid >= MIN_CANONICAL_VECTORS,
+        "only {valid} canonical vectors loaded; the corpus carries at least \
+         {MIN_CANONICAL_VECTORS}, so a smaller number means the corpus did not load rather \
+         than that the verifier got better"
+    );
+    assert!(
+        records.len() - valid >= MIN_PLANTED_DEFECTS,
+        "only {} planted defects loaded; the corpus carries at least {MIN_PLANTED_DEFECTS}",
+        records.len() - valid
+    );
+
     let report = verify_corpus(&corpus_dir()).expect("the corpus loads");
     assert_eq!(
         report.valid_confirmed, valid,
