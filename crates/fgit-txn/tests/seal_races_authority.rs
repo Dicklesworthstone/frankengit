@@ -190,6 +190,60 @@ fn prepare_publication(
     (receipt.token(), decision_batch, decision_head)
 }
 
+/// Locate the authority transition in an identically constructed, unfaulted
+/// publication.  Fault plans count every store operation, while the intent of
+/// the recovery scenarios below is specifically to lose or crash *after* the
+/// head replacement.  A pre-CAS stream replay is allowed to add reads, so a
+/// hard-coded global operation index would silently stop injecting the fault.
+fn locate_publication_cas_index(key: &[u8], oid: u8) -> OpIndex {
+    let twin = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x70FF));
+    let admitted = seal_request(&twin, &attempt(key, oid)).expect("twin seal");
+    let (expected, decision_batch, decision_head) = prepare_publication(&twin, admitted.tx_id());
+
+    // `install_fault_plan` resets the operation/effect logs.  The subsequent
+    // index is therefore relative to exactly the publication the real test
+    // will fault, rather than to setup operations such as sealing or genesis.
+    twin.install_fault_plan(FaultPlan::none());
+    assert!(matches!(
+        publish_decisions(
+            &twin,
+            &authority_head_key(),
+            expected,
+            &decision_batch,
+            &decision_head,
+            tenant(),
+        )
+        .expect("unfaulted twin publication"),
+        PublicationOutcome::Published(_)
+    ));
+    twin.effect_log()
+        .records()
+        .iter()
+        .find(|record| record.op_kind == AuthorityOpKind::CompareExchangeHead)
+        .map(|record| record.at)
+        .expect("one publication must reach the authority head transition")
+}
+
+fn assert_cas_fault_reached(store: &MemoryAuthorityStore, expected: FaultKind) {
+    let fault_log = store.fault_log();
+    let mut cas_faults = fault_log
+        .records()
+        .iter()
+        .filter(|record| record.op_kind == AuthorityOpKind::CompareExchangeHead);
+    let fault = cas_faults
+        .next()
+        .expect("the planned fault must target the authority head transition");
+    assert!(
+        cas_faults.next().is_none(),
+        "one publication must inject at most one head-transition fault"
+    );
+    assert_eq!(fault.kind, expected);
+    assert!(
+        fault.effect_reached,
+        "the fault must land after the head transition's effect"
+    );
+}
+
 fn expected_commit(sequence: u64, commit: u8) -> OutcomeLookup {
     OutcomeLookup::Decided(TerminalOutcome {
         decision_sequence: DecisionSequence::try_new(sequence).expect("positive sequence"),
@@ -410,15 +464,16 @@ fn crash_after_seal_before_decision_preserves_a_retryable_undecided_transaction(
 
 #[test]
 fn lost_cas_response_retries_to_the_same_replayed_terminal_outcome() {
+    let cas_index = locate_publication_cas_index(b"lost-cas-response", 0xA1);
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7010));
     let request = attempt(b"lost-cas-response", 0xA1);
     let admitted = seal_request(&store, &request).expect("seal");
     let (expected, decision_batch, decision_head) = prepare_publication(&store, admitted.tx_id());
 
-    // `publish_decisions` has two immutable stages followed by the authority
-    // CAS.  This injects the loss *after* that third operation's effect.
+    // Inject after the actual authority transition, even if protocol-required
+    // reads change the global operation sequence.
     store.install_fault_plan(FaultPlan::explicit(vec![
-        FaultDirective::new(OpIndex::from_raw(2), FaultKind::LoseResponse)
+        FaultDirective::new(cas_index, FaultKind::LoseResponse)
             .only_for(AuthorityOpKind::CompareExchangeHead),
     ]));
     let failure = publish_decisions(
@@ -431,17 +486,7 @@ fn lost_cas_response_retries_to_the_same_replayed_terminal_outcome() {
     )
     .expect_err("a CAS response is deliberately lost");
     assert!(is_lost_authority_response(&failure));
-    let fault = store
-        .fault_log()
-        .records()
-        .first()
-        .copied()
-        .expect("the planned loss fires");
-    assert_eq!(fault.kind, FaultKind::LoseResponse);
-    assert!(
-        fault.effect_reached,
-        "the CAS reached its linearization point"
-    );
+    assert_cas_fault_reached(&store, FaultKind::LoseResponse);
 
     // The error exits before accelerator indexing.  This is the recovery
     // shape of a wiped/behind accelerator: absence is repairable, never proof
@@ -495,6 +540,7 @@ fn lost_cas_response_retries_to_the_same_replayed_terminal_outcome() {
 
 #[test]
 fn crash_after_cas_restarts_to_the_same_terminal_outcome_without_an_index_entry() {
+    let cas_index = locate_publication_cas_index(b"crash-after-cas", 0xA1);
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7011));
     let request = attempt(b"crash-after-cas", 0xA1);
     let admitted = seal_request(&store, &request).expect("seal");
@@ -502,7 +548,7 @@ fn crash_after_cas_restarts_to_the_same_terminal_outcome_without_an_index_entry(
 
     store.install_fault_plan(FaultPlan::explicit(vec![
         FaultDirective::new(
-            OpIndex::from_raw(2),
+            cas_index,
             FaultKind::Crash {
                 position: FaultPosition::AfterEffect,
             },
@@ -520,13 +566,12 @@ fn crash_after_cas_restarts_to_the_same_terminal_outcome_without_an_index_entry(
     .expect_err("crash after CAS hides the outcome from the caller");
     assert!(is_lost_authority_response(&failure));
     assert!(store.is_crashed());
-    let fault = store
-        .fault_log()
-        .records()
-        .first()
-        .copied()
-        .expect("the planned crash fires");
-    assert!(fault.effect_reached, "the crash lands after the CAS effect");
+    assert_cas_fault_reached(
+        &store,
+        FaultKind::Crash {
+            position: FaultPosition::AfterEffect,
+        },
+    );
 
     store.restart();
     store.install_fault_plan(FaultPlan::none());
@@ -615,21 +660,19 @@ fn rejected_second_terminal_decision_never_becomes_canonical() {
 
 #[test]
 fn missing_accelerator_after_a_lost_response_cannot_admit_a_second_terminal() {
-    // EXPECTED-RED (FG-007b): this is intentionally failing against the known
-    // non-atomic authority transition. Do not weaken it or make it pass with
-    // an accelerator precheck; only the atomic publication fix closes the race.
-    // This is the race a read-before-CAS check cannot close.  Publisher B's
+    // This is the race a derived-index precheck cannot close. Publisher B's
     // CAS linearizes its decision, but its response is lost before the derived
     // accelerator write.  Publisher A then sees B's new head and an absent
     // accelerator; a non-atomic precheck would admit A's different decision
     // and create a second terminal decision in authenticated history.
+    let cas_index = locate_publication_cas_index(b"lost-response-then-duplicate", 0xA1);
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7016));
     let request = attempt(b"lost-response-then-duplicate", 0xA1);
     let admitted = seal_request(&store, &request).expect("seal");
     let (first_expected, first_batch, first_head) = prepare_publication(&store, admitted.tx_id());
 
     store.install_fault_plan(FaultPlan::explicit(vec![
-        FaultDirective::new(OpIndex::from_raw(2), FaultKind::LoseResponse)
+        FaultDirective::new(cas_index, FaultKind::LoseResponse)
             .only_for(AuthorityOpKind::CompareExchangeHead),
     ]));
     let first_failure = publish_decisions(
@@ -642,6 +685,7 @@ fn missing_accelerator_after_a_lost_response_cannot_admit_a_second_terminal() {
     )
     .expect_err("the first caller loses its post-CAS response");
     assert!(is_lost_authority_response(&first_failure));
+    assert_cas_fault_reached(&store, FaultKind::LoseResponse);
 
     store.install_fault_plan(FaultPlan::none());
     let HeadRead::Present(receipt) = store
