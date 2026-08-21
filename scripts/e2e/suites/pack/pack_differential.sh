@@ -136,13 +136,78 @@ generate_case() {
     printf 'corpus_denominator=6\n'
     printf 'oracle_pin=%s\n' "${PIN_ID}"
     printf 'oracle_attestation=operator-receipt-copied\n'
+    printf 'oracle_run_directory=%s\n' "${run_directory}"
     printf 'non_claim=E3 corpus evidence only; no full Git compatibility claim\n'
   } > "${corpus}/receipt.tsv"
+}
+
+receipt_value() {
+  local receipt=$1
+  local key=$2
+  local line=''
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    case "${line}" in "${key}"=*) printf '%s\n' "${line#*=}"; return 0 ;; esac
+  done < "${receipt}"
+  return 64
+}
+
+manifest_oid() {
+  local manifest=$1
+  local expected_body=$2
+  local oid=''
+  local object_type=''
+  local body=''
+  while IFS=$'\t' read -r oid object_type body; do
+    [[ "${body}" == "${expected_body}" ]] && { printf '%s\n' "${oid}"; return 0; }
+  done < "${manifest}"
+  return 64
+}
+
+generate_thin_case() {
+  local full_corpus=$1
+  local thin_corpus=$2
+  local run_directory=''
+  local algorithm=''
+  local base_oid=''
+  local head_oid=''
+  local oracle_root=''
+
+  [[ -f "${full_corpus}/receipt.tsv" && ! -e "${thin_corpus}" ]] || return 64
+  run_directory="$(receipt_value "${full_corpus}/receipt.tsv" oracle_run_directory)"
+  algorithm="$(receipt_value "${full_corpus}/receipt.tsv" algorithm)"
+  base_oid="$(manifest_oid "${full_corpus}/manifest.tsv" bodies/base-blob.body)"
+  head_oid="$(manifest_oid "${full_corpus}/manifest.tsv" bodies/head-blob.body)"
+  mkdir -p "${thin_corpus}/bodies"
+  printf '%s\n^%s\n' "${head_oid}" "${base_oid}" | \
+    "${ORACLE}" capture "${PIN_ID}" "${run_directory}" repo pack-thin -- \
+      pack-objects --thin --stdout --revs --window=10 --depth=10
+  cp -- "${run_directory}/transcripts/pack-thin/stdout.bin" "${thin_corpus}/thin.pack"
+  cp -- "${full_corpus}/bodies/base-blob.body" "${thin_corpus}/bodies/base-blob.body"
+  cp -- "${full_corpus}/bodies/head-blob.body" "${thin_corpus}/bodies/head-blob.body"
+  printf '%s\tblob\tbodies/head-blob.body\n' "${head_oid}" > "${thin_corpus}/thin-manifest.tsv"
+  printf '%s\tblob\tbodies/base-blob.body\n' "${base_oid}" > "${thin_corpus}/external-base.tsv"
+  oracle_root="${run_directory%/runs/*}"
+  cp -- "${oracle_root}/installs/${PIN_ID}/receipt.tsv" "${thin_corpus}/oracle-receipt.tsv"
+  {
+    printf 'schema=frankengit.pack-differential-corpus.v1\n'
+    printf 'algorithm=%s\n' "${algorithm}"
+    printf 'case_kind=thin_ref_delta\n'
+    printf 'corpus_denominator=1\n'
+    printf 'oracle_pin=%s\n' "${PIN_ID}"
+    printf 'oracle_attestation=operator-receipt-copied\n'
+    printf 'non_claim=E3 corpus evidence only; no full Git compatibility claim\n'
+  } > "${thin_corpus}/receipt.tsv"
 }
 
 if [[ "${1:-}" == 'generate-case' ]]; then
   [[ "$#" -eq 4 ]] || exit 64
   generate_case "$2" "$3" "$4"
+  exit 0
+fi
+
+if [[ "${1:-}" == 'generate-thin' ]]; then
+  [[ "$#" -eq 3 ]] || exit 64
+  generate_thin_case "$2" "$3"
   exit 0
 fi
 
@@ -191,6 +256,39 @@ run_case() {
   fi
 }
 
+run_thin_case() {
+  local algorithm=$1
+  local full_corpus=$2
+  local work_root=$3
+  local corpus="${work_root}/${algorithm}-thin"
+  local artifact_directory="${work_root}/findings-${algorithm}-thin"
+  local generation_exit=0
+  local differential_exit=0
+  local prefix="FG-016C-E2E-${algorithm}-thin"
+
+  fge_capture "generate-${algorithm}-thin" "$0" generate-thin "${full_corpus}" "${corpus}" || generation_exit=$?
+  fge_assert_exit "${prefix}-001" 0 "${generation_exit}" \
+    "the pinned oracle generated the ${algorithm} thin-pack corpus"
+  fge_assert_file "${prefix}-002" "${corpus}/thin.pack" \
+    'the thin corpus retains exact upstream Git pack bytes'
+  fge_assert_file "${prefix}-003" "${corpus}/external-base.tsv" \
+    'the thin corpus records the caller-supplied base'
+  if [[ "${generation_exit}" -ne 0 ]]; then
+    fge_fail "${prefix}-004" 'pinned oracle unavailable; no ambient Git fallback is permitted'
+    return 0
+  fi
+  fge_capture "differential-${algorithm}-thin" \
+    env RCH_CARGO_WRAPPER_BYPASS=1 \
+    "FGIT_PACK_DIFFERENTIAL_CORPUS=${corpus}" \
+    "FGIT_PACK_DIFFERENTIAL_ARTIFACT_DIR=${artifact_directory}" \
+    cargo test --locked -p fgit-pack --test differential_oracle \
+      pinned_oracle_thin_pack_requires_its_caller_supplied_base -- --ignored --nocapture || differential_exit=$?
+  fge_assert_exit "${prefix}-004" 0 "${differential_exit}" \
+    'the reader reconstructs the thin target only through its external base'
+  fge_assert_file "${prefix}-005" "${artifact_directory}/verdict.ndjson" \
+    'the thin differential records its denominator receipt'
+}
+
 fge_init fg016c-pack-differential
 fge_context bead frankengit-fg016c-pack-differential-md7
 fge_context evidence_class E3
@@ -204,6 +302,8 @@ run_case sha1 ofs "${work_root}"
 run_case sha1 ref "${work_root}"
 run_case sha256 ofs "${work_root}"
 run_case sha256 ref "${work_root}"
+run_thin_case sha1 "${work_root}/sha1-ref" "${work_root}"
+run_thin_case sha256 "${work_root}/sha256-ref" "${work_root}"
 
 fuzz_exit=0
 fge_capture deterministic-pack-fuzz \
