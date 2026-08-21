@@ -21,6 +21,11 @@ set -euo pipefail
 readonly CORPUS_SCHEMA='frankengit.object-differential-corpus.v1'
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly ORACLE="${SCRIPT_DIR}/oracle.sh"
+readonly HIGH_RATIO_BODY_BYTES=$((4 * 1024 * 1024))
+readonly HIGH_RATIO_MINIMUM=64
+readonly LARGE_MEMBER_BODY_BYTES=$((3 * 1024 * 1024))
+readonly LARGE_MEMBER_MINIMUM_BYTES=$((1024 * 1024))
+readonly LARGE_MEMBER_LCG_WORDS=$((LARGE_MEMBER_BODY_BYTES / 8))
 
 corpus_die() {
     printf 'FGIT_OBJECT_CORPUS_REFUSED: %s\n' "$1" >&2
@@ -52,6 +57,45 @@ corpus_sha256_file() {
     fi
     [[ "${digest}" =~ ^[0-9a-f]{64}$ ]] || corpus_die "invalid SHA-256 output for ${path}"
     printf '%s\n' "${digest}"
+}
+
+corpus_file_bytes() {
+    local path="$1"
+    local bytes=''
+
+    [[ -f "${path}" ]] || corpus_die "missing file for byte count: ${path}"
+    read -r bytes < <(wc -c < "${path}")
+    [[ "${bytes}" =~ ^[0-9]+$ ]] || corpus_die "invalid byte count for ${path}"
+    printf '%s\n' "${bytes}"
+}
+
+corpus_oracle_loose_path() {
+    local run_directory="$1"
+    local oid="$2"
+
+    [[ "${oid}" =~ ^[0-9a-f]+$ && ${#oid} -ge 3 ]] || \
+        corpus_die "invalid object ID for loose-object path: ${oid}"
+    printf '%s/work/repo/.git/objects/%s/%s\n' \
+        "${run_directory}" "${oid:0:2}" "${oid:2}"
+}
+
+corpus_write_deterministic_hex_body() {
+    local output_path="$1"
+    local state=2463534242
+    local index=0
+
+    # The body is deterministic without consuming ambient entropy. Hexadecimal
+    # output has enough entropy to make Git's zlib member exceed 1 MiB while
+    # remaining auditable from this fixed LCG seed and word count.
+    {
+        while ((index < LARGE_MEMBER_LCG_WORDS)); do
+            state=$(((state * 1664525 + 1013904223) & 0xffffffff))
+            printf '%08x' "${state}"
+            index=$((index + 1))
+        done
+    } > "${output_path}"
+    [[ "$(corpus_file_bytes "${output_path}")" -eq "${LARGE_MEMBER_BODY_BYTES}" ]] || \
+        corpus_die "deterministic large body has the wrong size: ${output_path}"
 }
 
 corpus_hex_to_raw_oid() {
@@ -130,6 +174,8 @@ corpus_generate() {
     local output_corpus=''
     local empty_tree_oid=''
     local blob_oid=''
+    local high_ratio_blob_oid=''
+    local large_member_blob_oid=''
     local edge_tree_oid=''
     local base_commit_oid=''
     local complex_commit_oid=''
@@ -137,6 +183,11 @@ corpus_generate() {
     local manifest_sha256=''
     local receipt_sha256=''
     local oracle_build_flags=''
+    local high_ratio_loose_path=''
+    local high_ratio_loose_bytes=0
+    local high_ratio_ratio=0
+    local large_member_loose_path=''
+    local large_member_loose_bytes=0
     local count=0
 
     corpus_safe_token "${pin_id}"
@@ -184,6 +235,35 @@ corpus_generate() {
     blob_oid="$(corpus_capture_object "${pin_id}" "${run_directory}" "${oid_width}" \
         "${algorithm}-blob-crlf-nonutf8" blob "${staging_directory}/inputs/blob-odd.body" \
         "${staging_directory}" "${manifest_path}")"
+    count=$((count + 1))
+
+    # This separately exercises the legitimate highly-compressible Git blob
+    # boundary. The ratio is measured from the pinned Git loose member, not
+    # inferred from an owned codec.
+    printf '%*s' "${HIGH_RATIO_BODY_BYTES}" '' > "${staging_directory}/inputs/blob-high-ratio.body"
+    high_ratio_blob_oid="$(corpus_capture_object "${pin_id}" "${run_directory}" "${oid_width}" \
+        "${algorithm}-blob-high-ratio-4mib" blob \
+        "${staging_directory}/inputs/blob-high-ratio.body" "${staging_directory}" \
+        "${manifest_path}")"
+    high_ratio_loose_path="$(corpus_oracle_loose_path "${run_directory}" "${high_ratio_blob_oid}")"
+    high_ratio_loose_bytes="$(corpus_file_bytes "${high_ratio_loose_path}")"
+    high_ratio_ratio=$((HIGH_RATIO_BODY_BYTES / high_ratio_loose_bytes))
+    ((high_ratio_ratio >= HIGH_RATIO_MINIMUM)) || corpus_die \
+        "pinned Git high-ratio member is below ${HIGH_RATIO_MINIMUM}:1 (${high_ratio_ratio}:1)"
+    count=$((count + 1))
+
+    # This fixed 3 MiB LCG stream is deliberately distinct from the repeated
+    # blob. Its source-generated Git loose member must cross 1 MiB, exercising
+    # the compressed-input admission boundary without ambient randomness.
+    corpus_write_deterministic_hex_body "${staging_directory}/inputs/blob-large-member.body"
+    large_member_blob_oid="$(corpus_capture_object "${pin_id}" "${run_directory}" "${oid_width}" \
+        "${algorithm}-blob-large-member-3mib" blob \
+        "${staging_directory}/inputs/blob-large-member.body" "${staging_directory}" \
+        "${manifest_path}")"
+    large_member_loose_path="$(corpus_oracle_loose_path "${run_directory}" "${large_member_blob_oid}")"
+    large_member_loose_bytes="$(corpus_file_bytes "${large_member_loose_path}")"
+    ((large_member_loose_bytes > LARGE_MEMBER_MINIMUM_BYTES)) || corpus_die \
+        "pinned Git large member is not over ${LARGE_MEMBER_MINIMUM_BYTES} bytes: ${large_member_loose_bytes}"
     count=$((count + 1))
 
     # This is Git's accepted ordering edge: directory comparison appends an
@@ -256,7 +336,17 @@ corpus_generate() {
         printf 'algorithm=%s\n' "${algorithm}"
         printf 'native_oid_hex_width=%s\n' "${oid_width}"
         printf 'corpus_denominator=%s\n' "${count}"
-        printf 'object_types=blob:1,tree:2,commit:2,tag:1\n'
+        printf 'object_types=blob:3,tree:2,commit:2,tag:1\n'
+        printf 'high_ratio_label=%s-blob-high-ratio-4mib\n' "${algorithm}"
+        printf 'high_ratio_body_bytes=%s\n' "${HIGH_RATIO_BODY_BYTES}"
+        printf 'high_ratio_loose_member_bytes=%s\n' "${high_ratio_loose_bytes}"
+        printf 'high_ratio_observed_ratio=%s\n' "${high_ratio_ratio}"
+        printf 'high_ratio_minimum=%s\n' "${HIGH_RATIO_MINIMUM}"
+        printf 'large_member_label=%s-blob-large-member-3mib\n' "${algorithm}"
+        printf 'large_member_body_bytes=%s\n' "${LARGE_MEMBER_BODY_BYTES}"
+        printf 'large_member_loose_member_bytes=%s\n' "${large_member_loose_bytes}"
+        printf 'large_member_minimum_bytes_exclusive=%s\n' "${LARGE_MEMBER_MINIMUM_BYTES}"
+        printf 'large_member_generator=lcg32-1664525-1013904223-seed-2463534242-hex-v1\n'
         printf 'manifest_sha256=%s\n' "${manifest_sha256}"
         printf 'oracle_receipt_sha256=%s\n' "${receipt_sha256}"
         printf 'oracle_build_attestation=%s\n' "${oracle_build_flags}"

@@ -13,6 +13,24 @@ REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd -P)"
 readonly CORPUS_GENERATOR="${REPOSITORY_ROOT}/scripts/e2e/oracle/object_corpus.sh"
 readonly PIN_ID='git-2.54.0'
 
+corpus_denominator() {
+  local receipt_path="$1"
+  local line=''
+  local value=''
+
+  [[ -f "${receipt_path}" ]] || return 1
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    case "${line}" in
+      corpus_denominator=*)
+        value="${line#corpus_denominator=}"
+        break
+        ;;
+    esac
+  done < "${receipt_path}"
+  [[ "${value}" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf '%s\n' "${value}"
+}
+
 record_findings() {
   local finding_root="$1"
   local finding_path=''
@@ -35,6 +53,7 @@ run_algorithm() {
   local differential_exit=0
   local corpus_directory="${corpus_root}/corpus-${algorithm}"
   local verdict_path="${finding_root}/verdict.ndjson"
+  local expected_denominator=''
 
   mkdir -p "${corpus_root}" "${finding_root}"
   fge_capture "${algorithm}-corpus" "${CORPUS_GENERATOR}" generate "${PIN_ID}" \
@@ -51,6 +70,13 @@ run_algorithm() {
       "pinned ${algorithm} corpus unavailable; no ambient Git fallback is permitted"
     return 0
   fi
+  if ! expected_denominator="$(corpus_denominator "${corpus_directory}/receipt.tsv")"; then
+    fge_fail "FG-015B-E2E-${algorithm}-010" \
+      "the ${algorithm} corpus receipt declares a positive denominator"
+    return 0
+  fi
+  fge_assert_match "FG-015B-E2E-${algorithm}-010" "${expected_denominator}" '^[1-9][0-9]*$' \
+    "the ${algorithm} corpus receipt declares a positive denominator"
 
   fge_capture "${algorithm}-differential" \
     env RCH_CARGO_WRAPPER_BYPASS=1 \
@@ -71,7 +97,8 @@ run_algorithm() {
     fge_assert_contains "FG-015B-E2E-${algorithm}-007" "${verdict}" \
       "\"algorithm\":\"${algorithm}\"" "the verdict names its hash domain"
     fge_assert_contains "FG-015B-E2E-${algorithm}-008" "${verdict}" \
-      '"corpus_denominator":6' "the verdict states the corpus denominator"
+      "\"corpus_denominator\":${expected_denominator}" \
+      "the verdict states the declared corpus denominator"
     fge_assert_contains "FG-015B-E2E-${algorithm}-009" "${verdict}" \
       'E3 corpus evidence only' "the verdict preserves its non-claim boundary"
     fge_artifact "${verdict_path}" object-differential-verdict
