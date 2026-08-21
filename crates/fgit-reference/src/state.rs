@@ -47,6 +47,16 @@ use crate::intent::{
     DurabilityProfile, ForgeStreamId, ForgeStreamPosition, OutboxDeliveryKey, RetentionRoot,
     SealFields, TxIdDerivationInputs,
 };
+use crate::transition::IdempotencyScope;
+
+/// The result of every fallible model transition.
+///
+/// The breach is boxed at the result boundary. [`InvariantBreach`] embeds
+/// typed identities, and those carry an inline domain tag and digest body, so
+/// an unboxed error variant would be several hundred bytes wide on every
+/// success path as well. Boxing keeps the common `Ok` path cheap; the breach
+/// itself stays a plain `Copy` value.
+pub type ModelResult<T> = Result<T, Box<InvariantBreach>>;
 
 /// A breach of one of the model's own invariants.
 ///
@@ -303,34 +313,34 @@ pub struct AuthorityHeadBody {
 
 impl AuthorityHeadBody {
     /// The decision sequence the next terminal decision must consume.
-    pub fn next_decision_sequence(&self) -> Result<DecisionSequence, InvariantBreach> {
+    pub fn next_decision_sequence(&self) -> ModelResult<DecisionSequence> {
         self.latest_decision_sequence.map_or_else(
             || Ok(DecisionSequence::FIRST),
             |latest| {
                 latest
                     .next()
-                    .map_err(|_| InvariantBreach::SequenceExhausted { kind: "decision" })
+                    .map_err(|_| Box::new(InvariantBreach::SequenceExhausted { kind: "decision" }))
             },
         )
     }
 
     /// The repository sequence the next commit must consume.
-    pub fn next_repository_sequence(&self) -> Result<RepositorySequence, InvariantBreach> {
+    pub fn next_repository_sequence(&self) -> ModelResult<RepositorySequence> {
         self.latest_repository_sequence.map_or_else(
             || Ok(RepositorySequence::FIRST),
             |latest| {
                 latest
                     .next()
-                    .map_err(|_| InvariantBreach::SequenceExhausted { kind: "repository" })
+                    .map_err(|_| Box::new(InvariantBreach::SequenceExhausted { kind: "repository" }))
             },
         )
     }
 
     /// The generation a candidate successor head must declare.
-    pub fn next_generation(&self) -> Result<HeadGeneration, InvariantBreach> {
+    pub fn next_generation(&self) -> ModelResult<HeadGeneration> {
         self.generation
             .next()
-            .map_err(|_| InvariantBreach::SequenceExhausted { kind: "generation" })
+            .map_err(|_| Box::new(InvariantBreach::SequenceExhausted { kind: "generation" }))
     }
 }
 
@@ -459,22 +469,22 @@ impl IdentityLedger {
         &mut self,
         tx_id: TxId,
         inputs: TxIdDerivationInputs,
-    ) -> Result<(), InvariantBreach> {
+    ) -> ModelResult<()> {
         if let Some(bound) = self.tx_by_inputs.get(&inputs)
             && *bound != tx_id
         {
-            return Err(InvariantBreach::TxIdDerivationInconsistent {
+            return Err(Box::new(InvariantBreach::TxIdDerivationInconsistent {
                 bound: *bound,
                 observed: tx_id,
-            });
+            }));
         }
         if let Some(bound_inputs) = self.inputs_by_tx.get(&tx_id)
             && *bound_inputs != inputs
         {
-            return Err(InvariantBreach::TxIdDerivationInconsistent {
+            return Err(Box::new(InvariantBreach::TxIdDerivationInconsistent {
                 bound: tx_id,
                 observed: tx_id,
-            });
+            }));
         }
         self.tx_by_inputs.insert(inputs, tx_id);
         self.inputs_by_tx.insert(tx_id, inputs);
@@ -491,7 +501,7 @@ impl IdentityLedger {
     pub fn introduce_head(
         &mut self,
         id: RepositoryAuthorityHeadId,
-    ) -> Result<(), InvariantBreach> {
+    ) -> ModelResult<()> {
         introduce(&mut self.heads, id, "head")
     }
 
@@ -499,22 +509,22 @@ impl IdentityLedger {
     pub fn introduce_batch(
         &mut self,
         id: RepositoryDecisionBatchId,
-    ) -> Result<(), InvariantBreach> {
+    ) -> ModelResult<()> {
         introduce(&mut self.batches, id, "batch")
     }
 
     /// Records a commit-record identity, refusing reuse.
-    pub fn introduce_commit(&mut self, id: RepositoryCommitId) -> Result<(), InvariantBreach> {
+    pub fn introduce_commit(&mut self, id: RepositoryCommitId) -> ModelResult<()> {
         introduce(&mut self.commits, id, "commit")
     }
 
     /// Records a prepared-capsule identity, refusing reuse.
-    pub fn introduce_capsule(&mut self, id: PreparedTxnCapsuleId) -> Result<(), InvariantBreach> {
+    pub fn introduce_capsule(&mut self, id: PreparedTxnCapsuleId) -> ModelResult<()> {
         introduce(&mut self.capsules, id, "capsule")
     }
 
     /// Records a seal identity, refusing reuse.
-    pub fn introduce_seal(&mut self, id: TransactionSealId) -> Result<(), InvariantBreach> {
+    pub fn introduce_seal(&mut self, id: TransactionSealId) -> ModelResult<()> {
         introduce(&mut self.seals, id, "seal")
     }
 }
@@ -523,11 +533,11 @@ fn introduce<T: Ord>(
     set: &mut BTreeSet<T>,
     id: T,
     kind: &'static str,
-) -> Result<(), InvariantBreach> {
+) -> ModelResult<()> {
     if set.insert(id) {
         Ok(())
     } else {
-        Err(InvariantBreach::IdentityReused { kind })
+        Err(Box::new(InvariantBreach::IdentityReused { kind }))
     }
 }
 
@@ -565,6 +575,7 @@ pub struct RepositoryState {
     pub(crate) decisions: Vec<PublishedDecision>,
     pub(crate) commits: Vec<RepositoryCommitRecord>,
     pub(crate) seals: BTreeMap<TxId, SealRecord>,
+    pub(crate) idempotency_index: BTreeMap<IdempotencyScope, Digest>,
     pub(crate) capsules: BTreeMap<PreparedTxnCapsuleId, PreparedTxnCapsule>,
     pub(crate) quarantine: BTreeMap<TxId, BTreeMap<GitOid, QuarantinedObject>>,
     pub(crate) objects: BTreeMap<GitOid, ObjectRecord>,
@@ -609,6 +620,7 @@ impl RepositoryState {
             decisions: Vec::new(),
             commits: Vec::new(),
             seals: BTreeMap::new(),
+            idempotency_index: BTreeMap::new(),
             capsules: BTreeMap::new(),
             quarantine: BTreeMap::new(),
             objects: BTreeMap::new(),
@@ -684,6 +696,15 @@ impl RepositoryState {
     #[must_use]
     pub fn seal_of(&self, tx_id: TxId) -> Option<&SealRecord> {
         self.seals.get(&tx_id)
+    }
+
+    /// The canonical request digest an idempotency key is already bound to.
+    ///
+    /// §3.3: presenting the same key with a different digest is a pre-decision
+    /// rejection, so the binding has to be observable.
+    #[must_use]
+    pub fn idempotency_binding(&self, scope: IdempotencyScope) -> Option<Digest> {
+        self.idempotency_index.get(&scope).copied()
     }
 
     /// A prepared capsule the model holds.
@@ -774,10 +795,10 @@ impl RepositoryState {
     ///
     /// This is release-blocking invariant 10. It is a query rather than an
     /// assertion so a campaign can evaluate it after every step.
-    pub fn assert_no_quarantine_escape(&self) -> Result<(), InvariantBreach> {
+    pub fn assert_no_quarantine_escape(&self) -> ModelResult<()> {
         for object in self.head.body.roots.protected_objects() {
             if !self.objects.contains_key(&object) {
-                return Err(InvariantBreach::QuarantineEscape { object });
+                return Err(Box::new(InvariantBreach::QuarantineEscape { object }));
             }
         }
         Ok(())
@@ -789,41 +810,41 @@ impl RepositoryState {
     /// predecessor's successor, so following the chain must reach a head with
     /// no predecessor in exactly `generation` steps. This is ADR-0001
     /// invariant 3 and release-blocking invariant 4.
-    pub fn assert_head_chain_continuous(&self) -> Result<(), InvariantBreach> {
+    pub fn assert_head_chain_continuous(&self) -> ModelResult<()> {
         let mut cursor = &self.head.body;
         let mut steps = 0_u64;
         while let Some(predecessor) = cursor.predecessor {
             let Some(body) = self.head_chain.get(&predecessor) else {
-                return Err(InvariantBreach::HeadPredecessorMismatch {
+                return Err(Box::new(InvariantBreach::HeadPredecessorMismatch {
                     current: predecessor,
                     declared: Some(predecessor),
-                });
+                }));
             };
             let expected = body.generation.next().map_err(|_| {
-                InvariantBreach::SequenceExhausted {
+                Box::new(InvariantBreach::SequenceExhausted {
                     kind: "generation",
-                }
+                })
             })?;
             if expected != cursor.generation {
-                return Err(InvariantBreach::HeadGenerationNotSuccessor {
+                return Err(Box::new(InvariantBreach::HeadGenerationNotSuccessor {
                     current: body.generation,
                     candidate: cursor.generation,
-                });
+                }));
             }
             cursor = body;
             steps += 1;
         }
         if cursor.generation.get() != HeadGeneration::FIRST.get() {
-            return Err(InvariantBreach::HeadGenerationNotSuccessor {
+            return Err(Box::new(InvariantBreach::HeadGenerationNotSuccessor {
                 current: cursor.generation,
                 candidate: HeadGeneration::FIRST,
-            });
+            }));
         }
         if steps + 1 != self.head.body.generation.get() {
-            return Err(InvariantBreach::HeadGenerationNotSuccessor {
+            return Err(Box::new(InvariantBreach::HeadGenerationNotSuccessor {
                 current: cursor.generation,
                 candidate: self.head.body.generation,
-            });
+            }));
         }
         Ok(())
     }
@@ -833,30 +854,30 @@ impl RepositoryState {
     ///
     /// The second half is the structural claim of this bead: a refusal
     /// consumes a decision sequence and leaves repository sequence alone.
-    pub fn assert_sequences_gap_free(&self) -> Result<(), InvariantBreach> {
+    pub fn assert_sequences_gap_free(&self) -> ModelResult<()> {
         let mut expected_decision = DecisionSequence::FIRST;
         for decision in &self.decisions {
             if decision.decision_sequence != expected_decision {
-                return Err(InvariantBreach::DecisionSequenceDiscontinuity {
+                return Err(Box::new(InvariantBreach::DecisionSequenceDiscontinuity {
                     expected: expected_decision,
                     observed: decision.decision_sequence,
-                });
+                }));
             }
             expected_decision = expected_decision
                 .next()
-                .map_err(|_| InvariantBreach::SequenceExhausted { kind: "decision" })?;
+                .map_err(|_| Box::new(InvariantBreach::SequenceExhausted { kind: "decision" }))?;
         }
         let mut expected_repository = RepositorySequence::FIRST;
         for record in &self.commits {
             if record.repository_sequence != expected_repository {
-                return Err(InvariantBreach::RepositorySequenceDiscontinuity {
+                return Err(Box::new(InvariantBreach::RepositorySequenceDiscontinuity {
                     expected: expected_repository,
                     observed: record.repository_sequence,
-                });
+                }));
             }
             expected_repository = expected_repository
                 .next()
-                .map_err(|_| InvariantBreach::SequenceExhausted { kind: "repository" })?;
+                .map_err(|_| Box::new(InvariantBreach::SequenceExhausted { kind: "repository" }))?;
         }
         Ok(())
     }

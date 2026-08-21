@@ -127,6 +127,7 @@ impl RefusalClass {
             | RefusalCode::PackFramingInvalid
             | RefusalCode::TreeEntryOrderingInvalid
             | RefusalCode::CommitOrTagHeaderInvalid
+            | RefusalCode::CanonicalFramingInvalid
             | RefusalCode::ObjectHeaderInvalid => Self::Malformed,
 
             // Features, schemas, and coverage classes this service does not
@@ -195,17 +196,28 @@ impl RefusalClass {
             | RefusalCode::QuotaExceeded
             | RefusalCode::ResourceBudgetExceeded
             | RefusalCode::DecompressionBudgetExceeded
+            | RefusalCode::CanonicalBoundExceeded
             | RefusalCode::DeltaBudgetExceeded => Self::Resource,
 
-            // Contradictory effects, and the atomic-transaction abort that a
+            // Contradictory effects, and the atomic-transaction abort a
             // sibling command's contradiction produces.
-            RefusalCode::AtomicTransactionAborted => Self::ConflictingEffects,
+            RefusalCode::AtomicTransactionAborted | RefusalCode::ConflictingSemanticEffects => {
+                Self::ConflictingEffects
+            }
 
-            // An externally observed effect whose commit status cannot be
-            // established, or unsettled obligations from a prior effect, are
-            // durability dimensions: the declared profile has not been reached
-            // and cannot be proven reachable.
-            RefusalCode::ExternalEffectIndeterminate
+            // An effect-scoped idempotency key bound to different canonical
+            // parameters by another transaction.
+            RefusalCode::EffectIdempotencyKeyReuse => Self::IdempotencyReuse,
+
+            // A first-party invariant observed broken.
+            RefusalCode::InternalInvariantBreach => Self::InternalInvariant,
+
+            // The declared placement predicate cannot be met, or an
+            // externally observed effect's commit status cannot be
+            // established: in both cases the declared durability profile has
+            // not been reached and cannot be proven reachable.
+            RefusalCode::DurabilityProfileUnavailable
+            | RefusalCode::ExternalEffectIndeterminate
             | RefusalCode::ObligationsOutstanding
             | RefusalCode::CancellationInProgress => Self::DurabilityUnavailable,
         }
@@ -224,6 +236,14 @@ impl RefusalClass {
 /// is exactly the set of codes the transitions emit, so a refusal added to a
 /// transition without being declared here, or declared here without a
 /// producing transition, fails the test rather than passing silently.
+///
+/// The surface covers twelve of the thirteen [`RefusalClass`] members. The
+/// thirteenth, [`RefusalClass::InternalInvariant`], is deliberately absent: the
+/// model reports a broken invariant as [`crate::state::InvariantBreach`] and
+/// refuses to make the transition at all, rather than writing a bug into the
+/// authenticated decision stream. [`crate::state::InvariantBreach::refusal_code`]
+/// gives a caller that must report it through the decision vocabulary the
+/// right code.
 pub const MODEL_REFUSAL_SURFACE: &[RefusalCode] = &[
     RefusalCode::CapabilityScopeViolation,
     RefusalCode::SchemaUnsupported,
@@ -232,13 +252,17 @@ pub const MODEL_REFUSAL_SURFACE: &[RefusalCode] = &[
     RefusalCode::ForceNotPermitted,
     RefusalCode::ProtectedRefTransitionDenied,
     RefusalCode::RefNameInvalid,
-    RefusalCode::AtomicTransactionAborted,
     RefusalCode::ObjectClosureIncomplete,
     RefusalCode::NativeObjectIdMismatch,
+    RefusalCode::HashAlgorithmDomainMismatch,
     RefusalCode::ResourceBudgetExceeded,
     RefusalCode::RetentionHoldViolation,
+    RefusalCode::PolicyEpochSuperseded,
     RefusalCode::BasisCapsuleNotReusable,
     RefusalCode::ForgeTransitionInvalid,
+    RefusalCode::EffectIdempotencyKeyReuse,
+    RefusalCode::ConflictingSemanticEffects,
+    RefusalCode::DurabilityProfileUnavailable,
 ];
 
 /// True when `code` is inside the model's declared refusal surface.

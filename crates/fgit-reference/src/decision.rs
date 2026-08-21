@@ -38,7 +38,7 @@ use crate::intent::{
     DurabilityProfile, ForgeStreamId, ForgeStreamPosition, OutboxDeliveryKey, RetentionRoot,
 };
 use fgit_types::refs::RefName;
-use crate::state::{InvariantBreach, RepositoryRoots};
+use crate::state::{InvariantBreach, ModelResult, RepositoryRoots};
 
 /// One terminal decision with the decision sequence it consumed.
 ///
@@ -328,9 +328,9 @@ impl DecisionBatchDraft {
         &mut self,
         tx_id: TxId,
         outcome: DecisionOutcome,
-    ) -> Result<SequenceAssignment, InvariantBreach> {
+    ) -> ModelResult<SequenceAssignment> {
         if outcome.advances_repository_sequence() {
-            return Err(InvariantBreach::RefusalOutcomeExpected { tx_id });
+            return Err(Box::new(InvariantBreach::RefusalOutcomeExpected { tx_id }));
         }
         let decision_sequence = self.reserve_decision_sequence(tx_id)?;
         self.decisions.push(PublishedDecision {
@@ -348,13 +348,13 @@ impl DecisionBatchDraft {
     pub fn push_commit(
         &mut self,
         candidate: CommitCandidate,
-    ) -> Result<SequenceAssignment, InvariantBreach> {
+    ) -> ModelResult<SequenceAssignment> {
         let tx_id = candidate.tx_id;
         let decision_sequence = self.reserve_decision_sequence(tx_id)?;
         let repository_sequence = self.next_repository_sequence;
         self.next_repository_sequence = repository_sequence
             .next()
-            .map_err(|_| InvariantBreach::SequenceExhausted { kind: "repository" })?;
+            .map_err(|_| Box::new(InvariantBreach::SequenceExhausted { kind: "repository" }))?;
 
         let record = RepositoryCommitRecord {
             id: candidate.id,
@@ -396,9 +396,9 @@ impl DecisionBatchDraft {
         self,
         resulting: RepositoryRoots,
         resulting_policy_epoch: PolicyEpoch,
-    ) -> Result<DecisionBatch, InvariantBreach> {
+    ) -> ModelResult<DecisionBatch> {
         if self.decisions.is_empty() {
-            return Err(InvariantBreach::EmptyDecisionBatch { batch: self.id });
+            return Err(Box::new(InvariantBreach::EmptyDecisionBatch { batch: self.id }));
         }
         Ok(DecisionBatch {
             id: self.id,
@@ -417,14 +417,14 @@ impl DecisionBatchDraft {
     fn reserve_decision_sequence(
         &mut self,
         tx_id: TxId,
-    ) -> Result<DecisionSequence, InvariantBreach> {
+    ) -> ModelResult<DecisionSequence> {
         if !self.seen.insert(tx_id) {
-            return Err(InvariantBreach::SecondDecisionInBatch { tx_id });
+            return Err(Box::new(InvariantBreach::SecondDecisionInBatch { tx_id }));
         }
         let assigned = self.next_decision_sequence;
         self.next_decision_sequence = assigned
             .next()
-            .map_err(|_| InvariantBreach::SequenceExhausted { kind: "decision" })?;
+            .map_err(|_| Box::new(InvariantBreach::SequenceExhausted { kind: "decision" }))?;
         Ok(assigned)
     }
 }

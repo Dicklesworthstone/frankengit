@@ -402,17 +402,11 @@ fn apply_intent(scratch: &mut Scratch, intent: &Intent) -> Applied {
                 Some(bound) if *bound == outbox.parameters => {
                     Applied::Absorbed(AbsorptionReason::DuplicateIdenticalDelivery)
                 }
-                // Same key, different canonical parameters: two contradictory
-                // values for one target, which plan §15.4 refuses rather than
-                // normalizing into an invented policy.
-                //
-                // `AtomicTransactionAborted` is the closest published code and
-                // classifies as `RefusalClass::ConflictingEffects`. A request
-                // to `fgit-types` for a dedicated effect-scoped idempotency
-                // code is open; if it lands, this refines to that code and the
-                // class becomes `IdempotencyReuse`. The condition detected and
-                // the behaviour are unaffected either way.
-                Some(_) => Applied::Mismatch(RefusalCode::AtomicTransactionAborted),
+                // Same key, different canonical parameters. This is the
+                // effect-scoped half of the idempotency rule: §3.3 governs the
+                // *request* key before a seal exists, and this governs an
+                // *effect* key after one does.
+                Some(_) => Applied::Mismatch(RefusalCode::EffectIdempotencyKeyReuse),
                 None => {
                     scratch
                         .outbox

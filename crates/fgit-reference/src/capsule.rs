@@ -40,7 +40,9 @@ use fgit_types::refs::RefName;
 use fgit_types::vocabulary::RefusalCode;
 
 use crate::effect::{IntentMapping, NetEffects};
-use crate::intent::{ForgeStreamId, ForgeStreamPosition, OutboxDeliveryKey, RetentionRoot};
+use crate::intent::{
+    DurabilityProfile, ForgeStreamId, ForgeStreamPosition, OutboxDeliveryKey, RetentionRoot,
+};
 use crate::state::RepositoryRoots;
 
 /// How precisely a witness describes what a transaction read.
@@ -93,8 +95,15 @@ impl ConflictWitness {
         if self.policy_epoch != policy_epoch {
             return false;
         }
+        // The coarse answer is the refined one *conjoined* with "the head has
+        // not moved". Expressing it that way is what makes the safety property
+        // hold by construction: coarse-reusable implies refined-reusable, so
+        // refinement can only ever remove a false conflict (`INV-010`), never
+        // admit a true one.
         match self.granularity {
-            WitnessGranularity::Coarse => self.basis_generation == generation,
+            WitnessGranularity::Coarse => {
+                self.basis_generation == generation && self.refined_reads_hold(roots)
+            }
             WitnessGranularity::Refined => self.refined_reads_hold(roots),
         }
     }
@@ -208,6 +217,8 @@ pub struct PreparedTxnCapsule {
     pub witness: ConflictWitness,
     /// What preparation concluded.
     pub verdict: PreparedVerdict,
+    /// The durability profile this transaction's publication must satisfy.
+    pub durability: DurabilityProfile,
     /// Which preparation implementation produced this capsule.
     pub profile: PreparationProfileId,
 }
