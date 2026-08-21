@@ -103,6 +103,39 @@ pub enum LabRefusal {
         /// How many runs were offered as the claim.
         runs: u64,
     },
+    /// A receipt was replayed against a build it does not describe.
+    ///
+    /// The seed and schedule can only reproduce a failure on the source,
+    /// toolchain, and runtime profile that produced it. Replaying against a
+    /// different build and reporting the original signature would be a
+    /// fabricated result, so the drift is refused instead.
+    ReplayDrift {
+        /// Which identity field disagreed.
+        field: &'static str,
+        /// What the receipt recorded.
+        recorded: String,
+        /// What the current build reports.
+        observed: String,
+    },
+    /// A replay reproduced a failure, but not the one the crashpack is about.
+    ///
+    /// Reproducing some other violation is not a successful replay; it looks
+    /// like success while hiding two bugs at once.
+    CausalSignatureMismatch {
+        /// The signature the crashpack expects.
+        expected: String,
+        /// The signature the replay actually produced.
+        observed: String,
+    },
+    /// A deterministic receipt was offered as evidence for a native class.
+    ///
+    /// Lab evidence is evidence about the model, not about parked workers, OS
+    /// I/O, signals, or process reaping. Crediting it for a native requirement
+    /// is proof-class inflation, so it fails closed.
+    DeterministicEvidenceForNativeClass {
+        /// The native class that was claimed.
+        class: &'static str,
+    },
 }
 
 impl LabRefusal {
@@ -124,6 +157,11 @@ impl LabRefusal {
             Self::TraceVersionUnsupported { .. } => "lab.trace.version_unsupported",
             Self::CancellationPhaseOutOfOrder { .. } => "lab.cancellation.out_of_order",
             Self::StressIsNotCoverage { .. } => "lab.coverage.stress_is_not_coverage",
+            Self::ReplayDrift { .. } => "lab.replay.drift",
+            Self::CausalSignatureMismatch { .. } => "lab.replay.causal_signature_mismatch",
+            Self::DeterministicEvidenceForNativeClass { .. } => {
+                "lab.evidence.deterministic_for_native_class"
+            }
         }
     }
 
@@ -207,6 +245,24 @@ impl fmt::Display for LabRefusal {
             Self::StressIsNotCoverage { runs } => write!(
                 f,
                 "{runs} run(s) is a stress count, not a coverage claim; report exercised failpoints instead"
+            ),
+            Self::ReplayDrift {
+                field,
+                recorded,
+                observed,
+            } => write!(
+                f,
+                "replay drift on `{field}`: receipt recorded `{recorded}`, this build reports \
+                 `{observed}`"
+            ),
+            Self::CausalSignatureMismatch { expected, observed } => write!(
+                f,
+                "replay reproduced a different failure: expected `{expected}`, observed \
+                 `{observed}`"
+            ),
+            Self::DeterministicEvidenceForNativeClass { class } => write!(
+                f,
+                "deterministic lab evidence cannot be credited for the native class `{class}`"
             ),
         }
     }

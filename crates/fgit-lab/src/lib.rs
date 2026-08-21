@@ -53,11 +53,14 @@
 
 pub mod clockvec;
 pub mod commute;
+pub mod crashpack;
 pub mod harness;
 pub mod hazard;
 pub mod journal;
+pub mod minimize;
 pub mod plan;
 pub mod probe;
+pub mod receipt;
 pub mod refuse;
 pub mod rng;
 pub mod search;
@@ -67,13 +70,22 @@ pub mod verdict;
 
 pub use clockvec::{ClockOrdering, VectorClock};
 pub use commute::{ConflictRelation, OwnedEvent, ProtocolEvent};
+pub use crashpack::{ArtifactFingerprint, CRASHPACK_VERSION, Crashpack, ReplayInputs};
 pub use harness::{Lab, LabConfig, LabRun, ReplayClass};
 pub use hazard::{
     CancelPhase, ExecutionFault, HazardScript, ObjectStoreFault, PacketFault, ScheduledHazard,
 };
 pub use journal::{LogicalTrace, ReplayMismatch, TraceEvent, TraceFingerprint};
+pub use minimize::{
+    CausalSignature, FailureOracle, Reduction, ReductionStep, RejectionReason, minimize,
+    minimize_counterexample,
+};
 pub use plan::{LabSchedule, StepCursor, StepId};
 pub use probe::{CoverageReport, FailpointId, FailpointRegistry};
+pub use receipt::{
+    BuildIdentity, CoverageReceipt, DeclaredBounds, ExternalArtifact, RECEIPT_VERSION,
+    ReplayCompleteness,
+};
 pub use refuse::LabRefusal;
 pub use rng::SeededEntropy;
 pub use search::{BoundHit, Counterexample, Dpor, ExplorationBudget, ExplorationOutcome, Program};
