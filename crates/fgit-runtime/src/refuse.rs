@@ -201,6 +201,19 @@ pub enum RuntimeRefusal {
         leaked: u32,
         /// Accounting moves the ledger could not complete.
         accounting_faults: u32,
+        /// Capability grants still held when the region closed.
+        ///
+        /// Counted separately from every obligation number above because it
+        /// answers a different question. The four counts describe work; this
+        /// describes *authority*. A grant outstanding at close is a capability
+        /// still held by something that outlived the region it was issued to,
+        /// and it is the field most likely to be the only non-zero one in a
+        /// shutdown that otherwise looks tidy. Folding it into `leaked` would
+        /// let a receipt read `0 unsettled, 0 escalated, 0 leaked,
+        /// 0 accounting faults` — indistinguishable from clean — while a live
+        /// grant was still outstanding. That is the containment failure
+        /// AGENTS.md 3.2 requires reported, arriving as silence.
+        outstanding_grants: u32,
     },
 }
 
@@ -337,10 +350,12 @@ impl fmt::Display for RuntimeRefusal {
                 escalated,
                 leaked,
                 accounting_faults,
+                outstanding_grants,
             } => write!(
                 f,
                 "region {region} closed with containment failure: {unsettled} unsettled, \
-                 {escalated} escalated, {leaked} leaked, {accounting_faults} accounting fault(s)"
+                 {escalated} escalated, {leaked} leaked, {accounting_faults} accounting \
+                 fault(s), {outstanding_grants} grant(s) still held"
             ),
         }
     }
@@ -388,6 +403,7 @@ mod tests {
                 escalated: 0,
                 leaked: 2,
                 accounting_faults: 0,
+                outstanding_grants: 0,
             },
         ];
 
@@ -416,6 +432,7 @@ mod tests {
             escalated: 1,
             leaked: 0,
             accounting_faults: 0,
+            outstanding_grants: 0,
         };
         assert_eq!(
             refusal.code(),
@@ -438,9 +455,42 @@ mod tests {
             escalated: 0,
             leaked: 1,
             accounting_faults: 0,
+            outstanding_grants: 0,
         };
         assert_ne!(refusal, dropped);
         assert_ne!(refusal.to_string(), dropped.to_string());
+
+        // A region that settled every obligation but still holds a capability
+        // grant is NOT clean. Without its own field this case renders
+        // identically to a clean close, which is the containment failure
+        // arriving as silence.
+        let clean = RuntimeRefusal::RegionCloseContainmentFailure {
+            region: 7,
+            unsettled: 0,
+            escalated: 0,
+            leaked: 0,
+            accounting_faults: 0,
+            outstanding_grants: 0,
+        };
+        let grant_still_held = RuntimeRefusal::RegionCloseContainmentFailure {
+            region: 7,
+            unsettled: 0,
+            escalated: 0,
+            leaked: 0,
+            accounting_faults: 0,
+            outstanding_grants: 1,
+        };
+        assert_ne!(clean, grant_still_held);
+        assert_ne!(
+            clean.to_string(),
+            grant_still_held.to_string(),
+            "an outstanding grant must be visible in the rendering, not only in the value"
+        );
+        assert!(
+            grant_still_held
+                .to_string()
+                .contains("1 grant(s) still held")
+        );
     }
 
     #[test]
