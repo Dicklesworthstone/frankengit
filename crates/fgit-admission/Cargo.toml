@@ -1,0 +1,19 @@
+[package]
+name = "fgit-admission"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+fgit-authority.workspace = true
+fgit-chronicle.workspace = true
+fgit-codec.workspace = true
+fgit-crypto.workspace = true
+fgit-pack.workspace = true
+fgit-reference.workspace = true
+fgit-txn.workspace = true
+fgit-types.workspace = true
+fgit-wire.workspace = true
+
+[lints]
+workspace = true

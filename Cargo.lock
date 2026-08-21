@@ -611,6 +611,7 @@ dependencies = [
  "fgit-chronicle",
  "fgit-codec",
  "fgit-crypto",
+ "fgit-pack",
  "fgit-reference",
  "fgit-txn",
  "fgit-types",
@@ -634,6 +635,7 @@ dependencies = [
  "fgit-codec",
  "fgit-types",
  "fsqlite",
+ "fsqlite-types",
 ]
 
 [[package]]
@@ -644,6 +646,14 @@ dependencies = [
  "fgit-codec",
  "fgit-crypto",
  "fgit-reference",
+ "fgit-types",
+]
+
+[[package]]
+name = "fgit-cli"
+version = "0.0.1"
+dependencies = [
+ "fgit-node",
  "fgit-types",
 ]
 
@@ -696,6 +706,20 @@ dependencies = [
  "asupersync",
  "fgit-authority",
  "fgit-runtime",
+]
+
+[[package]]
+name = "fgit-node"
+version = "0.0.1"
+dependencies = [
+ "fgit-authority",
+ "fgit-codec",
+ "fgit-crypto",
+ "fgit-git-object",
+ "fgit-object-fabric",
+ "fgit-resource",
+ "fgit-runtime",
+ "fgit-types",
 ]
 
 [[package]]
