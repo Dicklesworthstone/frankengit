@@ -207,7 +207,8 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
 - lifecycle/versioning resurrects retired head;
 - candidate batch/local row/gossip mistaken for canonical;
 - idempotency-key reuse with different request;
-- policy TOCTOU across retries.
+- policy TOCTOU across retries;
+- lost-response plus accelerator-lag double-terminal: a publisher wins the head CAS but loses its response before the derived outcome accelerator is written, and a second contender reads the absent accelerator as "undecided" and publishes a different terminal decision for the same `TxId` — a TOCTOU that promotes a derived index to authority.
 
 **Controls**
 
@@ -218,7 +219,8 @@ Data crossing zones carries typed identity, authorization/confidentiality, integ
 - lost-response resolution by rereading head/outcome;
 - no local projection or notification authority;
 - prepared-capsule witness revalidation and deterministic policy basis;
-- fail closed on inconsistent authority responses.
+- fail closed on inconsistent authority responses;
+- terminal outcome record and successor-head CAS publish as one atomic conditional replacement, and duplicate detection resolves from the authenticated decision stream rather than from accelerator presence or absence (`docs/NORMATIVE_PROTOCOL_CONTRACTS.md` §8.4).
 
 ### 7.3 Immutable storage attacks
 
