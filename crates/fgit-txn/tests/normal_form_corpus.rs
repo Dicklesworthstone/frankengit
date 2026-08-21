@@ -126,9 +126,9 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
     let mut dispositions = Vec::new();
     let mut last_writer: BTreeMap<RefName, usize> = BTreeMap::new();
     let mut touched: Vec<Option<RefName>> = Vec::new();
-    /// Whether each intent was an identity AT ITS EVALUATION POINT: its
-    /// requested after-state already equalled the scratch state. Per the
-    /// normative ruling this takes precedence over last-writer provenance.
+    // Whether each intent was an identity AT ITS EVALUATION POINT: its
+    // requested after-state already equalled the scratch state. Per the
+    // normative ruling this takes precedence over last-writer provenance.
     let mut identity_at_evaluation: Vec<bool> = Vec::new();
     let mut aborted = false;
 
