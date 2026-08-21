@@ -18,22 +18,21 @@ use fgit_authority::{
     initialize_repository,
 };
 use fgit_codec::schema::RepositoryAuthorityHeadBody;
-use fgit_crypto::{
-    GitHashAlgorithm, GitObjectKind, IdentityDomain, git_object_id, git_payload_commitment,
-};
+use fgit_crypto::{GitObjectKind, IdentityDomain, git_object_id, git_payload_commitment};
 use fgit_git_object::ObjectType;
-use fgit_object_fabric::{
-    ImmutableObjectFabric, LocalFilesystemConfig, LocalFilesystemFabric, ObjectEnvelope,
-    ObjectKind, PlacementAdmission, PutIfAbsent, SegmentLimits, StoreRefusal, VerifiedObject,
+use fgit_object_fabric::fabric::{
+    ImmutableObjectFabric, PlacementAdmission, PutIfAbsent, StoreRefusal, VerifiedObject,
 };
+use fgit_object_fabric::local::{LocalFilesystemConfig, LocalFilesystemFabric};
+use fgit_object_fabric::{ObjectEnvelope, ObjectKind, SegmentLimits};
 use fgit_resource::{
     Grade, LeakDisposition, ObligationLedger, RegionCloseOutcome, RegionId, ResourceError,
     ResourceVector,
 };
 use fgit_runtime::{NodeRuntime, RuntimeProfile, RuntimeRefusal};
 use fgit_types::{
-    CANONICAL_CODEC_VERSION, Digest, GitOid, HeadGeneration, PolicyEpoch, RegistryEpoch,
-    RepositoryId, TenantId,
+    CANONICAL_CODEC_VERSION, Digest, GitHashAlgorithm, GitOid, HeadGeneration, PolicyEpoch,
+    RegistryEpoch, RepositoryId, TenantId,
 };
 
 const OBJECT_CODEC_NAMESPACE: &[u8] = b"git-object-body/v1";
