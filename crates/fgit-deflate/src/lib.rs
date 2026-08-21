@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Bounded, streaming RFC 1950/RFC 1951 decompression for FrankenGit.
+//! Bounded, streaming RFC 1950/RFC 1951 decompression for `FrankenGit`.
 //!
 //! The decoder owns no ambient I/O, clock, task, or cancellation authority.
 //! Callers feed bytes through [`Inflater::push`], can drain tentative output
@@ -189,6 +189,227 @@ impl CancellationProbe for NeverCancel {
     }
 }
 
+/// Explicit resource ceilings for one deterministic zlib member encoder.
+///
+/// The encoder never buffers more than `max_pending_input_bytes`, and it
+/// accounts for the RFC 1950 header, RFC 1951 blocks, and Adler-32 trailer in
+/// `max_output_bytes` before allocating output space.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeflateLimits {
+    /// Maximum uncompressed bytes accepted over the whole member.
+    pub max_input_bytes: usize,
+    /// Maximum unencoded bytes retained between `push` calls.
+    pub max_pending_input_bytes: usize,
+    /// Maximum compressed zlib-member bytes emitted by one encoder.
+    pub max_output_bytes: usize,
+    /// Maximum RFC 1951 history window that an active profile may use.
+    pub max_window_bytes: usize,
+    /// Maximum symbols that a generated Huffman table may contain.
+    pub max_huffman_symbols: usize,
+    /// Maximum generated dynamic-code-length entries.
+    pub max_collection_elements: usize,
+    /// Deterministic encode work units. This is not a wall-clock budget;
+    /// callers supply deadline cancellation through [`CancellationProbe`].
+    pub max_work_units: u64,
+}
+
+impl DeflateLimits {
+    /// Conservative deterministic-compression limits for Git object and pack
+    /// emission. They constrain the encoder independently of a consumer's
+    /// object-size admission policy.
+    pub const GIT_OBJECT: Self = Self {
+        max_input_bytes: 64 * 1024 * 1024,
+        max_pending_input_bytes: 64 * 1024,
+        max_output_bytes: 128 * 1024 * 1024,
+        max_window_bytes: RFC1951_MAX_WINDOW_BYTES,
+        max_huffman_symbols: 320,
+        max_collection_elements: 320,
+        max_work_units: 512 * 1024 * 1024,
+    };
+
+    fn validate(self, profile: DeflateProfile) -> Result<(), DeflateRefusal> {
+        if self.max_input_bytes == 0
+            || self.max_pending_input_bytes < profile.block_bytes
+            || self.max_output_bytes < 6
+            || self.max_window_bytes > RFC1951_MAX_WINDOW_BYTES
+            || self.max_window_bytes < profile.window_bytes
+            || self.max_huffman_symbols == 0
+            || self.max_collection_elements == 0
+            || self.max_work_units == 0
+        {
+            return Err(DeflateRefusal::ResourceLimit {
+                resource: Resource::Configuration,
+                limit: 1,
+                observed: 0,
+            });
+        }
+        if profile.block_bytes == 0
+            || profile.block_bytes > usize::from(u16::MAX)
+            || profile.window_bytes > RFC1951_MAX_WINDOW_BYTES
+            || profile.max_match_chain > profile.window_bytes
+            || profile.lazy_matching
+        {
+            return Err(DeflateRefusal::InvalidProfile);
+        }
+        match profile.block_kind {
+            DeflateBlockKind::Stored | DeflateBlockKind::Dynamic
+                if profile.window_bytes != 0 || profile.max_match_chain != 0 =>
+            {
+                return Err(DeflateRefusal::InvalidProfile);
+            }
+            DeflateBlockKind::Fixed
+                if profile.window_bytes == 0 || profile.max_match_chain == 0 =>
+            {
+                return Err(DeflateRefusal::InvalidProfile);
+            }
+            DeflateBlockKind::Stored | DeflateBlockKind::Fixed | DeflateBlockKind::Dynamic => {}
+        }
+        Ok(())
+    }
+}
+
+/// RFC 1951 block coding selected by a deterministic encoder profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeflateBlockKind {
+    /// Stored (uncompressed) blocks, each with RFC 1951 length complement.
+    Stored,
+    /// Fixed RFC 1951 Huffman codes with deterministic bounded matching.
+    Fixed,
+    /// Dynamic RFC 1951 Huffman tables with deterministic literal emission.
+    Dynamic,
+}
+
+/// A frozen deterministic compression policy.
+///
+/// `block_bytes` is the canonical split boundary: streaming calls accumulate
+/// until that many bytes are present, then emit one non-final block. This
+/// makes one-shot and differently chunked streaming input choose the same
+/// blocks. `max_match_chain` is a direct backwards-search limit in this first
+/// slice, and `lazy_matching` records whether the profile compares the next
+/// position before accepting a match.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeflateProfile {
+    /// Stable receipt and evidence identifier for this exact policy.
+    pub id: &'static str,
+    /// RFC 1951 block coding chosen by the profile.
+    pub block_kind: DeflateBlockKind,
+    /// Canonical uncompressed block split size.
+    pub block_bytes: usize,
+    /// Maximum backwards history distance searched and retained.
+    pub window_bytes: usize,
+    /// Maximum candidate distances considered at each input position.
+    pub max_match_chain: usize,
+    /// Whether this profile performs one-byte lazy match comparison.
+    pub lazy_matching: bool,
+}
+
+impl DeflateProfile {
+    /// Fast, stored-heavy emission. It retains no match history and writes
+    /// 32 KiB stored blocks, trading compressed size for minimal matcher work.
+    pub const FAST_STORED: Self = Self {
+        id: "fast-stored-v1",
+        block_kind: DeflateBlockKind::Stored,
+        block_bytes: RFC1951_MAX_WINDOW_BYTES,
+        window_bytes: 0,
+        max_match_chain: 0,
+        lazy_matching: false,
+    };
+
+    /// Deterministic fixed-Huffman emission with a 32 KiB history and a
+    /// nearest-first, 64-candidate greedy matcher. This is the default pack
+    /// writer profile in this slice.
+    pub const DEFAULT: Self = Self {
+        id: "default-fixed-v1",
+        block_kind: DeflateBlockKind::Fixed,
+        block_bytes: RFC1951_MAX_WINDOW_BYTES,
+        window_bytes: RFC1951_MAX_WINDOW_BYTES,
+        max_match_chain: 64,
+        lazy_matching: false,
+    };
+
+    /// Fixed-Huffman emission with the same policy as [`Self::DEFAULT`].
+    pub const FIXED: Self = Self::DEFAULT;
+
+    /// Deterministic dynamic-Huffman emission. Its first slice emits literals
+    /// through a frozen dynamic codebook, so it intentionally retains no
+    /// match history while still exercising RFC 1951 dynamic-block framing.
+    pub const DYNAMIC: Self = Self {
+        id: "dynamic-literals-v1",
+        block_kind: DeflateBlockKind::Dynamic,
+        block_bytes: RFC1951_MAX_WINDOW_BYTES,
+        window_bytes: 0,
+        max_match_chain: 0,
+        lazy_matching: false,
+    };
+}
+
+/// Deterministic encoder progress after accepting one input chunk.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeflateStreamProgress {
+    /// The encoder remains open for input or an explicit finalization.
+    NeedInput,
+    /// The zlib member has been finalized and its receipt is available.
+    Finished,
+}
+
+/// Immutable evidence for one successfully finalized deterministic member.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeflateReceipt {
+    /// The full frozen policy that selected output bytes.
+    pub profile: DeflateProfile,
+    /// Total uncompressed bytes accepted before finalization.
+    pub input_bytes: usize,
+    /// Total RFC 1950 member bytes emitted, including header and trailer.
+    pub output_bytes: usize,
+    /// Number of RFC 1951 blocks emitted, including a final empty block.
+    pub block_count: usize,
+}
+
+/// A precise non-success result from deterministic zlib/DEFLATE emission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeflateRefusal {
+    /// A configured resource boundary or checked allocation was exceeded.
+    ResourceLimit {
+        /// The bounded resource that refused additional work or allocation.
+        resource: Resource,
+        /// The configured ceiling.
+        limit: u64,
+        /// The attempted amount.
+        observed: u64,
+    },
+    /// Caller-owned control requested cancellation between bounded steps.
+    Cancelled,
+    /// Input was supplied after the zlib member had already finalized.
+    AlreadyFinished,
+    /// The encoder was previously cancelled or refused a resource request.
+    RefusedAfterFailure,
+    /// A caller-provided profile violates this crate's static RFC boundaries.
+    InvalidProfile,
+}
+
+impl fmt::Display for DeflateRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ResourceLimit {
+                resource,
+                limit,
+                observed,
+            } => write!(
+                formatter,
+                "resource limit {resource:?} exceeded: {observed} > {limit}"
+            ),
+            Self::Cancelled => formatter.write_str("deflate cancelled by caller control"),
+            Self::AlreadyFinished => formatter.write_str("zlib member is already finalized"),
+            Self::RefusedAfterFailure => {
+                formatter.write_str("zlib member is unusable after an earlier refusal")
+            }
+            Self::InvalidProfile => formatter.write_str("invalid deterministic deflate profile"),
+        }
+    }
+}
+
+impl std::error::Error for DeflateRefusal {}
+
 /// Decoder progress after accepting a chunk.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamProgress {
@@ -216,15 +437,13 @@ impl BitReader {
 
     fn append(&mut self, input: &[u8], limit: usize) -> Result<(), InflateRefusal> {
         self.compact();
-        let required =
-            self.bytes
-                .len()
-                .checked_add(input.len())
-                .ok_or(InflateRefusal::ResourceLimit {
-                    resource: Resource::PendingInputBytes,
-                    limit: u64::try_from(limit).unwrap_or(u64::MAX),
-                    observed: u64::MAX,
-                })?;
+        let required = self.bytes.len().checked_add(input.len()).ok_or_else(|| {
+            InflateRefusal::ResourceLimit {
+                resource: Resource::PendingInputBytes,
+                limit: u64::try_from(limit).unwrap_or(u64::MAX),
+                observed: u64::MAX,
+            }
+        })?;
         if required > limit {
             return Err(InflateRefusal::ResourceLimit {
                 resource: Resource::PendingInputBytes,
@@ -243,7 +462,7 @@ impl BitReader {
         Ok(())
     }
 
-    fn available_bits(&self) -> usize {
+    const fn available_bits(&self) -> usize {
         self.bytes
             .len()
             .saturating_mul(8)
@@ -254,7 +473,7 @@ impl BitReader {
         self.bit_position
     }
 
-    fn restore(&mut self, checkpoint: usize) {
+    const fn restore(&mut self, checkpoint: usize) {
         self.bit_position = checkpoint;
     }
 
@@ -352,8 +571,8 @@ impl HuffmanTable {
         }
 
         let mut available = 1_i32;
-        for bit_len in 1..=usize::from(MAX_HUFFMAN_BITS) {
-            available = (available * 2) - i32::from(counts[bit_len]);
+        for &count in counts.iter().skip(1) {
+            available = (available * 2) - i32::from(count);
             if available < 0 {
                 return Err(InflateRefusal::OversubscribedHuffmanSet);
             }
@@ -532,13 +751,14 @@ impl Inflater {
         if matches!(self.state, State::Finished) && !input.is_empty() {
             return Err(InflateRefusal::TrailingGarbage);
         }
-        let received = self.received_input_bytes.checked_add(input.len()).ok_or(
-            InflateRefusal::ResourceLimit {
+        let received = self
+            .received_input_bytes
+            .checked_add(input.len())
+            .ok_or_else(|| InflateRefusal::ResourceLimit {
                 resource: Resource::InputBytes,
                 limit: u64::try_from(self.limits.max_input_bytes).unwrap_or(u64::MAX),
                 observed: u64::MAX,
-            },
-        )?;
+            })?;
         if received > self.limits.max_input_bytes {
             return Err(InflateRefusal::ResourceLimit {
                 resource: Resource::InputBytes,
@@ -656,7 +876,6 @@ impl Inflater {
                                 pending: PendingSymbol::Symbol,
                             }
                         }
-                        3 => return Err(InflateRefusal::ReservedBlockType),
                         _ => return Err(InflateRefusal::ReservedBlockType),
                     };
                 }
@@ -806,13 +1025,13 @@ impl Inflater {
                     self.reader.restore(checkpoint);
                     return Ok(false);
                 };
-                let length =
-                    base.checked_add(usize::from(extra))
-                        .ok_or(InflateRefusal::ResourceLimit {
-                            resource: Resource::OutputBytes,
-                            limit: u64::try_from(self.limits.max_output_bytes).unwrap_or(u64::MAX),
-                            observed: u64::MAX,
-                        })?;
+                let length = base.checked_add(usize::from(extra)).ok_or_else(|| {
+                    InflateRefusal::ResourceLimit {
+                        resource: Resource::OutputBytes,
+                        limit: u64::try_from(self.limits.max_output_bytes).unwrap_or(u64::MAX),
+                        observed: u64::MAX,
+                    }
+                })?;
                 self.state = State::Compressed {
                     final_block,
                     literal_length: literal_length.clone(),
@@ -1009,14 +1228,14 @@ impl Inflater {
         self.reserve_pending_output(length)?;
         for _ in 0..length {
             let index = self.window.len() - distance;
-            let byte = self
-                .window
-                .get(index)
-                .copied()
-                .ok_or(InflateRefusal::DistanceTooFar {
-                    distance,
-                    available: self.window.len(),
-                })?;
+            let byte =
+                self.window
+                    .get(index)
+                    .copied()
+                    .ok_or_else(|| InflateRefusal::DistanceTooFar {
+                        distance,
+                        available: self.window.len(),
+                    })?;
             self.emit_byte_unchecked(byte);
         }
         Ok(())
@@ -1030,13 +1249,14 @@ impl Inflater {
     }
 
     fn ensure_output_growth(&self, additional: usize) -> Result<(), InflateRefusal> {
-        let projected = self.emitted_output_bytes.checked_add(additional).ok_or(
-            InflateRefusal::ResourceLimit {
+        let projected = self
+            .emitted_output_bytes
+            .checked_add(additional)
+            .ok_or_else(|| InflateRefusal::ResourceLimit {
                 resource: Resource::OutputBytes,
                 limit: u64::try_from(self.limits.max_output_bytes).unwrap_or(u64::MAX),
                 observed: u64::MAX,
-            },
-        )?;
+            })?;
         if projected > self.limits.max_output_bytes {
             return Err(InflateRefusal::ResourceLimit {
                 resource: Resource::OutputBytes,
@@ -1116,6 +1336,744 @@ pub fn inflate_zlib(input: &[u8], limits: InflateLimits) -> Result<Vec<u8>, Infl
     Ok(inflater.take_output())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeflateState {
+    Active,
+    Finished,
+    Refused,
+}
+
+#[derive(Clone, Debug)]
+struct BitWriter {
+    complete_bytes: Vec<u8>,
+    partial_byte: u8,
+    used_bits: u8,
+}
+
+impl BitWriter {
+    const fn new() -> Self {
+        Self {
+            complete_bytes: Vec::new(),
+            partial_byte: 0,
+            used_bits: 0,
+        }
+    }
+
+    const fn is_aligned(&self) -> bool {
+        self.used_bits == 0
+    }
+
+    fn additional_physical_bytes(&self, bit_count: u8) -> usize {
+        if bit_count == 0 {
+            return 0;
+        }
+        let existing = usize::from(self.used_bits != 0);
+        let total_bits = usize::from(self.used_bits) + usize::from(bit_count);
+        total_bits.div_ceil(8).saturating_sub(existing)
+    }
+
+    fn try_reserve(&mut self, additional: usize) -> Result<(), ()> {
+        self.complete_bytes.try_reserve(additional).map_err(|_| ())
+    }
+
+    fn write_bits_unchecked(&mut self, value: u16, bit_count: u8) {
+        for offset in 0..bit_count {
+            let bit = u8::from(((value >> offset) & 1) != 0);
+            self.partial_byte |= bit << self.used_bits;
+            self.used_bits += 1;
+            if self.used_bits == 8 {
+                self.complete_bytes.push(self.partial_byte);
+                self.partial_byte = 0;
+                self.used_bits = 0;
+            }
+        }
+    }
+
+    fn align_zero_unchecked(&mut self) {
+        if self.used_bits != 0 {
+            self.complete_bytes.push(self.partial_byte);
+            self.partial_byte = 0;
+            self.used_bits = 0;
+        }
+    }
+
+    fn write_aligned_unchecked(&mut self, bytes: &[u8]) {
+        self.complete_bytes.extend_from_slice(bytes);
+    }
+
+    fn take_complete_bytes(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.complete_bytes)
+    }
+
+    fn discard(&mut self) {
+        self.complete_bytes.clear();
+        self.partial_byte = 0;
+        self.used_bits = 0;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EncodeCode {
+    symbol: u16,
+    reversed_bits: u16,
+    bit_len: u8,
+}
+
+#[derive(Clone, Debug)]
+struct EncodeCodebook {
+    codes: Vec<EncodeCode>,
+}
+
+impl EncodeCodebook {
+    fn build(lengths: &[u8], limits: DeflateLimits) -> Result<Self, DeflateRefusal> {
+        if lengths.len() > limits.max_huffman_symbols {
+            return Err(deflate_resource_limit(
+                Resource::HuffmanSymbols,
+                limits.max_huffman_symbols,
+                lengths.len(),
+            ));
+        }
+        let mut counts = [0_u16; HUFFMAN_LENGTH_SLOTS];
+        let mut non_zero = 0_usize;
+        for &length in lengths {
+            if length > MAX_HUFFMAN_BITS {
+                return Err(DeflateRefusal::InvalidProfile);
+            }
+            if length != 0 {
+                counts[usize::from(length)] += 1;
+                non_zero += 1;
+            }
+        }
+        if non_zero == 0 {
+            return Err(DeflateRefusal::InvalidProfile);
+        }
+
+        let mut available = 1_i32;
+        for &count in counts.iter().skip(1) {
+            available = (available * 2) - i32::from(count);
+            if available < 0 {
+                return Err(DeflateRefusal::InvalidProfile);
+            }
+        }
+
+        let mut next = [0_u16; HUFFMAN_LENGTH_SLOTS];
+        let mut code = 0_u16;
+        for bit_len in 1..=usize::from(MAX_HUFFMAN_BITS) {
+            code = (code + counts[bit_len - 1]) << 1;
+            next[bit_len] = code;
+        }
+
+        let mut codes = Vec::new();
+        codes.try_reserve(non_zero).map_err(|_| {
+            deflate_resource_limit(Resource::Allocation, limits.max_huffman_symbols, non_zero)
+        })?;
+        for (symbol, &bit_len) in lengths.iter().enumerate() {
+            if bit_len == 0 {
+                continue;
+            }
+            let index = usize::from(bit_len);
+            let canonical = next[index];
+            next[index] += 1;
+            codes.push(EncodeCode {
+                symbol: u16::try_from(symbol).map_err(|_| DeflateRefusal::InvalidProfile)?,
+                reversed_bits: reverse_low_bits(canonical, bit_len),
+                bit_len,
+            });
+        }
+        Ok(Self { codes })
+    }
+
+    fn code_for(&self, symbol: u16) -> Result<EncodeCode, DeflateRefusal> {
+        self.codes
+            .iter()
+            .copied()
+            .find(|code| code.symbol == symbol)
+            .ok_or(DeflateRefusal::InvalidProfile)
+    }
+}
+
+/// A bounded, deterministic streaming RFC 1950/RFC 1951 member encoder.
+///
+/// Output from [`Self::take_output`] before [`Self::finish`] is tentative.
+/// A caller must discard it after any refusal and may promote bytes only after
+/// `finish` succeeds. Input chunking does not select different blocks: full
+/// non-final blocks are always the profile's `block_bytes`, with the final
+/// remainder (or an empty final block) emitted by `finish`.
+#[derive(Clone, Debug)]
+pub struct Deflater {
+    limits: DeflateLimits,
+    profile: DeflateProfile,
+    state: DeflateState,
+    pending_input: Vec<u8>,
+    history: VecDeque<u8>,
+    accepted_input_bytes: usize,
+    output_bytes: usize,
+    work_units: u64,
+    block_count: usize,
+    writer: BitWriter,
+    adler32: Adler32,
+}
+
+impl Deflater {
+    /// Validates limits and creates a zlib member with its deterministic RFC
+    /// 1950 header. The header remains tentative until [`Self::finish`].
+    pub fn new(limits: DeflateLimits, profile: DeflateProfile) -> Result<Self, DeflateRefusal> {
+        limits.validate(profile)?;
+        let mut encoder = Self {
+            limits,
+            profile,
+            state: DeflateState::Active,
+            pending_input: Vec::new(),
+            history: VecDeque::new(),
+            accepted_input_bytes: 0,
+            output_bytes: 0,
+            work_units: 0,
+            block_count: 0,
+            writer: BitWriter::new(),
+            adler32: Adler32::new(),
+        };
+        // CM=8, CINFO=7 (32 KiB), no dictionary, FCHECK valid.
+        encoder.write_aligned(&[0x78, 0x01])?;
+        Ok(encoder)
+    }
+
+    /// Supplies uncompressed input using a control that never cancels.
+    pub fn push(&mut self, input: &[u8]) -> Result<DeflateStreamProgress, DeflateRefusal> {
+        let mut control = NeverCancel;
+        self.push_with_control(input, &mut control)
+    }
+
+    /// Supplies uncompressed input and checks caller-owned cancellation before
+    /// bounded copy, matching, and block-emission steps.
+    pub fn push_with_control(
+        &mut self,
+        input: &[u8],
+        control: &mut impl CancellationProbe,
+    ) -> Result<DeflateStreamProgress, DeflateRefusal> {
+        match self.state {
+            DeflateState::Finished => return Err(DeflateRefusal::AlreadyFinished),
+            DeflateState::Refused => return Err(DeflateRefusal::RefusedAfterFailure),
+            DeflateState::Active => {}
+        }
+        let result = self.push_active(input, control);
+        if result.is_err() {
+            self.refuse();
+        }
+        result.map(|()| DeflateStreamProgress::NeedInput)
+    }
+
+    /// Finalizes the last RFC 1951 block and appends the RFC 1950 Adler-32
+    /// trailer. A second finalization is idempotent.
+    pub fn finish(&mut self) -> Result<(), DeflateRefusal> {
+        let mut control = NeverCancel;
+        self.finish_with_control(&mut control)
+    }
+
+    /// Finalizes with caller-owned cancellation checked during the final block
+    /// and before Adler-32 trailer publication.
+    pub fn finish_with_control(
+        &mut self,
+        control: &mut impl CancellationProbe,
+    ) -> Result<(), DeflateRefusal> {
+        match self.state {
+            DeflateState::Finished => return Ok(()),
+            DeflateState::Refused => return Err(DeflateRefusal::RefusedAfterFailure),
+            DeflateState::Active => {}
+        }
+        let result = self.finish_active(control);
+        if result.is_err() {
+            self.refuse();
+        }
+        result
+    }
+
+    /// Drains complete output bytes. Bytes are never promoted by this method:
+    /// they remain tentative until [`Self::finish`] has succeeded. A refused
+    /// encoder returns no further bytes and discards its private remainder.
+    #[must_use]
+    pub fn take_output(&mut self) -> Vec<u8> {
+        if matches!(self.state, DeflateState::Refused) {
+            self.writer.discard();
+            return Vec::new();
+        }
+        self.writer.take_complete_bytes()
+    }
+
+    /// Returns whether the RFC 1950 trailer has been emitted successfully.
+    #[must_use]
+    pub const fn is_finished(&self) -> bool {
+        matches!(self.state, DeflateState::Finished)
+    }
+
+    /// Returns immutable finalization evidence only after successful finish.
+    #[must_use]
+    pub const fn receipt(&self) -> Option<DeflateReceipt> {
+        if !matches!(self.state, DeflateState::Finished) {
+            return None;
+        }
+        Some(DeflateReceipt {
+            profile: self.profile,
+            input_bytes: self.accepted_input_bytes,
+            output_bytes: self.output_bytes,
+            block_count: self.block_count,
+        })
+    }
+
+    fn push_active(
+        &mut self,
+        input: &[u8],
+        control: &mut impl CancellationProbe,
+    ) -> Result<(), DeflateRefusal> {
+        let accepted = self
+            .accepted_input_bytes
+            .checked_add(input.len())
+            .ok_or_else(|| {
+                deflate_resource_limit(
+                    Resource::InputBytes,
+                    self.limits.max_input_bytes,
+                    usize::MAX,
+                )
+            })?;
+        if accepted > self.limits.max_input_bytes {
+            return Err(deflate_resource_limit(
+                Resource::InputBytes,
+                self.limits.max_input_bytes,
+                accepted,
+            ));
+        }
+
+        let mut remaining = input;
+        while !remaining.is_empty() {
+            self.charge_work(control)?;
+            if self.pending_input.len() == self.limits.max_pending_input_bytes {
+                self.encode_pending_prefix(self.profile.block_bytes, false, control)?;
+                continue;
+            }
+            let capacity = self
+                .limits
+                .max_pending_input_bytes
+                .saturating_sub(self.pending_input.len());
+            let take = remaining.len().min(capacity);
+            self.reserve_pending_input(take)?;
+            let accepted_chunk = &remaining[..take];
+            self.pending_input.extend_from_slice(accepted_chunk);
+            for &byte in accepted_chunk {
+                self.adler32.update(byte);
+            }
+            remaining = &remaining[take..];
+
+            while self.pending_input.len() >= self.profile.block_bytes {
+                self.encode_pending_prefix(self.profile.block_bytes, false, control)?;
+            }
+        }
+        self.accepted_input_bytes = accepted;
+        Ok(())
+    }
+
+    fn finish_active(
+        &mut self,
+        control: &mut impl CancellationProbe,
+    ) -> Result<(), DeflateRefusal> {
+        let final_length = self.pending_input.len();
+        self.encode_pending_prefix(final_length, true, control)?;
+        self.charge_work(control)?;
+        self.align_zero();
+        let trailer = self.adler32.value().to_be_bytes();
+        self.write_aligned(&trailer)?;
+        self.state = DeflateState::Finished;
+        Ok(())
+    }
+
+    fn encode_pending_prefix(
+        &mut self,
+        length: usize,
+        final_block: bool,
+        control: &mut impl CancellationProbe,
+    ) -> Result<(), DeflateRefusal> {
+        if length > self.pending_input.len() || length > self.profile.block_bytes {
+            return Err(DeflateRefusal::InvalidProfile);
+        }
+        let mut block = Vec::new();
+        block.try_reserve(length).map_err(|_| {
+            deflate_resource_limit(
+                Resource::Allocation,
+                self.limits.max_pending_input_bytes,
+                length,
+            )
+        })?;
+        block.extend_from_slice(&self.pending_input[..length]);
+        self.encode_block(&block, final_block, control)?;
+        self.append_history(&block)?;
+        self.pending_input.drain(..length);
+        self.block_count = self.block_count.saturating_add(1);
+        Ok(())
+    }
+
+    fn encode_block(
+        &mut self,
+        block: &[u8],
+        final_block: bool,
+        control: &mut impl CancellationProbe,
+    ) -> Result<(), DeflateRefusal> {
+        self.charge_work(control)?;
+        match self.profile.block_kind {
+            DeflateBlockKind::Stored => self.encode_stored_block(block, final_block),
+            DeflateBlockKind::Fixed => self.encode_fixed_block(block, final_block, control),
+            DeflateBlockKind::Dynamic => self.encode_dynamic_block(block, final_block, control),
+        }
+    }
+
+    fn encode_stored_block(
+        &mut self,
+        block: &[u8],
+        final_block: bool,
+    ) -> Result<(), DeflateRefusal> {
+        let length = u16::try_from(block.len()).map_err(|_| DeflateRefusal::InvalidProfile)?;
+        self.write_bits(u16::from(final_block), 1)?;
+        self.write_bits(0, 2)?;
+        self.align_zero();
+        self.write_aligned(&length.to_le_bytes())?;
+        self.write_aligned(&(!length).to_le_bytes())?;
+        self.write_aligned(block)
+    }
+
+    fn encode_fixed_block(
+        &mut self,
+        block: &[u8],
+        final_block: bool,
+        control: &mut impl CancellationProbe,
+    ) -> Result<(), DeflateRefusal> {
+        self.write_bits(u16::from(final_block), 1)?;
+        self.write_bits(1, 2)?;
+        let mut position = 0_usize;
+        while position < block.len() {
+            self.charge_work(control)?;
+            if let Some((length, distance)) = self.find_match(block, position, control)? {
+                self.write_fixed_match(length, distance)?;
+                position += length;
+            } else {
+                self.write_fixed_symbol(u16::from(block[position]))?;
+                position += 1;
+            }
+        }
+        self.write_fixed_symbol(256)
+    }
+
+    fn encode_dynamic_block(
+        &mut self,
+        block: &[u8],
+        final_block: bool,
+        control: &mut impl CancellationProbe,
+    ) -> Result<(), DeflateRefusal> {
+        const LITERAL_COUNT: usize = 286;
+        const DISTANCE_COUNT: usize = 1;
+        const CODE_LENGTH_COUNT: usize = 19;
+        let total_lengths = LITERAL_COUNT + DISTANCE_COUNT;
+        if total_lengths > self.limits.max_collection_elements {
+            return Err(deflate_resource_limit(
+                Resource::CollectionElements,
+                self.limits.max_collection_elements,
+                total_lengths,
+            ));
+        }
+
+        let mut literal_lengths = [0_u8; LITERAL_COUNT];
+        literal_lengths[..144].fill(8);
+        literal_lengths[144..256].fill(9);
+        literal_lengths[256..280].fill(7);
+        literal_lengths[280..].fill(8);
+        let distance_lengths = [1_u8; DISTANCE_COUNT];
+        let mut code_length_lengths = [0_u8; CODE_LENGTH_COUNT];
+        code_length_lengths[..13].fill(4);
+        code_length_lengths[13..].fill(5);
+
+        let literal_codebook = EncodeCodebook::build(&literal_lengths, self.limits)?;
+        let code_length_codebook = EncodeCodebook::build(&code_length_lengths, self.limits)?;
+
+        self.write_bits(u16::from(final_block), 1)?;
+        self.write_bits(2, 2)?;
+        self.write_bits(29, 5)?;
+        self.write_bits(0, 5)?;
+        self.write_bits(15, 4)?;
+        for &index in &CODE_LENGTH_ORDER {
+            self.write_bits(u16::from(code_length_lengths[index]), 3)?;
+        }
+        for &length in literal_lengths.iter().chain(distance_lengths.iter()) {
+            self.write_codebook_symbol(&code_length_codebook, u16::from(length))?;
+        }
+        for &byte in block {
+            self.charge_work(control)?;
+            self.write_codebook_symbol(&literal_codebook, u16::from(byte))?;
+        }
+        self.write_codebook_symbol(&literal_codebook, 256)
+    }
+
+    fn find_match(
+        &mut self,
+        block: &[u8],
+        position: usize,
+        control: &mut impl CancellationProbe,
+    ) -> Result<Option<(usize, usize)>, DeflateRefusal> {
+        if self.profile.max_match_chain == 0 || position + 3 > block.len() {
+            return Ok(None);
+        }
+        let available = self.history.len().saturating_add(position);
+        let search_limit = available
+            .min(self.profile.window_bytes)
+            .min(self.profile.max_match_chain);
+        let max_length = (block.len() - position).min(258);
+        let mut best = None;
+        for distance in 1..=search_limit {
+            self.charge_work(control)?;
+            if self.match_source_byte(block, position, distance, 0) != Some(block[position]) {
+                continue;
+            }
+            let mut length = 1_usize;
+            while length < max_length {
+                self.charge_work(control)?;
+                if self.match_source_byte(block, position, distance, length)
+                    != Some(block[position + length])
+                {
+                    break;
+                }
+                length += 1;
+            }
+            if length >= 3 && best.is_none_or(|(best_length, _)| length > best_length) {
+                best = Some((length, distance));
+            }
+        }
+        Ok(best)
+    }
+
+    fn match_source_byte(
+        &self,
+        block: &[u8],
+        position: usize,
+        distance: usize,
+        offset: usize,
+    ) -> Option<u8> {
+        let source = self
+            .history
+            .len()
+            .checked_add(position)?
+            .checked_add(offset)?
+            .checked_sub(distance)?;
+        if source < self.history.len() {
+            self.history.get(source).copied()
+        } else {
+            block.get(source - self.history.len()).copied()
+        }
+    }
+
+    fn write_fixed_match(&mut self, length: usize, distance: usize) -> Result<(), DeflateRefusal> {
+        let length_index = LENGTH_BASE
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(index, base)| {
+                length >= **base && length <= **base + ((1_usize << LENGTH_EXTRA[*index]) - 1)
+            })
+            .map(|(index, _)| index)
+            .ok_or(DeflateRefusal::InvalidProfile)?;
+        let length_symbol = 257_u16
+            .checked_add(u16::try_from(length_index).map_err(|_| DeflateRefusal::InvalidProfile)?)
+            .ok_or(DeflateRefusal::InvalidProfile)?;
+        self.write_fixed_symbol(length_symbol)?;
+        self.write_bits(
+            u16::try_from(length - LENGTH_BASE[length_index])
+                .map_err(|_| DeflateRefusal::InvalidProfile)?,
+            LENGTH_EXTRA[length_index],
+        )?;
+
+        let distance_index = DISTANCE_BASE
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(index, base)| {
+                distance >= **base && distance <= **base + ((1_usize << DISTANCE_EXTRA[*index]) - 1)
+            })
+            .map(|(index, _)| index)
+            .ok_or(DeflateRefusal::InvalidProfile)?;
+        self.write_bits(
+            reverse_low_bits(
+                u16::try_from(distance_index).map_err(|_| DeflateRefusal::InvalidProfile)?,
+                5,
+            ),
+            5,
+        )?;
+        self.write_bits(
+            u16::try_from(distance - DISTANCE_BASE[distance_index])
+                .map_err(|_| DeflateRefusal::InvalidProfile)?,
+            DISTANCE_EXTRA[distance_index],
+        )
+    }
+
+    fn write_fixed_symbol(&mut self, symbol: u16) -> Result<(), DeflateRefusal> {
+        let (canonical, bit_len) = match symbol {
+            0..=143 => (0x30_u16 + symbol, 8),
+            144..=255 => (0x190_u16 + (symbol - 144), 9),
+            256..=279 => (symbol - 256, 7),
+            280..=287 => (0xc0_u16 + (symbol - 280), 8),
+            _ => return Err(DeflateRefusal::InvalidProfile),
+        };
+        self.write_bits(reverse_low_bits(canonical, bit_len), bit_len)
+    }
+
+    fn write_codebook_symbol(
+        &mut self,
+        codebook: &EncodeCodebook,
+        symbol: u16,
+    ) -> Result<(), DeflateRefusal> {
+        let code = codebook.code_for(symbol)?;
+        self.write_bits(code.reversed_bits, code.bit_len)
+    }
+
+    fn append_history(&mut self, block: &[u8]) -> Result<(), DeflateRefusal> {
+        if self.profile.window_bytes == 0 || block.is_empty() {
+            return Ok(());
+        }
+        let remaining_capacity = self.profile.window_bytes.saturating_sub(self.history.len());
+        self.history.try_reserve(remaining_capacity).map_err(|_| {
+            deflate_resource_limit(
+                Resource::Allocation,
+                self.profile.window_bytes,
+                self.profile.window_bytes,
+            )
+        })?;
+        for &byte in block {
+            if self.history.len() == self.profile.window_bytes {
+                let _ = self.history.pop_front();
+            }
+            self.history.push_back(byte);
+        }
+        Ok(())
+    }
+
+    fn reserve_pending_input(&mut self, additional: usize) -> Result<(), DeflateRefusal> {
+        let required = self
+            .pending_input
+            .len()
+            .checked_add(additional)
+            .ok_or_else(|| {
+                deflate_resource_limit(
+                    Resource::PendingInputBytes,
+                    self.limits.max_pending_input_bytes,
+                    usize::MAX,
+                )
+            })?;
+        if required > self.limits.max_pending_input_bytes {
+            return Err(deflate_resource_limit(
+                Resource::PendingInputBytes,
+                self.limits.max_pending_input_bytes,
+                required,
+            ));
+        }
+        self.pending_input.try_reserve(additional).map_err(|_| {
+            deflate_resource_limit(
+                Resource::Allocation,
+                self.limits.max_pending_input_bytes,
+                required,
+            )
+        })
+    }
+
+    fn write_bits(&mut self, value: u16, bit_count: u8) -> Result<(), DeflateRefusal> {
+        if bit_count > MAX_HUFFMAN_BITS {
+            return Err(DeflateRefusal::InvalidProfile);
+        }
+        let additional = self.writer.additional_physical_bytes(bit_count);
+        self.reserve_output(additional)?;
+        self.writer.write_bits_unchecked(value, bit_count);
+        self.output_bytes = self.output_bytes.saturating_add(additional);
+        Ok(())
+    }
+
+    fn align_zero(&mut self) {
+        if self.writer.is_aligned() {
+            return;
+        }
+        self.writer.align_zero_unchecked();
+    }
+
+    fn write_aligned(&mut self, bytes: &[u8]) -> Result<(), DeflateRefusal> {
+        if !self.writer.is_aligned() {
+            return Err(DeflateRefusal::InvalidProfile);
+        }
+        self.reserve_output(bytes.len())?;
+        self.writer.write_aligned_unchecked(bytes);
+        self.output_bytes = self.output_bytes.saturating_add(bytes.len());
+        Ok(())
+    }
+
+    fn reserve_output(&mut self, additional: usize) -> Result<(), DeflateRefusal> {
+        let projected = self.output_bytes.checked_add(additional).ok_or_else(|| {
+            deflate_resource_limit(
+                Resource::OutputBytes,
+                self.limits.max_output_bytes,
+                usize::MAX,
+            )
+        })?;
+        if projected > self.limits.max_output_bytes {
+            return Err(deflate_resource_limit(
+                Resource::OutputBytes,
+                self.limits.max_output_bytes,
+                projected,
+            ));
+        }
+        self.writer.try_reserve(additional).map_err(|_| {
+            deflate_resource_limit(
+                Resource::Allocation,
+                self.limits.max_output_bytes,
+                projected,
+            )
+        })
+    }
+
+    fn charge_work(&mut self, control: &mut impl CancellationProbe) -> Result<(), DeflateRefusal> {
+        if control.is_cancelled() {
+            return Err(DeflateRefusal::Cancelled);
+        }
+        let observed = self.work_units.saturating_add(1);
+        if observed > self.limits.max_work_units {
+            return Err(DeflateRefusal::ResourceLimit {
+                resource: Resource::WorkUnits,
+                limit: self.limits.max_work_units,
+                observed,
+            });
+        }
+        self.work_units = observed;
+        Ok(())
+    }
+
+    fn refuse(&mut self) {
+        self.state = DeflateState::Refused;
+        self.pending_input.clear();
+        self.history.clear();
+        self.writer.discard();
+    }
+}
+
+/// Encodes exactly one deterministic zlib member and returns bytes only after
+/// its final RFC 1950 Adler-32 trailer has been emitted.
+pub fn deflate_zlib(
+    input: &[u8],
+    limits: DeflateLimits,
+    profile: DeflateProfile,
+) -> Result<Vec<u8>, DeflateRefusal> {
+    let mut deflater = Deflater::new(limits, profile)?;
+    let _ = deflater.push(input)?;
+    deflater.finish()?;
+    Ok(deflater.take_output())
+}
+
+fn deflate_resource_limit(resource: Resource, limit: usize, observed: usize) -> DeflateRefusal {
+    DeflateRefusal::ResourceLimit {
+        resource,
+        limit: u64::try_from(limit).unwrap_or(u64::MAX),
+        observed: u64::try_from(observed).unwrap_or(u64::MAX),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Adler32 {
     a: u32,
@@ -1142,10 +2100,11 @@ impl Adler32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        inflate_zlib, Adler32, CancellationProbe, InflateLimits, InflateRefusal, Inflater,
-        Resource, StreamProgress,
+        Adler32, CancellationProbe, DeflateBlockKind, DeflateLimits, DeflateProfile,
+        DeflateRefusal, DeflateStreamProgress, Deflater, InflateLimits, InflateRefusal, Inflater,
+        NeverCancel, Resource, StreamProgress, deflate_zlib, inflate_zlib,
     };
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     const EMPTY_ZLIB: &[u8] = &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01];
 
@@ -1169,7 +2128,9 @@ mod tests {
             .collect();
         assert_eq!(compact.len() % 2, 0, "fixture must contain whole bytes");
         compact
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let high = hex_nibble(pair[0]);
                 let low = hex_nibble(pair[1]);
@@ -1223,7 +2184,7 @@ mod tests {
                 if self.used_bits == 0 {
                     self.bytes.push(0);
                 }
-                let bit = if ((value >> offset) & 1) == 0 { 0 } else { 1 };
+                let bit = u8::from(((value >> offset) & 1) != 0);
                 let final_index = self.bytes.len() - 1;
                 self.bytes[final_index] |= bit << self.used_bits;
                 self.used_bits = (self.used_bits + 1) % 8;
@@ -1267,7 +2228,7 @@ mod tests {
     }
 
     fn begin_fixed_block(packer: &mut BitPacker, final_block: bool) {
-        packer.push_bits(if final_block { 1 } else { 0 }, 1);
+        packer.push_bits(u16::from(final_block), 1);
         packer.push_bits(1, 2);
     }
 
@@ -1572,26 +2533,350 @@ mod tests {
             let Ok(result) = attempt else {
                 return;
             };
-            match result {
-                Ok(_) => {}
-                Err(
-                    InflateRefusal::ResourceLimit { .. }
-                    | InflateRefusal::Cancelled
-                    | InflateRefusal::InvalidZlibHeader
-                    | InflateRefusal::PresetDictionaryUnsupported
-                    | InflateRefusal::UnexpectedEnd
-                    | InflateRefusal::TrailingGarbage
-                    | InflateRefusal::Adler32Mismatch { .. }
-                    | InflateRefusal::ReservedBlockType
-                    | InflateRefusal::StoredLengthMismatch { .. }
-                    | InflateRefusal::InvalidHuffmanCode
-                    | InflateRefusal::IncompleteHuffmanSet
-                    | InflateRefusal::OversubscribedHuffmanSet
-                    | InflateRefusal::InvalidCodeLength
-                    | InflateRefusal::InvalidLengthOrDistanceCode
-                    | InflateRefusal::DistanceTooFar { .. },
-                ) => {}
+            assert!(
+                matches!(
+                    result,
+                    Ok(_)
+                        | Err(InflateRefusal::ResourceLimit { .. }
+                            | InflateRefusal::Cancelled
+                            | InflateRefusal::InvalidZlibHeader
+                            | InflateRefusal::PresetDictionaryUnsupported
+                            | InflateRefusal::UnexpectedEnd
+                            | InflateRefusal::TrailingGarbage
+                            | InflateRefusal::Adler32Mismatch { .. }
+                            | InflateRefusal::ReservedBlockType
+                            | InflateRefusal::StoredLengthMismatch { .. }
+                            | InflateRefusal::InvalidHuffmanCode
+                            | InflateRefusal::IncompleteHuffmanSet
+                            | InflateRefusal::OversubscribedHuffmanSet
+                            | InflateRefusal::InvalidCodeLength
+                            | InflateRefusal::InvalidLengthOrDistanceCode
+                            | InflateRefusal::DistanceTooFar { .. })
+                ),
+                "random decoder outcome was outside the public refusal vocabulary"
+            );
+        }
+    }
+
+    fn deflate_limits() -> DeflateLimits {
+        DeflateLimits {
+            max_input_bytes: 256 * 1024,
+            max_pending_input_bytes: 32_768,
+            max_output_bytes: 2 * 1024 * 1024,
+            max_window_bytes: 32_768,
+            max_huffman_symbols: 320,
+            max_collection_elements: 320,
+            max_work_units: 32 * 1024 * 1024,
+        }
+    }
+
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    fn encode_streamed(input: &[u8], profile: DeflateProfile, chunk_sizes: &[usize]) -> Vec<u8> {
+        let mut encoder = Deflater::new(deflate_limits(), profile)
+            .unwrap_or_else(|error| panic!("encoder configuration: {error}"));
+        let mut output = encoder.take_output();
+        let mut offset = 0_usize;
+        for &requested in chunk_sizes {
+            if offset == input.len() {
+                break;
+            }
+            let end = offset.saturating_add(requested).min(input.len());
+            assert_eq!(
+                encoder.push(&input[offset..end]),
+                Ok(DeflateStreamProgress::NeedInput)
+            );
+            output.extend(encoder.take_output());
+            offset = end;
+        }
+        if offset != input.len() {
+            assert_eq!(
+                encoder.push(&input[offset..]),
+                Ok(DeflateStreamProgress::NeedInput)
+            );
+            output.extend(encoder.take_output());
+        }
+        encoder
+            .finish()
+            .unwrap_or_else(|error| panic!("stream finalization: {error}"));
+        output.extend(encoder.take_output());
+        output
+    }
+
+    #[test]
+    fn encoder_profiles_emit_their_declared_rfc1951_block_kinds() {
+        let input = b"block-kind";
+        for (profile, expected_header, expected_kind) in [
+            (DeflateProfile::FAST_STORED, 1_u8, DeflateBlockKind::Stored),
+            (DeflateProfile::DEFAULT, 3_u8, DeflateBlockKind::Fixed),
+            (DeflateProfile::DYNAMIC, 5_u8, DeflateBlockKind::Dynamic),
+        ] {
+            let encoded = deflate_zlib(input, deflate_limits(), profile)
+                .unwrap_or_else(|error| panic!("{}: {error}", profile.id));
+            assert_eq!(encoded[2] & 0x07, expected_header, "{}", profile.id);
+            assert_eq!(profile.block_kind, expected_kind);
+            assert_eq!(
+                inflate_zlib(&encoded, limits()),
+                Ok(input.to_vec()),
+                "{}",
+                profile.id
+            );
+        }
+    }
+
+    #[test]
+    fn encoder_golden_output_fingerprints_are_profile_stable() {
+        // These non-cryptographic FNV-1a fingerprints are checked-in golden
+        // snapshots generated by a separately reviewed RFC bit-packing
+        // reference. They are regression sentinels, not object commitments.
+        let input = b"FrankenGit golden v1";
+        for (profile, expected_len, expected_fingerprint) in [
+            (
+                DeflateProfile::FAST_STORED,
+                31_usize,
+                0x7e4f_9115_9375_0729_u64,
+            ),
+            (DeflateProfile::DEFAULT, 28_usize, 0xc93d_a395_cc04_32fd_u64),
+            (
+                DeflateProfile::DYNAMIC,
+                180_usize,
+                0x7b0e_5b19_a996_c297_u64,
+            ),
+        ] {
+            let encoded = deflate_zlib(input, deflate_limits(), profile)
+                .unwrap_or_else(|error| panic!("{}: {error}", profile.id));
+            assert_eq!(encoded.len(), expected_len, "{}", profile.id);
+            assert_eq!(fnv1a64(&encoded), expected_fingerprint, "{}", profile.id);
+        }
+    }
+
+    #[test]
+    fn encoder_streaming_chunking_is_byte_identical_to_one_shot() {
+        let mut input = Vec::with_capacity(70_123);
+        let mut state = 0x8437_1529_5a6c_d1e2_u64;
+        for _ in 0..70_123 {
+            state ^= state << 7;
+            state ^= state >> 9;
+            state ^= state << 8;
+            input.push(u8::try_from(state & 0xff).unwrap_or(0));
+        }
+        for profile in [
+            DeflateProfile::FAST_STORED,
+            DeflateProfile::DEFAULT,
+            DeflateProfile::DYNAMIC,
+        ] {
+            let one_shot = deflate_zlib(&input, deflate_limits(), profile)
+                .unwrap_or_else(|error| panic!("{}: {error}", profile.id));
+            let streamed = encode_streamed(&input, profile, &[1, 17, 9_991, 31, 40_007]);
+            assert_eq!(streamed, one_shot, "{}", profile.id);
+        }
+    }
+
+    #[test]
+    fn fixed_matcher_reaches_rfc_maximum_length_for_all_zero_input() {
+        let input = vec![0_u8; 259];
+        let mut encoder = Deflater::new(deflate_limits(), DeflateProfile::DEFAULT)
+            .unwrap_or_else(|error| panic!("encoder configuration: {error}"));
+        let mut control = NeverCancel;
+        assert_eq!(
+            encoder.find_match(&input, 1, &mut control),
+            Ok(Some((258, 1)))
+        );
+
+        let encoded = deflate_zlib(&input, deflate_limits(), DeflateProfile::DEFAULT)
+            .unwrap_or_else(|error| panic!("all-zero input: {error}"));
+        assert!(encoded.len() < input.len(), "maximum match must compress");
+        assert_eq!(inflate_zlib(&encoded, limits()), Ok(input));
+    }
+
+    #[test]
+    fn encoder_round_trips_seeded_random_and_pathological_inputs() {
+        let mut cases = vec![Vec::new(), vec![0_u8; 8_192], vec![0_u8; 259]];
+        let mut seed = 0x72ba_1e09_45cd_318f_u64;
+        for case in 0..96_u32 {
+            let length = usize::try_from((seed & 0x7ff) + 1).unwrap_or(1);
+            let mut input = Vec::with_capacity(length);
+            for _ in 0..length {
+                seed ^= seed << 7;
+                seed ^= seed >> 9;
+                seed ^= seed << 8;
+                input.push(u8::try_from(seed & 0xff).unwrap_or(0));
+            }
+            cases.push(input);
+            assert_ne!(
+                seed, 0,
+                "random seed unexpectedly reached zero at case {case}"
+            );
+        }
+        for (case, input) in cases.iter().enumerate() {
+            for profile in [
+                DeflateProfile::FAST_STORED,
+                DeflateProfile::DEFAULT,
+                DeflateProfile::DYNAMIC,
+            ] {
+                let encoded =
+                    deflate_zlib(input, deflate_limits(), profile).unwrap_or_else(|error| {
+                        panic!(
+                            "encode seed {seed:016x}, case {case}, profile {}: {error}",
+                            profile.id
+                        )
+                    });
+                let decoded = inflate_zlib(&encoded, limits()).unwrap_or_else(|error| {
+                    panic!(
+                        "decode seed {seed:016x}, case {case}, profile {}: {error}",
+                        profile.id
+                    )
+                });
+                assert_eq!(
+                    decoded.as_slice(),
+                    input.as_slice(),
+                    "seed {seed:016x}, case {case}, {}",
+                    profile.id
+                );
             }
         }
+    }
+
+    #[test]
+    fn encoder_budget_refusal_discards_unpromoted_output() {
+        let input = b"budget refusal must not promote a member";
+        let refusal_limits = DeflateLimits {
+            max_output_bytes: 16,
+            ..deflate_limits()
+        };
+        let mut encoder = Deflater::new(refusal_limits, DeflateProfile::FAST_STORED)
+            .unwrap_or_else(|error| panic!("encoder configuration: {error}"));
+        let tentative_header = encoder.take_output();
+        assert_eq!(tentative_header, vec![0x78, 0x01]);
+        assert_eq!(encoder.push(input), Ok(DeflateStreamProgress::NeedInput));
+        let refusal = encoder
+            .finish()
+            .err()
+            .unwrap_or_else(|| panic!("small output budget must refuse"));
+        assert!(matches!(
+            refusal,
+            DeflateRefusal::ResourceLimit {
+                resource: Resource::OutputBytes,
+                ..
+            }
+        ));
+        assert!(!encoder.is_finished());
+        assert_eq!(encoder.receipt(), None);
+        assert!(encoder.take_output().is_empty());
+        assert_eq!(encoder.finish(), Err(DeflateRefusal::RefusedAfterFailure));
+
+        let permitted = deflate_zlib(input, deflate_limits(), DeflateProfile::FAST_STORED)
+            .unwrap_or_else(|error| panic!("near-identical permitted member: {error}"));
+        assert_eq!(inflate_zlib(&permitted, limits()), Ok(input.to_vec()));
+    }
+
+    #[test]
+    fn encoder_refuses_invalid_profiles_and_resource_limits_before_promotion() {
+        let invalid_profile = DeflateProfile {
+            lazy_matching: true,
+            ..DeflateProfile::DEFAULT
+        };
+        assert!(matches!(
+            Deflater::new(deflate_limits(), invalid_profile),
+            Err(DeflateRefusal::InvalidProfile)
+        ));
+        let invalid_limits = DeflateLimits {
+            max_output_bytes: 5,
+            ..deflate_limits()
+        };
+        assert!(matches!(
+            Deflater::new(invalid_limits, DeflateProfile::FAST_STORED),
+            Err(DeflateRefusal::ResourceLimit {
+                resource: Resource::Configuration,
+                ..
+            })
+        ));
+
+        let input_limited = DeflateLimits {
+            max_input_bytes: 3,
+            ..deflate_limits()
+        };
+        let mut encoder = Deflater::new(input_limited, DeflateProfile::FAST_STORED)
+            .unwrap_or_else(|error| panic!("encoder configuration: {error}"));
+        assert!(matches!(
+            encoder.push(b"four"),
+            Err(DeflateRefusal::ResourceLimit {
+                resource: Resource::InputBytes,
+                ..
+            })
+        ));
+        assert!(encoder.take_output().is_empty());
+
+        let work_limited = DeflateLimits {
+            max_work_units: 1,
+            ..deflate_limits()
+        };
+        let mut work_encoder = Deflater::new(work_limited, DeflateProfile::FAST_STORED)
+            .unwrap_or_else(|error| panic!("encoder configuration: {error}"));
+        assert!(matches!(
+            work_encoder.push(b"work"),
+            Err(DeflateRefusal::ResourceLimit {
+                resource: Resource::WorkUnits,
+                ..
+            })
+        ));
+        assert!(work_encoder.take_output().is_empty());
+
+        let permitted = deflate_zlib(b"three", deflate_limits(), DeflateProfile::FAST_STORED)
+            .unwrap_or_else(|error| panic!("near-identical permitted member: {error}"));
+        assert_eq!(inflate_zlib(&permitted, limits()), Ok(b"three".to_vec()));
+    }
+
+    struct CancelEncoderImmediately;
+
+    impl CancellationProbe for CancelEncoderImmediately {
+        fn is_cancelled(&mut self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn encoder_finish_cancellation_is_a_typed_refusal() {
+        let mut encoder = Deflater::new(deflate_limits(), DeflateProfile::DEFAULT)
+            .unwrap_or_else(|error| panic!("encoder configuration: {error}"));
+        assert_eq!(
+            encoder.push(b"cancellation must be caller controlled"),
+            Ok(DeflateStreamProgress::NeedInput)
+        );
+        let mut cancellation = CancelEncoderImmediately;
+        assert_eq!(
+            encoder.finish_with_control(&mut cancellation),
+            Err(DeflateRefusal::Cancelled)
+        );
+        assert_eq!(encoder.receipt(), None);
+        assert!(encoder.take_output().is_empty());
+    }
+
+    #[test]
+    fn finalized_encoder_receipt_records_the_frozen_profile() {
+        let mut encoder = Deflater::new(deflate_limits(), DeflateProfile::DYNAMIC)
+            .unwrap_or_else(|error| panic!("encoder configuration: {error}"));
+        let mut output = encoder.take_output();
+        assert_eq!(
+            encoder.push(b"receipt"),
+            Ok(DeflateStreamProgress::NeedInput)
+        );
+        output.extend(encoder.take_output());
+        encoder
+            .finish()
+            .unwrap_or_else(|error| panic!("encoder finalization: {error}"));
+        output.extend(encoder.take_output());
+        let receipt = encoder
+            .receipt()
+            .unwrap_or_else(|| panic!("finished encoder must retain receipt"));
+        assert_eq!(receipt.profile, DeflateProfile::DYNAMIC);
+        assert_eq!(receipt.input_bytes, 7);
+        assert_eq!(receipt.output_bytes, output.len());
+        assert_eq!(receipt.block_count, 1);
+        assert_eq!(inflate_zlib(&output, limits()), Ok(b"receipt".to_vec()));
     }
 }
