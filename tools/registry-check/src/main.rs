@@ -8,7 +8,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+mod enabled_macros;
+
 const REGISTRY_MARKER: &str = "# franken-registry-v1";
+
+/// Column count of `registries/dependency_policy.tsv` after FG-069 added
+/// `build_script` and `proc_macro`. Named rather than repeated so a future
+/// column cannot be added to `registry_schemas` while a length gate elsewhere
+/// silently keeps skipping every row.
+const DEPENDENCY_POLICY_COLUMNS: usize = 12;
 const CONSTELLATION_MARKER: &str = "# franken-constellation-v1";
 const LAYER_REPORT_MARKER: &str = "# franken-layer-report-v1";
 const CRATE_LAYERS_FILE: &str = "registries/crate_layers.tsv";
@@ -212,6 +220,7 @@ fn main() -> ExitCode {
             check_manifests(&root, &mut report);
             check_constellation(&root, &mut report);
             check_unsafe_ledger_policies(&root, &mut report);
+            enabled_macros::check_macro_surface(&root, &mut report);
             check_toolchain(&root, &mut report);
         }
         check_forbidden_artifacts(&root, &mut report);
@@ -377,6 +386,14 @@ fn registry_schemas() -> BTreeMap<&'static str, &'static [&'static str]> {
                 "unsafe_policy",
                 "ffi_policy",
                 "status",
+                // FG-069. `REGISTRY_MARKER` is one shared banner across all ten
+                // registry files, so it versions the file FORMAT, not any single
+                // registry's columns. Bumping it for one registry would force an
+                // edit to nine files this change has no business touching. The
+                // per-file column list here is the actual schema, so extending
+                // it is the schema change.
+                "build_script",
+                "proc_macro",
             ][..],
         ),
         (
@@ -1933,6 +1950,7 @@ fn generate_admission_ledger(root: &Path, command: CheckSet) -> Result<String, S
         })
         .map(|package| package.name.clone())
         .collect::<BTreeSet<_>>();
+    let surface = enabled_macros::resolve_enabled_surface(root)?;
     let mut output = String::new();
     for (next_id, name) in (next_admission_policy_id(root, config)?..).zip(&unresolved) {
         let packages_for_name = packages
@@ -1948,13 +1966,29 @@ fn generate_admission_ledger(root: &Path, command: CheckSet) -> Result<String, S
             .any(|package| metadata.proc_macros.contains(&package.name));
         let unsafe_policy = generated_unsafe_policy(name, proc_macro);
         let ffi_policy = generated_ffi_policy(name, proc_macro);
+        // FG-069: a generated row must be born with the same values the
+        // enumeration gate will demand of it. Emitting a placeholder here would
+        // make every freshly admitted dependency fail the lane on its first run,
+        // which trains people to hand-patch generated rows.
+        let build_script_state = enabled_macros::observed_state_for(
+            std::slice::from_ref(name),
+            &surface.build_scripts,
+            &metadata.build_scripts,
+        );
+        let proc_macro_state = enabled_macros::observed_state_for(
+            std::slice::from_ref(name),
+            &surface.proc_macros,
+            &metadata.proc_macros,
+        );
         writeln!(
             output,
-            "DEP-{next_id:03}\t{name}\tproduction\t{}\t{}\t{}_{}_transitive_direct_parent_{parent}\t{feature_policy}\t{unsafe_policy}\t{ffi_policy}\tactive",
+            "DEP-{next_id:03}\t{name}\tproduction\t{}\t{}\t{}_{}_transitive_direct_parent_{parent}\t{feature_policy}\t{unsafe_policy}\t{ffi_policy}\tactive\t{}\t{}",
             config.decision,
             config.owner,
             config.root_package,
             config.root_version,
+            build_script_state.as_registry_word(),
+            proc_macro_state.as_registry_word(),
         )
         .map_err(|error| format!("cannot render policy row: {error}"))?;
     }
@@ -2003,7 +2037,7 @@ fn baseline_dependency_patterns(
             continue;
         }
         let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() != 10 {
+        if fields.len() != DEPENDENCY_POLICY_COLUMNS {
             continue;
         }
         if fields[9] == "active"
@@ -2092,12 +2126,12 @@ fn next_admission_policy_id(root: &Path, config: AdmissionLedgerConfig) -> Resul
     Ok(largest + 1)
 }
 
-fn dependency_policy_fields(line: &str) -> Option<[&str; 10]> {
+fn dependency_policy_fields(line: &str) -> Option<[&str; 12]> {
     let fields = line.split('\t').collect::<Vec<_>>();
-    (fields.len() == 10).then(|| {
+    (fields.len() == DEPENDENCY_POLICY_COLUMNS).then(|| {
         [
             fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], fields[7],
-            fields[8], fields[9],
+            fields[8], fields[9], fields[10], fields[11],
         ]
     })
 }
@@ -2457,9 +2491,9 @@ fn load_active_dependency_policies(root: &Path) -> Result<Vec<ActiveDependencyPo
             continue;
         }
         let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() != 10 {
+        if fields.len() != DEPENDENCY_POLICY_COLUMNS {
             return Err(format!(
-                "dependency policy line {} has {} columns; expected 10",
+                "dependency policy line {} has {} columns; expected {DEPENDENCY_POLICY_COLUMNS}",
                 line_number + 1,
                 fields.len()
             ));
@@ -4406,7 +4440,7 @@ fn load_allowed_dependency_patterns(root: &Path, report: &mut Report) -> Vec<Str
             continue;
         }
         let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() < 10 {
+        if fields.len() < DEPENDENCY_POLICY_COLUMNS {
             continue;
         }
         let decision = fields[3];
@@ -5512,10 +5546,10 @@ mod tests {
             registry.join("dependency_policy.tsv"),
             concat!(
                 "# franken-registry-v1\n",
-                "id\tcrate_pattern\tscope\tdecision\towner\trationale\tfeature_policy\tunsafe_policy\tffi_policy\tstatus\n",
-                "DEP-013\tfgit-*\tproduction\tallow_first_party\tarchitecture\tfirst-party\tworkspace_pinned\tsafe\tno_ffi\tactive\n",
-                "DEP-014\taead\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.4.9_transitive_direct_parent_aes-gcm\tresolved_none\tledgered\tno_ffi\tactive\n",
-                "DEP-175\tbubblewrap\ttooling\texternal_tool\trelease\toracle sandbox\tnot_linked\tnot_in_binary\texternal_process\tactive\n"
+                "id\tcrate_pattern\tscope\tdecision\towner\trationale\tfeature_policy\tunsafe_policy\tffi_policy\tstatus\tbuild_script\tproc_macro\n",
+                "DEP-013\tfgit-*\tproduction\tallow_first_party\tarchitecture\tfirst-party\tworkspace_pinned\tsafe\tno_ffi\tactive\tabsent\tabsent\n",
+                "DEP-014\taead\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.4.9_transitive_direct_parent_aes-gcm\tresolved_none\tledgered\tno_ffi\tactive\tabsent\tabsent\n",
+                "DEP-175\tbubblewrap\ttooling\texternal_tool\trelease\toracle sandbox\tnot_linked\tnot_in_binary\texternal_process\tactive\tnot_applicable\tnot_applicable\n"
             ),
         )
         .expect("write registry fixture");
