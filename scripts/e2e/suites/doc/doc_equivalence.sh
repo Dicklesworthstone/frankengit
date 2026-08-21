@@ -19,6 +19,13 @@
 #
 # The allowlist below is intentionally re-derived, not imported. If the crate's
 # escaper and this checker ever disagree, that disagreement is the finding.
+#
+# Every text-processing pipeline pins LC_ALL=C. Case folding, bracket ranges and
+# collation are all locale-dependent, and a checker whose verdict depends on the
+# operator's locale is not a checker. In this suite the drift happened to fail
+# safe -- under tr_TR a tag <IMG> folds to a dotless 'img' that misses the
+# allowlist and is therefore rejected -- but "accidentally strict" is not a
+# property worth relying on.
 # =============================================================================
 set -euo pipefail
 
@@ -60,7 +67,7 @@ doc_violation() {
     body=${body%>}
     body=${body#/}
     body=${body%/}
-    name=$(printf '%s' "$body" | awk '{print tolower($1)}')
+    name=$(printf '%s' "$body" | LC_ALL=C awk '{print tolower($1)}')
     case $DOC_TAGS in
       *" $name "*) ;;
       *)
@@ -83,8 +90,8 @@ doc_violation() {
           return 0
           ;;
       esac
-    done < <(printf '%s' "$body" | grep -o '[a-zA-Z][a-zA-Z0-9-]*=' | tr -d '=' |
-      tr 'A-Z' 'a-z' | sort -u)
+    done < <(printf '%s' "$body" | LC_ALL=C grep -o '[a-zA-Z][a-zA-Z0-9-]*=' |
+      LC_ALL=C tr -d '=' | LC_ALL=C tr 'A-Z' 'a-z' | LC_ALL=C sort -u)
     while IFS= read -r value; do
       [ -n "$value" ] || continue
       # A numeric character reference in a destination is unverifiable from
@@ -99,7 +106,7 @@ doc_violation() {
       value=${value//&amp;/&}
       case $value in
         *:*)
-          scheme=$(printf '%s' "${value%%:*}" | tr 'A-Z' 'a-z')
+          scheme=$(printf '%s' "${value%%:*}" | LC_ALL=C tr 'A-Z' 'a-z')
           case $scheme in
             [a-z]*)
               case $scheme in
@@ -118,9 +125,9 @@ doc_violation() {
           esac
           ;;
       esac
-    done < <(printf '%s' "$body" | grep -o 'href="[^"]*"\|src="[^"]*"' |
-      sed 's/^[a-z]*="//; s/"$//')
-  done < <(grep -o '<[^>]*>' "$file" || true)
+    done < <(printf '%s' "$body" | LC_ALL=C grep -o 'href="[^"]*"\|src="[^"]*"' |
+      LC_ALL=C sed 's/^[a-z]*="//; s/"$//')
+  done < <(LC_ALL=C grep -o '<[^>]*>' "$file" || true)
   return 0
 }
 
@@ -133,7 +140,8 @@ doc_corpus_ids=()
 while IFS= read -r path; do
   base=${path##*/}
   doc_corpus_ids+=("${base%.mdin}")
-done < <(find "$DOC_GOLD/corpus" -maxdepth 1 -name '*.mdin' ! -name '*.edited.mdin' | sort)
+done < <(find "$DOC_GOLD/corpus" -maxdepth 1 -name '*.mdin' ! -name '*.edited.mdin' |
+  LC_ALL=C sort)
 
 doc_edited_count=$(find "$DOC_GOLD/corpus" -maxdepth 1 -name '*.edited.mdin' | wc -l | tr -d ' ')
 doc_malicious_count=$(find "$DOC_GOLD/malicious" -maxdepth 1 -name '*.mdin' | wc -l | tr -d ' ')
@@ -200,7 +208,8 @@ fi
 fge_phase assert
 fge_step rendered-inertness
 # -----------------------------------------------------------------------------
-doc_rendered=$(find "$DOC_GOLD/surfaces" -name '*.html_safe.html' 2>/dev/null | sort || true)
+doc_rendered=$(find "$DOC_GOLD/surfaces" -name '*.html_safe.html' 2>/dev/null |
+  LC_ALL=C sort || true)
 doc_bad=""
 doc_checked=0
 if [ -n "$doc_rendered" ]; then
@@ -279,7 +288,8 @@ fge_step bound-coverage
 # Independent coverage check: every refusal the crate declares must have a
 # fixture in the evidence suite that trips exactly it.
 doc_kinds=$(sed -n '/pub const ALL/,/\];/p' "$DOC_CRATE/src/limits.rs" |
-  grep -o 'Self::[A-Za-z0-9]*' | sed 's/Self:://' | sort -u || true)
+  LC_ALL=C grep -o 'Self::[A-Za-z0-9]*' | LC_ALL=C sed 's/Self:://' |
+  LC_ALL=C sort -u || true)
 doc_uncovered=""
 doc_kind_count=0
 for kind in $doc_kinds; do
