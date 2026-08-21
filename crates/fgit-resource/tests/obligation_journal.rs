@@ -13,11 +13,10 @@
 //! reservation records the leak instead of aborting the test process. The
 //! leak disposition is not what these tests are about.
 
-use fgit_resource::custody::RecordAmounts;
 use fgit_resource::kinds::{LaneSlot, PreparedTxnSlot, SlotHandedOff};
 use fgit_resource::{
     Grade, LeakDisposition, LedgerRecord, LifecycleEvent, ObligationClass, ObligationLedger,
-    ObligationState, RegionId, ReplayError, ResourceVector, replay_journal,
+    ObligationState, RecordAmounts, RegionId, ReplayError, ResourceVector, replay_journal,
 };
 use fgit_types::{
     CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, RepositoryDecisionBatchId, TxId,
