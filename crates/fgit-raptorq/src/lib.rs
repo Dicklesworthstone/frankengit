@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
-//! RaptorQ protection for the registered immutable microsegment class.
+//! `RaptorQ` protection for the registered immutable microsegment class.
 //!
 //! The only durable class this first slice protects is `DUR-016`, the
-//! `microsegment_v1` canonical object-fabric segment.  RaptorQ symbols are a
+//! `microsegment_v1` canonical object-fabric segment.  `RaptorQ` symbols are a
 //! transport and repair aid, never a new object identity: decoded bytes enter
 //! quarantine and must pass the object-fabric segment reader again before a
 //! placement authority can make them visible.
@@ -31,7 +31,7 @@ pub const DURABLE_CLASS: &str = "DUR-016";
 /// Stable coding-profile identifier named by the durable-object registry.
 pub const PROFILE_ID: &str = "microsegment_v1";
 
-/// Fixed, deterministic RaptorQ parameters for [`PROFILE_ID`].
+/// Fixed, deterministic `RaptorQ` parameters for [`PROFILE_ID`].
 ///
 /// One profile covers a single source block up to 8 KiB. Larger microsegments
 /// are a typed refusal until a separately registered multi-block profile is
@@ -62,7 +62,7 @@ impl MicrosegmentRaptorProfile {
     }
 }
 
-/// Scope committed beside every RaptorQ symbol before it reaches a decoder.
+/// Scope committed beside every `RaptorQ` symbol before it reaches a decoder.
 ///
 /// The 128-bit `ObjectId` is an Asupersync engine key only.  The complete
 /// 256-bit segment digest remains the identity that is verified after decode.
@@ -189,7 +189,7 @@ impl ScopedSymbol {
         &self.scope
     }
 
-    /// RaptorQ symbol metadata and payload.
+    /// `RaptorQ` symbol metadata and payload.
     #[must_use]
     pub const fn symbol(&self) -> &Symbol {
         &self.symbol
@@ -342,7 +342,7 @@ impl fmt::Display for RaptorRefusal {
 
 impl Error for RaptorRefusal {}
 
-/// Encodes a canonical microsegment with the registered RaptorQ profile.
+/// Encodes a canonical microsegment with the registered `RaptorQ` profile.
 ///
 /// The strict security context signs every emitted symbol.  The profile scope
 /// is then checked independently before a receiver allocates decoder state.
@@ -649,7 +649,7 @@ fn validate_symbol(
     Ok(())
 }
 
-fn encoding_config() -> EncodingConfig {
+const fn encoding_config() -> EncodingConfig {
     EncodingConfig {
         repair_overhead: 1.0,
         max_block_size: MicrosegmentRaptorProfile::MAX_SOURCE_BYTES,
@@ -659,7 +659,7 @@ fn encoding_config() -> EncodingConfig {
     }
 }
 
-fn decoding_config() -> DecodingConfig {
+const fn decoding_config() -> DecodingConfig {
     DecodingConfig {
         symbol_size: MicrosegmentRaptorProfile::SYMBOL_BYTES,
         max_block_size: MicrosegmentRaptorProfile::MAX_SOURCE_BYTES,

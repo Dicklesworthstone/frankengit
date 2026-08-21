@@ -26,7 +26,6 @@
 //! bit-level corruption corpus needs a test-only constructor, which is
 //! recorded on the bead rather than worked around by reaching into `src`.
 
-use fgit_object_fabric::fabric::ManifestLimits;
 use fgit_object_fabric::{
     CryptoDigest, DigestAlgorithm, MicrosegmentBuilder, ObjectEnvelope, ObjectKind, SegmentLimits,
     SegmentRecordInput,
@@ -523,7 +522,7 @@ use fgit_crypto::{
 use fgit_types::CANONICAL_CODEC_VERSION;
 
 /// Schema of the drill's reconstruction report.
-fn report_schema() -> SchemaId {
+const fn report_schema() -> SchemaId {
     SchemaId::new(
         SchemaFamily::from_static("frankengit.raptorq-reconstruction-report"),
         1,
