@@ -1899,11 +1899,7 @@ fn is_first_party_workspace_path(
         &extract_workspace_string_list(&root_manifest, "members"),
         path,
     );
-    let default_member_declared = workspace_member_path_is_declared(
-        &extract_workspace_string_list(&root_manifest, "default-members"),
-        path,
-    );
-    member_declared && default_member_declared
+    member_declared
 }
 
 /// Cargo workspace globs are legitimate only for direct child crate
