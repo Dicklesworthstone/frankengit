@@ -287,10 +287,21 @@
 # -----------------------------------------------------------------------------
 # Sequence numbers and assertion bookkeeping live in files under the run dir,
 # not in shell variables, so records emitted from background subshells are
-# still unique, gapless and counted. Sequence allocation takes a short
-# `mkdir`-based lock that records the holder PID and is broken if the holder
-# died. Record bytes are appended through a dedicated O_APPEND descriptor in a
-# single write.
+# still unique, gapless and counted.
+#
+# Sequence allocation is LOCK-FREE. A writer claims number n by creating
+# `.state/seq.d/<n>` with O_EXCL; the kernel guarantees exactly one winner per
+# n and a loser retries n+1. There is deliberately no mutex: the mkdir-mutex
+# version this replaced needed a stale-lock breaker, and "read the holder pid,
+# check it is dead, remove the lock" is an ABA race that can delete a lock a
+# third writer has legitimately taken, handing two writers the same number.
+# That reproduced in two runs out of three under 24 concurrent writers.
+#
+# Record bytes are appended outside any critical section through a dedicated
+# O_APPEND descriptor in a single write, so records may land out of order.
+# What holds is that the seq values of a complete log form exactly {1..N} --
+# which is why the validator checks the SET rather than the file order, and why
+# a lost record shows up as a gap rather than as silence.
 #
 # -----------------------------------------------------------------------------
 # 9. SEAM FOR FG-091 (exact expected-suite manifest)
