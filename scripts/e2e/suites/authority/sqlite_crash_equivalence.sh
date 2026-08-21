@@ -210,5 +210,11 @@ done < "$SQ_REPO/crates/fgit-authority-fsqlite/src/engine.rs"
 fge_assert_eq FG-005B-E2E-023 '0' "$sq_stashed_context" \
   'the store holds no per-store context, so a per-request cancel can still reach an operation'
 
+# A FOURTH cell, found while re-checking whether the other reasons had gone
+# stale. It is the sharpest of the four: the operation whose stated purpose is
+# surviving a crash is the one this crash matrix cannot reach.
+fge_unsupported FG-005B-E2E-024 \
+  'publish_head_with_outcomes (the atomic head+outcomes publication closing the section 5.2 window) cannot be driven from any external test: it requires a DuplicateAbsenceWitness, whose constructor is pub(crate) to fgit-authority by deliberate design so the witness cannot become a rubber stamp, and no public producer exists anywhere; fgit-chronicle/tests/capsule_pointer.rs:664 records the same limit'
+
 fge_unsupported FG-005B-E2E-022 \
-  'checkpoint under load: FsqliteAuthorityStore publishes exactly eight methods and none is a checkpoint operation, so this cell cannot be driven from outside the crate at all'
+  'checkpoint under load: FsqliteAuthorityStore publishes nine methods and none is a checkpoint operation, so this cell cannot be driven from outside the crate at all (the count was eight when first recorded; publish_head_with_outcomes has since landed, which is why it is stated as a count that must be re-checked rather than a bare claim)'
