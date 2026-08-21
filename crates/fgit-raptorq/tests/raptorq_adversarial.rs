@@ -200,6 +200,46 @@ fn an_empty_symbol_set_is_refused_rather_than_guessed() {
     }
 }
 
+#[test]
+fn one_symbol_short_of_the_envelope_still_refuses_rather_than_approximates() {
+    // The hardest anti-fabrication case: exactly ONE symbol short of what the
+    // profile needs. This is where a decoder is most likely to produce
+    // plausible-but-wrong output, because it has almost enough information --
+    // far more dangerous than the starved or empty cases, which are obviously
+    // hopeless.
+    let bytes = canonical_segment(b"tenant-a", 7, PAYLOAD);
+    let protected = protect(&bytes);
+    let needed = source_symbol_count(&protected);
+    assert!(
+        needed > 1,
+        "the boundary case needs a profile with room below it"
+    );
+
+    let one_short: Vec<ScopedSymbol> = protected
+        .symbols()
+        .iter()
+        .take(needed - 1)
+        .cloned()
+        .collect();
+    assert_eq!(one_short.len(), needed - 1);
+
+    match reconstruct_microsegment(
+        protected.scope(),
+        &one_short,
+        &SegmentLimits::default(),
+        &security(),
+    ) {
+        Err(_) => {}
+        Ok(verified) => assert_eq!(
+            verified.bytes(),
+            bytes,
+            "FABRICATION: one symbol short of the envelope, reconstruction returned SUCCESS \
+             with bytes that are not the original. Approximating is the failure mode erasure \
+             coding must never have."
+        ),
+    }
+}
+
 // --- malicious symbols: legitimate symbols in illegitimate contexts ---------
 
 #[test]
