@@ -19,11 +19,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fgit_authority::{
-    AsyncAuthorityStore, AuthenticatedHead, AuthorityLimits, HeadInit, HeadKey, HeadRead,
-    StoreInstanceId, body_key,
+    AsyncAuthorityStore, AuthenticatedHead, AuthorityLimits, AuthorityVersionToken, HeadInit,
+    HeadKey, HeadRead, PublicationOutcome, StoreInstanceId, body_key, publish_decisions_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
-use fgit_codec::{schema::RepositoryAuthorityHeadBody, wire::encode_body};
+use fgit_codec::{
+    schema::{RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody},
+    wire::encode_body,
+};
 use fgit_crypto::{GitObjectKind, IdentityDomain, git_object_id, git_payload_commitment};
 use fgit_git_object::ObjectType;
 use fgit_object_fabric::fabric::{
@@ -1097,6 +1100,35 @@ impl OneNode {
     pub async fn authenticate_authority_head(&self) -> Result<AuthenticatedHead, NodeRefusal> {
         let request = self.request_context();
         self.authenticate_authority_head_in(&request).await
+    }
+
+    /// Publishes one already-materialized decision batch through this node's
+    /// durable production authority path.
+    ///
+    /// `batch` and `successor` must come from the canonical transaction/ref
+    /// materializer. This boundary never synthesizes them from connection-local
+    /// state: the shared authority core verifies their binding, walks the
+    /// authenticated decision history, and atomically publishes the terminal
+    /// outcomes with the successor head. `expected` is the token from the
+    /// materializer's authenticated predecessor read.
+    pub async fn publish_decisions_in(
+        &self,
+        request: &NodeRequestContext,
+        expected: AuthorityVersionToken,
+        batch: &RepositoryDecisionBatchBody,
+        successor: &RepositoryAuthorityHeadBody,
+    ) -> Result<PublicationOutcome, NodeRefusal> {
+        publish_decisions_async(
+            &self.authority,
+            request.authority(),
+            &self.head_key,
+            expected,
+            batch,
+            successor,
+            self.tenant_id,
+        )
+        .await
+        .map_err(NodeRefusal::Authority)
     }
 
     /// Performs the currently published bounded doctor checks.
