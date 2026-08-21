@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 //! FG-019c acceptance lines 2 and 3, at the layer that can actually answer them.
 //!
-//! Independent adversary over ProudJaguar's `fgit-admission`. Nothing here
+//! Independent adversary over `fgit-admission`, which this file does not own.
+//! Nothing here
 //! modifies `crates/fgit-admission/src/**`; every probe drives the public API.
 //!
 //! ## What the wire layer could not decide, and why this file exists
@@ -9,7 +10,7 @@
 //! The structural half of the disconnect matrix lives in
 //! `crates/fgit-wire/tests/receivepack_adversarial.rs`: cancel at each
 //! checkpoint, assert `Err(Cancelled)`, phase `Refused`, quarantine empty.
-//! ProudJaguar was explicit that the wire machine stops there — it has no
+//! The wire owner was explicit that the machine stops there — it has no
 //! `TxId` and no outcome-discovery surface, so "leaves no seal, a retryable
 //! seal, or a terminal outcome" is not a question it can be asked.
 //!
@@ -36,7 +37,7 @@
 //! ## Why a test-authored projection is legitimate here, given that I said it was not
 //!
 //! I previously reported this work blocked on a public `AdmissionProjection`,
-//! and ProudJaguar agreed with the reason: `materialize_commit` and
+//! and the crate owner agreed with the reason: `materialize_commit` and
 //! `materialize_refusal` carry real semantics, so an adversary asserting
 //! against a projection it also authored is not an independent adversary.
 //!
@@ -136,7 +137,7 @@ struct UnboundAdapter {
 }
 
 impl UnboundAdapter {
-    fn new(label: &'static str, seed: u8) -> Self {
+    const fn new(label: &'static str, seed: u8) -> Self {
         Self {
             label,
             refs: BTreeMap::new(),
@@ -158,7 +159,7 @@ impl UnboundAdapter {
         member
     }
 
-    fn refusing_commit(mut self, code: RefusalCode) -> Self {
+    const fn refusing_commit(mut self, code: RefusalCode) -> Self {
         self.commit_refusal = Some(code);
         self
     }
@@ -630,7 +631,7 @@ fn a_transaction_that_cannot_be_resolved_is_classified_stuck() {
         },
     });
 
-    let conflict = reconcile_outcome(indexed.clone(), replayed);
+    let conflict = reconcile_outcome(indexed, replayed);
     assert!(
         conflict.is_err(),
         "an accelerator that disagrees with the stream must fail closed, not pick a side"
@@ -638,7 +639,7 @@ fn a_transaction_that_cannot_be_resolved_is_classified_stuck() {
     // The permitted twin: agreement resolves, so the arm above is a genuine
     // discrimination rather than a resolver that refuses everything.
     assert_eq!(
-        reconcile_outcome(indexed.clone(), indexed.clone()),
+        reconcile_outcome(indexed, indexed),
         Ok(indexed),
         "agreeing reads must resolve"
     );
@@ -862,7 +863,7 @@ fn a_duplicated_head_cas_does_not_decide_one_push_twice() {
 /// head the first one produced". It was not: the adapter ignores the head it is
 /// handed, so the second session saw a different ref table only because this
 /// test passed it one. Exactly-one-winner was *staged by the fixture*, not
-/// demonstrated by the system, and ProudJaguar was right to refuse it.
+/// demonstrated by the system, and the crate owner was right to refuse it.
 ///
 /// What is left is what never depended on the adapter: two sessions with
 /// different idempotency keys are different transactions, and each one's
@@ -941,7 +942,7 @@ fn two_sessions_seal_distinct_transactions_each_answered_from_its_own_decision()
 ///
 /// **This is deliberately no longer described as an independence argument.**
 /// Three unbound adapters are three variants of one unbound adapter, so their
-/// agreement is not evidence about projection semantics — ProudJaguar's point,
+/// agreement is not evidence about projection semantics — the crate owner's point,
 /// and it is correct. What the test still earns is narrower and real: the
 /// session shape and the agreement between a reported outcome and the
 /// authenticated stream survive all three routes through `admit_one`

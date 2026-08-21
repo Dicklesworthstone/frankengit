@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 //! FG-019c: adversarial probes over the receive → admission boundary.
 //!
-//! Independent adversary over ProudJaguar's `fgit-admission`. Nothing here
+//! Independent adversary over `fgit-admission`, which this file does not own.
+//! Nothing here
 //! modifies `crates/fgit-admission/src/**`; every probe drives the public API.
 //! This crate had no `tests/` directory before this file.
 //!
@@ -99,7 +100,7 @@ fn request_for(commands: &[Packet]) -> ReceiveRequest {
     (**request).clone()
 }
 
-fn receipt(delete_only: bool) -> QuarantineReceipt {
+const fn receipt(delete_only: bool) -> QuarantineReceipt {
     QuarantineReceipt {
         object_format: GitObjectFormat::Sha1,
         object_count: 0,
