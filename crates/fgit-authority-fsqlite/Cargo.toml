@@ -10,6 +10,12 @@ publish = false
 fgit-authority.workspace = true
 fgit-codec.workspace = true
 fgit-types.workspace = true
+# FG-069a / GoldLotus ruling 7613: inherit the workspace's `blake3/pure`
+# override so Cargo feature unification applies it to fsqlite-core as well.
+# Do not remove as unused: it prevents host-assembled BLAKE3 objects. `pure`
+# and `neon` are mutually exclusive, so a future `blake3/neon` request must
+# be resolved by an explicit review rather than by deleting this force point.
+blake3.workspace = true
 # Admitted at ffcf5f6 (DEP-176..218). default-features = false is load-bearing:
 # the default set pulls json, fts5, rtree, icu, misc and the uring profile.
 fsqlite = { version = "0.3.7", default-features = false, features = ["native", "async-api"] }

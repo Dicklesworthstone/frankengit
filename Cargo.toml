@@ -26,6 +26,9 @@ repository = "https://github.com/Dicklesworthstone/frankengit"
 # repeating it. Must stay equal to the version the crates that name it
 # directly already pin, and to the entry in Cargo.lock.
 asupersync = { version = "0.4.9", default-features = false }
+# FG-069a / GoldLotus ruling 7613: this direct edge unifies `pure` across
+# the fsqlite closure, preventing blake3's host-assembled x86-64 path.
+blake3 = { version = "1.8.7", features = ["pure"] }
 # Reused cryptographic primitives, admitted for direct first-party use by
 # ADR-0003 Amendment 1 (D8). `default-features = false` is load-bearing rather
 # than tidy: the default sets add dependency edges (`zeroize` for
