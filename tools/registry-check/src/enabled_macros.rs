@@ -585,6 +585,19 @@ fn check_native_linkage_policy(surface: &EnabledSurface, rows: &[SurfaceRow], re
         if libraries.is_empty() {
             continue;
         }
+        // Only a build script can emit link directives, so a package without an
+        // ENABLED build script in our own resolved graph cannot have produced
+        // this output for us. The target directory is not necessarily ours
+        // alone: `CARGO_TARGET_DIR` is commonly shared across checkouts, and on
+        // the machine this was written it held 471 build directories against a
+        // 206-package graph, nine of them emitting native linkage for packages
+        // FrankenGit does not depend on at all. Judging our registry against
+        // another project's build would make this gate's verdict depend on what
+        // else someone happened to compile - the same reproducibility defect
+        // this gate exists to refuse.
+        if !surface.build_scripts.contains(package) {
+            continue;
+        }
         let Some(row) = governing_row(rows, package) else {
             continue;
         };
@@ -1029,6 +1042,8 @@ cargo:rustc-link-lib=static=blake3_avx512_assembly
             linkage_is_observed: true,
             ..EnabledSurface::default()
         };
+        // blake3 must be in OUR graph for its linkage to be judged at all.
+        surface.build_scripts.insert("blake3".to_owned());
         surface
             .native_linkage
             .insert("blake3".to_owned(), parse_linkage_lines(REAL_BLAKE3_OUTPUT));
@@ -1057,6 +1072,46 @@ cargo:rustc-link-lib=static=blake3_avx512_assembly
         assert!(report.notes[0].contains("not evaluated"));
     }
 
+    /// Linkage from a package that is NOT in our resolved graph must be ignored.
+    ///
+    /// `CARGO_TARGET_DIR` is commonly shared between checkouts. Without this
+    /// filter the gate judges our registry against whatever else happened to be
+    /// compiled on the machine, which is both a false-refusal source and a
+    /// reproducibility defect.
+    #[test]
+    fn linkage_from_a_package_outside_our_graph_is_ignored() {
+        let rows = vec![SurfaceRow {
+            id: "DEP-003".to_owned(),
+            crate_pattern: "serde*".to_owned(),
+            ffi_policy: "no_ffi".to_owned(),
+            build_script: SurfaceState::Enabled,
+            proc_macro: SurfaceState::Absent,
+        }];
+        let mut surface = EnabledSurface {
+            triple: "x86_64-unknown-linux-gnu".to_owned(),
+            linkage_is_observed: true,
+            ..EnabledSurface::default()
+        };
+        // Observed in a shared target dir, but `serde` has no enabled build
+        // script in THIS surface, so the output cannot be ours.
+        surface
+            .native_linkage
+            .insert("serde".to_owned(), parse_linkage_lines(REAL_BLAKE3_OUTPUT));
+        let mut report = Report::new();
+        check_native_linkage_policy(&surface, &rows, &mut report);
+        assert!(
+            report.errors.is_empty(),
+            "foreign build output must not be judged against our registry: {:?}",
+            report.errors
+        );
+
+        // Same package, same emissions, but now it IS in our graph: refuse.
+        surface.build_scripts.insert("serde".to_owned());
+        let mut report = Report::new();
+        check_native_linkage_policy(&surface, &rows, &mut report);
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+    }
+
     /// A package that links native code but whose row permits it must pass.
     #[test]
     fn observed_linkage_against_a_permissive_row_is_allowed() {
@@ -1072,12 +1127,25 @@ cargo:rustc-link-lib=static=blake3_avx512_assembly
             linkage_is_observed: true,
             ..EnabledSurface::default()
         };
+        // blake3 must be in OUR graph for its linkage to be judged at all.
+        surface.build_scripts.insert("blake3".to_owned());
         surface
             .native_linkage
             .insert("blake3".to_owned(), parse_linkage_lines(REAL_BLAKE3_OUTPUT));
         let mut report = Report::new();
         check_native_linkage_policy(&surface, &rows, &mut report);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+        // Guard against this passing vacuously: with the package in the graph
+        // and the same emissions, a denying row MUST refuse. Otherwise a future
+        // change that stops evaluating anything would keep this test green.
+        let denying = vec![SurfaceRow {
+            ffi_policy: "no_ffi".to_owned(),
+            ..rows.into_iter().next().expect("one row")
+        }];
+        let mut report = Report::new();
+        check_native_linkage_policy(&surface, &denying, &mut report);
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
     }
 
     #[test]
