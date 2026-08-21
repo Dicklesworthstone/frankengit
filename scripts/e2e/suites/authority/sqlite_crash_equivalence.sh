@@ -174,5 +174,41 @@ fge_unsupported FG-005B-E2E-020 \
 fge_unsupported FG-005B-E2E-021 \
   'cancellation mid-operation: the conformance bridge blocks per operation, so a cancel cannot be interleaved with an operation in flight; this needs a harness able to hold several operations open, not another test'
 
+# The structural PRECONDITION for that cell, which IS checkable today.
+#
+# async_contract.rs states the rule and explains why it matters: the context
+# "must be per-call, never stored on the store. A single context held for the
+# store's lifetime breaks per-request budget and cancellation propagation... A
+# backend that stashes one context in its struct has satisfied the type and
+# lost the property."
+#
+# That rule lives only in a doc comment, and a doc comment is not a check. This
+# does not prove cancellation works -- FG-005B-E2E-021 above still says it is
+# unproved -- but it does prove the precondition has not silently regressed,
+# which is the difference between "unproved" and "quietly impossible".
+#
+# Comments are stripped before matching: the struct's own documentation
+# discusses contexts, and a whole-block grep would fire on the prose that
+# explains the rule. That mistake has been made in this file before.
+# Pure bash, per FG-000A-PORT-019: a state flag over the file rather than an
+# awk range. The first version of this stanza used awk and would have tripped
+# the portability gate -- the same slip that was caught in the codec suite
+# earlier today.
+sq_stashed_context=0
+sq_in_struct=''
+while IFS= read -r sq_line; do
+  case "$sq_line" in
+    'pub struct FsqliteAuthorityStore'*) sq_in_struct='yes'; continue ;;
+  esac
+  [ -n "$sq_in_struct" ] || continue
+  case "$sq_line" in
+    '}'*) break ;;
+    *//*) continue ;;
+    *Cx*|*Context*) sq_stashed_context=$((sq_stashed_context + 1)) ;;
+  esac
+done < "$SQ_REPO/crates/fgit-authority-fsqlite/src/engine.rs"
+fge_assert_eq FG-005B-E2E-023 '0' "$sq_stashed_context" \
+  'the store holds no per-store context, so a per-request cancel can still reach an operation'
+
 fge_unsupported FG-005B-E2E-022 \
   'checkpoint under load: FsqliteAuthorityStore publishes exactly eight methods and none is a checkpoint operation, so this cell cannot be driven from outside the crate at all'
