@@ -1,0 +1,16 @@
+[package]
+name = "fgit-lab"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+description = "FrankenGit deterministic protocol laboratory: virtual time, seeded entropy, enumerable failpoints, controlled schedules, composed fault models, and byte-identical logical traces."
+
+[dependencies]
+asupersync = { version = "0.4.9", default-features = false }
+fgit-authority.workspace = true
+fgit-runtime.workspace = true
+
+[lints]
+workspace = true
