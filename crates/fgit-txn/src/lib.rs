@@ -763,7 +763,7 @@ mod tests {
     use super::*;
 
     use fgit_reference::effect::ReferenceFolder;
-    use fgit_reference::harness::{label, IdentityMint, RequestBuilder};
+    use fgit_reference::harness::{IdentityMint, RequestBuilder, label};
     use fgit_reference::intent::{
         ForgeEntityId, ForgeIntent, IdempotencyKey, OutboxIntent, Statement,
     };
@@ -1012,10 +1012,12 @@ mod tests {
                 },
             }
         );
-        assert!(report
-            .mappings
-            .iter()
-            .all(|mapping| matches!(mapping.disposition, IntentDisposition::TransactionAborted)));
+        assert!(
+            report.mappings.iter().all(|mapping| matches!(
+                mapping.disposition,
+                IntentDisposition::TransactionAborted
+            ))
+        );
         assert!(report.is_total_for(&request));
     }
 
