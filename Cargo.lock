@@ -502,6 +502,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-codec-verify"
+version = "0.0.1"
+
+[[package]]
 name = "fgit-crypto"
 version = "0.0.1"
 dependencies = [
