@@ -917,6 +917,22 @@ fn line_without_lf(line: &[u8]) -> Result<&[u8], WireError> {
     Ok(text)
 }
 
+/// Parses one v0/v1 advertisement record without consuming its capability
+/// separator.  Unlike request and v2 advertisement records, the first v0/v1
+/// ref record carries its capability list after an in-band NUL byte; the
+/// caller owns the one-separator grammar and capability validation.
+fn v1_advertisement_line_without_lf(line: &[u8]) -> Result<&[u8], WireError> {
+    let Some((&b'\n', text)) = line.split_last() else {
+        return Err(WireError::MissingLineFeed);
+    };
+    if text.contains(&b'\n') || text.contains(&b'\r') {
+        return Err(WireError::MalformedRequestLine {
+            line: line.to_vec(),
+        });
+    }
+    Ok(text)
+}
+
 /// Parses a client request pkt-line payload.
 ///
 /// Git's server advertisements use LF-terminated records, but client request
@@ -1542,7 +1558,7 @@ impl V1Advertisement {
                         version_one_prelude = true;
                         continue;
                     }
-                    let line = line_without_lf(line)?;
+                    let line = v1_advertisement_line_without_lf(line)?;
                     let (reference, trailing_capabilities) =
                         parse_v1_ref_line(line, object_format, limits)?;
                     if trailing_capabilities.is_some() && !refs.is_empty() {
@@ -2570,7 +2586,7 @@ impl V2UploadPack {
 
     fn finish_fetch(
         &mut self,
-        repository: &impl UploadPackRepository,
+        _repository: &impl UploadPackRepository,
     ) -> Result<Transition, WireError> {
         if self.wants.is_empty() {
             return Err(WireError::MissingWant);
@@ -2581,24 +2597,10 @@ impl V2UploadPack {
                 packet: "flush",
             });
         }
-        let last_common = self
-            .haves
-            .iter()
-            .copied()
-            .rev()
-            .find(|oid| repository.is_common(*oid));
         let mut output = Vec::new();
         output
-            .try_reserve(5)
+            .try_reserve(1)
             .map_err(|_| WireError::AllocationFailure)?;
-        output.push(line_packet(b"acknowledgments\n"));
-        match last_common {
-            Some(oid) => output.push(line_packet(
-                format!("ACK {oid_hex}\n", oid_hex = oid_hex(oid)).into_bytes(),
-            )),
-            None => output.push(line_packet(b"NAK\n")),
-        }
-        output.push(Packet::Delimiter);
         output.push(line_packet(b"packfile\n"));
         self.state = V2State::Complete;
         Ok(Transition {

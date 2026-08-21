@@ -175,6 +175,30 @@ fn v1_advertisement_fixture_parses_and_reemits_exactly() {
 }
 
 #[test]
+fn v1_advertisement_accepts_git_nul_capability_suffix_and_reemits_exactly() {
+    let packets = vec![
+        Packet::Data(
+            format!("{WANT} HEAD\0symref=HEAD:refs/heads/main agent=git/2.54.0-Linux\n")
+                .into_bytes(),
+        ),
+        Packet::Data(format!("{WANT} refs/heads/main\n").into_bytes()),
+        Packet::Flush,
+    ];
+    let advertisement =
+        V1Advertisement::parse(&packets, GitObjectFormat::Sha1, &WireLimits::default())
+            .expect("Git's NUL-separated first-ref capability suffix is valid");
+    assert_eq!(advertisement.refs.len(), 2);
+    assert!(advertisement.capabilities.contains(b"symref"));
+    assert!(advertisement.capabilities.contains(b"agent"));
+    assert_eq!(
+        advertisement
+            .encode(&WireLimits::default())
+            .expect("v1 advertisement re-encodes"),
+        packets
+    );
+}
+
+#[test]
 fn v1_version_prelude_is_preserved_with_the_ref_advertisement() {
     let packets = vec![
         Packet::Data(b"version 1\n".to_vec()),
@@ -427,17 +451,10 @@ fn v2_fetch_transcript_requests_sideband_pack_after_done() {
             &repository,
         )
         .expect("fetch transcript");
-    assert!(
-        transition
-            .output
-            .iter()
-            .any(|packet| matches!(packet, Packet::Delimiter))
-    );
-    assert!(
-        transition
-            .output
-            .iter()
-            .any(|packet| matches!(packet, Packet::Data(line) if line == b"packfile\n"))
+    assert_eq!(
+        transition.output,
+        vec![Packet::Data(b"packfile\n".to_vec())],
+        "a protocol-v2 fetch without wait-for-done starts its response at packfile"
     );
     let Some(WireEvent::PackRequested(request)) = transition.events.last() else {
         panic!("complete v2 request must ask for a pack");
