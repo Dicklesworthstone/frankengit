@@ -22,6 +22,7 @@ repository = "https://github.com/Dicklesworthstone/frankengit"
 # AGENTS.md section 3.3 forbids for a release-facing crate.
 [workspace.dependencies]
 fgit-authority = { path = "crates/fgit-authority" }
+fgit-admission = { path = "crates/fgit-admission" }
 fgit-chronicle = { path = "crates/fgit-chronicle" }
 fgit-codec = { path = "crates/fgit-codec" }
 fgit-crypto = { path = "crates/fgit-crypto" }
@@ -32,6 +33,7 @@ fgit-git-object = { path = "crates/fgit-git-object" }
 fgit-lab = { path = "crates/fgit-lab" }
 fgit-object-fabric = { path = "crates/fgit-object-fabric" }
 fgit-pack = { path = "crates/fgit-pack" }
+fgit-raptorq = { path = "crates/fgit-raptorq" }
 fgit-reference = { path = "crates/fgit-reference" }
 fgit-resource = { path = "crates/fgit-resource" }
 fgit-runtime = { path = "crates/fgit-runtime" }

@@ -604,6 +604,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "fgit-admission"
+version = "0.1.0"
+dependencies = [
+ "fgit-authority",
+ "fgit-chronicle",
+ "fgit-codec",
+ "fgit-crypto",
+ "fgit-reference",
+ "fgit-txn",
+ "fgit-types",
+ "fgit-wire",
+]
+
+[[package]]
 name = "fgit-authority"
 version = "0.0.1"
 dependencies = [
@@ -701,6 +715,16 @@ dependencies = [
  "fgit-crypto",
  "fgit-deflate",
  "fgit-git-object",
+ "fgit-types",
+]
+
+[[package]]
+name = "fgit-raptorq"
+version = "0.1.0"
+dependencies = [
+ "asupersync",
+ "fgit-object-fabric",
+ "fgit-resource",
  "fgit-types",
 ]
 
