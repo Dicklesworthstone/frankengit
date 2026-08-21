@@ -331,10 +331,10 @@ impl<A: GitHashAlgorithm> GitOid<A> {
     /// The preimage is exactly Git's: `<type> <length>\0<content>`.
     #[must_use]
     pub fn of_object(kind: GitObjectKind, content: &[u8]) -> Self {
-        let mut hasher = A::Hasher::new();
-        for part in object_header(kind, content.len() as u64).iter() {
-            hasher.update(part);
-        }
+        let length = u64::try_from(content.len())
+            .expect("a slice length always fits in u64 on supported targets");
+        let mut hasher = <A::Hasher as DigestHasher>::new();
+        hasher.update(&object_header(kind, length));
         hasher.update(content);
         Self::from_digest(hasher.finish())
     }
@@ -347,13 +347,16 @@ impl<A: GitHashAlgorithm> GitOid<A> {
     }
 }
 
-/// The three header fragments Git writes before an object's content.
-fn object_header(kind: GitObjectKind, length: u64) -> [Vec<u8>; 3] {
-    [
-        kind.label().as_bytes().to_vec(),
-        format!(" {length}").into_bytes(),
-        vec![0],
-    ]
+/// The exact header Git writes before an object identity: type, space,
+/// decimal length, and a terminating zero byte.
+pub(crate) fn object_header(kind: GitObjectKind, length: u64) -> Vec<u8> {
+    let decimal = length.to_string();
+    let mut header = Vec::with_capacity(kind.label().len() + decimal.len() + 2);
+    header.extend_from_slice(kind.label().as_bytes());
+    header.push(b' ');
+    header.extend_from_slice(decimal.as_bytes());
+    header.push(0);
+    header
 }
 
 /// Streaming native identity for one framed Git object.
@@ -372,10 +375,8 @@ impl<A: GitHashAlgorithm> GitObjectHasher<A> {
     /// Begin hashing an object of `kind` with a declared content length.
     #[must_use]
     pub fn new(kind: GitObjectKind, declared_len: u64) -> Self {
-        let mut hasher = A::Hasher::new();
-        for part in object_header(kind, declared_len).iter() {
-            hasher.update(part);
-        }
+        let mut hasher = <A::Hasher as DigestHasher>::new();
+        hasher.update(&object_header(kind, declared_len));
         Self {
             hasher,
             declared: declared_len,
