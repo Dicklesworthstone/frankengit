@@ -10,7 +10,8 @@ use std::process::{Command, ExitCode};
 
 mod enabled_macros;
 
-const REGISTRY_MARKER: &str = "# franken-registry-v1";
+const REGISTRY_MARKER_V1: &str = "# franken-registry-v1";
+const DEPENDENCY_POLICY_MARKER_V2: &str = "# franken-registry-v2";
 
 /// Column count of `registries/dependency_policy.tsv` after FG-069 added
 /// `build_script` and `proc_macro`. Named rather than repeated so a future
@@ -386,12 +387,8 @@ fn registry_schemas() -> BTreeMap<&'static str, &'static [&'static str]> {
                 "unsafe_policy",
                 "ffi_policy",
                 "status",
-                // FG-069. `REGISTRY_MARKER` is one shared banner across all ten
-                // registry files, so it versions the file FORMAT, not any single
-                // registry's columns. Bumping it for one registry would force an
-                // edit to nine files this change has no business touching. The
-                // per-file column list here is the actual schema, so extending
-                // it is the schema change.
+                // FG-069 moves only dependency_policy.tsv to its v2 schema.
+                // Other registries remain v1 until their own schema migration.
                 "build_script",
                 "proc_macro",
             ][..],
@@ -471,6 +468,13 @@ fn registry_schemas() -> BTreeMap<&'static str, &'static [&'static str]> {
     ])
 }
 
+fn registry_marker_for(file_name: &str) -> &'static str {
+    match file_name {
+        "dependency_policy.tsv" => DEPENDENCY_POLICY_MARKER_V2,
+        _ => REGISTRY_MARKER_V1,
+    }
+}
+
 fn check_registries(root: &Path, report: &mut Report) {
     let schemas = registry_schemas();
     let registry_dir = root.join("registries");
@@ -492,9 +496,10 @@ fn check_registries(root: &Path, report: &mut Report) {
             report.error(format!("empty registry: {display}"));
             continue;
         };
-        if marker.trim() != REGISTRY_MARKER {
+        let expected_marker = registry_marker_for(file_name);
+        if marker.trim() != expected_marker {
             report.error(format!(
-                "registry marker mismatch at {display}:{}: expected `{REGISTRY_MARKER}`",
+                "registry marker mismatch at {display}:{}: expected `{expected_marker}`",
                 marker_line + 1
             ));
         }
@@ -3223,9 +3228,10 @@ fn load_crate_layer_registry(root: &Path, report: &mut Report) -> CrateLayerRegi
         report.error(format!("empty crate-layer registry {display}"));
         return CrateLayerRegistry::default();
     };
-    if marker.trim() != REGISTRY_MARKER {
+    let expected_marker = registry_marker_for("crate_layers.tsv");
+    if marker.trim() != expected_marker {
         report.error(format!(
-            "crate-layer registry marker mismatch at {display}:{}: expected `{REGISTRY_MARKER}`",
+            "crate-layer registry marker mismatch at {display}:{}: expected `{expected_marker}`",
             marker_line + 1
         ));
     }
@@ -5440,6 +5446,19 @@ mod tests {
     }
 
     #[test]
+    fn dependency_policy_schema_marker_is_versioned_independently() {
+        assert_eq!(
+            registry_marker_for("dependency_policy.tsv"),
+            DEPENDENCY_POLICY_MARKER_V2
+        );
+        assert_eq!(registry_marker_for("crate_layers.tsv"), REGISTRY_MARKER_V1);
+        assert_eq!(
+            registry_marker_for("verification_lanes.tsv"),
+            REGISTRY_MARKER_V1
+        );
+    }
+
+    #[test]
     fn constellation_default_features_follow_direct_workspace_edges() {
         let fsqlite = LockPackage {
             name: "fsqlite".to_owned(),
@@ -5545,7 +5564,7 @@ mod tests {
         fs::write(
             registry.join("dependency_policy.tsv"),
             concat!(
-                "# franken-registry-v1\n",
+                "# franken-registry-v2\n",
                 "id\tcrate_pattern\tscope\tdecision\towner\trationale\tfeature_policy\tunsafe_policy\tffi_policy\tstatus\tbuild_script\tproc_macro\n",
                 "DEP-013\tfgit-*\tproduction\tallow_first_party\tarchitecture\tfirst-party\tworkspace_pinned\tsafe\tno_ffi\tactive\tabsent\tabsent\n",
                 "DEP-014\taead\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.4.9_transitive_direct_parent_aes-gcm\tresolved_none\tledgered\tno_ffi\tactive\tabsent\tabsent\n",

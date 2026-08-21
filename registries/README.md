@@ -1,8 +1,8 @@
 # FrankenGit Constitutional Registries
 
-The registries are canonical, reviewable TSV files. They use tabs rather than a general configuration language so the bootstrap checker remains a zero-dependency, safe-Rust binary. Every file starts with `# franken-registry-v1`; the next non-comment line is the exact header; data rows are sorted by `id`.
+The registries are canonical, reviewable TSV files. They use tabs rather than a general configuration language so the bootstrap checker remains a zero-dependency, safe-Rust binary. Every file starts with its versioned `# franken-registry-vN` marker; the next non-comment line is the exact header; data rows are sorted by `id`. `dependency_policy.tsv` is currently v2; the other registries are v1.
 
-TSV values may contain spaces, commas, colons, slashes, and Markdown-style paths, but not tabs or newlines. Schema evolution creates a new registry version and migration; it does not reinterpret old columns silently.
+TSV values may contain spaces, commas, colons, slashes, and Markdown-style paths, but not tabs or newlines. Schema evolution creates a new version and migration for the affected registry; it does not reinterpret old columns silently or force unrelated registries to change version.
 
 `cargo run -p fgit-registry-check -- all` validates schemas, IDs, statuses, cross-file requirements, Markdown integrity, toolchain/workflow policy, and first-party unsafe/FFI rules.
 

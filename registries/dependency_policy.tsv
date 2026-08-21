@@ -1,4 +1,4 @@
-# franken-registry-v1
+# franken-registry-v2
 id	crate_pattern	scope	decision	owner	rationale	feature_policy	unsafe_policy	ffi_policy	status	build_script	proc_macro
 DEP-000	std	all	allow	constitution	Rust standard library	compiler_selected	trusted_language_runtime	os_abi_only	active	not_applicable	not_applicable
 DEP-001	asupersync	production	allow	concurrency	sole runtime, capabilities, obligations, ATP, lab	pinned_minimal_no_tokio	ledgered_transitive	no_foreign_runtime	active	enabled	absent
