@@ -1220,13 +1220,16 @@ fn check_manifest_dependency_sources(
     report: &mut Report,
 ) {
     let mut in_workspace_dependencies = false;
+    let mut in_dependency_section = false;
     for (line_number, raw_line) in text.lines().enumerate() {
         let line = raw_line.split('#').next().unwrap_or("").trim();
         if line.starts_with('[') && line.ends_with(']') {
-            in_workspace_dependencies = line == "[workspace.dependencies]";
+            let section = line.trim_matches(['[', ']']);
+            in_workspace_dependencies = section == "workspace.dependencies";
+            in_dependency_section = is_dependency_section(section);
             continue;
         }
-        if !looks_like_dependency_declaration(line) {
+        if !in_dependency_section || !looks_like_dependency_declaration(line) {
             continue;
         }
         if let Some(path) = extract_inline_string_field(line, "path") {
@@ -1256,6 +1259,15 @@ fn check_manifest_dependency_sources(
             ));
         }
     }
+}
+
+fn is_dependency_section(section: &str) -> bool {
+    matches!(
+        section,
+        "dependencies" | "dev-dependencies" | "build-dependencies" | "workspace.dependencies"
+    ) || section.ends_with(".dependencies")
+        || section.ends_with(".dev-dependencies")
+        || section.ends_with(".build-dependencies")
 }
 
 /// A first-party workspace package is not an unpublished external sibling:
@@ -3540,7 +3552,7 @@ mod tests {
             Path::new("/fixture"),
             Path::new("/fixture/Cargo.toml"),
             "fixtures/Cargo.toml",
-            "dep = { version = \"1\", path = \"/absolute/unpublished\" }",
+            "[dependencies]\ndep = { version = \"1\", path = \"/absolute/unpublished\" }",
             &mut report,
         );
         assert_error(
@@ -3566,6 +3578,20 @@ mod tests {
         let mut report = Report::new();
         check_manifest_overrides("fixtures/Cargo.toml", "[patch.crates-io]", &mut report);
         assert_error(&report, "[patch]/[replace]");
+
+        let mut report = Report::new();
+        check_manifest_dependency_sources(
+            Path::new("/fixture"),
+            Path::new("/fixture/Cargo.toml"),
+            "fixtures/Cargo.toml",
+            "[[test]]\npath = \"tests/suite/main.rs\"",
+            &mut report,
+        );
+        assert!(
+            report.errors.is_empty(),
+            "test target path is not a dependency: {:?}",
+            report.errors
+        );
     }
 
     #[test]
