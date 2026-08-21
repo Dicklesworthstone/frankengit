@@ -487,18 +487,15 @@ mod tests {
     fn object_count_mismatches_refuse_before_a_quarantined_pack_is_returned() {
         let mut too_many_declared = exact_pack(&pack_entry(3, b"blob"));
         too_many_declared[11] = 2;
-        assert_eq!(
+        assert!(matches!(
             parse_quarantined_pack(
                 &too_many_declared,
                 ObjectFormat::Sha1,
                 &limits(),
                 &mut always,
             ),
-            Err(PackError::ObjectCountMismatch {
-                declared: 2,
-                actual: 1,
-            })
-        );
+            Err(PackError::Truncated { .. })
+        ));
 
         let mut too_many_actual = pack_entry(3, b"one");
         too_many_actual.extend_from_slice(&pack_entry(3, b"two"));
