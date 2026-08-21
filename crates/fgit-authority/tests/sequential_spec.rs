@@ -6,6 +6,10 @@ use fgit_authority::{
     run_authority_conformance, run_fault_conformance,
 };
 
+fn head_generation(value: u64) -> HeadGeneration {
+    HeadGeneration::try_new(value).expect("a positive head generation")
+}
+
 fn store() -> MemoryAuthorityStore {
     MemoryAuthorityStore::new(StoreInstanceId::from_raw(1))
 }
@@ -58,7 +62,7 @@ fn head_read_after_commit_observes_the_commit() {
     };
 
     let CasOutcome::Committed(published) = store
-        .compare_exchange_head(&key, first.token(), HeadGeneration::from_raw(2), b"head-2")
+        .compare_exchange_head(&key, first.token(), head_generation(2), b"head-2")
         .expect("conditional replacement")
     else {
         panic!("a conditional write on the exact predecessor token must publish");
@@ -67,7 +71,7 @@ fn head_read_after_commit_observes_the_commit() {
     let HeadRead::Present(observed) = store.read_head(&key).expect("head read") else {
         panic!("a published head must be readable");
     };
-    assert_eq!(observed.generation(), HeadGeneration::from_raw(2));
+    assert_eq!(observed.generation(), head_generation(2));
     assert_eq!(observed.body(), b"head-2");
     assert_eq!(
         observed, published,

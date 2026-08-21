@@ -8,6 +8,10 @@ use fgit_authority::{
     StoreInstanceId, drive,
 };
 
+fn head_generation(value: u64) -> HeadGeneration {
+    HeadGeneration::try_new(value).expect("a positive head generation")
+}
+
 fn store() -> MemoryAuthorityStore {
     MemoryAuthorityStore::new(StoreInstanceId::from_raw(1))
 }
@@ -34,7 +38,7 @@ fn commit(
     body: &[u8],
 ) -> HeadReadReceipt {
     match store
-        .compare_exchange_head(key, expected, HeadGeneration::from_raw(generation), body)
+        .compare_exchange_head(key, expected, head_generation(generation), body)
         .expect("conditional replacement")
     {
         CasOutcome::Committed(receipt) => receipt,
@@ -80,7 +84,7 @@ fn a_byte_identical_restore_mints_a_third_token_and_defeats_the_first_holder() {
     assert_ne!(third.token(), second.token());
 
     let outcome = store
-        .compare_exchange_head(&key, first.token(), HeadGeneration::from_raw(4), b"state-c")
+        .compare_exchange_head(&key, first.token(), head_generation(4), b"state-c")
         .expect("a stale but issued token loses rather than erroring");
     assert_eq!(
         outcome,
@@ -91,7 +95,7 @@ fn a_byte_identical_restore_mints_a_third_token_and_defeats_the_first_holder() {
     let live = commit(&store, &key, third.token(), 4, b"state-c");
     assert_eq!(
         live.generation(),
-        HeadGeneration::from_raw(4),
+        head_generation(4),
         "the adjacent permitted case, a writer holding the current token, must proceed"
     );
 }
@@ -104,39 +108,29 @@ fn a_stale_generation_is_refused_and_a_strictly_increasing_one_is_accepted() {
     let seventh = commit(&store, &key, first.token(), 7, b"head-7");
 
     let equal = store
-        .compare_exchange_head(
-            &key,
-            seventh.token(),
-            HeadGeneration::from_raw(7),
-            b"head-7b",
-        )
+        .compare_exchange_head(&key, seventh.token(), head_generation(7), b"head-7b")
         .expect_err("an equal generation must be refused");
     assert_eq!(
         equal,
         AuthorityFailure::Refused(AuthorityRefusal::NonMonotoneGeneration {
-            current: HeadGeneration::from_raw(7),
-            proposed: HeadGeneration::from_raw(7),
+            current: head_generation(7),
+            proposed: head_generation(7),
         })
     );
 
     let lower = store
-        .compare_exchange_head(
-            &key,
-            seventh.token(),
-            HeadGeneration::from_raw(3),
-            b"head-3",
-        )
+        .compare_exchange_head(&key, seventh.token(), head_generation(3), b"head-3")
         .expect_err("a lower generation must be refused");
     assert_eq!(
         lower,
         AuthorityFailure::Refused(AuthorityRefusal::NonMonotoneGeneration {
-            current: HeadGeneration::from_raw(7),
-            proposed: HeadGeneration::from_raw(3),
+            current: head_generation(7),
+            proposed: head_generation(3),
         })
     );
 
     let eighth = commit(&store, &key, seventh.token(), 8, b"head-8");
-    assert_eq!(eighth.generation(), HeadGeneration::from_raw(8));
+    assert_eq!(eighth.generation(), head_generation(8));
 }
 
 #[test]
@@ -147,7 +141,7 @@ fn a_conditional_write_against_an_absent_head_is_refused() {
     let receipt = created(&store, &present, b"head-1");
 
     let refused = store
-        .compare_exchange_head(&absent, receipt.token(), HeadGeneration::from_raw(2), b"x")
+        .compare_exchange_head(&absent, receipt.token(), head_generation(2), b"x")
         .expect_err("a token issued for another key must be refused");
     assert_eq!(
         refused,
@@ -155,7 +149,7 @@ fn a_conditional_write_against_an_absent_head_is_refused() {
     );
 
     let published = commit(&store, &present, receipt.token(), 2, b"head-2");
-    assert_eq!(published.generation(), HeadGeneration::from_raw(2));
+    assert_eq!(published.generation(), head_generation(2));
 }
 
 /// A logical client that reads the head and then attempts one conditional write.
@@ -197,7 +191,7 @@ impl AuthorityClient for Contender {
             Stage::Write => self.token.map(|expected| AuthorityOp::CompareExchangeHead {
                 key: self.key.clone(),
                 expected,
-                new_generation: HeadGeneration::from_raw(self.generation + 1),
+                new_generation: head_generation(self.generation + 1),
                 new_body: vec![b'c', self.label],
             }),
             Stage::Done => None,
@@ -208,7 +202,7 @@ impl AuthorityClient for Contender {
         match response {
             AuthorityResponse::ReadHead(HeadRead::Present(receipt)) => {
                 self.token = Some(receipt.token());
-                self.generation = receipt.generation().raw();
+                self.generation = receipt.generation().get();
                 self.stage = Stage::Write;
             }
             AuthorityResponse::CompareExchangeHead(CasOutcome::PredecessorMismatch)
@@ -283,7 +277,7 @@ fn exactly_one_of_eight_contenders_wins_the_head() {
     let HeadRead::Present(head) = store.read_head(&key).expect("head read") else {
         panic!("the head must still be published");
     };
-    assert_eq!(head.generation(), HeadGeneration::from_raw(2));
+    assert_eq!(head.generation(), head_generation(2));
 }
 
 #[test]
@@ -320,7 +314,7 @@ fn a_cas_loser_rereads_and_wins_on_its_next_attempt() {
     };
     assert_eq!(
         head.generation(),
-        HeadGeneration::from_raw(3),
+        head_generation(3),
         "two publications advance the generation exactly twice"
     );
 }

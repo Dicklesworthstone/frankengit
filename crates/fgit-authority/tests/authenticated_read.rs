@@ -7,6 +7,10 @@ use fgit_authority::{
     VERSION_TOKEN_BYTES,
 };
 
+fn head_generation(value: u64) -> HeadGeneration {
+    HeadGeneration::try_new(value).expect("a positive head generation")
+}
+
 fn store_at(instance: u64) -> MemoryAuthorityStore {
     MemoryAuthorityStore::new(StoreInstanceId::from_raw(instance))
 }
@@ -63,7 +67,7 @@ fn a_token_the_store_never_issued_is_refused() {
     );
     assert_eq!(
         store
-            .compare_exchange_head(&key, forged, HeadGeneration::from_raw(2), b"head-2")
+            .compare_exchange_head(&key, forged, head_generation(2), b"head-2")
             .expect_err("a forged token must not win a conditional write"),
         AuthorityFailure::Refused(AuthorityRefusal::UnknownVersionToken),
         "an unissued token is refused, never merely reported as a lost race"
@@ -92,7 +96,7 @@ fn a_tampered_body_or_generation_is_refused() {
     let tampered_generation = HeadReadReceipt::new(
         key,
         genuine.token(),
-        HeadGeneration::from_raw(99),
+        head_generation(99),
         genuine.body().to_vec(),
     );
     assert_eq!(
@@ -128,7 +132,7 @@ fn an_authentic_stale_receipt_stays_authentic_and_still_loses() {
     let key = head_key("repo/head");
     let first = created(&store, &key, b"head-1");
     let CasOutcome::Committed(_) = store
-        .compare_exchange_head(&key, first.token(), HeadGeneration::from_raw(2), b"head-2")
+        .compare_exchange_head(&key, first.token(), head_generation(2), b"head-2")
         .expect("conditional replacement")
     else {
         panic!("the first conditional write must publish");
@@ -140,7 +144,7 @@ fn an_authentic_stale_receipt_stays_authentic_and_still_loses() {
 
     assert_eq!(
         store
-            .compare_exchange_head(&key, first.token(), HeadGeneration::from_raw(3), b"head-3")
+            .compare_exchange_head(&key, first.token(), head_generation(3), b"head-3")
             .expect("a stale token loses rather than erroring"),
         CasOutcome::PredecessorMismatch,
         "authenticity must never be mistaken for currency"
@@ -162,12 +166,7 @@ fn one_endpoint_never_honours_another_endpoints_token() {
     );
     assert_eq!(
         right
-            .compare_exchange_head(
-                &key,
-                left_receipt.token(),
-                HeadGeneration::from_raw(2),
-                b"head-2"
-            )
+            .compare_exchange_head(&key, left_receipt.token(), head_generation(2), b"head-2")
             .expect_err("endpoint confusion must be refused"),
         AuthorityFailure::Refused(AuthorityRefusal::UnknownVersionToken)
     );
@@ -179,12 +178,7 @@ fn one_endpoint_never_honours_another_endpoints_token() {
     );
 
     let CasOutcome::Committed(_) = right
-        .compare_exchange_head(
-            &key,
-            right_receipt.token(),
-            HeadGeneration::from_raw(2),
-            b"head-2",
-        )
+        .compare_exchange_head(&key, right_receipt.token(), head_generation(2), b"head-2")
         .expect("the endpoint's own token must proceed")
     else {
         panic!("the adjacent permitted case must publish");
@@ -205,12 +199,12 @@ fn an_opaque_token_round_trips_through_its_transport_form() {
     );
 
     let CasOutcome::Committed(published) = store
-        .compare_exchange_head(&key, transported, HeadGeneration::from_raw(2), b"head-2")
+        .compare_exchange_head(&key, transported, head_generation(2), b"head-2")
         .expect("a transported token is the same token")
     else {
         panic!("the transported current token must publish");
     };
-    assert_eq!(published.generation(), HeadGeneration::from_raw(2));
+    assert_eq!(published.generation(), head_generation(2));
     assert_eq!(published.body(), b"head-2");
     assert_ne!(
         published.token(),

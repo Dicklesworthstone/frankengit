@@ -1,4 +1,9 @@
-//! Version tokens, store identity, and head generations.
+//! Version tokens and store identity.
+//!
+//! The head generation itself is not defined here: it is
+//! `fgit_types::HeadGeneration`, the one canonical gap-free monotone counter
+//! for the `generation` field of `RepositoryAuthorityHeadBody`. This crate
+//! consumes that type rather than minting a parallel one.
 //!
 //! An authority version token is the opaque conditional-write handle defined in
 //! `NORMATIVE_PROTOCOL_CONTRACTS.md` §1: it is obtained from a previously
@@ -32,42 +37,6 @@ impl StoreInstanceId {
     #[must_use]
     pub const fn raw(self) -> u64 {
         self.0
-    }
-}
-
-/// Monotone generation of one repository authority head.
-///
-/// The generation is the anti-rollback counter carried in
-/// `RepositoryAuthorityHeadBody`.  The store enforces only that a conditional
-/// replacement strictly increases it; the exact successor rule (predecessor
-/// generation plus one, bound to `predecessor_head_id`) belongs to the
-/// reference state machine, not to storage.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct HeadGeneration(u64);
-
-impl HeadGeneration {
-    /// The generation of a freshly created repository head.
-    pub const FIRST: Self = Self(1);
-
-    /// Name a generation.
-    #[must_use]
-    pub const fn from_raw(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    /// The raw counter value.
-    #[must_use]
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-
-    /// The next generation, or `None` when the counter would overflow.
-    #[must_use]
-    pub const fn next(self) -> Option<Self> {
-        match self.0.checked_add(1) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
-        }
     }
 }
 

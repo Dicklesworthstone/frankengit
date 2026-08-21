@@ -24,7 +24,9 @@
 //! [`AuthorityStore`]: crate::AuthorityStore
 
 use crate::keys::{HeadKey, ImmutableKey, KeyError};
-use crate::tokens::{AuthorityVersionToken, HeadGeneration, StoreInstanceId};
+use fgit_types::HeadGeneration;
+
+use crate::tokens::{AuthorityVersionToken, StoreInstanceId};
 
 /// One authority-store invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -403,9 +405,7 @@ impl core::fmt::Display for AuthorityRefusal {
             Self::HeadAbsent => f.write_str("repository head slot does not exist"),
             Self::NonMonotoneGeneration { current, proposed } => write!(
                 f,
-                "proposed generation {} does not strictly increase past {}",
-                proposed.raw(),
-                current.raw()
+                "proposed generation {proposed} does not strictly increase past {current}"
             ),
             Self::Throttled => f.write_str("request shed before any effect"),
             Self::Unavailable => f.write_str("endpoint rejected the request without processing it"),

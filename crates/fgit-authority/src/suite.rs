@@ -20,7 +20,9 @@ use crate::injection::{
     DuplicateDelivery, FaultDirective, FaultKind, FaultPlan, FaultPosition, OpIndex,
 };
 use crate::keys::{HeadKey, ImmutableKey, KeyError};
-use crate::tokens::{AuthorityVersionToken, HeadGeneration, StoreInstanceId, VERSION_TOKEN_BYTES};
+use fgit_types::HeadGeneration;
+
+use crate::tokens::{AuthorityVersionToken, StoreInstanceId, VERSION_TOKEN_BYTES};
 use crate::vocabulary::{
     AmbiguityReason, AuthorityFailure, AuthorityRefusal, CasOutcome, HeadInit, HeadRead,
     HeadReadReceipt, ImmutableRead, PutOutcome,
@@ -87,6 +89,11 @@ impl ConformanceReport {
             detail,
         });
     }
+}
+
+/// A head generation, refusing zero the way `fgit-types` does.
+fn generation(value: u64) -> Result<HeadGeneration, String> {
+    HeadGeneration::try_new(value).map_err(|error| error.to_string())
 }
 
 fn head_key(name: &str) -> Result<HeadKey, String> {
@@ -234,13 +241,7 @@ fn ac_05_head_initialize_and_read<S: AuthorityStore + ?Sized>(store: &S) -> Resu
 fn ac_06_read_your_own_writes<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String> {
     let key = head_key("ac06/head")?;
     let first = initialized_head(store, &key, b"head-1")?;
-    let second = committed(
-        store,
-        &key,
-        first.token(),
-        HeadGeneration::from_raw(2),
-        b"head-2",
-    )?;
+    let second = committed(store, &key, first.token(), generation(2)?, b"head-2")?;
     let read = present_head(store, &key)?;
     if read == second {
         Ok(())
@@ -254,14 +255,8 @@ fn ac_06_read_your_own_writes<S: AuthorityStore + ?Sized>(store: &S) -> Result<(
 fn ac_07_cas_exact_predecessor<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String> {
     let key = head_key("ac07/head")?;
     let first = initialized_head(store, &key, b"head-1")?;
-    let second = committed(
-        store,
-        &key,
-        first.token(),
-        HeadGeneration::from_raw(2),
-        b"head-2",
-    )?;
-    if second.generation() == HeadGeneration::from_raw(2) && second.body() == b"head-2" {
+    let second = committed(store, &key, first.token(), generation(2)?, b"head-2")?;
+    if second.generation() == generation(2)? && second.body() == b"head-2" {
         Ok(())
     } else {
         Err(format!("commit published unexpected state: {second:?}"))
@@ -276,7 +271,7 @@ fn ac_08_single_winner<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), Stri
     for candidate in 0_u8..8 {
         let body = [b'c', candidate];
         let outcome = store
-            .compare_exchange_head(&key, base.token(), HeadGeneration::from_raw(2), &body)
+            .compare_exchange_head(&key, base.token(), generation(2)?, &body)
             .map_err(|failure| failure.to_string())?;
         match outcome {
             CasOutcome::Committed(_) => winners += 1,
@@ -295,20 +290,8 @@ fn ac_08_single_winner<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), Stri
 fn ac_09_token_unique_per_write<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String> {
     let key = head_key("ac09/head")?;
     let first = initialized_head(store, &key, b"head-1")?;
-    let second = committed(
-        store,
-        &key,
-        first.token(),
-        HeadGeneration::from_raw(2),
-        b"head-2",
-    )?;
-    let third = committed(
-        store,
-        &key,
-        second.token(),
-        HeadGeneration::from_raw(3),
-        b"head-3",
-    )?;
+    let second = committed(store, &key, first.token(), generation(2)?, b"head-2")?;
+    let third = committed(store, &key, second.token(), generation(3)?, b"head-3")?;
     if first.token() != second.token()
         && second.token() != third.token()
         && first.token() != third.token()
@@ -322,20 +305,8 @@ fn ac_09_token_unique_per_write<S: AuthorityStore + ?Sized>(store: &S) -> Result
 fn ac_10_aba_identical_restore<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String> {
     let key = head_key("ac10/head")?;
     let first = initialized_head(store, &key, b"state-a")?;
-    let second = committed(
-        store,
-        &key,
-        first.token(),
-        HeadGeneration::from_raw(2),
-        b"state-b",
-    )?;
-    let third = committed(
-        store,
-        &key,
-        second.token(),
-        HeadGeneration::from_raw(3),
-        b"state-a",
-    )?;
+    let second = committed(store, &key, first.token(), generation(2)?, b"state-b")?;
+    let third = committed(store, &key, second.token(), generation(3)?, b"state-a")?;
     if third.body() != b"state-a" {
         return Err("restore did not republish the byte-identical body".to_owned());
     }
@@ -343,7 +314,7 @@ fn ac_10_aba_identical_restore<S: AuthorityStore + ?Sized>(store: &S) -> Result<
         return Err("byte-identical restore reused the original version token".to_owned());
     }
     let outcome = store
-        .compare_exchange_head(&key, first.token(), HeadGeneration::from_raw(4), b"state-c")
+        .compare_exchange_head(&key, first.token(), generation(4)?, b"state-c")
         .map_err(|failure| failure.to_string())?;
     if outcome == CasOutcome::PredecessorMismatch {
         Ok(())
@@ -357,64 +328,40 @@ fn ac_10_aba_identical_restore<S: AuthorityStore + ?Sized>(store: &S) -> Result<
 fn ac_11_monotone_generation<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String> {
     let key = head_key("ac11/head")?;
     let first = initialized_head(store, &key, b"head-1")?;
-    let second = committed(
-        store,
-        &key,
-        first.token(),
-        HeadGeneration::from_raw(7),
-        b"head-7",
-    )?;
+    let second = committed(store, &key, first.token(), generation(7)?, b"head-7")?;
     let failure = store
-        .compare_exchange_head(
-            &key,
-            second.token(),
-            HeadGeneration::from_raw(7),
-            b"head-7b",
-        )
+        .compare_exchange_head(&key, second.token(), generation(7)?, b"head-7b")
         .err()
         .ok_or_else(|| "an equal generation was accepted".to_owned())?;
     expect_refusal(
         failure,
         &AuthorityRefusal::NonMonotoneGeneration {
-            current: HeadGeneration::from_raw(7),
-            proposed: HeadGeneration::from_raw(7),
+            current: generation(7)?,
+            proposed: generation(7)?,
         },
         "equal generation",
     )?;
     let failure = store
-        .compare_exchange_head(&key, second.token(), HeadGeneration::from_raw(3), b"head-3")
+        .compare_exchange_head(&key, second.token(), generation(3)?, b"head-3")
         .err()
         .ok_or_else(|| "a lower generation was accepted".to_owned())?;
     expect_refusal(
         failure,
         &AuthorityRefusal::NonMonotoneGeneration {
-            current: HeadGeneration::from_raw(7),
-            proposed: HeadGeneration::from_raw(3),
+            current: generation(7)?,
+            proposed: generation(3)?,
         },
         "lower generation",
     )?;
-    committed(
-        store,
-        &key,
-        second.token(),
-        HeadGeneration::from_raw(8),
-        b"head-8",
-    )
-    .map(|_| ())
+    committed(store, &key, second.token(), generation(8)?, b"head-8").map(|_| ())
 }
 
 fn ac_12_stale_token_loses<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String> {
     let key = head_key("ac12/head")?;
     let first = initialized_head(store, &key, b"head-1")?;
-    committed(
-        store,
-        &key,
-        first.token(),
-        HeadGeneration::from_raw(2),
-        b"head-2",
-    )?;
+    committed(store, &key, first.token(), generation(2)?, b"head-2")?;
     let outcome = store
-        .compare_exchange_head(&key, first.token(), HeadGeneration::from_raw(3), b"head-3")
+        .compare_exchange_head(&key, first.token(), generation(3)?, b"head-3")
         .map_err(|failure| format!("a stale but issued token must lose, not error: {failure}"))?;
     if outcome == CasOutcome::PredecessorMismatch {
         Ok(())
@@ -428,7 +375,7 @@ fn ac_13_forged_token_refused<S: AuthorityStore + ?Sized>(store: &S) -> Result<(
     initialized_head(store, &key, b"head-1")?;
     let forged = forged_token(0xAB);
     let failure = store
-        .compare_exchange_head(&key, forged, HeadGeneration::from_raw(2), b"head-2")
+        .compare_exchange_head(&key, forged, generation(2)?, b"head-2")
         .err()
         .ok_or_else(|| "a forged token was accepted by the conditional write".to_owned())?;
     expect_refusal(
@@ -436,8 +383,7 @@ fn ac_13_forged_token_refused<S: AuthorityStore + ?Sized>(store: &S) -> Result<(
         &AuthorityRefusal::UnknownVersionToken,
         "forged token on conditional write",
     )?;
-    let receipt =
-        HeadReadReceipt::new(key, forged, HeadGeneration::from_raw(1), b"head-1".to_vec());
+    let receipt = HeadReadReceipt::new(key, forged, generation(1)?, b"head-1".to_vec());
     let failure = store
         .authenticate_head_receipt(&receipt)
         .err()
@@ -473,7 +419,7 @@ fn ac_14_tampered_receipt_refused<S: AuthorityStore + ?Sized>(store: &S) -> Resu
     let regenerated = HeadReadReceipt::new(
         key,
         genuine.token(),
-        HeadGeneration::from_raw(99),
+        generation(99)?,
         genuine.body().to_vec(),
     );
     let failure = store
@@ -490,18 +436,12 @@ fn ac_14_tampered_receipt_refused<S: AuthorityStore + ?Sized>(store: &S) -> Resu
 fn ac_15_authenticity_is_not_currency<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String> {
     let key = head_key("ac15/head")?;
     let first = initialized_head(store, &key, b"head-1")?;
-    committed(
-        store,
-        &key,
-        first.token(),
-        HeadGeneration::from_raw(2),
-        b"head-2",
-    )?;
+    committed(store, &key, first.token(), generation(2)?, b"head-2")?;
     store.authenticate_head_receipt(&first).map_err(|failure| {
         format!("a genuinely issued but stale receipt must stay authentic: {failure}")
     })?;
     let outcome = store
-        .compare_exchange_head(&key, first.token(), HeadGeneration::from_raw(3), b"head-3")
+        .compare_exchange_head(&key, first.token(), generation(3)?, b"head-3")
         .map_err(|failure| failure.to_string())?;
     if outcome == CasOutcome::PredecessorMismatch {
         Ok(())
@@ -572,7 +512,7 @@ fn ac_18_head_absent<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String
     let present = head_key("ac18/present")?;
     let receipt = initialized_head(store, &present, b"head-1")?;
     let failure = store
-        .compare_exchange_head(&absent, receipt.token(), HeadGeneration::from_raw(2), b"x")
+        .compare_exchange_head(&absent, receipt.token(), generation(2)?, b"x")
         .err()
         .ok_or_else(|| "a conditional write against an absent head succeeded".to_owned())?;
     expect_refusal(
@@ -580,31 +520,18 @@ fn ac_18_head_absent<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String
         &AuthorityRefusal::TokenKeyMismatch,
         "token issued for another key",
     )?;
-    committed(
-        store,
-        &present,
-        receipt.token(),
-        HeadGeneration::from_raw(2),
-        b"head-2",
-    )
-    .map(|_| ())
+    committed(store, &present, receipt.token(), generation(2)?, b"head-2").map(|_| ())
 }
 
 fn ac_19_known_root_recovery<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String> {
     let key = head_key("ac19/head")?;
     let mut receipt = initialized_head(store, &key, b"gen-1")?;
-    for generation in 2_u64..=6 {
-        let body = format!("gen-{generation}").into_bytes();
-        receipt = committed(
-            store,
-            &key,
-            receipt.token(),
-            HeadGeneration::from_raw(generation),
-            &body,
-        )?;
+    for step in 2_u64..=6 {
+        let body = format!("gen-{step}").into_bytes();
+        receipt = committed(store, &key, receipt.token(), generation(step)?, &body)?;
     }
     let recovered = present_head(store, &key)?;
-    if recovered.generation() == HeadGeneration::from_raw(6) && recovered.body() == b"gen-6" {
+    if recovered.generation() == generation(6)? && recovered.body() == b"gen-6" {
         Ok(())
     } else {
         Err(format!("known-root read recovered {recovered:?}"))
@@ -622,12 +549,7 @@ where
     let left_receipt = initialized_head(&left, &key, b"head-1")?;
     initialized_head(&right, &key, b"head-1")?;
     let failure = right
-        .compare_exchange_head(
-            &key,
-            left_receipt.token(),
-            HeadGeneration::from_raw(2),
-            b"head-2",
-        )
+        .compare_exchange_head(&key, left_receipt.token(), generation(2)?, b"head-2")
         .err()
         .ok_or_else(|| "an endpoint honoured another endpoint's token".to_owned())?;
     expect_refusal(
@@ -780,14 +702,14 @@ fn af_01_lost_response_resolves_applied<S: FaultableAuthorityStore + ?Sized>(
         FaultKind::LoseResponse,
     )]));
     let failure = store
-        .compare_exchange_head(&key, first.token(), HeadGeneration::from_raw(2), b"head-2")
+        .compare_exchange_head(&key, first.token(), generation(2)?, b"head-2")
         .err()
         .ok_or_else(|| "a lost response still produced an outcome".to_owned())?;
     if failure.proves_no_effect() {
         return Err("a lost response was reported as proof of non-commit".to_owned());
     }
     store.install_fault_plan(FaultPlan::none());
-    match resolve_ambiguous_cas(store, &key, HeadGeneration::from_raw(2), b"head-2")
+    match resolve_ambiguous_cas(store, &key, generation(2)?, b"head-2")
         .map_err(|failure| failure.to_string())?
     {
         CasResolution::Applied(_) => Ok(()),
@@ -805,14 +727,14 @@ fn af_02_lost_request_resolves_not_applied<S: FaultableAuthorityStore + ?Sized>(
         FaultKind::LoseRequest,
     )]));
     let failure = store
-        .compare_exchange_head(&key, first.token(), HeadGeneration::from_raw(2), b"head-2")
+        .compare_exchange_head(&key, first.token(), generation(2)?, b"head-2")
         .err()
         .ok_or_else(|| "a lost request still produced an outcome".to_owned())?;
     if failure.proves_no_effect() {
         return Err("a lost request was reported as proof of non-commit".to_owned());
     }
     store.install_fault_plan(FaultPlan::none());
-    match resolve_ambiguous_cas(store, &key, HeadGeneration::from_raw(2), b"head-2")
+    match resolve_ambiguous_cas(store, &key, generation(2)?, b"head-2")
         .map_err(|failure| failure.to_string())?
     {
         CasResolution::NotApplied(_) => Ok(()),
@@ -836,7 +758,7 @@ where
             kind,
         )]));
         let failure = store
-            .compare_exchange_head(&key, first.token(), HeadGeneration::from_raw(2), b"head-2")
+            .compare_exchange_head(&key, first.token(), generation(2)?, b"head-2")
             .err()
             .ok_or_else(|| "an injected loss still produced an outcome".to_owned())?;
         observed.push(failure);
@@ -893,7 +815,7 @@ fn af_05_duplicate_cas_applies_once<S: FaultableAuthorityStore + ?Sized>(
         },
     )]));
     let outcome = store
-        .compare_exchange_head(&key, first.token(), HeadGeneration::from_raw(2), b"head-2")
+        .compare_exchange_head(&key, first.token(), generation(2)?, b"head-2")
         .map_err(|failure| failure.to_string())?;
     if outcome != CasOutcome::PredecessorMismatch {
         return Err(format!(
@@ -902,7 +824,7 @@ fn af_05_duplicate_cas_applies_once<S: FaultableAuthorityStore + ?Sized>(
     }
     store.install_fault_plan(FaultPlan::none());
     let head = present_head(store, &key)?;
-    if head.generation() == HeadGeneration::from_raw(2) && head.body() == b"head-2" {
+    if head.generation() == generation(2)? && head.body() == b"head-2" {
         Ok(())
     } else {
         Err(format!("a duplicated conditional write published {head:?}"))

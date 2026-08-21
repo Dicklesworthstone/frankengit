@@ -13,6 +13,10 @@ use fgit_authority::{
     resolve_ambiguous_cas, resolve_ambiguous_put,
 };
 
+fn head_generation(value: u64) -> HeadGeneration {
+    HeadGeneration::try_new(value).expect("a positive head generation")
+}
+
 fn store() -> MemoryAuthorityStore {
     MemoryAuthorityStore::new(StoreInstanceId::from_raw(1))
 }
@@ -44,7 +48,7 @@ fn attempt_with(kind: FaultKind) -> (MemoryAuthorityStore, HeadKey, AuthorityFai
         kind,
     )]));
     let failure = store
-        .compare_exchange_head(&key, first.token(), HeadGeneration::from_raw(2), b"head-2")
+        .compare_exchange_head(&key, first.token(), head_generation(2), b"head-2")
         .expect_err("an injected loss cannot return an outcome");
     store.install_fault_plan(FaultPlan::none());
     (store, key, failure)
@@ -55,12 +59,12 @@ fn a_response_lost_after_the_effect_resolves_to_applied() {
     let (store, key, failure) = attempt_with(FaultKind::LoseResponse);
     assert!(!failure.proves_no_effect());
 
-    let resolution = resolve_ambiguous_cas(&store, &key, HeadGeneration::from_raw(2), b"head-2")
+    let resolution = resolve_ambiguous_cas(&store, &key, head_generation(2), b"head-2")
         .expect("resolution read");
     let CasResolution::Applied(receipt) = resolution else {
         panic!("an effect that really happened must resolve to Applied, observed {resolution:?}");
     };
-    assert_eq!(receipt.generation(), HeadGeneration::from_raw(2));
+    assert_eq!(receipt.generation(), head_generation(2));
     assert_eq!(receipt.body(), b"head-2");
 }
 
@@ -69,7 +73,7 @@ fn a_request_lost_before_the_effect_resolves_to_not_applied() {
     let (store, key, failure) = attempt_with(FaultKind::LoseRequest);
     assert!(!failure.proves_no_effect());
 
-    let resolution = resolve_ambiguous_cas(&store, &key, HeadGeneration::from_raw(2), b"head-2")
+    let resolution = resolve_ambiguous_cas(&store, &key, head_generation(2), b"head-2")
         .expect("resolution read");
     let CasResolution::NotApplied(receipt) = resolution else {
         panic!("an effect that never happened must resolve to NotApplied, observed {resolution:?}");
@@ -168,17 +172,17 @@ fn a_superseded_head_defers_to_the_outcome_index() {
     let key = head_key("repo/head");
     let first = created(&store, &key, b"head-1");
     let second = match store
-        .compare_exchange_head(&key, first.token(), HeadGeneration::from_raw(2), b"head-2")
+        .compare_exchange_head(&key, first.token(), head_generation(2), b"head-2")
         .expect("conditional replacement")
     {
         fgit_authority::CasOutcome::Committed(receipt) => receipt,
         fgit_authority::CasOutcome::PredecessorMismatch => panic!("the first write must publish"),
     };
     store
-        .compare_exchange_head(&key, second.token(), HeadGeneration::from_raw(3), b"head-3")
+        .compare_exchange_head(&key, second.token(), head_generation(3), b"head-3")
         .expect("a third publication");
 
-    let resolution = resolve_ambiguous_cas(&store, &key, HeadGeneration::from_raw(2), b"head-2")
+    let resolution = resolve_ambiguous_cas(&store, &key, head_generation(2), b"head-2")
         .expect("resolution read");
     assert!(
         matches!(resolution, CasResolution::Superseded(_)),
@@ -228,7 +232,7 @@ fn the_ground_truth_of_an_ambiguous_attempt_lives_only_in_the_fault_log() {
     )]));
 
     let failure = scripted
-        .compare_exchange_head(&key, first.token(), HeadGeneration::from_raw(2), b"head-2")
+        .compare_exchange_head(&key, first.token(), head_generation(2), b"head-2")
         .expect_err("a lost response returns no outcome");
     assert_eq!(
         failure,

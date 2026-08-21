@@ -29,7 +29,9 @@
 
 use crate::injection::{EffectLog, FaultLog, FaultPlan};
 use crate::keys::{HeadKey, ImmutableKey};
-use crate::tokens::{AuthorityVersionToken, HeadGeneration, StoreInstanceId};
+use fgit_types::HeadGeneration;
+
+use crate::tokens::{AuthorityVersionToken, StoreInstanceId};
 use crate::vocabulary::{
     AmbiguityReason, AuthenticatedHead, AuthorityFailure, AuthorityOp, AuthorityRefusal,
     AuthorityResponse, CasOutcome, HeadInit, HeadRead, HeadReadReceipt, ImmutableRead, PutOutcome,

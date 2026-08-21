@@ -88,11 +88,12 @@ pub use crate::schedule::{
 pub use crate::suite::{
     ConformanceCheck, ConformanceReport, run_authority_conformance, run_fault_conformance,
 };
-pub use crate::tokens::{
-    AuthorityVersionToken, HeadGeneration, StoreInstanceId, VERSION_TOKEN_BYTES,
-};
+pub use crate::tokens::{AuthorityVersionToken, StoreInstanceId, VERSION_TOKEN_BYTES};
 pub use crate::vocabulary::{
     AmbiguityReason, AuthenticatedHead, AuthorityFailure, AuthorityOp, AuthorityOpKind,
     AuthorityRefusal, AuthorityResponse, CasOutcome, EffectKnowledge, HeadInit, HeadRead,
     HeadReadReceipt, ImmutableRead, PutOutcome,
 };
+/// The head generation is `fgit-types`' canonical monotone counter, re-exported
+/// so a consumer of this contract does not have to reach for two crates.
+pub use fgit_types::HeadGeneration;
