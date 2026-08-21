@@ -122,11 +122,24 @@ ca_foreign=$(grep -n 'fgit-' "$ca_manifest" | grep -v 'name = "fgit-codec-verify
 
 # The lockfile entry for a package with no dependencies has no `dependencies`
 # key at all; one that acquired any would gain the key and the names.
-ca_lock_entry=$(awk '
-  /^name = "fgit-codec-verify"$/ { inside = 1 }
-  inside { print }
-  inside && /^\[\[package\]\]$/ && ++seen > 0 { exit }
-' "$CA_REPO/Cargo.lock" | sed '/^\[\[package\]\]$/d')
+#
+# Pure bash on purpose. The harness keeps the evidence-validating path to bash
+# plus coreutils plus one sha-256 helper, so a suite reaching for awk would
+# reintroduce exactly the dependency the harness exists to avoid
+# (FG-000A-PORT-019). A line-oriented TOML stanza scan is a while/case loop.
+ca_lock_entry=''
+ca_inside=0
+while IFS= read -r ca_line; do
+  if [ "$ca_inside" = 1 ] && [ "$ca_line" = '[[package]]' ]; then
+    break
+  fi
+  if [ "$ca_line" = 'name = "fgit-codec-verify"' ]; then
+    ca_inside=1
+  fi
+  if [ "$ca_inside" = 1 ]; then
+    ca_lock_entry="$ca_lock_entry$ca_line"$'\n'
+  fi
+done < "$CA_REPO/Cargo.lock"
 
 fge_phase assert
 

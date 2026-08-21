@@ -635,8 +635,15 @@ fn the_refusal_tally_is_stable_across_runs() {
     let cases = load_goldens();
     let canonical = canonical_bytes(&cases, "txn-seal__canonical");
 
-    let first = campaign::<TransactionSealBody>("txn-seal/stability-a", &canonical);
-    let second = campaign::<TransactionSealBody>("txn-seal/stability-b", &canonical);
+    // The SAME name both times, and that is load-bearing rather than cosmetic:
+    // the coordinated pass seeds its generator from `MULTI_BIT_SEED ^
+    // seed_of(name)` so that different vectors draw different mutants. Passing
+    // two distinct labels here — which the first version of this test did —
+    // seeds two different generators and asserts a property that is both false
+    // and undesirable, namely that campaigns with different seeds agree. The
+    // claim worth making is that one campaign is reproducible.
+    let first = campaign::<TransactionSealBody>("txn-seal", &canonical);
+    let second = campaign::<TransactionSealBody>("txn-seal", &canonical);
 
     assert_eq!(
         first, second,
@@ -647,5 +654,5 @@ fn the_refusal_tally_is_stable_across_runs() {
         first.keys().any(|key| key.starts_with("refused:")),
         "a stable tally of nothing would satisfy the equality above vacuously"
     );
-    log_tally("txn-seal/stability", &first);
+    log_tally("txn-seal (reproduced)", &first);
 }
