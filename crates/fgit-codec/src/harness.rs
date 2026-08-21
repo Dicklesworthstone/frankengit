@@ -256,17 +256,17 @@ pub fn capsule_id() -> RepositoryCapsuleId {
 }
 
 #[must_use]
-pub fn tenant_id() -> TenantId {
+pub const fn tenant_id() -> TenantId {
     TenantId::from_bytes([0x11; 16])
 }
 
 #[must_use]
-pub fn repository_id() -> RepositoryId {
+pub const fn repository_id() -> RepositoryId {
     RepositoryId::from_bytes([0x22; 16])
 }
 
 #[must_use]
-pub fn principal_id() -> PrincipalId {
+pub const fn principal_id() -> PrincipalId {
     PrincipalId::from_bytes([0x33; 16])
 }
 
@@ -494,7 +494,7 @@ fn parse_golden(path: &std::path::Path) -> GoldenCase {
 
 fn decode_hex(name: &str, text: &str) -> Vec<u8> {
     assert!(
-        text.len() % 2 == 0,
+        text.len().is_multiple_of(2),
         "{name}: hex string has an odd number of digits"
     );
     text.as_bytes()
