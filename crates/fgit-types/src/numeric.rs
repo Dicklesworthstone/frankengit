@@ -221,7 +221,7 @@ macro_rules! monotone_counter {
             ///
             /// Zero is refused: it is reserved to mean "no value yet" in
             /// optional positions, so it can never be a live counter value.
-            pub fn try_new(value: u64) -> Result<Self, TypeRefusal> {
+            pub const fn try_new(value: u64) -> Result<Self, TypeRefusal> {
                 if value == 0 {
                     return Err(TypeRefusal::ValueOutOfRange {
                         field: $field,
@@ -342,7 +342,11 @@ impl ByteCount {
     pub const ZERO: Self = Self(0);
 
     /// Builds a byte count, refusing anything above `maximum`.
-    pub fn try_new(field: &'static str, value: u64, maximum: u64) -> Result<Self, TypeRefusal> {
+    pub const fn try_new(
+        field: &'static str,
+        value: u64,
+        maximum: u64,
+    ) -> Result<Self, TypeRefusal> {
         if value > maximum {
             return Err(TypeRefusal::ValueOutOfRange {
                 field,

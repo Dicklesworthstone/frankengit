@@ -142,11 +142,11 @@ impl<'a> Decoder<'a> {
 
     fn read_count(&mut self, field: &'static str) -> Result<usize, CodecRefusal> {
         let declared = u64::from(self.read_scalar::<u32>(field)?);
-        if declared > self.limits.max_element_count {
+        if declared > self.limits.elements {
             return Err(CodecRefusal::CountBoundExceeded {
                 field,
                 observed: declared,
-                limit: self.limits.max_element_count,
+                limit: self.limits.elements,
             });
         }
         // A collection cannot have more elements than there are bytes left to
@@ -162,13 +162,13 @@ impl<'a> Decoder<'a> {
         usize::try_from(declared).map_err(|_| CodecRefusal::CountBoundExceeded {
             field,
             observed: declared,
-            limit: self.limits.max_element_count,
+            limit: self.limits.elements,
         })
     }
 
     /// Reads a length-prefixed byte string.
     pub fn read_bytes(&mut self, field: &'static str) -> Result<&'a [u8], CodecRefusal> {
-        let length = self.read_length(field, self.limits.max_byte_string_len)?;
+        let length = self.read_length(field, self.limits.byte_string_bytes)?;
         self.take(field, length)
     }
 
@@ -197,9 +197,9 @@ impl<'a> Decoder<'a> {
     }
 
     fn enter(&mut self) -> Result<(), CodecRefusal> {
-        if self.depth >= self.limits.max_depth {
+        if self.depth >= self.limits.depth {
             return Err(CodecRefusal::DepthBoundExceeded {
-                limit: self.limits.max_depth,
+                limit: self.limits.depth,
                 offset: self.offset(),
             });
         }

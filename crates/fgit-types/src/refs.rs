@@ -70,8 +70,7 @@ impl RefName {
         if source == b"@" {
             return Err(structure("name_is_bare_at_sign", 0));
         }
-        for offset in 0..source.len().saturating_sub(1) {
-            let pair = &source[offset..offset + 2];
+        for (offset, pair) in source.windows(2).enumerate() {
             if pair == b".." {
                 return Err(structure("double_dot", at(offset + 1)));
             }
@@ -91,26 +90,22 @@ impl RefName {
 
         let mut component_start = 0;
         let mut components = 0;
-        for offset in 0..=source.len() {
-            let at_end = offset == source.len();
-            if !at_end && source[offset] != b'/' {
-                continue;
-            }
-            let component = &source[component_start..offset];
+        for component in source.split(|byte| *byte == b'/') {
+            let component_end = component_start + component.len();
             if component.is_empty() {
-                return Err(structure("empty_component", at(offset)));
+                return Err(structure("empty_component", at(component_end)));
             }
-            if component[0] == b'.' {
+            if component.starts_with(b".") {
                 return Err(structure("component_starts_with_dot", at(component_start)));
             }
-            if component.len() >= 5 && &component[component.len() - 5..] == b".lock" {
+            if component.ends_with(b".lock") {
                 return Err(structure(
                     "component_ends_with_dot_lock",
-                    at(offset.saturating_sub(5)),
+                    at(component_end.saturating_sub(5)),
                 ));
             }
             components += 1;
-            component_start = offset + 1;
+            component_start = component_end + 1;
         }
         if components < 2 && !allow_one_level {
             return Err(structure("name_is_one_level", 0));
@@ -138,7 +133,7 @@ impl RefName {
 
     /// Reference name length in bytes.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.bytes.len()
     }
 
@@ -149,7 +144,6 @@ impl RefName {
     }
 
     /// The slash-separated components, in order.
-    #[must_use]
     pub fn components(&self) -> impl Iterator<Item = &[u8]> {
         self.bytes.split(|byte| *byte == b'/')
     }

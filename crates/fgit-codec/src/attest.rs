@@ -13,19 +13,26 @@
 //!
 //! # What this module does not do
 //!
-//! It performs no cryptography. [`BodyDigest`] is the seam: `fgit-crypto` owns
-//! digest algorithms, the algorithm registry, signature schemes, and
-//! verification. This module owns only the byte layout and the structural
-//! checks that need no key material.
+//! It performs no cryptography, and it does not define the digest preimage
+//! either. [`BodyIdentity`] is the seam, and it is deliberately shaped as
+//! *(domain, schema, canonical body)* rather than *(bytes)*: `fgit-crypto`
+//! owns the preimage framing, the digest algorithms, the algorithm registry,
+//! signature schemes, and verification. Handing it the three components rather
+//! than a pre-assembled buffer is what keeps a second, silently divergent
+//! preimage from existing in this crate.
+//!
+//! This module owns the byte layout and the structural checks that need no key
+//! material.
 
-use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::identity::InternalObjectId;
-use fgit_types::{DomainTag, SchemaFamily};
+use fgit_types::{DomainTag, SchemaFamily, SchemaId};
 
 use crate::bounds::DecodeLimits;
 use crate::error::CodecRefusal;
 use crate::reader::Decoder;
-use crate::wire::{CODEC_VERSION, CanonicalBody, decode_body, encode_body, peek_frame_domain};
+use crate::wire::{
+    CanonicalBody, canonical_body_bytes, decode_body, encode_body, peek_frame_domain, split_frame,
+};
 use crate::writer::Encoder;
 
 /// Largest accepted signing-key identifier, in bytes.
@@ -35,56 +42,50 @@ pub const MAX_SIGNATURE_LEN: usize = 1024;
 /// Largest accepted carried body, in bytes.
 pub const MAX_CARRIED_BODY_LEN: usize = 8 * 1024 * 1024;
 
-/// Computes a digest over canonical bytes.
+/// Turns a body's domain, schema, and canonical bytes into its identity.
 ///
-/// This crate never implements one. `fgit-crypto` provides the production
-/// implementation and owns which code point names which construction.
-pub trait BodyDigest {
-    /// Registry code point of the construction this implementation computes.
-    fn algorithm(&self) -> DigestAlgorithmId;
-
-    /// The digest of `canonical_bytes`.
-    fn digest(&self, canonical_bytes: &[u8]) -> DigestBytes;
+/// This crate never implements one and never assembles a digest preimage.
+/// `fgit-crypto` owns the preimage framing, the digest construction, and the
+/// algorithm registry; giving it the three components separately is what stops
+/// a second preimage definition from growing here.
+pub trait BodyIdentity {
+    /// The identity of one canonical body.
+    fn identify(
+        &self,
+        domain: DomainTag,
+        schema: SchemaId,
+        canonical_body: &[u8],
+    ) -> InternalObjectId;
 }
 
-/// The identity of a body, given a digest implementation.
+/// The identity of a body.
 ///
-/// The digest is taken over the whole canonical frame, which already contains
-/// the domain separation tag and schema identifier at fixed length-delimited
-/// positions.
-pub fn body_id<B, D>(digest: &D, body: &B) -> Result<InternalObjectId, CodecRefusal>
+/// Computed over the body's payload, not its frame: transport framing is
+/// excluded from canonical body bytes, so re-framing a body cannot change what
+/// it is.
+pub fn body_id<B, I>(identity: &I, body: &B) -> Result<InternalObjectId, CodecRefusal>
 where
     B: CanonicalBody,
-    D: BodyDigest + ?Sized,
+    I: BodyIdentity + ?Sized,
 {
-    let bytes = encode_body(body)?;
-    Ok(InternalObjectId::new(
-        digest.algorithm(),
-        B::DOMAIN,
-        CODEC_VERSION,
-        digest.digest(&bytes),
-    ))
+    let payload = canonical_body_bytes(body)?;
+    Ok(identity.identify(B::DOMAIN, B::schema_id(), &payload))
 }
 
 /// The identity of a frame already in byte form.
 ///
-/// The domain is read from the frame rather than supplied, so a caller cannot
-/// label one body's bytes with another body's domain.
-pub fn body_id_of_frame<D>(
-    digest: &D,
+/// The domain and schema are read from the frame rather than supplied, so a
+/// caller cannot label one body's bytes with another body's domain.
+pub fn body_id_of_frame<I>(
+    identity: &I,
     frame: &[u8],
     limits: DecodeLimits,
 ) -> Result<InternalObjectId, CodecRefusal>
 where
-    D: BodyDigest + ?Sized,
+    I: BodyIdentity + ?Sized,
 {
-    let domain = peek_frame_domain(frame, limits)?;
-    Ok(InternalObjectId::new(
-        digest.algorithm(),
-        domain,
-        CODEC_VERSION,
-        digest.digest(frame),
-    ))
+    let (header, payload) = split_frame(frame, limits)?;
+    Ok(identity.identify(header.domain, header.schema, payload))
 }
 
 /// Registry code point naming a signature scheme.
@@ -96,7 +97,7 @@ pub struct SignatureSchemeId(u16);
 
 impl SignatureSchemeId {
     /// Builds a scheme code point, refusing the reserved zero slot.
-    pub fn try_new(code_point: u16) -> Result<Self, CodecRefusal> {
+    pub const fn try_new(code_point: u16) -> Result<Self, CodecRefusal> {
         if code_point == 0 {
             return Err(CodecRefusal::VariantUnknown {
                 field: "SignatureSchemeId",
@@ -195,7 +196,7 @@ fn bounded(
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SignedEnvelopeBody {
     /// The unsigned body's canonical frame bytes, exactly as they were
-    /// produced. These bytes are what a body identity is computed over.
+    /// produced. Its identity is computed from the payload inside them.
     body_frame: Vec<u8>,
     /// Detached signatures. Encoded as a canonical set, so their order in
     /// this vector never affects the envelope's bytes and a repeat is refused.
@@ -223,14 +224,14 @@ impl SignedEnvelopeBody {
 
     /// The carried body's canonical frame bytes.
     #[must_use]
-    pub fn body_frame(&self) -> &[u8] {
-        &self.body_frame
+    pub const fn body_frame(&self) -> &[u8] {
+        self.body_frame.as_slice()
     }
 
     /// The attached signatures.
     #[must_use]
-    pub fn signatures(&self) -> &[DetachedSignature] {
-        &self.signatures
+    pub const fn signatures(&self) -> &[DetachedSignature] {
+        self.signatures.as_slice()
     }
 
     /// Attaches a signature.
@@ -245,29 +246,29 @@ impl SignedEnvelopeBody {
     ) -> Result<(), CodecRefusal> {
         let domain = peek_frame_domain(&self.body_frame, limits)?;
         if signature.body_id.domain() != domain {
-            return Err(CodecRefusal::DomainUnexpected {
-                expected: domain,
-                observed: signature.body_id.domain(),
-            });
+            return Err(CodecRefusal::domain_unexpected(
+                domain,
+                signature.body_id.domain(),
+            ));
         }
         self.signatures.push(signature);
         Ok(())
     }
 
-    /// The carried body's identity under a digest implementation.
+    /// The carried body's identity.
     ///
-    /// This depends only on [`SignedEnvelopeBody::body_frame`], so it is the
-    /// same value for the unsigned body and for every envelope that carries
-    /// it, whatever signatures are attached.
-    pub fn carried_body_id<D>(
+    /// This depends only on the carried body's own bytes, so it is the same
+    /// value for the unsigned body and for every envelope that carries it,
+    /// whatever signatures are attached.
+    pub fn carried_body_id<I>(
         &self,
-        digest: &D,
+        identity: &I,
         limits: DecodeLimits,
     ) -> Result<InternalObjectId, CodecRefusal>
     where
-        D: BodyDigest + ?Sized,
+        I: BodyIdentity + ?Sized,
     {
-        body_id_of_frame(digest, &self.body_frame, limits)
+        body_id_of_frame(identity, &self.body_frame, limits)
     }
 
     /// Decodes the carried body.
@@ -305,10 +306,10 @@ impl CanonicalBody for SignedEnvelopeBody {
             input.read_canonical_set("SignedEnvelopeBody.signatures", DetachedSignature::read)?;
         for signature in &signatures {
             if signature.body_id.domain() != domain {
-                return Err(CodecRefusal::DomainUnexpected {
-                    expected: domain,
-                    observed: signature.body_id.domain(),
-                });
+                return Err(CodecRefusal::domain_unexpected(
+                    domain,
+                    signature.body_id.domain(),
+                ));
             }
         }
         Ok(Self {

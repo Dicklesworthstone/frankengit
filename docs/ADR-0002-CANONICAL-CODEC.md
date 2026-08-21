@@ -76,7 +76,9 @@ schema_minor   u16 big-endian
 payload        u32 length + payload bytes
 ```
 
-The **whole frame** is the body's canonical bytes, and a body's internal identity is the digest of the frame. Because the domain tag and schema identifier sit inside the digested bytes at fixed, explicitly length-delimited positions, this satisfies the domain-separation rule of the normative contract, and binds strictly more than that rule requires: the codec version and every length are committed too. Binding more cannot weaken domain separation, and it means a future codec change can never silently reinterpret old bytes as something else.
+**The frame is transport framing, and is therefore excluded from identity.** `docs/NORMATIVE_PROTOCOL_CONTRACTS.md` section 3.2 says canonical body bytes exclude transport framing, and the frame is exactly that: it makes bytes on a wire or in a store self-describing. A body's **canonical body bytes are its payload alone**, and its identity is computed from that payload together with the domain separation tag and the schema identifier.
+
+An earlier draft of this ADR digested the whole frame, on the reasoning that binding more can only be safer. That was wrong against section 3.2, and it had a concrete cost: re-framing a body under a later codec minor would have changed its identity. `crates/fgit-codec` exposes `canonical_body_bytes` (payload) separately from `encode_body` (frame) so the distinction is in the API rather than in a comment.
 
 ### Value rules
 
@@ -114,13 +116,25 @@ A signature whose committed identity is not in the carried body's domain cannot 
 
 ### Boundary with `fgit-crypto`
 
-`fgit-codec` performs no cryptography. `BodyDigest` is the seam: `fgit-crypto` owns digest algorithms, the code-point-to-construction registry, output lengths, migration, signature schemes, and verification. `fgit-types` owns the *shape* of a digest — an opaque registry code point plus bounded bytes — so every protocol body is expressible before any algorithm is chosen, and choosing one later cannot change a body's shape.
+`fgit-codec` performs no cryptography **and does not define the digest preimage either**. The seam is:
+
+```rust
+trait BodyIdentity {
+    fn identify(&self, domain: DomainTag, schema: SchemaId, canonical_body: &[u8])
+        -> InternalObjectId;
+}
+```
+
+Its shape is deliberate. Handing `fgit-crypto` the three components rather than a pre-assembled buffer is what stops a second, silently divergent preimage framing from growing inside this crate — which is precisely the failure that a "canonical" codec cannot afford, because two preimages mean two identities for one body.
+
+`fgit-crypto` owns the preimage framing, the digest algorithms, the code-point-to-construction registry, output lengths, migration, signature schemes, and verification. `fgit-types` owns the *shape* of a digest — an opaque registry code point plus bounded bytes — so every protocol body is expressible before any algorithm is chosen, and choosing one later cannot change a body's shape.
 
 ## Consequences
 
 ### Positive
 
 - Canonicality is structural rather than rule-enforced, so the most dangerous class of bug in a canonical codec is largely designed out rather than tested for.
+- Identity is independent of framing, so a transport or storage change cannot move a body's identity.
 - No dependency, no build script, no procedural macro, no platform assumptions; the same bytes on a server and in a browser build.
 - Every refusal names the field, the observed value, the bound, and the offset, so a rejected body is diagnosable from one log line.
 - A hexdump is readable against a one-page layout, which matters for an audit years after the code was written.
@@ -137,12 +151,13 @@ A signature whose committed identity is not in the carried body's domain cannot 
 
 1. One logical value has exactly one canonical byte string, in both directions: decoding a body and re-encoding it reproduces the original bytes, and encoding a value and decoding it reproduces the value.
 2. Bodies in different domains never share an identity, whatever their payloads.
-3. No canonical byte string contains a floating-point value, a platform-width integer, an ambiguous map, or a collection whose order is unspecified.
-4. Every length, count, and nesting depth is bounded before allocation, and exceeding a bound is a typed refusal naming the bound.
-5. An unknown codec major or schema major is refused, never guessed.
-6. A body carrying fields from a higher minor can be relayed without changing its identity.
-7. Attaching, removing, or replacing a signature never changes the identity of the body it signs.
-8. Every codec refusal maps to exactly one member of the closed protocol refusal vocabulary, deterministically, so a decode failure and the refusal recorded in the decision stream cannot disagree.
+3. A body's identity depends on its payload, its domain, and its schema, and on nothing else — not on its frame, not on how many signatures are attached to it.
+4. No canonical byte string contains a floating-point value, a platform-width integer, an ambiguous map, or a collection whose order is unspecified.
+5. Every length, count, and nesting depth is bounded before allocation, and exceeding a bound is a typed refusal naming the bound.
+6. An unknown codec major or schema major is refused, never guessed.
+7. A body carrying fields from a higher minor can be relayed without changing its identity.
+8. Attaching, removing, or replacing a signature never changes the identity of the body it signs.
+9. Every codec refusal maps to exactly one member of the closed protocol refusal vocabulary, deterministically, so a decode failure and the refusal recorded in the decision stream cannot disagree.
 
 ## Rejected alternatives
 
@@ -168,7 +183,7 @@ Rejected because it makes identity depend on who has signed so far. The same log
 
 ## Verification
 
-The corpus lives under `crates/fgit-codec/tests/goldens/` as one file per case in a line-oriented text format: the schema, whether the case is valid or a planted defect, the frame length, the expected identity, and the bytes as lowercase hexadecimal.
+The corpus lives under `crates/fgit-codec/tests/goldens/` as one file per case in a line-oriented text format: the schema, whether the case is valid or a planted defect, the frame length, the canonical body length, the expected identity, and the bytes as lowercase hexadecimal.
 
 The suite only ever **reads** the corpus. Regenerating it is a deliberate act, never something a failing test does for itself.
 
@@ -181,14 +196,17 @@ Coverage as committed:
 - shuffle-invariance sweeps for sorted collections and sorted-key maps;
 - forward-compatibility assertions in both directions: a higher-minor body decodes, preserves its unknown suffix, and re-encodes byte-identically, while an unexplained suffix at a known minor is refused;
 - bound assertions that accept a value exactly at each bound and refuse the value one past it;
-- the signed-envelope property: three envelopes carrying one body with zero, one, and two signatures agree on the carried body's bytes and identity while differing as envelopes.
+- the signed-envelope property: three envelopes carrying one body with zero, one, and two signatures agree on the carried body's bytes and identity while differing as envelopes;
+- a framing-independence assertion: the identity computed from a body equals the identity computed from its frame, and the frame is strictly larger than the bytes that were identified;
+- a domain-separation assertion: the same canonical bytes under two domains produce two identities.
 
 **The committed golden bytes were derived from this specification by a second implementation, written separately from the encoder and discarded afterwards.** The suite therefore compares two independent readings of the format rather than the encoder confirming itself. That is a weaker guarantee than an independently maintained verifier and is the reason FG-002c exists.
 
 ## Non-claims
 
 - **No cryptographic claim is made anywhere in this crate.** It computes no digest and verifies no signature.
-- **The corpus digest is not an identity function.** The committed identities were computed with a fully specified non-cryptographic function reserved to the corpus, so the identity path could be exercised before `fgit-crypto` published its registry. It has no collision-resistance property. What the corpus proves is that a body's identity depends on exactly its canonical bytes and on nothing else; it proves nothing about digest strength. Production identities are computed by `fgit-crypto` through the `BodyDigest` seam, and binding the corpus to real algorithm slots is FG-002b work.
+- **The corpus digest is not a cryptographic digest.** The committed identities were computed with a fully specified non-cryptographic function reserved to the corpus, so the identity path could be exercised before `fgit-crypto` published its registry. It has no collision-resistance property. What the corpus proves is that a body's identity depends on exactly its domain, schema, and canonical bytes and on nothing else; it proves nothing about digest strength. Production identities are computed by `fgit-crypto` through the `BodyIdentity` seam, and binding the corpus to real algorithm slots is FG-002b work.
+- **The corpus re-implements the `fgit-crypto` preimage framing rather than importing it.** That is what makes the committed identities a cross-check of that framing instead of a copy of it, but it also means the two could drift: nothing in this crate's suite fails if `fgit-crypto` changes its preimage. Closing that gap is a cross-crate test and belongs to FG-002b or FG-002c.
 - **The one-byte-string-per-value property is a design property supported by tests, not a proof.** No exhaustive search or mechanized argument has been performed. It is not claimed for any body type not represented in the corpus.
 - **Forward compatibility is claimed only for additive minor versions.** A higher major is refused, by design, and no claim of any kind is made about decoding one.
 - **Bound values are engineering defaults, not measured limits.** They were chosen for canonical protocol bodies and have not been derived from a workload.

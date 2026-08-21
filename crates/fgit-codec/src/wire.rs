@@ -14,14 +14,20 @@
 //! payload        u32 length + payload bytes
 //! ```
 //!
-//! The whole frame is the body's canonical bytes, and the internal identity of
-//! a body is the digest of the frame. Because the domain separation tag and
-//! the schema identifier sit inside the digested bytes at fixed, explicitly
-//! length-delimited positions, this satisfies the domain-separated identity
-//! rule of `docs/NORMATIVE_PROTOCOL_CONTRACTS.md` section 3.2, and it binds
-//! strictly more than that rule requires: the codec version and every length
-//! are committed too. Binding more cannot weaken domain separation, and it
-//! means a codec change can never silently reinterpret old bytes.
+//! # The frame is transport framing, and is not what a body is identified by
+//!
+//! `docs/NORMATIVE_PROTOCOL_CONTRACTS.md` section 3.2 says canonical body bytes
+//! **exclude** transport framing. The frame here is transport framing: it makes
+//! bytes on a wire or in a store self-describing. A body's identity is
+//! therefore computed over the **payload** alone, together with the domain
+//! separation tag and schema identifier, which `fgit-crypto` combines into a
+//! preimage.
+//!
+//! Two consequences worth stating plainly. Re-framing a body — a later codec
+//! minor, a different transport — does not change its identity. And this crate
+//! cannot compute an identity by itself: it produces the payload and names the
+//! domain and schema, and [`crate::attest::BodyIdentity`] is where the digest
+//! comes from.
 //!
 //! # Version rules
 //!
@@ -103,16 +109,24 @@ pub struct DecodedBody<B> {
 impl<B> DecodedBody<B> {
     /// True when the frame carried fields this build does not understand.
     #[must_use]
-    pub fn has_unknown_fields(&self) -> bool {
+    pub const fn has_unknown_fields(&self) -> bool {
         !self.unknown_suffix.is_empty()
     }
 }
 
-/// Encodes a body into its canonical frame.
-pub fn encode_body<B: CanonicalBody>(body: &B) -> Result<Vec<u8>, CodecRefusal> {
+/// The canonical body bytes of a body: its payload, without transport framing.
+///
+/// This is the byte string a body's identity is computed over, so it is
+/// deliberately separate from [`encode_body`], which adds the frame.
+pub fn canonical_body_bytes<B: CanonicalBody>(body: &B) -> Result<Vec<u8>, CodecRefusal> {
     let mut payload = Encoder::new();
     body.write_payload(&mut payload)?;
-    let payload = payload.into_bytes();
+    Ok(payload.into_bytes())
+}
+
+/// Encodes a body into its canonical frame.
+pub fn encode_body<B: CanonicalBody>(body: &B) -> Result<Vec<u8>, CodecRefusal> {
+    let payload = canonical_body_bytes(body)?;
     write_frame(
         CODEC_MINOR,
         B::DOMAIN,
@@ -212,6 +226,20 @@ pub fn peek_frame_domain(frame: &[u8], limits: DecodeLimits) -> Result<DomainTag
     read_frame_header(frame, limits).map(|(header, _)| header.domain)
 }
 
+/// Splits a frame into its header and its canonical body bytes.
+///
+/// The payload slice this returns is exactly what a body's identity is
+/// computed over.
+pub fn split_frame(
+    frame: &[u8],
+    limits: DecodeLimits,
+) -> Result<(FrameHeader, &[u8]), CodecRefusal> {
+    let (header, mut decoder) = read_frame_header(frame, limits)?;
+    let payload = decoder.read_bytes("payload")?;
+    decoder.finish()?;
+    Ok((header, payload))
+}
+
 /// Decodes a body strictly: the frame must declare exactly the versions this
 /// build implements, and the payload must contain no unknown suffix.
 pub fn decode_body<B: CanonicalBody>(
@@ -234,11 +262,11 @@ pub fn decode_body_preserving<B: CanonicalBody>(
     limits: DecodeLimits,
 ) -> Result<DecodedBody<B>, CodecRefusal> {
     let frame_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if frame_len > limits.max_frame_len {
+    if frame_len > limits.frame_bytes {
         return Err(CodecRefusal::LengthBoundExceeded {
             field: "frame",
             observed: frame_len,
-            limit: limits.max_frame_len,
+            limit: limits.frame_bytes,
         });
     }
     let (header, mut frame) = read_frame_header(bytes, limits)?;
@@ -248,23 +276,20 @@ pub fn decode_body_preserving<B: CanonicalBody>(
         schema,
     } = header;
     if domain != B::DOMAIN {
-        return Err(CodecRefusal::DomainUnexpected {
-            expected: B::DOMAIN,
-            observed: domain,
-        });
+        return Err(CodecRefusal::domain_unexpected(B::DOMAIN, domain));
     }
     if schema.family() != B::SCHEMA_FAMILY {
-        return Err(CodecRefusal::SchemaFamilyUnexpected {
-            expected: B::SCHEMA_FAMILY,
-            observed: schema.family(),
-        });
+        return Err(CodecRefusal::schema_family_unexpected(
+            B::SCHEMA_FAMILY,
+            schema.family(),
+        ));
     }
     if schema.major() != B::SCHEMA_MAJOR {
-        return Err(CodecRefusal::SchemaMajorUnsupported {
+        return Err(CodecRefusal::schema_major_unsupported(
             domain,
-            observed: schema.major(),
-            supported: B::SCHEMA_MAJOR,
-        });
+            schema.major(),
+            B::SCHEMA_MAJOR,
+        ));
     }
 
     let payload = frame.read_bytes("payload")?;

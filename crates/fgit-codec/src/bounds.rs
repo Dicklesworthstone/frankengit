@@ -12,30 +12,30 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DecodeLimits {
     /// Largest whole body frame, in bytes.
-    pub max_frame_len: u64,
+    pub frame_bytes: u64,
     /// Largest single byte string or text value, in bytes.
-    pub max_byte_string_len: u64,
+    pub byte_string_bytes: u64,
     /// Largest element count in any one collection.
-    pub max_element_count: u64,
+    pub elements: u64,
     /// Deepest nesting of collections and envelopes.
-    pub max_depth: u32,
+    pub depth: u32,
 }
 
 impl DecodeLimits {
     /// Bounds sized for ordinary canonical protocol bodies.
     pub const DEFAULT: Self = Self {
-        max_frame_len: 16 * 1024 * 1024,
-        max_byte_string_len: 8 * 1024 * 1024,
-        max_element_count: 1024 * 1024,
-        max_depth: 32,
+        frame_bytes: 16 * 1024 * 1024,
+        byte_string_bytes: 8 * 1024 * 1024,
+        elements: 1024 * 1024,
+        depth: 32,
     };
 
     /// Deliberately tiny bounds, for tests that must observe a refusal.
     pub const MINIMAL: Self = Self {
-        max_frame_len: 256,
-        max_byte_string_len: 64,
-        max_element_count: 4,
-        max_depth: 2,
+        frame_bytes: 256,
+        byte_string_bytes: 64,
+        elements: 4,
+        depth: 2,
     };
 }
 

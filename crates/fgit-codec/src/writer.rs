@@ -36,8 +36,8 @@ impl Encoder {
 
     /// The bytes written so far.
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.out
+    pub const fn as_bytes(&self) -> &[u8] {
+        self.out.as_slice()
     }
 
     /// Consumes the encoder and yields its bytes.
@@ -48,13 +48,13 @@ impl Encoder {
 
     /// Bytes written so far.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.out.len()
     }
 
     /// True when nothing has been written.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.out.is_empty()
     }
 

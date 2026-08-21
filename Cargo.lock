@@ -546,6 +546,14 @@ name = "fgit-types"
 version = "0.0.1"
 
 [[package]]
+name = "fgit-wire"
+version = "0.1.0"
+dependencies = [
+ "fgit-crypto",
+ "fgit-git-object",
+]
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

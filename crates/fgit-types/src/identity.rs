@@ -38,10 +38,16 @@ pub const MAX_AUTHORITY_VERSION_TOKEN_LEN: usize = 512;
 /// Declares a 128-bit opaque assigned identity.
 macro_rules! opaque_id {
     ($name:ident, $doc:literal) => {
+        opaque_id!(
+            $name,
+            $doc,
+            "The value is assigned, never derived from content, and stable across renames."
+        );
+    };
+    ($name:ident, $doc:literal, $detail:literal) => {
         #[doc = $doc]
         ///
-        /// The value is assigned, never derived from content, and stable
-        /// across renames.
+        #[doc = $detail]
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub struct $name([u8; OPAQUE_ID_LEN]);
 
@@ -64,7 +70,7 @@ macro_rules! opaque_id {
                     });
                 }
                 let mut bytes = [0_u8; OPAQUE_ID_LEN];
-                for (index, pair) in source.chunks_exact(2).enumerate() {
+                for (index, pair) in source.as_chunks::<2>().0.iter().enumerate() {
                     let high = nibble(stringify!($name), pair[0], index * 2)?;
                     let low = nibble(stringify!($name), pair[1], index * 2 + 1)?;
                     bytes[index] = (high << 4) | low;
@@ -110,7 +116,8 @@ opaque_id!(
 );
 opaque_id!(
     RepositoryIncarnationId,
-    "Identity of one repository incarnation. Deleting and recreating a repository under the same owner and name produces a new incarnation, so stale refs, tokens, caches, and location records cannot revive the prior repository."
+    "Identity of one repository incarnation.",
+    "Deleting and recreating a repository under the same owner and name produces a new incarnation, so stale refs, tokens, caches, and location records cannot revive the prior repository."
 );
 opaque_id!(PrincipalId, "Identity of one authenticated principal.");
 opaque_id!(
@@ -405,7 +412,7 @@ impl AuthorityVersionToken {
 
     /// Token length in bytes.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.0.len()
     }
 

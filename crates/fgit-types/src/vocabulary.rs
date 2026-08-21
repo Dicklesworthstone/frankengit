@@ -260,10 +260,11 @@ pub enum RefusalCode {
     ///
     /// Such input is refused rather than normalized into an invented policy.
     ConflictingSemanticEffects,
-    /// The declared placement, repair, and failure-domain predicate cannot be
-    /// satisfied, so the batch cannot reach the durability epoch its profile
-    /// requires. The bodies may be staged and valid; the profile is what
-    /// cannot be met.
+    /// The declared durability profile cannot be satisfied.
+    ///
+    /// The placement, repair, and failure-domain predicate cannot be met, so
+    /// the batch cannot reach the durability epoch its profile requires. The
+    /// bodies may be staged and valid; it is the profile that cannot be met.
     DurabilityProfileUnavailable,
     /// A first-party invariant was observed broken: a second terminal decision
     /// for one sealed transaction, or an accelerator that disagrees with the

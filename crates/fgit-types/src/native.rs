@@ -86,7 +86,7 @@ fn parse_hex<const N: usize>(field: &'static str, text: &str) -> Result<[u8; N],
         });
     }
     let mut out = [0_u8; N];
-    for (index, pair) in source.chunks_exact(2).enumerate() {
+    for (index, pair) in source.as_chunks::<2>().0.iter().enumerate() {
         let high = hex_nibble(field, pair[0], index * 2)?;
         let low = hex_nibble(field, pair[1], index * 2 + 1)?;
         out[index] = (high << 4) | low;
@@ -280,7 +280,7 @@ impl GitOid {
     }
 
     /// Returns the SHA-1 identity, refusing a value from the other domain.
-    pub fn require_sha1(&self) -> Result<GitOidSha1, TypeRefusal> {
+    pub const fn require_sha1(&self) -> Result<GitOidSha1, TypeRefusal> {
         match self {
             Self::Sha1(oid) => Ok(*oid),
             Self::Sha256(_) => Err(TypeRefusal::HashDomainMismatch {
@@ -291,7 +291,7 @@ impl GitOid {
     }
 
     /// Returns the SHA-256 identity, refusing a value from the other domain.
-    pub fn require_sha256(&self) -> Result<GitOidSha256, TypeRefusal> {
+    pub const fn require_sha256(&self) -> Result<GitOidSha256, TypeRefusal> {
         match self {
             Self::Sha256(oid) => Ok(*oid),
             Self::Sha1(_) => Err(TypeRefusal::HashDomainMismatch {

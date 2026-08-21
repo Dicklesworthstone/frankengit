@@ -8,14 +8,16 @@
 
 mod support;
 
-use fgit_codec::attest::{BodyDigest, SignedEnvelopeBody, body_id_of_frame};
+use fgit_codec::attest::{BodyIdentity, SignedEnvelopeBody, body_id_of_frame};
 use fgit_codec::schema::{
     RefusalRecordBody, RepositoryAuthorityHeadBody, RepositoryCommitRecord,
     RepositoryDecisionBatchBody, TransactionSealBody,
 };
-use fgit_codec::{CanonicalBody, CodecRefusal, DecodeLimits, decode_body, encode_body};
+use fgit_codec::{
+    CanonicalBody, CodecRefusal, DecodeLimits, canonical_body_bytes, decode_body, encode_body,
+};
 
-use support::{CorpusDigest, GoldenCase, load_goldens};
+use support::{CorpusIdentity, GoldenCase, load_goldens};
 
 /// Decodes one golden and re-encodes it, asserting the bytes are reproduced.
 fn round_trip<B: CanonicalBody + PartialEq + std::fmt::Debug>(case: &GoldenCase) {
@@ -29,6 +31,15 @@ fn round_trip<B: CanonicalBody + PartialEq + std::fmt::Debug>(case: &GoldenCase)
         "{}: encode(decode(bytes)) must reproduce the golden bytes",
         case.name
     );
+    if let Some(expected) = case.canonical_body_len {
+        let payload = canonical_body_bytes(&decoded).expect("payload encodes");
+        assert_eq!(
+            payload.len(),
+            expected,
+            "{}: canonical body length disagrees with the corpus",
+            case.name
+        );
+    }
 }
 
 /// Asserts the recorded identity is what the corpus digest produces.
@@ -36,7 +47,7 @@ fn check_body_id(case: &GoldenCase) {
     let Some(expected) = case.body_id.as_ref() else {
         return;
     };
-    let observed = body_id_of_frame(&CorpusDigest, &case.bytes, DecodeLimits::DEFAULT)
+    let observed = body_id_of_frame(&CorpusIdentity, &case.bytes, DecodeLimits::DEFAULT)
         .unwrap_or_else(|refusal| panic!("{}: identity must compute, got {refusal}", case.name));
     assert_eq!(
         &observed.to_string(),
@@ -234,7 +245,7 @@ fn a_signature_never_changes_the_body_it_signs() {
 
     let identity = |envelope: &SignedEnvelopeBody| {
         envelope
-            .carried_body_id(&CorpusDigest, DecodeLimits::DEFAULT)
+            .carried_body_id(&CorpusIdentity, DecodeLimits::DEFAULT)
             .expect("identity computes")
     };
     assert_eq!(identity(&unsigned), identity(&single));
@@ -266,20 +277,51 @@ fn a_signature_never_changes_the_body_it_signs() {
 }
 
 #[test]
-fn the_corpus_digest_depends_on_every_byte() {
-    // A tripwire for the tripwire: if the corpus digest ignored input, every
-    // identity assertion above would pass vacuously.
-    let seal = encode_body(&support::transaction_seal()).expect("encodes");
+fn the_corpus_identity_depends_on_every_byte_and_on_the_domain() {
+    // A tripwire for the tripwire: if the corpus function ignored its input,
+    // every identity assertion above would pass vacuously.
+    let seal = canonical_body_bytes(&support::transaction_seal()).expect("encodes");
     let mut altered = seal.clone();
     let last = altered.len() - 1;
     altered[last] ^= 0x01;
     assert_ne!(
-        CorpusDigest.digest(&seal).as_bytes(),
-        CorpusDigest.digest(&altered).as_bytes(),
+        CorpusIdentity.digest(&seal).as_bytes(),
+        CorpusIdentity.digest(&altered).as_bytes(),
         "a one-bit change must change the digest"
     );
     assert_ne!(
-        CorpusDigest.digest(&seal).as_bytes(),
-        CorpusDigest.digest(&[]).as_bytes()
+        CorpusIdentity.digest(&seal).as_bytes(),
+        CorpusIdentity.digest(&[]).as_bytes()
     );
+
+    // The same bytes under two domains are two identities. This is the
+    // property domain separation exists for, so the corpus must show it.
+    let under_seal = CorpusIdentity.identify(
+        TransactionSealBody::DOMAIN,
+        TransactionSealBody::schema_id(),
+        &seal,
+    );
+    let under_rcr = CorpusIdentity.identify(
+        RepositoryCommitRecord::DOMAIN,
+        RepositoryCommitRecord::schema_id(),
+        &seal,
+    );
+    assert_ne!(under_seal, under_rcr);
+    assert_ne!(under_seal.digest(), under_rcr.digest());
+}
+
+#[test]
+fn a_bodys_identity_does_not_depend_on_its_transport_framing() {
+    // Canonical body bytes exclude transport framing, so the identity computed
+    // from a frame must equal the identity computed from the body alone.
+    let seal = support::transaction_seal();
+    let from_body = fgit_codec::body_id(&CorpusIdentity, &seal).expect("identity computes");
+    let framed = encode_body(&seal).expect("encodes");
+    let from_frame =
+        body_id_of_frame(&CorpusIdentity, &framed, DecodeLimits::DEFAULT).expect("identity");
+    assert_eq!(from_body, from_frame);
+
+    // And the frame is strictly larger than what was identified.
+    let payload = canonical_body_bytes(&seal).expect("encodes");
+    assert!(framed.len() > payload.len());
 }

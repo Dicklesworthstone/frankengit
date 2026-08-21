@@ -3,8 +3,11 @@ bounded decoding, and the signed-envelope convention.
 
 Every value this crate writes has exactly one legal byte string, and every
 decoder re-verifies that property on the way in. That is the whole point: a
-body's identity is the digest of its canonical bytes, so two encodings of one
+body's identity is derived from its canonical bytes, so two encodings of one
 value would be two identities for one fact.
+
+Canonical body bytes are the **payload**. The frame is transport framing and is
+excluded from identity, so re-framing a body cannot change what it is.
 
 How the rule is kept:
 
@@ -26,9 +29,10 @@ How the rule is kept:
   preserved verbatim, so a process that does not understand a newer body can
   still relay it without changing its identity.
 
-The crate performs no cryptography. `BodyDigest` is the seam where
-`fgit-crypto` supplies digests; the decision about which construction a code
-point names belongs there, not here.
+The crate performs no cryptography and does not assemble a digest preimage.
+`BodyIdentity` is the seam, shaped as *(domain, schema, canonical body)* rather
+than *(bytes)* on purpose: `fgit-crypto` owns the preimage framing as well as
+the construction, so a second, silently divergent preimage cannot grow here.
 
 The reasoning behind the format, the alternatives that were weighed, and the
 explicit non-claims are in `docs/ADR-0002-CANONICAL-CODEC.md`.

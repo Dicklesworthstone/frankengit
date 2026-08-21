@@ -8,6 +8,16 @@ use core::fmt;
 
 use fgit_types::{DomainTag, RefusalCode, SchemaFamily, TypeRefusal};
 
+/// Stores a label compactly.
+///
+/// The label types are inline fixed-capacity buffers, which is right for a
+/// value that travels in every identity but wrong for an error: a refusal
+/// carrying two of them would push `Result<_, CodecRefusal>` past the size at
+/// which returning it by value costs more than the happy path it guards.
+fn label(value: &impl core::fmt::Display) -> Box<str> {
+    value.to_string().into_boxed_str()
+}
+
 /// Why a canonical body could not be encoded or decoded.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CodecRefusal {
@@ -29,7 +39,7 @@ pub enum CodecRefusal {
     /// The body declares a schema major version this build does not implement.
     SchemaMajorUnsupported {
         /// Domain separation tag of the body.
-        domain: DomainTag,
+        domain: Box<str>,
         /// Major version the body declares.
         observed: u16,
         /// Major version this build implements.
@@ -38,17 +48,17 @@ pub enum CodecRefusal {
     /// The frame's schema family is not the one the caller asked to decode.
     SchemaFamilyUnexpected {
         /// Family the caller required.
-        expected: SchemaFamily,
+        expected: Box<str>,
         /// Family the frame declares.
-        observed: SchemaFamily,
+        observed: Box<str>,
     },
     /// The frame's domain separation tag is not the one the caller asked to
     /// decode, so the bytes belong to a different schema.
     DomainUnexpected {
         /// Domain the caller required.
-        expected: DomainTag,
+        expected: Box<str>,
         /// Domain the frame declares.
-        observed: DomainTag,
+        observed: Box<str>,
     },
     /// The input ended before a value that the framing promised.
     InputTruncated {
@@ -160,6 +170,34 @@ pub enum CodecRefusal {
 }
 
 impl CodecRefusal {
+    /// Builds a domain mismatch from the typed labels.
+    #[must_use]
+    pub fn domain_unexpected(expected: DomainTag, observed: DomainTag) -> Self {
+        Self::DomainUnexpected {
+            expected: label(&expected),
+            observed: label(&observed),
+        }
+    }
+
+    /// Builds a schema-family mismatch from the typed labels.
+    #[must_use]
+    pub fn schema_family_unexpected(expected: SchemaFamily, observed: SchemaFamily) -> Self {
+        Self::SchemaFamilyUnexpected {
+            expected: label(&expected),
+            observed: label(&observed),
+        }
+    }
+
+    /// Builds an unsupported-schema-major refusal from the typed label.
+    #[must_use]
+    pub fn schema_major_unsupported(domain: DomainTag, observed: u16, supported: u16) -> Self {
+        Self::SchemaMajorUnsupported {
+            domain: label(&domain),
+            observed,
+            supported,
+        }
+    }
+
     /// Stable machine-readable discriminant for logs and evidence records.
     #[must_use]
     pub const fn kind(&self) -> &'static str {

@@ -19,13 +19,12 @@ use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::numeric::{DecisionSequence, HeadGeneration, PolicyEpoch, RepositorySequence};
 use fgit_types::{DecisionOutcome, DomainTag, RefusalCode, SchemaFamily, SchemaId};
 
-use support::{CorpusDigest, SplitMix64, digest_of};
+use support::{CorpusIdentity, SplitMix64, digest_of};
 
 const SEED: u64 = 0x0c0d_ec00_5eed_0001;
 
 fn fingerprint(bytes: &[u8]) -> String {
-    use fgit_codec::attest::BodyDigest;
-    CorpusDigest.digest(bytes).to_string()
+    CorpusIdentity.digest(bytes).to_string()
 }
 
 /// Encodes, decodes, and re-encodes, asserting both round-trip directions.

@@ -405,19 +405,12 @@ fn every_codec_refusal_reports_a_live_protocol_code_and_prints() {
             observed: 2,
             supported: 1,
         },
-        CodecRefusal::SchemaMajorUnsupported {
-            domain: TransactionSealBody::DOMAIN,
-            observed: 2,
-            supported: 1,
-        },
-        CodecRefusal::SchemaFamilyUnexpected {
-            expected: TransactionSealBody::SCHEMA_FAMILY,
-            observed: SchemaFamily::from_static("rcr"),
-        },
-        CodecRefusal::DomainUnexpected {
-            expected: TransactionSealBody::DOMAIN,
-            observed: SignedEnvelopeBody::DOMAIN,
-        },
+        CodecRefusal::schema_major_unsupported(TransactionSealBody::DOMAIN, 2, 1),
+        CodecRefusal::schema_family_unexpected(
+            TransactionSealBody::SCHEMA_FAMILY,
+            SchemaFamily::from_static("rcr"),
+        ),
+        CodecRefusal::domain_unexpected(TransactionSealBody::DOMAIN, SignedEnvelopeBody::DOMAIN),
         CodecRefusal::InputTruncated {
             field: "f",
             needed: 4,

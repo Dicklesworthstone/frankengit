@@ -2,7 +2,7 @@
 // fixtures the committed golden corpus was derived from.
 #![allow(dead_code)]
 
-use fgit_codec::attest::BodyDigest;
+use fgit_codec::attest::BodyIdentity;
 use fgit_codec::schema::{
     RefusalRecordBody, RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecision,
     RepositoryDecisionBatchBody, TransactionSealBody,
@@ -37,28 +37,70 @@ fn fnv1a64(data: &[u8]) -> u64 {
     hash
 }
 
-/// A fully specified, non-cryptographic digest used only by the corpus.
+/// The digest preimage, framed the way `fgit-crypto` freezes it.
+///
+/// Reimplemented here on purpose. The production preimage lives in
+/// `fgit-crypto`; writing it a second time in the corpus is what makes the
+/// committed identities a cross-check of that framing rather than a copy of
+/// it. If the two ever disagree, this is where it shows.
+pub fn identity_preimage(domain: DomainTag, schema: SchemaId, canonical_body: &[u8]) -> Vec<u8> {
+    let domain = domain.as_bytes();
+    let family = schema.family();
+    let family = family.as_bytes();
+    let mut out = Vec::with_capacity(domain.len() + family.len() + canonical_body.len() + 16);
+    out.push(u8::try_from(domain.len()).expect("a label is at most 64 bytes"));
+    out.extend_from_slice(domain);
+    out.push(u8::try_from(family.len()).expect("a label is at most 64 bytes"));
+    out.extend_from_slice(family);
+    out.extend_from_slice(&schema.major().to_be_bytes());
+    out.extend_from_slice(&schema.minor().to_be_bytes());
+    out.extend_from_slice(
+        &u64::try_from(canonical_body.len())
+            .expect("a canonical body fits in u64")
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(canonical_body);
+    out
+}
+
+/// A fully specified, non-cryptographic identity function used only by the
+/// corpus.
 ///
 /// It exists so the identity path can be exercised end to end before
 /// `fgit-crypto` publishes its registry. It is **not** an identity function
 /// for production use and carries no collision-resistance claim whatsoever:
 /// what it proves here is that a body's identity depends on exactly the body's
-/// canonical bytes and on nothing else.
-pub struct CorpusDigest;
+/// domain, schema, and canonical bytes, and on nothing else.
+pub struct CorpusIdentity;
 
-impl BodyDigest for CorpusDigest {
-    fn algorithm(&self) -> DigestAlgorithmId {
-        DigestAlgorithmId::try_new(CORPUS_ALGORITHM_CODE_POINT).expect("nonzero slot")
-    }
-
-    fn digest(&self, canonical_bytes: &[u8]) -> DigestBytes {
-        let forward = fnv1a64(canonical_bytes).to_be_bytes();
-        let reversed: Vec<u8> = canonical_bytes.iter().copied().rev().collect();
+impl CorpusIdentity {
+    /// The two-pass folding used by the corpus.
+    #[must_use]
+    pub fn digest(&self, bytes: &[u8]) -> DigestBytes {
+        let forward = fnv1a64(bytes).to_be_bytes();
+        let reversed: Vec<u8> = bytes.iter().copied().rev().collect();
         let backward = fnv1a64(&reversed).to_be_bytes();
         let mut out = [0_u8; 16];
         out[..8].copy_from_slice(&forward);
         out[8..].copy_from_slice(&backward);
         DigestBytes::try_new(&out).expect("16 bytes is the minimum digest length")
+    }
+}
+
+impl BodyIdentity for CorpusIdentity {
+    fn identify(
+        &self,
+        domain: DomainTag,
+        schema: SchemaId,
+        canonical_body: &[u8],
+    ) -> InternalObjectId {
+        let preimage = identity_preimage(domain, schema, canonical_body);
+        InternalObjectId::new(
+            DigestAlgorithmId::try_new(CORPUS_ALGORITHM_CODE_POINT).expect("nonzero slot"),
+            domain,
+            CANONICAL_CODEC_VERSION,
+            self.digest(&preimage),
+        )
     }
 }
 
@@ -326,6 +368,7 @@ pub struct GoldenCase {
     pub expect: Option<String>,
     pub body_id: Option<String>,
     pub frame_len: Option<usize>,
+    pub canonical_body_len: Option<usize>,
     pub bytes: Vec<u8>,
 }
 
@@ -366,6 +409,7 @@ fn parse_golden(path: &std::path::Path) -> GoldenCase {
         expect: None,
         body_id: None,
         frame_len: None,
+        canonical_body_len: None,
         bytes: Vec::new(),
     };
     for line in text.lines() {
@@ -385,6 +429,10 @@ fn parse_golden(path: &std::path::Path) -> GoldenCase {
             "body_id" => case.body_id = Some(value.to_owned()),
             "frame_len" => {
                 case.frame_len = Some(value.parse().expect("frame_len is a number"));
+            }
+            "canonical_body_len" => {
+                case.canonical_body_len =
+                    Some(value.parse().expect("canonical_body_len is a number"));
             }
             "bytes" => case.bytes = decode_hex(&case.name, value),
             other => panic!("{}: unknown golden key {other:?}", case.name),
@@ -409,7 +457,9 @@ fn decode_hex(name: &str, text: &str) -> Vec<u8> {
         "{name}: hex string has an odd number of digits"
     );
     text.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = nibble(name, pair[0]);
             let low = nibble(name, pair[1]);
