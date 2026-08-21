@@ -18,28 +18,17 @@ CG_WORK=$(fge_tempdir constellation-gate)
 cg_fixture() {
   local name=$1
   local root="$CG_WORK/$name"
-  mkdir -p "$root/crates"
+  mkdir -p "$root/tools"
   cp "$CG_REPO/Cargo.lock" "$root/Cargo.lock"
   cp "$CG_REPO/constellation.lock" "$root/constellation.lock"
   cp "$CG_REPO/LICENSE" "$root/LICENSE"
-  cp -a "$CG_REPO/crates/fgit-runtime" "$root/crates/fgit-runtime"
-  printf '%s\n' \
-    '[workspace]' \
-    'resolver = "3"' \
-    'members = ["crates/fgit-runtime"]' \
-    'default-members = ["crates/fgit-runtime"]' \
-    '' \
-    '[workspace.package]' \
-    'edition = "2024"' \
-    'license-file = "LICENSE"' \
-    'repository = "https://example.invalid/frankengit"' \
-    '' \
-    '[workspace.lints.rust]' \
-    'unsafe_code = "forbid"' \
-    '' \
-    '[workspace.lints.clippy]' \
-    'pedantic = "deny"' \
-    'nursery = "deny"' >"$root/Cargo.toml"
+  # `cargo metadata --locked` is part of admission. Its fixture must therefore
+  # retain the exact workspace membership represented by Cargo.lock; reducing
+  # it to fgit-runtime lets Cargo legitimately request a lock rewrite before
+  # the constellation checks can run.
+  cp "$CG_REPO/Cargo.toml" "$root/Cargo.toml"
+  cp -a "$CG_REPO/crates" "$root/crates"
+  cp -a "$CG_REPO/tools/registry-check" "$root/tools/registry-check"
   printf '%s' "$root"
 }
 
@@ -48,6 +37,33 @@ cg_replace_first() {
   content=$(<"$path")
   [[ $content == *"$before"* ]] || return 1
   printf '%s' "${content/"$before"/"$after"}" >"$path"
+}
+
+cg_corrupt_transitive_unsafe_digest() {
+  local path=$1 package=$2 replacement=$3 tmp changed=0 line
+  tmp=$(mktemp "${path}.XXXXXX")
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line != \#* && $line != package$'\t'* && $line != state$'\t'* ]]; then
+      local -a fields
+      IFS=$'\t' read -r -a fields <<<"$line"
+      if [[ ${fields[0]:-} == "$package" ]]; then
+        [[ ${#fields[@]} -eq 15 ]] || {
+          rm -f "$tmp"
+          return 1
+        }
+        fields[12]=$replacement
+        (IFS=$'\t'; printf '%s\n' "${fields[*]}") >>"$tmp"
+        changed=1
+        continue
+      fi
+    fi
+    printf '%s\n' "$line" >>"$tmp"
+  done <"$path"
+  [[ $changed -eq 1 ]] || {
+    rm -f "$tmp"
+    return 1
+  }
+  mv "$tmp" "$path"
 }
 
 cg_gate() {
@@ -105,10 +121,7 @@ codegen_exit=$CG_GATE_EXIT
 codegen_diagnostic=$CG_GATE_DIAGNOSTIC
 
 unsafe=$(cg_fixture unsafe)
-cg_replace_first \
-  "$unsafe/constellation.lock" \
-  '5f13356eef9e71d31db4d292f4329ff0bf4b20244c9ea137076e520ef729810b' \
-  'missing'
+cg_corrupt_transitive_unsafe_digest "$unsafe/constellation.lock" asupersync missing
 cg_gate "$unsafe" unsafe 'transitive-unsafe evidence'
 unsafe_exit=$CG_GATE_EXIT
 unsafe_diagnostic=$CG_GATE_DIAGNOSTIC

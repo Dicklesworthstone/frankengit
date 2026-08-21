@@ -1702,43 +1702,123 @@ fn check_manifest_dependency_sources(
 ) {
     let mut in_workspace_dependencies = false;
     let mut in_dependency_section = false;
+    let mut table_dependency: Option<DependencySource> = None;
     for (line_number, raw_line) in text.lines().enumerate() {
         let line = raw_line.split('#').next().unwrap_or("").trim();
         if line.starts_with('[') && line.ends_with(']') {
+            if let Some(dependency) = table_dependency.take() {
+                check_dependency_source(root, manifest_path, display, &dependency, report);
+            }
             let section = line.trim_matches(['[', ']']);
-            in_workspace_dependencies = section == "workspace.dependencies";
+            in_workspace_dependencies = section == "workspace.dependencies"
+                || section.starts_with("workspace.dependencies.");
             in_dependency_section = is_dependency_section(section);
+            table_dependency = dependency_table_alias(section).map(|name| DependencySource {
+                name: name.to_owned(),
+                in_workspace_dependencies,
+                path: None,
+                path_line: None,
+                git: None,
+                git_line: None,
+                rev: None,
+            });
+            continue;
+        }
+        if let Some(dependency) = table_dependency.as_mut() {
+            dependency.capture_table_field(line, line_number + 1);
             continue;
         }
         if !in_dependency_section || !looks_like_dependency_declaration(line) {
             continue;
         }
-        if let Some(path) = extract_inline_string_field(line, "path") {
-            let local_name = line
-                .split_once('=')
-                .map(|(name, _)| name.trim().trim_matches('"'))
-                .unwrap_or("");
-            if !is_first_party_workspace_path(
-                root,
-                manifest_path,
+        let Some((raw_name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let name = raw_name.trim().trim_matches('"');
+        check_dependency_source(
+            root,
+            manifest_path,
+            display,
+            &DependencySource {
+                name: name.to_owned(),
                 in_workspace_dependencies,
-                local_name,
-                &path,
-            ) {
-                report.error(format!(
-                    "unpublished path dependency `{path}` in {display}:{}; release-facing dependencies must resolve from a pinned release source",
-                    line_number + 1
-                ));
+                path: extract_inline_string_field(value, "path"),
+                path_line: Some(line_number + 1),
+                git: extract_inline_string_field(value, "git"),
+                git_line: Some(line_number + 1),
+                rev: extract_inline_string_field(value, "rev"),
+            },
+            report,
+        );
+    }
+    if let Some(dependency) = table_dependency.take() {
+        check_dependency_source(root, manifest_path, display, &dependency, report);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DependencySource {
+    name: String,
+    in_workspace_dependencies: bool,
+    path: Option<String>,
+    path_line: Option<usize>,
+    git: Option<String>,
+    git_line: Option<usize>,
+    rev: Option<String>,
+}
+
+impl DependencySource {
+    fn capture_table_field(&mut self, line: &str, line_number: usize) {
+        let Some((raw_key, value)) = line.split_once('=') else {
+            return;
+        };
+        let key = raw_key.trim().trim_matches('"');
+        let Some(value) = extract_string_value(value) else {
+            return;
+        };
+        match key {
+            "path" => {
+                self.path = Some(value);
+                self.path_line = Some(line_number);
             }
+            "git" => {
+                self.git = Some(value);
+                self.git_line = Some(line_number);
+            }
+            "rev" => self.rev = Some(value),
+            _ => {}
         }
-        if let Some(git) = extract_inline_string_field(line, "git")
-            && (!git.starts_with("https://") || extract_inline_string_field(line, "rev").is_none())
-        {
-            report.error(format!(
-                "unresolved Git dependency `{git}` in {display}:{}; require HTTPS plus an exact rev or use a registry release",
-                line_number + 1
-            ));
-        }
+    }
+}
+
+fn check_dependency_source(
+    root: &Path,
+    manifest_path: &Path,
+    display: &str,
+    dependency: &DependencySource,
+    report: &mut Report,
+) {
+    if let Some(path) = dependency.path.as_deref()
+        && !is_first_party_workspace_path(
+            root,
+            manifest_path,
+            dependency.in_workspace_dependencies,
+            &dependency.name,
+            path,
+        )
+    {
+        report.error(format!(
+            "unpublished path dependency `{path}` in {display}:{}; release-facing dependencies must resolve from a pinned release source",
+            dependency.path_line.unwrap_or(0)
+        ));
+    }
+    if let Some(git) = dependency.git.as_deref()
+        && (!git.starts_with("https://") || dependency.rev.is_none())
+    {
+        report.error(format!(
+            "unresolved Git dependency `{git}` in {display}:{}; require HTTPS plus an exact rev or use a registry release",
+            dependency.git_line.unwrap_or(0)
+        ));
     }
 }
 
@@ -1749,6 +1829,40 @@ fn is_dependency_section(section: &str) -> bool {
     ) || section.ends_with(".dependencies")
         || section.ends_with(".dev-dependencies")
         || section.ends_with(".build-dependencies")
+        || dependency_table_alias(section).is_some()
+}
+
+/// Cargo permits a dependency to use its own table, including inside a target
+/// dependency section. Keep this deliberately lexical parser aligned with the
+/// forms accepted by Cargo so a `path` or `git` source cannot hide below a
+/// table header that the closed-world checker treats as unrelated metadata.
+fn dependency_table_alias(section: &str) -> Option<&str> {
+    for prefix in [
+        "workspace.dependencies.",
+        "dependencies.",
+        "dev-dependencies.",
+        "build-dependencies.",
+    ] {
+        if let Some(candidate) = section
+            .strip_prefix(prefix)
+            .map(|tail| tail.trim_matches('"'))
+            && !candidate.is_empty()
+        {
+            return Some(candidate);
+        }
+    }
+    if !section.starts_with("target.") {
+        return None;
+    }
+    for marker in ["dependencies.", "dev-dependencies.", "build-dependencies."] {
+        if let Some(index) = section.rfind(marker) {
+            let candidate = section[index + marker.len()..].trim_matches('"');
+            if !candidate.is_empty() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// A first-party workspace package is not an unpublished external sibling:
@@ -5312,6 +5426,77 @@ mod tests {
         assert!(
             report.errors.is_empty(),
             "test target path is not a dependency: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn dependency_table_headers_cannot_hide_path_or_unpinned_git_sources() {
+        let workspace = fixture_workspace_in("workspace_inheritance", "table_header");
+        let root_manifest = workspace.root.join("Cargo.toml");
+        let root_text = fs::read_to_string(&root_manifest).expect("read root fixture manifest");
+        let mut report = Report::new();
+        check_manifest_dependency_sources(
+            &workspace.root,
+            &root_manifest,
+            "Cargo.toml",
+            &root_text,
+            &mut report,
+        );
+        assert!(
+            report.errors.is_empty(),
+            "first-party workspace table dependency should be admitted: {:?}",
+            report.errors
+        );
+        assert!(
+            manifest_dependency_names(&root_text).contains("fgit-table-header"),
+            "table-form workspace dependency must remain visible to the policy parser"
+        );
+
+        let manifest = workspace.root.join("crates/table/Cargo.toml");
+        let text = fs::read_to_string(&manifest).expect("read member fixture manifest");
+        let mut report = Report::new();
+        check_manifest_dependency_sources(
+            &workspace.root,
+            &manifest,
+            "crates/table/Cargo.toml",
+            &text,
+            &mut report,
+        );
+        assert_error(
+            &report,
+            "unpublished path dependency `/absolute/unpublished`",
+        );
+        assert_error(
+            &report,
+            "unresolved Git dependency `https://example.invalid/unpinned.git`",
+        );
+        assert_eq!(
+            report.errors.len(),
+            2,
+            "the table-form dependency with an exact HTTPS revision must be accepted: {:?}",
+            report.errors
+        );
+        assert_eq!(
+            manifest_dependency_names(&text),
+            BTreeSet::from([
+                "path-smuggle".to_owned(),
+                "pinned-git".to_owned(),
+                "unpinned-git".to_owned(),
+            ])
+        );
+
+        let mut report = Report::new();
+        check_manifest_dependency_sources(
+            Path::new("/fixture"),
+            Path::new("/fixture/Cargo.toml"),
+            "fixtures/Cargo.toml",
+            "[package.metadata.dependencies.provenance]\npath = \"/not/a/dependency\"",
+            &mut report,
+        );
+        assert!(
+            report.errors.is_empty(),
+            "metadata containing the word dependencies is not a Cargo dependency table: {:?}",
             report.errors
         );
     }

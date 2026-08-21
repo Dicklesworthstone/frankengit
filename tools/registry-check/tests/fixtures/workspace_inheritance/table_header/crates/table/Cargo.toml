@@ -1,0 +1,15 @@
+[package]
+name = "fgit-table-header"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies.path-smuggle]
+path = "/absolute/unpublished"
+
+[dependencies.unpinned-git]
+git = "https://example.invalid/unpinned.git"
+
+[dependencies.pinned-git]
+git = "https://example.invalid/pinned.git"
+rev = "0123456789012345678901234567890123456789"

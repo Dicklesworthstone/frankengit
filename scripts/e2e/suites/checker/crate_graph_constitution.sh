@@ -110,7 +110,12 @@ cg_gate() {
     --manifest-path "$CG_REPO/tools/registry-check/Cargo.toml" \
     -- "$command" --root "$fixture" || true
   CG_GATE_EXIT=$FGE_LAST_EXIT
-  CG_GATE_DIAGNOSTIC="$FGE_LAST_STDERR"$'\n'"$FGE_LAST_STDOUT"
+  # Assertion inputs must use the full capture. Constitution intentionally
+  # reports every independent finding, so the inline evidence preview may end
+  # before the unsafe-policy mismatch this fixture is proving.
+  CG_GATE_DIAGNOSTIC=$(<"$FGE_LAST_STDERR_FILE")
+  CG_GATE_DIAGNOSTIC+=$'\n'
+  CG_GATE_DIAGNOSTIC+=$(<"$FGE_LAST_STDOUT_FILE")
 }
 
 fge_phase action
