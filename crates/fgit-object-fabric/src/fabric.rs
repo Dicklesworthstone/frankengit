@@ -95,6 +95,10 @@ pub enum StoreRefusal {
     RuntimeCheckpointRejected,
     RuntimeSpawnUnavailable,
     RuntimeJoinConsumed,
+    ReferenceFaultInjected {
+        point: ReferenceFaultPoint,
+    },
+    ReferenceStatePoisoned,
     StorageIo {
         operation: StorageOperation,
         kind: std::io::ErrorKind,
@@ -192,6 +196,12 @@ impl fmt::Display for StoreRefusal {
             }
             Self::RuntimeJoinConsumed => formatter
                 .write_str("runtime task result was consumed before object-fabric observation"),
+            Self::ReferenceFaultInjected { point } => {
+                write!(formatter, "reference backend injected fault at {point}")
+            }
+            Self::ReferenceStatePoisoned => {
+                formatter.write_str("reference backend state became unavailable after a panic")
+            }
             Self::StorageIo { operation, kind } => {
                 write!(formatter, "local storage {operation} failed: {kind}")
             }
@@ -289,6 +299,7 @@ fn codec_refusal(error: CodecRefusal) -> StoreRefusal {
 #[repr(u8)]
 pub enum PlacementBackend {
     LocalFilesystem = 1,
+    MemoryReference = 2,
 }
 
 impl PlacementBackend {
@@ -299,8 +310,41 @@ impl PlacementBackend {
     const fn from_wire(value: u8) -> Result<Self, StoreRefusal> {
         match value {
             1 => Ok(Self::LocalFilesystem),
+            2 => Ok(Self::MemoryReference),
             _ => Err(StoreRefusal::InvalidPlacementKind(value)),
         }
+    }
+}
+
+/// One deterministic fault location in the non-durable reference profile.
+///
+/// This profile exists to exercise the same immutable algebra under atomic
+/// state transitions; it is never a durable or canonical-placement backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceFaultPoint {
+    BeforeObjectInsert,
+    AfterObjectInsert,
+    BeforeManifestInsert,
+    AfterManifestInsert,
+    BeforeRetentionBody,
+    AfterRetentionBody,
+    BeforeRetentionRoot,
+    AfterRetentionRoot,
+}
+
+impl fmt::Display for ReferenceFaultPoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::BeforeObjectInsert => "before object insertion",
+            Self::AfterObjectInsert => "after object insertion",
+            Self::BeforeManifestInsert => "before manifest insertion",
+            Self::AfterManifestInsert => "after manifest insertion",
+            Self::BeforeRetentionBody => "before retention-body insertion",
+            Self::AfterRetentionBody => "after retention-body insertion",
+            Self::BeforeRetentionRoot => "before retention-root insertion",
+            Self::AfterRetentionRoot => "after retention-root insertion",
+        };
+        formatter.write_str(name)
     }
 }
 

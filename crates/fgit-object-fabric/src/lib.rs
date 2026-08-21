@@ -23,6 +23,7 @@ use fgit_types::{
 
 pub mod fabric;
 pub mod local;
+pub mod reference;
 
 const ENVELOPE_MAGIC: &[u8; 4] = b"FGEN";
 const SEGMENT_MAGIC: &[u8; 4] = b"FGMS";
