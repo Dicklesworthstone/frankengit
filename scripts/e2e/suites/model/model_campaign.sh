@@ -126,10 +126,10 @@ main() {
       'a superseded capsule is reachable, so the space can actually conflict'
     fge_assert_not_contains 'FG-003C-E2E-023' "$receipt" '"committed_decisions":0' \
       'a commit is reachable in the explored space'
-    fge_assert_not_contains 'FG-003C-E2E-024' "$receipt" '"committed_decisions":1,' \
-      'two commits are reachable, so a transaction can succeed after another won the head'
-    fge_assert_not_contains 'FG-003C-E2E-025' "$receipt" '"cas_retry_wins":0' \
+    fge_assert_not_contains 'FG-003C-E2E-024' "$receipt" '"cas_retry_wins":0' \
       'a batch that lost the head can go on to win it — the retry of §10 step 19'
+    fge_assert_not_contains 'FG-003C-E2E-025' "$receipt" '"max_head_generation":1' \
+      'the head actually advanced, so publication was exercised rather than only staged'
 
     fge_artifact "$artifacts/receipt.ndjson" model-campaign-receipt
   fi
@@ -143,5 +143,6 @@ fge_context deep_mode 'set FGIT_REFERENCE_CAMPAIGN_MODE=deep for the wider docum
 fge_context non_claim 'bounded model checking over the reference model only; it is not a proof, and it says nothing about any implementation until trace refinement (plan §40.5) connects one to this oracle'
 fge_context non_claim_scope 'the result holds for the bounds named in the receipt and for no wider envelope'
 fge_context non_vacuity 'the receipt carries a per-property witness count and coverage counters; a property with zero witnesses fails this suite rather than reading as verified'
-fge_context detection 'the walker is self-tested against five planted model defects, one per property, in fgit-reference unit tests — the suite asserts coverage, the unit tests assert detection'
+fge_context detection 'the walker is self-tested against six planted model defects, at least one per property, in fgit-reference unit tests — the suite asserts coverage, the unit tests assert detection'
+fge_context reachability_limit 'these bounds spend their depth on retry breadth (two preparation attempts per transaction), so a transaction committing AFTER another one published is out of reach here; Bounds::SEQUENCED covers that execution and fgit-reference::campaign::tests::the_sequenced_bounds_reach_a_second_commit asserts it'
 main

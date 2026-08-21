@@ -68,7 +68,7 @@ use fgit_types::numeric::{HeadGeneration, PolicyEpoch, RegistryEpoch};
 use fgit_types::refs::RefName;
 use fgit_types::vocabulary::{DecisionOutcome, MismatchPolicy};
 
-use crate::capsule::WitnessGranularity;
+use crate::capsule::{PreparedVerdict, WitnessGranularity};
 use crate::harness::{IdentityMint, RequestBuilder, label};
 use crate::intent::{
     DurabilityProfile, ForgeEntityId, ForgeEventKind, ForgeIntent, ForgeStreamId,
@@ -116,6 +116,24 @@ impl Bounds {
         batches: 2,
         depth: 7,
         max_states: 20_000,
+    };
+
+    /// One attempt per transaction, but deeper.
+    ///
+    /// [`Self::DEFAULT`] spends its depth on retry *breadth* — two preparation
+    /// attempts per transaction — which leaves no room for a transaction to be
+    /// prepared **after** another one has already published. That execution
+    /// needs ten transitions: five to publish the first, then a seal,
+    /// quarantine, preparation, staging and compare-and-swap for the second.
+    /// Trading the second attempt for three more transitions reaches it in
+    /// under a thousand states, so the sequence is covered in a lane measured
+    /// in seconds rather than only in the deep run.
+    pub const SEQUENCED: Self = Self {
+        transactions: 2,
+        attempts_per_transaction: 1,
+        batches: 2,
+        depth: 10,
+        max_states: 400_000,
     };
 
     /// Wider bounds for a deliberate deep run.
@@ -363,6 +381,11 @@ impl CampaignReport {
             self.coverage.deferred_repreparations,
         );
         push_num(&mut out, "cancellations", self.coverage.cancellations);
+        push_num(
+            &mut out,
+            "max_head_generation",
+            usize::try_from(self.coverage.max_head_generation).unwrap_or(usize::MAX),
+        );
         push_num(
             &mut out,
             "vacuous_properties",
@@ -756,9 +779,64 @@ pub fn state_key(state: &RepositoryState) -> Result<Vec<u8>, CodecRefusal> {
         encoder.write_scalar(state.preparations_of(*tx_id));
         Ok(())
     })?;
+    // **Capsule contents, not just capsule identities.** A capsule's verdict,
+    // basis, and witness are exactly what `decide_against` reads, so two states
+    // holding the same capsule *id* with different contents answer differently
+    // and are different states. Keying on the id alone merged "prepared before
+    // another transaction published" with "prepared after" — the walk kept
+    // whichever it reached first, which is always the shorter path, and with it
+    // the stale verdict. Every execution in which a transaction commits after
+    // another one won the head was silently unreachable as a result.
     let capsules = state.held_capsules().copied().collect::<Vec<_>>();
-    out.write_sequence("capsules", &capsules, |encoder, capsule| {
-        encoder.write_internal_object_id(capsule.as_internal_object_id())
+    out.write_sequence("capsules", &capsules, |encoder, id| {
+        encoder.write_internal_object_id(id.as_internal_object_id())?;
+        let Some(capsule) = state.capsule(*id) else {
+            return Ok(());
+        };
+        encoder.write_internal_object_id(capsule.basis_head.as_internal_object_id())?;
+        encoder.write_scalar(capsule.basis_generation.get());
+        match &capsule.verdict {
+            PreparedVerdict::Commit(_) => encoder.write_raw_byte(1),
+            PreparedVerdict::Refuse(code) => {
+                encoder.write_raw_byte(2);
+                encoder.write_scalar(code.code_point());
+            }
+        }
+        let witness = &capsule.witness;
+        encoder.write_raw_byte(match witness.granularity {
+            WitnessGranularity::Coarse => 1,
+            WitnessGranularity::Refined => 2,
+        });
+        encoder.write_scalar(witness.basis_generation.get());
+        encoder.write_scalar(witness.policy_epoch.get());
+        encoder.write_sequence(
+            "witness_refs",
+            &witness.refs.iter().collect::<Vec<_>>(),
+            |inner, (name, observed)| {
+                inner.write_bytes("ref", name.as_bytes())?;
+                match observed {
+                    Some(oid) => {
+                        inner.write_raw_byte(1);
+                        inner.write_git_oid(oid);
+                    }
+                    None => inner.write_raw_byte(0),
+                }
+                Ok(())
+            },
+        )?;
+        encoder.write_sequence(
+            "witness_forge",
+            &witness.forge_positions.iter().collect::<Vec<_>>(),
+            |inner, (stream, position)| {
+                inner.write_bytes("stream", stream.label().as_str().as_bytes())?;
+                inner.write_scalar(position.get());
+                Ok(())
+            },
+        )?;
+        encoder.write_scalar(u64::try_from(witness.retention_present.len()).unwrap_or(u64::MAX));
+        encoder.write_scalar(u64::try_from(witness.retention_absent.len()).unwrap_or(u64::MAX));
+        encoder.write_scalar(u64::try_from(witness.outbox.len()).unwrap_or(u64::MAX));
+        Ok(())
     })?;
     let staged = state.staged_batches().copied().collect::<Vec<_>>();
     out.write_sequence("staged", &staged, |encoder, batch| {
@@ -1150,22 +1228,11 @@ fn observe(
         })
         .count();
     coverage.committed_decisions = coverage.committed_decisions.max(committed);
+    coverage.refused_decisions = coverage.refused_decisions.max(refused);
+    coverage.forge_merge_commits = coverage.forge_merge_commits.max(merges);
     coverage.max_head_generation = coverage
         .max_head_generation
         .max(next.head().body.generation.get());
-    if next.decisions().len() >= 2 && std::env::var_os("FGIT_PROBE").is_some() {
-        let shape: Vec<&str> = next
-            .decisions()
-            .iter()
-            .map(|d| match d.outcome {
-                DecisionOutcome::Committed { .. } => "commit",
-                DecisionOutcome::Refused { .. } => "refuse",
-            })
-            .collect();
-        println!("PROBE two-decision state: {shape:?}");
-    }
-    coverage.refused_decisions = coverage.refused_decisions.max(refused);
-    coverage.forge_merge_commits = coverage.forge_merge_commits.max(merges);
 }
 
 /// Which properties one reached state materially exercises.
@@ -1602,13 +1669,13 @@ mod tests {
         );
     }
 
-    /// The audit's remaining reachability gap: a batch that loses the head and
-    /// then wins it, and a transaction that commits after another one already
-    /// did. Both are out of reach at the fast bounds; the deep bounds exist for
-    /// exactly this.
+    /// The audit's remaining reachability gap: a transaction that commits
+    /// **after** another one already published. It is out of reach at the fast
+    /// bounds, which spend their depth on retry breadth instead;
+    /// [`Bounds::SEQUENCED`] exists for exactly this.
     #[test]
-    fn the_deep_bounds_reach_a_second_commit_and_a_retried_batch() {
-        let report = run(&Universe::new(Bounds::DEEP));
+    fn the_sequenced_bounds_reach_a_second_commit() {
+        let report = run(&Universe::new(Bounds::SEQUENCED));
         assert!(!report.truncated, "the deep walk hit its state ceiling");
         assert!(
             report.violations.is_empty(),
@@ -1737,152 +1804,5 @@ mod tests {
             !line.contains("\"exercised\":false"),
             "a property in the receipt was never exercised: {line}"
         );
-    }
-
-    #[test]
-    #[ignore = "diagnostic probe"]
-    fn probe_second_commit() {
-        use crate::machine::ModelInput;
-        let universe = Universe::new(Bounds::DEFAULT);
-        let mut state = RepositoryState::genesis(universe.genesis().clone());
-        // Drive the first transaction end to end by hand.
-        let mut applied = 0;
-        'outer: loop {
-            for input in universe.inputs(&state) {
-                let interesting = match &input {
-                    ModelInput::Seal(r) => r.request.tx_id == universe.requests[0].tx_id,
-                    ModelInput::StageObjects(r) => r.tx_id == universe.requests[0].tx_id,
-                    ModelInput::Prepare(r) => r.request.tx_id == universe.requests[0].tx_id,
-                    ModelInput::Stage(_) | ModelInput::CompareAndSwap(_) => true,
-                    _ => false,
-                };
-                if !interesting {
-                    continue;
-                }
-                if let Ok(step) = crate::machine::step(&state, &input) {
-                    if state.decisions().len() == step.next.decisions().len()
-                        && crate::campaign::state_key(&state).ok()
-                            == crate::campaign::state_key(&step.next).ok()
-                    {
-                        continue;
-                    }
-                    state = step.next;
-                    applied += 1;
-                    if !state.decisions().is_empty() {
-                        break 'outer;
-                    }
-                    continue 'outer;
-                }
-            }
-            break;
-        }
-        println!(
-            "after {applied} steps: decisions={} refs={:?} admitted={:?}",
-            state.decisions().len(),
-            state.roots().refs.values().collect::<Vec<_>>(),
-            state.admitted_objects().collect::<Vec<_>>()
-        );
-
-        // Now try to prepare the SECOND transaction against that state.
-        let second = &universe.requests[1];
-        for input in universe.inputs(&state) {
-            match &input {
-                ModelInput::Seal(r) if r.request.tx_id == second.tx_id => {
-                    state = crate::machine::step(&state, &input).expect("seal").next;
-                }
-                _ => {}
-            }
-        }
-        for input in universe.inputs(&state) {
-            match &input {
-                ModelInput::StageObjects(r) if r.tx_id == second.tx_id => {
-                    state = crate::machine::step(&state, &input)
-                        .expect("quarantine")
-                        .next;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        for input in universe.inputs(&state) {
-            match &input {
-                ModelInput::Prepare(r) if r.request.tx_id == second.tx_id => {
-                    match crate::machine::step(&state, &input) {
-                        Ok(step) => {
-                            let capsule_id = universe.capsules[1][0];
-                            if let Some(capsule) = step.next.capsule(capsule_id) {
-                                println!("second verdict: {:?}", capsule.verdict);
-                            }
-                            state = step.next;
-                        }
-                        Err(breach) => println!("second prepare breached: {breach}"),
-                    }
-                    break;
-                }
-                _ => {}
-            }
-        }
-
-        let mut staged_any = false;
-        for input in universe.inputs(&state) {
-            if let ModelInput::Stage(request) = &input {
-                match crate::machine::step(&state, &input) {
-                    Ok(step) => {
-                        println!("stage {:?} -> {:?}", request.batch_id, step.output);
-                        state = step.next;
-                        staged_any = true;
-                        break;
-                    }
-                    Err(breach) => println!("stage breached: {breach}"),
-                }
-            }
-        }
-        println!("staged_any={staged_any}");
-        for input in universe.inputs(&state) {
-            if let ModelInput::CompareAndSwap(_) = &input {
-                match crate::machine::step(&state, &input) {
-                    Ok(step) => {
-                        println!(
-                            "cas -> {:?} decisions={}",
-                            step.output,
-                            step.next.decisions().len()
-                        );
-                        if step.next.decisions().len() > 1 {
-                            for decision in step.next.decisions() {
-                                println!(
-                                    "  decision tx={} outcome={:?}",
-                                    decision.tx_id, decision.outcome
-                                );
-                            }
-                            return;
-                        }
-                    }
-                    Err(breach) => println!("cas breached: {breach}"),
-                }
-            }
-        }
-    }
-
-    #[test]
-    #[ignore = "diagnostic probe"]
-    fn probe_depths() {
-        for depth in 10..=12 {
-            let bounds = Bounds {
-                depth,
-                batches: 2,
-                max_states: 400_000,
-                ..Bounds::DEFAULT
-            };
-            let report = run(&Universe::new(bounds));
-            println!(
-                "depth={depth} states={} committed={} refused={} maxgen={} cas_wins={} truncated={}",
-                report.states_explored,
-                report.coverage.committed_decisions,
-                report.coverage.refused_decisions,
-                report.coverage.max_head_generation,
-                report.coverage.cas_wins,
-                report.truncated
-            );
-        }
     }
 }
