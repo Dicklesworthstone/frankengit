@@ -50,15 +50,16 @@ pub use capability::{
     CapabilityRefusal, ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId, WriteGrant,
 };
 pub use intent::{
-    IntentError, IntentEvaluation, IntentLog, NetEffect, NoOpReason, TreeEditIntent, TreeNetEffect,
+    BasisEntry, IntentError, IntentEvaluation, IntentLog, NetEffect, NoOpReason, TreeEditIntent,
+    TreeNetEffect,
 };
 pub use obligation::{
     WorkspaceAbortReason, WorkspaceLease, WorkspaceLeaseAbort, WorkspaceLeaseCommit,
     WorkspaceLeaseReservation,
 };
 pub use overlay::{
-    ContentId, ContentStore, EntryClass, FileMode, Overlay, OverlayEntry, OverlayLookup,
-    OverlayStats,
+    ContentId, ContentRef, ContentStore, EntryClass, FileMode, Overlay, OverlayEntry,
+    OverlayLookup, OverlayStats,
 };
 pub use path::{HostProfile, MAX_PATH_BYTES, PathPolicy, PathRefusal, TreePath};
 pub use snapshot::{

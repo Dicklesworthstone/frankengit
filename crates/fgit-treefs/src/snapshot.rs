@@ -240,7 +240,24 @@ impl OverlayRoot {
                 hasher.update(&[0_u8; 32]);
             }
             match entry {
-                crate::overlay::OverlayEntry::File { mode, class, .. } => {
+                crate::overlay::OverlayEntry::File {
+                    content,
+                    mode,
+                    class,
+                } => {
+                    // A base-carried body contributes its native reference and
+                    // its source path, so two overlays that differ only in
+                    // where a renamed body came from are different overlays.
+                    match content {
+                        crate::overlay::ContentRef::Overlay(_) => hasher.update(&[0]),
+                        crate::overlay::ContentRef::Base { oid, from } => {
+                            hasher.update(&[1]);
+                            hasher.update(&(oid.len() as u64).to_be_bytes());
+                            hasher.update(oid);
+                            hasher.update(&(from.as_bytes().len() as u64).to_be_bytes());
+                            hasher.update(from.as_bytes());
+                        }
+                    }
                     hasher.update(mode.as_octal_bytes());
                     match class {
                         crate::overlay::EntryClass::Content => hasher.update(&[0]),

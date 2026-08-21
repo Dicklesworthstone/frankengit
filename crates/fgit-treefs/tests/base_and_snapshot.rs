@@ -13,7 +13,7 @@ use fgit_treefs::base::{BaseEntry, BaseError, BaseView, ObjectSource, ObjectSour
 use fgit_treefs::capability::{
     CapabilityRefusal, ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId,
 };
-use fgit_treefs::overlay::{EntryClass, FileMode, Overlay, OverlayEntry};
+use fgit_treefs::overlay::{ContentRef, EntryClass, FileMode, Overlay, OverlayEntry};
 use fgit_treefs::path::{PathPolicy, TreePath};
 use fgit_treefs::snapshot::{
     AntiRollbackRefusal, EpochSet, OverlayRoot, SessionRecord, WorkspaceEpoch,
@@ -451,7 +451,7 @@ fn snapshots_are_immutable_against_later_overlay_edits() {
     overlay.put(
         path(b"src/a.rs"),
         OverlayEntry::File {
-            content: id,
+            content: ContentRef::Overlay(id),
             mode: FileMode::Regular,
             class: EntryClass::Content,
         },

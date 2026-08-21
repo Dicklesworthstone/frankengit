@@ -114,6 +114,43 @@ pub enum EntryClass {
     },
 }
 
+/// Where an entry's bytes actually live.
+///
+/// A rename or a mode-only change must not copy the file body, so an overlay
+/// entry can reference a body that is still in the immutable base. That is what
+/// keeps those operations O(1) in the file's size, and it is why the entry kind
+/// records *where* the bytes are rather than assuming the overlay owns them.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ContentRef {
+    /// The body was staged into this overlay's content store.
+    Overlay(ContentId),
+    /// The body remains in the immutable base under these native reference
+    /// bytes, carried from the recorded source path.
+    Base {
+        /// Raw native object-reference bytes of the base blob.
+        oid: Vec<u8>,
+        /// The base path the body was carried from, retained as lineage.
+        from: TreePath,
+    },
+}
+
+impl ContentRef {
+    /// The overlay content id, when the body is staged here.
+    #[must_use]
+    pub const fn overlay_id(&self) -> Option<ContentId> {
+        match self {
+            Self::Overlay(id) => Some(*id),
+            Self::Base { .. } => None,
+        }
+    }
+
+    /// Whether the bytes are still in the base.
+    #[must_use]
+    pub const fn is_base_carried(&self) -> bool {
+        matches!(self, Self::Base { .. })
+    }
+}
+
 /// One overlay entry.
 ///
 /// Every kind listed in `docs/GIT_TREE_FS.md` §3.2 is representable here, which
@@ -123,8 +160,8 @@ pub enum EntryClass {
 pub enum OverlayEntry {
     /// A regular or executable file body.
     File {
-        /// Identity of the body in the content store.
-        content: ContentId,
+        /// Where the body lives.
+        content: ContentRef,
         /// The file mode.
         mode: FileMode,
         /// Ordinary content or a declared generated output.
@@ -160,10 +197,22 @@ impl OverlayEntry {
     #[must_use]
     pub const fn content_id(&self) -> Option<ContentId> {
         match self {
-            Self::File { content, .. } => Some(*content),
+            Self::File { content, .. } => content.overlay_id(),
             Self::Symlink { target } => Some(*target),
             Self::Conflict { marker, .. } => Some(*marker),
             Self::Directory | Self::Whiteout | Self::Submodule { .. } => None,
+        }
+    }
+
+    /// The base body this entry carries, if its bytes are still in the base.
+    #[must_use]
+    pub const fn base_carry(&self) -> Option<(&Vec<u8>, &TreePath)> {
+        match self {
+            Self::File {
+                content: ContentRef::Base { oid, from },
+                ..
+            } => Some((oid, from)),
+            _ => None,
         }
     }
 

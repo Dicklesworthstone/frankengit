@@ -6,8 +6,12 @@
 //! byte, two workspaces over one base cannot see each other, and
 //! `staged >= visible >= durable` survives every write/flush/sync ordering.
 
-use fgit_treefs::intent::{IntentLog, NetEffect, NoOpReason, TreeEditIntent};
-use fgit_treefs::overlay::{EntryClass, FileMode, Overlay, OverlayEntry, OverlayLookup};
+use fgit_treefs::intent::{
+    BasisEntry, IntentError, IntentLog, NetEffect, NoOpReason, TreeEditIntent,
+};
+use fgit_treefs::overlay::{
+    ContentRef, EntryClass, FileMode, Overlay, OverlayEntry, OverlayLookup,
+};
 use fgit_treefs::path::TreePath;
 use fgit_treefs::snapshot::{EpochRefusal, EpochSet, OverlayRoot, WorkspaceEpoch};
 
@@ -70,7 +74,7 @@ fn overlay_entry_shadows_the_base() {
     overlay.put(
         target.clone(),
         OverlayEntry::File {
-            content: id,
+            content: ContentRef::Overlay(id),
             mode: FileMode::Regular,
             class: EntryClass::Content,
         },
@@ -162,6 +166,10 @@ fn chmod_against_a_base_file_copies_no_bytes() {
     let mut log = IntentLog::new();
     log.push(TreeEditIntent::Chmod {
         path: path(b"src/f3"),
+        basis_entry: Some(BasisEntry {
+            oid: vec![0x11; 20],
+            mode: FileMode::Regular,
+        }),
         after: FileMode::Executable,
     });
     let (overlay, evaluation) = log.evaluate(&base);
@@ -220,7 +228,7 @@ fn cloned_overlays_do_not_share_mutable_state() {
     original.put(
         path(b"a.txt"),
         OverlayEntry::File {
-            content: id,
+            content: ContentRef::Overlay(id),
             mode: FileMode::Regular,
             class: EntryClass::Content,
         },
@@ -263,6 +271,7 @@ fn intent_replay_reproduces_the_overlay_exactly() {
     });
     log.push(TreeEditIntent::Chmod {
         path: path(b"src/f1"),
+        basis_entry: None,
         after: FileMode::Executable,
     });
     log.push(TreeEditIntent::UpdateSubmodule {
@@ -424,10 +433,15 @@ fn every_intent_maps_to_exactly_one_outcome() {
     log.push(TreeEditIntent::Rename {
         from: path(b"src/f2"),
         to: path(b"moved.txt"),
+        basis_entry: Some(BasisEntry {
+            oid: vec![0x22; 20],
+            mode: FileMode::Regular,
+        }),
     });
     log.push(TreeEditIntent::Rename {
         from: path(b"does/not/exist"),
         to: path(b"nowhere.txt"),
+        basis_entry: None,
     });
 
     let (effect, evaluation) = log.fold(&base);
@@ -618,4 +632,194 @@ fn workspace_lease_declares_its_class_and_grades() {
     assert_eq!(WorkspaceLease::OBSERVATION, ObservationMode::Internal);
     assert!(WorkspaceLease::REQUIRED_GRADES.contains(&Grade::Bytes));
     assert!(WorkspaceLease::REQUIRED_GRADES.contains(&Grade::Objects));
+}
+
+// ---------------------------------------------------------------------------
+// base-carried bodies: rename and chmod copy no bytes
+// ---------------------------------------------------------------------------
+
+/// Renaming a base-resident file names the base body instead of copying it.
+#[test]
+fn renaming_a_base_file_carries_the_body_without_copying_it() {
+    let base = wide_base(10);
+    let mut log = IntentLog::new();
+    log.push(TreeEditIntent::Rename {
+        from: path(b"src/f5"),
+        to: path(b"renamed.rs"),
+        basis_entry: Some(BasisEntry {
+            oid: vec![0xAB; 20],
+            mode: FileMode::Executable,
+        }),
+    });
+
+    let (overlay, evaluation) = log.evaluate(&base);
+    assert!(matches!(
+        evaluation.outcomes()[0],
+        NetEffect::Survives { .. }
+    ));
+    assert_eq!(
+        overlay.stats().body_bytes,
+        0,
+        "a rename must not copy the file body"
+    );
+
+    match overlay.lookup(&path(b"renamed.rs")) {
+        OverlayLookup::Present(entry) => {
+            let (oid, from) = entry
+                .base_carry()
+                .expect("the destination names the base body");
+            assert_eq!(oid, &vec![0xAB; 20]);
+            assert_eq!(from.as_bytes(), b"src/f5", "lineage records the source");
+            match entry {
+                OverlayEntry::File { mode, content, .. } => {
+                    assert_eq!(*mode, FileMode::Executable, "the basis mode is preserved");
+                    assert!(content.is_base_carried());
+                }
+                other => panic!("expected a file, got {other:?}"),
+            }
+        }
+        other => panic!("expected an entry at the destination, got {other:?}"),
+    }
+
+    assert_eq!(
+        overlay.entries().get(&path(b"src/f5")),
+        Some(&OverlayEntry::Whiteout),
+        "the source is whited out"
+    );
+}
+
+/// Renaming a file staged earlier in the same log carries the staged body.
+#[test]
+fn renaming_a_staged_file_carries_the_staged_body() {
+    let base = wide_base(10);
+    let mut log = IntentLog::new();
+    log.push(write(b"draft.txt", b"staged body"));
+    log.push(TreeEditIntent::Rename {
+        from: path(b"draft.txt"),
+        to: path(b"final.txt"),
+        basis_entry: None,
+    });
+
+    let (overlay, _) = log.evaluate(&base);
+    match overlay.lookup(&path(b"final.txt")) {
+        OverlayLookup::Present(entry) => {
+            assert_eq!(overlay.body(entry).unwrap(), b"staged body");
+        }
+        other => panic!("expected the staged body at the destination, got {other:?}"),
+    }
+}
+
+/// A base-resident source with no basis entry is a typed statement error, not a
+/// guess — while the same rename with a basis proceeds.
+#[test]
+fn missing_basis_entry_is_refused_and_supplying_one_proceeds() {
+    let base = wide_base(10);
+
+    let mut without = IntentLog::new();
+    without.push(TreeEditIntent::Rename {
+        from: path(b"src/f6"),
+        to: path(b"moved.rs"),
+        basis_entry: None,
+    });
+    let (_, evaluation) = without.evaluate(&base);
+    assert!(matches!(
+        evaluation.outcomes()[0],
+        NetEffect::Error(IntentError::MissingBasisEntry { .. })
+    ));
+
+    let mut with = IntentLog::new();
+    with.push(TreeEditIntent::Rename {
+        from: path(b"src/f6"),
+        to: path(b"moved.rs"),
+        basis_entry: Some(BasisEntry {
+            oid: vec![0xCD; 20],
+            mode: FileMode::Regular,
+        }),
+    });
+    let (_, evaluation) = with.evaluate(&base);
+    assert!(matches!(
+        evaluation.outcomes()[0],
+        NetEffect::Survives { .. }
+    ));
+}
+
+/// A chmod against a base file names the base body and changes only the mode.
+#[test]
+fn chmod_against_a_base_file_names_the_base_body() {
+    let base = wide_base(10);
+    let mut log = IntentLog::new();
+    log.push(TreeEditIntent::Chmod {
+        path: path(b"src/f8"),
+        basis_entry: Some(BasisEntry {
+            oid: vec![0xEF; 20],
+            mode: FileMode::Regular,
+        }),
+        after: FileMode::Executable,
+    });
+
+    let (overlay, _) = log.evaluate(&base);
+    match overlay.lookup(&path(b"src/f8")) {
+        OverlayLookup::Present(OverlayEntry::File { content, mode, .. }) => {
+            assert_eq!(*mode, FileMode::Executable);
+            assert_eq!(
+                content,
+                &ContentRef::Base {
+                    oid: vec![0xEF; 20],
+                    from: path(b"src/f8"),
+                }
+            );
+        }
+        other => panic!("expected a base-carried file, got {other:?}"),
+    }
+    assert_eq!(overlay.stats().body_bytes, 0);
+}
+
+/// A chmod to the mode the base already has is a named no-op.
+#[test]
+fn chmod_to_the_existing_base_mode_is_a_no_op() {
+    let base = wide_base(10);
+    let mut log = IntentLog::new();
+    log.push(TreeEditIntent::Chmod {
+        path: path(b"src/f9"),
+        basis_entry: Some(BasisEntry {
+            oid: vec![0x01; 20],
+            mode: FileMode::Executable,
+        }),
+        after: FileMode::Executable,
+    });
+    let (_, evaluation) = log.evaluate(&base);
+    assert!(matches!(
+        evaluation.outcomes()[0],
+        NetEffect::NoOp(NoOpReason::AlreadyIdentical)
+    ));
+}
+
+/// A base-carried body and an overlay-staged body with the same mode are
+/// different overlay states, so they must not share an overlay root.
+#[test]
+fn base_carried_and_staged_bodies_are_distinguishable() {
+    let base = wide_base(10);
+
+    let mut carried = IntentLog::new();
+    carried.push(TreeEditIntent::Rename {
+        from: path(b"src/f1"),
+        to: path(b"target.txt"),
+        basis_entry: Some(BasisEntry {
+            oid: vec![0x77; 20],
+            mode: FileMode::Regular,
+        }),
+    });
+    let (carried_overlay, _) = carried.evaluate(&base);
+
+    let mut staged = IntentLog::new();
+    staged.push(TreeEditIntent::Delete {
+        path: path(b"src/f1"),
+    });
+    staged.push(write(b"target.txt", b"staged instead"));
+    let (staged_overlay, _) = staged.evaluate(&base);
+
+    assert_ne!(
+        OverlayRoot::of(&carried_overlay),
+        OverlayRoot::of(&staged_overlay)
+    );
 }

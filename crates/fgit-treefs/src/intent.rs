@@ -22,12 +22,27 @@
 //! equivalent one. Nothing here consults a clock, a random source, or map
 //! iteration order.
 
-use crate::overlay::{ContentId, EntryClass, FileMode, Overlay, OverlayEntry, OverlayLookup};
+use crate::overlay::{ContentRef, EntryClass, FileMode, Overlay, OverlayEntry, OverlayLookup};
 use crate::path::TreePath;
 use core::fmt::{self, Display, Formatter};
 use std::collections::BTreeMap;
 
 pub use crate::overlay::EntryClass as IntentEntryClass;
+
+/// What the base holds at a source path, supplied by the caller.
+///
+/// `docs/GIT_TREE_FS.md` §7 gives `Rename` and `Chmod` a `basis_entry` for a
+/// reason: evaluation is a pure function of the log and must not need an object
+/// source to move or re-mode a file. The caller has already resolved the source
+/// through [`crate::base::BaseView`]; handing the basis in keeps the body in the
+/// base (no copy) while still letting the overlay name it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BasisEntry {
+    /// Raw native object-reference bytes of the base blob.
+    pub oid: Vec<u8>,
+    /// The mode the base recorded.
+    pub mode: FileMode,
+}
 
 /// One recorded edit operation.
 ///
@@ -74,11 +89,17 @@ pub enum TreeEditIntent {
         from: TreePath,
         /// Destination path.
         to: TreePath,
+        /// What the base holds at `from`, when the source is base-resident.
+        /// `None` means the source was staged earlier in this same log.
+        basis_entry: Option<BasisEntry>,
     },
     /// Change a file's mode without touching its content.
     Chmod {
         /// Target path.
         path: TreePath,
+        /// What the base holds at `path`, when the file is base-resident.
+        /// `None` means it was staged earlier in this same log.
+        basis_entry: Option<BasisEntry>,
         /// Mode after the change.
         after: FileMode,
     },
@@ -177,6 +198,15 @@ pub enum IntentError {
         /// The offending path.
         path: TreePath,
     },
+    /// The source is base-resident but the intent carried no basis entry.
+    ///
+    /// Evaluation is pure and cannot consult an object source, so the caller
+    /// must supply what the base holds. Guessing here would either copy a body
+    /// the overlay is supposed to leave alone, or invent an identity.
+    MissingBasisEntry {
+        /// The path whose basis was not supplied.
+        path: TreePath,
+    },
 }
 
 impl Display for IntentError {
@@ -191,6 +221,12 @@ impl Display for IntentError {
             }
             Self::PathTypeConflict { path } => {
                 write!(formatter, "{path} would be both a file and a directory")
+            }
+            Self::MissingBasisEntry { path } => {
+                write!(
+                    formatter,
+                    "no basis entry supplied for base-resident {path}"
+                )
             }
         }
     }
@@ -422,7 +458,7 @@ fn apply_one(
         } => {
             let id = overlay.intern(content.clone());
             let candidate = OverlayEntry::File {
-                content: id,
+                content: ContentRef::Overlay(id),
                 mode: *mode,
                 class: entry_class.clone(),
             };
@@ -484,33 +520,48 @@ fn apply_one(
             overlay.put(path.clone(), OverlayEntry::Whiteout);
             NetEffect::Survives { path: path.clone() }
         }
-        TreeEditIntent::Rename { from, to } => {
+        TreeEditIntent::Rename {
+            from,
+            to,
+            basis_entry,
+        } => {
             let moved = match overlay.lookup(from) {
-                OverlayLookup::Present(entry) => Some(entry.clone()),
-                OverlayLookup::Absent if base_exists(from) => None,
+                // Staged earlier in this same log: carry the staged entry.
+                OverlayLookup::Present(entry) => entry.clone(),
+                // Base-resident: the caller supplies the basis, so the body
+                // stays in the base and the destination names it. Renaming a
+                // gigabyte file copies nothing.
+                OverlayLookup::Absent if base_exists(from) => match basis_entry {
+                    Some(basis) => OverlayEntry::File {
+                        content: ContentRef::Base {
+                            oid: basis.oid.clone(),
+                            from: from.clone(),
+                        },
+                        mode: basis.mode,
+                        class: EntryClass::Content,
+                    },
+                    None => {
+                        return NetEffect::Error(IntentError::MissingBasisEntry {
+                            path: from.clone(),
+                        });
+                    }
+                },
                 _ => {
                     return NetEffect::Error(IntentError::RenameSourceMissing {
                         from: from.clone(),
                     });
                 }
             };
-            match moved {
-                Some(entry) => {
-                    overlay.put(to.clone(), entry);
-                }
-                None => {
-                    // The body still lives in the base; the destination is
-                    // marked as a directory-neutral carry and the source is
-                    // whited out. A caller materialises the body on read
-                    // through the base at the recorded source.
-                    overlay.put(to.clone(), OverlayEntry::Directory);
-                }
-            }
+            overlay.put(to.clone(), moved);
             supersede(owner, evaluation, to, index, false);
             overlay.put(from.clone(), OverlayEntry::Whiteout);
             NetEffect::Survives { path: to.clone() }
         }
-        TreeEditIntent::Chmod { path, after } => {
+        TreeEditIntent::Chmod {
+            path,
+            basis_entry,
+            after,
+        } => {
             let updated = match overlay.lookup(path) {
                 OverlayLookup::Present(OverlayEntry::File {
                     content,
@@ -521,7 +572,7 @@ fn apply_one(
                         return NetEffect::NoOp(NoOpReason::AlreadyIdentical);
                     }
                     OverlayEntry::File {
-                        content: *content,
+                        content: content.clone(),
                         mode: *after,
                         class: class.clone(),
                     }
@@ -529,16 +580,28 @@ fn apply_one(
                 OverlayLookup::Present(_) => {
                     return NetEffect::Error(IntentError::NotAFile { path: path.clone() });
                 }
-                OverlayLookup::Absent if base_exists(path) => {
-                    // Mode-only change against a base file: recorded without
-                    // copying the body, which is the whole point of a sparse
-                    // overlay.
-                    OverlayEntry::File {
-                        content: ContentId::of(b""),
-                        mode: *after,
-                        class: EntryClass::Content,
+                OverlayLookup::Absent if base_exists(path) => match basis_entry {
+                    // Mode-only change against a base file: the body stays in
+                    // the base and is named, not copied.
+                    Some(basis) => {
+                        if basis.mode == *after {
+                            return NetEffect::NoOp(NoOpReason::AlreadyIdentical);
+                        }
+                        OverlayEntry::File {
+                            content: ContentRef::Base {
+                                oid: basis.oid.clone(),
+                                from: path.clone(),
+                            },
+                            mode: *after,
+                            class: EntryClass::Content,
+                        }
                     }
-                }
+                    None => {
+                        return NetEffect::Error(IntentError::MissingBasisEntry {
+                            path: path.clone(),
+                        });
+                    }
+                },
                 _ => return NetEffect::Error(IntentError::NotAFile { path: path.clone() }),
             };
             supersede(owner, evaluation, path, index, false);
