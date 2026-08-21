@@ -13,5 +13,8 @@ fgit-git-object.workspace = true
 fgit-resource.workspace = true
 fgit-types.workspace = true
 
+[dev-dependencies]
+fgit-resource.workspace = true
+
 [lints]
 workspace = true

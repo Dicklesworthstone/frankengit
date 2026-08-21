@@ -558,3 +558,64 @@ fn violating_epoch_sets_are_refused_at_construction() {
     .expect("a descending triple is legal");
     assert!(ok.invariant_holds());
 }
+
+// ---------------------------------------------------------------------------
+// workspace-lease obligation
+// ---------------------------------------------------------------------------
+
+/// A reservation admits an overlay that fits and refuses one that outgrew it.
+#[test]
+fn workspace_lease_reservation_is_checked_not_assumed() {
+    use fgit_treefs::capability::WorkspaceId;
+    use fgit_treefs::obligation::{WorkspaceAbortReason, WorkspaceLeaseReservation};
+    use fgit_treefs::overlay::OverlayStats;
+
+    let reservation = WorkspaceLeaseReservation {
+        workspace_id: WorkspaceId::from_bytes([1; 16]),
+        reserved_bytes: 100,
+        reserved_entries: 4,
+    };
+
+    let fits = OverlayStats {
+        entry_count: 4,
+        body_count: 2,
+        body_bytes: 100,
+    };
+    assert!(reservation.admits(&fits), "exactly at the reservation fits");
+
+    let too_many_bytes = OverlayStats {
+        entry_count: 1,
+        body_count: 1,
+        body_bytes: 101,
+    };
+    assert!(!reservation.admits(&too_many_bytes));
+
+    let too_many_entries = OverlayStats {
+        entry_count: 5,
+        body_count: 1,
+        body_bytes: 1,
+    };
+    assert!(!reservation.admits(&too_many_entries));
+
+    let abort = reservation.budget_exceeded(too_many_bytes);
+    assert!(matches!(
+        abort.reason,
+        WorkspaceAbortReason::BudgetExceeded {
+            reserved_bytes: 100,
+            observed_bytes: 101
+        }
+    ));
+    assert_eq!(abort.discarded, too_many_bytes);
+}
+
+/// The lease is declared as the workspace-overlay class and settles internally.
+#[test]
+fn workspace_lease_declares_its_class_and_grades() {
+    use fgit_resource::{Grade, ObligationClass, ObligationKind, ObservationMode};
+    use fgit_treefs::obligation::WorkspaceLease;
+
+    assert_eq!(WorkspaceLease::CLASS, ObligationClass::WorkspaceLease);
+    assert_eq!(WorkspaceLease::OBSERVATION, ObservationMode::Internal);
+    assert!(WorkspaceLease::REQUIRED_GRADES.contains(&Grade::Bytes));
+    assert!(WorkspaceLease::REQUIRED_GRADES.contains(&Grade::Objects));
+}
