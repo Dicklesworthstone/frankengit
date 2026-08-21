@@ -42,6 +42,7 @@ pub mod capability;
 pub mod intent;
 pub mod overlay;
 pub mod path;
+pub mod snapshot;
 
 pub use base::{BaseEntry, BaseError, BaseView, ObjectSource, ObjectSourceError};
 pub use capability::{
@@ -55,3 +56,7 @@ pub use overlay::{
     OverlayStats,
 };
 pub use path::{HostProfile, MAX_PATH_BYTES, PathPolicy, PathRefusal, TreePath};
+pub use snapshot::{
+    AntiRollbackRefusal, EpochRefusal, EpochSet, OverlayRoot, SessionRecord, WorkspaceEpoch,
+    WorkspaceSnapshotBody,
+};
