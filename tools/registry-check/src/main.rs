@@ -1178,12 +1178,32 @@ fn is_first_party_workspace_path(
     local_name: &str,
     path: &str,
 ) -> bool {
-    manifest_path == root.join("Cargo.toml")
-        && in_workspace_dependencies
-        && local_name.starts_with("fgit-")
-        && !Path::new(path).is_absolute()
-        && root.join(path).join("Cargo.toml").is_file()
-        && root.join(path).starts_with(root.join("crates"))
+    if manifest_path != root.join("Cargo.toml")
+        || !in_workspace_dependencies
+        || !local_name.starts_with("fgit-")
+        || Path::new(path).is_absolute()
+    {
+        return false;
+    }
+    let Ok(root_crates) = fs::canonicalize(root.join("crates")) else {
+        return false;
+    };
+    let Ok(candidate) = fs::canonicalize(root.join(path)) else {
+        return false;
+    };
+    if !candidate.starts_with(root_crates) || !candidate.join("Cargo.toml").is_file() {
+        return false;
+    }
+    let Ok(root_manifest) = fs::read_to_string(root.join("Cargo.toml")) else {
+        return false;
+    };
+    let member_declared = extract_workspace_string_list(&root_manifest, "members")
+        .iter()
+        .any(|member| member == path);
+    let default_member_declared = extract_workspace_string_list(&root_manifest, "default-members")
+        .iter()
+        .any(|member| member == path);
+    member_declared && default_member_declared
 }
 
 fn looks_like_dependency_declaration(line: &str) -> bool {
