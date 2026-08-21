@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 //! Canonical authority storage: the `AuthorityStore` contract and its reference profile.
 //!
-//! A FrankenGit repository mutation becomes canonical at exactly one instant:
+//! A `FrankenGit` repository mutation becomes canonical at exactly one instant:
 //! the successful conditional replacement of the exact predecessor repository
 //! authority head (`NORMATIVE_PROTOCOL_CONTRACTS.md` §8.3).  Everything else —
 //! staged bodies, routing hints, gossip, local projections, outcome
@@ -62,12 +62,12 @@
 //! because neither proves non-commit.
 
 mod contract;
-mod drive;
 pub mod history;
 mod injection;
 mod keys;
 pub mod lincheck;
 mod reference;
+mod schedule;
 mod suite;
 mod tokens;
 mod vocabulary;
@@ -76,15 +76,15 @@ pub use crate::contract::{
     AuthorityLimits, AuthorityStore, CasResolution, FaultableAuthorityStore, PutResolution,
     ambiguity_of, refusal_of, resolve_ambiguous_cas, resolve_ambiguous_put,
 };
-pub use crate::drive::{
-    AuthorityClient, AuthorityObserver, ClientId, DriveSummary, Interleaving, NoObserver, drive,
-};
 pub use crate::injection::{
     DuplicateDelivery, EffectLog, EffectRecord, FaultDirective, FaultKind, FaultLog, FaultPlan,
     FaultPosition, FaultRecord, OpIndex, SplitMix64,
 };
 pub use crate::keys::{HeadKey, ImmutableKey, KeyError, MAX_KEY_BYTES};
 pub use crate::reference::{MemoryAuthorityStore, MemoryStoreConfig};
+pub use crate::schedule::{
+    AuthorityClient, AuthorityObserver, ClientId, DriveSummary, Interleaving, NoObserver, drive,
+};
 pub use crate::suite::{
     ConformanceCheck, ConformanceReport, run_authority_conformance, run_fault_conformance,
 };

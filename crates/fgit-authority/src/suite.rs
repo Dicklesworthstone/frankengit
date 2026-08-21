@@ -1,7 +1,7 @@
 //! The shared authority-backend conformance suite.
 //!
 //! `VERIFY_SPEC.md` §7 requires every authority profile — the in-memory
-//! reference, the embedded FrankenSQLite profile, an object-store profile, a
+//! reference, the embedded `FrankenSQLite` profile, an object-store profile, a
 //! future replicated `authorityd` — to pass the *same* suite.  That is only
 //! meaningful if the suite is executable code that a backend crate can call, so
 //! it lives in the library rather than in this crate's test tree.
@@ -513,7 +513,7 @@ fn ac_15_authenticity_is_not_currency<S: AuthorityStore + ?Sized>(store: &S) -> 
 fn ac_16_bounded_typed_errors<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String> {
     let limits: AuthorityLimits = store.limits();
     let key = immutable_key("ac16/body")?;
-    let oversize = vec![0_u8; limits.max_body_bytes.saturating_add(1)];
+    let oversize = vec![0_u8; limits.body_bytes.saturating_add(1)];
     let failure = store
         .put_if_absent(&key, &oversize)
         .err()
@@ -522,11 +522,11 @@ fn ac_16_bounded_typed_errors<S: AuthorityStore + ?Sized>(store: &S) -> Result<(
         failure,
         &AuthorityRefusal::BodyTooLarge {
             len: oversize.len(),
-            limit: limits.max_body_bytes,
+            limit: limits.body_bytes,
         },
         "oversize body",
     )?;
-    let at_limit = vec![7_u8; limits.max_body_bytes];
+    let at_limit = vec![7_u8; limits.body_bytes];
     let outcome = store
         .put_if_absent(&key, &at_limit)
         .map_err(|failure| format!("a body at the declared bound was refused: {failure}"))?;
@@ -1003,7 +1003,10 @@ where
         }
         logs.push(store.fault_log());
     }
-    if logs.len() == 2 && logs[0] == logs[1] {
+    let [left_log, right_log] = logs.as_slice() else {
+        return Err("both scripted runs must produce a fault log".to_owned());
+    };
+    if left_log == right_log {
         Ok(())
     } else {
         Err("replaying an identical seeded plan produced a different fault log".to_owned())

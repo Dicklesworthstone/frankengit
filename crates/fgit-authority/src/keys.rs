@@ -1,7 +1,7 @@
 //! Bounded, opaque storage keys for the authority substrate.
 //!
 //! The authority substrate is deliberately key/value shaped: it never parses a
-//! head body, a seal body, or any other FrankenGit canonical encoding.  A key
+//! head body, a seal body, or any other `FrankenGit` canonical encoding.  A key
 //! is an opaque, bounded, non-empty byte string that the caller derives (for
 //! example from tenant/repository/`TxId` scoping as described in
 //! `NORMATIVE_PROTOCOL_CONTRACTS.md` §5.2).  Keeping key derivation outside the

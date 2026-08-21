@@ -90,7 +90,7 @@ fn a_tampered_body_or_generation_is_refused() {
     );
 
     let tampered_generation = HeadReadReceipt::new(
-        key.clone(),
+        key,
         genuine.token(),
         HeadGeneration::from_raw(99),
         genuine.body().to_vec(),

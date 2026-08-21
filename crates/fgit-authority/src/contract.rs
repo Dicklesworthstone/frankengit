@@ -42,22 +42,22 @@ use crate::vocabulary::{
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct AuthorityLimits {
     /// Largest admissible body in bytes.
-    pub max_body_bytes: usize,
+    pub body_bytes: usize,
     /// Largest number of occupied immutable slots.
-    pub max_immutable_entries: usize,
+    pub immutable_slots: usize,
     /// Largest number of occupied head slots.
-    pub max_head_entries: usize,
+    pub head_slots: usize,
     /// Largest number of version tokens one instance may issue.
-    pub max_issued_versions: usize,
+    pub version_tokens: usize,
 }
 
 impl Default for AuthorityLimits {
     fn default() -> Self {
         Self {
-            max_body_bytes: 1 << 20,
-            max_immutable_entries: 1 << 16,
-            max_head_entries: 1 << 12,
-            max_issued_versions: 1 << 20,
+            body_bytes: 1 << 20,
+            immutable_slots: 1 << 16,
+            head_slots: 1 << 12,
+            version_tokens: 1 << 20,
         }
     }
 }
@@ -144,6 +144,7 @@ pub trait AuthorityStore {
     /// This is the entry point the linearizability checker and the fault
     /// campaign drive; it is a total function from [`AuthorityOp`] to
     /// [`AuthorityResponse`] with no panicking path.
+    #[must_use]
     fn execute(&self, op: &AuthorityOp) -> AuthorityResponse {
         match op {
             AuthorityOp::PutIfAbsent { key, body } => self.put_if_absent(key, body).map_or_else(

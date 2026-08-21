@@ -88,7 +88,7 @@ fn a_duplicated_delivery_is_idempotent() {
 #[test]
 fn an_oversize_body_is_refused_and_a_body_at_the_bound_is_accepted() {
     let store = store();
-    let limit = store.limits().max_body_bytes;
+    let limit = store.limits().body_bytes;
 
     let refused = store
         .put_if_absent(&immutable_key("body/oversize"), &vec![0_u8; limit + 1])

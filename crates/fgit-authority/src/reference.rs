@@ -24,10 +24,8 @@
 //! All state sits behind one mutex, and every operation takes a position from a
 //! single counter, so a fixed sequence of calls always injects a fixed sequence
 //! of faults.  Real threads may share the store, but then the *caller* owns the
-//! schedule; the deterministic driver in [`crate::drive`] exists so that tests
+//! schedule; the deterministic driver in [`crate::Interleaving`] exists so that tests
 //! and campaigns never depend on thread interleaving.
-//!
-//! [`crate::drive`]: crate::Interleaving
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -307,10 +305,10 @@ impl MemoryAuthorityStore {
 /// Bodies are bounded server-side, inside the effect, so a body-size refusal is
 /// subject to exactly the same fault script as any other request.
 const fn check_body(limits: AuthorityLimits, body: &[u8]) -> Result<(), AuthorityRefusal> {
-    if body.len() > limits.max_body_bytes {
+    if body.len() > limits.body_bytes {
         return Err(AuthorityRefusal::BodyTooLarge {
             len: body.len(),
-            limit: limits.max_body_bytes,
+            limit: limits.body_bytes,
         });
     }
     Ok(())
@@ -386,10 +384,10 @@ impl AuthorityStore for MemoryAuthorityStore {
                 }
                 Some(_) => Ok(Applied::unchanged(PutOutcome::Conflict)),
                 None => {
-                    if state.immutable.len() >= limits.max_immutable_entries {
+                    if state.immutable.len() >= limits.immutable_slots {
                         return Err(AuthorityRefusal::CapacityExhausted {
                             occupancy: state.immutable.len(),
-                            limit: limits.max_immutable_entries,
+                            limit: limits.immutable_slots,
                         });
                     }
                     state.immutable.insert(key.clone(), body.to_vec());
@@ -430,16 +428,16 @@ impl AuthorityStore for MemoryAuthorityStore {
                 }
                 return Ok(Applied::unchanged(HeadInit::Conflict));
             }
-            if state.heads.len() >= limits.max_head_entries {
+            if state.heads.len() >= limits.head_slots {
                 return Err(AuthorityRefusal::CapacityExhausted {
                     occupancy: state.heads.len(),
-                    limit: limits.max_head_entries,
+                    limit: limits.head_slots,
                 });
             }
-            if state.issuance.len() >= limits.max_issued_versions {
+            if state.issuance.len() >= limits.version_tokens {
                 return Err(AuthorityRefusal::CapacityExhausted {
                     occupancy: state.issuance.len(),
-                    limit: limits.max_issued_versions,
+                    limit: limits.version_tokens,
                 });
             }
             let token = mint(state, instance);
@@ -503,10 +501,10 @@ impl AuthorityStore for MemoryAuthorityStore {
                         proposed: new_generation,
                     });
                 }
-                if state.issuance.len() >= limits.max_issued_versions {
+                if state.issuance.len() >= limits.version_tokens {
                     return Err(AuthorityRefusal::CapacityExhausted {
                         occupancy: state.issuance.len(),
-                        limit: limits.max_issued_versions,
+                        limit: limits.version_tokens,
                     });
                 }
                 let token = mint(state, instance);

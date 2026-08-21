@@ -95,23 +95,30 @@ fn every_injected_fault_is_logged_with_its_position_and_kind() {
     let _lost = store.put_if_absent(&key, b"a");
 
     let log = store.fault_log();
-    assert_eq!(log.len(), 3);
-    let records = log.records();
+    let [throttled, delayed, lost] = log.records() else {
+        panic!(
+            "expected exactly three injected faults, observed {:?}",
+            log.records()
+        );
+    };
 
-    assert_eq!(records[0].at, OpIndex::from_raw(0));
-    assert_eq!(records[0].kind, FaultKind::Throttle);
-    assert_eq!(records[0].op_kind, AuthorityOpKind::PutIfAbsent);
-    assert!(!records[0].effect_reached);
-    assert_eq!(records[0].sequence, 0);
+    assert_eq!(throttled.at, OpIndex::from_raw(0));
+    assert_eq!(throttled.kind, FaultKind::Throttle);
+    assert_eq!(throttled.op_kind, AuthorityOpKind::PutIfAbsent);
+    assert!(!throttled.effect_reached);
+    assert_eq!(throttled.sequence, 0);
 
-    assert_eq!(records[1].at, OpIndex::from_raw(1));
-    assert!(matches!(records[1].kind, FaultKind::Delay { ticks: 3, .. }));
-    assert!(!records[1].effect_reached);
+    assert_eq!(delayed.at, OpIndex::from_raw(1));
+    assert!(matches!(delayed.kind, FaultKind::Delay { ticks: 3, .. }));
+    assert!(!delayed.effect_reached);
 
-    assert_eq!(records[2].at, OpIndex::from_raw(2));
-    assert_eq!(records[2].kind, FaultKind::LoseResponse);
-    assert!(records[2].effect_reached);
-    assert_eq!(records[2].sequence, 2);
+    assert_eq!(lost.at, OpIndex::from_raw(2));
+    assert_eq!(lost.kind, FaultKind::LoseResponse);
+    assert!(
+        lost.effect_reached,
+        "the effect really happened even though the caller was told nothing"
+    );
+    assert_eq!(lost.sequence, 2);
 }
 
 #[test]
@@ -141,9 +148,15 @@ fn a_delay_advances_the_logical_clock_at_the_scripted_position() {
     store.put_if_absent(&key, b"a").expect("delayed retry");
     assert_eq!(store.logical_time(), 7);
 
-    let records = store.fault_log();
-    assert_eq!(records.records()[0].logical_time, 5);
-    assert_eq!(records.records()[1].logical_time, 7);
+    let log = store.fault_log();
+    let [before, after] = log.records() else {
+        panic!(
+            "expected exactly two injected delays, observed {:?}",
+            log.records()
+        );
+    };
+    assert_eq!(before.logical_time, 5);
+    assert_eq!(after.logical_time, 7);
 }
 
 #[test]

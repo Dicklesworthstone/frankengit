@@ -81,10 +81,10 @@ impl PlantedStore {
     }
 
     fn check_body(&self, body: &[u8]) -> Result<(), AuthorityFailure> {
-        if body.len() > self.limits.max_body_bytes {
+        if body.len() > self.limits.body_bytes {
             return Err(AuthorityFailure::Refused(AuthorityRefusal::BodyTooLarge {
                 len: body.len(),
-                limit: self.limits.max_body_bytes,
+                limit: self.limits.body_bytes,
             }));
         }
         Ok(())

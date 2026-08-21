@@ -237,8 +237,12 @@ fn the_ground_truth_of_an_ambiguous_attempt_lives_only_in_the_fault_log() {
     );
 
     let faults = scripted.fault_log();
-    assert_eq!(faults.len(), 1);
-    let record = faults.records()[0];
+    let [record] = faults.records() else {
+        panic!(
+            "expected exactly one injected fault, observed {:?}",
+            faults.records()
+        );
+    };
     assert_eq!(record.kind, FaultKind::LoseResponse);
     assert_eq!(record.at, OpIndex::ZERO);
     assert!(
