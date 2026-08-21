@@ -1194,3 +1194,74 @@ fn an_ordinal_within_kind_directive_is_unmoved_by_operations_before_it() {
          — that silence is what makes the miss cost a diagnosis every time"
     );
 }
+
+/// A restart after a crashed publication must retry to the SAME decision.
+///
+/// GoldLotus's open question on the three remaining recovery verifiers: once
+/// they are firing again, do they also need the retry/restart read-back to fall
+/// through to stream replay, or is retargeting enough? This answers the
+/// property directly rather than waiting on the retarget.
+///
+/// The crash lands after the publication effect, so the endpoint comes back up
+/// with the head advanced. The retry must discover the existing terminal
+/// decision — from the authenticated stream, which is the only thing that can
+/// answer after an index is wiped — and must not publish a second one.
+#[test]
+fn a_restart_after_a_crashed_publication_retries_to_the_same_terminal_outcome() {
+    let (store, head) = published_repository();
+    let token = current_token(&store);
+    store.install_fault_plan(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
+        0,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::Crash {
+            position: FaultPosition::AfterEffect,
+        },
+    )]));
+
+    let batch_body = crash_case_batch(&head);
+    let next = successor_head(&head, batch_id_of(&batch_body), 3);
+    let crashed = publish_decisions(&store, &head_slot(), token, &batch_body, &next, tenant());
+    assert!(crashed.is_err(), "the crash hides the outcome: {crashed:?}");
+    assert!(store.is_crashed(), "the planned crash must fire");
+
+    store.restart();
+    store.install_fault_plan(FaultPlan::default());
+
+    // The endpoint is back. The caller never learned it won, so it retries the
+    // SAME sealed batch against whatever head it now finds.
+    let retried = publish_decisions(
+        &store,
+        &head_slot(),
+        current_token(&store),
+        &batch_body,
+        &next,
+        tenant(),
+    );
+
+    match retried {
+        Ok(PublicationOutcome::AlreadyDecided { decided }) => {
+            assert_eq!(
+                decided.len(),
+                1,
+                "exactly the transaction this batch decided: {decided:?}"
+            );
+            assert_eq!(
+                decided[0].0,
+                tx(0xC3),
+                "the retry must recover the decision it made, not another"
+            );
+        }
+        other => panic!(
+            "a retry after a crashed publication must resolve to the standing \
+             decision, never publish a second one: {other:?}"
+        ),
+    }
+
+    // And the decision is resolvable, which is what a caller actually asks.
+    let resolved = resolve_outcome(&store, &head_slot(), tenant(), repository(), tx(0xC3))
+        .expect("the decision resolves after a restart");
+    assert!(
+        matches!(resolved, OutcomeLookup::Decided(_)),
+        "the transaction is terminal and must resolve as such: {resolved:?}"
+    );
+}
