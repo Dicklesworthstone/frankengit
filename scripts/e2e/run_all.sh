@@ -20,6 +20,34 @@
 # Explicit SCRIPT arguments bypass discovery and are used verbatim.
 #
 # -----------------------------------------------------------------------------
+# HOW A SUITE GETS RUN  --  read this before asking for a registration seam
+# -----------------------------------------------------------------------------
+# SUITES ARE DISCOVERED, NOT REGISTERED. There is no manifest file, no
+# registration interface, no approval step and nothing to publish. Put an
+# executable `.sh` anywhere under `scripts/e2e/suites/<area>/` and it runs.
+# That is the entire mechanism.
+#
+#   scripts/e2e/suites/<area>/<name>.sh   ->   id `suites-<area>-<name>`
+#
+# Discovery is recursive, restricted to executable regular files ending in
+# `.sh`, and ordered by an LC_ALL=C sort of repo-relative paths so aggregation
+# is deterministic across hosts.
+#
+# ANYTHING OUTSIDE `suites/` IS NOT DISCOVERED AND RUNS NOWHERE.
+# This is the failure mode worth knowing about, because it is silent: a script
+# at the `scripts/e2e/` root is never found by this runner, and unless some
+# other file invokes it by name it simply never executes. Its assertions still
+# read as coverage on a bead record. One such script currently exists in the
+# tree with 30 assertions, zero invokers, and a bead that has already closed.
+#
+# Note that wiring this runner into `scripts/verify.sh` (FG-091) does NOT
+# rescue such a script: that wires the RUNNER into the lane, and the runner
+# still only walks `suites/**`. A root-level script needs an explicit invoker,
+# and if it deliberately lives outside `suites/` it should say why in its own
+# header -- `self_test.sh` does, because it drives this runner and would
+# otherwise recurse into itself.
+#
+# -----------------------------------------------------------------------------
 # WHAT MAKES A SCRIPT NON-PASS
 # -----------------------------------------------------------------------------
 # Exactly one disposition is recorded per script, first match wins:
