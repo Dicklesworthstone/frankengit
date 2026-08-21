@@ -254,6 +254,105 @@ impl PackClosure {
         }
         Ok(())
     }
+
+    /// Plans this authenticated closure without expanding promised omissions.
+    ///
+    /// The pack planner owns canonical object verification, its resource
+    /// limits, deterministic ordering, delta choice, and cancellation. This
+    /// adapter owns the complementary partial-clone boundary: it authenticates
+    /// the omission manifest, bounds the selected-ID conversion before it
+    /// allocates, and refuses a returned plan that is not exactly this closure.
+    pub fn plan_selected(
+        &self,
+        planner: &fgit_pack::PackPlanner,
+        source: &impl fgit_pack::CanonicalObjectSource,
+        deadline: &mut impl fgit_pack::Deadline,
+        limits: &ClosureLimits,
+    ) -> Result<fgit_pack::PackPlan, PackClosurePlanError> {
+        limits.validate().map_err(PackClosurePlanError::Closure)?;
+        if !self.promisor.is_authenticated() {
+            return Err(PackClosurePlanError::Closure(
+                ClosureError::UnauthenticatedPromisorManifest,
+            ));
+        }
+        let selected = self
+            .selected_ids(limits)
+            .map_err(PackClosurePlanError::Closure)?;
+        let plan = planner
+            .plan_selected(source, &selected, deadline)
+            .map_err(PackClosurePlanError::Planner)?;
+        self.verify_selected_plan(&plan)
+            .map_err(PackClosurePlanError::Closure)?;
+        Ok(plan)
+    }
+
+    fn selected_ids(&self, limits: &ClosureLimits) -> Result<Vec<AnyGitOid>, ClosureError> {
+        if self.objects.len() > limits.max_objects {
+            return Err(limit_error("selected pack objects", limits.max_objects));
+        }
+        let mut selected = Vec::new();
+        selected
+            .try_reserve(self.objects.len())
+            .map_err(|_| ClosureError::AllocationFailure)?;
+        selected.extend(self.objects.iter().map(|object| object.oid));
+        Ok(selected)
+    }
+
+    fn verify_selected_plan(&self, plan: &fgit_pack::PackPlan) -> Result<(), ClosureError> {
+        if plan.entries().len() != self.objects.len() {
+            return Err(ClosureError::SelectedObjectCountMismatch {
+                expected: self.objects.len(),
+                observed: plan.entries().len(),
+            });
+        }
+        for entry in plan.entries() {
+            let object = entry.object();
+            let selected = ClosureObjectId {
+                oid: object.id(),
+                object_type: object.object_type(),
+            };
+            if self
+                .objects
+                .binary_search_by(|candidate| compare_object_ids(candidate, &selected))
+                .is_err()
+            {
+                return Err(ClosureError::FilteredObjectLeak {
+                    oid: selected.oid,
+                    object_type: selected.object_type,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Typed refusal while binding a partial-clone closure to a pack plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PackClosurePlanError {
+    /// The closure or its authenticated omission manifest was invalid.
+    Closure(ClosureError),
+    /// The dependency-owned pack planner refused the exact selected object list.
+    Planner(fgit_pack::PackWriteError),
+}
+
+impl Display for PackClosurePlanError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Closure(error) => write!(formatter, "invalid partial-clone closure: {error}"),
+            Self::Planner(error) => {
+                write!(formatter, "selected pack planner refused closure: {error}")
+            }
+        }
+    }
+}
+
+impl Error for PackClosurePlanError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Closure(error) => Some(error),
+            Self::Planner(error) => Some(error),
+        }
+    }
 }
 
 /// Typed refusal from bounded shallow or partial-clone computation.
@@ -279,12 +378,21 @@ pub enum ClosureError {
     InconsistentGraph { oid: AnyGitOid },
     /// A declared bound was reached before allocating another record.
     ResourceLimit { field: &'static str, limit: usize },
+    /// A bounded closure allocation could not be reserved.
+    AllocationFailure,
     /// A pack writer attempted to emit an object outside the filtered closure.
     FilteredObjectLeak {
         /// Leaked object identity.
         oid: AnyGitOid,
         /// Leaked object type.
         object_type: ObjectType,
+    },
+    /// A selected-object pack plan did not contain exactly the computed closure.
+    SelectedObjectCountMismatch {
+        /// Number of objects admitted by the closure.
+        expected: usize,
+        /// Number of objects returned by the selected-object planner.
+        observed: usize,
     },
     /// The promisor omission sequence no longer matches its commitment.
     UnauthenticatedPromisorManifest,
@@ -313,8 +421,17 @@ impl Display for ClosureError {
             Self::ResourceLimit { field, limit } => {
                 write!(formatter, "{field} exceeded closure limit {limit}")
             }
+            Self::AllocationFailure => {
+                formatter.write_str("closure allocation could not be reserved")
+            }
             Self::FilteredObjectLeak { oid, object_type } => {
                 write!(formatter, "filtered pack leaked {object_type:?} {oid:?}")
+            }
+            Self::SelectedObjectCountMismatch { expected, observed } => {
+                write!(
+                    formatter,
+                    "selected pack has {observed} objects but closure requires {expected}"
+                )
             }
             Self::UnauthenticatedPromisorManifest => {
                 formatter.write_str("promisor omission manifest is not authenticated")

@@ -1,9 +1,13 @@
 #![forbid(unsafe_code)]
 
-use fgit_crypto::sha256_digest;
+use fgit_crypto::{git_object_id, sha256_digest};
+use fgit_pack::{
+    CanonicalObjectSource, CanonicalPackObject, ObjectFormat, PackLimits, PackPlanner,
+    PackWriteError, PackWriteProfile,
+};
 use fgit_wire::closure::{
     ClosureError, ClosureLimits, ClosureObject, ClosureObjectId, ClosureTreeEntry, CommitNode,
-    ObjectClosureRepository, OmissionReason, PromisorOmission,
+    ObjectClosureRepository, OmissionReason, PackClosurePlanError, PromisorOmission,
     compute_authenticated_lazy_fetch_closure, compute_pack_closure,
 };
 use fgit_wire::{
@@ -386,6 +390,96 @@ fn lazy_fetch_refuses_non_promised_or_tampered_omissions() {
             &ClosureLimits::default(),
         ),
         Err(ClosureError::UnauthenticatedPromisorManifest)
+    );
+}
+
+#[derive(Clone, Debug)]
+struct PackFixtureSource {
+    objects: Vec<CanonicalPackObject>,
+}
+
+impl CanonicalObjectSource for PackFixtureSource {
+    fn load(&self, id: &AnyGitOid) -> Result<CanonicalPackObject, PackWriteError> {
+        self.objects
+            .iter()
+            .find(|object| object.id() == *id)
+            .cloned()
+            .ok_or(PackWriteError::MissingCanonicalObject(*id))
+    }
+}
+
+fn filtered_pack_fixture() -> (FixtureGraph, PackFixtureSource, AnyGitOid) {
+    let omitted_body = b"promised blob".to_vec();
+    let omitted = git_object_id(GitObjectFormat::Sha1, ObjectType::Blob, &omitted_body);
+    let mut tree_body = b"100644 promised\0".to_vec();
+    tree_body.extend_from_slice(omitted.as_bytes());
+    let tree = git_object_id(GitObjectFormat::Sha1, ObjectType::Tree, &tree_body);
+    let commit_body = format!(
+        "tree {tree}\nauthor A <a@example.test> 1 +0000\ncommitter A <a@example.test> 1 +0000\n\nfiltered\n"
+    )
+    .into_bytes();
+    let commit = git_object_id(GitObjectFormat::Sha1, ObjectType::Commit, &commit_body);
+    let graph = FixtureGraph {
+        objects: vec![
+            (
+                commit,
+                ClosureObject::Commit(CommitNode {
+                    tree,
+                    parents: Vec::new(),
+                    committer_time: 1,
+                }),
+            ),
+            (
+                tree,
+                ClosureObject::Tree(vec![ClosureTreeEntry {
+                    oid: omitted,
+                    object_type: ObjectType::Blob,
+                }]),
+            ),
+            (omitted, ClosureObject::Blob { size: 13 }),
+        ],
+    };
+    let source = PackFixtureSource {
+        objects: vec![
+            CanonicalPackObject::new(commit, ObjectType::Commit, commit_body, vec![tree], 1, 0),
+            CanonicalPackObject::new(tree, ObjectType::Tree, tree_body, vec![omitted], 0, 1),
+        ],
+    };
+    (graph, source, omitted)
+}
+
+#[test]
+fn authenticated_filtered_closure_plans_only_selected_pack_objects() {
+    let (graph, source, omitted) = filtered_pack_fixture();
+    let mut request = request(vec![graph.objects[0].0]);
+    request.filter = Some(ObjectFilter::BlobNone);
+    let closure = compute_pack_closure(&graph, &request, &ClosureLimits::default())
+        .expect("filtered closure");
+    let planner = PackPlanner::new(
+        ObjectFormat::Sha1,
+        PackWriteProfile::STORED_V1,
+        PackLimits::default(),
+    );
+    let mut deadline = || true;
+
+    let plan = closure
+        .plan_selected(&planner, &source, &mut deadline, &ClosureLimits::default())
+        .expect("authenticated selected closure plan");
+    assert_eq!(plan.entries().len(), closure.objects.len());
+    assert!(
+        plan.entries()
+            .iter()
+            .all(|entry| entry.object().id() != omitted),
+        "promised omission must not leak into the pack plan"
+    );
+
+    let mut tampered = closure;
+    tampered.promisor.omissions.clear();
+    assert_eq!(
+        tampered.plan_selected(&planner, &source, &mut deadline, &ClosureLimits::default()),
+        Err(PackClosurePlanError::Closure(
+            ClosureError::UnauthenticatedPromisorManifest
+        ))
     );
 }
 
