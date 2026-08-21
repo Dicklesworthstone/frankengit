@@ -16,6 +16,11 @@ use fgit_deflate::{
 
 const MANIFEST_ENV: &str = "FGIT_DEFLATE_LOOSE_MANIFEST";
 const ARTIFACT_ENV: &str = "FGIT_DEFLATE_DIFFERENTIAL_ARTIFACT_DIR";
+const ENCODER_PROFILES: [DeflateProfile; 3] = [
+    DeflateProfile::FAST_STORED,
+    DeflateProfile::DEFAULT,
+    DeflateProfile::DYNAMIC,
+];
 
 #[derive(Debug)]
 struct LooseObject {
@@ -115,6 +120,11 @@ fn pinned_oracle_loose_objects_round_trip_and_refuse_bomb() {
             encoded_directory.display()
         )
     });
+    for profile in ENCODER_PROFILES {
+        fs::create_dir_all(encoded_directory.join(profile.id)).unwrap_or_else(|error| {
+            panic!("create encoded {} artifact directory: {error}", profile.id)
+        });
+    }
 
     let entries = parse_manifest(&manifest_path);
     for entry in &entries {
@@ -125,20 +135,32 @@ fn pinned_oracle_loose_objects_round_trip_and_refuse_bomb() {
         expected.extend_from_slice(&body);
         assert_eq!(decoded, expected, "decoded loose object {}", entry.label);
 
-        let reencoded = deflate_zlib(&decoded, DeflateLimits::GIT_OBJECT, DeflateProfile::DEFAULT)
-            .unwrap_or_else(|error| panic!("deflate loose object {}: {error}", entry.label));
-        assert_eq!(
-            decode_or_panic(&reencoded, &entry.label),
-            expected,
-            "owned encoder round-trips loose object {}",
-            entry.label
-        );
-        fs::write(encoded_directory.join(&entry.oid), reencoded).unwrap_or_else(|error| {
-            panic!(
-                "write encoded loose object {} for {}: {error}",
-                entry.oid, entry.label
+        for profile in ENCODER_PROFILES {
+            let reencoded = deflate_zlib(&decoded, DeflateLimits::GIT_OBJECT, profile)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "deflate {} loose object {}: {error}",
+                        profile.id, entry.label
+                    )
+                });
+            assert_eq!(
+                decode_or_panic(&reencoded, &entry.label),
+                expected,
+                "owned {} encoder round-trips loose object {}",
+                profile.id,
+                entry.label
+            );
+            fs::write(
+                encoded_directory.join(profile.id).join(&entry.oid),
+                reencoded,
             )
-        });
+            .unwrap_or_else(|error| {
+                panic!(
+                    "write {} encoded loose object {} for {}: {error}",
+                    profile.id, entry.oid, entry.label
+                )
+            });
+        }
     }
 
     let bomb_input = vec![b'B'; 8 * 1024];
@@ -168,12 +190,11 @@ fn pinned_oracle_loose_objects_round_trip_and_refuse_bomb() {
             "{{\"schema\":\"frankengit.deflate.loose-object-differential.v1\",",
             "\"oracle_object_count\":{},",
             "\"oracle_pin\":\"git-2.54.0\",",
-            "\"encoder_profile\":\"{}\",",
+            "\"encoder_profiles\":[\"fast-stored-v1\",\"default-fixed-v1\",\"dynamic-literals-v1\"],",
             "\"bomb_refusal\":\"OutputBytes\",",
             "\"non_claim\":\"no zlib bit-compatibility claim\"}}\n"
         ),
         entries.len(),
-        DeflateProfile::DEFAULT.id
     );
     fs::write(artifact_directory.join("receipt.ndjson"), receipt)
         .unwrap_or_else(|error| panic!("write differential receipt: {error}"));

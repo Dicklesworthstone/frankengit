@@ -9,11 +9,17 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::Arc;
 
 /// The RFC 1951 maximum backwards-copy distance.
 pub const RFC1951_MAX_WINDOW_BYTES: usize = 32_768;
 const MAX_HUFFMAN_BITS: u8 = 15;
 const HUFFMAN_LENGTH_SLOTS: usize = 16;
+const HUFFMAN_LOOKUP_ENTRIES: usize = 1_usize << MAX_HUFFMAN_BITS;
+const HUFFMAN_LOOKUP_MISSING: u16 = u16::MAX;
+const HUFFMAN_LOOKUP_SYMBOL_BITS: u8 = 9;
+const MATCH_HASH_ENTRIES: usize = 32_768;
+const MATCH_INDEX_NONE: usize = usize::MAX;
 const ZLIB_MAGIC_ERROR: &str = "invalid RFC 1950 zlib header";
 
 /// Explicit resource ceilings for one zlib member.
@@ -44,9 +50,16 @@ impl InflateLimits {
     /// A conservative profile suitable for bounded Git object/pack admission.
     pub const GIT_OBJECT: Self = Self {
         max_input_bytes: 64 * 1024 * 1024,
-        max_pending_input_bytes: 1024 * 1024,
+        // One-shot callers legitimately supply an entire bounded object at
+        // once.  Keep the pending ceiling equal to the member input ceiling;
+        // streaming callers still compact consumed input after each push.
+        max_pending_input_bytes: 64 * 1024 * 1024,
         max_output_bytes: 256 * 1024 * 1024,
-        max_expansion_ratio: Some(256),
+        // Git permits highly compressible blobs.  The output, input, work,
+        // window, and allocation ceilings remain independent hard bounds;
+        // this ceiling admits ordinary multi-MiB repetition without making
+        // output unbounded.
+        max_expansion_ratio: Some(4_096),
         max_window_bytes: RFC1951_MAX_WINDOW_BYTES,
         max_huffman_symbols: 320,
         max_collection_elements: 320,
@@ -524,22 +537,16 @@ impl BitReader {
 }
 
 #[derive(Clone, Debug)]
-struct HuffmanCode {
-    reversed_bits: u16,
-    bit_len: u8,
-    symbol: u16,
-}
-
-#[derive(Clone, Debug)]
 struct HuffmanTable {
-    codes: Vec<HuffmanCode>,
+    lookup: Vec<u16>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HuffmanSetPolicy {
     Complete,
-    LiteralLengthMayBeIncomplete,
+    LiteralLengthMayUseSingleBitCode,
     DistanceMayUseSingleBitCode,
+    DistanceMayBeEmpty,
 }
 
 impl HuffmanTable {
@@ -566,8 +573,24 @@ impl HuffmanTable {
                 non_zero += 1;
             }
         }
+        let mut lookup = Vec::new();
+        lookup
+            .try_reserve_exact(HUFFMAN_LOOKUP_ENTRIES)
+            .map_err(|_| InflateRefusal::ResourceLimit {
+                resource: Resource::Allocation,
+                limit: u64::try_from(HUFFMAN_LOOKUP_ENTRIES).unwrap_or(u64::MAX),
+                observed: u64::try_from(HUFFMAN_LOOKUP_ENTRIES).unwrap_or(u64::MAX),
+            })?;
+        lookup.resize(HUFFMAN_LOOKUP_ENTRIES, HUFFMAN_LOOKUP_MISSING);
         if non_zero == 0 {
-            return Err(InflateRefusal::IncompleteHuffmanSet);
+            return match policy {
+                HuffmanSetPolicy::DistanceMayBeEmpty => Ok(Self { lookup }),
+                HuffmanSetPolicy::Complete
+                | HuffmanSetPolicy::LiteralLengthMayUseSingleBitCode
+                | HuffmanSetPolicy::DistanceMayUseSingleBitCode => {
+                    Err(InflateRefusal::IncompleteHuffmanSet)
+                }
+            };
         }
 
         let mut available = 1_i32;
@@ -581,8 +604,9 @@ impl HuffmanTable {
             let single_one_bit_symbol = non_zero == 1 && counts[1] == 1;
             let is_permitted = match policy {
                 HuffmanSetPolicy::Complete => false,
-                HuffmanSetPolicy::LiteralLengthMayBeIncomplete => true,
-                HuffmanSetPolicy::DistanceMayUseSingleBitCode => single_one_bit_symbol,
+                HuffmanSetPolicy::LiteralLengthMayUseSingleBitCode
+                | HuffmanSetPolicy::DistanceMayUseSingleBitCode => single_one_bit_symbol,
+                HuffmanSetPolicy::DistanceMayBeEmpty => false,
             };
             if !is_permitted {
                 return Err(InflateRefusal::IncompleteHuffmanSet);
@@ -596,14 +620,6 @@ impl HuffmanTable {
             next[bit_len] = code;
         }
 
-        let mut codes = Vec::new();
-        codes
-            .try_reserve(non_zero)
-            .map_err(|_| InflateRefusal::ResourceLimit {
-                resource: Resource::Allocation,
-                limit: u64::try_from(limits.max_huffman_symbols).unwrap_or(u64::MAX),
-                observed: u64::try_from(non_zero).unwrap_or(u64::MAX),
-            })?;
         for (symbol, &bit_len) in lengths.iter().enumerate() {
             if bit_len == 0 {
                 continue;
@@ -611,13 +627,24 @@ impl HuffmanTable {
             let index = usize::from(bit_len);
             let canonical = next[index];
             next[index] += 1;
-            codes.push(HuffmanCode {
-                reversed_bits: reverse_low_bits(canonical, bit_len),
+            let reversed_bits = reverse_low_bits(canonical, bit_len);
+            let packed = pack_huffman_lookup(
+                u16::try_from(symbol).map_err(|_| InflateRefusal::InvalidCodeLength)?,
                 bit_len,
-                symbol: u16::try_from(symbol).map_err(|_| InflateRefusal::InvalidCodeLength)?,
-            });
+            );
+            let suffix_count = 1_usize << (MAX_HUFFMAN_BITS - bit_len);
+            for suffix in 0..suffix_count {
+                let lookup_index = usize::from(reversed_bits) | (suffix << bit_len);
+                let slot = lookup
+                    .get_mut(lookup_index)
+                    .ok_or(InflateRefusal::InvalidHuffmanCode)?;
+                if *slot != HUFFMAN_LOOKUP_MISSING {
+                    return Err(InflateRefusal::OversubscribedHuffmanSet);
+                }
+                *slot = packed;
+            }
         }
-        Ok(Self { codes })
+        Ok(Self { lookup })
     }
 
     fn fixed_literal_length(limits: InflateLimits) -> Result<Self, InflateRefusal> {
@@ -632,6 +659,18 @@ impl HuffmanTable {
     fn fixed_distance(limits: InflateLimits) -> Result<Self, InflateRefusal> {
         Self::build(&[5_u8; 32], limits, HuffmanSetPolicy::Complete)
     }
+}
+
+const fn pack_huffman_lookup(symbol: u16, bit_len: u8) -> u16 {
+    ((bit_len as u16) << HUFFMAN_LOOKUP_SYMBOL_BITS) | symbol
+}
+
+const fn unpack_huffman_length(value: u16) -> u8 {
+    (value >> HUFFMAN_LOOKUP_SYMBOL_BITS) as u8
+}
+
+const fn unpack_huffman_symbol(value: u16) -> u16 {
+    value & ((1_u16 << HUFFMAN_LOOKUP_SYMBOL_BITS) - 1)
 }
 
 const fn reverse_low_bits(value: u16, bit_len: u8) -> u16 {
@@ -693,8 +732,8 @@ enum State {
     },
     Compressed {
         final_block: bool,
-        literal_length: HuffmanTable,
-        distance: HuffmanTable,
+        literal_length: Arc<HuffmanTable>,
+        distance: Arc<HuffmanTable>,
         pending: PendingSymbol,
     },
     Adler32,
@@ -856,8 +895,10 @@ impl Inflater {
                         0 => State::StoredHeader { final_block },
                         1 => State::Compressed {
                             final_block,
-                            literal_length: HuffmanTable::fixed_literal_length(self.limits)?,
-                            distance: HuffmanTable::fixed_distance(self.limits)?,
+                            literal_length: Arc::new(HuffmanTable::fixed_literal_length(
+                                self.limits,
+                            )?),
+                            distance: Arc::new(HuffmanTable::fixed_distance(self.limits)?),
                             pending: PendingSymbol::Symbol,
                         },
                         2 => {
@@ -871,8 +912,8 @@ impl Inflater {
                             };
                             State::Compressed {
                                 final_block,
-                                literal_length,
-                                distance,
+                                literal_length: Arc::new(literal_length),
+                                distance: Arc::new(distance),
                                 pending: PendingSymbol::Symbol,
                             }
                         }
@@ -974,8 +1015,8 @@ impl Inflater {
     fn advance_compressed(
         &mut self,
         final_block: bool,
-        literal_length: &HuffmanTable,
-        distance: &HuffmanTable,
+        literal_length: &Arc<HuffmanTable>,
+        distance: &Arc<HuffmanTable>,
         pending: PendingSymbol,
         control: &mut impl CancellationProbe,
     ) -> Result<bool, InflateRefusal> {
@@ -992,8 +1033,8 @@ impl Inflater {
                         )?;
                         self.state = State::Compressed {
                             final_block,
-                            literal_length: literal_length.clone(),
-                            distance: distance.clone(),
+                            literal_length: Arc::clone(literal_length),
+                            distance: Arc::clone(distance),
                             pending: PendingSymbol::Symbol,
                         };
                     }
@@ -1008,8 +1049,8 @@ impl Inflater {
                         let index = usize::from(symbol - 257);
                         self.state = State::Compressed {
                             final_block,
-                            literal_length: literal_length.clone(),
-                            distance: distance.clone(),
+                            literal_length: Arc::clone(literal_length),
+                            distance: Arc::clone(distance),
                             pending: PendingSymbol::Length {
                                 base: LENGTH_BASE[index],
                                 extra_bits: LENGTH_EXTRA[index],
@@ -1034,8 +1075,8 @@ impl Inflater {
                 })?;
                 self.state = State::Compressed {
                     final_block,
-                    literal_length: literal_length.clone(),
-                    distance: distance.clone(),
+                    literal_length: Arc::clone(literal_length),
+                    distance: Arc::clone(distance),
                     pending: PendingSymbol::Distance { length },
                 };
             }
@@ -1049,8 +1090,8 @@ impl Inflater {
                 }
                 self.state = State::Compressed {
                     final_block,
-                    literal_length: literal_length.clone(),
-                    distance: distance.clone(),
+                    literal_length: Arc::clone(literal_length),
+                    distance: Arc::clone(distance),
                     pending: PendingSymbol::DistanceExtra {
                         length,
                         base: DISTANCE_BASE[index],
@@ -1074,8 +1115,8 @@ impl Inflater {
                 self.copy_match(match_distance, length)?;
                 self.state = State::Compressed {
                     final_block,
-                    literal_length: literal_length.clone(),
-                    distance: distance.clone(),
+                    literal_length: Arc::clone(literal_length),
+                    distance: Arc::clone(distance),
                     pending: PendingSymbol::Symbol,
                 };
             }
@@ -1097,12 +1138,14 @@ impl Inflater {
                 return Ok(None);
             };
             bits |= next_bit << (bit_len - 1);
-            if let Some(code) = table
-                .codes
-                .iter()
-                .find(|code| code.bit_len == bit_len && code.reversed_bits == bits)
-            {
-                return Ok(Some(code.symbol));
+            let lookup_index = usize::from(bits);
+            let entry = table
+                .lookup
+                .get(lookup_index)
+                .copied()
+                .ok_or(InflateRefusal::InvalidHuffmanCode)?;
+            if entry != HUFFMAN_LOOKUP_MISSING && unpack_huffman_length(entry) <= bit_len {
+                return Ok(Some(unpack_huffman_symbol(entry)));
             }
         }
         Err(InflateRefusal::InvalidHuffmanCode)
@@ -1204,15 +1247,28 @@ impl Inflater {
         if lengths[256] == 0 {
             return Err(InflateRefusal::InvalidCodeLength);
         }
+        let literal_lengths = &lengths[..literal_count];
+        let distance_lengths = &lengths[literal_count..total];
+        let contains_length_symbol = literal_lengths
+            .get(257..)
+            .is_some_and(|values| values.iter().any(|length| *length != 0));
+        let has_distance_code = distance_lengths.iter().any(|length| *length != 0);
+        if contains_length_symbol && !has_distance_code {
+            return Err(InflateRefusal::InvalidLengthOrDistanceCode);
+        }
         let literal_length = HuffmanTable::build(
-            &lengths[..literal_count],
+            literal_lengths,
             self.limits,
-            HuffmanSetPolicy::LiteralLengthMayBeIncomplete,
+            HuffmanSetPolicy::LiteralLengthMayUseSingleBitCode,
         )?;
         let distance = HuffmanTable::build(
-            &lengths[literal_count..total],
+            distance_lengths,
             self.limits,
-            HuffmanSetPolicy::DistanceMayUseSingleBitCode,
+            if has_distance_code {
+                HuffmanSetPolicy::DistanceMayUseSingleBitCode
+            } else {
+                HuffmanSetPolicy::DistanceMayBeEmpty
+            },
         )?;
         Ok(Some((literal_length, distance)))
     }
@@ -1492,6 +1548,130 @@ impl EncodeCodebook {
     }
 }
 
+/// Bounded candidate index for one fixed-Huffman block.
+///
+/// The index is encoder-local planning state, never storage.  Its chains are
+/// keyed by the next three bytes and therefore let a finite candidate budget
+/// search the whole retained 32 KiB window instead of accidentally treating
+/// the candidate count as a distance ceiling.
+#[derive(Clone, Debug)]
+struct MatchIndex {
+    heads: Vec<usize>,
+    previous: Vec<usize>,
+    history_len: usize,
+}
+
+impl MatchIndex {
+    fn new(history: &VecDeque<u8>, block: &[u8]) -> Result<Self, DeflateRefusal> {
+        let total = history
+            .len()
+            .checked_add(block.len())
+            .ok_or(DeflateRefusal::InvalidProfile)?;
+        let mut heads = Vec::new();
+        heads.try_reserve_exact(MATCH_HASH_ENTRIES).map_err(|_| {
+            deflate_resource_limit(Resource::Allocation, MATCH_HASH_ENTRIES, MATCH_HASH_ENTRIES)
+        })?;
+        heads.resize(MATCH_HASH_ENTRIES, MATCH_INDEX_NONE);
+        let mut previous = Vec::new();
+        previous
+            .try_reserve_exact(total)
+            .map_err(|_| deflate_resource_limit(Resource::Allocation, total, total))?;
+        previous.resize(total, MATCH_INDEX_NONE);
+        let mut index = Self {
+            heads,
+            previous,
+            history_len: history.len(),
+        };
+        for position in 0..history.len() {
+            index.record(position, history, block)?;
+        }
+        Ok(index)
+    }
+
+    fn record_emitted(
+        &mut self,
+        block_position: usize,
+        length: usize,
+        history: &VecDeque<u8>,
+        block: &[u8],
+    ) -> Result<(), DeflateRefusal> {
+        let end = block_position
+            .checked_add(length)
+            .ok_or(DeflateRefusal::InvalidProfile)?;
+        if end > block.len() {
+            return Err(DeflateRefusal::InvalidProfile);
+        }
+        for position in block_position..end {
+            let virtual_position = self
+                .history_len
+                .checked_add(position)
+                .ok_or(DeflateRefusal::InvalidProfile)?;
+            self.record(virtual_position, history, block)?;
+        }
+        Ok(())
+    }
+
+    fn candidate_for(&self, block_position: usize, history: &VecDeque<u8>, block: &[u8]) -> usize {
+        let virtual_position = match self.history_len.checked_add(block_position) {
+            Some(position) => position,
+            None => return MATCH_INDEX_NONE,
+        };
+        let Some(hash) = triple_hash(virtual_position, history, block) else {
+            return MATCH_INDEX_NONE;
+        };
+        self.heads.get(hash).copied().unwrap_or(MATCH_INDEX_NONE)
+    }
+
+    fn previous_candidate(&self, position: usize) -> usize {
+        self.previous
+            .get(position)
+            .copied()
+            .unwrap_or(MATCH_INDEX_NONE)
+    }
+
+    fn record(
+        &mut self,
+        virtual_position: usize,
+        history: &VecDeque<u8>,
+        block: &[u8],
+    ) -> Result<(), DeflateRefusal> {
+        let Some(hash) = triple_hash(virtual_position, history, block) else {
+            return Ok(());
+        };
+        let head = self
+            .heads
+            .get_mut(hash)
+            .ok_or(DeflateRefusal::InvalidProfile)?;
+        let previous = self
+            .previous
+            .get_mut(virtual_position)
+            .ok_or(DeflateRefusal::InvalidProfile)?;
+        *previous = *head;
+        *head = virtual_position;
+        Ok(())
+    }
+}
+
+fn triple_hash(position: usize, history: &VecDeque<u8>, block: &[u8]) -> Option<usize> {
+    let first = virtual_byte(position, history, block)?;
+    let second = virtual_byte(position.checked_add(1)?, history, block)?;
+    let third = virtual_byte(position.checked_add(2)?, history, block)?;
+    let hash = usize::from(first)
+        .wrapping_mul(251)
+        .wrapping_add(usize::from(second))
+        .wrapping_mul(251)
+        .wrapping_add(usize::from(third));
+    Some(hash & (MATCH_HASH_ENTRIES - 1))
+}
+
+fn virtual_byte(position: usize, history: &VecDeque<u8>, block: &[u8]) -> Option<u8> {
+    if position < history.len() {
+        history.get(position).copied()
+    } else {
+        block.get(position.checked_sub(history.len())?).copied()
+    }
+}
+
 /// A bounded, deterministic streaming RFC 1950/RFC 1951 member encoder.
 ///
 /// Output from [`Self::take_output`] before [`Self::finish`] is tentative.
@@ -1746,14 +1926,17 @@ impl Deflater {
     ) -> Result<(), DeflateRefusal> {
         self.write_bits(u16::from(final_block), 1)?;
         self.write_bits(1, 2)?;
+        let mut matcher = MatchIndex::new(&self.history, block)?;
         let mut position = 0_usize;
         while position < block.len() {
             self.charge_work(control)?;
-            if let Some((length, distance)) = self.find_match(block, position, control)? {
+            if let Some((length, distance)) = self.find_match(block, position, &matcher, control)? {
                 self.write_fixed_match(length, distance)?;
+                matcher.record_emitted(position, length, &self.history, block)?;
                 position += length;
             } else {
                 self.write_fixed_symbol(u16::from(block[position]))?;
+                matcher.record_emitted(position, 1, &self.history, block)?;
                 position += 1;
             }
         }
@@ -1766,9 +1949,19 @@ impl Deflater {
         final_block: bool,
         control: &mut impl CancellationProbe,
     ) -> Result<(), DeflateRefusal> {
-        const LITERAL_COUNT: usize = 286;
+        // A dynamic literal/length alphabet needs a Kraft-complete code set.
+        // The former fixed-table prefix omitted symbols 286-287 while still
+        // advertising 286 entries, leaving 254/256 of the code space and
+        // producing members zlib correctly rejects.  This frozen table covers
+        // every literal plus EOB in exactly 257 entries: 255 eight-bit codes
+        // and two nine-bit codes fill the code space exactly.
+        const LITERAL_COUNT: usize = 257;
         const DISTANCE_COUNT: usize = 1;
-        const CODE_LENGTH_COUNT: usize = 19;
+        // The code-length alphabet must also represent the one-bit distance
+        // code.  Symbols 1, 8, and 9 are made complete with lengths 1, 2,
+        // and 2 respectively.  Symbol 1 occurs late in RFC 1951's prescribed
+        // transmission order, so HCLEN must include its eighteenth entry.
+        const CODE_LENGTH_COUNT: usize = 18;
         let total_lengths = LITERAL_COUNT + DISTANCE_COUNT;
         if total_lengths > self.limits.max_collection_elements {
             return Err(deflate_resource_limit(
@@ -1779,24 +1972,26 @@ impl Deflater {
         }
 
         let mut literal_lengths = [0_u8; LITERAL_COUNT];
-        literal_lengths[..144].fill(8);
-        literal_lengths[144..256].fill(9);
-        literal_lengths[256..280].fill(7);
-        literal_lengths[280..].fill(8);
+        literal_lengths[..255].fill(8);
+        literal_lengths[255..].fill(9);
         let distance_lengths = [1_u8; DISTANCE_COUNT];
-        let mut code_length_lengths = [0_u8; CODE_LENGTH_COUNT];
-        code_length_lengths[..13].fill(4);
-        code_length_lengths[13..].fill(5);
+        let mut code_length_lengths = [0_u8; 19];
+        code_length_lengths[1] = 1;
+        code_length_lengths[8] = 2;
+        code_length_lengths[9] = 2;
 
         let literal_codebook = EncodeCodebook::build(&literal_lengths, self.limits)?;
         let code_length_codebook = EncodeCodebook::build(&code_length_lengths, self.limits)?;
 
         self.write_bits(u16::from(final_block), 1)?;
         self.write_bits(2, 2)?;
-        self.write_bits(29, 5)?;
         self.write_bits(0, 5)?;
-        self.write_bits(15, 4)?;
-        for &index in &CODE_LENGTH_ORDER {
+        self.write_bits(0, 5)?;
+        self.write_bits(
+            u16::try_from(CODE_LENGTH_COUNT - 4).map_err(|_| DeflateRefusal::InvalidProfile)?,
+            4,
+        )?;
+        for &index in CODE_LENGTH_ORDER.iter().take(CODE_LENGTH_COUNT) {
             self.write_bits(u16::from(code_length_lengths[index]), 3)?;
         }
         for &length in literal_lengths.iter().chain(distance_lengths.iter()) {
@@ -1813,20 +2008,32 @@ impl Deflater {
         &mut self,
         block: &[u8],
         position: usize,
+        matcher: &MatchIndex,
         control: &mut impl CancellationProbe,
     ) -> Result<Option<(usize, usize)>, DeflateRefusal> {
         if self.profile.max_match_chain == 0 || position + 3 > block.len() {
             return Ok(None);
         }
         let available = self.history.len().saturating_add(position);
-        let search_limit = available
-            .min(self.profile.window_bytes)
-            .min(self.profile.max_match_chain);
+        let current = available;
         let max_length = (block.len() - position).min(258);
         let mut best = None;
-        for distance in 1..=search_limit {
+        let mut candidate = matcher.candidate_for(position, &self.history, block);
+        let mut candidates_seen = 0_usize;
+        while candidate != MATCH_INDEX_NONE && candidates_seen < self.profile.max_match_chain {
             self.charge_work(control)?;
+            if candidate >= current {
+                return Err(DeflateRefusal::InvalidProfile);
+            }
+            let distance = current - candidate;
+            if distance > self.profile.window_bytes {
+                candidate = matcher.previous_candidate(candidate);
+                candidates_seen += 1;
+                continue;
+            }
             if self.match_source_byte(block, position, distance, 0) != Some(block[position]) {
+                candidate = matcher.previous_candidate(candidate);
+                candidates_seen += 1;
                 continue;
             }
             let mut length = 1_usize;
@@ -1841,7 +2048,12 @@ impl Deflater {
             }
             if length >= 3 && best.is_none_or(|(best_length, _)| length > best_length) {
                 best = Some((length, distance));
+                if length == max_length {
+                    return Ok(best);
+                }
             }
+            candidate = matcher.previous_candidate(candidate);
+            candidates_seen += 1;
         }
         Ok(best)
     }
@@ -2113,7 +2325,7 @@ mod tests {
     use super::{
         Adler32, CancellationProbe, DeflateBlockKind, DeflateLimits, DeflateProfile,
         DeflateRefusal, DeflateStreamProgress, Deflater, InflateLimits, InflateRefusal, Inflater,
-        NeverCancel, Resource, StreamProgress, deflate_zlib, inflate_zlib,
+        MatchIndex, NeverCancel, Resource, StreamProgress, deflate_zlib, inflate_zlib,
     };
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -2288,6 +2500,26 @@ mod tests {
         zlib_member(deflate.finish(), &[])
     }
 
+    fn zero_distance_dynamic_member() -> Vec<u8> {
+        let mut deflate = BitPacker::default();
+        deflate.push_bits(1, 1);
+        deflate.push_bits(2, 2);
+        deflate.push_bits(0, 5);
+        deflate.push_bits(0, 5);
+        deflate.push_bits(14, 4);
+        for &index in super::CODE_LENGTH_ORDER.iter().take(18) {
+            let code_length = if index == 0 || index == 1 { 1 } else { 0 };
+            deflate.push_bits(code_length, 3);
+        }
+        for _ in 0..256 {
+            deflate.push_bits(0, 1);
+        }
+        deflate.push_bits(1, 1);
+        deflate.push_bits(0, 1);
+        deflate.push_bits(0, 1);
+        zlib_member(deflate.finish(), &[])
+    }
+
     fn assert_resource(error: InflateRefusal, resource: Resource) {
         assert!(
             matches!(error, InflateRefusal::ResourceLimit { resource: found, .. } if found == resource)
@@ -2372,6 +2604,14 @@ mod tests {
         assert_eq!(
             inflate_zlib(&malformed_dynamic_member([1, 1, 1, 0], &[]), limits()),
             Err(InflateRefusal::OversubscribedHuffmanSet)
+        );
+    }
+
+    #[test]
+    fn valid_dynamic_literal_only_block_may_omit_distance_codes() {
+        assert_eq!(
+            inflate_zlib(&zero_distance_dynamic_member(), limits()),
+            Ok(Vec::new())
         );
     }
 
@@ -2502,6 +2742,41 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("ratio ceiling is mandatory")),
             Resource::Configuration,
+        );
+    }
+
+    #[test]
+    fn git_object_profile_admits_large_repetition_and_large_one_shot_members() {
+        let repeated = vec![0_u8; 1024 * 1024];
+        let repeated_member = deflate_zlib(
+            &repeated,
+            DeflateLimits::GIT_OBJECT,
+            DeflateProfile::DEFAULT,
+        )
+        .unwrap_or_else(|error| panic!("encode high-ratio Git blob: {error}"));
+        assert_eq!(
+            inflate_zlib(&repeated_member, InflateLimits::GIT_OBJECT),
+            Ok(repeated)
+        );
+
+        let mut incompressible = Vec::with_capacity(1024 * 1024 + 1);
+        let mut seed = 0xa059_2174_5bce_d013_u64;
+        for _ in 0..(1024 * 1024 + 1) {
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            seed ^= seed << 8;
+            incompressible.push(u8::try_from(seed & 0xff).unwrap_or(0));
+        }
+        let large_member = deflate_zlib(
+            &incompressible,
+            DeflateLimits::GIT_OBJECT,
+            DeflateProfile::FAST_STORED,
+        )
+        .unwrap_or_else(|error| panic!("encode large Git member: {error}"));
+        assert!(large_member.len() > 1024 * 1024);
+        assert_eq!(
+            inflate_zlib(&large_member, InflateLimits::GIT_OBJECT),
+            Ok(incompressible)
         );
     }
 
@@ -2641,9 +2916,9 @@ mod tests {
 
     #[test]
     fn encoder_golden_output_fingerprints_are_profile_stable() {
-        // These non-cryptographic FNV-1a fingerprints are checked-in golden
-        // snapshots generated by a separately reviewed RFC bit-packing
-        // reference. They are regression sentinels, not object commitments.
+        // These non-cryptographic FNV-1a fingerprints are checked-in output
+        // snapshots for this frozen encoder policy. They are regression
+        // sentinels, not an external oracle or object commitments.
         let input = b"FrankenGit golden v1";
         for (profile, expected_len, expected_fingerprint) in [
             (
@@ -2654,14 +2929,26 @@ mod tests {
             (DeflateProfile::DEFAULT, 28_usize, 0xc93d_a395_cc04_32fd_u64),
             (
                 DeflateProfile::DYNAMIC,
-                180_usize,
-                0x7b0e_5b19_a996_c297_u64,
+                101_usize,
+                0xf25d_582e_0f0c_983d_u64,
             ),
         ] {
             let encoded = deflate_zlib(input, deflate_limits(), profile)
                 .unwrap_or_else(|error| panic!("{}: {error}", profile.id));
-            assert_eq!(encoded.len(), expected_len, "{}", profile.id);
-            assert_eq!(fnv1a64(&encoded), expected_fingerprint, "{}", profile.id);
+            assert_eq!(
+                encoded.len(),
+                expected_len,
+                "{}: actual fingerprint {:016x}",
+                profile.id,
+                fnv1a64(&encoded)
+            );
+            assert_eq!(
+                fnv1a64(&encoded),
+                expected_fingerprint,
+                "{}: actual length {}",
+                profile.id,
+                encoded.len()
+            );
         }
     }
 
@@ -2693,8 +2980,13 @@ mod tests {
         let mut encoder = Deflater::new(deflate_limits(), DeflateProfile::DEFAULT)
             .unwrap_or_else(|error| panic!("encoder configuration: {error}"));
         let mut control = NeverCancel;
+        let mut matcher = MatchIndex::new(&encoder.history, &input)
+            .unwrap_or_else(|error| panic!("matcher construction: {error}"));
+        matcher
+            .record_emitted(0, 1, &encoder.history, &input)
+            .unwrap_or_else(|error| panic!("record first byte: {error}"));
         assert_eq!(
-            encoder.find_match(&input, 1, &mut control),
+            encoder.find_match(&input, 1, &matcher, &mut control),
             Ok(Some((258, 1)))
         );
 
@@ -2702,6 +2994,24 @@ mod tests {
             .unwrap_or_else(|error| panic!("all-zero input: {error}"));
         assert!(member.len() < input.len(), "maximum match must compress");
         assert_eq!(inflate_zlib(&member, limits()), Ok(input));
+    }
+
+    #[test]
+    fn fixed_matcher_searches_the_retained_window_not_only_nearby_distances() {
+        let history = (0_u8..128).collect::<Vec<_>>();
+        let block = history.clone();
+        let mut encoder = Deflater::new(deflate_limits(), DeflateProfile::DEFAULT)
+            .unwrap_or_else(|error| panic!("encoder configuration: {error}"));
+        encoder
+            .append_history(&history)
+            .unwrap_or_else(|error| panic!("seed history: {error}"));
+        let matcher = MatchIndex::new(&encoder.history, &block)
+            .unwrap_or_else(|error| panic!("matcher construction: {error}"));
+        let mut control = NeverCancel;
+        assert_eq!(
+            encoder.find_match(&block, 0, &matcher, &mut control),
+            Ok(Some((128, 128)))
+        );
     }
 
     #[test]

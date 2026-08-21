@@ -92,31 +92,34 @@ publish_owned_members_to_oracle() {
   local oid_prefix=''
   local oid_suffix=''
   local transcript_path=''
+  local profile=''
 
   fge_capture 'owned-output-repository' "$ORACLE" run "$PIN_ID" "$run_directory" . -- \
     init --quiet encoded-repo || true
   fge_assert_exit 'FG-092-E2E-014' 0 "$FGE_LAST_EXIT" \
     'the pinned oracle created the encoder cross-acceptance repository'
 
-  while IFS=$'\t' read -r label object_type oid body_path loose_path; do
-    encoded_path="$worker_artifacts/encoded/$oid"
-    oid_prefix="$(printf '%s' "$oid" | cut -c1-2)"
-    oid_suffix="$(printf '%s' "$oid" | cut -c3-)"
-    target_path="$run_directory/work/encoded-repo/.git/objects/$oid_prefix/$oid_suffix"
-    mkdir -p "$(dirname "$target_path")"
-    fge_run "install-owned-$label" cp -- "$encoded_path" "$target_path" || true
-    fge_assert_file "FG-092-E2E-$label-004" "$target_path" \
-      "the owned encoder member is installed under its native object id"
+  for profile in fast-stored-v1 default-fixed-v1 dynamic-literals-v1; do
+    while IFS=$'\t' read -r label object_type oid body_path loose_path; do
+      encoded_path="$worker_artifacts/encoded/$profile/$oid"
+      oid_prefix="$(printf '%s' "$oid" | cut -c1-2)"
+      oid_suffix="$(printf '%s' "$oid" | cut -c3-)"
+      target_path="$run_directory/work/encoded-repo/.git/objects/$oid_prefix/$oid_suffix"
+      mkdir -p "$(dirname "$target_path")"
+      fge_run "install-owned-$profile-$label" cp -- "$encoded_path" "$target_path" || true
+      fge_assert_file "FG-092-E2E-$profile-$label-004" "$target_path" \
+        "the owned $profile encoder member is installed under its native object id"
 
-    fge_capture "oracle-read-$label" "$ORACLE" capture "$PIN_ID" "$run_directory" encoded-repo \
-      "owned-$label" -- cat-file "$object_type" "$oid" || true
-    transcript_path="$run_directory/transcripts/owned-$label/stdout.bin"
-    fge_assert_exit "FG-092-E2E-$label-005" 0 "$FGE_LAST_EXIT" \
-      "the pinned oracle accepts the owned zlib member for $label"
-    fge_assert_cmd "FG-092-E2E-$label-006" \
-      "the pinned oracle returns the original $label bytes from the owned member" \
-      cmp --silent -- "$transcript_path" "$body_path"
-  done < "$worker_manifest"
+      fge_capture "oracle-read-$profile-$label" "$ORACLE" capture "$PIN_ID" "$run_directory" encoded-repo \
+        "owned-$profile-$label" -- cat-file "$object_type" "$oid" || true
+      transcript_path="$run_directory/transcripts/owned-$profile-$label/stdout.bin"
+      fge_assert_exit "FG-092-E2E-$profile-$label-005" 0 "$FGE_LAST_EXIT" \
+        "the pinned oracle accepts the owned $profile zlib member for $label"
+      fge_assert_cmd "FG-092-E2E-$profile-$label-006" \
+        "the pinned oracle returns original $label bytes from the owned $profile member" \
+        cmp --silent -- "$transcript_path" "$body_path"
+    done < "$worker_manifest"
+  done
 }
 
 main() {
@@ -196,6 +199,9 @@ main() {
       'the planted decompression bomb records the explicit output budget refusal'
     fge_assert_contains 'FG-092-E2E-013' "$receipt" 'no zlib bit-compatibility claim' \
       'the differential receipt retains the encoder non-claim boundary'
+    fge_assert_contains 'FG-092-E2E-015' "$receipt" \
+      '"encoder_profiles":["fast-stored-v1","default-fixed-v1","dynamic-literals-v1"]' \
+      'the differential worker produced every declared encoder profile for oracle cross-acceptance'
     fge_artifact "$worker_artifacts/receipt.ndjson" deflate-loose-object-receipt
   fi
 
