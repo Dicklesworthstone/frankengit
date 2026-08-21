@@ -487,6 +487,6 @@ impl CanonicalBody for SemanticRequest {
 /// arrays, so anything carrying an identity or a domain tag crosses it and has
 /// to be boxed. These assertions fail the build rather than the lint, so the
 /// types cannot grow back quietly.
-pub(crate) const MAX_ERROR_BYTES: usize = 128;
+pub const MAX_ERROR_BYTES: usize = 128;
 
 const _: () = assert!(size_of::<RequestRefusal>() <= MAX_ERROR_BYTES);
