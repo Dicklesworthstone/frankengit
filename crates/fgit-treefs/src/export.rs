@@ -391,7 +391,11 @@ impl ExportPlanner {
                 .then_with(|| left.cmp(right))
         });
 
-        let mut rebuilt: BTreeMap<TreePath, GitOid<A>> = BTreeMap::new();
+        // `Some(oid)` = rebuilt to this identity; `None` = rebuilt and now empty;
+        // absent = never touched, so the base identity stands. Encoding the
+        // empty case as an absent key made it indistinguishable from untouched,
+        // which silently resurrected deleted directories.
+        let mut rebuilt: BTreeMap<TreePath, Option<GitOid<A>>> = BTreeMap::new();
 
         for directory in &deepest {
             if cancelled() {
@@ -407,16 +411,11 @@ impl ExportPlanner {
                 &mut objects,
                 now,
             )?;
-            match oid {
-                Some(oid) => {
-                    rebuilt.insert(directory.clone(), oid);
-                }
-                None => {
-                    // The directory became empty. Git has no empty tree entry,
-                    // so it is simply absent from its parent.
-                    rebuilt.remove(directory);
-                }
-            }
+            // Record the outcome either way. A directory that rebuilt to
+            // nothing must be REMEMBERED as empty: Git has no empty tree entry,
+            // so it has to disappear from its parent, and forgetting it here
+            // let the parent fall back to the base identity and undo the delete.
+            rebuilt.insert(directory.clone(), oid);
         }
 
         if cancelled() {
@@ -471,7 +470,7 @@ impl ExportPlanner {
         capability: &mut TreeCapability,
         overlay: &Overlay,
         directory: Option<&TreePath>,
-        rebuilt: &BTreeMap<TreePath, GitOid<A>>,
+        rebuilt: &BTreeMap<TreePath, Option<GitOid<A>>>,
         objects: &mut BTreeMap<Vec<u8>, ExportedObject<A>>,
         now: u64,
     ) -> Result<Option<GitOid<A>>, ExportRefusal> {
@@ -556,6 +555,29 @@ impl ExportPlanner {
             }
         }
 
+        // A directory created purely by the overlay has no base entry here and
+        // no overlay entry AT this level -- an add at `new/deep/file.txt` puts
+        // its only overlay entry two levels down. Without this pass the rebuilt
+        // `new/` subtree exists in `rebuilt` and nothing ever looks for it, so
+        // the whole added subtree is silently dropped from the export.
+        for (child, child_oid) in rebuilt {
+            if child_oid.is_none() {
+                continue;
+            }
+            let parent = child.parent();
+            let at_this_level = match (directory, parent.as_ref()) {
+                (None, None) => true,
+                (Some(here), Some(parent)) => here == parent,
+                _ => false,
+            };
+            if !at_this_level {
+                continue;
+            }
+            level
+                .entry(child.file_name().to_vec())
+                .or_insert(Resolved::Directory { base_oid: None });
+        }
+
         // Resolve subdirectory identities from the bottom-up pass. A directory
         // that rebuilt to nothing disappears, because Git cannot represent an
         // empty tree entry.
@@ -584,12 +606,21 @@ impl ExportPlanner {
                             |here| here.join(&name, base.path_policy()),
                         )
                         .map_err(|refusal| ExportRefusal::Base(refusal.to_string()))?;
-                    // Rebuilt subtree wins; otherwise the base identity is
-                    // carried forward unchanged. Only a directory that exists
-                    // in neither -- a newly created one that ended up empty --
-                    // is absent, because Git cannot represent an empty tree
-                    // entry.
-                    let resolved_oid = rebuilt.get(&child).copied().or(base_oid);
+                    // Three distinct cases, and collapsing any two of them
+                    // loses data:
+                    //   Some(Some(oid)) -- rebuilt; the new identity wins.
+                    //   Some(None)      -- rebuilt and now empty; it must
+                    //                      disappear. Falling back to the base
+                    //                      here undoes the deletion that
+                    //                      emptied it.
+                    //   None            -- never touched; the base identity is
+                    //                      carried forward verbatim, which is
+                    //                      what keeps untouched subtrees from
+                    //                      being dropped.
+                    let resolved_oid = match rebuilt.get(&child) {
+                        Some(rebuilt_oid) => *rebuilt_oid,
+                        None => base_oid,
+                    };
                     match resolved_oid {
                         Some(oid) => TreeEntry {
                             mode: MODE_TREE.to_vec(),
