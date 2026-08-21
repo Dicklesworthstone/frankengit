@@ -21,6 +21,7 @@ use fgit_git_object::{AcceptanceProfile, ParseLimits, parse_tree};
 use fgit_treefs::base::{BaseView, ObjectSource, ObjectSourceError};
 use fgit_treefs::capability::{ReadGrant, TreeCapability, WorkspaceId};
 use fgit_treefs::export::{ExportLimits, ExportPlanner};
+use fgit_treefs::materialize::materialize;
 use fgit_treefs::overlay::{ContentRef, EntryClass, FileMode, Overlay, OverlayEntry};
 use fgit_treefs::path::{PathPolicy, TreePath};
 use fgit_types::identity::RepositoryCommitId;
@@ -357,6 +358,8 @@ struct CaseOutcome {
     actual_root: String,
     byte_divergences: Vec<String>,
     trees_compared: usize,
+    /// Loose-object paths compared against Git's real on-disk layout.
+    layout_compared: usize,
 }
 
 fn run_case(case_dir: &Path, name: &str) -> Result<CaseOutcome, DifferentialError> {
@@ -437,11 +440,48 @@ fn run_case(case_dir: &Path, name: &str) -> Result<CaseOutcome, DifferentialErro
         }
     }
 
+    // Materialize the plan and check its loose-object layout against the layout
+    // Git actually wrote. Git's set is a SUPERSET -- it also holds the base
+    // objects from before the edit -- so the assertion is containment, not
+    // equality. What that pins is the fanout rule: the two-hex-character
+    // directory split and the 38-character remainder. Getting that wrong
+    // produces a store Git cannot read, and nothing else here would catch it,
+    // because every in-crate test of materialize was written against my own
+    // reading of the same rule.
+    let mut layout_compared = 0usize;
+    let loose_text = fs::read_to_string(case_dir.join("loose.txt")).unwrap_or_default();
+    let git_loose: std::collections::BTreeSet<&str> = loose_text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if !git_loose.is_empty() {
+        let layout = materialize(&plan, &ParseLimits::default()).map_err(|refusal| {
+            DifferentialError::new(format!("{name}: materialize refused: {refusal:?}"))
+        })?;
+        for relative in layout.paths() {
+            layout_compared += 1;
+            if !git_loose.contains(relative) {
+                byte_divergences.push(format!(
+                    "{name}: materialized loose path {relative} is absent from Git's own \
+                     object layout, so the fanout split disagrees with Git"
+                ));
+            }
+        }
+        if layout_compared == 0 {
+            byte_divergences.push(format!(
+                "{name}: materialize produced no loose paths, so the layout check was vacuous"
+            ));
+        }
+    }
+
     Ok(CaseOutcome {
         expected_root: expected_root_hex,
         actual_root: hex(plan.root_tree().digest_bytes()),
         byte_divergences,
         trees_compared,
+        layout_compared,
     })
 }
 
@@ -499,6 +539,7 @@ fn export_agrees_with_the_pinned_git_oracle() -> Result<(), DifferentialError> {
 
     let mut failures = Vec::new();
     let mut total_trees = 0usize;
+    let mut total_layout = 0usize;
     for case_dir in &case_dirs {
         let name = case_dir
             .file_name()
@@ -508,6 +549,7 @@ fn export_agrees_with_the_pinned_git_oracle() -> Result<(), DifferentialError> {
         match run_case(case_dir, &name) {
             Ok(outcome) => {
                 total_trees += outcome.trees_compared;
+                total_layout += outcome.layout_compared;
                 if outcome.expected_root != outcome.actual_root {
                     failures.push(format!(
                         "{name}: root tree mismatch — oracle {} vs frankengit {}",
@@ -531,7 +573,8 @@ fn export_agrees_with_the_pinned_git_oracle() -> Result<(), DifferentialError> {
 
     if failures.is_empty() {
         println!(
-            "differential ok: {} cases, {total_trees} tree bodies byte-compared against the oracle",
+            "differential ok: {} cases, {total_trees} tree bodies byte-compared and \
+             {total_layout} loose paths layout-checked against the oracle",
             case_dirs.len()
         );
         Ok(())

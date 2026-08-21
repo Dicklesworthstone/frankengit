@@ -323,6 +323,24 @@ build_corpus() {
       continue
     fi
 
+    # Git's real loose-object layout, as relative `xx/yyyy...` paths. Read from
+    # the run directory rather than through the sandbox: the worktree is bound
+    # outside it, so this needs no oracle invocation and no decompression -- the
+    # PATHS alone pin the fanout rule, which is the part we could get wrong.
+    # Dumped from .git, NOT .git/objects, so the paths carry the `objects/`
+    # component that materialize()'s relative_path is documented to include.
+    # Dumping one level deeper made every path mismatch and produced a failure
+    # message accusing the fanout split of disagreeing with Git when the fanout
+    # was byte-identical and only the base directory differed.
+    if [ -d "$work/.git/objects" ]; then
+      (
+        cd "$work/.git" || exit 0
+        find objects -type f 2>/dev/null | LC_ALL=C sort
+      ) >|"$dir/loose.txt"
+    else
+      : >|"$dir/loose.txt"
+    fi
+
     corpus_cases=$((corpus_cases + 1))
   done
 
