@@ -20,7 +20,7 @@ FG-001 constitution + registries
   ├─ FG-002 canonical codec and IDs
   │    ├─ FG-003 reference state machine
   │    ├─ FG-004 AuthorityStore contract
-  │    │    ├─ FG-005 embedded FrankenSQLite authority profile
+  │    │    ├─ FG-005 embedded FrankenSQLite authority profile (also needs FG-011 runtime profile)
   │    │    └─ FG-006 object-store authority conformance profile
   │    ├─ FG-007 transaction seal/outcome
   │    ├─ FG-008 intent/effect normal form
@@ -147,8 +147,11 @@ Use FrankenSQLite to implement the same `AuthorityStore` semantics for a one-nod
 
 - no C SQLite/rusqlite dependency;
 - compare-and-exchange and immutable-body transactions match the reference model;
+- uses the Asupersync-aware asynchronous API with runtime-owned `&Cx`, minimal `default-features = false` features, bounded connection workers/queues, and explicit close/join;
+- transactions await commit/rollback; bounded retry restarts the whole transaction only for the registered transient family, and `SnapshotTooOld` forces a fresh snapshot;
 - crash matrix around body write, sync, head CAS, outcome accelerator, and restart;
 - per-core staging uses FrankenSQLite MVCC without creating a second truth universe;
+- writer admission stays inside the exact upstream concurrency envelope proved for the pinned revision; no lock-free or unbounded-multiwriter claim;
 - export/import to the canonical object/decision format;
 - performance artifact compares the embedded path with a filesystem baseline.
 
@@ -246,10 +249,13 @@ Pin the exact Asupersync capabilities used by gateways, transfers, publication, 
 **Acceptance:**
 
 - one runtime/feature universe, no Tokio compatibility in production;
-- explicit `Cx`, budget, deadline, cancellation, RNG, and effect capabilities;
-- region tree and task ownership for every long-lived service;
+- production `Cx` values originate from the owning `Runtime`/`RuntimeHandle`; effectful APIs take `&Cx` first and capability narrowing is planted-negative tested;
+- finite child budgets meet parent deadline/poll/cost/priority limits; success/error/cancelled/panicked outcomes remain typed through policy edges;
+- one compiled `AppSpec` lifecycle and explicit scope/`JoinSet`/actor ownership for every long-lived service;
+- request → drain → finalize cancellation, dependency-ordered shutdown, and explicit obligation-leak policy with no silent/log-only false quiescence;
 - runtime profile identity is attached to evidence artifacts;
 - deterministic Lab and production profiles share typed protocol behavior;
+- native parked-worker/file/socket/blocking-worker teardown tests complement rather than duplicate Lab evidence;
 - foreign reactor/runtime dependencies fail the constitution gate.
 
 ### FG-012 — Implement obligation-typed canonical and external effects
@@ -283,6 +289,7 @@ Create a reusable deterministic harness for authority, transfer, repair, workspa
 - schedule coverage receipt names explored equivalence classes and bounds;
 - cancellation/crash can occur at every declared yield/publication point;
 - minimized counterexample replay command;
+- a separate native-cancellation lane exercises parked workers, real files/sockets, blocking workers, signals, and child-process reaping, with the distinction from deterministic schedule evidence explicit;
 - no raw stress count may substitute for schedule coverage.
 
 ### FG-014 — Implement per-core preparation lanes and flat combining

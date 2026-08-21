@@ -82,6 +82,10 @@ FrankenGit uses this to explore head-CAS races, cancellation, ref/forge atomicit
 
 Asupersync’s dependency governance—especially bans on hidden Tokio and external transport stacks—becomes a workspace-level FrankenGit gate. The production graph has one runtime universe.
 
+### 1.8 Concrete production integration
+
+The imported mechanism is now pinned at the caller-contract level, not only named architecturally. A FrankenGit node is one compiled `AppSpec` lifecycle; production request contexts come from the owning runtime with finite budgets; effectful APIs take a narrowed `&Cx`; the four `Outcome` states survive to the policy edge; and scopes, bounded `JoinSet`s, and actors are selected by ownership shape. Cancellation is request → drain → finalize, with explicit obligation-leak policy and dependency-ordered shutdown. Deterministic Lab exploration does not substitute for native parked-worker, OS I/O, blocking-worker, signal, or process-reaping evidence. Current Asupersync only proves live restart at the actor level, so FrankenGit does not overclaim a tree-wide compiled-supervisor restart contract.
+
 ## 2. FrankenSQLite: high-concurrency preparation without weakening order
 
 ### 2.1 MVCC as witness discipline
@@ -146,6 +150,8 @@ FrankenSQLite is the local authority backend and derived MVCC engine for:
 - evidence catalogs.
 
 It is not a second distributed source of truth beside the immutable decision log.
+
+The direct caller profile is equally explicit. Production uses the Asupersync-aware asynchronous API with a runtime-owned `&Cx`; raw non-`Send` connections remain on one owner, asynchronous connection workers/channels are bounded and explicitly closed, and transactions await commit or rollback. Retry restarts the whole transaction, is limited to the registered transient error family and remaining budget, and treats `SnapshotTooOld` as a fresh-snapshot decision. The reviewed engine still serializes a portion of commit and does not yet justify a blanket ten-plus implicit-writer claim, so FrankenGit admission-controls writers to the tested envelope and records the exact profile. Parallel preparation is not relabeled lock-free commit.
 
 ## 3. FrankenFS: workspace semantics, repair serialization, and crash honesty
 
@@ -396,13 +402,13 @@ FrankenGit’s local release lane binds commit, lockfile, constellation, nightly
 
 ## 8a. Product-surface stack: fastapi_rust, sqlmodel_rust, frankentui
 
-The forge is not only a truth engine; it needs a gateway, projections, and interfaces. Three sibling projects supply these on the sole runtime, keeping the whole stack in one Rust universe.
+The forge is not only a truth engine; it needs a gateway, projections, and interfaces. These three sibling projects are settled adoptions. Their current reviewed revisions do not yet form one admissible runtime constellation, so their owned upstream repositories must converge before FrankenGit integrates them: fastapi_rust and FrankenTUI must advance from Asupersync 0.3.x to the selected 0.4.x contract, while sqlmodel_rust must align its exact runtime pin and replace its unpublished absolute FrankenSQLite patches with the admitted release. This is a blocking integration prerequisite, not a framework-selection reopening.
 
 ### 8a.1 fastapi_rust -> gateway/API
 Pure-Rust, Asupersync-native web framework (typed routing, zero-copy parsing, deterministic testing, OpenAPI generation). It becomes `fgit-gateway`/`fgit-api`; its OpenAPI generation is unified with the schema registry so ONE schema source drives Rust types, validators, OpenAPI, and generated clients (no handwritten wire structs). No Tokio.
 
 ### 8a.2 sqlmodel_rust -> projection read-models
-SQLModel-style typed models + compile-time-checked query builders, via the `sqlmodel-frankensqlite` backend (asupersync + fsqlite only). It becomes the substrate for DERIVED projection read-models over the mandated embedded engine. Hard boundary: projections only (never a second source of truth beside the decision log), and only the frankensqlite backend is admitted — the C-SQLite/Postgres/MySQL backends are excluded.
+SQLModel-style typed models + compile-time-checked query builders, via the `sqlmodel-frankensqlite` backend (Asupersync + FrankenSQLite only). It becomes the substrate for DERIVED projection read-models over the mandated embedded engine. Hard boundary: projections only (never a second source of truth beside the decision log), and only the FrankenSQLite backend is admitted—the C-SQLite/Postgres/MySQL backends are excluded. Its pool/session layer must preserve FrankenSQLite's non-`Send` connection ownership, bounded worker topology, explicit close, transaction-wide retry law, and rebuild semantics rather than hiding them behind ORM ergonomics.
 
 ### 8a.3 frankentui (ftui) -> terminal UI and an optional parallel web skin
 A mature pure-Rust terminal-UI kernel with an `asupersync-executor` feature and a WASM backend. It becomes `fgit-tui` (operator/agent/SSH console) and, optionally, a parallel terminal-style web surface. It is deliberately NOT the primary web UI: that is a familiar GitHub-like DOM-oriented pure-Rust->WASM app (Leptos or Dioxus, SSR + Tailwind, real DOM, so text selection / a11y / SEO all work), because a terminal aesthetic (and a canvas-painted WASM UI) would hurt most web users. What the surfaces share is the Rust substrate (canonical types, franken_markdown rendering, the verified-read verifier as native code), not one look; a generated TypeScript client and React reference are the supported alternative front-end.

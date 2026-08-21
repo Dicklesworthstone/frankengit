@@ -74,6 +74,8 @@ Preserve ordinary Git at the edge while making canonical repository and forge st
 
 A cell may be preferred for a repository through rendezvous hashing, but it is not an authority owner. Any eligible cell can reread the head and attempt publication. Gossip is a freshness/cache hint only.
 
+Each node is one Asupersync-owned application lifecycle. A compiled `AppSpec` owns long-lived services; runtime-created, finite-budget `Cx` values are narrowed into requests; scopes/`JoinSet`/actors match the child-ownership shape; and shutdown stops admission, requests cancellation, drains, finalizes or transfers obligations, explicitly closes database workers, and joins to quiescence. `Outcome` cancellation and panic/containment states are retained until protocol policy resolves them. Deterministic Lab schedules prove logical interleavings, while native parked-worker/file/socket/process campaigns separately prove real teardown. See [`docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md`](docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md).
+
 ## 4. Canonical object model
 
 ### 4.1 Transaction seal
@@ -179,6 +181,8 @@ No raw byte/XOR source merge and no silent change to a sealed request.
 ### Embedded
 
 FrankenSQLite provides the head compare-and-swap and local MVCC projections. Immutable bodies live in the local object fabric. Export uses the same canonical records as clustered deployments.
+
+The embedded adapter uses the Asupersync-aware asynchronous API with runtime-owned `&Cx`, a minimal `default-features = false` feature set, bounded connection/worker ownership, explicit close/join, and awaited commit/rollback. Whole-transaction retries are finite and restricted to registered transient classes. Authority writers and projection writers stay within the exact upstream concurrency profile proven by the selected constellation; the architecture does not infer lock-free or unlimited multiwriter behavior from parallel preparation.
 
 ### Object-store cluster
 

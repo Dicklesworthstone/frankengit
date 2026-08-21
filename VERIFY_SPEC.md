@@ -94,6 +94,23 @@ Must check every first-party Rust target and Cargo manifest for:
 
 The same checks must run without a hosted Actions token. `.github/workflows` is tested as a local DSR/`act` adapter, not a remote authority.
 
+### 5.4 Asupersync/FrankenSQLite integration lane
+
+The adopted runtime, storage, gateway, projection, and TUI stack must pass one exact-constellation lane before any dependent product slice can claim completion. The lane checks:
+
+- exactly one Asupersync version and public type universe in the production lockfile; two Cargo-resolved 0.x versions fail;
+- runtime-owned production `Cx` construction, capability narrowing, finite child-budget meet, and preservation of success/error/cancelled/panicked `Outcome` states;
+- one compiled node lifecycle with dependency-ordered start, request → drain → finalize cancellation, explicit stop/join, and zero unresolved obligations or a typed containment failure;
+- deterministic Lab schedule/crashpack coverage plus separate native parked-worker, real-file/socket, blocking-worker, signal, and process-teardown coverage;
+- explicit obligation-leak policy: fail-fast in verification/release; no `Silent`, and no log-only result credited as quiescence;
+- FrankenSQLite `default-features = false` with the minimal role-specific feature closure, no C API/native SQLite, no concurrent stock-SQLite access, and no unpublished/absolute path or `[patch]` dependency;
+- asynchronous FrankenSQLite calls receive the runtime-owned `&Cx`; connection/worker count and command queues are bounded; every worker has explicit close/join evidence;
+- awaited transaction commit/rollback, whole-transaction retry over only the registered transient family, fresh-snapshot handling for `SnapshotTooOld`, and refusal when retry budget is exhausted;
+- authority CAS history equivalence and exactly one winner under every claimed contender profile; and
+- projection watermark, authority-negative, migration, wipe/rebuild, cancellation, and bounded-writer tests against the exact claimed FrankenSQLite concurrency envelope.
+
+Planted-negative fixtures must introduce a second Asupersync, Tokio, an absolute sibling path, a forbidden sqlmodel backend, a feature/unsafe/proc-macro drift, capability widening, an unbounded request budget, statement-only retry, an unclosed database worker, and an unsupported writer count; each fixture must fail for the intended reason. The current sibling projects are settled adoptions, but their integration remains blocked until their owned upstream version/path updates make this lane green.
+
 ## 6. Canonical encoding and identity suites
 
 For every identity-bearing type:
