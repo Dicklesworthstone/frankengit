@@ -201,6 +201,30 @@ capture_output_sha256() {
   } | sha256_stdin
 }
 
+artifact_timestamp_utc() {
+  local nanoseconds=""
+  local seconds=""
+
+  # Do not depend on a particular `date -u` implementation accepting a literal
+  # trailing Z alongside %N.  POSIX date does not define %N, so accept it only
+  # when it expands to the complete numeric subsecond suffix and otherwise
+  # take the portable seconds-resolution path.  LC_ALL and TZ are deliberately
+  # set for this command rather than inherited from the lane environment.
+  nanoseconds="$(LC_ALL=C TZ=UTC0 date '+%Y%m%dT%H%M%S%N' 2>/dev/null || true)"
+  if [[ "${nanoseconds}" =~ ^[0-9]{8}T[0-9]{6}[0-9]{9}$ ]]; then
+    printf '%sZ\n' "${nanoseconds}"
+    return 0
+  fi
+
+  seconds="$(LC_ALL=C TZ=UTC0 date '+%Y%m%dT%H%M%S' 2>/dev/null || true)"
+  if [[ "${seconds}" =~ ^[0-9]{8}T[0-9]{6}$ ]]; then
+    printf '%sZ\n' "${seconds}"
+    return 0
+  fi
+
+  return 1
+}
+
 write_replay_artifact() {
   local lane_name="$1"
   local command_json="$2"
@@ -218,14 +242,7 @@ write_replay_artifact() {
   local stderr_sha256=""
   local captured_output_sha256=""
 
-  if ! timestamp="$(date -u +%Y%m%dT%H%M%S%NZ 2>/dev/null || date -u +%Y%m%dT%H%M%SZ)"; then
-    artifact_warning 'cannot read the UTC clock'
-    return 0
-  fi
-  if ! [[ "${timestamp}" =~ ^[0-9]{8}T[0-9]{6}[0-9]{9}Z$ ]]; then
-    timestamp="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || true)"
-  fi
-  if ! [[ "${timestamp}" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]; then
+  if ! timestamp="$(artifact_timestamp_utc)"; then
     artifact_warning 'cannot format a UTC artifact timestamp'
     return 0
   fi
