@@ -363,6 +363,23 @@ impl Lab {
         &self.trace
     }
 
+    /// Fold a sub-run's caller-visible trace into this one.
+    ///
+    /// Used when a component runs its own driver and produces its own trace —
+    /// [`AuthorityCampaign`](crate::store::AuthorityCampaign) is the case that
+    /// exists today. The events are appended in order, so the composed trace
+    /// stays a single ordered record rather than becoming a set of parallel
+    /// logs a reader would have to interleave by hand.
+    ///
+    /// Only pass a trace that already excludes ground truth; this does not
+    /// filter, because the component that produced the events is the one that
+    /// knows which of them a caller could actually observe.
+    pub fn absorb_trace(&mut self, other: &LogicalTrace) {
+        for event in other.events() {
+            self.trace.record(event.clone());
+        }
+    }
+
     /// Advance logical time, recording it.
     pub fn advance(&mut self, ticks: u64) -> LabTime {
         let now = self.clock.advance(ticks);
