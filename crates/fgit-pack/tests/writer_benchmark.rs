@@ -50,6 +50,7 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -244,7 +245,7 @@ fn corpus_similar() -> BenchCorpus {
         .collect();
     for index in 0..24_u32 {
         let mut body = base.clone();
-        body.push_str(&format!("revision {index}\n"));
+        writeln!(&mut body, "revision {index}").expect("writing to a String cannot fail");
         let object = blob(body.into_bytes());
         entries.push(("100644", format!("rev{index:03}.txt"), object.id));
         objects.push(object);
@@ -294,7 +295,7 @@ fn commit(tree_id: ObjectId, parents: &[ObjectId], message: &str) -> BenchObject
 ///
 /// The bead asks for "representative histories", and blobs under one tree are
 /// not a history: they exercise no commit or parent-chain packing at all.
-/// TurquoiseDog, who owns the writer, recommended this shape directly. Twelve
+/// `TurquoiseDog`, who owns the writer, recommended this shape directly. Twelve
 /// revisions of a file plus a stable subdirectory, each with its own tree and
 /// commit, so the pack carries commits, multiple trees, and successive blob
 /// revisions the way a real fetch would.
@@ -302,7 +303,7 @@ fn corpus_history() -> BenchCorpus {
     let mut objects = Vec::new();
     let nested = blob(b"stable nested content\n".to_vec());
     let sub = tree(&[("100644", "nested.txt".to_owned(), nested.id)]);
-    objects.push(nested.clone());
+    objects.push(nested);
     objects.push(sub.clone());
 
     let mut parents: Vec<ObjectId> = Vec::new();
@@ -310,9 +311,10 @@ fn corpus_history() -> BenchCorpus {
     for revision in 0..12_u32 {
         let mut content = String::new();
         for line in 0..120 {
-            content.push_str(&format!("document line {line}\n"));
+            writeln!(&mut content, "document line {line}")
+                .expect("writing to a String cannot fail");
         }
-        content.push_str(&format!("revision {revision}\n"));
+        writeln!(&mut content, "revision {revision}").expect("writing to a String cannot fail");
         let file = blob(content.into_bytes());
         let root = tree(&[
             ("100644", "file.txt".to_owned(), file.id),
@@ -476,10 +478,11 @@ fn emit_benchmark_samples_and_inputs() {
         // only an absolute byte count.
         let source_bytes: usize = corpus.objects.iter().map(|object| object.body.len()).sum();
 
-        records.push_str(&format!(
+        writeln!(
+            &mut records,
             "{{\"schema\":\"frankengit.pack-writer-benchmark.v1\",\"corpus\":\"{}\",\"regime\":\"{}\",\
              \"profile\":\"{}\",\"iterations\":{},\"warmup\":{},\"objects\":{},\"source_bytes\":{},\
-             \"fgit_pack_bytes\":{},{},{},\"aa_control_p50_delta_ns\":{}}}\n",
+             \"fgit_pack_bytes\":{},{},{},\"aa_control_p50_delta_ns\":{}}}",
             corpus.name,
             corpus.regime,
             PackWriteProfile::STORED_V1.id,
@@ -491,21 +494,26 @@ fn emit_benchmark_samples_and_inputs() {
             summarize("fgit_a", &samples_a),
             summarize("fgit_a_prime", &samples_a_prime),
             aa_spread
-        ));
+        )
+        .expect("writing to a String cannot fail");
 
         // Raw samples, because §38.4 requires them and a summary alone cannot
         // be re-analysed by anyone who doubts the summary.
         for (index, sample) in samples_a.iter().enumerate() {
-            raw.push_str(&format!(
-                "{{\"corpus\":\"{}\",\"arm\":\"a\",\"iteration\":{index},\"ns\":{sample}}}\n",
+            writeln!(
+                &mut raw,
+                "{{\"corpus\":\"{}\",\"arm\":\"a\",\"iteration\":{index},\"ns\":{sample}}}",
                 corpus.name
-            ));
+            )
+            .expect("writing to a String cannot fail");
         }
         for (index, sample) in samples_a_prime.iter().enumerate() {
-            raw.push_str(&format!(
-                "{{\"corpus\":\"{}\",\"arm\":\"a_prime\",\"iteration\":{index},\"ns\":{sample}}}\n",
+            writeln!(
+                &mut raw,
+                "{{\"corpus\":\"{}\",\"arm\":\"a_prime\",\"iteration\":{index},\"ns\":{sample}}}",
                 corpus.name
-            ));
+            )
+            .expect("writing to a String cannot fail");
         }
 
         // The object bodies, so the suite can load the SAME object set into a
@@ -525,7 +533,8 @@ fn emit_benchmark_samples_and_inputs() {
             let file = bodies.join(hex_oid(object.id));
             fs::write(&file, &object.body)
                 .unwrap_or_else(|error| panic!("cannot write {}: {error}", file.display()));
-            index_lines.push_str(&format!("{}\t{}\n", kind, hex_oid(object.id)));
+            writeln!(&mut index_lines, "{}\t{}", kind, hex_oid(object.id))
+                .expect("writing to a String cannot fail");
         }
         let index_path = directory.join(format!("{}-objects.tsv", corpus.name));
         fs::write(&index_path, index_lines)

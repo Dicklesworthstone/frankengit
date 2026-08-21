@@ -1028,7 +1028,7 @@ mod tests {
             let base_a = (0..length)
                 .map(|index| seed.wrapping_add(u8::try_from(index).expect("small fixture")))
                 .collect::<Vec<_>>();
-            let base_b = (0..(length / 2 + 1))
+            let base_b = (0..=(length / 2))
                 .map(|index| {
                     seed.wrapping_mul(3)
                         .wrapping_add(u8::try_from(index).expect("small fixture"))

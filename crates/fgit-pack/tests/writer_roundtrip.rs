@@ -39,6 +39,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
@@ -150,7 +151,7 @@ fn blob(content: &[u8]) -> CorpusObject {
 /// ordering is applied here rather than trusted from the caller.
 fn tree(entries: &[(&str, &str, ObjectId)]) -> CorpusObject {
     let mut sorted: Vec<(&str, &str, ObjectId)> = entries.to_vec();
-    sorted.sort_by(|left, right| sort_key(left.0, left.1).cmp(&sort_key(right.0, right.1)));
+    sorted.sort_by_key(|left| sort_key(left.0, left.1));
 
     let mut body = Vec::new();
     let mut references = Vec::new();
@@ -450,11 +451,11 @@ fn every_written_pack_reads_back_as_exactly_the_planned_closure() {
                     )
                 });
             let object = planned_entry.object();
-            let recomputed = ObjectId::from(fgit_crypto::git_object_id(
+            let recomputed = fgit_crypto::git_object_id(
                 ObjectFormat::Sha1,
                 object.object_type(),
                 &reconstructed,
-            ));
+            );
             assert_eq!(
                 recomputed,
                 object.id(),
@@ -573,7 +574,7 @@ fn emit_packs_for_the_pinned_oracle_lane() {
         manifest.push_str("\",\"corpus\":\"");
         manifest.push_str(corpus.name);
         manifest.push_str("\",\"pack\":\"");
-        manifest.push_str(&format!("{}.pack", corpus.name));
+        write!(&mut manifest, "{}.pack", corpus.name).expect("writing to a String cannot fail");
         manifest.push_str("\",\"objects\":");
         manifest.push_str(&planned.len().to_string());
         manifest.push_str(",\"pack_bytes\":");
