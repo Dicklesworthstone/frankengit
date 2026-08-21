@@ -576,6 +576,37 @@ impl IdentityLedger {
     }
 
     /// Records a head identity, refusing reuse.
+    /// Every head identity already spent, in canonical order.
+    ///
+    /// Exposed because an identity may be introduced only once, so what a state
+    /// has *already spent* decides which transitions remain available from it.
+    /// A consumer that deduplicates states must include this or it will merge
+    /// two states with different remaining identity budgets and silently lose
+    /// reachability — see [`crate::campaign::state_key`].
+    pub fn spent_heads(&self) -> impl Iterator<Item = &RepositoryAuthorityHeadId> {
+        self.heads.iter()
+    }
+
+    /// Every batch identity already spent, in canonical order.
+    pub fn spent_batches(&self) -> impl Iterator<Item = &RepositoryDecisionBatchId> {
+        self.batches.iter()
+    }
+
+    /// Every commit identity already spent, in canonical order.
+    pub fn spent_commits(&self) -> impl Iterator<Item = &RepositoryCommitId> {
+        self.commits.iter()
+    }
+
+    /// Every capsule identity already spent, in canonical order.
+    pub fn spent_capsules(&self) -> impl Iterator<Item = &PreparedTxnCapsuleId> {
+        self.capsules.iter()
+    }
+
+    /// Every seal identity already spent, in canonical order.
+    pub fn spent_seals(&self) -> impl Iterator<Item = &TransactionSealId> {
+        self.seals.iter()
+    }
+
     pub fn introduce_head(&mut self, id: RepositoryAuthorityHeadId) -> ModelResult<()> {
         introduce(&mut self.heads, id, "head")
     }

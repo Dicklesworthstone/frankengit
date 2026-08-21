@@ -126,7 +126,7 @@ impl Bounds {
         transactions: 2,
         attempts_per_transaction: 2,
         batches: 3,
-        depth: 9,
+        depth: 10,
         max_states: 400_000,
     };
 }
@@ -259,6 +259,8 @@ pub struct CampaignReport {
 pub struct Coverage {
     /// The most terminal commits any single reached state held.
     pub committed_decisions: usize,
+    /// The highest head generation any reached state published.
+    pub max_head_generation: u64,
     /// The most terminal refusals any single reached state held.
     pub refused_decisions: usize,
     /// The most commit records carrying a merge event any state held.
@@ -267,6 +269,18 @@ pub struct Coverage {
     pub cas_wins: usize,
     /// Batches that lost one.
     pub cas_losses: usize,
+    /// Compare-and-swaps that won a batch the walk had already seen lose one.
+    ///
+    /// This is §10 step 19's lose-then-retry, counted rather than assumed —
+    /// but deliberately **not** counted along a path. A lost compare-and-swap
+    /// returns the state unchanged, which is the model being correct: losing
+    /// publishes nothing. In a state-space enumeration that makes it a
+    /// self-loop, so a losing attempt never extends any explored path and
+    /// "lost, then won" is not two states — it is one state, left by two
+    /// different transitions. This counter therefore asks the question the walk
+    /// can actually answer: was this batch observed losing, and was the same
+    /// batch observed winning.
+    pub cas_retry_wins: usize,
     /// Capsules staging handed back for re-preparation because their basis
     /// moved.
     pub deferred_repreparations: usize,
@@ -342,6 +356,7 @@ impl CampaignReport {
         );
         push_num(&mut out, "cas_wins", self.coverage.cas_wins);
         push_num(&mut out, "cas_losses", self.coverage.cas_losses);
+        push_num(&mut out, "cas_retry_wins", self.coverage.cas_retry_wins);
         push_num(
             &mut out,
             "deferred_repreparations",
@@ -400,7 +415,7 @@ pub struct Universe {
     batches: Vec<RepositoryDecisionBatchId>,
     heads: Vec<RepositoryAuthorityHeadId>,
     bodies: BTreeMap<TxId, DecisionBodyIdentity>,
-    objects: Vec<QuarantinedObject>,
+    objects: Vec<Vec<QuarantinedObject>>,
     principal_snapshot: fgit_types::identity::PrincipalSnapshotId,
     bounds: Bounds,
 }
@@ -449,21 +464,6 @@ impl Universe {
             format_registry_epoch: RegistryEpoch::FIRST,
         };
 
-        // Two objects: a root and its child, so both a fast-forward and a
-        // non-fast-forward update are reachable.
-        let objects = vec![
-            QuarantinedObject {
-                declared: oid(1),
-                recomputed: oid(1),
-                parents: Vec::new(),
-            },
-            QuarantinedObject {
-                declared: oid(2),
-                recomputed: oid(2),
-                parents: vec![oid(1)],
-            },
-        ];
-
         // **Every transaction targets the same ref.** An earlier version of this
         // universe gave each transaction its own ref, which made the whole
         // space conflict-free: no capsule was ever superseded, no decision was
@@ -478,16 +478,46 @@ impl Universe {
         let mut seals = Vec::with_capacity(bounds.transactions);
         let mut capsules = Vec::with_capacity(bounds.transactions);
         let mut bodies = BTreeMap::new();
+        // **One object set per transaction, holding only what that transaction
+        // promises.** Sharing one set across all of them made a second commit
+        // unreachable: once a winning compare-and-swap admitted an object, no
+        // later transaction could quarantine it again, so no later transaction
+        // could ever be prepared. The objects form a chain — oid(1) is a root
+        // and oid(2) is its child — so a transaction that runs after another
+        // one published is a fast-forward rather than a fresh ref.
+        let mut objects: Vec<Vec<QuarantinedObject>> = Vec::with_capacity(bounds.transactions);
 
         for index in 0..bounds.transactions {
             let new = oid(u8::try_from(index % 2 + 1).unwrap_or(1));
+            let parents = if index % 2 == 0 {
+                Vec::new()
+            } else {
+                vec![oid(1)]
+            };
+            objects.push(vec![QuarantinedObject {
+                declared: new,
+                recomputed: new,
+                parents,
+            }]);
             // Odd-numbered transactions are pull-request merges: the forge
             // event and the ref update it describes, in one sealed request.
             // Without one of these in the space, `AtomicRefAndForgeEffects` is
             // checked over nothing.
+            // Even transactions assert the ref is absent, odd ones assert
+            // nothing. Both orders then mean something: an odd transaction
+            // decided after an even one fast-forwards and commits, and an even
+            // one decided second is refused because its precondition no longer
+            // holds. With every transaction asserting `Absent` the space could
+            // only ever hold one commit, so the whole lose-reprepare-commit
+            // loop was out of reach.
+            let expected = if index % 2 == 0 {
+                ExpectedRefState::Absent
+            } else {
+                ExpectedRefState::Any
+            };
             let mut intents = vec![Intent::Ref(RefIntent::Update {
                 name: ref_name(TARGET),
-                expected: ExpectedRefState::Absent,
+                expected,
                 new,
                 force: false,
             })];
@@ -576,7 +606,7 @@ impl Universe {
             if state.seal_of(request.tx_id).is_some() {
                 inputs.push(ModelInput::StageObjects(QuarantineRequest {
                     tx_id: request.tx_id,
-                    objects: self.objects.clone(),
+                    objects: self.objects[index].clone(),
                 }));
                 for attempt in 0..self.bounds.attempts_per_transaction {
                     inputs.push(ModelInput::Prepare(Box::new(PrepareRequest {
@@ -624,14 +654,26 @@ impl Universe {
             }
         }
 
-        // Compare-and-swap: against the current head, and against a stale
-        // predecessor so the lost-CAS path is explored rather than assumed.
+        // Compare-and-swap: against the current head; against the current head
+        // at the wrong generation; and against a stale predecessor. The two
+        // losing forms are what make the lost-CAS path *explored* rather than
+        // assumed, and the wrong-generation one matters because it needs no
+        // prior head transition — so a batch that loses the head and then wins
+        // it is reachable from genesis, not only after another batch has
+        // already published.
         for batch_id in &self.batches {
             inputs.push(ModelInput::CompareAndSwap(CasRequest {
                 expected_head: state.head().id,
                 expected_generation: state.head().body.generation,
                 batch: *batch_id,
             }));
+            if let Ok(wrong_generation) = state.head().body.generation.next() {
+                inputs.push(ModelInput::CompareAndSwap(CasRequest {
+                    expected_head: state.head().id,
+                    expected_generation: wrong_generation,
+                    batch: *batch_id,
+                }));
+            }
             if let Some(predecessor) = state.head().body.predecessor {
                 inputs.push(ModelInput::CompareAndSwap(CasRequest {
                     expected_head: predecessor,
@@ -734,6 +776,41 @@ pub fn state_key(state: &RepositoryState) -> Result<Vec<u8>, CodecRefusal> {
         encoder.write_git_oid(object);
         Ok(())
     })?;
+
+    // **What the state has already spent.** An identity may be introduced only
+    // once, so two states with identical published and staged content can still
+    // offer different transitions: the one that has already spent a batch or a
+    // candidate-head identity cannot stage with it again. Leaving the ledger
+    // out merges those two, and the merged representative may be the one with
+    // the smaller remaining budget — which silently removes whole regions of
+    // the space from the walk. That is not a performance detail: it is a walk
+    // reporting that it explored something it never reached.
+    let ledger = state.identities();
+    out.write_sequence(
+        "spent_heads",
+        &ledger.spent_heads().copied().collect::<Vec<_>>(),
+        |encoder, id| encoder.write_internal_object_id(id.as_internal_object_id()),
+    )?;
+    out.write_sequence(
+        "spent_batches",
+        &ledger.spent_batches().copied().collect::<Vec<_>>(),
+        |encoder, id| encoder.write_internal_object_id(id.as_internal_object_id()),
+    )?;
+    out.write_sequence(
+        "spent_commits",
+        &ledger.spent_commits().copied().collect::<Vec<_>>(),
+        |encoder, id| encoder.write_internal_object_id(id.as_internal_object_id()),
+    )?;
+    out.write_sequence(
+        "spent_capsules",
+        &ledger.spent_capsules().copied().collect::<Vec<_>>(),
+        |encoder, id| encoder.write_internal_object_id(id.as_internal_object_id()),
+    )?;
+    out.write_sequence(
+        "spent_seals",
+        &ledger.spent_seals().copied().collect::<Vec<_>>(),
+        |encoder, id| encoder.write_internal_object_id(id.as_internal_object_id()),
+    )?;
 
     Ok(out.into_bytes())
 }
@@ -927,6 +1004,7 @@ pub fn run_with(universe: &Universe, defect: Option<PlantedDefect>) -> CampaignR
     let mut refused = 0_usize;
     let mut defects_planted = 0_usize;
     let mut defects_detected = 0_usize;
+    let mut lost_batches: BTreeSet<RepositoryDecisionBatchId> = BTreeSet::new();
     let mut truncated = false;
 
     if let Ok(key) = state_key(&genesis) {
@@ -953,7 +1031,7 @@ pub fn run_with(universe: &Universe, defect: Option<PlantedDefect>) -> CampaignR
             // zero of each while exploring them constantly — which is exactly
             // how this campaign came to claim it had explored races it never
             // observed. Coverage counts observed transitions.
-            observe(&mut coverage, &output, &next);
+            observe(&mut coverage, &mut lost_batches, &output, &input, &next);
 
             let Ok(key) = state_key(&next) else {
                 continue;
@@ -1019,10 +1097,28 @@ pub fn run_with(universe: &Universe, defect: Option<PlantedDefect>) -> CampaignR
 }
 
 /// Folds one observed transition into the coverage counters.
-fn observe(coverage: &mut Coverage, output: &ModelOutput, next: &RepositoryState) {
+fn observe(
+    coverage: &mut Coverage,
+    lost_batches: &mut BTreeSet<RepositoryDecisionBatchId>,
+    output: &ModelOutput,
+    input: &ModelInput,
+    next: &RepositoryState,
+) {
     match output {
-        ModelOutput::HeadTransition(CasOutcome::Won { .. }) => coverage.cas_wins += 1,
-        ModelOutput::HeadTransition(CasOutcome::Lost { .. }) => coverage.cas_losses += 1,
+        ModelOutput::HeadTransition(CasOutcome::Won { .. }) => {
+            coverage.cas_wins += 1;
+            if let ModelInput::CompareAndSwap(request) = input
+                && lost_batches.contains(&request.batch)
+            {
+                coverage.cas_retry_wins += 1;
+            }
+        }
+        ModelOutput::HeadTransition(CasOutcome::Lost { .. }) => {
+            coverage.cas_losses += 1;
+            if let ModelInput::CompareAndSwap(request) = input {
+                lost_batches.insert(request.batch);
+            }
+        }
         ModelOutput::Staged(staged) => {
             coverage.deferred_repreparations += staged.deferred.len();
         }
@@ -1054,6 +1150,9 @@ fn observe(coverage: &mut Coverage, output: &ModelOutput, next: &RepositoryState
         })
         .count();
     coverage.committed_decisions = coverage.committed_decisions.max(committed);
+    coverage.max_head_generation = coverage
+        .max_head_generation
+        .max(next.head().body.generation.get());
     coverage.refused_decisions = coverage.refused_decisions.max(refused);
     coverage.forge_merge_commits = coverage.forge_merge_commits.max(merges);
 }
@@ -1461,9 +1560,58 @@ mod tests {
             "no capsule was ever superseded, so the space cannot conflict:              {coverage:?}"
         );
         assert!(
+            coverage.cas_retry_wins > 0,
+            "no batch that lost the head was ever seen winning it, so the \
+             lose-then-retry sequence of §10 step 19 is unexplored: {coverage:?}"
+        );
+        assert!(
             coverage.cancellations > 0,
             "cancellation was never reached: {coverage:?}"
         );
+    }
+
+    /// What the *fast* bounds cannot reach, stated as a test so the limit is a
+    /// recorded fact rather than a silence.
+    ///
+    /// A second commit needs a transaction prepared **after** another one won
+    /// the head — five transitions to publish the first, three to prepare the
+    /// second, then a stage and a compare-and-swap. That is ten, and
+    /// [`Bounds::DEFAULT`] stops at seven so the lane stays in the seconds.
+    /// [`Bounds::DEEP`] is where the whole loop is reachable, and
+    /// `the_deep_bounds_reach_a_second_commit_and_a_retried_batch` asserts it.
+    #[test]
+    fn the_default_bounds_stop_short_of_a_second_commit_and_say_so() {
+        let report = run(&Universe::new(Bounds::DEFAULT));
+        assert_eq!(
+            report.coverage.committed_decisions, 1,
+            "if the fast bounds now reach a second commit, move the deep-only \
+             assertion here and delete this test rather than leaving the limit \
+             documented as tighter than it is: {:?}",
+            report.coverage
+        );
+    }
+
+    /// The audit's remaining reachability gap: a batch that loses the head and
+    /// then wins it, and a transaction that commits after another one already
+    /// did. Both are out of reach at the fast bounds; the deep bounds exist for
+    /// exactly this.
+    #[test]
+    fn the_deep_bounds_reach_a_second_commit_and_a_retried_batch() {
+        let report = run(&Universe::new(Bounds::DEEP));
+        assert!(!report.truncated, "the deep walk hit its state ceiling");
+        assert!(
+            report.violations.is_empty(),
+            "violations: {:?}",
+            report.violations
+        );
+        let coverage = report.coverage;
+        assert!(
+            coverage.committed_decisions > 1,
+            "no reached state held two commits, so a transaction succeeding \
+             after another won the head is still out of reach: {coverage:?}"
+        );
+        assert!(coverage.cas_retry_wins > 0, "{coverage:?}");
+        assert_eq!(report.vacuous_properties(), Vec::new());
     }
 
     // -----------------------------------------------------------------------
@@ -1578,5 +1726,152 @@ mod tests {
             !line.contains("\"exercised\":false"),
             "a property in the receipt was never exercised: {line}"
         );
+    }
+
+    #[test]
+    #[ignore = "diagnostic probe"]
+    fn probe_second_commit() {
+        use crate::machine::ModelInput;
+        let universe = Universe::new(Bounds::DEFAULT);
+        let mut state = RepositoryState::genesis(universe.genesis().clone());
+        // Drive the first transaction end to end by hand.
+        let mut applied = 0;
+        'outer: loop {
+            for input in universe.inputs(&state) {
+                let interesting = match &input {
+                    ModelInput::Seal(r) => r.request.tx_id == universe.requests[0].tx_id,
+                    ModelInput::StageObjects(r) => r.tx_id == universe.requests[0].tx_id,
+                    ModelInput::Prepare(r) => r.request.tx_id == universe.requests[0].tx_id,
+                    ModelInput::Stage(_) | ModelInput::CompareAndSwap(_) => true,
+                    _ => false,
+                };
+                if !interesting {
+                    continue;
+                }
+                if let Ok(step) = crate::machine::step(&state, &input) {
+                    if state.decisions().len() == step.next.decisions().len()
+                        && crate::campaign::state_key(&state).ok()
+                            == crate::campaign::state_key(&step.next).ok()
+                    {
+                        continue;
+                    }
+                    state = step.next;
+                    applied += 1;
+                    if !state.decisions().is_empty() {
+                        break 'outer;
+                    }
+                    continue 'outer;
+                }
+            }
+            break;
+        }
+        println!(
+            "after {applied} steps: decisions={} refs={:?} admitted={:?}",
+            state.decisions().len(),
+            state.roots().refs.values().collect::<Vec<_>>(),
+            state.admitted_objects().collect::<Vec<_>>()
+        );
+
+        // Now try to prepare the SECOND transaction against that state.
+        let second = &universe.requests[1];
+        for input in universe.inputs(&state) {
+            match &input {
+                ModelInput::Seal(r) if r.request.tx_id == second.tx_id => {
+                    state = crate::machine::step(&state, &input).expect("seal").next;
+                }
+                _ => {}
+            }
+        }
+        for input in universe.inputs(&state) {
+            match &input {
+                ModelInput::StageObjects(r) if r.tx_id == second.tx_id => {
+                    state = crate::machine::step(&state, &input)
+                        .expect("quarantine")
+                        .next;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        for input in universe.inputs(&state) {
+            match &input {
+                ModelInput::Prepare(r) if r.request.tx_id == second.tx_id => {
+                    match crate::machine::step(&state, &input) {
+                        Ok(step) => {
+                            let capsule_id = universe.capsules[1][0];
+                            if let Some(capsule) = step.next.capsule(capsule_id) {
+                                println!("second verdict: {:?}", capsule.verdict);
+                            }
+                            state = step.next;
+                        }
+                        Err(breach) => println!("second prepare breached: {breach}"),
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let mut staged_any = false;
+        for input in universe.inputs(&state) {
+            if let ModelInput::Stage(request) = &input {
+                match crate::machine::step(&state, &input) {
+                    Ok(step) => {
+                        println!("stage {:?} -> {:?}", request.batch_id, step.output);
+                        state = step.next;
+                        staged_any = true;
+                        break;
+                    }
+                    Err(breach) => println!("stage breached: {breach}"),
+                }
+            }
+        }
+        println!("staged_any={staged_any}");
+        for input in universe.inputs(&state) {
+            if let ModelInput::CompareAndSwap(_) = &input {
+                match crate::machine::step(&state, &input) {
+                    Ok(step) => {
+                        println!(
+                            "cas -> {:?} decisions={}",
+                            step.output,
+                            step.next.decisions().len()
+                        );
+                        if step.next.decisions().len() > 1 {
+                            for decision in step.next.decisions() {
+                                println!(
+                                    "  decision tx={} outcome={:?}",
+                                    decision.tx_id, decision.outcome
+                                );
+                            }
+                            return;
+                        }
+                    }
+                    Err(breach) => println!("cas breached: {breach}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "diagnostic probe"]
+    fn probe_depths() {
+        for depth in 10..=12 {
+            let bounds = Bounds {
+                depth,
+                batches: 2,
+                max_states: 400_000,
+                ..Bounds::DEFAULT
+            };
+            let report = run(&Universe::new(bounds));
+            println!(
+                "depth={depth} states={} committed={} refused={} maxgen={} cas_wins={} truncated={}",
+                report.states_explored,
+                report.coverage.committed_decisions,
+                report.coverage.refused_decisions,
+                report.coverage.max_head_generation,
+                report.coverage.cas_wins,
+                report.truncated
+            );
+        }
     }
 }

@@ -126,6 +126,10 @@ main() {
       'a superseded capsule is reachable, so the space can actually conflict'
     fge_assert_not_contains 'FG-003C-E2E-023' "$receipt" '"committed_decisions":0' \
       'a commit is reachable in the explored space'
+    fge_assert_not_contains 'FG-003C-E2E-024' "$receipt" '"committed_decisions":1,' \
+      'two commits are reachable, so a transaction can succeed after another won the head'
+    fge_assert_not_contains 'FG-003C-E2E-025' "$receipt" '"cas_retry_wins":0' \
+      'a batch that lost the head can go on to win it — the retry of §10 step 19'
 
     fge_artifact "$artifacts/receipt.ndjson" model-campaign-receipt
   fi
