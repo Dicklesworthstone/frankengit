@@ -527,13 +527,30 @@ fn planted_protocol_negatives_refuse_before_admission_or_unbounded_storage() {
     );
     assert_eq!(wrong_object_format.phase(), ReceivePhase::Refused);
 
-    let mut delete_without_capability = ReceivePack::new(context(b"")).expect("machine");
-    delete_without_capability
+    // `delete-refs` is a server advertisement rather than a client-selected
+    // capability. A client may therefore send a zero-ID delete without
+    // echoing it, provided the server advertised that support.
+    let mut delete_without_client_echo =
+        ReceivePack::new(context(b"delete-refs")).expect("machine");
+    delete_without_client_echo
         .push_packet(command(OLD, ZERO, "refs/heads/delete", None))
-        .expect("syntax before capability check");
+        .expect("delete syntax");
+    let delete_request = ready_request(&mut delete_without_client_echo);
+    assert!(delete_request.deletes_only());
+    assert!(!delete_request.has_capability(b"delete-refs"));
+    assert_eq!(delete_without_client_echo.phase(), ReceivePhase::Ready);
+
+    let mut delete_without_server_advertisement = ReceivePack::new(context(b"")).expect("machine");
+    delete_without_server_advertisement
+        .push_packet(command(OLD, ZERO, "refs/heads/delete", None))
+        .expect("delete syntax before server-support check");
     assert_eq!(
-        delete_without_capability.push_packet(Packet::Flush),
+        delete_without_server_advertisement.push_packet(Packet::Flush),
         Err(ReceiveError::DeleteRefsNotNegotiated)
+    );
+    assert_eq!(
+        delete_without_server_advertisement.phase(),
+        ReceivePhase::Refused
     );
 
     let mut limits = ReceiveLimits::default();

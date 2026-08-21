@@ -689,7 +689,7 @@ impl ReceivePack {
 
     fn validate_command_capabilities(&self) -> Result<(), ReceiveError> {
         if self.commands.iter().any(|command| command.new.is_zero())
-            && !self.has_client_capability(b"delete-refs")
+            && !self.context.server_capabilities.contains(b"delete-refs")
         {
             return Err(ReceiveError::DeleteRefsNotNegotiated);
         }
@@ -1558,7 +1558,8 @@ pub enum ReceiveError {
     BothObjectIdsZero,
     /// A command did not have exactly old/new/ref fields.
     MalformedCommand { line: Vec<u8> },
-    /// A delete command was supplied without negotiated `delete-refs`.
+    /// A delete command was supplied although the server did not advertise
+    /// `delete-refs` support.
     DeleteRefsNotNegotiated,
     /// A packet/control marker is invalid in the current state.
     UnexpectedPacket {
@@ -1642,7 +1643,7 @@ impl Display for ReceiveError {
                 write!(formatter, "malformed receive command {line:?}")
             }
             Self::DeleteRefsNotNegotiated => {
-                formatter.write_str("delete command lacks delete-refs capability")
+                formatter.write_str("server did not advertise delete-refs for delete command")
             }
             Self::UnexpectedPacket { state, packet } => write!(
                 formatter,
