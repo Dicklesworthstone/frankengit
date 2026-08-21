@@ -85,8 +85,9 @@ struct ReferenceState {
 
 /// In-memory, faultable conformance reference for the immutable-fabric traits.
 ///
-/// Its visible epoch never claims durability. Callers must never use this
-/// backend for canonical placement, recovery, or retention evidence.
+/// Its staged epoch never claims authority visibility or durability. Callers
+/// must never use this backend for canonical placement, recovery, or
+/// retention evidence.
 #[derive(Debug, Clone)]
 pub struct ReferenceMemoryFabric {
     namespace: Vec<u8>,
@@ -148,8 +149,8 @@ impl ReferenceMemoryFabric {
         })
     }
 
-    fn visible_epochs() -> PublicationState {
-        PublicationState::new(false, true, false)
+    fn staged_epochs() -> PublicationState {
+        PublicationState::new(true, false, false)
     }
 }
 
@@ -208,7 +209,7 @@ impl ImmutableObjectFabric for ReferenceMemoryFabric {
                 }
                 return Ok(PutIfAbsent::AlreadyPresent {
                     placement: self.placement.clone(),
-                    epochs: Self::visible_epochs(),
+                    epochs: Self::staged_epochs(),
                 });
             }
         }
@@ -249,7 +250,7 @@ impl ImmutableObjectFabric for ReferenceMemoryFabric {
             }
             return Ok(PutIfAbsent::AlreadyPresent {
                 placement: self.placement.clone(),
-                epochs: Self::visible_epochs(),
+                epochs: Self::staged_epochs(),
             });
         }
         if let Err(error) = self.fault_if(ReferenceFaultPoint::BeforeObjectInsert) {
@@ -287,7 +288,7 @@ impl ImmutableObjectFabric for ReferenceMemoryFabric {
         match reserved.commit_internal(receipt, &usage) {
             Ok(_settled) => Ok(PutIfAbsent::Created {
                 placement: self.placement.clone(),
-                epochs: Self::visible_epochs(),
+                epochs: Self::staged_epochs(),
             }),
             Err(refused) => {
                 let error = refused.error();
@@ -373,7 +374,7 @@ impl ImmutableObjectFabric for ReferenceMemoryFabric {
             .retention_roots
             .insert(proposal.authority_head(), proposal.retention_root());
         self.fault_if(ReferenceFaultPoint::AfterRetentionRoot)?;
-        Ok(Self::visible_epochs())
+        Ok(Self::staged_epochs())
     }
 
     fn delete_if_unretained<R: AuthenticatedRetentionRegistry>(
@@ -584,7 +585,8 @@ mod tests {
             created,
             PutIfAbsent::Created { placement, epochs }
                 if placement.backend() == PlacementBackend::MemoryReference
-                    && epochs.contains(PublicationEpoch::Visible)
+                    && epochs.contains(PublicationEpoch::Staged)
+                    && !epochs.contains(PublicationEpoch::Visible)
                     && !epochs.contains(PublicationEpoch::Durable)
         ));
         let second = fabric
@@ -645,7 +647,8 @@ mod tests {
         let epochs = fabric
             .publish_retention_root(&AllowRetention, &proposal)
             .expect("current retention evidence must publish to reference state");
-        assert!(epochs.contains(PublicationEpoch::Visible));
+        assert!(epochs.contains(PublicationEpoch::Staged));
+        assert!(!epochs.contains(PublicationEpoch::Visible));
         assert!(!epochs.contains(PublicationEpoch::Durable));
         assert_eq!(
             fabric
