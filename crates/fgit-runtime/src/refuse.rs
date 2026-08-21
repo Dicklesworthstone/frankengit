@@ -177,6 +177,31 @@ pub enum RuntimeRefusal {
         /// The first phase that never ran.
         missing: &'static str,
     },
+    /// A region closed without reaching obligation quiescence.
+    ///
+    /// The counts are split rather than summed because they call for
+    /// different responses: an *escalated* effect is owned by a named
+    /// principal and a human is already on it, a *leaked* effect means the
+    /// program dropped work on the floor, and an *accounting fault* is worse
+    /// than either — the ledger itself could not complete a move, so the
+    /// numbers beside it are not trustworthy. Folding them into one
+    /// "unresolved" total would erase exactly the distinction an operator
+    /// needs. Shape agreed with `fgit-resource` (fg012a); the fields are
+    /// plain scalars so this can carry a
+    /// `RegionCloseOutcome::ContainmentFailure` across the crate boundary
+    /// before `fgit-runtime` depends on that crate.
+    RegionCloseContainmentFailure {
+        /// The region that failed to close cleanly.
+        region: u64,
+        /// Obligations neither settled nor escalated.
+        unsettled: u32,
+        /// Obligations handed to a named principal.
+        escalated: u32,
+        /// Obligations whose responsibility was dropped.
+        leaked: u32,
+        /// Accounting moves the ledger could not complete.
+        accounting_faults: u32,
+    },
 }
 
 /// Why a node topology failed to compile.
@@ -245,6 +270,9 @@ impl RuntimeRefusal {
             Self::RuntimeUnavailable => "runtime.unavailable",
             Self::ShutdownOutOfOrder { .. } => "runtime.shutdown.out_of_order",
             Self::ShutdownIncomplete { .. } => "runtime.shutdown.incomplete",
+            Self::RegionCloseContainmentFailure { .. } => {
+                "runtime.obligation.region_close_containment_failure"
+            }
         }
     }
 
@@ -303,6 +331,17 @@ impl fmt::Display for RuntimeRefusal {
                 f,
                 "shutdown finished before phase `{missing}` ran; the node is not quiescent"
             ),
+            Self::RegionCloseContainmentFailure {
+                region,
+                unsettled,
+                escalated,
+                leaked,
+                accounting_faults,
+            } => write!(
+                f,
+                "region {region} closed with containment failure: {unsettled} unsettled, \
+                 {escalated} escalated, {leaked} leaked, {accounting_faults} accounting fault(s)"
+            ),
         }
     }
 }
@@ -343,6 +382,13 @@ mod tests {
             RuntimeRefusal::ShutdownIncomplete {
                 missing: "flush_evidence",
             },
+            RuntimeRefusal::RegionCloseContainmentFailure {
+                region: 3,
+                unsettled: 1,
+                escalated: 0,
+                leaked: 2,
+                accounting_faults: 0,
+            },
         ];
 
         let mut codes: Vec<&str> = refusals.iter().map(RuntimeRefusal::code).collect();
@@ -358,6 +404,43 @@ mod tests {
                 "refusal code `{code}` must be namespaced under `runtime.`"
             );
         }
+    }
+
+    #[test]
+    fn a_containment_failure_keeps_its_counts_separate() {
+        // The counts must not be summed: each one calls for a different
+        // response, and an accounting fault means the others are suspect.
+        let refusal = RuntimeRefusal::RegionCloseContainmentFailure {
+            region: 7,
+            unsettled: 0,
+            escalated: 1,
+            leaked: 0,
+            accounting_faults: 0,
+        };
+        assert_eq!(
+            refusal.code(),
+            "runtime.obligation.region_close_containment_failure"
+        );
+        assert!(!refusal.is_retryable());
+
+        let rendered = refusal.to_string();
+        assert!(rendered.contains("region 7"));
+        assert!(rendered.contains("0 unsettled"));
+        assert!(rendered.contains("1 escalated"));
+        assert!(rendered.contains("0 leaked"));
+        assert!(rendered.contains("0 accounting fault"));
+
+        // A human-owned escalation and a dropped effect are distinguishable,
+        // which is the whole reason the counts are split.
+        let dropped = RuntimeRefusal::RegionCloseContainmentFailure {
+            region: 7,
+            unsettled: 0,
+            escalated: 0,
+            leaked: 1,
+            accounting_faults: 0,
+        };
+        assert_ne!(refusal, dropped);
+        assert_ne!(refusal.to_string(), dropped.to_string());
     }
 
     #[test]
