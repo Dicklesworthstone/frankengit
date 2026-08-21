@@ -209,9 +209,33 @@ fn correct_clients_survive_every_interleaving() {
         "correct clients must pass every class, got {outcome:?}"
     );
     assert!(outcome.counterexample().is_none());
-    // Both writers conflict on the same head key at every step, so no two
-    // events commute: 4 events, 2 per participant, 6 interleavings.
-    assert_eq!(outcome.classes(), 6);
+
+    // Golden = 4, derived by hand from the declared conflict relation rather
+    // than read off the explorer.
+    //
+    // Events: w1r w1c w2r w2c, with program order w1r<w1c and w2r<w2c, so
+    // C(4,2) = 6 interleavings:
+    //
+    //   1. w1r w1c w2r w2c        4. w2r w1r w1c w2c
+    //   2. w1r w2r w1c w2c        5. w2r w1r w2c w1c
+    //   3. w1r w2r w2c w1c        6. w2r w2c w1r w1c
+    //
+    // Under the relation, the ONLY independent pair is (w1r, w2r): two reads
+    // of one key both being non-mutations is the one commuting case here.
+    // Every other pair shares the head key with at least one mutation, and
+    // same-actor pairs are ordered by program order.
+    //
+    // So 2 and 4 differ only by swapping the adjacent independent reads, as do
+    // 3 and 5. In 1 and 6 the two reads are never adjacent. Mazurkiewicz
+    // classes: {1}, {2,4}, {3,5}, {6} = 4.
+    //
+    // My original 6 was wrong because I asserted "no two events commute",
+    // contradicting the two-reads-commute rule this crate declares itself.
+    assert_eq!(
+        outcome.classes(),
+        4,
+        "the two read_head events commute, collapsing 6 interleavings to 4 classes"
+    );
 }
 
 #[test]

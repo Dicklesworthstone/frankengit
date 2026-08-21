@@ -1,21 +1,22 @@
 //! A bounded, deterministic Wing--Gong style linearizability checker.
 //!
 //! This checker is deliberately an offline verifier, not an authority-store
-//! implementation or benchmark. Its default bound is 16 completed operations
-//! and 250,000 explored search nodes. Callers may choose another bound up to
-//! 63 completed operations, but an over-bound or budget-exhausted history is
-//! reported as indeterminate instead of being accepted or silently truncated.
+//! implementation or benchmark. Its default bound is 16 recorded operations
+//! (including invocations without a response) and 250,000 explored search
+//! nodes. Callers may choose another bound up to 63 recorded operations, but
+//! an over-bound or budget-exhausted history is reported as indeterminate
+//! instead of being accepted or silently truncated.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::history::{History, OperationId, RecordedOperation};
+use crate::history::{History, OperationId, RecordedOperation, normalize_authority_tokens};
 use crate::vocabulary::{AuthorityOp, AuthorityResponse};
 
 /// Stable schema label for newline-delimited checker reports.
 pub const NDJSON_SCHEMA: &str = "fgit.authority.lincheck.v1";
 
-/// The maximum number of completed operations representable by the search mask.
+/// The maximum number of recorded operations representable by the search mask.
 pub const HARD_MAX_COMPLETED_OPERATIONS: usize = 63;
 
 /// History binding for the authority operation vocabulary.
@@ -67,7 +68,11 @@ impl<Specification> AuthoritySequentialSpec for Specification where
 /// Explicit resource bounds for one checker invocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CheckLimits {
-    /// Maximum completed operations permitted in the supplied history.
+    /// Maximum recorded operations permitted in the supplied history.
+    ///
+    /// The historical field name is retained for source compatibility. An
+    /// incomplete invocation can still take effect, so it consumes the same
+    /// bounded-search capacity as an operation with a recorded response.
     pub max_completed_operations: usize,
     /// Maximum depth-first search nodes explored before returning indeterminate.
     pub max_search_nodes: usize,
@@ -122,10 +127,12 @@ impl LinearizabilityChecker {
 
     /// Checks a validated history against a sequential specification.
     ///
-    /// Completed operations are explored in `OperationId` order whenever their
-    /// response-before-invocation predecessors have already linearized. This
-    /// makes both the witness and a predecessor-closed minimal conflict window
-    /// stable.
+    /// Operations are explored in `OperationId` order whenever their
+    /// response-before-invocation predecessors have already linearized. A
+    /// pending invocation is explored deterministically in both legal forms:
+    /// it may have taken effect, or it may be absent from the linearization.
+    /// This makes both the witness and a predecessor-closed minimal conflict
+    /// window stable without treating a lost acknowledgement as a negative.
     #[must_use]
     pub fn check<Spec>(
         &self,
@@ -147,7 +154,7 @@ impl LinearizabilityChecker {
             .filter_map(completed_from_recorded)
             .collect::<Vec<_>>();
 
-        if completed_operations.len() > self.limits.max_completed_operations {
+        if operations.len() > self.limits.max_completed_operations {
             return CheckReport {
                 completed_operations: completed_operations.len(),
                 pending_operations,
@@ -155,17 +162,14 @@ impl LinearizabilityChecker {
                 verdict: CheckVerdict::Indeterminate {
                     reason: IndeterminateReason::HistoryTooLarge {
                         completed_operations: completed_operations.len(),
+                        pending_operations: operations.len() - completed_operations.len(),
                         allowed_operations: self.limits.max_completed_operations,
                     },
                 },
             };
         }
 
-        match run_search(
-            specification,
-            &completed_operations,
-            self.limits.max_search_nodes,
-        ) {
+        match run_search(specification, &operations, self.limits.max_search_nodes) {
             SearchOutcome::Linearizable {
                 witness,
                 explored_nodes,
@@ -203,6 +207,26 @@ impl LinearizabilityChecker {
             },
         }
     }
+
+    /// Checks the real authority vocabulary without depending on a backend's
+    /// private opaque-token byte layout.
+    ///
+    /// Authority tokens are equality-only handles. The adapter preserves their
+    /// observed equality classes while assigning checker-local representatives,
+    /// so a sequential specification verifies issuance and predecessor rules
+    /// rather than transcribing a particular store implementation.
+    #[must_use]
+    pub fn check_authority<Spec>(
+        &self,
+        specification: &Spec,
+        history: &AuthorityHistory,
+    ) -> CheckReport
+    where
+        Spec: AuthoritySequentialSpec,
+    {
+        let normalized = normalize_authority_tokens(history);
+        self.check(specification, &normalized)
+    }
 }
 
 /// A structured checker report that can be rendered as one NDJSON record.
@@ -210,7 +234,8 @@ impl LinearizabilityChecker {
 pub struct CheckReport {
     /// Number of operations that supplied both an invocation and a response.
     pub completed_operations: usize,
-    /// Invocations without a response that the checker intentionally omitted.
+    /// Invocations without a response. Each is explicitly explored as either
+    /// effectful or absent; see a successful witness for the effectful subset.
     pub pending_operations: Vec<OperationId>,
     /// Search nodes explored by the primary history evaluation.
     pub explored_nodes: usize,
@@ -234,8 +259,9 @@ impl CheckReport {
 
         match &self.verdict {
             CheckVerdict::Linearizable { witness } => format!(
-                "{{{common},\"verdict\":\"linearizable\",\"witness\":[{}]}}\n",
-                format_operation_ids(&witness.operation_ids)
+                "{{{common},\"verdict\":\"linearizable\",\"witness\":[{}],\"effectful_pending_operations\":[{}]}}\n",
+                format_operation_ids(&witness.operation_ids),
+                format_operation_ids(&witness.effectful_pending_operations),
             ),
             CheckVerdict::NotLinearizable {
                 conflict,
@@ -254,11 +280,14 @@ impl CheckReport {
     }
 }
 
-/// A successful sequential order for the completed operations.
+/// A successful sequential order for the operations that took effect.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinearizationWitness {
-    /// Completed operations in deterministic linearization order.
+    /// Completed operations and effectful pending invocations in deterministic
+    /// linearization order.
     pub operation_ids: Vec<OperationId>,
+    /// The subset of `operation_ids` that lacked an observed response.
+    pub effectful_pending_operations: Vec<OperationId>,
 }
 
 /// The smallest deterministic predecessor-closed conflict set found by deletion.
@@ -299,10 +328,12 @@ pub enum CheckVerdict {
 /// A declared limit prevented the checker from producing a yes/no verdict.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IndeterminateReason {
-    /// The history contains more completed operations than the caller allowed.
+    /// The history contains more recorded operations than the caller allowed.
     HistoryTooLarge {
         /// Number of complete operations observed.
         completed_operations: usize,
+        /// Number of incomplete invocations observed.
+        pending_operations: usize,
         /// Configured cap.
         allowed_operations: usize,
     },
@@ -318,9 +349,10 @@ impl IndeterminateReason {
         match self {
             Self::HistoryTooLarge {
                 completed_operations,
+                pending_operations,
                 allowed_operations,
             } => format!(
-                "\"reason\":\"history-too-large\",\"observed_completed_operations\":{completed_operations},\"allowed_completed_operations\":{allowed_operations}"
+                "\"reason\":\"history-too-large\",\"observed_completed_operations\":{completed_operations},\"observed_pending_operations\":{pending_operations},\"allowed_recorded_operations\":{allowed_operations}"
             ),
             Self::SearchBudgetExhausted { allowed_nodes } => {
                 format!(
@@ -351,14 +383,14 @@ impl fmt::Display for CheckLimitsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroCompletedOperationBound => {
-                formatter.write_str("completed-operation bound must be greater than zero")
+                formatter.write_str("recorded-operation bound must be greater than zero")
             }
             Self::CompletedOperationBoundExceedsHardLimit {
                 requested,
                 hard_limit,
             } => write!(
                 formatter,
-                "completed-operation bound {requested} exceeds hard limit {hard_limit}"
+                "recorded-operation bound {requested} exceeds hard limit {hard_limit}"
             ),
             Self::ZeroSearchNodeBudget => {
                 formatter.write_str("search-node budget must be greater than zero")
@@ -376,6 +408,23 @@ struct CompletedOperation<'history, Operation, Response> {
     response_event_index: usize,
     operation: &'history Operation,
     response: &'history Response,
+}
+
+#[derive(Debug)]
+struct SearchOperation<'history, Operation, Response> {
+    id: OperationId,
+    invocation_event_index: usize,
+    response_event_index: Option<usize>,
+    operation: &'history Operation,
+    response: Option<&'history Response>,
+}
+
+impl<Operation, Response> Copy for SearchOperation<'_, Operation, Response> {}
+
+impl<Operation, Response> Clone for SearchOperation<'_, Operation, Response> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<Operation, Response> Copy for CompletedOperation<'_, Operation, Response> {}
@@ -401,6 +450,18 @@ const fn completed_from_recorded<Operation, Response>(
     }
 }
 
+const fn search_from_recorded<Operation, Response>(
+    recorded: RecordedOperation<'_, Operation, Response>,
+) -> SearchOperation<'_, Operation, Response> {
+    SearchOperation {
+        id: recorded.id,
+        invocation_event_index: recorded.invocation_event_index,
+        response_event_index: recorded.response_event_index,
+        operation: recorded.operation,
+        response: recorded.response,
+    }
+}
+
 enum SearchOutcome {
     Linearizable {
         witness: LinearizationWitness,
@@ -416,20 +477,27 @@ enum SearchOutcome {
 
 fn run_search<Spec>(
     specification: &Spec,
-    operations: &[CompletedOperation<'_, Spec::Operation, Spec::Response>],
+    operations: &[RecordedOperation<'_, Spec::Operation, Spec::Response>],
     max_search_nodes: usize,
 ) -> SearchOutcome
 where
     Spec: SequentialSpec,
 {
-    let mut engine = SearchEngine::new(specification, operations, max_search_nodes);
+    let search_operations = operations
+        .iter()
+        .copied()
+        .map(search_from_recorded)
+        .collect::<Vec<_>>();
+    let mut engine = SearchEngine::new(specification, &search_operations, max_search_nodes);
     let mut witness = Vec::with_capacity(operations.len());
+    let mut effectful_pending_operations = Vec::new();
     let state = specification.initial_state();
 
-    match engine.search(state, 0, &mut witness) {
+    match engine.search(state, 0, 0, &mut witness, &mut effectful_pending_operations) {
         SearchStep::Found => SearchOutcome::Linearizable {
             witness: LinearizationWitness {
                 operation_ids: witness,
+                effectful_pending_operations,
             },
             explored_nodes: engine.explored_nodes,
         },
@@ -447,12 +515,12 @@ where
     Spec: SequentialSpec,
 {
     specification: &'specification Spec,
-    operations: &'operations [CompletedOperation<'history, Spec::Operation, Spec::Response>],
+    operations: &'operations [SearchOperation<'history, Spec::Operation, Spec::Response>],
     predecessors: Vec<u64>,
     full_mask: u64,
     max_search_nodes: usize,
     explored_nodes: usize,
-    exhausted_states: BTreeMap<u64, Vec<Spec::State>>,
+    exhausted_states: BTreeMap<(u64, u64), Vec<Spec::State>>,
 }
 
 impl<'operations, 'history, 'specification, Spec>
@@ -462,7 +530,7 @@ where
 {
     fn new(
         specification: &'specification Spec,
-        operations: &'operations [CompletedOperation<'history, Spec::Operation, Spec::Response>],
+        operations: &'operations [SearchOperation<'history, Spec::Operation, Spec::Response>],
         max_search_nodes: usize,
     ) -> Self {
         let predecessors = build_predecessors(operations);
@@ -482,15 +550,17 @@ where
         &mut self,
         state: Spec::State,
         linearized_mask: u64,
+        skipped_pending_mask: u64,
         witness: &mut Vec<OperationId>,
+        effectful_pending_operations: &mut Vec<OperationId>,
     ) -> SearchStep {
-        if linearized_mask == self.full_mask {
+        if linearized_mask | skipped_pending_mask == self.full_mask {
             return SearchStep::Found;
         }
 
         if self
             .exhausted_states
-            .get(&linearized_mask)
+            .get(&(linearized_mask, skipped_pending_mask))
             .is_some_and(|states| states.iter().any(|known| known == &state))
         {
             return SearchStep::NoSolution;
@@ -503,7 +573,7 @@ where
 
         for operation_index in 0..self.operations.len() {
             let bit = 1_u64 << operation_index;
-            if linearized_mask & bit != 0
+            if (linearized_mask | skipped_pending_mask) & bit != 0
                 || self.predecessors[operation_index] & !linearized_mask != 0
             {
                 continue;
@@ -512,25 +582,67 @@ where
             let operation = self.operations[operation_index];
             let (next_state, expected_response) =
                 self.specification.apply(&state, operation.operation);
-            if !expected_response.eq(operation.response) {
-                continue;
-            }
 
-            witness.push(operation.id);
-            match self.search(next_state, linearized_mask | bit, witness) {
-                SearchStep::Found => return SearchStep::Found,
-                SearchStep::NoSolution => {
-                    let _ = witness.pop();
+            if let Some(response) = operation.response {
+                if !expected_response.eq(response) {
+                    continue;
                 }
-                SearchStep::SearchBudgetExhausted => {
-                    let _ = witness.pop();
-                    return SearchStep::SearchBudgetExhausted;
+
+                witness.push(operation.id);
+                match self.search(
+                    next_state,
+                    linearized_mask | bit,
+                    skipped_pending_mask,
+                    witness,
+                    effectful_pending_operations,
+                ) {
+                    SearchStep::Found => return SearchStep::Found,
+                    SearchStep::NoSolution => {
+                        let _ = witness.pop();
+                    }
+                    SearchStep::SearchBudgetExhausted => {
+                        let _ = witness.pop();
+                        return SearchStep::SearchBudgetExhausted;
+                    }
+                }
+            } else {
+                witness.push(operation.id);
+                effectful_pending_operations.push(operation.id);
+                match self.search(
+                    next_state,
+                    linearized_mask | bit,
+                    skipped_pending_mask,
+                    witness,
+                    effectful_pending_operations,
+                ) {
+                    SearchStep::Found => return SearchStep::Found,
+                    SearchStep::NoSolution => {
+                        let _ = effectful_pending_operations.pop();
+                        let _ = witness.pop();
+                    }
+                    SearchStep::SearchBudgetExhausted => {
+                        let _ = effectful_pending_operations.pop();
+                        let _ = witness.pop();
+                        return SearchStep::SearchBudgetExhausted;
+                    }
+                }
+
+                match self.search(
+                    state.clone(),
+                    linearized_mask,
+                    skipped_pending_mask | bit,
+                    witness,
+                    effectful_pending_operations,
+                ) {
+                    SearchStep::Found => return SearchStep::Found,
+                    SearchStep::NoSolution => {}
+                    SearchStep::SearchBudgetExhausted => return SearchStep::SearchBudgetExhausted,
                 }
             }
         }
 
         self.exhausted_states
-            .entry(linearized_mask)
+            .entry((linearized_mask, skipped_pending_mask))
             .or_default()
             .push(state);
         SearchStep::NoSolution
@@ -545,7 +657,7 @@ enum SearchStep {
 }
 
 fn build_predecessors<Operation, Response>(
-    operations: &[CompletedOperation<'_, Operation, Response>],
+    operations: &[SearchOperation<'_, Operation, Response>],
 ) -> Vec<u64> {
     operations
         .iter()
@@ -554,7 +666,11 @@ fn build_predecessors<Operation, Response>(
                 .iter()
                 .enumerate()
                 .filter_map(|(candidate_index, candidate)| {
-                    (candidate.response_event_index < operation.invocation_event_index)
+                    candidate
+                        .response_event_index
+                        .is_some_and(|response_event_index| {
+                            response_event_index < operation.invocation_event_index
+                        })
                         .then_some(1_u64 << candidate_index)
                 })
                 .fold(0_u64, |predecessors, predecessor| {
@@ -588,7 +704,19 @@ where
         let mut trial = active.clone();
         trial.remove(candidate_index);
 
-        match run_search(specification, &trial, max_search_nodes) {
+        let trial_recorded = trial
+            .iter()
+            .map(|operation| RecordedOperation {
+                id: operation.id,
+                client: crate::history::ClientId(0),
+                invocation_event_index: operation.invocation_event_index,
+                response_event_index: Some(operation.response_event_index),
+                operation: operation.operation,
+                response: Some(operation.response),
+            })
+            .collect::<Vec<_>>();
+
+        match run_search(specification, &trial_recorded, max_search_nodes) {
             SearchOutcome::NotLinearizable { .. } => {
                 active = trial;
                 candidate_index = 0;

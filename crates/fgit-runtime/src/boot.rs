@@ -16,7 +16,11 @@
 use std::time::Duration;
 
 use asupersync::Budget;
+use std::sync::Arc;
+
 use asupersync::cx::Cx;
+use asupersync::cx::cap::{self, CapSetRuntimeMask, SubsetOf};
+use asupersync::cx::wrappers::narrow;
 use asupersync::runtime::config::{
     BlockingPoolConfig, RuntimeConfig, SchedulerPlacementMode, SpawnAdmissionMode,
 };
@@ -507,6 +511,28 @@ impl NodeRuntime {
         self.runtime.request_cx_with_budget(self.budget_for(class))
     }
 
+    /// Mint a production request context **narrowed to a capability row**.
+    ///
+    /// This is the capability boundary actually being enforced, as opposed to
+    /// merely recorded. [`request_cx`](Self::request_cx) hands back a
+    /// full-capability context; this narrows it through Asupersync's own
+    /// [`narrow`], so the returned context's *type* carries the reduced row and
+    /// a subsystem holding it cannot reach a capability the row drops — the
+    /// missing `SubsetOf` impl in the sealed lattice makes widening a compile
+    /// error rather than a runtime check.
+    ///
+    /// Prefer this over `request_cx` for anything that should not hold the full
+    /// node-root capability. A recorded mask that does not match the context's
+    /// actual row is a fabricated field, not a narrowing.
+    #[must_use]
+    pub fn request_cx_narrowed<C>(&self, class: BudgetClass) -> Arc<Cx<C>>
+    where
+        C: SubsetOf<cap::All> + CapSetRuntimeMask,
+    {
+        let full = Arc::new(self.runtime.request_cx_with_budget(self.budget_for(class)));
+        narrow::<cap::All, C>(&full)
+    }
+
     /// Mint a production request context, reporting runtime teardown instead of
     /// panicking.
     ///
@@ -868,6 +894,40 @@ mod tests {
         // exists to prevent.
         drop(request_cx);
         drop(parser_cx);
+        assert!(node.join_root(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn a_narrowed_context_really_carries_the_reduced_capability_row() {
+        // The audit finding this answers: a recorded mask that does not match
+        // the context's actual row is a fabricated field. Here the row is the
+        // context's TYPE, so the mask is a fact about the value rather than a
+        // constant stamped beside it.
+        use asupersync::cx::cap::{CapMask, CapSet};
+
+        type ReadOnly = CapSet<false, true, false, true, false>;
+
+        let node = RuntimeProfile::deterministic().build().expect("builds");
+        let narrowed = node.request_cx_narrowed::<ReadOnly>(BudgetClass::Request);
+
+        // The budget survives narrowing: capability narrowing must not silently
+        // widen or reset the resource envelope.
+        assert!(narrowed.budget().deadline.is_some());
+        assert!(!crate::meter::is_unbounded(narrowed.budget()));
+
+        // The row genuinely drops spawn/random/remote and keeps time/io.
+        let mask = <ReadOnly as CapSetRuntimeMask>::MASK;
+        let spawn = <CapSet<true, false, false, false, false> as CapSetRuntimeMask>::MASK;
+        let random = <CapSet<false, false, true, false, false> as CapSetRuntimeMask>::MASK;
+        let time = <CapSet<false, true, false, false, false> as CapSetRuntimeMask>::MASK;
+        let io = <CapSet<false, false, false, true, false> as CapSetRuntimeMask>::MASK;
+        assert!(!mask.contains(spawn));
+        assert!(!mask.contains(random));
+        assert!(mask.contains(time));
+        assert!(mask.contains(io));
+        assert!(CapMask::all().contains(mask), "narrowing cannot widen");
+
+        drop(narrowed);
         assert!(node.join_root(Duration::from_secs(5)));
     }
 

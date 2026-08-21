@@ -64,6 +64,19 @@ pub enum TraceEvent {
         /// A stable description of the fault.
         fault: String,
     },
+    /// A work class's *declared* limits were recorded.
+    ///
+    /// Deliberately carries no capability mask: nothing was minted, so there
+    /// is no context whose row could be reported. Recording a mask here would
+    /// be describing a context that does not exist.
+    ContextDeclared {
+        /// Logical time.
+        at: LabTime,
+        /// The budget class.
+        class: &'static str,
+        /// The declared poll quota.
+        poll_quota: u32,
+    },
     /// A request context was minted for a work class.
     ContextMinted {
         /// Logical time.
@@ -132,6 +145,11 @@ impl TraceEvent {
                 format!("failpoint\t{at}\tpoint={point}\tfired={fired}")
             }
             Self::FaultInjected { at, fault } => format!("fault\t{at}\tfault={fault}"),
+            Self::ContextDeclared {
+                at,
+                class,
+                poll_quota,
+            } => format!("context_declared\t{at}\tclass={class}\tpoll_quota={poll_quota}"),
             Self::ContextMinted {
                 at,
                 class,

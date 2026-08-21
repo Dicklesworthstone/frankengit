@@ -106,7 +106,7 @@ fn checker() -> LinearizabilityChecker {
     .expect("test checker limits are valid")
 }
 
-fn invocation(
+const fn invocation(
     client: u64,
     timestamp: u64,
     operation_id: u64,
@@ -120,7 +120,7 @@ fn invocation(
     )
 }
 
-fn response(
+const fn response(
     client: u64,
     timestamp: u64,
     operation_id: u64,
@@ -241,6 +241,7 @@ fn history_beyond_the_declared_bound_is_indeterminate_not_accepted() {
         CheckVerdict::Indeterminate {
             reason: fgit_authority::lincheck::IndeterminateReason::HistoryTooLarge {
                 completed_operations: 4,
+                pending_operations: 0,
                 allowed_operations: 1,
             },
         }
@@ -283,6 +284,109 @@ fn rejects_stale_read_after_a_completed_compare_exchange() {
     assert_eq!(
         conflict(report),
         (vec![OperationId(10), OperationId(20)], 0, 3)
+    );
+}
+
+#[test]
+fn pending_compare_exchange_can_take_effect_before_a_resolution_read() {
+    let report = checker().check(
+        &AuthoritySequentialSpec,
+        &history(vec![
+            invocation(
+                1,
+                1,
+                10,
+                AuthorityOperation::CompareExchange {
+                    expected_version: 1,
+                    value: 1,
+                },
+            ),
+            invocation(2, 1, 20, AuthorityOperation::ReadHead),
+            response(
+                2,
+                2,
+                20,
+                AuthorityResponse::ReadHead {
+                    value: Some(1),
+                    version: 2,
+                },
+            ),
+        ]),
+    );
+
+    assert_eq!(
+        report.verdict,
+        CheckVerdict::Linearizable {
+            witness: fgit_authority::lincheck::LinearizationWitness {
+                operation_ids: vec![OperationId(10), OperationId(20)],
+                effectful_pending_operations: vec![OperationId(10)],
+            },
+        }
+    );
+}
+
+#[test]
+fn pending_compare_exchange_can_be_absent_when_the_resolution_is_unchanged() {
+    let report = checker().check(
+        &AuthoritySequentialSpec,
+        &history(vec![
+            invocation(
+                1,
+                1,
+                10,
+                AuthorityOperation::CompareExchange {
+                    expected_version: 1,
+                    value: 1,
+                },
+            ),
+            invocation(2, 1, 20, AuthorityOperation::ReadHead),
+            response(
+                2,
+                2,
+                20,
+                AuthorityResponse::ReadHead {
+                    value: Some(0),
+                    version: 1,
+                },
+            ),
+        ]),
+    );
+
+    assert_eq!(
+        report.verdict,
+        CheckVerdict::Linearizable {
+            witness: fgit_authority::lincheck::LinearizationWitness {
+                operation_ids: vec![OperationId(20)],
+                effectful_pending_operations: Vec::new(),
+            },
+        }
+    );
+}
+
+#[test]
+fn pending_operations_are_part_of_the_history_bound() {
+    let checker = LinearizabilityChecker::new(CheckLimits {
+        max_completed_operations: 1,
+        max_search_nodes: 100,
+    })
+    .expect("test checker limits are valid");
+    let report = checker.check(
+        &AuthoritySequentialSpec,
+        &history(vec![
+            invocation(1, 1, 10, AuthorityOperation::ReadHead),
+            invocation(2, 1, 20, AuthorityOperation::ReadHead),
+        ]),
+    );
+
+    assert_eq!(
+        report.verdict,
+        CheckVerdict::Indeterminate {
+            reason: fgit_authority::lincheck::IndeterminateReason::HistoryTooLarge {
+                completed_operations: 0,
+                pending_operations: 2,
+                allowed_operations: 1,
+            },
+        }
     );
 }
 
@@ -529,6 +633,7 @@ fn overlapping_compare_exchange_attempts_pass_when_exactly_one_wins() {
         CheckVerdict::Linearizable {
             witness: fgit_authority::lincheck::LinearizationWitness {
                 operation_ids: vec![OperationId(10), OperationId(20)],
+                effectful_pending_operations: Vec::new(),
             },
         }
     );

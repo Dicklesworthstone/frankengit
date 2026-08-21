@@ -286,6 +286,7 @@ pub struct Lab {
     obligations: ObligationOracle,
     region: QuiescenceOracle,
     steps: usize,
+    cancellation_phases: usize,
 }
 
 impl core::fmt::Debug for Lab {
@@ -322,6 +323,7 @@ impl Lab {
             obligations: ObligationOracle::new(),
             region: QuiescenceOracle::new(),
             steps: 0,
+            cancellation_phases: 0,
         }
     }
 
@@ -451,40 +453,68 @@ impl Lab {
     /// what the request actually carried.
     pub fn record_context(&mut self, class: BudgetClass) {
         let limits = self.config.profile.budgets().limits_for(class);
-        self.trace.record(TraceEvent::ContextMinted {
+        self.trace.record(TraceEvent::ContextDeclared {
             at: self.clock.now(),
             class: class.code(),
-            capability_mask: <LabCaps as CapSetRuntimeMask>::MASK.bits(),
             poll_quota: limits.poll_quota,
         });
     }
 
     /// Record a context that was actually minted by the runtime.
     ///
-    /// Unlike [`record_context`](Self::record_context), which records the
-    /// profile's declared budget for a class, this reads the budget off a live
-    /// [`Cx`] produced by `fgit-runtime`'s production factory. That is the
-    /// difference between a trace asserting what the budget *should* be and
-    /// one recording what a request actually carried.
-    pub fn record_minted_context(&mut self, cx: &asupersync::cx::Cx, class: BudgetClass) {
+    /// Both recorded facts come from the value, not from a constant beside it:
+    /// the budget is read off the live [`Cx`], and the capability mask is the
+    /// mask of that context's own capability row `C`, which is part of its
+    /// type. Pass a context obtained from
+    /// [`NodeRuntime::request_cx_narrowed`](fgit_runtime::NodeRuntime::request_cx_narrowed)
+    /// and the recorded row is the row it actually carries.
+    ///
+    /// An earlier version of this method stamped a fixed `LabCaps` mask
+    /// regardless of the context handed in, which made the trace's `caps` field
+    /// a fabrication whenever the context was not in fact narrowed. The type
+    /// parameter is what stops that from being expressible.
+    pub fn record_minted_context<C>(&mut self, cx: &asupersync::cx::Cx<C>, class: BudgetClass)
+    where
+        C: CapSetRuntimeMask,
+    {
         self.trace.record(TraceEvent::ContextMinted {
             at: self.clock.now(),
             class: class.code(),
-            capability_mask: <LabCaps as CapSetRuntimeMask>::MASK.bits(),
+            capability_mask: C::MASK.bits(),
             poll_quota: cx.budget().poll_quota,
         });
     }
 
-    /// Record entry into a cancellation phase.
+    /// Record entry into a cancellation phase, in the fixed order.
     ///
-    /// Phases are the profile's fixed sequence; passing anything else is a
-    /// programming error the caller controls, so the parameter is a closed
-    /// enum-like `&'static str` drawn from [`CANCELLATION_PHASES`].
-    pub fn record_cancellation(&mut self, phase: &'static str) {
+    /// Cancellation is request → drain → finalize, and the order is the
+    /// protocol rather than a convention: draining before requesting
+    /// cancellation admits work that is about to be cancelled, and finalizing
+    /// before draining strands in-flight effects. So this *enforces* the
+    /// sequence instead of recording whatever it is handed — a trace that
+    /// merely replays the order its caller happened to use proves nothing
+    /// about the order the system requires.
+    ///
+    /// # Errors
+    ///
+    /// [`LabRefusal::CancellationPhaseOutOfOrder`] naming the expected phase.
+    pub fn record_cancellation(&mut self, phase: &'static str) -> Result<(), LabRefusal> {
+        let expected = CANCELLATION_PHASES
+            .get(self.cancellation_phases)
+            .copied()
+            .unwrap_or("none");
+        if expected != phase {
+            return Err(LabRefusal::CancellationPhaseOutOfOrder {
+                expected,
+                actual: phase,
+            });
+        }
+        self.cancellation_phases += 1;
         self.trace.record(TraceEvent::CancellationPhase {
             at: self.clock.now(),
             phase,
         });
+        Ok(())
     }
 
     /// Record an injected fault.
@@ -655,7 +685,7 @@ mod tests {
             lab.region().task_finished();
         }
         for phase in CANCELLATION_PHASES {
-            lab.record_cancellation(phase);
+            lab.record_cancellation(phase)?;
         }
         Ok(())
     }
@@ -819,18 +849,53 @@ mod tests {
     }
 
     #[test]
-    fn traces_carry_capability_masks_and_finite_budgets() {
+    fn a_declared_context_records_no_capability_mask() {
+        // `record_context` reports the profile's DECLARED limits. Nothing was
+        // minted, so there is no context whose row could be reported, and
+        // stamping one would describe a context that does not exist. This is
+        // the audit finding: a mask beside a value it does not come from is a
+        // fabricated field.
         let mut lab = Lab::start(config(3));
         lab.record_context(BudgetClass::Request);
         lab.record_context(BudgetClass::Parser);
 
         let text = String::from_utf8(lab.trace().canonical_bytes()).expect("utf-8");
+        assert!(text.contains("context_declared"));
         assert!(text.contains("class=request"));
         assert!(text.contains("class=parser"));
-        // The mask that appears is the masked lab row, not node root.
-        assert!(text.contains(&format!("caps={:#06b}", lab_capability_mask().bits())));
+        assert!(
+            !text.contains("caps="),
+            "a declared context must not carry a capability mask: {text}"
+        );
         // Finite budget, present in the trace rather than assumed.
         assert!(!text.contains("poll_quota=4294967295"));
+    }
+
+    #[test]
+    fn a_minted_context_records_the_row_it_actually_carries() {
+        // The paired positive: a context genuinely narrowed through
+        // `request_cx_narrowed` records ITS row, read from the context's type
+        // rather than from a constant standing beside it.
+        use std::time::Duration;
+
+        let config = config(3);
+        let node = config.build_runtime().expect("builds");
+        let narrowed = node.request_cx_narrowed::<LabCaps>(BudgetClass::Request);
+
+        let mut lab = Lab::start(config);
+        lab.record_minted_context(narrowed.as_ref(), BudgetClass::Request);
+
+        let text = String::from_utf8(lab.trace().canonical_bytes()).expect("utf-8");
+        assert!(text.contains(&format!("caps={:#06b}", lab_capability_mask().bits())));
+        assert!(!text.contains("poll_quota=4294967295"));
+
+        // And the row really is narrower than node root, so the recorded value
+        // is a fact about the context rather than a restatement of the default.
+        assert!(CapMask::all().contains(lab_capability_mask()));
+        assert_ne!(lab_capability_mask(), CapMask::all());
+
+        drop(narrowed);
+        assert!(node.join_root(Duration::from_secs(5)));
     }
 
     #[test]
@@ -885,17 +950,58 @@ mod tests {
     }
 
     #[test]
-    fn traces_carry_the_cancellation_phase_ordering() {
+    fn the_cancellation_phase_order_is_enforced_not_merely_replayed() {
+        // The audit finding this answers: the old version of this test wrote
+        // the phases in order and then asserted they were in order, which is a
+        // tautology — it would have passed against a lab that recorded whatever
+        // it was handed. The property worth asserting is that the lab REFUSES
+        // an order the protocol does not allow.
         let mut lab = Lab::start(config(3));
+
+        // Independent expectation, written out rather than taken from the
+        // constant under test.
+        assert_eq!(CANCELLATION_PHASES, ["request", "drain", "finalize"]);
+
+        // Skipping drain is refused, naming what was expected.
+        lab.record_cancellation("request")
+            .expect("request is first");
+        let refusal = lab
+            .record_cancellation("finalize")
+            .expect_err("finalize cannot precede drain");
+        assert_eq!(
+            refusal,
+            LabRefusal::CancellationPhaseOutOfOrder {
+                expected: "drain",
+                actual: "finalize",
+            }
+        );
+        assert!(refusal.indicts_subject());
+
+        // Starting out of order is refused too.
+        let mut fresh = Lab::start(config(3));
+        assert_eq!(
+            fresh
+                .record_cancellation("drain")
+                .expect_err("drain cannot be first"),
+            LabRefusal::CancellationPhaseOutOfOrder {
+                expected: "request",
+                actual: "drain",
+            }
+        );
+
+        // Paired permitted case: the correct order proceeds and reaches the
+        // trace in that order.
+        let mut ok = Lab::start(config(3));
         for phase in CANCELLATION_PHASES {
-            lab.record_cancellation(phase);
+            ok.record_cancellation(phase).expect("in order");
         }
-        let text = String::from_utf8(lab.trace().canonical_bytes()).expect("utf-8");
-        let request = text.find("phase=request").expect("request phase");
-        let drain = text.find("phase=drain").expect("drain phase");
-        let finalize = text.find("phase=finalize").expect("finalize phase");
-        assert!(request < drain, "request precedes drain");
-        assert!(drain < finalize, "drain precedes finalize");
+        let text = String::from_utf8(ok.trace().canonical_bytes()).expect("utf-8");
+        let at = |p: &str| text.find(&format!("phase={p}")).expect("phase recorded");
+        assert!(at("request") < at("drain"));
+        assert!(at("drain") < at("finalize"));
+
+        // And a fourth phase has nowhere to go.
+        assert!(ok.record_cancellation("request").is_err());
     }
 
     #[test]

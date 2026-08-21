@@ -91,6 +91,13 @@ pub enum LabRefusal {
         /// The marker that was found.
         found: String,
     },
+    /// A cancellation phase was recorded out of the fixed order.
+    CancellationPhaseOutOfOrder {
+        /// The phase the sequence expected next.
+        expected: &'static str,
+        /// The phase that was recorded.
+        actual: &'static str,
+    },
     /// A stress count was offered where a coverage claim was required.
     StressIsNotCoverage {
         /// How many runs were offered as the claim.
@@ -115,6 +122,7 @@ impl LabRefusal {
             Self::UnavailableClassNotReplayable { .. } => "lab.boundary.not_replayable",
             Self::RegionNotQuiescent { .. } => "lab.region.not_quiescent",
             Self::TraceVersionUnsupported { .. } => "lab.trace.version_unsupported",
+            Self::CancellationPhaseOutOfOrder { .. } => "lab.cancellation.out_of_order",
             Self::StressIsNotCoverage { .. } => "lab.coverage.stress_is_not_coverage",
         }
     }
@@ -135,6 +143,7 @@ impl LabRefusal {
                 | Self::AmbientSourceUsed { .. }
                 | Self::ClockRegressed { .. }
                 | Self::RegionNotQuiescent { .. }
+                | Self::CancellationPhaseOutOfOrder { .. }
         )
     }
 }
@@ -191,6 +200,10 @@ impl fmt::Display for LabRefusal {
             Self::TraceVersionUnsupported { found } => {
                 write!(f, "unsupported trace format marker `{found}`")
             }
+            Self::CancellationPhaseOutOfOrder { expected, actual } => write!(
+                f,
+                "cancellation phase `{actual}` recorded out of order; the protocol expects `{expected}` next"
+            ),
             Self::StressIsNotCoverage { runs } => write!(
                 f,
                 "{runs} run(s) is a stress count, not a coverage claim; report exercised failpoints instead"
@@ -240,6 +253,10 @@ mod tests {
             LabRefusal::RegionNotQuiescent { outstanding: 1 },
             LabRefusal::TraceVersionUnsupported {
                 found: "nope".to_owned(),
+            },
+            LabRefusal::CancellationPhaseOutOfOrder {
+                expected: "drain",
+                actual: "finalize",
             },
             LabRefusal::StressIsNotCoverage { runs: 10_000 },
         ]

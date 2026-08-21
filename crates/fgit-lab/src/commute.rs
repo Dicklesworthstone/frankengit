@@ -175,9 +175,22 @@ impl ConflictRelation {
         }
 
         match (&left.event, &right.event) {
-            // Cancellation orders against the cancelled participant's work and
-            // nothing else. Because the actors differ here, only a cancel that
-            // names the *other* actor conflicts.
+            // Two cancels order when they name the same target: the second
+            // observes whether the first already stopped it. This arm must come
+            // first — matching `(Cancel, _)` before it would compare the target
+            // against the *canceller's* actor id rather than against the other
+            // cancel's target, and call two same-target cancels independent.
+            (
+                ProtocolEvent::Cancel {
+                    participant: left_target,
+                },
+                ProtocolEvent::Cancel {
+                    participant: right_target,
+                },
+            ) => left_target == right_target,
+            // Otherwise a cancel orders against the cancelled participant's own
+            // work and nothing else. The actors differ here, so only a cancel
+            // naming the *other* actor conflicts.
             (ProtocolEvent::Cancel { participant }, _) => *participant == right.actor,
             (_, ProtocolEvent::Cancel { participant }) => *participant == left.actor,
             (first, second) => Self::state_conflict(first, second),

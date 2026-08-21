@@ -156,7 +156,7 @@ fn composed_run(lab: &mut Lab) -> Result<(), LabRefusal> {
     // Cancellation phases, in the fixed order.
     for phase in CANCELLATION_PHASES {
         lab.advance(1);
-        lab.record_cancellation(phase);
+        lab.record_cancellation(phase)?;
     }
 
     Ok(())

@@ -7,7 +7,7 @@
 //! in the evidence record; it is never rewritten to a fabricated negative.
 
 use std::collections::BTreeMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Barrier, Mutex, PoisonError, mpsc};
 
 use fgit_authority::history::{
     ClientId as HistoryClientId, HistoryEvent, LogicalTime, OperationId,
@@ -44,13 +44,12 @@ struct AuthorityModelState {
 impl AuthorityModelState {
     fn mint_receipt(
         &mut self,
-        instance: StoreInstanceId,
         key: HeadKey,
         generation: HeadGeneration,
         body: Vec<u8>,
     ) -> HeadReadReceipt {
         let mut bytes = [0_u8; 16];
-        bytes[..8].copy_from_slice(&instance.raw().to_be_bytes());
+        bytes[..8].copy_from_slice(b"fgithist");
         bytes[8..].copy_from_slice(&self.next_issuance.to_be_bytes());
         self.next_issuance = self.next_issuance.saturating_add(1);
         let token = AuthorityVersionToken::from_opaque_bytes(bytes);
@@ -133,12 +132,7 @@ impl SequentialSpec for AuthorityModel {
                     }
                     Some(_) => AuthorityResponse::InitializeHead(HeadInit::Conflict),
                     None => {
-                        let receipt = next.mint_receipt(
-                            self.instance,
-                            key.clone(),
-                            *generation,
-                            body.clone(),
-                        );
+                        let receipt = next.mint_receipt(key.clone(), *generation, body.clone());
                         next.heads.insert(key.clone(), receipt.clone());
                         AuthorityResponse::InitializeHead(HeadInit::Created(receipt))
                     }
@@ -175,12 +169,8 @@ impl SequentialSpec for AuthorityModel {
                             })
                         }
                         Some(_) => {
-                            let receipt = next.mint_receipt(
-                                self.instance,
-                                key.clone(),
-                                *new_generation,
-                                new_body.clone(),
-                            );
+                            let receipt =
+                                next.mint_receipt(key.clone(), *new_generation, new_body.clone());
                             next.heads.insert(key.clone(), receipt.clone());
                             AuthorityResponse::CompareExchangeHead(CasOutcome::Committed(receipt))
                         }
@@ -302,6 +292,13 @@ fn committed_receipt(response: &AuthorityResponse) -> HeadReadReceipt {
     }
 }
 
+fn read_receipt(response: &AuthorityResponse) -> HeadReadReceipt {
+    match response {
+        AuthorityResponse::ReadHead(HeadRead::Present(receipt)) => receipt.clone(),
+        unexpected => panic!("expected a present head read, got {unexpected:?}"),
+    }
+}
+
 fn expect_linearizable(report: &CheckReport) {
     assert!(
         matches!(&report.verdict, CheckVerdict::Linearizable { .. }),
@@ -386,7 +383,7 @@ fn check_and_emit(
     note: &str,
 ) -> CheckReport {
     let history = recorder.history();
-    let report = checker().check(&model, &history);
+    let report = checker().check_authority(&model, &history);
     println!(
         "{}",
         evidence_ndjson(seed, plan, recorder, &history, &report, note)
@@ -474,6 +471,10 @@ fn lost_acknowledgement_after_cas_and_crash_point_preserve_pending_histories() {
         response,
         AuthorityResponse::Ambiguous(AmbiguityReason::NoResponse)
     );
+    let resolution =
+        read_receipt(&recorder.execute(&store, 2, AuthorityOp::ReadHead { key: key.clone() }));
+    assert_eq!(resolution.generation(), generation(2));
+    assert_eq!(resolution.body(), b"after-loss");
     assert!(matches!(
         resolve_ambiguous_cas(&store, &key, generation(2), b"after-loss"),
         Ok(fgit_authority::CasResolution::Applied(_))
@@ -483,7 +484,7 @@ fn lost_acknowledgement_after_cas_and_crash_point_preserve_pending_histories() {
         &plan,
         &recorder,
         AuthorityModel::new(instance),
-        "lost CAS acknowledgement remains a pending invocation; exact-key resolution confirmed it applied",
+        "lost CAS acknowledgement remains pending; the recorded exact-key resolution proves its effect",
     );
     expect_linearizable(&report);
 
@@ -603,10 +604,10 @@ fn stale_token_and_malicious_receipt_attempts_are_linearized_or_refused() {
 #[test]
 fn overlapping_multi_client_cas_race_has_exactly_one_winner() {
     let instance = StoreInstanceId::from_raw(0xF004_C005);
-    let store = MemoryAuthorityStore::new(instance);
+    let store = Arc::new(MemoryAuthorityStore::new(instance));
     let key = head_key("concurrent-cas");
     let mut recorder = HistoryRecorder::default();
-    let predecessor = initialize(&mut recorder, &store, &key);
+    let predecessor = initialize(&mut recorder, store.as_ref(), &key);
     let left = AuthorityOp::CompareExchangeHead {
         key: key.clone(),
         expected: predecessor.token(),
@@ -621,12 +622,32 @@ fn overlapping_multi_client_cas_race_has_exactly_one_winner() {
     };
     let left_id = recorder.invoke(1, left.clone());
     let right_id = recorder.invoke(2, right.clone());
-    let left_response = store.execute(&left);
-    recorder.respond(1, left_id, left_response.clone());
-    let right_response = store.execute(&right);
-    recorder.respond(2, right_id, right_response.clone());
+    let barrier = Arc::new(Barrier::new(3));
+    let (sender, receiver) = mpsc::channel();
 
-    let winners = [left_response, right_response]
+    std::thread::scope(|scope| {
+        for (client, operation_id, operation) in [(1, left_id, left), (2, right_id, right)] {
+            let barrier = Arc::clone(&barrier);
+            let sender = sender.clone();
+            let store = Arc::clone(&store);
+            scope.spawn(move || {
+                barrier.wait();
+                let response = store.execute(&operation);
+                sender
+                    .send((client, operation_id, response))
+                    .expect("race observer remains alive");
+            });
+        }
+        barrier.wait();
+        drop(sender);
+
+        for (client, operation_id, response) in receiver {
+            recorder.respond(client, operation_id, response);
+        }
+    });
+
+    let winners = recorder
+        .raw_responses
         .iter()
         .filter(|response| {
             matches!(
@@ -642,7 +663,7 @@ fn overlapping_multi_client_cas_race_has_exactly_one_winner() {
         &plan,
         &recorder,
         AuthorityModel::new(instance),
-        "two logical clients overlap their exact-predecessor CAS attempts",
+        "two OS threads pass a barrier before racing their exact-predecessor CAS attempts",
     );
     expect_linearizable(&report);
 }
@@ -720,12 +741,19 @@ impl AuthorityStore for SeededDoubleSuccessStore {
                 *self.first_commit() = Some(receipt.clone());
                 Ok(CasOutcome::Committed(receipt))
             }
-            Ok(CasOutcome::PredecessorMismatch) => self
-                .first_commit()
-                .take()
-                .map_or(Ok(CasOutcome::PredecessorMismatch), |receipt| {
-                    Ok(CasOutcome::Committed(receipt))
-                }),
+            Ok(CasOutcome::PredecessorMismatch) => {
+                self.first_commit()
+                    .take()
+                    .map_or(Ok(CasOutcome::PredecessorMismatch), |_| {
+                        let receipt = HeadReadReceipt::new(
+                            key.clone(),
+                            AuthorityVersionToken::from_opaque_bytes([0xD0; 16]),
+                            new_generation,
+                            new_body.to_vec(),
+                        );
+                        Ok(CasOutcome::Committed(receipt))
+                    })
+            }
             Err(error) => Err(error),
         }
     }
@@ -769,21 +797,21 @@ fn seeded_double_success_bug_is_caught_by_the_same_checker() {
     let left_id = recorder.invoke(1, left.clone());
     let right_id = recorder.invoke(2, right.clone());
     let left_response = store.execute(&left);
-    recorder.respond(1, left_id, left_response.clone());
+    assert!(matches!(
+        &left_response,
+        AuthorityResponse::CompareExchangeHead(CasOutcome::Committed(_))
+    ));
+    recorder.respond(1, left_id, left_response);
     let right_response = store.execute(&right);
-    recorder.respond(2, right_id, right_response.clone());
     assert!(matches!(
-        left_response,
+        &right_response,
         AuthorityResponse::CompareExchangeHead(CasOutcome::Committed(_))
     ));
-    assert!(matches!(
-        right_response,
-        AuthorityResponse::CompareExchangeHead(CasOutcome::Committed(_))
-    ));
+    recorder.respond(2, right_id, right_response);
 
     let plan = FaultPlan::none();
     let history = recorder.history();
-    let report = checker().check(&AuthorityModel::new(instance), &history);
+    let report = checker().check_authority(&AuthorityModel::new(instance), &history);
     println!(
         "{}",
         evidence_ndjson(
@@ -798,6 +826,80 @@ fn seeded_double_success_bug_is_caught_by_the_same_checker() {
     assert!(
         matches!(&report.verdict, CheckVerdict::NotLinearizable { .. }),
         "the planted double-success backend must be rejected: {report:?}"
+    );
+}
+
+#[test]
+fn lost_acknowledgement_resolution_exposes_the_seeded_double_success_bug() {
+    let seed = configured_seed(DEFAULT_SEED ^ 0xD0B1_E001);
+    let instance = StoreInstanceId::from_raw(0xF004_C008);
+    let store = SeededDoubleSuccessStore::new(instance);
+    let key = head_key("lost-ack-double-success");
+    let mut recorder = HistoryRecorder::default();
+    let predecessor = created_receipt(&recorder.execute(
+        &store,
+        0,
+        AuthorityOp::InitializeHead {
+            key: key.clone(),
+            generation: HeadGeneration::FIRST,
+            body: b"root".to_vec(),
+        },
+    ));
+    let left = AuthorityOp::CompareExchangeHead {
+        key: key.clone(),
+        expected: predecessor.token(),
+        new_generation: generation(2),
+        new_body: b"left-after-lost-ack".to_vec(),
+    };
+    let right = AuthorityOp::CompareExchangeHead {
+        key: key.clone(),
+        expected: predecessor.token(),
+        new_generation: generation(2),
+        new_body: b"counterfeit-second-success".to_vec(),
+    };
+    let left_id = recorder.invoke(1, left.clone());
+    let right_id = recorder.invoke(2, right.clone());
+
+    let left_response = store.execute(&left);
+    assert!(matches!(
+        left_response,
+        AuthorityResponse::CompareExchangeHead(CasOutcome::Committed(_))
+    ));
+    recorder.respond(
+        1,
+        left_id,
+        AuthorityResponse::Ambiguous(AmbiguityReason::NoResponse),
+    );
+
+    let resolution =
+        read_receipt(&recorder.execute(&store, 3, AuthorityOp::ReadHead { key: key.clone() }));
+    assert_eq!(resolution.body(), b"left-after-lost-ack");
+
+    let right_response = store.execute(&right);
+    assert!(matches!(
+        &right_response,
+        AuthorityResponse::CompareExchangeHead(CasOutcome::Committed(receipt))
+            if receipt.body() == b"counterfeit-second-success"
+    ));
+    recorder.respond(2, right_id, right_response);
+
+    let plan = FaultPlan::none();
+    let history = recorder.history();
+    let report = checker().check_authority(&AuthorityModel::new(instance), &history);
+    println!(
+        "{}",
+        evidence_ndjson(
+            seed,
+            &plan,
+            &recorder,
+            &history,
+            &report,
+            "lost acknowledgement leaves the first CAS pending; recorded resolution forces its effect before a counterfeit second old-token success",
+        )
+    );
+    assert!(
+        matches!(&report.verdict, CheckVerdict::NotLinearizable { .. }),
+        "the resolution-constrained lost-ack double-success history must be rejected: {report:?}"
     );
 }
 
