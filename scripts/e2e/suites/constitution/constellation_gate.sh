@@ -16,7 +16,8 @@ fge_phase setup
 CG_WORK=$(fge_tempdir constellation-gate)
 
 cg_fixture() {
-  local name=$1 root="$CG_WORK/$name"
+  local name=$1
+  local root="$CG_WORK/$name"
   mkdir -p "$root/crates"
   cp "$CG_REPO/Cargo.lock" "$root/Cargo.lock"
   cp "$CG_REPO/constellation.lock" "$root/constellation.lock"
