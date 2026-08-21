@@ -1424,35 +1424,6 @@ impl<'a> Cursor<'a> {
 mod tests {
     use super::*;
 
-    #[derive(Debug, Clone, Copy)]
-    struct FixtureDigest;
-
-    #[derive(Debug, Clone, Copy)]
-    struct FixtureState(DigestDomain);
-
-    impl DigestAlgorithm for FixtureDigest {
-        type State = FixtureState;
-
-        fn begin(
-            &self,
-            domain: DigestDomain,
-            _content_len: usize,
-        ) -> Result<Self::State, FabricError> {
-            Ok(FixtureState(domain))
-        }
-
-        fn update(&self, _state: &mut Self::State, _bytes: &[u8]) {}
-
-        fn finish(&self, state: Self::State) -> Commitment {
-            match state.0 {
-                DigestDomain::Payload => [1; COMMITMENT_BYTES],
-                DigestDomain::MerkleLeaf => [2; COMMITMENT_BYTES],
-                DigestDomain::MerkleNode | DigestDomain::Segment => [3; COMMITMENT_BYTES],
-                DigestDomain::LogicalObject => [4; COMMITMENT_BYTES],
-            }
-        }
-    }
-
     fn limits() -> SegmentLimits {
         SegmentLimits {
             max_segment_bytes: 64 * 1024,
@@ -1465,12 +1436,16 @@ mod tests {
     }
 
     fn envelope(identity: u8) -> ObjectEnvelope {
+        let payload = payload(identity);
+        let digest = CryptoDigest;
         ObjectEnvelope::new(
             vec![b'n'],
             oid(identity),
             ObjectKind::Blob,
-            1,
-            [1; COMMITMENT_BYTES],
+            u64::try_from(payload.len()).expect("fixture payload length must fit u64"),
+            digest
+                .payload_commitment(ObjectKind::Blob, &payload)
+                .expect("registered payload commitment must succeed"),
             vec![b'c'],
             [4; COMMITMENT_BYTES],
             None,
@@ -1483,27 +1458,149 @@ mod tests {
         GitOid::Sha1(GitOidSha1::from_bytes([identity; GitOidSha1::LEN]))
     }
 
+    fn payload(identity: u8) -> Vec<u8> {
+        vec![b'p', identity]
+    }
+
     fn segment_with(identities: &[u8]) -> Microsegment {
-        let digest = FixtureDigest;
+        let digest = CryptoDigest;
         let mut builder = MicrosegmentBuilder::new(&digest, limits());
         for identity in identities {
             builder
                 .push(SegmentRecordInput {
                     envelope: envelope(*identity),
-                    payload: vec![b'p'],
+                    payload: payload(*identity),
                 })
                 .expect("ordered fixture record must be valid");
         }
         builder.build().expect("fixture segment must build")
     }
 
+    /// Independently frames the one-record golden using the V1 layout rather
+    /// than `MicrosegmentBuilder`. Its hashes are the registered fgit-crypto
+    /// constructions, so changing canonical framing or a commitment domain
+    /// changes this independently assembled vector.
+    fn independently_framed_one_record_segment() -> Vec<u8> {
+        let digest = CryptoDigest;
+        let object_identity = oid(b'o');
+        let payload = payload(b'o');
+        let payload_commitment = digest
+            .payload_commitment(ObjectKind::Blob, &payload)
+            .expect("registered payload commitment must succeed");
+
+        let mut envelope = Vec::new();
+        envelope.extend_from_slice(ENVELOPE_MAGIC);
+        envelope.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+        envelope.extend_from_slice(&1_u16.to_be_bytes());
+        envelope.push(b'n');
+        envelope.extend_from_slice(&object_identity.algorithm().code_point().to_be_bytes());
+        envelope.extend_from_slice(object_identity.as_bytes());
+        envelope.push(ObjectKind::Blob.to_wire());
+        envelope.extend_from_slice(
+            &u64::try_from(payload.len())
+                .expect("fixture payload length must fit u64")
+                .to_be_bytes(),
+        );
+        envelope.extend_from_slice(&payload_commitment);
+        envelope.extend_from_slice(&1_u16.to_be_bytes());
+        envelope.push(b'c');
+        envelope.extend_from_slice(&[4; COMMITMENT_BYTES]);
+        envelope.push(0);
+
+        let mut record = Vec::new();
+        let record_body_len = 4usize
+            .checked_add(envelope.len())
+            .and_then(|value| value.checked_add(8))
+            .and_then(|value| value.checked_add(payload.len()))
+            .expect("one-record golden body length must fit usize");
+        record.extend_from_slice(
+            &u32::try_from(record_body_len)
+                .expect("one-record golden record body must fit u32")
+                .to_be_bytes(),
+        );
+        record.extend_from_slice(
+            &u32::try_from(envelope.len())
+                .expect("one-record golden envelope must fit u32")
+                .to_be_bytes(),
+        );
+        record.extend_from_slice(&envelope);
+        record.extend_from_slice(
+            &u64::try_from(payload.len())
+                .expect("fixture payload length must fit u64")
+                .to_be_bytes(),
+        );
+        record.extend_from_slice(&payload);
+        let leaf = digest
+            .digest(DigestDomain::MerkleLeaf, &[&record])
+            .expect("registered Merkle leaf digest must succeed");
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(SEGMENT_MAGIC);
+        bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&1_u16.to_be_bytes());
+        bytes.push(b'n');
+        bytes.extend_from_slice(&1_u32.to_be_bytes());
+        let index_offset = bytes
+            .len()
+            .checked_add(record.len())
+            .expect("one-record golden index offset must fit usize");
+        bytes.extend_from_slice(&record);
+
+        let mut index = Vec::new();
+        index.extend_from_slice(INDEX_MAGIC);
+        index.extend_from_slice(&1_u32.to_be_bytes());
+        index.extend_from_slice(&object_identity.algorithm().code_point().to_be_bytes());
+        index.extend_from_slice(object_identity.as_bytes());
+        index.extend_from_slice(&13_u64.to_be_bytes());
+        index.extend_from_slice(
+            &u32::try_from(record.len())
+                .expect("one-record golden record length must fit u32")
+                .to_be_bytes(),
+        );
+        index.push(ObjectKind::Blob.to_wire());
+        index.extend_from_slice(
+            &u64::try_from(payload.len())
+                .expect("fixture payload length must fit u64")
+                .to_be_bytes(),
+        );
+        index.extend_from_slice(&payload_commitment);
+        index.extend_from_slice(&leaf);
+        bytes.extend_from_slice(&index);
+
+        bytes.extend_from_slice(FOOTER_MAGIC);
+        bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&0_u16.to_be_bytes());
+        bytes.extend_from_slice(&1_u32.to_be_bytes());
+        bytes.extend_from_slice(
+            &u64::try_from(index_offset)
+                .expect("one-record golden index offset must fit u64")
+                .to_be_bytes(),
+        );
+        bytes.extend_from_slice(
+            &u64::try_from(index.len())
+                .expect("one-record golden index length must fit u64")
+                .to_be_bytes(),
+        );
+        bytes.extend_from_slice(&leaf);
+        let segment_digest = digest
+            .digest(DigestDomain::Segment, &[&bytes])
+            .expect("registered segment digest must succeed");
+        bytes.extend_from_slice(&segment_digest);
+        bytes
+    }
+
     #[test]
     fn one_record_segment_matches_pinned_golden_and_round_trips() {
-        let digest = FixtureDigest;
+        let digest = CryptoDigest;
         let segment = segment_with(b"o");
         let expected = decode_hex(include_str!(
             "../tests/goldens/microsegment_v1_one_record.hex"
         ));
+        assert_eq!(
+            expected,
+            independently_framed_one_record_segment(),
+            "the fixed golden must retain the V1 independently framed bytes"
+        );
         let golden_reader = MicrosegmentReader::open(&expected, &digest, &limits())
             .expect("pinned golden must be independently readable");
         assert_eq!(
@@ -1517,13 +1614,13 @@ mod tests {
         let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, &limits())
             .expect("golden segment must be readable");
         assert_eq!(reader.len(), 1);
-        assert_eq!(reader.record(0).expect("record must exist").payload, b"p");
+        assert_eq!(reader.record(0).expect("record must exist").payload, b"po");
         assert_eq!(reader.segment_digest(), segment.segment_digest());
     }
 
     #[test]
     fn build_read_rebuild_round_trips_canonical_segment() {
-        let digest = FixtureDigest;
+        let digest = CryptoDigest;
         let segment = segment_with(b"abc");
         let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, &limits())
             .expect("fixture segment must be readable");
@@ -1692,7 +1789,7 @@ mod tests {
 
     #[test]
     fn sorted_index_lookup_matches_linear_oracle_with_logarithmic_witness() {
-        let digest = FixtureDigest;
+        let digest = CryptoDigest;
         let identities = (1u8..64).collect::<Vec<_>>();
         let segment = segment_with(&identities);
         let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, &limits())
@@ -1718,7 +1815,7 @@ mod tests {
 
     #[test]
     fn every_record_merkle_proof_verifies() {
-        let digest = FixtureDigest;
+        let digest = CryptoDigest;
         let segment = segment_with(b"abc");
         let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, &limits())
             .expect("fixture segment must be readable");
@@ -1733,12 +1830,18 @@ mod tests {
                 &proof,
                 reader.merkle_root()
             ));
+            let mut wrong_sibling = proof;
+            wrong_sibling.siblings[0][0] ^= 1;
+            assert!(
+                !verify_merkle_proof(&digest, leaf, &wrong_sibling, reader.merkle_root()),
+                "a changed authentication-path sibling must not verify"
+            );
         }
     }
 
     #[test]
     fn streaming_integrity_verification_accepts_arbitrary_chunk_boundaries() {
-        let digest = FixtureDigest;
+        let digest = CryptoDigest;
         let segment = segment_with(b"ab");
         let mut verifier =
             StreamingSegmentVerifier::new(&digest, segment.as_bytes().len(), &limits())
@@ -1764,18 +1867,18 @@ mod tests {
 
     #[test]
     fn builder_refuses_mixed_namespaces_out_of_order_and_wrong_payload_commitment() {
-        let digest = FixtureDigest;
+        let digest = CryptoDigest;
         let mut builder = MicrosegmentBuilder::new(&digest, limits());
         builder
             .push(SegmentRecordInput {
                 envelope: envelope(b'b'),
-                payload: vec![b'p'],
+                payload: payload(b'b'),
             })
             .expect("first record must be valid");
         assert_eq!(
             builder.push(SegmentRecordInput {
                 envelope: envelope(b'a'),
-                payload: vec![b'p'],
+                payload: payload(b'a'),
             }),
             Err(FabricError::NonCanonicalRecordOrder)
         );
@@ -1784,7 +1887,7 @@ mod tests {
         assert_eq!(
             builder.push(SegmentRecordInput {
                 envelope: other_namespace,
-                payload: vec![b'p'],
+                payload: payload(b'c'),
             }),
             Err(FabricError::MixedNamespace)
         );
@@ -1793,7 +1896,7 @@ mod tests {
         assert_eq!(
             builder.push(SegmentRecordInput {
                 envelope: wrong_commitment,
-                payload: vec![b'p'],
+                payload: payload(b'c'),
             }),
             Err(FabricError::PayloadCommitmentMismatch)
         );
@@ -1815,7 +1918,7 @@ mod tests {
 
     #[test]
     fn reader_refuses_truncated_footer_index_record_mismatch_and_corruption() {
-        let digest = FixtureDigest;
+        let digest = CryptoDigest;
         let segment = segment_with(b"ab");
         assert!(matches!(
             MicrosegmentReader::open(
@@ -1865,7 +1968,7 @@ mod tests {
 
     #[test]
     fn reader_refuses_noncanonical_order_and_mixed_namespace() {
-        let digest = FixtureDigest;
+        let digest = CryptoDigest;
         let segment = segment_with(b"ab");
         let records_start = SEGMENT_MAGIC.len() + 2 + 2 + 1 + 4;
         let mut noncanonical = segment.as_bytes().to_vec();
