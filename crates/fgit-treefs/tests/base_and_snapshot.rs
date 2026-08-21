@@ -391,9 +391,19 @@ fn fetch_budgets_are_enforced_at_the_boundary() {
     ));
 }
 
-/// Attenuation narrows and refuses to widen.
+/// Attenuation narrows PATH SCOPE and refuses a prefix outside the parent's.
+///
+/// Deliberately named for what it checks. It used to be called
+/// `attenuation_narrows_but_never_widens`, and the audit caught that: "never
+/// widens" is a claim about every dimension of authority — path scope, budget
+/// ceilings, spent budget, expiry, revocation, symlink policy — while the body
+/// only ever compared path prefixes. A budget-scoped widening lived behind that
+/// name for as long as it existed. The other dimensions are covered by
+/// `attenuation_does_not_restore_spent_budget`,
+/// `attenuation_does_not_restore_liveness`, and
+/// `attenuation_preserves_every_widening_relevant_field`.
 #[test]
-fn attenuation_narrows_but_never_widens() {
+fn attenuation_narrows_path_scope_and_refuses_a_wider_prefix() {
     let capability = full_capability();
 
     let narrowed = capability
@@ -734,4 +744,92 @@ fn root_listing_is_authorised_as_root_and_empty_capabilities_still_refuse() {
         ),
         "a capability granting nothing cannot read the root"
     );
+}
+
+/// Attenuation carries every field through which authority could widen.
+///
+/// This is the assertion the old `never_widens` name implied but did not make.
+/// `attenuate` rebuilds the struct field by field, so any field a future edit
+/// forgets to carry silently resets to the permissive default — which is how
+/// the spent-budget widening happened. Each field below is checked against a
+/// parent whose value is deliberately MORE restrictive than the default, so a
+/// dropped field shows up as a widening rather than as an equal value.
+#[test]
+fn attenuation_preserves_every_widening_relevant_field() {
+    let mut parent = full_capability()
+        .with_symlink_policy(SymlinkPolicy::Refuse)
+        .with_fetch_budget(ByteCount::try_new("fetch budget", 64, u64::MAX).unwrap())
+        .with_file_budget(2)
+        .with_expiry(500);
+    parent.charge_fetch(10).expect("parent spends some budget");
+
+    let child = parent
+        .attenuate(vec![path(b"src")], vec![path(b"src")])
+        .expect("narrowing is permitted");
+
+    // Symlink policy: the restrictive parent policy must survive.
+    assert_eq!(
+        child.symlink_policy(),
+        SymlinkPolicy::Refuse,
+        "a permissive default here would let a child traverse links the parent refused"
+    );
+    assert!(child.check_symlink(&path(b"src/link")).is_err());
+
+    // Expiry: the child must not outlive the parent.
+    assert!(
+        child.authorize_read(&path(b"src/a.rs"), 499).is_ok(),
+        "before expiry the child works"
+    );
+    assert!(
+        matches!(
+            child.authorize_read(&path(b"src/a.rs"), 500),
+            Err(CapabilityRefusal::Expired { .. })
+        ),
+        "the child expires exactly when the parent does"
+    );
+
+    // Spent budget carries, so the remaining allowance is the parent's.
+    assert_eq!(child.fetched_bytes(), 10);
+    assert_eq!(child.fetched_files(), 1);
+
+    // File ceiling carries: the parent used 1 of 2, so exactly one slot remains.
+    let mut file_probe = child.clone();
+    assert!(file_probe.charge_fetch(0).is_ok(), "one file slot remains");
+    assert!(
+        matches!(
+            file_probe.charge_fetch(0),
+            Err(CapabilityRefusal::FileBudgetExceeded { .. })
+        ),
+        "the file ceiling is the parent's, not a reset default"
+    );
+
+    // Byte ceiling carries. This needs its own parent with a generous FILE
+    // budget: `charge_fetch` checks the file ceiling before the byte ceiling,
+    // so a tight file budget trips first and the byte ceiling is never reached.
+    // The first version of this test made exactly that mistake and read as a
+    // code defect when it was a test defect.
+    let mut byte_parent = full_capability()
+        .with_fetch_budget(ByteCount::try_new("fetch budget", 64, u64::MAX).unwrap())
+        .with_file_budget(u64::MAX);
+    byte_parent
+        .charge_fetch(10)
+        .expect("parent spends some budget");
+    let mut byte_child = byte_parent
+        .attenuate(vec![path(b"src")], vec![path(b"src")])
+        .expect("narrowing is permitted");
+    assert!(
+        byte_child.charge_fetch(54).is_ok(),
+        "the parent's remaining 54 bytes are available"
+    );
+    assert!(
+        matches!(
+            byte_child.charge_fetch(1),
+            Err(CapabilityRefusal::FetchBudgetExceeded { .. })
+        ),
+        "the byte ceiling is the parent's 64, not a reset default"
+    );
+
+    // Identity is preserved, so a child cannot re-target another workspace.
+    assert_eq!(child.workspace_id(), parent.workspace_id());
+    assert_eq!(child.repository_id(), parent.repository_id());
 }
