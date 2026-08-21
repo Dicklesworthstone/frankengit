@@ -19,7 +19,7 @@ pub use fgit_deflate::{CancellationProbe, InflateLimits, InflateRefusal, StreamP
 
 /// Parser policy for an object that is being imported or newly created.
 ///
-/// `StrictCreate` accepts only object shapes FrankenGit will create: canonical
+/// `StrictCreate` accepts only object shapes `FrankenGit` will create: canonical
 /// Git modes/tree order, safe tree names, a header separator, and required
 /// commit/tag headers with bounded dates. The import profile preserves bounded
 /// unusual headers, missing commit/tag separators, unordered tree entries,
@@ -30,7 +30,7 @@ pub use fgit_deflate::{CancellationProbe, InflateLimits, InflateRefusal, StreamP
 /// Differential coverage of every pinned upstream-version edge is FG-015b.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AcceptanceProfile {
-    /// Reject malformed or non-canonical structures before FrankenGit creates them.
+    /// Reject malformed or non-canonical structures before `FrankenGit` creates them.
     #[default]
     StrictCreate,
     /// Preserve historically tolerated structures that have a bounded, unambiguous parse.
@@ -341,7 +341,7 @@ impl ZlibLooseObjectDecoder {
 impl LooseObjectDecoder {
     /// Starts a decoder with the specified hard limits.
     #[must_use]
-    pub fn new(limits: ParseLimits) -> Self {
+    pub const fn new(limits: ParseLimits) -> Self {
         Self {
             limits,
             header: Vec::new(),
@@ -355,10 +355,7 @@ impl LooseObjectDecoder {
     pub fn push(&mut self, mut chunk: &[u8]) -> Result<(), ObjectError> {
         if self.object_type.is_none() {
             let terminator = chunk.iter().position(|byte| *byte == 0);
-            let header_part = match terminator {
-                Some(index) => &chunk[..index],
-                None => chunk,
-            };
+            let header_part = terminator.map_or(chunk, |index| &chunk[..index]);
             let new_header_len = self.header.len().checked_add(header_part.len()).ok_or(
                 ObjectError::LooseHeaderTooLarge {
                     limit: self.limits.max_loose_header_bytes,
@@ -489,7 +486,7 @@ pub fn native_object_hasher<A: GitHashAlgorithm>(
 }
 
 /// One parsed tree entry. `object_id` is an opaque native-width byte sequence,
-/// not a FrankenGit OID type; conversion is owned by `fgit-crypto`.
+/// not a `FrankenGit` OID type; conversion is owned by `fgit-crypto`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TreeEntry {
     /// Original ASCII-octal mode bytes.
@@ -743,7 +740,6 @@ impl Commit {
     }
 
     /// Returns all raw parent-reference values in original header order.
-    #[must_use]
     pub fn parent_references(&self) -> impl Iterator<Item = &[u8]> {
         self.headers
             .iter()
@@ -862,7 +858,7 @@ fn parse_loose_header(
     Ok((object_type, value))
 }
 
-fn validate_tree_reference_width(width: usize) -> Result<(), ObjectError> {
+const fn validate_tree_reference_width(width: usize) -> Result<(), ObjectError> {
     if matches!(width, 20 | 32) {
         Ok(())
     } else {
@@ -1156,9 +1152,10 @@ mod tests {
     fn decode_hex(text: &str) -> Vec<u8> {
         let text = text.trim();
         assert_eq!(text.len() % 2, 0, "fixture contains whole bytes");
-        text.as_bytes()
-            .chunks_exact(2)
-            .map(|pair| (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]))
+        let bytes = text.as_bytes();
+        (0..bytes.len())
+            .step_by(2)
+            .map(|index| (hex_nibble(bytes[index]) << 4) | hex_nibble(bytes[index + 1]))
             .collect()
     }
 
@@ -1236,10 +1233,14 @@ mod tests {
         );
 
         let commit = b"tree 1111111111111111111111111111111111111111\nauthor A <a@x> 1 +0000\ncommitter C <c@x> 1 +0000\n\nmessage";
-        let mut headers_limited = limits();
-        headers_limited.max_header_lines = 2;
+        let mut commit_headers_limited = limits();
+        commit_headers_limited.max_header_lines = 2;
         assert_eq!(
-            parse_commit(commit, AcceptanceProfile::StrictCreate, &headers_limited),
+            parse_commit(
+                commit,
+                AcceptanceProfile::StrictCreate,
+                &commit_headers_limited
+            ),
             Err(ObjectError::HeaderLimitExceeded { limit: 2 })
         );
     }
