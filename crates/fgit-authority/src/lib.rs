@@ -93,7 +93,7 @@ pub use crate::identity::{
 };
 pub use crate::injection::{
     DuplicateDelivery, EffectLog, EffectRecord, FaultDirective, FaultKind, FaultLog, FaultPlan,
-    FaultPosition, FaultRecord, OpIndex, SplitMix64,
+    FaultPosition, FaultRecord, OpCounting, OpIndex, SplitMix64,
 };
 pub use crate::keys::{HeadKey, ImmutableKey, KeyError, MAX_KEY_BYTES};
 pub use crate::outcome::{

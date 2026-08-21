@@ -102,15 +102,45 @@ impl FaultKind {
     }
 }
 
+/// How a directive's position is counted.
+///
+/// Absolute addressing is the right primitive for a replayable script over a
+/// fixed operation sequence, and it stays. It becomes the wrong one when a test
+/// means "the operation that transitions the head" rather than "operation 2":
+/// the two coincide only until the implementation performs one more read, and
+/// then the directive does not fire on the wrong operation — the kind filter
+/// guarantees it fires *nowhere*. The publication completes normally and the
+/// campaign truthfully reports a publication it expected to interrupt and did
+/// not, which reads as an assertion problem and is a targeting problem.
+///
+/// Counting within a kind is invariant under operations of other kinds, and
+/// gives up nothing: the Nth occurrence of a kind is as deterministic and as
+/// replayable as an absolute position.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum OpCounting {
+    /// `at` is a position in the store's global operation sequence.
+    #[default]
+    Absolute,
+    /// `at` is a position among operations of this directive's own kind.
+    ///
+    /// Only meaningful with `applies_to` set, which
+    /// [`FaultDirective::nth_of_kind`] guarantees.
+    WithinKind,
+}
+
 /// One scripted fault at one operation position.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct FaultDirective {
     /// The operation position at which the directive fires.
+    ///
+    /// Interpreted according to [`Self::counting`].
     pub at: OpIndex,
     /// The fault to inject.
     pub kind: FaultKind,
     /// Restrict the directive to one operation kind, or `None` for any kind.
     pub applies_to: Option<AuthorityOpKind>,
+    /// How [`Self::at`] is counted.
+    pub counting: OpCounting,
 }
 
 impl FaultDirective {
@@ -121,6 +151,27 @@ impl FaultDirective {
             at,
             kind,
             applies_to: None,
+            counting: OpCounting::Absolute,
+        }
+    }
+
+    /// A directive that fires on the `ordinal`-th operation of `op_kind`.
+    ///
+    /// Zero-based: `nth_of_kind(0, CompareExchangeHead, ...)` fires on the
+    /// first head transition the store performs under the current plan,
+    /// whatever else happens before it.
+    ///
+    /// This is the form to use when the test means a *step of the protocol*
+    /// rather than a position in a sequence. It is unaffected by an
+    /// implementation adding reads before the operation it targets, which
+    /// absolute addressing is not — see [`OpCounting`].
+    #[must_use]
+    pub const fn nth_of_kind(ordinal: u64, op_kind: AuthorityOpKind, kind: FaultKind) -> Self {
+        Self {
+            at: OpIndex::from_raw(ordinal),
+            kind,
+            applies_to: Some(op_kind),
+            counting: OpCounting::WithinKind,
         }
     }
 
@@ -131,10 +182,33 @@ impl FaultDirective {
         self
     }
 
-    /// Whether this directive fires for the given position and operation kind.
+    /// Whether this ABSOLUTE directive fires at the given position and kind.
+    ///
+    /// A [`OpCounting::WithinKind`] directive never fires here: its `at` is an
+    /// ordinal within a kind, and comparing it against a global position would
+    /// fire it at an unrelated operation that happens to share the number. Use
+    /// [`Self::selects`], which the store does.
     #[must_use]
     pub fn matches(&self, at: OpIndex, kind: AuthorityOpKind) -> bool {
-        self.at == at && self.applies_to.is_none_or(|only| only == kind)
+        matches!(self.counting, OpCounting::Absolute)
+            && self.at == at
+            && self.applies_to.is_none_or(|only| only == kind)
+    }
+
+    /// Whether this directive fires, given both addressing coordinates.
+    ///
+    /// `absolute` is the operation's position in the store's whole sequence;
+    /// `within_kind` is its position among operations of `kind`. Both are
+    /// zero-based and both reset when a new plan is installed.
+    #[must_use]
+    pub fn selects(&self, absolute: OpIndex, within_kind: OpIndex, kind: AuthorityOpKind) -> bool {
+        if !self.applies_to.is_none_or(|only| only == kind) {
+            return false;
+        }
+        match self.counting {
+            OpCounting::Absolute => self.at == absolute,
+            OpCounting::WithinKind => self.at == within_kind,
+        }
     }
 }
 
@@ -229,7 +303,27 @@ impl FaultPlan {
         self.directives.is_empty()
     }
 
-    /// Directives that fire at one position for one operation kind.
+    /// Directives that fire at one operation, under either addressing mode.
+    ///
+    /// This is what the store consults; it understands both
+    /// [`OpCounting::Absolute`] and [`OpCounting::WithinKind`] directives.
+    #[must_use]
+    pub fn selecting(
+        &self,
+        absolute: OpIndex,
+        within_kind: OpIndex,
+        kind: AuthorityOpKind,
+    ) -> Vec<FaultDirective> {
+        self.directives
+            .iter()
+            .filter(|directive| directive.selects(absolute, within_kind, kind))
+            .copied()
+            .collect()
+    }
+
+    /// Directives that fire at one ABSOLUTE position for one operation kind.
+    ///
+    /// Absolute directives only; see [`FaultDirective::matches`].
     #[must_use]
     pub fn matching(&self, at: OpIndex, kind: AuthorityOpKind) -> Vec<FaultDirective> {
         self.directives

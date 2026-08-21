@@ -95,6 +95,11 @@ struct State {
     issuance: BTreeMap<AuthorityVersionToken, IssuedVersion>,
     next_issuance: u64,
     op_index: u64,
+    /// How many operations of each kind have begun under the current plan.
+    ///
+    /// Lets a directive address the Nth operation of a kind, which is invariant
+    /// under operations of other kinds appearing before it.
+    kind_counts: BTreeMap<AuthorityOpKind, u64>,
     logical_time: u64,
     fault_sequence: u64,
     effect_sequence: u64,
@@ -165,6 +170,7 @@ impl MemoryAuthorityStore {
                 issuance: BTreeMap::new(),
                 next_issuance: 0,
                 op_index: 0,
+                kind_counts: BTreeMap::new(),
                 logical_time: 0,
                 fault_sequence: 0,
                 effect_sequence: 0,
@@ -212,12 +218,15 @@ impl MemoryAuthorityStore {
 
         let at = OpIndex::from_raw(state.op_index);
         state.op_index = state.op_index.saturating_add(1);
+        let seen = state.kind_counts.entry(op_kind).or_insert(0);
+        let within_kind = OpIndex::from_raw(*seen);
+        *seen = seen.saturating_add(1);
 
         if state.crashed {
             return Err(AuthorityFailure::Refused(AuthorityRefusal::Unavailable));
         }
 
-        let directives = state.plan.matching(at, op_kind);
+        let directives = state.plan.selecting(at, within_kind, op_kind);
 
         for directive in &directives {
             match directive.kind {
@@ -673,6 +682,7 @@ impl FaultableAuthorityStore for MemoryAuthorityStore {
         let mut state = self.locked();
         state.plan = plan;
         state.op_index = 0;
+        state.kind_counts.clear();
         state.logical_time = 0;
         state.fault_sequence = 0;
         state.effect_sequence = 0;

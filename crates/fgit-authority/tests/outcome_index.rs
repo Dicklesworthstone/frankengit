@@ -941,14 +941,11 @@ fn crash_case_batch(head: &RepositoryAuthorityHeadBody) -> RepositoryDecisionBat
 
 /// Find the operation index of the atomic publication, by running it.
 ///
-/// Deliberately *located* rather than written down. A fault plan that hard-codes
-/// a global operation index is coupled to every unrelated operation the
-/// implementation happens to perform before the one it cares about, so an
-/// implementation change that adds a read silently moves the fault off its
-/// target and the campaign reports a publication it expected to interrupt but
-/// did not. Locating the index from the effect log asks the question the test
-/// actually means — "the operation that transitions the head" — and survives
-/// the sequence changing underneath it.
+/// Retained to PIN the ordinal-within-kind selector against an independently
+/// derived answer: `nth_of_kind(0, CompareExchangeHead, ..)` and "the absolute
+/// index the effect log reports for the first head transition" must name the
+/// same operation, and one test below asserts exactly that. Tests themselves
+/// use the selector; this is the oracle it is checked against.
 fn locate_atomic_publication() -> OpIndex {
     let (twin, head) = published_repository();
     let token = current_token(&twin);
@@ -990,19 +987,15 @@ fn head_generation_now(store: &MemoryAuthorityStore) -> u64 {
 /// accelerator is exactly where the old ordering would have left it empty.
 #[test]
 fn a_crash_at_the_publication_never_leaves_the_head_ahead_of_its_outcomes() {
-    let at = locate_atomic_publication();
-
     let (store, head) = published_repository();
     let token = current_token(&store);
-    store.install_fault_plan(FaultPlan::explicit(vec![
-        FaultDirective::new(
-            at,
-            FaultKind::Crash {
-                position: FaultPosition::AfterEffect,
-            },
-        )
-        .only_for(AuthorityOpKind::CompareExchangeHead),
-    ]));
+    store.install_fault_plan(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
+        0,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::Crash {
+            position: FaultPosition::AfterEffect,
+        },
+    )]));
 
     let batch_body = crash_case_batch(&head);
     let next = successor_head(&head, batch_id_of(&batch_body), 3);
@@ -1053,14 +1046,13 @@ fn a_crash_at_the_publication_never_leaves_the_head_ahead_of_its_outcomes() {
 /// stream, it cannot.
 #[test]
 fn a_lost_publication_response_still_refuses_a_second_terminal_decision() {
-    let at = locate_atomic_publication();
-
     let (store, head) = published_repository();
     let token = current_token(&store);
-    store.install_fault_plan(FaultPlan::explicit(vec![
-        FaultDirective::new(at, FaultKind::LoseResponse)
-            .only_for(AuthorityOpKind::CompareExchangeHead),
-    ]));
+    store.install_fault_plan(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
+        0,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::LoseResponse,
+    )]));
 
     let batch_body = crash_case_batch(&head);
     let next = successor_head(&head, batch_id_of(&batch_body), 3);
@@ -1091,5 +1083,114 @@ fn a_lost_publication_response_still_refuses_a_second_terminal_decision() {
         matches!(outcome, Err(OutcomeFailure::AcceleratorConflict { .. })),
         "one sealed transaction has at most one terminal decision, and the \
          first one linearized even though its response was lost: {outcome:?}"
+    );
+}
+
+/// The selector and the located index must name the same operation.
+///
+/// `nth_of_kind(0, CompareExchangeHead, ..)` is a claim about which operation
+/// gets the fault. This checks it against an independently derived answer — the
+/// absolute index the effect log reports for the first head transition — so the
+/// selector is pinned to an oracle rather than trusted.
+#[test]
+fn the_ordinal_selector_and_the_located_index_name_the_same_operation() {
+    let located = locate_atomic_publication();
+
+    let (store, head) = published_repository();
+    let token = current_token(&store);
+    store.install_fault_plan(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
+        0,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::LoseResponse,
+    )]));
+    let batch_body = crash_case_batch(&head);
+    let next = successor_head(&head, batch_id_of(&batch_body), 3);
+    let _ = publish_decisions(&store, &head_slot(), token, &batch_body, &next, tenant());
+
+    let fired = store
+        .fault_log()
+        .records()
+        .first()
+        .copied()
+        .expect("the ordinal directive fires");
+    assert_eq!(
+        fired.at, located,
+        "the ordinal selector must land on the same operation the effect log \
+         identifies as the first head transition"
+    );
+}
+
+/// The point of the selector: operations before the target must not move it.
+///
+/// This reproduces, in miniature, what happened to the FG-007b recovery plans
+/// when publication grew a pre-CAS stream walk. The absolute directive does not
+/// fire on the wrong operation — the kind filter means it fires NOWHERE, the
+/// publication completes normally, and the test truthfully reports a
+/// publication it expected to interrupt and did not. The ordinal directive is
+/// unmoved.
+#[test]
+fn an_ordinal_within_kind_directive_is_unmoved_by_operations_before_it() {
+    let noise = outcome_key(tenant(), repository(), tx(0xEE)).expect("a key");
+
+    // Ordinal addressing: fires, whatever precedes the head transition.
+    let (ordinal_store, ordinal_head) = published_repository();
+    let ordinal_token = current_token(&ordinal_store);
+    ordinal_store.install_fault_plan(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
+        0,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::LoseResponse,
+    )]));
+    for _ in 0..5 {
+        ordinal_store
+            .read_immutable(&noise)
+            .expect("a readable slot");
+    }
+    let ordinal_batch = crash_case_batch(&ordinal_head);
+    let ordinal_next = successor_head(&ordinal_head, batch_id_of(&ordinal_batch), 3);
+    let ordinal_result = publish_decisions(
+        &ordinal_store,
+        &head_slot(),
+        ordinal_token,
+        &ordinal_batch,
+        &ordinal_next,
+        tenant(),
+    );
+    assert!(
+        ordinal_result.is_err(),
+        "the ordinal directive must still fire after unrelated operations: \
+         {ordinal_result:?}"
+    );
+
+    // Absolute addressing at the same number: silently fires nowhere.
+    let (absolute_store, absolute_head) = published_repository();
+    let absolute_token = current_token(&absolute_store);
+    absolute_store.install_fault_plan(FaultPlan::explicit(vec![
+        FaultDirective::new(OpIndex::from_raw(0), FaultKind::LoseResponse)
+            .only_for(AuthorityOpKind::CompareExchangeHead),
+    ]));
+    for _ in 0..5 {
+        absolute_store
+            .read_immutable(&noise)
+            .expect("a readable slot");
+    }
+    let absolute_batch = crash_case_batch(&absolute_head);
+    let absolute_next = successor_head(&absolute_head, batch_id_of(&absolute_batch), 3);
+    let absolute_result = publish_decisions(
+        &absolute_store,
+        &head_slot(),
+        absolute_token,
+        &absolute_batch,
+        &absolute_next,
+        tenant(),
+    );
+    assert!(
+        absolute_result.is_ok(),
+        "this case is only meaningful if the absolute directive misses: \
+         {absolute_result:?}"
+    );
+    assert!(
+        absolute_store.fault_log().records().is_empty(),
+        "the absolute directive fires NOWHERE rather than on a wrong operation \
+         — that silence is what makes the miss cost a diagnosis every time"
     );
 }
