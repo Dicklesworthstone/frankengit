@@ -181,7 +181,7 @@ fn ordinals_that_do_not_advance_are_refused() {
     drop(reserved);
 }
 
-/// The defect OliveFortress found: `mark` applied transitions without
+/// The defect `OliveFortress` found: `mark` applied transitions without
 /// journalling them, so defer / acknowledge / escalate / fail-terminally —
 /// four of the seven lifecycle events — were invisible to a replay.
 ///

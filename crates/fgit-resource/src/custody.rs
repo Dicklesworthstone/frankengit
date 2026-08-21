@@ -223,7 +223,6 @@ impl LedgerRecord {
     /// part of the API rather than a test affordance. Constructing a record
     /// asserts nothing: `replay_journal` decides whether a sequence of them is a
     /// history the lifecycle could actually have produced.
-    #[must_use]
     pub const fn new(
         region: RegionId,
         ordinal: u64,
