@@ -7,6 +7,7 @@ fgit-admission	L4	L0,L1,L2,L3,L4	receive-pack-admission	active
 fgit-authority	L1	L0,L1	authority	active
 fgit-authority-fsqlite	L1	L0,L1	authority	active
 fgit-chronicle	L2	L0,L1,L2	decision-log	active
+fgit-cli	L4	L0,L1,L2,L3,L4	cli	active
 fgit-codec	L0	L0	canonical-codec	active
 fgit-codec-verify	L0	none	canonical-codec	active
 fgit-crypto	L1	L0,L1	crypto	active
@@ -15,6 +16,7 @@ fgit-diff	L2	L0,L1,L2	git-core	active
 fgit-doc	L3	L0,L1,L2	document-intelligence	active
 fgit-git-object	L1	L0,L1	git-core	active
 fgit-lab	L2	L0,L1,L2	concurrency	active
+fgit-node	L4	L0,L1,L2,L3,L4	node	active
 fgit-object-fabric	L1	L0,L1	object-fabric	active
 fgit-pack	L1	L0,L1	pack	active
 fgit-raptorq	L1	L0,L1	object-fabric	active
