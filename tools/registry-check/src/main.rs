@@ -45,6 +45,46 @@ impl CheckSet {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct Invocation {
+    check_set: CheckSet,
+    json: bool,
+    root_override: Option<PathBuf>,
+}
+
+fn parse_invocation(arguments: impl IntoIterator<Item = String>) -> Result<Invocation, String> {
+    let mut positional = Vec::new();
+    let mut json = false;
+    let mut root_override = None;
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--json" => json = true,
+            "--root" => {
+                let Some(value) = arguments.next() else {
+                    return Err("--root requires a directory path".to_owned());
+                };
+                if root_override.replace(PathBuf::from(value)).is_some() {
+                    return Err("--root may be provided only once".to_owned());
+                }
+            }
+            _ => positional.push(argument),
+        }
+    }
+    let check_set = CheckSet::parse(positional.first().map(String::as_str))?;
+    if positional.len() > 1 {
+        return Err(format!(
+            "unexpected positional arguments: {:?}",
+            &positional[1..]
+        ));
+    }
+    Ok(Invocation {
+        check_set,
+        json,
+        root_override,
+    })
+}
+
 #[derive(Debug)]
 struct Report {
     errors: Vec<String>,
@@ -71,40 +111,35 @@ impl Report {
 }
 
 fn main() -> ExitCode {
-    let mut positional = Vec::new();
-    let mut json = false;
-    for arg in env::args().skip(1) {
-        if arg == "--json" {
-            json = true;
-        } else {
-            positional.push(arg);
-        }
-    }
-
-    let check_set = match CheckSet::parse(positional.first().map(String::as_str)) {
+    let invocation = match parse_invocation(env::args().skip(1)) {
         Ok(value) => value,
         Err(error) => {
             eprintln!("{error}");
             return ExitCode::from(2);
         }
     };
-    if positional.len() > 1 {
-        eprintln!("unexpected positional arguments: {:?}", &positional[1..]);
-        return ExitCode::from(2);
-    }
 
-    let root = workspace_root();
+    let root = match invocation.root_override {
+        Some(path) => match explicit_workspace_root(path) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::from(2);
+            }
+        },
+        None => workspace_root(),
+    };
     let mut report = Report::new();
     check_required_files(&root, &mut report);
-    if check_set.includes_registries() {
+    if invocation.check_set.includes_registries() {
         check_registries(&root, &mut report);
     }
-    if check_set.includes_docs() {
+    if invocation.check_set.includes_docs() {
         check_markdown(&root, &mut report);
         check_workflows(&root, &mut report);
         check_contract_phrases(&root, &mut report);
     }
-    if check_set.includes_constitution() {
+    if invocation.check_set.includes_constitution() {
         check_rust_sources(&root, &mut report);
         check_manifests(&root, &mut report);
         check_constellation(&root, &mut report);
@@ -114,7 +149,7 @@ fn main() -> ExitCode {
 
     report.errors.sort();
     report.errors.dedup();
-    if json {
+    if invocation.json {
         print_json(&report);
     } else {
         print_human(&report);
@@ -125,6 +160,18 @@ fn main() -> ExitCode {
     } else {
         ExitCode::from(1)
     }
+}
+
+fn explicit_workspace_root(path: PathBuf) -> Result<PathBuf, String> {
+    let canonical = fs::canonicalize(&path)
+        .map_err(|error| format!("cannot resolve --root `{}`: {error}", path.display()))?;
+    if !canonical.is_dir() {
+        return Err(format!(
+            "--root `{}` is not a directory",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
 }
 
 /// Resolves the repository root at runtime so a relocated binary can never
@@ -2860,6 +2907,27 @@ mod tests {
         assert_eq!(
             extract_workspace_string_list(manifest, "default-members"),
             vec!["crates/fgit-types"]
+        );
+    }
+
+    #[test]
+    fn invocation_parser_accepts_a_single_fixture_root_override() {
+        let invocation = parse_invocation(vec![
+            "constitution".to_owned(),
+            "--json".to_owned(),
+            "--root".to_owned(),
+            "/tmp/constellation-fixture".to_owned(),
+        ])
+        .expect("parse invocation");
+        assert_eq!(invocation.check_set, CheckSet::Constitution);
+        assert!(invocation.json);
+        assert_eq!(
+            invocation.root_override,
+            Some(PathBuf::from("/tmp/constellation-fixture"))
+        );
+        assert_eq!(
+            parse_invocation(vec!["--root".to_owned()]),
+            Err("--root requires a directory path".to_owned())
         );
     }
 }

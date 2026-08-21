@@ -715,7 +715,7 @@ impl LedgerHandle {
     /// Current accounting.
     #[must_use]
     pub fn snapshot(&self) -> PoolSnapshot {
-        self.with_state(LedgerState::snapshot)
+        self.with_state(|state| state.snapshot())
     }
 
     /// Runtime state of one obligation, if the region knows it.
@@ -903,10 +903,6 @@ impl LeakGuard {
         self.handle.clone()
     }
 
-    pub(crate) const fn subject(&self) -> LeakSubject {
-        self.subject
-    }
-
     pub(crate) const fn disarm(&mut self) {
         self.armed = false;
     }
@@ -1034,7 +1030,7 @@ impl ObligationLedger {
     ) -> Result<ReservedObligation<K>, ReserveError> {
         let amount = grant.amount();
         if self.handle.with_state(|state| state.closed) {
-            grant.release();
+            let _released = grant.release();
             return Err(ReserveError::RegionClosed(self.handle.region()));
         }
         let missing = K::REQUIRED_GRADES
@@ -1042,7 +1038,7 @@ impl ObligationLedger {
             .copied()
             .find(|grade| amount.get(*grade) == 0);
         if let Some(grade) = missing {
-            grant.release();
+            let _released = grant.release();
             return Err(ReserveError::MissingGrade {
                 class: K::CLASS,
                 grade,
