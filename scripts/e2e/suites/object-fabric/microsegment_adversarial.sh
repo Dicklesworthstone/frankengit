@@ -25,14 +25,32 @@ fge_assert_file FG-020B-E2E-002 \
   "$E2E_ROOT/../../crates/fgit-object-fabric/tests/corpus/microsegment_economics_v1.tsv" \
   'the benchmark-class economics fixture is present in the repository'
 
+benchmark_evidence=$(fge_artifact_path benchmark-evidence)
+source_revision=$(fge__git_revision "$FGE_REPO_ROOT")
+source_tree="revision_dirty=${FGE_REVISION_DIRTY:-unknown}"
+
 fge_phase action
 test_exit=0
 fge_run FG-020B-E2E-003-run \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
   FGIT_MICROSEGMENT_CORPUS_SEED="${FGIT_MICROSEGMENT_CORPUS_SEED:-2002}" \
+  FGIT_MICROSEGMENT_BENCHMARK_OUT="$benchmark_evidence" \
+  FGIT_MICROSEGMENT_SOURCE_REVISION="$source_revision" \
+  FGIT_MICROSEGMENT_SOURCE_TREE="$source_tree" \
   cargo test --locked -p fgit-object-fabric --test microsegment_adversarial \
   || test_exit=$?
 
 fge_phase assert
 fge_assert_exit FG-020B-E2E-003 0 "$test_exit" \
   'all truncation, record-transplant, namespace, duplicate, determinism, and economics assertions hold'
+
+for corpus in monorepo-history-window-v1 many-small-tenant-v1 binary-heavy-replay-v1 agent-write-burst-v1; do
+  fge_assert_file "FG-020B-E2E-004-${corpus}" \
+    "$benchmark_evidence/$corpus/benchmark.ndjson" \
+    "the $corpus raw baseline/candidate/A-A evidence is retained"
+  fge_assert_file "FG-020B-E2E-005-${corpus}" \
+    "$benchmark_evidence/$corpus/replay-and-rollback.txt" \
+    "the $corpus replay and rollback recipe is retained"
+  fge_artifact "$benchmark_evidence/$corpus/benchmark.ndjson" benchmark-evidence
+  fge_artifact "$benchmark_evidence/$corpus/replay-and-rollback.txt" benchmark-replay-rollback
+done
