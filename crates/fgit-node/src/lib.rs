@@ -20,13 +20,11 @@ use std::time::Duration;
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityLimits, AuthorityVersionToken, HeadInit,
-    HeadKey, HeadRead, PublicationOutcome, StoreInstanceId, body_key, publish_decisions_async,
+    HeadKey, HeadRead, OutcomeLookup, PublicationOutcome, StoreInstanceId,
+    initialize_repository_async, publish_decisions_async, resolve_outcome_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
-use fgit_codec::{
-    schema::{RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody},
-    wire::encode_body,
-};
+use fgit_codec::schema::{RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody};
 use fgit_crypto::{GitObjectKind, IdentityDomain, git_object_id, git_payload_commitment};
 use fgit_git_object::ObjectType;
 use fgit_object_fabric::fabric::{
@@ -1107,6 +1105,38 @@ impl OneNode {
         self.authenticate_authority_head_in(&request).await
     }
 
+    /// Resolves one sealed transaction outcome through authoritative durable state.
+    ///
+    /// This reconciles the authenticated decision stream with its derived
+    /// outcome accelerator. In particular, an absent accelerator row is not
+    /// treated as an undecided transaction without replaying the current
+    /// authority-selected history first.
+    pub async fn resolve_outcome_in(
+        &self,
+        request: &NodeRequestContext,
+        transaction_id: fgit_types::TxId,
+    ) -> Result<OutcomeLookup, NodeRefusal> {
+        resolve_outcome_async(
+            &self.authority,
+            request.authority(),
+            &self.head_key,
+            self.tenant_id,
+            self.repository_id,
+            transaction_id,
+        )
+        .await
+        .map_err(NodeRefusal::Authority)
+    }
+
+    /// Resolves one sealed transaction outcome with a fresh bounded context.
+    pub async fn resolve_outcome(
+        &self,
+        transaction_id: fgit_types::TxId,
+    ) -> Result<OutcomeLookup, NodeRefusal> {
+        let request = self.request_context();
+        self.resolve_outcome_in(&request, transaction_id).await
+    }
+
     /// Publishes one already-materialized decision batch through this node's
     /// durable production authority path.
     ///
@@ -1326,18 +1356,14 @@ fn initialize_embedded_repository(
     head_key: &HeadKey,
     genesis: &RepositoryAuthorityHeadBody,
 ) -> Result<HeadInit, NodeRefusal> {
-    let immutable_key = body_key(IdentityDomain::RepositoryAuthorityHead, genesis)
-        .map_err(|error| NodeRefusal::Authority(error.into()))?;
-    let body = encode_body(genesis).map_err(|error| NodeRefusal::Authority(error.into()))?;
     runtime
-        .block_on(authority.put_if_absent(authority_cx, &immutable_key, &body))
-        .map_err(authority_engine_refusal)?;
-    let generation = HeadGeneration::try_new(genesis.generation.get()).map_err(|error| {
-        NodeRefusal::Authority(fgit_authority::OutcomeFailure::Codec(error.into()))
-    })?;
-    runtime
-        .block_on(authority.initialize_head(authority_cx, head_key, generation, &body))
-        .map_err(authority_engine_refusal)
+        .block_on(initialize_repository_async(
+            authority,
+            authority_cx,
+            head_key,
+            genesis,
+        ))
+        .map_err(NodeRefusal::Authority)
 }
 
 fn object_namespace(repository_id: RepositoryId) -> Vec<u8> {
@@ -1413,8 +1439,8 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use fgit_authority::HeadRead;
-    use fgit_codec::harness::{advanced_head, decision_batch};
+    use fgit_authority::{HeadRead, OutcomeLookup};
+    use fgit_codec::harness::{advanced_head, decision_batch, tx_id};
     use fgit_types::{RepositoryId, TenantId};
     use fgit_wire::{
         AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, PackPayloadSource, Packet,
@@ -1773,6 +1799,21 @@ mod tests {
             fgit_types::HeadGeneration::FIRST
         );
         reopened.shutdown().expect("reopened node closes cleanly");
+    }
+
+    #[test]
+    fn node_resolves_an_undecided_transaction_through_async_authority() {
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf());
+        let (node, _) = OneNode::init(config).expect("node opens");
+        let request = node.request_context();
+
+        let outcome = node
+            .runtime()
+            .block_on(node.resolve_outcome_in(&request, tx_id()))
+            .expect("fresh authority has no terminal outcome for fixture transaction");
+        assert_eq!(outcome, OutcomeLookup::Undecided);
+        node.shutdown().expect("node closes cleanly");
     }
 
     #[test]
