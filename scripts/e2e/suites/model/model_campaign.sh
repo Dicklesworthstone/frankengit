@@ -36,10 +36,25 @@ main() {
 
   # `--ignored` is how the worker is gated out of an ordinary test run; the
   # deflate differential worker uses the same shape.
-  fge_run_ok 'campaign-worker' env \
+  #
+  # `fge_capture`, not `fge_run_ok`: `fge_run_ok` calls `fge_die` on a non-zero
+  # exit, and `fge_die` exits the suite immediately. That would abort before a
+  # single assertion below ran, so a failing campaign would report a bare
+  # "step failed with exit 101" and lose the receipt, the violated property and
+  # the minimised counterexample — exactly the evidence the suite exists to
+  # surface. `fge_capture` returns the exit code instead, and additionally
+  # saves the worker's stdout, which carries the NDJSON receipt and the
+  # step-by-step counterexample the worker prints on violation.
+  fge_capture 'campaign-worker' env \
     "FGIT_REFERENCE_CAMPAIGN_ARTIFACT_DIR=$artifacts" \
     "FGIT_REFERENCE_CAMPAIGN_MODE=${FGIT_REFERENCE_CAMPAIGN_MODE:-default}" \
     cargo test --locked -p fgit-reference --test "$TEST_NAME" -- --ignored || worker_exit=$?
+
+  # Preserve the worker's own output whatever happened, so a violation is
+  # diagnosable from the run's artifacts alone.
+  if [[ -n "${FGE_LAST_STDOUT_FILE:-}" && -f "${FGE_LAST_STDOUT_FILE}" ]]; then
+    fge_artifact "$FGE_LAST_STDOUT_FILE" model-campaign-worker-stdout
+  fi
 
   fge_assert_exit 'FG-003C-E2E-001' 0 "$worker_exit" \
     'the bounded campaign exhausts its declared space with no property violation'
