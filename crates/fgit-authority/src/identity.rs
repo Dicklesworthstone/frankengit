@@ -27,10 +27,11 @@
 use fgit_codec::wire::{CanonicalBody, canonical_body_bytes};
 use fgit_codec::{CodecRefusal, Decoder, Encoder};
 use fgit_crypto::{IdentityDomain, internal_digest_value, internal_object_id};
+use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::hash::Digest;
 use fgit_types::identity::{InternalObjectId, PrincipalId, RepositoryId, TenantId, TxId};
 use fgit_types::label::{DomainTag, SchemaFamily, SchemaId};
-use fgit_types::numeric::{CANONICAL_CODEC_VERSION, CodecVersion};
+use fgit_types::numeric::CodecVersion;
 
 use crate::request::{RequestRefusal, SemanticRequest};
 

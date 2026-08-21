@@ -63,11 +63,15 @@
 
 mod contract;
 pub mod history;
+mod identity;
 mod injection;
 mod keys;
 pub mod lincheck;
+mod outcome;
 mod reference;
+mod request;
 mod schedule;
+mod seal;
 mod suite;
 mod tokens;
 mod vocabulary;
@@ -76,14 +80,33 @@ pub use crate::contract::{
     AuthorityLimits, AuthorityStore, CasResolution, FaultableAuthorityStore, PutResolution,
     ambiguity_of, refusal_of, resolve_ambiguous_cas, resolve_ambiguous_put,
 };
+pub use crate::identity::{
+    IdempotencyKey, IdentityRefusal, MAX_IDEMPOTENCY_KEY_BYTES, TxIdPreimage, canonical_body_id,
+    canonical_request_digest, derive_tx_id,
+};
 pub use crate::injection::{
     DuplicateDelivery, EffectLog, EffectRecord, FaultDirective, FaultKind, FaultLog, FaultPlan,
     FaultPosition, FaultRecord, OpIndex, SplitMix64,
 };
 pub use crate::keys::{HeadKey, ImmutableKey, KeyError, MAX_KEY_BYTES};
+pub use crate::outcome::{
+    MAX_REPLAY_BATCHES, OUTCOME_KEY_PREFIX, OutcomeFailure, OutcomeLookup, PublicationOutcome,
+    TerminalOutcome, indexed_outcome, outcome_key, publish_decisions, replay_outcome,
+    resolve_outcome,
+};
 pub use crate::reference::{MemoryAuthorityStore, MemoryStoreConfig};
+pub use crate::request::{
+    ExpectedOld, MAX_PUSH_OPTION_BYTES, MAX_PUSH_OPTIONS, MAX_REF_COMMANDS, MAX_SCOPED_ENTRIES,
+    MAX_SCOPED_VALUE_BYTES, ProposedNew, PushOption, RefCommand, RequestRefusal, ScopedEntry,
+    SemanticRequest,
+};
 pub use crate::schedule::{
     AuthorityClient, AuthorityObserver, ClientId, DriveSummary, Interleaving, NoObserver, drive,
+};
+pub use crate::seal::{
+    BODY_KEY_PREFIX, IDEMPOTENCY_BINDING_KEY_PREFIX, KeyBinding, RequestRejection, SEAL_KEY_PREFIX,
+    SealAdmission, SealAttempt, SealFailure, admit_seal, bind_idempotency_key, body_key,
+    idempotency_binding_key, read_seal, seal_key, seal_request,
 };
 pub use crate::suite::{
     ConformanceCheck, ConformanceReport, run_authority_conformance, run_fault_conformance,

@@ -302,7 +302,8 @@ impl ScopedEntry {
     }
 
     fn read(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
-        let namespace = AsciiSlug::try_new("ScopedEntry.namespace", input.read_bytes("namespace")?)?;
+        let namespace =
+            AsciiSlug::try_new("ScopedEntry.namespace", input.read_bytes("namespace")?)?;
         let key = AsciiSlug::try_new("ScopedEntry.key", input.read_bytes("key")?)?;
         let value = input.read_bytes("value")?.to_vec();
         Ok(Self {
