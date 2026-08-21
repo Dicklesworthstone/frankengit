@@ -945,15 +945,16 @@ fn histogram_atoms(
             limits,
             budget,
         )?);
-        output.extend((old_center_end..old_end).map(|old_index| AtomicEdit::Equal {
-            old: old_index,
-            new: new_center_end + (old_index - old_center_end),
-        }));
+        output.extend(
+            (old_center_end..old_end).map(|old_index| AtomicEdit::Equal {
+                old: old_index,
+                new: new_center_end + (old_index - old_center_end),
+            }),
+        );
         return Ok(output);
     }
-    let Some((old_anchor, new_anchor)) = histogram_anchor(
-        old, old_start, old_end, new, new_start, new_end, budget,
-    )?
+    let Some((old_anchor, new_anchor)) =
+        histogram_anchor(old, old_start, old_end, new, new_start, new_end, budget)?
     else {
         return minimal_atoms(
             old, old_start, old_end, new, new_start, new_end, limits, budget,
@@ -1097,7 +1098,7 @@ pub struct TreeEntry<ObjectId> {
     pub object: ObjectId,
 }
 
-/// Tree-level classification; renames are intentionally absent from this model.
+/// Tree-level classification in deterministic Git tree order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TreeChange<ObjectId> {
     Added(TreeEntry<ObjectId>),
@@ -1110,6 +1111,11 @@ pub enum TreeChange<ObjectId> {
         before: TreeEntry<ObjectId>,
         after: TreeEntry<ObjectId>,
         object_changed: bool,
+    },
+    Renamed {
+        before: TreeEntry<ObjectId>,
+        after: TreeEntry<ObjectId>,
+        similarity_percent: u8,
     },
 }
 
@@ -1129,17 +1135,31 @@ impl Default for TreeDiffLimits {
     }
 }
 
-/// Explicitly keeps unsupported rename detection visible at the API boundary.
+/// An explicitly selected rename policy. The implemented `ExactObject` profile
+/// reports only byte-identical objects as 100 percent similar; it does not
+/// fabricate an unverified content-similarity result. It scans deletions in
+/// tree-diff order and pairs each with the earliest still-unpaired matching
+/// addition; the rename occupies the deletion's original output slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenameProfile {
+    Disabled,
+    ExactObject {
+        minimum_similarity_percent: u8,
+        max_candidate_pairs: usize,
+    },
+}
+
+/// Tree-diff behavior and hard bounds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TreeDiffOptions {
-    pub detect_renames: bool,
+    pub rename: RenameProfile,
     pub limits: TreeDiffLimits,
 }
 
 impl Default for TreeDiffOptions {
     fn default() -> Self {
         Self {
-            detect_renames: false,
+            rename: RenameProfile::Disabled,
             limits: TreeDiffLimits::default(),
         }
     }
@@ -1153,9 +1173,11 @@ pub struct TreeDiff<ObjectId> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TreeDiffError {
     UnsortedOrDuplicatePath,
-    UnsupportedRenameDetection,
     EntryLimitExceeded { limit: usize },
     ChangeLimitExceeded { limit: usize },
+    InvalidSimilarityThreshold { requested: u8 },
+    UnsupportedSimilarityThreshold { requested: u8 },
+    RenameCandidateLimitExceeded { limit: usize },
 }
 
 /// Diff two Git-canonical-tree-sorted streams. This pure iterator API is the
@@ -1170,9 +1192,6 @@ where
     OldEntries: IntoIterator<Item = TreeEntry<ObjectId>>,
     NewEntries: IntoIterator<Item = TreeEntry<ObjectId>>,
 {
-    if options.detect_renames {
-        return Err(TreeDiffError::UnsupportedRenameDetection);
-    }
     let old = collect_tree_entries(old_entries, options.limits.max_entries_per_tree)?;
     let new = collect_tree_entries(new_entries, options.limits.max_entries_per_tree)?;
     let mut old_index = 0;
@@ -1239,7 +1258,78 @@ where
             (None, None) => break,
         }
     }
+    let changes = match options.rename {
+        RenameProfile::Disabled => changes,
+        RenameProfile::ExactObject {
+            minimum_similarity_percent,
+            max_candidate_pairs,
+        } => exact_object_renames(changes, minimum_similarity_percent, max_candidate_pairs)?,
+    };
     Ok(TreeDiff { changes })
+}
+
+fn exact_object_renames<ObjectId>(
+    changes: Vec<TreeChange<ObjectId>>,
+    minimum_similarity_percent: u8,
+    max_candidate_pairs: usize,
+) -> Result<Vec<TreeChange<ObjectId>>, TreeDiffError>
+where
+    ObjectId: Clone + Eq,
+{
+    if minimum_similarity_percent > 100 {
+        return Err(TreeDiffError::InvalidSimilarityThreshold {
+            requested: minimum_similarity_percent,
+        });
+    }
+    if minimum_similarity_percent != 100 {
+        return Err(TreeDiffError::UnsupportedSimilarityThreshold {
+            requested: minimum_similarity_percent,
+        });
+    }
+    let mut candidate_pairs = 0;
+    let mut paired_additions = BTreeSet::new();
+    let mut replacements = BTreeMap::new();
+    for (delete_index, change) in changes.iter().enumerate() {
+        let TreeChange::Deleted(before) = change else {
+            continue;
+        };
+        for (addition_index, candidate) in changes.iter().enumerate() {
+            let TreeChange::Added(after) = candidate else {
+                continue;
+            };
+            if paired_additions.contains(&addition_index) {
+                continue;
+            }
+            if candidate_pairs == max_candidate_pairs {
+                return Err(TreeDiffError::RenameCandidateLimitExceeded {
+                    limit: max_candidate_pairs,
+                });
+            }
+            candidate_pairs += 1;
+            if before.object == after.object {
+                paired_additions.insert(addition_index);
+                replacements.insert(
+                    delete_index,
+                    TreeChange::Renamed {
+                        before: before.clone(),
+                        after: after.clone(),
+                        similarity_percent: 100,
+                    },
+                );
+                break;
+            }
+        }
+    }
+
+    let mut resolved = Vec::with_capacity(changes.len());
+    for (index, change) in changes.into_iter().enumerate() {
+        if let Some(rename) = replacements.remove(&index) {
+            resolved.push(rename);
+        } else if !paired_additions.contains(&index) {
+            resolved.push(change);
+        }
+    }
+    Ok(resolved)
 }
 
 fn collect_tree_entries<ObjectId, Entries>(
@@ -1747,7 +1837,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_diff_refuses_unsorted_entries_and_rename_detection() {
+    fn tree_diff_refuses_unsorted_entries_and_unsupported_rename_similarity() {
         let unsorted = vec![
             TreeEntry {
                 path: b"b".to_vec(),
@@ -1769,11 +1859,14 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 TreeDiffOptions {
-                    detect_renames: true,
+                    rename: RenameProfile::ExactObject {
+                        minimum_similarity_percent: 99,
+                        max_candidate_pairs: 1,
+                    },
                     ..TreeDiffOptions::default()
                 },
             ),
-            Err(TreeDiffError::UnsupportedRenameDetection)
+            Err(TreeDiffError::UnsupportedSimilarityThreshold { requested: 99 })
         );
 
         let one_entry = vec![TreeEntry {
@@ -1828,6 +1921,48 @@ mod tests {
         let result = diff_trees(Vec::new(), entries, TreeDiffOptions::default())
             .expect("Git tree order is accepted");
         assert_eq!(result.changes.len(), 2);
+    }
+
+    #[test]
+    fn exact_object_rename_profile_receipts_a_permitted_rename_deterministically() {
+        let old = vec![TreeEntry {
+            path: b"before".to_vec(),
+            mode: TreeMode(0o100644),
+            object: 7_u8,
+        }];
+        let new = vec![TreeEntry {
+            path: b"after".to_vec(),
+            mode: TreeMode(0o100644),
+            object: 7_u8,
+        }];
+        let result = diff_trees(
+            old,
+            new,
+            TreeDiffOptions {
+                rename: RenameProfile::ExactObject {
+                    minimum_similarity_percent: 100,
+                    max_candidate_pairs: 1,
+                },
+                ..TreeDiffOptions::default()
+            },
+        )
+        .expect("exact-object rename");
+        assert_eq!(
+            result.changes,
+            vec![TreeChange::Renamed {
+                before: TreeEntry {
+                    path: b"before".to_vec(),
+                    mode: TreeMode(0o100644),
+                    object: 7_u8,
+                },
+                after: TreeEntry {
+                    path: b"after".to_vec(),
+                    mode: TreeMode(0o100644),
+                    object: 7_u8,
+                },
+                similarity_percent: 100,
+            }]
+        );
     }
 
     #[derive(Default)]
