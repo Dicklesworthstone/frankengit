@@ -97,6 +97,7 @@
 //! them byte for byte.
 
 mod body_identity;
+mod commitment;
 mod corpus;
 mod defense;
 mod hashing;
@@ -114,6 +115,7 @@ pub use body_identity::{
     internal_domain_tag, internal_id_preimage, internal_id_preimage_header, internal_object_id,
     internal_object_id_for_tag, lowercase_hex, resolve_domain, verify_internal_object_id,
 };
+pub use commitment::{GitObjectCommitment, NativeCommitmentError, committed_bytes};
 pub use corpus::{
     ALGORITHM_HEADER, DOMAIN_HEADER, REGISTRY_MARKER, export_algorithm_registry,
     export_domain_registry,
