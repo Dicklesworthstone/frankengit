@@ -167,6 +167,56 @@ impl BoundHit {
     }
 }
 
+/// Where to pick exploration up again.
+///
+/// Resumption is expressed as "skip the first N complete executions, then
+/// continue" rather than as a checkpointed recursion stack. That is exact
+/// here because exploration order is fully deterministic: re-walking the
+/// prefix visits precisely the executions it visited before, in the same
+/// order, so the resumed segment covers exactly what a single unbounded run
+/// would have covered next.
+///
+/// The alternative — serialising the search stack and sleep sets — would be a
+/// second representation of state the search already derives, and any drift
+/// between the two would silently change which classes a resumed run visits.
+/// Re-walking costs transitions; it cannot be wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct ResumeToken {
+    completed: usize,
+}
+
+impl ResumeToken {
+    /// Begin from the start.
+    #[must_use]
+    pub const fn start() -> Self {
+        Self { completed: 0 }
+    }
+
+    /// Resume after `completed` executions have already been covered.
+    #[must_use]
+    pub const fn after(completed: usize) -> Self {
+        Self { completed }
+    }
+
+    /// How many complete executions this token skips.
+    #[must_use]
+    pub const fn completed(self) -> usize {
+        self.completed
+    }
+
+    /// Whether this token is the beginning of a search.
+    #[must_use]
+    pub const fn is_start(self) -> bool {
+        self.completed == 0
+    }
+
+    /// A canonical rendering for the receipt.
+    #[must_use]
+    pub fn canonical(self) -> String {
+        format!("resume_after={}", self.completed)
+    }
+}
+
 /// A schedule that reproduces a failing property.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Counterexample {
@@ -265,10 +315,13 @@ pub enum ExplorationOutcome {
     Incomplete {
         /// Which bound stopped it.
         bound: BoundHit,
-        /// Complete executions visited.
+        /// Complete executions visited **in this segment**.
         classes: usize,
-        /// Transitions taken.
+        /// Transitions taken in this segment.
         transitions: u64,
+        /// Where to pick up: pass this to
+        /// [`Dpor::explore_from`] to continue.
+        resume: ResumeToken,
     },
 }
 
@@ -299,6 +352,19 @@ impl ExplorationOutcome {
         }
     }
 
+    /// Where to resume, when a bound stopped exploration.
+    ///
+    /// `None` for an exhaustive or violating outcome: there is nothing left to
+    /// cover in the first case, and in the second the caller should fix the
+    /// violation rather than keep exploring past it.
+    #[must_use]
+    pub const fn resume(&self) -> Option<ResumeToken> {
+        match self {
+            Self::Incomplete { resume, .. } => Some(*resume),
+            _ => None,
+        }
+    }
+
     /// The counterexample, if a property failed.
     #[must_use]
     pub fn counterexample(&self) -> Option<&Counterexample> {
@@ -319,11 +385,13 @@ impl ExplorationOutcome {
             Self::Incomplete { bound, .. } => format!("incomplete:{}", bound.code()),
         };
         format!(
-            "fgit-lab-exploration-v1|verdict={}|classes={}|transitions={}|{}",
+            "fgit-lab-exploration-v1|verdict={}|classes={}|transitions={}|{}|{}",
             verdict,
             self.classes(),
             self.transitions(),
-            budget.canonical()
+            budget.canonical(),
+            self.resume()
+                .map_or_else(|| "resume_after=none".to_owned(), ResumeToken::canonical)
         )
     }
 }
@@ -381,6 +449,32 @@ impl Dpor {
         program: &Program,
         budget: ExplorationBudget,
         property_name: &str,
+        property: P,
+    ) -> ExplorationOutcome
+    where
+        P: FnMut(&[OwnedEvent]) -> Result<(), String>,
+    {
+        self.explore_from(
+            program,
+            budget,
+            ResumeToken::start(),
+            property_name,
+            property,
+        )
+    }
+
+    /// Continue an exploration that a bound cut short.
+    ///
+    /// Pass the [`ResumeToken`] from a previous
+    /// [`ExplorationOutcome::Incomplete`]. The segment covers the classes the
+    /// previous one would have gone on to visit, so running to exhaustion in
+    /// segments covers exactly what one unbounded run would have.
+    pub fn explore_from<P>(
+        self,
+        program: &Program,
+        budget: ExplorationBudget,
+        resume: ResumeToken,
+        property_name: &str,
         mut property: P,
     ) -> ExplorationOutcome
     where
@@ -397,6 +491,8 @@ impl Dpor {
             violation: None,
             bound_hit: None,
             property_name: property_name.to_owned(),
+            skip: resume.completed(),
+            skipped: 0,
         };
         state.walk(&mut property, &BTreeSet::new());
 
@@ -412,6 +508,7 @@ impl Dpor {
                 bound,
                 classes: state.classes,
                 transitions: state.transitions,
+                resume: ResumeToken::after(resume.completed() + state.classes),
             };
         }
         ExplorationOutcome::Exhaustive {
@@ -433,6 +530,10 @@ struct Search<'a> {
     violation: Option<Counterexample>,
     bound_hit: Option<BoundHit>,
     property_name: String,
+    /// Complete executions already covered by earlier segments.
+    skip: usize,
+    /// How many of those have been re-walked so far.
+    skipped: usize,
 }
 
 impl Search<'_> {
@@ -545,6 +646,14 @@ impl Search<'_> {
     where
         P: FnMut(&[OwnedEvent]) -> Result<(), String>,
     {
+        // Re-walk the prefix an earlier segment already covered without
+        // re-counting it or re-checking the property: those classes are
+        // accounted for, and re-reporting a violation already reported would
+        // make a resumed run look like a fresh finding.
+        if self.skipped < self.skip {
+            self.skipped += 1;
+            return;
+        }
         if self.classes >= self.budget.max_executions() {
             self.bound_hit = Some(BoundHit::Executions);
             return;
@@ -1021,6 +1130,195 @@ mod tests {
             counterexample.clocks().len(),
             counterexample.sequence().len(),
             "every event in a counterexample carries its clock"
+        );
+    }
+
+    #[test]
+    fn segmented_exploration_covers_exactly_what_one_unbroken_run_covers() {
+        // The acceptance line: exploration is resumable. The check that
+        // matters is not that resume() returns something, but that running to
+        // exhaustion in segments visits the same executions, in the same
+        // order, as a single unbounded run.
+        let program = Program::new(vec![
+            (who("a"), vec![cas("main")]),
+            (who("b"), vec![cas("main")]),
+            (who("c"), vec![cas("main")]),
+        ])
+        .expect("valid program");
+
+        let record = |budget: ExplorationBudget, resume: ResumeToken, seen: &mut Vec<String>| {
+            Dpor::new().explore_from(&program, budget, resume, "collect", |sequence| {
+                seen.push(
+                    sequence
+                        .iter()
+                        .map(crate::commute::OwnedEvent::canonical)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+                Ok(())
+            })
+        };
+
+        let mut whole = Vec::new();
+        let unbroken = record(GENEROUS, ResumeToken::start(), &mut whole);
+        assert!(unbroken.is_exhaustive());
+        assert_eq!(whole.len(), 6);
+
+        // Now the same space in segments of two.
+        let two = ExplorationBudget::new(2, 1_000_000);
+        let mut segmented = Vec::new();
+        let mut resume = ResumeToken::start();
+        let mut segments = 0;
+        loop {
+            let outcome = record(two, resume, &mut segmented);
+            segments += 1;
+            match outcome.resume() {
+                Some(next) => {
+                    assert_eq!(outcome.classes(), 2);
+                    resume = next;
+                }
+                None => {
+                    assert!(outcome.is_exhaustive());
+                    break;
+                }
+            }
+            assert!(segments < 10, "segmented exploration failed to terminate");
+        }
+
+        assert_eq!(
+            segmented, whole,
+            "resumed segments must cover the same executions in the same order"
+        );
+    }
+
+    #[test]
+    fn a_resume_token_advances_by_the_classes_the_segment_covered() {
+        let program = Program::new(vec![
+            (who("a"), vec![cas("main")]),
+            (who("b"), vec![cas("main")]),
+            (who("c"), vec![cas("main")]),
+        ])
+        .expect("valid program");
+
+        let two = ExplorationBudget::new(2, 1_000_000);
+        let first = Dpor::new().explore_from(
+            &program,
+            two,
+            ResumeToken::start(),
+            "trivial",
+            |_: &[OwnedEvent]| Ok(()),
+        );
+        let token = first.resume().expect("a bounded run resumes");
+        assert_eq!(token.completed(), 2);
+        assert!(!token.is_start());
+
+        let second =
+            Dpor::new().explore_from(&program, two, token, "trivial", |_: &[OwnedEvent]| Ok(()));
+        assert_eq!(second.resume().expect("still more").completed(), 4);
+    }
+
+    #[test]
+    fn a_resumed_segment_does_not_re_report_an_earlier_violation() {
+        // Re-walking the prefix must not re-check it. If it did, a resumed run
+        // would surface a violation an earlier segment already reported and
+        // look like a fresh finding.
+        let program = Program::new(vec![
+            (who("a"), vec![cas("main")]),
+            (who("b"), vec![cas("main")]),
+        ])
+        .expect("valid program");
+
+        let one = ExplorationBudget::new(1, 1_000_000);
+        // Fail only on the very first execution the search reaches.
+        let mut checked = 0;
+        let first = Dpor::new().explore_from(
+            &program,
+            one,
+            ResumeToken::start(),
+            "first_only",
+            |_: &[OwnedEvent]| {
+                checked += 1;
+                if checked == 1 {
+                    Err("the first execution fails".to_owned())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(first.counterexample().is_some());
+
+        // Resuming past it re-walks that execution but must not re-check it.
+        let mut rechecked = 0;
+        let second = Dpor::new().explore_from(
+            &program,
+            GENEROUS,
+            ResumeToken::after(1),
+            "first_only",
+            |_: &[OwnedEvent]| {
+                rechecked += 1;
+                Ok(())
+            },
+        );
+        assert!(second.is_exhaustive());
+        assert_eq!(
+            rechecked, 1,
+            "only the un-covered execution should be checked on resume"
+        );
+    }
+
+    #[test]
+    fn resuming_past_the_end_is_exhaustive_and_checks_nothing() {
+        let program = Program::new(vec![
+            (who("a"), vec![cas("main")]),
+            (who("b"), vec![cas("main")]),
+        ])
+        .expect("valid program");
+
+        let mut checked = 0;
+        let outcome = Dpor::new().explore_from(
+            &program,
+            GENEROUS,
+            ResumeToken::after(99),
+            "trivial",
+            |_: &[OwnedEvent]| {
+                checked += 1;
+                Ok(())
+            },
+        );
+        assert!(outcome.is_exhaustive());
+        assert_eq!(outcome.classes(), 0);
+        assert_eq!(checked, 0);
+        assert!(outcome.resume().is_none());
+    }
+
+    #[test]
+    fn the_receipt_records_the_resume_point() {
+        // Bounds recorded in the receipt is an acceptance requirement, and a
+        // bound without the point it stopped at cannot be continued from.
+        let program = Program::new(vec![
+            (who("a"), vec![cas("main")]),
+            (who("b"), vec![cas("main")]),
+            (who("c"), vec![cas("main")]),
+        ])
+        .expect("valid program");
+
+        let two = ExplorationBudget::new(2, 1_000_000);
+        let outcome = Dpor::new().explore_from(
+            &program,
+            two,
+            ResumeToken::start(),
+            "trivial",
+            |_: &[OwnedEvent]| Ok(()),
+        );
+        let receipt = outcome.canonical_receipt(two);
+        assert!(receipt.contains("verdict=incomplete:max_executions"));
+        assert!(receipt.contains("resume_after=2"));
+
+        // An exhaustive run has nothing to resume from, and says so.
+        let done = Dpor::new().explore(&program, GENEROUS, "trivial", |_: &[OwnedEvent]| Ok(()));
+        assert!(
+            done.canonical_receipt(GENEROUS)
+                .contains("resume_after=none")
         );
     }
 
