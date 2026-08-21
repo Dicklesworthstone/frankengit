@@ -77,7 +77,7 @@ impl Default for AdmissionLimits {
 }
 
 impl AdmissionLimits {
-    fn validate(self) -> Result<(), AdmissionError> {
+    const fn validate(self) -> Result<(), AdmissionError> {
         if self.max_commands == 0 || self.max_commands > 64 || self.max_cas_replans == 0 {
             return Err(AdmissionError::InvalidLimit);
         }
@@ -122,9 +122,10 @@ pub struct ValidatedClosure {
     pub objects: BTreeSet<fgit_types::GitOid>,
 }
 
-/// Validates that a structural `fgit-wire` quarantine is admissible for a
-/// ref decision.  The implementation belongs beside the pack/object store;
-/// this crate never parses a pack or reaches into quarantine bytes.
+/// Validates a structural `fgit-wire` quarantine for a ref decision.
+///
+/// The implementation belongs beside the pack/object store; this crate never
+/// parses a pack or reaches into quarantine bytes.
 pub trait QuarantineValidator {
     /// Returns a closure witness, or a terminal admission refusal.
     fn validate(
@@ -161,9 +162,10 @@ impl ValidatedReceive {
     }
 }
 
-/// Validates closure and object availability while the pack remains in its
-/// `fgit-pack` quarantine.  Non-delete commands without that pack are refused
-/// before a seal exists; deleting refs is the permitted near-identical path.
+/// Validates closure and object availability for a quarantined pack.
+///
+/// Non-delete commands without that pack are refused before a seal exists;
+/// deleting refs is the permitted near-identical path.
 pub fn validate_receive<Validator>(
     request: &ReceiveRequest,
     pack: Option<&QuarantinedPack>,
@@ -289,14 +291,14 @@ pub trait AdmissionProjection {
 pub struct SessionMapping {
     /// Whether the receive session is one all-or-nothing transaction.
     pub atomic: bool,
-    /// One TxId for an atomic session, or one TxId per command otherwise.
+    /// One `TxId` for an atomic session, or one `TxId` per command otherwise.
     pub tx_ids: Vec<TxId>,
 }
 
 /// A terminal outcome attached to one receive command in wire order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommandOutcome {
-    /// The TxId whose authenticated decision controls this status.
+    /// The `TxId` whose authenticated decision controls this status.
     pub tx_id: TxId,
     /// Authenticated terminal decision.  This is never inferred from pack
     /// receipt or from a successful staging write.
@@ -370,7 +372,7 @@ pub enum AdmissionError {
     Outcome(Box<OutcomeFailure>),
     /// A materializer gave a commit record inconsistent with the sealed request.
     MaterializationMismatch(&'static str),
-    /// A terminal decision published but its TxId could not be resolved.
+    /// A terminal decision published but its `TxId` could not be resolved.
     PublishedOutcomeMissing,
     /// A pre-CAS duplicate verdict omitted the terminal outcome for this request.
     AlreadyDecidedOutcomeMissing,
@@ -718,7 +720,7 @@ where
                 projection,
             )?,
             FoldOutcome::Folded(_) => {
-                match projection.materialize_commit(&basis, &model_request, &fold, &closure) {
+                match projection.materialize_commit(&basis, &model_request, &fold, closure) {
                     Ok(materialization) => publish_commit(
                         store,
                         context,
@@ -726,7 +728,7 @@ where
                         receipt.token(),
                         tx_id,
                         &lowered.semantic,
-                        &closure,
+                        closure,
                         materialization,
                     )?,
                     Err(code) => publish_refusal(
@@ -965,7 +967,7 @@ fn refusal_record_id(record: &RefusalRecordBody) -> Result<RefusalRecordId, Admi
         })
 }
 
-/// Selects the already-canonical terminal outcome for this publication's TxId.
+/// Selects the already-canonical terminal outcome for this publication's `TxId`.
 ///
 /// A pre-CAS duplicate is a successful idempotent retry: returning a fresh
 /// lookup result or replanning it could conceal the existing terminal decision.
