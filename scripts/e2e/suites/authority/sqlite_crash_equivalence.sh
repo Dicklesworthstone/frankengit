@@ -90,6 +90,13 @@ fge_run sqlite-lifecycle \
   cargo test --locked -p fgit-authority-fsqlite --test lifecycle
 sq_lifecycle_exit=$FGE_LAST_EXIT
 
+# The retry law derived from the specification rather than from the code. This
+# is the independent counterpart to the crate's own retry_law.rs, which is
+# implementer evidence and cannot catch a misreading of the clause.
+fge_run sqlite-retry-law-independent \
+  cargo test --locked -p fgit-authority-fsqlite --test retry_law_independent
+sq_retry_exit=$FGE_LAST_EXIT
+
 fge_phase assert
 
 fge_assert_exit FG-005B-E2E-010 0 "$sq_campaign_exit" \
@@ -98,6 +105,8 @@ fge_assert_exit FG-005B-E2E-011 0 "$sq_conformance_exit" \
   'the FG-004 conformance run still passes alongside it'
 fge_assert_exit FG-005B-E2E-012 0 "$sq_lifecycle_exit" \
   'the lifecycle evidence still passes alongside it'
+fge_assert_exit FG-005B-E2E-018 0 "$sq_retry_exit" \
+  'the spec-derived retry law agrees with the implementation'
 
 fge_assert_eq FG-005B-E2E-013 '' "$sq_missing" \
   'every mechanism the campaign depends on is still present in it'
