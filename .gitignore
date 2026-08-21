@@ -18,3 +18,6 @@ artifacts/
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# rch project override (local builds only)
+.rch/
