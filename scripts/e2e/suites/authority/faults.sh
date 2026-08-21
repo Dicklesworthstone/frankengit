@@ -18,7 +18,11 @@ fge_capture authority-fault-campaign \
   env "FG_AUTHORITY_FAULT_SEED=0x$seed" RCH_CARGO_WRAPPER_BYPASS=1 \
   cargo test -p fgit-authority --test fault_campaign -- --nocapture || true
 campaign_exit=$FGE_LAST_EXIT
-campaign_output=$FGE_LAST_STDOUT
+# `FGE_LAST_STDOUT` is intentionally capped for harness NDJSON records.  The
+# campaign emits one large evidence line per seed, so assertions must inspect
+# the complete captured artifact rather than treating the diagnostic preview
+# as the campaign transcript.
+campaign_output=$(<"$FGE_LAST_STDOUT_FILE")
 
 fge_phase assert
 fge_assert_exit FG-004C-E2E-001 0 "$campaign_exit" \

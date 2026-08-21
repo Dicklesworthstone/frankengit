@@ -386,9 +386,9 @@ impl<Operation, Response> Clone for CompletedOperation<'_, Operation, Response> 
     }
 }
 
-fn completed_from_recorded<'history, Operation, Response>(
-    recorded: RecordedOperation<'history, Operation, Response>,
-) -> Option<CompletedOperation<'history, Operation, Response>> {
+const fn completed_from_recorded<Operation, Response>(
+    recorded: RecordedOperation<'_, Operation, Response>,
+) -> Option<CompletedOperation<'_, Operation, Response>> {
     match (recorded.response_event_index, recorded.response) {
         (Some(response_event_index), Some(response)) => Some(CompletedOperation {
             id: recorded.id,
