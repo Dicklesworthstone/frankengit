@@ -132,6 +132,42 @@ fi
 
 # -----------------------------------------------------------------------------
 fge_phase assert
+fge_step denial-does-not-count-as-statement
+# -----------------------------------------------------------------------------
+# REGRESSION. This gate's own first implementation used `grep -qF "$status"`, so
+# under a decision of `MIT` a README reading "This project is NOT MIT licensed"
+# satisfied the check and the gate announced every surface consistent. Denial is
+# the single most likely thing a stale licensing surface actually says, which
+# makes a substring match not merely imprecise but wrong in the common case.
+lic_deny="$(fge_tempdir denial)"
+cp -r "$lic_work"/. "$lic_deny"/
+printf 'This project is NOT %s licensed.\n' "$lic_spdx" > "$lic_deny/README.md"
+lic_deny_exit=0
+(cd "$lic_deny" && ./scripts/license_gate.sh) >/dev/null 2>&1 || lic_deny_exit=$?
+fge_assert_eq fg062-denial-is-not-a-statement 3 "$lic_deny_exit" \
+  "a surface DENYING the decided terms does not count as stating them"
+
+# Paired permitted case, differing only in the denial.
+lic_affirm="$(fge_tempdir affirm)"
+cp -r "$lic_work"/. "$lic_affirm"/
+printf 'This project is %s licensed.\n' "$lic_spdx" > "$lic_affirm/README.md"
+lic_affirm_exit=0
+(cd "$lic_affirm" && ./scripts/license_gate.sh) >/dev/null 2>&1 || lic_affirm_exit=$?
+fge_assert_eq fg062-affirmation-is-a-statement 0 "$lic_affirm_exit" \
+  "the same sentence without the denial does state the terms"
+
+# Token boundary: a LONGER identifier that merely contains the decided one is
+# different terms, not the decided terms.
+lic_boundary="$(fge_tempdir boundary)"
+cp -r "$lic_work"/. "$lic_boundary"/
+printf 'Licensed under %s-WITH-LLVM-exception.\n' "$lic_spdx" > "$lic_boundary/README.md"
+lic_boundary_exit=0
+(cd "$lic_boundary" && ./scripts/license_gate.sh) >/dev/null 2>&1 || lic_boundary_exit=$?
+fge_assert_eq fg062-longer-identifier-is-different-terms 3 "$lic_boundary_exit" \
+  "an identifier that merely contains the decided one is not the decided one"
+
+# -----------------------------------------------------------------------------
+fge_phase assert
 fge_step split-licensing-must-be-recorded
 # -----------------------------------------------------------------------------
 # Option D in the decision document splits a reciprocal server from permissive

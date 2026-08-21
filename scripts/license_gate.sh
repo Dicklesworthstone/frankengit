@@ -70,6 +70,38 @@ note "decision marker: $status"
 # an unresolved one: it lets a release claim terms the LICENSE file does not
 # grant. Each surface below is checked for the decided value, and every
 # disagreement is reported (not just the first) so one pass fixes all of them.
+# Escapes a value for safe use inside an extended regular expression.
+ere_escape() {
+  printf '%s' "$1" | sed -E 's/[][(){}.^$*+?|\\]/\\&/g'
+}
+
+# A surface STATES the decided terms when it carries them as a standalone token
+# on at least one line that does not deny them.
+#
+# The obvious implementation -- `grep -qF "$status"` -- is wrong, and was this
+# gate's own bug until it was probed: under a decision of `MIT`, a README
+# reading "This project is NOT MIT licensed" satisfied a substring match and the
+# gate reported every surface consistent. That is the act-versus-mention
+# confusion this repository has now hit five times, and a licensing gate is the
+# worst place for it, because denial is the single most likely thing a stale
+# surface actually says.
+#
+# Two corrections:
+#   token boundary -- `Apache-2.0` must not be satisfied by
+#     `Apache-2.0-WITH-LLVM-exception`, which is different terms, so an adjacent
+#     identifier character disqualifies the match;
+#   negation filter -- a line denying the terms does not state them. At least
+#     one surviving line is required, so an incidental "not" elsewhere in the
+#     file cannot suppress a genuine statement.
+surface_states_terms() {
+  local path="$1" esc pattern
+  esc=$(ere_escape "$status")
+  pattern="(^|[^A-Za-z0-9_+-])${esc}($|[^A-Za-z0-9_+-])"
+  LC_ALL=C grep -E "$pattern" "$path" 2>/dev/null \
+    | LC_ALL=C grep -viE "is ?n'?o?t|(^|[^a-z])(not|never|neither|nor|rather than|instead of|other than|excluding|no longer)([^a-z]|$)" \
+    | LC_ALL=C grep -q .
+}
+
 check_surface() {
   local label="$1" path="$2"
   if [ ! -f "$path" ]; then
@@ -77,8 +109,9 @@ check_surface() {
     fail=1
     return
   fi
-  if ! LC_ALL=C grep -qF "$status" "$path"; then
+  if ! surface_states_terms "$path"; then
     note "REFUSED: $label ($path) does not state the decided terms '$status'."
+    note "  (a line that merely MENTIONS or DENIES them does not count as stating them)"
     fail=1
   fi
 }
