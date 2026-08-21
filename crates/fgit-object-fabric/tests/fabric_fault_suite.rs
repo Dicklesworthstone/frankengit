@@ -52,13 +52,15 @@ use fgit_object_fabric::fabric::{
 };
 use fgit_object_fabric::fabric::{PlacementReceipt, SegmentManifest};
 use fgit_object_fabric::reference::{ReferenceMemoryConfig, ReferenceMemoryFabric};
-use fgit_object_fabric::{CryptoDigest, DigestAlgorithm, ObjectEnvelope, ObjectKind};
+use fgit_object_fabric::{
+    CryptoDigest, DigestAlgorithm, ObjectEnvelope, ObjectKind, SegmentLimits,
+};
 use fgit_resource::algebra::{Grade, ResourceVector};
 use fgit_resource::custody::{LeakDisposition, ObligationLedger};
 use fgit_resource::{OpaqueHandle, RegionId};
 use fgit_types::{
-    CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, GitOid, GitOidSha1,
-    PublicationEpoch, RepositoryAuthorityHeadId,
+    CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, GitOid, PublicationEpoch,
+    RepositoryAuthorityHeadId,
 };
 
 const NAMESPACE: &[u8] = b"fg021b-adversary";
@@ -112,7 +114,7 @@ fn envelope_for(payload: &[u8], claimed_identity: GitOid) -> ObjectEnvelope {
         b"raw".to_vec(),
         [7; 32],
         None,
-        &Default::default(),
+        &SegmentLimits::default(),
     )
     .expect("an envelope may claim any identity, so this must build")
 }
@@ -288,7 +290,7 @@ fn a_clean_write_settles_its_obligation_too() {
         .expect("an unfaulted write must succeed");
     assert!(matches!(outcome, PutIfAbsent::Created { .. }));
 
-    assert!(ledger.leaks().is_empty());
+    assert_eq!(ledger.leaks(), [] as [fgit_resource::LeakRecord; 0]);
     close_quiescent(ledger);
 }
 

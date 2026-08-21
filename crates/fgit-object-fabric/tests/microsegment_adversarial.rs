@@ -8,7 +8,9 @@
 
 use std::{
     collections::BTreeMap,
-    env, fs,
+    env,
+    fmt::Write as _,
+    fs,
     path::PathBuf,
     sync::atomic::{AtomicU8, Ordering},
 };
@@ -35,7 +37,7 @@ fn limits() -> SegmentLimits {
     SegmentLimits::default()
 }
 
-fn oid(identity: u8) -> GitOid {
+const fn oid(identity: u8) -> GitOid {
     GitOid::Sha1(GitOidSha1::from_bytes([identity; GitOidSha1::LEN]))
 }
 
@@ -104,12 +106,12 @@ fn record_offsets(bytes: &[u8], namespace_len: usize, record_count: usize) -> Ve
     offsets
 }
 
-fn envelope_namespace_offset(record_offset: usize) -> usize {
+const fn envelope_namespace_offset(record_offset: usize) -> usize {
     // record body length + envelope length + FGEN + version + namespace length
     record_offset + 4 + 4 + 4 + 2 + 2
 }
 
-fn envelope_sha1_offset(record_offset: usize, namespace_len: usize) -> usize {
+const fn envelope_sha1_offset(record_offset: usize, namespace_len: usize) -> usize {
     // record prefix, envelope header/namespace, then the two-byte OID algorithm.
     envelope_namespace_offset(record_offset) + namespace_len + 2
 }
@@ -385,7 +387,7 @@ fn decimal_digits(value: usize) -> usize {
     value.to_string().len()
 }
 
-fn pack_object_header_bytes(payload_bytes: usize) -> usize {
+const fn pack_object_header_bytes(payload_bytes: usize) -> usize {
     let mut remaining = payload_bytes >> 4;
     let mut bytes = 1;
     while remaining != 0 {
@@ -625,17 +627,19 @@ fn benchmark_plan(corpus: CorpusSpec) -> BenchmarkPlan {
 }
 
 fn evidence_directory(corpus_id: &str) -> (PathBuf, bool) {
-    match env::var_os("FGIT_MICROSEGMENT_BENCHMARK_OUT") {
-        Some(root) => (PathBuf::from(root).join(corpus_id), false),
-        None => (
-            env::temp_dir().join(format!(
-                "fg020b-microsegment-economics-{}-{}",
-                std::process::id(),
-                corpus_id
-            )),
-            true,
-        ),
-    }
+    env::var_os("FGIT_MICROSEGMENT_BENCHMARK_OUT").map_or_else(
+        || {
+            (
+                env::temp_dir().join(format!(
+                    "fg020b-microsegment-economics-{}-{}",
+                    std::process::id(),
+                    corpus_id
+                )),
+                true,
+            )
+        },
+        |root| (PathBuf::from(root).join(corpus_id), false),
+    )
 }
 
 fn benchmark_artifact(corpus: CorpusSpec) -> (BenchmarkArtifact, bool, PathBuf) {
@@ -685,8 +689,9 @@ fn economics_artifact_records_replayable_size_and_locality_models() {
         "# FG-020b benchmark evidence v1; measured canonical microsegment bytes and explicit request-count models.\n# Non-claim: loose and pack columns are uncompressed/no-delta framing baselines, not an end-to-end storage or latency result.\n# corpus_id uniquely binds deterministic fixture generation: namespace=economics-v1; SHA-1 OID bytes repeat 1..N; blob payload byte repeats its OID value.\ncorpus_id\tobject_count\tpayload_bytes_each\tmicrosegment_bytes\tloose_canonical_bytes\tpack_uncompressed_no_delta_bytes\tsequential_loose_requests\tsequential_microsegment_requests\tsequential_pack_requests\trandom_four_loose_requests\trandom_four_microsegment_requests\trandom_four_pack_requests\tclaim_class\n",
     );
     for row in rows {
-        actual.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tbenchmark\n",
+        writeln!(
+            actual,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tbenchmark",
             row.corpus_id,
             row.object_count,
             row.payload_bytes_each,
@@ -699,7 +704,8 @@ fn economics_artifact_records_replayable_size_and_locality_models() {
             row.random_four_loose_requests,
             row.random_four_microsegment_requests,
             row.random_four_pack_requests,
-        ));
+        )
+        .expect("writing into a String cannot fail");
     }
     assert_eq!(
         ECONOMICS_TSV, actual,
