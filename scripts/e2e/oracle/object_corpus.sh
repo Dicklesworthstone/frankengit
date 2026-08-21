@@ -186,15 +186,16 @@ corpus_generate() {
         "${staging_directory}" "${manifest_path}")"
     count=$((count + 1))
 
-    # This deliberately uses Git-compatible import ordering rather than
-    # StrictCreate ordering: the directory/file boundary and unusual modes are
-    # the corpus edge, while all object-reference bytes remain native-width.
+    # This is Git's accepted ordering edge: directory comparison appends an
+    # implicit slash, followed by unusual modes and a non-UTF-8 name. The
+    # oracle refuses corrupt trees, so the corpus never turns a malformed
+    # fixture into a claimed upstream behavior.
     {
-        printf '100755 z-executable\0'
-        corpus_hex_to_raw_oid "${blob_oid}"
         printf '40000 a-directory\0'
         corpus_hex_to_raw_oid "${empty_tree_oid}"
         printf '120000 a-symlink\0'
+        corpus_hex_to_raw_oid "${blob_oid}"
+        printf '100755 z-executable\0'
         corpus_hex_to_raw_oid "${blob_oid}"
         printf '100644 \377-nonutf8-name\0'
         corpus_hex_to_raw_oid "${blob_oid}"
