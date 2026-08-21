@@ -354,3 +354,63 @@ fn the_compact_profile_keeps_one_node_on_one_line_under_hostile_text() {
         "a fence header plus one line per code line: {output:?}"
     );
 }
+
+#[test]
+fn html_output_is_pinnable_for_the_constructs_that_span_lines_or_nest() {
+    // The previous round showed that span invariants cannot catch a structural
+    // mis-parse: merged text is still fully covered by spans. Only pinned
+    // output can, so every construct whose parse depends on line context or
+    // nesting gets an exact expectation here.
+    assert_eq!(html_of("Title\n=====\n"), "<h1>Title</h1>\n");
+    assert_eq!(html_of("a\n---\n"), "<h2>a</h2>\n");
+    assert_eq!(
+        html_of("    code\n"),
+        "<pre><code>code\n</code></pre>\n",
+        "an indented code block"
+    );
+    assert_eq!(
+        html_of("> a\nb\n"),
+        "<blockquote>\n<p>a\nb</p>\n</blockquote>\n",
+        "lazy continuation of a quoted paragraph"
+    );
+    assert_eq!(
+        html_of("> a\n> > b\n"),
+        "<blockquote>\n<p>a</p>\n<blockquote>\n<p>b</p>\n</blockquote>\n</blockquote>\n",
+        "a nested quote"
+    );
+    assert_eq!(html_of("a  \nb\n"), "<p>a<br />\nb</p>\n", "a hard break");
+    assert_eq!(
+        html_of("- a\n  - b\n"),
+        "<ul>\n<li>a\n<ul>\n<li>b</li>\n</ul>\n</li>\n</ul>\n",
+        "a nested tight list"
+    );
+    assert_eq!(
+        html_of("- a\n\n  para two\n"),
+        "<ul>\n<li>\n<p>a</p>\n<p>para two</p>\n</li>\n</ul>\n",
+        "an item with two blocks is loose"
+    );
+    assert_eq!(
+        html_of("***f***\n"),
+        "<p><em><strong>f</strong></em></p>\n",
+        "triple emphasis nests strong inside emphasis"
+    );
+    assert_eq!(
+        html_of("i__j__k\n"),
+        "<p>i__j__k</p>\n",
+        "an intraword underscore run is literal text"
+    );
+    assert_eq!(html_of("\\*x\\*\n"), "<p>*x*</p>\n", "backslash escapes");
+    assert_eq!(
+        html_of("![alt](x.png)\n"),
+        "<p><img src=\"x.png\" alt=\"alt\" /></p>\n"
+    );
+    assert_eq!(
+        html_of("<https://e.com>\n"),
+        "<p><a href=\"https://e.com\" rel=\"nofollow noopener noreferrer\">https://e.com</a></p>\n"
+    );
+    assert_eq!(
+        html_of("<a@b.com>\n"),
+        "<p><a href=\"mailto:a@b.com\" rel=\"nofollow noopener noreferrer\">a@b.com</a></p>\n",
+        "an email autolink gains a mailto scheme"
+    );
+}
