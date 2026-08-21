@@ -229,17 +229,15 @@ impl ResourceVector {
     /// The first grade in which `other` exceeds this amount, if any.
     #[must_use]
     pub fn first_deficit(&self, other: &Self) -> Option<ResourceError> {
-        Grade::ALL
-            .into_iter()
-            .zip(self.0)
-            .zip(other.0)
-            .find_map(|((grade, available), requested)| {
+        Grade::ALL.into_iter().zip(self.0).zip(other.0).find_map(
+            |((grade, available), requested)| {
                 (available < requested).then_some(ResourceError::Conservation {
                     grade,
                     available,
                     requested,
                 })
-            })
+            },
+        )
     }
 
     /// Composes two graded amounts pointwise.
@@ -250,9 +248,9 @@ impl ResourceVector {
         let mut out = [0_u64; GRADE_COUNT];
         let inputs = Grade::ALL.into_iter().zip(self.0).zip(other.0);
         for (slot, ((grade, left), right)) in out.iter_mut().zip(inputs) {
-            *slot = left
-                .checked_add(right)
-                .ok_or(ResourceError::Overflow { grade, left, right })?;
+            *slot =
+                left.checked_add(right)
+                    .ok_or(ResourceError::Overflow { grade, left, right })?;
         }
         Ok(Self(out))
     }
@@ -281,7 +279,11 @@ impl ResourceVector {
     pub fn mask(&self, keep: GradeDisposition) -> Self {
         let mut out = [0_u64; GRADE_COUNT];
         for (slot, (grade, amount)) in out.iter_mut().zip(Grade::ALL.into_iter().zip(self.0)) {
-            *slot = if grade.disposition() == keep { amount } else { 0 };
+            *slot = if grade.disposition() == keep {
+                amount
+            } else {
+                0
+            };
         }
         Self(out)
     }

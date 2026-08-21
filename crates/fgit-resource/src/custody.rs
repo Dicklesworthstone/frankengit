@@ -7,9 +7,7 @@
 //! crash-recovered outbox row, or a heterogeneous set of live obligations
 //! that a region must settle before it can claim quiescence.
 
-use crate::algebra::{
-    BudgetGrant, Grade, GradeDisposition, ResourceError, ResourceVector,
-};
+use crate::algebra::{BudgetGrant, Grade, GradeDisposition, ResourceError, ResourceVector};
 use crate::ids::{GrantId, ObligationId, RegionId};
 use crate::twophase::{ObligationClass, ObligationKind, ReservedObligation};
 use core::fmt;
@@ -1086,12 +1084,13 @@ impl ObligationLedger {
                             | ObligationState::DeferredExternally
                     )
                 }),
-                escalated: collect_outstanding(state, |value| {
-                    value == ObligationState::Escalated
-                }),
+                escalated: collect_outstanding(state, |value| value == ObligationState::Escalated),
                 leaks: state.leaks.clone(),
                 consumed: state.consumed,
-                returned: state.available.combine(&state.granted()).unwrap_or(state.available),
+                returned: state
+                    .available
+                    .combine(&state.granted())
+                    .unwrap_or(state.available),
                 settled: u64::try_from(
                     state
                         .entries

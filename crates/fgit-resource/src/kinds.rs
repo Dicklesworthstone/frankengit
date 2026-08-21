@@ -93,7 +93,10 @@ impl fmt::Display for AdmissionRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::StructureNotVerified(verdict) => {
-                write!(f, "admission structure verdict is {verdict:?}, not verified")
+                write!(
+                    f,
+                    "admission structure verdict is {verdict:?}, not verified"
+                )
             }
             Self::LengthMismatch { declared, verified } => write!(
                 f,

@@ -91,8 +91,8 @@ pub mod settlement;
 pub mod twophase;
 
 pub use algebra::{
-    BudgetGrant, Grade, GradeDisposition, ReleaseReceipt, ResourceError, ResourceVector,
-    GRADE_COUNT,
+    BudgetGrant, GRADE_COUNT, Grade, GradeDisposition, ReleaseReceipt, ResourceError,
+    ResourceVector,
 };
 pub use custody::{
     ContainmentFailure, LeakClass, LeakPolicy, LeakRecord, LeakSubject, LedgerHandle,
@@ -101,8 +101,8 @@ pub use custody::{
 };
 pub use ids::{BoundIdentity, GrantId, IdempotencyKey, IdentityError, ObligationId, RegionId};
 pub use settlement::{
-    reconcile, DownstreamChannel, DownstreamIdempotency, ReconcileOutcome, ReconcilePlan,
-    ReconcilePolicy, ReconcileState,
+    DownstreamChannel, DownstreamIdempotency, ReconcileOutcome, ReconcilePlan, ReconcilePolicy,
+    ReconcileState, reconcile,
 };
 pub use twophase::{
     CommittedObligation, DeferralReason, EscalationReason, EscalationReceipt, ExternallyObserved,

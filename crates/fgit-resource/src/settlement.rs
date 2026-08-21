@@ -36,8 +36,8 @@
 
 use crate::ids::{BoundIdentity, IdempotencyKey};
 use crate::twophase::{
-    EscalationReason, EscalationReceipt, ObligationKind, SettledObligation,
-    TerminalFailureReason, UnacknowledgedEffect,
+    EscalationReason, EscalationReceipt, ObligationKind, SettledObligation, TerminalFailureReason,
+    UnacknowledgedEffect,
 };
 use core::fmt;
 use core::num::NonZeroU32;
@@ -269,7 +269,10 @@ impl ReconcilePlan {
             }
             ReconcileState::Probing { attempt } => {
                 let verdict = channel.probe(&self.key);
-                (Observation::Probe(verdict), self.after_probe(attempt, verdict))
+                (
+                    Observation::Probe(verdict),
+                    self.after_probe(attempt, verdict),
+                )
             }
             terminal => return terminal,
         };

@@ -485,11 +485,7 @@ impl<K: ObligationKind> ReservedObligation<K> {
         let handle = self.guard.handle();
         let state = handle
             .abort_reservation(self.id, &ResourceVector::ZERO)
-            .unwrap_or_else(|_| {
-                handle
-                    .state_of(self.id)
-                    .unwrap_or(ObligationState::Aborted)
-            });
+            .unwrap_or_else(|_| handle.state_of(self.id).unwrap_or(ObligationState::Aborted));
         let Self {
             id,
             reservation: _,
