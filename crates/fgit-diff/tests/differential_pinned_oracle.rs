@@ -287,7 +287,7 @@ const fn diff_limits() -> DiffLimits {
     }
 }
 
-fn diff_options(profile: DiffProfile) -> DiffOptions {
+const fn diff_options(profile: DiffProfile) -> DiffOptions {
     DiffOptions {
         profile,
         granularity: SequenceGranularity::Lines,
