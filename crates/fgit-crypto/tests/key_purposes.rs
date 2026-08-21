@@ -194,3 +194,63 @@ fn a_key_never_prints_its_material() {
     assert!(format!("{ROOT:?}").contains("redacted"));
     assert!(format!("{:?}", capsule.store()).contains("redacted"));
 }
+
+// --- signature-scheme code points -------------------------------------------
+
+#[test]
+fn the_squatted_code_point_is_not_allocatable_to_a_real_scheme() {
+    // fgit-codec fixtures use scheme code point 1 with a 64-byte payload,
+    // which is exactly an Ed25519 signature length. If 1 were ever allocated
+    // to Ed25519 those fixtures would become well-formed-looking signatures
+    // that only a real verification rejects.
+    assert!(
+        fgit_crypto::is_allocatable(1),
+        "1 is outside the reserved range today"
+    );
+    // ...which is precisely why nothing is registered at it.
+    assert_eq!(
+        fgit_crypto::resolve_signature_scheme(1),
+        Err(fgit_crypto::SignatureSchemeError::Unregistered { code_point: 1 })
+    );
+}
+
+#[test]
+fn reserved_scheme_code_points_are_refused_distinctly_from_unregistered_ones() {
+    // "permanently never a scheme" and "no scheme yet" are different facts,
+    // and a caller seeing corpus material should be able to tell.
+    assert_eq!(
+        fgit_crypto::resolve_signature_scheme(0xfff1),
+        Err(fgit_crypto::SignatureSchemeError::ReservedForHarness { code_point: 0xfff1 })
+    );
+    assert_eq!(
+        fgit_crypto::resolve_signature_scheme(7),
+        Err(fgit_crypto::SignatureSchemeError::Unregistered { code_point: 7 })
+    );
+    assert!(!fgit_crypto::is_allocatable(0xfff0));
+    assert!(!fgit_crypto::is_allocatable(0xffff));
+    assert!(
+        !fgit_crypto::is_allocatable(0),
+        "zero is reserved by fgit-codec"
+    );
+    assert!(
+        fgit_crypto::is_allocatable(0xffef),
+        "just below the range stays allocatable"
+    );
+}
+
+#[test]
+fn no_registered_scheme_occupies_a_reserved_or_zero_code_point() {
+    // Vacuous while the registry is empty, and deliberately written now so it
+    // is already in place on the first allocation rather than remembered then.
+    for row in fgit_crypto::SIGNATURE_SCHEME_REGISTRY {
+        assert!(
+            fgit_crypto::is_allocatable(row.code_point),
+            "{} occupies a code point that may never be a production scheme",
+            row.name
+        );
+        assert_eq!(
+            fgit_crypto::resolve_signature_scheme(row.code_point).map(|found| found.name),
+            Ok(row.name)
+        );
+    }
+}

@@ -107,6 +107,7 @@ mod lifecycle;
 mod mac;
 mod native;
 mod registry;
+mod schemes;
 mod screened;
 
 #[cfg(any(test, feature = "test-double"))]
@@ -147,6 +148,10 @@ pub use native::{
 pub use registry::{
     ALGORITHM_REGISTRY, AlgorithmRow, AlgorithmUsage, CORPUS_RESERVED_CODE_POINTS, DOMAIN_REGISTRY,
     DigestAlgorithm, DomainRow, IdentityDomain, InternalDigestAlgorithm, RowStatus,
+};
+pub use schemes::{
+    SIGNATURE_SCHEME_REGISTRY, SIGNATURE_SCHEME_RESERVED_CODE_POINTS, SignatureSchemeError,
+    SignatureSchemeRow, is_allocatable, resolve_signature_scheme,
 };
 pub use screened::{
     Sha1IdentityProfile, screened_sha1_digest, screened_sha1_git_oid, sha1_git_oid_with_profile,
