@@ -420,8 +420,13 @@ pub fn reconstruct_microsegment(
             SymbolAcceptResult::Rejected(_) => return Err(RaptorRefusal::DecodeFailed),
             SymbolAcceptResult::Accepted { .. }
             | SymbolAcceptResult::DecodingStarted { .. }
-            | SymbolAcceptResult::BlockComplete { .. }
             | SymbolAcceptResult::Duplicate => {}
+            // `microsegment_v1` declares exactly one source block.  Once the
+            // decoder completes it, later repair symbols are redundant and
+            // feeding them would correctly yield `BlockAlreadyDecoded`; that
+            // terminal decoder state is not a refusal of the verified
+            // candidate.
+            SymbolAcceptResult::BlockComplete { .. } => break,
         }
     }
     let bytes = decoder
