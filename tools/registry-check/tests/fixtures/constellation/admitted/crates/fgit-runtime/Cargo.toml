@@ -1,0 +1,6 @@
+[package]
+name = "fgit-runtime"
+version = "0.0.1"
+
+[dependencies]
+asupersync = { version = "0.4.9", default-features = false }

@@ -1,0 +1,5 @@
+# franken-constellation-v1
+# State is dormant until an adopted dependency is a root-workspace member with
+# a fully resolved Cargo.lock entry and its exact evidence record below.
+state	dormant
+package	source	version	revision	checksum	features	default_features	public_contract_fingerprint	target_support	license	build_scripts	proc_macros	transitive_unsafe_digest	evidence_class	removal_update_path

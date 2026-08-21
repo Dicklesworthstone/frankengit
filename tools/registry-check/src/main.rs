@@ -1083,16 +1083,9 @@ fn check_manifests(root: &Path, report: &mut Report) {
             ));
         }
 
-        for line in text.lines() {
-            let line = line.trim();
-            if line.starts_with("[patch") || line.starts_with("[replace") {
-                report.error(format!(
-                    "manifest {display} declares a [patch]/[replace] section, which bypasses the closed dependency universe"
-                ));
-            }
-        }
+        check_manifest_overrides(&display, &text, report);
 
-        check_manifest_dependency_sources(&display, &text, report);
+        check_manifest_dependency_sources(root, path, &display, &text, report);
 
         for dependency in manifest_dependency_names(&text) {
             if !allowed
@@ -1109,25 +1102,57 @@ fn check_manifests(root: &Path, report: &mut Report) {
     check_lockfile(root, &allowed, report);
 }
 
+fn check_manifest_overrides(display: &str, text: &str, report: &mut Report) {
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("[patch") || line.starts_with("[replace") {
+            report.error(format!(
+                "manifest {display} declares a [patch]/[replace] section, which bypasses the closed dependency universe"
+            ));
+        }
+    }
+}
+
 /// Refuse every local or floating Git dependency in a release-facing
 /// manifest. Cargo accepts these forms, but neither can be represented as a
 /// reproducible, registry-resolvable release source. This is deliberately a
 /// manifest check as `Cargo.lock` erases ordinary `path =` edges.
-fn check_manifest_dependency_sources(display: &str, text: &str, report: &mut Report) {
+fn check_manifest_dependency_sources(
+    root: &Path,
+    manifest_path: &Path,
+    display: &str,
+    text: &str,
+    report: &mut Report,
+) {
+    let mut in_workspace_dependencies = false;
     for (line_number, raw_line) in text.lines().enumerate() {
         let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_workspace_dependencies = line == "[workspace.dependencies]";
+            continue;
+        }
         if !looks_like_dependency_declaration(line) {
             continue;
         }
         if let Some(path) = extract_inline_string_field(line, "path") {
-            report.error(format!(
-                "unpublished path dependency `{path}` in {display}:{}; release-facing dependencies must resolve from a pinned release source",
-                line_number + 1
-            ));
+            let local_name = line
+                .split_once('=')
+                .map(|(name, _)| name.trim().trim_matches('"'))
+                .unwrap_or("");
+            if !is_first_party_workspace_path(
+                root,
+                manifest_path,
+                in_workspace_dependencies,
+                local_name,
+                &path,
+            ) {
+                report.error(format!(
+                    "unpublished path dependency `{path}` in {display}:{}; release-facing dependencies must resolve from a pinned release source",
+                    line_number + 1
+                ));
+            }
         }
         if let Some(git) = extract_inline_string_field(line, "git")
-            && (!git.starts_with("https://")
-                || extract_inline_string_field(line, "rev").is_none())
+            && (!git.starts_with("https://") || extract_inline_string_field(line, "rev").is_none())
         {
             report.error(format!(
                 "unresolved Git dependency `{git}` in {display}:{}; require HTTPS plus an exact rev or use a registry release",
@@ -1135,6 +1160,25 @@ fn check_manifest_dependency_sources(display: &str, text: &str, report: &mut Rep
             ));
         }
     }
+}
+
+/// A first-party workspace package is not an unpublished external sibling:
+/// the root manifest owns the one internal path edge, and member manifests use
+/// `.workspace = true`. This narrow exemption does not allow arbitrary member
+/// paths, external sibling checkouts, absolute paths, or nested overrides.
+fn is_first_party_workspace_path(
+    root: &Path,
+    manifest_path: &Path,
+    in_workspace_dependencies: bool,
+    local_name: &str,
+    path: &str,
+) -> bool {
+    manifest_path == root.join("Cargo.toml")
+        && in_workspace_dependencies
+        && local_name.starts_with("fgit-")
+        && !Path::new(path).is_absolute()
+        && root.join(path).join("Cargo.toml").is_file()
+        && root.join(path).starts_with(root.join("crates"))
 }
 
 fn looks_like_dependency_declaration(line: &str) -> bool {
@@ -1306,10 +1350,7 @@ fn parse_constellation_lock(text: &str) -> Result<ConstellationLock, String> {
     if meaningful.is_empty() {
         return Err("constellation.lock is empty".to_owned());
     }
-    if !text
-        .lines()
-        .any(|line| line.trim() == CONSTELLATION_MARKER)
-    {
+    if !text.lines().any(|line| line.trim() == CONSTELLATION_MARKER) {
         return Err(format!(
             "constellation.lock marker mismatch; expected `{CONSTELLATION_MARKER}`"
         ));
@@ -1404,9 +1445,7 @@ fn parse_canonical_list(
         ));
     }
     let canonical = values.iter().collect::<BTreeSet<_>>();
-    if canonical.len() != values.len()
-        || values.windows(2).any(|pair| pair[0] >= pair[1])
-    {
+    if canonical.len() != values.len() || values.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(format!(
             "constellation.lock:{line_number} `{field}` must be sorted, unique, comma-separated values or `none`"
         ));
@@ -1433,9 +1472,6 @@ fn workspace_manifest_paths(root: &Path, report: &mut Report) -> Vec<PathBuf> {
         return Vec::new();
     };
     let mut members = extract_workspace_string_list(&text, "members");
-    if !members.iter().any(|member| member == "tools/registry-check") {
-        members.push("tools/registry-check".to_owned());
-    }
     members.sort();
     members.dedup();
     members
@@ -1471,7 +1507,10 @@ fn extract_workspace_string_list(text: &str, key: &str) -> Vec<String> {
         if !collecting {
             continue;
         }
-        let Some(value) = line.strip_prefix(key).and_then(|rest| rest.trim_start().strip_prefix('=')) else {
+        let Some(value) = line
+            .strip_prefix(key)
+            .and_then(|rest| rest.trim_start().strip_prefix('='))
+        else {
             continue;
         };
         body.push_str(value);
@@ -1528,8 +1567,8 @@ fn parse_manifest_dependencies(display: &str, text: &str) -> Vec<WorkspaceDepend
         if name.is_empty() {
             continue;
         }
-        let package = extract_inline_string_field(value, "package")
-            .unwrap_or_else(|| name.to_owned());
+        let package =
+            extract_inline_string_field(value, "package").unwrap_or_else(|| name.to_owned());
         let default_features = if value.contains("default-features = false") {
             "disabled"
         } else {
@@ -1658,9 +1697,10 @@ fn parse_cargo_metadata(text: &str) -> Result<MetadataSnapshot, String> {
         let Some((package, version)) = package_name_and_version_from_metadata_id(&id) else {
             continue;
         };
-        snapshot
-            .feature_closures
-            .insert((package, version), json_string_array_field(node, "features")?);
+        snapshot.feature_closures.insert(
+            (package, version),
+            json_string_array_field(node, "features")?,
+        );
     }
     Ok(snapshot)
 }
@@ -1718,7 +1758,9 @@ fn json_array_objects<'a>(text: &'a str, key: &str) -> Result<Vec<&'a str>, Stri
                 depth -= 1;
                 if depth == 0 {
                     let Some(object_start) = object_start.take() else {
-                        return Err(format!("cargo metadata JSON key `{key}` has no object start"));
+                        return Err(format!(
+                            "cargo metadata JSON key `{key}` has no object start"
+                        ));
                     };
                     objects.push(&after_colon[object_start..=offset]);
                 }
@@ -1727,7 +1769,9 @@ fn json_array_objects<'a>(text: &'a str, key: &str) -> Result<Vec<&'a str>, Stri
             _ => {}
         }
     }
-    Err(format!("cargo metadata JSON key `{key}` has an unclosed array"))
+    Err(format!(
+        "cargo metadata JSON key `{key}` has an unclosed array"
+    ))
 }
 
 fn json_string_field(text: &str, key: &str) -> Option<String> {
@@ -1764,10 +1808,14 @@ fn json_string_array_field(text: &str, key: &str) -> Result<BTreeSet<String>, St
     };
     let tail = tail.trim_start();
     let Some(tail) = tail.strip_prefix('[') else {
-        return Err(format!("cargo metadata JSON key `{key}` is not a string array"));
+        return Err(format!(
+            "cargo metadata JSON key `{key}` is not a string array"
+        ));
     };
     let Some(close) = tail.find(']') else {
-        return Err(format!("cargo metadata JSON key `{key}` has an unclosed array"));
+        return Err(format!(
+            "cargo metadata JSON key `{key}` has an unclosed array"
+        ));
     };
     let mut values = BTreeSet::new();
     for raw in tail[..close].split(',') {
@@ -1776,7 +1824,9 @@ fn json_string_array_field(text: &str, key: &str) -> Result<BTreeSet<String>, St
             continue;
         }
         let Some(value) = extract_string_value(value) else {
-            return Err(format!("cargo metadata JSON key `{key}` contains a non-string value"));
+            return Err(format!(
+                "cargo metadata JSON key `{key}` contains a non-string value"
+            ));
         };
         values.insert(value);
     }
@@ -1799,7 +1849,9 @@ fn check_constellation(root: &Path, report: &mut Report) {
     let lock_text = match fs::read_to_string(root.join("Cargo.lock")) {
         Ok(value) => value,
         Err(error) => {
-            report.error(format!("cannot read Cargo.lock for constellation verification: {error}"));
+            report.error(format!(
+                "cannot read Cargo.lock for constellation verification: {error}"
+            ));
             return;
         }
     };
@@ -1811,16 +1863,41 @@ fn check_constellation(root: &Path, report: &mut Report) {
         }
     };
     let dependencies = workspace_dependencies(root, report);
+    let metadata = if constellation.state == ConstellationState::Dormant {
+        None
+    } else {
+        match cargo_metadata(root) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                report.error(error);
+                return;
+            }
+        }
+    };
+    check_constellation_model(
+        &constellation,
+        &packages,
+        &dependencies,
+        metadata.as_ref(),
+        report,
+    );
+}
+
+fn check_constellation_model(
+    constellation: &ConstellationLock,
+    packages: &[LockPackage],
+    dependencies: &[WorkspaceDependency],
+    metadata: Option<&MetadataSnapshot>,
+    report: &mut Report,
+) {
     let selected = packages
         .iter()
         .filter(|package| is_constellation_package(&package.name))
-        .cloned()
         .collect::<Vec<_>>();
     let linked = dependencies
         .iter()
         .filter(|dependency| is_constellation_package(&dependency.package))
         .collect::<Vec<_>>();
-
     check_runtime_universe(&packages, report);
     check_forbidden_constellation_surfaces(&packages, &dependencies, report);
 
@@ -1850,21 +1927,14 @@ fn check_constellation(root: &Path, report: &mut Report) {
                 .to_owned(),
         );
     }
-
-    let metadata = match cargo_metadata(root) {
-        Ok(value) => value,
-        Err(error) => {
-            report.error(error);
-            return;
-        }
+    let Some(metadata) = metadata else {
+        report.error(
+            "constellation metadata is required for candidate/admitted feature and code-generation verification"
+                .to_owned(),
+        );
+        return;
     };
-    check_constellation_exact(
-        &constellation,
-        &packages,
-        &dependencies,
-        &metadata,
-        report,
-    );
+    check_constellation_exact(&constellation, &packages, &dependencies, metadata, report);
 }
 
 fn check_runtime_universe(packages: &[LockPackage], report: &mut Report) {
@@ -2067,7 +2137,10 @@ fn check_constellation_entry(
 }
 
 fn check_entry_evidence(entry: &ConstellationEntry, package: &LockPackage, report: &mut Report) {
-    if !matches!(entry.default_features.as_str(), "enabled" | "disabled" | "not_applicable") {
+    if !matches!(
+        entry.default_features.as_str(),
+        "enabled" | "disabled" | "not_applicable"
+    ) {
         report.error(format!(
             "constellation default_features for `{}` must be enabled, disabled, or not_applicable",
             package.name
@@ -2320,7 +2393,10 @@ fn collect_files(root: &Path, output: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name();
-        if name == OsStr::new(".git") || name == OsStr::new("target") {
+        if name == OsStr::new(".git")
+            || name == OsStr::new("target")
+            || is_registry_checker_fixture_dir(&path)
+        {
             continue;
         }
         if entry
@@ -2336,6 +2412,20 @@ fn collect_files(root: &Path, output: &mut Vec<PathBuf>) {
             output.push(path);
         }
     }
+}
+
+/// Checker fixtures intentionally contain malformed Cargo manifests, locks,
+/// and Rust snippets. They are executable test data, never production source,
+/// so the live self-check must not interpret their planted violations as a
+/// violation in the FrankenGit tree.
+fn is_registry_checker_fixture_dir(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new("fixtures"))
+        && path.parent().and_then(Path::file_name) == Some(OsStr::new("tests"))
+        && path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            == Some(OsStr::new("registry-check"))
 }
 
 fn relative(root: &Path, path: &Path) -> String {
@@ -2402,4 +2492,327 @@ fn json_escape(value: &str) -> String {
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+
+    struct FixtureWorkspace {
+        root: PathBuf,
+    }
+
+    impl Drop for FixtureWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn fixture_workspace(name: &str) -> FixtureWorkspace {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/constellation")
+            .join(name);
+        let nonce = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock precedes epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("fgit-registry-check-{nanos}-{nonce}"));
+        copy_tree(&source, &root);
+        FixtureWorkspace { root }
+    }
+
+    fn copy_tree(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination).expect("create fixture destination");
+        for entry in fs::read_dir(source).expect("read fixture source").flatten() {
+            let from = entry.path();
+            let to = destination.join(entry.file_name());
+            if from.is_dir() {
+                copy_tree(&from, &to);
+            } else {
+                fs::copy(&from, &to).expect("copy fixture file");
+            }
+        }
+    }
+
+    fn matching_metadata() -> MetadataSnapshot {
+        let mut snapshot = MetadataSnapshot::default();
+        snapshot.feature_closures.insert(
+            ("asupersync".to_owned(), "0.4.9".to_owned()),
+            BTreeSet::new(),
+        );
+        snapshot
+    }
+
+    fn report_for_fixture(
+        workspace: &FixtureWorkspace,
+        metadata: Option<&MetadataSnapshot>,
+    ) -> Report {
+        let constellation = parse_constellation_lock(
+            &fs::read_to_string(workspace.root.join("constellation.lock"))
+                .expect("read fixture constellation"),
+        )
+        .expect("parse fixture constellation");
+        let packages = parse_lock_packages(
+            &fs::read_to_string(workspace.root.join("Cargo.lock")).expect("read fixture lock"),
+        )
+        .expect("parse fixture lock");
+        let mut report = Report::new();
+        let dependencies = workspace_dependencies(&workspace.root, &mut report);
+        check_constellation_model(
+            &constellation,
+            &packages,
+            &dependencies,
+            metadata,
+            &mut report,
+        );
+        report
+    }
+
+    fn assert_error(report: &Report, expected: &str) {
+        assert!(
+            report.errors.iter().any(|error| error.contains(expected)),
+            "expected diagnostic containing `{expected}`, observed {:?}",
+            report.errors
+        );
+    }
+
+    fn replace_fixture_file(workspace: &FixtureWorkspace, relative: &str, from: &str, to: &str) {
+        let path = workspace.root.join(relative);
+        let text = fs::read_to_string(&path).expect("read fixture file");
+        assert!(
+            text.contains(from),
+            "fixture did not contain replacement source"
+        );
+        fs::write(path, text.replacen(from, to, 1)).expect("write fixture file");
+    }
+
+    #[test]
+    fn dormant_fixture_is_an_explicit_vacuous_pass() {
+        let workspace = fixture_workspace("dormant");
+        let report = report_for_fixture(&workspace, None);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("explicitly dormant"))
+        );
+    }
+
+    #[test]
+    fn admitted_fixture_matches_exact_lock_metadata_and_evidence() {
+        let workspace = fixture_workspace("admitted");
+        let metadata = matching_metadata();
+        let report = report_for_fixture(&workspace, Some(&metadata));
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn planted_second_asupersync_is_a_type_universe_failure() {
+        let workspace = fixture_workspace("admitted");
+        let addition = "\n[[package]]\nname = \"asupersync\"\nversion = \"0.3.9\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"\n";
+        let path = workspace.root.join("Cargo.lock");
+        let text = fs::read_to_string(&path).expect("read lock");
+        fs::write(path, format!("{text}{addition}")).expect("write lock");
+        let metadata = matching_metadata();
+        assert_error(
+            &report_for_fixture(&workspace, Some(&metadata)),
+            "multiple Asupersync 0.x type universes",
+        );
+    }
+
+    #[test]
+    fn planted_tokio_is_a_typed_second_runtime_failure() {
+        let workspace = fixture_workspace("admitted");
+        let path = workspace.root.join("Cargo.lock");
+        let text = fs::read_to_string(&path).expect("read lock");
+        fs::write(
+            path,
+            format!("{text}\n[[package]]\nname = \"tokio\"\nversion = \"1.0.0\"\n"),
+        )
+        .expect("write lock");
+        let metadata = matching_metadata();
+        assert_error(
+            &report_for_fixture(&workspace, Some(&metadata)),
+            "alternate async runtime `tokio`",
+        );
+    }
+
+    #[test]
+    fn planted_source_version_and_checksum_drift_are_diagnosed() {
+        for (from, to, expected) in [
+            (
+                "registry+https://github.com/rust-lang/crates.io-index",
+                "registry+https://example.invalid/index",
+                "constellation source drift",
+            ),
+            ("\t0.4.9\t", "\t0.4.8\t", "constellation version drift"),
+            (
+                "\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tnone",
+                "\tdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\tnone",
+                "constellation checksum drift",
+            ),
+        ] {
+            let workspace = fixture_workspace("admitted");
+            replace_fixture_file(&workspace, "constellation.lock", from, to);
+            let metadata = matching_metadata();
+            assert_error(&report_for_fixture(&workspace, Some(&metadata)), expected);
+        }
+    }
+
+    #[test]
+    fn planted_missing_row_and_default_feature_drift_are_diagnosed() {
+        let workspace = fixture_workspace("admitted");
+        let path = workspace.root.join("constellation.lock");
+        let text = fs::read_to_string(&path).expect("read constellation");
+        fs::write(&path, text.lines().take(3).collect::<Vec<_>>().join("\n"))
+            .expect("write constellation");
+        let metadata = matching_metadata();
+        assert_error(
+            &report_for_fixture(&workspace, Some(&metadata)),
+            "lacks a row for resolved adopted package `asupersync`",
+        );
+
+        let workspace = fixture_workspace("admitted");
+        replace_fixture_file(
+            &workspace,
+            "constellation.lock",
+            "\tdisabled\t",
+            "\tenabled\t",
+        );
+        let metadata = matching_metadata();
+        assert_error(
+            &report_for_fixture(&workspace, Some(&metadata)),
+            "constellation default-feature drift",
+        );
+    }
+
+    #[test]
+    fn planted_path_and_patch_dependency_forms_are_refused() {
+        let mut report = Report::new();
+        check_manifest_dependency_sources(
+            Path::new("/fixture"),
+            Path::new("/fixture/Cargo.toml"),
+            "fixtures/Cargo.toml",
+            "dep = { version = \"1\", path = \"/absolute/unpublished\" }",
+            &mut report,
+        );
+        assert_error(
+            &report,
+            "unpublished path dependency `/absolute/unpublished`",
+        );
+
+        let workspace = fixture_workspace("admitted");
+        let mut report = Report::new();
+        check_manifest_dependency_sources(
+            &workspace.root,
+            &workspace.root.join("Cargo.toml"),
+            "Cargo.toml",
+            "[workspace.dependencies]\nfgit-runtime = { path = \"crates/fgit-runtime\" }",
+            &mut report,
+        );
+        assert!(report.errors.is_empty(), "unexpected errors: {:?}", report.errors);
+
+        let mut report = Report::new();
+        check_manifest_overrides("fixtures/Cargo.toml", "[patch.crates-io]", &mut report);
+        assert_error(&report, "[patch]/[replace]");
+    }
+
+    #[test]
+    fn planted_sqlmodel_backend_and_ftui_demo_are_refused() {
+        let workspace = fixture_workspace("admitted");
+        let path = workspace.root.join("Cargo.lock");
+        let text = fs::read_to_string(&path).expect("read lock");
+        fs::write(
+            path,
+            format!("{text}\n[[package]]\nname = \"sqlmodel-postgres\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"ftui-showcase\"\nversion = \"0.1.0\"\n"),
+        )
+        .expect("write lock");
+        let metadata = matching_metadata();
+        let report = report_for_fixture(&workspace, Some(&metadata));
+        assert_error(&report, "forbidden sqlmodel backend `sqlmodel-postgres`");
+        assert_error(
+            &report,
+            "forbidden ftui demo/showcase package `ftui-showcase`",
+        );
+    }
+
+    #[test]
+    fn planted_feature_build_proc_unsafe_and_license_drift_are_refused() {
+        let workspace = fixture_workspace("admitted");
+        let mut metadata = matching_metadata();
+        metadata
+            .feature_closures
+            .get_mut(&("asupersync".to_owned(), "0.4.9".to_owned()))
+            .expect("fixture feature closure")
+            .insert("unexpected".to_owned());
+        metadata.build_scripts.insert("build-risk".to_owned());
+        metadata.proc_macros.insert("macro-risk".to_owned());
+        let report = report_for_fixture(&workspace, Some(&metadata));
+        assert_error(&report, "constellation feature closure drift");
+        assert_error(&report, "constellation build-script inventory drift");
+        assert_error(&report, "constellation proc-macro inventory drift");
+
+        replace_fixture_file(
+            &workspace,
+            "constellation.lock",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "missing",
+        );
+        replace_fixture_file(
+            &workspace,
+            "constellation.lock",
+            "MIT OR Apache-2.0",
+            "missing",
+        );
+        let report = report_for_fixture(&workspace, Some(&matching_metadata()));
+        assert_error(&report, "transitive-unsafe evidence");
+        assert_error(&report, "license evidence is missing");
+    }
+
+    #[test]
+    fn candidate_state_and_malformed_schema_fail_closed() {
+        let workspace = fixture_workspace("admitted");
+        replace_fixture_file(
+            &workspace,
+            "constellation.lock",
+            "state\tadmitted",
+            "state\tcandidate",
+        );
+        let metadata = matching_metadata();
+        assert_error(
+            &report_for_fixture(&workspace, Some(&metadata)),
+            "state=candidate is not a release admission",
+        );
+        assert!(parse_constellation_lock("# wrong\nstate\tdormant\n").is_err());
+    }
+
+    #[test]
+    fn cargo_metadata_parser_extracts_feature_and_codegen_closures() {
+        let metadata = parse_cargo_metadata(
+            r#"{"packages":[{"name":"asupersync","targets":[{"kind":["lib"]},{"kind":["custom-build"]}]},{"name":"derive-risk","targets":[{"kind":["proc-macro"]}]}],"resolve":{"nodes":[{"id":"registry+https://index#asupersync@0.4.9","features":["lab","net"]}]}}"#,
+        )
+        .expect("parse metadata");
+        assert_eq!(
+            metadata
+                .feature_closures
+                .get(&("asupersync".to_owned(), "0.4.9".to_owned())),
+            Some(&BTreeSet::from(["lab".to_owned(), "net".to_owned()]))
+        );
+        assert!(metadata.build_scripts.contains("asupersync"));
+        assert!(metadata.proc_macros.contains("derive-risk"));
+    }
 }
