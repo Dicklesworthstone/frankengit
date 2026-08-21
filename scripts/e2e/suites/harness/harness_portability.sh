@@ -208,7 +208,7 @@ CMD_START='(^|[;&|(])[[:space:]]*'
 # Ignoring string CONTENTS makes the detector more accurate, not weaker: text in
 # a literal cannot execute. The single exception is `eval`, which executes its
 # string argument, so any line mentioning `eval` is left intact and searched in
-# full. FG-000A-PORT-023 and -024 pin both halves through these very functions.
+# full. FG-000A-PORT-032/033/034 pin both halves through these very functions.
 detect__strip() {
   grep -v '^[[:space:]]*#' "$1" |
     sed -E "/eval/! { s/'[^']*'//g; s/\"[^\"]*\"//g; }"
@@ -402,13 +402,13 @@ fge_assert_eq FG-000A-PORT-017 '' "$strict_failures" \
   'every harness script enables strict shell mode'
 fge_assert_eq FG-000A-PORT-018 '' "$suite_strict_failures" \
   'every suite script uses the full set -euo pipefail'
-fge_assert_eq FG-000A-PORT-023 no "$prose_git_fired" \
+fge_assert_eq FG-000A-PORT-032 no "$prose_git_fired" \
   'a git name inside a string literal is prose, not an invocation'
 
-fge_assert_eq FG-000A-PORT-025 no "$prose_tool_fired" \
+fge_assert_eq FG-000A-PORT-033 no "$prose_tool_fired" \
   'a jq or awk name inside a string literal is prose, not an invocation'
 
-fge_assert_eq FG-000A-PORT-024 yes "$eval_git_fired" \
+fge_assert_eq FG-000A-PORT-034 yes "$eval_git_fired" \
   'eval of a quoted git command is still an invocation and still fires'
 
 fge_assert_eq FG-000A-PORT-019 '' "$forbidden_tools" \
