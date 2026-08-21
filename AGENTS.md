@@ -269,3 +269,76 @@ Stop and escalate instead of improvising when:
 - a release depends on remote Actions state or incomplete target assets.
 
 The correct outcome may be a typed unsupported/refusal, a constitutional amendment proposal, or a negative-evidence record. It is never silent architectural drift.
+
+## 16. Swarm operations and honest credit (binding for agents and humans alike)
+
+The purpose of agent work here is working, deployable FrankenGit capability
+delivered accretively. Process serves that outcome and never becomes the
+product.
+
+### 16.1 Workspace layout and shared-worktree rules
+
+- First-party crates live at `crates/fgit-<name>/` with package name
+  `fgit-<name>`; the constitutional checker stays at `tools/registry-check/`.
+  Add a new crate to both `members` and `default-members` in the root
+  `Cargo.toml` under an Agent Mail reservation (a one-line edit; commit it
+  at once and release the reservation).
+- Swarm agents share ONE checkout on `main`. Reserve shared files through
+  Agent Mail before editing them (`Cargo.toml`, `registries/*.tsv`,
+  `AGENTS.md`, `scripts/e2e/lib.sh`, `tools/registry-check/**`, another
+  agent's crate). Stage only your own files by explicit path; never
+  `git add -A`/`git add .`; never `reset`/`checkout --`/`stash`/`rebase`/
+  `commit --amend` shared state. Commit early and often with the bead ID.
+- Registry rows (`registries/dependency_policy.tsv`) are appended under
+  reservation with the next free `DEP-NNN`, all ten columns filled, sorted
+  IDs, and a recorded rationale/unsafe/FFI policy — never by guessing.
+- A crate owner publishes its public surface by Agent Mail; consumers build
+  against it and request changes by mail. Contracts are frozen per wave; no
+  agent redefines a shared interface to make its own code pass (SM-5).
+
+### 16.2 Code-first waves and central batch verification
+
+- Phase 1 (all agents, parallel): claim the assigned bead with
+  `br update <id> --claim --actor <AgentName>`, write the real code AND its
+  real tests in the same bead, run at most the syntax gate
+  `RCH_CARGO_WRAPPER_BYPASS=1 cargo check -p <crate>`, commit immediately,
+  move the bead to `batch_pending` with `--transition-comment` only when
+  substantively complete (code + tests + bead-linked commit + every
+  acceptance line mapped to a concrete test + no known defect).
+- Agents do NOT run `cargo test`, `cargo clippy`, `cargo build`, or
+  `./scripts/verify.sh`: the orchestrator runs one `verify.sh fast` per wave
+  over everyone's combined changes, returns failures to the same assignee as
+  `rework`, and alone records the `batch_verify` gate and closes beads with
+  revision-bound evidence. `.beads/policy.yaml` refuses every other close
+  path, self-closes, and stale gate results.
+- `batch_pending` earns no capability credit; it frees claim capacity.
+  Commit rate is a saturation signal, never a KPI (SM-1/RH-4).
+- Builds run locally (128 cores): always set `RCH_CARGO_WRAPPER_BYPASS=1` so
+  the rch offload wrapper is bypassed.
+
+### 16.3 Honest credit
+
+- A process artifact (certificate, ledger, dashboard, matrix, meta-report,
+  speculative check) may be created only if it names a concrete consumer,
+  the named feature it gates, the observed defect class justifying it, and
+  its deletion condition. Boundary test: if running code branches on it, it
+  is product; if only humans and status reports read it, it is process.
+- Forbidden: faked tests, fixtures/mocks presented as live proof, weakened
+  assertions, golden regeneration to force green, hard-coded success paths,
+  `todo!()`/`unimplemented!()` in commits, editing the spec or a gate instead
+  of implementing it, narrowing scope while claiming full success, splitting
+  one unit of work to harvest closures, moving an in-scope acceptance
+  condition into a "follow-up" to close the original.
+- A typed refusal beats a fabricated result and is less valuable than the
+  real capability; refusal-only work stays open, labeled `refusal-only`, and
+  pairs every forbidden case with a near-identical permitted case.
+- Truthful null results ("checked X, found no material increment") and
+  explicit blocked reports naming the exact missing thing are successful
+  outcomes. Unsupported claims are worse than silence. Never silence stderr
+  in an evidence-bearing command.
+- Name these pathologies when they occur (gate self-weakening RH-1,
+  proof-class inflation RH-2, golden regeneration RH-3, commit pumping RH-4,
+  tautological tests RH-5, easy-bead cherry-picking RH-6, close-pump RH-7,
+  scope-splitting RH-8, follow-up laundering RH-9, spec-editing RH-10,
+  dependency smuggling RH-11, demo-path hardcoding RH-12). The full catalog
+  lives in the `just-say-no-to-process-porn-and-ceremony` skill.

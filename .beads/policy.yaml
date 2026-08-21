@@ -1,0 +1,41 @@
+# FrankenGit swarm tracker policy — code-first / batch-verify pump.
+# Only the batch-verify orchestrator closes work, citing revision-bound evidence.
+allow_bypass: false
+close_policy:
+  require_close_reason: {enabled: true, min_length: 20}
+  require_acceptance_criteria_satisfied: {enabled: false}
+  forbid_self_close_after_in_progress: {enabled: true}
+workflow:
+  strict: true
+  statuses: [open, in_progress, batch_pending, rework, blocked, deferred, closed, tombstone]
+  status_groups:
+    ready: [open, rework]
+  transitions:
+    initial: [open, blocked]
+    open: [in_progress, blocked, deferred]
+    in_progress: [batch_pending, rework, blocked, open]
+    batch_pending: [rework, closed, in_progress]
+    rework: [in_progress, blocked, deferred]
+    blocked: [open, rework, in_progress]
+    deferred: [open]
+    closed: [open]
+  required_fields:
+    "in_progress -> batch_pending": [transition_comment]
+    "batch_pending -> rework": [transition_comment]
+    "batch_pending -> closed": [transition_comment]
+  gates:
+    "open -> closed":        {require_all: [must_transition_through_batch_pending]}
+    "in_progress -> closed": {require_all: [must_transition_through_batch_pending]}
+    "rework -> closed":      {require_all: [must_transition_through_batch_pending]}
+    "blocked -> closed":     {require_all: [must_transition_through_batch_pending]}
+    "deferred -> closed":    {require_all: [must_transition_through_batch_pending]}
+    "batch_pending -> closed": {require_all: [batch_verify]}
+  capacity:
+    counting: {hierarchy: leaf_work}
+    statuses:
+      in_progress: {soft: 16, hard: 20}
+    groups:
+      verification_debt:
+        statuses: [in_progress, batch_pending]
+        soft: 28
+        hard: 36
