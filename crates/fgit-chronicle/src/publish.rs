@@ -66,17 +66,17 @@ pub enum LostCandidate {
 /// moved. On a lost race the candidate is classified against the accelerator
 /// so the caller learns whether it may replan.
 ///
-/// The failure is boxed because `OutcomeFailure` is a wide enum: carrying it
-/// unboxed would make every success on this path pay for the widest error it
-/// could have returned. The size is asserted at compile time in the crate
-/// root, so this stays a decision rather than an accident.
+/// The failure travels unboxed: `fgit-authority` now keeps `OutcomeFailure`
+/// inside the workspace error-payload bound, so the indirection this path
+/// briefly carried is gone. The crate root asserts that bound, so if the type
+/// ever widens again the build says so rather than a lint catching it later.
 pub fn publish<S>(
     store: &S,
     head_key: &HeadKey,
     expected: AuthorityVersionToken,
     publication: &VerifiedPublication,
     tenant_id: TenantId,
-) -> Result<PublicationVerdict, Box<OutcomeFailure>>
+) -> Result<PublicationVerdict, OutcomeFailure>
 where
     S: AuthorityStore + ?Sized,
 {
@@ -89,14 +89,10 @@ where
         tenant_id,
     )?;
     match outcome {
-        PublicationOutcome::Published {
-            head,
-            batch_id,
-            indexed,
-        } => Ok(PublicationVerdict::Published {
-            head,
-            batch: batch_id,
-            indexed,
+        PublicationOutcome::Published(published) => Ok(PublicationVerdict::Published {
+            head: published.head,
+            batch: published.batch_id,
+            indexed: published.indexed,
         }),
         PublicationOutcome::PredecessorMismatch => Ok(PublicationVerdict::Lost(classify_loss(
             store,
@@ -116,7 +112,7 @@ fn classify_loss<S>(
     store: &S,
     publication: &VerifiedPublication,
     tenant_id: TenantId,
-) -> Result<LostCandidate, Box<OutcomeFailure>>
+) -> Result<LostCandidate, OutcomeFailure>
 where
     S: AuthorityStore + ?Sized,
 {
