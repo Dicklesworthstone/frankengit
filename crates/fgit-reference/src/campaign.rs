@@ -139,11 +139,19 @@ impl Bounds {
     /// Wider bounds for a deliberate deep run.
     ///
     /// Documented rather than default because the space grows sharply: this is
-    /// the `--deep` mode the campaign's acceptance asks for.
+    /// the `--deep` mode the campaign's acceptance asks for. It keeps
+    /// [`Self::DEFAULT`]'s retry breadth and spends three more transitions, so
+    /// it is a strict superset of the fast lane and reaches the
+    /// publish-then-publish-again execution as well.
+    ///
+    /// A third batch slot was tried here and abandoned: it multiplies the
+    /// staging alphabet and the run did not finish inside twenty-five minutes,
+    /// which is not a mode anyone would actually run. Depth buys reachability
+    /// more cheaply than batch slots do, so the depth is where the budget went.
     pub const DEEP: Self = Self {
         transactions: 2,
         attempts_per_transaction: 2,
-        batches: 3,
+        batches: 2,
         depth: 10,
         max_states: 400_000,
     };
