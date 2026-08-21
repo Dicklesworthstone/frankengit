@@ -316,3 +316,85 @@ fn the_capsule_encoding_is_byte_pinned() {
         "the frame is non-empty"
     );
 }
+
+/// The frame header, assembled from the layout written in
+/// `docs/ADR-0002-CANONICAL-CODEC.md`, not from the encoder under test.
+///
+/// ```text
+/// magic          4 bytes, "FGC1"
+/// codec_major    u16 big-endian
+/// codec_minor    u16 big-endian
+/// domain         u32 length + label bytes
+/// schema_family  u32 length + label bytes
+/// schema_major   u16 big-endian
+/// schema_minor   u16 big-endian
+/// payload        u32 length + payload bytes
+/// ```
+fn expected_frame_header() -> Vec<u8> {
+    let domain = b"frankengit/repository-capsule/v1";
+    let family = b"repository-capsule";
+    let mut header = Vec::new();
+    header.extend_from_slice(b"FGC1");
+    header.extend_from_slice(&1_u16.to_be_bytes()); // codec_major
+    header.extend_from_slice(&0_u16.to_be_bytes()); // codec_minor
+    header.extend_from_slice(&u32::try_from(domain.len()).expect("fits").to_be_bytes());
+    header.extend_from_slice(domain);
+    header.extend_from_slice(&u32::try_from(family.len()).expect("fits").to_be_bytes());
+    header.extend_from_slice(family);
+    header.extend_from_slice(&1_u16.to_be_bytes()); // schema_major
+    header.extend_from_slice(&0_u16.to_be_bytes()); // schema_minor
+    header
+}
+
+#[test]
+fn the_capsule_frame_matches_the_layout_written_in_the_adr() {
+    let capsule = capsule_at(3, None);
+    let frame = encode_body(&capsule).expect("a capsule encodes");
+    let header = expected_frame_header();
+
+    assert!(
+        frame.starts_with(&header),
+        "the encoded frame must begin with the header the ADR specifies;\n         expected prefix {:02x?}\nactual prefix   {:02x?}",
+        header,
+        &frame[..header.len().min(frame.len())]
+    );
+
+    // The payload length prefix follows the header and must describe the rest.
+    let prefix_end = header.len() + 4;
+    assert!(
+        frame.len() >= prefix_end,
+        "the frame carries a payload length"
+    );
+    let declared = u32::from_be_bytes([
+        frame[header.len()],
+        frame[header.len() + 1],
+        frame[header.len() + 2],
+        frame[header.len() + 3],
+    ]);
+    assert_eq!(
+        usize::try_from(declared).expect("a length fits"),
+        frame.len() - prefix_end,
+        "the declared payload length must equal the bytes that follow it"
+    );
+}
+
+#[test]
+fn the_capsule_domain_and_family_are_the_registered_ones() {
+    // A body whose domain the identity registry does not know has no identity
+    // at all, so the tag in the frame and the tag fgit-crypto registers are one
+    // fact. Asserting the exact bytes here is what would catch a rename on
+    // either side, which otherwise only surfaces as an identity refusal at the
+    // first call site.
+    let capsule = capsule_at(3, None);
+    let frame = encode_body(&capsule).expect("a capsule encodes");
+    assert!(
+        frame
+            .windows(b"frankengit/repository-capsule/v1".len())
+            .any(|window| window == b"frankengit/repository-capsule/v1"),
+        "the frame declares the registered domain tag verbatim"
+    );
+    assert!(
+        capsule_identity(&CryptoBodyIdentity, &capsule).is_ok(),
+        "and the registry accepts it, which is the other half of the same fact"
+    );
+}
