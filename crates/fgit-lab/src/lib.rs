@@ -51,6 +51,8 @@
 //! while leaving declared points untouched. A stress count is never accepted
 //! as a coverage claim.
 
+pub mod clockvec;
+pub mod commute;
 pub mod harness;
 pub mod hazard;
 pub mod journal;
@@ -58,10 +60,13 @@ pub mod plan;
 pub mod probe;
 pub mod refuse;
 pub mod rng;
+pub mod search;
 pub mod store;
 pub mod tick;
 pub mod verdict;
 
+pub use clockvec::{ClockOrdering, VectorClock};
+pub use commute::{ConflictRelation, OwnedEvent, ProtocolEvent};
 pub use harness::{Lab, LabConfig, LabRun, ReplayClass};
 pub use hazard::{
     CancelPhase, ExecutionFault, HazardScript, ObjectStoreFault, PacketFault, ScheduledHazard,
@@ -71,6 +76,7 @@ pub use plan::{LabSchedule, StepCursor, StepId};
 pub use probe::{CoverageReport, FailpointId, FailpointRegistry};
 pub use refuse::LabRefusal;
 pub use rng::SeededEntropy;
+pub use search::{BoundHit, Counterexample, Dpor, ExplorationBudget, ExplorationOutcome, Program};
 pub use store::{AuthorityCampaign, CampaignOutcome, ScriptedClient, TraceObserver};
 pub use tick::{LabTime, VirtualClock};
 pub use verdict::{ObligationOracle, OracleReport, QuiescenceOracle, Settlement};

@@ -274,11 +274,31 @@ impl AuthorityCampaign {
         hazards: &HazardScript,
     ) -> CampaignOutcome {
         let store = MemoryAuthorityStore::new(self.instance);
+        self.run_on(&store, clients, schedule, hazards)
+    }
+
+    /// Run against a store the caller owns.
+    ///
+    /// Same driving as [`run`](Self::run), but the store outlives the call so
+    /// the caller can interrogate final state — the head generation after a
+    /// campaign, say, which is what a linearizability check needs and what a
+    /// per-operation trace cannot tell you.
+    #[must_use]
+    pub fn run_on<S>(
+        &self,
+        store: &S,
+        clients: &mut [Box<dyn AuthorityClient>],
+        schedule: &LabSchedule,
+        hazards: &HazardScript,
+    ) -> CampaignOutcome
+    where
+        S: FaultableAuthorityStore + ?Sized,
+    {
         store.install_fault_plan(hazards.storage().clone());
 
         let interleaving = interleaving_for(schedule, clients.len());
         let mut observer = TraceObserver::new(self.ticks_per_op);
-        let summary = drive(&store, clients, &interleaving, &mut observer);
+        let summary = drive(store, clients, &interleaving, &mut observer);
 
         CampaignOutcome {
             ambiguous: observer.ambiguous(),
