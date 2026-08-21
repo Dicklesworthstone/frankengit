@@ -337,6 +337,28 @@ fn canonical_bytes(cases: &[GoldenCase], name: &str) -> Vec<u8> {
         .clone()
 }
 
+/// Prints the per-vector outcome tally.
+///
+/// The acceptance line asks for refusal codes to be logged, not merely
+/// counted: a campaign that classifies thousands of mutants and reports only
+/// pass/fail hides which refusals actually fired, and a decoder that quietly
+/// stopped diagnosing would look identical to one that still does. `cargo test`
+/// captures this unless a test fails or `--nocapture` is given, which is the
+/// right default — it is diagnostic output, not a result.
+fn log_tally(name: &str, tally: &BTreeMap<String, usize>) {
+    let total: usize = tally.values().sum();
+    println!("mutation campaign {name}: {total} mutants classified");
+    for (outcome, count) in tally {
+        println!("  {outcome:40} {count:>7}");
+    }
+}
+
+/// Logs the tally and then asserts the campaign was substantive.
+fn log_tally_and_assert(name: &str, tally: &BTreeMap<String, usize>) {
+    log_tally(name, tally);
+    assert_campaign_is_substantive(name, tally);
+}
+
 /// The counts must show the campaign actually ran and actually varied.
 fn assert_campaign_is_substantive(name: &str, tally: &BTreeMap<String, usize>) {
     let total: usize = tally.values().sum();
@@ -361,7 +383,7 @@ fn no_mutant_of_the_transaction_seal_shares_its_identity() {
     let cases = load_goldens();
     let canonical = canonical_bytes(&cases, "txn-seal__canonical");
     let tally = campaign::<TransactionSealBody>("txn-seal", &canonical);
-    assert_campaign_is_substantive("txn-seal", &tally);
+    log_tally_and_assert("txn-seal", &tally);
 }
 
 #[test]
@@ -369,7 +391,7 @@ fn no_mutant_of_the_commit_record_shares_its_identity() {
     let cases = load_goldens();
     let canonical = canonical_bytes(&cases, "rcr__canonical");
     let tally = campaign::<RepositoryCommitRecord>("rcr", &canonical);
-    assert_campaign_is_substantive("rcr", &tally);
+    log_tally_and_assert("rcr", &tally);
 }
 
 #[test]
@@ -377,7 +399,7 @@ fn no_mutant_of_the_decision_batch_shares_its_identity() {
     let cases = load_goldens();
     let canonical = canonical_bytes(&cases, "decision-batch__canonical");
     let tally = campaign::<RepositoryDecisionBatchBody>("decision-batch", &canonical);
-    assert_campaign_is_substantive("decision-batch", &tally);
+    log_tally_and_assert("decision-batch", &tally);
 }
 
 #[test]
@@ -386,7 +408,7 @@ fn no_mutant_of_either_authority_head_shares_its_identity() {
     for name in ["authority-head__genesis", "authority-head__advanced"] {
         let canonical = canonical_bytes(&cases, name);
         let tally = campaign::<RepositoryAuthorityHeadBody>(name, &canonical);
-        assert_campaign_is_substantive(name, &tally);
+        log_tally_and_assert(name, &tally);
     }
 }
 
@@ -395,7 +417,7 @@ fn no_mutant_of_the_refusal_record_shares_its_identity() {
     let cases = load_goldens();
     let canonical = canonical_bytes(&cases, "refusal-record__canonical");
     let tally = campaign::<RefusalRecordBody>("refusal-record", &canonical);
-    assert_campaign_is_substantive("refusal-record", &tally);
+    log_tally_and_assert("refusal-record", &tally);
 }
 
 #[test]
@@ -408,7 +430,7 @@ fn no_mutant_of_any_signed_envelope_shares_its_identity() {
     ] {
         let canonical = canonical_bytes(&cases, name);
         let tally = campaign::<SignedEnvelopeBody>(name, &canonical);
-        assert_campaign_is_substantive(name, &tally);
+        log_tally_and_assert(name, &tally);
     }
 }
 
@@ -596,4 +618,34 @@ fn a_higher_minor_is_refused_strictly_even_when_it_carries_no_new_fields() {
 
     // Permitted counterpart: the untouched vector decodes strictly.
     assert!(decode_body::<TransactionSealBody>(&canonical, DecodeLimits::DEFAULT).is_ok());
+}
+
+#[test]
+fn the_refusal_tally_is_stable_across_runs() {
+    // "Refusal codes logged and stable" is two claims. Logging is
+    // `log_tally`; this is stability, and it is asserted rather than assumed
+    // because the campaign draws coordinated mutants from a generator, and a
+    // generator seeded from anything ambient would make every run a different
+    // experiment and every logged tally unfalsifiable.
+    //
+    // One vector rather than all nine: the property is a property of the
+    // generator and the decoder, not of any particular corpus entry, and
+    // running the full campaign twice would double the suite's cost to
+    // re-prove the same thing eight more times.
+    let cases = load_goldens();
+    let canonical = canonical_bytes(&cases, "txn-seal__canonical");
+
+    let first = campaign::<TransactionSealBody>("txn-seal/stability-a", &canonical);
+    let second = campaign::<TransactionSealBody>("txn-seal/stability-b", &canonical);
+
+    assert_eq!(
+        first, second,
+        "the campaign is not deterministic: two runs over identical bytes \
+         produced different outcome tallies, so any logged tally is unfalsifiable"
+    );
+    assert!(
+        first.keys().any(|key| key.starts_with("refused:")),
+        "a stable tally of nothing would satisfy the equality above vacuously"
+    );
+    log_tally("txn-seal/stability", &first);
 }
