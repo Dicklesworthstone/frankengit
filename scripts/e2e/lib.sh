@@ -75,7 +75,33 @@
 #   fge_die   MESSAGE                    typed fatal error; terminal record still emitted
 #
 # Commands (all set FGE_LAST_EXIT / FGE_LAST_DURATION_MS / FGE_LAST_STEP)
+#
+#   >>> IF YOU INTEND TO ASSERT ON THE EXIT CODE, WRITE `|| true`. <<<
+#
+#   fge_run and fge_capture RETURN the command's exit status, and every suite
+#   runs under `set -euo pipefail`. So a bare call whose command fails kills the
+#   script ON THAT LINE -- before FGE_LAST_EXIT is read and before the assertion
+#   meant to report the failure can run:
+#
+#       fge_run build cargo test ...        # <-- dies here on failure
+#       rc=$FGE_LAST_EXIT                   # never reached
+#       fge_assert_eq FG-X-001 0 "$rc" ...  # never reached
+#
+#   The run is still caught as failing, so nothing green slips through, but it
+#   reports `status=fail failed=0` with the remaining assertions never executed:
+#   the operator learns the suite died, not which check broke, and one early
+#   failure masks every later assertion. Write it as:
+#
+#       fge_run build cargo test ... || true
+#       rc=$FGE_LAST_EXIT
+#       fge_assert_eq FG-X-001 0 "$rc" ...
+#
+#   A bare call is correct when the failure SHOULD abort -- that is what
+#   fge_run_ok is for, and it says so at the call site. The trap is only the
+#   combination: bare call, capture the exit, assert on it.
+#
 #   fge_run          STEP CMD [ARG...]             run, time, record; returns cmd exit
+#                                                  (see the warning above)
 #   fge_run_ok       STEP CMD [ARG...]             as fge_run, fge_die on nonzero
 #   fge_capture      STEP CMD [ARG...]             as fge_run + capture stdout/stderr
 #                                                  to artifacts; sets FGE_LAST_STDOUT,
