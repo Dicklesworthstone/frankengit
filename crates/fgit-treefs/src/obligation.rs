@@ -60,6 +60,21 @@ pub enum WorkspaceAbortReason {
     /// The caller discarded the workspace deliberately.
     Discarded,
     /// Evaluation produced statement errors and nothing was published.
+    ///
+    /// SEMANTICS RULED, PRODUCER UNWIRED -- a typed non-claim, deliberately.
+    ///
+    /// Per AGENTS.md §5.3 an intent-evaluation mismatch resolves to one of three
+    /// classes: a typed no-op, a statement error, or a transaction abort. ONLY
+    /// the transaction-abort class aborts the workspace lease. A statement error
+    /// leaves the lease alive, because the surviving intents still have a
+    /// coherent net effect and killing the lease would discard work the caller
+    /// never asked to discard.
+    ///
+    /// Nothing constructs this yet. That is not an oversight and not a scaffold:
+    /// the wiring is a §5.2 two-phase boundary slice and lands with the
+    /// workspace-lease bead, not as a side effect of the export path that
+    /// happens to sit nearest it. Found by the refusal-enum audit (declared,
+    /// never constructed) and ruled rather than invented.
     IntentErrors {
         /// How many source intents failed.
         count: usize,
@@ -72,6 +87,20 @@ pub enum WorkspaceAbortReason {
         observed_bytes: u64,
     },
     /// The session refused the snapshot as a rollback.
+    ///
+    /// SEMANTICS RULED, PRODUCER UNWIRED -- a typed non-claim, deliberately.
+    ///
+    /// Per AGENTS.md §5.5, when anti-rollback refuses a lease's basis advance
+    /// the lease MUST abort rather than continue on a stale basis. Continuing
+    /// silently is precisely the silent rollback to an older valid root that the
+    /// constitution bans: the lease would go on producing effects against a
+    /// basis the session has already rejected, and every one of them would look
+    /// legitimate.
+    ///
+    /// `AntiRollbackRefusal` already refuses the adoption (snapshot.rs); what is
+    /// missing is the edge that turns that refusal into a lease abort. Same
+    /// disposition as [`Self::IntentErrors`]: wiring is a §5.2 slice for the
+    /// workspace-lease bead.
     RollbackRefused,
 }
 
