@@ -1,0 +1,6 @@
+object 0123456789012345678901234567890123456789
+type commit
+tag v1.2.3
+tagger Example Tagger <tagger@example.com> 1700000002 +0100
+
+Signed release notes

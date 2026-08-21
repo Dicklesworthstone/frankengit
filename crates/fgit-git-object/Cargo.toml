@@ -1,0 +1,14 @@
+[package]
+name = "fgit-git-object"
+version = "0.1.0"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+fgit-crypto.workspace = true
+fgit-deflate.workspace = true
+
+[lints]
+workspace = true
