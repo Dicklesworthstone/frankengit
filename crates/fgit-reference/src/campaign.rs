@@ -1153,6 +1153,17 @@ fn observe(
     coverage.max_head_generation = coverage
         .max_head_generation
         .max(next.head().body.generation.get());
+    if next.decisions().len() >= 2 && std::env::var_os("FGIT_PROBE").is_some() {
+        let shape: Vec<&str> = next
+            .decisions()
+            .iter()
+            .map(|d| match d.outcome {
+                DecisionOutcome::Committed { .. } => "commit",
+                DecisionOutcome::Refused { .. } => "refuse",
+            })
+            .collect();
+        println!("PROBE two-decision state: {shape:?}");
+    }
     coverage.refused_decisions = coverage.refused_decisions.max(refused);
     coverage.forge_merge_commits = coverage.forge_merge_commits.max(merges);
 }
