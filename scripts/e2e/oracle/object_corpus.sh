@@ -196,6 +196,8 @@ corpus_generate() {
         corpus_hex_to_raw_oid "${empty_tree_oid}"
         printf '120000 a-symlink\0'
         corpus_hex_to_raw_oid "${blob_oid}"
+        printf '100644 \377-nonutf8-name\0'
+        corpus_hex_to_raw_oid "${blob_oid}"
     } > "${staging_directory}/inputs/tree-order-modes.body"
     edge_tree_oid="$(corpus_capture_object "${pin_id}" "${run_directory}" "${oid_width}" \
         "${algorithm}-tree-order-modes" tree "${staging_directory}/inputs/tree-order-modes.body" \
