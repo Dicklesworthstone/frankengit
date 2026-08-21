@@ -39,10 +39,15 @@
 
 pub mod base;
 pub mod capability;
+pub mod overlay;
 pub mod path;
 
 pub use base::{BaseEntry, BaseError, BaseView, ObjectSource, ObjectSourceError};
 pub use capability::{
     CapabilityRefusal, ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId, WriteGrant,
+};
+pub use overlay::{
+    ContentId, ContentStore, EntryClass, FileMode, Overlay, OverlayEntry, OverlayLookup,
+    OverlayStats,
 };
 pub use path::{HostProfile, MAX_PATH_BYTES, PathPolicy, PathRefusal, TreePath};
