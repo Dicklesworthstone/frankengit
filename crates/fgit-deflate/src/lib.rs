@@ -316,8 +316,19 @@ struct HuffmanTable {
     codes: Vec<HuffmanCode>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HuffmanSetPolicy {
+    Complete,
+    LiteralLengthMayBeIncomplete,
+    DistanceMayUseSingleBitCode,
+}
+
 impl HuffmanTable {
-    fn build(lengths: &[u8], limits: InflateLimits) -> Result<Self, InflateRefusal> {
+    fn build(
+        lengths: &[u8],
+        limits: InflateLimits,
+        policy: HuffmanSetPolicy,
+    ) -> Result<Self, InflateRefusal> {
         if lengths.len() > limits.max_huffman_symbols {
             return Err(InflateRefusal::ResourceLimit {
                 resource: Resource::HuffmanSymbols,
@@ -347,9 +358,16 @@ impl HuffmanTable {
                 return Err(InflateRefusal::OversubscribedHuffmanSet);
             }
         }
-        let single_one_bit_symbol = non_zero == 1 && counts[1] == 1;
-        if available != 0 && !single_one_bit_symbol {
-            return Err(InflateRefusal::IncompleteHuffmanSet);
+        if available != 0 {
+            let single_one_bit_symbol = non_zero == 1 && counts[1] == 1;
+            let is_permitted = match policy {
+                HuffmanSetPolicy::Complete => false,
+                HuffmanSetPolicy::LiteralLengthMayBeIncomplete => true,
+                HuffmanSetPolicy::DistanceMayUseSingleBitCode => single_one_bit_symbol,
+            };
+            if !is_permitted {
+                return Err(InflateRefusal::IncompleteHuffmanSet);
+            }
         }
 
         let mut next = [0_u16; HUFFMAN_LENGTH_SLOTS];
@@ -389,11 +407,11 @@ impl HuffmanTable {
         lengths[144..256].fill(9);
         lengths[256..280].fill(7);
         lengths[280..].fill(8);
-        Self::build(&lengths, limits)
+        Self::build(&lengths, limits, HuffmanSetPolicy::Complete)
     }
 
     fn fixed_distance(limits: InflateLimits) -> Result<Self, InflateRefusal> {
-        Self::build(&[5_u8; 32], limits)
+        Self::build(&[5_u8; 32], limits, HuffmanSetPolicy::Complete)
     }
 }
 
@@ -908,7 +926,8 @@ impl Inflater {
             code_lengths[*index] =
                 u8::try_from(length).map_err(|_| InflateRefusal::InvalidCodeLength)?;
         }
-        let code_length_table = HuffmanTable::build(&code_lengths, self.limits)?;
+        let code_length_table =
+            HuffmanTable::build(&code_lengths, self.limits, HuffmanSetPolicy::Complete)?;
         let mut lengths = [0_u8; 320];
         let mut position = 0_usize;
         while position < total {
@@ -966,8 +985,16 @@ impl Inflater {
         if lengths[256] == 0 {
             return Err(InflateRefusal::InvalidCodeLength);
         }
-        let literal_length = HuffmanTable::build(&lengths[..literal_count], self.limits)?;
-        let distance = HuffmanTable::build(&lengths[literal_count..total], self.limits)?;
+        let literal_length = HuffmanTable::build(
+            &lengths[..literal_count],
+            self.limits,
+            HuffmanSetPolicy::LiteralLengthMayBeIncomplete,
+        )?;
+        let distance = HuffmanTable::build(
+            &lengths[literal_count..total],
+            self.limits,
+            HuffmanSetPolicy::DistanceMayUseSingleBitCode,
+        )?;
         Ok(Some((literal_length, distance)))
     }
 
