@@ -209,7 +209,7 @@
 #   "phase":"setup|action|assert|failpoint|cleanup|teardown",
 #   "step":"seed-repo",
 #   "env":{"harness":"frankengit-e2e","harness_version":1,
-#          "revision":"<git sha or unknown>","revision_dirty":false,
+#          "revision":"<git sha or unknown>","revision_dirty":true|false|null,
 #          "toolchain":"<rust-toolchain.toml channel>","target":"...",
 #          "features":"","profile":"debug","os":"Linux","kernel":"...",
 #          "bash":"5.2.37","digest_tool":"sha256sum","timeout_impl":"coreutils",
@@ -1412,7 +1412,7 @@ fge__toolchain() {
 }
 
 fge__build_env_json() {
-  local rev dirty=false tc os kern arch
+  local rev dirty tc os kern arch
   rev=$(fge__git_revision "$FGE_REPO_ROOT")
   rev=${rev//[^0-9a-fA-F]/}
   [ -n "$rev" ] || rev=unknown
@@ -1420,8 +1420,31 @@ fge__build_env_json() {
   os=$(uname -s 2>/dev/null || printf 'unknown')
   kern=$(uname -r 2>/dev/null || printf 'unknown')
   arch=$(uname -m 2>/dev/null || printf 'unknown')
-  dirty=${FGE_REVISION_DIRTY:-false}
-  case $dirty in true | false) ;; *) dirty=false ;; esac
+  # NOT measured here, and that is deliberate. Comparing a work tree against
+  # HEAD requires git, and FG-000A-PORT-020 forbids any harness script from
+  # shelling out to it -- the same invariant that makes `fge__git_revision`
+  # parse .git/HEAD by hand. There is no pure-bash way to do it, so the harness
+  # reports what it actually knows.
+  #
+  # The change from the previous behaviour is the whole point of this fix. It
+  # defaulted to `false`, which asserted a CLEAN TREE THAT WAS NEVER CHECKED,
+  # in every record of every suite. A record naming a revision while the tree
+  # carried uncommitted edits claims the evidence came from that commit when it
+  # did not -- the exact overstatement the SHA-bound-claims rule exists to
+  # prevent. `null` says "not determined", which is true; `false` said "clean",
+  # which was not.
+  #
+  # A caller that CAN measure supplies it. That belongs outside scripts/e2e,
+  # since everything inside is swept by PORT-020: an orchestrator sweep, CI, or
+  # a developer shell exports FGE_REVISION_DIRTY=true|false before invoking.
+  # Anything unrecognised stays indeterminate rather than clean, so a malformed
+  # override can never manufacture a cleanliness claim.
+  dirty=null
+  case ${FGE_REVISION_DIRTY:-} in
+    true) dirty=true ;;
+    false) dirty=false ;;
+    *) ;;
+  esac
 
   local saved=$FGE__J
   FGE__J='{'
