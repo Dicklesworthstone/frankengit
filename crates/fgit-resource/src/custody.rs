@@ -233,13 +233,15 @@ impl ObligationState {
         let next = match (self, event) {
             (Self::Reserved, LifecycleEvent::Commit) => Self::Committed,
             (Self::Reserved, LifecycleEvent::Abort) => Self::Aborted,
-            (Self::Committed, LifecycleEvent::Acknowledge)
-            | (Self::DeferredExternally, LifecycleEvent::Acknowledge)
-            | (Self::Escalated, LifecycleEvent::Acknowledge) => Self::Acknowledged,
+            (
+                Self::Committed | Self::DeferredExternally | Self::Escalated,
+                LifecycleEvent::Acknowledge,
+            ) => Self::Acknowledged,
             (Self::Committed, LifecycleEvent::Defer) => Self::DeferredExternally,
             (Self::DeferredExternally, LifecycleEvent::Escalate) => Self::Escalated,
-            (Self::DeferredExternally, LifecycleEvent::FailTerminally)
-            | (Self::Escalated, LifecycleEvent::FailTerminally) => Self::TerminallyFailed,
+            (Self::DeferredExternally | Self::Escalated, LifecycleEvent::FailTerminally) => {
+                Self::TerminallyFailed
+            }
             (
                 Self::Reserved | Self::Committed | Self::DeferredExternally | Self::Escalated,
                 LifecycleEvent::Leak,
@@ -674,12 +676,12 @@ impl LedgerState {
         }
     }
 
-    fn allocate_grant_id(&mut self) -> GrantId {
+    const fn allocate_grant_id(&mut self) -> GrantId {
         self.next_grant = self.next_grant.saturating_add(1);
         GrantId::new(self.region, self.next_grant)
     }
 
-    fn allocate_obligation_id(&mut self) -> ObligationId {
+    const fn allocate_obligation_id(&mut self) -> ObligationId {
         self.next_obligation = self.next_obligation.saturating_add(1);
         ObligationId::new(self.region, self.next_obligation)
     }
@@ -748,7 +750,7 @@ impl LedgerState {
         record
     }
 
-    fn fresh(region: RegionId, capacity: ResourceVector) -> Self {
+    const fn fresh(region: RegionId, capacity: ResourceVector) -> Self {
         Self {
             region,
             capacity,
@@ -961,9 +963,14 @@ impl LedgerHandle {
 
     fn record_leak(&self, subject: LeakSubject, class: LeakClass) {
         let record = self.with_state(|state| state.record_leak(subject, class));
-        if self.0.disposition == LeakDisposition::FailFast && !std::thread::panicking() {
-            panic!("obligation leak under the fail-fast disposition: {record}");
-        }
+        // The durable record above is written under every disposition. Only
+        // the raise is conditional, and it is suppressed mid-unwind so a leak
+        // found during another failure's cleanup cannot abort the process and
+        // destroy the original diagnosis.
+        assert!(
+            self.0.disposition != LeakDisposition::FailFast || std::thread::panicking(),
+            "obligation leak under the fail-fast disposition: {record}"
+        );
     }
 }
 
