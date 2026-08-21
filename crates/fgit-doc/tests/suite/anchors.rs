@@ -350,3 +350,45 @@ fn anchoring_works_for_every_block_kind_in_a_mixed_document() {
         );
     }
 }
+
+#[test]
+fn the_preimage_domain_matches_the_identity_domain_the_types_crate_pins() {
+    // Two crates spell this domain independently: fgit-doc stamps it into every
+    // anchor preimage, and fgit-types pins it on the fixed-width identity. If
+    // they ever drift, a digest taken over one crate's preimage would be
+    // published under the other's domain, so the agreement is checked rather
+    // than trusted.
+    assert_eq!(
+        fgit_doc::ANCHOR_PREIMAGE_DOMAIN,
+        fgit_types::identity::DocumentAnchorId::DOMAIN
+    );
+    let document = document_of("alpha\n");
+    let anchor = anchor_on(&document, "alpha", b"blob");
+    let mut domain = fgit_doc::ANCHOR_PREIMAGE_DOMAIN.as_bytes().to_vec();
+    domain.push(0);
+    assert!(
+        anchor.id().canonical_bytes().starts_with(&domain),
+        "the preimage must carry the domain it claims"
+    );
+}
+
+#[test]
+fn a_digest_over_the_preimage_becomes_a_domain_pinned_identity() {
+    // The seam this crate deliberately stops at: it produces the preimage, the
+    // caller digests it, and the identity is stamped with one domain that no
+    // consumer has to spell for itself.
+    let document = document_of("alpha\n");
+    let anchor = anchor_on(&document, "alpha", b"blob");
+    let preimage = anchor.id().canonical_bytes();
+    assert!(!preimage.is_empty());
+
+    // A stand-in digest: this crate does not compute one, and the test must not
+    // pretend otherwise. What is under test is the domain stamping, not the hash.
+    let algorithm = fgit_types::hash::DigestAlgorithmId::try_new(1).expect("an algorithm slot");
+    let digest = fgit_types::hash::DigestBytes::try_new(&[0x11_u8; 32]).expect("digest bytes");
+    let codec = fgit_types::numeric::CodecVersion::new(1, 0);
+    let identity = fgit_doc::document_anchor_id(algorithm, codec, digest);
+    let internal = identity.as_internal_object_id();
+    assert_eq!(internal.domain().as_str(), "frankengit/doc-anchor/v1");
+    assert_eq!(internal.digest().as_bytes(), &[0x11_u8; 32]);
+}

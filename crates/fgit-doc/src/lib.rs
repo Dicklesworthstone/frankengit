@@ -68,7 +68,10 @@ mod inline;
 mod json;
 mod url;
 
-pub use anchors::{Anchor, AnchorId, RemapOutcome, RemapReport, SourceObjectId};
+pub use anchors::{
+    ANCHOR_PREIMAGE_DOMAIN, Anchor, AnchorId, RemapOutcome, RemapReport, SourceObjectId,
+    document_anchor_id,
+};
 pub use ast::{Document, Node, NodeId, NodeKind};
 pub use batch::{
     BatchInput, BatchPlan, BatchReceipt, InputOutcome, VarianceClass, WorkloadProfile,

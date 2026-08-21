@@ -523,6 +523,9 @@ version = "0.0.1"
 [[package]]
 name = "fgit-doc"
 version = "0.0.0"
+dependencies = [
+ "fgit-types",
+]
 
 [[package]]
 name = "fgit-git-object"

@@ -11,6 +11,7 @@ description = "Source-spanned safe document parsing, review anchors, and determi
 workspace = true
 
 [dependencies]
+fgit-types.workspace = true
 
 # One integration binary rather than one per group: the shared corpus and
 # invariant helpers are then used by the crate that compiles them, so no group

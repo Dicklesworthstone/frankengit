@@ -25,6 +25,10 @@
 //! Those bindings live on the [`Anchor`] itself, where remapping can compare
 //! them.
 
+use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
+use fgit_types::identity::DocumentAnchorId;
+use fgit_types::numeric::CodecVersion;
+
 use crate::ast::{Document, NodeId};
 use crate::limits::{Limits, Refusal, RefusalKind, as_u64, offset_u32, usize_of};
 use crate::profile::ProfileId;
@@ -44,6 +48,23 @@ pub const ANCHOR_PREIMAGE_DOMAIN: &str = "frankengit/doc-anchor/v1";
 
 /// Domain tag prefixed to every canonical anchor encoding.
 const ANCHOR_DOMAIN: &[u8] = b"frankengit/doc-anchor/v1\0";
+
+/// Binds a digest of an anchor preimage to the document-anchor identity domain.
+///
+/// The caller computes `digest` over [`AnchorId::canonical_bytes`] using the
+/// crate that owns domain-separated digests. This crate implements no digest and
+/// will not: an identity function belongs with the registry that governs its
+/// algorithms. What this function removes is the last reason for a consumer to
+/// spell the domain itself, which is exactly how two schemas end up sharing a
+/// tag and one body's digest becomes readable as another's identity.
+#[must_use]
+pub const fn document_anchor_id(
+    algorithm: DigestAlgorithmId,
+    codec_version: CodecVersion,
+    digest: DigestBytes,
+) -> DocumentAnchorId {
+    DocumentAnchorId::from_digest(algorithm, codec_version, digest)
+}
 
 /// An opaque host-supplied identity for the object the source came from.
 ///
