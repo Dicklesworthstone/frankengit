@@ -1895,11 +1895,10 @@ fn is_first_party_workspace_path(
     let Ok(root_manifest) = fs::read_to_string(root.join("Cargo.toml")) else {
         return false;
     };
-    let member_declared = workspace_member_path_is_declared(
+    workspace_member_path_is_declared(
         &extract_workspace_string_list(&root_manifest, "members"),
         path,
-    );
-    member_declared
+    )
 }
 
 /// Cargo workspace globs are legitimate only for direct child crate
@@ -3759,10 +3758,9 @@ fn parse_manifest_dependencies(
             continue;
         };
         let raw_name = raw_name.trim().trim_matches('"');
-        let (name, dotted_workspace) = match raw_name.strip_suffix(".workspace") {
-            Some(name) => (name, true),
-            None => (raw_name, false),
-        };
+        let (name, dotted_workspace) = raw_name
+            .strip_suffix(".workspace")
+            .map_or((raw_name, false), |name| (name, true));
         if name.is_empty() {
             continue;
         }
@@ -3820,10 +3818,7 @@ fn extract_bool_value(value: &str) -> Option<bool> {
 
 fn extract_inline_bool_field(value: &str, field: &str) -> Option<bool> {
     let tail = inline_field_value(value, field)?;
-    extract_bool_value(
-        tail.split(|character: char| character == ',' || character == '}')
-            .next()?,
-    )
+    extract_bool_value(tail.split([',', '}']).next()?)
 }
 
 fn extract_inline_string_list(value: &str, field: &str) -> BTreeSet<String> {

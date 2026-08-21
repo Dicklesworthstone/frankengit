@@ -245,7 +245,8 @@ pub struct Claim<C: ClaimClass> {
 
 impl<C: ClaimClass> Claim<C> {
     /// Builds a typed claim from canonical identifier and scope text.
-    pub fn new(id: ClaimText, scope: ClaimText) -> Self {
+    #[must_use]
+    pub const fn new(id: ClaimText, scope: ClaimText) -> Self {
         Self {
             id,
             scope,
@@ -281,7 +282,8 @@ pub struct Evidence<E: ClaimClass> {
 
 impl<E: ClaimClass> Evidence<E> {
     /// Builds an evidence reference from canonical artifact text.
-    pub fn new(artifact: ClaimText) -> Self {
+    #[must_use]
+    pub const fn new(artifact: ClaimText) -> Self {
         Self {
             artifact,
             marker: PhantomData,
@@ -308,13 +310,10 @@ pub struct JustifiedClaim<C: ClaimClass, E: ClaimClass> {
     evidence: Evidence<E>,
 }
 
-impl<C: ClaimClass, E: ClaimClass> JustifiedClaim<C, E>
-where
-    E: Justifies<C>,
-{
+impl<C: ClaimClass, E: ClaimClass + Justifies<C>> JustifiedClaim<C, E> {
     /// Binds a typed claim to typed evidence along an admissible lattice edge.
     #[must_use]
-    pub fn new(claim: Claim<C>, evidence: Evidence<E>) -> Self {
+    pub const fn new(claim: Claim<C>, evidence: Evidence<E>) -> Self {
         Self { claim, evidence }
     }
 
@@ -333,7 +332,10 @@ where
 
 /// Checks a dynamic registry edge against the same closed order used by the
 /// typed constructors.
-pub fn validate_justification(claim: ClaimRank, evidence: ClaimRank) -> Result<(), ClaimRefusal> {
+pub const fn validate_justification(
+    claim: ClaimRank,
+    evidence: ClaimRank,
+) -> Result<(), ClaimRefusal> {
     if evidence.justifies(claim) {
         Ok(())
     } else {

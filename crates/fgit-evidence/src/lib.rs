@@ -65,7 +65,7 @@ impl EvidenceText {
         &self.0
     }
 
-    fn decoded(value: String) -> Self {
+    const fn decoded(value: String) -> Self {
         Self(value)
     }
 }
@@ -90,7 +90,7 @@ pub enum ReplayCompleteness {
 }
 
 impl ReplayCompleteness {
-    fn code(self) -> u8 {
+    const fn code(self) -> u8 {
         match self {
             Self::Replayable => 0,
             Self::Structural => 1,
@@ -124,7 +124,7 @@ pub struct EvidenceArtifact {
 impl EvidenceArtifact {
     /// Constructs one named artifact commitment.
     #[must_use]
-    pub fn new(location: EvidenceText, commitment: Digest) -> Self {
+    pub const fn new(location: EvidenceText, commitment: Digest) -> Self {
         Self {
             location,
             commitment,
@@ -530,15 +530,15 @@ impl EvidenceRecord {
             })?;
         if frame_id != self.id {
             return Err(EvidenceRefusal::IdentityMismatch {
-                expected: self.id,
-                observed: frame_id,
+                expected: Box::new(self.id),
+                observed: Box::new(frame_id),
             });
         }
         let recomputed = identify(&self.body)?;
         if recomputed != self.id {
             return Err(EvidenceRefusal::IdentityMismatch {
-                expected: self.id,
-                observed: recomputed,
+                expected: Box::new(self.id),
+                observed: Box::new(recomputed),
             });
         }
         if self.body.context.supersedes == Some(self.id) {
@@ -579,9 +579,9 @@ pub enum EvidenceRefusal {
     /// The supplied identity commits to different body bytes.
     IdentityMismatch {
         /// Attached identity.
-        expected: EvidenceRecordId,
+        expected: Box<EvidenceRecordId>,
         /// Identity recomputed through the registered authority.
-        observed: EvidenceRecordId,
+        observed: Box<EvidenceRecordId>,
     },
     /// A strict decoder accepted bytes that did not re-encode identically.
     FrameNotCanonical,
@@ -663,7 +663,7 @@ fn validate_collection<T: Eq>(
     Ok(())
 }
 
-fn claim_rank_code(rank: ClaimRank) -> u8 {
+const fn claim_rank_code(rank: ClaimRank) -> u8 {
     match rank {
         ClaimRank::Benchmark => 0,
         ClaimRank::Slo => 1,

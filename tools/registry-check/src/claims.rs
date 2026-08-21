@@ -77,7 +77,7 @@ enum Evaluation {
 }
 
 /// Checks claim rank, evidence strength, and artifact commitments.
-pub(crate) fn check(root: &Path, report: &mut Report) {
+pub fn check(root: &Path, report: &mut Report) {
     let ranks = match load_claim_class_ranks(root) {
         Ok(ranks) => ranks,
         Err(error) => {
@@ -111,7 +111,7 @@ pub(crate) fn check(root: &Path, report: &mut Report) {
 }
 
 /// Renders the README-owned, staleness-gated claim status section.
-pub(crate) fn render_status(root: &Path) -> Result<String, String> {
+pub fn render_status(root: &Path) -> Result<String, String> {
     let ranks = load_claim_class_ranks(root)?;
     let invariants = load_invariant_ids(root)?;
     let rows = load_claim_rows(root)?;
@@ -141,7 +141,7 @@ pub(crate) fn render_status(root: &Path) -> Result<String, String> {
 }
 
 /// Refuses a README whose checked-in status block is not the generated result.
-pub(crate) fn check_readme(root: &Path, report: &mut Report) {
+pub fn check_readme(root: &Path, report: &mut Report) {
     let expected = match render_status(root) {
         Ok(status) => status,
         Err(error) => {

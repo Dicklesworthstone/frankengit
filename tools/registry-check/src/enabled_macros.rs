@@ -35,7 +35,7 @@ use crate::{
 /// none" from "has one that this platform does not build", and that distinction
 /// is the whole point of the gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum SurfaceState {
+pub enum SurfaceState {
     /// The row governs no package in the lock at all: `std`, the deny patterns
     /// that correctly match nothing, and the external-tool rows.
     NotApplicable,
@@ -48,21 +48,21 @@ pub(crate) enum SurfaceState {
 }
 
 impl SurfaceState {
-    pub(crate) fn as_registry_word(self) -> &'static str {
+    pub const fn as_registry_word(self) -> &'static str {
         match self {
-            SurfaceState::NotApplicable => "not_applicable",
-            SurfaceState::Absent => "absent",
-            SurfaceState::Disabled => "disabled",
-            SurfaceState::Enabled => "enabled",
+            Self::NotApplicable => "not_applicable",
+            Self::Absent => "absent",
+            Self::Disabled => "disabled",
+            Self::Enabled => "enabled",
         }
     }
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
-            "not_applicable" => Some(SurfaceState::NotApplicable),
-            "absent" => Some(SurfaceState::Absent),
-            "disabled" => Some(SurfaceState::Disabled),
-            "enabled" => Some(SurfaceState::Enabled),
+            "not_applicable" => Some(Self::NotApplicable),
+            "absent" => Some(Self::Absent),
+            "disabled" => Some(Self::Disabled),
+            "enabled" => Some(Self::Enabled),
             _ => None,
         }
     }
@@ -70,7 +70,7 @@ impl SurfaceState {
 
 /// The enabled surface of the resolved graph, resolved for one host triple.
 #[derive(Debug, Default)]
-pub(crate) struct EnabledSurface {
+pub struct EnabledSurface {
     pub(crate) triple: String,
     pub(crate) build_scripts: BTreeSet<String>,
     pub(crate) proc_macros: BTreeSet<String>,
@@ -124,7 +124,7 @@ fn host_triple() -> Result<String, String> {
 /// Development edges are followed only out of workspace members. A dependency's
 /// own dev-dependencies are never built, so counting them would inflate the
 /// audited surface with packages that cannot run at all.
-pub(crate) fn resolve_enabled_surface(root: &Path) -> Result<EnabledSurface, String> {
+pub fn resolve_enabled_surface(root: &Path) -> Result<EnabledSurface, String> {
     let triple = host_triple()?;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
@@ -157,10 +157,8 @@ pub(crate) fn resolve_enabled_surface(root: &Path) -> Result<EnabledSurface, Str
 
 /// Where cargo leaves build-script output for this workspace.
 fn cargo_target_root(root: &Path) -> std::path::PathBuf {
-    match std::env::var_os("CARGO_TARGET_DIR") {
-        Some(dir) => std::path::PathBuf::from(dir),
-        None => root.join("target"),
-    }
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| root.join("target"), std::path::PathBuf::from)
 }
 
 /// Harvest `cargo:rustc-link-lib` / `rustc-link-search` emissions from the
@@ -236,7 +234,7 @@ fn absorb_output(path: &Path, package: &str, linkage: &mut BTreeMap<String, BTre
 
 /// Cargo accepts both the `cargo:` and newer `cargo::` emission prefixes, and a
 /// build script may use either; blake3 mixes them in one file.
-pub(crate) fn parse_linkage_lines(text: &str) -> BTreeSet<String> {
+pub fn parse_linkage_lines(text: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     for line in text.lines() {
         let line = line.trim();
@@ -261,7 +259,7 @@ pub(crate) fn parse_linkage_lines(text: &str) -> BTreeSet<String> {
 
 /// Split out from the subprocess so the reachability walk is directly testable
 /// against pinned JSON rather than only against whatever this host resolves.
-pub(crate) fn parse_enabled_surface(text: &str, triple: String) -> Result<EnabledSurface, String> {
+pub fn parse_enabled_surface(text: &str, triple: String) -> Result<EnabledSurface, String> {
     let mut has_build_script = BTreeMap::new();
     let mut has_proc_macro = BTreeMap::new();
     let mut name_of = BTreeMap::new();
@@ -362,7 +360,7 @@ pub(crate) fn parse_enabled_surface(text: &str, triple: String) -> Result<Enable
 
 /// One dependency-registry row, reduced to the fields this gate reads.
 #[derive(Debug, Clone)]
-pub(crate) struct SurfaceRow {
+pub struct SurfaceRow {
     pub(crate) id: String,
     pub(crate) crate_pattern: String,
     pub(crate) ffi_policy: String,
@@ -379,7 +377,7 @@ pub(crate) struct SurfaceRow {
 /// ordering into one shared helper is a follow-up for the checker's owner rather
 /// than something this gate should do to a function it does not own. If the two
 /// ever disagree, the bug is here.
-pub(crate) fn governing_row<'a>(rows: &'a [SurfaceRow], package: &str) -> Option<&'a SurfaceRow> {
+pub fn governing_row<'a>(rows: &'a [SurfaceRow], package: &str) -> Option<&'a SurfaceRow> {
     rows.iter()
         .filter(|row| dependency_pattern_matches(&row.crate_pattern, package))
         .min_by(|left, right| {
@@ -398,7 +396,7 @@ pub(crate) fn governing_row<'a>(rows: &'a [SurfaceRow], package: &str) -> Option
 /// with no registry row is the obvious direction; a row that claims a build
 /// script the graph no longer has is the direction that quietly rots, because
 /// nothing else in the lane ever reads it again.
-pub(crate) fn check_enabled_macro_surface(
+pub fn check_enabled_macro_surface(
     unfiltered: &MetadataSnapshot,
     surface: &EnabledSurface,
     rows: &[SurfaceRow],
@@ -452,7 +450,7 @@ pub(crate) fn check_enabled_macro_surface(
 
 /// Public wrapper so the admission-ledger generator can stamp a freshly admitted
 /// row with the same value this gate will later demand of it.
-pub(crate) fn observed_state_for(
+pub fn observed_state_for(
     packages: &[String],
     enabled: &BTreeSet<String>,
     present: &BTreeSet<String>,
@@ -525,7 +523,7 @@ fn governed_packages(
 /// The FG-069 constitution gate: enumerate the enabled macro surface, compare it
 /// with the dependency registry, and refuse a first-party crate that acquires a
 /// third-party derive macro.
-pub(crate) fn check_macro_surface(root: &Path, report: &mut Report) {
+pub fn check_macro_surface(root: &Path, report: &mut Report) {
     let unfiltered = match crate::cargo_metadata(root) {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -561,7 +559,7 @@ pub(crate) fn check_macro_surface(root: &Path, report: &mut Report) {
     check_first_party_derive_acquisition(root, &surface, report);
 }
 
-/// GoldLotus ruling 3: linking native object code is a property of the build,
+/// `GoldLotus` ruling 3: linking native object code is a property of the build,
 /// not of the manifest, so a manifest cannot be the oracle for it. A build
 /// script that emits `cargo:rustc-link-lib` or `rustc-link-search` for a package
 /// whose registry `ffi_policy` denies a foreign engine is a refusal.
@@ -669,7 +667,7 @@ fn observed_state(
         .unwrap_or(SurfaceState::Absent)
 }
 
-/// Deliverable 2 (GoldLotus ruling 5): refuse a first-party crate acquiring a
+/// Deliverable 2 (`GoldLotus` ruling 5): refuse a first-party crate acquiring a
 /// third-party derive macro.
 ///
 /// The original bead asked for golden expansions of serde derives on the fg002
@@ -691,7 +689,7 @@ fn observed_state(
 /// feature-aware for free. Plain `zerocopy` acquires no derive and is allowed;
 /// `zerocopy` with the `derive` feature pulls `zerocopy-derive` and is refused.
 /// A name list could not tell those apart.
-pub(crate) fn derive_acquisitions(
+pub fn derive_acquisitions(
     manifest_text: &str,
     proc_macros: &BTreeSet<String>,
     vendors: &BTreeMap<String, BTreeSet<String>>,
@@ -818,7 +816,7 @@ mod tests {
     #[test]
     fn present_but_not_enabled_is_disabled_not_absent() {
         let enabled = BTreeSet::new();
-        let present: BTreeSet<String> = ["winapi".to_owned()].into_iter().collect();
+        let present: BTreeSet<String> = std::iter::once("winapi".to_owned()).collect();
         let packages = vec!["winapi".to_owned()];
         // Collapsing this to `absent` would let a package acquire a build script
         // on another platform with no registry signal at all.
@@ -830,7 +828,7 @@ mod tests {
 
     #[test]
     fn enabled_wins_over_disabled_within_one_governed_set() {
-        let enabled: BTreeSet<String> = ["serde".to_owned()].into_iter().collect();
+        let enabled: BTreeSet<String> = std::iter::once("serde".to_owned()).collect();
         let present: BTreeSet<String> = ["serde".to_owned(), "serde_x".to_owned()]
             .into_iter()
             .collect();
@@ -853,11 +851,11 @@ mod tests {
         let mut vendors = BTreeMap::new();
         vendors.insert(
             "serde".to_owned(),
-            ["serde_derive".to_owned()].into_iter().collect(),
+            std::iter::once("serde_derive".to_owned()).collect(),
         );
         vendors.insert(
             "thiserror".to_owned(),
-            ["thiserror-impl".to_owned()].into_iter().collect(),
+            std::iter::once("thiserror-impl".to_owned()).collect(),
         );
         // The three third-party dependencies first-party crates actually
         // declare, all with zero direct proc-macro edges at e5c745a.
@@ -888,10 +886,13 @@ fgit-types.workspace = true
 [dev-dependencies]
 fsqlite = { version = "0.3.7", default-features = false, features = ["native"] }
 "#;
-        assert!(derive_acquisitions(manifest, &pm, &vendors, &fp).is_empty());
+        assert_eq!(
+            derive_acquisitions(manifest, &pm, &vendors, &fp),
+            Vec::new()
+        );
     }
 
-    /// YellowLotus: a guard nobody has seen fail is not yet a guard. Plant a
+    /// `YellowLotus`: a guard nobody has seen fail is not yet a guard. Plant a
     /// row in every section, in both inline and table form, and require each
     /// one to be caught individually.
     #[test]
@@ -971,12 +972,15 @@ fsqlite = { version = "0.3.7", default-features = false, features = ["native"] }
     fn a_dependency_with_no_resolved_derive_edge_is_permitted() {
         let (pm, mut vendors, fp) = derive_world();
         let manifest = "[dependencies]\nzerocopy = { version = \"0.8\", features = [\"simd\"] }\n";
-        assert!(derive_acquisitions(manifest, &pm, &vendors, &fp).is_empty());
+        assert_eq!(
+            derive_acquisitions(manifest, &pm, &vendors, &fp),
+            Vec::new()
+        );
 
         // Same crate, same manifest line shape, derive feature resolved on.
         vendors.insert(
             "zerocopy".to_owned(),
-            ["zerocopy-derive".to_owned()].into_iter().collect(),
+            std::iter::once("zerocopy-derive".to_owned()).collect(),
         );
         let found = derive_acquisitions(manifest, &pm, &vendors, &fp);
         assert_eq!(found.len(), 1);
@@ -1067,7 +1071,7 @@ cargo:rustc-link-lib=static=blake3_avx512_assembly
         };
         let mut report = Report::new();
         check_native_linkage_policy(&surface, &rows, &mut report);
-        assert!(report.errors.is_empty());
+        assert_eq!(report.errors, Vec::<String>::new());
         assert_eq!(report.notes.len(), 1, "{:?}", report.notes);
         assert!(report.notes[0].contains("not evaluated"));
     }
