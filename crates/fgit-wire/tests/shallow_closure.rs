@@ -448,6 +448,123 @@ fn filtered_pack_fixture() -> (FixtureGraph, PackFixtureSource, AnyGitOid) {
     (graph, source, omitted)
 }
 
+fn reference_blob_none_closure(
+    graph: &FixtureGraph,
+    root: AnyGitOid,
+) -> (Vec<ClosureObjectId>, Vec<PromisorOmission>) {
+    let mut visited = Vec::new();
+    let mut objects = Vec::new();
+    let mut omissions = Vec::new();
+    reference_visit_blob_none(
+        graph,
+        root,
+        None,
+        0,
+        &mut visited,
+        &mut objects,
+        &mut omissions,
+    );
+    objects.sort_by_key(|object| object.oid);
+    omissions.sort_by_key(|omission| omission.oid);
+    (objects, omissions)
+}
+
+fn reference_visit_blob_none(
+    graph: &FixtureGraph,
+    oid: AnyGitOid,
+    parent: Option<AnyGitOid>,
+    depth: u32,
+    visited: &mut Vec<AnyGitOid>,
+    objects: &mut Vec<ClosureObjectId>,
+    omissions: &mut Vec<PromisorOmission>,
+) {
+    if visited.contains(&oid) {
+        return;
+    }
+    visited.push(oid);
+    let object = graph
+        .objects
+        .iter()
+        .find(|(candidate, _)| *candidate == oid)
+        .map(|(_, object)| object.clone())
+        .expect("reference fixture contains every graph edge");
+    match object {
+        ClosureObject::Commit(commit) => {
+            objects.push(ClosureObjectId {
+                oid,
+                object_type: ObjectType::Commit,
+            });
+            reference_visit_blob_none(
+                graph,
+                commit.tree,
+                Some(oid),
+                0,
+                visited,
+                objects,
+                omissions,
+            );
+            for parent_commit in commit.parents {
+                reference_visit_blob_none(
+                    graph,
+                    parent_commit,
+                    Some(oid),
+                    0,
+                    visited,
+                    objects,
+                    omissions,
+                );
+            }
+        }
+        ClosureObject::Tree(entries) => {
+            objects.push(ClosureObjectId {
+                oid,
+                object_type: ObjectType::Tree,
+            });
+            for entry in entries {
+                let entry_depth = depth.checked_add(1).expect("fixture depth fits u32");
+                reference_visit_blob_none(
+                    graph,
+                    entry.oid,
+                    Some(oid),
+                    entry_depth,
+                    visited,
+                    objects,
+                    omissions,
+                );
+            }
+        }
+        ClosureObject::Blob { .. } => omissions.push(PromisorOmission {
+            oid,
+            object_type: ObjectType::Blob,
+            parent,
+            depth,
+            reason: OmissionReason::BlobFilter,
+        }),
+        ClosureObject::Tag { target } => {
+            objects.push(ClosureObjectId {
+                oid,
+                object_type: ObjectType::Tag,
+            });
+            reference_visit_blob_none(graph, target, Some(oid), depth, visited, objects, omissions);
+        }
+    }
+}
+
+#[test]
+fn filtered_closure_equals_independent_reference_model() {
+    let (graph, _source, _omitted) = filtered_pack_fixture();
+    let root = graph.objects[0].0;
+    let mut request = request(vec![root]);
+    request.filter = Some(ObjectFilter::BlobNone);
+
+    let actual = compute_pack_closure(&graph, &request, &ClosureLimits::default())
+        .expect("filtered closure");
+    let (expected_objects, expected_omissions) = reference_blob_none_closure(&graph, root);
+
+    assert_eq!(actual.objects, expected_objects);
+    assert_eq!(actual.promisor.omissions, expected_omissions);
+}
+
 #[test]
 fn authenticated_filtered_closure_plans_only_selected_pack_objects() {
     let (graph, source, omitted) = filtered_pack_fixture();
