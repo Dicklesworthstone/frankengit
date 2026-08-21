@@ -40,34 +40,37 @@ impl QuarantinedPack {
     pub fn into_scalar_objects(
         self,
         mut oid_at_offset: impl FnMut(u64) -> Option<ObjectId>,
-    ) -> Vec<PackObject> {
-        self.entries
-            .into_iter()
-            .map(|entry| {
-                let id = oid_at_offset(entry.offset);
-                match entry.delta_base {
-                    None => PackObject::Base {
-                        offset: entry.offset,
-                        id,
-                        data: entry.inflated,
-                    },
-                    Some(ParsedDeltaBase::Ofs { base_offset, .. }) => {
-                        PackObject::Delta(DeltaObject {
-                            offset: entry.offset,
-                            id,
-                            base: DeltaBase::Ofs(base_offset),
-                            program: entry.inflated,
-                        })
-                    }
-                    Some(ParsedDeltaBase::Ref { base, .. }) => PackObject::Delta(DeltaObject {
-                        offset: entry.offset,
-                        id,
-                        base: DeltaBase::Ref(base),
-                        program: entry.inflated,
-                    }),
-                }
-            })
-            .collect()
+    ) -> Result<Vec<PackObject>, PackError> {
+        let mut objects = Vec::new();
+        objects
+            .try_reserve_exact(self.entries.len())
+            .map_err(|_| PackError::AllocationFailed {
+                requested: self.entries.len(),
+            })?;
+        for entry in self.entries {
+            let id = oid_at_offset(entry.offset);
+            let object = match entry.delta_base {
+                None => PackObject::Base {
+                    offset: entry.offset,
+                    id,
+                    data: entry.inflated,
+                },
+                Some(ParsedDeltaBase::Ofs { base_offset, .. }) => PackObject::Delta(DeltaObject {
+                    offset: entry.offset,
+                    id,
+                    base: DeltaBase::Ofs(base_offset),
+                    program: entry.inflated,
+                }),
+                Some(ParsedDeltaBase::Ref { base, .. }) => PackObject::Delta(DeltaObject {
+                    offset: entry.offset,
+                    id,
+                    base: DeltaBase::Ref(base),
+                    program: entry.inflated,
+                }),
+            };
+            objects.push(object);
+        }
+        Ok(objects)
     }
 }
 

@@ -1,6 +1,33 @@
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject};
 
-use crate::{EntryKind, ObjectFormat, ObjectId, PackError, QuarantinedEntry};
+use crate::{
+    EntryKind, IdxChecksumVerifier, ObjectFormat, ObjectId, PackError, PackTrailerVerifier,
+    QuarantinedEntry,
+};
+
+/// Native Git SHA trailer verifier backed exclusively by `fgit-crypto`.
+/// It is suitable for both pack and idx v2 checksum boundaries.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NativeChecksumVerifier;
+
+impl PackTrailerVerifier for NativeChecksumVerifier {
+    fn verify(&self, body: &[u8], trailer: &[u8], format: ObjectFormat) -> bool {
+        digest_matches(body, trailer, format)
+    }
+}
+
+impl IdxChecksumVerifier for NativeChecksumVerifier {
+    fn verify(&self, body: &[u8], trailer: &[u8], format: ObjectFormat) -> bool {
+        digest_matches(body, trailer, format)
+    }
+}
+
+fn digest_matches(body: &[u8], trailer: &[u8], format: ObjectFormat) -> bool {
+    match format {
+        ObjectFormat::Sha1 => fgit_crypto::sha1_digest(body).as_slice() == trailer,
+        ObjectFormat::Sha256 => fgit_crypto::sha256_digest(body).as_slice() == trailer,
+    }
+}
 
 /// Resolves the native Git type carried by a non-delta pack entry. Delta
 /// entries intentionally refuse here: their type belongs to the resolved
@@ -110,5 +137,29 @@ mod tests {
             ),
             Err(PackError::NativeObjectIdMismatch)
         );
+    }
+
+    #[test]
+    fn crypto_checksum_adapter_authenticates_both_native_domains() {
+        let verifier = NativeChecksumVerifier;
+        let body = b"pack checksum adapter";
+        assert!(PackTrailerVerifier::verify(
+            &verifier,
+            body,
+            &fgit_crypto::sha1_digest(body),
+            ObjectFormat::Sha1,
+        ));
+        assert!(IdxChecksumVerifier::verify(
+            &verifier,
+            body,
+            &fgit_crypto::sha256_digest(body),
+            ObjectFormat::Sha256,
+        ));
+        assert!(!PackTrailerVerifier::verify(
+            &verifier,
+            body,
+            &[0; 20],
+            ObjectFormat::Sha1,
+        ));
     }
 }

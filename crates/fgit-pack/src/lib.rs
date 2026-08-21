@@ -22,7 +22,9 @@ pub use pack::{
     split_pack_trailer, validate_object_count, validate_pack_trailer,
 };
 pub use reader::{QuarantinedEntry, QuarantinedPack, parse_quarantined_pack, read_verified_pack};
-pub use verify::{object_type_from_base_entry, verify_base_entry, verify_native_object};
+pub use verify::{
+    NativeChecksumVerifier, object_type_from_base_entry, verify_base_entry, verify_native_object,
+};
 
 use std::error::Error;
 use std::fmt;
