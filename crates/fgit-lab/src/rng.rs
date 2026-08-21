@@ -70,9 +70,9 @@ impl SeededEntropy {
     /// Draw a boolean with the given percentage chance of `true`.
     ///
     /// `percent` is clamped to `0..=100`.
-    pub const fn chance_percent(&mut self, percent: u8) -> bool {
+    pub fn chance_percent(&mut self, percent: u8) -> bool {
         let percent = if percent > 100 { 100 } else { percent };
-        self.next_below(100) < percent as u64
+        self.next_below(100) < u64::from(percent)
     }
 
     /// Choose an index into a collection of `len` items.
@@ -80,11 +80,15 @@ impl SeededEntropy {
     /// Returns `None` for an empty collection *without* consuming a draw,
     /// because there is no choice to make and consuming one would make the
     /// stream depend on collection sizes the trace does not record.
-    pub const fn choose_index(&mut self, len: usize) -> Option<usize> {
+    pub fn choose_index(&mut self, len: usize) -> Option<usize> {
         if len == 0 {
             return None;
         }
-        Some(self.next_below(len as u64) as usize)
+        // `len` came from a real collection, so it fits u64 on every target
+        // this crate builds for; the saturating fallbacks keep the draw in
+        // range rather than panicking if that ever stops being true.
+        let bound = u64::try_from(len).unwrap_or(u64::MAX);
+        Some(usize::try_from(self.next_below(bound)).unwrap_or(len - 1))
     }
 
     /// Fork an independent sub-stream labelled by `tag`.

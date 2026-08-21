@@ -166,7 +166,10 @@ mod tests {
         }
         assert_eq!(first, second);
         assert_eq!(first.now(), LabTime::from_ticks(280));
-        assert_eq!(first.advance_count(), script.len() as u64);
+        assert_eq!(
+            first.advance_count(),
+            u64::try_from(script.len()).expect("a test script length fits u64")
+        );
     }
 
     #[test]

@@ -84,7 +84,8 @@ impl ObligationOracle {
     /// How many obligations are still open.
     #[must_use]
     pub fn outstanding(&self) -> usize {
-        self.open.values().map(|count| *count as usize).sum()
+        let total: u64 = self.open.values().sum();
+        usize::try_from(total).unwrap_or(usize::MAX)
     }
 
     /// The identifiers still open, in name order.

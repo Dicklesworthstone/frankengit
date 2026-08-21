@@ -306,13 +306,11 @@ impl TraceFingerprint {
 
     /// Checksum some bytes.
     #[must_use]
-    pub const fn of(bytes: &[u8]) -> Self {
+    pub fn of(bytes: &[u8]) -> Self {
         let mut hash = Self::OFFSET;
-        let mut index = 0;
-        while index < bytes.len() {
-            hash ^= bytes[index] as u64;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(Self::PRIME);
-            index += 1;
         }
         Self(hash)
     }
