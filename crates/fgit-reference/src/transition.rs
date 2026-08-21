@@ -20,7 +20,7 @@ use fgit_types::identity::{
     TenantId, TransactionSealId, TxId,
 };
 use fgit_types::native::GitOid;
-use fgit_types::numeric::HeadGeneration;
+use fgit_types::numeric::{HeadGeneration, PolicyEpoch};
 use fgit_types::refs::RefName;
 use fgit_types::vocabulary::{DecisionOutcome, RefusalCode, RequestRejectionCode};
 
@@ -37,7 +37,7 @@ use crate::intent::{
 };
 use crate::refs::{is_canonical, scope_of};
 use crate::state::{
-    AuthorityHead, AuthorityHeadBody, InvariantBreach, ModelResult, ObjectRecord,
+    AuthorityHead, AuthorityHeadBody, InvariantBreach, ModelResult, ObjectRecord, PolicySnapshot,
     QuarantinedObject, RepositoryRoots, RepositoryState, SealRecord, StagedBatch,
 };
 
@@ -305,6 +305,13 @@ fn evaluate(state: &RepositoryState, request: &TransactionRequest) -> Evaluation
     }
     if request.intent_count() > policy.max_intents_per_transaction {
         return refuse(RefusalCode::ResourceBudgetExceeded);
+    }
+    // §9: the profile a request demands must be one this repository can
+    // actually offer. This is "cannot be met", which is terminal — distinct
+    // from "not met yet", which leaves the batch staged and retryable and is
+    // reported by `CasOutcome::DurabilityUnsatisfied`.
+    if !policy.offers_durability(request.durability) {
+        return refuse(RefusalCode::DurabilityProfileUnavailable);
     }
 
     // Every ref an intent or a forge event names must be inside the canonical
@@ -941,6 +948,112 @@ fn apply_effects(roots: &mut RepositoryRoots, effects: &NetEffects) {
     for (key, parameters) in &effects.outbox {
         roots.outbox.insert(*key, *parameters);
     }
+}
+
+/// One configuration head transition.
+///
+/// §15.9 pins one policy and configuration snapshot per attempt, and §8.2 puts
+/// the policy epoch inside the head body, so changing policy is a head
+/// transition like any other: exact predecessor, monotone generation.
+///
+/// It publishes no decision. A configuration transition consumes a head
+/// generation and leaves both sequences alone, which is why the decision tail
+/// and every root carry forward unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigurationRequest {
+    /// Identity the publisher assigned to the candidate head body.
+    pub candidate_head_id: RepositoryAuthorityHeadId,
+    /// The head the attempt believes is current.
+    pub expected_head: RepositoryAuthorityHeadId,
+    /// That head's generation.
+    pub expected_generation: HeadGeneration,
+    /// The snapshot to pin.
+    pub policy: PolicySnapshot,
+}
+
+/// Publishes a new pinned policy snapshot through the same head authority.
+///
+/// The new epoch must be the immediate successor of the current one. §22
+/// requires generation activation to be exact-predecessor and anti-rollback,
+/// and a policy epoch that could move backwards, or skip forward, would let a
+/// superseded policy be reinstated without an audited restore.
+pub fn publish_configuration(
+    state: &RepositoryState,
+    input: &ConfigurationRequest,
+) -> ModelResult<(RepositoryState, ConfigurationOutcome)> {
+    if input.expected_head != state.head.id
+        || input.expected_generation != state.head.body.generation
+    {
+        return Ok((
+            state.clone(),
+            ConfigurationOutcome::Lost {
+                current_head: state.head.id,
+                current_generation: state.head.body.generation,
+            },
+        ));
+    }
+    let required = state
+        .head
+        .body
+        .configuration
+        .epoch
+        .next()
+        .map_err(|_| Box::new(InvariantBreach::SequenceExhausted { kind: "policy" }))?;
+    if input.policy.epoch != required {
+        return Err(Box::new(InvariantBreach::PolicyEpochNotSuccessor {
+            current: state.head.body.configuration.epoch,
+            candidate: input.policy.epoch,
+        }));
+    }
+
+    let generation = state.head.body.next_generation()?;
+    let candidate = AuthorityHead {
+        id: input.candidate_head_id,
+        body: AuthorityHeadBody {
+            repository: state.head.body.repository,
+            generation,
+            predecessor: Some(state.head.id),
+            decision_tail: state.head.body.decision_tail,
+            latest_decision_sequence: state.head.body.latest_decision_sequence,
+            latest_committed_rcr: state.head.body.latest_committed_rcr,
+            latest_repository_sequence: state.head.body.latest_repository_sequence,
+            roots: state.head.body.roots.clone(),
+            configuration: input.policy.clone(),
+            format_registry_epoch: state.head.body.format_registry_epoch,
+        },
+    };
+
+    let mut next = state.clone();
+    next.identities.introduce_head(input.candidate_head_id)?;
+    next.head_chain
+        .insert(input.candidate_head_id, candidate.body.clone());
+    next.head = candidate;
+    Ok((
+        next,
+        ConfigurationOutcome::Won {
+            head: input.candidate_head_id,
+            epoch: input.policy.epoch,
+        },
+    ))
+}
+
+/// What a configuration head transition produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ConfigurationOutcome {
+    /// The conditional replacement succeeded and the new epoch is pinned.
+    Won {
+        /// The head that is now current.
+        head: RepositoryAuthorityHeadId,
+        /// The policy epoch now in force.
+        epoch: PolicyEpoch,
+    },
+    /// The conditional replacement failed because the head had moved.
+    Lost {
+        /// The head that is actually current.
+        current_head: RepositoryAuthorityHeadId,
+        /// That head's generation.
+        current_generation: HeadGeneration,
+    },
 }
 
 /// What a head compare-and-swap attempt produced.

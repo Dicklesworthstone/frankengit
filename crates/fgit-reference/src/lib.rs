@@ -79,12 +79,19 @@
 //!   forge state is a small pull-request vocabulary chosen to exercise §7's
 //!   ref/forge atomicity rule, not a forge product surface. Both are typed
 //!   refusals at the boundary, never silent reinterpretation.
-//! * **Two of the thirteen §15.11 refusal classes are deliberately not terminal
-//!   decisions in this model.** `DurabilityUnavailable` is a publication
-//!   predicate, so it surfaces as [`transition::CasOutcome::DurabilityUnsatisfied`]
-//!   and leaves the batch staged and retryable; `InternalInvariant` surfaces as
-//!   [`state::InvariantBreach`]. Recording either as a decision would write a
-//!   publication condition, or a bug, into the authenticated history.
+//! * **Durability splits into two conditions, and only one is a decision.**
+//!   A request demanding a profile the repository cannot offer is refused
+//!   terminally with `DurabilityProfileUnavailable`. A batch whose declared
+//!   placement predicate is merely *not satisfied yet* is not refused at all:
+//!   [`transition::CasOutcome::DurabilityUnsatisfied`] leaves it staged and
+//!   retryable, because §9 makes durability a publication predicate rather
+//!   than a verdict on the transaction's semantics.
+//! * **An invariant breach is never a decision.** `InternalInvariant` is the
+//!   one §15.11 class this model does not emit into the decision stream: it
+//!   surfaces as [`state::InvariantBreach`] and the transition does not happen.
+//!   Writing a bug into the authenticated history would make it replayable
+//!   truth. [`state::InvariantBreach::refusal_code`] gives a boundary that has
+//!   no other channel the right code to report it with.
 //! * **Passing this model's tests is not a proof.** It is bounded-model
 //!   evidence about the model. Connecting it to an implementation requires the
 //!   trace-refinement discipline of §40.5, which is a different bead.
@@ -92,6 +99,7 @@
 pub mod capsule;
 pub mod decision;
 pub mod effect;
+pub mod harness;
 pub mod intent;
 pub mod machine;
 pub mod refs;
@@ -99,6 +107,7 @@ pub mod refusal;
 pub mod state;
 pub mod transition;
 
+pub use harness::{IdentityMint, label};
 pub use machine::{
     CancellationPhase, CancellationReport, CancellationRequest, ModelInput, ModelOutput, ModelStep,
     step,

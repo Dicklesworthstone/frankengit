@@ -26,6 +26,7 @@
 //! quarantined object becomes a retention root before commit") testable rather
 //! than asserted.
 
+use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_types::hash::Digest;
@@ -39,7 +40,7 @@ use fgit_types::numeric::{
     DecisionSequence, HeadGeneration, PolicyEpoch, RegistryEpoch, RepositorySequence,
 };
 use fgit_types::refs::RefName;
-use fgit_types::vocabulary::DecisionOutcome;
+use fgit_types::vocabulary::{DecisionOutcome, RefusalCode};
 
 use crate::capsule::PreparedTxnCapsule;
 use crate::decision::{DecisionBatch, PublishedDecision, RepositoryCommitRecord};
@@ -108,6 +109,15 @@ pub enum InvariantBreach {
         current: RepositoryAuthorityHeadId,
         /// The predecessor the candidate declared.
         declared: Option<RepositoryAuthorityHeadId>,
+    },
+    /// A candidate policy snapshot's epoch was not the immediate successor of
+    /// the pinned one. §22 makes activation exact-predecessor and
+    /// anti-rollback.
+    PolicyEpochNotSuccessor {
+        /// The pinned epoch.
+        current: PolicyEpoch,
+        /// The epoch the candidate declared.
+        candidate: PolicyEpoch,
     },
     /// A candidate head's generation was not the immediate successor of the
     /// current head's generation.
@@ -185,6 +195,54 @@ pub enum InvariantBreach {
     },
 }
 
+impl InvariantBreach {
+    /// Stable machine-readable discriminant for logs and evidence records.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::SecondDecisionInBatch { .. } => "second_decision_in_batch",
+            Self::SecondTerminalDecision { .. } => "second_terminal_decision",
+            Self::RefusalOutcomeExpected { .. } => "refusal_outcome_expected",
+            Self::SequenceExhausted { .. } => "sequence_exhausted",
+            Self::EmptyDecisionBatch { .. } => "empty_decision_batch",
+            Self::HeadPredecessorMismatch { .. } => "head_predecessor_mismatch",
+            Self::HeadGenerationNotSuccessor { .. } => "head_generation_not_successor",
+            Self::PolicyEpochNotSuccessor { .. } => "policy_epoch_not_successor",
+            Self::DecisionSequenceDiscontinuity { .. } => "decision_sequence_discontinuity",
+            Self::RepositorySequenceDiscontinuity { .. } => "repository_sequence_discontinuity",
+            Self::IdentityReused { .. } => "identity_reused",
+            Self::TxIdDerivationInconsistent { .. } => "tx_id_derivation_inconsistent",
+            Self::TxIdInputsInconsistent { .. } => "tx_id_inputs_inconsistent",
+            Self::UnknownSeal { .. } => "unknown_seal",
+            Self::UnknownCapsule { .. } => "unknown_capsule",
+            Self::UnstagedBatch { .. } => "unstaged_batch",
+            Self::RepositoryMismatch { .. } => "repository_mismatch",
+            Self::ResultingRootMismatch { .. } => "resulting_root_mismatch",
+            Self::QuarantineEscape { .. } => "quarantine_escape",
+        }
+    }
+
+    /// The refusal code a caller uses when it must report this breach through
+    /// the terminal-decision vocabulary.
+    ///
+    /// The model itself never writes a breach into the decision stream — see
+    /// the type documentation. This mapping exists for a boundary that has no
+    /// other channel, so the one condition operators most need to see is
+    /// reported as itself rather than as a nearby class.
+    #[must_use]
+    pub const fn refusal_code(&self) -> RefusalCode {
+        RefusalCode::InternalInvariantBreach
+    }
+}
+
+impl fmt::Display for InvariantBreach {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "model invariant breach: {}", self.kind())
+    }
+}
+
+impl std::error::Error for InvariantBreach {}
+
 /// What a principal may do.
 ///
 /// Capabilities are part of the pinned policy snapshot, so a decision is
@@ -227,6 +285,13 @@ pub struct PolicySnapshot {
     pub max_intents_per_transaction: usize,
     /// Request schemas this service implements.
     pub supported_schemas: BTreeSet<SchemaId>,
+    /// Durability profiles this repository can actually offer.
+    ///
+    /// §9 versions the allowed transition graphs per profile. A repository
+    /// whose placement domains cannot satisfy the canonical source profile
+    /// must refuse a request that demands it, rather than accept the request
+    /// and publish under a weaker predicate than the caller asked for.
+    pub supported_durability: BTreeSet<DurabilityProfile>,
 }
 
 impl PolicySnapshot {
@@ -246,6 +311,12 @@ impl PolicySnapshot {
     #[must_use]
     pub fn is_protected(&self, scope: &[u8]) -> bool {
         self.protected_scopes.contains(scope)
+    }
+
+    /// True when this repository can offer `profile`.
+    #[must_use]
+    pub fn offers_durability(&self, profile: DurabilityProfile) -> bool {
+        self.supported_durability.contains(&profile)
     }
 }
 
