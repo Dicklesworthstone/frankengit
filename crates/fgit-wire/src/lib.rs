@@ -2089,7 +2089,11 @@ impl LegacyUploadPack {
 
     fn final_ack_transition(&self) -> Transition {
         let output = self.last_common.map_or_else(
-            || vec![line_packet(b"NAK\n")],
+            // The want-phase flush already emitted NAK when no common object
+            // was known.  Git 2.54.0 does not duplicate it at `done` (or at a
+            // negotiated `no-done` terminal flush) before handing off to the
+            // pack writer.
+            Vec::new,
             |oid| match self.ack_mode {
                 AckMode::MultiAckDetailed => vec![line_packet(
                     format!("ACK {oid_hex} ready\n", oid_hex = oid_hex(oid)).into_bytes(),

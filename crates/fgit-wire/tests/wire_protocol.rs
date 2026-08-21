@@ -295,9 +295,13 @@ fn legacy_terminal_flush_requires_no_done_and_accepts_the_negotiated_twin() {
             &repository,
         )
         .expect("want without line feed is permitted");
-    without_no_done
+    let initial_nak = without_no_done
         .push_packet(&Packet::Flush, &repository)
         .expect("want flush");
+    assert!(matches!(
+        initial_nak.output.as_slice(),
+        [Packet::Data(line)] if line == b"NAK\n"
+    ));
     assert_eq!(
         without_no_done.push_packet(&Packet::Flush, &repository),
         Err(WireError::IllegalTransition {
@@ -318,12 +322,17 @@ fn legacy_terminal_flush_requires_no_done_and_accepts_the_negotiated_twin() {
             &repository,
         )
         .expect("want with no-done is permitted");
-    with_no_done
+    let initial_nak = with_no_done
         .push_packet(&Packet::Flush, &repository)
         .expect("want flush");
+    assert!(matches!(
+        initial_nak.output.as_slice(),
+        [Packet::Data(line)] if line == b"NAK\n"
+    ));
     let transition = with_no_done
         .push_packet(&Packet::Flush, &repository)
         .expect("negotiated no-done permits terminal flush");
+    assert!(transition.output.is_empty());
     assert!(matches!(
         transition.events.as_slice(),
         [WireEvent::PackRequested(_)]
@@ -395,7 +404,7 @@ fn pinned_oracle_v0_no_done_depth_request_accepts_lf_free_deepen_and_two_flushes
         )
         .expect("pinned Git 2.54.0 depth transcript");
     machine.finish().expect("complete nested pkt-line stream");
-    assert_eq!(completed.output.len(), 2);
+    assert_eq!(completed.output.len(), 1);
     assert!(
         completed
             .output
