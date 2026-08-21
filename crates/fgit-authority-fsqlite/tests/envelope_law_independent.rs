@@ -37,28 +37,30 @@
 //! attempt — and says nothing about what happens once one is running. Two of
 //! the six scenarios §3.5 lists (checkpoint under load, and process
 //! crash/reopen/recovery) are behavioural; the crash/reopen half is covered by
-//! `crash_equivalence.rs`, and checkpoint-under-load cannot be driven at all
-//! from this crate — though it **does happen**.
+//! `crash_equivalence.rs`, and checkpoint-under-load **does not apply to this
+//! store at all**: it never enables WAL, so there is no log to checkpoint.
 //!
-//! That cell has now carried two wrong reasons, and both invited a wrong
-//! repair. It was first recorded as "the store publishes no checkpoint
-//! operation", which invites *add one*. I replaced that with "every public
-//! path that checkpoints also closes the connection, so the scenario is
-//! unreachable", which invites *stop worrying* — and that one was worse,
-//! because it was false. It came from scanning the `fsqlite` facade alone
-//! while the WAL lives in `fsqlite-wal`.
+//! That cell has now carried three reasons and the first two were wrong, which
+//! is worth leaving on the record. It began as "the store publishes no
+//! checkpoint operation", which invites the repair *add one*. That was replaced
+//! with "every public path that checkpoints also closes the connection, so the
+//! scenario is unreachable" — false, from scanning the `fsqlite` facade while
+//! the WAL lives in `fsqlite-wal`. That was replaced with "checkpoints happen
+//! automatically under load" — also false here, because that machinery acts on
+//! a WAL this store does not have. **Two absence-scans, two wrong answers, in
+//! opposite directions.**
 //!
-//! What is actually true: `fsqlite` checkpoints a live WAL by itself, on an
-//! open connection, during ordinary writes — `fsqlite-wal::execute_checkpoint`
-//! closes nothing, `fsqlite-core`'s `wal_adapter` calls it, and
-//! `maybe_run_adaptive_autocheckpoint` runs on normal connection paths under
-//! `PRAGMA wal_autocheckpoint`. So the scenario is **live and unobserved**:
-//! `FsqliteAuthorityStore` publishes no checkpoint operation and admits no
-//! `PRAGMA`, so this crate can neither trigger a checkpoint nor detect that one
-//! happened. That is a gap worth keeping open, not a non-claim to file away.
-//! See `NEG-022` in `registries/negative_evidence.tsv` and the crate-level
-//! docs, which carry the corrected measurement and what would make the cell
-//! testable.
+//! What holds up, each link a positive observation: `JournalMode` defaults to
+//! `Delete`; `AsyncConnection::open` uses `ConnectionEnv::default()`;
+//! `ConnectionEnv` has no journal-mode field; and this crate's entire statement
+//! set is 17 statements — 4 `CREATE TABLE`, 4 `INSERT`, 7 `SELECT`, 1 `UPDATE`
+//! — with no `PRAGMA` among them.
+//!
+//! Which turns this cell into a sharper question for the envelope **these very
+//! tests check**: §3.5 is derived from a profile presuming WAL concurrency, and
+//! the topologies admitted below are admitted against it. Whether a rollback
+//! journal is intended for a durable authority store is not settled here. See
+//! `NEG-022` in `registries/negative_evidence.tsv` and the crate-level docs.
 
 use fgit_authority_fsqlite::{
     ConcurrencyEnvelope, EnvelopeRefusal, MAX_ADMITTED_AUTOCOMMIT_WRITERS, WriterTopology,
