@@ -100,6 +100,32 @@ elif ! LC_ALL=C grep -qE '^license-file[[:space:]]*=' Cargo.toml; then
   fail=1
 fi
 
+# ------------------------------------------- per-component licences (option D)
+#
+# Option D deliberately splits a reciprocal server from permissive clients,
+# SDKs, schemas and conformance kits. A gate that only checked the root
+# expression would pass such a repository while saying nothing about the crates
+# that carry their OWN terms -- which under option D is the entire point of the
+# decision, so the gate would be blindest exactly where the decision is most
+# complex.
+#
+# The rule: every first-party crate that declares its own `license` must either
+# match the root decision, or be named in the decision document. A split is
+# allowed; an UNRECORDED split is not, because that is how a crate quietly ships
+# terms nobody ruled on.
+while IFS= read -r manifest; do
+  [ -n "$manifest" ] || continue
+  crate_license=$(LC_ALL=C grep -m1 -E '^license[[:space:]]*=[[:space:]]*"' "$manifest" \
+    | sed -E 's/^license[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')
+  [ -n "$crate_license" ] || continue
+  [ "$crate_license" = "$status" ] && continue
+  if ! LC_ALL=C grep -qF "$crate_license" "$DECISION_DOC"; then
+    note "REFUSED: $manifest declares license '$crate_license', which is neither the decided"
+    note "  root terms '$status' nor recorded as part of a split in $DECISION_DOC."
+    fail=1
+  fi
+done < <(find crates -mindepth 2 -maxdepth 2 -name Cargo.toml 2>/dev/null | LC_ALL=C sort)
+
 if [ "$fail" -ne 0 ]; then
   note "REFUSED: the recorded decision is not stated consistently across every surface."
   exit 3

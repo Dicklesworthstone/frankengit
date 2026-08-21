@@ -132,6 +132,36 @@ fi
 
 # -----------------------------------------------------------------------------
 fge_phase assert
+fge_step split-licensing-must-be-recorded
+# -----------------------------------------------------------------------------
+# Option D in the decision document splits a reciprocal server from permissive
+# clients, SDKs, schemas and conformance kits. A gate checking only the root
+# expression would be blindest exactly where the decision is most complex, so a
+# crate carrying its OWN terms must either match the root decision or be named
+# in the decision document. A split is allowed; an UNRECORDED split is not.
+lic_split_base="$(fge_tempdir split)"
+cp -r "$lic_work"/. "$lic_split_base"/
+mkdir -p "$lic_split_base/crates/fgit-sdk"
+printf '[package]\nname = "fgit-sdk"\nlicense = "MIT"\n' > "$lic_split_base/crates/fgit-sdk/Cargo.toml"
+
+# Refused: the SDK ships MIT while the decision says Apache-2.0 and the document
+# says nothing about a split.
+lic_split_exit=0
+(cd "$lic_split_base" && ./scripts/license_gate.sh) >/dev/null 2>&1 || lic_split_exit=$?
+fge_assert_eq fg062-unrecorded-split-refused 3 "$lic_split_exit" \
+  "a crate shipping terms the decision document never records is refused"
+
+# Permitted, and near-identical: the SAME split, now recorded in the document.
+lic_split_ok="$(fge_tempdir split-recorded)"
+cp -r "$lic_split_base"/. "$lic_split_ok"/
+printf 'Recorded split: client SDKs ship under MIT.\n' >> "$lic_split_ok/docs/LICENSING_DECISION.md"
+lic_split_ok_exit=0
+(cd "$lic_split_ok" && ./scripts/license_gate.sh) >/dev/null 2>&1 || lic_split_ok_exit=$?
+fge_assert_eq fg062-recorded-split-permitted 0 "$lic_split_ok_exit" \
+  "the same split passes once the decision document records it"
+
+# -----------------------------------------------------------------------------
+fge_phase assert
 fge_step no-premature-open-source-claim
 # -----------------------------------------------------------------------------
 # The repository may DISCUSS open source freely -- the decision document is
