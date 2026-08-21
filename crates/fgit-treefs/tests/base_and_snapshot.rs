@@ -609,8 +609,8 @@ fn snapshot_reports_three_separate_epochs() {
 /// Identities are checked against published Git constants, not against this
 /// crate's own output.
 ///
-/// Every other identity assertion in this suite compares FrankenGit to
-/// FrankenGit, which cannot detect a systematically wrong hash preimage. These
+/// Every other identity assertion in this suite compares `FrankenGit` to
+/// `FrankenGit`, which cannot detect a systematically wrong hash preimage. These
 /// three values are published, widely cited Git SHA-1 identities that exist
 /// independently of this codebase: if the object header framing were wrong by
 /// even one byte, all three would differ.
