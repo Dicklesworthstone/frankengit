@@ -26,6 +26,17 @@ fge_context bead frankengit-fg005b-sqlite-crash-equiv-gda
 fge_context crate fgit-authority-fsqlite
 fge_context campaign crash_equivalence
 
+# Builds run locally (AGENTS.md §16.2). Without this the rch wrapper offloads
+# the build: the worker RUNS AND PASSES on the remote host, but any artifact it
+# writes lands in the remote directory and only the binary returns. The suite
+# then fails for a missing artifact while its own worker reports success --
+# which misattributes itself to whichever crate was touched last.
+#
+# Exported rather than prefixed onto each `cargo` invocation deliberately: a
+# per-call `env` has to be remembered by whoever adds the NEXT cargo line, and
+# this suite has already grown three of them.
+export RCH_CARGO_WRAPPER_BYPASS=1
+
 readonly SQ_CAMPAIGN="$SQ_REPO/crates/fgit-authority-fsqlite/tests/crash_equivalence.rs"
 
 fge_phase setup

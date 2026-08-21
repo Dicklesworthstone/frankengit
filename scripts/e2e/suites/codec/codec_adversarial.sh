@@ -37,6 +37,17 @@ readonly CA_PROPERTY_SEED="${FGE_CODEC_SEED:-0x0c0dec005eed0001}"
 fge_context property_seed "$CA_PROPERTY_SEED"
 fge_context harness_seed "$(fge_seed)"
 
+# Builds run locally (AGENTS.md §16.2). Without this the rch wrapper offloads
+# the build: the worker RUNS AND PASSES on the remote host, but any artifact it
+# writes lands in the remote directory and only the binary returns. The suite
+# then fails for a missing artifact while its own worker reports success --
+# which misattributes itself to whichever crate was touched last.
+#
+# Exported rather than prefixed onto each `cargo` invocation deliberately: a
+# per-call `env` has to be remembered by whoever adds the NEXT cargo line, and
+# this suite has already grown three of them.
+export RCH_CARGO_WRAPPER_BYPASS=1
+
 readonly CA_CORPUS="$CA_REPO/crates/fgit-codec/tests/goldens"
 
 fge_phase setup
