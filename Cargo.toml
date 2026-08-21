@@ -21,6 +21,11 @@ repository = "https://github.com/Dicklesworthstone/frankengit"
 # allow_first_party) — not the unpublished external path dependency that
 # AGENTS.md section 3.3 forbids for a release-facing crate.
 [workspace.dependencies]
+# The sole async runtime (AGENTS.md 3.2, registries/dependency_policy.tsv DEP-001),
+# aliased here so a crate can inherit the one pinned version instead of
+# repeating it. Must stay equal to the version the crates that name it
+# directly already pin, and to the entry in Cargo.lock.
+asupersync = { version = "0.4.9", default-features = false }
 fgit-admission = { path = "crates/fgit-admission" }
 fgit-authority = { path = "crates/fgit-authority" }
 fgit-chronicle = { path = "crates/fgit-chronicle" }
