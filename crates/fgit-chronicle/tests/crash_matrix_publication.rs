@@ -31,7 +31,7 @@
 
 use fgit_authority::{
     AuthorityOpKind, AuthorityStore, FaultDirective, FaultKind, FaultPlan, HeadInit, HeadKey,
-    HeadRead, MemoryAuthorityStore, OpIndex, OutcomeLookup, StoreInstanceId, canonical_body_id,
+    HeadRead, MemoryAuthorityStore, OutcomeLookup, StoreInstanceId, canonical_body_id,
     indexed_outcome, initialize_repository, replay_outcome, resolve_outcome,
 };
 use fgit_chronicle::{
@@ -226,7 +226,7 @@ fn current_head(store: &MemoryAuthorityStore) -> RepositoryAuthorityHeadBody {
 /// readable, which is the difference between asserting on real state and
 /// asserting on nothing.
 fn armed(
-    offset: u64,
+    ordinal: u64,
     kind: AuthorityOpKind,
     fault: FaultKind,
 ) -> (
@@ -234,20 +234,30 @@ fn armed(
     PublicationBasis,
     fgit_authority::AuthorityVersionToken,
 ) {
-    let (probe, _) = opened(FaultPlan::none());
-    let _ = current_token(&probe);
-    let at = probe.operations_started() + offset;
-
-    let (store, basis) = opened(FaultPlan::explicit(vec![
-        FaultDirective::new(OpIndex::from_raw(at), fault).only_for(kind),
-    ]));
+    let (store, basis) = opened(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
+        ordinal, kind, fault,
+    )]));
     let token = current_token(&store);
     (store, basis, token)
 }
 
-/// Publication step offsets, named so a reader need not count.
-const STEP_CAS: u64 = 2;
-const STEP_FIRST_ACCELERATOR: u64 = 3;
+/// Which occurrence of an operation KIND to interrupt, not which absolute
+/// operation.
+///
+/// These were absolute offsets from `operations_started()`, which coupled the
+/// plan to the publication's operation *count*. The atomic-publication change
+/// added a duplicate-detection stream walk before the CAS, and that coupling
+/// broke silently: `only_for(CompareExchangeHead)` is a filter, not a counting
+/// mode, so a shifted index does not fire on the wrong operation - it fires on
+/// NONE. The publication then completes untouched and the test truthfully
+/// reports that a publication it expected to interrupt was not interrupted,
+/// which reads as an assertion problem and is a targeting problem.
+///
+/// An ordinal within kind says what the test means - "the first head
+/// replacement" - and is invariant under operations of other kinds appearing
+/// before it.
+const FIRST_HEAD_REPLACEMENT: u64 = 0;
+const FIRST_ACCELERATOR_WRITE: u64 = 2;
 
 // ------------------------------------------- crash before the head moves
 
@@ -256,7 +266,7 @@ fn a_publication_whose_head_replacement_never_applies_publishes_nothing() {
     // The request is lost before the compare-exchange takes effect, so both
     // bodies are staged and the head is untouched. Nothing may be canonical.
     let (store, basis, token) = armed(
-        STEP_CAS,
+        FIRST_HEAD_REPLACEMENT,
         AuthorityOpKind::CompareExchangeHead,
         FaultKind::LoseRequest,
     );
@@ -303,7 +313,7 @@ fn a_head_that_moved_without_answering_still_makes_its_decision_canonical() {
     // Regression guard: green because RainyLotus fixed loss classification at
     // 06b65dc. It turns red if resolution ever stops replaying the stream.
     let (store, basis, token) = armed(
-        STEP_CAS,
+        FIRST_HEAD_REPLACEMENT,
         AuthorityOpKind::CompareExchangeHead,
         FaultKind::LoseResponse,
     );
@@ -352,7 +362,7 @@ fn a_publication_interrupted_inside_the_accelerator_leaves_every_decision_canoni
     // not, and both must still resolve as decided, because the head is the
     // authority and the index is a hint.
     let (store, basis, token) = armed(
-        STEP_FIRST_ACCELERATOR,
+        FIRST_ACCELERATOR_WRITE,
         AuthorityOpKind::PutIfAbsent,
         FaultKind::LoseResponse,
     );
@@ -460,7 +470,7 @@ fn an_interrupted_publication_resumes_without_deciding_twice() {
     // publication. The one-terminal-decision rule says the retry must not
     // produce a second decision for the same transaction.
     let (store, basis, token) = armed(
-        STEP_CAS,
+        FIRST_HEAD_REPLACEMENT,
         AuthorityOpKind::CompareExchangeHead,
         FaultKind::LoseResponse,
     );
