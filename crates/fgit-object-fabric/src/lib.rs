@@ -1555,6 +1555,31 @@ mod tests {
             reader.record(0).expect("record must exist").payload,
             payload
         );
+        let mut verifier =
+            StreamingSegmentVerifier::new(&digest, segment.as_bytes().len(), &limits())
+                .expect("crypto stream verifier must initialize");
+        for chunk in segment.as_bytes().chunks(3) {
+            verifier
+                .push(chunk)
+                .expect("canonical crypto segment chunk must be accepted");
+        }
+        assert_eq!(
+            verifier
+                .finish()
+                .expect("crypto stream must reproduce the registered segment identity"),
+            segment.segment_digest()
+        );
+
+        let mut corrupt = segment.as_bytes().to_vec();
+        corrupt[0] ^= 1;
+        let mut verifier = StreamingSegmentVerifier::new(&digest, corrupt.len(), &limits())
+            .expect("corrupt stream verifier must initialize");
+        for chunk in corrupt.chunks(5) {
+            verifier
+                .push(chunk)
+                .expect("bounded corrupt chunk must be accepted before final verification");
+        }
+        assert_eq!(verifier.finish(), Err(FabricError::SegmentDigestMismatch));
     }
 
     #[test]
