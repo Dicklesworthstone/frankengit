@@ -42,8 +42,7 @@ impl Display for CliRefusal {
             Self::ServeUnavailable => formatter.write_str(
                 "fg serve is unavailable: no published raw-socket gateway and canonical admission projection are available",
             ),
-            Self::Tenant(error) => Display::fmt(error, formatter),
-            Self::Repository(error) => Display::fmt(error, formatter),
+            Self::Tenant(error) | Self::Repository(error) => Display::fmt(error, formatter),
             Self::Node(error) => Display::fmt(error, formatter),
             Self::DoctorCleanup {
                 inspection,

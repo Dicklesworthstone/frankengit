@@ -17,10 +17,11 @@ fn main() -> ExitCode {
             println!(
                 "authenticated authority head at generation {}{}",
                 report.authority_head().receipt().generation().get(),
-                report.sampled_object().map_or_else(
-                    || "".to_owned(),
-                    |identity| format!("; verified object sample {identity}"),
-                )
+                report
+                    .sampled_object()
+                    .map_or_else(String::new, |identity| format!(
+                        "; verified object sample {identity}"
+                    ),)
             );
             ExitCode::SUCCESS
         }
