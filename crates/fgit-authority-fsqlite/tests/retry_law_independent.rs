@@ -29,10 +29,18 @@
 //!
 //! # What this does NOT claim
 //!
-//! Nothing about backoff timing, jitter seeding, or deadline arithmetic. §3.4
-//! also requires bounded, cancellation-aware backoff that stops before the
-//! parent deadline; proving that needs a harness that can observe waiting, and
-//! this file only inspects classification.
+//! The backoff assertions below inspect the **plan**, not the waiting.
+//! `BackoffPlan`, `RetryBudget` and `decide_after_failure` are all `const fn`,
+//! so boundedness, seed reproducibility, deadline arithmetic and the
+//! exhaustion receipt are all checkable without a runtime -- which is the only
+//! reason that half of §3.4 is reachable here at all.
+//!
+//! What remains unproven: that the loop actually *sleeps* for the delay it
+//! computed, and that a cancellation interrupts a wait already in flight.
+//! §3.4 calls the backoff "cancellation-aware", and nothing in this file
+//! tests that word. It needs a harness able to observe waiting, which is the
+//! same missing harness that blocks cancellation-mid-operation for this
+//! backend.
 
 use fgit_authority_fsqlite::TransientClass;
 
@@ -202,5 +210,147 @@ fn the_class_list_here_is_exhaustive() {
             TransientClass::Permanent => "permanent",
         };
         assert!(!named.is_empty(), "every class needs a stable receipt name");
+    }
+}
+
+// ------------------------------------------------------------- the backoff law
+//
+// §3.4, second half:
+//
+//   > Backoff is bounded, cancellation-aware, seeded/receipted where jitter is
+//   > used, and stops before the parent deadline. Exhaustion returns a stable
+//   > refusal with attempts, elapsed budget, last error class, and remediation.
+//
+// These inspect the PLAN rather than observing real waiting. `BackoffPlan`,
+// `RetryBudget` and `decide_after_failure` are all `const fn`, so the law is
+// checkable without a runtime -- which is the only reason this sub-cell is
+// reachable at all.
+//
+// NON-CLAIM: nothing here proves the loop actually sleeps for the computed
+// delay, or that a cancel interrupts a wait in flight. That needs a harness
+// able to observe waiting, and it stays open.
+
+use fgit_authority_fsqlite::{BackoffPlan, RetryBudget, RetryVerdict, decide_after_failure};
+
+const BASE: u64 = 4;
+const CEILING: u64 = 64;
+const SEED: u64 = 0x5eed;
+
+#[test]
+fn the_backoff_is_bounded_at_every_attempt_including_absurd_ones() {
+    // "Backoff is bounded". The interesting input is not attempt 3, it is the
+    // attempt number no sane loop reaches: a shift- or multiply-based backoff
+    // that never saturates will overflow or wrap there, and a wrapped delay is
+    // an UNBOUNDED wait wearing a small number. The bound must come from
+    // saturation, not from the caller stopping early.
+    let plan = BackoffPlan::new(BASE, CEILING, SEED);
+    for attempt in [0_u32, 1, 2, 3, 7, 31, 32, 63, 64, 65, 1000, u32::MAX] {
+        let delay = plan.delay_ticks(attempt);
+        assert!(
+            delay <= CEILING,
+            "attempt {attempt} produced a delay of {delay} ticks against a ceiling of {CEILING}: \
+             backoff must saturate rather than depend on the caller stopping first"
+        );
+    }
+}
+
+#[test]
+fn the_same_seed_reproduces_the_same_delays() {
+    // "seeded/receipted where jitter is used". A jittered backoff that cannot
+    // be replayed turns an intermittent failure into an unreproducible one,
+    // and the seed is carried in RetryExhausted precisely so a receipt can
+    // replay it.
+    let a = BackoffPlan::new(BASE, CEILING, SEED);
+    let b = BackoffPlan::new(BASE, CEILING, SEED);
+    assert_eq!(
+        a.seed(),
+        b.seed(),
+        "the seed must be what it was constructed with"
+    );
+    for attempt in 0..16 {
+        assert_eq!(
+            a.delay_ticks(attempt),
+            b.delay_ticks(attempt),
+            "attempt {attempt} differed between two plans built from the same seed; a backoff \
+             that cannot be replayed makes an intermittent failure unreproducible"
+        );
+    }
+}
+
+#[test]
+fn a_budget_that_cannot_afford_the_next_wait_stops_instead_of_retrying() {
+    // "stops before the parent deadline". This is the assertion that matters:
+    // a retry loop which waits past its deadline has not just been slow, it
+    // has held a transaction open beyond the window its caller reserved.
+    let plan = BackoffPlan::new(BASE, CEILING, SEED);
+    let starved = RetryBudget::new(0, 8);
+
+    let verdict = decide_after_failure(starved, plan, 1, 0, TransientClass::Busy);
+    assert!(
+        !matches!(verdict, RetryVerdict::Retry { .. }),
+        "a budget with no remaining ticks must not authorise another wait; got {verdict:?}"
+    );
+    assert!(
+        matches!(verdict, RetryVerdict::Exhausted(_)),
+        "running out of budget is exhaustion and must be reported as such, not as a permanent \
+         error or a silent stop; got {verdict:?}"
+    );
+}
+
+#[test]
+fn exhaustion_carries_every_field_the_clause_names() {
+    // "Exhaustion returns a stable refusal with attempts, elapsed budget, last
+    // error class, and remediation." A refusal missing any of these is not
+    // actionable: the operator cannot tell how hard it tried, how long it
+    // took, what actually failed, or what to do next.
+    let plan = BackoffPlan::new(BASE, CEILING, SEED);
+    let starved = RetryBudget::new(0, 4);
+    let verdict = decide_after_failure(starved, plan, 3, 999, TransientClass::WriteConflict);
+
+    let RetryVerdict::Exhausted(report) = verdict else {
+        panic!("expected exhaustion, got {verdict:?}");
+    };
+    assert_eq!(
+        report.attempts, 3,
+        "the refusal must say how many attempts were made"
+    );
+    assert_eq!(
+        report.elapsed_ticks, 999,
+        "the refusal must say how much budget was spent"
+    );
+    assert_eq!(
+        report.last_class,
+        TransientClass::WriteConflict,
+        "the refusal must name the class that actually failed last"
+    );
+    assert_eq!(
+        report.seed, SEED,
+        "the refusal must carry the seed so the run can be replayed"
+    );
+    assert!(
+        !report.remediation.is_empty(),
+        "an exhaustion refusal with no remediation tells an operator nothing about what to do next"
+    );
+}
+
+#[test]
+fn a_non_transient_class_short_circuits_whatever_the_budget_says() {
+    // The classification decides first; the budget only decides how long a
+    // RETRYABLE class may keep trying. If a generous budget could turn a
+    // permanent error into a retry, §3.4's exclusion list would be advisory.
+    let plan = BackoffPlan::new(BASE, CEILING, SEED);
+    let generous = RetryBudget::new(u64::MAX, u32::MAX);
+
+    for (class, expected) in [
+        (TransientClass::Permanent, "permanent"),
+        (TransientClass::FreshSnapshotRequired, "fresh snapshot"),
+        (TransientClass::OutcomeIndeterminate, "indeterminate"),
+    ] {
+        let verdict = decide_after_failure(generous, plan, 1, 0, class);
+        assert!(
+            !matches!(verdict, RetryVerdict::Retry { .. }),
+            "{expected} ({class:?}) was retried because the budget was generous; classification \
+             must decide before budget, or the exclusion list is advisory"
+        );
     }
 }
