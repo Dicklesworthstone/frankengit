@@ -520,6 +520,7 @@ dependencies = [
 name = "fgit-object-fabric"
 version = "0.1.0"
 dependencies = [
+ "fgit-codec",
  "fgit-crypto",
  "fgit-resource",
  "fgit-types",
