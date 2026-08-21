@@ -486,6 +486,98 @@ fn the_command_ceiling_accepts_the_bound_and_refuses_one_past_it() {
 }
 
 // ---------------------------------------------------------------------------
+// Bomb packs: the retention ceiling, refused before the bytes are kept
+// ---------------------------------------------------------------------------
+
+/// A pack larger than the quarantine ceiling is refused, and the ceiling is not
+/// exceeded on the way to refusing it.
+///
+/// This is the property that distinguishes a real bound from a check: a machine
+/// that buffered the whole oversized pack and *then* noticed would have already
+/// paid the memory cost the bound exists to prevent. Asserting only the refusal
+/// would pass on exactly that machine. So this asserts the refusal **and** that
+/// the retained byte count never exceeded the limit.
+///
+/// The pack here is a bomb only in the sense that matters at this layer — it is
+/// bigger than the machine agreed to hold. Decompression bombs are the pack
+/// reader's dimension and are covered by `pack_bombs.sh`; duplicating them here
+/// would be re-testing someone else's boundary through a thinner interface.
+#[test]
+fn a_pack_past_the_quarantine_ceiling_is_refused_without_ever_exceeding_it() {
+    // The ceiling must not exceed the pack reader's own input bound, so shrink
+    // both together rather than only one.
+    let mut limits = ReceiveLimits::default();
+    limits.pack.max_input_bytes = 64;
+    limits.max_quarantine_bytes = 64;
+
+    let mut machine = ReceivePack::new(context_with(limits)).expect("machine");
+    machine
+        .push_packet(command(ZERO, NEW, "refs/heads/main", Some("report-status")))
+        .expect("create command");
+    machine.push_packet(Packet::Flush).expect("command flush");
+
+    // Feed well past the ceiling, in chunks, checking after every chunk that the
+    // machine never held more than it agreed to.
+    let chunk = [0_u8; 32];
+    let mut refusal = None;
+    for _ in 0..8 {
+        match machine.push_bytes(&chunk) {
+            Ok(_) => {
+                assert!(
+                    machine.quarantine_len() <= 64,
+                    "the machine held {} bytes against a 64-byte ceiling",
+                    machine.quarantine_len()
+                );
+            }
+            Err(error) => {
+                refusal = Some(error);
+                break;
+            }
+        }
+    }
+
+    let refusal = refusal.expect("a pack past the quarantine ceiling must be refused");
+    assert!(
+        matches!(refusal, ReceiveError::QuarantineBytesExceeded { limit: 64 }),
+        "expected QuarantineBytesExceeded {{ limit: 64 }}, got {refusal:?}"
+    );
+    assert_eq!(
+        machine.quarantine_len(),
+        0,
+        "refused the oversized pack but kept {} bytes",
+        machine.quarantine_len()
+    );
+    assert_eq!(machine.phase(), ReceivePhase::Refused);
+}
+
+/// The permitted twin: a pack that fits is accepted and retained.
+///
+/// Without this the ceiling test would pass on a machine that refused every
+/// byte, and "the bound works" would mean "nothing gets through".
+#[test]
+fn a_pack_within_the_quarantine_ceiling_is_accepted_and_retained() {
+    let mut limits = ReceiveLimits::default();
+    limits.pack.max_input_bytes = 64;
+    limits.max_quarantine_bytes = 64;
+
+    let mut machine = ReceivePack::new(context_with(limits)).expect("machine");
+    machine
+        .push_packet(command(ZERO, NEW, "refs/heads/main", Some("report-status")))
+        .expect("create command");
+    machine.push_packet(Packet::Flush).expect("command flush");
+
+    machine
+        .push_bytes(&[0_u8; 64])
+        .expect("a pack exactly at the ceiling must be accepted");
+    assert_eq!(
+        machine.quarantine_len(),
+        64,
+        "a pack at the ceiling must actually be retained, or the twin proves nothing"
+    );
+    assert_ne!(machine.phase(), ReceivePhase::Refused);
+}
+
+// ---------------------------------------------------------------------------
 // Disclosure boundary
 // ---------------------------------------------------------------------------
 

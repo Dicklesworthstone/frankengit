@@ -40,7 +40,7 @@ readonly TEST_NAME='receivepack_adversarial'
 # The two corpora and the probe count each must run. Pinned as numbers so a
 # corpus that silently stopped emitting probes fails this lane instead of
 # quietly shrinking it.
-readonly WIRE_PROBES=7
+readonly WIRE_PROBES=9
 readonly ADMISSION_PROBES=4
 
 main() {
