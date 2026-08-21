@@ -1199,14 +1199,17 @@ use fgit_authority::{
     authority_head_identity, decision_batch_identity, outcome_key, publish_decisions_async,
 };
 use fgit_codec::RepositoryDecision;
-use fgit_codec::{RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody, encode_body};
+use fgit_codec::{
+    RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecisionBatchBody, encode_body,
+};
 use fgit_types::hash::DigestAlgorithmId;
 use fgit_types::identity::{
-    RefusalRecordId, RepositoryAuthorityHeadId, RepositoryDecisionBatchId, TxId,
+    PrincipalSnapshotId, RefusalRecordId, RepositoryAuthorityHeadId, RepositoryCommitId,
+    RepositoryDecisionBatchId, TxId,
 };
 use fgit_types::{
     CANONICAL_CODEC_VERSION, DecisionOutcome, DecisionSequence, Digest, DigestBytes, OPAQUE_ID_LEN,
-    PolicyEpoch, RefusalCode, RegistryEpoch, RepositoryId, TenantId,
+    PolicyEpoch, RefusalCode, RegistryEpoch, RepositoryId, RepositorySequence, TenantId,
 };
 
 fn repository_id() -> RepositoryId {
@@ -1403,4 +1406,133 @@ fn a_kill_around_the_atomic_publication_leaves_head_and_outcomes_agreeing() {
             "an acknowledged publication must not be absent after reopen"
         );
     }
+}
+
+fn commit_id_of(byte: u8) -> RepositoryCommitId {
+    RepositoryCommitId::from_digest(
+        DigestAlgorithmId::try_new(2).expect("a nonzero algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[byte; 32]).expect("a bounded digest"),
+    )
+}
+
+fn snapshot_of(byte: u8) -> PrincipalSnapshotId {
+    PrincipalSnapshotId::from_digest(
+        DigestAlgorithmId::try_new(2).expect("a nonzero algorithm slot"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[byte; 32]).expect("a bounded digest"),
+    )
+}
+
+/// A batch that COMMITS, so the publication writes a repository commit record
+/// alongside the outcome entries and the head.
+///
+/// Deliberately distinct from the refusal-only fixture: a committing batch
+/// widens the atomic window. More rows enter the same `BEGIN`/`COMMIT`, so if
+/// atomicity were partial rather than total, this is the shape that exposes it
+/// — a refusal-only batch could survive a torn transaction that a committing
+/// one would not.
+fn committing_batch_for(predecessor: &RepositoryAuthorityHeadBody) -> RepositoryDecisionBatchBody {
+    let tx = tx_of(0xc1);
+    RepositoryDecisionBatchBody {
+        repository_id: repository_id(),
+        predecessor_head_id: head_body_id(predecessor),
+        predecessor_head_generation: predecessor.generation,
+        first_decision_sequence: DecisionSequence::FIRST,
+        decisions: vec![RepositoryDecision {
+            tx_id: tx,
+            decision_sequence: DecisionSequence::FIRST,
+            outcome: DecisionOutcome::Committed {
+                repository_commit_id: commit_id_of(0xc1),
+            },
+        }],
+        committed_rcrs: vec![RepositoryCommitRecord {
+            repository_id: repository_id(),
+            repository_sequence: RepositorySequence::FIRST,
+            parent_rcr_id: None,
+            tx_id: tx,
+            principal_snapshot_id: snapshot_of(0xc2),
+            canonical_request_digest: digest_of(0x30),
+            ref_delta_root: digest_of(0x31),
+            resulting_ref_root: digest_of(0x32),
+            object_closure_root: digest_of(0x33),
+            forge_event_batch_root: digest_of(0x34),
+            resulting_forge_position_root: digest_of(0x35),
+            policy_epoch: PolicyEpoch::FIRST,
+            policy_decision_root: digest_of(0x36),
+            invariant_evidence_root: digest_of(0x37),
+            outbox_effect_root: digest_of(0x38),
+            retention_delta_root: digest_of(0x39),
+        }],
+        resulting_ref_root: digest_of(0x32),
+        resulting_forge_position_root: digest_of(0x35),
+        resulting_outcome_index_root: digest_of(0x3a),
+        resulting_retention_root: digest_of(0x13),
+        resulting_outbox_root: digest_of(0x14),
+        resulting_policy_epoch: PolicyEpoch::FIRST,
+        batch_evidence_root: digest_of(0x3b),
+    }
+}
+
+#[test]
+fn a_kill_around_a_committing_publication_keeps_the_commit_record_with_the_head() {
+    // The wider atomic window. A committing batch puts a RepositoryCommitRecord
+    // into the same transaction as the outcome entries and the head
+    // replacement, so a partially applied transaction has more ways to show.
+    let scratch = Scratch::new("atomic-commit-kill");
+    let node = node();
+    let key = head_key();
+
+    let genesis = genesis_head_body();
+    let genesis_bytes = encode_body(&genesis).expect("the genesis head encodes");
+    let store = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+    store.init_head(&key, HeadGeneration::FIRST, &genesis_bytes);
+    let token = store.token(&key);
+
+    let batch = committing_batch_for(&genesis);
+    let mut next = successor_of(&genesis, batch_body_id(&batch));
+    next.latest_committed_rcr_id = Some(commit_id_of(0xc1));
+    next.latest_repository_sequence = Some(RepositorySequence::FIRST);
+    next.ref_root = digest_of(0x32);
+    next.forge_position_root = digest_of(0x35);
+    next.outcome_index_root = digest_of(0x3a);
+    let next_bytes = encode_body(&next).expect("the successor head encodes");
+
+    let published = node.block_on(publish_decisions_async(
+        &store.store,
+        &store.cx,
+        &key,
+        token,
+        &batch,
+        &next,
+        tenant_id(),
+    ));
+    assert!(
+        published.is_ok(),
+        "a committing publication against a fresh store must succeed, or the assertions below \
+         run on the did-not-move branch and prove nothing: {published:?}"
+    );
+    store.kill();
+
+    let reopened = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+    let receipt = match reopened.read_head(&key).expect("the head reads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("an initialized head must survive an unclean shutdown"),
+    };
+    assert_eq!(
+        receipt.body(),
+        next_bytes.as_slice(),
+        "an acknowledged committing publication must be whole after reopen"
+    );
+
+    let entry = outcome_key(tenant_id(), repository_id(), tx_of(0xc1)).expect("a key derives");
+    assert!(
+        matches!(
+            reopened.read_body(&entry).expect("the outcome slot reads"),
+            ImmutableRead::Present(_)
+        ),
+        "the committed decision's outcome entry must survive with the head it was published \
+         alongside: a head naming a commit whose outcome is missing is the torn state the \
+         single transaction forbids"
+    );
 }

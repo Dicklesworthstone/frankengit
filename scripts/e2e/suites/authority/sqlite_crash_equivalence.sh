@@ -146,7 +146,7 @@ if [ "$sq_kills" -lt 12 ]; then
   fge_fail FG-005B-E2E-016 \
     "only $sq_kills kill/reopen sites; the crash matrix requires at least twelve"
 fi
-if [ "$sq_tests" -lt 18 ]; then
+if [ "$sq_tests" -lt 19 ]; then
   fge_fail FG-005B-E2E-017 \
     "only $sq_tests tests in the campaign; the dispatch names more scenarios than that"
 fi
