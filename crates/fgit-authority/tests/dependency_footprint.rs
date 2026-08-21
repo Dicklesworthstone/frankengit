@@ -50,8 +50,12 @@ fn dependency_name(line: &str) -> Option<String> {
         return None;
     }
     let (key, _) = line.split_once('=')?;
-    let key = key.trim().trim_matches('"');
+    // Split the sub-key off *before* stripping quotes. A quoted dotted key
+    // spells the closing quote in the middle -- `"fgit-types".workspace` -- so
+    // trimming first leaves it stranded on the name.
+    let key = key.trim();
     let name = key.split_once('.').map_or(key, |(head, _)| head);
+    let name = name.trim().trim_matches('"');
     if name.is_empty() {
         return None;
     }
