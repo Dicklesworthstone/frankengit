@@ -1253,9 +1253,9 @@ fn a_superseded_capsule_is_repreparable_and_the_retry_commits() {
     );
 
     // The fix: a race, not a verdict.
-    let stale = fixture.state.capsule(first).expect("capsule survives");
+    let superseded = fixture.state.capsule(first).expect("capsule survives");
     assert_eq!(
-        decide(&fixture.state, stale),
+        decide(&fixture.state, superseded),
         DecisionVerdict::RequiresRepreparation(RepreparationReason::BasisSuperseded),
         "a superseded basis must not be a terminal decision"
     );
@@ -1505,9 +1505,9 @@ fn the_repreparation_budget_is_finite_and_a_still_stale_capsule_is_then_refused(
     // attempt before the last one is non-terminal.
     let mut state = fixture.state.clone();
     while state.preparations_of(request.tx_id) < REPREPARATION_BUDGET {
-        let stale = state.capsule(first).expect("capsule survives");
+        let superseded = state.capsule(first).expect("capsule survives");
         assert_eq!(
-            decide(&state, stale),
+            decide(&state, superseded),
             DecisionVerdict::RequiresRepreparation(RepreparationReason::BasisSuperseded),
             "attempt {} of {REPREPARATION_BUDGET} must still be retryable",
             state.preparations_of(request.tx_id)
@@ -1517,9 +1517,9 @@ fn the_repreparation_budget_is_finite_and_a_still_stale_capsule_is_then_refused(
     }
 
     assert_eq!(state.preparations_of(request.tx_id), REPREPARATION_BUDGET);
-    let stale = state.capsule(first).expect("capsule survives");
+    let superseded = state.capsule(first).expect("capsule survives");
     assert_eq!(
-        decide(&state, stale),
+        decide(&state, superseded),
         DecisionVerdict::Refuse(RefusalCode::BasisCapsuleNotReusable),
         "with the budget spent, a still-stale capsule is terminal"
     );
