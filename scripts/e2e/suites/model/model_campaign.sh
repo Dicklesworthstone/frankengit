@@ -45,7 +45,16 @@ main() {
   # surface. `fge_capture` returns the exit code instead, and additionally
   # saves the worker's stdout, which carries the NDJSON receipt and the
   # step-by-step counterexample the worker prints on violation.
+  # `RCH_CARGO_WRAPPER_BYPASS=1` is set HERE rather than assumed from the
+  # caller's environment (AGENTS.md 16.2). Without it the rch wrapper offloads
+  # the build to a remote host: the worker runs and PASSES there, but it writes
+  # the receipt into the remote artifact directory, only the built binary comes
+  # back, and this suite then fails two assertions for a missing receipt. That
+  # reads exactly like a campaign regression and is not one -- it cost real
+  # diagnosis time once, which is why it is pinned in the suite instead of left
+  # to whoever invokes it.
   fge_capture 'campaign-worker' env \
+    RCH_CARGO_WRAPPER_BYPASS=1 \
     "FGIT_REFERENCE_CAMPAIGN_ARTIFACT_DIR=$artifacts" \
     "FGIT_REFERENCE_CAMPAIGN_MODE=${FGIT_REFERENCE_CAMPAIGN_MODE:-default}" \
     cargo test --locked -p fgit-reference --test "$TEST_NAME" -- --ignored || worker_exit=$?
