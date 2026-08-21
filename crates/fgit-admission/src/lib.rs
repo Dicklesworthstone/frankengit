@@ -1337,13 +1337,20 @@ mod tests {
 
     #[test]
     fn cas_loser_resolves_and_retries_the_same_sealed_request() {
+        // After installing the plan, this admission path performs two seal
+        // puts; two exact-outcome probes; a head read plus authentication for
+        // the publication basis; a second receipt authentication for the
+        // projection; then stages the batch and head. The CAS is operation 11.
+        // Keeping that transcript explicit makes a changed authority call
+        // graph fail this planted-race test instead of silently skipping it.
+        const PUBLISH_CAS_OPERATION: OpIndex = OpIndex::from_raw(11);
         let context = context();
         let store = store_with_genesis(&context);
         let projection = FixtureProjection::default();
         let completion = completion(vec![create(b"refs/heads/main", 31)], true);
         store.install_fault_plan(FaultPlan::explicit(vec![
             FaultDirective::new(
-                OpIndex::from_raw(9),
+                PUBLISH_CAS_OPERATION,
                 FaultKind::DuplicateRequest {
                     deliver: DuplicateDelivery::Second,
                 },
@@ -1368,7 +1375,18 @@ mod tests {
         )
         .expect("same sealed request retries without a second decision");
 
-        assert_eq!(store.fault_log().len(), 1);
+        let faults = store.fault_log();
+        assert_eq!(faults.len(), 1);
+        assert_eq!(
+            faults.records()[0].at,
+            PUBLISH_CAS_OPERATION,
+            "the planted duplication must reach the publication CAS"
+        );
+        assert_eq!(
+            faults.records()[0].op_kind,
+            AuthorityOpKind::CompareExchangeHead
+        );
+        assert!(faults.records()[0].effect_reached);
         assert_eq!(observed_loser.session, retry.session);
         assert_eq!(observed_loser.commands, retry.commands);
     }
