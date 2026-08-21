@@ -835,6 +835,12 @@ fn write_refusal(out: &mut Encoder, refusal: AuthorityRefusal) -> Result<(), Cod
             write_tag_only(out, 10);
             Ok(())
         }
+        // Tag 11 is additive: no previously recorded trace can contain it, so
+        // existing goldens decode unchanged.
+        AuthorityRefusal::OperationUnsupported => {
+            write_tag_only(out, 11);
+            Ok(())
+        }
     }
 }
 
@@ -861,6 +867,7 @@ fn read_refusal(input: &mut Decoder<'_>) -> Result<AuthorityRefusal, CodecRefusa
         }),
         9 => Ok(AuthorityRefusal::Throttled),
         10 => Ok(AuthorityRefusal::Unavailable),
+        11 => Ok(AuthorityRefusal::OperationUnsupported),
         observed => Err(unknown_variant("AuthorityRefusal.tag", observed, offset)),
     }
 }

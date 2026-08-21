@@ -382,6 +382,25 @@ pub enum AuthorityRefusal {
     /// This is the connection-refused shape, not the timeout shape.  A timeout
     /// is [`AmbiguityReason::Timeout`] and proves nothing.
     Unavailable,
+    /// This backend does not implement the requested operation at all.
+    ///
+    /// Structural and permanent, which is why it is not
+    /// [`AuthorityRefusal::Unavailable`]: that one is the connection-refused
+    /// shape, and a caller may reasonably retry it. A backend that cannot
+    /// publish atomically will never be able to, so reporting it as an endpoint
+    /// rejection would invite a retry that can never succeed.
+    ///
+    /// Added for the atomic publication primitive: an object store with no
+    /// multi-key transaction has to be able to say so honestly rather than
+    /// borrow a nearby code. A near-miss refusal is worse than a new variant —
+    /// it is a wrong answer that looks like a right one.
+    ///
+    /// Carries no payload deliberately. A `&'static str` naming the operation
+    /// reads well but cannot round-trip through the history decoder without
+    /// leaking or inventing a registry, and the caller already knows which
+    /// operation it invoked. A field that cannot survive replay is not
+    /// evidence.
+    OperationUnsupported,
 }
 
 impl core::fmt::Display for AuthorityRefusal {
@@ -408,6 +427,9 @@ impl core::fmt::Display for AuthorityRefusal {
                 "proposed generation {proposed} does not strictly increase past {current}"
             ),
             Self::Throttled => f.write_str("request shed before any effect"),
+            Self::OperationUnsupported => {
+                f.write_str("this backend does not implement the requested operation")
+            }
             Self::Unavailable => f.write_str("endpoint rejected the request without processing it"),
         }
     }
