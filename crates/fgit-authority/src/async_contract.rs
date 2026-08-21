@@ -172,6 +172,32 @@ pub trait AsyncAuthorityStore: Sync {
     /// Callers detect duplicates upstream; this operation makes the winner's
     /// publication indivisible.
     ///
+    /// # The ordering a caller must not break
+    ///
+    /// Upstream detection is sound **only** when the stream walk and this call
+    /// are bound to the same head token:
+    ///
+    /// ```text
+    /// 1. read head -> H1, token T1
+    /// 2. walk the AUTHENTICATED stream from H1   (never the accelerator)
+    /// 3. call this with expected = T1
+    /// ```
+    ///
+    /// Step 2's check is validated by step 3's condition: an interleaving
+    /// publisher moves the head, this call returns
+    /// [`CasOutcome::PredecessorMismatch`], nothing is written, and the retry
+    /// walks from the new head and finds the decision. That is what
+    /// compare-and-swap is for.
+    ///
+    /// **A caller that walks the stream and then re-reads the head before
+    /// calling this silently reintroduces the window**, because the token it
+    /// passes would no longer be the one its check was performed against.
+    ///
+    /// The defect was never that detection lived upstream — it was that
+    /// detection read a derived index the CAS token does not cover. Requirement
+    /// 2 of the ruling is about *what is read*, not about *where the reading
+    /// happens*.
+    ///
     /// # Errors
     ///
     /// [`CasOutcome::PredecessorMismatch`] when the head no longer carries
