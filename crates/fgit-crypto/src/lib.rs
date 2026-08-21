@@ -102,6 +102,7 @@ mod corpus;
 mod defense;
 mod derive;
 mod hashing;
+mod keys;
 mod mac;
 mod native;
 mod registry;
@@ -128,6 +129,11 @@ pub use defense::{
 };
 pub use derive::{MAX_OUTPUT_BYTES, OutputTooLong, derive, derive_key, expand, extract};
 pub use hashing::{DigestHasher, Sha1Hasher, Sha256Hasher, sha1_digest, sha256_digest};
+pub use keys::{
+    AuthorityAdmin, Capsule, Evidence, Identity, KEY_BYTES, KeyEpoch, KeyId, KeyPurpose,
+    KeyPurposeMarker, KeyScope, MacCapable, PackageRelease, PurposeMismatch, Recovery, RootSecret,
+    SecretKey, StoredKey, TenantEncryption, Webhook, derivation_info,
+};
 pub use mac::{HmacSha256, TAG_BYTES, hmac_sha256, verify_mac};
 pub use native::{
     GitHashAlgorithm, GitHashError, GitObjectHasher, GitObjectKind, GitOid, NativeObjectIdentity,
