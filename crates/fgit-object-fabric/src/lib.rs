@@ -21,6 +21,8 @@ use fgit_types::{
     TypeRefusal,
 };
 
+pub mod fabric;
+
 const ENVELOPE_MAGIC: &[u8; 4] = b"FGEN";
 const SEGMENT_MAGIC: &[u8; 4] = b"FGMS";
 const INDEX_MAGIC: &[u8; 4] = b"FGIX";

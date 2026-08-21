@@ -356,6 +356,23 @@ pub enum IdentityDomain {
     MerkleLeaf,
     /// One interior node of a segment or microsegment Merkle structure.
     MerkleNode,
+    /// One immutable admission receipt over a transaction seal identity.
+    ///
+    /// `NORMATIVE_PROTOCOL_CONTRACTS.md` section 5.2: admission capability,
+    /// policy epoch, issuer, and first-seen time are "separate immutable
+    /// admission receipts over the seal ID; they are not fields a retry must
+    /// regenerate". They are therefore their own body class, and folding them
+    /// into the seal body or reusing the evidence-record tag would either make
+    /// a retry regenerate them or make a receipt forgeable as an evidence
+    /// record.
+    AdmissionReceipt,
+    /// One source-span anchor into a parsed document.
+    ///
+    /// Plan section 28.4: an anchor binds source object, byte and codepoint
+    /// spans, parse-profile identity, diff basis, and semantic context. Its
+    /// canonical body is the injective anchor preimage; the digest of that
+    /// body is the anchor's stable identity across re-parses.
+    DocumentAnchor,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -539,6 +556,18 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/merkle-node/v1",
         None,
     ),
+    owned_row(
+        28,
+        IdentityDomain::AdmissionReceipt,
+        "frankengit/admission-receipt/v1",
+        None,
+    ),
+    owned_row(
+        29,
+        IdentityDomain::DocumentAnchor,
+        "frankengit/doc-anchor/v1",
+        None,
+    ),
 ];
 
 const fn pinned_row(
@@ -650,6 +679,8 @@ impl IdentityDomain {
         Self::CiArtifact,
         Self::MerkleLeaf,
         Self::MerkleNode,
+        Self::AdmissionReceipt,
+        Self::DocumentAnchor,
     ];
 
     /// Position of this domain in [`DOMAIN_REGISTRY`].
