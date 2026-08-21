@@ -3,6 +3,20 @@
 version = 4
 
 [[package]]
+name = "fgit-object-fabric"
+version = "0.1.0"
+dependencies = [
+ "fgit-types",
+]
+
+[[package]]
+name = "fgit-pack"
+version = "0.0.1"
+dependencies = [
+ "fgit-types",
+]
+
+[[package]]
 name = "fgit-registry-check"
 version = "0.0.1"
 

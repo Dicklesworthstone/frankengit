@@ -1,10 +1,11 @@
-# FrankenGit constitutional bootstrap workspace.
+# FrankenGit workspace.
 # Engine crates enter only with a real vertical slice; no placeholder crates.
+# A crate and its `members`/`default-members` lines land in the SAME commit.
 
 [workspace]
 resolver = "3"
-members = ["crates/fgit-object-fabric", "crates/fgit-types", "tools/registry-check"]
-default-members = ["crates/fgit-object-fabric", "crates/fgit-types", "tools/registry-check"]
+members = ["crates/fgit-object-fabric", "crates/fgit-pack", "crates/fgit-types", "tools/registry-check"]
+default-members = ["crates/fgit-object-fabric", "crates/fgit-pack", "crates/fgit-types", "tools/registry-check"]
 
 [workspace.package]
 edition = "2024"
