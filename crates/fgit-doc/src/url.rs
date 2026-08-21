@@ -26,6 +26,14 @@ pub fn classify(destination: &str) -> UrlVerdict {
     if trimmed.chars().any(is_url_forbidden) {
         return UrlVerdict::Rejected(UrlRejection::ControlCharacter);
     }
+    // A protocol-relative destination carries no scheme, so the allowlist above
+    // would wave it through as a relative reference -- but a browser resolves
+    // `//host/path` against the PAGE's scheme and lands off-origin. It is an
+    // absolute destination wearing a relative costume, and the one case where
+    // "no scheme" does not mean "same document".
+    if trimmed.starts_with("//") {
+        return UrlVerdict::Rejected(UrlRejection::ProtocolRelative);
+    }
     scheme_of(trimmed).map_or(UrlVerdict::Allowed, |scheme| {
         if NAVIGABLE_SCHEMES
             .iter()

@@ -561,3 +561,28 @@ fn a_bidi_control_in_link_text_is_inert_while_the_link_still_works() {
     );
     assert!(!html.contains('\u{202e}'), "{html}");
 }
+
+#[test]
+fn a_protocol_relative_destination_is_refused_and_a_rooted_one_is_not() {
+    // `//host/path` carries no scheme, so a scheme allowlist waves it through as
+    // if it were relative — but a browser resolves it against the PAGE's scheme
+    // and lands off-origin. It is an absolute destination wearing a relative
+    // costume, and the one case where "no scheme" does not mean "same document".
+    let hostile = html_of("[click](//evil.example/steal)\n");
+    assert!(
+        !hostile.contains("href"),
+        "a protocol-relative destination must not become a target: {hostile}"
+    );
+    assert!(
+        hostile.contains("data-fgit-doc-rejected=\"protocol_relative\""),
+        "the rejection reason must name itself: {hostile}"
+    );
+
+    // The paired permitted cases: an ordinary rooted path and a relative one are
+    // still same-document references and must keep working.
+    assert!(html_of("[a](/rooted/path)\n").contains("href=\"/rooted/path\""));
+    assert!(html_of("[a](./relative)\n").contains("href=\"./relative\""));
+    // And an image source gets the same treatment as a link.
+    let image = html_of("![alt](//evil.example/pixel.png)\n");
+    assert!(!image.contains("src="), "{image}");
+}

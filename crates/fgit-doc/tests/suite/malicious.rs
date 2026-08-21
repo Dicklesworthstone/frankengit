@@ -198,24 +198,76 @@ fn parse_attributes(region: &str) -> Vec<(String, String)> {
 }
 
 /// Whether an emitted destination may be navigated to.
+/// One left-to-right `HTML` attribute decode, exactly as a browser performs it.
+///
+/// This must be a SINGLE pass, and that is the whole subtlety. Sequential
+/// `replace` calls simulate a *double* decode: they turn `java&amp;#9;script:`
+/// into `java` + tab + `script:` and cry wolf, when a browser scans the value
+/// once, consumes `&amp;` into a literal `&`, and resumes *after* it — leaving
+/// the inert text `java&#9;script:`. Conversely a RAW `&#106;avascript:`, which
+/// the renderer would only emit if its escaping were broken, decodes here to
+/// `javascript:` and is then caught by the scheme allowlist. Modelling the
+/// browser correctly is what makes both verdicts right, so no ad-hoc refusal of
+/// `&#` is needed or wanted.
+fn decode_attribute_once(value: &str) -> String {
+    const NAMED: [(&str, char); 4] = [
+        ("&amp;", '&'),
+        ("&lt;", '<'),
+        ("&gt;", '>'),
+        ("&quot;", '"'),
+    ];
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    'outer: while !rest.is_empty() {
+        if rest.starts_with('&') {
+            for (entity, decoded) in NAMED {
+                if let Some(tail) = rest.strip_prefix(entity) {
+                    out.push(decoded);
+                    rest = tail;
+                    continue 'outer;
+                }
+            }
+            if let Some((decoded, tail)) = decode_numeric_reference(rest) {
+                out.push(decoded);
+                rest = tail;
+                continue 'outer;
+            }
+        }
+        let mut characters = rest.chars();
+        if let Some(value) = characters.next() {
+            out.push(value);
+        }
+        rest = characters.as_str();
+    }
+    out
+}
+
+/// Decodes one `&#NN;` or `&#xHH;` reference, returning it and the remainder.
+fn decode_numeric_reference(rest: &str) -> Option<(char, &str)> {
+    let body = rest.strip_prefix("&#")?;
+    let (hexadecimal, body) = body
+        .strip_prefix(['x', 'X'])
+        .map_or((false, body), |tail| (true, tail));
+    let end = body.find(';')?;
+    let digits = body.get(..end)?;
+    if digits.is_empty() || digits.len() > 7 {
+        return None;
+    }
+    let radix = if hexadecimal { 16 } else { 10 };
+    let code = u32::from_str_radix(digits, radix).ok()?;
+    let decoded = char::from_u32(code)?;
+    Some((decoded, body.get(end + 1..)?))
+}
+
+/// Whether an emitted destination may be navigated to.
 fn destination_is_navigable(value: &str) -> bool {
-    // A numeric character reference inside a destination is unverifiable from
-    // the outside: a browser decodes it, and this checker deliberately does not
-    // model every decoding path a browser implements. Refusing is the only
-    // honest answer — an independent verifier must not assume the renderer
-    // escaped the ampersand that makes such a value inert.
-    if value.contains("&#") {
+    let decoded = decode_attribute_once(value);
+    let trimmed = decoded.trim();
+    // Protocol-relative destinations resolve against the PAGE's scheme and land
+    // off-origin, so "carries no scheme" does not make them same-document.
+    if trimmed.starts_with("//") {
         return false;
     }
-    // The renderer escaped this value on the way in; judge what a browser will
-    // actually see, not what the file literally holds.
-    let decoded = value
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#x27;", "'");
-    let trimmed = decoded.trim();
     let Some((scheme, _)) = trimmed.split_once(':') else {
         return true;
     };
@@ -365,6 +417,7 @@ fn the_allowlist_checker_rejects_content_the_renderer_could_never_emit() {
         "<p><img src=\"data:text/html,x\" /></p>",
         "<p><iframe srcdoc=\"x\"></iframe></p>",
         "<p><a href=\"&#106;avascript:alert(1)\">x</a></p>",
+        "<p><a href=\"//evil.example/x\">x</a></p>",
     ] {
         let outcome = std::panic::catch_unwind(|| assert_no_active_content("planted", planted));
         assert!(

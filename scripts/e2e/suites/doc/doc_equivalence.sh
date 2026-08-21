@@ -67,7 +67,11 @@ doc_violation() {
     body=${body%>}
     body=${body#/}
     body=${body%/}
-    name=$(printf '%s' "$body" | LC_ALL=C awk '{print tolower($1)}')
+    # Shell-only: the harness deliberately adds nothing to the closed dependency
+    # universe, so a suite must not fork awk/jq/python. Two parameter expansions,
+    # zero subprocesses (FG-000A-PORT-019).
+    name=${body%%[[:space:]]*}
+    name=${name,,}
     case $DOC_TAGS in
       *" $name "*) ;;
       *)
@@ -94,16 +98,37 @@ doc_violation() {
       LC_ALL=C tr -d '=' | LC_ALL=C tr 'A-Z' 'a-z' | LC_ALL=C sort -u)
     while IFS= read -r value; do
       [ -n "$value" ] || continue
-      # A numeric character reference in a destination is unverifiable from
-      # outside: a browser decodes it and this checker does not model every
-      # decoding path. Refuse rather than guess.
-      case $value in
+      # Judge what ONE browser decode produces, which is the subtlety that
+      # made an earlier version of this check wrong in both directions.
+      #
+      # A browser scans the raw attribute once. So `java&amp;#9;script:` yields
+      # the inert literal `java&#9;script:` -- note the RAW value contains no
+      # `&#` at all, because the `&` there is followed by `a`. Decoding `&amp;`
+      # first and then hunting for `&#` simulates a DOUBLE decode and cries
+      # wolf. Checking the raw value instead is both simpler and correct.
+      #
+      # This verifier is deliberately a different algorithm from the crate's
+      # Rust checker, which models the full single pass. Same property, two
+      # independent routes to it.
+      case ${value//'&#x27;'/} in
         *'&#'*)
-          printf 'numeric character reference in a destination on <%s>' "$name"
+          # A raw numeric reference the renderer did not emit: a browser WILL
+          # decode it, so `&#106;avascript:` really does become `javascript:`.
+          printf 'raw numeric character reference in a destination on <%s>' "$name"
           return 0
           ;;
       esac
-      value=${value//&amp;/&}
+      value=${value//'&amp;'/'&'}
+      value=${value//'&lt;'/'<'}
+      value=${value//'&gt;'/'>'}
+      value=${value//'&quot;'/'"'}
+      value=${value//'&#x27;'/"'"}
+      case $value in
+        //*)
+          printf 'protocol-relative destination on <%s>' "$name"
+          return 0
+          ;;
+      esac
       case $value in
         *:*)
           scheme=$(printf '%s' "${value%%:*}" | LC_ALL=C tr 'A-Z' 'a-z')
@@ -253,6 +278,7 @@ doc_plant scheme '<p><a href="javascript:alert(1)">x</a></p>'
 doc_plant datauri '<p><img src="data:text/html,x" /></p>'
 doc_plant vbscript '<p><a href="VBScript:msgbox(1)">x</a></p>'
 doc_plant numeric_entity '<p><a href="&#106;avascript:alert(1)">x</a></p>'
+doc_plant protocol_relative '<p><a href="//evil.example/x">x</a></p>'
 if [ -z "$doc_planted_missed" ]; then
   fge_pass fg027b-checker-can-fail "the allowlist rejected every planted payload:$doc_planted_caught"
 else

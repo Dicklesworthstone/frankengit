@@ -88,6 +88,8 @@ pub enum UrlRejection {
     DisallowedScheme,
     /// The destination contains a control character or whitespace.
     ControlCharacter,
+    /// The destination is protocol-relative and silently inherits the page scheme.
+    ProtocolRelative,
     /// The destination is longer than this crate accepts.
     TooLong,
 }
@@ -99,6 +101,7 @@ impl UrlRejection {
         match self {
             Self::DisallowedScheme => "disallowed_scheme",
             Self::ControlCharacter => "control_character",
+            Self::ProtocolRelative => "protocol_relative",
             Self::TooLong => "too_long",
         }
     }
