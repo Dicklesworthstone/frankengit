@@ -229,9 +229,10 @@ oracle_require_bwrap() {
 
 oracle_sandbox_version() {
     local install_dir="$1"
+    local version_line=""
 
     oracle_require_bwrap
-    bwrap --die-with-parent --new-session --unshare-all --clearenv \
+    if ! version_line="$(bwrap --die-with-parent --new-session --unshare-all --clearenv \
         --ro-bind /usr /usr \
         --symlink usr/bin /bin \
         --symlink usr/lib /lib \
@@ -253,7 +254,10 @@ oracle_sandbox_version() {
         --setenv GIT_CONFIG_VALUE_1 '' \
         --setenv GIT_ASKPASS /bin/false \
         --setenv GIT_TERMINAL_PROMPT 0 \
-        -- /oracle/bin/git --version
+        -- /oracle/bin/git --version)"; then
+        oracle_die "UNAVAILABLE" "sandboxed oracle failed while reporting its version"
+    fi
+    printf '%s\n' "${version_line}"
 }
 
 oracle_write_receipt() {
@@ -437,6 +441,21 @@ oracle_validate_relative_directory() {
     done
 }
 
+oracle_require_work_directory() {
+    local run_directory="$1"
+    local work_directory="$2"
+    local current_directory="${run_directory}/work"
+    local component=""
+    local -a components=()
+
+    [[ "${work_directory}" == "." ]] && return
+    IFS=/ read -r -a components <<< "${work_directory}"
+    for component in "${components[@]}"; do
+        current_directory="${current_directory}/${component}"
+        [[ -d "${current_directory}" && ! -L "${current_directory}" ]] || oracle_die "ESCAPE" "sandbox working directory is missing or contains a symlink"
+    done
+}
+
 oracle_validate_run_directory() {
     local run_directory="$1"
     local root="$(oracle_root)"
@@ -506,7 +525,7 @@ oracle_run() {
     if [[ "${work_directory}" == "." ]]; then
         sandbox_workdir="/work"
     else
-        [[ -d "${run_directory}/work/${work_directory}" && ! -L "${run_directory}/work/${work_directory}" ]] || oracle_die "ESCAPE" "sandbox working directory is missing or symlinked"
+        oracle_require_work_directory "${run_directory}" "${work_directory}"
         sandbox_workdir="/work/${work_directory}"
     fi
     install_dir="$(oracle_install_dir)"
