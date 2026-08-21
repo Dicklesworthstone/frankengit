@@ -901,7 +901,6 @@ impl DoctorReport {
 #[derive(Debug)]
 pub struct OneNode {
     authority: FsqliteAuthorityStore,
-    lifecycle_cx: FsqliteCx,
     head_key: HeadKey,
     fabric: LocalFilesystemFabric,
     tenant_id: TenantId,
@@ -910,8 +909,6 @@ pub struct OneNode {
     object_format: GitHashAlgorithm,
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
-    // Kept last so an unexpected drop releases the lifecycle context before
-    // the runtime that owns its attached native context.
     runtime: NodeRuntime,
 }
 
@@ -924,10 +921,11 @@ impl OneNode {
     pub fn init(config: NodeConfig) -> Result<(Self, NodeInitialization), NodeRefusal> {
         let genesis = genesis_head(config.repository_id);
         let node = Self::open_components(config)?;
+        let initialization_cx = node.authority_context();
         let initialization = match initialize_embedded_repository(
             &node.runtime,
             &node.authority,
-            &node.lifecycle_cx,
+            &initialization_cx,
             &node.head_key,
             &genesis,
         ) {
@@ -994,14 +992,10 @@ impl OneNode {
         .map_err(NodeRefusal::Fabric)?;
 
         let head_key = head_key(config.repository_id)?;
-        let lifecycle_native_cx = runtime.request_cx(BudgetClass::Database);
-        let lifecycle_cx = FsqliteCx::new();
-        // Opening and closing the dedicated authority worker are node lifecycle
-        // operations. Request reads deliberately mint their own contexts below.
-        lifecycle_cx.set_native_cx(lifecycle_native_cx);
+        let opening_cx = authority_context_for(&runtime);
         let authority = runtime
             .block_on(FsqliteAuthorityStore::open(
-                &lifecycle_cx,
+                &opening_cx,
                 authority_path,
                 config.store_instance,
                 AuthorityLimits::default(),
@@ -1010,7 +1004,6 @@ impl OneNode {
         Ok(Self {
             runtime,
             authority,
-            lifecycle_cx,
             head_key,
             fabric,
             tenant_id: config.tenant_id,
@@ -1043,14 +1036,14 @@ impl OneNode {
     /// Mints the bounded authority context for one node request.
     ///
     /// Each call creates a new FrankenSQLite context attached to a fresh
-    /// `BudgetClass::Request` Asupersync context. The returned value must stay
+    /// `BudgetClass::Database` Asupersync context. The returned value must stay
     /// alive while its matching node operations are awaited; it is never saved
     /// in the authority store or shared with another request.
     #[must_use]
     pub fn request_context(&self) -> NodeRequestContext {
-        let authority = FsqliteCx::new();
-        authority.set_native_cx(self.runtime.request_cx(BudgetClass::Request));
-        NodeRequestContext { authority }
+        NodeRequestContext {
+            authority: self.authority_context(),
+        }
     }
 
     /// Reads the current authority-selected head in `request`.
@@ -1142,15 +1135,20 @@ impl OneNode {
     /// Callers that obtain a node must use this before dropping it so a clean
     /// stop has an observed quiescence result instead of relying on the
     /// database driver's drop-time backstop.
-    pub fn shutdown(mut self) -> Result<(), NodeRefusal> {
+    pub fn shutdown(self) -> Result<(), NodeRefusal> {
+        let shutdown_cx = self.authority_context();
         self.runtime
-            .block_on(self.authority.close(&self.lifecycle_cx))
+            .block_on(self.authority.close(&shutdown_cx))
             .map_err(authority_engine_refusal)?;
         if self.runtime.join_root(SHUTDOWN_TIMEOUT) {
             Ok(())
         } else {
             Err(NodeRefusal::RuntimeContainment)
         }
+    }
+
+    fn authority_context(&self) -> FsqliteCx {
+        authority_context_for(&self.runtime)
     }
 
     /// Validates and immutably places one native Git object through object fabric.
@@ -1262,6 +1260,12 @@ fn authority_database_path(storage_root: &Path) -> Result<String, NodeRefusal> {
         .into_os_string()
         .into_string()
         .map_err(|_| NodeRefusal::StoragePathEncoding)
+}
+
+fn authority_context_for(runtime: &NodeRuntime) -> FsqliteCx {
+    let authority = FsqliteCx::new();
+    authority.set_native_cx(runtime.request_cx(BudgetClass::Database));
+    authority
 }
 
 fn authority_engine_refusal(error: EngineError) -> NodeRefusal {
