@@ -1285,6 +1285,33 @@ pub trait UploadPackRepository {
 }
 
 /// Minimal deferred request passed from wire parsing to a future pack writer.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PackOptions(u8);
+
+impl PackOptions {
+    /// No optional pack features were requested.
+    pub const NONE: Self = Self(0);
+    /// Pack payload uses `side-band-64k` framing.
+    pub const SIDE_BAND_64K: Self = Self(1);
+    const THIN_PACK: u8 = 1 << 1;
+    const INCLUDE_TAG: u8 = 1 << 2;
+    const OFS_DELTA: u8 = 1 << 3;
+    const NO_PROGRESS: u8 = 1 << 4;
+    const SIDEBAND_ALL: u8 = 1 << 5;
+
+    const fn with(self, option: u8) -> Self {
+        Self(self.0 | option)
+    }
+    const fn contains(self, option: u8) -> bool {
+        self.0 & option != 0
+    }
+    /// Whether pack data uses `side-band-64k` framing.
+    #[must_use]
+    pub const fn sideband_64k(self) -> bool {
+        self.contains(Self::SIDE_BAND_64K.0)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackRequest {
     /// Protocol version that selected this request.
@@ -1303,18 +1330,8 @@ pub struct PackRequest {
     pub deepen_not: Vec<AnyGitOid>,
     /// Optional parsed partial-clone filter.
     pub filter: Option<ObjectFilter>,
-    /// Whether the pack must be multiplexed through sideband-64k.
-    pub sideband_64k: bool,
-    /// Whether the generated pack may omit bases the client claimed to have.
-    pub thin_pack: bool,
-    /// Whether annotated tags reachable from wants should be included.
-    pub include_tag: bool,
-    /// Whether pack deltas may use offset notation.
-    pub ofs_delta: bool,
-    /// Whether progress packets should be omitted.
-    pub no_progress: bool,
-    /// Whether all protocol-v2 response sections use sideband framing.
-    pub sideband_all: bool,
+    /// Typed optional pack behaviors negotiated for this request.
+    pub options: PackOptions,
 }
 
 /// A protocol observation or required external action from a transition.
@@ -1632,11 +1649,7 @@ pub struct LegacyUploadPack {
     deepen_not: Vec<AnyGitOid>,
     filter: Option<ObjectFilter>,
     ack_mode: AckMode,
-    sideband_64k: bool,
-    thin_pack: bool,
-    include_tag: bool,
-    ofs_delta: bool,
-    no_progress: bool,
+    options: PackOptions,
     last_common: Option<AnyGitOid>,
     saw_want_capabilities: bool,
 }
@@ -1669,11 +1682,7 @@ impl LegacyUploadPack {
             deepen_not: Vec::new(),
             filter: None,
             ack_mode: AckMode::None,
-            sideband_64k: false,
-            thin_pack: false,
-            include_tag: false,
-            ofs_delta: false,
-            no_progress: false,
+            options: PackOptions::NONE,
             last_common: None,
             saw_want_capabilities: false,
         })
@@ -1890,11 +1899,11 @@ impl LegacyUploadPack {
                     }
                 }
                 b"multi_ack_detailed" => self.ack_mode = AckMode::MultiAckDetailed,
-                b"side-band-64k" => self.sideband_64k = true,
-                b"thin-pack" => self.thin_pack = true,
-                b"include-tag" => self.include_tag = true,
-                b"ofs-delta" => self.ofs_delta = true,
-                b"no-progress" => self.no_progress = true,
+                b"side-band-64k" => self.options = self.options.with(PackOptions::SIDE_BAND_64K.0),
+                b"thin-pack" => self.options = self.options.with(PackOptions::THIN_PACK),
+                b"include-tag" => self.options = self.options.with(PackOptions::INCLUDE_TAG),
+                b"ofs-delta" => self.options = self.options.with(PackOptions::OFS_DELTA),
+                b"no-progress" => self.options = self.options.with(PackOptions::NO_PROGRESS),
                 _ => {}
             }
         }
@@ -1955,12 +1964,7 @@ impl LegacyUploadPack {
             deepen_since: self.deepen_since,
             deepen_not: self.deepen_not.clone(),
             filter: self.filter.clone(),
-            sideband_64k: self.sideband_64k,
-            thin_pack: self.thin_pack,
-            include_tag: self.include_tag,
-            ofs_delta: self.ofs_delta,
-            no_progress: self.no_progress,
-            sideband_all: false,
+            options: self.options,
         }
     }
 }
@@ -2002,6 +2006,22 @@ enum V2State {
     Complete,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct LsRefsOptions(u8);
+
+impl LsRefsOptions {
+    const SYMREFS: u8 = 1;
+    const PEEL: u8 = 1 << 1;
+    const UNBORN: u8 = 1 << 2;
+
+    const fn with(self, option: u8) -> Self {
+        Self(self.0 | option)
+    }
+    const fn contains(self, option: u8) -> bool {
+        self.0 & option != 0
+    }
+}
+
 /// SANS-I/O protocol-v2 upload-pack command machine for `ls-refs` and `fetch`.
 #[derive(Clone, Debug)]
 pub struct V2UploadPack {
@@ -2017,16 +2037,10 @@ pub struct V2UploadPack {
     deepen_since: Option<i64>,
     deepen_not: Vec<AnyGitOid>,
     filter: Option<ObjectFilter>,
-    sideband_all: bool,
-    thin_pack: bool,
-    include_tag: bool,
-    ofs_delta: bool,
-    no_progress: bool,
+    options: PackOptions,
     done: bool,
     ref_prefixes: Vec<Vec<u8>>,
-    symrefs: bool,
-    peel: bool,
-    unborn: bool,
+    ls_refs: LsRefsOptions,
 }
 
 impl V2UploadPack {
@@ -2046,16 +2060,10 @@ impl V2UploadPack {
             deepen_since: None,
             deepen_not: Vec::new(),
             filter: None,
-            sideband_all: false,
-            thin_pack: false,
-            include_tag: false,
-            ofs_delta: false,
-            no_progress: false,
+            options: PackOptions::NONE,
             done: false,
             ref_prefixes: Vec::new(),
-            symrefs: false,
-            peel: false,
-            unborn: false,
+            ls_refs: LsRefsOptions::default(),
         })
     }
 
@@ -2185,9 +2193,9 @@ impl V2UploadPack {
 
     fn accept_ls_refs_argument(&mut self, line: &[u8]) -> Result<Transition, WireError> {
         match line {
-            b"symrefs" => self.symrefs = true,
-            b"peel" => self.peel = true,
-            b"unborn" => self.unborn = true,
+            b"symrefs" => self.ls_refs = self.ls_refs.with(LsRefsOptions::SYMREFS),
+            b"peel" => self.ls_refs = self.ls_refs.with(LsRefsOptions::PEEL),
+            b"unborn" => self.ls_refs = self.ls_refs.with(LsRefsOptions::UNBORN),
             _ => {
                 let Some(prefix) = line.strip_prefix(b"ref-prefix ") else {
                     return Err(WireError::MalformedRequestLine {
@@ -2296,14 +2304,14 @@ impl V2UploadPack {
                     capability: b"sideband-all".to_vec(),
                 });
             }
-            self.sideband_all = true;
+            self.options = self.options.with(PackOptions::SIDEBAND_ALL);
             return Ok(Transition::empty());
         }
         match line {
-            b"thin-pack" => self.thin_pack = true,
-            b"include-tag" => self.include_tag = true,
-            b"ofs-delta" => self.ofs_delta = true,
-            b"no-progress" => self.no_progress = true,
+            b"thin-pack" => self.options = self.options.with(PackOptions::THIN_PACK),
+            b"include-tag" => self.options = self.options.with(PackOptions::INCLUDE_TAG),
+            b"ofs-delta" => self.options = self.options.with(PackOptions::OFS_DELTA),
+            b"no-progress" => self.options = self.options.with(PackOptions::NO_PROGRESS),
             _ => {}
         }
         if matches!(
@@ -2354,7 +2362,7 @@ impl V2UploadPack {
                 .map_err(|_| WireError::AllocationFailure)?;
             line.push(b' ');
             line.extend_from_slice(&reference.name);
-            if self.symrefs
+            if self.ls_refs.contains(LsRefsOptions::SYMREFS)
                 && let Some(target) = repository.symref_target(&reference.name)
             {
                 parse_ref_name(target, &self.limits)?;
@@ -2363,7 +2371,7 @@ impl V2UploadPack {
                 line.extend_from_slice(b" symref-target:");
                 line.extend_from_slice(target);
             }
-            if self.peel
+            if self.ls_refs.contains(LsRefsOptions::PEEL)
                 && let Some(peeled) = repository.peeled(reference.oid)
             {
                 if peeled.algorithm() != repository.object_format() {
@@ -2400,9 +2408,9 @@ impl V2UploadPack {
             output,
             events: vec![WireEvent::LsRefs {
                 prefixes: self.ref_prefixes.clone(),
-                symrefs: self.symrefs,
-                peel: self.peel,
-                unborn: self.unborn,
+                symrefs: self.ls_refs.contains(LsRefsOptions::SYMREFS),
+                peel: self.ls_refs.contains(LsRefsOptions::PEEL),
+                unborn: self.ls_refs.contains(LsRefsOptions::UNBORN),
             }],
         })
     }
@@ -2469,12 +2477,7 @@ impl V2UploadPack {
                 deepen_since: self.deepen_since,
                 deepen_not: self.deepen_not.clone(),
                 filter: self.filter.clone(),
-                sideband_64k: true,
-                thin_pack: self.thin_pack,
-                include_tag: self.include_tag,
-                ofs_delta: self.ofs_delta,
-                no_progress: self.no_progress,
-                sideband_all: self.sideband_all,
+                options: self.options.with(PackOptions::SIDE_BAND_64K.0),
             })],
         })
     }

@@ -5,8 +5,9 @@ use fgit_wire::closure::{
     ObjectClosureRepository, compute_lazy_fetch_closure, compute_pack_closure,
 };
 use fgit_wire::{
-    AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, ObjectFilter, ObjectType, PackRequest,
-    Packet, UploadPackRepository, UploadPackVersion, V2UploadPack, WireEvent, WireLimits,
+    AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, ObjectFilter, ObjectType, PackOptions,
+    PackRequest, Packet, UploadPackRepository, UploadPackVersion, V2UploadPack, WireEvent,
+    WireLimits,
 };
 
 fn oid(hex: &str) -> AnyGitOid {
@@ -175,12 +176,7 @@ fn request(wants: Vec<AnyGitOid>) -> PackRequest {
         deepen_since: None,
         deepen_not: Vec::new(),
         filter: None,
-        sideband_64k: true,
-        thin_pack: false,
-        include_tag: false,
-        ofs_delta: false,
-        no_progress: false,
-        sideband_all: false,
+        options: PackOptions::SIDE_BAND_64K,
     }
 }
 

@@ -215,7 +215,7 @@ fn v1_fetch_transcript_emits_multi_ack_detailed_and_pack_request() {
     assert_eq!(request.version, UploadPackVersion::V1);
     assert_eq!(request.wants.len(), 1);
     assert_eq!(request.haves.len(), 1);
-    assert!(request.sideband_64k);
+    assert!(request.options.sideband_64k());
 }
 
 #[test]
