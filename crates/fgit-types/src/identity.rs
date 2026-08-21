@@ -11,7 +11,11 @@
 //!   identity refuses to be built from a digest that belongs to another
 //!   schema, so a decision-batch identity can never be presented as a
 //!   transaction identity.
-//! * **Backend tokens** ([`AuthorityVersionToken`]) are opaque store state.
+//! * **Backend tokens** ([`OpaqueStoreToken`]) are opaque store state.
+//!   Deliberately NOT named `AuthorityVersionToken`: that name belongs to
+//!   `fgit-authority`'s concrete fixed-width token, and one name across an
+//!   abstract and a concrete type is how a caller ends up holding the wrong
+//!   one (AGENTS.md §10).
 //!   They are excluded from canonical body bytes: a token is evidence for a
 //!   conditional write, never part of an identity.
 //!
@@ -33,7 +37,7 @@ use crate::numeric::CodecVersion;
 pub const OPAQUE_ID_LEN: usize = 16;
 
 /// Largest accepted authority version token, in bytes.
-pub const MAX_AUTHORITY_VERSION_TOKEN_LEN: usize = 512;
+pub const MAX_OPAQUE_STORE_TOKEN_LEN: usize = 512;
 
 /// Declares a 128-bit opaque assigned identity.
 macro_rules! opaque_id {
@@ -400,14 +404,14 @@ pub const DERIVED_ID_DOMAINS: &[&str] = &[
 /// state. Protection against reuse of a recycled token comes from the head's
 /// monotone generation and predecessor checks, not from the token itself.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct AuthorityVersionToken(Vec<u8>);
+pub struct OpaqueStoreToken(Vec<u8>);
 
-impl AuthorityVersionToken {
+impl OpaqueStoreToken {
     /// Builds a token, refusing an empty or oversized value.
     pub fn try_new(source: &[u8]) -> Result<Self, TypeRefusal> {
-        if source.is_empty() || source.len() > MAX_AUTHORITY_VERSION_TOKEN_LEN {
+        if source.is_empty() || source.len() > MAX_OPAQUE_STORE_TOKEN_LEN {
             return Err(TypeRefusal::LengthOutOfRange {
-                field: "AuthorityVersionToken",
+                field: "OpaqueStoreToken",
                 observed: u32::try_from(source.len()).unwrap_or(u32::MAX),
                 minimum: 1,
                 maximum: 512,
@@ -435,7 +439,7 @@ impl AuthorityVersionToken {
     }
 }
 
-impl fmt::Display for AuthorityVersionToken {
+impl fmt::Display for OpaqueStoreToken {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         for byte in &self.0 {
             write!(formatter, "{byte:02x}")?;

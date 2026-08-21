@@ -36,8 +36,8 @@ use fgit_resource::{
     RegionCloseOutcome, RegionId, ResourceVector,
 };
 use fgit_types::{
-    AuthorityVersionToken, CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes,
-    EvidenceRecordId, GenerationId, GitOid, GitOidSha1, OPAQUE_ID_LEN, ObjectEnvelopeId,
+    CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, EvidenceRecordId,
+    GenerationId, GitOid, GitOidSha1, OPAQUE_ID_LEN, ObjectEnvelopeId, OpaqueStoreToken,
     PrincipalId, PrincipalSnapshotId, RepositoryAuthorityHeadId, RepositoryCommitId,
     RepositoryDecisionBatchId, SegmentManifestId, TenantId, TxId,
 };
@@ -133,8 +133,8 @@ const fn oid(tag: u8) -> GitOid {
     GitOid::Sha1(GitOidSha1::from_bytes([tag; GitOidSha1::LEN]))
 }
 
-fn token(tag: u8) -> AuthorityVersionToken {
-    AuthorityVersionToken::try_new(&[tag; 16]).expect("sixteen bytes is a valid version token")
+fn token(tag: u8) -> OpaqueStoreToken {
+    OpaqueStoreToken::try_new(&[tag; 16]).expect("sixteen bytes is a valid version token")
 }
 
 fn opaque(tag: u8) -> OpaqueHandle {

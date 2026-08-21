@@ -13,8 +13,8 @@ pub mod vocabulary;
 pub use error::TypeRefusal;
 pub use hash::{Digest, DigestAlgorithmId, DigestBytes, MAX_DIGEST_LEN, MIN_DIGEST_LEN};
 pub use identity::{
-    AuthorityVersionToken, DERIVED_ID_DOMAINS, EvidenceRecordId, ForgeEventId, GenerationId,
-    InternalObjectId, MAX_AUTHORITY_VERSION_TOKEN_LEN, OPAQUE_ID_LEN, ObjectEnvelopeId,
+    DERIVED_ID_DOMAINS, EvidenceRecordId, ForgeEventId, GenerationId, InternalObjectId,
+    MAX_OPAQUE_STORE_TOKEN_LEN, OPAQUE_ID_LEN, ObjectEnvelopeId, OpaqueStoreToken,
     PreparationProfileId, PreparedTxnCapsuleId, PrincipalId, PrincipalSnapshotId, RefusalRecordId,
     RepositoryAuthorityHeadId, RepositoryCapsuleId, RepositoryCommitId, RepositoryDecisionBatchId,
     RepositoryId, RepositoryIncarnationId, RequestId, SegmentManifestId, TenantId,

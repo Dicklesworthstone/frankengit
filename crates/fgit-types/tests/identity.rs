@@ -6,9 +6,9 @@ use std::collections::BTreeSet;
 
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::identity::{
-    AdmissionReceiptId, AuthorityVersionToken, DERIVED_ID_DOMAINS, DocumentAnchorId,
-    InternalObjectId, PrincipalId, RepositoryAuthorityHeadId, RepositoryCommitId,
-    RepositoryDecisionBatchId, RequestId, TenantId, TransactionSealId, TxId,
+    AdmissionReceiptId, DERIVED_ID_DOMAINS, DocumentAnchorId, InternalObjectId, OpaqueStoreToken,
+    PrincipalId, RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryDecisionBatchId,
+    RequestId, TenantId, TransactionSealId, TxId,
 };
 use fgit_types::numeric::CodecVersion;
 use fgit_types::{CANONICAL_CODEC_VERSION, TypeRefusal};
@@ -158,35 +158,35 @@ fn opaque_identities_refuse_uppercase_hex_and_wrong_length() {
 
 #[test]
 fn authority_version_tokens_are_bounded_and_never_empty() {
-    let permitted = AuthorityVersionToken::try_new(b"etag-91af").expect("ordinary token");
+    let permitted = OpaqueStoreToken::try_new(b"etag-91af").expect("ordinary token");
     assert_eq!(permitted.as_bytes(), b"etag-91af");
     assert_eq!(permitted.len(), 9);
     assert!(!permitted.is_empty());
 
-    let empty = AuthorityVersionToken::try_new(b"")
-        .expect_err("an empty token cannot make a write conditional");
+    let empty =
+        OpaqueStoreToken::try_new(b"").expect_err("an empty token cannot make a write conditional");
     assert!(matches!(
         empty,
         TypeRefusal::LengthOutOfRange {
-            field: "AuthorityVersionToken",
+            field: "OpaqueStoreToken",
             observed: 0,
             ..
         }
     ));
 
-    let oversized = AuthorityVersionToken::try_new(&[b'x'; 513])
+    let oversized = OpaqueStoreToken::try_new(&[b'x'; 513])
         .expect_err("a token above the bound must be refused before allocation");
     assert!(matches!(
         oversized,
         TypeRefusal::LengthOutOfRange {
-            field: "AuthorityVersionToken",
+            field: "OpaqueStoreToken",
             observed: 513,
             maximum: 512,
             ..
         }
     ));
     // Permitted counterpart: exactly at the bound.
-    assert!(AuthorityVersionToken::try_new(&[b'x'; 512]).is_ok());
+    assert!(OpaqueStoreToken::try_new(&[b'x'; 512]).is_ok());
 }
 
 #[test]

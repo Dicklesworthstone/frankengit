@@ -19,7 +19,7 @@ use crate::twophase::{
 };
 use core::fmt;
 use fgit_types::{
-    AuthorityVersionToken, Digest, EvidenceRecordId, GenerationId, GitOid, ObjectEnvelopeId,
+    Digest, EvidenceRecordId, GenerationId, GitOid, ObjectEnvelopeId, OpaqueStoreToken,
     PrincipalId, PrincipalSnapshotId, RepositoryAuthorityHeadId, RepositoryCommitId,
     RepositoryDecisionBatchId, SegmentManifestId, TenantId, TxId,
 };
@@ -264,7 +264,7 @@ pub struct HeadCasAttempt;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CasAttempt {
     /// The exact predecessor version token the attempt replaces.
-    pub expected_version: AuthorityVersionToken,
+    pub expected_version: OpaqueStoreToken,
     /// The candidate head being published.
     pub candidate_head: RepositoryAuthorityHeadId,
     /// The decision batch the candidate head commits.
@@ -279,7 +279,7 @@ pub struct CasAttempt {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CasWon {
     /// The store's winning version token.
-    pub winning_version: AuthorityVersionToken,
+    pub winning_version: OpaqueStoreToken,
 }
 
 /// Why a head compare-and-set published nothing.
@@ -291,7 +291,7 @@ pub enum CasAbortReason {
     /// Another attempt replaced the expected predecessor first.
     LostRace {
         /// The version the store held instead.
-        observed_version: AuthorityVersionToken,
+        observed_version: OpaqueStoreToken,
     },
     /// The deadline passed before the store answered.
     DeadlineExpired,
