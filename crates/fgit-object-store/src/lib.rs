@@ -3,7 +3,7 @@
 //!
 //! This crate binds a deliberately small HTTP object-store profile to
 //! [`fgit_authority::AsyncAuthorityStore`].  It does **not** treat a normal
-//! content ETag as an authority token: a usable provider has a version token
+//! content `ETag` as an authority token: a usable provider has a version token
 //! that is unique for every write, supports conditional writes against that
 //! token, and can retrieve the exact historical version named by it.  The
 //! startup probe demonstrates those properties using only exact keys under a
@@ -53,7 +53,7 @@ pub struct ObjectStoreRequest {
 }
 
 impl ObjectStoreRequest {
-    fn new(method: ObjectStoreMethod, url: String, body: Vec<u8>) -> Self {
+    const fn new(method: ObjectStoreMethod, url: String, body: Vec<u8>) -> Self {
         Self {
             method,
             url,
@@ -180,7 +180,7 @@ impl AsupersyncHttpTransport {
     /// client here, configured with redirects, retries, cookies, and proxies
     /// disabled.  The provider-neutral adapter itself remains usable with a
     /// transport that satisfies [`ObjectStoreTransport`].
-    pub fn new(_max_response_body_bytes: usize) -> Result<Self, TransportSetupRefusal> {
+    pub const fn new(_max_response_body_bytes: usize) -> Result<Self, TransportSetupRefusal> {
         Err(TransportSetupRefusal::TlsTransportNotAdmitted)
     }
 }
@@ -210,7 +210,7 @@ pub trait RequestSigner {
     fn sign(&self, request: &mut ObjectStoreRequest) -> Result<(), AdapterConfigError>;
 }
 
-/// Deterministic HMAC-SHA-256 signer for the minimal FrankenGit object-store profile.
+/// Deterministic HMAC-SHA-256 signer for the minimal `FrankenGit` object-store profile.
 ///
 /// This is deliberately not called an AWS signer: the signed canonical request
 /// is documented by this crate and can be implemented by any compatible store.
@@ -488,7 +488,7 @@ impl std::error::Error for AdapterConfigError {}
 /// Async object-store implementation of the authority contract.
 ///
 /// Construction consumes a private [`AuthorityCapabilityReceipt`], so a
-/// provider is not admitted based on configuration or an ETag claim alone.
+/// provider is not admitted based on configuration or an `ETag` claim alone.
 /// The adapter has no listing or deletion operation.
 pub struct ObjectStoreAuthority<T, S> {
     transport: T,
@@ -512,8 +512,8 @@ impl<T, S> fmt::Debug for ObjectStoreAuthority<T, S> {
 
 impl<T, S> ObjectStoreAuthority<T, S>
 where
-    T: ObjectStoreTransport,
-    S: RequestSigner,
+    T: ObjectStoreTransport + Sync,
+    S: RequestSigner + Sync,
 {
     /// Probe an endpoint's authority-relevant conditional-write semantics.
     ///
@@ -680,7 +680,7 @@ where
             .map_err(map_transport_failure)
     }
 
-    fn check_body(&self, body: &[u8]) -> Result<(), AuthorityFailure> {
+    const fn check_body(&self, body: &[u8]) -> Result<(), AuthorityFailure> {
         if body.len() > self.limits.body_bytes {
             return Err(AuthorityFailure::Refused(AuthorityRefusal::BodyTooLarge {
                 len: body.len(),
@@ -987,8 +987,8 @@ async fn send_probe<T, S>(
     mut request: ObjectStoreRequest,
 ) -> Result<ObjectStoreResponse, CapabilityProbeFailure>
 where
-    T: ObjectStoreTransport,
-    S: RequestSigner,
+    T: ObjectStoreTransport + Sync,
+    S: RequestSigner + Sync,
 {
     if let Err(error) = cx.checkpoint() {
         return Err(CapabilityProbeFailure::Ambiguous(checkpoint_ambiguity(
@@ -1011,7 +1011,7 @@ where
         })
 }
 
-fn map_transport_failure(failure: ObjectStoreTransportError) -> AuthorityFailure {
+const fn map_transport_failure(failure: ObjectStoreTransportError) -> AuthorityFailure {
     match failure {
         ObjectStoreTransportError::Rejected => {
             AuthorityFailure::Refused(AuthorityRefusal::Unavailable)
@@ -1020,7 +1020,7 @@ fn map_transport_failure(failure: ObjectStoreTransportError) -> AuthorityFailure
     }
 }
 
-fn checkpoint_ambiguity(error: &asupersync::Error) -> AmbiguityReason {
+const fn checkpoint_ambiguity(error: &asupersync::Error) -> AmbiguityReason {
     if error.is_timeout() {
         AmbiguityReason::Timeout
     } else {
@@ -1182,20 +1182,23 @@ mod tests {
     }
 
     impl ObjectStoreTransport for ScriptTransport {
-        async fn send(
+        fn send(
             &self,
             _cx: &Cx,
             request: ObjectStoreRequest,
-        ) -> Result<ObjectStoreResponse, ObjectStoreTransportError> {
+        ) -> impl Future<Output = Result<ObjectStoreResponse, ObjectStoreTransportError>> + Send
+        {
             self.requests
                 .lock()
                 .expect("request log lock")
                 .push(request);
-            self.responses
+            let response = self
+                .responses
                 .lock()
                 .expect("response script lock")
                 .pop_front()
-                .expect("script contains one response per request")
+                .expect("script contains one response per request");
+            std::future::ready(response)
         }
     }
 
@@ -1236,36 +1239,43 @@ mod tests {
     }
 
     impl ObjectStoreTransport for ConditionalStoreTestDouble {
-        async fn send(
+        fn send(
             &self,
             _cx: &Cx,
             request: ObjectStoreRequest,
-        ) -> Result<ObjectStoreResponse, ObjectStoreTransportError> {
+        ) -> impl Future<Output = Result<ObjectStoreResponse, ObjectStoreTransportError>> + Send
+        {
             let mut state = self.state.lock().expect("conditional store lock");
             state.requests.push(request.clone());
-            let (url, historical_token) = match request.url.split_once("?fgit-version-token=") {
+            let parsed_url = request.url.split_once("?fgit-version-token=");
+            let (url, historical_token) = match parsed_url {
                 Some((url, token)) => match hex_decode_fixed::<VERSION_TOKEN_BYTES>(token) {
                     Some(token) => (url, Some(token)),
                     None => {
-                        return Ok(ObjectStoreResponse::new(400, [], Vec::new()).expect("response"));
+                        return std::future::ready(Ok(ObjectStoreResponse::new(
+                            400,
+                            [],
+                            Vec::new(),
+                        )
+                        .expect("response")));
                     }
                 },
                 None => (request.url.as_str(), None),
             };
-            match request.method {
-                ObjectStoreMethod::Get => {
-                    let Some(versions) = state.objects.get(url) else {
-                        return Ok(ObjectStoreResponse::new(404, [], Vec::new()).expect("response"));
-                    };
-                    let version = historical_token.map_or_else(
-                        || versions.last(),
-                        |token| versions.iter().find(|version| version.token == token),
-                    );
-                    let Some(version) = version else {
-                        return Ok(ObjectStoreResponse::new(404, [], Vec::new()).expect("response"));
-                    };
-                    Ok(test_store_response(200, version))
-                }
+            let response = match request.method {
+                ObjectStoreMethod::Get => state
+                    .objects
+                    .get(url)
+                    .and_then(|versions| {
+                        historical_token.map_or_else(
+                            || versions.last(),
+                            |token| versions.iter().find(|version| version.token == token),
+                        )
+                    })
+                    .map_or_else(
+                        || Ok(ObjectStoreResponse::new(404, [], Vec::new()).expect("response")),
+                        |version| Ok(test_store_response(200, version)),
+                    ),
                 ObjectStoreMethod::Put => {
                     let if_none = request
                         .headers
@@ -1285,39 +1295,34 @@ mod tests {
                         .and_then(|versions| versions.last())
                         .map(|version| version.token);
                     if if_none && occupied {
-                        return Ok(ObjectStoreResponse::new(412, [], Vec::new()).expect("response"));
+                        Ok(ObjectStoreResponse::new(412, [], Vec::new()).expect("response"))
+                    } else if !if_none && if_match.is_none() {
+                        Ok(ObjectStoreResponse::new(400, [], Vec::new()).expect("response"))
+                    } else if !if_none && current_token != if_match {
+                        Ok(ObjectStoreResponse::new(412, [], Vec::new()).expect("response"))
+                    } else {
+                        state.next_token = state
+                            .next_token
+                            .checked_add(1)
+                            .expect("test token capacity");
+                        let mut token = [0_u8; VERSION_TOKEN_BYTES];
+                        token[8..].copy_from_slice(&state.next_token.to_be_bytes());
+                        let generation = request.headers.get(GENERATION_HEADER).cloned();
+                        let versions = state.objects.entry(url.to_owned()).or_default();
+                        versions.push(ConditionalStoreVersion {
+                            token,
+                            body: request.body,
+                            generation,
+                        });
+                        Ok(test_store_response(
+                            201,
+                            versions.last().expect("just pushed version"),
+                        ))
                     }
-                    if !if_none {
-                        let Some(expected) = if_match else {
-                            return Ok(
-                                ObjectStoreResponse::new(400, [], Vec::new()).expect("response")
-                            );
-                        };
-                        if current_token != Some(expected) {
-                            return Ok(
-                                ObjectStoreResponse::new(412, [], Vec::new()).expect("response")
-                            );
-                        }
-                    }
-                    state.next_token = state
-                        .next_token
-                        .checked_add(1)
-                        .expect("test token capacity");
-                    let mut token = [0_u8; VERSION_TOKEN_BYTES];
-                    token[8..].copy_from_slice(&state.next_token.to_be_bytes());
-                    let generation = request.headers.get(GENERATION_HEADER).cloned();
-                    let versions = state.objects.entry(url.to_owned()).or_default();
-                    versions.push(ConditionalStoreVersion {
-                        token,
-                        body: request.body,
-                        generation,
-                    });
-                    Ok(test_store_response(
-                        201,
-                        versions.last().expect("just pushed version"),
-                    ))
                 }
-            }
+            };
+            drop(state);
+            std::future::ready(response)
         }
     }
 
@@ -1549,7 +1554,7 @@ mod tests {
             failure,
             CapabilityProbeFailure::Ambiguous(AmbiguityReason::Cancelled)
         );
-        assert!(transport.requests().is_empty());
+        assert_eq!(transport.requests(), [] as [ObjectStoreRequest; 0]);
     }
 
     #[test]
@@ -1636,7 +1641,9 @@ mod tests {
         .expect("CAS")
         {
             CasOutcome::Committed(receipt) => receipt,
-            other => panic!("expected committed head, got {other:?}"),
+            other @ CasOutcome::PredecessorMismatch => {
+                panic!("expected committed head, got {other:?}")
+            }
         };
         assert_eq!(
             second.generation(),
