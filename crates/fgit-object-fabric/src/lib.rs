@@ -1477,6 +1477,15 @@ mod tests {
         let expected = decode_hex(include_str!(
             "../tests/goldens/microsegment_v1_one_record.hex"
         ));
+        let golden_reader = MicrosegmentReader::open(&expected, &digest, &limits())
+            .expect("pinned golden must be independently readable");
+        assert_eq!(
+            golden_reader
+                .record(0)
+                .expect("golden record must exist")
+                .offset,
+            13
+        );
         assert_eq!(segment.as_bytes(), expected.as_slice());
         let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, &limits())
             .expect("golden segment must be readable");

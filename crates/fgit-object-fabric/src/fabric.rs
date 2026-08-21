@@ -1059,6 +1059,12 @@ mod tests {
             ),
             Err(StoreRefusal::NonCanonicalObjectOrder)
         );
+        let earlier = PlacementReceipt::new(
+            PlacementBackend::LocalFilesystem,
+            OpaqueHandle::new(b"a").expect("fixture locator must fit"),
+            OpaqueHandle::new(b"rack-a").expect("fixture failure domain must fit"),
+            OpaqueHandle::new(b"key-a").expect("fixture key dependency must fit"),
+        );
         let later = PlacementReceipt::new(
             PlacementBackend::LocalFilesystem,
             OpaqueHandle::new(b"z").expect("fixture locator must fit"),
@@ -1070,7 +1076,7 @@ mod tests {
                 vec![b'n'],
                 [9; 32],
                 vec![manifest_entry(b'a')],
-                vec![later, placement()],
+                vec![later, earlier],
                 &manifest_limits(),
             ),
             Err(StoreRefusal::NonCanonicalPlacementOrder)
