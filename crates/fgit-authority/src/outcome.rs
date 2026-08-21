@@ -739,6 +739,115 @@ where
     ))))
 }
 
+/// What a duplicate walk means for a publication that intends to replace
+/// `expected`.
+///
+/// This is the whole decision, and it is deliberately a pure function of what
+/// the walk saw. Both the synchronous and the asynchronous driver consult it,
+/// so the two surfaces cannot answer the same situation differently — the
+/// drivers differ only in how they perform I/O, never in what they conclude.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum DuplicateVerdict {
+    /// The walk observed a head other than the one being replaced.
+    Lost,
+    /// Every decision that already stands is the one being replayed.
+    Idempotent,
+    /// A different terminal decision already stands for a sealed transaction.
+    Conflict {
+        /// The decision that already stands.
+        indexed: Box<TerminalOutcome>,
+        /// The decision this batch proposed for the same transaction.
+        replayed: Box<TerminalOutcome>,
+    },
+}
+
+/// The terminal outcome this batch proposes for `tx_id`, if it carries one.
+fn proposed_outcome(batch: &RepositoryDecisionBatchBody, tx_id: TxId) -> Option<TerminalOutcome> {
+    batch
+        .decisions
+        .iter()
+        .find(|decision| decision.tx_id == tx_id)
+        .map(|decision| TerminalOutcome {
+            decision_sequence: decision.decision_sequence,
+            outcome: decision.outcome,
+        })
+}
+
+/// Classify what the walk found against what this publication intends.
+///
+/// Two orderings here are load-bearing.
+///
+/// Staleness is checked first because it dominates: if the head already moved,
+/// this batch lost a race and the winner consumed the positions it chose.
+/// Reporting the duplicates as a pre-replacement decision would tell the caller
+/// its basis is still current when it is not.
+///
+/// Then §5.2 is applied at its actual boundary, which is *semantics* rather
+/// than recurrence. Replaying a decision that already stands is an idempotent
+/// retry and is exactly what a lost response produces; presenting a *different*
+/// decision for the same sealed transaction is the one-terminal-decision rule
+/// being broken, and fails closed.
+pub(crate) fn classify_duplicates(
+    observed: AuthorityVersionToken,
+    expected: AuthorityVersionToken,
+    decided: &[(TxId, TerminalOutcome)],
+    batch: &RepositoryDecisionBatchBody,
+) -> DuplicateVerdict {
+    if observed != expected {
+        return DuplicateVerdict::Lost;
+    }
+    for (tx_id, existing) in decided {
+        let Some(proposed) = proposed_outcome(batch, *tx_id) else {
+            // Decided, but not by this batch. It constrains nothing here.
+            continue;
+        };
+        if proposed != *existing {
+            return DuplicateVerdict::Conflict {
+                indexed: Box::new(existing.clone()),
+                replayed: Box::new(proposed),
+            };
+        }
+    }
+    DuplicateVerdict::Idempotent
+}
+
+/// The accelerator entries this batch publishes, in decision order.
+fn outcome_entries(
+    tenant_id: TenantId,
+    batch: &RepositoryDecisionBatchBody,
+) -> Result<Vec<(ImmutableKey, Vec<u8>)>, OutcomeFailure> {
+    let mut entries: Vec<(ImmutableKey, Vec<u8>)> = Vec::with_capacity(batch.decisions.len());
+    for decision in &batch.decisions {
+        let key = outcome_key(tenant_id, batch.repository_id, decision.tx_id)?;
+        let entry = TerminalOutcome {
+            decision_sequence: decision.decision_sequence,
+            outcome: decision.outcome,
+        };
+        entries.push((key, encode_outcome(&entry)?));
+    }
+    Ok(entries)
+}
+
+/// The generation a head body publishes at.
+fn head_generation(head: &RepositoryAuthorityHeadBody) -> Result<HeadGeneration, OutcomeFailure> {
+    HeadGeneration::try_new(head.generation.get())
+        .map_err(|refusal| OutcomeFailure::Codec(refusal.into()))
+}
+
+/// The identity a decision batch publishes under.
+fn decision_batch_identity(
+    batch: &RepositoryDecisionBatchBody,
+) -> Result<RepositoryDecisionBatchId, OutcomeFailure> {
+    RepositoryDecisionBatchId::from_internal_object_id(canonical_body_id(
+        IdentityDomain::RepositoryDecisionBatch,
+        CANONICAL_CODEC_VERSION,
+        batch,
+    )?)
+    .map_err(|_| OutcomeFailure::StreamBodyMissing {
+        link: "decision batch identity",
+    })
+}
+
 /// Stage a batch and its head, then publish the head and its terminal outcomes
 /// as one indivisible transition.
 ///
@@ -766,14 +875,7 @@ pub fn publish_decisions<S>(
 where
     S: AuthorityStore + ?Sized,
 {
-    let batch_id = RepositoryDecisionBatchId::from_internal_object_id(canonical_body_id(
-        IdentityDomain::RepositoryDecisionBatch,
-        CANONICAL_CODEC_VERSION,
-        batch,
-    )?)
-    .map_err(|_| OutcomeFailure::StreamBodyMissing {
-        link: "decision batch identity",
-    })?;
+    let batch_id = decision_batch_identity(batch)?;
 
     let batch_key = body_key(IdentityDomain::RepositoryDecisionBatch, batch)?;
     let batch_bytes = encode_body(batch)?;
@@ -783,8 +885,7 @@ where
     let head_bytes = encode_body(head)?;
     store.put_if_absent(&head_key_by_id, &head_bytes)?;
 
-    let generation = HeadGeneration::try_new(head.generation.get())
-        .map_err(|refusal| OutcomeFailure::Codec(refusal.into()))?;
+    let generation = head_generation(head)?;
 
     // Requirement 2. The question "is this transaction already decided?" is
     // answered from the authenticated decision stream reachable from the head,
@@ -798,60 +899,25 @@ where
         .collect();
     let witness = match scan_for_existing_decisions(store, head_key, &tx_ids)? {
         DuplicateScan::Found { observed, decided } => {
-            // Staleness dominates duplication, and the order is not cosmetic.
-            // If the head already moved, this batch lost a race and the winner
-            // consumed the positions it chose; reporting the duplicates as a
-            // pre-replacement `AlreadyDecided` would tell the caller its basis
-            // is still current when it is not, and it would replan against a
-            // head that no longer exists.
-            if observed != expected {
-                return Ok(PublicationOutcome::PredecessorMismatch);
-            }
-            // §5.2 draws the line at *semantics*, not at recurrence: replaying
-            // a decision that already stands is an idempotent retry, while
-            // presenting a different decision for the same sealed transaction
-            // is the one-terminal-decision rule being broken and fails closed.
-            for (tx_id, existing) in &decided {
-                let Some(proposed) = batch
-                    .decisions
-                    .iter()
-                    .find(|decision| decision.tx_id == *tx_id)
-                    .map(|decision| TerminalOutcome {
-                        decision_sequence: decision.decision_sequence,
-                        outcome: decision.outcome,
-                    })
-                else {
-                    continue;
-                };
-                if proposed != *existing {
-                    return Err(OutcomeFailure::AcceleratorConflict {
-                        indexed: Box::new(existing.clone()),
-                        replayed: Box::new(proposed),
-                    });
+            return match classify_duplicates(observed, expected, &decided, batch) {
+                DuplicateVerdict::Lost => Ok(PublicationOutcome::PredecessorMismatch),
+                DuplicateVerdict::Conflict { indexed, replayed } => {
+                    Err(OutcomeFailure::AcceleratorConflict { indexed, replayed })
                 }
-            }
-            return Ok(PublicationOutcome::AlreadyDecided { decided });
+                DuplicateVerdict::Idempotent => Ok(PublicationOutcome::AlreadyDecided { decided }),
+            };
         }
         DuplicateScan::Absent(witness) => witness,
     };
 
     // The walk is sound only if it observed the very head this publication is
-    // about to replace. A witness minted against some other token proves
-    // nothing about the state the conditional replacement will act on, so a
-    // mismatch here is the same loss as losing the replacement itself.
+    // about to replace. A witness minted against some other head proves nothing
+    // about the state the conditional replacement will act on.
     if witness.bound_to() != expected {
         return Ok(PublicationOutcome::PredecessorMismatch);
     }
 
-    let mut entries: Vec<(ImmutableKey, Vec<u8>)> = Vec::with_capacity(batch.decisions.len());
-    for decision in &batch.decisions {
-        let key = outcome_key(tenant_id, batch.repository_id, decision.tx_id)?;
-        let entry = TerminalOutcome {
-            decision_sequence: decision.decision_sequence,
-            outcome: decision.outcome,
-        };
-        entries.push((key, encode_outcome(&entry)?));
-    }
+    let entries = outcome_entries(tenant_id, batch)?;
     let indexed = entries.len();
 
     // One linearization point: the entries and the head move together.
@@ -888,3 +954,229 @@ where
 }
 
 const _: () = assert!(size_of::<OutcomeFailure>() <= crate::request::MAX_ERROR_BYTES);
+
+/// Read one head body by identity, asynchronously.
+async fn read_head_body_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_id: RepositoryAuthorityHeadId,
+) -> Result<RepositoryAuthorityHeadBody, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = body_key_for_id(b"fg/body/v1/", head_id.as_internal_object_id())?;
+    match store.read_immutable(cx, &key).await? {
+        ImmutableRead::Absent => Err(OutcomeFailure::StreamBodyMissing { link: "head body" }),
+        ImmutableRead::Present(bytes) => Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?),
+    }
+}
+
+/// Read one decision batch body by identity, asynchronously.
+async fn read_batch_body_async<S>(
+    store: &S,
+    cx: &S::Context,
+    batch_id: RepositoryDecisionBatchId,
+) -> Result<RepositoryDecisionBatchBody, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = body_key_for_id(b"fg/body/v1/", batch_id.as_internal_object_id())?;
+    match store.read_immutable(cx, &key).await? {
+        ImmutableRead::Absent => Err(OutcomeFailure::StreamBodyMissing {
+            link: "decision batch",
+        }),
+        ImmutableRead::Present(bytes) => Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?),
+    }
+}
+
+/// Step one link back along the decision stream, asynchronously.
+async fn read_predecessor_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_id: RepositoryAuthorityHeadId,
+) -> Result<Option<RepositoryAuthorityHeadBody>, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let body = read_head_body_async(store, cx, head_id).await?;
+    // The genesis head has no decision tail, so the walk ends there.
+    Ok(body.decision_tail_id.map(|_| body))
+}
+
+/// Walk the authenticated decision stream for prior decisions, asynchronously.
+///
+/// The asynchronous twin of [`scan_for_existing_decisions`]. It performs the
+/// same walk, in the same order, with the same bound, and mints the witness
+/// against the same observed token — only the I/O differs.
+pub async fn scan_for_existing_decisions_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    tx_ids: &[TxId],
+) -> Result<DuplicateScan, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let HeadRead::Present(receipt) = store.read_head(cx, head_key).await? else {
+        // No head at all: nothing can have been decided. The zero token will
+        // not match any real `expected`, so the primitive refuses rather than
+        // accepting a witness that validated nothing. See the sync twin.
+        return Ok(DuplicateScan::Absent(
+            DuplicateAbsenceWitness::minted_against(AuthorityVersionToken::from_opaque_bytes(
+                [0_u8; crate::tokens::VERSION_TOKEN_BYTES],
+            )),
+        ));
+    };
+    let observed = receipt.token();
+    let mut head: RepositoryAuthorityHeadBody = decode_body(receipt.body(), DecodeLimits::DEFAULT)?;
+    let mut walked = 0_usize;
+    let mut found: Vec<(TxId, TerminalOutcome)> = Vec::new();
+
+    loop {
+        let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? else {
+            break;
+        };
+        let batch = read_batch_body_async(store, cx, batch_id).await?;
+        for tx_id in tx_ids {
+            if let Some(outcome) = scan_batch_for(&batch, *tx_id) {
+                found.push((*tx_id, outcome));
+            }
+        }
+        let Some(previous) = read_predecessor_async(store, cx, batch.predecessor_head_id).await?
+        else {
+            break;
+        };
+        head = previous;
+    }
+
+    if found.is_empty() {
+        Ok(DuplicateScan::Absent(
+            DuplicateAbsenceWitness::minted_against(observed),
+        ))
+    } else {
+        Ok(DuplicateScan::Found {
+            observed,
+            decided: found,
+        })
+    }
+}
+
+/// Name the accelerator entry that disagrees with the stream, asynchronously.
+async fn accelerator_conflict_for_async<S>(
+    store: &S,
+    cx: &S::Context,
+    tenant_id: TenantId,
+    batch: &RepositoryDecisionBatchBody,
+) -> OutcomeFailure
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    for decision in &batch.decisions {
+        let proposed = TerminalOutcome {
+            decision_sequence: decision.decision_sequence,
+            outcome: decision.outcome,
+        };
+        match indexed_outcome_async(store, cx, tenant_id, batch.repository_id, decision.tx_id).await
+        {
+            Ok(OutcomeLookup::Decided(existing)) if existing != proposed => {
+                return OutcomeFailure::AcceleratorConflict {
+                    indexed: Box::new(existing),
+                    replayed: Box::new(proposed),
+                };
+            }
+            Ok(_) => {}
+            Err(failure) => return failure,
+        }
+    }
+    OutcomeFailure::Seal(Box::new(SealFailure::Store(AuthorityFailure::Refused(
+        AuthorityRefusal::TokenBodyMismatch,
+    ))))
+}
+
+/// Publish one decision batch on the production surface.
+///
+/// The asynchronous twin of [`publish_decisions`], and deliberately not a
+/// second protocol. Every decision either surface makes is taken by the same
+/// pure core — [`classify_duplicates`] for what the walk means,
+/// [`outcome_entries`] for what gets written, [`next_batch_to_replay`] for how
+/// far the walk goes — so the two cannot diverge in what they conclude, only in
+/// how they wait. §5.2 requires one publication model, not one per runtime.
+pub async fn publish_decisions_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    expected: AuthorityVersionToken,
+    batch: &RepositoryDecisionBatchBody,
+    head: &RepositoryAuthorityHeadBody,
+    tenant_id: TenantId,
+) -> Result<PublicationOutcome, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let batch_id = decision_batch_identity(batch)?;
+
+    let batch_key = body_key(IdentityDomain::RepositoryDecisionBatch, batch)?;
+    let batch_bytes = encode_body(batch)?;
+    store.put_if_absent(cx, &batch_key, &batch_bytes).await?;
+
+    let head_key_by_id = body_key(IdentityDomain::RepositoryAuthorityHead, head)?;
+    let head_bytes = encode_body(head)?;
+    store
+        .put_if_absent(cx, &head_key_by_id, &head_bytes)
+        .await?;
+
+    let generation = head_generation(head)?;
+
+    let tx_ids: Vec<TxId> = batch
+        .decisions
+        .iter()
+        .map(|decision| decision.tx_id)
+        .collect();
+    let witness = match scan_for_existing_decisions_async(store, cx, head_key, &tx_ids).await? {
+        DuplicateScan::Found { observed, decided } => {
+            return match classify_duplicates(observed, expected, &decided, batch) {
+                DuplicateVerdict::Lost => Ok(PublicationOutcome::PredecessorMismatch),
+                DuplicateVerdict::Conflict { indexed, replayed } => {
+                    Err(OutcomeFailure::AcceleratorConflict { indexed, replayed })
+                }
+                DuplicateVerdict::Idempotent => Ok(PublicationOutcome::AlreadyDecided { decided }),
+            };
+        }
+        DuplicateScan::Absent(witness) => witness,
+    };
+
+    if witness.bound_to() != expected {
+        return Ok(PublicationOutcome::PredecessorMismatch);
+    }
+
+    let entries = outcome_entries(tenant_id, batch)?;
+    let indexed = entries.len();
+
+    let published = store
+        .publish_head_with_outcomes(
+            cx,
+            head_key,
+            expected,
+            generation,
+            &head_bytes,
+            &entries,
+            &witness,
+        )
+        .await;
+    let receipt = match published {
+        Ok(CasOutcome::Committed(receipt)) => receipt,
+        Ok(CasOutcome::PredecessorMismatch) => {
+            return Ok(PublicationOutcome::PredecessorMismatch);
+        }
+        Err(AuthorityFailure::Refused(AuthorityRefusal::TokenBodyMismatch)) => {
+            return Err(accelerator_conflict_for_async(store, cx, tenant_id, batch).await);
+        }
+        Err(failure) => return Err(failure.into()),
+    };
+
+    Ok(PublicationOutcome::Published(Box::new(PublishedBatch {
+        head: receipt,
+        batch_id,
+        indexed,
+    })))
+}

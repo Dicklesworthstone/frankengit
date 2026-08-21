@@ -579,3 +579,348 @@ fn the_empty_index_has_a_defined_root_of_its_own() {
         "the empty root is a fixed value, not an accident"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Sync/async publication equivalence (t7ip condition 1)
+// ---------------------------------------------------------------------------
+
+use fgit_authority::{
+    AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
+    AuthorityVersionToken, DuplicateAbsenceWitness, HeadInit, HeadReadReceipt, ImmutableKey,
+    ImmutableRead, PutOutcome, publish_decisions_async,
+};
+use fgit_types::numeric::HeadGeneration as AsyncHeadGeneration;
+use std::future::Future;
+
+/// An async view over the in-memory reference store, for equivalence only.
+///
+/// Not a blocking adapter: every operation is already resolved when its future
+/// is created, so nothing blocks and no cancellation is silently dropped. It
+/// exists so both surfaces can be driven over identically-constructed store
+/// state in one test, which is the only way to show they AGREE rather than
+/// merely that each works alone. Test-only per the t7ip ruling's condition 4;
+/// production async use goes through the fsqlite implementation.
+///
+/// It DOES override `publish_head_with_outcomes`, and that is a deliberate
+/// reversal of the reasoning that (correctly) refused the override in
+/// chronicle's `capsule_pointer` view. The objection there was that a
+/// delegating implementation would compose a head CAS with separate puts and
+/// therefore satisfy the signature without providing atomicity — a fixture that
+/// looks like it publishes atomically and does not. That objection was sound
+/// while `MemoryAuthorityStore` had no atomic primitive. It now has one, and
+/// this delegates to *that*, inside a single mutex-guarded critical section, so
+/// the property is real rather than simulated.
+struct AsyncView(MemoryAuthorityStore);
+
+impl AsyncAuthorityStore for AsyncView {
+    type Context = ();
+
+    fn instance_id(&self) -> StoreInstanceId {
+        self.0.instance_id()
+    }
+
+    fn limits(&self) -> AuthorityLimits {
+        self.0.limits()
+    }
+
+    fn put_if_absent(
+        &self,
+        _cx: &Self::Context,
+        key: &ImmutableKey,
+        body: &[u8],
+    ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> + Send {
+        let resolved = self.0.put_if_absent(key, body);
+        async move { resolved }
+    }
+
+    fn read_immutable(
+        &self,
+        _cx: &Self::Context,
+        key: &ImmutableKey,
+    ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> + Send {
+        let resolved = self.0.read_immutable(key);
+        async move { resolved }
+    }
+
+    fn initialize_head(
+        &self,
+        _cx: &Self::Context,
+        key: &HeadKey,
+        generation: AsyncHeadGeneration,
+        body: &[u8],
+    ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> + Send {
+        let resolved = self.0.initialize_head(key, generation, body);
+        async move { resolved }
+    }
+
+    fn read_head(
+        &self,
+        _cx: &Self::Context,
+        key: &HeadKey,
+    ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> + Send {
+        let resolved = self.0.read_head(key);
+        async move { resolved }
+    }
+
+    fn compare_exchange_head(
+        &self,
+        _cx: &Self::Context,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: AsyncHeadGeneration,
+        new_body: &[u8],
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        let resolved = self
+            .0
+            .compare_exchange_head(key, expected, new_generation, new_body);
+        async move { resolved }
+    }
+
+    fn publish_head_with_outcomes(
+        &self,
+        _cx: &Self::Context,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: AsyncHeadGeneration,
+        new_body: &[u8],
+        outcomes: &[(ImmutableKey, Vec<u8>)],
+        witness: &DuplicateAbsenceWitness,
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        let resolved = self.0.publish_head_with_outcomes(
+            key,
+            expected,
+            new_generation,
+            new_body,
+            outcomes,
+            witness,
+        );
+        async move { resolved }
+    }
+
+    fn authenticate_head_receipt(
+        &self,
+        _cx: &Self::Context,
+        receipt: &HeadReadReceipt,
+    ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> + Send {
+        let resolved = self.0.authenticate_head_receipt(receipt);
+        async move { resolved }
+    }
+}
+
+/// Drive an already-resolved future to its value.
+fn poll_ready<F: Future>(future: F) -> F::Output {
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+    struct NoopWake;
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+    let waker = Waker::from(Arc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+    let mut future = Box::pin(future);
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("the in-memory async view must never suspend"),
+    }
+}
+
+/// A stable label for a publication result, so failures compare by shape.
+fn label(result: &Result<PublicationOutcome, OutcomeFailure>) -> String {
+    match result {
+        Ok(PublicationOutcome::Published(published)) => {
+            format!("published/{}", published.indexed)
+        }
+        Ok(PublicationOutcome::PredecessorMismatch) => "predecessor-mismatch".to_owned(),
+        Ok(PublicationOutcome::AlreadyDecided { decided }) => {
+            format!("already-decided/{}", decided.len())
+        }
+        Err(OutcomeFailure::AcceleratorConflict { .. }) => "accelerator-conflict".to_owned(),
+        Err(other) => format!("failure/{other:?}"),
+    }
+}
+
+/// Both surfaces must reach the same conclusion from the same state.
+fn assert_surfaces_agree(
+    sync_result: &Result<PublicationOutcome, OutcomeFailure>,
+    async_result: &Result<PublicationOutcome, OutcomeFailure>,
+    case: &str,
+) {
+    assert_eq!(
+        label(sync_result),
+        label(async_result),
+        "{case}: the surfaces disagree"
+    );
+    if let (Ok(sync_outcome), Ok(async_outcome)) = (sync_result, async_result) {
+        // Beyond the shape: the published receipt, batch identity and entry
+        // count must match exactly, not merely classify the same way.
+        assert_eq!(
+            sync_outcome, async_outcome,
+            "{case}: the surfaces agree in shape but not in value"
+        );
+    }
+}
+
+/// Publish one batch on each surface, over identically-constructed stores.
+fn publish_on_both(
+    make: impl Fn() -> (MemoryAuthorityStore, RepositoryAuthorityHeadBody),
+    batch_of: impl Fn(&RepositoryAuthorityHeadBody) -> RepositoryDecisionBatchBody,
+    generation: u64,
+    token_of: impl Fn(&MemoryAuthorityStore) -> AuthorityVersionToken,
+) -> (
+    Result<PublicationOutcome, OutcomeFailure>,
+    Result<PublicationOutcome, OutcomeFailure>,
+) {
+    let (sync_store, sync_head) = make();
+    let sync_batch = batch_of(&sync_head);
+    let sync_next = successor_head(&sync_head, batch_id_of(&sync_batch), generation);
+    let sync_result = publish_decisions(
+        &sync_store,
+        &head_slot(),
+        token_of(&sync_store),
+        &sync_batch,
+        &sync_next,
+        tenant(),
+    );
+
+    let (async_store, async_head) = make();
+    let async_batch = batch_of(&async_head);
+    let async_next = successor_head(&async_head, batch_id_of(&async_batch), generation);
+    let token = token_of(&async_store);
+    let view = AsyncView(async_store);
+    let async_result = poll_ready(publish_decisions_async(
+        &view,
+        &(),
+        &head_slot(),
+        token,
+        &async_batch,
+        &async_next,
+        tenant(),
+    ));
+
+    (sync_result, async_result)
+}
+
+/// The current head token, which is what a publication conditions on.
+fn current_token(store: &MemoryAuthorityStore) -> AuthorityVersionToken {
+    let HeadRead::Present(receipt) = store.read_head(&head_slot()).expect("a readable head") else {
+        panic!("the repository must be published");
+    };
+    receipt.token()
+}
+
+/// A token that no longer names the current head.
+fn stale_token(store: &MemoryAuthorityStore) -> AuthorityVersionToken {
+    let _ = store;
+    AuthorityVersionToken::from_opaque_bytes([0x7E; 16])
+}
+
+#[test]
+fn both_publication_surfaces_agree_on_a_fresh_batch() {
+    let (sync_result, async_result) = publish_on_both(
+        published_repository,
+        |head| batch(head, 3, vec![committed(tx(0xC3), 3, 0x53)]),
+        3,
+        current_token,
+    );
+    assert_surfaces_agree(&sync_result, &async_result, "a fresh batch");
+    assert!(
+        matches!(sync_result, Ok(PublicationOutcome::Published(_))),
+        "a fresh batch must publish, else this case proves nothing: {sync_result:?}"
+    );
+}
+
+#[test]
+fn both_publication_surfaces_agree_on_an_idempotent_replay() {
+    // The SAME decision that already stands, replayed — the lost-response case.
+    let (sync_result, async_result) = publish_on_both(
+        published_repository,
+        |head| batch(head, 3, vec![committed(tx(0xA1), 1, 0x51)]),
+        3,
+        current_token,
+    );
+    assert_surfaces_agree(&sync_result, &async_result, "an idempotent replay");
+    assert!(
+        matches!(sync_result, Ok(PublicationOutcome::AlreadyDecided { .. })),
+        "replaying a standing decision is idempotent, not a conflict: {sync_result:?}"
+    );
+}
+
+#[test]
+fn both_publication_surfaces_agree_when_a_second_decision_conflicts() {
+    // A DIFFERENT decision for a transaction that is already terminal.
+    let (sync_result, async_result) = publish_on_both(
+        published_repository,
+        |head| batch(head, 3, vec![refused(tx(0xA1), 3, 0x5F)]),
+        3,
+        current_token,
+    );
+    assert_surfaces_agree(&sync_result, &async_result, "a conflicting second decision");
+    assert!(
+        matches!(sync_result, Err(OutcomeFailure::AcceleratorConflict { .. })),
+        "a different decision for a sealed transaction must fail closed: {sync_result:?}"
+    );
+}
+
+#[test]
+fn both_publication_surfaces_agree_on_a_stale_token() {
+    let (sync_result, async_result) = publish_on_both(
+        published_repository,
+        |head| batch(head, 3, vec![committed(tx(0xC3), 3, 0x53)]),
+        3,
+        stale_token,
+    );
+    assert_surfaces_agree(&sync_result, &async_result, "a stale token");
+    assert!(
+        matches!(sync_result, Ok(PublicationOutcome::PredecessorMismatch)),
+        "a stale token loses the race: {sync_result:?}"
+    );
+}
+
+/// The corpus must be able to tell the surfaces apart.
+///
+/// Four cases that all produced the same answer would agree trivially, and an
+/// async path that returned one constant would pass every case above. This
+/// pins that the corpus actually separates them.
+#[test]
+fn the_publication_equivalence_corpus_is_not_vacuous() {
+    let fresh = publish_on_both(
+        published_repository,
+        |head| batch(head, 3, vec![committed(tx(0xC3), 3, 0x53)]),
+        3,
+        current_token,
+    );
+    let replay = publish_on_both(
+        published_repository,
+        |head| batch(head, 3, vec![committed(tx(0xA1), 1, 0x51)]),
+        3,
+        current_token,
+    );
+    let conflict = publish_on_both(
+        published_repository,
+        |head| batch(head, 3, vec![refused(tx(0xA1), 3, 0x5F)]),
+        3,
+        current_token,
+    );
+    let stale = publish_on_both(
+        published_repository,
+        |head| batch(head, 3, vec![committed(tx(0xC3), 3, 0x53)]),
+        3,
+        stale_token,
+    );
+
+    let labels = [
+        label(&fresh.1),
+        label(&replay.1),
+        label(&conflict.1),
+        label(&stale.1),
+    ];
+    let mut distinct = labels.to_vec();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(
+        distinct.len(),
+        labels.len(),
+        "the async surface answers these four cases identically, so agreement \
+         with the sync surface would prove nothing: {labels:?}"
+    );
+}
