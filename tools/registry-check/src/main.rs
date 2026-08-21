@@ -6,9 +6,10 @@ use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 const REGISTRY_MARKER: &str = "# franken-registry-v1";
+const CONSTELLATION_MARKER: &str = "# franken-constellation-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CheckSet {
@@ -106,6 +107,7 @@ fn main() -> ExitCode {
     if check_set.includes_constitution() {
         check_rust_sources(&root, &mut report);
         check_manifests(&root, &mut report);
+        check_constellation(&root, &mut report);
         check_toolchain(&root, &mut report);
     }
     check_forbidden_artifacts(&root, &mut report);
@@ -154,6 +156,7 @@ fn check_required_files(root: &Path, report: &mut Report) {
     const REQUIRED: &[&str] = &[
         "Cargo.toml",
         "Cargo.lock",
+        "constellation.lock",
         "rust-toolchain.toml",
         "LICENSE",
         "README.md",
@@ -1089,6 +1092,8 @@ fn check_manifests(root: &Path, report: &mut Report) {
             }
         }
 
+        check_manifest_dependency_sources(&display, &text, report);
+
         for dependency in manifest_dependency_names(&text) {
             if !allowed
                 .iter()
@@ -1102,6 +1107,38 @@ fn check_manifests(root: &Path, report: &mut Report) {
     }
 
     check_lockfile(root, &allowed, report);
+}
+
+/// Refuse every local or floating Git dependency in a release-facing
+/// manifest. Cargo accepts these forms, but neither can be represented as a
+/// reproducible, registry-resolvable release source. This is deliberately a
+/// manifest check as `Cargo.lock` erases ordinary `path =` edges.
+fn check_manifest_dependency_sources(display: &str, text: &str, report: &mut Report) {
+    for (line_number, raw_line) in text.lines().enumerate() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if !looks_like_dependency_declaration(line) {
+            continue;
+        }
+        if let Some(path) = extract_inline_string_field(line, "path") {
+            report.error(format!(
+                "unpublished path dependency `{path}` in {display}:{}; release-facing dependencies must resolve from a pinned release source",
+                line_number + 1
+            ));
+        }
+        if let Some(git) = extract_inline_string_field(line, "git")
+            && (!git.starts_with("https://")
+                || extract_inline_string_field(line, "rev").is_none())
+        {
+            report.error(format!(
+                "unresolved Git dependency `{git}` in {display}:{}; require HTTPS plus an exact rev or use a registry release",
+                line_number + 1
+            ));
+        }
+    }
+}
+
+fn looks_like_dependency_declaration(line: &str) -> bool {
+    line.contains("path =") || line.contains("git =")
 }
 
 /// Closed-world check over the full resolved graph: every package in
@@ -1134,6 +1171,969 @@ fn check_lockfile(root: &Path, allowed: &[String], report: &mut Report) {
             ));
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LockPackage {
+    name: String,
+    version: String,
+    source: Option<String>,
+    checksum: Option<String>,
+}
+
+/// Cargo.lock is TOML, but this deliberately handles only its package-array
+/// shape. The checker fails closed if a package omits a name or version rather
+/// than silently accepting a future lockfile grammar change.
+fn parse_lock_packages(text: &str) -> Result<Vec<LockPackage>, String> {
+    let mut packages = Vec::new();
+    let mut current: Option<LockPackage> = None;
+
+    for (line_number, raw_line) in text.lines().enumerate() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line == "[[package]]" {
+            if let Some(package) = current.take() {
+                if package.name.is_empty() || package.version.is_empty() {
+                    return Err(format!(
+                        "Cargo.lock package before line {} lacks a name or version",
+                        line_number + 1
+                    ));
+                }
+                packages.push(package);
+            }
+            current = Some(LockPackage {
+                name: String::new(),
+                version: String::new(),
+                source: None,
+                checksum: None,
+            });
+            continue;
+        }
+        let Some(package) = current.as_mut() else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(value) = extract_string_value(value) else {
+            continue;
+        };
+        match key.trim() {
+            "name" => package.name = value,
+            "version" => package.version = value,
+            "source" => package.source = Some(value),
+            "checksum" => package.checksum = Some(value),
+            _ => {}
+        }
+    }
+    if let Some(package) = current {
+        if package.name.is_empty() || package.version.is_empty() {
+            return Err("Cargo.lock final package lacks a name or version".to_owned());
+        }
+        packages.push(package);
+    }
+    Ok(packages)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConstellationState {
+    Dormant,
+    Candidate,
+    Admitted,
+}
+
+impl ConstellationState {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "dormant" => Ok(Self::Dormant),
+            "candidate" => Ok(Self::Candidate),
+            "admitted" => Ok(Self::Admitted),
+            other => Err(format!(
+                "constellation.lock state `{other}` is invalid; expected dormant, candidate, or admitted"
+            )),
+        }
+    }
+}
+
+const CONSTELLATION_COLUMNS: [&str; 15] = [
+    "package",
+    "source",
+    "version",
+    "revision",
+    "checksum",
+    "features",
+    "default_features",
+    "public_contract_fingerprint",
+    "target_support",
+    "license",
+    "build_scripts",
+    "proc_macros",
+    "transitive_unsafe_digest",
+    "evidence_class",
+    "removal_update_path",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConstellationEntry {
+    package: String,
+    source: String,
+    version: String,
+    revision: String,
+    checksum: String,
+    features: BTreeSet<String>,
+    default_features: String,
+    public_contract_fingerprint: String,
+    target_support: String,
+    license: String,
+    build_scripts: BTreeSet<String>,
+    proc_macros: BTreeSet<String>,
+    transitive_unsafe_digest: String,
+    evidence_class: String,
+    removal_update_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConstellationLock {
+    state: ConstellationState,
+    entries: BTreeMap<String, ConstellationEntry>,
+}
+
+fn parse_constellation_lock(text: &str) -> Result<ConstellationLock, String> {
+    let meaningful = text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>();
+    if meaningful.is_empty() {
+        return Err("constellation.lock is empty".to_owned());
+    }
+    if !text
+        .lines()
+        .any(|line| line.trim() == CONSTELLATION_MARKER)
+    {
+        return Err(format!(
+            "constellation.lock marker mismatch; expected `{CONSTELLATION_MARKER}`"
+        ));
+    }
+    if meaningful.len() < 2 {
+        return Err("constellation.lock lacks state or header".to_owned());
+    }
+    let (state_line, state) = meaningful[0];
+    let Some((key, value)) = state.split_once('\t') else {
+        return Err(format!(
+            "constellation.lock:{} must declare `state<TAB>...`",
+            state_line + 1
+        ));
+    };
+    if key != "state" {
+        return Err(format!(
+            "constellation.lock:{} must start with `state`",
+            state_line + 1
+        ));
+    }
+    let state = ConstellationState::parse(value)?;
+    let (header_line, header) = meaningful[1];
+    let observed = header.split('\t').collect::<Vec<_>>();
+    if observed != CONSTELLATION_COLUMNS {
+        return Err(format!(
+            "constellation.lock:{} header mismatch: expected {:?}, observed {:?}",
+            header_line + 1,
+            CONSTELLATION_COLUMNS,
+            observed
+        ));
+    }
+
+    let mut entries = BTreeMap::new();
+    for (line_number, line) in meaningful.into_iter().skip(2) {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != CONSTELLATION_COLUMNS.len() {
+            return Err(format!(
+                "constellation.lock:{} column count mismatch: expected {}, observed {}",
+                line_number + 1,
+                CONSTELLATION_COLUMNS.len(),
+                fields.len()
+            ));
+        }
+        for (index, value) in fields.iter().enumerate() {
+            if value.trim().is_empty() {
+                return Err(format!(
+                    "constellation.lock:{} empty `{}` evidence field",
+                    line_number + 1,
+                    CONSTELLATION_COLUMNS[index]
+                ));
+            }
+        }
+        let entry = ConstellationEntry {
+            package: fields[0].to_owned(),
+            source: fields[1].to_owned(),
+            version: fields[2].to_owned(),
+            revision: fields[3].to_owned(),
+            checksum: fields[4].to_owned(),
+            features: parse_canonical_list(fields[5], "features", line_number + 1)?,
+            default_features: fields[6].to_owned(),
+            public_contract_fingerprint: fields[7].to_owned(),
+            target_support: fields[8].to_owned(),
+            license: fields[9].to_owned(),
+            build_scripts: parse_canonical_list(fields[10], "build_scripts", line_number + 1)?,
+            proc_macros: parse_canonical_list(fields[11], "proc_macros", line_number + 1)?,
+            transitive_unsafe_digest: fields[12].to_owned(),
+            evidence_class: fields[13].to_owned(),
+            removal_update_path: fields[14].to_owned(),
+        };
+        if entries.insert(entry.package.clone(), entry).is_some() {
+            return Err(format!(
+                "constellation.lock:{} duplicates a package row",
+                line_number + 1
+            ));
+        }
+    }
+    Ok(ConstellationLock { state, entries })
+}
+
+fn parse_canonical_list(
+    value: &str,
+    field: &str,
+    line_number: usize,
+) -> Result<BTreeSet<String>, String> {
+    if value == "none" {
+        return Ok(BTreeSet::new());
+    }
+    let values = value.split(',').map(str::to_owned).collect::<Vec<_>>();
+    if values.iter().any(|item| item.is_empty()) {
+        return Err(format!(
+            "constellation.lock:{line_number} `{field}` has an empty list item"
+        ));
+    }
+    let canonical = values.iter().collect::<BTreeSet<_>>();
+    if canonical.len() != values.len()
+        || values.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(format!(
+            "constellation.lock:{line_number} `{field}` must be sorted, unique, comma-separated values or `none`"
+        ));
+    }
+    Ok(values.into_iter().collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceDependency {
+    package: String,
+    manifest: String,
+    default_features: String,
+    declared_features: BTreeSet<String>,
+}
+
+/// Only manifests actually listed in the root workspace define the
+/// release-facing graph. This prevents an untracked sibling worktree or a
+/// checker fixture from turning the shared constitutional lane red before its
+/// owner has joined it to the workspace and resolved its lockfile.
+fn workspace_manifest_paths(root: &Path, report: &mut Report) -> Vec<PathBuf> {
+    let root_manifest = root.join("Cargo.toml");
+    let Ok(text) = fs::read_to_string(&root_manifest) else {
+        report.error("cannot read root Cargo.toml for workspace membership");
+        return Vec::new();
+    };
+    let mut members = extract_workspace_string_list(&text, "members");
+    if !members.iter().any(|member| member == "tools/registry-check") {
+        members.push("tools/registry-check".to_owned());
+    }
+    members.sort();
+    members.dedup();
+    members
+        .into_iter()
+        .map(|member| root.join(member).join("Cargo.toml"))
+        .filter(|path| {
+            if path.is_file() {
+                true
+            } else {
+                report.error(format!(
+                    "workspace member lacks Cargo.toml: {}",
+                    relative(root, path)
+                ));
+                false
+            }
+        })
+        .collect()
+}
+
+fn extract_workspace_string_list(text: &str, key: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut collecting = false;
+    let mut body = String::new();
+    for raw_line in text.lines() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line == "[workspace]" {
+            collecting = true;
+            continue;
+        }
+        if collecting && line.starts_with('[') {
+            break;
+        }
+        if !collecting {
+            continue;
+        }
+        let Some(value) = line.strip_prefix(key).and_then(|rest| rest.trim_start().strip_prefix('=')) else {
+            continue;
+        };
+        body.push_str(value);
+        if !value.contains(']') {
+            continue;
+        }
+        let Some(open) = body.find('[') else {
+            return result;
+        };
+        let Some(close) = body.rfind(']') else {
+            return result;
+        };
+        let values = &body[open + 1..close];
+        for item in values.split(',') {
+            if let Some(value) = extract_string_value(item) {
+                result.push(value);
+            }
+        }
+        return result;
+    }
+    result
+}
+
+fn workspace_dependencies(root: &Path, report: &mut Report) -> Vec<WorkspaceDependency> {
+    let mut dependencies = Vec::new();
+    for path in workspace_manifest_paths(root, report) {
+        let display = relative(root, &path);
+        let Ok(text) = fs::read_to_string(&path) else {
+            report.error(format!("cannot read workspace manifest {display}"));
+            continue;
+        };
+        dependencies.extend(parse_manifest_dependencies(&display, &text));
+    }
+    dependencies
+}
+
+fn parse_manifest_dependencies(display: &str, text: &str) -> Vec<WorkspaceDependency> {
+    let mut dependencies = Vec::new();
+    let mut in_dependencies = false;
+    for raw_line in text.lines() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            let section = &line[1..line.len() - 1];
+            in_dependencies = section == "dependencies" || section == "workspace.dependencies";
+            continue;
+        }
+        if !in_dependencies || line.is_empty() {
+            continue;
+        }
+        let Some((raw_name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let name = raw_name.trim().trim_matches('"');
+        if name.is_empty() {
+            continue;
+        }
+        let package = extract_inline_string_field(value, "package")
+            .unwrap_or_else(|| name.to_owned());
+        let default_features = if value.contains("default-features = false") {
+            "disabled"
+        } else {
+            "enabled"
+        };
+        dependencies.push(WorkspaceDependency {
+            package,
+            manifest: display.to_owned(),
+            default_features: default_features.to_owned(),
+            declared_features: extract_inline_string_list(value, "features"),
+        });
+    }
+    dependencies
+}
+
+fn extract_inline_string_list(value: &str, field: &str) -> BTreeSet<String> {
+    let Some(position) = value.find(field) else {
+        return BTreeSet::new();
+    };
+    let tail = &value[position + field.len()..];
+    let Some(after_equals) = tail.trim_start().strip_prefix('=') else {
+        return BTreeSet::new();
+    };
+    let Some(open) = after_equals.find('[') else {
+        return BTreeSet::new();
+    };
+    let Some(close) = after_equals[open + 1..].find(']') else {
+        return BTreeSet::new();
+    };
+    after_equals[open + 1..open + 1 + close]
+        .split(',')
+        .filter_map(extract_string_value)
+        .collect()
+}
+
+fn is_constellation_package(name: &str) -> bool {
+    name == "asupersync"
+        || name == "fsqlite"
+        || name == "frankensqlite"
+        || name.starts_with("franken-")
+        || name.starts_with("franken_")
+        || name.starts_with("fastapi")
+        || name.starts_with("sqlmodel")
+        || name.starts_with("frankentui")
+        || name.starts_with("ftui")
+}
+
+fn is_alternate_runtime(name: &str) -> bool {
+    matches!(
+        name,
+        "async-std" | "smol" | "glommio" | "monoio" | "executor-lite" | "futures-executor"
+    ) || name == "tokio"
+        || name.starts_with("tokio-")
+}
+
+fn is_forbidden_sqlmodel_backend(name: &str, features: &BTreeSet<String>) -> bool {
+    let forbidden_name = ["sqlite", "postgres", "mysql", "c-sqlite", "native"]
+        .iter()
+        .any(|needle| name.starts_with("sqlmodel") && name.contains(needle));
+    let forbidden_feature = features.iter().any(|feature| {
+        matches!(
+            feature.as_str(),
+            "sqlite" | "postgres" | "mysql" | "c-sqlite" | "native-sqlite"
+        )
+    });
+    forbidden_name || forbidden_feature
+}
+
+fn is_forbidden_ftui_surface(name: &str, features: &BTreeSet<String>) -> bool {
+    (name.starts_with("ftui") || name.starts_with("frankentui"))
+        && (name.contains("demo")
+            || name.contains("showcase")
+            || features
+                .iter()
+                .any(|feature| matches!(feature.as_str(), "demo" | "showcase")))
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct MetadataSnapshot {
+    feature_closures: BTreeMap<(String, String), BTreeSet<String>>,
+    build_scripts: BTreeSet<String>,
+    proc_macros: BTreeSet<String>,
+}
+
+fn cargo_metadata(root: &Path) -> Result<MetadataSnapshot, String> {
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = Command::new(cargo)
+        .args(["metadata", "--locked", "--offline", "--format-version=1"])
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("cannot execute cargo metadata: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata --locked --offline failed (status {}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|error| format!("cargo metadata emitted non-UTF-8 JSON: {error}"))?;
+    parse_cargo_metadata(&text)
+}
+
+/// Cargo metadata is JSON, but adding a general-purpose JSON dependency would
+/// contradict the checker's deliberately std-only dependency surface. These
+/// bounded extractors handle the three stable arrays this gate needs and reject
+/// malformed JSON rather than guessing.
+fn parse_cargo_metadata(text: &str) -> Result<MetadataSnapshot, String> {
+    let mut snapshot = MetadataSnapshot::default();
+    for package in json_array_objects(text, "packages")? {
+        let name = json_string_field(package, "name")
+            .ok_or_else(|| "cargo metadata package lacks name".to_owned())?;
+        for target in json_array_objects(package, "targets")? {
+            let kinds = json_string_array_field(target, "kind")?;
+            if kinds.contains("custom-build") {
+                snapshot.build_scripts.insert(name.clone());
+            }
+            if kinds.contains("proc-macro") {
+                snapshot.proc_macros.insert(name.clone());
+            }
+        }
+    }
+    for node in json_array_objects(text, "nodes")? {
+        let id = json_string_field(node, "id")
+            .ok_or_else(|| "cargo metadata resolve node lacks id".to_owned())?;
+        let Some((package, version)) = package_name_and_version_from_metadata_id(&id) else {
+            continue;
+        };
+        snapshot
+            .feature_closures
+            .insert((package, version), json_string_array_field(node, "features")?);
+    }
+    Ok(snapshot)
+}
+
+fn package_name_and_version_from_metadata_id(id: &str) -> Option<(String, String)> {
+    let (_, tail) = id.rsplit_once('#')?;
+    let (package, version) = tail.rsplit_once('@')?;
+    if package.is_empty() || version.is_empty() {
+        return None;
+    }
+    Some((package.to_owned(), version.to_owned()))
+}
+
+fn json_array_objects<'a>(text: &'a str, key: &str) -> Result<Vec<&'a str>, String> {
+    let needle = format!("\"{key}\"");
+    let Some(start) = text.find(&needle) else {
+        return Ok(Vec::new());
+    };
+    let after_key = &text[start + needle.len()..];
+    let Some(colon) = after_key.find(':') else {
+        return Err(format!("cargo metadata JSON key `{key}` lacks colon"));
+    };
+    let after_colon = after_key[colon + 1..].trim_start();
+    if !after_colon.starts_with('[') {
+        return Err(format!("cargo metadata JSON key `{key}` is not an array"));
+    }
+    let mut objects = Vec::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut object_start = None;
+    for (offset, character) in after_colon.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    object_start = Some(offset);
+                }
+                depth += 1;
+            }
+            '}' => {
+                if depth == 0 {
+                    return Err(format!("cargo metadata JSON key `{key}` has unmatched }}"));
+                }
+                depth -= 1;
+                if depth == 0 {
+                    let Some(object_start) = object_start.take() else {
+                        return Err(format!("cargo metadata JSON key `{key}` has no object start"));
+                    };
+                    objects.push(&after_colon[object_start..=offset]);
+                }
+            }
+            ']' if depth == 0 => return Ok(objects),
+            _ => {}
+        }
+    }
+    Err(format!("cargo metadata JSON key `{key}` has an unclosed array"))
+}
+
+fn json_string_field(text: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let start = text.find(&needle)? + needle.len();
+    let tail = text[start..].trim_start();
+    let tail = tail.strip_prefix(':')?.trim_start();
+    let quoted = tail.strip_prefix('"')?;
+    let mut output = String::new();
+    let mut escaped = false;
+    for character in quoted.chars() {
+        if escaped {
+            output.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            return Some(output);
+        } else {
+            output.push(character);
+        }
+    }
+    None
+}
+
+fn json_string_array_field(text: &str, key: &str) -> Result<BTreeSet<String>, String> {
+    let needle = format!("\"{key}\"");
+    let Some(start) = text.find(&needle) else {
+        return Ok(BTreeSet::new());
+    };
+    let tail = text[start + needle.len()..].trim_start();
+    let Some(tail) = tail.strip_prefix(':') else {
+        return Err(format!("cargo metadata JSON key `{key}` lacks colon"));
+    };
+    let tail = tail.trim_start();
+    let Some(tail) = tail.strip_prefix('[') else {
+        return Err(format!("cargo metadata JSON key `{key}` is not a string array"));
+    };
+    let Some(close) = tail.find(']') else {
+        return Err(format!("cargo metadata JSON key `{key}` has an unclosed array"));
+    };
+    let mut values = BTreeSet::new();
+    for raw in tail[..close].split(',') {
+        let value = raw.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let Some(value) = extract_string_value(value) else {
+            return Err(format!("cargo metadata JSON key `{key}` contains a non-string value"));
+        };
+        values.insert(value);
+    }
+    Ok(values)
+}
+
+fn check_constellation(root: &Path, report: &mut Report) {
+    let path = root.join("constellation.lock");
+    let Ok(text) = fs::read_to_string(&path) else {
+        report.error("cannot read constellation.lock");
+        return;
+    };
+    let constellation = match parse_constellation_lock(&text) {
+        Ok(value) => value,
+        Err(error) => {
+            report.error(error);
+            return;
+        }
+    };
+    let lock_text = match fs::read_to_string(root.join("Cargo.lock")) {
+        Ok(value) => value,
+        Err(error) => {
+            report.error(format!("cannot read Cargo.lock for constellation verification: {error}"));
+            return;
+        }
+    };
+    let packages = match parse_lock_packages(&lock_text) {
+        Ok(value) => value,
+        Err(error) => {
+            report.error(error);
+            return;
+        }
+    };
+    let dependencies = workspace_dependencies(root, report);
+    let selected = packages
+        .iter()
+        .filter(|package| is_constellation_package(&package.name))
+        .cloned()
+        .collect::<Vec<_>>();
+    let linked = dependencies
+        .iter()
+        .filter(|dependency| is_constellation_package(&dependency.package))
+        .collect::<Vec<_>>();
+
+    check_runtime_universe(&packages, report);
+    check_forbidden_constellation_surfaces(&packages, &dependencies, report);
+
+    if constellation.state == ConstellationState::Dormant {
+        if selected.is_empty() && linked.is_empty() && constellation.entries.is_empty() {
+            report
+                .notes
+                .push("constellation.lock is explicitly dormant: no workspace-resolved adopted sibling is linked".to_owned());
+        } else {
+            report.error(
+                "constellation.lock is dormant while an adopted dependency is linked; add exact candidate/admitted rows after upstream convergence"
+                    .to_owned(),
+            );
+        }
+        return;
+    }
+    if selected.is_empty() && linked.is_empty() {
+        report.error(
+            "constellation.lock has candidate/admitted rows but no workspace-resolved adopted dependency; use state=dormant"
+                .to_owned(),
+        );
+        return;
+    }
+    if constellation.state == ConstellationState::Candidate {
+        report.error(
+            "constellation.lock state=candidate is not a release admission; required sibling convergence remains blocked"
+                .to_owned(),
+        );
+    }
+
+    let metadata = match cargo_metadata(root) {
+        Ok(value) => value,
+        Err(error) => {
+            report.error(error);
+            return;
+        }
+    };
+    check_constellation_exact(
+        &constellation,
+        &packages,
+        &dependencies,
+        &metadata,
+        report,
+    );
+}
+
+fn check_runtime_universe(packages: &[LockPackage], report: &mut Report) {
+    let runtime_versions = packages
+        .iter()
+        .filter(|package| package.name == "asupersync")
+        .map(|package| package.version.clone())
+        .collect::<BTreeSet<_>>();
+    if runtime_versions.len() > 1 {
+        report.error(format!(
+            "multiple Asupersync 0.x type universes resolved in Cargo.lock: {:?}; exactly one version is permitted",
+            runtime_versions
+        ));
+    }
+    for package in packages {
+        if is_alternate_runtime(&package.name) {
+            report.error(format!(
+                "alternate async runtime `{}` resolved in Cargo.lock; Asupersync is the sole runtime",
+                package.name
+            ));
+        }
+    }
+}
+
+fn check_forbidden_constellation_surfaces(
+    packages: &[LockPackage],
+    dependencies: &[WorkspaceDependency],
+    report: &mut Report,
+) {
+    for package in packages {
+        if is_forbidden_sqlmodel_backend(&package.name, &BTreeSet::new()) {
+            report.error(format!(
+                "forbidden sqlmodel backend `{}` resolved in Cargo.lock; only the FrankenSQLite projection closure is admissible",
+                package.name
+            ));
+        }
+        if is_forbidden_ftui_surface(&package.name, &BTreeSet::new()) {
+            report.error(format!(
+                "forbidden ftui demo/showcase package `{}` resolved in Cargo.lock",
+                package.name
+            ));
+        }
+    }
+    for dependency in dependencies {
+        if is_forbidden_sqlmodel_backend(&dependency.package, &dependency.declared_features) {
+            report.error(format!(
+                "forbidden sqlmodel backend feature closure for `{}` in {}",
+                dependency.package, dependency.manifest
+            ));
+        }
+        if is_forbidden_ftui_surface(&dependency.package, &dependency.declared_features) {
+            report.error(format!(
+                "forbidden ftui demo/showcase feature closure for `{}` in {}",
+                dependency.package, dependency.manifest
+            ));
+        }
+    }
+}
+
+fn check_constellation_exact(
+    constellation: &ConstellationLock,
+    packages: &[LockPackage],
+    dependencies: &[WorkspaceDependency],
+    metadata: &MetadataSnapshot,
+    report: &mut Report,
+) {
+    let selected = packages
+        .iter()
+        .filter(|package| is_constellation_package(&package.name))
+        .collect::<Vec<_>>();
+    let selected_names = selected
+        .iter()
+        .map(|package| package.name.clone())
+        .collect::<BTreeSet<_>>();
+    for package in &selected_names {
+        if !constellation.entries.contains_key(package) {
+            report.error(format!(
+                "constellation.lock lacks a row for resolved adopted package `{package}`"
+            ));
+        }
+    }
+    for package in constellation.entries.keys() {
+        if !selected_names.contains(package) {
+            report.error(format!(
+                "constellation.lock records `{package}`, but Cargo.lock has no resolved adopted package by that name"
+            ));
+        }
+    }
+    for dependency in dependencies
+        .iter()
+        .filter(|dependency| is_constellation_package(&dependency.package))
+    {
+        if !selected_names.contains(&dependency.package) {
+            report.error(format!(
+                "adopted dependency `{}` in {} is absent from Cargo.lock; resolve the exact release source before admission",
+                dependency.package, dependency.manifest
+            ));
+        }
+    }
+
+    for package in selected {
+        let Some(entry) = constellation.entries.get(&package.name) else {
+            continue;
+        };
+        check_constellation_entry(entry, package, dependencies, metadata, report);
+    }
+    check_global_codegen_inventory(constellation, metadata, report);
+}
+
+fn check_constellation_entry(
+    entry: &ConstellationEntry,
+    package: &LockPackage,
+    dependencies: &[WorkspaceDependency],
+    metadata: &MetadataSnapshot,
+    report: &mut Report,
+) {
+    if entry.version != package.version {
+        report.error(format!(
+            "constellation version drift for `{}`: lock has `{}`, constellation records `{}`",
+            package.name, package.version, entry.version
+        ));
+    }
+    let source = package.source.as_deref().unwrap_or("workspace");
+    if entry.source != source {
+        report.error(format!(
+            "constellation source drift for `{}`: lock has `{source}`, constellation records `{}`",
+            package.name, entry.source
+        ));
+    }
+    if source.starts_with("path+") || source == "workspace" {
+        report.error(format!(
+            "adopted package `{}` has unpublished source `{source}` in Cargo.lock",
+            package.name
+        ));
+    }
+    if source.starts_with("git+") {
+        let revision = source.rsplit('#').next().unwrap_or("");
+        if !is_hex_digest(revision, 40) || entry.revision != revision {
+            report.error(format!(
+                "constellation revision drift for `{}`: Git source requires exact revision `{revision}`",
+                package.name
+            ));
+        }
+        if entry.checksum != "not_applicable" {
+            report.error(format!(
+                "constellation checksum for Git package `{}` must be `not_applicable`",
+                package.name
+            ));
+        }
+    } else if source.starts_with("registry+") {
+        if entry.revision != "not_applicable" {
+            report.error(format!(
+                "constellation revision for registry package `{}` must be `not_applicable`",
+                package.name
+            ));
+        }
+        let checksum = package.checksum.as_deref().unwrap_or("");
+        if !is_hex_digest(checksum, 64) || entry.checksum != checksum {
+            report.error(format!(
+                "constellation checksum drift for `{}`: registry source must match Cargo.lock exactly",
+                package.name
+            ));
+        }
+    } else {
+        report.error(format!(
+            "adopted package `{}` uses non-release source `{source}`",
+            package.name
+        ));
+    }
+
+    match metadata
+        .feature_closures
+        .get(&(package.name.clone(), package.version.clone()))
+    {
+        Some(actual) if actual != &entry.features => report.error(format!(
+            "constellation feature closure drift for `{}`: metadata {:?}, constellation {:?}",
+            package.name, actual, entry.features
+        )),
+        None => report.error(format!(
+            "cargo metadata lacks the resolved feature closure for `{}` {}",
+            package.name, package.version
+        )),
+        _ => {}
+    }
+    for dependency in dependencies
+        .iter()
+        .filter(|dependency| dependency.package == package.name)
+    {
+        if entry.default_features != dependency.default_features {
+            report.error(format!(
+                "constellation default-feature drift for `{}` in {}: manifest is {}, constellation is {}",
+                package.name,
+                dependency.manifest,
+                dependency.default_features,
+                entry.default_features
+            ));
+        }
+    }
+    check_entry_evidence(entry, package, report);
+}
+
+fn check_entry_evidence(entry: &ConstellationEntry, package: &LockPackage, report: &mut Report) {
+    if !matches!(entry.default_features.as_str(), "enabled" | "disabled" | "not_applicable") {
+        report.error(format!(
+            "constellation default_features for `{}` must be enabled, disabled, or not_applicable",
+            package.name
+        ));
+    }
+    if !is_hex_digest(&entry.public_contract_fingerprint, 64) {
+        report.error(format!(
+            "constellation public-contract fingerprint for `{}` must be a 64-hex digest",
+            package.name
+        ));
+    }
+    if entry.target_support == "unknown" || entry.target_support == "missing" {
+        report.error(format!(
+            "constellation target-support evidence is missing for `{}`",
+            package.name
+        ));
+    }
+    if entry.license == "unknown" || entry.license == "missing" {
+        report.error(format!(
+            "constellation license evidence is missing for `{}`",
+            package.name
+        ));
+    }
+    if !is_hex_digest(&entry.transitive_unsafe_digest, 64) {
+        report.error(format!(
+            "constellation transitive-unsafe evidence for `{}` must be a 64-hex inventory digest",
+            package.name
+        ));
+    }
+    if !matches!(entry.evidence_class.as_str(), "reviewed" | "admitted") {
+        report.error(format!(
+            "constellation evidence_class for `{}` must be reviewed or admitted",
+            package.name
+        ));
+    }
+    if entry.removal_update_path == "missing" || entry.removal_update_path == "unknown" {
+        report.error(format!(
+            "constellation removal/update path is missing for `{}`",
+            package.name
+        ));
+    }
+}
+
+fn check_global_codegen_inventory(
+    constellation: &ConstellationLock,
+    metadata: &MetadataSnapshot,
+    report: &mut Report,
+) {
+    for entry in constellation.entries.values() {
+        if entry.build_scripts != metadata.build_scripts {
+            report.error(format!(
+                "constellation build-script inventory drift for `{}`: metadata {:?}, constellation {:?}",
+                entry.package, metadata.build_scripts, entry.build_scripts
+            ));
+        }
+        if entry.proc_macros != metadata.proc_macros {
+            report.error(format!(
+                "constellation proc-macro inventory drift for `{}`: metadata {:?}, constellation {:?}",
+                entry.package, metadata.proc_macros, entry.proc_macros
+            ));
+        }
+    }
+}
+
+fn is_hex_digest(value: &str, length: usize) -> bool {
+    value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn load_allowed_dependency_patterns(root: &Path, report: &mut Report) -> Vec<String> {
