@@ -30,6 +30,30 @@ pub enum PublicationVerdict {
     Published(Box<CanonicalBatchReceipt>),
     /// The head moved first. Nothing this candidate staged is referenced.
     Lost(LostCandidate),
+    /// At least one transaction was ALREADY terminal before anything was
+    /// attempted, so no conditional replacement was made.
+    ///
+    /// Established by walking the authenticated decision stream from the
+    /// current head, bound to the same version token the publication would
+    /// have conditioned on. Never from an accelerator entry's presence or
+    /// absence: a missing accelerator row means "resolve authoritatively",
+    /// never "no decision exists", and that inference is the TOCTOU that
+    /// FG-007b records.
+    ///
+    /// This is NOT [`LostCandidate::Superseded`], and the difference is not
+    /// cosmetic even though the payloads match. `Lost` means the head moved
+    /// and this batch's chosen positions are stale, so everything must be
+    /// replanned. `AlreadyDecided` means the head did NOT move: nothing was
+    /// staged as canonical, the basis is still current, and only the named
+    /// transactions are settled. Reporting this as a lost race would tell a
+    /// caller to discard positions that are still valid.
+    ///
+    /// Re-deciding any named transaction would violate the
+    /// one-terminal-decision rule, so those must never be retried.
+    AlreadyDecided {
+        /// The transactions that are already terminal, with their outcomes.
+        decided: Vec<(TxId, TerminalOutcome)>,
+    },
 }
 
 /// Evidence that one decision batch became canonical.

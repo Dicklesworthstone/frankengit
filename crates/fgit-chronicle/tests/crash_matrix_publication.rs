@@ -497,6 +497,12 @@ fn an_interrupted_publication_resumes_without_deciding_twice() {
         PublicationVerdict::Published(_) => {
             panic!("a stale token cannot publish, and this one is stale")
         }
+        PublicationVerdict::AlreadyDecided { .. } => panic!(
+            "this retry presents a STALE token, so the head has already moved: the \
+             answer is a lost race carrying the superseded decisions, not a \
+             pre-CAS AlreadyDecided. Reporting it as AlreadyDecided would tell the \
+             caller its basis is still current when the winner has consumed it"
+        ),
     }
     assert_eq!(
         current_head(&store).decision_tail_id,
