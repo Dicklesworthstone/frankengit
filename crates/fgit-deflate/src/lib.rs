@@ -603,10 +603,12 @@ impl HuffmanTable {
         if available != 0 {
             let single_one_bit_symbol = non_zero == 1 && counts[1] == 1;
             let is_permitted = match policy {
-                HuffmanSetPolicy::Complete => false,
+                // Both arms refuse, for distinct reasons: `Complete` never permits an
+                // incomplete set at all, while `DistanceMayBeEmpty` only tolerates an
+                // EMPTY distance set and this branch is reached when `available != 0`.
+                HuffmanSetPolicy::Complete | HuffmanSetPolicy::DistanceMayBeEmpty => false,
                 HuffmanSetPolicy::LiteralLengthMayUseSingleBitCode
                 | HuffmanSetPolicy::DistanceMayUseSingleBitCode => single_one_bit_symbol,
-                HuffmanSetPolicy::DistanceMayBeEmpty => false,
             };
             if !is_permitted {
                 return Err(InflateRefusal::IncompleteHuffmanSet);
