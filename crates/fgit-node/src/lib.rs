@@ -1280,8 +1280,11 @@ mod tests {
     use std::convert::Infallible;
     use std::fs;
     use std::io::{Cursor, Read};
+    use std::net::{Shutdown, TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::Duration;
 
     use fgit_authority::HeadRead;
     use fgit_types::{RepositoryId, TenantId};
@@ -1292,7 +1295,8 @@ mod tests {
 
     use super::{
         GitDaemonServeError, GitDaemonTransportRefusal, NodeConfig, NodeInitialization,
-        NodeRefusal, OneNode, parse_git_daemon_request, serve_git_daemon_upload_pack,
+        NodeRefusal, OneNode, parse_git_daemon_request, serve_git_daemon_tcp_once,
+        serve_git_daemon_upload_pack,
     };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -1527,6 +1531,61 @@ mod tests {
                 GitDaemonTransportRefusal::IncompleteNegotiation
             ))
         ));
+    }
+
+    #[test]
+    fn git_daemon_tcp_once_signals_eof_after_the_raw_pack_payload() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
+        let address = listener
+            .local_addr()
+            .expect("listener address is available");
+        let repository = FixtureRepository::single_main_ref();
+        let server = thread::spawn(move || {
+            serve_git_daemon_tcp_once(
+                &listener,
+                &repository,
+                Capabilities::default(),
+                WireLimits::default(),
+                |_request, _pack_request| -> Result<FixturePack, Infallible> {
+                    Ok(FixturePack {
+                        bytes: Some(b"PACK\0tcp".to_vec()),
+                    })
+                },
+            )
+        });
+
+        let mut client = TcpStream::connect(address).expect("loopback client connects");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("client read timeout configures");
+        let want = "1111111111111111111111111111111111111111";
+        let mut request = daemon_greeting(b"git-upload-pack /demo.git\0host=loopback\0");
+        request.extend(
+            encode_packets(
+                &[
+                    Packet::Data(format!("want {want}\n").into_bytes()),
+                    Packet::Flush,
+                    Packet::Data(b"done\n".to_vec()),
+                ],
+                &WireLimits::default(),
+            )
+            .expect("fixed TCP negotiation encodes"),
+        );
+        std::io::Write::write_all(&mut client, &request).expect("client request writes");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client closes request half after done");
+
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .expect("server response reaches write-half EOF");
+        let receipt = server
+            .join()
+            .expect("server thread joins")
+            .expect("server accepts the complete V0 request");
+        assert_eq!(receipt.request().repository_path().as_bytes(), b"/demo.git");
+        assert!(response.ends_with(b"PACK\0tcp"));
     }
 
     #[test]
