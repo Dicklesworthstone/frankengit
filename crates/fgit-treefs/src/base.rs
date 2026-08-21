@@ -317,6 +317,24 @@ impl<A: GitHashAlgorithm> BaseView<A> {
         Ok(bytes)
     }
 
+    /// Refuses a capability minted for a different repository.
+    ///
+    /// Both this view and the capability carry a `RepositoryId`, and
+    /// `CapabilityRefusal::RepositoryMismatch` exists for the mismatch, but
+    /// nothing compared them: a capability for repository A authorised every
+    /// read and write against repository B. A capability names the repository it
+    /// is for, and a scope that is not checked is not a scope.
+    ///
+    /// Checked before anything else, and before any source read, so a
+    /// cross-repository probe cannot even learn whether a path exists.
+    fn check_repository(&self, capability: &TreeCapability) -> Result<(), BaseError> {
+        if capability.repository_id() == self.repository_id {
+            Ok(())
+        } else {
+            Err(BaseError::Capability(CapabilityRefusal::RepositoryMismatch))
+        }
+    }
+
     /// Resolves one path to its base entry, walking only the trees on the way.
     ///
     /// The walk refuses to pass through a symlink. A repository symlink is data
@@ -330,6 +348,8 @@ impl<A: GitHashAlgorithm> BaseView<A> {
         path: &TreePath,
         now: u64,
     ) -> Result<BaseEntry<A>, BaseError> {
+        self.check_repository(capability)?;
+
         let mut tree_oid = self.base_tree_oid;
         let mut walked: Option<TreePath> = None;
 
@@ -411,6 +431,11 @@ impl<A: GitHashAlgorithm> BaseView<A> {
         directory: Option<&TreePath>,
         now: u64,
     ) -> Result<DirectoryListing<A>, BaseError> {
+        // Above the match: the Some(path) arm delegates to resolve, which checks
+        // for itself, but the root arm does not, and the root listing is exactly
+        // where an unchecked capability would be most useful to an attacker.
+        self.check_repository(capability)?;
+
         let (tree_oid, scope) = match directory {
             None => (self.base_tree_oid, None),
             Some(path) => match self.resolve(source, capability, path, now)? {
