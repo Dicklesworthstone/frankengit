@@ -1288,7 +1288,7 @@ mod tests {
 
     fn limits() -> SegmentLimits {
         SegmentLimits {
-            max_segment_bytes: 4096,
+            max_segment_bytes: 64 * 1024,
             max_records: 128,
             max_namespace_bytes: 16,
             max_object_identity_bytes: 32,
