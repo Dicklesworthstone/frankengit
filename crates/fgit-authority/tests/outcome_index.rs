@@ -924,3 +924,172 @@ fn the_publication_equivalence_corpus_is_not_vacuous() {
          with the sync surface would prove nothing: {labels:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The §5.2 property itself, under a crash at the publication
+// ---------------------------------------------------------------------------
+
+use fgit_authority::{
+    AuthorityOpKind, FaultDirective, FaultKind, FaultPlan, FaultPosition, FaultableAuthorityStore,
+    OpIndex,
+};
+
+/// The batch every crash case below publishes.
+fn crash_case_batch(head: &RepositoryAuthorityHeadBody) -> RepositoryDecisionBatchBody {
+    batch(head, 3, vec![committed(tx(0xC3), 3, 0x53)])
+}
+
+/// Find the operation index of the atomic publication, by running it.
+///
+/// Deliberately *located* rather than written down. A fault plan that hard-codes
+/// a global operation index is coupled to every unrelated operation the
+/// implementation happens to perform before the one it cares about, so an
+/// implementation change that adds a read silently moves the fault off its
+/// target and the campaign reports a publication it expected to interrupt but
+/// did not. Locating the index from the effect log asks the question the test
+/// actually means — "the operation that transitions the head" — and survives
+/// the sequence changing underneath it.
+fn locate_atomic_publication() -> OpIndex {
+    let (twin, head) = published_repository();
+    let token = current_token(&twin);
+    // Resets the operation counter, so the index is relative to this point and
+    // the real run below can reproduce it exactly.
+    twin.install_fault_plan(FaultPlan::default());
+    let batch_body = crash_case_batch(&head);
+    let next = successor_head(&head, batch_id_of(&batch_body), 3);
+    publish_decisions(&twin, &head_slot(), token, &batch_body, &next, tenant())
+        .expect("the unfaulted twin publishes");
+
+    twin.effect_log()
+        .records()
+        .iter()
+        .find(|record| record.op_kind == AuthorityOpKind::CompareExchangeHead)
+        .map(|record| record.at)
+        .expect("the publication reaches a head transition")
+}
+
+/// Whether the head has advanced past the state `published_repository` leaves.
+fn head_generation_now(store: &MemoryAuthorityStore) -> u64 {
+    let HeadRead::Present(receipt) = store.read_head(&head_slot()).expect("a readable head") else {
+        panic!("the repository must be published");
+    };
+    receipt.generation().get()
+}
+
+/// The §5.2 guarantee, stated as the observation it forbids.
+///
+/// "If a caller can observe the new head, the outcome records are necessarily
+/// observable." The old composition — head CAS, then a loop of accelerator puts
+/// — could not offer this: a crash between the two left a transaction
+/// canonically decided with no entry, and the next publisher read that absence
+/// as "undecided" and published a second terminal decision for the same sealed
+/// transaction.
+///
+/// This drives a crash *after* the publication effect applies, which is the
+/// worst case: the effect is real, the caller never learns it, and the
+/// accelerator is exactly where the old ordering would have left it empty.
+#[test]
+fn a_crash_at_the_publication_never_leaves_the_head_ahead_of_its_outcomes() {
+    let at = locate_atomic_publication();
+
+    let (store, head) = published_repository();
+    let token = current_token(&store);
+    store.install_fault_plan(FaultPlan::explicit(vec![
+        FaultDirective::new(
+            at,
+            FaultKind::Crash {
+                position: FaultPosition::AfterEffect,
+            },
+        )
+        .only_for(AuthorityOpKind::CompareExchangeHead),
+    ]));
+
+    let batch_body = crash_case_batch(&head);
+    let next = successor_head(&head, batch_id_of(&batch_body), 3);
+    let result = publish_decisions(&store, &head_slot(), token, &batch_body, &next, tenant());
+
+    assert!(
+        result.is_err(),
+        "a crash after the effect hides the outcome from the caller: {result:?}"
+    );
+    assert!(store.is_crashed(), "the planned crash must fire");
+    let fired = store
+        .fault_log()
+        .records()
+        .first()
+        .copied()
+        .expect("the planned crash is recorded");
+    assert!(
+        fired.effect_reached,
+        "this case is only meaningful if the crash lands AFTER the effect applied"
+    );
+
+    store.restart();
+
+    // The head advanced, because the effect applied before the crash.
+    assert_eq!(
+        head_generation_now(&store),
+        3,
+        "the publication effect applied, so the head must carry it"
+    );
+
+    // Therefore every terminal outcome in that batch must be observable. Under
+    // the old ordering this is precisely where the accelerator was empty.
+    let decided = indexed_outcome(&store, tenant(), repository(), tx(0xC3))
+        .expect("the accelerator is readable");
+    assert!(
+        matches!(decided, OutcomeLookup::Decided(_)),
+        "the head is canonical at generation 3, so its decisions must be \
+         observable — a head ahead of its outcomes is the §5.2 defect: {decided:?}"
+    );
+}
+
+/// A second, different decision after a lost publication must not be admitted.
+///
+/// This is the race the campaign named: publisher B's transition linearizes but
+/// its response is lost, so B cannot know it won. A second publisher then asks
+/// whether the transaction is decided. If it asks the accelerator it may read
+/// an absence and publish a second terminal decision; asking the authenticated
+/// stream, it cannot.
+#[test]
+fn a_lost_publication_response_still_refuses_a_second_terminal_decision() {
+    let at = locate_atomic_publication();
+
+    let (store, head) = published_repository();
+    let token = current_token(&store);
+    store.install_fault_plan(FaultPlan::explicit(vec![
+        FaultDirective::new(at, FaultKind::LoseResponse)
+            .only_for(AuthorityOpKind::CompareExchangeHead),
+    ]));
+
+    let batch_body = crash_case_batch(&head);
+    let next = successor_head(&head, batch_id_of(&batch_body), 3);
+    let lost = publish_decisions(&store, &head_slot(), token, &batch_body, &next, tenant());
+    assert!(
+        lost.is_err(),
+        "a lost response must not be reported as a publication: {lost:?}"
+    );
+
+    // Clear the plan so the second publisher runs unfaulted.
+    store.install_fault_plan(FaultPlan::default());
+
+    // A second publisher, with a DIFFERENT decision for the same TxId, off the
+    // head the winner established.
+    let winner_head = successor_head(&head, batch_id_of(&batch_body), 3);
+    let second = batch(&winner_head, 4, vec![refused(tx(0xC3), 4, 0x5F)]);
+    let second_head = successor_head(&winner_head, batch_id_of(&second), 4);
+    let outcome = publish_decisions(
+        &store,
+        &head_slot(),
+        current_token(&store),
+        &second,
+        &second_head,
+        tenant(),
+    );
+
+    assert!(
+        matches!(outcome, Err(OutcomeFailure::AcceleratorConflict { .. })),
+        "one sealed transaction has at most one terminal decision, and the \
+         first one linearized even though its response was lost: {outcome:?}"
+    );
+}
