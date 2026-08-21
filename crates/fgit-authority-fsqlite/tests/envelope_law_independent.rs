@@ -62,7 +62,7 @@ const SPEC_MAX_AUTOCOMMIT_WRITERS: u32 = 9;
 /// The first count §3.5 refuses.
 const SPEC_FIRST_UNPROVEN_COUNT: u32 = 10;
 
-fn autocommit(writers: u32) -> WriterTopology {
+const fn autocommit(writers: u32) -> WriterTopology {
     WriterTopology {
         connections: writers,
         writers,
