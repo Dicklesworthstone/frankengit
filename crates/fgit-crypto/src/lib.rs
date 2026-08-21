@@ -150,7 +150,8 @@ pub use native::{
 };
 pub use registry::{
     ALGORITHM_REGISTRY, AlgorithmRow, AlgorithmUsage, CORPUS_RESERVED_CODE_POINTS, DOMAIN_REGISTRY,
-    DigestAlgorithm, DomainRow, IdentityDomain, InternalDigestAlgorithm, RowStatus,
+    DigestAlgorithm, DomainRow, IdentityDomain, InternalDigestAlgorithm, NonIdentityTag,
+    RESERVED_NON_IDENTITY_TAGS, RowStatus,
 };
 pub use schemes::{
     AEAD_SCHEME_REGISTRY, AeadSchemeRow, ED25519_CODE_POINT, SIGNATURE_SCHEME_REGISTRY,

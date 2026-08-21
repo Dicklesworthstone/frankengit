@@ -415,6 +415,17 @@ pub enum IdentityDomain {
     /// body itself; this row exists on the strength of the audit requirement,
     /// with FG-010a as the consumer building it.
     RestoreReport,
+    /// One authority-history body.
+    ///
+    /// `fgit-authority` already writes this tag at `src/history.rs` as its
+    /// `CanonicalBody::DOMAIN`, so the tag was live in the `frankengit/`
+    /// namespace before it was registered and [`crate::resolve_domain`] would
+    /// have refused it. Registered here rather than asking that crate to
+    /// invent a different string, because the tag it chose is the right one:
+    /// authority history is authority-local semantics, not a
+    /// protocol-normative body, which is why it is an `owned_row` with no
+    /// `fgit-types` derived identity pinning it.
+    AuthorityHistory,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -628,6 +639,12 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/restore-report/v1",
         Some("DUR-004"),
     ),
+    owned_row(
+        33,
+        IdentityDomain::AuthorityHistory,
+        "frankengit/authority-history/v1",
+        None,
+    ),
 ];
 
 const fn pinned_row(
@@ -666,6 +683,110 @@ const fn owned_row(
         status: RowStatus::Active,
     }
 }
+
+/// A `frankengit/` domain-separation tag that is deliberately *not* an
+/// identity domain.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct NonIdentityTag {
+    /// The literal tag string.
+    pub tag: &'static str,
+    /// The crate that writes it.
+    pub owner: &'static str,
+    /// Why it is not an identity domain.
+    pub reason: &'static str,
+}
+
+/// Tags allocated in the `frankengit/` namespace that compute no identity.
+///
+/// # Why this list exists rather than more [`DOMAIN_REGISTRY`] rows
+///
+/// Every row in [`DOMAIN_REGISTRY`] carries an [`InternalDigestAlgorithm`] and
+/// is reachable from [`crate::internal_object_id`]. A tag that is only a
+/// domain-separation prefix inside an encoding — never hashed, no body schema,
+/// no derived identity — cannot honestly take such a row: it would have to
+/// become an [`IdentityDomain`] variant, which would make it *constructible*
+/// into an identity computation that has no meaning for it. Registering it
+/// would put a claim in the table that the code does not honour.
+///
+/// But the `frankengit/` namespace is shared whether or not a tag is hashed.
+/// Two crates independently choosing one string for different purposes is the
+/// same class of bug as a fixture squatting a production code point, and this
+/// project has now hit that class twice. So the allocation is recorded, and
+/// the collision is made a build failure, without lying about what the tag is.
+///
+/// The rule this encodes: **the identity registry covers derived-identity
+/// domains only; this list covers the rest of the namespace.**
+pub const RESERVED_NON_IDENTITY_TAGS: &[NonIdentityTag] = &[
+    NonIdentityTag {
+        tag: "frankengit/model-trace/v1",
+        owner: "fgit-reference",
+        reason: "domain-separation prefix on the model trace encoding; fgit-reference computes no digests",
+    },
+    NonIdentityTag {
+        tag: "frankengit/model-roots/v1",
+        owner: "fgit-reference",
+        reason: "domain-separation prefix on the model roots encoding; fgit-reference computes no digests",
+    },
+];
+
+/// Byte equality for two `&str` in a `const` context.
+const fn tags_equal(left: &str, right: &str) -> bool {
+    let (left, right) = (left.as_bytes(), right.as_bytes());
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+// The guard that makes the list above worth having. A tag cannot be both an
+// identity domain and a non-identity separation constant, and discovering that
+// at runtime would mean two different bodies had already been written under
+// one string.
+const _: () = {
+    let mut reserved = 0;
+    while reserved < RESERVED_NON_IDENTITY_TAGS.len() {
+        let mut row = 0;
+        while row < DOMAIN_REGISTRY.len() {
+            assert!(
+                !tags_equal(
+                    DOMAIN_REGISTRY[row].tag,
+                    RESERVED_NON_IDENTITY_TAGS[reserved].tag
+                ),
+                "a frankengit/ tag is registered as both an identity domain and a non-identity separation constant"
+            );
+            row += 1;
+        }
+        reserved += 1;
+    }
+};
+
+// Two entries in the non-identity list must not collide with each other
+// either; the list is an allocation record, and a duplicate would mean two
+// owners believe they hold the same string.
+const _: () = {
+    let mut outer = 0;
+    while outer < RESERVED_NON_IDENTITY_TAGS.len() {
+        let mut inner = outer + 1;
+        while inner < RESERVED_NON_IDENTITY_TAGS.len() {
+            assert!(
+                !tags_equal(
+                    RESERVED_NON_IDENTITY_TAGS[outer].tag,
+                    RESERVED_NON_IDENTITY_TAGS[inner].tag
+                ),
+                "two owners are recorded as holding the same frankengit/ tag"
+            );
+            inner += 1;
+        }
+        outer += 1;
+    }
+};
 
 /// The algorithm registry, in code-point order.
 pub const ALGORITHM_REGISTRY: &[AlgorithmRow] = &[
@@ -744,6 +865,7 @@ impl IdentityDomain {
         Self::SignedEnvelope,
         Self::KeyLifecycleReceipt,
         Self::RestoreReport,
+        Self::AuthorityHistory,
     ];
 
     /// Position of this domain in [`DOMAIN_REGISTRY`].

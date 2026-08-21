@@ -6,10 +6,11 @@ use fgit_crypto::{
     DERIVED_ID_DOMAINS, DOMAIN_REGISTRY, DigestAlgorithm, DigestBytes, DomainTag,
     GIT_PAYLOAD_SCHEMA, GitHashError, GitObjectFormat, GitObjectKind, GitOid, IdentityDomain,
     InternalDigestAlgorithm, InternalIdentityError, InternalObjectId, NativeObjectIdentity,
-    RowStatus, SchemaFamily, SchemaId, Sha1, Sha256, UnregisteredDomainTag, git_object_id,
-    git_payload_body, git_payload_commitment, internal_digest_in_domain,
-    internal_digest_over_parts, internal_digest_value, internal_object_id,
-    internal_object_id_for_tag, parse_git_oid, resolve_domain, verify_internal_object_id,
+    RESERVED_NON_IDENTITY_TAGS, RowStatus, SchemaFamily, SchemaId, Sha1, Sha256,
+    UnregisteredDomainTag, git_object_id, git_payload_body, git_payload_commitment,
+    internal_digest_in_domain, internal_digest_over_parts, internal_digest_value,
+    internal_object_id, internal_object_id_for_tag, parse_git_oid, resolve_domain,
+    verify_internal_object_id,
 };
 
 const EMPTY_BLOB_SHA1: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
@@ -721,4 +722,83 @@ fn the_sealed_algorithm_set_admits_both_built_in_markers() {
     }
     assert_eq!(algorithm_of::<Sha1>(), DigestAlgorithm::Sha1);
     assert_eq!(algorithm_of::<Sha256>(), DigestAlgorithm::Sha256);
+}
+
+// --- the frankengit/ namespace boundary --------------------------------------
+
+#[test]
+fn the_authority_history_tag_resolves_to_its_own_domain() {
+    // fgit-authority writes this tag at src/history.rs as its CanonicalBody
+    // DOMAIN. Before row 33 it was live in the namespace and unregistered, so
+    // resolve_domain refused it. This is the test that says it is reachable.
+    let tag = DomainTag::from_static("frankengit/authority-history/v1");
+    assert_eq!(resolve_domain(tag), Ok(IdentityDomain::AuthorityHistory));
+    assert_eq!(
+        IdentityDomain::AuthorityHistory.tag(),
+        "frankengit/authority-history/v1"
+    );
+}
+
+#[test]
+fn a_non_identity_tag_is_refused_by_the_identity_resolver() {
+    // The whole point of RESERVED_NON_IDENTITY_TAGS: these strings are
+    // allocated in the frankengit/ namespace and must NOT be usable to compute
+    // an identity. Paired below with a registered tag that does resolve, so a
+    // resolver that refused everything could not pass this.
+    assert!(
+        !RESERVED_NON_IDENTITY_TAGS.is_empty(),
+        "an empty list would make every assertion below vacuous"
+    );
+    for reserved in RESERVED_NON_IDENTITY_TAGS {
+        let tag = DomainTag::try_new(reserved.tag.as_bytes())
+            .expect("a reserved tag is a canonical label");
+        assert_eq!(
+            resolve_domain(tag),
+            Err(UnregisteredDomainTag {
+                tag: reserved.tag.to_owned()
+            }),
+            "{} must not resolve to an identity domain",
+            reserved.tag
+        );
+    }
+    assert_eq!(
+        resolve_domain(DomainTag::from_static("frankengit/authority-history/v1")),
+        Ok(IdentityDomain::AuthorityHistory),
+        "a registered tag must still resolve"
+    );
+}
+
+#[test]
+fn no_reserved_tag_is_also_an_identity_domain() {
+    // The runtime mirror of the compile-time guard in registry.rs. Kept as a
+    // test as well so a reader who never triggers the const assertion still
+    // sees the invariant stated.
+    for reserved in RESERVED_NON_IDENTITY_TAGS {
+        for row in DOMAIN_REGISTRY {
+            assert_ne!(
+                row.tag, reserved.tag,
+                "{} is registered as both an identity domain and a separation constant",
+                reserved.tag
+            );
+        }
+    }
+}
+
+#[test]
+fn every_reserved_tag_records_an_owner_and_a_reason() {
+    // An allocation record with a blank owner is not a record; the next agent
+    // choosing a tag has to be able to see who holds this one and why it is
+    // not an identity domain.
+    for reserved in RESERVED_NON_IDENTITY_TAGS {
+        assert!(
+            reserved.tag.starts_with("frankengit/"),
+            "only the frankengit/ namespace is allocated here"
+        );
+        assert!(!reserved.owner.is_empty(), "{} has no owner", reserved.tag);
+        assert!(
+            !reserved.reason.is_empty(),
+            "{} has no reason",
+            reserved.tag
+        );
+    }
 }
