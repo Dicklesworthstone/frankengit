@@ -24,6 +24,15 @@
 //!   relationship with the database; it does not lose the operating system's
 //!   page cache or interrupt an `fsync`. Torn writes and lost sectors are a
 //!   different harness, and nothing here should be read as covering them.
+//! * **Every kill here FOLLOWS a completed operation.** `Crashable::kill` runs
+//!   after the call it is paired with has returned, so what is under test is
+//!   what a finished operation left behind, not an operation interrupted
+//!   mid-flight. That is a real property — durability across an unclean
+//!   shutdown, and old-complete-or-new-complete afterwards — and it is a
+//!   weaker one than "crash during the exchange", which a file called a crash
+//!   matrix invites a reader to assume. Interrupting an operation partway
+//!   needs fault injection, and `FsqliteAuthorityStore` has none: see
+//!   FG-005B-E2E-020.
 //! * **This says nothing about cancellation mid-operation.** Like the
 //!   conformance bridge, these tests block per operation, so a cancel cannot be
 //!   interleaved with an operation in flight. That gap is named in
@@ -283,7 +292,7 @@ fn a_body_reoffered_after_a_kill_is_an_identical_retry_not_a_second_write() {
 // ----------------------------------------------------- old- or new-completeness
 
 #[test]
-fn a_head_is_old_complete_or_new_complete_after_a_kill_at_the_exchange() {
+fn a_head_is_old_complete_or_new_complete_after_a_kill_following_the_exchange() {
     // THE CENTRAL ACCEPTANCE LINE. The head is either the predecessor or the
     // successor after an unclean shutdown, never a mixture of the two, and
     // never a generation that no writer ever published.
