@@ -34,11 +34,32 @@
 //!
 //! `native` for the engine; `async-api` because it is the only source of
 //! `AsyncConnection`, which §3.3 requires (a raw `Connection` is `!Send` and
-//! must stay on its owning worker). Every other feature is off, including
-//! `linux-asupersync-uring` (§3.2 makes io_uring a target-specific profile, not
-//! an unconditional dependency) and `mvcc` (an empty feature with no `cfg` site
-//! in the engine's source, so enabling it would imply a concurrency claim §3.5
-//! forbids extrapolating).
+//! must stay on its owning worker). `json`, `fts3`, `fts5`, `rtree`, `icu`,
+//! `misc`, `session`, `raptorq` and `wasm` are off, and so is `mvcc` — an empty
+//! feature with no `cfg` site in the engine's source, so enabling it would
+//! imply a concurrency claim §3.5 forbids extrapolating.
+//!
+//! # `linux-asupersync-uring` cannot actually be turned off, and saying so
+//!
+//! It is off in *our* dependency line and that is not sufficient.
+//! `fsqlite-vfs` defines `native = ["fsqlite-types/native",
+//! "linux-asupersync-uring"]`, so `fsqlite/native` reaches
+//! `fsqlite-vfs/linux-asupersync-uring` transitively; the resolved graph shows
+//! `fsqlite-vfs` with `FEATURES=[linux-asupersync-uring, native]`. At 0.3.7
+//! there is no way to have a native VFS without it.
+//!
+//! §3.2 is therefore half satisfied, and the halves are worth keeping apart:
+//!
+//! * the io-uring **crate** is declared
+//!   `[target.'cfg(target_os = "linux")'.dependencies]`, so it really is
+//!   target-specific — a non-Linux target resolves without it entirely;
+//! * the **feature** is not optional on Linux, so the portable fallback cannot
+//!   be exercised on Linux hardware, and any claim that both paths pass the
+//!   same contract suite would be false on this host.
+//!
+//! That bounds what may be claimed rather than blocking the dependency, and the
+//! crash and equivalence matrix must record that the Linux lane exercises the
+//! uring VFS only.
 //!
 //! # Where the runtime enters
 //!
