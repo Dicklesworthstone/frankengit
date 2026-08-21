@@ -57,8 +57,10 @@ pub mod html;
 pub mod limits;
 pub mod parse;
 pub mod profile;
+pub mod publication;
 pub mod render;
 pub mod span;
+pub mod unicode;
 
 mod block;
 mod builder;
@@ -76,5 +78,9 @@ pub use diagnostic::{Diagnostic, DiagnosticCode};
 pub use limits::{Limits, Refusal, RefusalKind, StructuralLimits};
 pub use parse::{ParseOutput, parse, parse_bytes, parse_with};
 pub use profile::{ParseProfile, ProfileFamily, ProfileId};
+pub use publication::{
+    AbortReceipt, CommitReceipt, OutputName, OutputRequest, OutputReservation, RollbackReceipt,
+    StagedOutput, stage, standard_requests,
+};
 pub use render::{RenderProfile, Rendered, render, subtree_text};
 pub use span::{LineCol, Span};

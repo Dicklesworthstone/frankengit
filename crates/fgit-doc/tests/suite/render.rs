@@ -467,3 +467,97 @@ fn plain_text_drops_decoration_but_keeps_container_prefixes() {
         "a list starting past one keeps its numbering"
     );
 }
+
+#[test]
+fn bidi_controls_are_rendered_inert_and_reported_once() {
+    // The trojan-source trick: a right-to-left override makes the rendered text
+    // read differently from the source it came from. Escaping the character
+    // would not help, because the browser still applies it.
+    let source = "a\u{202e}b\n";
+    let parsed = parse(source).expect("bidi text still parses");
+    let codes = parsed
+        .diagnostics()
+        .iter()
+        .filter(|entry| entry.code.tag() == "bidi_control_character")
+        .count();
+    assert_eq!(codes, 1, "exactly one diagnostic per document");
+
+    let document = parsed.into_document();
+    let html = render(&document, RenderProfile::HtmlSafe, Limits::DEFAULT)
+        .expect("html render succeeds")
+        .into_string();
+    assert_eq!(
+        html,
+        "<p>a<span data-fgit-doc-neutralised=\"bidi_control\">U+202E</span>b</p>\n"
+    );
+
+    let compact = render(&document, RenderProfile::CompactMachine, Limits::DEFAULT)
+        .expect("compact render succeeds")
+        .into_string();
+    assert_eq!(compact, "p a\\u{202e}b\n", "an agent view spells it out");
+
+    let json = render(&document, RenderProfile::ApiJson, Limits::DEFAULT)
+        .expect("json render succeeds")
+        .into_string();
+    assert!(json.contains("\\u202e"), "raw json stays legible: {json}");
+    assert!(
+        !json.contains('\u{202e}'),
+        "no raw override byte in the json payload"
+    );
+
+    // A document without one is untouched: the neutralisation is targeted, not
+    // a blanket rewrite of every non-ASCII character.
+    let clean = parse("a\u{e9}b\n")
+        .expect("accented text parses")
+        .into_document();
+    assert_eq!(
+        render(&clean, RenderProfile::HtmlSafe, Limits::DEFAULT)
+            .expect("html render succeeds")
+            .as_str(),
+        "<p>a\u{e9}b</p>\n"
+    );
+}
+
+#[test]
+fn a_bidi_control_inside_code_is_neutralised_too() {
+    // Trojan source lives in code, not prose, so the code paths must not be
+    // the ones that pass it through.
+    let span = html_of("`if \u{202e}x`\n");
+    assert!(
+        span.contains("data-fgit-doc-neutralised=\"bidi_control\""),
+        "code span: {span}"
+    );
+    let block = html_of("```\nif \u{202e}x\n```\n");
+    assert!(
+        block.contains("data-fgit-doc-neutralised=\"bidi_control\""),
+        "code block: {block}"
+    );
+    assert!(
+        !block.contains('\u{202e}'),
+        "no raw override survives into the rendered code block"
+    );
+}
+
+#[test]
+fn a_destination_carrying_a_bidi_control_is_refused_and_a_clean_one_is_not() {
+    let hostile = html_of("[click](https://exa\u{202e}mple.com)\n");
+    assert!(
+        !hostile.contains("href"),
+        "a spoofed destination must not become a target: {hostile}"
+    );
+    assert!(hostile.contains("data-fgit-doc-rejected=\"control_character\""));
+
+    let clean = html_of("[click](https://example.com)\n");
+    assert!(clean.contains("href=\"https://example.com\""));
+}
+
+#[test]
+fn a_bidi_control_in_link_text_is_inert_while_the_link_still_works() {
+    let html = html_of("[a\u{202e}b](https://example.com)\n");
+    assert!(html.contains("href=\"https://example.com\""), "{html}");
+    assert!(
+        html.contains("data-fgit-doc-neutralised=\"bidi_control\""),
+        "{html}"
+    );
+    assert!(!html.contains('\u{202e}'), "{html}");
+}

@@ -8,10 +8,10 @@
 use crate::ast::Document;
 use crate::block;
 use crate::builder::{Ctx, check_line_lengths, split_lines};
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::limits::{Refusal, RefusalKind};
 use crate::profile::ParseProfile;
-use crate::span::{CharIndex, LineTable};
+use crate::span::{CharIndex, LineTable, Span};
 
 /// A parsed document and the diagnostics raised while parsing it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +55,12 @@ pub fn parse_with(source: &str, profile: ParseProfile) -> Result<ParseOutput, Re
     let mut ctx = Ctx::new(source, &chars, profile.limits.structural);
     block::parse_blocks(&mut ctx, &lines, None, 1)?;
     let mut diagnostics = ctx.diagnostics;
+    if let Some(span) = first_bidi_run(source, &chars) {
+        diagnostics.push(Diagnostic {
+            code: DiagnosticCode::BidiControlCharacter,
+            span,
+        });
+    }
     diagnostics.sort_by_key(|entry| {
         (
             entry.span.byte_start(),
@@ -81,4 +87,23 @@ pub fn parse_bytes(bytes: &[u8], profile: ParseProfile) -> Result<ParseOutput, R
     let source = core::str::from_utf8(bytes)
         .map_err(|_| Refusal::precondition(RefusalKind::SourceNotUtf8))?;
     parse_with(source, profile)
+}
+
+/// The first run of bidirectional formatting characters in a source, if any.
+///
+/// One diagnostic per document is enough to say "this document contains them";
+/// every individual occurrence is marked by the rendering surfaces, so a
+/// per-occurrence diagnostic would add cost without adding information, and on
+/// a hostile input there could be millions of them.
+fn first_bidi_run(source: &str, chars: &CharIndex) -> Option<Span> {
+    let mut run: Option<(usize, usize)> = None;
+    for (offset, value) in source.char_indices() {
+        if crate::unicode::is_bidi_control(value) {
+            let end = offset + value.len_utf8();
+            run = Some(run.map_or((offset, end), |(start, _)| (start, end)));
+        } else if run.is_some() {
+            break;
+        }
+    }
+    run.map(|(start, end)| chars.span(start, end))
 }

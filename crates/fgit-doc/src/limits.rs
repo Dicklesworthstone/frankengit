@@ -149,6 +149,12 @@ pub enum RefusalKind {
     TooManyBatchInputs,
     /// A declared batch workload is not usable, for example a zero core cap.
     WorkloadUnusable,
+    /// An output name is empty, too long, or not safe for a host path.
+    OutputNameInvalid,
+    /// Two outputs of one publication requested the same name.
+    DuplicateOutputName,
+    /// A publication declares no outputs, or more than one reservation may hold.
+    TooManyOutputs,
 }
 
 impl RefusalKind {
@@ -168,6 +174,9 @@ impl RefusalKind {
             Self::UnknownNode => "unknown_node",
             Self::TooManyBatchInputs => "too_many_batch_inputs",
             Self::WorkloadUnusable => "workload_unusable",
+            Self::OutputNameInvalid => "output_name_invalid",
+            Self::DuplicateOutputName => "duplicate_output_name",
+            Self::TooManyOutputs => "too_many_outputs",
         }
     }
 }

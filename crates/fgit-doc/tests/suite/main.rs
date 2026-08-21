@@ -11,5 +11,6 @@ mod adversarial;
 mod anchors;
 mod batch;
 mod determinism;
+mod publication;
 mod render;
 mod spans;

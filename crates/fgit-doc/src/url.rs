@@ -95,7 +95,9 @@ const fn is_url_trim(value: char) -> bool {
 /// Characters that make a destination unusable as a navigable target.
 ///
 /// Control characters and raw whitespace are the classic scheme-smuggling
-/// vehicle, so they are rejected rather than stripped.
-const fn is_url_forbidden(value: char) -> bool {
-    value.is_control() || value.is_whitespace()
+/// vehicle, and a bidirectional override can make a destination read as a
+/// different host than the one it resolves to. All three are rejected rather
+/// than stripped, because a stripped destination is a different destination.
+fn is_url_forbidden(value: char) -> bool {
+    value.is_control() || value.is_whitespace() || crate::unicode::is_bidi_control(value)
 }

@@ -18,6 +18,11 @@ pub enum DiagnosticCode {
     RejectedDestination,
     /// A link reference definition was found; this profile does not resolve references.
     UnresolvedReference,
+    /// The document contains bidirectional formatting characters.
+    ///
+    /// Emitted once per document, spanning the first run. Every occurrence is
+    /// marked inertly by the rendering surfaces; see [`crate::unicode`].
+    BidiControlCharacter,
 }
 
 impl DiagnosticCode {
@@ -29,6 +34,7 @@ impl DiagnosticCode {
             Self::RawMarkupNeutralised => "raw_markup_neutralised",
             Self::RejectedDestination => "rejected_destination",
             Self::UnresolvedReference => "unresolved_reference",
+            Self::BidiControlCharacter => "bidi_control_character",
         }
     }
 }

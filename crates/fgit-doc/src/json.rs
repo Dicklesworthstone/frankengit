@@ -159,6 +159,15 @@ fn quote(text: &str) -> String {
                 out.push(hex_digit(code >> 4));
                 out.push(hex_digit(code));
             }
+            // Escaped rather than neutralised: the value a parser sees is
+            // unchanged, but the raw bytes an operator reads are legible.
+            value if crate::unicode::is_bidi_control(value) => {
+                let code = u32::from(value);
+                out.push_str("\\u");
+                for shift in (0..4).rev() {
+                    out.push(hex_digit(code >> (shift * 4)));
+                }
+            }
             value => out.push(value),
         }
     }

@@ -515,6 +515,9 @@ fn compact_leaf_line(
 }
 
 /// Escapes a compact-machine field so one node is always one line.
+///
+/// Bidirectional controls are spelled out rather than emitted, so the line an
+/// agent reads is the line the source actually contains.
 fn escape_field(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for value in text.chars() {
@@ -523,6 +526,14 @@ fn escape_field(text: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            _ if crate::unicode::is_bidi_control(value) => {
+                out.push_str("\\u{");
+                let code = u32::from(value);
+                for shift in (0..4).rev() {
+                    out.push(hex_digit(code >> (shift * 4)));
+                }
+                out.push('}');
+            }
             _ => out.push(value),
         }
     }

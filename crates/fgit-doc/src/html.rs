@@ -11,8 +11,11 @@ use crate::inline::decode_escapes;
 use crate::limits::Refusal;
 use crate::render::{Sink, escaped_char, literal, subtree_text, verbatim_lines};
 
-/// Marker attribute placed on every neutralised construct.
+/// Marker attribute placed on every construct the link policy refused.
 const REJECTED_ATTR: &str = "data-fgit-doc-rejected";
+
+/// Marker attribute placed on content that was rendered inert rather than refused.
+const NEUTRALISED_ATTR: &str = "data-fgit-doc-neutralised";
 
 /// Relationship applied to every emitted link, hostile-content default.
 const LINK_REL: &str = " rel=\"nofollow noopener noreferrer\"";
@@ -25,17 +28,63 @@ pub(crate) fn render_html(document: &Document, sink: &mut Sink) -> Result<(), Re
 ///
 /// One escaper covers both positions: quoting `"` and `'` as well as the three
 /// structural characters means a value can never break out of either context.
+///
+/// This is character escaping only. It does **not** neutralise bidirectional
+/// formatting characters, because what to do with those depends on whether the
+/// destination is character data or an attribute; the renderer decides that
+/// through [`escape_text`] and [`escape_attribute`].
 #[must_use]
 pub fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for value in text.chars() {
-        match value {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            _ => out.push(value),
+        push_escaped(&mut out, value);
+    }
+    out
+}
+
+fn push_escaped(out: &mut String, value: char) {
+    match value {
+        '&' => out.push_str("&amp;"),
+        '<' => out.push_str("&lt;"),
+        '>' => out.push_str("&gt;"),
+        '"' => out.push_str("&quot;"),
+        '\'' => out.push_str("&#x27;"),
+        _ => out.push(value),
+    }
+}
+
+/// Escapes character data and renders each bidirectional control inertly.
+///
+/// A right-to-left override in prose, in link text, or inside a code span makes
+/// the rendered text read differently from the source it came from. Emitting
+/// the character escaped would not help: the browser would still apply it. So
+/// each one becomes a marked span naming its code point, which is inert, is
+/// visible to a reviewer, and loses no information.
+fn escape_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for value in text.chars() {
+        if crate::unicode::is_bidi_control(value) {
+            out.push_str(&format!(
+                "<span {NEUTRALISED_ATTR}=\"bidi_control\">{}</span>",
+                crate::unicode::code_point_label(value)
+            ));
+        } else {
+            push_escaped(&mut out, value);
+        }
+    }
+    out
+}
+
+/// Escapes an attribute value, dropping bidirectional controls entirely.
+///
+/// An attribute cannot carry a marked span, and a bidirectional control has no
+/// legitimate role in a title or in alternative text, so it is removed. A
+/// destination carrying one never reaches here: the link policy refuses it.
+fn escape_attribute(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for value in text.chars() {
+        if !crate::unicode::is_bidi_control(value) {
+            push_escaped(&mut out, value);
         }
     }
     out
@@ -97,7 +146,7 @@ fn block(document: &Document, id: NodeId, sink: &mut Sink) -> Result<(), Refusal
 
 fn verbatim(document: &Document, id: NodeId, sink: &mut Sink) -> Result<(), Refusal> {
     for line in verbatim_lines(document, id) {
-        sink.write(&escape(line))?;
+        sink.write(&escape_text(line))?;
         sink.write("\n")?;
     }
     Ok(())
@@ -170,12 +219,12 @@ fn inline_node(document: &Document, id: NodeId, sink: &mut Sink) -> Result<(), R
         return Ok(());
     };
     match *node.kind() {
-        NodeKind::Text | NodeKind::VerbatimLine => sink.write(&escape(literal(document, id))),
+        NodeKind::Text | NodeKind::VerbatimLine => sink.write(&escape_text(literal(document, id))),
         NodeKind::RawHtmlInline => sink.write(&format!(
             "<span {REJECTED_ATTR}=\"raw_markup\">{}</span>",
-            escape(literal(document, id))
+            escape_text(literal(document, id))
         )),
-        NodeKind::Escaped => sink.write(&escape(escaped_char(document, id))),
+        NodeKind::Escaped => sink.write(&escape_text(escaped_char(document, id))),
         NodeKind::SoftBreak => sink.write("\n"),
         NodeKind::HardBreak => sink.write("<br />\n"),
         NodeKind::Emphasis => {
@@ -197,7 +246,7 @@ fn inline_node(document: &Document, id: NodeId, sink: &mut Sink) -> Result<(), R
                 ) {
                     sink.write(" ")?;
                 } else {
-                    sink.write(&escape(literal(document, *child)))?;
+                    sink.write(&escape_text(literal(document, *child)))?;
                 }
             }
             sink.write("</code>")
@@ -214,11 +263,11 @@ fn inline_node(document: &Document, id: NodeId, sink: &mut Sink) -> Result<(), R
                 };
                 sink.write(&format!(
                     "<a href=\"{}\"{LINK_REL}>{}</a>",
-                    escape(&target),
-                    escape(raw)
+                    escape_attribute(&target),
+                    escape_text(raw)
                 ))
             } else {
-                sink.write(&rejected(info.verdict, &escape(raw)))
+                sink.write(&rejected(info.verdict, &escape_text(raw)))
             }
         }
         _ => inlines(document, node.children(), sink),
@@ -238,10 +287,13 @@ fn anchor(document: &Document, id: NodeId, info: LinkInfo, sink: &mut Sink) -> R
         match title {
             Some(value) => sink.write(&format!(
                 "<a href=\"{}\" title=\"{}\"{LINK_REL}>",
-                escape(&target),
-                escape(&value)
+                escape_attribute(&target),
+                escape_attribute(&value)
             ))?,
-            None => sink.write(&format!("<a href=\"{}\"{LINK_REL}>", escape(&target)))?,
+            None => sink.write(&format!(
+                "<a href=\"{}\"{LINK_REL}>",
+                escape_attribute(&target)
+            ))?,
         }
         inlines(document, node.children(), sink)?;
         sink.write("</a>")
@@ -256,7 +308,7 @@ fn anchor(document: &Document, id: NodeId, info: LinkInfo, sink: &mut Sink) -> R
 }
 
 fn image(document: &Document, id: NodeId, info: LinkInfo, sink: &mut Sink) -> Result<(), Refusal> {
-    let alternative = escape(&subtree_text(document, id));
+    let alternative = escape_attribute(&subtree_text(document, id));
     if info.verdict.is_allowed() {
         let target = decode_escapes(document.text(info.destination).unwrap_or(""));
         let title = info
@@ -266,12 +318,12 @@ fn image(document: &Document, id: NodeId, info: LinkInfo, sink: &mut Sink) -> Re
         match title {
             Some(value) => sink.write(&format!(
                 "<img src=\"{}\" alt=\"{alternative}\" title=\"{}\" />",
-                escape(&target),
-                escape(&value)
+                escape_attribute(&target),
+                escape_attribute(&value)
             )),
             None => sink.write(&format!(
                 "<img src=\"{}\" alt=\"{alternative}\" />",
-                escape(&target)
+                escape_attribute(&target)
             )),
         }
     } else {
