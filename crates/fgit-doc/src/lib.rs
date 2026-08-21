@@ -28,6 +28,11 @@
 //! - **Safe by default.** Raw markup is captured and escaped, never passed
 //!   through; link destinations are policy-checked at parse time so every
 //!   surface makes the same decision; neutralisation is visible in the output.
+//! - **Anchors bind their presentation.** A review anchor records the source
+//!   object, the parse profile, and the comparison it was read under (see
+//!   [`basis`]). Remapping across presentations that are not comparable -- the
+//!   two sides of one diff, or a diff side against a standalone reading -- is
+//!   a refusal, never a silent reattachment to text the comment was not about.
 //!
 //! # What this crate does not do
 //!
@@ -51,6 +56,7 @@
 
 pub mod anchors;
 pub mod ast;
+pub mod basis;
 pub mod batch;
 pub mod diagnostic;
 pub mod html;
@@ -73,6 +79,7 @@ pub use anchors::{
     document_anchor_id,
 };
 pub use ast::{Document, Node, NodeId, NodeKind};
+pub use basis::{AnchorBasis, BasisId, DiffSide};
 pub use batch::{
     BatchInput, BatchPlan, BatchReceipt, InputOutcome, VarianceClass, WorkloadProfile,
     render_batch, worker_count,

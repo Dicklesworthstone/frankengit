@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 
 use fgit_doc::ast::{Document, NodeId};
 use fgit_doc::{
-    Anchor, Limits, RemapOutcome, RenderProfile, SourceObjectId, parse, render, subtree_text,
+    Anchor, AnchorBasis, DiffSide, Limits, RemapOutcome, RenderProfile, SourceObjectId, parse,
+    render, subtree_text,
 };
 
 fn goldens_root() -> PathBuf {
@@ -114,6 +115,7 @@ fn anchor_of(document: &Document, id: NodeId, blob: &[u8]) -> Anchor {
         document,
         id,
         SourceObjectId::new(blob).expect("source identity accepted"),
+        AnchorBasis::Whole,
         Limits::DEFAULT,
     )
     .expect("every block node can be anchored")
@@ -164,7 +166,7 @@ fn remap_table(base: &Document, edited: &Document) -> String {
     for id in block_nodes(base) {
         let anchor = anchor_of(base, id, b"base");
         let report = anchor
-            .remap(edited, Limits::DEFAULT)
+            .remap(edited, &AnchorBasis::Whole, Limits::DEFAULT)
             .expect("the edited sibling shares the profile");
         let resolved = report.resolved().map_or_else(
             || "-".to_owned(),
@@ -211,6 +213,38 @@ fn compare(relative: &str, actual: &str, found: &mut Vec<Mismatch>) {
         },
         actual_path: target,
     });
+}
+
+/// Every presentation pair, with the comparability decision the crate makes.
+///
+/// This is the whole basis policy as a table, so a change to it is a visible
+/// diff rather than a behavioural surprise. The e2e lane re-derives the same
+/// table from the rule stated in prose and compares, which is what makes this
+/// golden evidence rather than a recording of whatever the code happened to do.
+fn basis_matrix() -> String {
+    let presentations = [
+        ("whole", AnchorBasis::Whole),
+        ("old:base-1", basis_named(b"base-1", DiffSide::Old)),
+        ("new:base-1", basis_named(b"base-1", DiffSide::New)),
+        ("old:base-2", basis_named(b"base-2", DiffSide::Old)),
+        ("new:base-2", basis_named(b"base-2", DiffSide::New)),
+    ];
+    let mut out = String::from("anchored_under\tremapped_onto\tcomparable\tbasis_advanced\n");
+    for (left_name, left) in &presentations {
+        for (right_name, right) in &presentations {
+            let _ = writeln!(
+                out,
+                "{left_name}\t{right_name}\t{}\t{}",
+                left.is_comparable_to(right),
+                left.advances_to(right)
+            );
+        }
+    }
+    out
+}
+
+fn basis_named(basis: &[u8], side: DiffSide) -> AnchorBasis {
+    AnchorBasis::diff(basis, side).expect("basis identity accepted")
 }
 
 const fn profile_extension(profile: RenderProfile) -> &'static str {
@@ -262,6 +296,11 @@ fn every_surface_matches_its_golden() {
             );
         }
     }
+    compare(
+        "anchors/basis-comparability.tsv",
+        &basis_matrix(),
+        &mut found,
+    );
     assert!(
         found.is_empty(),
         "{} golden artifact(s) are missing or changed.\n{}\n\
@@ -359,7 +398,7 @@ fn anchors_survive_an_edit_that_does_not_touch_them() {
     for id in block_nodes(&base) {
         let anchor = anchor_of(&base, id, b"base");
         let report = anchor
-            .remap(&edited, Limits::DEFAULT)
+            .remap(&edited, &AnchorBasis::Whole, Limits::DEFAULT)
             .expect("the sibling shares the profile");
         assert!(
             report.outcome().is_attached(),
@@ -390,7 +429,7 @@ fn an_edit_to_the_anchored_text_itself_is_reported_as_outdated() {
     for id in block_nodes(&base) {
         let anchor = anchor_of(&base, id, b"base");
         let report = anchor
-            .remap(&edited, Limits::DEFAULT)
+            .remap(&edited, &AnchorBasis::Whole, Limits::DEFAULT)
             .expect("the sibling shares the profile");
         if report.outcome() == RemapOutcome::Outdated {
             outdated += 1;

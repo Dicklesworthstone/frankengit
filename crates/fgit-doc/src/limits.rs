@@ -143,6 +143,10 @@ pub enum RefusalKind {
     SourceIdTooLong,
     /// An anchor was remapped against a document parsed by another profile.
     ProfileMismatch,
+    /// An anchor was remapped onto a presentation it cannot be compared with.
+    BasisMismatch,
+    /// A comparison-basis identity is longer than this crate accepts.
+    BasisIdTooLong,
     /// A node identifier does not belong to the document it was used with.
     UnknownNode,
     /// A batch declares more inputs than the configured ceiling.
@@ -173,6 +177,8 @@ impl RefusalKind {
         Self::SourceNotUtf8,
         Self::SourceIdTooLong,
         Self::ProfileMismatch,
+        Self::BasisMismatch,
+        Self::BasisIdTooLong,
         Self::UnknownNode,
         Self::TooManyBatchInputs,
         Self::WorkloadUnusable,
@@ -194,6 +200,8 @@ impl RefusalKind {
             Self::SourceNotUtf8 => "source_not_utf8",
             Self::SourceIdTooLong => "source_id_too_long",
             Self::ProfileMismatch => "profile_mismatch",
+            Self::BasisMismatch => "basis_mismatch",
+            Self::BasisIdTooLong => "basis_id_too_long",
             Self::UnknownNode => "unknown_node",
             Self::TooManyBatchInputs => "too_many_batch_inputs",
             Self::WorkloadUnusable => "workload_unusable",

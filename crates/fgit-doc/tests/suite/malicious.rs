@@ -13,8 +13,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use fgit_doc::{
-    Limits, ParseProfile, RefusalKind, RenderProfile, StructuralLimits, parse, parse_bytes,
-    parse_with, render,
+    AnchorBasis, Limits, ParseProfile, RefusalKind, RenderProfile, StructuralLimits, parse,
+    parse_bytes, parse_with, render,
 };
 
 /// Text-surface output may not exceed this multiple of the input size.
@@ -521,6 +521,10 @@ fn trip(kind: RefusalKind) -> RefusalKind {
             .expect_err("tripped")
             .kind(),
         RefusalKind::ProfileMismatch => trip_profile_mismatch(),
+        RefusalKind::BasisMismatch => trip_basis_mismatch(),
+        RefusalKind::BasisIdTooLong => fgit_doc::BasisId::new(&[0_u8; 65])
+            .expect_err("tripped")
+            .kind(),
         RefusalKind::UnknownNode => trip_unknown_node(),
         RefusalKind::TooManyBatchInputs => fgit_doc::render_batch(
             &[fgit_doc::BatchInput::render("x\n"); 2],
@@ -559,12 +563,36 @@ fn trip(kind: RefusalKind) -> RefusalKind {
     }
 }
 
+/// An anchor taken on the removed side of a comparison, offered the added
+/// side. The text is identical on both sides, so nothing but the basis binding
+/// stands between this and a comment reattaching to code it was never about.
+fn trip_basis_mismatch() -> RefusalKind {
+    let document = parse("alpha\n").expect("parses").into_document();
+    let anchor = fgit_doc::Anchor::create(
+        &document,
+        document.roots()[0],
+        fgit_doc::SourceObjectId::new(b"a").expect("identity"),
+        AnchorBasis::diff(b"base-1", fgit_doc::DiffSide::Old).expect("basis accepted"),
+        Limits::DEFAULT,
+    )
+    .expect("anchor");
+    anchor
+        .remap(
+            &document,
+            &AnchorBasis::diff(b"base-1", fgit_doc::DiffSide::New).expect("basis accepted"),
+            Limits::DEFAULT,
+        )
+        .expect_err("tripped")
+        .kind()
+}
+
 fn trip_profile_mismatch() -> RefusalKind {
     let document = parse("alpha\n").expect("parses").into_document();
     let anchor = fgit_doc::Anchor::create(
         &document,
         document.roots()[0],
         fgit_doc::SourceObjectId::new(b"a").expect("identity"),
+        AnchorBasis::Whole,
         Limits::DEFAULT,
     )
     .expect("anchor");
@@ -581,7 +609,7 @@ fn trip_profile_mismatch() -> RefusalKind {
     .expect("parses")
     .into_document();
     anchor
-        .remap(&other, Limits::DEFAULT)
+        .remap(&other, &AnchorBasis::Whole, Limits::DEFAULT)
         .expect_err("tripped")
         .kind()
 }
@@ -598,6 +626,7 @@ fn trip_unknown_node() -> RefusalKind {
         &small,
         stranger,
         fgit_doc::SourceObjectId::new(b"a").expect("identity"),
+        AnchorBasis::Whole,
         Limits::DEFAULT,
     )
     .expect_err("tripped")

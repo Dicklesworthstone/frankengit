@@ -1,8 +1,8 @@
 //! Review anchors and their remap outcomes.
 //!
 //! An anchor binds a piece of reviewed text to the source object, parse
-//! profile, byte and codepoint span, structural path, and surrounding context
-//! that identified it. Re-resolving an anchor against a later version of the
+//! profile, comparison basis, byte and codepoint span, structural path, and
+//! surrounding context that identified it. Re-resolving an anchor against a later version of the
 //! same document produces one of four explicit outcomes and never silently
 //! attaches a comment to different text because a heuristic found something
 //! similar.
@@ -20,16 +20,17 @@
 //! domain-separated digest owned by the crypto crate to
 //! [`AnchorId::canonical_bytes`].
 //!
-//! The identity deliberately excludes the source object, the span, and the
-//! structural path, so an edit elsewhere in the document leaves it unchanged.
-//! Those bindings live on the [`Anchor`] itself, where remapping can compare
-//! them.
+//! The identity deliberately excludes the source object, the comparison basis,
+//! the span, and the structural path, so an edit elsewhere in the document
+//! leaves it unchanged. Those bindings live on the [`Anchor`] itself, where
+//! remapping can compare them.
 
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::identity::DocumentAnchorId;
 use fgit_types::numeric::CodecVersion;
 
 use crate::ast::{Document, NodeId};
+use crate::basis::AnchorBasis;
 use crate::limits::{Limits, Refusal, RefusalKind, as_u64, offset_u32, usize_of};
 use crate::profile::ProfileId;
 use crate::render::{hex_digit, normalize_text, subtree_text};
@@ -145,6 +146,7 @@ pub struct AnchorContext {
 pub struct Anchor {
     source: SourceObjectId,
     profile: ProfileId,
+    basis: AnchorBasis,
     span: Span,
     node: NodeId,
     context: AnchorContext,
@@ -190,6 +192,7 @@ pub struct RemapReport {
     original: Span,
     resolved: Option<(NodeId, Span)>,
     candidates: Vec<(NodeId, Span)>,
+    basis_advanced: bool,
 }
 
 impl RemapReport {
@@ -216,6 +219,17 @@ impl RemapReport {
     pub fn candidates(&self) -> &[(NodeId, Span)] {
         &self.candidates
     }
+
+    /// Whether the target was the same side of a comparison against a
+    /// different version than the anchor was created against.
+    ///
+    /// An outcome of [`RemapOutcome::Exact`] with this set means the reviewed
+    /// text survived the version change untouched; it does not mean nothing
+    /// about the comparison changed.
+    #[must_use]
+    pub const fn basis_advanced(&self) -> bool {
+        self.basis_advanced
+    }
 }
 
 /// The comparable identity of one node's anchored text.
@@ -233,6 +247,7 @@ impl Anchor {
         document: &Document,
         node: NodeId,
         source: SourceObjectId,
+        basis: AnchorBasis,
         limits: Limits,
     ) -> Result<Self, Refusal> {
         let Some(entry) = document.node(node) else {
@@ -261,6 +276,7 @@ impl Anchor {
         Ok(Self {
             source,
             profile: document.profile(),
+            basis,
             span: entry.span(),
             node,
             context,
@@ -284,6 +300,12 @@ impl Anchor {
     #[must_use]
     pub const fn profile(&self) -> ProfileId {
         self.profile
+    }
+
+    /// The presentation the anchor was created against.
+    #[must_use]
+    pub const fn basis(&self) -> &AnchorBasis {
+        &self.basis
     }
 
     /// The span the anchor was created against.
@@ -318,10 +340,27 @@ impl Anchor {
     ///    anchor was created: the candidate at the recorded occurrence index,
     ///    by the rule in step two;
     /// 5. otherwise: [`RemapOutcome::Ambiguous`], attaching nothing.
-    pub fn remap(&self, document: &Document, limits: Limits) -> Result<RemapReport, Refusal> {
+    ///
+    /// `basis` is the presentation `document` represents. A basis that is not
+    /// comparable with the one the anchor was created against is refused
+    /// before any candidate is considered, because the four outcomes above
+    /// describe one reviewed location moving within one presentation. The same
+    /// side of a comparison against a newer version IS comparable -- that is a
+    /// branch advancing -- and the report records it through
+    /// [`RemapReport::basis_advanced`].
+    pub fn remap(
+        &self,
+        document: &Document,
+        basis: &AnchorBasis,
+        limits: Limits,
+    ) -> Result<RemapReport, Refusal> {
         if document.profile() != self.profile {
             return Err(Refusal::precondition(RefusalKind::ProfileMismatch));
         }
+        if !self.basis.is_comparable_to(basis) {
+            return Err(Refusal::precondition(RefusalKind::BasisMismatch));
+        }
+        let advanced = self.basis.advances_to(basis);
         let budget = usize_of(limits.max_anchor_context_bytes);
         let key = ContentKey {
             kind: self.context.kind,
@@ -336,10 +375,11 @@ impl Anchor {
                 original: self.span,
                 resolved: None,
                 candidates: Vec::new(),
+                basis_advanced: advanced,
             });
         }
         if let [only] = candidates.as_slice() {
-            return Ok(self.attach(*only, &candidates, document));
+            return Ok(self.attach(*only, &candidates, document, advanced));
         }
         let contextual = candidates
             .iter()
@@ -351,18 +391,19 @@ impl Anchor {
             .copied()
             .collect::<Vec<_>>();
         if let [only] = contextual.as_slice() {
-            return Ok(self.attach(*only, &candidates, document));
+            return Ok(self.attach(*only, &candidates, document, advanced));
         }
         if offset_u32(candidates.len()) == self.context.occurrence_total
             && let Some(entry) = candidates.get(usize_of(self.context.occurrence))
         {
-            return Ok(self.attach(*entry, &candidates, document));
+            return Ok(self.attach(*entry, &candidates, document, advanced));
         }
         Ok(RemapReport {
             outcome: RemapOutcome::Ambiguous,
             original: self.span,
             resolved: None,
             candidates,
+            basis_advanced: advanced,
         })
     }
 
@@ -371,6 +412,7 @@ impl Anchor {
         entry: (NodeId, Span),
         candidates: &[(NodeId, Span)],
         document: &Document,
+        basis_advanced: bool,
     ) -> RemapReport {
         let (node, span) = entry;
         let same_place = span == self.span && document.path_of(node) == self.context.path;
@@ -383,6 +425,7 @@ impl Anchor {
             original: self.span,
             resolved: Some(entry),
             candidates: candidates.to_vec(),
+            basis_advanced,
         }
     }
 }

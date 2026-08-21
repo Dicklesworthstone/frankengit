@@ -2,8 +2,8 @@
 
 use crate::common::{corpus, parse_case, render_all};
 use fgit_doc::{
-    Anchor, BatchInput, Limits, ParseProfile, RenderProfile, SourceObjectId, VarianceClass,
-    WorkloadProfile, render_batch,
+    Anchor, AnchorBasis, BatchInput, Limits, ParseProfile, RenderProfile, SourceObjectId,
+    VarianceClass, WorkloadProfile, render_batch,
 };
 
 #[test]
@@ -62,6 +62,7 @@ fn anchor_identities_are_deterministic() {
                 &document,
                 *root,
                 SourceObjectId::new(b"blob").expect("identity accepted"),
+                AnchorBasis::Whole,
                 Limits::DEFAULT,
             )
             .expect("anchor created");
@@ -69,6 +70,7 @@ fn anchor_identities_are_deterministic() {
                 &document,
                 *root,
                 SourceObjectId::new(b"blob").expect("identity accepted"),
+                AnchorBasis::Whole,
                 Limits::DEFAULT,
             )
             .expect("anchor created");

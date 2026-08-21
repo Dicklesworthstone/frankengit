@@ -12,6 +12,7 @@ a normal test run; the suite only ever *compares* against these files.
 | `surfaces/NNN-name.<profile>.<ext>` | one render profile's exact output |
 | `shape/NNN-name.shape.tsv` | the AST: kind, depth, byte span, codepoint span, leaf literal |
 | `anchors/NNN-name.anchors.tsv` | every input the anchor identity is derived from |
+| `anchors/basis-comparability.tsv` | the whole comparison-basis policy as a decision table |
 | `remap/NNN-name.remap.tsv` | how each anchor resolves against the edited sibling |
 | `malicious/mNN-name.md` | a hostile input that must end bounded and inert, or refused |
 

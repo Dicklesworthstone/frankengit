@@ -3,8 +3,8 @@
 use crate::common::default_profile;
 use fgit_doc::ast::Document;
 use fgit_doc::{
-    Anchor, Limits, NodeId, RefusalKind, RemapOutcome, SourceObjectId, StructuralLimits, parse,
-    parse_with,
+    Anchor, AnchorBasis, BasisId, DiffSide, Limits, NodeId, RefusalKind, RemapOutcome,
+    SourceObjectId, StructuralLimits, parse, parse_with,
 };
 
 fn document_of(source: &str) -> Document {
@@ -33,6 +33,7 @@ fn anchor_on(document: &Document, text: &str, blob: &[u8]) -> Anchor {
         document,
         node,
         SourceObjectId::new(blob).expect("source identity accepted"),
+        AnchorBasis::Whole,
         Limits::DEFAULT,
     )
     .expect("anchor created")
@@ -98,7 +99,9 @@ fn an_edit_below_the_anchor_leaves_it_exact() {
     let before = document_of("alpha\n\nbeta\n\ngamma\n");
     let after = document_of("alpha\n\nbeta\n\ngamma rewritten entirely\n");
     let anchor = anchor_on(&before, "beta", b"blob-a");
-    let report = anchor.remap(&after, Limits::DEFAULT).expect("remap runs");
+    let report = anchor
+        .remap(&after, &AnchorBasis::Whole, Limits::DEFAULT)
+        .expect("remap runs");
     assert_eq!(report.outcome(), RemapOutcome::Exact);
     assert_eq!(report.original_span(), anchor.span());
     let (_, span) = report.resolved().expect("an exact outcome attaches");
@@ -110,7 +113,9 @@ fn an_edit_above_the_anchor_remaps_it_and_keeps_the_original_span() {
     let before = document_of("alpha\n\nbeta\n\ngamma\n");
     let after = document_of("inserted first\n\nalpha\n\nbeta\n\ngamma\n");
     let anchor = anchor_on(&before, "beta", b"blob-a");
-    let report = anchor.remap(&after, Limits::DEFAULT).expect("remap runs");
+    let report = anchor
+        .remap(&after, &AnchorBasis::Whole, Limits::DEFAULT)
+        .expect("remap runs");
     assert_eq!(report.outcome(), RemapOutcome::Remapped);
     assert_eq!(
         report.original_span(),
@@ -128,7 +133,9 @@ fn an_edit_inside_the_anchored_span_makes_it_outdated() {
     let before = document_of("alpha\n\nbeta\n\ngamma\n");
     let after = document_of("alpha\n\nbeta rewritten\n\ngamma\n");
     let anchor = anchor_on(&before, "beta", b"blob-a");
-    let report = anchor.remap(&after, Limits::DEFAULT).expect("remap runs");
+    let report = anchor
+        .remap(&after, &AnchorBasis::Whole, Limits::DEFAULT)
+        .expect("remap runs");
     assert_eq!(report.outcome(), RemapOutcome::Outdated);
     assert!(
         report.resolved().is_none(),
@@ -142,7 +149,9 @@ fn indistinguishable_duplicates_are_ambiguous_and_reattach_nothing() {
     let before = document_of("alpha\n\nbeta\n\ngamma\n");
     let after = document_of("alpha\n\nbeta\n\ngamma\n\nalpha\n\nbeta\n\ngamma\n");
     let anchor = anchor_on(&before, "beta", b"blob-a");
-    let report = anchor.remap(&after, Limits::DEFAULT).expect("remap runs");
+    let report = anchor
+        .remap(&after, &AnchorBasis::Whole, Limits::DEFAULT)
+        .expect("remap runs");
     assert_eq!(report.outcome(), RemapOutcome::Ambiguous);
     assert!(
         report.resolved().is_none(),
@@ -156,7 +165,9 @@ fn surrounding_context_disambiguates_duplicates_into_a_remap() {
     let before = document_of("alpha\n\nbeta\n\ngamma\n");
     let after = document_of("preface\n\nalpha\n\nbeta\n\ngamma\n\ndelta\n\nbeta\n\nepsilon\n");
     let anchor = anchor_on(&before, "beta", b"blob-a");
-    let report = anchor.remap(&after, Limits::DEFAULT).expect("remap runs");
+    let report = anchor
+        .remap(&after, &AnchorBasis::Whole, Limits::DEFAULT)
+        .expect("remap runs");
     assert_eq!(report.outcome(), RemapOutcome::Remapped);
     assert_eq!(report.candidates().len(), 2);
     let (node, _) = report.resolved().expect("context picked one candidate");
@@ -187,12 +198,15 @@ fn a_stable_duplicate_population_resolves_by_recorded_occurrence() {
         &before,
         node,
         SourceObjectId::new(b"blob-a").expect("identity accepted"),
+        AnchorBasis::Whole,
         Limits::DEFAULT,
     )
     .expect("anchor created");
     assert_eq!(anchor.context().occurrence, 1);
     assert_eq!(anchor.context().occurrence_total, 2);
-    let report = anchor.remap(&after, Limits::DEFAULT).expect("remap runs");
+    let report = anchor
+        .remap(&after, &AnchorBasis::Whole, Limits::DEFAULT)
+        .expect("remap runs");
     assert_eq!(report.outcome(), RemapOutcome::Remapped);
     let (resolved, _) = report.resolved().expect("occurrence picked one candidate");
     assert_eq!(after.path_of(resolved), vec![5]);
@@ -207,10 +221,13 @@ fn a_changed_duplicate_population_refuses_to_guess() {
         &before,
         node,
         SourceObjectId::new(b"blob-a").expect("identity accepted"),
+        AnchorBasis::Whole,
         Limits::DEFAULT,
     )
     .expect("anchor created");
-    let report = anchor.remap(&after, Limits::DEFAULT).expect("remap runs");
+    let report = anchor
+        .remap(&after, &AnchorBasis::Whole, Limits::DEFAULT)
+        .expect("remap runs");
     assert_eq!(report.outcome(), RemapOutcome::Ambiguous);
     assert!(report.resolved().is_none());
     assert_eq!(report.candidates().len(), 3);
@@ -222,7 +239,7 @@ fn remapping_across_profiles_is_refused_but_the_same_profile_proceeds() {
     let permitted = document_of(source);
     let anchor = anchor_on(&permitted, "beta", b"blob-a");
     let same_profile = anchor
-        .remap(&permitted, Limits::DEFAULT)
+        .remap(&permitted, &AnchorBasis::Whole, Limits::DEFAULT)
         .expect("the permitted case proceeds");
     assert_eq!(same_profile.outcome(), RemapOutcome::Exact);
 
@@ -235,7 +252,7 @@ fn remapping_across_profiles_is_refused_but_the_same_profile_proceeds() {
         .expect("the other profile parses")
         .into_document();
     let refusal = anchor
-        .remap(&other, Limits::DEFAULT)
+        .remap(&other, &AnchorBasis::Whole, Limits::DEFAULT)
         .expect_err("a foreign profile is refused");
     assert_eq!(refusal.kind(), RefusalKind::ProfileMismatch);
 }
@@ -248,6 +265,7 @@ fn an_unknown_node_is_refused_and_a_known_node_proceeds() {
         &document,
         known,
         SourceObjectId::new(b"blob").expect("identity accepted"),
+        AnchorBasis::Whole,
         Limits::DEFAULT,
     )
     .expect("the permitted case proceeds");
@@ -266,6 +284,7 @@ fn an_unknown_node_is_refused_and_a_known_node_proceeds() {
         &document,
         missing,
         SourceObjectId::new(b"blob").expect("identity accepted"),
+        AnchorBasis::Whole,
         Limits::DEFAULT,
     )
     .expect_err("an unknown node is refused");
@@ -294,6 +313,7 @@ fn long_content_records_its_full_length_so_a_prefix_cannot_impersonate_it() {
         &first,
         first.roots()[0],
         SourceObjectId::new(b"a").expect("identity"),
+        AnchorBasis::Whole,
         limits,
     )
     .expect("anchor created");
@@ -301,6 +321,7 @@ fn long_content_records_its_full_length_so_a_prefix_cannot_impersonate_it() {
         &second,
         second.roots()[0],
         SourceObjectId::new(b"a").expect("identity"),
+        AnchorBasis::Whole,
         limits,
     )
     .expect("anchor created");
@@ -316,7 +337,7 @@ fn long_content_records_its_full_length_so_a_prefix_cannot_impersonate_it() {
     );
 
     let report = anchor_long
-        .remap(&second, limits)
+        .remap(&second, &AnchorBasis::Whole, limits)
         .expect("remap runs across the two documents");
     assert_eq!(
         report.outcome(),
@@ -336,11 +357,12 @@ fn anchoring_works_for_every_block_kind_in_a_mixed_document() {
             &document,
             *root,
             SourceObjectId::new(b"blob").expect("identity accepted"),
+            AnchorBasis::Whole,
             Limits::DEFAULT,
         )
         .expect("every block kind can be anchored");
         let report = anchor
-            .remap(&document, Limits::DEFAULT)
+            .remap(&document, &AnchorBasis::Whole, Limits::DEFAULT)
             .expect("remap runs");
         assert_eq!(
             report.outcome(),
@@ -391,4 +413,174 @@ fn a_digest_over_the_preimage_becomes_a_domain_pinned_identity() {
     let internal = identity.as_internal_object_id();
     assert_eq!(internal.domain().as_str(), "frankengit/doc-anchor/v1");
     assert_eq!(internal.digest().as_bytes(), &[0x11_u8; 32]);
+}
+
+// ------------------------------------------------- comparison-basis binding
+//
+// An anchor records the presentation it was reviewed under, not just the text.
+// Without that binding, remapping compares a location against a document it was
+// never about, and the four outcomes above describe a move that never happened.
+// Every refusal here is paired with the near-identical case that must proceed.
+
+fn diff_basis(basis: &[u8], side: DiffSide) -> AnchorBasis {
+    AnchorBasis::diff(basis, side).expect("basis identity accepted")
+}
+
+fn anchor_under(document: &Document, text: &str, basis: AnchorBasis) -> Anchor {
+    Anchor::create(
+        document,
+        paragraph_with(document, text),
+        SourceObjectId::new(b"blob-a").expect("source identity accepted"),
+        basis,
+        Limits::DEFAULT,
+    )
+    .expect("anchor created")
+}
+
+#[test]
+fn anchor_binds_the_comparison_basis_it_was_created_under() {
+    let document = document_of("alpha\n\nbeta\n\ngamma\n");
+    let whole = anchor_on(&document, "beta", b"blob-a");
+    assert_eq!(whole.basis(), &AnchorBasis::Whole);
+
+    let old_side = anchor_under(&document, "beta", diff_basis(b"base-1", DiffSide::Old));
+    assert_eq!(
+        old_side.basis(),
+        &diff_basis(b"base-1", DiffSide::Old),
+        "the anchor must carry the exact comparison it was reviewed under"
+    );
+    // The binding is beside the identity, never inside it: the same reviewed
+    // text keeps one identifier across every presentation, which is the whole
+    // point of a stable anchor.
+    assert_eq!(whole.id(), old_side.id());
+}
+
+#[test]
+fn remapping_onto_the_other_side_of_a_diff_is_refused() {
+    // Both sides contain "beta" verbatim, so content matching alone would
+    // happily reattach the comment to the wrong side.
+    let document = document_of("alpha\n\nbeta\n\ngamma\n");
+    let anchor = anchor_under(&document, "beta", diff_basis(b"base-1", DiffSide::Old));
+    let refusal = anchor
+        .remap(
+            &document,
+            &diff_basis(b"base-1", DiffSide::New),
+            Limits::DEFAULT,
+        )
+        .expect_err("the other side of a comparison is not the same location");
+    assert_eq!(refusal.kind(), RefusalKind::BasisMismatch);
+}
+
+#[test]
+fn remapping_within_the_same_side_of_a_diff_is_permitted() {
+    // Identical in every respect to the refused case above except the side.
+    let document = document_of("alpha\n\nbeta\n\ngamma\n");
+    let anchor = anchor_under(&document, "beta", diff_basis(b"base-1", DiffSide::Old));
+    let report = anchor
+        .remap(
+            &document,
+            &diff_basis(b"base-1", DiffSide::Old),
+            Limits::DEFAULT,
+        )
+        .expect("the same side of the same comparison is comparable");
+    assert_eq!(report.outcome(), RemapOutcome::Exact);
+    assert!(!report.basis_advanced());
+}
+
+#[test]
+fn remapping_between_a_standalone_document_and_a_diff_side_is_refused() {
+    let document = document_of("alpha\n\nbeta\n\ngamma\n");
+    let standalone = anchor_on(&document, "beta", b"blob-a");
+    assert_eq!(
+        standalone
+            .remap(
+                &document,
+                &diff_basis(b"base-1", DiffSide::New),
+                Limits::DEFAULT
+            )
+            .expect_err("a standalone reading is not a diff side")
+            .kind(),
+        RefusalKind::BasisMismatch
+    );
+
+    // ...and the refusal is symmetric.
+    let on_diff = anchor_under(&document, "beta", diff_basis(b"base-1", DiffSide::New));
+    assert_eq!(
+        on_diff
+            .remap(&document, &AnchorBasis::Whole, Limits::DEFAULT)
+            .expect_err("a diff side is not a standalone reading")
+            .kind(),
+        RefusalKind::BasisMismatch
+    );
+}
+
+#[test]
+fn remapping_a_standalone_anchor_onto_a_standalone_document_is_permitted() {
+    let document = document_of("alpha\n\nbeta\n\ngamma\n");
+    let report = anchor_on(&document, "beta", b"blob-a")
+        .remap(&document, &AnchorBasis::Whole, Limits::DEFAULT)
+        .expect("two standalone readings are comparable");
+    assert_eq!(report.outcome(), RemapOutcome::Exact);
+    assert!(!report.basis_advanced());
+}
+
+#[test]
+fn a_basis_advancing_still_remaps_and_says_so() {
+    // The ordinary case: the branch moved on, an earlier line was deleted, and
+    // the comment must follow its text rather than being refused or silently
+    // treated as if nothing changed.
+    let before = document_of("alpha\n\nbeta\n\ngamma\n");
+    let after = document_of("beta\n\ngamma\n");
+    let anchor = anchor_under(&before, "beta", diff_basis(b"base-1", DiffSide::New));
+    let report = anchor
+        .remap(
+            &after,
+            &diff_basis(b"base-2", DiffSide::New),
+            Limits::DEFAULT,
+        )
+        .expect("a newer version of the same side is comparable");
+    assert_eq!(report.outcome(), RemapOutcome::Remapped);
+    assert!(
+        report.basis_advanced(),
+        "a caller must be able to tell a moved location from a still one"
+    );
+    assert_eq!(report.original_span(), anchor.span());
+}
+
+#[test]
+fn an_exact_outcome_across_an_advanced_basis_is_still_reported_as_advanced() {
+    // The text did not move, but the comparison it is being read under did.
+    // Reporting only `Exact` here would tell a reviewer nothing changed.
+    let document = document_of("alpha\n\nbeta\n\ngamma\n");
+    let anchor = anchor_under(&document, "beta", diff_basis(b"base-1", DiffSide::New));
+    let report = anchor
+        .remap(
+            &document,
+            &diff_basis(b"base-2", DiffSide::New),
+            Limits::DEFAULT,
+        )
+        .expect("a newer version of the same side is comparable");
+    assert_eq!(report.outcome(), RemapOutcome::Exact);
+    assert!(report.basis_advanced());
+}
+
+#[test]
+fn an_over_long_basis_identity_is_refused_and_the_longest_accepted_one_is_not() {
+    assert_eq!(
+        BasisId::new(&[0_u8; 65])
+            .expect_err("a 65-byte basis identity is refused")
+            .kind(),
+        RefusalKind::BasisIdTooLong
+    );
+    let accepted = BasisId::new(&[0_u8; 64]).expect("a 64-byte basis identity is accepted");
+    assert_eq!(accepted.as_bytes().len(), 64);
+}
+
+#[test]
+fn basis_tags_are_stable_and_distinguish_every_presentation() {
+    assert_eq!(AnchorBasis::Whole.tag(), "whole");
+    assert_eq!(diff_basis(b"b", DiffSide::Old).tag(), "old");
+    assert_eq!(diff_basis(b"b", DiffSide::New).tag(), "new");
+    assert_eq!(DiffSide::Old.tag(), "old");
+    assert_eq!(DiffSide::New.tag(), "new");
 }

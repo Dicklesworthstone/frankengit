@@ -450,5 +450,79 @@ doc_published=$(find "$DOC_PUBLISH" -type f | wc -l | tr -d ' ')
 fge_assert_eq fg027b-commit-publishes-all "${#doc_staged[@]}" "$doc_published" \
   "a successful multi-output publication publishes every sibling"
 
+# -----------------------------------------------------------------------------
+fge_phase assert
+fge_step anchor-basis-policy
+# -----------------------------------------------------------------------------
+# INDEPENDENT re-derivation of the comparison-basis policy (FG-027 acceptance:
+# anchors bind the diff basis). The crate emits its whole decision table as a
+# golden; this re-derives the same table from the rule as WRITTEN, never by
+# calling the crate, and requires the two to agree row for row.
+#
+# The rule:
+#   comparable  <- both sides standalone, OR both diff sides with the SAME side
+#   advanced    <- both diff sides, same side, DIFFERENT basis identity
+#
+# A future edit that quietly made the old and new sides of a diff comparable
+# would keep every Rust test green only by also editing those tests. It cannot
+# make this pass without editing the rule here, in a separate file, in words.
+doc_basis_golden="$DOC_GOLD/anchors/basis-comparability.tsv"
+doc_basis_rows=0
+doc_basis_bad=""
+
+if [ ! -f "$doc_basis_golden" ]; then
+  fge_fail fg027-basis-policy-matches "the basis comparability golden is missing: $doc_basis_golden"
+else
+  while IFS="$(printf '\t')" read -r left right claimed_comp claimed_adv; do
+    [ "$left" = "anchored_under" ] && continue
+    [ -n "$left" ] || continue
+    doc_basis_rows=$((doc_basis_rows + 1))
+
+    # Split each presentation into side and basis identity. "whole" has neither.
+    case $left in
+      whole) left_side=""; left_basis="" ;;
+      *) left_side=${left%%:*}; left_basis=${left#*:} ;;
+    esac
+    case $right in
+      whole) right_side=""; right_basis="" ;;
+      *) right_side=${right%%:*}; right_basis=${right#*:} ;;
+    esac
+
+    if [ -z "$left_side" ] && [ -z "$right_side" ]; then
+      want_comp=true; want_adv=false
+    elif [ -n "$left_side" ] && [ -n "$right_side" ]; then
+      if [ "$left_side" = "$right_side" ]; then
+        want_comp=true
+        if [ "$left_basis" = "$right_basis" ]; then want_adv=false; else want_adv=true; fi
+      else
+        want_comp=false; want_adv=false
+      fi
+    else
+      want_comp=false; want_adv=false
+    fi
+
+    if [ "$claimed_comp" != "$want_comp" ] || [ "$claimed_adv" != "$want_adv" ]; then
+      doc_basis_bad="$doc_basis_bad $left->$right(claimed:$claimed_comp/$claimed_adv,rule:$want_comp/$want_adv)"
+    fi
+  done < "$doc_basis_golden"
+
+  fge_field basis_rows_checked "$doc_basis_rows"
+  if [ "$doc_basis_rows" -ne 25 ]; then
+    fge_fail fg027-basis-policy-matches \
+      "expected the 5x5 presentation matrix (25 rows), read $doc_basis_rows; the table is not exhaustive"
+  elif [ -n "$doc_basis_bad" ]; then
+    fge_fail fg027-basis-policy-matches "crate policy disagrees with the written rule:$doc_basis_bad"
+  else
+    fge_pass fg027-basis-policy-matches \
+      "all 25 presentation pairs match the independently re-derived basis rule"
+  fi
+
+  # The cross-side refusal is the single row this whole binding exists for.
+  doc_cross_side=$(LC_ALL=C grep -c '^old:base-1'"$(printf '\t')"'new:base-1'"$(printf '\t')"'false' \
+    "$doc_basis_golden" || true)
+  fge_assert_eq fg027-basis-cross-side-refused 1 "$doc_cross_side" \
+    "an anchor on the removed side is not comparable with the added side"
+fi
+
 fge_phase teardown
-fge_note "independent verifier: allowlist and bound coverage were re-derived in shell, not imported from the crate"
+fge_note "independent verifier: allowlist, bound coverage and the anchor basis policy were re-derived in shell, not imported from the crate"
