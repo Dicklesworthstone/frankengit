@@ -130,10 +130,6 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
     /// requested after-state already equalled the scratch state. Per the
     /// normative ruling this takes precedence over last-writer provenance.
     let mut identity_at_evaluation: Vec<bool> = Vec::new();
-    /// Whether the ref, after each intent, held exactly its basis value. Used
-    /// only to separate an inverse cancellation from an identity at a target
-    /// that ends with no surviving effect.
-    let mut post_is_basis: Vec<bool> = Vec::new();
     let mut aborted = false;
 
     'outer: for statement in &request.statements {
@@ -143,7 +139,6 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
                 dispositions.push(OracleDisposition::StatementError);
                 touched.push(None);
                 identity_at_evaluation.push(true);
-                post_is_basis.push(true);
                 continue;
             };
             let name = ref_intent.target().clone();
@@ -157,19 +152,16 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
                         ));
                         touched.push(None);
                         identity_at_evaluation.push(true);
-                        post_is_basis.push(true);
                     }
                     MismatchPolicy::StatementError => {
                         dispositions.push(OracleDisposition::StatementError);
                         touched.push(None);
                         identity_at_evaluation.push(true);
-                        post_is_basis.push(true);
                     }
                     MismatchPolicy::TxnAbort => {
                         dispositions.push(OracleDisposition::TransactionAborted);
                         touched.push(None);
                         identity_at_evaluation.push(true);
-                        post_is_basis.push(true);
                         aborted = true;
                         break 'outer;
                     }
@@ -201,7 +193,6 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
             // nothing.
             let did_change = before != after.get(&name).cloned();
             identity_at_evaluation.push(!did_change);
-            post_is_basis.push(after.get(&name) == basis.get(&name));
             if did_change {
                 last_writer.insert(name.clone(), index);
             }
@@ -318,7 +309,17 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
             } else {
                 OracleDisposition::Absorbed(AbsorptionReason::OverwrittenBySucceedingIntent)
             }
-        } else if post_is_basis[index] {
+        } else if last_writer.get(name) == Some(&index) {
+            // At a target that ends with no surviving effect, only the LAST
+            // intent to change it earns the identity label: its restoration to
+            // the basis value is the one that stands. An earlier intent that
+            // also landed on the basis value had its restoration undone by a
+            // later change, so it was itself cancelled.
+            //
+            // Found by the 10^5 campaign and NOT by the 500-program default: it
+            // needs one target written four or more times with two separate
+            // returns to the basis value. That is the argument for the
+            // acceptance bound being what it is.
             OracleDisposition::Absorbed(AbsorptionReason::IdentityEffect)
         } else {
             OracleDisposition::Absorbed(AbsorptionReason::InverseCancelled)
