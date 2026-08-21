@@ -51,8 +51,12 @@ fge_assert_file FG-057-E2E-003 "$KL_GOLDENS/derive_vectors.tsv" \
 # they check. The derivation script is checked in beside them for that reason.
 fge_assert_file FG-057-E2E-004 "$KL_GOLDENS/derive.py" \
   'the independent oracle that produced the vectors is checked in'
+fge_assert_file FG-057-E2E-005 "$KL_GOLDENS/seal_vectors.tsv" \
+  'the envelope-sealing vectors are checked in'
+fge_assert_file FG-057-E2E-006 "$KL_GOLDENS/seal.py" \
+  'the independent oracle that produced the sealing vectors is checked in'
 
-fge_phase run
+fge_phase action
 
 fge_run crypto-keyed-vectors \
   cargo test --locked -p fgit-crypto --test keyed_vectors
@@ -65,6 +69,14 @@ kl_purposes_exit=$FGE_LAST_EXIT
 fge_run crypto-key-lifecycle \
   cargo test --locked -p fgit-crypto --test key_lifecycle
 kl_lifecycle_exit=$FGE_LAST_EXIT
+
+fge_run crypto-signing \
+  cargo test --locked -p fgit-crypto --test signing
+kl_signing_exit=$FGE_LAST_EXIT
+
+fge_run crypto-sealing \
+  cargo test --locked -p fgit-crypto --test sealing
+kl_sealing_exit=$FGE_LAST_EXIT
 
 # The compile-time half of the purpose separation lives in compile_fail
 # doctests, which only a doc-test run executes. Skipping it here would leave
@@ -83,6 +95,10 @@ fge_assert_exit FG-057-E2E-012 0 "$kl_lifecycle_exit" \
   'rotation, revocation and erasure behave as the drills require'
 fge_assert_exit FG-057-E2E-013 0 "$kl_doctests_exit" \
   'every compile_fail boundary is rejected and its permitted twin compiles'
+fge_assert_exit FG-057-E2E-018 0 "$kl_signing_exit" \
+  'detached Ed25519 envelopes refuse cross-domain, relabelled and forged input'
+fge_assert_exit FG-057-E2E-019 0 "$kl_sealing_exit" \
+  'sealed envelopes reproduce the independent oracle and refuse misplacement'
 
 # The eight purposes come from the threat model, not from this crate. If the
 # enumeration drifts from the document, the separation is protecting a
@@ -99,11 +115,49 @@ fge_assert_cmd FG-057-E2E-015 'the key-lifecycle receipt has an identity-domain 
   grep -qF 'frankengit/key-lifecycle-receipt/v1' \
   "$KL_REPO/crates/fgit-crypto/goldens/domain_registry.tsv"
 
-# Zero-dependency is a property of this crate, not an accident, and it is the
-# reason the primitives here needed no admission review.
-fge_assert_cmd FG-057-E2E-016 'fgit-crypto depends only on first-party fgit-* crates' \
-  grep -qE '^fgit-types\.workspace = true$' \
+# This suite used to assert that fgit-crypto depends only on first-party
+# fgit-* crates. ADR-0003 ended that: the crate now reuses Ed25519 and
+# XChaCha20-Poly1305. The old assertion would still have PASSED -- it grepped
+# for a line that is still there -- while its description claimed something no
+# longer true, which is the worst shape a check can take.
+#
+# What replaces it is the check the ADR's Amendment 1 records as missing at the
+# registry-check level: every external dependency this crate names must hold an
+# active row that authorises DIRECT first-party use, not merely a transitive
+# admission. Scoped to this crate because tools/registry-check is not mine.
+kl_policy="$KL_REPO/registries/dependency_policy.tsv"
+kl_external=$(sed -n '/^\[dependencies\]/,/^\[/p' "$KL_REPO/crates/fgit-crypto/Cargo.toml" \
+  | grep -oE '^[a-z0-9-]+\.workspace = true$' \
+  | sed 's/\.workspace = true//' \
+  | grep -v '^fgit-' || true)
+fge_note 'external dependencies declared by fgit-crypto' "$(echo "$kl_external" | tr '\n' ' ')"
+
+kl_unadmitted=""
+for kl_dep in $kl_external; do
+  if ! awk -F'\t' -v dep="$kl_dep" \
+      '$2 == dep && $4 == "allow_direct_first_party" && $10 == "active" { found = 1 }
+       END { exit !found }' "$kl_policy"; then
+    kl_unadmitted="$kl_unadmitted $kl_dep"
+  fi
+done
+fge_assert_cmd FG-057-E2E-016 \
+  'every external fgit-crypto dependency holds an active direct-admission row' \
+  test -z "$kl_unadmitted"
+
+# The two the ADR selected, named explicitly, so silently dropping one from the
+# manifest cannot make the loop above vacuously pass.
+fge_assert_cmd FG-057-E2E-020 'Ed25519 is the admitted signature primitive' \
+  grep -qE '^ed25519-dalek\.workspace = true$' \
   "$KL_REPO/crates/fgit-crypto/Cargo.toml"
+fge_assert_cmd FG-057-E2E-021 'XChaCha20-Poly1305 is the admitted AEAD primitive' \
+  grep -qE '^chacha20poly1305\.workspace = true$' \
+  "$KL_REPO/crates/fgit-crypto/Cargo.toml"
+
+# The ADR is the reason those rows exist. If it ever reverts to proposed, the
+# direct admissions above are unauthorised.
+fge_assert_cmd FG-057-E2E-022 'ADR-0003 is accepted' \
+  grep -qE '^- \*\*Status:\*\* \*\*accepted\*\*' \
+  "$KL_REPO/docs/ADR-0003-CRYPTOGRAPHY-AND-KEY-POLICY.md"
 fge_assert_cmd FG-057-E2E-017 'fgit-crypto forbids unsafe code' \
   grep -qF '#![forbid(unsafe_code)]' "$KL_REPO/crates/fgit-crypto/src/lib.rs"
 
