@@ -9,7 +9,7 @@
 //! `NodeRuntime`'s production factory, never through a test-only constructor.
 //!
 //! The companion `live_outcomes` test covers the demo protocol under both
-//! runtime profiles.  This file instead keeps the AppSpec non-claim explicit
+//! runtime profiles.  This file instead keeps the `AppSpec` non-claim explicit
 //! while independently exercising the live-node drain boundary that is only
 //! available with an owned runtime state.
 
@@ -37,7 +37,7 @@ const NOW: Time = Time::from_secs(0);
 const LONG_RUNNING_STEPS: u64 = 10_000;
 const START_STEPS: u32 = 16;
 
-/// An AppSpec started on an owned Lab RuntimeState.
+/// An `AppSpec` started on an owned Lab `RuntimeState`.
 ///
 /// Keeping the production runtime alive is necessary because it owns the
 /// production-minted context that the supervisor receives at start.
@@ -65,7 +65,7 @@ fn one_service_app(start: Box<dyn ChildStart>) -> AppSpec {
         .expect("the one-service evidence topology is valid")
 }
 
-/// Start the supplied AppSpec and schedule every supervisor-created child.
+/// Start the supplied `AppSpec` and schedule every supervisor-created child.
 fn start_app(app_spec: AppSpec) -> StartedApp {
     let profile = RuntimeProfile::deterministic();
     let identity = profile.identity();
@@ -157,7 +157,7 @@ struct SupervisorCxNegative {
 }
 
 impl SupervisorCxNegative {
-    fn new(probe: Arc<ContextProbe>, budget: Budget) -> Self {
+    const fn new(probe: Arc<ContextProbe>, budget: Budget) -> Self {
         Self { probe, budget }
     }
 }
