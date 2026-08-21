@@ -66,6 +66,20 @@ Section 3 records what design review rejected before code existed. This subsecti
 18. **A canonical decoder that validates every field accepts only canonical bytes** (`NEG-018`) — false, and found by the `FG-002c` mutation campaign rather than by review. The codec validated every field it read and re-verified collection ordering on the way in, but the frame carries a codec minor and a schema minor that a strict decode never compared against its own. Bumping either left the payload untouched, so the mutant decoded to the *canonical value* while carrying different bytes: `encode(decode(b)) == b` failed, which is invariant 1 of `docs/ADR-0002-CANONICAL-CODEC.md`. Identity still differed, because the codec version travels inside it, so this was never an identity collision — it was a second encoding of one value, which is the defect one step upstream of one. The general lesson is the entry: **a field a decoder reads but never compares is a field that admits a second encoding**, and "I validated everything I parsed" is not the same claim as "I accept only what I would emit". Strict decoding now refuses any minor it cannot reproduce; the preserving path still accepts and relays such a body byte-for-byte, so forward compatibility was not the price.
 19. **Host-probed BLAKE3 assembly is reproducible and constitutionally admissible** (`NEG-019`) — false. `blake3 1.8.7` chooses x86-64 assembly after probing the host C compiler, so identical source and lockfile can link different native objects on hosts with different toolchains. The `FG-069a` interim remedy forces `blake3/pure` through Cargo feature unification. A fresh-target syntax gate then observed zero BLAKE3 native object/archive artifacts and zero active `_ffi` cfg emissions; its only x86 cfg emissions select Rust intrinsics. This is not a performance claim: the portable path is required until a safe, reproducible SIMD path is admitted.
 
+20. **A stored-block pack profile is size-competitive with upstream `git pack-objects`** (`NEG-020`) — false, and quantified rather than merely asserted. `FG-017b` packed three corpora chosen to span compressibility regimes and handed the *identical object sets* to pinned git 2.54.0:
+
+    | corpus | source | FrankenGit | git | ratio |
+    |---|---|---|---|---|
+    | compressible (long runs) | 197 520 | 197 901 | 1 513 | **130.80×** |
+    | similar (near-identical revisions) | 166 550 | 8 467 | 2 098 | **4.04×** |
+    | incompressible (pseudo-random) | 197 568 | 197 949 | 197 623 | **1.00×** |
+
+    The monotone ordering is the mechanism evidence: the gap collapses to framing overhead exactly where DEFLATE has nothing to remove, so the loss *is* compression rather than something else wearing its clothes. Our own delta selection is doing real work — 166 KB to 8.5 KB on the `similar` corpus, a 20× reduction — and git still wins there 4× by deltifying *and* compressing.
+
+    This is a **designed** loss, not a regression: `PackWriteProfile::STORED_V1` documents stored blocks as the price of an especially auditable first slice, and this row is the baseline a later compressing profile must beat. The benchmark lane *asserts* the loss (`FG-017B-BENCH-041`): if FrankenGit ever packs the compressible corpus no larger than git, the profile is not storing and the lane fails loudly rather than quietly reporting an improvement nobody designed.
+
+    Two limits belong with the number. Only **size** was compared; the timing arms are not comparable, because FrankenGit's is an in-process call while git's is a sandboxed process spawn paying fork, exec, linking and sandbox setup before it packs anything, and dividing them would produce a figure that looks like a speed-up and measures process startup. CPU and RSS were not measured at all. The corpora are small and synthetic, and plan §38.4 is explicit that a microbenchmark cannot carry an end-to-end claim — which is moot here, since the only comparable dimension is a loss.
+
 ## 4. Revisit protocol
 
 A rejected idea may be revisited only when the proposal identifies:
