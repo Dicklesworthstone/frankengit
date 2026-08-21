@@ -85,8 +85,14 @@ fge_step campaign-shape "corpus: $nf_tests tests"
 
 fge_phase action
 
+# FG008B_CORPUS=campaign selects the acceptance bound (>= 10^5 seeded
+# programs). A bare `cargo test` runs a much smaller default so a workspace run
+# stays fast; both paths run the SAME properties over the SAME generator, so the
+# default is a weaker statement of the identical claim rather than a different
+# claim. The corpus refuses to start on an unparseable value rather than
+# silently falling back, so this lane cannot report a campaign it did not run.
 fge_run normal-form-corpus \
-  cargo test --locked -p fgit-txn --test normal_form_corpus
+  env FG008B_CORPUS=campaign cargo test --locked -p fgit-txn --test normal_form_corpus
 nf_corpus_exit=$FGE_LAST_EXIT
 
 # The crate's existing evidence must keep passing alongside the new corpus: a
@@ -118,6 +124,6 @@ fge_step non-claim \
 fge_step non-claim \
   'does NOT establish: anything about forge streams, retention roots or outbox deliveries -- the oracle carries refs only, so DuplicateIdenticalDelivery is unreached by construction'
 fge_step non-claim \
-  'does NOT establish: the 10^5-program bound named in the acceptance -- the in-tree corpus is deliberately smaller so the unit suite stays fast, and the larger campaign needs its own time budget'
+  'the 10^5-program acceptance bound is exercised by THIS lane via FG008B_CORPUS=campaign; a bare cargo test runs a smaller default of the same properties, so a green workspace run is a weaker statement of the same claim and must not be cited as the campaign'
 fge_step non-claim \
   'assumption under test: on a precondition failure under MismatchPolicy::StatementError the oracle continues with the remaining intents in that statement. NPC 13 does not say whether the rest of the statement evaluates. A disagreement here is a specification ambiguity, not automatically a defect in either side'
