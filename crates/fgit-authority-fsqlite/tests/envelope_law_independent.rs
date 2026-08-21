@@ -37,30 +37,36 @@
 //! attempt — and says nothing about what happens once one is running. Two of
 //! the six scenarios §3.5 lists (checkpoint under load, and process
 //! crash/reopen/recovery) are behavioural; the crash/reopen half is covered by
-//! `crash_equivalence.rs`, and checkpoint-under-load **does not apply to this
-//! store at all**: it never enables WAL, so there is no log to checkpoint.
+//! `crash_equivalence.rs`, and checkpoint-under-load is **live**: this store
+//! runs on WAL, so §5.2 requires that cell be exercised rather than documented
+//! away.
 //!
-//! That cell has now carried three reasons and the first two were wrong, which
-//! is worth leaving on the record. It began as "the store publishes no
-//! checkpoint operation", which invites the repair *add one*. That was replaced
-//! with "every public path that checkpoints also closes the connection, so the
-//! scenario is unreachable" — false, from scanning the `fsqlite` facade while
-//! the WAL lives in `fsqlite-wal`. That was replaced with "checkpoints happen
-//! automatically under load" — also false here, because that machinery acts on
-//! a WAL this store does not have. **Two absence-scans, two wrong answers, in
-//! opposite directions.**
+//! That cell carried **three wrong reasons in one afternoon** before anyone
+//! measured it, and the sequence belongs next to a test file whose whole point
+//! is that authors cannot catch their own misreadings:
 //!
-//! What holds up, each link a positive observation: `JournalMode` defaults to
-//! `Delete`; `AsyncConnection::open` uses `ConnectionEnv::default()`;
-//! `ConnectionEnv` has no journal-mode field; and this crate's entire statement
-//! set is 17 statements — 4 `CREATE TABLE`, 4 `INSERT`, 7 `SELECT`, 1 `UPDATE`
-//! — with no `PRAGMA` among them.
+//! 1. "the store publishes no checkpoint operation" — invites the repair *add
+//!    one*;
+//! 2. "every public path that checkpoints also closes the connection, so the
+//!    scenario is unreachable" — false; scanned the `fsqlite` facade while the
+//!    WAL lives in `fsqlite-wal`;
+//! 3. "there is no WAL at all" — false; built on `fsqlite-pager`'s
+//!    `JournalMode` being `#[default] Delete`, which is a **type** default at
+//!    the pager layer and not the mode a new file database receives.
 //!
-//! Which turns this cell into a sharper question for the envelope **these very
-//! tests check**: §3.5 is derived from a profile presuming WAL concurrency, and
-//! the topologies admitted below are admitted against it. Whether a rollback
-//! journal is intended for a durable authority store is not settled here. See
-//! `NEG-022` in `registries/negative_evidence.tsv` and the crate-level docs.
+//! Reading 3 was positively enumerated over four links, every link correct, and
+//! independently re-derived by a second pane before anyone doubted it.
+//! **Re-deriving a chain inherits the premise the chain rests on.** What
+//! settled it was `PRAGMA journal_mode`, which answers `wal` — pinned upstream
+//! by `test_pragma_journal_mode_default_is_wal_for_new_file_database`. The tell
+//! everyone walked past was `crash_equivalence.rs` cleaning up `-wal`/`-shm`
+//! sidecars a rollback-journal store never produces.
+//!
+//! That is directly this file's own lesson one level up: these tests exist
+//! because an implementer's tests cannot catch an implementer's misreading of a
+//! clause, and a reader's re-derivation cannot catch a reader's misreading of a
+//! default. Only asking the running system can. See `NEG-022` in
+//! `registries/negative_evidence.tsv` and the crate-level docs.
 
 use fgit_authority_fsqlite::{
     ConcurrencyEnvelope, EnvelopeRefusal, MAX_ADMITTED_AUTOCOMMIT_WRITERS, WriterTopology,

@@ -80,65 +80,66 @@
 //! backstops that cannot prove quiescent shutdown — the awaited `close(&Cx)` is
 //! the only path this crate will use.
 //!
-//! # Journal mode, and why the checkpoint cell does not apply
+//! # Journal mode: WAL, measured -- and three readings that said otherwise
 //!
-//! **This store never enables WAL.** It runs on the default rollback journal,
-//! so there is no write-ahead log, nothing to checkpoint, and §3.5's
-//! checkpoint-under-load scenario does not describe this configuration at all.
+//! This store runs on **WAL**. Checkpoint-under-load is therefore a *live*
+//! scenario, and NPC 5.2 requires that cell be exercised rather than
+//! documented away.
 //!
-//! Each link is a positive observation rather than a failed search, which
-//! matters because two earlier versions of this section were wrong and both
-//! rested on *not finding* something:
+//! That single sentence took four attempts, and the first three are kept here
+//! because they are the more useful half.
 //!
-//! * `fsqlite-pager`'s `JournalMode` declares `#[default] Delete`, documented
-//!   as "the default mode";
-//! * `AsyncConnection::open` delegates to `open_with_env` with
-//!   `ConnectionEnv::default()`;
-//! * `ConnectionEnv` carries a runtime, a page-buffer ceiling, a memory-VFS
-//!   config, a strict-multi-process flag and a bounded-writer write-set
-//!   ceiling — and **no journal-mode field**;
-//! * this crate's complete statement set is 17 statements — 4 `CREATE TABLE`,
-//!   4 `INSERT`, 7 `SELECT`, 1 `UPDATE` — and contains no `PRAGMA`.
+//! ## The measurement
 //!
-//! ## Two retracted claims, kept because the sequence is the lesson
+//! `PRAGMA journal_mode` against a database created by this crate's own open
+//! path answers `wal`. Upstream pins it: `fsqlite-core`'s
+//! `test_pragma_journal_mode_default_is_wal_for_new_file_database` asserts both
+//! the text `wal` and `pager.journal_mode() == JournalMode::Wal` for a new file
+//! database (the `:memory:` counterpart reports its own mode, which is why an
+//! in-memory probe would answer a different question).
 //!
-//! **First** this section said the sole checkpoint trigger was
-//! `Command::Close { checkpoint }`, so the cell was unreachable by
-//! construction. That came from scanning the `fsqlite` facade and calling it
-//! exhaustive; `fsqlite` is a facade over fifteen crates and the WAL lives in
-//! `fsqlite-wal`. *Exhaustive* is a claim about a search boundary, and the
-//! boundary has to be proved before the scan means anything.
+//! ## The three retracted readings
 //!
-//! **Then** it said checkpoints happen automatically under load, via
-//! `maybe_run_adaptive_autocheckpoint`. That machinery is real — but it acts on
-//! a WAL, and this store has none. Correcting one absence-scan with another
-//! produced a second wrong answer in the opposite direction.
+//! 1. *"The sole checkpoint trigger is `Command::Close { checkpoint }`, so the
+//!    cell is unreachable."* Scanned the `fsqlite` facade and called it
+//!    exhaustive. `fsqlite` is a facade over ~15 crates and the WAL lives in
+//!    `fsqlite-wal`.
+//! 2. *"Checkpoints happen automatically under load."* Right mechanism,
+//!    asserted without establishing the mode.
+//! 3. *"There is no WAL at all."* Built on `fsqlite-pager`'s `JournalMode`
+//!    being `#[default] Delete`. That is a **type** default at the pager layer,
+//!    not the mode a new file database receives -- the connection layer decides,
+//!    and chooses WAL.
 //!
-//! Still true from both attempts: `Cx::checkpoint()` and
-//! `checkpoint_or_interrupt` are **cancellation** polls (§3.3), unrelated to
-//! the WAL. Counting them as coverage here would be a false green.
+//! Reading 3 is the instructive one. It was positively enumerated over four
+//! links, every link individually correct, and independently re-derived by a
+//! second pane -- and still wrong, because **re-deriving a chain inherits the
+//! premise the chain rests on.** Two careful people confirming each other is
+//! weaker evidence than it feels like.
 //!
-//! ## What this leaves open
+//! The tell everyone walked past: `tests/crash_equivalence.rs` cleans up `-wal`
+//! and `-shm` sidecars, which a rollback-journal store never produces.
 //!
-//! The real question is upstream of the checkpoint cell: **is a rollback
-//! journal intended for a durable authority store?** §3.5's envelope — several
-//! connections, readers alongside bounded writers, checkpoint-under-load as a
-//! listed scenario — is derived from a profile that presumes WAL concurrency,
-//! and [`ConcurrencyEnvelope`] admits topologies against it. This crate does
-//! not answer that, and does not assume it away.
+//! **The rule, stated where the next reader will need it: for a question about
+//! runtime behaviour, ask the running system.** Four readings were spent on
+//! something one `PRAGMA` settled.
 //!
-//! Recorded as `NEG-022`. If the store ever issues `PRAGMA journal_mode=WAL`,
-//! the cell becomes both live *and* driveable — `PRAGMA wal_checkpoint(…)` is
-//! supported and returns `busy`, `log` and `checkpointed` — and the honest
-//! outcome then is a real drill, not a non-claim.
+//! ## What remains open
 //!
-//! Deliberately **not** claimed: behaviour when handed a pre-existing
-//! WAL-mode database file. Journal mode is persistent in the SQLite header,
-//! and whether that is detected on open was not established here.
+//! This crate never *states* a journal mode -- it inherits one, because journal
+//! mode persists in the SQLite header and is detected on reopen. So a store
+//! handed an existing file adopts that file's durability semantics rather than
+//! its own. Whichever mode is right, being handed it by a file is not a design
+//! decision; tracked as `frankengit-zru1`.
+//!
+//! Still true from the retracted readings: `Cx::checkpoint()` and
+//! `checkpoint_or_interrupt` are **cancellation** polls (3.3), unrelated to the
+//! WAL. Counting them as coverage here would be a false green.
+//!
+//! Recorded as `NEG-022`.
 //!
 //! [`AuthorityStore`]: fgit_authority::AuthorityStore
 //! [`FsqliteAuthorityStore`]: crate::FsqliteAuthorityStore
-//! [`ConcurrencyEnvelope`]: crate::ConcurrencyEnvelope
 
 mod classify;
 mod engine;
