@@ -346,6 +346,9 @@ fn apply_intent(scratch: &mut Scratch, intent: &Intent) -> Applied {
             if !expected.is_satisfied_by(scratch.refs.get(name)) {
                 return Applied::Mismatch(RefusalCode::ExpectedOldRefMismatch);
             }
+            if scratch.refs.get(name) == Some(new) {
+                return Applied::Absorbed(AbsorptionReason::IdentityEffect);
+            }
             scratch.refs.insert(name.clone(), *new);
             Applied::Changed(EffectTarget::Ref(name.clone()))
         }
@@ -353,8 +356,11 @@ fn apply_intent(scratch: &mut Scratch, intent: &Intent) -> Applied {
             if !expected.is_satisfied_by(scratch.refs.get(name)) {
                 return Applied::Mismatch(RefusalCode::ExpectedOldRefMismatch);
             }
-            scratch.refs.remove(name);
-            Applied::Changed(EffectTarget::Ref(name.clone()))
+            if scratch.refs.remove(name).is_some() {
+                Applied::Changed(EffectTarget::Ref(name.clone()))
+            } else {
+                Applied::Absorbed(AbsorptionReason::IdentityEffect)
+            }
         }
         Intent::Forge(forge) => {
             let current = scratch

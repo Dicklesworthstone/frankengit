@@ -653,6 +653,55 @@ mod tests {
     }
 
     #[test]
+    fn repeated_same_state_ref_intents_are_each_identity_noops() {
+        let absent = name("refs/heads/absent");
+        let existing = name("refs/heads/existing");
+        let request = request(vec![Statement {
+            mismatch_policy: MismatchPolicy::TxnAbort,
+            intents: vec![
+                Intent::Ref(RefIntent::Delete {
+                    name: absent.clone(),
+                    expected: ExpectedRefState::Any,
+                }),
+                Intent::Ref(RefIntent::Delete {
+                    name: absent.clone(),
+                    expected: ExpectedRefState::Any,
+                }),
+                Intent::Ref(RefIntent::Delete {
+                    name: absent,
+                    expected: ExpectedRefState::Any,
+                }),
+                update(
+                    "refs/heads/existing",
+                    ExpectedRefState::Exact(oid(7)),
+                    oid(7),
+                ),
+                update(
+                    "refs/heads/existing",
+                    ExpectedRefState::Exact(oid(7)),
+                    oid(7),
+                ),
+                update(
+                    "refs/heads/existing",
+                    ExpectedRefState::Exact(oid(7)),
+                    oid(7),
+                ),
+            ],
+        }]);
+        let (mut refs, forge, retention, outbox) = empty_basis();
+        refs.insert(existing, oid(7));
+
+        let report =
+            IntentEvaluator.evaluate(basis_of(&refs, &forge, &retention, &outbox), &request);
+
+        assert_eq!(report.effects(), Some(&NetEffects::default()));
+        assert!(report.mappings.iter().all(|mapping| {
+            mapping.disposition == IntentDisposition::Absorbed(AbsorptionReason::IdentityEffect)
+        }));
+        assert!(report.is_total_for(&request));
+    }
+
+    #[test]
     fn statement_error_mismatch_is_local_and_later_intents_continue() {
         let request = request(vec![
             Statement {
