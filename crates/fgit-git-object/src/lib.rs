@@ -120,6 +120,10 @@ pub enum ObjectError {
     MissingOrDuplicateCommitTree,
     /// Strict commit creation requires exactly one author and committer header.
     MissingOrDuplicateCommitIdentity,
+    /// Strict commit creation requires Git's tree/parent/author/committer prefix order.
+    StrictCommitHeaderOrder,
+    /// Strict commit creation rejects a NUL anywhere in the commit body.
+    NulInStrictCommit,
     /// A native object-reference field was not 40 or 64 lowercase-or-uppercase hex bytes.
     MalformedObjectReference,
     /// A strict author, committer, or tagger date was malformed.
@@ -193,6 +197,10 @@ impl Display for ObjectError {
             Self::MissingOrDuplicateCommitIdentity => {
                 formatter.write_str("strict commit requires one author and committer")
             }
+            Self::StrictCommitHeaderOrder => {
+                formatter.write_str("strict commit headers are not in Git fsck order")
+            }
+            Self::NulInStrictCommit => formatter.write_str("strict commit contains a NUL byte"),
             Self::MalformedObjectReference => {
                 formatter.write_str("malformed native object reference")
             }
@@ -688,15 +696,25 @@ pub fn emit_object_body(
         ParsedObject::Tree(entries) => emit_tree(entries, profile, limits),
         ParsedObject::Commit(commit) => {
             if profile == AcceptanceProfile::StrictCreate {
-                validate_strict_commit(commit.headers(), limits)?;
+                validate_strict_commit(commit.headers(), commit.as_bytes(), limits)?;
             }
-            checked_body_copy(&commit.raw, limits)
+            emit_header_object_body(
+                commit.headers(),
+                commit.message(),
+                commit.has_message_separator,
+                limits,
+            )
         }
         ParsedObject::Tag(tag) => {
             if profile == AcceptanceProfile::StrictCreate {
                 validate_strict_tag(tag.headers(), limits)?;
             }
-            checked_body_copy(&tag.raw, limits)
+            emit_header_object_body(
+                tag.headers(),
+                tag.message(),
+                tag.has_message_separator,
+                limits,
+            )
         }
     }
 }
@@ -718,6 +736,7 @@ pub struct Commit {
     raw: Vec<u8>,
     headers: Vec<HeaderField>,
     message_start: usize,
+    has_message_separator: bool,
 }
 
 impl Commit {
@@ -763,6 +782,7 @@ pub struct Tag {
     raw: Vec<u8>,
     headers: Vec<HeaderField>,
     message_start: usize,
+    has_message_separator: bool,
 }
 
 impl Tag {
@@ -791,14 +811,15 @@ pub fn parse_commit(
     profile: AcceptanceProfile,
     limits: &ParseLimits,
 ) -> Result<Commit, ObjectError> {
-    let (headers, message_start) = parse_headers(body, profile, limits)?;
+    let (headers, message_start, has_message_separator) = parse_headers(body, profile, limits)?;
     if profile == AcceptanceProfile::StrictCreate {
-        validate_strict_commit(&headers, limits)?;
+        validate_strict_commit(&headers, body, limits)?;
     }
     Ok(Commit {
         raw: copy_bytes(body)?,
         headers,
         message_start,
+        has_message_separator,
     })
 }
 
@@ -808,7 +829,7 @@ pub fn parse_tag(
     profile: AcceptanceProfile,
     limits: &ParseLimits,
 ) -> Result<Tag, ObjectError> {
-    let (headers, message_start) = parse_headers(body, profile, limits)?;
+    let (headers, message_start, has_message_separator) = parse_headers(body, profile, limits)?;
     if profile == AcceptanceProfile::StrictCreate {
         validate_strict_tag(&headers, limits)?;
     }
@@ -816,6 +837,7 @@ pub fn parse_tag(
         raw: copy_bytes(body)?,
         headers,
         message_start,
+        has_message_separator,
     })
 }
 
@@ -916,16 +938,16 @@ fn parse_headers(
     body: &[u8],
     profile: AcceptanceProfile,
     limits: &ParseLimits,
-) -> Result<(Vec<HeaderField>, usize), ObjectError> {
+) -> Result<(Vec<HeaderField>, usize, bool), ObjectError> {
     let boundary = body.windows(2).position(|window| window == b"\n\n");
-    let (header_bytes, message_start) = match boundary {
-        Some(index) => (&body[..index], index + 2),
-        None if profile == AcceptanceProfile::GitCompatibleImport => (body, body.len()),
+    let (header_bytes, message_start, has_message_separator) = match boundary {
+        Some(index) => (&body[..index], index + 2, true),
+        None if profile == AcceptanceProfile::GitCompatibleImport => (body, body.len(), false),
         None => return Err(ObjectError::MissingHeaderMessageSeparator),
     };
     let mut headers: Vec<HeaderField> = Vec::new();
     if header_bytes.is_empty() {
-        return Ok((headers, message_start));
+        return Ok((headers, message_start, has_message_separator));
     }
     let mut line_count = 0_usize;
     for line in header_bytes.split(|byte| *byte == b'\n') {
@@ -970,7 +992,7 @@ fn parse_headers(
             continuations: Vec::new(),
         });
     }
-    Ok((headers, message_start))
+    Ok((headers, message_start, has_message_separator))
 }
 
 fn is_strict_header_name(name: &[u8]) -> bool {
@@ -980,39 +1002,77 @@ fn is_strict_header_name(name: &[u8]) -> bool {
 
 fn validate_strict_commit(
     headers: &[HeaderField],
+    body: &[u8],
     limits: &ParseLimits,
 ) -> Result<(), ObjectError> {
-    let mut tree_count = 0;
-    let mut author_count = 0;
-    let mut committer_count = 0;
-    for header in headers {
-        match header.name.as_slice() {
-            b"tree" => {
-                tree_count += 1;
-                validate_native_reference(&header.value, limits.tree_reference_bytes)?;
-            }
-            b"parent" => validate_native_reference(&header.value, limits.tree_reference_bytes)?,
-            b"author" => {
-                author_count += 1;
-                validate_signature_date(&header.value)?;
-            }
-            b"committer" => {
-                committer_count += 1;
-                validate_signature_date(&header.value)?;
-            }
-            b"encoding"
-                if header.value.is_empty() || header.value.iter().any(u8::is_ascii_whitespace) =>
-            {
-                return Err(ObjectError::MalformedHeader);
-            }
-            _ => {}
-        }
+    if body.contains(&0) {
+        return Err(ObjectError::NulInStrictCommit);
     }
-    if tree_count != 1 {
+    let Some((tree, remaining)) = headers.split_first() else {
         return Err(ObjectError::MissingOrDuplicateCommitTree);
+    };
+    if tree.name != b"tree" || !tree.continuations.is_empty() {
+        return Err(ObjectError::StrictCommitHeaderOrder);
     }
-    if author_count != 1 || committer_count != 1 {
+    validate_native_reference(&tree.value, limits.tree_reference_bytes)?;
+
+    let mut position = 0_usize;
+    while let Some(parent) = remaining.get(position) {
+        if parent.name != b"parent" {
+            break;
+        }
+        if !parent.continuations.is_empty() {
+            return Err(ObjectError::StrictCommitHeaderOrder);
+        }
+        validate_native_reference(&parent.value, limits.tree_reference_bytes)?;
+        position += 1;
+    }
+
+    let author_start = position;
+    while let Some(author) = remaining.get(position) {
+        if author.name != b"author" {
+            break;
+        }
+        if !author.continuations.is_empty() {
+            return Err(ObjectError::StrictCommitHeaderOrder);
+        }
+        validate_signature_date(&author.value)?;
+        position += 1;
+    }
+    let author_count = position - author_start;
+    if author_count > 1 {
         return Err(ObjectError::MissingOrDuplicateCommitIdentity);
+    }
+    if author_count == 0 {
+        if remaining[position..]
+            .iter()
+            .any(|header| matches!(header.name.as_slice(), b"author" | b"committer"))
+        {
+            return Err(ObjectError::StrictCommitHeaderOrder);
+        }
+        return Err(ObjectError::MissingOrDuplicateCommitIdentity);
+    }
+
+    let Some(committer) = remaining.get(position) else {
+        return Err(ObjectError::MissingOrDuplicateCommitIdentity);
+    };
+    if committer.name != b"committer" || !committer.continuations.is_empty() {
+        if remaining[position..]
+            .iter()
+            .any(|header| header.name == b"committer")
+        {
+            return Err(ObjectError::StrictCommitHeaderOrder);
+        }
+        return Err(ObjectError::MissingOrDuplicateCommitIdentity);
+    }
+    validate_signature_date(&committer.value)?;
+
+    for header in &remaining[position + 1..] {
+        if header.name == b"encoding"
+            && (header.value.is_empty() || header.value.iter().any(u8::is_ascii_whitespace))
+        {
+            return Err(ObjectError::MalformedHeader);
+        }
     }
     Ok(())
 }
@@ -1077,18 +1137,40 @@ fn validate_native_reference(value: &[u8], object_id_bytes: usize) -> Result<(),
 }
 
 fn validate_signature_date(value: &[u8]) -> Result<(), ObjectError> {
-    let mut fields = value
-        .rsplit(|byte| *byte == b' ')
-        .filter(|field| !field.is_empty());
-    let timezone = fields.next().ok_or(ObjectError::MalformedSignatureDate)?;
-    let timestamp = fields.next().ok_or(ObjectError::MalformedSignatureDate)?;
-    let identity_prefix = fields.next().ok_or(ObjectError::MalformedSignatureDate)?;
-    if !identity_prefix.ends_with(b">")
-        || timestamp.is_empty()
-        || !timestamp.iter().all(u8::is_ascii_digit)
+    let email_start = value
+        .iter()
+        .position(|byte| *byte == b'<')
+        .ok_or(ObjectError::MalformedSignatureDate)?;
+    if email_start == 0 || value[email_start - 1] != b' ' {
+        return Err(ObjectError::MalformedSignatureDate);
+    }
+    let after_email = &value[email_start + 1..];
+    let email_end = after_email
+        .iter()
+        .position(|byte| *byte == b'>')
+        .ok_or(ObjectError::MalformedSignatureDate)?;
+    if email_end == 0 || after_email[..email_end].contains(&b'<') {
+        return Err(ObjectError::MalformedSignatureDate);
+    }
+    let after_identity = &after_email[email_end + 1..];
+    let Some(mut timestamp_and_timezone) = after_identity.strip_prefix(b" ") else {
+        return Err(ObjectError::MalformedSignatureDate);
+    };
+    while matches!(timestamp_and_timezone.first(), Some(b' ' | b'\t')) {
+        timestamp_and_timezone = &timestamp_and_timezone[1..];
+    }
+    let timestamp_length = timestamp_and_timezone
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    let (timestamp, after_timestamp) = timestamp_and_timezone.split_at(timestamp_length);
+    if timestamp.is_empty()
+        || (timestamp[0] == b'0' && timestamp.get(1) != Some(&b' '))
+        || !after_timestamp.starts_with(b" ")
     {
         return Err(ObjectError::MalformedSignatureDate);
     }
+    let timezone = &after_timestamp[1..];
     if timezone.len() != 5
         || !matches!(timezone[0], b'+' | b'-')
         || !timezone[1..].iter().all(u8::is_ascii_digit)
@@ -1096,12 +1178,69 @@ fn validate_signature_date(value: &[u8]) -> Result<(), ObjectError> {
         return Err(ObjectError::MalformedSignatureDate);
     }
     let _timestamp = parse_decimal_u64(timestamp)?;
-    let hours = usize::from(timezone[1] - b'0') * 10 + usize::from(timezone[2] - b'0');
-    let minutes = usize::from(timezone[3] - b'0') * 10 + usize::from(timezone[4] - b'0');
-    if hours > 23 || minutes > 59 {
-        return Err(ObjectError::MalformedSignatureDate);
-    }
     Ok(())
+}
+
+fn emit_header_object_body(
+    headers: &[HeaderField],
+    message: &[u8],
+    has_message_separator: bool,
+    limits: &ParseLimits,
+) -> Result<Vec<u8>, ObjectError> {
+    let mut output_len = message.len();
+    if has_message_separator {
+        output_len = output_len
+            .checked_add(2)
+            .ok_or(ObjectError::ObjectTooLarge {
+                limit: limits.max_object_bytes,
+            })?;
+    }
+    for (index, header) in headers.iter().enumerate() {
+        let line_prefix = usize::from(index != 0);
+        output_len = output_len
+            .checked_add(line_prefix)
+            .and_then(|length| length.checked_add(header.name.len()))
+            .and_then(|length| length.checked_add(1))
+            .and_then(|length| length.checked_add(header.value.len()))
+            .ok_or(ObjectError::ObjectTooLarge {
+                limit: limits.max_object_bytes,
+            })?;
+        for continuation in &header.continuations {
+            output_len = output_len
+                .checked_add(2)
+                .and_then(|length| length.checked_add(continuation.len()))
+                .ok_or(ObjectError::ObjectTooLarge {
+                    limit: limits.max_object_bytes,
+                })?;
+        }
+    }
+    if output_len > limits.max_object_bytes {
+        return Err(ObjectError::ObjectTooLarge {
+            limit: limits.max_object_bytes,
+        });
+    }
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(output_len)
+        .map_err(|_| ObjectError::AllocationFailure)?;
+    for (index, header) in headers.iter().enumerate() {
+        if index != 0 {
+            output.push(b'\n');
+        }
+        output.extend_from_slice(&header.name);
+        output.push(b' ');
+        output.extend_from_slice(&header.value);
+        for continuation in &header.continuations {
+            output.push(b'\n');
+            output.push(b' ');
+            output.extend_from_slice(continuation);
+        }
+    }
+    if has_message_separator {
+        output.extend_from_slice(b"\n\n");
+    }
+    output.extend_from_slice(message);
+    Ok(output)
 }
 
 fn parse_decimal_u64(bytes: &[u8]) -> Result<u64, ObjectError> {
@@ -1258,6 +1397,37 @@ mod tests {
                 .expect("parsed loose object remains internally consistent"),
             b"blob 5\0hello"
         );
+    }
+
+    #[test]
+    fn pinned_git_level9_high_ratio_loose_blob_is_admitted_with_a_bounded_twin_refusal() {
+        let compressed = decode_hex(include_str!(
+            "../tests/corpus/loose-blob-zeros-1mib-git.zlib.hex"
+        ));
+        let object = parse_zlib_loose(
+            &compressed,
+            InflateLimits::GIT_OBJECT,
+            ParseLimits::default(),
+        )
+        .expect("pinned Git 2.54.0 level-9 loose blob remains within Git-object admission limits");
+        assert_eq!(object.object_type, ObjectType::Blob);
+        assert_eq!(object.body.len(), 1024 * 1024);
+        assert!(object.body[..1024 * 1024 - 1].iter().all(|byte| *byte == 0));
+        assert_eq!(object.body.last(), Some(&b'x'));
+
+        let limited = InflateLimits {
+            max_expansion_ratio: Some(512),
+            ..InflateLimits::GIT_OBJECT
+        };
+        assert!(matches!(
+            parse_zlib_loose(&compressed, limited, ParseLimits::default()),
+            Err(LooseObjectDecodeError::Inflate(
+                InflateRefusal::ResourceLimit {
+                    resource: fgit_deflate::Resource::ExpansionRatio,
+                    ..
+                }
+            ))
+        ));
     }
 
     #[test]
@@ -1504,7 +1674,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_corpus_round_trips() {
+    fn checked_in_corpus_reconstructs_exact_object_bodies() {
         let limits = limits();
         let blob = b"checked-in blob\n";
         let tree_entries = vec![TreeEntry {
@@ -1515,18 +1685,28 @@ mod tests {
         let tree = emit_tree(&tree_entries, AcceptanceProfile::StrictCreate, &limits)
             .expect("strict tree corpus constructs");
         let corpus = [
-            (ObjectType::Blob, blob.as_slice()),
-            (ObjectType::Tree, tree.as_slice()),
+            (
+                ObjectType::Blob,
+                blob.as_slice(),
+                AcceptanceProfile::StrictCreate,
+            ),
+            (
+                ObjectType::Tree,
+                tree.as_slice(),
+                AcceptanceProfile::StrictCreate,
+            ),
             (
                 ObjectType::Commit,
                 include_bytes!("../tests/corpus/commit.body").as_slice(),
+                AcceptanceProfile::GitCompatibleImport,
             ),
             (
                 ObjectType::Tag,
                 include_bytes!("../tests/corpus/tag.body").as_slice(),
+                AcceptanceProfile::StrictCreate,
             ),
         ];
-        for (object_type, body) in corpus {
+        for (object_type, body, profile) in corpus {
             let framed = emit_loose_framed(object_type, body, &limits)
                 .expect("bounded loose corpus frame constructs");
             let parsed_loose =
@@ -1534,12 +1714,12 @@ mod tests {
             let parsed = parse_object_body(
                 parsed_loose.object_type,
                 &parsed_loose.body,
-                AcceptanceProfile::StrictCreate,
+                profile,
                 &limits,
             )
             .expect("structured corpus parses");
-            let emitted_body = emit_object_body(&parsed, AcceptanceProfile::StrictCreate, &limits)
-                .expect("structured corpus emits");
+            let emitted_body =
+                emit_object_body(&parsed, profile, &limits).expect("structured corpus emits");
             assert_eq!(
                 emit_loose_framed(object_type, &emitted_body, &limits)
                     .expect("loose corpus re-emits"),
@@ -1554,14 +1734,61 @@ mod tests {
         let parent_a = "2".repeat(40);
         let parent_b = "3".repeat(40);
         let body = format!(
-            "tree {tree}\nparent {parent_a}\nparent {parent_b}\nmergetag object {tree}\n extra signed body\ngpgsig -----BEGIN SIGNATURE-----\n continued signature\nencoding ISO-8859-1\nx-custom opaque\nauthor A U Thor <a@example.com> 1700000000 +0000\ncommitter C Ommitter <c@example.com> 1700000001 -0530\n\nmessage\0tail"
+            "tree {tree}\nparent {parent_a}\nparent {parent_b}\nauthor A U Thor <a@example.com> 1700000000 +0000\ncommitter C Ommitter <c@example.com> 1700000001 -0530\nmergetag object {tree}\n extra signed body\ngpgsig -----BEGIN SIGNATURE-----\n continued signature\nencoding ISO-8859-1\nx-custom opaque\n\nmessage"
         );
         let commit = parse_commit(body.as_bytes(), AcceptanceProfile::StrictCreate, &limits())
             .expect("strict commit accepted");
         assert_eq!(commit.parent_references().count(), 2);
-        assert_eq!(commit.headers()[4].name, b"gpgsig");
+        assert_eq!(commit.headers()[6].name, b"gpgsig");
         assert_eq!(commit.as_bytes(), body.as_bytes());
-        assert_eq!(commit.message(), b"message\0tail");
+        assert_eq!(commit.message(), b"message");
+        assert_eq!(
+            emit_object_body(
+                &ParsedObject::Commit(commit),
+                AcceptanceProfile::StrictCreate,
+                &limits()
+            )
+            .expect("strict commit fields reconstruct"),
+            body.as_bytes()
+        );
+    }
+
+    #[test]
+    fn import_preserves_out_of_order_commit_headers_but_strict_refuses_them() {
+        let tree = "1".repeat(40);
+        let parent = "2".repeat(40);
+        let body = format!(
+            "tree {tree}\nparent {parent}\nmergetag object {tree}\n extra signed body\ngpgsig -----BEGIN SIGNATURE-----\n continued signature\nencoding ISO-8859-1\nx-custom opaque\nauthor A U Thor <a@example.com> 1700000000 +0000\ncommitter C Ommitter <c@example.com> 1700000001 -0530\n\nmessage"
+        );
+        let imported = parse_commit(
+            body.as_bytes(),
+            AcceptanceProfile::GitCompatibleImport,
+            &limits(),
+        )
+        .expect("import profile preserves bounded unusual header order");
+        assert_eq!(
+            emit_object_body(
+                &ParsedObject::Commit(imported),
+                AcceptanceProfile::GitCompatibleImport,
+                &limits()
+            )
+            .expect("imported fields reconstruct"),
+            body.as_bytes()
+        );
+        assert_eq!(
+            parse_commit(body.as_bytes(), AcceptanceProfile::StrictCreate, &limits()),
+            Err(ObjectError::StrictCommitHeaderOrder)
+        );
+    }
+
+    #[test]
+    fn strict_commit_refuses_nul_while_import_preserves_it() {
+        let body = b"tree 1111111111111111111111111111111111111111\nauthor A <a@x> 1 +0000\ncommitter C <c@x> 1 +0000\n\nmessage\0tail";
+        assert!(parse_commit(body, AcceptanceProfile::GitCompatibleImport, &limits()).is_ok());
+        assert_eq!(
+            parse_commit(body, AcceptanceProfile::StrictCreate, &limits()),
+            Err(ObjectError::NulInStrictCommit)
+        );
     }
 
     #[test]
@@ -1575,10 +1802,34 @@ mod tests {
     }
 
     #[test]
-    fn strict_commit_rejects_malformed_date() {
-        let body = b"tree 1111111111111111111111111111111111111111\nauthor A <a@x> bad +0000\ncommitter C <c@x> 1 +0000\n\nmessage";
+    fn strict_commit_date_syntax_matches_git_fsck_edges() {
+        let malformed = b"tree 1111111111111111111111111111111111111111\nauthor A <a@x> bad +0000\ncommitter C <c@x> 1 +0000\n\nmessage";
         assert_eq!(
-            parse_commit(body, AcceptanceProfile::StrictCreate, &limits()),
+            parse_commit(malformed, AcceptanceProfile::StrictCreate, &limits()),
+            Err(ObjectError::MalformedSignatureDate)
+        );
+        let zero_padded = b"tree 1111111111111111111111111111111111111111\nauthor A <a@x> 01 +0000\ncommitter C <c@x> 1 +0000\n\nmessage";
+        assert_eq!(
+            parse_commit(zero_padded, AcceptanceProfile::StrictCreate, &limits()),
+            Err(ObjectError::MalformedSignatureDate)
+        );
+        assert!(
+            parse_commit(
+                zero_padded,
+                AcceptanceProfile::GitCompatibleImport,
+                &limits()
+            )
+            .is_ok()
+        );
+        let git_permitted = b"tree 1111111111111111111111111111111111111111\nauthor A <a@x> 1 +9900\ncommitter C <c@x> 1 +9900\n\nmessage";
+        assert!(parse_commit(git_permitted, AcceptanceProfile::StrictCreate, &limits()).is_ok());
+        let malformed_timezone = b"tree 1111111111111111111111111111111111111111\nauthor A <a@x> 1 +9x00\ncommitter C <c@x> 1 +0000\n\nmessage";
+        assert_eq!(
+            parse_commit(
+                malformed_timezone,
+                AcceptanceProfile::StrictCreate,
+                &limits()
+            ),
             Err(ObjectError::MalformedSignatureDate)
         );
     }
