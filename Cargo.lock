@@ -723,6 +723,7 @@ dependencies = [
  "fgit-authority",
  "fgit-resource",
  "fgit-runtime",
+ "fgit-types",
 ]
 
 [[package]]
