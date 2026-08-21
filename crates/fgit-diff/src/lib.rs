@@ -725,9 +725,9 @@ fn lcs_prefix(
 ) -> Result<Vec<usize>, DiffError> {
     let width = new_end - new_start;
     let storage_len = width.checked_add(1).ok_or(DiffError::ArithmeticOverflow)?;
-    let mut previous = vec![0; storage_len];
+    let mut previous = vec![0_usize; storage_len];
     for old_index in old_start..old_end {
-        let mut current = vec![0; storage_len];
+        let mut current = vec![0_usize; storage_len];
         for new_offset in 0..width {
             budget.consume(1)?;
             let new_index = new_start + new_offset;
@@ -755,9 +755,9 @@ fn lcs_suffix(
 ) -> Result<Vec<usize>, DiffError> {
     let width = new_end - new_start;
     let storage_len = width.checked_add(1).ok_or(DiffError::ArithmeticOverflow)?;
-    let mut previous = vec![0; storage_len];
+    let mut previous = vec![0_usize; storage_len];
     for old_index in (old_start..old_end).rev() {
-        let mut current = vec![0; storage_len];
+        let mut current = vec![0_usize; storage_len];
         for new_offset in (0..width).rev() {
             budget.consume(1)?;
             let new_index = new_start + new_offset;
@@ -1545,7 +1545,7 @@ where
 {
     let mut pending: BTreeSet<_> = starts.into_iter().collect();
     let mut snapshot = BTreeMap::new();
-    let mut edge_count = 0;
+    let mut edge_count = 0_usize;
     while let Some(commit) = pending.iter().next().cloned() {
         pending.remove(&commit);
         if snapshot.contains_key(&commit) {
