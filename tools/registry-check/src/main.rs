@@ -20,6 +20,7 @@ enum CheckSet {
     Constellation,
     CrateGraph,
     LedgerPolicy,
+    LedgerFsqlitePolicy,
     LedgerConstellation,
     LedgerUnsafe,
 }
@@ -34,10 +35,11 @@ impl CheckSet {
             "constellation" => Ok(Self::Constellation),
             "crate-graph" => Ok(Self::CrateGraph),
             "ledger-policy" => Ok(Self::LedgerPolicy),
+            "ledger-fsqlite-policy" => Ok(Self::LedgerFsqlitePolicy),
             "ledger-constellation" => Ok(Self::LedgerConstellation),
             "ledger-unsafe" => Ok(Self::LedgerUnsafe),
             other => Err(format!(
-                "unknown command `{other}`; expected all, docs, registries, constitution, constellation, crate-graph, ledger-policy, ledger-constellation, or ledger-unsafe"
+                "unknown command `{other}`; expected all, docs, registries, constitution, constellation, crate-graph, ledger-policy, ledger-fsqlite-policy, ledger-constellation, or ledger-unsafe"
             )),
         }
     }
@@ -57,7 +59,10 @@ impl CheckSet {
     const fn is_ledger(self) -> bool {
         matches!(
             self,
-            Self::LedgerPolicy | Self::LedgerConstellation | Self::LedgerUnsafe
+            Self::LedgerPolicy
+                | Self::LedgerFsqlitePolicy
+                | Self::LedgerConstellation
+                | Self::LedgerUnsafe
         )
     }
 }
@@ -1825,10 +1830,10 @@ fn lock_dependency_name(value: &str) -> &str {
     value.split_ascii_whitespace().next().unwrap_or(value)
 }
 
-/// Emits deterministic, reviewable policy rows for the exact package closure
-/// rooted at the one admitted runtime. It deliberately emits rows rather than
-/// editing the registry: a reviewer can inspect every generated rationale and
-/// policy before the rows are applied under the registry reservation.
+/// Emits deterministic, reviewable policy rows for an exact admitted closure.
+/// It deliberately emits rows rather than editing the registry: a reviewer can
+/// inspect every generated rationale and policy before the rows are applied
+/// under the registry reservation.
 fn generate_admission_ledger(root: &Path, command: CheckSet) -> Result<String, String> {
     let lock_text = fs::read_to_string(root.join("Cargo.lock"))
         .map_err(|error| format!("cannot read Cargo.lock: {error}"))?;
@@ -1837,10 +1842,13 @@ fn generate_admission_ledger(root: &Path, command: CheckSet) -> Result<String, S
         .iter()
         .filter(|package| package.name == "asupersync")
         .collect::<Vec<_>>();
-    if runtime.len() != 1 {
+    if runtime.len() != 1 || runtime[0].version != "0.4.9" {
         return Err(format!(
-            "expected exactly one asupersync package before ledger generation, observed {}",
-            runtime.len()
+            "expected exactly one asupersync 0.4.9 package before ledger generation, observed {:?}",
+            runtime
+                .iter()
+                .map(|package| package.version.as_str())
+                .collect::<Vec<_>>()
         ));
     }
     if command == CheckSet::LedgerConstellation {
@@ -1849,8 +1857,25 @@ fn generate_admission_ledger(root: &Path, command: CheckSet) -> Result<String, S
     if command == CheckSet::LedgerUnsafe {
         return generate_unsafe_ledger(root, &packages, &cargo_metadata(root)?);
     }
-    let closure = dependency_closure(&packages, "asupersync");
-    let baseline_allowed = baseline_dependency_patterns(root)?;
+    let config = admission_ledger_config(command)
+        .ok_or_else(|| "requested command does not emit admission policy rows".to_owned())?;
+    let roots = packages
+        .iter()
+        .filter(|package| package.name == config.root_package)
+        .collect::<Vec<_>>();
+    if roots.len() != 1 || roots[0].version != config.root_version {
+        return Err(format!(
+            "expected exactly one {} {} package before ledger generation, observed {:?}",
+            config.root_package,
+            config.root_version,
+            roots
+                .iter()
+                .map(|package| package.version.as_str())
+                .collect::<Vec<_>>()
+        ));
+    }
+    let closure = dependency_closure(&packages, config.root_package);
+    let baseline_allowed = baseline_dependency_patterns(root, config.decision)?;
     let metadata = cargo_metadata(root)?;
     let parent_edges = direct_parent_edges(&packages, &closure);
     let unresolved = packages
@@ -1865,29 +1890,67 @@ fn generate_admission_ledger(root: &Path, command: CheckSet) -> Result<String, S
         .map(|package| package.name.clone())
         .collect::<BTreeSet<_>>();
     let mut output = String::new();
-    for (next_id, name) in (next_admission_policy_id(root)?..).zip(&unresolved) {
+    for (next_id, name) in (next_admission_policy_id(root, config)?..).zip(&unresolved) {
         let packages_for_name = packages
             .iter()
             .filter(|package| package.name == *name)
             .collect::<Vec<_>>();
         let feature_policy = resolved_feature_policy(&packages_for_name, &metadata);
-        let parent = parent_edges.get(name).map_or("asupersync", String::as_str);
-        let unsafe_policy = generated_unsafe_policy(name);
-        let ffi_policy = generated_ffi_policy(name);
+        let parent = parent_edges
+            .get(name)
+            .map_or(config.root_package, String::as_str);
+        let proc_macro = packages_for_name
+            .iter()
+            .any(|package| metadata.proc_macros.contains(&package.name));
+        let unsafe_policy = generated_unsafe_policy(name, proc_macro);
+        let ffi_policy = generated_ffi_policy(name, proc_macro);
         writeln!(
             output,
-            "DEP-{next_id:03}\t{name}\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.4.9_transitive_direct_parent_{parent}\t{feature_policy}\t{unsafe_policy}\t{ffi_policy}\tactive"
+            "DEP-{next_id:03}\t{name}\tproduction\t{}\t{}\t{}_{}_transitive_direct_parent_{parent}\t{feature_policy}\t{unsafe_policy}\t{ffi_policy}\tactive",
+            config.decision,
+            config.owner,
+            config.root_package,
+            config.root_version,
         )
         .map_err(|error| format!("cannot render policy row: {error}"))?;
     }
     Ok(output)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AdmissionLedgerConfig {
+    root_package: &'static str,
+    root_version: &'static str,
+    decision: &'static str,
+    owner: &'static str,
+}
+
+const fn admission_ledger_config(command: CheckSet) -> Option<AdmissionLedgerConfig> {
+    match command {
+        CheckSet::LedgerPolicy => Some(AdmissionLedgerConfig {
+            root_package: "asupersync",
+            root_version: "0.4.9",
+            decision: "allow_transitive_admitted_runtime",
+            owner: "concurrency",
+        }),
+        CheckSet::LedgerFsqlitePolicy => Some(AdmissionLedgerConfig {
+            root_package: "fsqlite",
+            root_version: "0.3.7",
+            decision: "allow_transitive_admitted_fsqlite",
+            owner: "storage",
+        }),
+        _ => None,
+    }
+}
+
 /// Generated rows must remain reproducible after they have been admitted. The
 /// baseline is therefore every active allow row except the generator's own
-/// `allow_transitive_admitted_runtime` decision; using the full active registry
-/// would make a second invocation emit nothing and hide drift.
-fn baseline_dependency_patterns(root: &Path) -> Result<Vec<String>, String> {
+/// decision; using the full active registry would make a second invocation
+/// emit nothing and hide drift.
+fn baseline_dependency_patterns(
+    root: &Path,
+    generated_decision: &str,
+) -> Result<Vec<String>, String> {
     let text = fs::read_to_string(root.join("registries/dependency_policy.tsv"))
         .map_err(|error| format!("cannot read dependency policy registry: {error}"))?;
     let mut patterns = Vec::new();
@@ -1901,7 +1964,7 @@ fn baseline_dependency_patterns(root: &Path) -> Result<Vec<String>, String> {
         }
         if fields[9] == "active"
             && fields[3].starts_with("allow")
-            && fields[3] != "allow_transitive_admitted_runtime"
+            && fields[3] != generated_decision
         {
             patterns.push(fields[1].to_owned());
         }
@@ -1951,20 +2014,23 @@ fn direct_parent_edges(
     parents
 }
 
-/// The generated runtime admission block retains its first assigned ID even if
-/// a later, unrelated policy row is appended. On a fresh registry it starts at
-/// the next free ID; once present it is identified by its exact decision,
-/// owner, and runtime-rooted rationale rather than by the registry tail.
-fn next_admission_policy_id(root: &Path) -> Result<usize, String> {
+/// A generated admission block retains its first assigned ID even if a later,
+/// unrelated policy row is appended. On a fresh registry it starts at the next
+/// free ID; once present it is identified by its exact closure identity rather
+/// than by the registry tail.
+fn next_admission_policy_id(root: &Path, config: AdmissionLedgerConfig) -> Result<usize, String> {
     let text = fs::read_to_string(root.join("registries/dependency_policy.tsv"))
         .map_err(|error| format!("cannot read dependency policy registry: {error}"))?;
     let generated_start = text
         .lines()
         .filter_map(dependency_policy_fields)
         .filter(|fields| {
-            fields[3] == "allow_transitive_admitted_runtime"
-                && fields[4] == "concurrency"
-                && fields[5].starts_with("asupersync_0.4.9_transitive_direct_parent_")
+            fields[3] == config.decision
+                && fields[4] == config.owner
+                && fields[5].starts_with(&format!(
+                    "{}_{}_transitive_direct_parent_",
+                    config.root_package, config.root_version
+                ))
         })
         .filter_map(|fields| fields[0].strip_prefix("DEP-"))
         .filter_map(|number| number.parse::<usize>().ok())
@@ -2012,41 +2078,12 @@ fn resolved_feature_policy(packages: &[&LockPackage], metadata: &MetadataSnapsho
     }
 }
 
-fn generated_unsafe_policy(name: &str) -> &'static str {
-    if name.contains("derive")
-        || name.contains("macro")
-        || name.starts_with("wasm")
-        || matches!(
-            name,
-            "quote"
-                | "syn"
-                | "proc-macro2"
-                | "pastey"
-                | "rustversion"
-                | "windows-implement"
-                | "windows-interface"
-        )
-    {
-        "proc_macro_transitive"
-    } else if matches!(
-        name,
-        "libc" | "nix" | "ntapi" | "rustix" | "socket2" | "windows" | "windows-sys" | "winapi"
-    ) || name.starts_with("windows-")
-        || name.starts_with("winapi")
-        || name.starts_with("objc2")
-        || matches!(
-            name,
-            "dispatch2" | "wasi" | "r-efi" | "redox_syscall" | "hermit-abi"
-        )
-    {
-        "os_abi"
-    } else {
-        "ledgered_transitive_unaudited"
-    }
+fn generated_unsafe_policy(name: &str, proc_macro: bool) -> String {
+    expected_unsafe_policy(name, proc_macro)
 }
 
-fn generated_ffi_policy(name: &str) -> &'static str {
-    if generated_unsafe_policy(name) == "os_abi" {
+fn generated_ffi_policy(name: &str, proc_macro: bool) -> &'static str {
+    if generated_unsafe_policy(name, proc_macro) == "os_abi" {
         "os_abi_shim_no_foreign_engine"
     } else {
         "no_foreign_engine_declared"
@@ -2377,7 +2414,12 @@ fn active_policy_for_package<'a>(
 fn expected_unsafe_policy(package: &str, proc_macro: bool) -> String {
     if package.starts_with("fgit-") {
         "must_forbid_first_party_unsafe".to_owned()
-    } else if package.starts_with("franken-") || package.starts_with("franken_") {
+    } else if package.starts_with("franken-")
+        || package.starts_with("franken_")
+        || package == "fsqlite"
+        || package.starts_with("fsqlite-")
+        || package == "frankensqlite"
+    {
         "must_match_sibling_contract".to_owned()
     } else if proc_macro
         || package.starts_with("wasm-bindgen")
@@ -4622,15 +4664,38 @@ mod tests {
 
     #[test]
     fn generated_policy_classification_marks_os_and_wasm_surfaces() {
-        assert_eq!(generated_unsafe_policy("libc"), "os_abi");
-        assert_eq!(generated_unsafe_policy("windows-sys"), "os_abi");
+        assert_eq!(generated_unsafe_policy("libc", false), "os_abi");
+        assert_eq!(generated_unsafe_policy("windows-sys", false), "os_abi");
         assert_eq!(
-            generated_unsafe_policy("wasm-bindgen"),
+            generated_unsafe_policy("wasm-bindgen", false),
             "proc_macro_transitive"
         );
         assert_eq!(
-            generated_ffi_policy("windows-sys"),
+            generated_ffi_policy("windows-sys", false),
             "os_abi_shim_no_foreign_engine"
+        );
+        assert_eq!(
+            generated_unsafe_policy("tracing-attributes", true),
+            "proc_macro_transitive"
+        );
+        assert_eq!(
+            generated_unsafe_policy("fsqlite-vfs", false),
+            "must_match_sibling_contract"
+        );
+    }
+
+    #[test]
+    fn fsqlite_admission_ledger_configuration_is_exact_and_distinct() {
+        let config = admission_ledger_config(CheckSet::LedgerFsqlitePolicy)
+            .expect("fsqlite policy generator must have a configuration");
+        assert_eq!(config.root_package, "fsqlite");
+        assert_eq!(config.root_version, "0.3.7");
+        assert_eq!(config.decision, "allow_transitive_admitted_fsqlite");
+        assert_eq!(config.owner, "storage");
+        assert_ne!(
+            config,
+            admission_ledger_config(CheckSet::LedgerPolicy)
+                .expect("runtime policy generator must have a configuration")
         );
     }
 
@@ -4650,7 +4715,13 @@ mod tests {
             ),
         )
         .expect("write registry fixture");
-        assert_eq!(next_admission_policy_id(&workspace.root), Ok(14));
+        assert_eq!(
+            next_admission_policy_id(
+                &workspace.root,
+                admission_ledger_config(CheckSet::LedgerPolicy).expect("runtime config"),
+            ),
+            Ok(14)
+        );
     }
 
     #[test]
