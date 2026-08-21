@@ -318,7 +318,10 @@ started_ns="$(now_epoch_ns)"
 if ! stdout_path="$(mktemp "${TMPDIR:-/tmp}/frankengit-verify-stdout.XXXXXXXX")"; then
   artifact_warning 'cannot allocate stdout capture; running lane without an artifact'
   set +e
-  (run_lane "${lane}")
+  (
+    set -e
+    run_lane "${lane}"
+  )
   lane_exit=$?
   set -e
   exit "${lane_exit}"
@@ -327,14 +330,20 @@ if ! stderr_path="$(mktemp "${TMPDIR:-/tmp}/frankengit-verify-stderr.XXXXXXXX")"
   artifact_warning 'cannot allocate stderr capture; running lane without an artifact'
   rm -f -- "${stdout_path}" || true
   set +e
-  (run_lane "${lane}")
+  (
+    set -e
+    run_lane "${lane}"
+  )
   lane_exit=$?
   set -e
   exit "${lane_exit}"
 fi
 
 set +e
-(run_lane "${lane}") > "${stdout_path}" 2> "${stderr_path}"
+(
+  set -e
+  run_lane "${lane}"
+) > "${stdout_path}" 2> "${stderr_path}"
 lane_exit=$?
 set -e
 finished_ns="$(now_epoch_ns)"
