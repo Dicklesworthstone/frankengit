@@ -59,30 +59,36 @@ fge_assert_file FG-057-E2E-006 "$KL_GOLDENS/seal.py" \
 fge_phase action
 
 fge_run crypto-keyed-vectors \
-  cargo test --locked -p fgit-crypto --test keyed_vectors
+  env RCH_CARGO_WRAPPER_BYPASS=1 \
+    cargo test --locked -p fgit-crypto --test keyed_vectors
 kl_vectors_exit=$FGE_LAST_EXIT
 
 fge_run crypto-key-purposes \
-  cargo test --locked -p fgit-crypto --test key_purposes
+  env RCH_CARGO_WRAPPER_BYPASS=1 \
+    cargo test --locked -p fgit-crypto --test key_purposes
 kl_purposes_exit=$FGE_LAST_EXIT
 
 fge_run crypto-key-lifecycle \
-  cargo test --locked -p fgit-crypto --test key_lifecycle
+  env RCH_CARGO_WRAPPER_BYPASS=1 \
+    cargo test --locked -p fgit-crypto --test key_lifecycle
 kl_lifecycle_exit=$FGE_LAST_EXIT
 
 fge_run crypto-signing \
-  cargo test --locked -p fgit-crypto --test signing
+  env RCH_CARGO_WRAPPER_BYPASS=1 \
+    cargo test --locked -p fgit-crypto --test signing
 kl_signing_exit=$FGE_LAST_EXIT
 
 fge_run crypto-sealing \
-  cargo test --locked -p fgit-crypto --test sealing
+  env RCH_CARGO_WRAPPER_BYPASS=1 \
+    cargo test --locked -p fgit-crypto --test sealing
 kl_sealing_exit=$FGE_LAST_EXIT
 
 # The compile-time half of the purpose separation lives in compile_fail
 # doctests, which only a doc-test run executes. Skipping it here would leave
 # "cross-purpose use is unrepresentable" untested by this suite.
 fge_run crypto-doctests \
-  cargo test --locked -p fgit-crypto --doc
+  env RCH_CARGO_WRAPPER_BYPASS=1 \
+    cargo test --locked -p fgit-crypto --doc
 kl_doctests_exit=$FGE_LAST_EXIT
 
 fge_phase assert

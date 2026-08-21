@@ -47,13 +47,15 @@ fge_assert_file FG-010b-E2E-002 "$CD_REPO/crates/fgit-chronicle/tests/capsule_dr
 fge_phase action
 
 fge_run chronicle-capsule-drills \
-  cargo test --locked -p fgit-chronicle --test capsule_drills
+  env RCH_CARGO_WRAPPER_BYPASS=1 \
+    cargo test --locked -p fgit-chronicle --test capsule_drills
 cd_drills_exit=$FGE_LAST_EXIT
 
 # The drills sit on top of fg010a's recovery rules; if those regress the
 # masquerade assertion above is resting on a broken foundation.
 fge_run chronicle-recovery-rules \
-  cargo test --locked -p fgit-chronicle --test recovery_rules
+  env RCH_CARGO_WRAPPER_BYPASS=1 \
+    cargo test --locked -p fgit-chronicle --test recovery_rules
 cd_recovery_exit=$FGE_LAST_EXIT
 
 fge_phase assert
