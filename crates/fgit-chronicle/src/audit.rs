@@ -56,7 +56,12 @@ where
 }
 
 /// The identity of a decision batch, computed from its canonical bytes.
-pub(crate) fn batch_identity<I>(
+///
+/// Public because anyone holding a batch and a head needs the same answer this
+/// module checks against: a head is bound to a batch by the batch's bytes, not
+/// by a label somebody chose. Mutating a batch changes its identity, so a
+/// caller that edits one must rebind the head or the pair is stale.
+pub fn batch_identity<I>(
     identity: &I,
     batch: &RepositoryDecisionBatchBody,
 ) -> Result<RepositoryDecisionBatchId, ChronicleRefusal>

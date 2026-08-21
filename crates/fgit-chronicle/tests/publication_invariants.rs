@@ -6,7 +6,7 @@
 
 use fgit_chronicle::{
     ChronicleRefusal, PublicationBasis, PublicationPlan, ResultingRoots, VerifiedPublication,
-    verify_pair,
+    batch_identity, verify_pair,
 };
 use fgit_codec::CryptoBodyIdentity;
 use fgit_codec::schema::{
@@ -170,7 +170,11 @@ fn the_successor_head_binds_the_batch_and_the_predecessor() {
     assert_eq!(head.predecessor_head_id, Some(basis().id()));
     assert_eq!(
         head.decision_tail_id,
-        Some(derived!(RepositoryDecisionBatchId, 0x40))
+        Some(
+            batch_identity(&CryptoBodyIdentity, published.batch())
+                .expect("the batch has an identity")
+        ),
+        "the head names the batch by its bytes, not by a label the caller chose"
     );
     assert_eq!(head.latest_decision_sequence, Some(DecisionSequence::FIRST));
     assert_eq!(
@@ -218,7 +222,7 @@ fn a_refusal_only_batch_consumes_decision_sequence_and_nothing_else() {
 #[test]
 fn an_empty_plan_refuses_to_seal() {
     let plan = PublicationPlan::open(basis()).expect("genesis basis opens");
-    assert!(plan.is_empty());
+    assert!(plan.is_empty(), "a freshly opened plan has decided nothing");
     assert_eq!(
         plan.seal(&CryptoBodyIdentity, refusal_only_roots()),
         Err(ChronicleRefusal::EmptyBatch),
@@ -324,12 +328,17 @@ fn a_decision_sequence_gap_is_refused_and_the_contiguous_twin_is_not() {
     );
 
     // Near-identical permitted case: the same appended refusal, in position.
+    // Editing the batch changes its identity, so the head is rebound to the
+    // edited bytes. Without that the pair would carry two defects and this
+    // would stop being a test about sequence contiguity.
     if let Some(last) = batch.decisions.last_mut() {
         last.decision_sequence = DecisionSequence::try_new(2).expect("two is a valid position");
     }
     let mut head = head;
     head.latest_decision_sequence =
         Some(DecisionSequence::try_new(2).expect("two is a valid position"));
+    head.decision_tail_id =
+        Some(batch_identity(&CryptoBodyIdentity, &batch).expect("the batch has an identity"));
     assert_eq!(
         verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
         Ok(())
@@ -405,8 +414,12 @@ fn a_refusal_only_batch_that_moved_the_ref_root_is_refused() {
     let mut head = published.head().clone();
 
     // Planted negative: a batch that committed nothing moves the source root.
+    // The head is rebound to the edited batch so the pair carries exactly one
+    // defect and the assertion is about refusal-only semantics, not staleness.
     batch.resulting_ref_root = digest(0xB2);
     head.ref_root = digest(0xB2);
+    head.decision_tail_id =
+        Some(batch_identity(&CryptoBodyIdentity, &batch).expect("the batch has an identity"));
     assert_eq!(
         verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
         Err(ChronicleRefusal::RefusalOnlyBatchAdvancedCommittedState {
@@ -418,6 +431,8 @@ fn a_refusal_only_batch_that_moved_the_ref_root_is_refused() {
     // Near-identical permitted case: the same refusal leaving the root alone.
     batch.resulting_ref_root = genesis_head().ref_root;
     head.ref_root = genesis_head().ref_root;
+    head.decision_tail_id =
+        Some(batch_identity(&CryptoBodyIdentity, &batch).expect("the batch has an identity"));
     assert_eq!(
         verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
         Ok(())
