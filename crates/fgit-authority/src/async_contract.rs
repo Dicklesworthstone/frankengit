@@ -101,7 +101,24 @@ impl DuplicateAbsenceWitness {
 /// the failure vocabulary, so that a single set of semantics can serve both.
 /// The only additions are `Context` and the `async`.
 ///
+/// # This is the production surface
+///
+/// Publication in a live node runs through here, over a durable backend, via
+/// [`publish_decisions_async`]. [`AuthorityStore`] is the deterministic
+/// verification surface. **Both are permanent and neither is deprecated**: this
+/// one is not a replacement, and that one is not a legacy shape awaiting
+/// migration.
+///
+/// They are siblings rather than layers because they share one delegated
+/// decision core — the same duplicate classification, the same entry
+/// construction, the same replay bound. Neither can conclude something the
+/// other would not about the same state; they differ only in how they wait.
+/// An equivalence suite pins that on a corpus whose cases produce distinct
+/// answers, so agreement cannot be satisfied by a driver that returns one
+/// constant.
+///
 /// [`AuthorityStore`]: crate::AuthorityStore
+/// [`publish_decisions_async`]: crate::publish_decisions_async
 pub trait AsyncAuthorityStore: Sync {
     /// The runtime-owned context threaded through every operation.
     ///

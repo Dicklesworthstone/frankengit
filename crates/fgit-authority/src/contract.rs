@@ -82,6 +82,25 @@ impl Default for AuthorityLimits {
 /// Every one of these is exercised by [`crate::run_authority_conformance`], and
 /// a backend that stores bytes durably but fails any of them cannot carry
 /// canonical mutation.
+///
+/// # This is the deterministic verification surface
+///
+/// Synchronous on purpose, and **permanent**. It is not a legacy shape awaiting
+/// migration to [`AsyncAuthorityStore`], and it is not deprecated. Two things
+/// depend on its being synchronous and neither is incidental: the
+/// linearizability checker calls it without a runtime, and all deterministic
+/// fault injection lives behind [`FaultableAuthorityStore`], which extends it.
+/// Making this trait async would drag both into a runtime and damage the
+/// verification machinery in order to feed production — which is why the t7ip
+/// ruling added a sibling rather than converting this one.
+///
+/// The production counterpart is [`AsyncAuthorityStore`]. **Both are permanent,
+/// neither is deprecated**, and they share one delegated decision core, so they
+/// cannot conclude differently about the same state — only wait differently.
+/// Do not reach for this trait in a node because its signature is simpler; that
+/// was the architectural mistake t7ip exists to correct.
+///
+/// [`AsyncAuthorityStore`]: crate::AsyncAuthorityStore
 pub trait AuthorityStore {
     /// Identity of this endpoint and credential scope.
     fn instance_id(&self) -> StoreInstanceId;
