@@ -551,6 +551,9 @@ fn crash_after_cas_restarts_to_the_same_terminal_outcome_without_an_index_entry(
 
 #[test]
 fn rejected_second_terminal_decision_never_becomes_canonical() {
+    // EXPECTED-RED (FG-007b): this documents a confirmed authority invariant
+    // violation. Keep the assertion failing until publication atomically binds
+    // outcome entries with the successor-head CAS; a pre-CAS lookup is TOCTOU.
     // A conflict response alone is insufficient: because the authority head is
     // the only publication point, an attempted duplicate must leave both the
     // current head and authenticated replay on the first terminal outcome.
@@ -612,6 +615,9 @@ fn rejected_second_terminal_decision_never_becomes_canonical() {
 
 #[test]
 fn missing_accelerator_after_a_lost_response_cannot_admit_a_second_terminal() {
+    // EXPECTED-RED (FG-007b): this is intentionally failing against the known
+    // non-atomic authority transition. Do not weaken it or make it pass with
+    // an accelerator precheck; only the atomic publication fix closes the race.
     // This is the race a read-before-CAS check cannot close.  Publisher B's
     // CAS linearizes its decision, but its response is lost before the derived
     // accelerator write.  Publisher A then sees B's new head and an absent
