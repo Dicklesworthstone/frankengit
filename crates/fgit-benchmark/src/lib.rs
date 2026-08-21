@@ -19,7 +19,7 @@
 
 use std::{
     collections::BTreeMap,
-    fmt,
+    fmt::{self, Write as _},
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -521,12 +521,14 @@ impl BenchmarkArtifact {
     #[must_use]
     pub fn to_ndjson(&self) -> String {
         let mut output = String::new();
-        output.push_str(&format!(
-            "{{\"schema\":\"{ARTIFACT_SCHEMA}\",\"schema_version\":{ARTIFACT_SCHEMA_VERSION},\"kind\":\"begin\",\"fingerprint\":{},\"workload\":{},\"admission\":{}}}\n",
+        writeln!(
+            output,
+            "{{\"schema\":\"{ARTIFACT_SCHEMA}\",\"schema_version\":{ARTIFACT_SCHEMA_VERSION},\"kind\":\"begin\",\"fingerprint\":{},\"workload\":{},\"admission\":{}}}",
             fingerprint_json(&self.plan.fingerprint),
             workload_json(&self.plan.workload),
             admission_json(&self.plan.admission),
-        ));
+        )
+        .expect("writing into a String cannot fail");
         for sample in self
             .baseline
             .iter()
@@ -536,15 +538,17 @@ impl BenchmarkArtifact {
             output.push_str(&raw_sample_json(sample));
             output.push('\n');
         }
-        output.push_str(&format!(
-            "{{\"schema\":\"{ARTIFACT_SCHEMA}\",\"schema_version\":{ARTIFACT_SCHEMA_VERSION},\"kind\":\"terminal\",\"baseline_tails\":{},\"candidate_tails\":{},\"aa_control_tails\":{},\"aa_noise\":{{\"p95_noise_ns\":{},\"p99_noise_ns\":{}}},\"speedup_admissible\":{}}}\n",
+        writeln!(
+            output,
+            "{{\"schema\":\"{ARTIFACT_SCHEMA}\",\"schema_version\":{ARTIFACT_SCHEMA_VERSION},\"kind\":\"terminal\",\"baseline_tails\":{},\"candidate_tails\":{},\"aa_control_tails\":{},\"aa_noise\":{{\"p95_noise_ns\":{},\"p99_noise_ns\":{}}},\"speedup_admissible\":{}}}",
             tails_json(self.baseline_tails),
             tails_json(self.candidate_tails),
             tails_json(self.aa_control_tails),
             self.aa_noise.p95_noise_ns,
             self.aa_noise.p99_noise_ns,
             self.speedup_is_admissible(),
-        ));
+        )
+        .expect("writing into a String cannot fail");
         output
     }
 

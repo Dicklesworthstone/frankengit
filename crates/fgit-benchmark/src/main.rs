@@ -116,13 +116,12 @@ fn cpu_model() -> String {
     }
     #[cfg(target_os = "linux")]
     {
-        if let Ok(cpu_info) = std::fs::read_to_string("/proc/cpuinfo") {
-            if let Some(model) = cpu_info
+        if let Ok(cpu_info) = std::fs::read_to_string("/proc/cpuinfo")
+            && let Some(model) = cpu_info
                 .lines()
                 .find_map(|line| line.strip_prefix("model name\t: "))
-            {
-                return model.to_owned();
-            }
+        {
+            return model.to_owned();
         }
     }
     "unavailable; set FG_BENCH_CPU_MODEL".to_owned()
