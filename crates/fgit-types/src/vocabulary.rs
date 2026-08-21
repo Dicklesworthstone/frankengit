@@ -246,6 +246,32 @@ pub enum RefusalCode {
     ForgeTransitionInvalid,
     /// The request names a superseded repository incarnation.
     RepositoryIncarnationMismatch,
+    /// A sealed transaction bound an effect-scoped idempotency key that another
+    /// transaction already bound to different canonical parameters.
+    ///
+    /// Distinct from [`RequestRejectionCode::IdempotencyKeyReuse`], which is a
+    /// pre-seal rejection over the *request* key. This one is a terminal
+    /// decision about an *effect* key and is repository history. The same key
+    /// with identical canonical parameters stays an absorbed no-op and is not
+    /// a refusal.
+    EffectIdempotencyKeyReuse,
+    /// Source intents folded to contradictory duplicate values, an ambiguous
+    /// cascade, or an unordered collection, so no single net effect exists.
+    ///
+    /// Such input is refused rather than normalized into an invented policy.
+    ConflictingSemanticEffects,
+    /// The declared placement, repair, and failure-domain predicate cannot be
+    /// satisfied, so the batch cannot reach the durability epoch its profile
+    /// requires. The bodies may be staged and valid; the profile is what
+    /// cannot be met.
+    DurabilityProfileUnavailable,
+    /// A first-party invariant was observed broken: a second terminal decision
+    /// for one sealed transaction, or an accelerator that disagrees with the
+    /// authenticated stream.
+    ///
+    /// This exists so the one condition operators most need to see is reported
+    /// as itself instead of failing closed as a nearby class.
+    InternalInvariantBreach,
 }
 
 impl RefusalCode {
@@ -306,6 +332,10 @@ impl RefusalCode {
         Self::BasisCapsuleNotReusable,
         Self::ForgeTransitionInvalid,
         Self::RepositoryIncarnationMismatch,
+        Self::EffectIdempotencyKeyReuse,
+        Self::ConflictingSemanticEffects,
+        Self::DurabilityProfileUnavailable,
+        Self::InternalInvariantBreach,
     ];
 
     /// Stable wire code point.
@@ -367,6 +397,10 @@ impl RefusalCode {
             Self::BasisCapsuleNotReusable => 0x0217,
             Self::ForgeTransitionInvalid => 0x0218,
             Self::RepositoryIncarnationMismatch => 0x0219,
+            Self::EffectIdempotencyKeyReuse => 0x021a,
+            Self::ConflictingSemanticEffects => 0x021b,
+            Self::DurabilityProfileUnavailable => 0x021c,
+            Self::InternalInvariantBreach => 0x021d,
         }
     }
 
@@ -429,6 +463,10 @@ impl RefusalCode {
             Self::BasisCapsuleNotReusable => "BasisCapsuleNotReusable",
             Self::ForgeTransitionInvalid => "ForgeTransitionInvalid",
             Self::RepositoryIncarnationMismatch => "RepositoryIncarnationMismatch",
+            Self::EffectIdempotencyKeyReuse => "EffectIdempotencyKeyReuse",
+            Self::ConflictingSemanticEffects => "ConflictingSemanticEffects",
+            Self::DurabilityProfileUnavailable => "DurabilityProfileUnavailable",
+            Self::InternalInvariantBreach => "InternalInvariantBreach",
         }
     }
 
