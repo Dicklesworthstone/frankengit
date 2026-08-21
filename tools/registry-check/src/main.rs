@@ -18,6 +18,7 @@ enum CheckSet {
     Registries,
     Constitution,
     Constellation,
+    CrateGraph,
     LedgerPolicy,
     LedgerConstellation,
 }
@@ -30,10 +31,11 @@ impl CheckSet {
             "registries" => Ok(Self::Registries),
             "constitution" => Ok(Self::Constitution),
             "constellation" => Ok(Self::Constellation),
+            "crate-graph" => Ok(Self::CrateGraph),
             "ledger-policy" => Ok(Self::LedgerPolicy),
             "ledger-constellation" => Ok(Self::LedgerConstellation),
             other => Err(format!(
-                "unknown command `{other}`; expected all, docs, registries, constitution, constellation, ledger-policy, or ledger-constellation"
+                "unknown command `{other}`; expected all, docs, registries, constitution, constellation, crate-graph, ledger-policy, or ledger-constellation"
             )),
         }
     }
@@ -155,6 +157,9 @@ fn main() -> ExitCode {
     if invocation.check_set == CheckSet::Constellation {
         check_constellation_manifests(&root, &mut report);
         check_constellation(&root, &mut report);
+    } else if invocation.check_set == CheckSet::CrateGraph {
+        check_workspace_crate_graph(&root, &mut report);
+        check_forbidden_artifacts(&root, &mut report);
     } else {
         check_required_files(&root, &mut report);
         if invocation.check_set.includes_registries() {
@@ -167,6 +172,7 @@ fn main() -> ExitCode {
         }
         if invocation.check_set.includes_constitution() {
             check_rust_sources(&root, &mut report);
+            check_workspace_crate_graph(&root, &mut report);
             check_manifests(&root, &mut report);
             check_constellation(&root, &mut report);
             check_toolchain(&root, &mut report);
@@ -1034,6 +1040,328 @@ fn check_contract_phrases(root: &Path, report: &mut Report) {
     if !dsr.contains("workflow: .github/workflows/docs-integrity.yml") {
         report.error("DSR example must point to the checked-in local workflow manifest");
     }
+}
+
+/// Runs the focused first-party crate-graph scan. It is also the implementation
+/// that the constitution lane adopts once every existing workspace member is
+/// known to satisfy its concrete findings; keeping the command separately
+/// invocable makes that transition observable rather than silently weakening
+/// the new checks around in-progress crates.
+fn check_workspace_crate_graph(root: &Path, report: &mut Report) {
+    for manifest in workspace_manifest_paths(root, report) {
+        let crate_dir = manifest.parent().unwrap_or(root);
+        let crate_display = relative(root, crate_dir);
+        let source_dir = crate_dir.join("src");
+        let sources = production_rust_source_files(&source_dir);
+        if sources.is_empty() {
+            report.error(format!(
+                "workspace crate `{crate_display}` has no production Rust target under {crate_display}/src"
+            ));
+            continue;
+        }
+
+        let mut has_production_item = false;
+        let mut has_cfg_test_item = false;
+        let mut lib_is_reexport_only = false;
+        for path in &sources {
+            let display = relative(root, path);
+            let Ok(text) = fs::read_to_string(path) else {
+                report.error(format!("cannot read first-party Rust source {display}"));
+                continue;
+            };
+            let assessment = assess_first_party_source(&text);
+            has_production_item |= assessment.has_production_item;
+            has_cfg_test_item |= assessment.has_cfg_test_item;
+            if path.file_name() == Some(OsStr::new("lib.rs"))
+                && assessment.has_item
+                && !assessment.has_non_reexport_item
+            {
+                lib_is_reexport_only = true;
+            }
+            if let Some(placeholder) = assessment.placeholder {
+                report.error(format!(
+                    "placeholder `{placeholder}` in non-test first-party source {display}"
+                ));
+            }
+            if let Some(relaxation) = assessment.lint_relaxation {
+                report.error(format!(
+                    "forbidden first-party lint relaxation `{relaxation}` in {display}"
+                ));
+            }
+        }
+        if !has_production_item {
+            let reason = if has_cfg_test_item {
+                "contains only cfg(test)-gated behavior"
+            } else {
+                "contains no real production item"
+            };
+            report.error(format!("workspace crate `{crate_display}` {reason}"));
+        }
+        if lib_is_reexport_only {
+            report.error(format!(
+                "workspace crate `{crate_display}` lib.rs only re-exports symbols and contains no implementation item"
+            ));
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct SourceAssessment {
+    has_item: bool,
+    has_non_reexport_item: bool,
+    has_production_item: bool,
+    has_cfg_test_item: bool,
+    placeholder: Option<String>,
+    lint_relaxation: Option<String>,
+}
+
+fn production_rust_source_files(source_dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_files(source_dir, &mut files);
+    files.retain(|path| {
+        path.extension() == Some(OsStr::new("rs")) && !is_test_only_rust_path(source_dir, path)
+    });
+    files.sort();
+    files
+}
+
+fn is_test_only_rust_path(source_dir: &Path, path: &Path) -> bool {
+    path.strip_prefix(source_dir).is_ok_and(|relative_path| {
+        relative_path.components().any(|component| {
+            matches!(
+                component.as_os_str().to_str(),
+                Some("tests" | "examples" | "benches")
+            )
+        })
+    })
+}
+
+fn assess_first_party_source(text: &str) -> SourceAssessment {
+    let production_text = strip_cfg_test_items(text);
+    let code = strip_rust_comments(&production_text);
+    let mut assessment = SourceAssessment {
+        has_cfg_test_item: text.contains("#[cfg(test)]"),
+        placeholder: find_placeholder_construct(&code),
+        lint_relaxation: find_forbidden_lint_relaxation(&code),
+        ..SourceAssessment::default()
+    };
+    for line in code.lines().map(str::trim) {
+        let Some(item) = source_item_kind(line) else {
+            continue;
+        };
+        assessment.has_item = true;
+        if item == SourceItemKind::Reexport {
+            continue;
+        }
+        assessment.has_non_reexport_item = true;
+        assessment.has_production_item = true;
+    }
+    assessment
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceItemKind {
+    Reexport,
+    Implementation,
+}
+
+fn source_item_kind(line: &str) -> Option<SourceItemKind> {
+    let line = line
+        .strip_prefix("pub(crate) ")
+        .or_else(|| line.strip_prefix("pub "))
+        .unwrap_or(line);
+    if line.starts_with("use ") {
+        return Some(SourceItemKind::Reexport);
+    }
+    for prefix in [
+        "mod ",
+        "struct ",
+        "enum ",
+        "trait ",
+        "fn ",
+        "const ",
+        "static ",
+        "type ",
+        "impl",
+        "macro_rules!",
+    ] {
+        if line.starts_with(prefix) {
+            return Some(SourceItemKind::Implementation);
+        }
+    }
+    None
+}
+
+/// Removes straightforward `cfg(test)` items before the production-source
+/// pass. This is intentionally a detector, not a Rust parser: nested or
+/// conditional macro-generated items remain a human-review obligation.
+fn strip_cfg_test_items(text: &str) -> String {
+    let mut output = String::new();
+    let mut cfg_test_pending = false;
+    let mut skipped_brace_depth: Option<usize> = None;
+    for raw_line in text.lines() {
+        if let Some(depth) = skipped_brace_depth.as_mut() {
+            *depth = depth
+                .saturating_add(raw_line.matches('{').count())
+                .saturating_sub(raw_line.matches('}').count());
+            if *depth == 0 {
+                skipped_brace_depth = None;
+            }
+            continue;
+        }
+        let line = raw_line.trim();
+        if line == "#[cfg(test)]" {
+            cfg_test_pending = true;
+            continue;
+        }
+        if cfg_test_pending {
+            cfg_test_pending = false;
+            let opens = raw_line.matches('{').count();
+            let closes = raw_line.matches('}').count();
+            if opens > closes {
+                skipped_brace_depth = Some(opens - closes);
+            }
+            continue;
+        }
+        output.push_str(raw_line);
+        output.push('\n');
+    }
+    output
+}
+
+/// Removes line and block comments while retaining quoted messages, which are
+/// needed to distinguish `panic!(\"TODO\")` from an ordinary panic. It is
+/// deliberately lexical and reports its limits through the check description.
+fn strip_rust_comments(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut block_depth = 0usize;
+    while let Some(character) = characters.next() {
+        if block_depth > 0 {
+            if character == '*' && characters.peek() == Some(&'/') {
+                characters.next();
+                block_depth -= 1;
+            } else if character == '/' && characters.peek() == Some(&'*') {
+                characters.next();
+                block_depth += 1;
+            } else if character == '\n' {
+                output.push('\n');
+            }
+            continue;
+        }
+        if in_string {
+            output.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if character == '"' {
+            in_string = true;
+            output.push(character);
+        } else if character == '/' && characters.peek() == Some(&'/') {
+            characters.next();
+            while let Some(next) = characters.next() {
+                if next == '\n' {
+                    output.push('\n');
+                    break;
+                }
+            }
+        } else if character == '/' && characters.peek() == Some(&'*') {
+            characters.next();
+            block_depth = 1;
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn find_placeholder_construct(text: &str) -> Option<String> {
+    for (name, marker) in [
+        ("todo", concat!("to", "do!")),
+        ("unimplemented", concat!("un", "implemented!")),
+    ] {
+        if contains_macro_invocation(text, marker) {
+            return Some(format!("{name}!"));
+        }
+    }
+    for name in ["panic", "unreachable"] {
+        if contains_todo_message(text, name) {
+            return Some(format!("{name}!(\"TODO…\")"));
+        }
+    }
+    None
+}
+
+fn contains_macro_invocation(text: &str, marker: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut offset = 0usize;
+    while let Some(found) = text[offset..].find(marker) {
+        let start = offset + found;
+        let end = start + marker.len();
+        offset = end;
+        let before_is_ident =
+            start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+        if !before_is_ident {
+            return true;
+        }
+    }
+    false
+}
+
+fn contains_todo_message(text: &str, macro_name: &str) -> bool {
+    let marker = format!("{macro_name}!");
+    let mut offset = 0usize;
+    while let Some(found) = text[offset..].find(&marker) {
+        let start = offset + found;
+        offset = start + marker.len();
+        let tail = text[offset..].trim_start();
+        let Some(tail) = tail.strip_prefix('(') else {
+            continue;
+        };
+        let tail = tail.trim_start();
+        if tail.starts_with("\"TODO") {
+            return true;
+        }
+    }
+    false
+}
+
+fn find_forbidden_lint_relaxation(text: &str) -> Option<String> {
+    let mut remaining = text;
+    while let Some(open) = remaining.find("#[") {
+        let attribute = &remaining[open..];
+        let Some(close) = attribute.find(']') else {
+            return Some("unterminated attribute".to_owned());
+        };
+        let attribute = &attribute[..=close];
+        remaining = &remaining[open + close + 1..];
+        if !attribute.contains("allow") {
+            continue;
+        }
+        if attribute.contains("unsafe_code") {
+            return Some("unsafe_code".to_owned());
+        }
+        if let Some(position) = attribute.find("clippy::") {
+            let tail = &attribute[position..];
+            let lint = tail
+                .trim_end_matches(']')
+                .trim_end_matches(')')
+                .split(',')
+                .next()
+                .unwrap_or(tail)
+                .trim();
+            return Some(lint.to_owned());
+        }
+    }
+    None
 }
 
 fn check_rust_sources(root: &Path, report: &mut Report) {
@@ -3391,8 +3719,15 @@ mod tests {
     }
 
     fn fixture_workspace(name: &str) -> FixtureWorkspace {
+        fixture_workspace_in("constellation", name)
+    }
+
+    fn fixture_workspace_in(group: &str, name: &str) -> FixtureWorkspace {
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/constellation")
+            .parent()
+            .expect("fixture group parent")
+            .join(group)
             .join(name);
         let nonce = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let nanos = SystemTime::now()
@@ -3457,6 +3792,48 @@ mod tests {
             "expected diagnostic containing `{expected}`, observed {:?}",
             report.errors
         );
+    }
+
+    #[test]
+    fn crate_graph_fixture_with_a_real_vertical_slice_proceeds() {
+        let workspace = fixture_workspace_in("crate_graph", "clean");
+        let mut report = Report::new();
+        check_workspace_crate_graph(&workspace.root, &mut report);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected crate-graph errors: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn planted_empty_and_reexport_only_crates_are_refused() {
+        for (fixture, expected) in [
+            ("empty", "contains no real production item"),
+            (
+                "reexport_only",
+                "lib.rs only re-exports symbols and contains no implementation item",
+            ),
+        ] {
+            let workspace = fixture_workspace_in("crate_graph", fixture);
+            let mut report = Report::new();
+            check_workspace_crate_graph(&workspace.root, &mut report);
+            assert_error(&report, expected);
+        }
+    }
+
+    #[test]
+    fn planted_placeholder_cfg_test_only_and_lint_relaxation_are_refused() {
+        for (fixture, expected) in [
+            ("placeholders", "placeholder `todo!`"),
+            ("cfg_test_only", "contains only cfg(test)-gated behavior"),
+            ("lint_relaxation", "clippy::too_many_arguments"),
+        ] {
+            let workspace = fixture_workspace_in("crate_graph", fixture);
+            let mut report = Report::new();
+            check_workspace_crate_graph(&workspace.root, &mut report);
+            assert_error(&report, expected);
+        }
     }
 
     fn replace_fixture_file(workspace: &FixtureWorkspace, relative: &str, from: &str, to: &str) {

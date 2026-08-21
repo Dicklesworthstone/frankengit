@@ -4,7 +4,7 @@
 // message together with the iteration and a digest of the input, so a failing
 // case is reproducible from the log alone.
 
-mod support;
+use fgit_codec::harness as support;
 
 use fgit_codec::schema::{
     RefusalRecordBody, RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecision,
@@ -19,12 +19,12 @@ use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::numeric::{DecisionSequence, HeadGeneration, PolicyEpoch, RepositorySequence};
 use fgit_types::{DecisionOutcome, DomainTag, RefusalCode, SchemaFamily, SchemaId};
 
-use support::{CorpusIdentity, SplitMix64, digest_of};
+use fgit_codec::harness::{SplitMix64, corpus_digest, digest_of};
 
 const SEED: u64 = 0x0c0d_ec00_5eed_0001;
 
 fn fingerprint(bytes: &[u8]) -> String {
-    CorpusIdentity.digest(bytes).to_string()
+    corpus_digest(bytes).to_string()
 }
 
 /// Encodes, decodes, and re-encodes, asserting both round-trip directions.

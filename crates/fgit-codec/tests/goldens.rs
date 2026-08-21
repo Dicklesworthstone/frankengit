@@ -6,7 +6,7 @@
 // the encoder confirming itself. The suite only ever reads the corpus; it
 // never rewrites it.
 
-mod support;
+use fgit_codec::harness as support;
 
 use fgit_codec::attest::{BodyIdentity, SignedEnvelopeBody, body_id_of_frame};
 use fgit_codec::schema::{
@@ -17,7 +17,7 @@ use fgit_codec::{
     CanonicalBody, CodecRefusal, DecodeLimits, canonical_body_bytes, decode_body, encode_body,
 };
 
-use support::{CorpusIdentity, GoldenCase, load_goldens};
+use fgit_codec::harness::{CorpusIdentity, GoldenCase, corpus_digest, load_goldens};
 
 /// Decodes one golden and re-encodes it, asserting the bytes are reproduced.
 fn round_trip<B: CanonicalBody + PartialEq + std::fmt::Debug>(case: &GoldenCase) {
@@ -285,13 +285,13 @@ fn the_corpus_identity_depends_on_every_byte_and_on_the_domain() {
     let last = altered.len() - 1;
     altered[last] ^= 0x01;
     assert_ne!(
-        CorpusIdentity.digest(&seal).as_bytes(),
-        CorpusIdentity.digest(&altered).as_bytes(),
+        corpus_digest(&seal).as_bytes(),
+        corpus_digest(&altered).as_bytes(),
         "a one-bit change must change the digest"
     );
     assert_ne!(
-        CorpusIdentity.digest(&seal).as_bytes(),
-        CorpusIdentity.digest(&[]).as_bytes()
+        corpus_digest(&seal).as_bytes(),
+        corpus_digest(&[]).as_bytes()
     );
 
     // The same bytes under two domains are two identities. This is the

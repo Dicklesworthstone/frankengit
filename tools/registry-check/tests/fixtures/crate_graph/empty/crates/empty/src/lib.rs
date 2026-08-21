@@ -1,0 +1,4 @@
+#![forbid(unsafe_code)]
+
+//! Marker text alone is not a production abstraction.
+

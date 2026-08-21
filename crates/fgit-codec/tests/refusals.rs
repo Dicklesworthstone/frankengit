@@ -4,7 +4,7 @@
 // the suite shows the codec still does its job rather than only that it says
 // no.
 
-mod support;
+use fgit_codec::harness as support;
 
 use fgit_codec::attest::{DetachedSignature, SignatureSchemeId, SignedEnvelopeBody};
 use fgit_codec::schema::TransactionSealBody;

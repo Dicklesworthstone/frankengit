@@ -5,6 +5,7 @@ pub mod attest;
 pub mod bounds;
 pub mod bridge;
 pub mod error;
+pub mod harness;
 pub mod reader;
 pub mod schema;
 pub mod wire;

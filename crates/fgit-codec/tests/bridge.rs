@@ -5,7 +5,7 @@
 // shape, but only a test that runs both crates can prove that bytes produced
 // here yield an identity `fgit-crypto` itself verifies.
 
-mod support;
+use fgit_codec::harness as support;
 
 use fgit_codec::attest::{BodyIdentity, SignedEnvelopeBody};
 use fgit_codec::schema::{RepositoryCommitRecord, TransactionSealBody};

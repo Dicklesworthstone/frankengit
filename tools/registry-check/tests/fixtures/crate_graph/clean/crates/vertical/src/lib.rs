@@ -1,0 +1,14 @@
+#![forbid(unsafe_code)]
+
+/// A minimal complete production slice, not an empty crate marker.
+pub struct VerticalSlice {
+    revision: u64,
+}
+
+impl VerticalSlice {
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+}
+

@@ -13,6 +13,7 @@ use std::fmt::{self, Display, Formatter};
 
 pub use fgit_crypto::{
     GitHashAlgorithm, GitObjectHasher, GitObjectKind as ObjectType, GitOid, NativeObjectIdentity,
+    Sha1, Sha256,
 };
 pub use fgit_deflate::{CancellationProbe, InflateLimits, InflateRefusal, StreamProgress};
 
@@ -1137,7 +1138,6 @@ fn copy_bytes(bytes: &[u8]) -> Result<Vec<u8>, ObjectError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fgit_crypto::{Sha1, Sha256};
 
     fn limits() -> ParseLimits {
         ParseLimits {

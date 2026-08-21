@@ -1,10 +1,25 @@
-// Shared test support: the corpus digest, a deterministic generator, and the
-// fixtures the committed golden corpus was derived from.
-#![allow(dead_code)]
+//! Corpus harness: the fixtures, the deterministic generator, and the
+//! non-cryptographic identity function the committed golden corpus was built
+//! against.
+//!
+//! This lives in the library rather than in `tests/` because four test
+//! binaries share it, and a shared `tests/` module forces a local dead-code
+//! lint exception — every binary uses a different subset, so most items look
+//! unused in most of them. First-party code carries no local lint exceptions,
+//! so the module moved here, where public items are live by definition.
+//!
+//! # This is harness code and cannot masquerade as production
+//!
+//! [`CorpusIdentity`] computes identities under algorithm code point
+//! [`CORPUS_ALGORITHM_CODE_POINT`], which sits inside the range `fgit-crypto`
+//! reserves for harnesses and asserts at compile time that no registered
+//! construction occupies. An identity it produces therefore fails verification
+//! against any real algorithm slot: the guard is structural, not a comment.
+//! It carries no collision-resistance property of any kind.
 
-use fgit_codec::CodecRefusal;
-use fgit_codec::attest::BodyIdentity;
-use fgit_codec::schema::{
+use crate::attest::BodyIdentity;
+use crate::error::CodecRefusal;
+use crate::schema::{
     RefusalRecordBody, RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecision,
     RepositoryDecisionBatchBody, TransactionSealBody,
 };
@@ -44,6 +59,7 @@ fn fnv1a64(data: &[u8]) -> u64 {
 /// `fgit-crypto`; writing it a second time in the corpus is what makes the
 /// committed identities a cross-check of that framing rather than a copy of
 /// it. If the two ever disagree, this is where it shows.
+#[must_use]
 pub fn identity_preimage(domain: DomainTag, schema: SchemaId, canonical_body: &[u8]) -> Vec<u8> {
     let domain = domain.as_bytes();
     let family = schema.family();
@@ -74,18 +90,18 @@ pub fn identity_preimage(domain: DomainTag, schema: SchemaId, canonical_body: &[
 /// domain, schema, and canonical bytes, and on nothing else.
 pub struct CorpusIdentity;
 
-impl CorpusIdentity {
-    /// The two-pass folding used by the corpus.
-    #[must_use]
-    pub fn digest(&self, bytes: &[u8]) -> DigestBytes {
-        let forward = fnv1a64(bytes).to_be_bytes();
-        let reversed: Vec<u8> = bytes.iter().copied().rev().collect();
-        let backward = fnv1a64(&reversed).to_be_bytes();
-        let mut out = [0_u8; 16];
-        out[..8].copy_from_slice(&forward);
-        out[8..].copy_from_slice(&backward);
-        DigestBytes::try_new(&out).expect("16 bytes is the minimum digest length")
-    }
+/// The two-pass folding the corpus uses.
+///
+/// Not a cryptographic digest and never to be used as one.
+#[must_use]
+pub fn corpus_digest(bytes: &[u8]) -> DigestBytes {
+    let forward = fnv1a64(bytes).to_be_bytes();
+    let reversed: Vec<u8> = bytes.iter().copied().rev().collect();
+    let backward = fnv1a64(&reversed).to_be_bytes();
+    let mut out = [0_u8; 16];
+    out[..8].copy_from_slice(&forward);
+    out[8..].copy_from_slice(&backward);
+    DigestBytes::try_new(&out).expect("16 bytes is the minimum digest length")
 }
 
 impl BodyIdentity for CorpusIdentity {
@@ -101,7 +117,7 @@ impl BodyIdentity for CorpusIdentity {
             DigestAlgorithmId::try_new(CORPUS_ALGORITHM_CODE_POINT).expect("nonzero slot"),
             domain,
             codec_version,
-            self.digest(&preimage),
+            corpus_digest(&preimage),
         ))
     }
 }
@@ -112,10 +128,12 @@ impl BodyIdentity for CorpusIdentity {
 pub struct SplitMix64(u64);
 
 impl SplitMix64 {
+    #[must_use]
     pub const fn new(seed: u64) -> Self {
         Self(seed)
     }
 
+    #[must_use]
     pub const fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.0;
@@ -125,6 +143,7 @@ impl SplitMix64 {
     }
 
     /// A value below `bound`, for picking indices.
+    #[must_use]
     pub fn below(&mut self, bound: usize) -> usize {
         if bound == 0 {
             return 0;
@@ -146,11 +165,13 @@ impl SplitMix64 {
 
 pub const ALGORITHM: u16 = 1;
 
+#[must_use]
 pub fn algorithm() -> DigestAlgorithmId {
     DigestAlgorithmId::try_new(ALGORITHM).expect("nonzero slot")
 }
 
 /// A digest whose body is `length` copies of `fill`.
+#[must_use]
 pub fn digest_of(fill: u8) -> Digest {
     Digest::new(
         algorithm(),
@@ -168,6 +189,7 @@ fn internal(domain: DomainTag, body: &[u8]) -> InternalObjectId {
 }
 
 /// The transaction identity used throughout the corpus: digest body `00..1f`.
+#[must_use]
 pub fn tx_id() -> TxId {
     let mut body = [0_u8; 32];
     for (index, slot) in body.iter_mut().enumerate() {
@@ -176,11 +198,13 @@ pub fn tx_id() -> TxId {
     TxId::from_internal_object_id(internal(TxId::DOMAIN_TAG, &body)).expect("own domain")
 }
 
+#[must_use]
 pub fn seal_id() -> TransactionSealId {
     TransactionSealId::from_internal_object_id(internal(TransactionSealId::DOMAIN_TAG, &[0x51; 32]))
         .expect("own domain")
 }
 
+#[must_use]
 pub fn commit_id() -> RepositoryCommitId {
     RepositoryCommitId::from_internal_object_id(internal(
         RepositoryCommitId::DOMAIN_TAG,
@@ -189,6 +213,7 @@ pub fn commit_id() -> RepositoryCommitId {
     .expect("own domain")
 }
 
+#[must_use]
 pub fn batch_id() -> RepositoryDecisionBatchId {
     RepositoryDecisionBatchId::from_internal_object_id(internal(
         RepositoryDecisionBatchId::DOMAIN_TAG,
@@ -197,6 +222,7 @@ pub fn batch_id() -> RepositoryDecisionBatchId {
     .expect("own domain")
 }
 
+#[must_use]
 pub fn head_id() -> RepositoryAuthorityHeadId {
     RepositoryAuthorityHeadId::from_internal_object_id(internal(
         RepositoryAuthorityHeadId::DOMAIN_TAG,
@@ -205,11 +231,13 @@ pub fn head_id() -> RepositoryAuthorityHeadId {
     .expect("own domain")
 }
 
+#[must_use]
 pub fn refusal_record_id() -> RefusalRecordId {
     RefusalRecordId::from_internal_object_id(internal(RefusalRecordId::DOMAIN_TAG, &[0x55; 32]))
         .expect("own domain")
 }
 
+#[must_use]
 pub fn principal_snapshot_id() -> PrincipalSnapshotId {
     PrincipalSnapshotId::from_internal_object_id(internal(
         PrincipalSnapshotId::DOMAIN_TAG,
@@ -218,6 +246,7 @@ pub fn principal_snapshot_id() -> PrincipalSnapshotId {
     .expect("own domain")
 }
 
+#[must_use]
 pub fn capsule_id() -> RepositoryCapsuleId {
     RepositoryCapsuleId::from_internal_object_id(internal(
         RepositoryCapsuleId::DOMAIN_TAG,
@@ -226,18 +255,22 @@ pub fn capsule_id() -> RepositoryCapsuleId {
     .expect("own domain")
 }
 
+#[must_use]
 pub fn tenant_id() -> TenantId {
     TenantId::from_bytes([0x11; 16])
 }
 
+#[must_use]
 pub fn repository_id() -> RepositoryId {
     RepositoryId::from_bytes([0x22; 16])
 }
 
+#[must_use]
 pub fn principal_id() -> PrincipalId {
     PrincipalId::from_bytes([0x33; 16])
 }
 
+#[must_use]
 pub fn transaction_seal() -> TransactionSealBody {
     TransactionSealBody {
         tx_id: tx_id(),
@@ -250,6 +283,7 @@ pub fn transaction_seal() -> TransactionSealBody {
     }
 }
 
+#[must_use]
 pub fn commit_record() -> RepositoryCommitRecord {
     RepositoryCommitRecord {
         repository_id: repository_id(),
@@ -271,6 +305,7 @@ pub fn commit_record() -> RepositoryCommitRecord {
     }
 }
 
+#[must_use]
 pub fn decision_batch() -> RepositoryDecisionBatchBody {
     RepositoryDecisionBatchBody {
         repository_id: repository_id(),
@@ -305,6 +340,7 @@ pub fn decision_batch() -> RepositoryDecisionBatchBody {
     }
 }
 
+#[must_use]
 pub fn genesis_head() -> RepositoryAuthorityHeadBody {
     RepositoryAuthorityHeadBody {
         repository_id: repository_id(),
@@ -326,6 +362,7 @@ pub fn genesis_head() -> RepositoryAuthorityHeadBody {
     }
 }
 
+#[must_use]
 pub fn advanced_head() -> RepositoryAuthorityHeadBody {
     RepositoryAuthorityHeadBody {
         repository_id: repository_id(),
@@ -347,6 +384,7 @@ pub fn advanced_head() -> RepositoryAuthorityHeadBody {
     }
 }
 
+#[must_use]
 pub fn refusal_record() -> RefusalRecordBody {
     RefusalRecordBody {
         tx_id: tx_id(),
@@ -379,6 +417,7 @@ pub struct GoldenCase {
 /// The corpus is read from disk and never written by the suite. Regenerating
 /// it is a deliberate act recorded in `docs/ADR-0002-CANONICAL-CODEC.md`, not
 /// something a failing test can do for itself.
+#[must_use]
 pub fn load_goldens() -> Vec<GoldenCase> {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
