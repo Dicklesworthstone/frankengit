@@ -3,8 +3,8 @@
 
 [workspace]
 resolver = "3"
-members = ["tools/registry-check"]
-default-members = ["tools/registry-check"]
+members = ["crates/fgit-types", "tools/registry-check"]
+default-members = ["crates/fgit-types", "tools/registry-check"]
 
 [workspace.package]
 edition = "2024"
