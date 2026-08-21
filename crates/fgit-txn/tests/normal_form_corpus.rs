@@ -126,10 +126,14 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
     let mut dispositions = Vec::new();
     let mut last_writer: BTreeMap<RefName, usize> = BTreeMap::new();
     let mut touched: Vec<Option<RefName>> = Vec::new();
-    /// Whether each intent contributed no divergence from the basis: either it
-    /// altered nothing when it ran, or it moved the ref back to exactly its
-    /// basis value. Both are identity no-ops; neither alone is sufficient.
-    let mut no_divergence: Vec<bool> = Vec::new();
+    /// Whether each intent was an identity AT ITS EVALUATION POINT: its
+    /// requested after-state already equalled the scratch state. Per the
+    /// normative ruling this takes precedence over last-writer provenance.
+    let mut identity_at_evaluation: Vec<bool> = Vec::new();
+    /// Whether the ref, after each intent, held exactly its basis value. Used
+    /// only to separate an inverse cancellation from an identity at a target
+    /// that ends with no surviving effect.
+    let mut post_is_basis: Vec<bool> = Vec::new();
     let mut aborted = false;
 
     'outer: for statement in &request.statements {
@@ -138,7 +142,8 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
                 // Only ref intents are modelled; see the module non-claims.
                 dispositions.push(OracleDisposition::StatementError);
                 touched.push(None);
-                no_divergence.push(true);
+                identity_at_evaluation.push(true);
+                post_is_basis.push(true);
                 continue;
             };
             let name = ref_intent.target().clone();
@@ -151,17 +156,20 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
                             AbsorptionReason::PreconditionMismatchNoOp,
                         ));
                         touched.push(None);
-                        no_divergence.push(true);
+                        identity_at_evaluation.push(true);
+                        post_is_basis.push(true);
                     }
                     MismatchPolicy::StatementError => {
                         dispositions.push(OracleDisposition::StatementError);
                         touched.push(None);
-                        no_divergence.push(true);
+                        identity_at_evaluation.push(true);
+                        post_is_basis.push(true);
                     }
                     MismatchPolicy::TxnAbort => {
                         dispositions.push(OracleDisposition::TransactionAborted);
                         touched.push(None);
-                        no_divergence.push(true);
+                        identity_at_evaluation.push(true);
+                        post_is_basis.push(true);
                         aborted = true;
                         break 'outer;
                     }
@@ -192,12 +200,8 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
             // `OverwrittenBySucceedingIntent` — by an intent that overwrote
             // nothing.
             let did_change = before != after.get(&name).cloned();
-            // Either half makes it an identity. `!did_change` covers re-writing
-            // the value already present; `post == basis` covers the delete that
-            // undoes an earlier create, and a restore. Using only one of the
-            // two mislabels the other, which cost two rounds of this
-            // comparison to discover.
-            no_divergence.push(!did_change || after.get(&name) == basis.get(&name));
+            identity_at_evaluation.push(!did_change);
+            post_is_basis.push(after.get(&name) == basis.get(&name));
             if did_change {
                 last_writer.insert(name.clone(), index);
             }
@@ -284,36 +288,37 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
         // cancellation) with writing the value already present (an identity).
         // Whether the ref happens to have existed in the basis is irrelevant to
         // either question.
-        // The rule, derived by measurement against the evaluator rather than
-        // guessed. Provenance splits first on whether the TARGET carries a
-        // surviving effect at all, and only then on this intent's own state:
+        // The rule, per GoldLotus's normative ruling on fg008a.
         //
-        //   target has an effect:
+        // IDENTITY AT EVALUATION TAKES PRECEDENCE over last-writer provenance.
+        // An intent whose requested after-state already equals the scratch
+        // state is Absorbed(IdentityEffect) UNIFORMLY — including at a target
+        // that does carry a surviving effect. OverwrittenBySucceedingIntent is
+        // reserved for real overwrites.
+        //
+        // Only once an intent is known to have actually changed something does
+        // provenance matter:
+        //
+        //   target carries an effect:
         //     this intent produced the final value -> Surviving
         //     otherwise                            -> OverwrittenBySucceedingIntent
-        //   target has no effect:
+        //   target carries no effect:
         //     the ref ends at its basis value      -> IdentityEffect
         //     otherwise                            -> InverseCancelled
         //
-        // Three narrower rules were tried and each failed on a case the others
-        // covered: "did this intent change anything" mislabels the delete that
-        // undoes a create; "post == basis" mislabels a re-write at a target
-        // that does carry an effect; the disjunction of the two mislabels the
-        // same. The split on target-effect-first is what reconciles them.
-        //
-        // NOTE: which of two intents on one target is credited as Surviving
-        // when the later one is a value-identity is NOT settled by the
-        // specification -- see the module docs. This encodes the evaluator's
-        // observed behaviour so the comparison isolates that one question
-        // instead of drowning it in unrelated disagreements.
+        // The ruling reversed GoldLotus's own stated prior, which was
+        // last-writer-survives; the spec reading won over the prior. Recorded
+        // because that is worth more to a later reader than the rule alone.
         let target_has_effect = refs.contains_key(name);
-        dispositions[index] = if target_has_effect {
+        dispositions[index] = if identity_at_evaluation[index] {
+            OracleDisposition::Absorbed(AbsorptionReason::IdentityEffect)
+        } else if target_has_effect {
             if last_writer.get(name) == Some(&index) {
                 OracleDisposition::Surviving(name.clone())
             } else {
                 OracleDisposition::Absorbed(AbsorptionReason::OverwrittenBySucceedingIntent)
             }
-        } else if no_divergence[index] {
+        } else if post_is_basis[index] {
             OracleDisposition::Absorbed(AbsorptionReason::IdentityEffect)
         } else {
             OracleDisposition::Absorbed(AbsorptionReason::InverseCancelled)
