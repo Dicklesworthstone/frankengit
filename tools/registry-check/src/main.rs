@@ -1852,7 +1852,14 @@ fn generate_admission_ledger(root: &Path, command: CheckSet) -> Result<String, S
         ));
     }
     if command == CheckSet::LedgerConstellation {
-        return generate_constellation_ledger(&packages, &cargo_metadata(root)?);
+        let mut report = Report::new();
+        let dependencies = workspace_dependencies(root, &mut report);
+        if let Some(error) = report.errors.into_iter().next() {
+            return Err(format!(
+                "cannot derive workspace dependency evidence for constellation ledger: {error}"
+            ));
+        }
+        return generate_constellation_ledger(&packages, &cargo_metadata(root)?, &dependencies);
     }
     if command == CheckSet::LedgerUnsafe {
         return generate_unsafe_ledger(root, &packages, &cargo_metadata(root)?);
@@ -2099,6 +2106,7 @@ fn generated_ffi_policy(name: &str, proc_macro: bool) -> &'static str {
 fn generate_constellation_ledger(
     packages: &[LockPackage],
     metadata: &MetadataSnapshot,
+    dependencies: &[WorkspaceDependency],
 ) -> Result<String, String> {
     let mut output = String::new();
     for package in packages
@@ -2163,11 +2171,7 @@ fn generate_constellation_ledger(
         } else {
             "disabled"
         };
-        let default_features = if package.name == "asupersync" {
-            "disabled"
-        } else {
-            "not_applicable"
-        };
+        let default_features = constellation_default_features(package, dependencies)?;
         let features = canonical_feature_list(features);
         writeln!(
             output,
@@ -2180,6 +2184,28 @@ fn generate_constellation_ledger(
         return Err("Cargo.lock has no resolved constellation package".to_owned());
     }
     Ok(output)
+}
+
+fn constellation_default_features(
+    package: &LockPackage,
+    dependencies: &[WorkspaceDependency],
+) -> Result<String, String> {
+    let states = dependencies
+        .iter()
+        .filter(|dependency| dependency.package == package.name)
+        .map(|dependency| dependency.default_features.as_str())
+        .collect::<BTreeSet<_>>();
+    match states.len() {
+        0 => Ok("not_applicable".to_owned()),
+        1 => states
+            .first()
+            .map(|state| (*state).to_owned())
+            .ok_or_else(|| "default-feature state collection unexpectedly empty".to_owned()),
+        _ => Err(format!(
+            "constellation package `{}` has conflicting direct default-feature states: {:?}",
+            package.name, states
+        )),
+    }
 }
 
 fn canonical_feature_list(features: &BTreeSet<String>) -> String {
@@ -3509,7 +3535,7 @@ fn check_constellation_model(
         return;
     };
     check_constellation_exact(constellation, packages, dependencies, metadata, report);
-    check_generated_constellation_evidence(constellation, packages, metadata, report);
+    check_generated_constellation_evidence(constellation, packages, metadata, dependencies, report);
 }
 
 /// Admission records are not arbitrary digest-shaped strings: whenever `Cargo`
@@ -3521,12 +3547,13 @@ fn check_generated_constellation_evidence(
     constellation: &ConstellationLock,
     packages: &[LockPackage],
     metadata: &MetadataSnapshot,
+    dependencies: &[WorkspaceDependency],
     report: &mut Report,
 ) {
     if constellation.state != ConstellationState::Admitted || metadata.package_sources.is_empty() {
         return;
     }
-    let rows = match generate_constellation_ledger(packages, metadata) {
+    let rows = match generate_constellation_ledger(packages, metadata, dependencies) {
         Ok(rows) => rows,
         Err(error) => {
             report.error(format!(
@@ -4760,6 +4787,43 @@ mod tests {
             config,
             admission_ledger_config(CheckSet::LedgerPolicy)
                 .expect("runtime policy generator must have a configuration")
+        );
+    }
+
+    #[test]
+    fn constellation_default_features_follow_direct_workspace_edges() {
+        let fsqlite = LockPackage {
+            name: "fsqlite".to_owned(),
+            version: "0.3.7".to_owned(),
+            source: Some("registry+https://example.invalid/index".to_owned()),
+            checksum: Some("a".repeat(64)),
+            dependencies: Vec::new(),
+        };
+        let disabled = vec![WorkspaceDependency {
+            package: "fsqlite".to_owned(),
+            manifest: "crates/fgit-authority-fsqlite/Cargo.toml".to_owned(),
+            default_features: "disabled".to_owned(),
+            declared_features: BTreeSet::new(),
+        }];
+        assert_eq!(
+            constellation_default_features(&fsqlite, &disabled),
+            Ok("disabled".to_owned())
+        );
+        assert_eq!(
+            constellation_default_features(&fsqlite, &[]),
+            Ok("not_applicable".to_owned())
+        );
+        let mut conflicting = disabled;
+        conflicting.push(WorkspaceDependency {
+            package: "fsqlite".to_owned(),
+            manifest: "crates/another-adapter/Cargo.toml".to_owned(),
+            default_features: "enabled".to_owned(),
+            declared_features: BTreeSet::new(),
+        });
+        assert!(
+            constellation_default_features(&fsqlite, &conflicting)
+                .expect_err("conflicting direct feature policy must fail closed")
+                .contains("conflicting direct default-feature states")
         );
     }
 
