@@ -96,9 +96,11 @@ fn deterministic_node() -> NodeRuntime {
 
 /// Ask an already-created database which journal mode it is in.
 fn journal_mode_of(node: &NodeRuntime, path: &str) -> String {
-    let native = node.request_cx(BudgetClass::Request);
     let cx = FsqliteCx::new();
-    cx.set_native_cx(native.clone());
+    // Not held past this scope: unlike the conformance harness, which keeps the
+    // native context alive for a store that outlives the call, everything here
+    // completes before the function returns and `cx` owns what it needs.
+    cx.set_native_cx(node.request_cx(BudgetClass::Request));
 
     let connection = node
         .block_on(AsyncConnection::open(&cx, path.to_owned()))
@@ -125,9 +127,8 @@ fn a_file_backed_store_runs_on_the_journal_mode_this_pins() {
     // the probe reads a file our open path produced rather than one shaped by
     // the probe's own connection.
     {
-        let native = node.request_cx(BudgetClass::Request);
         let cx = FsqliteCx::new();
-        cx.set_native_cx(native.clone());
+        cx.set_native_cx(node.request_cx(BudgetClass::Request));
         let mut store = node
             .block_on(FsqliteAuthorityStore::open(
                 &cx,
@@ -163,9 +164,8 @@ fn an_in_memory_store_does_not_share_the_file_backed_journal_mode() {
     let scratch = Scratch::new("contrast");
 
     {
-        let native = node.request_cx(BudgetClass::Request);
         let cx = FsqliteCx::new();
-        cx.set_native_cx(native.clone());
+        cx.set_native_cx(node.request_cx(BudgetClass::Request));
         let mut store = node
             .block_on(FsqliteAuthorityStore::open(
                 &cx,
