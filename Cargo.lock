@@ -779,6 +779,7 @@ name = "fgit-raptorq"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "fgit-crypto",
  "fgit-object-fabric",
  "fgit-resource",
  "fgit-types",

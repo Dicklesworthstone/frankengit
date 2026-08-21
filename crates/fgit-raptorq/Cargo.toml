@@ -10,5 +10,12 @@ fgit-object-fabric.workspace = true
 fgit-resource.workspace = true
 fgit-types.workspace = true
 
+[dev-dependencies]
+# FG-024b: the destructive drill emits a genuinely SIGNED reconstruction report
+# -- Ed25519 detached envelope over a domain-separated evidence body -- rather
+# than a report that is "signed-format" in name only. Test tree only; this
+# crate's production code takes no crypto dependency.
+fgit-crypto.workspace = true
+
 [lints]
 workspace = true
