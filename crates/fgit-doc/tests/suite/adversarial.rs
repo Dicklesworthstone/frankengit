@@ -108,7 +108,7 @@ fn too_many_inline_delimiters_is_refused_and_a_modest_count_parses() {
 
 #[test]
 fn invalid_utf8_bytes_are_refused_and_valid_bytes_parse() {
-    parse_bytes("valid text\n".as_bytes(), ParseProfile::DEFAULT).expect("valid bytes parse");
+    parse_bytes(b"valid text\n", ParseProfile::DEFAULT).expect("valid bytes parse");
     let refusal = parse_bytes(&[0x66, 0x6f, 0xff, 0x6f], ParseProfile::DEFAULT)
         .expect_err("invalid bytes are refused");
     assert_eq!(refusal.kind(), RefusalKind::SourceNotUtf8);
@@ -202,7 +202,7 @@ fn hostile_sources_produce_a_document_or_a_typed_refusal_but_never_a_panic() {
 struct Lcg(u64);
 
 impl Lcg {
-    fn step(&mut self) -> u64 {
+    const fn step(&mut self) -> u64 {
         self.0 = self
             .0
             .wrapping_mul(6_364_136_223_846_793_005)

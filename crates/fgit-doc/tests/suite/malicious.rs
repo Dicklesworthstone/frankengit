@@ -54,9 +54,9 @@ fn malicious_cases() -> Vec<(String, Vec<u8>)> {
         .filter_map(Result::ok)
         .filter(|entry| {
             entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.ends_with(".mdin"))
+                .path()
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("mdin"))
         })
         .map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -160,7 +160,7 @@ fn parse_attributes(region: &str) -> Vec<(String, String)> {
         match value {
             '=' => {
                 let mut text = String::new();
-                if matches!(characters.peek(), Some('"') | Some('\'')) {
+                if matches!(characters.peek(), Some('"' | '\'')) {
                     let quote = characters.next().unwrap_or('"');
                     for inner in characters.by_ref() {
                         if inner == quote {
@@ -332,10 +332,14 @@ fn the_whole_golden_corpus_is_inert_too() {
         .expect("the corpus directory exists")
         .flatten()
     {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.ends_with(".mdin") {
+        if entry
+            .path()
+            .extension()
+            .is_none_or(|extension| !extension.eq_ignore_ascii_case("mdin"))
+        {
             continue;
         }
+        let name = entry.file_name().to_string_lossy().into_owned();
         let source = fs::read_to_string(entry.path()).expect("a corpus file is readable");
         let document = parse(&source)
             .unwrap_or_else(|refusal| panic!("{name}: {refusal}"))

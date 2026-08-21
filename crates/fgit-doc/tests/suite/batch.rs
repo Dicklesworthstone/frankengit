@@ -262,6 +262,6 @@ fn an_empty_batch_is_a_valid_complete_receipt() {
         WorkloadProfile::SERIAL,
     )
     .expect("an empty batch runs");
-    assert!(receipt.outcomes().is_empty());
+    assert_eq!(receipt.outcomes(), []);
     assert_eq!(receipt.plan().workers(), 1);
 }

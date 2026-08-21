@@ -11,6 +11,7 @@
 //! deliberate change is a copy rather than a guess.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -82,14 +83,16 @@ fn shape_listing(document: &Document) -> String {
         } else {
             "-".to_owned()
         };
-        out.push_str(&format!(
-            "{depth}\t{}\t{}..{}\t{}..{}\t{literal}\n",
+        writeln!(
+            out,
+            "{depth}\t{}\t{}..{}\t{}..{}\t{literal}",
             node.kind().tag(),
             span.byte_start(),
             span.byte_end(),
             span.char_start(),
             span.char_end()
-        ));
+        )
+        .expect("writing to a String is infallible");
     }
     out
 }
@@ -134,8 +137,9 @@ fn anchor_table(document: &Document, blob: &[u8]) -> String {
         let anchor = anchor_of(document, id, blob);
         let context = anchor.context();
         let span = anchor.span();
-        out.push_str(&format!(
-            "{}\t{}\t{}..{}\t{}..{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        writeln!(
+            out,
+            "{}\t{}\t{}..{}\t{}..{}\t{}\t{}\t{}\t{}\t{}\t{}",
             path_of(document, id),
             context.kind,
             span.byte_start(),
@@ -148,7 +152,8 @@ fn anchor_table(document: &Document, blob: &[u8]) -> String {
             context.content_chars,
             anchor.id().canonical_bytes().len(),
             field(&context.content)
-        ));
+        )
+        .expect("writing to a String is infallible");
     }
     out
 }
@@ -165,13 +170,15 @@ fn remap_table(base: &Document, edited: &Document) -> String {
             || "-".to_owned(),
             |(_, span)| format!("{}..{}", span.byte_start(), span.byte_end()),
         );
-        out.push_str(&format!(
-            "{}\t{}\t{}\t{resolved}\t{}\n",
+        writeln!(
+            out,
+            "{}\t{}\t{}\t{resolved}\t{}",
             path_of(base, id),
             anchor.context().kind,
             report.outcome().tag(),
             report.candidates().len()
-        ));
+        )
+        .expect("writing to a String is infallible");
     }
     out
 }

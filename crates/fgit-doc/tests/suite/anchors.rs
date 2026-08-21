@@ -134,7 +134,7 @@ fn an_edit_inside_the_anchored_span_makes_it_outdated() {
         report.resolved().is_none(),
         "an outdated anchor never reattaches"
     );
-    assert!(report.candidates().is_empty());
+    assert_eq!(report.candidates(), []);
 }
 
 #[test]
@@ -276,7 +276,7 @@ fn an_unknown_node_is_refused_and_a_known_node_proceeds() {
 fn an_oversized_source_identity_is_refused_and_the_largest_accepted_one_is_not() {
     let permitted = vec![0x5a_u8; 64];
     SourceObjectId::new(&permitted).expect("sixty-four bytes are accepted");
-    let refusal = SourceObjectId::new(&vec![0x5a_u8; 65]).expect_err("sixty-five are refused");
+    let refusal = SourceObjectId::new(&[0x5a_u8; 65]).expect_err("sixty-five are refused");
     assert_eq!(refusal.kind(), RefusalKind::SourceIdTooLong);
     assert_eq!(refusal.limit(), 64);
     assert_eq!(refusal.observed(), 65);
@@ -380,7 +380,7 @@ fn a_digest_over_the_preimage_becomes_a_domain_pinned_identity() {
     let document = document_of("alpha\n");
     let anchor = anchor_on(&document, "alpha", b"blob");
     let preimage = anchor.id().canonical_bytes();
-    assert!(!preimage.is_empty());
+    assert_ne!(preimage, []);
 
     // A stand-in digest: this crate does not compute one, and the test must not
     // pretend otherwise. What is under test is the domain stamping, not the hash.
