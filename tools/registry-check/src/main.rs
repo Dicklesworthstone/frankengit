@@ -21,6 +21,7 @@ enum CheckSet {
     CrateGraph,
     LedgerPolicy,
     LedgerConstellation,
+    LedgerUnsafe,
 }
 
 impl CheckSet {
@@ -34,8 +35,9 @@ impl CheckSet {
             "crate-graph" => Ok(Self::CrateGraph),
             "ledger-policy" => Ok(Self::LedgerPolicy),
             "ledger-constellation" => Ok(Self::LedgerConstellation),
+            "ledger-unsafe" => Ok(Self::LedgerUnsafe),
             other => Err(format!(
-                "unknown command `{other}`; expected all, docs, registries, constitution, constellation, crate-graph, ledger-policy, or ledger-constellation"
+                "unknown command `{other}`; expected all, docs, registries, constitution, constellation, crate-graph, ledger-policy, ledger-constellation, or ledger-unsafe"
             )),
         }
     }
@@ -53,7 +55,10 @@ impl CheckSet {
     }
 
     const fn is_ledger(self) -> bool {
-        matches!(self, Self::LedgerPolicy | Self::LedgerConstellation)
+        matches!(
+            self,
+            Self::LedgerPolicy | Self::LedgerConstellation | Self::LedgerUnsafe
+        )
     }
 }
 
@@ -1799,6 +1804,9 @@ fn generate_admission_ledger(root: &Path, command: CheckSet) -> Result<String, S
     if command == CheckSet::LedgerConstellation {
         return generate_constellation_ledger(&packages, &cargo_metadata(root)?);
     }
+    if command == CheckSet::LedgerUnsafe {
+        return generate_unsafe_ledger(root, &packages, &cargo_metadata(root)?);
+    }
     let closure = dependency_closure(&packages, "asupersync");
     let baseline_allowed = baseline_dependency_patterns(root)?;
     let metadata = cargo_metadata(root)?;
@@ -2171,6 +2179,221 @@ fn transitive_unsafe_digest(
         }
     }
     Ok(sha256_hex(inventory.as_bytes()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveDependencyPolicy {
+    id: String,
+    crate_pattern: String,
+    unsafe_policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnsafeLedgerRow {
+    name: String,
+    version: String,
+    source: String,
+    checksum: String,
+    rust_files: usize,
+    unsafe_tokens: usize,
+    build_script: bool,
+    proc_macro: bool,
+    expected_policy: String,
+    registry_policy: String,
+}
+
+/// Emits the resolved-lock lexical unsafe inventory. It is evidence about the
+/// source tree Cargo selected, not a reachability or soundness proof: generated
+/// expansion and target-specific dead code remain explicitly visible limits.
+fn generate_unsafe_ledger(
+    root: &Path,
+    packages: &[LockPackage],
+    metadata: &MetadataSnapshot,
+) -> Result<String, String> {
+    let policies = load_active_dependency_policies(root)?;
+    let rows = unsafe_ledger_rows(packages, metadata, &policies)?;
+    let mut output = String::from(
+        "# franken-unsafe-ledger-v1\npackage\tversion\tsource\tchecksum\trust_files\tunsafe_tokens\tbuild_script\tproc_macro\texpected_unsafe_policy\tregistry_unsafe_policy\tpolicy_match\n",
+    );
+    for row in rows {
+        let policy_match = unsafe_policy_matches(&row.expected_policy, &row.registry_policy);
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            row.name,
+            row.version,
+            row.source,
+            row.checksum,
+            row.rust_files,
+            row.unsafe_tokens,
+            bool_word(row.build_script),
+            bool_word(row.proc_macro),
+            row.expected_policy,
+            row.registry_policy,
+            bool_word(policy_match),
+        )
+        .map_err(|error| format!("cannot render unsafe ledger row: {error}"))?;
+    }
+    Ok(output)
+}
+
+fn load_active_dependency_policies(root: &Path) -> Result<Vec<ActiveDependencyPolicy>, String> {
+    let text = fs::read_to_string(root.join("registries/dependency_policy.tsv"))
+        .map_err(|error| format!("cannot read dependency policy registry: {error}"))?;
+    let mut policies = Vec::new();
+    for (line_number, line) in text.lines().enumerate() {
+        if line.is_empty() || line.starts_with('#') || line.starts_with("id\t") {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != 10 {
+            return Err(format!(
+                "dependency policy line {} has {} columns; expected 10",
+                line_number + 1,
+                fields.len()
+            ));
+        }
+        if fields[9] == "active" {
+            policies.push(ActiveDependencyPolicy {
+                id: fields[0].to_owned(),
+                crate_pattern: fields[1].to_owned(),
+                unsafe_policy: fields[7].to_owned(),
+            });
+        }
+    }
+    policies.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(policies)
+}
+
+fn unsafe_ledger_rows(
+    packages: &[LockPackage],
+    metadata: &MetadataSnapshot,
+    policies: &[ActiveDependencyPolicy],
+) -> Result<Vec<UnsafeLedgerRow>, String> {
+    let mut ordered = packages.to_vec();
+    ordered.sort_by(|left, right| {
+        (&left.name, &left.version, &left.source).cmp(&(&right.name, &right.version, &right.source))
+    });
+    let mut rows = Vec::with_capacity(ordered.len());
+    for package in &ordered {
+        let policy = active_policy_for_package(policies, &package.name).ok_or_else(|| {
+            format!(
+                "unsafe ledger lacks an active dependency policy for resolved package `{}` {}",
+                package.name, package.version
+            )
+        })?;
+        let package_source = package_source(package, metadata)?;
+        let source_root = source_root(package_source)?;
+        let source_files = rust_source_files(&source_root)?;
+        let mut unsafe_tokens = 0usize;
+        for path in &source_files {
+            let text = fs::read_to_string(path)
+                .map_err(|error| format!("cannot read source `{}`: {error}", path.display()))?;
+            unsafe_tokens = unsafe_tokens.saturating_add(count_unsafe_constructs(&text));
+        }
+        let proc_macro = metadata.proc_macros.contains(&package.name);
+        let expected_policy = expected_unsafe_policy(&package.name, proc_macro);
+        rows.push(UnsafeLedgerRow {
+            name: package.name.clone(),
+            version: package.version.clone(),
+            source: package
+                .source
+                .clone()
+                .unwrap_or_else(|| "workspace".to_owned()),
+            checksum: package
+                .checksum
+                .clone()
+                .unwrap_or_else(|| "not_applicable".to_owned()),
+            rust_files: source_files.len(),
+            unsafe_tokens,
+            build_script: metadata.build_scripts.contains(&package.name),
+            proc_macro,
+            expected_policy,
+            registry_policy: policy.unsafe_policy.clone(),
+        });
+    }
+    Ok(rows)
+}
+
+fn active_policy_for_package<'a>(
+    policies: &'a [ActiveDependencyPolicy],
+    package: &str,
+) -> Option<&'a ActiveDependencyPolicy> {
+    policies
+        .iter()
+        .filter(|policy| dependency_pattern_matches(&policy.crate_pattern, package))
+        .min_by(|left, right| {
+            let left_exact = left.crate_pattern == package;
+            let right_exact = right.crate_pattern == package;
+            right_exact
+                .cmp(&left_exact)
+                .then_with(|| right.crate_pattern.len().cmp(&left.crate_pattern.len()))
+                .then_with(|| left.id.cmp(&right.id))
+        })
+}
+
+fn expected_unsafe_policy(package: &str, proc_macro: bool) -> String {
+    if package.starts_with("fgit-") {
+        "must_forbid_first_party_unsafe".to_owned()
+    } else if package.starts_with("franken-") || package.starts_with("franken_") {
+        "must_match_sibling_contract".to_owned()
+    } else if proc_macro || package.starts_with("wasm-bindgen") {
+        "proc_macro_transitive".to_owned()
+    } else if matches!(package, "proc-macro2" | "quote" | "syn" | "tinyvec_macros") {
+        "proc_macro_transitive".to_owned()
+    } else if matches!(
+        package,
+        "dispatch2"
+            | "hermit-abi"
+            | "libc"
+            | "nix"
+            | "ntapi"
+            | "r-efi"
+            | "redox_syscall"
+            | "rustix"
+            | "socket2"
+            | "wasi"
+            | "windows"
+            | "windows-sys"
+            | "winapi"
+    ) || package.starts_with("windows-")
+        || package.starts_with("winapi")
+        || package.starts_with("objc2")
+    {
+        "os_abi".to_owned()
+    } else {
+        "ledgered_transitive".to_owned()
+    }
+}
+
+fn unsafe_policy_matches(expected: &str, observed: &str) -> bool {
+    match expected {
+        "ledgered_transitive" => {
+            matches!(
+                observed,
+                "ledgered_transitive" | "ledgered_transitive_unaudited"
+            )
+        }
+        _ => expected == observed,
+    }
+}
+
+fn count_unsafe_constructs(text: &str) -> usize {
+    let mut remaining = text;
+    let mut count = 0usize;
+    while let Some(token) = find_unsafe_construct(remaining) {
+        count = count.saturating_add(1);
+        let marker = token.split_ascii_whitespace().next().unwrap_or_default();
+        let Some(position) = remaining.find(marker) else {
+            break;
+        };
+        remaining = &remaining[position + marker.len()..];
+    }
+    count
+}
+
+const fn bool_word(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
 }
 
 fn package_source<'a>(
@@ -3839,6 +4062,67 @@ mod tests {
             check_workspace_crate_graph(&workspace.root, &mut report);
             assert_error(&report, expected);
         }
+    }
+
+    #[test]
+    fn unsafe_ledger_policy_classes_are_specific_and_stable() {
+        assert_eq!(
+            expected_unsafe_policy("fgit-vertical", false),
+            "must_forbid_first_party_unsafe"
+        );
+        assert_eq!(
+            expected_unsafe_policy("franken-evidence", false),
+            "must_match_sibling_contract"
+        );
+        assert_eq!(
+            expected_unsafe_policy("pin-project-internal", true),
+            "proc_macro_transitive"
+        );
+        assert_eq!(expected_unsafe_policy("rustix", false), "os_abi");
+        assert!(unsafe_policy_matches(
+            "ledgered_transitive",
+            "ledgered_transitive_unaudited"
+        ));
+        assert!(!unsafe_policy_matches(
+            "proc_macro_transitive",
+            "ledgered_transitive_unaudited"
+        ));
+    }
+
+    #[test]
+    fn unsafe_ledger_rows_are_deterministic_and_count_lexical_constructs() {
+        let workspace = fixture_workspace_in("crate_graph", "clean");
+        let package = LockPackage {
+            name: "fgit-vertical".to_owned(),
+            version: "0.0.1".to_owned(),
+            source: None,
+            checksum: None,
+            dependencies: Vec::new(),
+        };
+        let mut metadata = MetadataSnapshot::default();
+        metadata.package_sources.insert(
+            (package.name.clone(), package.version.clone()),
+            PackageSource {
+                manifest_path: workspace.root.join("crates/vertical/Cargo.toml"),
+                license: "not_applicable".to_owned(),
+            },
+        );
+        let policies = vec![ActiveDependencyPolicy {
+            id: "DEP-013".to_owned(),
+            crate_pattern: "fgit-*".to_owned(),
+            unsafe_policy: "must_forbid_first_party_unsafe".to_owned(),
+        }];
+        let first = unsafe_ledger_rows(&[package.clone()], &metadata, &policies)
+            .expect("render first unsafe ledger row");
+        let second = unsafe_ledger_rows(&[package], &metadata, &policies)
+            .expect("render second unsafe ledger row");
+        assert_eq!(first, second);
+        assert_eq!(first[0].rust_files, 1);
+        assert_eq!(first[0].unsafe_tokens, 0);
+        assert_eq!(
+            count_unsafe_constructs("unsafe { let value = 1_u8; let _ = value; }"),
+            1
+        );
     }
 
     fn replace_fixture_file(workspace: &FixtureWorkspace, relative: &str, from: &str, to: &str) {

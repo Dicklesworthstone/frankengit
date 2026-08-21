@@ -13,4 +13,3 @@ pub fn widened_surface(
 ) -> u8 {
     one + two + three + four + five + six + seven + eight
 }
-
