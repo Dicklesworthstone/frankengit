@@ -40,6 +40,8 @@ for sq_needle in \
   'FsqliteAuthorityStore::open' \
   'MemoryAuthorityStore' \
   'scripted_history' \
+  'fn contend' \
+  'Defect::SecondWinner' \
   'fn kill' \
   'std::env::temp_dir'; do
   if ! grep -qF "$sq_needle" "$SQ_CAMPAIGN"; then
@@ -60,10 +62,10 @@ if grep -qE '(include!|path *= *"[^"]*fsqlite/src)' "$SQ_CAMPAIGN"; then
   sq_reaches_into_src='yes'
 fi
 
-sq_tests=$(grep -c '^fn ' "$SQ_CAMPAIGN" || true)
+sq_tests=$(grep -c '^#\[test\]' "$SQ_CAMPAIGN" || true)
 sq_kills=$(grep -c '\.kill()' "$SQ_CAMPAIGN" || true)
 
-fge_step campaign-shape "campaign: $sq_tests functions, $sq_kills kill/reopen sites"
+fge_step campaign-shape "campaign: $sq_tests tests, $sq_kills kill/reopen sites"
 
 fge_phase action
 
@@ -97,13 +99,13 @@ fge_assert_eq FG-005B-E2E-014 '' "$sq_reaches_into_src" \
 fge_assert_eq FG-005B-E2E-015 '' "$sq_in_memory" \
   'the campaign opens real files, never ":memory:", or it cannot reopen anything'
 
-if [ "$sq_kills" -lt 4 ]; then
+if [ "$sq_kills" -lt 6 ]; then
   fge_fail FG-005B-E2E-016 \
-    "only $sq_kills kill/reopen sites; the crash matrix requires at least four"
+    "only $sq_kills kill/reopen sites; the crash matrix requires at least six"
 fi
-if [ "$sq_tests" -lt 6 ]; then
+if [ "$sq_tests" -lt 11 ]; then
   fge_fail FG-005B-E2E-017 \
-    "only $sq_tests functions in the campaign; the dispatch names more scenarios than that"
+    "only $sq_tests tests in the campaign; the dispatch names more scenarios than that"
 fi
 
 # The honest limit of this lane, recorded rather than left for a reader to

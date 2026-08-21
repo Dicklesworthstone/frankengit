@@ -678,3 +678,153 @@ fn the_differential_rejects_every_planted_backend() {
         );
     }
 }
+
+// ------------------------------------------------------- one winner under contention
+//
+// The acceptance line is "exact one-winner histories". These drive N
+// contenders that all present the SAME predecessor token, which is the shape
+// a real race produces: every writer read the head at the same generation and
+// each believes it is replacing that exact predecessor.
+//
+// NON-CLAIM, and it bounds everything below: this is *contention*, not
+// *parallelism*. The bridge blocks per operation, so the attempts are issued
+// in turn rather than raced on separate threads. That is enough to prove the
+// exclusion rule -- only one holder of a given predecessor may commit -- and
+// it is NOT enough to prove anything about interleaving inside the engine.
+// A true parallel race needs a harness that can hold several operations in
+// flight, which is the same gap `engine_conformance.rs` names for
+// cancellation.
+
+/// Every contender presents `token`; returns each outcome in attempt order.
+fn contend<S: AuthorityStore>(
+    store: &S,
+    key: &HeadKey,
+    token: AuthorityVersionToken,
+    contenders: usize,
+) -> Vec<bool> {
+    (0..contenders)
+        .map(|index| {
+            let body = format!("contender-{index}").into_bytes();
+            matches!(
+                store.compare_exchange_head(key, token, generation(2), &body),
+                Ok(CasOutcome::Committed(_))
+            )
+        })
+        .collect()
+}
+
+/// Set up a genesis head and hand back the token every contender will present.
+fn genesis_token<S: AuthorityStore>(store: &S, key: &HeadKey) -> AuthorityVersionToken {
+    store
+        .initialize_head(key, generation(1), GENESIS)
+        .expect("the genesis head initializes");
+    match store.read_head(key).expect("the head reads") {
+        HeadRead::Present(receipt) => receipt.token(),
+        HeadRead::Absent => panic!("an initialized head must be present"),
+    }
+}
+
+#[test]
+fn exactly_one_contender_wins_on_the_engine_and_the_survivor_is_its_body() {
+    let scratch = Scratch::new("one-winner-engine");
+    let node = node();
+    let key = head_key();
+    let store = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+
+    let token = genesis_token(&store, &key);
+    let outcomes = contend(&store, &key, token, 5);
+
+    let winners: Vec<usize> = outcomes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, won)| won.then_some(index))
+        .collect();
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one holder of a predecessor token may commit, got {winners:?}"
+    );
+
+    // The survivor must be the winner's body, not merely *a* contender's. A
+    // store that committed one writer while persisting another's bytes would
+    // satisfy a naive count and still have published something nobody was
+    // told about.
+    let expected = format!("contender-{}", winners[0]).into_bytes();
+    match store.read_head(&key).expect("the head reads") {
+        HeadRead::Present(receipt) => assert_eq!(
+            receipt.body(),
+            expected.as_slice(),
+            "the head must carry the body of the writer that was told it won"
+        ),
+        HeadRead::Absent => panic!("the head vanished under contention"),
+    }
+}
+
+#[test]
+fn the_engine_and_the_reference_pick_the_same_winner_under_contention() {
+    // Both backends must not merely produce *a* single winner; under an
+    // identical script they must produce the SAME one, or a caller that
+    // migrates between profiles sees a different history for the same
+    // sequence of requests.
+    let scratch = Scratch::new("one-winner-differential");
+    let node = node();
+    let key = head_key();
+
+    let reference = MemoryAuthorityStore::new(StoreInstanceId::from_raw(1));
+    let engine = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+
+    let from_reference = contend(&reference, &key, genesis_token(&reference, &key), 5);
+    let from_engine = contend(&engine, &key, genesis_token(&engine, &key), 5);
+
+    assert_eq!(
+        from_reference, from_engine,
+        "the two profiles disagreed about which contender won the same scripted race"
+    );
+    assert_eq!(
+        from_reference.iter().filter(|won| **won).count(),
+        1,
+        "the shared result must itself be a single winner, or the agreement is agreement on a bug"
+    );
+}
+
+#[test]
+fn a_kill_during_contention_still_leaves_exactly_one_winner() {
+    // The dangerous combination: a race and a crash. After reopen the head
+    // must carry one contender's body whole -- not a blend, and not a
+    // generation from a writer that was refused.
+    let scratch = Scratch::new("contention-then-kill");
+    let node = node();
+    let key = head_key();
+
+    let first = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+    let token = genesis_token(&first, &key);
+    let outcomes = contend(&first, &key, token, 4);
+    let winners = outcomes.iter().filter(|won| **won).count();
+    first.kill();
+
+    let second = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+    let receipt = match second.read_head(&key).expect("the head reads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("a contended head must survive an unclean shutdown"),
+    };
+
+    let survivor = receipt.body().to_vec();
+    let is_genesis = survivor == GENESIS;
+    let is_contender = (0..4).any(|index| survivor == format!("contender-{index}").into_bytes());
+    assert!(
+        is_genesis || is_contender,
+        "after a kill the head must be the predecessor or one whole contender, not a blend: \
+         {survivor:?}"
+    );
+    assert_eq!(
+        receipt.generation(),
+        generation(if is_genesis { 1 } else { 2 }),
+        "the surviving generation must match the surviving body"
+    );
+    if winners == 1 {
+        assert!(
+            is_contender,
+            "a contender was told it committed, so its body may not be absent after reopen"
+        );
+    }
+}
