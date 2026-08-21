@@ -11,6 +11,15 @@ edition = "2024"
 license-file = "LICENSE"
 repository = "https://github.com/Dicklesworthstone/frankengit"
 
+# First-party workspace members are wired by path in exactly one place, so
+# every consumer writes `fgit-types.workspace = true` and no crate invents its
+# own relative path. This is the layered first-party crate DAG of the plan's
+# prospective implementation architecture, admitted by DEP-013 (`fgit-*`,
+# allow_first_party) — not the unpublished external path dependency that
+# AGENTS.md section 3.3 forbids for a release-facing crate.
+[workspace.dependencies]
+fgit-types = { path = "crates/fgit-types" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
