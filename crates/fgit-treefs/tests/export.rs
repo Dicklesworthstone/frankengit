@@ -776,3 +776,249 @@ fn proposal_request_bytes_are_deterministic_and_distinguishing() {
     assert_eq!(proposal.receipt().base_tree_oid, root);
     assert_eq!(proposal.ref_intents().len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// tree ordering and mode fidelity
+// ---------------------------------------------------------------------------
+
+/// Git orders a directory as though its name ended in `/`.
+///
+/// This is the case a plain byte sort gets wrong and the reason the planner
+/// defers to `compare_tree_entries`. `a.txt` (blob) must precede `a` (tree),
+/// because `a.txt` < `a/` — `.` is 0x2E and `/` is 0x2F. Getting this backwards
+/// produces a valid-looking tree with the wrong OID, which is the worst kind of
+/// wrong: silent, and only visible as a differential failure much later.
+#[test]
+fn directory_entries_sort_as_though_they_ended_in_a_slash() {
+    let mut source = MemorySource::default();
+    let leaf = source.blob(b"leaf\n");
+    let inner = source.tree(&[entry(b"100644", b"inner.txt", &leaf)]);
+    let sibling = source.blob(b"sibling\n");
+    // Deliberately supplied in an order Git would not accept, to prove the
+    // planner sorts rather than trusting input order.
+    let root = source.tree(&[
+        entry(b"40000", b"a", &inner),
+        entry(b"100644", b"a.txt", &sibling),
+    ]);
+
+    let view = base(root.clone());
+    let mut cap = TreeCapability::new(
+        WorkspaceId::from_bytes([1; 16]),
+        repository_id(),
+        vec![path(b"a"), path(b"a.txt")],
+        vec![path(b"a")],
+    );
+
+    let mut overlay = Overlay::new();
+    let id = overlay.intern(b"edited leaf\n".to_vec());
+    overlay.put(
+        path(b"a/inner.txt"),
+        OverlayEntry::File {
+            content: fgit_treefs::overlay::ContentRef::Overlay(id),
+            mode: FileMode::Regular,
+            class: EntryClass::Content,
+        },
+    );
+
+    let plan = planner()
+        .plan(&view, &source, &mut cap, &overlay, 0, &never_cancelled())
+        .expect("export succeeds");
+
+    let root_object = plan
+        .get(plan.root_tree())
+        .expect("root tree is in the plan");
+    let entries = parse_tree(
+        root_object.body(),
+        AcceptanceProfile::StrictCreate,
+        &limits(),
+    )
+    .expect("the emitted root parses strictly, which itself checks canonical order");
+
+    let names: Vec<Vec<u8>> = entries.iter().map(|entry| entry.name.clone()).collect();
+    assert_eq!(
+        names,
+        vec![b"a.txt".to_vec(), b"a".to_vec()],
+        "a.txt must precede the directory a, because a.txt < a/"
+    );
+}
+
+/// Executable, symlink and gitlink modes survive an export unchanged.
+#[test]
+fn modes_survive_the_export_exactly() {
+    let (source, root) = fixture();
+    let view = base(root);
+    let mut cap = capability();
+
+    let mut overlay = Overlay::new();
+    let exec_id = overlay.intern(b"#!/bin/sh\n".to_vec());
+    overlay.put(
+        path(b"src/run.sh"),
+        OverlayEntry::File {
+            content: fgit_treefs::overlay::ContentRef::Overlay(exec_id),
+            mode: FileMode::Executable,
+            class: EntryClass::Content,
+        },
+    );
+
+    let plan = planner()
+        .plan(&view, &source, &mut cap, &overlay, 0, &never_cancelled())
+        .expect("export succeeds");
+
+    // Walk the root to src, then inspect src's entries.
+    let root_object = plan.get(plan.root_tree()).expect("root in plan");
+    let root_entries = parse_tree(
+        root_object.body(),
+        AcceptanceProfile::StrictCreate,
+        &limits(),
+    )
+    .expect("root parses");
+    let src = root_entries
+        .iter()
+        .find(|entry| entry.name == b"src")
+        .expect("src is present");
+    let src_oid = {
+        let mut hex = String::new();
+        use std::fmt::Write as _;
+        for byte in &src.object_id {
+            let _ = write!(hex, "{byte:02x}");
+        }
+        <Sha1 as fgit_crypto::GitHashAlgorithm>::parse_hex(&hex).expect("src oid parses")
+    };
+    let src_object = plan
+        .get(&src_oid)
+        .expect("the rebuilt src tree is in the plan");
+    let src_entries = parse_tree(
+        src_object.body(),
+        AcceptanceProfile::StrictCreate,
+        &limits(),
+    )
+    .expect("src parses");
+
+    let mode_of = |name: &[u8]| -> Vec<u8> {
+        src_entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.mode.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        mode_of(b"run.sh"),
+        b"100755",
+        "executable mode is preserved"
+    );
+    assert_eq!(mode_of(b"lib.rs"), b"100644", "regular mode is preserved");
+    assert_eq!(
+        mode_of(b"link"),
+        b"120000",
+        "a base symlink stays a symlink through export"
+    );
+
+    let gitlink = root_entries
+        .iter()
+        .find(|entry| entry.name == b"vendor")
+        .expect("vendor is present");
+    assert_eq!(gitlink.mode, b"160000", "a gitlink stays a gitlink");
+}
+
+/// A whiteout removes the entry from the exported tree, and its sibling stays.
+#[test]
+fn whiteout_removes_only_its_own_entry() {
+    let (source, root) = fixture();
+    let view = base(root);
+    let mut cap = capability();
+
+    let mut overlay = Overlay::new();
+    overlay.put(path(b"src/lib.rs"), OverlayEntry::Whiteout);
+
+    let plan = planner()
+        .plan(&view, &source, &mut cap, &overlay, 0, &never_cancelled())
+        .expect("export succeeds");
+
+    let root_object = plan.get(plan.root_tree()).expect("root in plan");
+    let root_entries = parse_tree(
+        root_object.body(),
+        AcceptanceProfile::StrictCreate,
+        &limits(),
+    )
+    .expect("root parses");
+    let src = root_entries
+        .iter()
+        .find(|entry| entry.name == b"src")
+        .expect("src survives because its sibling entry remains");
+    let src_oid = {
+        let mut hex = String::new();
+        use std::fmt::Write as _;
+        for byte in &src.object_id {
+            let _ = write!(hex, "{byte:02x}");
+        }
+        <Sha1 as fgit_crypto::GitHashAlgorithm>::parse_hex(&hex).expect("oid parses")
+    };
+    let src_object = plan.get(&src_oid).expect("rebuilt src is in the plan");
+    let src_entries = parse_tree(
+        src_object.body(),
+        AcceptanceProfile::StrictCreate,
+        &limits(),
+    )
+    .expect("src parses");
+
+    assert!(
+        !src_entries.iter().any(|entry| entry.name == b"lib.rs"),
+        "the whited-out entry is gone"
+    );
+    assert!(
+        src_entries.iter().any(|entry| entry.name == b"link"),
+        "its sibling is untouched"
+    );
+}
+
+/// An overlay body that is missing from the content store is a typed refusal,
+/// never a silently omitted entry.
+///
+/// This is the planted intent-omission defect: an entry that names a body the
+/// store does not hold must not quietly vanish from the exported tree, because
+/// a silently dropped intent is exactly the omission the totality map exists to
+/// make impossible.
+#[test]
+fn an_entry_naming_a_missing_body_is_refused_not_omitted() {
+    let (source, root) = fixture();
+    let view = base(root);
+    let mut cap = capability();
+
+    let mut overlay = Overlay::new();
+    // Reference a content id that was never interned.
+    let orphan = fgit_treefs::overlay::ContentId::of(b"never interned");
+    overlay.put(
+        path(b"src/ghost.rs"),
+        OverlayEntry::File {
+            content: fgit_treefs::overlay::ContentRef::Overlay(orphan),
+            mode: FileMode::Regular,
+            class: EntryClass::Content,
+        },
+    );
+
+    assert!(
+        matches!(
+            planner().plan(&view, &source, &mut cap, &overlay, 0, &never_cancelled()),
+            Err(ExportRefusal::MissingBody { .. })
+        ),
+        "a missing body must refuse the whole export, not drop the entry"
+    );
+
+    // Permitted near-twin: the same path with its body actually interned.
+    let mut good = Overlay::new();
+    let id = good.intern(b"real body\n".to_vec());
+    good.put(
+        path(b"src/ghost.rs"),
+        OverlayEntry::File {
+            content: fgit_treefs::overlay::ContentRef::Overlay(id),
+            mode: FileMode::Regular,
+            class: EntryClass::Content,
+        },
+    );
+    let mut cap = capability();
+    assert!(
+        planner()
+            .plan(&view, &source, &mut cap, &good, 0, &never_cancelled())
+            .is_ok()
+    );
+}
