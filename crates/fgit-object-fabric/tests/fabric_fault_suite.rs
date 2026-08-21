@@ -50,6 +50,7 @@ use fgit_object_fabric::fabric::{
     RetentionRootProposal, RuntimeImmutableObjectFabric, StoreRefusal, VerifiedObject,
     VerifiedStreamBudget,
 };
+use fgit_object_fabric::fabric::{PlacementReceipt, SegmentManifest};
 use fgit_object_fabric::reference::{ReferenceMemoryConfig, ReferenceMemoryFabric};
 use fgit_object_fabric::{CryptoDigest, DigestAlgorithm, ObjectEnvelope, ObjectKind};
 use fgit_resource::algebra::{Grade, ResourceVector};
@@ -420,22 +421,94 @@ fn reading_an_absent_object_is_a_typed_absence_not_an_empty_success() {
     );
 }
 
+/// A canonical manifest for the manifest-path fault drills.
+///
+/// Deliberately entry-free. `ManifestEntry`'s fields are private and it has no
+/// public constructor, so an external adversary **cannot synthesize manifest
+/// entries at all** — the only public routes to a populated manifest are
+/// `SegmentManifest::from_verified_segment`, which requires a genuinely
+/// verified segment reader, and decoding bytes that already verify.
+///
+/// That is a hardening property worth naming rather than working around: a
+/// manifest describing objects that were never verified is unconstructable
+/// from outside the crate. These drills only need the manifest to reach the
+/// fault points, so an empty one is the honest minimum rather than a
+/// concession.
+fn manifest_fixture() -> SegmentManifest {
+    SegmentManifest::new(
+        NAMESPACE.to_vec(),
+        [9; 32],
+        Vec::new(),
+        vec![PlacementReceipt::new(
+            PlacementBackend::MemoryReference,
+            handle(b"locator"),
+            handle(b"failure-domain-a"),
+            handle(b"encryption-dependency"),
+        )],
+        &ManifestLimits::default(),
+    )
+    .expect("an entry-free manifest with one placement is canonical")
+}
+
+/// A retention-root proposal for the retention-path fault drills.
+fn proposal_fixture() -> RetentionRootProposal {
+    RetentionRootProposal::new(
+        RepositoryAuthorityHeadId::from_digest(
+            DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
+            CANONICAL_CODEC_VERSION,
+            DigestBytes::try_new(&[7; 32]).expect("fixture digest must fit"),
+        ),
+        Digest::new(
+            DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
+            DigestBytes::try_new(&[9; 32]).expect("fixture digest must fit"),
+        ),
+        Vec::new(),
+    )
+    .expect("an empty-manifest proposal is well formed")
+}
+
 #[test]
 fn every_declared_fault_point_produces_its_own_named_refusal() {
-    // Coverage with a denominator: each declared point must be reachable and
-    // must name itself. A fault point that silently does nothing would other-
-    // wise look identical to one that works.
-    let points = [
+    // Coverage WITH ITS DENOMINATOR. `ReferenceFaultPoint` declares eight
+    // variants and this drill exercises all eight, across the three entry
+    // points that reach them.
+    //
+    // The first version of this test covered only the two reachable through
+    // `put_if_absent` and would have reported "every declared fault point"
+    // while testing a quarter of them. TurquoiseWillow confirmed all eight are
+    // live rather than reserved, so testing six fewer and calling it coverage
+    // would have been exactly the missing-denominator failure this suite is
+    // meant to catch in other people's work.
+    //
+    // A point that silently did nothing would otherwise be indistinguishable
+    // from one that works.
+    let object_points = [
         ReferenceFaultPoint::BeforeObjectInsert,
         ReferenceFaultPoint::AfterObjectInsert,
     ];
+    let manifest_points = [
+        ReferenceFaultPoint::BeforeManifestInsert,
+        ReferenceFaultPoint::AfterManifestInsert,
+    ];
+    let retention_points = [
+        ReferenceFaultPoint::BeforeRetentionBody,
+        ReferenceFaultPoint::AfterRetentionBody,
+        ReferenceFaultPoint::BeforeRetentionRoot,
+        ReferenceFaultPoint::AfterRetentionRoot,
+    ];
+    let permissive = Registry {
+        permits_deletion: true,
+        revalidates: true,
+    };
 
-    for point in points {
+    let mut covered = 0_usize;
+
+    for point in object_points {
         let store = fabric(Some(point));
         let ledger = ledger();
         let refusal = store
             .put_if_absent(verified(b"fault-probe"), admission(&ledger))
-            .expect_err("each declared fault point must refuse when armed");
+            .expect_err("an armed object-path fault must refuse");
         assert_eq!(
             refusal,
             StoreRefusal::ReferenceFaultInjected { point },
@@ -446,7 +519,41 @@ fn every_declared_fault_point_produces_its_own_named_refusal() {
             outcome.is_quiescent(),
             "fault point {point} must settle its obligation: {outcome:?}"
         );
+        covered += 1;
     }
+
+    for point in manifest_points {
+        let store = fabric(Some(point));
+        let refusal = store
+            .write_manifest(&manifest_fixture())
+            .expect_err("an armed manifest-path fault must refuse");
+        assert_eq!(
+            refusal,
+            StoreRefusal::ReferenceFaultInjected { point },
+            "fault point {point} must name itself in its refusal"
+        );
+        covered += 1;
+    }
+
+    for point in retention_points {
+        let store = fabric(Some(point));
+        let refusal = store
+            .publish_retention_root(&permissive, &proposal_fixture())
+            .expect_err("an armed retention-path fault must refuse");
+        assert_eq!(
+            refusal,
+            StoreRefusal::ReferenceFaultInjected { point },
+            "fault point {point} must name itself in its refusal"
+        );
+        covered += 1;
+    }
+
+    // The denominator, asserted rather than implied. If a ninth variant is
+    // added and this drill is not extended, this line fails and says so.
+    assert_eq!(
+        covered, 8,
+        "all eight declared ReferenceFaultPoint variants must be exercised"
+    );
 }
 
 // ---------------------------------------------------------------------------
