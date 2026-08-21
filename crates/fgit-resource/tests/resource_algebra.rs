@@ -507,6 +507,11 @@ fn a_child_region_cannot_mint_budget_and_returns_what_it_did_not_spend() {
     let after = parent.snapshot();
     assert!(after.is_conserved(), "parent identity survives child close");
     assert_eq!(
+        after.accounting_faults(),
+        0,
+        "returning a child's capacity completes without an accounting fault"
+    );
+    assert_eq!(
         after.available(),
         capacity,
         "an unspent child returns its whole capacity to the parent"

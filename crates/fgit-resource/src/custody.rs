@@ -335,6 +335,7 @@ pub struct PoolSnapshot {
     reserved: ResourceVector,
     consumed: ResourceVector,
     delegated: ResourceVector,
+    accounting_faults: u32,
 }
 
 impl PoolSnapshot {
@@ -374,6 +375,18 @@ impl PoolSnapshot {
         self.delegated
     }
 
+    /// How many times the ledger could not complete an accounting move.
+    ///
+    /// A well-formed ledger never records one: every live amount was carved
+    /// out of `capacity`, so no sum can overflow and no subtraction can
+    /// underflow. The counter exists so that a ledger which somehow did reach
+    /// that state says so, instead of quietly keeping a stale number. A
+    /// non-zero count makes the region close as a containment failure.
+    #[must_use]
+    pub const fn accounting_faults(&self) -> u32 {
+        self.accounting_faults
+    }
+
     /// The sum of every account.
     ///
     /// The region's accounting identity is `accounted() == capacity()`. It is
@@ -391,7 +404,7 @@ impl PoolSnapshot {
     /// Whether the accounting identity holds right now.
     #[must_use]
     pub fn is_conserved(&self) -> bool {
-        self.accounted() == Ok(self.capacity)
+        self.accounting_faults == 0 && self.accounted() == Ok(self.capacity)
     }
 }
 
@@ -475,6 +488,7 @@ pub struct ContainmentFailure {
     escalated: Vec<OutstandingObligation>,
     leaks: Vec<LeakRecord>,
     consumed: ResourceVector,
+    accounting_faults: u32,
 }
 
 impl ContainmentFailure {
@@ -507,17 +521,24 @@ impl ContainmentFailure {
     pub const fn consumed(&self) -> ResourceVector {
         self.consumed
     }
+
+    /// Accounting moves the ledger could not complete.
+    #[must_use]
+    pub const fn accounting_faults(&self) -> u32 {
+        self.accounting_faults
+    }
 }
 
 impl fmt::Display for ContainmentFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} containment failure: {} unsettled, {} escalated, {} leaked",
+            "{} containment failure: {} unsettled, {} escalated, {} leaked, {} accounting faults",
             self.region,
             self.unsettled.len(),
             self.escalated.len(),
-            self.leaks.len()
+            self.leaks.len(),
+            self.accounting_faults
         )
     }
 }
@@ -561,15 +582,16 @@ struct LedgerState {
     next_grant: u64,
     next_obligation: u64,
     leak_ordinal: u64,
+    accounting_faults: u32,
     closed: bool,
 }
 
-/// Folds a sequence of amounts, refusing to lose budget on overflow.
+/// Folds a sequence of amounts held by a ledger.
 ///
-/// Overflow cannot occur for well-formed ledgers because every live amount was
-/// carved out of `capacity`; the saturating fallback keeps a corrupted ledger
-/// observable through [`PoolSnapshot::is_conserved`] instead of panicking
-/// inside a lock.
+/// Overflow cannot occur for a well-formed ledger because every live amount was
+/// carved out of `capacity`. If it somehow did, the fold drops the offending
+/// term rather than panicking inside a lock, and the resulting shortfall is
+/// reported by [`PoolSnapshot::is_conserved`].
 fn sum_amounts<'a>(amounts: impl Iterator<Item = &'a ResourceVector>) -> ResourceVector {
     amounts.fold(ResourceVector::ZERO, |total, amount| {
         total.combine(amount).unwrap_or(total)
@@ -593,6 +615,45 @@ impl LedgerState {
             reserved: self.reserved(),
             consumed: self.consumed,
             delegated: self.delegated,
+            accounting_faults: self.accounting_faults,
+        }
+    }
+
+    /// Records that an accounting move could not be completed.
+    ///
+    /// Reaching this is a ledger defect, not an ordinary outcome. It is
+    /// counted rather than panicked because the caller is inside the ledger
+    /// lock, and it is surfaced by [`PoolSnapshot::accounting_faults`] and by
+    /// region close so that it can never pass as a clean settlement.
+    const fn note_fault(&mut self) {
+        self.accounting_faults = self.accounting_faults.saturating_add(1);
+    }
+
+    fn add_available(&mut self, amount: &ResourceVector) {
+        match self.available.combine(amount) {
+            Ok(total) => self.available = total,
+            Err(_) => self.note_fault(),
+        }
+    }
+
+    fn add_consumed(&mut self, amount: &ResourceVector) {
+        match self.consumed.combine(amount) {
+            Ok(total) => self.consumed = total,
+            Err(_) => self.note_fault(),
+        }
+    }
+
+    fn add_delegated(&mut self, amount: &ResourceVector) {
+        match self.delegated.combine(amount) {
+            Ok(total) => self.delegated = total,
+            Err(_) => self.note_fault(),
+        }
+    }
+
+    fn drop_delegated(&mut self, amount: &ResourceVector) {
+        match self.delegated.split(amount) {
+            Ok((_, rest)) => self.delegated = rest,
+            Err(_) => self.note_fault(),
         }
     }
 
@@ -617,17 +678,24 @@ impl LedgerState {
 
     /// Retires a grant and returns the amount it held.
     fn retire(&mut self, id: GrantId) -> ResourceVector {
-        self.grants.remove(&id).unwrap_or(ResourceVector::ZERO)
+        match self.grants.remove(&id) {
+            Some(amount) => amount,
+            None => {
+                self.note_fault();
+                ResourceVector::ZERO
+            }
+        }
     }
 
     fn give_back(&mut self, amount: ResourceVector) {
-        self.available = self.available.combine(&amount).unwrap_or(self.available);
+        self.add_available(&amount);
     }
 
     fn record_leak(&mut self, subject: LeakSubject, class: LeakClass) -> LeakRecord {
         self.leak_ordinal = self.leak_ordinal.saturating_add(1);
         let mut reclaimed = ResourceVector::ZERO;
         let mut obligation = None;
+        let mut faulted = false;
         match subject {
             LeakSubject::Grant(id) => {
                 reclaimed = self.retire(id);
@@ -638,14 +706,17 @@ impl LedgerState {
                     obligation = Some(entry.class);
                     reclaimed = entry.reserved;
                     entry.reserved = ResourceVector::ZERO;
-                    entry.state = entry
-                        .state
-                        .apply(LifecycleEvent::Leak)
-                        .unwrap_or(entry.state);
+                    match entry.state.apply(LifecycleEvent::Leak) {
+                        Ok(next) => entry.state = next,
+                        Err(_) => faulted = true,
+                    }
                 }
                 self.give_back(reclaimed);
             }
             LeakSubject::Region(_) => {}
+        }
+        if faulted {
+            self.note_fault();
         }
         let record = LeakRecord {
             subject,
@@ -671,6 +742,7 @@ impl LedgerState {
             next_grant: 0,
             next_obligation: 0,
             leak_ordinal: 0,
+            accounting_faults: 0,
             closed: false,
         }
     }
@@ -828,7 +900,7 @@ impl LedgerHandle {
                 .split(spent)
                 .and_then(|_| entry.reserved.split(&charged))
                 .map_err(LifecycleError::ChargeExceedsReservation)?;
-            state.consumed = state.consumed.combine(&charged).unwrap_or(state.consumed);
+            state.add_consumed(&charged);
             state.give_back(returned);
             if let Some(slot) = state.entries.get_mut(&id) {
                 slot.state = next;
@@ -967,10 +1039,7 @@ impl ObligationLedger {
         let (id, _, parent) = grant.into_parts();
         parent.with_state(|state| {
             state.retire(id);
-            state.delegated = state
-                .delegated
-                .combine(&capacity)
-                .unwrap_or(state.delegated);
+            state.add_delegated(&capacity);
         });
         Self::from_inner(LedgerInner {
             region,
@@ -1075,6 +1144,14 @@ impl ObligationLedger {
         guard.disarm();
         let report = handle.with_state(|state| {
             state.closed = true;
+            let granted_now = state.granted();
+            let returned = match state.available.combine(&granted_now) {
+                Ok(total) => total,
+                Err(_) => {
+                    state.note_fault();
+                    state.available
+                }
+            };
             CloseReport {
                 unsettled: collect_outstanding(state, |value| {
                     matches!(
@@ -1087,10 +1164,7 @@ impl ObligationLedger {
                 escalated: collect_outstanding(state, |value| value == ObligationState::Escalated),
                 leaks: state.leaks.clone(),
                 consumed: state.consumed,
-                returned: state
-                    .available
-                    .combine(&state.granted())
-                    .unwrap_or(state.available),
+                returned,
                 settled: u64::try_from(
                     state
                         .entries
@@ -1100,12 +1174,17 @@ impl ObligationLedger {
                 )
                 .unwrap_or(u64::MAX),
                 capacity: state.capacity,
+                accounting_faults: state.accounting_faults,
             }
         });
         if let Some(parent) = handle.0.parent.clone() {
             settle_child_into_parent(&parent, report.capacity, report.consumed);
         }
-        if report.unsettled.is_empty() && report.escalated.is_empty() && report.leaks.is_empty() {
+        if report.unsettled.is_empty()
+            && report.escalated.is_empty()
+            && report.leaks.is_empty()
+            && report.accounting_faults == 0
+        {
             RegionCloseOutcome::Quiescent(QuiescenceReceipt {
                 region: handle.region(),
                 settled: report.settled,
@@ -1119,6 +1198,7 @@ impl ObligationLedger {
                 escalated: report.escalated,
                 leaks: report.leaks,
                 consumed: report.consumed,
+                accounting_faults: report.accounting_faults,
             })
         }
     }
@@ -1133,6 +1213,7 @@ struct CloseReport {
     returned: ResourceVector,
     settled: u64,
     capacity: ResourceVector,
+    accounting_faults: u32,
 }
 
 /// Returns a closed child's unspent capacity to its parent.
@@ -1147,15 +1228,11 @@ fn settle_child_into_parent(
     consumed: ResourceVector,
 ) {
     parent.with_state(|state| {
-        let (_, remaining_delegation) = state
-            .delegated
-            .split(&capacity)
-            .unwrap_or((capacity, ResourceVector::ZERO));
-        state.delegated = remaining_delegation;
-        state.consumed = state.consumed.combine(&consumed).unwrap_or(state.consumed);
-        let unspent = capacity
-            .split(&consumed)
-            .map_or(ResourceVector::ZERO, |(_, rest)| rest);
-        state.give_back(unspent);
+        state.drop_delegated(&capacity);
+        state.add_consumed(&consumed);
+        match capacity.split(&consumed) {
+            Ok((_, unspent)) => state.give_back(unspent),
+            Err(_) => state.note_fault(),
+        }
     });
 }

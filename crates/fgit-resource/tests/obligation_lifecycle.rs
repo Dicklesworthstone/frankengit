@@ -440,6 +440,11 @@ fn dropping_a_reserved_obligation_is_a_typed_leak_and_aborting_it_is_not() {
     let snapshot = ledger.snapshot();
     assert!(snapshot.is_conserved(), "the leak reclaims its budget");
     assert_eq!(snapshot.available(), capacity);
+    assert_eq!(
+        snapshot.accounting_faults(),
+        0,
+        "a leak is a lifecycle failure, not an accounting fault"
+    );
 
     match ledger.close() {
         RegionCloseOutcome::ContainmentFailure(failure) => {
