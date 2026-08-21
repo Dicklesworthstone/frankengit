@@ -165,6 +165,18 @@ pub enum RuntimeRefusal {
     },
     /// The owning runtime is gone, so no production context can be minted.
     RuntimeUnavailable,
+    /// A shutdown phase was run out of the canonical order.
+    ShutdownOutOfOrder {
+        /// The phase the sequence expected next.
+        expected: &'static str,
+        /// The phase the caller tried to run.
+        actual: &'static str,
+    },
+    /// Shutdown was finished before every phase had run.
+    ShutdownIncomplete {
+        /// The first phase that never ran.
+        missing: &'static str,
+    },
 }
 
 /// Why a node topology failed to compile.
@@ -231,6 +243,8 @@ impl RuntimeRefusal {
             Self::TopologyInvalid { .. } => "runtime.topology.invalid",
             Self::AdmissionRefused { .. } => "runtime.admission.refused",
             Self::RuntimeUnavailable => "runtime.unavailable",
+            Self::ShutdownOutOfOrder { .. } => "runtime.shutdown.out_of_order",
+            Self::ShutdownIncomplete { .. } => "runtime.shutdown.incomplete",
         }
     }
 
@@ -281,6 +295,14 @@ impl fmt::Display for RuntimeRefusal {
             Self::RuntimeUnavailable => {
                 f.write_str("owning runtime is unavailable; no production context can be minted")
             }
+            Self::ShutdownOutOfOrder { expected, actual } => write!(
+                f,
+                "shutdown phase `{actual}` ran out of order; the sequence expected `{expected}`"
+            ),
+            Self::ShutdownIncomplete { missing } => write!(
+                f,
+                "shutdown finished before phase `{missing}` ran; the node is not quiescent"
+            ),
         }
     }
 }
@@ -314,6 +336,13 @@ mod tests {
             },
             RuntimeRefusal::AdmissionRefused { limit: 8 },
             RuntimeRefusal::RuntimeUnavailable,
+            RuntimeRefusal::ShutdownOutOfOrder {
+                expected: "stop_admission",
+                actual: "join_root",
+            },
+            RuntimeRefusal::ShutdownIncomplete {
+                missing: "flush_evidence",
+            },
         ];
 
         let mut codes: Vec<&str> = refusals.iter().map(RuntimeRefusal::code).collect();

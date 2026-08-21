@@ -53,7 +53,9 @@ pub mod topology;
 pub use adapter::{CommitAmbiguity, OutcomeClass, ServiceOutcome};
 pub use boot::{NodeRuntime, ProfileClass, ProfileIdentity, RuntimeProfile};
 pub use grant::{AuthorityCapability, AuthoritySet, CapabilityProfile, Ownership};
-pub use meter::{BudgetClass, BudgetPolicy, derive_child};
-pub use obligations::{LeakControls, LeakPolicy};
+pub use meter::{BudgetClass, BudgetPolicy, ClassLimits, derive_child};
+pub use obligations::{LeakControls, LeakPolicy, RecoverySinks};
 pub use refuse::{BudgetDimension, Exhaustion, RuntimeRefusal, TopologyDefect};
-pub use topology::{NodeSpec, ServiceSpec, ShutdownPhase, StartPlan};
+pub use topology::{
+    NodeSpec, ServiceSpec, ShutdownDriver, ShutdownPhase, ShutdownReceipt, StartPlan,
+};

@@ -380,6 +380,129 @@ impl StartPlan {
     }
 }
 
+/// Drives the canonical shutdown sequence in order, refusing deviation.
+///
+/// A declared phase order is only a comment until something enforces it. This
+/// is the enforcement: phases must run in the canonical order, each exactly
+/// once, and [`finish`](Self::finish) refuses a sequence that stopped early.
+///
+/// The driver does not implement the phases. It cannot: sessions, database
+/// workers, and the evidence sink belong to other subsystems. What it owns is
+/// the *ordering contract* they must be run under, plus the receipt proving
+/// they were.
+#[derive(Debug)]
+pub struct ShutdownDriver {
+    completed: Vec<ShutdownPhase>,
+    stop_order: Vec<String>,
+}
+
+impl ShutdownDriver {
+    /// Begin a shutdown for a compiled plan.
+    #[must_use]
+    pub fn new(plan: &StartPlan) -> Self {
+        Self {
+            completed: Vec::new(),
+            stop_order: plan.stop_order(),
+        }
+    }
+
+    /// The phase the sequence expects next, or `None` when every phase has run.
+    #[must_use]
+    pub fn next_phase(&self) -> Option<ShutdownPhase> {
+        ShutdownPhase::sequence().get(self.completed.len()).copied()
+    }
+
+    /// The service stop order: dependents before their dependencies.
+    #[must_use]
+    pub fn stop_order(&self) -> &[String] {
+        &self.stop_order
+    }
+
+    /// Run one phase, in order.
+    ///
+    /// The handler receives the service stop order so cancellation and drain
+    /// phases can walk services dependents-first.
+    ///
+    /// # Errors
+    ///
+    /// - [`RuntimeRefusal::ShutdownOutOfOrder`] when `phase` is not the phase
+    ///   the sequence expects next.
+    /// - Whatever the handler itself refuses, unchanged.
+    pub fn run_phase<F>(&mut self, phase: ShutdownPhase, handler: F) -> Result<(), RuntimeRefusal>
+    where
+        F: FnOnce(&[String]) -> Result<(), RuntimeRefusal>,
+    {
+        let expected = self
+            .next_phase()
+            .ok_or(RuntimeRefusal::ShutdownOutOfOrder {
+                expected: "none",
+                actual: phase.code(),
+            })?;
+        if expected != phase {
+            return Err(RuntimeRefusal::ShutdownOutOfOrder {
+                expected: expected.code(),
+                actual: phase.code(),
+            });
+        }
+        handler(&self.stop_order)?;
+        self.completed.push(phase);
+        Ok(())
+    }
+
+    /// Finish, producing the receipt.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeRefusal::ShutdownIncomplete`] naming the first phase that
+    /// never ran.
+    pub fn finish(self) -> Result<ShutdownReceipt, RuntimeRefusal> {
+        if let Some(missing) = self.next_phase() {
+            return Err(RuntimeRefusal::ShutdownIncomplete {
+                missing: missing.code(),
+            });
+        }
+        Ok(ShutdownReceipt {
+            phases: self.completed,
+            stop_order: self.stop_order,
+        })
+    }
+}
+
+/// Evidence that a node ran the complete shutdown sequence in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShutdownReceipt {
+    phases: Vec<ShutdownPhase>,
+    stop_order: Vec<String>,
+}
+
+impl ShutdownReceipt {
+    /// The phases that ran, in the order they ran.
+    #[must_use]
+    pub fn phases(&self) -> &[ShutdownPhase] {
+        &self.phases
+    }
+
+    /// The service stop order used.
+    #[must_use]
+    pub fn stop_order(&self) -> &[String] {
+        &self.stop_order
+    }
+
+    /// A canonical single-line descriptor for evidence.
+    #[must_use]
+    pub fn canonical_descriptor(&self) -> String {
+        format!(
+            "fgit-shutdown-v1|phases={}|stop_order={}",
+            self.phases
+                .iter()
+                .map(|phase| phase.code())
+                .collect::<Vec<_>>()
+                .join(","),
+            self.stop_order.join(",")
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use asupersync::cx::cap::CapMask;
@@ -701,6 +824,154 @@ mod tests {
                 .capabilities()
                 .authority()
                 .contains(AuthorityCapability::Publication)
+        );
+    }
+
+    #[test]
+    fn the_shutdown_driver_runs_every_phase_in_canonical_order() {
+        let plan = node().compile().expect("valid");
+        let mut driver = ShutdownDriver::new(&plan);
+        let mut seen = Vec::new();
+
+        for phase in ShutdownPhase::sequence() {
+            driver
+                .run_phase(phase, |stop_order| {
+                    // Every phase sees the dependents-first stop order.
+                    assert_eq!(stop_order.len(), 4);
+                    assert_eq!(stop_order[0], "protocol");
+                    seen.push(phase);
+                    Ok(())
+                })
+                .expect("phases run in order");
+        }
+
+        let receipt = driver.finish().expect("the sequence completed");
+        assert_eq!(receipt.phases(), &ShutdownPhase::sequence()[..]);
+        assert_eq!(seen, ShutdownPhase::sequence().to_vec());
+        assert!(
+            receipt
+                .canonical_descriptor()
+                .contains("stop_admission,request_cancellation")
+        );
+        assert!(receipt.canonical_descriptor().ends_with("store"));
+    }
+
+    #[test]
+    fn running_a_shutdown_phase_out_of_order_is_refused() {
+        let plan = node().compile().expect("valid");
+        let mut driver = ShutdownDriver::new(&plan);
+
+        // Planted negative: joining the root before anything has been drained.
+        let refusal = driver
+            .run_phase(ShutdownPhase::JoinRoot, |_| Ok(()))
+            .expect_err("the root may not be joined first");
+        assert_eq!(
+            refusal,
+            RuntimeRefusal::ShutdownOutOfOrder {
+                expected: "stop_admission",
+                actual: "join_root",
+            }
+        );
+
+        // Paired permitted case: the phase the sequence actually expects.
+        driver
+            .run_phase(ShutdownPhase::StopAdmission, |_| Ok(()))
+            .expect("stop_admission is first");
+        assert_eq!(
+            driver.next_phase(),
+            Some(ShutdownPhase::RequestCancellation)
+        );
+    }
+
+    #[test]
+    fn skipping_obligation_finalization_is_refused() {
+        // The specific ordering that turns an unresolved obligation into a
+        // leak: closing database workers before obligations are finalized.
+        let plan = node().compile().expect("valid");
+        let mut driver = ShutdownDriver::new(&plan);
+        for phase in [
+            ShutdownPhase::StopAdmission,
+            ShutdownPhase::RequestCancellation,
+            ShutdownPhase::DrainSessions,
+        ] {
+            driver.run_phase(phase, |_| Ok(())).expect("in order");
+        }
+
+        let refusal = driver
+            .run_phase(ShutdownPhase::CloseDatabaseWorkers, |_| Ok(()))
+            .expect_err("obligations are finalized before workers close");
+        assert_eq!(
+            refusal,
+            RuntimeRefusal::ShutdownOutOfOrder {
+                expected: "finalize_obligations",
+                actual: "close_database_workers",
+            }
+        );
+    }
+
+    #[test]
+    fn finishing_an_incomplete_shutdown_is_refused() {
+        let plan = node().compile().expect("valid");
+        let mut driver = ShutdownDriver::new(&plan);
+        for phase in [
+            ShutdownPhase::StopAdmission,
+            ShutdownPhase::RequestCancellation,
+        ] {
+            driver.run_phase(phase, |_| Ok(())).expect("in order");
+        }
+
+        let refusal = driver
+            .finish()
+            .expect_err("a node that skipped drain is not quiescent");
+        assert_eq!(
+            refusal,
+            RuntimeRefusal::ShutdownIncomplete {
+                missing: "drain_sessions"
+            }
+        );
+    }
+
+    #[test]
+    fn a_refusing_phase_handler_does_not_advance_the_sequence() {
+        let plan = node().compile().expect("valid");
+        let mut driver = ShutdownDriver::new(&plan);
+
+        let refusal = driver
+            .run_phase(ShutdownPhase::StopAdmission, |_| {
+                Err(RuntimeRefusal::RuntimeUnavailable)
+            })
+            .expect_err("the handler refused");
+        assert_eq!(refusal, RuntimeRefusal::RuntimeUnavailable);
+
+        // The phase did not count as run, so it is still what comes next.
+        assert_eq!(driver.next_phase(), Some(ShutdownPhase::StopAdmission));
+
+        // Paired permitted case: retrying the same phase succeeds.
+        driver
+            .run_phase(ShutdownPhase::StopAdmission, |_| Ok(()))
+            .expect("a retried phase advances");
+        assert_eq!(
+            driver.next_phase(),
+            Some(ShutdownPhase::RequestCancellation)
+        );
+    }
+
+    #[test]
+    fn a_phase_cannot_run_twice() {
+        let plan = node().compile().expect("valid");
+        let mut driver = ShutdownDriver::new(&plan);
+        driver
+            .run_phase(ShutdownPhase::StopAdmission, |_| Ok(()))
+            .expect("first run");
+        let refusal = driver
+            .run_phase(ShutdownPhase::StopAdmission, |_| Ok(()))
+            .expect_err("a phase runs exactly once");
+        assert_eq!(
+            refusal,
+            RuntimeRefusal::ShutdownOutOfOrder {
+                expected: "request_cancellation",
+                actual: "stop_admission",
+            }
         );
     }
 }
