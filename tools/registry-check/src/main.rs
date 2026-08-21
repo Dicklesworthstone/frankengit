@@ -3879,6 +3879,73 @@ fn is_forbidden_ftui_surface(name: &str, features: &BTreeSet<String>) -> bool {
                 .any(|feature| matches!(feature.as_str(), "demo" | "showcase")))
 }
 
+/// Alternate HTTP runtimes, reactors, and native TLS/compression backends that
+/// must never enter the resolved closure, whichever sibling drags them in.
+///
+/// `AGENTS.md` section 3.1 already forbids linking C/C++ libraries to obtain
+/// TLS or compression behaviour, and section 3.2 forbids a second runtime.
+/// Before this rule those sentences were enforced only for the handful of
+/// names [`is_alternate_runtime`] happens to list, so a reactor arriving under
+/// a different name -- `hyper`, `actix-rt` -- or a C backend arriving as
+/// `openssl-sys` passed the preflight. A gateway framework is the realistic
+/// way such a package enters, so the constellation preflight is where it is
+/// caught, before any per-entry bookkeeping runs.
+///
+/// Pure-Rust compression is admissible and deliberately absent here:
+/// `miniz_oxide` and `flate2`'s default backend are not forbidden; only the
+/// `-sys` shims that link a C library are.
+fn is_forbidden_native_transport(name: &str) -> bool {
+    matches!(
+        name,
+        "hyper"
+            | "hyper-util"
+            | "h2"
+            | "axum"
+            | "axum-core"
+            | "warp"
+            | "tide"
+            | "rocket"
+            | "salvo"
+            | "poem"
+            | "ntex"
+            | "native-tls"
+            | "openssl"
+            | "openssl-sys"
+            | "openssl-probe"
+            | "schannel"
+            | "security-framework"
+            | "security-framework-sys"
+            | "libz-sys"
+            | "libz-ng-sys"
+            | "zlib-ng"
+            | "bzip2-sys"
+            | "lzma-sys"
+            | "zstd-sys"
+    ) || name.starts_with("actix")
+}
+
+/// fastapi surfaces refused even once the family is otherwise admitted.
+///
+/// Demo and example packages carry sample servers that would become a second
+/// unowned entrypoint. The feature names are the ones that switch fastapi onto
+/// a foreign reactor or a native TLS/compression backend; refusing the feature
+/// closure catches the switch at the manifest, where the resulting package may
+/// not yet be in `Cargo.lock`.
+fn is_forbidden_fastapi_surface(name: &str, features: &BTreeSet<String>) -> bool {
+    if !name.starts_with("fastapi") {
+        return false;
+    }
+    name.contains("demo")
+        || name.contains("example")
+        || name.contains("showcase")
+        || features.iter().any(|feature| {
+            matches!(
+                feature.as_str(),
+                "tokio" | "hyper" | "native-tls" | "default-tls" | "compression-native"
+            )
+        })
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct MetadataSnapshot {
     feature_closures: BTreeMap<(String, String), BTreeSet<String>>,
@@ -4337,6 +4404,18 @@ fn check_forbidden_constellation_surfaces(
                 package.name
             ));
         }
+        if is_forbidden_fastapi_surface(&package.name, &BTreeSet::new()) {
+            report.error(format!(
+                "forbidden fastapi demo/example package `{}` resolved in Cargo.lock",
+                package.name
+            ));
+        }
+        if is_forbidden_native_transport(&package.name) {
+            report.error(format!(
+                "forbidden native transport `{}` resolved in Cargo.lock; Asupersync owns the reactor and TLS/compression must be pure Rust",
+                package.name
+            ));
+        }
     }
     for dependency in dependencies {
         if is_forbidden_sqlmodel_backend(&dependency.package, &dependency.declared_features) {
@@ -4348,6 +4427,18 @@ fn check_forbidden_constellation_surfaces(
         if is_forbidden_ftui_surface(&dependency.package, &dependency.declared_features) {
             report.error(format!(
                 "forbidden ftui demo/showcase feature closure for `{}` in {}",
+                dependency.package, dependency.manifest
+            ));
+        }
+        if is_forbidden_fastapi_surface(&dependency.package, &dependency.declared_features) {
+            report.error(format!(
+                "forbidden fastapi feature closure for `{}` in {}",
+                dependency.package, dependency.manifest
+            ));
+        }
+        if is_forbidden_native_transport(&dependency.package) {
+            report.error(format!(
+                "forbidden native transport dependency `{}` declared in {}",
                 dependency.package, dependency.manifest
             ));
         }
@@ -5508,6 +5599,108 @@ mod tests {
         assert_error(
             &report,
             "forbidden ftui demo/showcase package `ftui-showcase`",
+        );
+    }
+
+    fn assert_no_error(report: &Report, unexpected: &str) {
+        assert!(
+            !report.errors.iter().any(|error| error.contains(unexpected)),
+            "diagnostic containing `{unexpected}` must not fire, observed {:?}",
+            report.errors
+        );
+    }
+
+    fn lock_with_extra_packages(workspace: &FixtureWorkspace, packages: &[(&str, &str)]) {
+        let path = workspace.root.join("Cargo.lock");
+        let mut text = fs::read_to_string(&path).expect("read lock");
+        for (name, version) in packages {
+            text.push_str(&format!(
+                "\n[[package]]\nname = \"{name}\"\nversion = \"{version}\"\n"
+            ));
+        }
+        fs::write(path, text).expect("write lock");
+    }
+
+    #[test]
+    fn planted_gateway_transport_surfaces_are_refused() {
+        let workspace = fixture_workspace("admitted");
+        lock_with_extra_packages(
+            &workspace,
+            &[
+                ("hyper", "1.4.0"),
+                ("openssl-sys", "0.9.0"),
+                ("actix-rt", "2.9.0"),
+                ("libz-sys", "1.1.0"),
+                ("fastapi-demo", "0.4.3"),
+            ],
+        );
+        let metadata = matching_metadata();
+        let report = report_for_fixture(&workspace, Some(&metadata));
+        for package in ["hyper", "openssl-sys", "actix-rt", "libz-sys"] {
+            assert_error(
+                &report,
+                &format!("forbidden native transport `{package}` resolved in Cargo.lock"),
+            );
+        }
+        assert_error(
+            &report,
+            "forbidden fastapi demo/example package `fastapi-demo`",
+        );
+    }
+
+    /// The permitted twin for [`planted_gateway_transport_surfaces_are_refused`].
+    ///
+    /// Without this, a rule that refused every package would pass that test for
+    /// entirely the wrong reason.
+    #[test]
+    fn the_admitted_closure_carries_no_forbidden_transport() {
+        let workspace = fixture_workspace("admitted");
+        let metadata = matching_metadata();
+        let report = report_for_fixture(&workspace, Some(&metadata));
+        assert_no_error(&report, "forbidden native transport");
+        assert_no_error(&report, "forbidden fastapi");
+    }
+
+    /// Pure-Rust compression is admissible; only the `-sys` shims that link a C
+    /// library are refused. A rule matching on "compression" rather than on the
+    /// exact backend names would fail here.
+    #[test]
+    fn pure_rust_compression_is_not_mistaken_for_a_native_backend() {
+        let workspace = fixture_workspace("admitted");
+        lock_with_extra_packages(
+            &workspace,
+            &[("flate2", "1.0.30"), ("miniz_oxide", "0.7.3")],
+        );
+        let metadata = matching_metadata();
+        let report = report_for_fixture(&workspace, Some(&metadata));
+        assert_no_error(&report, "forbidden native transport `flate2`");
+        assert_no_error(&report, "forbidden native transport `miniz_oxide`");
+    }
+
+    /// Records the reason FG-048c cannot admit fastapi_rust today.
+    ///
+    /// Every published fastapi-core 0.4.x (0.4.0 through 0.4.3, each checked
+    /// separately) carries a non-optional `futures-executor` dependency, and
+    /// `futures-executor` is an alternate runtime. This test encodes that
+    /// upstream fact, and is expected to keep failing to admit until the
+    /// upstream owner drops the dependency -- at which point the planted lock
+    /// below stops resembling reality and this test should be revisited.
+    #[test]
+    fn published_fastapi_zero_four_x_is_refused_for_its_bundled_executor() {
+        let workspace = fixture_workspace("admitted");
+        lock_with_extra_packages(
+            &workspace,
+            &[
+                ("fastapi-rust", "0.4.3"),
+                ("fastapi-core", "0.4.3"),
+                ("futures-executor", "0.3.31"),
+            ],
+        );
+        let metadata = matching_metadata();
+        let report = report_for_fixture(&workspace, Some(&metadata));
+        assert_error(
+            &report,
+            "alternate async runtime `futures-executor` resolved in Cargo.lock",
         );
     }
 
