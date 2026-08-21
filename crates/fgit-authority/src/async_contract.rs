@@ -46,8 +46,8 @@ use crate::contract::AuthorityLimits;
 use crate::keys::{HeadKey, ImmutableKey};
 use crate::tokens::{AuthorityVersionToken, StoreInstanceId};
 use crate::vocabulary::{
-    AuthenticatedHead, AuthorityFailure, CasOutcome, HeadInit, HeadRead, HeadReadReceipt,
-    ImmutableRead, PutOutcome,
+    AuthenticatedHead, AuthorityFailure, AuthorityRefusal, CasOutcome, HeadInit, HeadRead,
+    HeadReadReceipt, ImmutableRead, PutOutcome,
 };
 use fgit_types::HeadGeneration;
 
@@ -262,7 +262,38 @@ pub trait AsyncAuthorityStore: Sync {
         new_body: &[u8],
         outcomes: &[(ImmutableKey, Vec<u8>)],
         witness: &DuplicateAbsenceWitness,
-    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send;
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        // Default: refuse. A backend that has not implemented atomic
+        // publication says so honestly and is unusable for publication until
+        // it does.
+        //
+        // The alternative default — delegating to a separate CAS then puts —
+        // would be actively dangerous: it satisfies the signature while
+        // providing none of the atomicity, so a caller (or a test) could pass
+        // against it and be read as evidence the §5.2 window is closed. Both
+        // implementors who hit this trait reached that conclusion
+        // independently and wrote refusals by hand; making it the default
+        // spares the next one the same discovery.
+        //
+        // A backend that CAN publish atomically overrides this. One that
+        // cannot inherits a typed, permanent refusal rather than a compile
+        // error, which keeps a required-method addition from reddening every
+        // lane in the workspace mid-surgery.
+        let _ = (
+            cx,
+            key,
+            expected,
+            new_generation,
+            new_body,
+            outcomes,
+            witness,
+        );
+        async {
+            Err(AuthorityFailure::Refused(
+                AuthorityRefusal::OperationUnsupported,
+            ))
+        }
+    }
 
     /// Confirm that this store issued `receipt` exactly as presented.
     ///
