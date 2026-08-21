@@ -39,12 +39,16 @@
 
 pub mod base;
 pub mod capability;
+pub mod intent;
 pub mod overlay;
 pub mod path;
 
 pub use base::{BaseEntry, BaseError, BaseView, ObjectSource, ObjectSourceError};
 pub use capability::{
     CapabilityRefusal, ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId, WriteGrant,
+};
+pub use intent::{
+    IntentError, IntentEvaluation, IntentLog, NetEffect, NoOpReason, TreeEditIntent, TreeNetEffect,
 };
 pub use overlay::{
     ContentId, ContentStore, EntryClass, FileMode, Overlay, OverlayEntry, OverlayLookup,
