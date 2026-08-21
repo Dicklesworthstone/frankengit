@@ -346,6 +346,8 @@ oracle_build() {
         --symlink usr/bin /bin \
         --symlink usr/lib /lib \
         --symlink usr/lib64 /lib64 \
+        --dir /etc \
+        --ro-bind /etc/alternatives /etc/alternatives \
         --proc /proc \
         --dev /dev \
         --tmpfs /tmp \
