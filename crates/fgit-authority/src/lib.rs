@@ -61,6 +61,7 @@
 //! [`AmbiguityReason::Timeout`]; neither may ever be reported as a refusal,
 //! because neither proves non-commit.
 
+mod admission;
 mod contract;
 pub mod history;
 mod identity;
@@ -76,6 +77,10 @@ mod suite;
 mod tokens;
 mod vocabulary;
 
+pub use crate::admission::{
+    ADMISSION_KEY_PREFIX, AdmissionInstant, AdmissionOutcome, AdmissionReceiptBody, admission_key,
+    read_admission, record_admission,
+};
 pub use crate::contract::{
     AuthorityLimits, AuthorityStore, CasResolution, FaultableAuthorityStore, PutResolution,
     ambiguity_of, refusal_of, resolve_ambiguous_cas, resolve_ambiguous_put,
