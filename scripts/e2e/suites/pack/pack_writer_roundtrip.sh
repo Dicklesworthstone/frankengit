@@ -217,15 +217,18 @@ main() {
     # Flip every bit of one byte in the middle of the pack body. The trailer
     # checksum no longer matches and the entry stream is damaged, so a client
     # performing real validation must refuse.
-    perl -e '
-      my ($src, $dst) = @ARGV;
-      open my $in, "<:raw", $src or die $!;
-      local $/; my $bytes = <$in>; close $in;
-      my $mid = int(length($bytes) / 2);
-      substr($bytes, $mid, 1) = chr(ord(substr($bytes, $mid, 1)) ^ 0xFF);
-      open my $out, ">:raw", $dst or die $!;
-      print $out $bytes; close $out;
-    ' "${corrupt_source}" "${run_directory}/work/pack/corrupt.pack"
+    #
+    # coreutils only: FG-000A-PORT-019 forbids the harness from invoking jq,
+    # python, perl or awk, because each drags a second language into a shell
+    # harness. od/dd/wc/tr are not interpreters and are not on that list.
+    local corrupt_size=0 corrupt_mid=0 corrupt_byte=0
+    corrupt_size=$(wc -c < "${corrupt_source}")
+    corrupt_mid=$((corrupt_size / 2))
+    corrupt_byte=$(od -An -tu1 -j "${corrupt_mid}" -N1 "${corrupt_source}" | tr -d ' ')
+    cp -- "${corrupt_source}" "${run_directory}/work/pack/corrupt.pack"
+    printf "$(printf '\\%03o' "$((corrupt_byte ^ 255))")" |
+      dd of="${run_directory}/work/pack/corrupt.pack" bs=1 seek="${corrupt_mid}" \
+        conv=notrunc status=none
 
     fge_capture 'index-negative-control' \
       "${ORACLE}" run "${PIN_ID}" "${run_directory}" pack -- \
