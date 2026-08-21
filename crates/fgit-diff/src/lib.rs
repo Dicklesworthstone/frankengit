@@ -312,7 +312,12 @@ fn unit_count(bytes: &[u8], granularity: SequenceGranularity) -> usize {
     match granularity {
         SequenceGranularity::Bytes => bytes.len(),
         SequenceGranularity::Lines => {
-            let newline_count = bytes.iter().filter(|byte| **byte == b'\n').count();
+            let mut newline_count = 0;
+            for byte in bytes {
+                if *byte == b'\n' {
+                    newline_count += 1;
+                }
+            }
             newline_count + usize::from(bytes.last() != Some(&b'\n') && !bytes.is_empty())
         }
     }
@@ -1135,11 +1140,13 @@ impl Default for TreeDiffLimits {
     }
 }
 
-/// An explicitly selected rename policy. The implemented `ExactObject` profile
-/// reports only byte-identical objects as 100 percent similar; it does not
-/// fabricate an unverified content-similarity result. It scans deletions in
-/// tree-diff order and pairs each with the earliest still-unpaired matching
-/// addition; the rename occupies the deletion's original output slot.
+/// An explicitly selected rename policy.
+///
+/// The implemented `ExactObject` profile reports only byte-identical objects
+/// as 100 percent similar; it does not fabricate an unverified
+/// content-similarity result. It scans deletions in tree-diff order and pairs
+/// each with the earliest still-unpaired matching addition; the rename occupies
+/// the deletion's original output slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RenameProfile {
     Disabled,
@@ -1231,7 +1238,7 @@ where
                 )?;
                 old_index += 1;
             }
-            (Some(_), Some(after)) => {
+            (Some(_), Some(after)) | (None, Some(after)) => {
                 push_tree_change(
                     &mut changes,
                     TreeChange::Added(after.clone()),
@@ -1246,14 +1253,6 @@ where
                     options.limits.max_changes,
                 )?;
                 old_index += 1;
-            }
-            (None, Some(after)) => {
-                push_tree_change(
-                    &mut changes,
-                    TreeChange::Added(after.clone()),
-                    options.limits.max_changes,
-                )?;
-                new_index += 1;
             }
             (None, None) => break,
         }
@@ -1386,7 +1385,7 @@ fn compare_tree_entries<ObjectId>(
 }
 
 const fn tree_name_terminator(mode: TreeMode) -> u8 {
-    if mode.0 & 0o170000 == 0o040000 {
+    if mode.0 & 0o170_000 == 0o040_000 {
         b'/'
     } else {
         0
@@ -1444,13 +1443,19 @@ pub enum MergeBaseError<CommitId, SourceError> {
     EdgeLimitExceeded { limit: usize },
 }
 
+/// The typed result of an all-best merge-base query.
+pub type MergeBaseQueryResult<CommitId, SourceError> =
+    Result<MergeBaseResult<CommitId>, MergeBaseError<CommitId, SourceError>>;
+
+type ParentSnapshot<CommitId> = BTreeMap<CommitId, Vec<CommitId>>;
+
 /// Return all best common ancestors in ascending `CommitId` order.
 pub fn merge_bases_all<Graph>(
     graph: &Graph,
     left: Graph::CommitId,
     right: Graph::CommitId,
     limits: MergeBaseLimits,
-) -> Result<MergeBaseResult<Graph::CommitId>, MergeBaseError<Graph::CommitId, Graph::Error>>
+) -> MergeBaseQueryResult<Graph::CommitId, Graph::Error>
 where
     Graph: CommitGraph,
 {
@@ -1486,7 +1491,7 @@ where
 }
 
 fn descendant_first_topology<CommitId, SourceError>(
-    snapshot: &BTreeMap<CommitId, Vec<CommitId>>,
+    snapshot: &ParentSnapshot<CommitId>,
 ) -> Result<Vec<CommitId>, MergeBaseError<CommitId, SourceError>>
 where
     CommitId: Clone + Ord,
@@ -1505,7 +1510,8 @@ where
     }
     let mut ready: BTreeSet<_> = incoming
         .iter()
-        .filter_map(|(commit, degree)| (*degree == 0).then(|| commit.clone()))
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(commit, _)| commit.clone())
         .collect();
     let mut ordered = Vec::with_capacity(snapshot.len());
     while let Some(commit) = ready.iter().next().cloned() {
@@ -1535,10 +1541,7 @@ fn load_graph<Graph, Starts>(
     graph: &Graph,
     starts: Starts,
     limits: MergeBaseLimits,
-) -> Result<
-    BTreeMap<Graph::CommitId, Vec<Graph::CommitId>>,
-    MergeBaseError<Graph::CommitId, Graph::Error>,
->
+) -> Result<ParentSnapshot<Graph::CommitId>, MergeBaseError<Graph::CommitId, Graph::Error>>
 where
     Graph: CommitGraph,
     Starts: IntoIterator<Item = Graph::CommitId>,
@@ -1583,7 +1586,7 @@ where
 }
 
 fn ancestors_of<CommitId, SourceError>(
-    snapshot: &BTreeMap<CommitId, Vec<CommitId>>,
+    snapshot: &ParentSnapshot<CommitId>,
     start: &CommitId,
 ) -> Result<BTreeSet<CommitId>, MergeBaseError<CommitId, SourceError>>
 where
@@ -1603,6 +1606,10 @@ where
     }
     Ok(ancestors)
 }
+
+mod merge;
+
+pub use merge::*;
 
 #[cfg(test)]
 mod tests {
@@ -1798,34 +1805,34 @@ mod tests {
         let old = vec![
             TreeEntry {
                 path: b"a".to_vec(),
-                mode: TreeMode(0o100644),
+                mode: TreeMode(0o100_644),
                 object: 1_u8,
             },
             TreeEntry {
                 path: b"b".to_vec(),
-                mode: TreeMode(0o100644),
+                mode: TreeMode(0o100_644),
                 object: 2,
             },
             TreeEntry {
                 path: b"gone".to_vec(),
-                mode: TreeMode(0o100644),
+                mode: TreeMode(0o100_644),
                 object: 3,
             },
         ];
         let new = vec![
             TreeEntry {
                 path: b"a".to_vec(),
-                mode: TreeMode(0o100755),
+                mode: TreeMode(0o100_755),
                 object: 1,
             },
             TreeEntry {
                 path: b"b".to_vec(),
-                mode: TreeMode(0o100644),
+                mode: TreeMode(0o100_644),
                 object: 4,
             },
             TreeEntry {
                 path: b"new".to_vec(),
-                mode: TreeMode(0o100644),
+                mode: TreeMode(0o100_644),
                 object: 5,
             },
         ];
@@ -1841,12 +1848,12 @@ mod tests {
         let unsorted = vec![
             TreeEntry {
                 path: b"b".to_vec(),
-                mode: TreeMode(0o100644),
+                mode: TreeMode(0o100_644),
                 object: 1_u8,
             },
             TreeEntry {
                 path: b"a".to_vec(),
-                mode: TreeMode(0o100644),
+                mode: TreeMode(0o100_644),
                 object: 2,
             },
         ];
@@ -1871,7 +1878,7 @@ mod tests {
 
         let one_entry = vec![TreeEntry {
             path: b"a".to_vec(),
-            mode: TreeMode(0o100644),
+            mode: TreeMode(0o100_644),
             object: 1_u8,
         }];
         assert_eq!(
@@ -1909,12 +1916,12 @@ mod tests {
         let entries = vec![
             TreeEntry {
                 path: b"foo.bar".to_vec(),
-                mode: TreeMode(0o100644),
+                mode: TreeMode(0o100_644),
                 object: 1_u8,
             },
             TreeEntry {
                 path: b"foo".to_vec(),
-                mode: TreeMode(0o040000),
+                mode: TreeMode(0o040_000),
                 object: 2,
             },
         ];
@@ -1927,12 +1934,12 @@ mod tests {
     fn exact_object_rename_profile_receipts_a_permitted_rename_deterministically() {
         let old = vec![TreeEntry {
             path: b"before".to_vec(),
-            mode: TreeMode(0o100644),
+            mode: TreeMode(0o100_644),
             object: 7_u8,
         }];
         let new = vec![TreeEntry {
             path: b"after".to_vec(),
-            mode: TreeMode(0o100644),
+            mode: TreeMode(0o100_644),
             object: 7_u8,
         }];
         let result = diff_trees(
@@ -1952,12 +1959,12 @@ mod tests {
             vec![TreeChange::Renamed {
                 before: TreeEntry {
                     path: b"before".to_vec(),
-                    mode: TreeMode(0o100644),
+                    mode: TreeMode(0o100_644),
                     object: 7_u8,
                 },
                 after: TreeEntry {
                     path: b"after".to_vec(),
-                    mode: TreeMode(0o100644),
+                    mode: TreeMode(0o100_644),
                     object: 7_u8,
                 },
                 similarity_percent: 100,
