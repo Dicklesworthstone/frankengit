@@ -290,7 +290,7 @@ impl NodeSpec {
                 .find(|candidate| candidate.name == *name)
                 .expect("plan order is drawn from the declared services");
 
-            let mut child = ChildSpec::new(service.name.clone(), start_for(service))
+            let mut child = ChildSpec::new(service.name.clone(), BoxedStart(start_for(service)))
                 .with_shutdown_budget(self.policy.budget_for(BudgetClass::ShutdownCleanup));
             for dependency in &service.depends_on {
                 child = child.depends_on(dependency.clone());
@@ -304,6 +304,25 @@ impl NodeSpec {
 
 fn invalid(defect: TopologyDefect) -> RuntimeRefusal {
     RuntimeRefusal::TopologyInvalid { defect }
+}
+
+/// Adapts a caller-supplied boxed start body to the supervisor's trait.
+///
+/// [`ChildSpec::new`] takes a concrete `impl ChildStart`, and there is no
+/// blanket implementation for `Box<dyn ChildStart>`, so the box is delegated
+/// through this newtype rather than forcing every caller to name one concrete
+/// start type for a heterogeneous service set.
+struct BoxedStart(Box<dyn ChildStart>);
+
+impl ChildStart for BoxedStart {
+    fn start(
+        &mut self,
+        scope: &asupersync::cx::Scope<'static, asupersync::types::policy::FailFast>,
+        state: &mut asupersync::runtime::RuntimeState,
+        cx: &asupersync::cx::Cx,
+    ) -> Result<asupersync::types::id::TaskId, asupersync::runtime::SpawnError> {
+        self.0.start(scope, state, cx)
+    }
 }
 
 /// A validated node topology with its canonical orders.
