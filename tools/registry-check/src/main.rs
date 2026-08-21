@@ -3467,7 +3467,7 @@ fn parse_manifest_dependencies(display: &str, text: &str) -> Vec<WorkspaceDepend
         let line = raw_line.split('#').next().unwrap_or("").trim();
         if line.starts_with('[') && line.ends_with(']') {
             let section = &line[1..line.len() - 1];
-            in_dependencies = section == "dependencies" || section == "workspace.dependencies";
+            in_dependencies = is_dependency_section(section);
             continue;
         }
         if !in_dependencies || line.is_empty() {
