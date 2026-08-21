@@ -183,7 +183,10 @@ fge_assert_eq FG-018B-E2E-008 true "${depth_shallow}" \
   'depth-two clone is observably shallow'
 
 blob_clone_exit=0
-oracle_capture blob-none-clone . clone --quiet --no-local --depth=1 --filter=blob:none source.git blob-none || blob_clone_exit=$?
+# A normal clone checks out README and may materialize the promised blob before
+# this transfer-state probe. Preserve the filtered fetch result until the
+# explicit lazy-access cell below.
+oracle_capture blob-none-clone . clone --quiet --no-local --no-checkout --depth=1 --filter=blob:none source.git blob-none || blob_clone_exit=$?
 fge_assert_exit FG-018B-E2E-009 0 "${blob_clone_exit}" \
   'pinned Git completes a depth-one blob:none clone'
 
