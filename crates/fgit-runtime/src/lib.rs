@@ -48,6 +48,7 @@ pub mod grant;
 pub mod meter;
 pub mod obligations;
 pub mod refuse;
+pub mod service;
 pub mod topology;
 
 pub use adapter::{CommitAmbiguity, OutcomeClass, ServiceOutcome};
