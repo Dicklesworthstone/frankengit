@@ -124,7 +124,7 @@ impl ReplayClass {
 ///
 /// Two configs that compare equal produce identical traces. Anything that
 /// could change a run and is not in here is a determinism bug.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabConfig {
     seed: u64,
     profile: RuntimeProfile,
@@ -670,7 +670,7 @@ mod tests {
             lab.finish().expect("quiescent")
         };
         let second = {
-            let mut lab = Lab::start(config.clone());
+            let mut lab = Lab::start(config);
             scenario(&mut lab).expect("scenario runs");
             lab.finish().expect("quiescent")
         };

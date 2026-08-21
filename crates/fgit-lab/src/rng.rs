@@ -97,6 +97,7 @@ impl SeededEntropy {
     /// tag, so sub-streams are reproducible and distinct. Forking consumes one
     /// draw from the parent, which keeps the parent's stream a function of how
     /// many forks were taken.
+    #[must_use]
     pub fn fork(&mut self, tag: &str) -> Self {
         let mut mix = self.next_u64();
         for byte in tag.as_bytes() {

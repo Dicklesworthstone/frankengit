@@ -437,7 +437,7 @@ struct Search<'a> {
 
 impl Search<'_> {
     /// Whether the search must stop.
-    fn stopped(&self) -> bool {
+    const fn stopped(&self) -> bool {
         self.violation.is_some() || self.bound_hit.is_some()
     }
 
@@ -560,7 +560,7 @@ impl Search<'_> {
             let clocks = causal_clocks(&self.sequence, self.relation);
             // The exported schedule is an ordinary explicit LabSchedule, so
             // the replay path consumes it with no special case.
-            if let Ok(schedule) = LabSchedule::explicit(self.program.participants.to_vec(), order) {
+            if let Ok(schedule) = LabSchedule::explicit(self.program.participants.clone(), order) {
                 self.violation = Some(Counterexample {
                     property: self.property_name.clone(),
                     detail,
@@ -599,10 +599,6 @@ mod tests {
         }
     }
 
-    fn always_holds(_: &[OwnedEvent]) -> Result<(), String> {
-        Ok(())
-    }
-
     const GENEROUS: ExplorationBudget = ExplorationBudget::new(10_000, 1_000_000);
 
     #[test]
@@ -616,7 +612,7 @@ mod tests {
         ])
         .expect("valid program");
 
-        let outcome = Dpor::new().explore(&program, GENEROUS, "trivial", always_holds);
+        let outcome = Dpor::new().explore(&program, GENEROUS, "trivial", |_: &[OwnedEvent]| Ok(()));
         assert!(outcome.is_exhaustive());
         assert_eq!(outcome.classes(), 1);
     }
@@ -631,7 +627,7 @@ mod tests {
         ])
         .expect("valid program");
 
-        let outcome = Dpor::new().explore(&program, GENEROUS, "trivial", always_holds);
+        let outcome = Dpor::new().explore(&program, GENEROUS, "trivial", |_: &[OwnedEvent]| Ok(()));
         assert!(outcome.is_exhaustive());
         assert_eq!(outcome.classes(), 2);
     }
@@ -646,7 +642,7 @@ mod tests {
         ])
         .expect("valid program");
 
-        let outcome = Dpor::new().explore(&program, GENEROUS, "trivial", always_holds);
+        let outcome = Dpor::new().explore(&program, GENEROUS, "trivial", |_: &[OwnedEvent]| Ok(()));
         assert!(outcome.is_exhaustive());
         assert_eq!(outcome.classes(), 6);
     }
@@ -663,7 +659,7 @@ mod tests {
         ])
         .expect("valid program");
 
-        let outcome = Dpor::new().explore(&program, GENEROUS, "trivial", always_holds);
+        let outcome = Dpor::new().explore(&program, GENEROUS, "trivial", |_: &[OwnedEvent]| Ok(()));
         assert!(outcome.is_exhaustive());
         assert_eq!(outcome.classes(), 1);
     }
@@ -677,7 +673,7 @@ mod tests {
         ])
         .expect("valid program");
 
-        let outcome = Dpor::new().explore(&program, GENEROUS, "trivial", always_holds);
+        let outcome = Dpor::new().explore(&program, GENEROUS, "trivial", |_: &[OwnedEvent]| Ok(()));
         assert_eq!(outcome.classes(), 2);
 
         // Paired independent case: two reads commute, so one class.
@@ -688,7 +684,7 @@ mod tests {
         .expect("valid program");
         assert_eq!(
             Dpor::new()
-                .explore(&readers, GENEROUS, "trivial", always_holds)
+                .explore(&readers, GENEROUS, "trivial", |_: &[OwnedEvent]| Ok(()))
                 .classes(),
             1
         );
@@ -805,7 +801,7 @@ mod tests {
         ])
         .expect("valid program");
 
-        let outcome = Dpor::new().explore(&program, GENEROUS, "always", always_holds);
+        let outcome = Dpor::new().explore(&program, GENEROUS, "always", |_: &[OwnedEvent]| Ok(()));
         assert!(outcome.is_exhaustive());
         assert!(outcome.counterexample().is_none());
         assert!(
@@ -827,7 +823,7 @@ mod tests {
         .expect("valid program");
 
         let budget = ExplorationBudget::new(2, 1_000_000);
-        let outcome = Dpor::new().explore(&program, budget, "trivial", always_holds);
+        let outcome = Dpor::new().explore(&program, budget, "trivial", |_: &[OwnedEvent]| Ok(()));
 
         assert!(!outcome.is_exhaustive());
         match outcome {
@@ -839,7 +835,8 @@ mod tests {
         }
 
         // Paired permitted case: a budget that covers the space is exhaustive.
-        let generous = Dpor::new().explore(&program, GENEROUS, "trivial", always_holds);
+        let generous =
+            Dpor::new().explore(&program, GENEROUS, "trivial", |_: &[OwnedEvent]| Ok(()));
         assert!(generous.is_exhaustive());
         assert_eq!(generous.classes(), 6);
     }
@@ -853,7 +850,7 @@ mod tests {
         .expect("valid program");
 
         let budget = ExplorationBudget::new(10_000, 3);
-        let outcome = Dpor::new().explore(&program, budget, "trivial", always_holds);
+        let outcome = Dpor::new().explore(&program, budget, "trivial", |_: &[OwnedEvent]| Ok(()));
 
         match outcome {
             ExplorationOutcome::Incomplete { bound, .. } => {
@@ -875,7 +872,7 @@ mod tests {
         let program = Program::new(vec![(who("a"), vec![cas("main")])]).expect("valid");
         let budget = ExplorationBudget::new(5, 50);
         let receipt = Dpor::new()
-            .explore(&program, budget, "trivial", always_holds)
+            .explore(&program, budget, "trivial", |_: &[OwnedEvent]| Ok(()))
             .canonical_receipt(budget);
 
         assert!(receipt.starts_with("fgit-lab-exploration-v1"));
@@ -910,7 +907,7 @@ mod tests {
     fn an_empty_program_has_exactly_one_empty_execution() {
         let program = Program::new(vec![]).expect("an empty program is valid");
         assert_eq!(program.total_events(), 0);
-        let outcome = Dpor::new().explore(&program, GENEROUS, "trivial", always_holds);
+        let outcome = Dpor::new().explore(&program, GENEROUS, "trivial", |_: &[OwnedEvent]| Ok(()));
         assert!(outcome.is_exhaustive());
         assert_eq!(outcome.classes(), 1);
         assert_eq!(outcome.transitions(), 0);
@@ -1001,7 +998,11 @@ mod tests {
 
     #[test]
     fn an_empty_execution_has_no_clocks() {
-        assert!(causal_clocks(&[], ConflictRelation).is_empty());
+        let clocks = causal_clocks(&[], ConflictRelation);
+        assert!(
+            clocks.is_empty(),
+            "an empty execution has no clocks, got {clocks:?}"
+        );
     }
 
     #[test]

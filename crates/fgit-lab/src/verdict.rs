@@ -49,7 +49,7 @@ pub struct ObligationOracle {
 impl ObligationOracle {
     /// A fresh oracle.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             open: BTreeMap::new(),
             settled: BTreeMap::new(),
@@ -333,7 +333,11 @@ mod tests {
         obligations.settled("charge", Settlement::Committed);
         assert_eq!(obligations.outstanding(), 0);
         assert!(obligations.is_clean());
-        assert!(obligations.double_settlements().is_empty());
+        assert!(
+            obligations.double_settlements().is_empty(),
+            "no obligation was settled twice, got {:?}",
+            obligations.double_settlements()
+        );
     }
 
     #[test]

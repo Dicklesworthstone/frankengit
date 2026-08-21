@@ -301,7 +301,7 @@ impl ScheduledHazard {
 /// Storage faults are delegated to `fgit-authority`'s [`FaultPlan`]; packet and
 /// object-store faults are held here. Keeping all three in one value is what
 /// lets a campaign say "this exact configuration" and mean it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HazardScript {
     storage: FaultPlan,
     hazards: Vec<ScheduledHazard>,
@@ -314,7 +314,7 @@ impl HazardScript {
     /// The control condition. A campaign that cannot pass with no faults has
     /// not yet learned anything about faults.
     #[must_use]
-    pub fn none() -> Self {
+    pub const fn none() -> Self {
         Self {
             storage: FaultPlan::none(),
             hazards: Vec::new(),
@@ -397,7 +397,7 @@ impl HazardScript {
 
     /// The storage fault plan, to install on a faultable store.
     #[must_use]
-    pub fn storage(&self) -> &FaultPlan {
+    pub const fn storage(&self) -> &FaultPlan {
         &self.storage
     }
 
@@ -415,7 +415,7 @@ impl HazardScript {
 
     /// Whether this script injects nothing.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.storage.is_empty() && self.hazards.is_empty()
     }
 
@@ -564,7 +564,11 @@ mod tests {
         // Faults compose: two classes can fire at the same operation.
         assert_eq!(script.at(OpIndex::from_raw(4)).len(), 2);
         assert_eq!(script.at(OpIndex::from_raw(7)).len(), 1);
-        assert!(script.at(OpIndex::from_raw(5)).is_empty());
+        assert!(
+            script.at(OpIndex::from_raw(5)).is_empty(),
+            "no hazard is scheduled at index 5, got {:?}",
+            script.at(OpIndex::from_raw(5))
+        );
     }
 
     #[test]

@@ -41,7 +41,7 @@ pub struct ScriptedClient {
 impl ScriptedClient {
     /// A client that will issue `ops` in order.
     #[must_use]
-    pub fn new(ops: Vec<AuthorityOp>) -> Self {
+    pub const fn new(ops: Vec<AuthorityOp>) -> Self {
         Self {
             ops,
             issued: 0,

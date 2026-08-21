@@ -143,13 +143,13 @@ impl LabSchedule {
 
     /// How many steps the schedule declares.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.order.len()
     }
 
     /// Whether the schedule has no steps.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.order.is_empty()
     }
 
@@ -235,11 +235,13 @@ impl StepCursor<'_> {
     /// Running past the end silently would let a campaign's real step count
     /// drift from the schedule it claims to have run.
     pub fn next_step(&mut self) -> Result<&StepId, LabRefusal> {
-        let step = self.schedule.order.get(self.position).ok_or_else(|| {
-            LabRefusal::ScheduleExhausted {
+        let step = self
+            .schedule
+            .order
+            .get(self.position)
+            .ok_or(LabRefusal::ScheduleExhausted {
                 declared: self.schedule.order.len(),
-            }
-        })?;
+            })?;
         self.position += 1;
         Ok(step)
     }

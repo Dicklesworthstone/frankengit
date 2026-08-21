@@ -71,7 +71,7 @@ pub struct FailpointRegistry {
 impl FailpointRegistry {
     /// An empty registry.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             points: BTreeMap::new(),
         }
@@ -90,7 +90,7 @@ impl FailpointRegistry {
         description: impl Into<String>,
     ) -> Result<(), LabRefusal> {
         if self.points.contains_key(&id) {
-            return Err(LabRefusal::FailpointRedeclared { name: id.0.clone() });
+            return Err(LabRefusal::FailpointRedeclared { name: id.0 });
         }
         self.points.insert(
             id,
@@ -245,13 +245,13 @@ impl CoverageReport {
 
     /// Declared point count.
     #[must_use]
-    pub fn declared_count(&self) -> usize {
+    pub const fn declared_count(&self) -> usize {
         self.exercised.len() + self.unexercised.len()
     }
 
     /// Whether every declared point was reached.
     #[must_use]
-    pub fn is_complete(&self) -> bool {
+    pub const fn is_complete(&self) -> bool {
         self.unexercised.is_empty()
     }
 
@@ -444,7 +444,11 @@ mod tests {
             .expect("every declared point was reached");
         assert!(report.is_complete());
         assert_eq!(report.exercised().len(), 3);
-        assert!(report.unexercised().is_empty());
+        assert!(
+            report.unexercised().is_empty(),
+            "every declared point was reached, yet these are unexercised: {:?}",
+            report.unexercised()
+        );
     }
 
     #[test]

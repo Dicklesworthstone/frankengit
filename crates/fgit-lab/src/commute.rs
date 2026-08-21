@@ -1,4 +1,4 @@
-//! The conflict relation over FrankenGit protocol events.
+//! The conflict relation over `FrankenGit` protocol events.
 //!
 //! Partial-order reduction is only as sound as this relation. Two events are
 //! *independent* when swapping adjacent occurrences of them cannot change any

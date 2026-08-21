@@ -12,7 +12,7 @@
 //! with `treat_mismatch_as_success` set reports a publication it did not make
 //! when its CAS loses. That is a realistic client bug — treating
 //! `PredecessorMismatch` as "someone else already wrote what I wanted" is a
-//! mistake a person makes — and it is exactly the class BoldIbis's own planted
+//! mistake a person makes — and it is exactly the class `BoldIbis`'s own planted
 //! backends cover from the other side.
 //!
 //! # Why the bug is interleaving-dependent
@@ -107,12 +107,12 @@ impl AuthorityClient for PublicationClient {
             AuthorityResponse::CompareExchangeHead(CasOutcome::Committed(_)) => {
                 *self.claimed.borrow_mut() += 1;
             }
-            AuthorityResponse::CompareExchangeHead(CasOutcome::PredecessorMismatch) => {
-                // The plant. A losing CAS is not a publication, and reporting
-                // it as one is a lost update the caller never learns about.
-                if self.treat_mismatch_as_success {
-                    *self.claimed.borrow_mut() += 1;
-                }
+            // The plant. A losing CAS is not a publication, and reporting it
+            // as one is a lost update the caller never learns about.
+            AuthorityResponse::CompareExchangeHead(CasOutcome::PredecessorMismatch)
+                if self.treat_mismatch_as_success =>
+            {
+                *self.claimed.borrow_mut() += 1;
             }
             _ => {}
         }

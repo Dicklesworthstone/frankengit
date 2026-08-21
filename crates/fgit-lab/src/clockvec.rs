@@ -67,7 +67,7 @@ pub struct VectorClock {
 impl VectorClock {
     /// The clock at the start of a run: every entry zero.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
         }
