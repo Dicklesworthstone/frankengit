@@ -251,6 +251,9 @@ expect_case FG-000A-ST-NONEWL   truncated-stream   1 truncated_log    corrupt_no
 expect_case FG-000A-ST-NOTERM   missing-terminal   1 missing_terminal corrupt_missing_terminal.sh
 expect_case FG-000A-ST-EXITMM   exit-mismatch      1 exit_mismatch    corrupt_exit_mismatch.sh
 expect_case FG-000A-ST-NOLOG    missing-log        1 missing_log      corrupt_missing_log.sh
+expect_case FG-000A-ST-NOKEY    missing-base-key   1 malformed_log    corrupt_missing_key.sh
+fge_assert_contains FG-000A-ST-NOKEY-DETAIL "$CASE_DETAIL" "missing required key 'replay'" \
+  'a record that parses but lost a required base key is named precisely'
 
 # Timeout: a 3s budget against a 30s stall.
 expect_case FG-000A-ST-TIMEOUT  wall-timeout       1 timeout          neg_timeout.sh 3
