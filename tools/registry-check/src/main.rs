@@ -1177,7 +1177,6 @@ fn assess_first_party_source(text: &str) -> SourceAssessment {
         item_flags: u8::from(text.contains("#[cfg(test)]")) * SourceAssessment::HAS_CFG_TEST_ITEM,
         placeholders: find_placeholder_constructs(&code),
         lint_relaxation: find_forbidden_lint_relaxation(&code),
-        ..SourceAssessment::default()
     };
     for line in code.lines().map(str::trim) {
         let Some(item) = source_item_kind(line) else {
