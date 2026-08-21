@@ -1,0 +1,7 @@
+# franken-registry-v1
+crate	layer	allowed_dependency_layers	owner	status
+fgit-derived	L3	L0,L1,L2	derived	active
+fgit-engine	L2	L0,L1,L2	engine	active
+fgit-foundation	L0	none	foundation	active
+fgit-product	L4	L0,L1,L2,L3,L4	product	active
+fgit-protocol	L1	L0,L1	protocol	active

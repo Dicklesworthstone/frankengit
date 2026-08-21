@@ -1,0 +1,7 @@
+[package]
+name = "fgit-derived"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+fgit-engine = { path = "../engine" }

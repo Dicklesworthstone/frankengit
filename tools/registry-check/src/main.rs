@@ -10,6 +10,15 @@ use std::process::{Command, ExitCode};
 
 const REGISTRY_MARKER: &str = "# franken-registry-v1";
 const CONSTELLATION_MARKER: &str = "# franken-constellation-v1";
+const LAYER_REPORT_MARKER: &str = "# franken-layer-report-v1";
+const CRATE_LAYERS_FILE: &str = "registries/crate_layers.tsv";
+const CRATE_LAYERS_COLUMNS: [&str; 5] = [
+    "crate",
+    "layer",
+    "allowed_dependency_layers",
+    "owner",
+    "status",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CheckSet {
@@ -19,6 +28,7 @@ enum CheckSet {
     Constitution,
     Constellation,
     CrateGraph,
+    LayerReport,
     LedgerPolicy,
     LedgerFsqlitePolicy,
     LedgerConstellation,
@@ -34,12 +44,13 @@ impl CheckSet {
             "constitution" => Ok(Self::Constitution),
             "constellation" => Ok(Self::Constellation),
             "crate-graph" => Ok(Self::CrateGraph),
+            "layer-report" => Ok(Self::LayerReport),
             "ledger-policy" => Ok(Self::LedgerPolicy),
             "ledger-fsqlite-policy" => Ok(Self::LedgerFsqlitePolicy),
             "ledger-constellation" => Ok(Self::LedgerConstellation),
             "ledger-unsafe" => Ok(Self::LedgerUnsafe),
             other => Err(format!(
-                "unknown command `{other}`; expected all, docs, registries, constitution, constellation, crate-graph, ledger-policy, ledger-fsqlite-policy, ledger-constellation, or ledger-unsafe"
+                "unknown command `{other}`; expected all, docs, registries, constitution, constellation, crate-graph, layer-report, ledger-policy, ledger-fsqlite-policy, ledger-constellation, or ledger-unsafe"
             )),
         }
     }
@@ -163,6 +174,20 @@ fn main() -> ExitCode {
             }
         };
     }
+    if invocation.check_set == CheckSet::LayerReport {
+        let mut report = Report::new();
+        let layer_report = evaluate_crate_layers(&root, &mut report);
+        report.errors.sort();
+        report.errors.dedup();
+        print!("{}", layer_report.render());
+        if report.errors.is_empty() {
+            return ExitCode::SUCCESS;
+        }
+        for error in report.errors {
+            eprintln!("layer-report error: {error}");
+        }
+        return ExitCode::from(1);
+    }
     let mut report = Report::new();
     if invocation.check_set == CheckSet::Constellation {
         check_constellation_manifests(&root, &mut report);
@@ -281,6 +306,7 @@ fn check_required_files(root: &Path, report: &mut Report) {
         "registries/README.md",
         "registries/calm_operations.tsv",
         "registries/claim_classes.tsv",
+        "registries/crate_layers.tsv",
         "registries/dependency_policy.tsv",
         "registries/durable_objects.tsv",
         "registries/graph_views.tsv",
@@ -324,6 +350,16 @@ fn registry_schemas() -> BTreeMap<&'static str, &'static [&'static str]> {
                 "stronger_than",
                 "required_evidence",
                 "forbidden_upgrade",
+                "status",
+            ][..],
+        ),
+        (
+            "crate_layers.tsv",
+            &[
+                "crate",
+                "layer",
+                "allowed_dependency_layers",
+                "owner",
                 "status",
             ][..],
         ),
@@ -2953,6 +2989,361 @@ fn parse_canonical_list(
     Ok(values.into_iter().collect())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CrateLayer {
+    L0,
+    L1,
+    L2,
+    L3,
+    L4,
+}
+
+impl CrateLayer {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "L0" => Some(Self::L0),
+            "L1" => Some(Self::L1),
+            "L2" => Some(Self::L2),
+            "L3" => Some(Self::L3),
+            "L4" => Some(Self::L4),
+            _ => None,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::L0 => "L0",
+            Self::L1 => "L1",
+            Self::L2 => "L2",
+            Self::L3 => "L3",
+            Self::L4 => "L4",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CrateLayerEntry {
+    crate_name: String,
+    layer: CrateLayer,
+    allowed_dependency_layers: BTreeSet<CrateLayer>,
+    owner: String,
+    status: String,
+}
+
+#[derive(Debug, Default)]
+struct CrateLayerRegistry {
+    entries: BTreeMap<String, CrateLayerEntry>,
+}
+
+#[derive(Debug, Default)]
+struct LayerReport {
+    rows: Vec<String>,
+}
+
+impl LayerReport {
+    fn render(&self) -> String {
+        let mut output = String::from(LAYER_REPORT_MARKER);
+        output.push('\n');
+        output.push_str(
+            "record\tcrate\tlayer\towner\tstatus\tdependency\tdependency_layer\tallowed_dependency_layers\toutcome\n",
+        );
+        for row in &self.rows {
+            output.push_str(row);
+            output.push('\n');
+        }
+        output
+    }
+}
+
+fn evaluate_crate_layers(root: &Path, report: &mut Report) -> LayerReport {
+    let registry = load_crate_layer_registry(root, report);
+    let workspace_crates = workspace_crate_names(root, report);
+    let mut layer_report = LayerReport::default();
+
+    for (crate_name, manifest) in &workspace_crates {
+        if !registry.entries.contains_key(crate_name) {
+            report.error(format!(
+                "crate-layer registry lacks workspace crate `{crate_name}` declared by {manifest}"
+            ));
+        }
+    }
+    for crate_name in registry.entries.keys() {
+        if !workspace_crates.contains_key(crate_name) {
+            report.error(format!(
+                "crate-layer registry declares non-workspace crate `{crate_name}`"
+            ));
+        }
+    }
+
+    for entry in registry.entries.values() {
+        layer_report.rows.push(format!(
+            "crate\t{}\t{}\t{}\t{}\t-\t-\t{}\tregistered",
+            entry.crate_name,
+            entry.layer.as_str(),
+            entry.owner,
+            entry.status,
+            render_allowed_layers(&entry.allowed_dependency_layers)
+        ));
+    }
+
+    let manifests_to_crates = workspace_crates
+        .iter()
+        .map(|(crate_name, manifest)| (manifest.as_str(), crate_name.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut edges = workspace_dependencies(root, report)
+        .into_iter()
+        .filter_map(|dependency| {
+            let source = manifests_to_crates.get(dependency.manifest.as_str())?;
+            registry
+                .entries
+                .contains_key(&dependency.package)
+                .then(|| ((*source).to_owned(), dependency.package))
+        })
+        .collect::<Vec<_>>();
+    edges.sort();
+    edges.dedup();
+
+    for (source, dependency) in edges {
+        let Some(source_entry) = registry.entries.get(&source) else {
+            continue;
+        };
+        let Some(dependency_entry) = registry.entries.get(&dependency) else {
+            continue;
+        };
+        let allowed = render_allowed_layers(&source_entry.allowed_dependency_layers);
+        let outcome = if dependency_entry.layer > source_entry.layer {
+            report.error(format!(
+                "crate-layer violation `{source}` ({}) -> `{dependency}` ({}): a crate may not depend on a higher layer; declared allowed layers `{allowed}`",
+                source_entry.layer.as_str(),
+                dependency_entry.layer.as_str(),
+            ));
+            "upward_layer_violation"
+        } else if source_entry.layer == CrateLayer::L3 && dependency_entry.layer == CrateLayer::L3 {
+            report.error(format!(
+                "crate-layer violation `{source}` (L3) -> `{dependency}` (L3): L3 siblings may not depend on one another"
+            ));
+            "l3_sibling_violation"
+        } else if !source_entry
+            .allowed_dependency_layers
+            .contains(&dependency_entry.layer)
+        {
+            report.error(format!(
+                "crate-layer violation `{source}` ({}) -> `{dependency}` ({}): target layer is absent from declared allowed layers `{allowed}`",
+                source_entry.layer.as_str(),
+                dependency_entry.layer.as_str(),
+            ));
+            "undeclared_layer_violation"
+        } else {
+            "permitted"
+        };
+        layer_report.rows.push(format!(
+            "edge\t{source}\t{}\t{}\t{}\t{dependency}\t{}\t{allowed}\t{outcome}",
+            source_entry.layer.as_str(),
+            source_entry.owner,
+            source_entry.status,
+            dependency_entry.layer.as_str(),
+        ));
+    }
+
+    layer_report
+}
+
+fn load_crate_layer_registry(root: &Path, report: &mut Report) -> CrateLayerRegistry {
+    let path = root.join(CRATE_LAYERS_FILE);
+    let display = relative(root, &path);
+    let Ok(text) = fs::read_to_string(&path) else {
+        report.error(format!("cannot read crate-layer registry {display}"));
+        return CrateLayerRegistry::default();
+    };
+    let mut non_empty = text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty());
+    let Some((marker_line, marker)) = non_empty.next() else {
+        report.error(format!("empty crate-layer registry {display}"));
+        return CrateLayerRegistry::default();
+    };
+    if marker.trim() != REGISTRY_MARKER {
+        report.error(format!(
+            "crate-layer registry marker mismatch at {display}:{}: expected `{REGISTRY_MARKER}`",
+            marker_line + 1
+        ));
+    }
+    let Some((header_line, header)) =
+        non_empty.find(|(_, line)| !line.trim_start().starts_with('#'))
+    else {
+        report.error(format!("crate-layer registry has no header: {display}"));
+        return CrateLayerRegistry::default();
+    };
+    let observed_header = header.split('\t').collect::<Vec<_>>();
+    if observed_header != CRATE_LAYERS_COLUMNS {
+        report.error(format!(
+            "crate-layer registry header mismatch at {display}:{}: expected {:?}, observed {:?}",
+            header_line + 1,
+            CRATE_LAYERS_COLUMNS,
+            observed_header
+        ));
+        return CrateLayerRegistry::default();
+    }
+
+    let mut registry = CrateLayerRegistry::default();
+    let mut previous_name: Option<String> = None;
+    for (line_index, line) in text.lines().enumerate().skip(header_line + 1) {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != CRATE_LAYERS_COLUMNS.len() {
+            report.error(format!(
+                "crate-layer registry column count mismatch at {display}:{}: expected {}, observed {}",
+                line_index + 1,
+                CRATE_LAYERS_COLUMNS.len(),
+                fields.len()
+            ));
+            continue;
+        }
+        if fields.iter().any(|field| field.trim().is_empty()) {
+            report.error(format!(
+                "crate-layer registry has an empty field at {display}:{}",
+                line_index + 1
+            ));
+            continue;
+        }
+        let crate_name = fields[0].to_owned();
+        if !crate_name.starts_with("fgit-") {
+            report.error(format!(
+                "crate-layer registry crate `{crate_name}` at {display}:{} is not first-party",
+                line_index + 1
+            ));
+        }
+        if let Some(previous) = &previous_name
+            && crate_name <= *previous
+        {
+            report.error(format!(
+                "crate-layer registry crate names are not strictly sorted at {display}:{}: `{crate_name}` follows `{previous}`",
+                line_index + 1
+            ));
+        }
+        previous_name = Some(crate_name.clone());
+        let Some(layer) = CrateLayer::parse(fields[1]) else {
+            report.error(format!(
+                "crate-layer registry `{crate_name}` at {display}:{} has unknown layer `{}`",
+                line_index + 1,
+                fields[1]
+            ));
+            continue;
+        };
+        let allowed_dependency_layers = match parse_allowed_layers(fields[2]) {
+            Ok(value) => value,
+            Err(error) => {
+                report.error(format!(
+                    "crate-layer registry `{crate_name}` at {display}:{} {error}",
+                    line_index + 1
+                ));
+                continue;
+            }
+        };
+        if !is_known_status(fields[4]) {
+            report.error(format!(
+                "crate-layer registry `{crate_name}` at {display}:{} has unknown status `{}`",
+                line_index + 1,
+                fields[4]
+            ));
+        }
+        let entry = CrateLayerEntry {
+            crate_name: crate_name.clone(),
+            layer,
+            allowed_dependency_layers,
+            owner: fields[3].to_owned(),
+            status: fields[4].to_owned(),
+        };
+        if registry.entries.insert(crate_name, entry).is_some() {
+            report.error(format!(
+                "crate-layer registry duplicates a crate row at {display}:{}",
+                line_index + 1
+            ));
+        }
+    }
+    registry
+}
+
+fn parse_allowed_layers(value: &str) -> Result<BTreeSet<CrateLayer>, String> {
+    if value == "none" {
+        return Ok(BTreeSet::new());
+    }
+    let mut layers = BTreeSet::new();
+    for raw_layer in value.split(',') {
+        let Some(layer) = CrateLayer::parse(raw_layer) else {
+            return Err(format!(
+                "has unknown allowed dependency layer `{raw_layer}`"
+            ));
+        };
+        if !layers.insert(layer) {
+            return Err(format!("duplicates allowed dependency layer `{raw_layer}`"));
+        }
+    }
+    if render_allowed_layers(&layers) != value {
+        return Err("allowed dependency layers must be sorted and comma-separated".to_owned());
+    }
+    Ok(layers)
+}
+
+fn render_allowed_layers(layers: &BTreeSet<CrateLayer>) -> String {
+    if layers.is_empty() {
+        "none".to_owned()
+    } else {
+        layers
+            .iter()
+            .map(|layer| layer.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn workspace_crate_names(root: &Path, report: &mut Report) -> BTreeMap<String, String> {
+    let mut crates = BTreeMap::new();
+    for path in workspace_manifest_paths(root, report) {
+        let display = relative(root, &path);
+        let Ok(text) = fs::read_to_string(&path) else {
+            report.error(format!("cannot read workspace manifest {display}"));
+            continue;
+        };
+        let Some(crate_name) = parse_manifest_package_name(&text) else {
+            report.error(format!(
+                "workspace manifest {display} lacks a package name for crate-layer validation"
+            ));
+            continue;
+        };
+        if let Some(previous) = crates.insert(crate_name.clone(), display.clone()) {
+            report.error(format!(
+                "workspace crate `{crate_name}` has duplicate manifests `{previous}` and `{display}`"
+            ));
+        }
+    }
+    crates
+}
+
+fn parse_manifest_package_name(text: &str) -> Option<String> {
+    let mut in_package = false;
+    for raw_line in text.lines() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "name" {
+            return extract_string_value(value);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkspaceDependency {
     package: String,
@@ -3085,7 +3476,8 @@ fn parse_manifest_dependencies(display: &str, text: &str) -> Vec<WorkspaceDepend
         let Some((raw_name, value)) = line.split_once('=') else {
             continue;
         };
-        let name = raw_name.trim().trim_matches('"');
+        let raw_name = raw_name.trim().trim_matches('"');
+        let name = raw_name.strip_suffix(".workspace").unwrap_or(raw_name);
         if name.is_empty() {
             continue;
         }
@@ -4297,6 +4689,72 @@ mod tests {
             check_workspace_crate_graph(&workspace.root, &mut report);
             assert_error(&report, expected);
         }
+    }
+
+    #[test]
+    fn layer_registry_fixture_with_downward_edges_emits_a_deterministic_report() {
+        let workspace = fixture_workspace_in("layers", "clean");
+        let mut report = Report::new();
+        let layer_report = evaluate_crate_layers(&workspace.root, &mut report);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected layer errors: {:?}",
+            report.errors
+        );
+        assert_eq!(
+            layer_report.render(),
+            concat!(
+                "# franken-layer-report-v1\n",
+                "record\tcrate\tlayer\towner\tstatus\tdependency\tdependency_layer\tallowed_dependency_layers\toutcome\n",
+                "crate\tfgit-derived\tL3\tderived\tactive\t-\t-\tL0,L1,L2\tregistered\n",
+                "crate\tfgit-engine\tL2\tengine\tactive\t-\t-\tL0,L1,L2\tregistered\n",
+                "crate\tfgit-foundation\tL0\tfoundation\tactive\t-\t-\tnone\tregistered\n",
+                "crate\tfgit-product\tL4\tproduct\tactive\t-\t-\tL0,L1,L2,L3,L4\tregistered\n",
+                "crate\tfgit-protocol\tL1\tprotocol\tactive\t-\t-\tL0,L1\tregistered\n",
+                "edge\tfgit-derived\tL3\tderived\tactive\tfgit-engine\tL2\tL0,L1,L2\tpermitted\n",
+                "edge\tfgit-engine\tL2\tengine\tactive\tfgit-protocol\tL1\tL0,L1,L2\tpermitted\n",
+                "edge\tfgit-product\tL4\tproduct\tactive\tfgit-derived\tL3\tL0,L1,L2,L3,L4\tpermitted\n",
+                "edge\tfgit-protocol\tL1\tprotocol\tactive\tfgit-foundation\tL0\tL0,L1\tpermitted\n"
+            )
+        );
+    }
+
+    #[test]
+    fn planted_upward_and_l3_sibling_edges_are_refused() {
+        for (fixture, expected) in [
+            ("upward", "`fgit-engine` (L2) -> `fgit-derived` (L3)"),
+            ("l3_sibling", "`fgit-alpha` (L3) -> `fgit-beta` (L3)"),
+        ] {
+            let workspace = fixture_workspace_in("layers", fixture);
+            let mut report = Report::new();
+            let layer_report = evaluate_crate_layers(&workspace.root, &mut report);
+            assert_error(&report, expected);
+            assert!(
+                layer_report.render().contains("violation"),
+                "layer report must retain the failing edge: {}",
+                layer_report.render()
+            );
+        }
+    }
+
+    #[test]
+    fn layer_registry_requires_an_explicit_row_for_every_workspace_crate() {
+        let workspace = fixture_workspace_in("layers", "clean");
+        let path = workspace.root.join(CRATE_LAYERS_FILE);
+        let registry = fs::read_to_string(&path).expect("read layer registry fixture");
+        let without_product = registry
+            .lines()
+            .filter(|line| !line.starts_with("fgit-product\t"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&path, format!("{without_product}\n")).expect("write incomplete layer registry");
+
+        let mut report = Report::new();
+        let _ = evaluate_crate_layers(&workspace.root, &mut report);
+        assert_error(
+            &report,
+            "crate-layer registry lacks workspace crate `fgit-product`",
+        );
     }
 
     #[test]

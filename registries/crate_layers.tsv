@@ -1,0 +1,29 @@
+# franken-registry-v1
+# The layer registry is the design-review boundary for every workspace crate.
+# `allowed_dependency_layers` is a sorted comma-separated restriction; `none`
+# means that the crate currently admits no first-party dependency layer.
+crate	layer	allowed_dependency_layers	owner	status
+fgit-admission	L4	L0,L1,L2,L3,L4	receive-pack-admission	active
+fgit-authority	L1	L0,L1	authority	active
+fgit-authority-fsqlite	L1	L0,L1	authority	active
+fgit-chronicle	L2	L0,L1,L2	decision-log	active
+fgit-codec	L0	L0	canonical-codec	active
+fgit-codec-verify	L0	none	canonical-codec	active
+fgit-crypto	L1	L0,L1	crypto	active
+fgit-deflate	L1	L0,L1	pack	active
+fgit-diff	L2	L0,L1,L2	git-core	active
+fgit-doc	L3	L0,L1,L2	document-intelligence	active
+fgit-git-object	L1	L0,L1	git-core	active
+fgit-lab	L2	L0,L1,L2	concurrency	active
+fgit-object-fabric	L1	L0,L1	object-fabric	active
+fgit-pack	L1	L0,L1	pack	active
+fgit-raptorq	L1	L0,L1	object-fabric	active
+fgit-reference	L2	L0,L1,L2	reference-model	active
+fgit-registry-check	L0	none	constitution	active
+fgit-resource	L0	L0	resource	active
+fgit-runtime	L2	L0,L1,L2	concurrency	active
+fgit-treefs	L1	L0,L1	treefs	active
+fgit-txn	L2	L0,L1,L2	transactions	active
+fgit-types	L0	none	types	active
+fgit-wire	L1	L0,L1	git-protocol	active
+fgit-witness	L2	L0,L1,L2	transactions	active
