@@ -515,6 +515,7 @@ struct ItemScan {
     lines: Vec<LineSlice>,
     next: usize,
     interior_blank: bool,
+    trailing_blank: bool,
 }
 
 fn scan_item(
@@ -553,12 +554,14 @@ fn scan_item(
         break;
     }
     let kept = trim_trailing_blanks(ctx, &collected);
+    let trailing_blank = kept < collected.len();
     let body = collected.get(..kept).unwrap_or(&[]).to_vec();
     let interior_blank = body.iter().any(|entry| ctx.is_blank(*entry));
     ItemScan {
         lines: body,
         next: end,
         interior_blank,
+        trailing_blank,
     }
 }
 
@@ -599,6 +602,7 @@ fn list(
         let (_, marker_start) = measure_indent(ctx.source, line.start);
         let scan = scan_item(ctx, lines, position, marker, line);
         loose = loose || scan.interior_blank;
+        let separated_from_next = scan.trailing_blank;
         let item_end = scan
             .lines
             .last()
@@ -636,7 +640,9 @@ fn list(
         if next_marker.ordered != marker.ordered || next_marker.character != marker.character {
             break;
         }
-        loose = loose || skipped_blank;
+        // A blank line between two items makes the list loose whether the item
+        // scan absorbed it as a trailing blank or the lookahead skipped it.
+        loose = loose || skipped_blank || separated_from_next;
         marker = next_marker;
         position = lookahead;
     }

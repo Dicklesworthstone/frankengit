@@ -278,3 +278,50 @@ fn a_reference_definition_is_reported_rather_than_silently_resolved() {
         "an unresolved reference must be visible"
     );
 }
+
+#[test]
+fn a_blank_line_between_items_makes_the_list_loose() {
+    let document = parse("- a\n- b\n")
+        .expect("tight list parses")
+        .into_document();
+    let tight = render(&document, RenderProfile::CompactMachine, Limits::DEFAULT)
+        .expect("compact render succeeds")
+        .into_string();
+    assert!(
+        tight.starts_with("list ordered=false start=1 tight=true\n"),
+        "{tight}"
+    );
+    assert_eq!(
+        html_of("- a\n- b\n"),
+        "<ul>\n<li>a</li>\n<li>b</li>\n</ul>\n"
+    );
+
+    let separated = parse("- a\n\n- b\n")
+        .expect("loose list parses")
+        .into_document();
+    let loose = render(&separated, RenderProfile::CompactMachine, Limits::DEFAULT)
+        .expect("compact render succeeds")
+        .into_string();
+    assert!(
+        loose.starts_with("list ordered=false start=1 tight=false\n"),
+        "a blank line between items makes the list loose: {loose}"
+    );
+    assert_eq!(
+        html_of("- a\n\n- b\n"),
+        "<ul>\n<li>\n<p>a</p>\n</li>\n<li>\n<p>b</p>\n</li>\n</ul>\n"
+    );
+}
+
+#[test]
+fn nested_containers_render_with_stable_prefixes() {
+    assert_eq!(plain_of("> > deep\n"), "> > deep\n");
+    assert_eq!(
+        plain_of("- outer\n  - inner\n"),
+        "- outer\n  - inner\n",
+        "a nested list indents by the marker width"
+    );
+    assert_eq!(
+        html_of("> - a\n> - b\n"),
+        "<blockquote>\n<ul>\n<li>a</li>\n<li>b</li>\n</ul>\n</blockquote>\n"
+    );
+}
