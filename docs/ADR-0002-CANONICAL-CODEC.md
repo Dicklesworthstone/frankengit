@@ -103,7 +103,8 @@ Every length and count is checked against an explicit limit **and** against the 
 
 - An unknown **codec major** is refused. A future major may reorder or reinterpret fields.
 - An unknown **schema major** is refused, for the same reason at body level.
-- A **higher minor** is additive. A decoder reads the fields its own minor declares and retains the unparsed suffix verbatim, so re-encoding reproduces the original bytes exactly and a process that does not understand a newer body can still relay it without changing its identity.
+- A **higher minor** is additive, and the two decode entry points treat it differently on purpose. The **preserving** decoder reads the fields its own minor declares and retains the unparsed suffix verbatim, so re-encoding reproduces the original bytes exactly and a process that does not understand a newer body can still relay it without changing its identity. The **strict** decoder refuses a higher minor outright, codec or schema, *even when it carries no new fields*.
+- That last clause was not in the first draft, and the mutation campaign is what found it. Bumping a frame's codec minor leaves the payload untouched, so the mutant decoded to the canonical **value** while carrying different bytes: `encode(decode(b)) == b` failed, which is invariant 1. The identity still differed, because the codec version travels in it, so it was not an identity collision — it was a second encoding of one value, the defect one step upstream of one. Strict decoding now accepts only what it can reproduce.
 - At a minor the decoder implements, there is no suffix, and trailing bytes there are refused.
 
 The strict entry point refuses a body carrying unknown fields outright, because it cannot hand back a value that would re-encode to different bytes. The preserving entry point returns the value together with the suffix.
@@ -162,7 +163,7 @@ A typed variant, `body_id_of_frame_as::<B>`, additionally pins a frame's domain 
 4. No canonical byte string contains a floating-point value, a platform-width integer, an ambiguous map, or a collection whose order is unspecified.
 5. Every length, count, and nesting depth is bounded before allocation, and exceeding a bound is a typed refusal naming the bound.
 6. An unknown codec major or schema major is refused, never guessed.
-7. A body carrying fields from a higher minor can be relayed without changing its identity.
+7. A body carrying fields from a higher minor can be relayed without changing its identity, and a strict decode accepts only bytes it can reproduce exactly.
 8. Attaching, removing, or replacing a signature never changes the identity of the body it signs.
 9. Every codec refusal maps to exactly one member of the closed protocol refusal vocabulary, deterministically, so a decode failure and the refusal recorded in the decision stream cannot disagree.
 10. A domain no identity registry knows yields a refusal, never a computed identity.
@@ -209,6 +210,12 @@ Coverage as committed:
 - a framing-independence assertion: the identity computed from a body equals the identity computed from its frame, and the frame is strictly larger than the bytes that were identified;
 - a domain-separation assertion: the same canonical bytes under two domains produce two identities;
 - cross-crate bridge assertions: an identity this crate produces is one `fgit-crypto` verifies and rejects against a different body; the corpus framing equals the production framing; every body domain has a registry row; the corpus algorithm slot lies inside the range `fgit-crypto` reserves for harnesses; and a registered domain on the wrong body type is refused when the caller states what it expects.
+
+On top of that, FG-002c adds the adversarial half:
+
+- **a mutation campaign** over every canonical vector, asserting that each mutant either refuses or decodes to something whose identity differs from the canonical form's. Mutants are exhaustive where that is cheap — every bit of every byte — plus truncation at every length, trailing bytes, payload-length-prefix tampering, and version bumps; a descending collection and a repeated element are constructed directly, because byte mutation cannot reach them. Nothing is random, so a failure names an exact byte and bit. Each campaign asserts it was substantive rather than vacuous: a minimum mutant count and a minimum number of distinct refusal kinds, so a decoder failing for one blunt reason cannot pass as one that diagnoses;
+- **an independent verifier**, `fgit-codec-verify`, depending on `std` alone and re-implementing the frame format, the identity preimage and the corpus digest from this document. It shares no code with the crate it checks, because a bug present in both an encoder and its checker is invisible. It re-derives 100% of the canonical vectors, counted rather than assumed;
+- **an e2e suite**, `scripts/e2e/suites/codec/codec_adversarial.sh`, running all of the above at one revision with a per-vector NDJSON digest record, and asserting against the manifest that the verifier has not acquired a dependency on what it verifies.
 
 **The committed golden bytes were derived from this specification by a second implementation, written separately from the encoder and discarded afterwards.** The suite therefore compares two independent readings of the format rather than the encoder confirming itself. That is a weaker guarantee than an independently maintained verifier and is the reason FG-002c exists.
 
