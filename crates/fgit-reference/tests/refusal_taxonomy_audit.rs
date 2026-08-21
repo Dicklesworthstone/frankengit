@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 //! The refusal-enum audit, applied to this crate's own taxonomy.
 //!
-//! SnowyFortress's method — look for enum variants that are **never
+//! `SnowyFortress`'s method — look for enum variants that are **never
 //! constructed** and variants that are **never tested** — was adopted
 //! swarm-wide after it found a decorative repository binding in `fgit-treefs`.
 //! This applies it to `RefusalClass`, which is `fgit-reference`'s own surface
@@ -21,16 +21,25 @@
 //! documents a security posture nothing enforces, and would be cited as
 //! evidence that some category of refusal is handled.
 //!
-//! ## What this file deliberately does NOT try to prove
+//! ## What this file does NOT prove, and where that check actually belongs
 //!
-//! **`RefusalCode::ALL` completeness is not checkable here, and pretending
-//! otherwise would be the circular-check trap.** `RefusalCode::from_code_point`
-//! is implemented by searching `ALL`, so any test comparing the decodable
+//! **`RefusalCode::ALL` completeness is not provable at runtime**, and the
+//! obvious attempt is the circular-check trap: `RefusalCode::from_code_point`
+//! is implemented by *searching* `ALL`, so a test comparing the decodable
 //! surface against `ALL` compares `ALL` with itself and passes no matter what
-//! is missing. Rust offers no variant reflection, so a forgotten `ALL` entry is
-//! unenforceable from this crate. See the module note below — it is reported to
-//! the `fgit-types` owner rather than papered over with a test that cannot
-//! fail.
+//! is missing.
+//!
+//! A sound check does exist, but not as a Rust test. `RefusalClass::of` is an
+//! **exhaustive match**, so the compiler forces every real variant to appear in
+//! `refusal.rs` — which makes that file an independent enumeration of the enum,
+//! and comparing it against `ALL` non-circular. That comparison is over source
+//! text, so it belongs in a checker or constitution-lane rule rather than here.
+//! Measured once by hand at the time of writing: the two agree on 61 variants,
+//! with nothing missing from `ALL`.
+//!
+//! Recorded precisely because an earlier draft of this paragraph said the check
+//! was *unenforceable*, which was wrong, and a stale impossibility claim is how
+//! a gap stops being looked at.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -81,8 +90,7 @@ fn the_orphan_detection_finds_an_orphan_when_one_exists() {
 
     // A name that is deliberately not in the taxonomy, standing in for a class
     // that nothing classifies into.
-    let orphans: Vec<&str> = ["a-class-no-code-maps-to"]
-        .into_iter()
+    let orphans: Vec<&str> = std::iter::once("a-class-no-code-maps-to")
         .filter(|name| !reached.contains(name))
         .collect();
 
@@ -95,8 +103,7 @@ fn the_orphan_detection_finds_an_orphan_when_one_exists() {
 
     // And the permitted twin: a class that IS reached must not be flagged.
     let reached_example = RefusalClass::of(RefusalCode::RefNameInvalid).as_str();
-    let false_positives: Vec<&str> = [reached_example]
-        .into_iter()
+    let false_positives: Vec<&str> = std::iter::once(reached_example)
         .filter(|name| !reached.contains(name))
         .collect();
     assert!(
