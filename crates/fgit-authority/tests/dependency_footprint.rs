@@ -12,10 +12,22 @@ use std::path::Path;
 
 /// The exact set this crate is allowed to depend on.
 ///
-/// `fgit-types` supplies the one canonical `HeadGeneration` counter. Everything
-/// else the contract needs — keys, tokens, outcomes, refusals — is either `std`
-/// or owned here.
-const PERMITTED: [&str; 1] = ["fgit-types"];
+/// Each entry is here for one capability that must not be reimplemented:
+///
+/// * `fgit-types` — the canonical identity, counter, and refusal vocabularies.
+///   A parallel `HeadGeneration` or a locally invented refusal code would be a
+///   second contract.
+/// * `fgit-codec` — canonical byte encoding and the seal, decision, batch, and
+///   head schemas. Transaction identity is a digest over canonical bytes, so
+///   hand-rolling the encoding here would fork the identity.
+/// * `fgit-crypto` — domain-separated digests and the closed identity-domain
+///   registry. Domain separation is a security property, not a formatting
+///   choice, and it belongs to one owner.
+///
+/// The storage contract itself — keys, version tokens, outcomes, ambiguity,
+/// fault injection — remains `std` only. Adding anything to this list is a
+/// contract change and needs a reason of the same kind.
+const PERMITTED: [&str; 3] = ["fgit-types", "fgit-codec", "fgit-crypto"];
 
 #[test]
 fn the_crate_declares_only_its_permitted_dependencies() {
