@@ -87,6 +87,15 @@ doc_violation() {
       tr 'A-Z' 'a-z' | sort -u)
     while IFS= read -r value; do
       [ -n "$value" ] || continue
+      # A numeric character reference in a destination is unverifiable from
+      # outside: a browser decodes it and this checker does not model every
+      # decoding path. Refuse rather than guess.
+      case $value in
+        *'&#'*)
+          printf 'numeric character reference in a destination on <%s>' "$name"
+          return 0
+          ;;
+      esac
       value=${value//&amp;/&}
       case $value in
         *:*)
@@ -234,6 +243,7 @@ doc_plant handler '<p onclick="steal()">x</p>'
 doc_plant scheme '<p><a href="javascript:alert(1)">x</a></p>'
 doc_plant datauri '<p><img src="data:text/html,x" /></p>'
 doc_plant vbscript '<p><a href="VBScript:msgbox(1)">x</a></p>'
+doc_plant numeric_entity '<p><a href="&#106;avascript:alert(1)">x</a></p>'
 if [ -z "$doc_planted_missed" ]; then
   fge_pass fg027b-checker-can-fail "the allowlist rejected every planted payload:$doc_planted_caught"
 else

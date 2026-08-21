@@ -199,6 +199,14 @@ fn parse_attributes(region: &str) -> Vec<(String, String)> {
 
 /// Whether an emitted destination may be navigated to.
 fn destination_is_navigable(value: &str) -> bool {
+    // A numeric character reference inside a destination is unverifiable from
+    // the outside: a browser decodes it, and this checker deliberately does not
+    // model every decoding path a browser implements. Refusing is the only
+    // honest answer — an independent verifier must not assume the renderer
+    // escaped the ampersand that makes such a value inert.
+    if value.contains("&#") {
+        return false;
+    }
     // The renderer escaped this value on the way in; judge what a browser will
     // actually see, not what the file literally holds.
     let decoded = value
@@ -352,6 +360,7 @@ fn the_allowlist_checker_rejects_content_the_renderer_could_never_emit() {
         "<p onclick=\"steal()\">x</p>",
         "<p><img src=\"data:text/html,x\" /></p>",
         "<p><iframe srcdoc=\"x\"></iframe></p>",
+        "<p><a href=\"&#106;avascript:alert(1)\">x</a></p>",
     ] {
         let outcome = std::panic::catch_unwind(|| assert_no_active_content("planted", planted));
         assert!(
