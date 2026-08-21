@@ -398,3 +398,49 @@ fn the_capsule_domain_and_family_are_the_registered_ones() {
         "and the registry accepts it, which is the other half of the same fact"
     );
 }
+
+#[test]
+fn a_capsule_mirrors_the_head_it_was_taken_at() {
+    // at_head copies the position out of ONE authenticated head. If a future
+    // edit drops a field, the capsule would silently restore to a position the
+    // head never had — and every other test here would still pass, because
+    // they compare capsules to capsules rather than to the head.
+    let head = head_at(5);
+    let capsule = RepositoryCapsuleBody::at_head(
+        head_id(0x50),
+        &head,
+        None,
+        digest(0x20),
+        digest(0x21),
+        BackupProfile::FullClosureWithRepair,
+    );
+
+    assert_eq!(capsule.repository_id, head.repository_id);
+    assert_eq!(capsule.head_generation, head.generation);
+    assert_eq!(capsule.decision_tail_id, head.decision_tail_id);
+    assert_eq!(
+        capsule.latest_decision_sequence,
+        head.latest_decision_sequence
+    );
+    assert_eq!(
+        capsule.latest_committed_rcr_id,
+        head.latest_committed_rcr_id
+    );
+    assert_eq!(
+        capsule.latest_repository_sequence,
+        head.latest_repository_sequence
+    );
+    assert_eq!(capsule.ref_root, head.ref_root);
+    assert_eq!(capsule.forge_position_root, head.forge_position_root);
+    assert_eq!(capsule.retention_root, head.retention_root);
+    assert_eq!(capsule.configuration_root, head.configuration_root);
+    assert_eq!(capsule.policy_epoch, head.policy_epoch);
+    assert_eq!(capsule.format_registry_epoch, head.format_registry_epoch);
+
+    // The two roots the head does not carry come from the caller, and are the
+    // only fields at_head cannot check for itself.
+    assert_eq!(capsule.object_closure_root, digest(0x20));
+    assert_eq!(capsule.segment_manifest_root, digest(0x21));
+    assert_eq!(capsule.head_id, head_id(0x50));
+    assert_eq!(capsule.backup_profile, BackupProfile::FullClosureWithRepair);
+}
