@@ -42,6 +42,7 @@ use fgit_types::identity::{
 use fgit_types::numeric::DecisionSequence;
 use fgit_types::vocabulary::{DecisionOutcome, RefusalCode};
 
+use crate::async_contract::AsyncAuthorityStore;
 use crate::contract::AuthorityStore;
 use crate::identity::canonical_body_id;
 use crate::keys::{HeadKey, ImmutableKey};
@@ -236,10 +237,43 @@ where
     S: AuthorityStore + ?Sized,
 {
     let key = outcome_key(tenant_id, repository_id, tx_id)?;
-    match store.read_immutable(&key)? {
+    interpret_indexed_outcome(store.read_immutable(&key)?)
+}
+
+/// Interpret one accelerator read.
+///
+/// Shared core (t7ip condition 1): the read differs between the synchronous and
+/// asynchronous drivers, this interpretation does not. An absent slot means the
+/// accelerator has no answer — **not** that the transaction is undecided, which
+/// is why [`reconcile_outcome`] must still consult the authenticated replay.
+pub fn interpret_indexed_outcome(read: ImmutableRead) -> Result<OutcomeLookup, OutcomeFailure> {
+    match read {
         ImmutableRead::Absent => Ok(OutcomeLookup::Undecided),
         ImmutableRead::Present(bytes) => Ok(OutcomeLookup::Decided(decode_outcome(&bytes)?)),
     }
+}
+
+/// The asynchronous sibling of [`indexed_outcome`].
+///
+/// Identical semantics by construction: the same key derivation, the same
+/// [`interpret_indexed_outcome`]. Only the read is awaited.
+///
+/// # Errors
+///
+/// Propagates the store's failure and any decode refusal, exactly as the
+/// synchronous form does.
+pub async fn indexed_outcome_async<S>(
+    store: &S,
+    cx: &S::Context,
+    tenant_id: TenantId,
+    repository_id: RepositoryId,
+    tx_id: TxId,
+) -> Result<OutcomeLookup, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = outcome_key(tenant_id, repository_id, tx_id)?;
+    interpret_indexed_outcome(store.read_immutable(cx, &key).await?)
 }
 
 fn read_head_body<S>(
