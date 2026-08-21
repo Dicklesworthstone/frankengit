@@ -48,6 +48,19 @@
 //! different behaviours and only the second is an expected-old check, so the
 //! corpus uses a resolvable-but-wrong oid to reach the check it means to reach.
 //!
+//! ## A defect this lane found, and the fix it now guards
+//!
+//! The `delete_without_negotiated_capability` cell exists because our machine
+//! refused a push that Git accepted: a delete whose client did not echo
+//! `delete-refs`. That was ruled a **compatibility defect in ours** — the
+//! capability is a *server* advertisement telling the client it may send
+//! zero-id deletes, not something the client echoes back — and repaired in
+//! `fgit-wire` at ee5663e.
+//!
+//! The cell now requires the two sides to **agree**, and a refusal is a defect.
+//! It is kept rather than deleted: once a defect is fixed, the probe that found
+//! it is the only thing that would notice it coming back.
+//!
 //! ## Non-claims
 //!
 //! * **Framing, not decisions.** See above.
@@ -526,16 +539,6 @@ enum Verdict {
     /// A difference that is settled: each side is correct to differ, and no
     /// owner ruling is outstanding.
     AcceptedDivergence(&'static str),
-    /// A difference **observed** against Git that the owning crate has not yet
-    /// ruled on.
-    ///
-    /// Deliberately distinct from `AcceptedDivergence`. ProudJaguar, who owns
-    /// `fgit-wire`, is reviewing the normative protocol contracts and asked
-    /// that this not be recast as accepted compatibility until that resolves.
-    /// Calling it "accepted" would pre-empt their ruling in a verdict artifact
-    /// other people read, so it gets its own vocabulary and its own suite
-    /// assertion.
-    ObservedPendingRuling(&'static str),
     Defect(String),
 }
 
@@ -545,9 +548,6 @@ impl Verdict {
             Self::Match => "match".to_owned(),
             Self::AcceptedDivergence(rationale) => {
                 format!("accepted-divergence-with-rationale:{rationale}")
-            }
-            Self::ObservedPendingRuling(rationale) => {
-                format!("observed-divergence-pending-owner-ruling:{rationale}")
             }
             Self::Defect(detail) => format!("defect:{detail}"),
         }
@@ -718,18 +718,27 @@ fn our_report_status_frames_what_git_frames() {
     let oracle_unnegotiated = report_section(&unnegotiated_response);
     let ours_unnegotiated = try_request_from(&unnegotiated_payload);
 
+    // RULED, and the direction reversed. This cell recorded a divergence:
+    // Git accepted a delete whose client did not echo `delete-refs`, and our
+    // machine refused it as `DeleteRefsNotNegotiated`. ProudJaguar ruled that a
+    // **compatibility defect in ours** — the Git protocol-capabilities
+    // documentation makes `delete-refs` a SERVER advertisement telling the
+    // client it may send zero-id deletes, not something the client echoes back.
+    // Repaired in `fgit-wire` at ee5663e, which validates zero-id deletes
+    // against the server advertisement.
+    //
+    // So agreement is now the requirement rather than the surprise, and a
+    // refusal is a regression. The cell is deliberately kept — deleting it once
+    // the defect was fixed would remove the only thing that would notice it
+    // coming back.
     cells.push((
         "delete_without_negotiated_capability",
         match (oracle_unnegotiated.len(), &ours_unnegotiated) {
-            (2, Err(reason)) if reason.contains("DeleteRefsNotNegotiated") => {
-                Verdict::ObservedPendingRuling(
-                    "Git-2.54.0-accepts-a-delete-whose-client-omitted-delete-refs;fgit-refuses-DeleteRefsNotNegotiated;fgit-is-STRICTER;NOT-yet-ruled-compatible-ProudJaguar-is-reviewing-the-normative-contracts;fgit-wire-source-unchanged",
-                )
-            }
-            (2, Ok(_)) => Verdict::Defect(
-                "our machine now accepts a delete without a negotiated delete-refs; the recorded divergence is stale and this cell must be re-decided by the fgit-wire owner"
-                    .to_owned(),
-            ),
+            (2, Ok(_)) => Verdict::Match,
+            (2, Err(reason)) => Verdict::Defect(format!(
+                "Git accepted a delete whose client omitted delete-refs and our machine refused it: {reason}. \
+                 This is the ee5663e compatibility fix regressing"
+            )),
             (count, _) => Verdict::Defect(format!(
                 "the oracle did not answer the unnegotiated push: {count} report lines"
             )),
