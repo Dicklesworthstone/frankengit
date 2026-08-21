@@ -9,7 +9,11 @@ use std::error::Error;
 use std::fmt;
 
 use fgit_codec::{CodecRefusal, DecodeLimits, Decoder, Encoder};
-use fgit_resource::{BudgetGrant, IdentityError, ObligationLedger, OpaqueHandle};
+use fgit_resource::kinds::AdmissionRefusal;
+use fgit_resource::{
+    BudgetGrant, IdentityError, LifecycleError, ObligationLedger, OpaqueHandle, ReserveError,
+    ResourceError,
+};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, GitOid, PublicationEpoch, RepositoryAuthorityHeadId,
     SchemaFamily, SchemaId, SegmentManifestId, TypeRefusal,
@@ -73,6 +77,22 @@ pub enum StoreRefusal {
     RangeOutOfBounds,
     RetentionRevalidationFailed,
     DeletionRetained,
+    NamespaceMismatch,
+    ObjectAbsent,
+    StoredObjectTooLarge {
+        offered: u64,
+        maximum: u64,
+    },
+    MalformedStoredObject,
+    StoredObjectMismatch,
+    StorageIo {
+        operation: StorageOperation,
+        kind: std::io::ErrorKind,
+    },
+    Resource(ResourceError),
+    Reserve(ReserveError),
+    Settlement(LifecycleError),
+    AdmissionEvidence(AdmissionRefusal),
     Codec(CodecRefusal),
     Fabric(FabricError),
     Type(TypeRefusal),
@@ -136,6 +156,26 @@ impl fmt::Display for StoreRefusal {
             Self::DeletionRetained => {
                 formatter.write_str("authenticated retention registry still protects this object")
             }
+            Self::NamespaceMismatch => {
+                formatter.write_str("object namespace does not match the local fabric scope")
+            }
+            Self::ObjectAbsent => formatter.write_str("object is absent from the local fabric"),
+            Self::StoredObjectTooLarge { .. } => {
+                formatter.write_str("stored object exceeds the configured local bound")
+            }
+            Self::MalformedStoredObject => {
+                formatter.write_str("stored local object body is malformed")
+            }
+            Self::StoredObjectMismatch => {
+                formatter.write_str("stored immutable body disagrees with its exact key")
+            }
+            Self::StorageIo { operation, kind } => {
+                write!(formatter, "local storage {operation} failed: {kind}")
+            }
+            Self::Resource(error) => fmt::Display::fmt(error, formatter),
+            Self::Reserve(error) => fmt::Display::fmt(error, formatter),
+            Self::Settlement(error) => fmt::Display::fmt(error, formatter),
+            Self::AdmissionEvidence(error) => fmt::Display::fmt(error, formatter),
             Self::Codec(error) => fmt::Display::fmt(error, formatter),
             Self::Fabric(error) => fmt::Display::fmt(error, formatter),
             Self::Type(error) => fmt::Display::fmt(error, formatter),
@@ -161,6 +201,55 @@ impl From<TypeRefusal> for StoreRefusal {
 impl From<IdentityError> for StoreRefusal {
     fn from(error: IdentityError) -> Self {
         Self::OpaqueIdentity(error)
+    }
+}
+
+impl From<ResourceError> for StoreRefusal {
+    fn from(error: ResourceError) -> Self {
+        Self::Resource(error)
+    }
+}
+
+impl From<ReserveError> for StoreRefusal {
+    fn from(error: ReserveError) -> Self {
+        Self::Reserve(error)
+    }
+}
+
+impl From<AdmissionRefusal> for StoreRefusal {
+    fn from(error: AdmissionRefusal) -> Self {
+        Self::AdmissionEvidence(error)
+    }
+}
+
+/// Filesystem step that failed without producing a partial success claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageOperation {
+    CreateDirectory,
+    WriteStage,
+    SyncStage,
+    PublishImmutableBody,
+    SyncDirectory,
+    ReadBody,
+    RemoveBody,
+    PublishRetentionBody,
+    PublishRetentionRoot,
+}
+
+impl fmt::Display for StorageOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::CreateDirectory => "directory creation",
+            Self::WriteStage => "staged body write",
+            Self::SyncStage => "staged body sync",
+            Self::PublishImmutableBody => "immutable body publication",
+            Self::SyncDirectory => "directory sync",
+            Self::ReadBody => "body read",
+            Self::RemoveBody => "body removal",
+            Self::PublishRetentionBody => "retention body publication",
+            Self::PublishRetentionRoot => "retention root publication",
+        };
+        formatter.write_str(name)
     }
 }
 
@@ -795,6 +884,29 @@ impl RetentionRootProposal {
     pub fn manifests(&self) -> &[SegmentManifestId] {
         &self.manifests
     }
+
+    /// Stable local-root body bytes. These bytes are storage evidence only;
+    /// authority is still supplied by the registry that revalidated this value.
+    pub(crate) fn canonical_bytes(&self) -> Result<Vec<u8>, StoreRefusal> {
+        let mut bytes = Encoder::new();
+        bytes.write_raw(b"FGRT");
+        push_u16(&mut bytes, 1);
+        push_internal_object_id(&mut bytes, self.authority_head.as_internal_object_id())?;
+        push_u16(&mut bytes, self.retention_root.algorithm().code_point());
+        let root_bytes = self.retention_root.bytes().as_bytes();
+        bytes.write_raw_byte(
+            u8::try_from(root_bytes.len()).map_err(|_| StoreRefusal::LengthOverflow)?,
+        );
+        bytes.write_raw(root_bytes);
+        push_u32(
+            &mut bytes,
+            u32::try_from(self.manifests.len()).map_err(|_| StoreRefusal::TooManyEntries)?,
+        );
+        for manifest in &self.manifests {
+            push_internal_object_id(&mut bytes, manifest.as_internal_object_id())?;
+        }
+        Ok(bytes.into_bytes())
+    }
 }
 
 /// Final storage interface; it intentionally has no list operation.
@@ -901,6 +1013,23 @@ fn push_u64(output: &mut Encoder, value: u64) {
 
 fn push_git_oid(output: &mut Encoder, identity: GitOid) {
     output.write_git_oid(&identity);
+}
+
+fn push_internal_object_id(
+    output: &mut Encoder,
+    identity: &fgit_types::InternalObjectId,
+) -> Result<(), StoreRefusal> {
+    push_u16(output, identity.algorithm().code_point());
+    let domain_tag = identity.domain();
+    let domain = domain_tag.as_bytes();
+    output.write_raw_byte(u8::try_from(domain.len()).map_err(|_| StoreRefusal::LengthOverflow)?);
+    output.write_raw(domain);
+    push_u16(output, identity.codec_version().major());
+    push_u16(output, identity.codec_version().minor());
+    let digest = identity.digest().as_bytes();
+    output.write_raw_byte(u8::try_from(digest.len()).map_err(|_| StoreRefusal::LengthOverflow)?);
+    output.write_raw(digest);
+    Ok(())
 }
 
 fn push_handle(output: &mut Encoder, handle: OpaqueHandle) -> Result<(), StoreRefusal> {

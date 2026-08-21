@@ -1,12 +1,12 @@
 #![forbid(unsafe_code)]
 //! Immutable object envelopes and deterministic microsegments.
 //!
-//! This first object-fabric slice owns byte layout, bounded parsing, ordering,
-//! index/Merkle/footer verification, and random-access lookup. It deliberately
-//! does not own storage backends, placement manifests, or object admission. The
-//! digest trait is an adapter boundary: production callers bind the fgit-crypto
-//! domain-separated digest implementation and typed fgit-types OIDs here. This
-//! crate never implements a cryptographic hash or invents a parallel ID type.
+//! This object-fabric slice owns byte layout, bounded parsing, ordering,
+//! index/Merkle/footer verification, local immutable placement, manifests, and
+//! authenticated-retention hooks. The digest trait is an adapter boundary:
+//! production callers bind the `fgit-crypto` domain-separated digest
+//! implementation and typed `fgit-types` OIDs here. This crate never
+//! implements a cryptographic hash or invents a parallel ID type.
 
 use std::cmp::Ordering;
 use std::error::Error;
@@ -22,6 +22,7 @@ use fgit_types::{
 };
 
 pub mod fabric;
+pub mod local;
 
 const ENVELOPE_MAGIC: &[u8; 4] = b"FGEN";
 const SEGMENT_MAGIC: &[u8; 4] = b"FGMS";
@@ -36,7 +37,7 @@ const MICROSEGMENT_SCHEMA: SchemaId = SchemaId::new(
     1,
     0,
 );
-const ENVELOPE_SCHEMA: SchemaId = SchemaId::new(
+pub(crate) const ENVELOPE_SCHEMA: SchemaId = SchemaId::new(
     SchemaFamily::from_static("frankengit.object-envelope"),
     1,
     0,
@@ -338,7 +339,6 @@ pub struct ObjectEnvelope {
 }
 
 impl ObjectEnvelope {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         namespace: Vec<u8>,
         object_identity: GitOid,
