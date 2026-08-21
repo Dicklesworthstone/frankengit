@@ -13,6 +13,7 @@ use std::fmt;
 /// The RFC 1951 maximum backwards-copy distance.
 pub const RFC1951_MAX_WINDOW_BYTES: usize = 32_768;
 const MAX_HUFFMAN_BITS: u8 = 15;
+const HUFFMAN_LENGTH_SLOTS: usize = 16;
 const ZLIB_MAGIC_ERROR: &str = "invalid RFC 1950 zlib header";
 
 /// Explicit resource ceilings for one zlib member.
@@ -324,7 +325,7 @@ impl HuffmanTable {
                 observed: u64::try_from(lengths.len()).unwrap_or(u64::MAX),
             });
         }
-        let mut counts = [0_u16; usize::from(MAX_HUFFMAN_BITS) + 1];
+        let mut counts = [0_u16; HUFFMAN_LENGTH_SLOTS];
         let mut non_zero = 0_usize;
         for &length in lengths {
             if length > MAX_HUFFMAN_BITS {
@@ -351,7 +352,7 @@ impl HuffmanTable {
             return Err(InflateRefusal::IncompleteHuffmanSet);
         }
 
-        let mut next = [0_u16; usize::from(MAX_HUFFMAN_BITS) + 1];
+        let mut next = [0_u16; HUFFMAN_LENGTH_SLOTS];
         let mut code = 0_u16;
         for bit_len in 1..=usize::from(MAX_HUFFMAN_BITS) {
             code = (code + counts[bit_len - 1]) << 1;
@@ -787,13 +788,13 @@ impl Inflater {
                     self.reader.restore(checkpoint);
                     return Ok(false);
                 };
-                let length = base
-                    .checked_add(usize::from(extra))
-                    .ok_or(InflateRefusal::ResourceLimit {
-                        resource: Resource::OutputBytes,
-                        limit: u64::try_from(self.limits.max_output_bytes).unwrap_or(u64::MAX),
-                        observed: u64::MAX,
-                    })?;
+                let length =
+                    base.checked_add(usize::from(extra))
+                        .ok_or(InflateRefusal::ResourceLimit {
+                            resource: Resource::OutputBytes,
+                            limit: u64::try_from(self.limits.max_output_bytes).unwrap_or(u64::MAX),
+                            observed: u64::MAX,
+                        })?;
                 self.state = State::Compressed {
                     final_block,
                     literal_length: literal_length.clone(),
@@ -830,10 +831,10 @@ impl Inflater {
                     self.reader.restore(checkpoint);
                     return Ok(false);
                 };
-                let distance = base
+                let match_distance = base
                     .checked_add(usize::from(extra))
                     .ok_or(InflateRefusal::InvalidLengthOrDistanceCode)?;
-                self.copy_match(distance, length)?;
+                self.copy_match(match_distance, length)?;
                 self.state = State::Compressed {
                     final_block,
                     literal_length: literal_length.clone(),
@@ -1018,8 +1019,20 @@ impl Inflater {
         }
         if let Some(ratio) = self.limits.max_expansion_ratio {
             let compressed = self.reader.consumed_bytes().max(1);
-            let allowed = u128::from(compressed).saturating_mul(u128::from(ratio));
-            if u128::from(projected) > allowed {
+            let compressed =
+                u128::try_from(compressed).map_err(|_| InflateRefusal::ResourceLimit {
+                    resource: Resource::ExpansionRatio,
+                    limit: u64::MAX,
+                    observed: u64::MAX,
+                })?;
+            let projected =
+                u128::try_from(projected).map_err(|_| InflateRefusal::ResourceLimit {
+                    resource: Resource::OutputBytes,
+                    limit: u64::try_from(self.limits.max_output_bytes).unwrap_or(u64::MAX),
+                    observed: u64::MAX,
+                })?;
+            let allowed = compressed.saturating_mul(u128::from(ratio));
+            if projected > allowed {
                 return Err(InflateRefusal::ResourceLimit {
                     resource: Resource::ExpansionRatio,
                     limit: u64::try_from(allowed).unwrap_or(u64::MAX),
@@ -1096,5 +1109,462 @@ impl Adler32 {
 
     const fn value(self) -> u32 {
         (self.b << 16) | self.a
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        inflate_zlib, Adler32, CancellationProbe, InflateLimits, InflateRefusal, Inflater,
+        Resource, StreamProgress,
+    };
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    const EMPTY_ZLIB: &[u8] = &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01];
+
+    fn limits() -> InflateLimits {
+        InflateLimits {
+            max_input_bytes: 128 * 1024,
+            max_pending_input_bytes: 128 * 1024,
+            max_output_bytes: 128 * 1024,
+            max_expansion_ratio: Some(512),
+            max_window_bytes: 32_768,
+            max_huffman_symbols: 320,
+            max_collection_elements: 320,
+            max_work_units: 1_000_000,
+        }
+    }
+
+    fn decode_hex(hex: &str) -> Vec<u8> {
+        let compact: Vec<u8> = hex
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .collect();
+        assert_eq!(compact.len() % 2, 0, "fixture must contain whole bytes");
+        compact
+            .chunks_exact(2)
+            .map(|pair| {
+                let high = hex_nibble(pair[0]);
+                let low = hex_nibble(pair[1]);
+                (high << 4) | low
+            })
+            .collect()
+    }
+
+    fn hex_nibble(byte: u8) -> u8 {
+        match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => panic!("fixture contains a non-hex byte"),
+        }
+    }
+
+    fn fixture(name: &str) -> Vec<u8> {
+        match name {
+            "stored" => decode_hex(include_str!("../fixtures/stored_hello.zlib.hex")),
+            "fixed" => decode_hex(include_str!("../fixtures/fixed_repetition.zlib.hex")),
+            "dynamic" => decode_hex(include_str!("../fixtures/dynamic_text.zlib.hex")),
+            _ => panic!("unknown fixture"),
+        }
+    }
+
+    fn adler32(bytes: &[u8]) -> u32 {
+        let mut checksum = Adler32::new();
+        for &byte in bytes {
+            checksum.update(byte);
+        }
+        checksum.value()
+    }
+
+    fn zlib_member(deflate: Vec<u8>, plain: &[u8]) -> Vec<u8> {
+        let mut member = vec![0x78, 0x01];
+        member.extend(deflate);
+        member.extend(adler32(plain).to_be_bytes());
+        member
+    }
+
+    #[derive(Default)]
+    struct BitPacker {
+        bytes: Vec<u8>,
+        used_bits: u8,
+    }
+
+    impl BitPacker {
+        fn push_bits(&mut self, value: u16, count: u8) {
+            for offset in 0..count {
+                if self.used_bits == 0 {
+                    self.bytes.push(0);
+                }
+                let bit = if ((value >> offset) & 1) == 0 { 0 } else { 1 };
+                let final_index = self.bytes.len() - 1;
+                self.bytes[final_index] |= bit << self.used_bits;
+                self.used_bits = (self.used_bits + 1) % 8;
+            }
+        }
+
+        fn align_to_byte(&mut self) {
+            if self.used_bits != 0 {
+                self.used_bits = 0;
+            }
+        }
+
+        fn push_aligned_slice(&mut self, bytes: &[u8]) {
+            assert_eq!(self.used_bits, 0, "stored bytes must be byte aligned");
+            self.bytes.extend_from_slice(bytes);
+        }
+
+        fn finish(self) -> Vec<u8> {
+            self.bytes
+        }
+    }
+
+    fn fixed_literal_code(symbol: u16) -> (u16, u8) {
+        let (canonical, bits) = match symbol {
+            0..=143 => (0x30 + symbol, 8),
+            144..=255 => (0x190 + (symbol - 144), 9),
+            256..=279 => (symbol - 256, 7),
+            280..=287 => (0xc0 + (symbol - 280), 8),
+            _ => panic!("not a fixed literal/length symbol"),
+        };
+        (super::reverse_low_bits(canonical, bits), bits)
+    }
+
+    fn push_fixed_literal(packer: &mut BitPacker, symbol: u16) {
+        let (bits, length) = fixed_literal_code(symbol);
+        packer.push_bits(bits, length);
+    }
+
+    fn push_fixed_distance(packer: &mut BitPacker, symbol: u16) {
+        packer.push_bits(super::reverse_low_bits(symbol, 5), 5);
+    }
+
+    fn begin_fixed_block(packer: &mut BitPacker, final_block: bool) {
+        packer.push_bits(if final_block { 1 } else { 0 }, 1);
+        packer.push_bits(1, 2);
+    }
+
+    fn distance_one_run_member() -> Vec<u8> {
+        let mut deflate = BitPacker::default();
+        begin_fixed_block(&mut deflate, true);
+        push_fixed_literal(&mut deflate, u16::from(b'A'));
+        push_fixed_literal(&mut deflate, 285);
+        push_fixed_distance(&mut deflate, 0);
+        push_fixed_literal(&mut deflate, 256);
+        zlib_member(deflate.finish(), &vec![b'A'; 259])
+    }
+
+    fn maximum_distance_member() -> Vec<u8> {
+        let prefix = vec![b'Z'; 32_768];
+        let mut deflate = BitPacker::default();
+        deflate.push_bits(0, 1);
+        deflate.push_bits(0, 2);
+        deflate.align_to_byte();
+        deflate.push_aligned_slice(&32_768_u16.to_le_bytes());
+        deflate.push_aligned_slice(&(!32_768_u16).to_le_bytes());
+        deflate.push_aligned_slice(&prefix);
+        begin_fixed_block(&mut deflate, true);
+        push_fixed_literal(&mut deflate, 257);
+        push_fixed_distance(&mut deflate, 29);
+        deflate.push_bits(8_191, 13);
+        push_fixed_literal(&mut deflate, 256);
+        let mut plain = prefix;
+        plain.extend_from_slice(b"ZZZ");
+        zlib_member(deflate.finish(), &plain)
+    }
+
+    fn malformed_dynamic_member(code_length_lengths: [u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut deflate = BitPacker::default();
+        deflate.push_bits(1, 1);
+        deflate.push_bits(2, 2);
+        deflate.push_bits(0, 5);
+        deflate.push_bits(0, 5);
+        deflate.push_bits(0, 4);
+        for code_length in code_length_lengths {
+            deflate.push_bits(u16::from(code_length), 3);
+        }
+        for &byte in body {
+            deflate.push_bits(u16::from(byte), 8);
+        }
+        zlib_member(deflate.finish(), &[])
+    }
+
+    fn assert_resource(error: InflateRefusal, resource: Resource) {
+        assert!(
+            matches!(error, InflateRefusal::ResourceLimit { resource: found, .. } if found == resource)
+        );
+    }
+
+    #[test]
+    fn rfc1950_empty_reference_vector_decodes() {
+        assert_eq!(inflate_zlib(EMPTY_ZLIB, limits()), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn offline_reference_vectors_decode_each_deflate_block_type() {
+        let stored = fixture("stored");
+        let fixed = fixture("fixed");
+        let dynamic = fixture("dynamic");
+        assert_eq!((stored[2] >> 1) & 0b11, 0);
+        assert_eq!((fixed[2] >> 1) & 0b11, 1);
+        assert_eq!((dynamic[2] >> 1) & 0b11, 2);
+        assert_eq!(inflate_zlib(&stored, limits()), Ok(b"hello".to_vec()));
+        assert_eq!(
+            inflate_zlib(&fixed, limits()),
+            Ok(b"fixed huffman reference vector: abracadabra abracadabra abracadabra".to_vec())
+        );
+
+        let mut expected = b"The quick brown fox jumps over the lazy dog. ".repeat(80);
+        expected.extend(0_u8..128);
+        expected.extend(b" dynamic huffman corpus ".repeat(50));
+        assert_eq!(inflate_zlib(&dynamic, limits()), Ok(expected));
+    }
+
+    #[test]
+    fn streaming_output_is_tentative_until_finish_verifies_adler32() {
+        let encoded = fixture("dynamic");
+        let mut inflater =
+            Inflater::new(limits()).unwrap_or_else(|error| panic!("limits: {error}"));
+        let mut output = Vec::new();
+        for chunk in encoded.chunks(3) {
+            assert!(matches!(
+                inflater.push(chunk),
+                Ok(StreamProgress::NeedInput | StreamProgress::Finished)
+            ));
+            output.extend(inflater.take_output());
+        }
+        assert!(inflater.finish().is_ok());
+        assert!(inflater.is_finished());
+        let mut expected = b"The quick brown fox jumps over the lazy dog. ".repeat(80);
+        expected.extend(0_u8..128);
+        expected.extend(b" dynamic huffman corpus ".repeat(50));
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn fixed_back_references_cover_distance_one_length_258_and_distance_32768() {
+        let distance_one = distance_one_run_member();
+        assert_eq!(inflate_zlib(&distance_one, limits()), Ok(vec![b'A'; 259]));
+
+        let maximum_distance = maximum_distance_member();
+        let decoded = inflate_zlib(&maximum_distance, limits());
+        assert_eq!(decoded.as_ref().map(Vec::len), Ok(32_771));
+        assert!(matches!(decoded, Ok(bytes) if bytes.iter().all(|byte| *byte == b'Z')));
+    }
+
+    #[test]
+    fn stored_length_mismatch_is_refused_before_payload_acceptance() {
+        let deflate = vec![0b0000_0001, 1, 0, 0, 0];
+        assert!(matches!(
+            inflate_zlib(&zlib_member(deflate, &[]), limits()),
+            Err(InflateRefusal::StoredLengthMismatch {
+                length: 1,
+                complement: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn incomplete_and_oversubscribed_dynamic_code_sets_are_refused() {
+        assert_eq!(
+            inflate_zlib(&malformed_dynamic_member([2, 0, 0, 0], &[]), limits()),
+            Err(InflateRefusal::IncompleteHuffmanSet)
+        );
+        assert_eq!(
+            inflate_zlib(&malformed_dynamic_member([1, 1, 1, 0], &[]), limits()),
+            Err(InflateRefusal::OversubscribedHuffmanSet)
+        );
+    }
+
+    #[test]
+    fn dynamic_code_length_repeats_past_the_declared_table_are_refused() {
+        let body = [0b1111_1111, 0b1111_1111];
+        assert_eq!(
+            inflate_zlib(&malformed_dynamic_member([0, 0, 1, 1], &body), limits()),
+            Err(InflateRefusal::InvalidCodeLength)
+        );
+    }
+
+    #[test]
+    fn distance_too_far_is_refused_and_nearby_distance_one_is_permitted() {
+        let mut deflate = BitPacker::default();
+        begin_fixed_block(&mut deflate, true);
+        push_fixed_literal(&mut deflate, 257);
+        push_fixed_distance(&mut deflate, 0);
+        push_fixed_literal(&mut deflate, 256);
+        assert_eq!(
+            inflate_zlib(&zlib_member(deflate.finish(), &[]), limits()),
+            Err(InflateRefusal::DistanceTooFar {
+                distance: 1,
+                available: 0
+            })
+        );
+        assert_eq!(
+            inflate_zlib(&distance_one_run_member(), limits()),
+            Ok(vec![b'A'; 259])
+        );
+    }
+
+    #[test]
+    fn invalid_length_distance_and_reserved_block_types_are_refused() {
+        let mut invalid_length = BitPacker::default();
+        begin_fixed_block(&mut invalid_length, true);
+        push_fixed_literal(&mut invalid_length, 286);
+        assert_eq!(
+            inflate_zlib(&zlib_member(invalid_length.finish(), &[]), limits()),
+            Err(InflateRefusal::InvalidLengthOrDistanceCode)
+        );
+
+        let mut reserved = BitPacker::default();
+        reserved.push_bits(1, 1);
+        reserved.push_bits(3, 2);
+        assert_eq!(
+            inflate_zlib(&zlib_member(reserved.finish(), &[]), limits()),
+            Err(InflateRefusal::ReservedBlockType)
+        );
+    }
+
+    #[test]
+    fn checksum_trailing_input_and_dictionary_requests_are_refused() {
+        let mut checksum_bad = EMPTY_ZLIB.to_vec();
+        let last = checksum_bad.len() - 1;
+        checksum_bad[last] ^= 1;
+        assert!(matches!(
+            inflate_zlib(&checksum_bad, limits()),
+            Err(InflateRefusal::Adler32Mismatch { .. })
+        ));
+
+        let mut trailing = EMPTY_ZLIB.to_vec();
+        trailing.push(0);
+        assert_eq!(
+            inflate_zlib(&trailing, limits()),
+            Err(InflateRefusal::TrailingGarbage)
+        );
+        assert_eq!(
+            inflate_zlib(&[0x78, 0x20], limits()),
+            Err(InflateRefusal::PresetDictionaryUnsupported)
+        );
+    }
+
+    #[test]
+    fn window_output_ratio_and_pending_input_limits_are_enforced() {
+        let narrow_window = InflateLimits {
+            max_window_bytes: 16_384,
+            ..limits()
+        };
+        assert_resource(
+            inflate_zlib(EMPTY_ZLIB, narrow_window)
+                .err()
+                .unwrap_or_else(|| panic!("32KiB zlib header must exceed narrow window")),
+            Resource::WindowBytes,
+        );
+
+        let ratio_limited = InflateLimits {
+            max_expansion_ratio: Some(4),
+            ..limits()
+        };
+        assert_resource(
+            inflate_zlib(&distance_one_run_member(), ratio_limited)
+                .err()
+                .unwrap_or_else(|| panic!("run must exceed ratio limit")),
+            Resource::ExpansionRatio,
+        );
+
+        let output_limited = InflateLimits {
+            max_output_bytes: 128,
+            max_expansion_ratio: Some(512),
+            ..limits()
+        };
+        assert_resource(
+            inflate_zlib(&distance_one_run_member(), output_limited)
+                .err()
+                .unwrap_or_else(|| panic!("run must exceed output limit")),
+            Resource::OutputBytes,
+        );
+
+        let pending_limited = InflateLimits {
+            max_pending_input_bytes: 4,
+            ..limits()
+        };
+        assert_resource(
+            Inflater::new(pending_limited)
+                .and_then(|mut inflater| inflater.push(EMPTY_ZLIB).map(|_| ()))
+                .err()
+                .unwrap_or_else(|| panic!("input must exceed pending-input limit")),
+            Resource::PendingInputBytes,
+        );
+
+        let ratio_disabled = InflateLimits {
+            max_expansion_ratio: None,
+            ..limits()
+        };
+        assert_resource(
+            Inflater::new(ratio_disabled)
+                .err()
+                .unwrap_or_else(|| panic!("ratio ceiling is mandatory")),
+            Resource::Configuration,
+        );
+    }
+
+    struct CancelImmediately;
+
+    impl CancellationProbe for CancelImmediately {
+        fn is_cancelled(&mut self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn cancellation_is_a_typed_refusal_before_decode_progress() {
+        let mut inflater =
+            Inflater::new(limits()).unwrap_or_else(|error| panic!("limits: {error}"));
+        let mut cancellation = CancelImmediately;
+        assert_eq!(
+            inflater.push_with_control(EMPTY_ZLIB, &mut cancellation),
+            Err(InflateRefusal::Cancelled)
+        );
+    }
+
+    #[test]
+    fn seeded_random_input_never_panics_and_only_returns_typed_outcomes() {
+        let mut seed = 0x59d5_3489_7a11_4c3d_u64;
+        for case in 0..2_000_u32 {
+            let length = usize::try_from(seed & 0x7f).unwrap_or(0);
+            let mut input = Vec::with_capacity(length);
+            for _ in 0..length {
+                seed ^= seed << 7;
+                seed ^= seed >> 9;
+                seed ^= seed << 8;
+                input.push(u8::try_from(seed & 0xff).unwrap_or(0));
+            }
+            let attempt = catch_unwind(AssertUnwindSafe(|| inflate_zlib(&input, limits())));
+            assert!(
+                attempt.is_ok(),
+                "decoder panicked for seed {seed:016x}, case {case}"
+            );
+            let Ok(result) = attempt else {
+                return;
+            };
+            match result {
+                Ok(_) => {}
+                Err(
+                    InflateRefusal::ResourceLimit { .. }
+                    | InflateRefusal::Cancelled
+                    | InflateRefusal::InvalidZlibHeader
+                    | InflateRefusal::PresetDictionaryUnsupported
+                    | InflateRefusal::UnexpectedEnd
+                    | InflateRefusal::TrailingGarbage
+                    | InflateRefusal::Adler32Mismatch { .. }
+                    | InflateRefusal::ReservedBlockType
+                    | InflateRefusal::StoredLengthMismatch { .. }
+                    | InflateRefusal::InvalidHuffmanCode
+                    | InflateRefusal::IncompleteHuffmanSet
+                    | InflateRefusal::OversubscribedHuffmanSet
+                    | InflateRefusal::InvalidCodeLength
+                    | InflateRefusal::InvalidLengthOrDistanceCode
+                    | InflateRefusal::DistanceTooFar { .. },
+                ) => {}
+            }
+        }
     }
 }

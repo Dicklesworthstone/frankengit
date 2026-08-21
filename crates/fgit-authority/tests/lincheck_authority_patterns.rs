@@ -207,6 +207,47 @@ fn generated_history_from_the_sequential_spec_passes() {
 }
 
 #[test]
+fn history_refuses_a_non_monotonic_per_client_clock() {
+    let malformed = History::new(vec![
+        invocation(1, 1, 10, AuthorityOperation::ReadHead),
+        response(
+            1,
+            1,
+            10,
+            AuthorityResponse::ReadHead {
+                value: Some(0),
+                version: 1,
+            },
+        ),
+    ]);
+
+    assert!(matches!(
+        malformed,
+        Err(fgit_authority::history::HistoryError::NonMonotonicClientTime { .. })
+    ));
+}
+
+#[test]
+fn history_beyond_the_declared_bound_is_indeterminate_not_accepted() {
+    let checker = LinearizabilityChecker::new(CheckLimits {
+        max_completed_operations: 1,
+        max_search_nodes: 100,
+    })
+    .expect("test checker limits are valid");
+    let report = checker.check(&AuthoritySequentialSpec, &generated_good_history());
+
+    assert_eq!(
+        report.verdict,
+        CheckVerdict::Indeterminate {
+            reason: fgit_authority::lincheck::IndeterminateReason::HistoryTooLarge {
+                completed_operations: 4,
+                allowed_operations: 1,
+            },
+        }
+    );
+}
+
+#[test]
 fn rejects_stale_read_after_a_completed_compare_exchange() {
     let report = checker().check(
         &AuthoritySequentialSpec,
