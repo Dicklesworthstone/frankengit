@@ -12,6 +12,7 @@ Desktop.ini
 target/
 coverage/
 artifacts/
+evidence/
 *.bundle
 *.tar.gz
 *.zip
