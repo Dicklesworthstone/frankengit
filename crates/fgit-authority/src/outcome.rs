@@ -354,6 +354,33 @@ where
 {
     let replayed = replay_outcome(store, head_key, tx_id)?;
     let indexed = indexed_outcome(store, tenant_id, repository_id, tx_id)?;
+    reconcile_outcome(indexed, replayed)
+}
+
+/// Reconcile the accelerator's answer with the authenticated replay.
+///
+/// **This is the shared core of outcome resolution** (t7ip condition 1). The
+/// two reads differ between the synchronous and asynchronous drivers; this
+/// decision does not, and it lives here exactly once so the two cannot fork.
+///
+/// # Why it takes both answers rather than fetching them
+///
+/// Not merely to be pure. Replay of the authenticated decision stream is
+/// **authoritative** and the accelerator is a repairable hint, because the
+/// accelerator is written *after* the head moves: a crash in that window leaves
+/// a transaction genuinely decided with no accelerator entry. Consulting the
+/// accelerator alone reads that as undecided and returns "replannable" —
+/// telling a caller to replan a transaction that already committed, which is
+/// how one sealed transaction acquires two terminal decisions.
+///
+/// Requiring both answers as arguments makes an accelerator-only resolver
+/// **unrepresentable** rather than merely discouraged. An asynchronous port
+/// that quietly dropped the replay would have to change this signature to do
+/// it, instead of silently omitting a call.
+pub fn reconcile_outcome(
+    indexed: OutcomeLookup,
+    replayed: OutcomeLookup,
+) -> Result<OutcomeLookup, OutcomeFailure> {
     match (indexed, replayed) {
         // The accelerator is allowed to be behind: that is the repairable
         // state a crash between publication and indexing leaves.
