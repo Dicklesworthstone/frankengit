@@ -1643,11 +1643,11 @@ fn generated_ffi_policy(name: &str) -> &'static str {
     }
 }
 
-/// Renders the four currently resolved FrankenSuite rows from Cargo's lock and
+/// Renders the four currently resolved FrankenSuite rows from `Cargo`'s lock and
 /// metadata rather than accepting human-invented evidence digests. The public
 /// contract fingerprint is a canonical source-level inventory of public-item
 /// candidates; it is deliberately not a claim that this lexical pass is a
-/// semantic Rust API proof. The unsafe digest similarly records a canonical
+/// semantic `Rust` API proof. The unsafe digest similarly records a canonical
 /// lexical inventory over the package's resolved transitive closure.
 fn generate_constellation_ledger(
     packages: &[LockPackage],
@@ -2711,7 +2711,7 @@ fn check_constellation_model(
     check_generated_constellation_evidence(constellation, packages, metadata, report);
 }
 
-/// Admission records are not arbitrary digest-shaped strings: whenever Cargo
+/// Admission records are not arbitrary digest-shaped strings: whenever `Cargo`
 /// supplied package source paths, reconstruct the deterministic evidence and
 /// require the checked-in rows to match it exactly. Hand-built unit metadata
 /// deliberately omits package paths, so those small model tests exercise the
@@ -3697,6 +3697,23 @@ mod tests {
             extract_workspace_string_list(manifest, "default-members"),
             vec!["crates/fgit-types"]
         );
+    }
+
+    #[test]
+    fn direct_crate_glob_membership_permits_only_one_child_segment() {
+        let members = vec!["crates/*".to_owned()];
+        assert!(workspace_member_path_is_declared(
+            &members,
+            "crates/fgit-runtime"
+        ));
+        assert!(!workspace_member_path_is_declared(
+            &members,
+            "crates/fgit-runtime/nested"
+        ));
+        assert!(!workspace_member_path_is_declared(
+            &members,
+            "outside/fgit-runtime"
+        ));
     }
 
     #[test]
