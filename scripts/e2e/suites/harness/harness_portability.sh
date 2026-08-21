@@ -198,14 +198,45 @@ done < <(find "$E2E_ROOT/suites" -type f -name '*.sh' -print0 | LC_ALL=C sort -z
 # permitted file, so the narrowing above cannot quietly become a loophole.
 CMD_START='(^|[;&|(])[[:space:]]*'
 
-detect_forbidden_tool() {
+# Comment lines are dropped, then quoted spans are removed so a tool NAME
+# appearing inside a string is not mistaken for an invocation. That distinction
+# is not cosmetic: a peer suite printing a JSON receipt whose prose read
+# "...fgit arm is in-process; git arm is a sandboxed process spawn" was reported
+# as shelling out to git, because the `; git ` inside its printf format matched
+# CMD_START. That file invokes nothing.
+#
+# Ignoring string CONTENTS makes the detector more accurate, not weaker: text in
+# a literal cannot execute. The single exception is `eval`, which executes its
+# string argument, so any line mentioning `eval` is left intact and searched in
+# full. FG-000A-PORT-023 and -024 pin both halves through these very functions.
+detect__strip() {
   grep -v '^[[:space:]]*#' "$1" |
-    grep -qE "${CMD_START}(jq|python3?|perl|g?awk|mawk)([[:space:]]|\$)"
+    sed -E "/eval/! { s/'[^']*'//g; s/\"[^\"]*\"//g; }"
+}
+
+# `eval` lines are matched PERMISSIVELY -- any occurrence of the tool name, not
+# just one at a command start. `eval "git rev-parse HEAD"` invokes git, but the
+# character before `git` is a quote, so CMD_START never matched it. That hole
+# predates the string-stripping above; it was verified against the previous
+# detector before this was written, so it is a hole being closed, not one being
+# introduced. Over-eagerness on `eval` lines is the right trade: `eval` is rare
+# in a harness and suspicious when present, so a false positive there costs one
+# justification and a miss costs the whole gate.
+detect__eval_lines() {
+  grep -v '^[[:space:]]*#' "$1" | grep 'eval'
+}
+
+detect_forbidden_tool() {
+  detect__strip "$1" |
+    grep -qE "${CMD_START}(jq|python3?|perl|g?awk|mawk)([[:space:]]|\$)" && return 0
+  detect__eval_lines "$1" |
+    grep -qE "(jq|python3?|perl|g?awk|mawk)([[:space:]]|\$)"
 }
 
 detect_git_subprocess() {
-  grep -v '^[[:space:]]*#' "$1" |
-    grep -qE "${CMD_START}git([[:space:]]|\$)"
+  detect__strip "$1" |
+    grep -qE "${CMD_START}git([[:space:]]|\$)" && return 0
+  detect__eval_lines "$1" | grep -qE "git([[:space:]]|\$)"
 }
 
 # This file is excluded from its own sweep because the planted-violation
@@ -247,6 +278,32 @@ cat >"$permitted_git" <<'PLANTEDEOF'
 #!/usr/bin/env bash
 fge_cmd_digest git status --short
 PLANTEDEOF
+
+# The exact shape that produced a false positive against a peer's committed
+# suite: a command separator followed by a tool name, both inside a string.
+prose_tools="$work/prose_tools.sh"
+cat >"$prose_tools" <<'PLANTEDEOF'
+#!/usr/bin/env bash
+printf '%s\n' 'fgit arm is in-process; git arm is a sandboxed process spawn'
+printf '%s\n' "measured without jq; awk was not used either"
+PLANTEDEOF
+
+# ...and the hole that stripping strings would otherwise open. `eval` executes
+# its argument, so a quoted invocation there is a real one and must still fire.
+eval_git="$work/eval_git.sh"
+cat >"$eval_git" <<'PLANTEDEOF'
+#!/usr/bin/env bash
+eval "git rev-parse HEAD"
+PLANTEDEOF
+
+# Exercised through the REAL detector functions, not a reimplementation of them:
+# a copy could drift from the thing actually gating the swarm.
+prose_git_fired=no
+detect_git_subprocess "$prose_tools" && prose_git_fired=yes
+prose_tool_fired=no
+detect_forbidden_tool "$prose_tools" && prose_tool_fired=yes
+eval_git_fired=no
+detect_git_subprocess "$eval_git" && eval_git_fired=yes
 
 tool_detector_fires=no
 detect_forbidden_tool "$planted_tool" && tool_detector_fires=yes
@@ -345,6 +402,15 @@ fge_assert_eq FG-000A-PORT-017 '' "$strict_failures" \
   'every harness script enables strict shell mode'
 fge_assert_eq FG-000A-PORT-018 '' "$suite_strict_failures" \
   'every suite script uses the full set -euo pipefail'
+fge_assert_eq FG-000A-PORT-023 no "$prose_git_fired" \
+  'a git name inside a string literal is prose, not an invocation'
+
+fge_assert_eq FG-000A-PORT-025 no "$prose_tool_fired" \
+  'a jq or awk name inside a string literal is prose, not an invocation'
+
+fge_assert_eq FG-000A-PORT-024 yes "$eval_git_fired" \
+  'eval of a quoted git command is still an invocation and still fires'
+
 fge_assert_eq FG-000A-PORT-019 '' "$forbidden_tools" \
   'no harness script invokes jq, python, perl or awk'
 fge_assert_eq FG-000A-PORT-020 '' "$git_subprocess" \
