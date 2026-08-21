@@ -58,7 +58,7 @@ use fgit_txn::IntentEvaluator;
 use fgit_types::label::{SchemaFamily, SchemaId};
 use fgit_types::native::{GitOid, GitOidSha1};
 use fgit_types::refs::RefName;
-use fgit_types::vocabulary::MismatchPolicy;
+use fgit_types::vocabulary::{MismatchPolicy, RefusalCode};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -94,7 +94,15 @@ fn ref_alphabet() -> Vec<RefName> {
 enum OracleDisposition {
     Surviving(RefName),
     Absorbed(AbsorptionReason),
-    StatementError,
+    /// The refusal code is carried, not discarded.
+    ///
+    /// An earlier version compared a bare `StatementError`, which let the two
+    /// sides agree while saying nothing about *why* a statement was refused —
+    /// the same coarse-resolution mistake this file already made once with
+    /// `Absorbed`, and which only surfaced then because someone corrected it.
+    /// The intent-relevant taxonomy is four codes out of `RefusalCode`'s 61;
+    /// comparing at the arm rather than the code tests none of them.
+    StatementError(RefusalCode),
     TransactionAborted,
 }
 
@@ -136,7 +144,9 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
         for intent in &statement.intents {
             let Intent::Ref(ref_intent) = intent else {
                 // Only ref intents are modelled; see the module non-claims.
-                dispositions.push(OracleDisposition::StatementError);
+                dispositions.push(OracleDisposition::StatementError(
+                    RefusalCode::ExpectedOldRefMismatch,
+                ));
                 touched.push(None);
                 identity_at_evaluation.push(true);
                 continue;
@@ -154,7 +164,13 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
                         identity_at_evaluation.push(true);
                     }
                     MismatchPolicy::StatementError => {
-                        dispositions.push(OracleDisposition::StatementError);
+                        // Refs-only model: the sole reachable intent refusal is
+                        // a precondition mismatch. The other three
+                        // intent-relevant codes need carriers this model does
+                        // not have; see `the_intent_refusal_taxonomy_is_bounded`.
+                        dispositions.push(OracleDisposition::StatementError(
+                            RefusalCode::ExpectedOldRefMismatch,
+                        ));
                         touched.push(None);
                         identity_at_evaluation.push(true);
                     }
@@ -197,7 +213,9 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
                 last_writer.insert(name.clone(), index);
             }
             // Placeholder; classified after the fold, when survival is known.
-            dispositions.push(OracleDisposition::StatementError);
+            dispositions.push(OracleDisposition::StatementError(
+                RefusalCode::ExpectedOldRefMismatch,
+            ));
             touched.push(Some(name));
         }
     }
@@ -473,9 +491,18 @@ fn translate(disposition: &IntentDisposition) -> OracleDisposition {
         IntentDisposition::Surviving(EffectTarget::Ref(name)) => {
             OracleDisposition::Surviving(name.clone())
         }
-        IntentDisposition::Surviving(_) => OracleDisposition::StatementError,
+        // A surviving effect at a non-ref target means the corpus produced
+        // something outside this refs-only model. The previous version mapped
+        // it silently onto StatementError, which would have made an escaped
+        // model look like an ordinary refusal and agree with an oracle that
+        // never generated it. Loud is correct here.
+        IntentDisposition::Surviving(other) => panic!(
+            "the corpus produced a surviving effect at a non-ref target ({other:?}); this \
+             model generates ref intents only, so either the generator or the evaluator has \
+             moved and the comparison is no longer testing what it claims"
+        ),
         IntentDisposition::Absorbed(reason) => OracleDisposition::Absorbed(*reason),
-        IntentDisposition::StatementError(_) => OracleDisposition::StatementError,
+        IntentDisposition::StatementError(code) => OracleDisposition::StatementError(*code),
         IntentDisposition::TransactionAborted => OracleDisposition::TransactionAborted,
     }
 }
@@ -597,7 +624,7 @@ fn the_corpus_reaches_the_dispositions_it_claims_to_test() {
             seen.insert(match disposition {
                 OracleDisposition::Surviving(_) => "surviving".to_owned(),
                 OracleDisposition::Absorbed(reason) => format!("absorbed:{reason:?}"),
-                OracleDisposition::StatementError => "statement-error".to_owned(),
+                OracleDisposition::StatementError(code) => format!("statement-error:{code:?}"),
                 OracleDisposition::TransactionAborted => "aborted".to_owned(),
             });
         }
@@ -607,7 +634,7 @@ fn the_corpus_reaches_the_dispositions_it_claims_to_test() {
         "surviving",
         "absorbed:OverwrittenBySucceedingIntent",
         "absorbed:PreconditionMismatchNoOp",
-        "statement-error",
+        "statement-error:ExpectedOldRefMismatch",
         "aborted",
     ] {
         assert!(
@@ -835,4 +862,75 @@ fn the_provenance_ambiguity_is_pinned_and_reproducible() {
              which makes this a different and more serious disagreement"
         );
     }
+}
+
+/// The intent-relevant refusal taxonomy.
+///
+/// `RefusalCode` has 61 variants; the folder emits exactly these four on the
+/// intent path. Enumerated here so "exhaustive over the refusal taxonomy
+/// relevant to intents" is a checkable claim rather than a feeling.
+const INTENT_REFUSAL_TAXONOMY: [RefusalCode; 4] = [
+    RefusalCode::ExpectedOldRefMismatch,
+    RefusalCode::EffectIdempotencyKeyReuse,
+    RefusalCode::ForgeTransitionInvalid,
+    RefusalCode::ResourceBudgetExceeded,
+];
+
+#[test]
+fn the_intent_refusal_taxonomy_is_bounded_and_its_gaps_are_named() {
+    // The acceptance asks for a refusal corpus exhaustive over the taxonomy
+    // relevant to intents. This states exactly how far that is met, because a
+    // corpus reaching one of four codes while claiming exhaustiveness is worse
+    // than one that admits the gap.
+    //
+    //   ExpectedOldRefMismatch     REACHED — every precondition mismatch under
+    //                              MismatchPolicy::StatementError.
+    //   EffectIdempotencyKeyReuse  NOT reachable: needs outbox delivery keys.
+    //   ForgeTransitionInvalid     NOT reachable: needs forge intents and
+    //                              stream positions.
+    //   ResourceBudgetExceeded     NOT reachable: needs a declared budget the
+    //                              generator can exceed.
+    //
+    // All three gaps are the same gap: this model carries ref intents only.
+    // Closing them means extending the carrier, not adding assertions.
+    let mut reached: BTreeSet<RefusalCode> = BTreeSet::new();
+    for i in 0..programs() {
+        let seed = CORPUS_SEED.wrapping_add(i as u64);
+        let mut rng = Rng::new(seed);
+        let mut mint = IdentityMint::new(seed);
+        let basis = generate_basis(&mut rng);
+        let request = generate_request(&mut rng, &mut mint, &basis, "taxonomy");
+        for disposition in oracle_fold(&basis, &request).dispositions {
+            if let OracleDisposition::StatementError(code) = disposition {
+                reached.insert(code);
+            }
+        }
+    }
+
+    assert!(
+        reached.contains(&RefusalCode::ExpectedOldRefMismatch),
+        "the corpus must exercise a precondition mismatch; it is the one intent refusal a \
+         refs-only model can reach, and without it the statement-error arm is untested"
+    );
+
+    let unreachable: Vec<RefusalCode> = INTENT_REFUSAL_TAXONOMY
+        .into_iter()
+        .filter(|code| *code != RefusalCode::ExpectedOldRefMismatch)
+        .collect();
+    for code in unreachable {
+        assert!(
+            !reached.contains(&code),
+            "{code:?} is now reachable from the refs-only corpus. That is good news, but this \
+             test records it as unreachable — extend the taxonomy coverage claim and remove it \
+             from the gap list rather than leaving a stale assertion"
+        );
+    }
+
+    assert_eq!(
+        reached.len(),
+        1,
+        "the refs-only corpus should reach exactly one of the four intent refusal codes; \
+         reaching more means the model grew and this claim needs updating, reaching none \
+         means the statement-error path went untested. Reached: {reached:?}"
+    );
 }
