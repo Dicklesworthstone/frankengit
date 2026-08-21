@@ -1216,3 +1216,108 @@ where
         indexed,
     })))
 }
+
+/// Create the repository head slot on the production surface.
+///
+/// The asynchronous twin of [`initialize_repository`]. Without it a live node
+/// can publish decisions over a durable store but cannot bring a repository
+/// into existence there, which leaves the production path able to continue a
+/// history it has no way to start.
+///
+/// # Errors
+///
+/// Propagates the store's typed refusals, and
+/// [`OutcomeFailure::Codec`] when the head's generation is not admissible.
+pub async fn initialize_repository_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    head: &RepositoryAuthorityHeadBody,
+) -> Result<HeadInit, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = body_key(IdentityDomain::RepositoryAuthorityHead, head)?;
+    let bytes = encode_body(head)?;
+    store.put_if_absent(cx, &key, &bytes).await?;
+    let generation = head_generation(head)?;
+    Ok(store
+        .initialize_head(cx, head_key, generation, &bytes)
+        .await?)
+}
+
+/// Replay the authenticated decision stream for one transaction, async.
+///
+/// The asynchronous twin of [`replay_outcome`]: same walk, same order, same
+/// [`MAX_REPLAY_BATCHES`] bound via [`next_batch_to_replay`], same hit test via
+/// [`scan_batch_for`]. Only the reads differ.
+///
+/// # Errors
+///
+/// Propagates the store's typed refusals, [`OutcomeFailure::StreamBodyMissing`]
+/// when a link in the stream is absent, and
+/// [`OutcomeFailure::ReplayBoundExceeded`] when the walk exceeds its bound.
+pub async fn replay_outcome_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    tx_id: TxId,
+) -> Result<OutcomeLookup, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let HeadRead::Present(receipt) = store.read_head(cx, head_key).await? else {
+        return Ok(OutcomeLookup::Undecided);
+    };
+    let mut head: RepositoryAuthorityHeadBody = decode_body(receipt.body(), DecodeLimits::DEFAULT)?;
+    let mut walked = 0_usize;
+    loop {
+        let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? else {
+            return Ok(OutcomeLookup::Undecided);
+        };
+        let batch = read_batch_body_async(store, cx, batch_id).await?;
+        if let Some(found) = scan_batch_for(&batch, tx_id) {
+            return Ok(OutcomeLookup::Decided(found));
+        }
+        let predecessor = batch.predecessor_head_id;
+        let Some(previous) = read_predecessor_async(store, cx, predecessor).await? else {
+            return Ok(OutcomeLookup::Undecided);
+        };
+        head = previous;
+    }
+}
+
+/// Answer "what happened to this transaction" on the production surface.
+///
+/// The asynchronous twin of [`resolve_outcome`], and the reason it has to exist
+/// rather than callers using [`indexed_outcome_async`]: **that function reads
+/// the accelerator alone.** The accelerator is a derived projection (§5.1), so
+/// an absent row means "resolve authoritatively", never "no decision exists" —
+/// and answering a post-disconnect lookup from it is the exact TOCTOU the §5.2
+/// ruling exists to eliminate. Until this existed, the production surface could
+/// *publish* correctly but could only *answer* from the hint.
+///
+/// Both answers are handed to [`reconcile_outcome`], which is the same pure
+/// core the synchronous path uses. The two surfaces therefore cannot disagree
+/// about what a pair of reads means; they differ only in how they wait.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::AcceleratorConflict`] when the accelerator and the stream
+/// disagree — this fails closed rather than picking a side. Otherwise the
+/// store's typed refusals.
+pub async fn resolve_outcome_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    tenant_id: TenantId,
+    repository_id: RepositoryId,
+    tx_id: TxId,
+) -> Result<OutcomeLookup, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let replayed = replay_outcome_async(store, cx, head_key, tx_id).await?;
+    let indexed = indexed_outcome_async(store, cx, tenant_id, repository_id, tx_id).await?;
+    reconcile_outcome(indexed, replayed)
+}

@@ -100,9 +100,10 @@ pub use crate::outcome::{
     DuplicateScan, MAX_REPLAY_BATCHES, OUTCOME_KEY_PREFIX, OutcomeFailure, OutcomeLookup,
     PublicationOutcome, PublishedBatch, TerminalOutcome, authority_head_identity,
     decision_batch_identity, indexed_outcome, indexed_outcome_async, initialize_repository,
-    interpret_indexed_outcome, next_batch_to_replay, outcome_index_root, outcome_key,
-    publish_decisions, publish_decisions_async, reconcile_outcome, replay_outcome, resolve_outcome,
-    scan_batch_for, scan_for_existing_decisions, scan_for_existing_decisions_async,
+    initialize_repository_async, interpret_indexed_outcome, next_batch_to_replay,
+    outcome_index_root, outcome_key, publish_decisions, publish_decisions_async, reconcile_outcome,
+    replay_outcome, replay_outcome_async, resolve_outcome, resolve_outcome_async, scan_batch_for,
+    scan_for_existing_decisions, scan_for_existing_decisions_async,
 };
 pub use crate::reference::{MemoryAuthorityStore, MemoryStoreConfig};
 pub use crate::request::{

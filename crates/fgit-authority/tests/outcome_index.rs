@@ -588,7 +588,7 @@ use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
     AuthorityVersionToken, DuplicateAbsenceWitness, HeadInit, HeadReadReceipt, ImmutableKey,
     ImmutableRead, PutOutcome, authority_head_identity, decision_batch_identity,
-    publish_decisions_async,
+    initialize_repository_async, publish_decisions_async, resolve_outcome_async,
 };
 use fgit_types::numeric::HeadGeneration as AsyncHeadGeneration;
 use std::future::Future;
@@ -1381,4 +1381,185 @@ fn an_absent_accelerator_still_refuses_a_second_terminal_decision() {
         2,
         "a refused duplicate must not have crossed the head-CAS boundary"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Sync/async RESOLUTION equivalence (t7ip condition 1, read side)
+// ---------------------------------------------------------------------------
+
+/// Build a repository whose head is canonical but whose accelerator is empty.
+///
+/// Stages the bodies and moves the head with `compare_exchange_head`, writing
+/// no outcome entries — the wiped/rebuilt/never-written index state. Returns the
+/// store and the transaction the stream decides.
+fn store_with_decision_absent_from_accelerator() -> MemoryAuthorityStore {
+    let store = store();
+    let genesis = genesis_head();
+    initialize_repository(&store, &head_slot(), &genesis).expect("genesis");
+
+    let first = batch(&genesis, 1, vec![committed(tx(0xA1), 1, 0x51)]);
+    let head = successor_head(&genesis, batch_id_of(&first), 2);
+    let batch_slot = body_key(IdentityDomain::RepositoryDecisionBatch, &first).expect("a key");
+    store
+        .put_if_absent(&batch_slot, &encode_body(&first).expect("encodable"))
+        .expect("staging the batch");
+    let head_slot_by_id = body_key(IdentityDomain::RepositoryAuthorityHead, &head).expect("a key");
+    let head_bytes = encode_body(&head).expect("encodable");
+    store
+        .put_if_absent(&head_slot_by_id, &head_bytes)
+        .expect("staging the head");
+    let HeadRead::Present(receipt) = store.read_head(&head_slot()).expect("a readable head") else {
+        panic!("genesis must be published");
+    };
+    let CasOutcome::Committed(_) = store
+        .compare_exchange_head(
+            &head_slot(),
+            receipt.token(),
+            HeadGeneration::try_new(2).expect("positive"),
+            &head_bytes,
+        )
+        .expect("the conditional replacement")
+    else {
+        panic!("the replacement must publish");
+    };
+    store
+}
+
+/// A stable label for a resolution result, so failures compare by shape.
+fn resolution_label(result: &Result<OutcomeLookup, OutcomeFailure>) -> String {
+    match result {
+        Ok(OutcomeLookup::Decided(outcome)) => {
+            format!("decided/{}", outcome.decision_sequence.get())
+        }
+        Ok(OutcomeLookup::Undecided) => "undecided".to_owned(),
+        Err(OutcomeFailure::AcceleratorConflict { .. }) => "accelerator-conflict".to_owned(),
+        Err(other) => format!("failure/{other:?}"),
+    }
+}
+
+/// Resolve one transaction on both surfaces, over identical store state.
+fn resolve_on_both(
+    make: impl Fn() -> MemoryAuthorityStore,
+    tx_id: TxId,
+) -> (
+    Result<OutcomeLookup, OutcomeFailure>,
+    Result<OutcomeLookup, OutcomeFailure>,
+) {
+    let sync_result = resolve_outcome(&make(), &head_slot(), tenant(), repository(), tx_id);
+    let view = AsyncView(make());
+    let async_result = poll_ready(resolve_outcome_async(
+        &view,
+        &(),
+        &head_slot(),
+        tenant(),
+        repository(),
+        tx_id,
+    ));
+    (sync_result, async_result)
+}
+
+/// Both surfaces must reach the same resolution from the same state.
+fn assert_resolutions_agree(
+    sync_result: &Result<OutcomeLookup, OutcomeFailure>,
+    async_result: &Result<OutcomeLookup, OutcomeFailure>,
+    case: &str,
+) {
+    assert_eq!(
+        resolution_label(sync_result),
+        resolution_label(async_result),
+        "{case}: the surfaces resolve differently"
+    );
+    if let (Ok(left), Ok(right)) = (sync_result, async_result) {
+        assert_eq!(left, right, "{case}: same shape, different value");
+    }
+}
+
+#[test]
+fn both_resolution_surfaces_agree_on_a_decided_transaction() {
+    let (sync_result, async_result) = resolve_on_both(|| published_repository().0, tx(0xA1));
+    assert_resolutions_agree(&sync_result, &async_result, "a decided transaction");
+    assert!(
+        matches!(sync_result, Ok(OutcomeLookup::Decided(_))),
+        "the fixture publishes this transaction: {sync_result:?}"
+    );
+}
+
+#[test]
+fn both_resolution_surfaces_agree_on_an_undecided_transaction() {
+    let (sync_result, async_result) = resolve_on_both(|| published_repository().0, tx(0xEE));
+    assert_resolutions_agree(&sync_result, &async_result, "an undecided transaction");
+    assert_eq!(
+        sync_result.expect("resolution runs"),
+        OutcomeLookup::Undecided,
+        "this transaction was never sealed"
+    );
+}
+
+/// The requirement-2 case, and the reason `resolve_outcome_async` has to exist.
+///
+/// The head is canonical and the accelerator holds nothing. A resolver that
+/// consulted the accelerator alone would answer `Undecided` and tell a caller to
+/// replan a transaction that already committed. Both surfaces must replay.
+#[test]
+fn both_resolution_surfaces_replay_when_the_accelerator_is_empty() {
+    let (sync_result, async_result) =
+        resolve_on_both(store_with_decision_absent_from_accelerator, tx(0xA1));
+    assert_resolutions_agree(&sync_result, &async_result, "an absent accelerator");
+    assert!(
+        matches!(sync_result, Ok(OutcomeLookup::Decided(_))),
+        "accelerator absence must never be read as 'not decided' when the \
+         authenticated stream says otherwise: {sync_result:?}"
+    );
+
+    // And the premise is real: the accelerator genuinely holds nothing, so the
+    // answer above can only have come from the stream.
+    let store = store_with_decision_absent_from_accelerator();
+    assert_eq!(
+        indexed_outcome(&store, tenant(), repository(), tx(0xA1)).expect("index read"),
+        OutcomeLookup::Undecided,
+        "this case proves nothing unless the accelerator is genuinely empty"
+    );
+}
+
+/// The corpus must be able to tell the two surfaces apart.
+#[test]
+fn the_resolution_equivalence_corpus_is_not_vacuous() {
+    let decided = resolve_on_both(|| published_repository().0, tx(0xA1));
+    let undecided = resolve_on_both(|| published_repository().0, tx(0xEE));
+    let replayed = resolve_on_both(store_with_decision_absent_from_accelerator, tx(0xA1));
+
+    let labels = [resolution_label(&decided.1), resolution_label(&undecided.1)];
+    assert_ne!(
+        labels[0], labels[1],
+        "decided and undecided must differ, or agreement proves nothing: {labels:?}"
+    );
+    assert_eq!(
+        resolution_label(&replayed.1),
+        resolution_label(&decided.1),
+        "the replayed case must reach the SAME decided answer, by a different route"
+    );
+}
+
+/// Bootstrap must also agree, or the production surface cannot start a history.
+#[test]
+fn both_surfaces_initialize_a_repository_identically() {
+    let genesis = genesis_head();
+
+    let sync_store = store();
+    let sync_init = initialize_repository(&sync_store, &head_slot(), &genesis);
+
+    let view = AsyncView(store());
+    let async_init = poll_ready(initialize_repository_async(
+        &view,
+        &(),
+        &head_slot(),
+        &genesis,
+    ));
+
+    assert_eq!(
+        format!("{sync_init:?}"),
+        format!("{async_init:?}"),
+        "the two surfaces must bring a repository into existence identically"
+    );
+    assert!(sync_init.is_ok(), "genesis must initialize: {sync_init:?}");
 }
