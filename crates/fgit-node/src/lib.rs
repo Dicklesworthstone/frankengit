@@ -1631,8 +1631,8 @@ mod tests {
                 .windows(b"NAK\n".len())
                 .filter(|window| *window == b"NAK\n")
                 .count(),
-            2,
-            "want flush and final done each emit their negotiated NAK before raw pack bytes"
+            1,
+            "the want-phase flush emits the sole negotiated NAK before raw pack bytes; the final done transition delegates fgit-wire's non-duplicating Git 2.54 behavior"
         );
     }
 
