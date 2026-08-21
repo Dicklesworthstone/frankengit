@@ -990,7 +990,7 @@ impl PlantedDefect {
     fn plant(self, previous: &RepositoryState, state: &mut RepositoryState) -> bool {
         match self {
             Self::SecondTerminalDecision => {
-                let Some(first) = state.decisions.first().cloned() else {
+                let Some(first) = state.decisions.first().copied() else {
                     return false;
                 };
                 state.decisions.push(first);
