@@ -411,6 +411,55 @@ fge_assert_eq FG-000A-PORT-033 no "$prose_tool_fired" \
 fge_assert_eq FG-000A-PORT-034 yes "$eval_git_fired" \
   'eval of a quoted git command is still an invocation and still fires'
 
+# ---------------------------------------------------------------------------
+# MEASURED, NOT GATED: suites whose failing step would lose its own attribution
+#
+# fge_run and fge_capture return the command's exit status, so under
+# `set -euo pipefail` a bare call that fails kills the script before
+# FGE_LAST_EXIT is read and before the assertion meant to report it can run. The
+# run is still caught -- it is not a false green -- but it reports
+# `status=fail failed=0` with the remaining assertions never executed, so the
+# operator learns the suite died rather than which check broke.
+#
+# Emitted as a field rather than an assertion, on purpose. Asserting today would
+# red this gate for every affected suite at once and block the sweep, which is
+# not a call I get to make for ten other agents' files. Documented the trap in
+# lib.sh's header instead (8bee060); this measures whether that worked.
+#
+# §16.3 justification for carrying a process artifact at all:
+#   consumer          GoldLotus, for dispatch -- who still has the pattern.
+#   gate it feeds     FG-000A-PORT-035, once the count is zero.
+#   defect class      a failing step deleting itself from the evidence record.
+#   deletion condition when bare_exit_reads reaches 0, convert to that assertion
+#                     and remove this block. If the count is still climbing a day
+#                     from now, documentation was the wrong instrument and the
+#                     gate should land with a grace period instead.
+bare_exit_reads=0
+for p in "${harness_scripts[@]}"; do
+  [ "$(basename "$p")" = "$self_basename" ] && continue
+  # A statement is suspect when it is an unguarded fge_run/fge_capture whose
+  # next few lines read FGE_LAST_EXIT: that combination says "I intend to report
+  # this failure" while guaranteeing it cannot.
+  while IFS= read -r hit; do
+    bare_exit_reads=$((bare_exit_reads + 1))
+  done < <(
+    grep -nE "^[[:space:]]*fge_(run|capture)[[:space:]]" "$p" |
+      cut -d: -f1 |
+      while IFS= read -r ln; do
+        stmt=$(sed -n "${ln},$((ln + 4))p" "$p" | tr '\n' ' ')
+        case $stmt in
+          *"||"* | *"&&"*) continue ;;
+        esac
+        case $stmt in
+          *FGE_LAST_EXIT*) printf '%s\n' "$ln" ;;
+        esac
+      done
+  )
+done
+fge_field bare_exit_reads "$bare_exit_reads"
+fge_note bare-exit-read-debt \
+  "$bare_exit_reads unguarded fge_run/fge_capture call sites read FGE_LAST_EXIT; each would lose its failing assertion under set -e. Measured, not gated -- see FG-000A-PORT-035 deletion condition."
+
 fge_assert_eq FG-000A-PORT-019 '' "$forbidden_tools" \
   'no harness script invokes jq, python, perl or awk'
 fge_assert_eq FG-000A-PORT-020 '' "$git_subprocess" \
