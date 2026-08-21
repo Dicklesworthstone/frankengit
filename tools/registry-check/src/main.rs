@@ -3733,6 +3733,25 @@ mod tests {
     }
 
     #[test]
+    fn generated_policy_block_keeps_its_first_id_after_later_admission() {
+        let workspace = fixture_workspace("dormant");
+        let registry = workspace.root.join("registries");
+        fs::create_dir_all(&registry).expect("create registry fixture");
+        fs::write(
+            registry.join("dependency_policy.tsv"),
+            concat!(
+                "# franken-registry-v1\n",
+                "id\tcrate_pattern\tscope\tdecision\towner\trationale\tfeature_policy\tunsafe_policy\tffi_policy\tstatus\n",
+                "DEP-013\tfgit-*\tproduction\tallow_first_party\tarchitecture\tfirst-party\tworkspace_pinned\tsafe\tno_ffi\tactive\n",
+                "DEP-014\taead\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.4.9_transitive_direct_parent_aes-gcm\tresolved_none\tledgered\tno_ffi\tactive\n",
+                "DEP-175\tbubblewrap\ttooling\texternal_tool\trelease\toracle sandbox\tnot_linked\tnot_in_binary\texternal_process\tactive\n"
+            ),
+        )
+        .expect("write registry fixture");
+        assert_eq!(next_admission_policy_id(&workspace.root), Ok(14));
+    }
+
+    #[test]
     fn workspace_member_parser_accepts_multiline_membership_lists() {
         let manifest = "[workspace]\nmembers = [\n  \"crates/fgit-types\",\n  \"tools/registry-check\",\n]\ndefault-members = [\n  \"crates/fgit-types\",\n]\n";
         assert_eq!(
