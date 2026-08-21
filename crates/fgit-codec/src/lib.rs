@@ -13,7 +13,7 @@ pub mod writer;
 
 pub use attest::{
     BodyIdentity, DetachedSignature, SignatureSchemeId, SignedEnvelopeBody, body_id,
-    body_id_of_frame,
+    body_id_of_frame, body_id_of_frame_as,
 };
 pub use bounds::DecodeLimits;
 pub use bridge::CryptoBodyIdentity;

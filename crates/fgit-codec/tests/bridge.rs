@@ -1,9 +1,21 @@
 // The production identity bridge.
 //
-// These are the cross-crate assertions the golden corpus deliberately cannot
-// make: the corpus re-implements the preimage framing so it cross-checks the
-// shape, but only a test that runs both crates can prove that bytes produced
-// here yield an identity `fgit-crypto` itself verifies.
+// One clause in an earlier version of this comment was false and CloudyTiger
+// caught it: `an_identity_this_crate_produces_is_one_fgit_crypto_verifies`
+// cannot detect preimage-framing drift, because both the construction and the
+// verification route through `fgit-crypto`'s framing. Change that framing and
+// both move together and the test still passes.
+//
+// What that test does pin is that `fgit-codec` hands over the *payload* and
+// not the frame — the defect fixed at 158c899, now regression-locked — plus
+// domain separation, rejection against a different body, and the
+// unregistered-domain refusal.
+//
+// The framing cross-check is a separate assertion below
+// (`the_corpus_preimage_framing_matches_the_production_framing`), and it is
+// the one that actually bites: it compares the corpus's own re-implementation
+// of the framing against the production one. Those are the two independent
+// implementations, so that is where drift can hide.
 
 use fgit_codec::harness as support;
 
@@ -11,16 +23,18 @@ use fgit_codec::attest::{BodyIdentity, SignedEnvelopeBody};
 use fgit_codec::schema::{RepositoryCommitRecord, TransactionSealBody};
 use fgit_codec::{
     CODEC_VERSION, CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits, body_id,
-    canonical_body_bytes, encode_body,
+    body_id_of_frame_as, canonical_body_bytes, encode_body,
 };
 use fgit_crypto::{IdentityDomain, verify_internal_object_id};
 use fgit_types::{DomainTag, RefusalCode};
 
 #[test]
 fn an_identity_this_crate_produces_is_one_fgit_crypto_verifies() {
-    // The binding that closes the seam. `fgit-codec` decides the canonical
-    // body bytes; `fgit-crypto` decides the preimage and the digest. If either
-    // side drifts, this fails.
+    // `fgit-codec` decides the canonical body bytes; `fgit-crypto` decides the
+    // preimage and the digest. This pins that the bytes handed over are the
+    // payload rather than the frame, and that the identity round-trips through
+    // verification. It does NOT pin the framing itself — see the module
+    // comment and the framing test below.
     let seal = support::transaction_seal();
     let identity = body_id(&CryptoBodyIdentity, &seal).expect("a registered domain identifies");
     let body = canonical_body_bytes(&seal).expect("encodes");
@@ -149,6 +163,42 @@ fn a_signature_does_not_move_the_production_identity_either() {
 }
 
 #[test]
+fn the_corpus_preimage_framing_matches_the_production_framing() {
+    // The corpus re-implements the preimage framing on purpose, so the golden
+    // identities cross-check that framing rather than copy it. The cost of
+    // that choice is drift: two implementations that never meet. This is
+    // where they meet.
+    //
+    // `fgit-crypto` cannot host this — it must not depend on `fgit-codec`, and
+    // that direction stays closed — so it lives here.
+    for (domain, schema) in [
+        (
+            TransactionSealBody::DOMAIN,
+            TransactionSealBody::schema_id(),
+        ),
+        (
+            RepositoryCommitRecord::DOMAIN,
+            RepositoryCommitRecord::schema_id(),
+        ),
+        (SignedEnvelopeBody::DOMAIN, SignedEnvelopeBody::schema_id()),
+    ] {
+        let registered =
+            IdentityDomain::from_tag(domain.as_str()).expect("body domains are registered");
+        for body in [
+            &b""[..],
+            b"one",
+            &canonical_body_bytes(&support::transaction_seal()).expect("encodes"),
+        ] {
+            assert_eq!(
+                support::identity_preimage(domain, schema, body),
+                fgit_crypto::internal_id_preimage(registered, schema, body),
+                "the corpus framing and the production framing disagree for {domain}"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_corpus_algorithm_slot_stays_inside_the_range_fgit_crypto_reserved() {
     // The corpus identity function is deliberately non-cryptographic and lives
     // at a slot fgit-crypto has reserved for harness use. Asserting the two
@@ -188,4 +238,71 @@ fn every_body_domain_this_crate_uses_is_registered() {
             "body domain {tag} has no fgit-crypto registry row"
         );
     }
+}
+
+#[test]
+fn a_registered_domain_on_the_wrong_body_type_is_refused_when_the_caller_knows() {
+    // The hole neither of fgit-crypto's refusals can reach: the tag is
+    // registered and the digest is right, but the frame holds a different body
+    // than the caller expects. Untyped identification cannot see it because it
+    // never learns what was expected.
+    let record_frame = encode_body(&support::commit_record()).expect("encodes");
+
+    // Untyped: succeeds, because the frame's own domain is perfectly valid.
+    let untyped =
+        fgit_codec::body_id_of_frame(&CryptoBodyIdentity, &record_frame, DecodeLimits::DEFAULT)
+            .expect("a commit record identifies as a commit record");
+    assert_eq!(
+        untyped.domain(),
+        RepositoryCommitRecord::DOMAIN,
+        "untyped identification reports what the frame says it is"
+    );
+
+    // Typed as the wrong body: refused.
+    let refusal = body_id_of_frame_as::<TransactionSealBody, _>(
+        &CryptoBodyIdentity,
+        &record_frame,
+        DecodeLimits::DEFAULT,
+    )
+    .expect_err("a commit record must not be identified as a seal");
+    assert!(matches!(refusal, CodecRefusal::DomainUnexpected { .. }));
+    assert_eq!(
+        refusal.refusal_code(),
+        fgit_types::RefusalCode::SchemaUnsupported
+    );
+
+    // Permitted counterpart: typed as what it actually is.
+    let typed = body_id_of_frame_as::<RepositoryCommitRecord, _>(
+        &CryptoBodyIdentity,
+        &record_frame,
+        DecodeLimits::DEFAULT,
+    )
+    .expect("a commit record identifies as a commit record");
+    assert_eq!(
+        typed, untyped,
+        "pinning the type must not change the identity"
+    );
+}
+
+#[test]
+fn an_envelope_carrying_the_wrong_body_type_is_refused_when_the_caller_knows() {
+    let envelope = SignedEnvelopeBody::seal(&support::commit_record()).expect("seals");
+
+    assert!(
+        envelope
+            .carried_body_id_as::<TransactionSealBody, _>(
+                &CryptoBodyIdentity,
+                DecodeLimits::DEFAULT
+            )
+            .is_err(),
+        "an envelope carrying a commit record must not yield a seal identity"
+    );
+    let carried = envelope
+        .carried_body_id_as::<RepositoryCommitRecord, _>(&CryptoBodyIdentity, DecodeLimits::DEFAULT)
+        .expect("the carried type is a commit record");
+    assert_eq!(
+        carried,
+        body_id(&CryptoBodyIdentity, &support::commit_record()).expect("identifies"),
+        "the carried identity must equal the body's own identity"
+    );
 }

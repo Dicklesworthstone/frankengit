@@ -102,6 +102,52 @@ where
     )
 }
 
+/// The identity of a frame the caller expects to hold a specific body type.
+///
+/// [`body_id_of_frame`] takes the domain from the frame, which is right when
+/// the caller genuinely does not know what it is holding — relaying, indexing,
+/// repair. It is wrong when the caller *does* know: a frame carrying a
+/// different but perfectly registered domain would be identified without
+/// complaint, and the caller would attribute a commit record's identity to a
+/// seal.
+///
+/// This variant pins the frame to `B` first. `fgit-crypto`'s refusals catch an
+/// unregistered tag and a wrong digest; neither of them can catch a registered
+/// tag on the wrong body type, because neither ever sees `B`.
+pub fn body_id_of_frame_as<B, I>(
+    identity: &I,
+    frame: &[u8],
+    limits: DecodeLimits,
+) -> Result<InternalObjectId, CodecRefusal>
+where
+    B: CanonicalBody,
+    I: BodyIdentity + ?Sized,
+{
+    let (header, payload) = split_frame(frame, limits)?;
+    if header.domain != B::DOMAIN {
+        return Err(CodecRefusal::domain_unexpected(B::DOMAIN, header.domain));
+    }
+    if header.schema.family() != B::SCHEMA_FAMILY {
+        return Err(CodecRefusal::schema_family_unexpected(
+            B::SCHEMA_FAMILY,
+            header.schema.family(),
+        ));
+    }
+    if header.schema.major() != B::SCHEMA_MAJOR {
+        return Err(CodecRefusal::schema_major_unsupported(
+            header.domain,
+            header.schema.major(),
+            B::SCHEMA_MAJOR,
+        ));
+    }
+    identity.identify(
+        header.domain,
+        header.schema,
+        CodecVersion::new(CODEC_MAJOR, header.codec_minor),
+        payload,
+    )
+}
+
 /// Registry code point naming a signature scheme.
 ///
 /// Opaque here: `fgit-crypto` owns the mapping to a construction. Zero is
@@ -283,6 +329,25 @@ impl SignedEnvelopeBody {
         I: BodyIdentity + ?Sized,
     {
         body_id_of_frame(identity, &self.body_frame, limits)
+    }
+
+    /// The carried body's identity, refusing an envelope that carries a
+    /// different body type than the caller expects.
+    ///
+    /// Prefer this over [`SignedEnvelopeBody::carried_body_id`] whenever the
+    /// caller knows what should be inside: otherwise an envelope carrying some
+    /// other registered body yields an identity the caller then attributes to
+    /// the type it was expecting.
+    pub fn carried_body_id_as<B, I>(
+        &self,
+        identity: &I,
+        limits: DecodeLimits,
+    ) -> Result<InternalObjectId, CodecRefusal>
+    where
+        B: CanonicalBody,
+        I: BodyIdentity + ?Sized,
+    {
+        body_id_of_frame_as::<B, I>(identity, &self.body_frame, limits)
     }
 
     /// Decodes the carried body.
