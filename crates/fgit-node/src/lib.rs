@@ -70,6 +70,8 @@ pub enum NodeRefusal {
     Authority(fgit_authority::OutcomeFailure),
     /// A non-initializing open found no canonical authority head.
     AuthorityHeadAbsent,
+    /// A supplied authority materialization names another repository.
+    RepositoryMismatch,
     /// The operator-selected storage root cannot name the embedded database.
     StoragePathEncoding,
     /// The derived authority-head key was outside the bounded key vocabulary.
@@ -116,6 +118,8 @@ impl Display for NodeRefusal {
             Self::AuthorityHeadAbsent => {
                 formatter.write_str("node authority head is absent; run fg init before doctor")
             }
+            Self::RepositoryMismatch => formatter
+                .write_str("authority materialization does not belong to this node repository"),
             Self::StoragePathEncoding => formatter.write_str(
                 "node storage root cannot be represented as a UTF-8 embedded authority path",
             ),
@@ -170,6 +174,7 @@ impl Error for NodeRefusal {
             Self::EmptyStorageRoot
             | Self::InvalidWorkerCount
             | Self::AuthorityHeadAbsent
+            | Self::RepositoryMismatch
             | Self::HeadInitializationConflict
             | Self::StoragePathEncoding
             | Self::ObjectTooLarge { .. }
@@ -1110,7 +1115,8 @@ impl OneNode {
     /// state: the shared authority core verifies their binding, walks the
     /// authenticated decision history, and atomically publishes the terminal
     /// outcomes with the successor head. `expected` is the token from the
-    /// materializer's authenticated predecessor read.
+    /// materializer's authenticated predecessor read. Materializations for a
+    /// different repository are refused before any immutable staging work.
     pub async fn publish_decisions_in(
         &self,
         request: &NodeRequestContext,
@@ -1118,6 +1124,11 @@ impl OneNode {
         batch: &RepositoryDecisionBatchBody,
         successor: &RepositoryAuthorityHeadBody,
     ) -> Result<PublicationOutcome, NodeRefusal> {
+        if batch.repository_id != self.repository_id
+            || successor.repository_id != self.repository_id
+        {
+            return Err(NodeRefusal::RepositoryMismatch);
+        }
         publish_decisions_async(
             &self.authority,
             request.authority(),
@@ -1403,6 +1414,7 @@ mod tests {
     use std::time::Duration;
 
     use fgit_authority::HeadRead;
+    use fgit_codec::harness::{advanced_head, decision_batch};
     use fgit_types::{RepositoryId, TenantId};
     use fgit_wire::{
         AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, PackPayloadSource, Packet,
@@ -1761,6 +1773,42 @@ mod tests {
             fgit_types::HeadGeneration::FIRST
         );
         reopened.shutdown().expect("reopened node closes cleanly");
+    }
+
+    #[test]
+    fn durable_publication_refuses_another_repository_before_staging() {
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf());
+        let (node, _) = OneNode::init(config).expect("node opens");
+        let request = node.request_context();
+        let before = node
+            .runtime()
+            .block_on(node.read_authority_head_in(&request))
+            .expect("genesis head reads");
+        let HeadRead::Present(before_receipt) = before else {
+            panic!("node initialization creates its authority head");
+        };
+
+        let other_repository = RepositoryId::from_bytes([0x44; 16]);
+        let mut batch = decision_batch();
+        batch.repository_id = other_repository;
+        let mut successor = advanced_head();
+        successor.repository_id = other_repository;
+
+        let refusal = node.runtime().block_on(node.publish_decisions_in(
+            &request,
+            before_receipt.token(),
+            &batch,
+            &successor,
+        ));
+        assert!(matches!(refusal, Err(NodeRefusal::RepositoryMismatch)));
+
+        let after = node
+            .runtime()
+            .block_on(node.read_authority_head_in(&request))
+            .expect("rejected publication leaves head readable");
+        assert_eq!(after, HeadRead::Present(before_receipt));
+        node.shutdown().expect("node closes cleanly");
     }
 
     #[test]
