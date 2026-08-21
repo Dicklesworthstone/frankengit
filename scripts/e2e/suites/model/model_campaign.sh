@@ -104,6 +104,29 @@ main() {
     fge_assert_contains 'FG-003C-E2E-016' "$receipt" '"no_silent_anti_rollback"' \
       'the receipt names the no-silent-anti-rollback property'
 
+    # Naming a property is not checking one. A property whose subject never
+    # occurs in the explored space holds vacuously, so the receipt carries a
+    # witness count per property and these assertions refuse a run where any of
+    # them is zero.
+    fge_assert_contains 'FG-003C-E2E-017' "$receipt" '"vacuous_properties":0' \
+      'every declared property was exercised by a reached state'
+    fge_assert_not_contains 'FG-003C-E2E-018' "$receipt" '"exercised":false' \
+      'no property in the receipt was checked over an empty set'
+
+    # The space has to contain the cases the properties are about. Each of these
+    # was zero before this bead was reopened, which is what made the clean
+    # verdict misleading.
+    fge_assert_not_contains 'FG-003C-E2E-019' "$receipt" '"refused_decisions":0' \
+      'a terminal refusal is reachable in the explored space'
+    fge_assert_not_contains 'FG-003C-E2E-020' "$receipt" '"forge_merge_commits":0' \
+      'a committed merge event is reachable, so the atomicity property has a subject'
+    fge_assert_not_contains 'FG-003C-E2E-021' "$receipt" '"cas_losses":0' \
+      'a lost head compare-and-swap is reachable'
+    fge_assert_not_contains 'FG-003C-E2E-022' "$receipt" '"deferred_repreparations":0' \
+      'a superseded capsule is reachable, so the space can actually conflict'
+    fge_assert_not_contains 'FG-003C-E2E-023' "$receipt" '"committed_decisions":0' \
+      'a commit is reachable in the explored space'
+
     fge_artifact "$artifacts/receipt.ndjson" model-campaign-receipt
   fi
 }
@@ -115,4 +138,6 @@ fge_context method 'explicit breadth-first state-space enumeration with exact de
 fge_context deep_mode 'set FGIT_REFERENCE_CAMPAIGN_MODE=deep for the wider documented bounds'
 fge_context non_claim 'bounded model checking over the reference model only; it is not a proof, and it says nothing about any implementation until trace refinement (plan §40.5) connects one to this oracle'
 fge_context non_claim_scope 'the result holds for the bounds named in the receipt and for no wider envelope'
+fge_context non_vacuity 'the receipt carries a per-property witness count and coverage counters; a property with zero witnesses fails this suite rather than reading as verified'
+fge_context detection 'the walker is self-tested against five planted model defects, one per property, in fgit-reference unit tests — the suite asserts coverage, the unit tests assert detection'
 main

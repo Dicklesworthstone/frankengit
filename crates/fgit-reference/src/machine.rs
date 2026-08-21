@@ -7,14 +7,14 @@
 //! and so the alphabet of things that can happen to a repository is written
 //! down in one closed enum.
 
-use fgit_types::identity::{PreparedTxnCapsuleId, RepositoryDecisionBatchId, TxId};
+use fgit_types::identity::{PreparedTxnCapsuleId, TxId};
 use fgit_types::vocabulary::DecisionOutcome;
 
 use crate::state::{InvariantBreach, ModelResult, RepositoryState};
 use crate::transition::{
     CasOutcome, CasRequest, ConfigurationOutcome, ConfigurationRequest, DecisionVerdict,
-    PrepareRequest, QuarantineRequest, SealOutcome, SealRequest, StageRequest, compare_and_swap,
-    decide, prepare, publish_configuration, seal, stage, stage_objects,
+    PrepareRequest, QuarantineRequest, SealOutcome, SealRequest, StageOutcome, StageRequest,
+    compare_and_swap, decide, prepare, publish_configuration, seal, stage, stage_objects,
 };
 
 /// When a client cancelled, relative to the head compare-and-swap.
@@ -117,8 +117,9 @@ pub enum ModelOutput {
     Prepared(PreparedTxnCapsuleId),
     /// A capsule was decided against the current head.
     Decided(DecisionVerdict),
-    /// A batch and candidate head were staged, and nothing became canonical.
-    Staged(RepositoryDecisionBatchId),
+    /// Staging ran: a batch may have been staged, and capsules whose basis
+    /// moved were deferred for re-preparation. Nothing became canonical.
+    Staged(StageOutcome),
     /// A head compare-and-swap was attempted.
     HeadTransition(CasOutcome),
     /// A configuration head transition was attempted.
@@ -184,10 +185,10 @@ pub fn step(state: &RepositoryState, input: &ModelInput) -> ModelResult<ModelSte
             })
         }
         ModelInput::Stage(request) => {
-            let (next, batch) = stage(state, request)?;
+            let (next, staged) = stage(state, request)?;
             Ok(ModelStep {
                 next,
-                output: ModelOutput::Staged(batch),
+                output: ModelOutput::Staged(staged),
             })
         }
         ModelInput::CompareAndSwap(request) => {

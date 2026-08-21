@@ -260,3 +260,272 @@ impl PreparedTxnCapsule {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use fgit_types::hash::{Digest, DigestAlgorithmId, DigestBytes};
+    use fgit_types::native::{GitOid, GitOidSha1};
+    use fgit_types::numeric::{HeadGeneration, PolicyEpoch};
+    use fgit_types::refs::RefName;
+
+    use super::{ConflictWitness, WitnessGranularity};
+    use crate::harness::label;
+    use crate::intent::{
+        ForgeStreamId, ForgeStreamPosition, OutboxDeliveryKey, RetentionClass, RetentionRoot,
+    };
+    use crate::state::RepositoryRoots;
+
+    fn name(text: &str) -> RefName {
+        RefName::try_new(text.as_bytes()).expect("valid ref name")
+    }
+
+    const fn oid(byte: u8) -> GitOid {
+        GitOid::Sha1(GitOidSha1::from_bytes([byte; GitOidSha1::LEN]))
+    }
+
+    fn digest(byte: u8) -> Digest {
+        Digest::new(
+            DigestAlgorithmId::try_new(1).expect("a non-reserved algorithm slot"),
+            DigestBytes::try_new(&[byte; 32]).expect("a 32-byte body is inside the window"),
+        )
+    }
+
+    fn stream() -> ForgeStreamId {
+        ForgeStreamId::new(label("pulls"))
+    }
+
+    fn delivery() -> OutboxDeliveryKey {
+        OutboxDeliveryKey::new(label("hook"))
+    }
+
+    const fn retention() -> RetentionRoot {
+        RetentionRoot {
+            object: oid(9),
+            class: RetentionClass::LegalHold,
+        }
+    }
+
+    /// The basis every witness in this module was taken against.
+    fn basis_roots() -> RepositoryRoots {
+        let mut roots = RepositoryRoots::default();
+        roots.refs.insert(name("refs/heads/main"), oid(1));
+        roots
+            .forge_positions
+            .insert(stream(), ForgeStreamPosition::GENESIS);
+        roots.retention.insert(retention());
+        roots.outbox.insert(delivery(), digest(3));
+        roots
+    }
+
+    /// A witness that read every dimension of [`basis_roots`].
+    fn witness(granularity: WitnessGranularity) -> ConflictWitness {
+        let mut refs = BTreeMap::new();
+        refs.insert(name("refs/heads/main"), Some(oid(1)));
+        refs.insert(name("refs/heads/absent"), None);
+        let mut forge_positions = BTreeMap::new();
+        forge_positions.insert(stream(), ForgeStreamPosition::GENESIS);
+        let mut outbox = BTreeMap::new();
+        outbox.insert(delivery(), Some(digest(3)));
+        ConflictWitness {
+            granularity,
+            basis_generation: HeadGeneration::FIRST,
+            refs,
+            forge_positions,
+            retention_present: BTreeSet::from([retention()]),
+            retention_absent: BTreeSet::new(),
+            outbox,
+            policy_epoch: PolicyEpoch::FIRST,
+        }
+    }
+
+    /// Every roots value the law is checked over: the basis itself and one
+    /// single-dimension mutation of each thing the witness read, plus one
+    /// mutation of something it did not read.
+    fn candidate_roots() -> Vec<(&'static str, RepositoryRoots)> {
+        let mut cases = vec![("unchanged", basis_roots())];
+
+        let mut moved_ref = basis_roots();
+        moved_ref.refs.insert(name("refs/heads/main"), oid(2));
+        cases.push(("read ref moved", moved_ref));
+
+        let mut deleted_ref = basis_roots();
+        deleted_ref.refs.remove(&name("refs/heads/main"));
+        cases.push(("read ref deleted", deleted_ref));
+
+        let mut appeared = basis_roots();
+        appeared.refs.insert(name("refs/heads/absent"), oid(4));
+        cases.push(("ref observed absent now exists", appeared));
+
+        let mut moved_forge = basis_roots();
+        moved_forge
+            .forge_positions
+            .insert(stream(), ForgeStreamPosition::GENESIS.successor());
+        cases.push(("forge stream advanced", moved_forge));
+
+        let mut dropped_hold = basis_roots();
+        dropped_hold.retention.remove(&retention());
+        cases.push(("retention root removed", dropped_hold));
+
+        let mut rebound = basis_roots();
+        rebound.outbox.insert(delivery(), digest(4));
+        cases.push(("outbox key rebound", rebound));
+
+        let mut unread = basis_roots();
+        unread.refs.insert(name("refs/heads/other"), oid(7));
+        cases.push(("unread ref changed", unread));
+
+        cases
+    }
+
+    /// `INV-010`, the one safety property: **coarse-reusable implies
+    /// refined-reusable**, so refinement can only ever remove a conflict the
+    /// coarse witness reported falsely — it can never clear a real one.
+    ///
+    /// Checked over every roots value in [`candidate_roots`] crossed with both
+    /// generations and both policy epochs, rather than at one point, because
+    /// the implication is a property of the pair and a single example would
+    /// hold vacuously whenever the coarse side is false.
+    #[test]
+    fn refinement_can_only_remove_a_false_conflict() {
+        let coarse = witness(WitnessGranularity::Coarse);
+        let refined = witness(WitnessGranularity::Refined);
+        let mut coarse_reusable_seen = 0_u32;
+
+        for (label, roots) in candidate_roots() {
+            for generation in [HeadGeneration::FIRST, HeadGeneration::FIRST.next().unwrap()] {
+                for epoch in [PolicyEpoch::FIRST, PolicyEpoch::FIRST.next().unwrap()] {
+                    let coarse_says = coarse.is_reusable_against(&roots, generation, epoch);
+                    let refined_says = refined.is_reusable_against(&roots, generation, epoch);
+                    if coarse_says {
+                        coarse_reusable_seen += 1;
+                        assert!(
+                            refined_says,
+                            "INV-010 violated at {label} (generation {generation:?}, epoch \
+                             {epoch:?}): the coarse witness reports reusable and the refined one \
+                             does not, so refinement admitted a true conflict"
+                        );
+                    }
+                }
+            }
+        }
+
+        assert!(
+            coarse_reusable_seen > 0,
+            "the law held only vacuously: no case in the space made the coarse witness reusable, \
+             so the implication was never actually exercised"
+        );
+    }
+
+    /// The coarse granularity is the pessimistic one: an unrelated commit
+    /// invalidates it even though nothing it read changed.
+    #[test]
+    fn a_coarse_witness_is_invalidated_by_a_commit_that_touched_nothing_it_read() {
+        let coarse = witness(WitnessGranularity::Coarse);
+        let mut roots = basis_roots();
+        roots.refs.insert(name("refs/heads/other"), oid(7));
+        let moved = HeadGeneration::FIRST.next().expect("successor");
+
+        assert!(
+            !coarse.is_reusable_against(&roots, moved, PolicyEpoch::FIRST),
+            "a coarse witness must not survive a head movement"
+        );
+
+        // The permitted twin, one generation away: at the generation it was
+        // taken at, the same witness over the same roots is reusable.
+        assert!(
+            coarse.is_reusable_against(&roots, HeadGeneration::FIRST, PolicyEpoch::FIRST),
+            "a coarse witness at an unmoved generation must be reusable"
+        );
+    }
+
+    /// The refined granularity is the whole point of §12: it clears exactly
+    /// the case the coarse one gets wrong.
+    #[test]
+    fn refinement_clears_the_disjoint_race_that_the_coarse_witness_refuses() {
+        let mut roots = basis_roots();
+        roots.refs.insert(name("refs/heads/other"), oid(7));
+        let moved = HeadGeneration::FIRST.next().expect("successor");
+
+        assert!(
+            !witness(WitnessGranularity::Coarse).is_reusable_against(
+                &roots,
+                moved,
+                PolicyEpoch::FIRST
+            ),
+            "the coarse witness is expected to report this false conflict"
+        );
+        assert!(
+            witness(WitnessGranularity::Refined).is_reusable_against(
+                &roots,
+                moved,
+                PolicyEpoch::FIRST
+            ),
+            "refinement must clear a conflict with a commit that touched nothing this \
+             transaction read"
+        );
+    }
+
+    /// The direction that must never hold: refinement cannot rescue a capsule
+    /// whose own reads moved.
+    #[test]
+    fn refinement_does_not_clear_a_conflict_on_a_target_that_was_read() {
+        let mut roots = basis_roots();
+        roots.refs.insert(name("refs/heads/main"), oid(2));
+        let moved = HeadGeneration::FIRST.next().expect("successor");
+
+        for granularity in [WitnessGranularity::Coarse, WitnessGranularity::Refined] {
+            assert!(
+                !witness(granularity).is_reusable_against(&roots, moved, PolicyEpoch::FIRST),
+                "{granularity:?} cleared a real conflict on a target the witness read"
+            );
+        }
+    }
+
+    /// A moved policy epoch defeats both granularities: §15.9 pins one epoch
+    /// per attempt, and no amount of refinement over *reads* speaks to it.
+    #[test]
+    fn a_moved_policy_epoch_defeats_every_granularity() {
+        let roots = basis_roots();
+        let moved_epoch = PolicyEpoch::FIRST.next().expect("successor");
+
+        for granularity in [WitnessGranularity::Coarse, WitnessGranularity::Refined] {
+            assert!(
+                !witness(granularity).is_reusable_against(
+                    &roots,
+                    HeadGeneration::FIRST,
+                    moved_epoch
+                ),
+                "{granularity:?} survived a policy epoch move"
+            );
+            // The permitted twin: the same witness, same roots, pinned epoch.
+            assert!(
+                witness(granularity).is_reusable_against(
+                    &roots,
+                    HeadGeneration::FIRST,
+                    PolicyEpoch::FIRST
+                ),
+                "{granularity:?} must be reusable at the epoch it pinned"
+            );
+        }
+    }
+
+    /// `coarsened` and `refined` change the granularity and nothing else, so
+    /// the two answers in the law above are over the *same* reads.
+    #[test]
+    fn changing_granularity_preserves_every_recorded_read() {
+        let refined = witness(WitnessGranularity::Refined);
+        let coarse = refined.coarsened();
+
+        assert_eq!(coarse.granularity, WitnessGranularity::Coarse);
+        assert_eq!(coarse.refs, refined.refs);
+        assert_eq!(coarse.forge_positions, refined.forge_positions);
+        assert_eq!(coarse.retention_present, refined.retention_present);
+        assert_eq!(coarse.retention_absent, refined.retention_absent);
+        assert_eq!(coarse.outbox, refined.outbox);
+        assert_eq!(coarse.basis_generation, refined.basis_generation);
+        assert_eq!(coarse.policy_epoch, refined.policy_epoch);
+        assert_eq!(coarse.refined(), refined);
+    }
+}

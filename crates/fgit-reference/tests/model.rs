@@ -39,10 +39,13 @@ use fgit_reference::state::{
 };
 use fgit_reference::transition::{
     CasOutcome, CasRequest, ConfigurationOutcome, ConfigurationRequest, DecisionBodyIdentity,
-    DecisionVerdict, PrepareRequest, QuarantineRequest, SealOutcome, SealRequest, StageRequest,
-    compare_and_swap, decide, prepare, publish_configuration, seal, stage, stage_objects,
+    DecisionVerdict, PrepareRequest, QuarantineRequest, REPREPARATION_BUDGET, RepreparationReason,
+    SealOutcome, SealRequest, StageOutcome, StageRequest, compare_and_swap, decide, prepare,
+    publish_configuration, seal, stage, stage_objects,
 };
-use fgit_types::identity::{PrincipalId, RepositoryId, TenantId};
+use fgit_types::identity::{
+    PreparedTxnCapsuleId, PrincipalId, RepositoryDecisionBatchId, RepositoryId, TenantId, TxId,
+};
 use fgit_types::label::{SchemaFamily, SchemaId};
 use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1};
 use fgit_types::numeric::{
@@ -120,6 +123,20 @@ fn update(target: &str, expected: ExpectedRefState, new: GitOid, force: bool) ->
         new,
         force,
     })
+}
+
+/// The batch a staging call was expected to produce.
+///
+/// Asserts the stronger thing the caller means: a batch was staged **and**
+/// nothing was deferred for re-preparation, so the scenario is the one the test
+/// set up rather than a silently-lost race.
+fn expect_batch(staged: &StageOutcome) -> RepositoryDecisionBatchId {
+    assert!(
+        staged.deferred.is_empty(),
+        "staging deferred {:?} when the test expected a full batch",
+        staged.deferred
+    );
+    staged.batch.expect("staging produced no batch")
 }
 
 fn delete(target: &str, expected: ExpectedRefState) -> Intent {
@@ -352,7 +369,7 @@ fn nothing_is_canonical_until_the_head_compare_and_swap_wins() {
             refusal_record: fixture.mint.refusal_record(),
         },
     );
-    let (state, batch) = stage(
+    let (state, staged) = stage(
         &state,
         &StageRequest {
             batch_id: fixture.mint.batch(),
@@ -363,6 +380,7 @@ fn nothing_is_canonical_until_the_head_compare_and_swap_wins() {
         },
     )
     .expect("stage");
+    let batch = expect_batch(&staged);
 
     // Staging published nothing either: the batch exists but no authority root
     // references it, which is §9's staged epoch.
@@ -895,7 +913,7 @@ fn a_compare_and_swap_from_a_stale_predecessor_head_loses() {
             refusal_record: fixture.mint.refusal_record(),
         },
     );
-    let (state, batch) = stage(
+    let (state, staged) = stage(
         &state,
         &StageRequest {
             batch_id: fixture.mint.batch(),
@@ -906,6 +924,7 @@ fn a_compare_and_swap_from_a_stale_predecessor_head_loses() {
         },
     )
     .expect("stage");
+    let batch = expect_batch(&staged);
 
     // A competing transaction wins the head first.
     fixture.state = state;
@@ -998,7 +1017,7 @@ fn a_compare_and_swap_naming_the_right_head_at_the_wrong_generation_loses() {
             refusal_record: fixture.mint.refusal_record(),
         },
     );
-    let (state, batch) = stage(
+    let (state, staged) = stage(
         &state,
         &StageRequest {
             batch_id: fixture.mint.batch(),
@@ -1009,6 +1028,7 @@ fn a_compare_and_swap_naming_the_right_head_at_the_wrong_generation_loses() {
         },
     )
     .expect("stage");
+    let batch = expect_batch(&staged);
 
     let wrong_generation = state.head().body.generation.next().unwrap();
     let (_, outcome) = compare_and_swap(
@@ -1109,6 +1129,430 @@ fn a_batch_staged_against_a_superseded_head_cannot_be_swapped_in_later() {
     );
     assert_eq!(fixture.state.decisions().len(), 2);
     fixture.assert_structurally_sound();
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance: a lost race is re-prepared, not refused (§5.2, §10 step 19)
+// ---------------------------------------------------------------------------
+
+/// Builds one forced, unconditional ref update and prepares it.
+///
+/// Unconditional and forced on purpose: §5.2 forbids changing the sealed
+/// request on retry, so the sealed bytes have to be ones that stay applicable
+/// after the ref moves. Anything pinned to an exact predecessor would be
+/// refused by policy on the retry and would prove nothing about basis staleness.
+fn prepared_forced_update(
+    fixture: &mut Fixture,
+    key: &str,
+    new: GitOid,
+    parents: &[GitOid],
+) -> (RepositoryState, TransactionRequest, PreparedTxnCapsuleId) {
+    let request = fixture
+        .request(fixture.author, key)
+        .statement(
+            MismatchPolicy::TxnAbort,
+            vec![update("refs/heads/main", ExpectedRefState::Any, new, true)],
+        )
+        .promising(new)
+        .build(&mut fixture.mint);
+    let (state, _) = seal(
+        &fixture.state,
+        &SealRequest {
+            seal_id: fixture.mint.seal(),
+            request: request.clone(),
+        },
+    )
+    .expect("seal");
+    let state = stage_objects(
+        &state,
+        &QuarantineRequest {
+            tx_id: request.tx_id,
+            objects: vec![object(new, parents)],
+        },
+    )
+    .expect("quarantine");
+    let (state, capsule) = reprepare(fixture, &state, &request);
+    (state, request, capsule)
+}
+
+/// Prepares the **same** sealed request again against `state`.
+fn reprepare(
+    fixture: &mut Fixture,
+    state: &RepositoryState,
+    request: &TransactionRequest,
+) -> (RepositoryState, PreparedTxnCapsuleId) {
+    prepare(
+        state,
+        &PrepareRequest {
+            capsule_id: fixture.mint.capsule(),
+            request: request.clone(),
+            principal_snapshot: fixture.mint.principal_snapshot(),
+            profile: IdentityMint::preparation_profile(),
+            granularity: WitnessGranularity::Refined,
+        },
+    )
+    .expect("prepare")
+}
+
+/// The decision-body identities one transaction's decision may consume.
+fn bodies_for(fixture: &mut Fixture, tx_id: TxId) -> BTreeMap<TxId, DecisionBodyIdentity> {
+    let mut bodies = BTreeMap::new();
+    bodies.insert(
+        tx_id,
+        DecisionBodyIdentity {
+            commit: fixture.mint.commit(),
+            refusal_record: fixture.mint.refusal_record(),
+        },
+    );
+    bodies
+}
+
+/// The defect this test exists for: a capsule whose basis moved used to be
+/// turned into a **terminal** `BasisCapsuleNotReusable` refusal, so a single
+/// lost race permanently refused a request that §5.2 and §10 step 19 both say
+/// must be retried. It is now a non-terminal re-preparation, and the retry of
+/// the same sealed request commits.
+#[test]
+fn a_superseded_capsule_is_repreparable_and_the_retry_commits() {
+    let mut fixture = Fixture::new(220);
+    fixture.commit_ref(
+        "k0",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
+
+    let (state, request, first) = prepared_forced_update(&mut fixture, "k1", oid(2), &[oid(1)]);
+    assert_eq!(
+        state.preparations_of(request.tx_id),
+        1,
+        "one preparation has been charged against the budget"
+    );
+
+    // Permitted twin: decided against the basis it read, the same capsule
+    // commits.
+    assert!(
+        matches!(
+            decide(&state, state.capsule(first).expect("capsule")),
+            DecisionVerdict::Commit(_)
+        ),
+        "a capsule decided against its own basis must commit"
+    );
+
+    // A competing transaction wins the head and moves the very ref this
+    // capsule read.
+    fixture.state = state;
+    let seal_before = *fixture.state.seal_of(request.tx_id).expect("seal");
+    fixture.commit_ref(
+        "k2",
+        "refs/heads/main",
+        ExpectedRefState::Exact(oid(1)),
+        oid(8),
+        &[oid(1)],
+    );
+
+    // The fix: a race, not a verdict.
+    let stale = fixture.state.capsule(first).expect("capsule survives");
+    assert_eq!(
+        decide(&fixture.state, stale),
+        DecisionVerdict::RequiresRepreparation(RepreparationReason::BasisSuperseded),
+        "a superseded basis must not be a terminal decision"
+    );
+    assert!(
+        fixture.state.outcome_of(request.tx_id).is_none(),
+        "a lost race must leave the transaction undecided and retryable"
+    );
+    let seal_after = *fixture.state.seal_of(request.tx_id).expect("seal survives");
+    assert_eq!(
+        seal_after.fields, seal_before.fields,
+        "re-preparation must not change the sealed request"
+    );
+    assert_eq!(seal_after.seal_id, seal_before.seal_id);
+
+    // §5.2: re-prepare the same sealed request against the new basis.
+    let basis = fixture.state.clone();
+    let (state, retry) = reprepare(&mut fixture, &basis, &request);
+    assert_ne!(retry, first, "the retry is a new capsule body");
+    assert_eq!(state.preparations_of(request.tx_id), 2);
+
+    let bodies = bodies_for(&mut fixture, request.tx_id);
+    let (state, staged) = stage(
+        &state,
+        &StageRequest {
+            batch_id: fixture.mint.batch(),
+            candidate_head_id: fixture.mint.head(),
+            capsules: vec![retry],
+            bodies,
+            durability_satisfied: true,
+        },
+    )
+    .expect("stage");
+    let batch = expect_batch(&staged);
+    let (state, outcome) = compare_and_swap(
+        &state,
+        CasRequest {
+            expected_head: state.head().id,
+            expected_generation: state.head().body.generation,
+            batch,
+        },
+    )
+    .expect("compare and swap");
+
+    assert!(
+        matches!(outcome, CasOutcome::Won { .. }),
+        "the retry lost the head as well: {outcome:?}"
+    );
+    assert!(
+        matches!(
+            state.outcome_of(request.tx_id),
+            Some(DecisionOutcome::Committed { .. })
+        ),
+        "the retried transaction must commit"
+    );
+    assert_eq!(
+        state.roots().refs.get(&name("refs/heads/main")),
+        Some(&oid(2)),
+        "the retry published its own effect"
+    );
+}
+
+/// Staging must leave a superseded capsule out of the batch entirely. Writing
+/// a refusal for it would consume decision sequence and make the transaction
+/// terminal, which is the same defect one layer up.
+#[test]
+fn staging_defers_a_superseded_capsule_instead_of_deciding_it() {
+    let mut fixture = Fixture::new(221);
+    fixture.commit_ref(
+        "k0",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
+    let (state, request, capsule) = prepared_forced_update(&mut fixture, "k1", oid(2), &[oid(1)]);
+
+    fixture.state = state;
+    fixture.commit_ref(
+        "k2",
+        "refs/heads/main",
+        ExpectedRefState::Exact(oid(1)),
+        oid(8),
+        &[oid(1)],
+    );
+
+    let before = fixture.state.clone();
+    let bodies = bodies_for(&mut fixture, request.tx_id);
+    let (after, staged) = stage(
+        &fixture.state,
+        &StageRequest {
+            batch_id: fixture.mint.batch(),
+            candidate_head_id: fixture.mint.head(),
+            capsules: vec![capsule],
+            bodies,
+            durability_satisfied: true,
+        },
+    )
+    .expect("stage");
+
+    assert!(
+        staged.batch.is_none(),
+        "nothing was decidable, so no batch may be staged: {staged:?}"
+    );
+    assert!(!staged.staged_anything());
+    assert_eq!(
+        staged.deferred,
+        vec![(request.tx_id, RepreparationReason::BasisSuperseded)]
+    );
+    assert_eq!(
+        after, before,
+        "deferring must not change the state at all: no sequence consumed, no body introduced"
+    );
+    assert!(after.outcome_of(request.tx_id).is_none());
+}
+
+/// A batch is not all-or-nothing: the capsule that can still be decided is
+/// batched, and only the superseded one is handed back.
+#[test]
+fn a_mixed_batch_stages_the_decidable_capsule_and_defers_the_superseded_one() {
+    let mut fixture = Fixture::new(222);
+    fixture.commit_ref(
+        "k0",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
+    let (state, stale_request, stale_capsule) =
+        prepared_forced_update(&mut fixture, "k1", oid(2), &[oid(1)]);
+
+    // Move the ref the first capsule read, superseding it.
+    fixture.state = state;
+    fixture.commit_ref(
+        "k2",
+        "refs/heads/main",
+        ExpectedRefState::Exact(oid(1)),
+        oid(8),
+        &[oid(1)],
+    );
+
+    // A second transaction prepared against the *current* basis, touching a
+    // ref the first one never read.
+    let fresh_request = fixture
+        .request(fixture.author, "k3")
+        .statement(
+            MismatchPolicy::TxnAbort,
+            vec![update(
+                "refs/heads/dev",
+                ExpectedRefState::Absent,
+                oid(4),
+                false,
+            )],
+        )
+        .promising(oid(4))
+        .build(&mut fixture.mint);
+    let (state, _) = seal(
+        &fixture.state,
+        &SealRequest {
+            seal_id: fixture.mint.seal(),
+            request: fresh_request.clone(),
+        },
+    )
+    .expect("seal");
+    let state = stage_objects(
+        &state,
+        &QuarantineRequest {
+            tx_id: fresh_request.tx_id,
+            objects: vec![object(oid(4), &[])],
+        },
+    )
+    .expect("quarantine");
+    let (state, fresh_capsule) = prepare(
+        &state,
+        &PrepareRequest {
+            capsule_id: fixture.mint.capsule(),
+            request: fresh_request.clone(),
+            principal_snapshot: fixture.mint.principal_snapshot(),
+            profile: IdentityMint::preparation_profile(),
+            granularity: WitnessGranularity::Refined,
+        },
+    )
+    .expect("prepare");
+
+    let mut bodies = bodies_for(&mut fixture, stale_request.tx_id);
+    bodies.extend(bodies_for(&mut fixture, fresh_request.tx_id));
+    let (state, staged) = stage(
+        &state,
+        &StageRequest {
+            batch_id: fixture.mint.batch(),
+            candidate_head_id: fixture.mint.head(),
+            capsules: vec![stale_capsule, fresh_capsule],
+            bodies,
+            durability_satisfied: true,
+        },
+    )
+    .expect("stage");
+
+    let batch = staged
+        .batch
+        .expect("the decidable capsule must still batch");
+    assert_eq!(
+        staged.deferred,
+        vec![(stale_request.tx_id, RepreparationReason::BasisSuperseded)]
+    );
+    let decisions = state
+        .staged(batch)
+        .expect("staged")
+        .batch
+        .decisions()
+        .to_vec();
+    assert_eq!(decisions.len(), 1, "only one capsule was decidable");
+    assert_eq!(decisions[0].tx_id, fresh_request.tx_id);
+    assert!(
+        decisions
+            .iter()
+            .all(|decision| decision.tx_id != stale_request.tx_id),
+        "a deferred capsule must not appear in the authenticated decision stream"
+    );
+}
+
+/// §16.5: the permission to retry is **bounded**. An unbounded one is a
+/// livelock, not fairness — so once the sealed request has spent its
+/// re-preparation budget, a capsule that is still stale is refused terminally
+/// with the stale-basis code.
+#[test]
+fn the_repreparation_budget_is_finite_and_a_still_stale_capsule_is_then_refused() {
+    let mut fixture = Fixture::new(223);
+    fixture.commit_ref(
+        "k0",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+        &[],
+    );
+    let (state, request, first) = prepared_forced_update(&mut fixture, "k1", oid(2), &[oid(1)]);
+
+    fixture.state = state;
+    fixture.commit_ref(
+        "k2",
+        "refs/heads/main",
+        ExpectedRefState::Exact(oid(1)),
+        oid(8),
+        &[oid(1)],
+    );
+
+    // Spend the budget on re-preparations of the same sealed request. Every
+    // attempt before the last one is non-terminal.
+    let mut state = fixture.state.clone();
+    while state.preparations_of(request.tx_id) < REPREPARATION_BUDGET {
+        let stale = state.capsule(first).expect("capsule survives");
+        assert_eq!(
+            decide(&state, stale),
+            DecisionVerdict::RequiresRepreparation(RepreparationReason::BasisSuperseded),
+            "attempt {} of {REPREPARATION_BUDGET} must still be retryable",
+            state.preparations_of(request.tx_id)
+        );
+        let (next, _) = reprepare(&mut fixture, &state, &request);
+        state = next;
+    }
+
+    assert_eq!(state.preparations_of(request.tx_id), REPREPARATION_BUDGET);
+    let stale = state.capsule(first).expect("capsule survives");
+    assert_eq!(
+        decide(&state, stale),
+        DecisionVerdict::Refuse(RefusalCode::BasisCapsuleNotReusable),
+        "with the budget spent, a still-stale capsule is terminal"
+    );
+}
+
+/// The budget is spent by re-preparation, not by losing races, so a
+/// transaction that keeps winning is never pushed toward a refusal.
+#[test]
+fn a_transaction_that_never_reprepares_never_approaches_the_budget() {
+    let mut fixture = Fixture::new(224);
+    for (key, target) in [("k1", "refs/heads/a"), ("k2", "refs/heads/b")] {
+        let request = fixture
+            .request(fixture.author, key)
+            .statement(
+                MismatchPolicy::TxnAbort,
+                vec![update(target, ExpectedRefState::Absent, oid(1), false)],
+            )
+            .promising(oid(1))
+            .build(&mut fixture.mint);
+        let tx_id = request.tx_id;
+        let report = fixture.publish(&request, &[object(oid(1), &[])]);
+        assert!(report.is_committed(), "{key} was {report:?}");
+        assert!(
+            report.deferred.is_empty(),
+            "an uncontended publish must defer nothing"
+        );
+        assert!(report.repreparation_reason().is_none());
+        assert_eq!(
+            fixture.state.preparations_of(tx_id),
+            1,
+            "one preparation, so the budget is untouched"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1814,7 +2258,7 @@ fn refusal_policy_epoch_superseded() -> RefusalCode {
         &state,
         &PrepareRequest {
             capsule_id: fixture.mint.capsule(),
-            request,
+            request: request.clone(),
             principal_snapshot: fixture.mint.principal_snapshot(),
             profile: IdentityMint::preparation_profile(),
             granularity: WitnessGranularity::Refined,
@@ -1846,10 +2290,26 @@ fn refusal_policy_epoch_superseded() -> RefusalCode {
     .expect("configuration transition");
     assert!(matches!(transition, ConfigurationOutcome::Won { .. }));
 
+    // A moved epoch is a race first: §15.9's remedy is to re-evaluate the same
+    // sealed request under the new snapshot, not to refuse it.
     let prepared = superseded.capsule(capsule).expect("capsule survives");
-    let code = match decide(&superseded, prepared) {
+    assert_eq!(
+        decide(&superseded, prepared),
+        DecisionVerdict::RequiresRepreparation(RepreparationReason::PolicyEpochSuperseded),
+        "the first superseded attempt must stay retryable"
+    );
+
+    // §16.5 bounds that permission. Once the budget is spent, the capsule
+    // pinned to the retired epoch is terminal.
+    let mut state = superseded;
+    while state.preparations_of(request.tx_id) < REPREPARATION_BUDGET {
+        let (next, _) = reprepare(&mut fixture, &state, &request);
+        state = next;
+    }
+    let prepared = state.capsule(capsule).expect("capsule survives");
+    let code = match decide(&state, prepared) {
         DecisionVerdict::Refuse(code) => code,
-        other => panic!("expected a refusal, got {other:?}"),
+        other => panic!("expected a refusal once the budget was spent, got {other:?}"),
     };
     assert_eq!(code, RefusalCode::PolicyEpochSuperseded);
     code
@@ -1899,7 +2359,7 @@ fn refusal_basis_capsule_not_reusable() -> RefusalCode {
         &state,
         &PrepareRequest {
             capsule_id: fixture.mint.capsule(),
-            request,
+            request: request.clone(),
             principal_snapshot: fixture.mint.principal_snapshot(),
             profile: IdentityMint::preparation_profile(),
             granularity: WitnessGranularity::Refined,
@@ -1932,10 +2392,26 @@ fn refusal_basis_capsule_not_reusable() -> RefusalCode {
         oid(8),
         &[oid(1)],
     );
+    // Non-terminal first: §5.2's CAS loser re-prepares rather than being
+    // refused. `a_superseded_capsule_is_repreparable_and_the_retry_commits`
+    // carries the successful retry; this scenario carries the bounded end of
+    // it.
     let prepared = fixture.state.capsule(capsule).expect("capsule survives");
-    let code = match decide(&fixture.state, prepared) {
+    assert_eq!(
+        decide(&fixture.state, prepared),
+        DecisionVerdict::RequiresRepreparation(RepreparationReason::BasisSuperseded),
+        "the first superseded attempt must stay retryable"
+    );
+
+    let mut state = fixture.state.clone();
+    while state.preparations_of(request.tx_id) < REPREPARATION_BUDGET {
+        let (next, _) = reprepare(&mut fixture, &state, &request);
+        state = next;
+    }
+    let prepared = state.capsule(capsule).expect("capsule survives");
+    let code = match decide(&state, prepared) {
         DecisionVerdict::Refuse(code) => code,
-        other => panic!("expected a stale-basis refusal, got {other:?}"),
+        other => panic!("expected a stale-basis refusal once the budget was spent, got {other:?}"),
     };
     assert_eq!(code, RefusalCode::BasisCapsuleNotReusable);
     code
@@ -2686,7 +3162,7 @@ fn no_transition_mutates_the_state_it_is_given() {
         },
     );
     let before_stage = prepared_state.clone();
-    let (staged_state, batch) = stage(
+    let (staged_state, staged) = stage(
         &prepared_state,
         &StageRequest {
             batch_id: fixture.mint.batch(),
@@ -2697,6 +3173,7 @@ fn no_transition_mutates_the_state_it_is_given() {
         },
     )
     .expect("stage");
+    let batch = expect_batch(&staged);
     assert_eq!(prepared_state, before_stage, "stage mutated its input");
 
     let before_cas = staged_state.clone();
@@ -2837,7 +3314,7 @@ fn batch_admission_order_does_not_depend_on_the_order_capsules_are_listed() {
         if !listed_forwards {
             capsules.reverse();
         }
-        let (staged, batch) = stage(
+        let (staged_state, staged) = stage(
             &state,
             &StageRequest {
                 batch_id: fixture.mint.batch(),
@@ -2848,7 +3325,8 @@ fn batch_admission_order_does_not_depend_on_the_order_capsules_are_listed() {
             },
         )
         .expect("stage");
-        let decisions: Vec<PublishedDecision> = staged
+        let batch = expect_batch(&staged);
+        let decisions: Vec<PublishedDecision> = staged_state
             .staged(batch)
             .expect("staged")
             .batch

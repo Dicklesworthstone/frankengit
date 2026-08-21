@@ -1129,7 +1129,7 @@ pub enum ObservedOutcome {
     DecidedRefuse(u16),
     /// The transaction was already terminal when decided.
     DecidedAlreadyTerminal,
-    /// A batch was staged and nothing became canonical.
+    /// A batch was staged, nothing was deferred, and nothing became canonical.
     Staged,
     /// A head compare-and-swap won.
     CasWon,
@@ -1141,6 +1141,15 @@ pub enum ObservedOutcome {
     ConfigurationWon,
     /// A configuration head transition lost.
     ConfigurationLost,
+    /// A capsule could not be decided and must be prepared again, with this
+    /// [`crate::transition::RepreparationReason`] code point. Not a decision.
+    DecidedRequiresRepreparation(u16),
+    /// A batch was staged and this many capsules were deferred for
+    /// re-preparation.
+    StagedWithDeferrals(u64),
+    /// No batch was staged because this many capsules all needed
+    /// re-preparation.
+    StagedNothing(u64),
     /// A cancellation was processed; the flags are whether the seal survives
     /// and whether the transaction is decided.
     Cancelled {
@@ -1172,7 +1181,19 @@ impl ObservedOutcome {
             ModelOutput::Decided(DecisionVerdict::AlreadyTerminal(_)) => {
                 Self::DecidedAlreadyTerminal
             }
-            ModelOutput::Staged(_) => Self::Staged,
+            ModelOutput::Decided(DecisionVerdict::RequiresRepreparation(reason)) => {
+                Self::DecidedRequiresRepreparation(reason.code_point())
+            }
+            ModelOutput::Staged(outcome) => {
+                let deferred = u64::try_from(outcome.deferred.len()).unwrap_or(u64::MAX);
+                if outcome.batch.is_none() {
+                    Self::StagedNothing(deferred)
+                } else if deferred == 0 {
+                    Self::Staged
+                } else {
+                    Self::StagedWithDeferrals(deferred)
+                }
+            }
             ModelOutput::HeadTransition(CasOutcome::Won { .. }) => Self::CasWon,
             ModelOutput::HeadTransition(CasOutcome::Lost { .. }) => Self::CasLost,
             ModelOutput::HeadTransition(CasOutcome::DurabilityUnsatisfied { .. }) => {
@@ -1203,7 +1224,10 @@ impl ObservedOutcome {
             Self::DecidedCommit => "decided_commit",
             Self::DecidedRefuse(_) => "decided_refuse",
             Self::DecidedAlreadyTerminal => "decided_already_terminal",
+            Self::DecidedRequiresRepreparation(_) => "decided_requires_repreparation",
             Self::Staged => "staged",
+            Self::StagedWithDeferrals(_) => "staged_with_deferrals",
+            Self::StagedNothing(_) => "staged_nothing",
             Self::CasWon => "cas_won",
             Self::CasLost => "cas_lost",
             Self::CasDurabilityUnsatisfied => "cas_durability_unsatisfied",
@@ -1239,6 +1263,18 @@ fn write_observed(out: &mut Encoder, observed: ObservedOutcome) {
         ObservedOutcome::CasDurabilityUnsatisfied => out.write_raw_byte(12),
         ObservedOutcome::ConfigurationWon => out.write_raw_byte(13),
         ObservedOutcome::ConfigurationLost => out.write_raw_byte(14),
+        ObservedOutcome::DecidedRequiresRepreparation(reason) => {
+            out.write_raw_byte(16);
+            out.write_scalar(reason);
+        }
+        ObservedOutcome::StagedWithDeferrals(deferred) => {
+            out.write_raw_byte(17);
+            out.write_scalar(deferred);
+        }
+        ObservedOutcome::StagedNothing(deferred) => {
+            out.write_raw_byte(18);
+            out.write_scalar(deferred);
+        }
         ObservedOutcome::Cancelled {
             seal_survives,
             decided,
@@ -1280,6 +1316,15 @@ fn read_observed(input: &mut Decoder<'_>) -> Result<ObservedOutcome, CodecRefusa
                 decided,
             })
         }
+        16 => Ok(ObservedOutcome::DecidedRequiresRepreparation(
+            input.read_scalar::<u16>("RepreparationReason")?,
+        )),
+        17 => Ok(ObservedOutcome::StagedWithDeferrals(
+            input.read_scalar::<u64>("deferred")?,
+        )),
+        18 => Ok(ObservedOutcome::StagedNothing(
+            input.read_scalar::<u64>("deferred")?,
+        )),
         other => malformed("ObservedOutcome", u64::from(other)),
     }
 }

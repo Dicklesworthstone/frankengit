@@ -29,6 +29,31 @@
 //! [`Property`] enumerates exactly the five of plan §40.2. They are checked on
 //! every reachable state, not only at the end of a path, because a violation
 //! that a later transition repairs is still a violation.
+//!
+//! ## Two things a clean verdict does not mean on its own
+//!
+//! **It could be vacuous.** A property whose subject never occurs in the
+//! explored space holds trivially: check "a merge publishes with its ref" over
+//! a space containing no merges and it passes without examining anything. So
+//! every reached state records which properties it *materially* exercised
+//! ([`CampaignReport::property_witnesses`]), the receipt carries those counts
+//! and the [`Coverage`] of the space beside the verdict, and
+//! [`CampaignReport::is_clean`] is false when any property has no witness.
+//!
+//! **The checker could be blind.** A walk that has never caught anything is
+//! not evidence that there is nothing to catch. [`PlantedDefect`] carries one
+//! deliberate model defect per property; [`run_with`] applies it to every state
+//! the walk reaches, and the campaign's own tests require that *every* planted
+//! instance is detected by the property it targets. A blind spot shows up as
+//! `defects_detected < defects_planted` rather than as a clean run.
+//!
+//! ## Non-claims
+//!
+//! This is `bounded_model` evidence about the reference model under the bounds
+//! in the receipt, and nothing wider. It is not a proof, it says nothing about
+//! any implementation until trace refinement (plan §40.5) connects one to this
+//! oracle, and the planted-defect mode establishes that the checks *can* fail —
+//! not that they would catch every defect.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -46,9 +71,12 @@ use fgit_types::vocabulary::{DecisionOutcome, MismatchPolicy};
 use crate::capsule::WitnessGranularity;
 use crate::harness::{IdentityMint, RequestBuilder, label};
 use crate::intent::{
-    DurabilityProfile, ForgeEventKind, IdempotencyKey, Intent, RefIntent, TransactionRequest,
+    DurabilityProfile, ForgeEntityId, ForgeEventKind, ForgeIntent, ForgeStreamId,
+    ForgeStreamPosition, IdempotencyKey, Intent, RefIntent, TransactionRequest,
 };
-use crate::machine::{CancellationPhase, CancellationRequest, ModelInput, ModelStep, step};
+use crate::machine::{
+    CancellationPhase, CancellationRequest, ModelInput, ModelOutput, ModelStep, step,
+};
 use crate::refs::ExpectedRefState;
 use crate::state::{
     GenesisConfiguration, ModelResult, PolicySnapshot, PrincipalCapabilities, QuarantinedObject,
@@ -56,7 +84,8 @@ use crate::state::{
 };
 use crate::trace::{TraceStep, encode_roots};
 use crate::transition::{
-    CasRequest, DecisionBodyIdentity, PrepareRequest, QuarantineRequest, SealRequest, StageRequest,
+    CasOutcome, CasRequest, DecisionBodyIdentity, PrepareRequest, QuarantineRequest, SealRequest,
+    StageRequest,
 };
 
 /// The declared bounds of one campaign.
@@ -195,15 +224,85 @@ pub struct CampaignReport {
     pub refused_transitions: usize,
     /// Whether the walk hit its own state ceiling before exhausting the space.
     pub truncated: bool,
+    /// How many reached states **materially exercised** each property.
+    ///
+    /// A property whose count is zero was checked over nothing: its verdict is
+    /// vacuously true and says nothing about the model. Listing the five
+    /// properties without this is how a receipt overstates itself, so the
+    /// counts travel with the verdict and
+    /// [`CampaignReport::vacuous_properties`] names any that are empty.
+    pub property_witnesses: BTreeMap<Property, usize>,
+    /// What the walk observed, so the shape of the explored space is on the
+    /// record rather than assumed.
+    pub coverage: Coverage,
+    /// The defect this run planted, when it was a self-test rather than a
+    /// campaign.
+    pub planted_defect: Option<PlantedDefect>,
+    /// How many reached states the planted defect could actually be applied to.
+    pub defects_planted: usize,
+    /// How many of those the property checks caught.
+    ///
+    /// `defects_detected < defects_planted` is a **blind spot**: a state was
+    /// corrupted in a way one of the five properties forbids and no property
+    /// noticed. That is the number the planted-defect test asserts on.
+    pub defects_detected: usize,
     /// Every violation found.
     pub violations: Vec<Violation>,
 }
 
+/// Events the walk actually reached.
+///
+/// These are **coverage**, not verdicts: they exist so a reader can tell
+/// whether a clean report means "the interesting cases all held" or "the
+/// interesting cases never happened".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Coverage {
+    /// The most terminal commits any single reached state held.
+    pub committed_decisions: usize,
+    /// The most terminal refusals any single reached state held.
+    pub refused_decisions: usize,
+    /// The most commit records carrying a merge event any state held.
+    pub forge_merge_commits: usize,
+    /// Batches that won a head compare-and-swap.
+    pub cas_wins: usize,
+    /// Batches that lost one.
+    pub cas_losses: usize,
+    /// Capsules staging handed back for re-preparation because their basis
+    /// moved.
+    pub deferred_repreparations: usize,
+    /// Cancellations processed.
+    pub cancellations: usize,
+}
+
 impl CampaignReport {
-    /// True when the bounded space was fully explored and no property failed.
+    /// True when the bounded space was fully explored, no property failed, and
+    /// **every** property was actually exercised.
+    ///
+    /// The last conjunct is the one that stops this from being a tautology: a
+    /// walk that reached no decision at all would satisfy the first two and
+    /// mean nothing.
     #[must_use]
-    pub const fn is_clean(&self) -> bool {
-        self.violations.is_empty() && !self.truncated
+    pub fn is_clean(&self) -> bool {
+        self.violations.is_empty() && !self.truncated && self.vacuous_properties().is_empty()
+    }
+
+    /// Properties no reached state exercised, in declaration order.
+    #[must_use]
+    pub fn vacuous_properties(&self) -> Vec<Property> {
+        Property::ALL
+            .iter()
+            .copied()
+            .filter(|property| self.witnesses(*property) == 0)
+            .collect()
+    }
+
+    /// How many reached states materially exercised `property`.
+    #[must_use]
+    pub fn witnesses(&self, property: Property) -> usize {
+        self.property_witnesses
+            .get(&property)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// One NDJSON record summarizing the run.
@@ -226,14 +325,54 @@ impl CampaignReport {
         out.push_str(",\"truncated\":");
         out.push_str(if self.truncated { "true" } else { "false" });
         push_num(&mut out, "violations", self.violations.len());
+        push_num(
+            &mut out,
+            "committed_decisions",
+            self.coverage.committed_decisions,
+        );
+        push_num(
+            &mut out,
+            "refused_decisions",
+            self.coverage.refused_decisions,
+        );
+        push_num(
+            &mut out,
+            "forge_merge_commits",
+            self.coverage.forge_merge_commits,
+        );
+        push_num(&mut out, "cas_wins", self.coverage.cas_wins);
+        push_num(&mut out, "cas_losses", self.coverage.cas_losses);
+        push_num(
+            &mut out,
+            "deferred_repreparations",
+            self.coverage.deferred_repreparations,
+        );
+        push_num(&mut out, "cancellations", self.coverage.cancellations);
+        push_num(
+            &mut out,
+            "vacuous_properties",
+            self.vacuous_properties().len(),
+        );
+
+        // Each property is reported with the number of states that actually
+        // exercised it. A name alone would let a vacuous check read as a
+        // verified one.
         out.push_str(",\"properties\":[");
         for (index, property) in Property::ALL.iter().enumerate() {
             if index > 0 {
                 out.push(',');
             }
-            out.push('"');
+            out.push_str("{\"name\":\"");
             out.push_str(property.as_str());
-            out.push('"');
+            out.push_str("\",\"witnesses\":");
+            out.push_str(&self.witnesses(*property).to_string());
+            out.push_str(",\"exercised\":");
+            out.push_str(if self.witnesses(*property) == 0 {
+                "false"
+            } else {
+                "true"
+            });
+            out.push('}');
         }
         out.push_str("]}");
         out
@@ -325,15 +464,43 @@ impl Universe {
             },
         ];
 
-        let targets = ["refs/heads/a", "refs/heads/b"];
+        // **Every transaction targets the same ref.** An earlier version of this
+        // universe gave each transaction its own ref, which made the whole
+        // space conflict-free: no capsule was ever superseded, no decision was
+        // ever a refusal, and the atomicity property was checked over an empty
+        // set of forge events. A campaign over a space where the interesting
+        // thing cannot happen reports "clean" for the wrong reason.
+        const TARGET: &str = "refs/heads/a";
+        let stream = ForgeStreamId::new(label("pulls"));
+        let pull_request = ForgeEntityId::new(label("pr-1"));
+
         let mut requests = Vec::with_capacity(bounds.transactions);
         let mut seals = Vec::with_capacity(bounds.transactions);
         let mut capsules = Vec::with_capacity(bounds.transactions);
         let mut bodies = BTreeMap::new();
 
         for index in 0..bounds.transactions {
-            let target = targets[index % targets.len()];
             let new = oid(u8::try_from(index % 2 + 1).unwrap_or(1));
+            // Odd-numbered transactions are pull-request merges: the forge
+            // event and the ref update it describes, in one sealed request.
+            // Without one of these in the space, `AtomicRefAndForgeEffects` is
+            // checked over nothing.
+            let mut intents = vec![Intent::Ref(RefIntent::Update {
+                name: ref_name(TARGET),
+                expected: ExpectedRefState::Absent,
+                new,
+                force: false,
+            })];
+            if index % 2 == 1 {
+                intents.push(Intent::Forge(ForgeIntent {
+                    stream,
+                    expected_position: ForgeStreamPosition::GENESIS,
+                    event: ForgeEventKind::PullRequestMerged {
+                        pull_request,
+                        target: ref_name(TARGET),
+                    },
+                }));
+            }
             let request = RequestBuilder::new(
                 tenant,
                 repository,
@@ -341,15 +508,7 @@ impl Universe {
                 schema(),
                 IdempotencyKey::new(label(&format!("k{index}"))),
             )
-            .statement(
-                MismatchPolicy::TxnAbort,
-                vec![Intent::Ref(RefIntent::Update {
-                    name: ref_name(target),
-                    expected: ExpectedRefState::Absent,
-                    new,
-                    force: false,
-                })],
-            )
+            .statement(MismatchPolicy::TxnAbort, intents)
             .promising(new)
             .build(&mut mint);
             bodies.insert(
@@ -546,9 +705,14 @@ pub fn state_key(state: &RepositoryState) -> Result<Vec<u8>, CodecRefusal> {
     // even though the head does not publish it. Omitting any of these would
     // merge two genuinely different states and could hide a reachable
     // violation, so they are part of the key rather than an optimization.
+    // The seal carries its spent re-preparation budget, which decides whether a
+    // superseded basis is another attempt or a terminal refusal, so two states
+    // that differ only in that counter are different states.
     let sealed = state.sealed_transactions().copied().collect::<Vec<_>>();
     out.write_sequence("sealed", &sealed, |encoder, tx_id| {
-        encoder.write_internal_object_id(tx_id.as_internal_object_id())
+        encoder.write_internal_object_id(tx_id.as_internal_object_id())?;
+        encoder.write_scalar(state.preparations_of(*tx_id));
+        Ok(())
     })?;
     let capsules = state.held_capsules().copied().collect::<Vec<_>>();
     out.write_sequence("capsules", &capsules, |encoder, capsule| {
@@ -580,14 +744,189 @@ pub fn state_key(state: &RepositoryState) -> Result<Vec<u8>, CodecRefusal> {
 /// shortest one and a counterexample needs no separate shrinking pass.
 #[must_use]
 pub fn run(universe: &Universe) -> CampaignReport {
+    run_with(universe, None)
+}
+
+/// A model defect planted on purpose, to prove the walk can find one.
+///
+/// A campaign that has never caught anything is not evidence that there is
+/// nothing to catch. Each variant corrupts a state the walk has already
+/// reached, in exactly the way one of the five properties forbids, so
+/// [`run_with`] must report *that* property with a replayable path.
+///
+/// This mutates a state the walker produced; it cannot reach the transitions
+/// themselves, and there is deliberately no variant that makes a property
+/// easier to satisfy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PlantedDefect {
+    /// Record a second, different terminal decision for a transaction that
+    /// already has one.
+    SecondTerminalDecision,
+    /// Leave a published decision out of the outcome index.
+    OutcomeIndexOmission,
+    /// Point a canonical ref at an object that never left quarantine.
+    QuarantineEscape,
+    /// Publish a merge event whose ref effect has been stripped out.
+    MergeWithoutItsRefEffect,
+    /// Roll the head generation backwards.
+    HeadGenerationRollback,
+    /// Drop the most recent decision, shrinking committed history.
+    ///
+    /// Deliberately the *last* one: the surviving prefix is still gap-free and
+    /// still agrees with the outcome index, so this passes properties one
+    /// through four and reaches property five. A defect that trips an earlier
+    /// check would never exercise the one it is supposed to.
+    DecisionHistoryShrank,
+}
+
+impl PlantedDefect {
+    /// Every planted defect, one per property.
+    pub const ALL: &'static [Self] = &[
+        Self::SecondTerminalDecision,
+        Self::OutcomeIndexOmission,
+        Self::QuarantineEscape,
+        Self::MergeWithoutItsRefEffect,
+        Self::HeadGenerationRollback,
+        Self::DecisionHistoryShrank,
+    ];
+
+    /// The property this defect is designed to violate.
+    #[must_use]
+    pub const fn violates(self) -> Property {
+        match self {
+            Self::SecondTerminalDecision | Self::OutcomeIndexOmission => {
+                Property::UniqueTerminalOutcome
+            }
+            Self::QuarantineEscape => Property::NoRootOmission,
+            Self::MergeWithoutItsRefEffect => Property::AtomicRefAndForgeEffects,
+            Self::HeadGenerationRollback => Property::HeadChainContinuity,
+            Self::DecisionHistoryShrank => Property::NoSilentAntiRollback,
+        }
+    }
+
+    /// Stable machine-readable name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SecondTerminalDecision => "second_terminal_decision",
+            Self::OutcomeIndexOmission => "outcome_index_omission",
+            Self::QuarantineEscape => "quarantine_escape",
+            Self::MergeWithoutItsRefEffect => "merge_without_its_ref_effect",
+            Self::HeadGenerationRollback => "head_generation_rollback",
+            Self::DecisionHistoryShrank => "decision_history_shrank",
+        }
+    }
+
+    /// Corrupts `state`, returning whether the defect could be applied.
+    ///
+    /// `false` means this transition had no subject to corrupt — no decision,
+    /// no merge record, a genesis generation, or a change that cannot be made
+    /// to look like a rollback relative to `previous`. Returning `false` there
+    /// is what keeps the self-test honest: a plant that did not actually
+    /// create a violation must not be counted as one the checks missed.
+    fn plant(self, previous: &RepositoryState, state: &mut RepositoryState) -> bool {
+        match self {
+            Self::SecondTerminalDecision => {
+                let Some(first) = state.decisions.first().cloned() else {
+                    return false;
+                };
+                state.decisions.push(first);
+                true
+            }
+            Self::OutcomeIndexOmission => {
+                let Some(tx_id) = state.decisions.first().map(|decision| decision.tx_id) else {
+                    return false;
+                };
+                state.head.body.roots.outcome_index.remove(&tx_id).is_some()
+            }
+            Self::QuarantineEscape => {
+                // Only an object that is still *only* in quarantine is an
+                // escape. One that has already been admitted by a winning
+                // compare-and-swap is legitimately referenceable, and planting
+                // it would be planting nothing — the check would be right to
+                // stay silent, and counting that as a miss would turn this
+                // self-test into a false alarm.
+                let Some(escaped) = state
+                    .quarantine
+                    .values()
+                    .flat_map(BTreeMap::keys)
+                    .find(|object| !state.objects.contains_key(*object))
+                    .copied()
+                else {
+                    return false;
+                };
+                state
+                    .head
+                    .body
+                    .roots
+                    .refs
+                    .insert(ref_name("refs/heads/escaped"), escaped);
+                true
+            }
+            Self::MergeWithoutItsRefEffect => {
+                let mut planted = false;
+                for record in &mut state.commits {
+                    let targets: Vec<RefName> = record
+                        .effects
+                        .forge
+                        .values()
+                        .flatten()
+                        .filter_map(|event| match event {
+                            ForgeEventKind::PullRequestMerged { target, .. } => {
+                                Some(target.clone())
+                            }
+                            ForgeEventKind::PullRequestClosed { .. }
+                            | ForgeEventKind::PullRequestOpened { .. } => None,
+                        })
+                        .collect();
+                    for target in targets {
+                        planted |= record.effects.refs.remove(&target).is_some();
+                    }
+                }
+                planted
+            }
+            Self::HeadGenerationRollback => {
+                if state.head.body.generation == HeadGeneration::FIRST {
+                    return false;
+                }
+                state.head.body.generation = HeadGeneration::FIRST;
+                true
+            }
+            Self::DecisionHistoryShrank => {
+                // History has to end up strictly shorter than it was *before*
+                // the transition. Dropping one decision from a transition that
+                // published two leaves history longer than it started, which
+                // is not a rollback and must not be counted as a missed one.
+                while state.decisions.len() >= previous.decisions().len() {
+                    if state.decisions.pop().is_none() {
+                        break;
+                    }
+                }
+                state.decisions.len() < previous.decisions().len()
+            }
+        }
+    }
+}
+
+/// Runs the campaign, optionally planting `defect` in every state the walk
+/// reaches.
+///
+/// With `None` this is [`run`]. With a defect it is the campaign's own
+/// self-test: the walk must report the property that defect violates.
+#[must_use]
+pub fn run_with(universe: &Universe, defect: Option<PlantedDefect>) -> CampaignReport {
     let bounds = universe.bounds();
     let genesis = RepositoryState::genesis(universe.genesis().clone());
 
     let mut seen: BTreeSet<Vec<u8>> = BTreeSet::new();
     let mut queue: VecDeque<(RepositoryState, Vec<ModelInput>)> = VecDeque::new();
     let mut violations = Vec::new();
+    let mut witnesses: BTreeMap<Property, usize> = BTreeMap::new();
+    let mut coverage = Coverage::default();
     let mut transitions = 0_usize;
     let mut refused = 0_usize;
+    let mut defects_planted = 0_usize;
+    let mut defects_detected = 0_usize;
     let mut truncated = false;
 
     if let Ok(key) = state_key(&genesis) {
@@ -601,12 +940,20 @@ pub fn run(universe: &Universe) -> CampaignReport {
         }
         for input in universe.inputs(&state) {
             transitions += 1;
-            let Ok(ModelStep { next, .. }) = step(&state, &input) else {
+            let Ok(ModelStep { next, output }) = step(&state, &input) else {
                 // A typed refusal of a structurally impossible call. Expected,
                 // and counted as evidence that illegal inputs were offered.
                 refused += 1;
                 continue;
             };
+
+            // Folded **before** deduplication. A lost compare-and-swap and a
+            // staging that defers every capsule both leave the state
+            // unchanged, so a walk that only counted new states would report
+            // zero of each while exploring them constantly — which is exactly
+            // how this campaign came to claim it had explored races it never
+            // observed. Coverage counts observed transitions.
+            observe(&mut coverage, &output, &next);
 
             let Ok(key) = state_key(&next) else {
                 continue;
@@ -618,7 +965,30 @@ pub fn run(universe: &Universe) -> CampaignReport {
             let mut next_path = path.clone();
             next_path.push(input);
 
-            if let Some(violation) = check(&state, &next, &next_path) {
+            // The walk always explores the model's own successor; only a
+            // separate copy carries a planted defect, so one plant cannot
+            // cascade into states the model would never produce. Without a
+            // defect there is no copy at all.
+            let mut corrupted = None;
+            if let Some(defect) = defect {
+                let mut copy = next.clone();
+                if defect.plant(&state, &mut copy) {
+                    defects_planted += 1;
+                    corrupted = Some(copy);
+                }
+            }
+            let checked = corrupted.as_ref().unwrap_or(&next);
+
+            // Coverage describes the real model, so it is taken from the
+            // unplanted successor.
+            for property in exercised(&state, &next) {
+                *witnesses.entry(property).or_default() += 1;
+            }
+
+            if let Some(violation) = check(&state, checked, &next_path) {
+                if corrupted.is_some() {
+                    defects_detected += 1;
+                }
                 violations.push(violation);
             }
 
@@ -639,8 +1009,98 @@ pub fn run(universe: &Universe) -> CampaignReport {
         transitions_explored: transitions,
         refused_transitions: refused,
         truncated,
+        property_witnesses: witnesses,
+        coverage,
+        planted_defect: defect,
+        defects_planted,
+        defects_detected,
         violations,
     }
+}
+
+/// Folds one observed transition into the coverage counters.
+fn observe(coverage: &mut Coverage, output: &ModelOutput, next: &RepositoryState) {
+    match output {
+        ModelOutput::HeadTransition(CasOutcome::Won { .. }) => coverage.cas_wins += 1,
+        ModelOutput::HeadTransition(CasOutcome::Lost { .. }) => coverage.cas_losses += 1,
+        ModelOutput::Staged(staged) => {
+            coverage.deferred_repreparations += staged.deferred.len();
+        }
+        ModelOutput::Cancelled(_) => coverage.cancellations += 1,
+        ModelOutput::Sealed(_)
+        | ModelOutput::ObjectsQuarantined { .. }
+        | ModelOutput::Prepared(_)
+        | ModelOutput::Decided(_)
+        | ModelOutput::HeadTransition(CasOutcome::DurabilityUnsatisfied { .. })
+        | ModelOutput::ConfigurationTransition(_) => {}
+    }
+
+    let committed = next
+        .decisions()
+        .iter()
+        .filter(|decision| matches!(decision.outcome, DecisionOutcome::Committed { .. }))
+        .count();
+    let refused = next.decisions().len() - committed;
+    let merges = next
+        .commits()
+        .iter()
+        .filter(|record| {
+            record
+                .effects
+                .forge
+                .values()
+                .flatten()
+                .any(|event| matches!(event, ForgeEventKind::PullRequestMerged { .. }))
+        })
+        .count();
+    coverage.committed_decisions = coverage.committed_decisions.max(committed);
+    coverage.refused_decisions = coverage.refused_decisions.max(refused);
+    coverage.forge_merge_commits = coverage.forge_merge_commits.max(merges);
+}
+
+/// Which properties one reached state materially exercises.
+///
+/// "Materially" means the check had something to look at: a property whose
+/// subject is absent holds vacuously, and counting that as coverage is how a
+/// bounded-model receipt overstates what it verified.
+fn exercised(previous: &RepositoryState, state: &RepositoryState) -> Vec<Property> {
+    let mut out = Vec::with_capacity(Property::ALL.len());
+
+    // Something was decided, so "at most one terminal decision" has a subject.
+    if !state.decisions().is_empty() {
+        out.push(Property::UniqueTerminalOutcome);
+    }
+    // A genesis head has no predecessor, so there is no chain link to check.
+    if state.head().body.predecessor.is_some() {
+        out.push(Property::HeadChainContinuity);
+    }
+    // The atomicity property reads merge events out of committed records. With
+    // no merge event committed there is nothing to be atomic about.
+    if state.commits().iter().any(|record| {
+        record
+            .effects
+            .forge
+            .values()
+            .flatten()
+            .any(|event| matches!(event, ForgeEventKind::PullRequestMerged { .. }))
+    }) {
+        out.push(Property::AtomicRefAndForgeEffects);
+    }
+    // Root omission needs a root to omit and something in quarantine that
+    // could have escaped into it.
+    if !state.commits().is_empty() || state.quarantined_transactions().next().is_some() {
+        out.push(Property::NoRootOmission);
+    }
+    // Anti-rollback is only meaningful across a transition that moved history
+    // forward; comparing a state to itself proves nothing.
+    if state.head().body.generation > previous.head().body.generation
+        || state.decisions().len() > previous.decisions().len()
+        || state.commits().len() > previous.commits().len()
+    {
+        out.push(Property::NoSilentAntiRollback);
+    }
+
+    out
 }
 
 /// Checks all five properties on one reached state.
@@ -788,7 +1248,10 @@ pub fn committed_transactions(state: &RepositoryState) -> Vec<TxId> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Bounds, CampaignReport, Property, Universe, run, state_key};
+    use super::{
+        Bounds, CampaignReport, Coverage, PlantedDefect, Property, Universe, run, run_with,
+        state_key,
+    };
     use crate::state::RepositoryState;
 
     #[test]
@@ -916,6 +1379,14 @@ mod tests {
             transitions_explored: 1,
             refused_transitions: 0,
             truncated: false,
+            property_witnesses: Property::ALL
+                .iter()
+                .map(|property| (*property, 1))
+                .collect(),
+            coverage: Coverage::default(),
+            planted_defect: None,
+            defects_planted: 0,
+            defects_detected: 0,
             violations: Vec::new(),
         };
         assert!(report.is_clean());
@@ -925,5 +1396,187 @@ mod tests {
             path: Vec::new(),
         });
         assert!(!report.is_clean());
+    }
+
+    // -----------------------------------------------------------------------
+    // Non-vacuity: the space contains the cases the properties are about
+    // -----------------------------------------------------------------------
+
+    /// The defect that reopened this bead: the universe used to give every
+    /// transaction its own ref, so nothing ever conflicted, no decision was
+    /// ever a refusal, and `AtomicRefAndForgeEffects` was checked over an
+    /// empty set while still being listed in the receipt as a property that
+    /// held.
+    #[test]
+    fn every_declared_property_is_exercised_by_a_reached_state() {
+        let report = run(&Universe::new(Bounds::DEFAULT));
+        assert_eq!(
+            report.vacuous_properties(),
+            Vec::new(),
+            "these properties were checked over nothing, so their verdict is              vacuous: {:?}",
+            report
+                .vacuous_properties()
+                .iter()
+                .map(|property| property.as_str())
+                .collect::<Vec<_>>()
+        );
+        for property in Property::ALL {
+            assert!(
+                report.witnesses(*property) > 0,
+                "{} has no witness",
+                property.as_str()
+            );
+        }
+    }
+
+    /// The interesting cases have to be *reachable*, not merely permitted by
+    /// the bounds. Each of these was zero in the universe this bead reopened
+    /// over.
+    #[test]
+    fn the_explored_space_contains_conflicts_refusals_merges_and_lost_races() {
+        let report = run(&Universe::new(Bounds::DEFAULT));
+        let coverage = report.coverage;
+        assert!(
+            coverage.committed_decisions > 0,
+            "nothing ever committed: {coverage:?}"
+        );
+        assert!(
+            coverage.refused_decisions > 0,
+            "no decision was ever a refusal, so the refusal path is untested              by this campaign: {coverage:?}"
+        );
+        assert!(
+            coverage.forge_merge_commits > 0,
+            "no merge event was ever committed, so the atomicity property is              vacuous: {coverage:?}"
+        );
+        assert!(
+            coverage.cas_wins > 0,
+            "no batch ever won the head: {coverage:?}"
+        );
+        assert!(
+            coverage.cas_losses > 0,
+            "no batch ever lost the head, so the lost-race path is unexplored:              {coverage:?}"
+        );
+        assert!(
+            coverage.deferred_repreparations > 0,
+            "no capsule was ever superseded, so the space cannot conflict:              {coverage:?}"
+        );
+        assert!(
+            coverage.cancellations > 0,
+            "cancellation was never reached: {coverage:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The walker can detect a defect
+    // -----------------------------------------------------------------------
+
+    /// A campaign that has never caught anything is not evidence that there is
+    /// nothing to catch. Each planted defect corrupts a reached state exactly
+    /// as one of the five properties forbids; the walk must find **every**
+    /// instance, not merely one.
+    #[test]
+    fn every_planted_defect_is_detected_wherever_it_is_planted() {
+        let universe = Universe::new(Bounds::DEFAULT);
+        for defect in PlantedDefect::ALL {
+            let report = run_with(&universe, Some(*defect));
+            assert!(
+                report.defects_planted > 0,
+                "{} was never applicable to any reached state, so this proves                  nothing",
+                defect.as_str()
+            );
+            assert_eq!(
+                report.defects_detected,
+                report.defects_planted,
+                "{} was planted in {} states and caught in only {} — the                  difference is a blind spot in the property checks",
+                defect.as_str(),
+                report.defects_planted,
+                report.defects_detected
+            );
+            assert!(
+                report
+                    .violations
+                    .iter()
+                    .any(|violation| violation.property == defect.violates()),
+                "{} was detected, but never by {}, which is the property it                  violates",
+                defect.as_str(),
+                defect.violates().as_str()
+            );
+        }
+    }
+
+    /// Every property has at least one defect that targets it, so a property
+    /// cannot be listed in the receipt without a demonstration that its check
+    /// can fail.
+    #[test]
+    fn every_property_has_a_planted_defect_that_exercises_its_check() {
+        for property in Property::ALL {
+            assert!(
+                PlantedDefect::ALL
+                    .iter()
+                    .any(|defect| defect.violates() == *property),
+                "no planted defect targets {}, so nothing shows its check can                  fail",
+                property.as_str()
+            );
+        }
+    }
+
+    /// A counterexample must be replayable, not just describable: the path is
+    /// a real input sequence that reproduces the state.
+    #[test]
+    fn a_planted_defect_yields_a_replayable_counterexample() {
+        let universe = Universe::new(Bounds::DEFAULT);
+        let report = run_with(&universe, Some(PlantedDefect::SecondTerminalDecision));
+        let violation = report
+            .violations
+            .first()
+            .expect("the planted defect must produce a violation");
+        assert!(
+            !violation.path.is_empty(),
+            "a counterexample with an empty path cannot be replayed"
+        );
+        let steps = violation
+            .to_trace_steps(universe.genesis())
+            .expect("the counterexample path must replay through the model");
+        assert_eq!(steps.len(), violation.path.len());
+    }
+
+    /// Planting must not change what the walk explores, or a self-test run
+    /// would be measuring a different space than the campaign it vouches for.
+    #[test]
+    fn planting_a_defect_does_not_change_the_explored_space() {
+        let universe = Universe::new(Bounds::DEFAULT);
+        let clean = run(&universe);
+        let planted = run_with(&universe, Some(PlantedDefect::HeadGenerationRollback));
+        assert_eq!(clean.states_explored, planted.states_explored);
+        assert_eq!(clean.transitions_explored, planted.transitions_explored);
+        assert_eq!(clean.refused_transitions, planted.refused_transitions);
+        assert_eq!(clean.property_witnesses, planted.property_witnesses);
+        assert!(
+            clean.violations.is_empty(),
+            "the unplanted campaign must be clean: {:?}",
+            clean.violations
+        );
+    }
+
+    /// The receipt must say how much each property was exercised, not merely
+    /// name it.
+    #[test]
+    fn the_receipt_reports_witness_counts_and_coverage() {
+        let report = run(&Universe::new(Bounds::DEFAULT));
+        let line = report.to_ndjson();
+        for key in [
+            "\"vacuous_properties\":0",
+            "\"refused_decisions\":",
+            "\"forge_merge_commits\":",
+            "\"cas_losses\":",
+            "\"deferred_repreparations\":",
+            "\"exercised\":true",
+        ] {
+            assert!(line.contains(key), "missing {key} in {line}");
+        }
+        assert!(
+            !line.contains("\"exercised\":false"),
+            "a property in the receipt was never exercised: {line}"
+        );
     }
 }

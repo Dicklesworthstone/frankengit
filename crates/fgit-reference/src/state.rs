@@ -432,6 +432,16 @@ pub struct SealRecord {
     pub seal_id: TransactionSealId,
     /// The stable fields a retry must reproduce exactly.
     pub fields: SealFields,
+    /// How many capsules have been prepared for this sealed request.
+    ///
+    /// §5.2 lets a compare-and-exchange loser re-prepare the **same** sealed
+    /// request, so this counter never changes [`SealRecord::fields`] and never
+    /// creates a second logical mutation. It exists because that permission
+    /// must be *bounded*: §16.5's fairness obligation is that a transaction
+    /// cannot be retried forever, so once the budget in
+    /// [`crate::transition::REPREPARATION_BUDGET`] is spent, a capsule that is
+    /// still stale becomes a terminal refusal instead of another attempt.
+    pub preparations: u32,
 }
 
 /// An object whose identity has been verified and which canonical roots may
@@ -751,6 +761,12 @@ impl RepositoryState {
     #[must_use]
     pub fn is_terminal(&self, tx_id: TxId) -> bool {
         self.outcome_of(tx_id).is_some()
+    }
+
+    /// How many capsules have been prepared for `tx_id`, zero when unsealed.
+    #[must_use]
+    pub fn preparations_of(&self, tx_id: TxId) -> u32 {
+        self.seals.get(&tx_id).map_or(0, |seal| seal.preparations)
     }
 
     /// The seal for one transaction, if it has been sealed.

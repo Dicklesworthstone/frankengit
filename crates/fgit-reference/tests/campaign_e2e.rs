@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use fgit_reference::campaign::{Bounds, Property, Universe, run};
+use fgit_reference::campaign::{Bounds, PlantedDefect, Property, Universe, run, run_with};
 
 /// Where the suite asks for the receipt.
 const ARTIFACT_DIR: &str = "FGIT_REFERENCE_CAMPAIGN_ARTIFACT_DIR";
@@ -94,4 +94,54 @@ fn model_campaign() {
          established that illegal calls fail closed"
     );
     assert_eq!(Property::ALL.len(), 5);
+
+    // Naming five properties is not checking five properties. A property whose
+    // subject never occurs holds vacuously, and a receipt that lists it anyway
+    // overstates what the run verified.
+    assert_eq!(
+        report.vacuous_properties(),
+        Vec::new(),
+        "these properties were checked over nothing: {:?}",
+        report
+            .vacuous_properties()
+            .iter()
+            .map(|property| property.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // The space must contain the cases the properties are about.
+    let coverage = report.coverage;
+    assert!(
+        coverage.committed_decisions > 0 && coverage.refused_decisions > 0,
+        "both terminal outcomes must be reachable: {coverage:?}"
+    );
+    assert!(
+        coverage.forge_merge_commits > 0,
+        "no merge event was ever committed, so the atomicity property has no \
+         subject: {coverage:?}"
+    );
+    assert!(
+        coverage.cas_losses > 0 && coverage.deferred_repreparations > 0,
+        "no race was ever lost, so the space cannot conflict: {coverage:?}"
+    );
+
+    // The walker's ability to detect is asserted where the planted defects
+    // live, in the crate's unit tests; this worker asserts only that the
+    // self-test mode is wired and applicable to this universe.
+    for defect in PlantedDefect::ALL {
+        let planted = run_with(&universe, Some(*defect));
+        assert!(
+            planted.defects_planted > 0,
+            "{} was never applicable in these bounds",
+            defect.as_str()
+        );
+        assert_eq!(
+            planted.defects_detected,
+            planted.defects_planted,
+            "{} was planted {} times and caught {} times",
+            defect.as_str(),
+            planted.defects_planted,
+            planted.defects_detected
+        );
+    }
 }

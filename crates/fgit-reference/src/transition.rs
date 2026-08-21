@@ -172,6 +172,7 @@ pub fn seal(
         SealRecord {
             seal_id: input.seal_id,
             fields,
+            preparations: 0,
         },
     );
     next.idempotency_index
@@ -271,6 +272,13 @@ pub fn prepare(
     let mut next = state.clone();
     next.identities.introduce_capsule(input.capsule_id)?;
     next.capsules.insert(input.capsule_id, capsule);
+    // Charge the attempt against the sealed request's bounded re-preparation
+    // budget. The seal's identity fields are untouched: §5.2 permits re-
+    // preparing the same sealed request, and §16.5 requires that permission to
+    // be finite.
+    if let Some(record) = next.seals.get_mut(&request.tx_id) {
+        record.preparations = record.preparations.saturating_add(1);
+    }
     Ok((next, input.capsule_id))
 }
 
@@ -653,6 +661,67 @@ fn build_witness(
     }
 }
 
+/// How many capsules one sealed request may have prepared for it.
+///
+/// §5.2 lets a compare-and-exchange loser "reuse/revalidate/refine/reprepare
+/// without changing the sealed request", so losing a race must not be terminal.
+/// §16.5 requires that permission to be bounded, because an unbounded retry is
+/// a livelock, not fairness. So the first
+/// `REPREPARATION_BUDGET` preparations of a sealed request may be superseded
+/// and asked to try again; a capsule that is still stale once the budget is
+/// spent is refused terminally, with the stale-basis or policy-epoch code that
+/// says why.
+pub const REPREPARATION_BUDGET: u32 = 4;
+
+/// Why a capsule must go back for preparation instead of being decided.
+///
+/// Both reasons are **non-terminal**. §10 step 19 requires a losing attempt to
+/// "deterministically preserve, refine, rebase, or re-evaluate the same sealed
+/// request", and `AGENTS.md` §5.2 says CAS losers "reuse/revalidate/refine/
+/// reprepare without changing the sealed request". A superseded basis is a
+/// race, not a verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RepreparationReason {
+    /// Something the capsule read has moved since it was prepared.
+    BasisSuperseded,
+    /// The pinned policy epoch moved, so the capsule must be re-evaluated
+    /// against the new policy snapshot (§15.9).
+    PolicyEpochSuperseded,
+}
+
+impl RepreparationReason {
+    /// Every reason, for exhaustiveness in tests and receipts.
+    pub const ALL: &'static [Self] = &[Self::BasisSuperseded, Self::PolicyEpochSuperseded];
+
+    /// Stable machine-readable name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BasisSuperseded => "basis_superseded",
+            Self::PolicyEpochSuperseded => "policy_epoch_superseded",
+        }
+    }
+
+    /// Stable code point, for trace encoding.
+    #[must_use]
+    pub const fn code_point(self) -> u16 {
+        match self {
+            Self::BasisSuperseded => 1,
+            Self::PolicyEpochSuperseded => 2,
+        }
+    }
+
+    /// The reason for a code point, if it names one.
+    #[must_use]
+    pub const fn from_code_point(point: u16) -> Option<Self> {
+        match point {
+            1 => Some(Self::BasisSuperseded),
+            2 => Some(Self::PolicyEpochSuperseded),
+            _ => None,
+        }
+    }
+}
+
 /// What deciding one prepared capsule against the current head concluded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecisionVerdict {
@@ -663,6 +732,14 @@ pub enum DecisionVerdict {
     Commit(NetEffects),
     /// The capsule would be refused with this terminal code.
     Refuse(RefusalCode),
+    /// The capsule cannot be decided at all and must be prepared again.
+    ///
+    /// **Not a decision.** It consumes no decision sequence, writes nothing to
+    /// the outcome index, and leaves the sealed transaction retryable. Turning
+    /// this into a terminal refusal — which this model previously did — lets a
+    /// single lost race permanently refuse a request the specification says
+    /// must be retried.
+    RequiresRepreparation(RepreparationReason),
 }
 
 /// Revalidates a capsule against a set of roots and concludes.
@@ -686,17 +763,30 @@ pub fn decide_against(
             // §15.9 pins one policy epoch per attempt. A superseded epoch is
             // reported as its own dimension rather than folded into a stale
             // basis, because the remedy differs: re-prepare under the new
-            // policy, not merely rebase onto the new roots.
+            // policy rather than merely rebase onto the new roots. Neither is
+            // terminal — see `RepreparationReason`.
+            // The budget is spent when this capsule is the last preparation the
+            // sealed request is entitled to; only then is a stale basis
+            // terminal.
+            let exhausted = state.preparations_of(capsule.tx_id) >= REPREPARATION_BUDGET;
             if capsule.witness.policy_epoch != policy_epoch {
-                return DecisionVerdict::Refuse(RefusalCode::PolicyEpochSuperseded);
+                return if exhausted {
+                    DecisionVerdict::Refuse(RefusalCode::PolicyEpochSuperseded)
+                } else {
+                    DecisionVerdict::RequiresRepreparation(
+                        RepreparationReason::PolicyEpochSuperseded,
+                    )
+                };
             }
             if capsule
                 .witness
                 .is_reusable_against(roots, generation, policy_epoch)
             {
                 DecisionVerdict::Commit(effects.clone())
-            } else {
+            } else if exhausted {
                 DecisionVerdict::Refuse(RefusalCode::BasisCapsuleNotReusable)
+            } else {
+                DecisionVerdict::RequiresRepreparation(RepreparationReason::BasisSuperseded)
             }
         }
     }
@@ -741,6 +831,27 @@ pub struct StageRequest {
     pub durability_satisfied: bool,
 }
 
+/// What staging produced.
+///
+/// A batch is `None` when every selected capsule needed re-preparation. That is
+/// an ordinary outcome of a lost race, not a failure: nothing was decided, so
+/// there is nothing to publish and every sealed request stays retryable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StageOutcome {
+    /// The staged batch, when at least one capsule could be decided.
+    pub batch: Option<RepositoryDecisionBatchId>,
+    /// Capsules that must be prepared again, with the reason.
+    pub deferred: Vec<(TxId, RepreparationReason)>,
+}
+
+impl StageOutcome {
+    /// True when a batch was staged.
+    #[must_use]
+    pub const fn staged_anything(&self) -> bool {
+        self.batch.is_some()
+    }
+}
+
 /// Stages one decision batch and its candidate head.
 ///
 /// §10 steps 13 through 15. Nothing here is canonical: the batch and the
@@ -755,10 +866,20 @@ pub struct StageRequest {
 /// in ascending `TxId` order**, regardless of the order the caller listed them.
 /// The model therefore produces the same batch for any permutation of the same
 /// capsule set, which is a property a test can check.
+///
+/// ## A moved basis is deferred, never decided
+///
+/// A capsule whose basis or policy epoch was superseded is **left out of the
+/// batch** and reported in [`StageOutcome::deferred`]. It consumes no decision
+/// sequence and writes nothing to the outcome index, so its sealed request is
+/// still retryable — §5.2's "CAS losers reuse/revalidate/refine/reprepare
+/// without changing the sealed request". Only once the sealed request has spent
+/// [`REPREPARATION_BUDGET`] preparations does `decide_against` return a terminal
+/// refusal, which this function then batches like any other.
 pub fn stage(
     state: &RepositoryState,
     input: &StageRequest,
-) -> ModelResult<(RepositoryState, RepositoryDecisionBatchId)> {
+) -> ModelResult<(RepositoryState, StageOutcome)> {
     let mut selected = Vec::with_capacity(input.capsules.len());
     for id in &input.capsules {
         let Some(capsule) = state.capsules.get(id) else {
@@ -781,6 +902,7 @@ pub fn stage(
     );
     let mut scratch = head.body.roots.clone();
     let mut committed_transactions = Vec::new();
+    let mut deferred: Vec<(TxId, RepreparationReason)> = Vec::new();
 
     for capsule in selected {
         if let Some(existing) = state.outcome_of(capsule.tx_id) {
@@ -806,6 +928,11 @@ pub fn stage(
                     tx_id: capsule.tx_id,
                     existing,
                 }));
+            }
+            DecisionVerdict::RequiresRepreparation(reason) => {
+                // Not batched and not decided: the sealed request stays
+                // retryable and its owner re-prepares against the new basis.
+                deferred.push((capsule.tx_id, reason));
             }
             DecisionVerdict::Refuse(code) => {
                 let outcome = DecisionOutcome::Refused {
@@ -843,6 +970,17 @@ pub fn stage(
         }
     }
 
+    // Nothing decidable: stage no batch at all rather than an empty one.
+    if draft.is_empty() {
+        return Ok((
+            state.clone(),
+            StageOutcome {
+                batch: None,
+                deferred,
+            },
+        ));
+    }
+
     let policy_epoch = head.body.configuration.epoch;
     let batch = draft.finish(scratch, policy_epoch)?;
     let candidate_head = build_candidate_head(head, &batch, input.candidate_head_id)?;
@@ -863,7 +1001,13 @@ pub fn stage(
             durability_satisfied: input.durability_satisfied,
         },
     );
-    Ok((next, input.batch_id))
+    Ok((
+        next,
+        StageOutcome {
+            batch: Some(input.batch_id),
+            deferred,
+        },
+    ))
 }
 
 /// The strictest durability profile among the capsules sharing a batch.

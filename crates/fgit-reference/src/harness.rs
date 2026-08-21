@@ -43,8 +43,9 @@ use crate::capsule::WitnessGranularity;
 use crate::intent::{DurabilityProfile, IdempotencyKey, Intent, Statement, TransactionRequest};
 use crate::state::{ModelResult, QuarantinedObject, RepositoryState};
 use crate::transition::{
-    CasOutcome, CasRequest, DecisionBodyIdentity, PrepareRequest, QuarantineRequest, SealOutcome,
-    SealRequest, StageRequest, compare_and_swap, prepare, seal, stage, stage_objects,
+    CasOutcome, CasRequest, DecisionBodyIdentity, PrepareRequest, QuarantineRequest,
+    RepreparationReason, SealOutcome, SealRequest, StageRequest, compare_and_swap, prepare, seal,
+    stage, stage_objects,
 };
 
 /// The digest algorithm slot minted identities are stamped with.
@@ -347,6 +348,12 @@ pub struct PublishReport {
     pub capsule: Option<PreparedTxnCapsuleId>,
     /// The staged batch, when staging ran.
     pub batch: Option<RepositoryDecisionBatchId>,
+    /// Capsules staging deferred for re-preparation, with the reason.
+    ///
+    /// Non-empty means the attempt lost a race and the sealed request must be
+    /// prepared again (§5.2). It is an ordinary retryable outcome, not a
+    /// decision.
+    pub deferred: Vec<(TxId, RepreparationReason)>,
     /// The compare-and-swap result, when one was attempted.
     pub cas: Option<CasOutcome>,
     /// The terminal outcome, when the transaction has one.
@@ -361,6 +368,12 @@ impl PublishReport {
     #[must_use]
     pub const fn is_committed(&self) -> bool {
         matches!(self.outcome, Some(DecisionOutcome::Committed { .. }))
+    }
+
+    /// Why this attempt must be prepared again, when staging deferred it.
+    #[must_use]
+    pub fn repreparation_reason(&self) -> Option<RepreparationReason> {
+        self.deferred.first().map(|(_, reason)| *reason)
     }
 
     /// The terminal refusal code, when the transaction was refused.
@@ -404,6 +417,7 @@ pub fn publish(
                 seal: seal_outcome,
                 capsule: None,
                 batch: None,
+                deferred: Vec::new(),
                 cas: None,
                 outcome: None,
             },
@@ -446,7 +460,25 @@ pub fn publish(
         bodies,
         durability_satisfied,
     };
-    let (state, batch) = stage(&state, &stage_request)?;
+    let (state, staged) = stage(&state, &stage_request)?;
+
+    // Staging deferred this capsule: its basis moved, so there is no batch to
+    // publish and nothing to compare-and-swap. The seal survives and the caller
+    // prepares again — this is §5.2's retry, not a decision.
+    let Some(batch) = staged.batch else {
+        let outcome = state.outcome_of(request.tx_id);
+        return Ok((
+            state,
+            PublishReport {
+                seal: seal_outcome,
+                capsule: Some(capsule),
+                batch: None,
+                deferred: staged.deferred,
+                cas: None,
+                outcome,
+            },
+        ));
+    };
 
     let cas_request = CasRequest {
         expected_head: state.head().id,
@@ -462,6 +494,7 @@ pub fn publish(
             seal: seal_outcome,
             capsule: Some(capsule),
             batch: Some(batch),
+            deferred: staged.deferred,
             cas: Some(cas),
             outcome,
         },
