@@ -488,6 +488,7 @@ dependencies = [
  "fgit-authority",
  "fgit-codec",
  "fgit-crypto",
+ "fgit-reference",
  "fgit-types",
 ]
 
