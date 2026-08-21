@@ -198,20 +198,37 @@ fn a_key_never_prints_its_material() {
 // --- signature-scheme code points -------------------------------------------
 
 #[test]
-fn the_squatted_code_point_is_not_allocatable_to_a_real_scheme() {
-    // fgit-codec fixtures use scheme code point 1 with a 64-byte payload,
-    // which is exactly an Ed25519 signature length. If 1 were ever allocated
-    // to Ed25519 those fixtures would become well-formed-looking signatures
-    // that only a real verification rejects.
-    assert!(
-        fgit_crypto::is_allocatable(1),
-        "1 is outside the reserved range today"
-    );
-    // ...which is precisely why nothing is registered at it.
+fn the_squatted_code_point_is_now_a_real_scheme_so_fixtures_must_leave_it() {
+    // This test previously asserted that code point 1 resolved to nothing,
+    // because fgit-codec fixtures squat it with a 64-byte payload -- exactly
+    // an Ed25519 signature length -- and while the registry was empty,
+    // refusing to allocate was the cheapest way to keep those fixtures from
+    // looking like real signatures.
+    //
+    // ADR-0003 Amendment 1 allocated 1 to Ed25519, so that premise is gone and
+    // the old assertion is obsolete rather than failing. It is replaced rather
+    // than deleted: the hazard it named is still real, and what changed is the
+    // mitigation. Length is now only framing, and
+    // `signing.rs::a_fixture_shaped_signature_has_the_registered_length_and_
+    // still_fails_verification` is the test that closes it.
     assert_eq!(
-        fgit_crypto::resolve_signature_scheme(1),
-        Err(fgit_crypto::SignatureSchemeError::Unregistered { code_point: 1 })
+        fgit_crypto::resolve_signature_scheme(fgit_crypto::ED25519_CODE_POINT).map(|row| row.name),
+        Ok("ed25519")
     );
+
+    // What remains true, and is the standing advice to fixture authors: the
+    // reserved range is the one place a code point can never collide with a
+    // production scheme.
+    for code_point in fgit_crypto::SIGNATURE_SCHEME_RESERVED_CODE_POINTS {
+        assert!(
+            !fgit_crypto::is_allocatable(code_point),
+            "{code_point:#06x} must never be allocatable to a production scheme"
+        );
+        assert_eq!(
+            fgit_crypto::resolve_signature_scheme(code_point),
+            Err(fgit_crypto::SignatureSchemeError::ReservedForHarness { code_point })
+        );
+    }
 }
 
 #[test]

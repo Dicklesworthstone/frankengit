@@ -115,6 +115,70 @@ const _: () = {
     }
 };
 
+/// One registered authenticated-encryption scheme.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AeadSchemeRow {
+    /// Stable code point carried on the wire.
+    pub code_point: u16,
+    /// Stable lowercase scheme name.
+    pub name: &'static str,
+    /// Key width in bytes.
+    pub key_len: usize,
+    /// Nonce width in bytes.
+    pub nonce_len: usize,
+    /// Authentication tag width in bytes.
+    pub tag_len: usize,
+    /// Row lifecycle.
+    pub status: RowStatus,
+}
+
+/// Code point of XChaCha20-Poly1305, selected by ADR-0003 Amendment 1.
+pub const XCHACHA20_POLY1305_CODE_POINT: u16 = 1;
+
+/// The registered authenticated-encryption schemes.
+///
+/// A separate namespace from the signature schemes, sharing only the reserved
+/// range. Two registries rather than one because a code point that means
+/// "Ed25519" in a signature envelope and "XChaCha20-Poly1305" in a ciphertext
+/// envelope is not an ambiguity as long as the two are never read by the same
+/// resolver — and keeping them separate is what guarantees that.
+pub const AEAD_SCHEME_REGISTRY: &[AeadSchemeRow] = &[AeadSchemeRow {
+    code_point: XCHACHA20_POLY1305_CODE_POINT,
+    name: "xchacha20-poly1305",
+    key_len: 32,
+    nonce_len: 24,
+    tag_len: 16,
+    status: RowStatus::Active,
+}];
+
+// Same reasoning as the signature registry: the row is the wire contract and
+// the module is the implementation, so a disagreement is pinned here rather
+// than discovered on a real ciphertext.
+const _: () = {
+    assert!(AEAD_SCHEME_REGISTRY.len() == 1);
+    assert!(AEAD_SCHEME_REGISTRY[0].nonce_len == crate::envelope::NONCE_BYTES);
+    assert!(AEAD_SCHEME_REGISTRY[0].tag_len == crate::envelope::AEAD_TAG_BYTES);
+    assert!(AEAD_SCHEME_REGISTRY[0].key_len == crate::mac::TAG_BYTES);
+    assert!(AEAD_SCHEME_REGISTRY[0].code_point != 0);
+    assert!(AEAD_SCHEME_REGISTRY[0].code_point < 0xfff0);
+};
+
+/// Resolve an AEAD scheme code point that arrived as data.
+///
+/// Shares [`SIGNATURE_SCHEME_RESERVED_CODE_POINTS`] so that "this number is
+/// never real" means one thing across the crate.
+pub fn resolve_aead_scheme(
+    code_point: u16,
+) -> Result<&'static AeadSchemeRow, SignatureSchemeError> {
+    if SIGNATURE_SCHEME_RESERVED_CODE_POINTS.contains(&code_point) {
+        return Err(SignatureSchemeError::ReservedForHarness { code_point });
+    }
+    AEAD_SCHEME_REGISTRY
+        .iter()
+        .find(|row| row.code_point == code_point)
+        .ok_or(SignatureSchemeError::Unregistered { code_point })
+}
+
 /// Refusal from resolving a signature-scheme code point.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SignatureSchemeError {

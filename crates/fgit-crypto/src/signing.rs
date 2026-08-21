@@ -1,6 +1,6 @@
 //! Detached signatures over domain-separated bodies.
 //!
-//! ADR-0003 draws the line at Git object identity: FrankenGit owns the hashes
+//! ADR-0003 draws the line at Git object identity: `FrankenGit` owns the hashes
 //! that compute it and reuses every other primitive. Signatures are therefore
 //! Ed25519 from `ed25519-dalek`, and this module is the boundary — it owns
 //! what is signed, which key may sign it, and what a verifier is required to
@@ -415,7 +415,7 @@ mod tests {
     ///
     /// Independently confirmed before being written down, because a
     /// known-answer vector recalled from memory is not a known answer.
-    /// OpenSSL 3.5.3 reproduced all three public keys from their seeds and the
+    /// `OpenSSL` 3.5.3 reproduced all three public keys from their seeds and the
     /// signatures for messages `72` and `af82`; its CLI refuses a zero-length
     /// input, so the empty-message signature was confirmed against
     /// python-cryptography instead. Two independent implementations, neither

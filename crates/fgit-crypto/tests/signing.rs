@@ -1,7 +1,7 @@
 //! Detached-signature envelope behaviour.
 //!
 //! The RFC 8032 known-answer vectors live in `src/signing.rs`, next to the
-//! primitive binding they pin. What is tested here is the part FrankenGit
+//! primitive binding they pin. What is tested here is the part `FrankenGit`
 //! owns: what goes into the signed preimage, and therefore which replays the
 //! construction refuses.
 //!
@@ -17,11 +17,11 @@ use fgit_crypto::{
 
 const BODY: &[u8] = b"one canonical capsule body";
 
-fn root() -> RootSecret {
+const fn root() -> RootSecret {
     RootSecret::from_bytes([0x5a; 32])
 }
 
-fn schema() -> SchemaId {
+const fn schema() -> SchemaId {
     SchemaId::new(SchemaFamily::from_static("frankengit.capsule"), 1, 0)
 }
 
@@ -143,13 +143,13 @@ fn verifying_against_another_key_is_a_mismatch_not_a_forgery() {
     // The distinction matters operationally: a mismatch is "you asked the
     // wrong question", a forgery is a security event. Reporting one as the
     // other sends an operator down the wrong path.
-    let signer = capsule_key();
+    let authoring_key = capsule_key();
     let other = SecretKey::<Capsule>::derive(
         &RootSecret::from_bytes([0xa5; 32]),
         KeyEpoch::FIRST,
         KeyScope::OPERATOR,
     );
-    let signed = signer.sign(IdentityDomain::RepositoryCapsule, schema(), BODY);
+    let signed = authoring_key.sign(IdentityDomain::RepositoryCapsule, schema(), BODY);
 
     assert_eq!(
         signed.verify_with(
@@ -323,8 +323,17 @@ fn an_unimplemented_scheme_is_refused_before_any_curve_operation() {
 fn an_off_curve_declared_key_is_refused_as_malformed() {
     let key = capsule_key();
     let signed = key.sign(IdentityDomain::RepositoryCapsule, schema(), BODY);
-    // All-ones is not a canonical curve point.
-    let bogus = [0xff; 32];
+    // Choosing this value mattered more than it looks. The obvious guess --
+    // all-ones -- decompresses fine, and both ed25519-dalek and `OpenSSL` accept
+    // it, so the first version of this test asserted MalformedVerifyingKey and
+    // got Invalid instead.
+    //
+    // This encoding is y = 2, little-endian, sign bit clear. Decompression
+    // solves x^2 = (y^2 - 1) / (d*y^2 + 1) over GF(2^255 - 19); for y = 2 that
+    // value is a quadratic non-residue, so no x exists and the point cannot be
+    // decompressed at all. Computed independently rather than guessed.
+    let mut bogus = [0x00; 32];
+    bogus[0] = 0x02;
     let malformed = DetachedSignature::from_parts(
         signed.scheme(),
         signed.purpose(),
@@ -396,4 +405,56 @@ fn the_harness_range_is_still_refused_distinctly_from_an_unknown_scheme() {
     );
     assert!(!is_allocatable(reserved));
     assert!(is_allocatable(ED25519_CODE_POINT));
+}
+
+#[test]
+fn a_fixture_shaped_signature_has_the_registered_length_and_still_fails_verification() {
+    // The concrete hazard from allocating code point 1: fgit-codec fixtures
+    // carry 64 bytes of 0xa0 at scheme 1, which is exactly the registered
+    // Ed25519 signature length. A decoder that validated only the length would
+    // now accept them.
+    //
+    // This is the test that makes allocating 1 safe, so it asserts both halves:
+    // the length check a naive decoder would run DOES pass, and verification
+    // still refuses.
+    let key = capsule_key();
+    let genuine = key.sign(IdentityDomain::RepositoryCapsule, schema(), BODY);
+    let fixture_payload = [0xa0_u8; 64];
+
+    let row = resolve_signature_scheme(ED25519_CODE_POINT).expect("ed25519 is registered");
+    assert_eq!(
+        fixture_payload.len(),
+        row.signature_len,
+        "the fixture really is the registered length, or this test proves nothing"
+    );
+
+    let fixture = DetachedSignature::from_parts(
+        ED25519_CODE_POINT,
+        genuine.purpose(),
+        genuine.epoch(),
+        *genuine.key_commitment(),
+        *genuine.declared_verifying_key().as_bytes(),
+        fixture_payload,
+    );
+
+    assert_eq!(
+        fixture.verify_with(
+            &key.verifying_key(),
+            IdentityDomain::RepositoryCapsule,
+            schema(),
+            BODY
+        ),
+        Err(SignatureError::Invalid),
+        "a constant-byte fixture must not verify"
+    );
+    assert_eq!(
+        genuine.verify_with(
+            &key.verifying_key(),
+            IdentityDomain::RepositoryCapsule,
+            schema(),
+            BODY
+        ),
+        Ok(()),
+        "the genuine signature must still verify, or the refusal above is vacuous"
+    );
 }

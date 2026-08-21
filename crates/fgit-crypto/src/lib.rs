@@ -101,6 +101,7 @@ mod commitment;
 mod corpus;
 mod defense;
 mod derive;
+mod envelope;
 mod hashing;
 mod keys;
 mod lifecycle;
@@ -131,6 +132,7 @@ pub use defense::{
     Sha1CollisionDetector,
 };
 pub use derive::{MAX_OUTPUT_BYTES, OutputTooLong, derive, derive_key, expand, extract};
+pub use envelope::{AEAD_TAG_BYTES, EnvelopeError, EnvelopeNonce, NONCE_BYTES, SealedEnvelope};
 pub use hashing::{DigestHasher, Sha1Hasher, Sha256Hasher, sha1_digest, sha256_digest};
 pub use keys::{
     AuthorityAdmin, Capsule, EncryptionCapable, Evidence, Identity, KEY_BYTES, KeyEpoch, KeyId,
@@ -151,8 +153,9 @@ pub use registry::{
     DigestAlgorithm, DomainRow, IdentityDomain, InternalDigestAlgorithm, RowStatus,
 };
 pub use schemes::{
-    ED25519_CODE_POINT, SIGNATURE_SCHEME_REGISTRY, SIGNATURE_SCHEME_RESERVED_CODE_POINTS,
-    SignatureSchemeError, SignatureSchemeRow, is_allocatable, resolve_signature_scheme,
+    AEAD_SCHEME_REGISTRY, AeadSchemeRow, ED25519_CODE_POINT, SIGNATURE_SCHEME_REGISTRY,
+    SIGNATURE_SCHEME_RESERVED_CODE_POINTS, SignatureSchemeError, SignatureSchemeRow,
+    XCHACHA20_POLY1305_CODE_POINT, is_allocatable, resolve_aead_scheme, resolve_signature_scheme,
 };
 pub use screened::{
     Sha1IdentityProfile, screened_sha1_digest, screened_sha1_git_oid, sha1_git_oid_with_profile,
