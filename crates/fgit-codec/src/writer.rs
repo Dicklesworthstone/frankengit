@@ -9,9 +9,7 @@
 use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::InternalObjectId;
 use fgit_types::numeric::{CanonicalScalar, CodecVersion};
-use fgit_types::{
-    DomainTag, GitHashAlgorithm, GitOid, RefName, SchemaId, OPAQUE_ID_LEN,
-};
+use fgit_types::{DomainTag, GitHashAlgorithm, GitOid, OPAQUE_ID_LEN, RefName, SchemaId};
 
 use crate::error::CodecRefusal;
 
@@ -270,10 +268,7 @@ impl Encoder {
     }
 
     /// Writes an internal object identity as its four components.
-    pub fn write_internal_object_id(
-        &mut self,
-        id: &InternalObjectId,
-    ) -> Result<(), CodecRefusal> {
+    pub fn write_internal_object_id(&mut self, id: &InternalObjectId) -> Result<(), CodecRefusal> {
         self.write_scalar(id.algorithm().code_point());
         self.write_domain_tag(id.domain())?;
         self.write_codec_version(id.codec_version());

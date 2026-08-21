@@ -469,6 +469,13 @@ name = "fgit-authority"
 version = "0.0.1"
 
 [[package]]
+name = "fgit-codec"
+version = "0.0.1"
+dependencies = [
+ "fgit-types",
+]
+
+[[package]]
 name = "fgit-crypto"
 version = "0.0.1"
 dependencies = [
@@ -499,6 +506,7 @@ dependencies = [
 name = "fgit-object-fabric"
 version = "0.1.0"
 dependencies = [
+ "fgit-crypto",
  "fgit-types",
 ]
 
@@ -519,6 +527,9 @@ version = "0.0.1"
 [[package]]
 name = "fgit-resource"
 version = "0.0.1"
+dependencies = [
+ "fgit-types",
+]
 
 [[package]]
 name = "fgit-runtime"

@@ -6,7 +6,7 @@
 
 use core::fmt;
 
-use fgit_types::{DomainTag, RefusalCode, TypeRefusal};
+use fgit_types::{DomainTag, RefusalCode, SchemaFamily, TypeRefusal};
 
 /// Why a canonical body could not be encoded or decoded.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -34,6 +34,13 @@ pub enum CodecRefusal {
         observed: u16,
         /// Major version this build implements.
         supported: u16,
+    },
+    /// The frame's schema family is not the one the caller asked to decode.
+    SchemaFamilyUnexpected {
+        /// Family the caller required.
+        expected: SchemaFamily,
+        /// Family the frame declares.
+        observed: SchemaFamily,
     },
     /// The frame's domain separation tag is not the one the caller asked to
     /// decode, so the bytes belong to a different schema.
@@ -160,6 +167,7 @@ impl CodecRefusal {
             Self::MagicUnrecognized { .. } => "magic_unrecognized",
             Self::CodecMajorUnsupported { .. } => "codec_major_unsupported",
             Self::SchemaMajorUnsupported { .. } => "schema_major_unsupported",
+            Self::SchemaFamilyUnexpected { .. } => "schema_family_unexpected",
             Self::DomainUnexpected { .. } => "domain_unexpected",
             Self::InputTruncated { .. } => "input_truncated",
             Self::TrailingBytes { .. } => "trailing_bytes",
@@ -187,6 +195,7 @@ impl CodecRefusal {
             Self::MagicUnrecognized { .. }
             | Self::CodecMajorUnsupported { .. }
             | Self::SchemaMajorUnsupported { .. }
+            | Self::SchemaFamilyUnexpected { .. }
             | Self::DomainUnexpected { .. } => RefusalCode::SchemaUnsupported,
             Self::InputTruncated { .. }
             | Self::TrailingBytes { .. }
@@ -232,6 +241,10 @@ impl fmt::Display for CodecRefusal {
                 formatter,
                 "{domain}: schema major {observed} is unsupported; this build implements {supported}"
             ),
+            Self::SchemaFamilyUnexpected { expected, observed } => write!(
+                formatter,
+                "schema family mismatch: expected {expected}, observed {observed}"
+            ),
             Self::DomainUnexpected { expected, observed } => write!(
                 formatter,
                 "domain mismatch: expected {expected}, observed {observed}"
@@ -265,10 +278,9 @@ impl fmt::Display for CodecRefusal {
                 formatter,
                 "{field}: declared count {observed} exceeds the bound {limit}"
             ),
-            Self::DepthBoundExceeded { limit, offset } => write!(
-                formatter,
-                "nesting deeper than {limit} at offset {offset}"
-            ),
+            Self::DepthBoundExceeded { limit, offset } => {
+                write!(formatter, "nesting deeper than {limit} at offset {offset}")
+            }
             Self::BooleanByteInvalid { observed, offset } => write!(
                 formatter,
                 "boolean byte 0x{observed:02x} at offset {offset} is neither 0x00 nor 0x01"
