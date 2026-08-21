@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
+use fgit_codec::{CodecRefusal, DecodeLimits, Decoder, Encoder};
 use fgit_resource::{BudgetGrant, IdentityError, ObligationLedger, OpaqueHandle};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, GitOid, PublicationEpoch, RepositoryAuthorityHeadId,
@@ -72,6 +73,7 @@ pub enum StoreRefusal {
     RangeOutOfBounds,
     RetentionRevalidationFailed,
     DeletionRetained,
+    Codec(CodecRefusal),
     Fabric(FabricError),
     Type(TypeRefusal),
     OpaqueIdentity(IdentityError),
@@ -134,6 +136,7 @@ impl fmt::Display for StoreRefusal {
             Self::DeletionRetained => {
                 formatter.write_str("authenticated retention registry still protects this object")
             }
+            Self::Codec(error) => fmt::Display::fmt(error, formatter),
             Self::Fabric(error) => fmt::Display::fmt(error, formatter),
             Self::Type(error) => fmt::Display::fmt(error, formatter),
             Self::OpaqueIdentity(error) => fmt::Display::fmt(error, formatter),
@@ -158,6 +161,14 @@ impl From<TypeRefusal> for StoreRefusal {
 impl From<IdentityError> for StoreRefusal {
     fn from(error: IdentityError) -> Self {
         Self::OpaqueIdentity(error)
+    }
+}
+
+fn codec_refusal(error: CodecRefusal) -> StoreRefusal {
+    match error {
+        CodecRefusal::InputTruncated { .. } => StoreRefusal::Truncated,
+        CodecRefusal::Type(error) => StoreRefusal::Type(error),
+        error => StoreRefusal::Codec(error),
     }
 }
 
@@ -227,14 +238,14 @@ impl PlacementReceipt {
     }
 
     fn canonical_bytes(&self) -> Result<Vec<u8>, StoreRefusal> {
-        let mut bytes = Vec::with_capacity(
+        let mut bytes = Encoder::with_capacity(
             4 + self.locator.len() + self.failure_domain.len() + self.encryption_dependency.len(),
         );
-        bytes.push(self.backend.to_wire());
+        bytes.write_raw_byte(self.backend.to_wire());
         push_handle(&mut bytes, self.locator)?;
         push_handle(&mut bytes, self.failure_domain)?;
         push_handle(&mut bytes, self.encryption_dependency)?;
-        Ok(bytes)
+        Ok(bytes.into_bytes())
     }
 }
 
@@ -352,17 +363,17 @@ impl SegmentManifest {
         Ok(())
     }
 
-    /// Canonical bytes of the manifest body, excluding its typed identity.
+    /// Canonical body bytes, excluding transport framing and the typed identity.
     pub fn encode(&self) -> Result<Vec<u8>, StoreRefusal> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(MANIFEST_MAGIC);
+        let mut bytes = Encoder::new();
+        bytes.write_raw(MANIFEST_MAGIC);
         push_u16(&mut bytes, MANIFEST_VERSION);
         push_u16(
             &mut bytes,
             u16::try_from(self.namespace.len()).map_err(|_| StoreRefusal::NamespaceTooLarge)?,
         );
-        bytes.extend_from_slice(&self.namespace);
-        bytes.extend_from_slice(&self.segment_digest);
+        bytes.write_raw(&self.namespace);
+        bytes.write_raw(&self.segment_digest);
         push_u32(
             &mut bytes,
             u32::try_from(self.entries.len()).map_err(|_| StoreRefusal::TooManyEntries)?,
@@ -371,18 +382,18 @@ impl SegmentManifest {
             push_git_oid(&mut bytes, entry.object_identity);
             push_u64(&mut bytes, entry.record_offset);
             push_u32(&mut bytes, entry.record_length);
-            bytes.push(entry.object_kind.to_wire());
+            bytes.write_raw_byte(entry.object_kind.to_wire());
             push_u64(&mut bytes, entry.payload_length);
-            bytes.extend_from_slice(&entry.payload_commitment);
+            bytes.write_raw(&entry.payload_commitment);
         }
         push_u32(
             &mut bytes,
             u32::try_from(self.placements.len()).map_err(|_| StoreRefusal::TooManyPlacements)?,
         );
         for placement in &self.placements {
-            bytes.extend_from_slice(&placement.canonical_bytes()?);
+            bytes.write_raw(&placement.canonical_bytes()?);
         }
-        Ok(bytes)
+        Ok(bytes.into_bytes())
     }
 
     /// Decodes a bounded manifest and rechecks every canonical ordering rule.
@@ -876,37 +887,37 @@ impl LocatorCache {
     }
 }
 
-fn push_u16(output: &mut Vec<u8>, value: u16) {
-    output.extend_from_slice(&value.to_be_bytes());
+fn push_u16(output: &mut Encoder, value: u16) {
+    output.write_scalar(value);
 }
 
-fn push_u32(output: &mut Vec<u8>, value: u32) {
-    output.extend_from_slice(&value.to_be_bytes());
+fn push_u32(output: &mut Encoder, value: u32) {
+    output.write_scalar(value);
 }
 
-fn push_u64(output: &mut Vec<u8>, value: u64) {
-    output.extend_from_slice(&value.to_be_bytes());
+fn push_u64(output: &mut Encoder, value: u64) {
+    output.write_scalar(value);
 }
 
-fn push_git_oid(output: &mut Vec<u8>, identity: GitOid) {
-    push_u16(output, identity.algorithm().code_point());
-    output.extend_from_slice(identity.as_bytes());
+fn push_git_oid(output: &mut Encoder, identity: GitOid) {
+    output.write_git_oid(&identity);
 }
 
-fn push_handle(output: &mut Vec<u8>, handle: OpaqueHandle) -> Result<(), StoreRefusal> {
-    output.push(u8::try_from(handle.len()).map_err(|_| StoreRefusal::LengthOverflow)?);
-    output.extend_from_slice(handle.as_bytes());
+fn push_handle(output: &mut Encoder, handle: OpaqueHandle) -> Result<(), StoreRefusal> {
+    output.write_raw_byte(u8::try_from(handle.len()).map_err(|_| StoreRefusal::LengthOverflow)?);
+    output.write_raw(handle.as_bytes());
     Ok(())
 }
 
 struct ManifestCursor<'a> {
-    bytes: &'a [u8],
-    position: usize,
+    decoder: Decoder<'a>,
 }
 
 impl<'a> ManifestCursor<'a> {
-    const fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, position: 0 }
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            decoder: Decoder::new(bytes, DecodeLimits::default()),
+        }
     }
 
     fn expect_magic(&mut self, expected: &[u8; 4]) -> Result<(), StoreRefusal> {
@@ -917,16 +928,9 @@ impl<'a> ManifestCursor<'a> {
     }
 
     fn take(&mut self, length: usize) -> Result<&'a [u8], StoreRefusal> {
-        let end = self
-            .position
-            .checked_add(length)
-            .ok_or(StoreRefusal::LengthOverflow)?;
-        if end > self.bytes.len() {
-            return Err(StoreRefusal::Truncated);
-        }
-        let result = &self.bytes[self.position..end];
-        self.position = end;
-        Ok(result)
+        self.decoder
+            .take("segment manifest", length)
+            .map_err(codec_refusal)
     }
 
     fn read_u8(&mut self) -> Result<u8, StoreRefusal> {
@@ -934,20 +938,21 @@ impl<'a> ManifestCursor<'a> {
     }
 
     fn read_u16(&mut self) -> Result<u16, StoreRefusal> {
-        let bytes = self.take(2)?;
-        Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+        self.decoder
+            .read_scalar("segment manifest u16")
+            .map_err(codec_refusal)
     }
 
     fn read_u32(&mut self) -> Result<u32, StoreRefusal> {
-        let bytes = self.take(4)?;
-        Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        self.decoder
+            .read_scalar("segment manifest u32")
+            .map_err(codec_refusal)
     }
 
     fn read_u64(&mut self) -> Result<u64, StoreRefusal> {
-        let bytes = self.take(8)?;
-        Ok(u64::from_be_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]))
+        self.decoder
+            .read_scalar("segment manifest u64")
+            .map_err(codec_refusal)
     }
 
     fn read_commitment(&mut self) -> Result<Commitment, StoreRefusal> {
@@ -957,19 +962,7 @@ impl<'a> ManifestCursor<'a> {
     }
 
     fn read_git_oid(&mut self) -> Result<GitOid, StoreRefusal> {
-        let algorithm = fgit_types::GitHashAlgorithm::from_code_point(self.read_u16()?)?;
-        match algorithm {
-            fgit_types::GitHashAlgorithm::Sha1 => {
-                let mut bytes = [0; fgit_types::GitOidSha1::LEN];
-                bytes.copy_from_slice(self.take(fgit_types::GitOidSha1::LEN)?);
-                Ok(GitOid::Sha1(fgit_types::GitOidSha1::from_bytes(bytes)))
-            }
-            fgit_types::GitHashAlgorithm::Sha256 => {
-                let mut bytes = [0; fgit_types::GitOidSha256::LEN];
-                bytes.copy_from_slice(self.take(fgit_types::GitOidSha256::LEN)?);
-                Ok(GitOid::Sha256(fgit_types::GitOidSha256::from_bytes(bytes)))
-            }
-        }
+        self.decoder.read_git_oid().map_err(codec_refusal)
     }
 
     fn read_handle(&mut self) -> Result<OpaqueHandle, StoreRefusal> {
@@ -978,7 +971,7 @@ impl<'a> ManifestCursor<'a> {
     }
 
     const fn remaining(&self) -> usize {
-        self.bytes.len() - self.position
+        self.decoder.remaining()
     }
 
     const fn is_finished(&self) -> bool {
