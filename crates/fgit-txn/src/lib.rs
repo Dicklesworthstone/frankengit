@@ -4,9 +4,10 @@
 //! A client submits [`fgit_reference::intent::TransactionRequest`] values: typed
 //! intents and their asserted preconditions, never caller-computed effects or
 //! resulting roots. [`IntentEvaluator`] evaluates those intents in source order
-//! against one pinned basis, applying read-your-own-writes to a private scratch
-//! state. It then emits the target-disjoint [`NetEffects`] normal form required
-//! by protocol contract §13 and plan §15.4.
+//! against one pinned basis. [`IntentEvaluator`] deliberately delegates the
+//! read-your-own-writes evaluation and target-disjoint [`NetEffects`] normal
+//! form to `fgit-reference`'s single source of truth; this crate owns the
+//! stable application-facing facade plus canonical normal-form bytes.
 //!
 //! ## Mismatch and refusal vocabulary
 //!
@@ -16,38 +17,37 @@
 //!   exhausted position is [`RefusalCode::ResourceBudgetExceeded`].
 //! * Reusing an outbox delivery key with different canonical parameters is
 //!   [`RefusalCode::EffectIdempotencyKeyReuse`].
-//! * An impossible ambiguous final-effect candidate is
-//!   [`RefusalCode::ConflictingSemanticEffects`].
+//! * [`RefusalCode::ConflictingSemanticEffects`] is reserved for validation of
+//!   a caller-supplied malformed report with two surviving non-forge mappings
+//!   for one target. It cannot arise from typed intent evaluation: the
+//!   reference normal-form types are target-disjoint by construction.
 //!
-//! The statement's [`MismatchPolicy`] decides whether an ordinary precondition
+//! The statement's [`fgit_types::vocabulary::MismatchPolicy`] decides whether an ordinary precondition
 //! mismatch becomes an explicit absorbed no-op, a statement-local error, or a
 //! transaction abort. A transaction abort has no effects and maps every source
 //! intent, including intents after the triggering one, to
 //! [`IntentDisposition::TransactionAborted`].
 //!
-//! The production evaluator is independently implemented here and is compared
-//! in tests with `fgit-reference`'s deliberately simple `ReferenceFolder`.
+//! This is intentionally not an independent evaluator or differential claim.
+//! A later optimized folder must be separately implemented and tested against
+//! the reference folder before it may replace this delegation.
 
 pub mod combiner;
 pub mod lanes;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use fgit_codec::{CodecRefusal, Encoder};
 use fgit_reference::effect::{
     AbsorptionReason, EffectTarget, FoldBasis, FoldOutcome, FoldReport, IntentDisposition,
-    IntentMapping, NetEffectFolder, NetEffects, RefEffect, RetentionEffect,
+    IntentMapping, NetEffectFolder, NetEffects, RefEffect, ReferenceFolder, RetentionEffect,
 };
 use fgit_reference::intent::{
-    ForgeEventKind, ForgeStreamId, ForgeStreamPosition, Intent, IntentAddress, IntentIndex,
-    OutboxDeliveryKey, RefIntent, RetentionClass, RetentionIntent, RetentionRoot, StatementIndex,
+    ForgeEventKind, ForgeStreamId, IntentAddress, OutboxDeliveryKey, RetentionClass, RetentionRoot,
     TransactionRequest,
 };
 use fgit_reference::state::RepositoryState;
-use fgit_types::hash::Digest;
-use fgit_types::native::GitOid;
-use fgit_types::refs::RefName;
-use fgit_types::vocabulary::{MismatchPolicy, RefusalCode};
+use fgit_types::vocabulary::RefusalCode;
 
 pub use fgit_reference::effect::{
     FoldOutcome as TransactionFoldOutcome, FoldReport as TransactionFoldReport,
@@ -71,65 +71,12 @@ impl IntentEvaluator {
         Self
     }
 
-    /// Folds a request against its pinned root projection.
+    /// Folds a request against its pinned root projection through the reference
+    /// folder. Keeping this call explicit prevents this facade from silently
+    /// becoming a second evaluator with diverging normal-form semantics.
     #[must_use]
     pub fn evaluate(&self, basis: FoldBasis<'_>, request: &TransactionRequest) -> FoldReport {
-        let mut scratch = Scratch::from_basis(basis);
-        let mut mappings = Vec::with_capacity(request.intent_count());
-        let mut contributed = BTreeMap::new();
-
-        for (statement_offset, statement) in request.statements.iter().enumerate() {
-            for (intent_offset, intent) in statement.intents.iter().enumerate() {
-                let address = IntentAddress {
-                    statement: StatementIndex(statement_offset),
-                    intent: IntentIndex(intent_offset),
-                };
-                match apply_intent(&mut scratch, intent) {
-                    Applied::Changed(target) => {
-                        contributed.insert(target.clone(), mappings.len());
-                        mappings.push(IntentMapping {
-                            address,
-                            disposition: IntentDisposition::Surviving(target),
-                        });
-                    }
-                    Applied::Absorbed(reason) => mappings.push(IntentMapping {
-                        address,
-                        disposition: IntentDisposition::Absorbed(reason),
-                    }),
-                    Applied::Mismatch(code) => match statement.mismatch_policy {
-                        MismatchPolicy::NoOp => mappings.push(IntentMapping {
-                            address,
-                            disposition: IntentDisposition::Absorbed(
-                                AbsorptionReason::PreconditionMismatchNoOp,
-                            ),
-                        }),
-                        MismatchPolicy::StatementError => mappings.push(IntentMapping {
-                            address,
-                            disposition: IntentDisposition::StatementError(code),
-                        }),
-                        MismatchPolicy::TxnAbort => return aborted_report(request, code, address),
-                    },
-                }
-            }
-        }
-
-        let effects = match normal_form_from_scratch(basis, &scratch) {
-            Ok(effects) => effects,
-            Err(code) => {
-                let Some((address, _)) = request.addressed_intents().next() else {
-                    return FoldReport {
-                        outcome: FoldOutcome::Folded(NetEffects::default()),
-                        mappings,
-                    };
-                };
-                return aborted_report(request, code, address);
-            }
-        };
-        retire_absorbed(&effects, &contributed, &mut mappings);
-        FoldReport {
-            outcome: FoldOutcome::Folded(effects),
-            mappings,
-        }
+        ReferenceFolder.fold(basis, request)
     }
 
     /// Folds against the current authority-head roots of the reference-model
@@ -235,248 +182,6 @@ pub fn canonical_effect_bytes(effects: &NetEffects) -> Result<Vec<u8>, CodecRefu
     Ok(out.into_bytes())
 }
 
-/// The private basis copy used to provide read-your-own-writes semantics.
-#[derive(Clone, Debug)]
-struct Scratch {
-    refs: BTreeMap<RefName, GitOid>,
-    forge_positions: BTreeMap<ForgeStreamId, ForgeStreamPosition>,
-    forge_events: BTreeMap<ForgeStreamId, Vec<ForgeEventKind>>,
-    retention: BTreeSet<RetentionRoot>,
-    outbox: BTreeMap<OutboxDeliveryKey, Digest>,
-}
-
-impl Scratch {
-    fn from_basis(basis: FoldBasis<'_>) -> Self {
-        Self {
-            refs: basis.refs.clone(),
-            forge_positions: basis.forge_positions.clone(),
-            forge_events: BTreeMap::new(),
-            retention: basis.retention.clone(),
-            outbox: basis.outbox.clone(),
-        }
-    }
-}
-
-/// Result of applying one typed intent to scratch state.
-enum Applied {
-    Changed(EffectTarget),
-    Absorbed(AbsorptionReason),
-    Mismatch(RefusalCode),
-}
-
-fn apply_intent(scratch: &mut Scratch, intent: &Intent) -> Applied {
-    match intent {
-        Intent::Ref(RefIntent::Update {
-            name,
-            expected,
-            new,
-            ..
-        }) => {
-            if !expected.is_satisfied_by(scratch.refs.get(name)) {
-                return Applied::Mismatch(RefusalCode::ExpectedOldRefMismatch);
-            }
-            scratch.refs.insert(name.clone(), *new);
-            Applied::Changed(EffectTarget::Ref(name.clone()))
-        }
-        Intent::Ref(RefIntent::Delete { name, expected }) => {
-            if !expected.is_satisfied_by(scratch.refs.get(name)) {
-                return Applied::Mismatch(RefusalCode::ExpectedOldRefMismatch);
-            }
-            scratch.refs.remove(name);
-            Applied::Changed(EffectTarget::Ref(name.clone()))
-        }
-        Intent::Forge(forge) => {
-            let current = scratch
-                .forge_positions
-                .get(&forge.stream)
-                .copied()
-                .unwrap_or(ForgeStreamPosition::GENESIS);
-            if current != forge.expected_position {
-                return Applied::Mismatch(RefusalCode::ForgeTransitionInvalid);
-            }
-            if current.is_exhausted() {
-                return Applied::Mismatch(RefusalCode::ResourceBudgetExceeded);
-            }
-            scratch
-                .forge_positions
-                .insert(forge.stream, current.successor());
-            scratch
-                .forge_events
-                .entry(forge.stream)
-                .or_default()
-                .push(forge.event.clone());
-            Applied::Changed(EffectTarget::ForgeStream(forge.stream))
-        }
-        Intent::Retention(RetentionIntent::AddRoot(root)) => {
-            if scratch.retention.contains(root) {
-                return Applied::Absorbed(AbsorptionReason::IdentityEffect);
-            }
-            scratch.retention.insert(*root);
-            Applied::Changed(EffectTarget::Retention(*root))
-        }
-        Intent::Retention(RetentionIntent::RemoveRoot(root)) => {
-            if scratch.retention.remove(root) {
-                Applied::Changed(EffectTarget::Retention(*root))
-            } else {
-                Applied::Absorbed(AbsorptionReason::IdentityEffect)
-            }
-        }
-        Intent::Outbox(outbox) => match scratch.outbox.get(&outbox.delivery_key) {
-            Some(bound) if *bound == outbox.parameters => {
-                Applied::Absorbed(AbsorptionReason::DuplicateIdenticalDelivery)
-            }
-            Some(_) => Applied::Mismatch(RefusalCode::EffectIdempotencyKeyReuse),
-            None => {
-                scratch
-                    .outbox
-                    .insert(outbox.delivery_key, outbox.parameters);
-                Applied::Changed(EffectTarget::Outbox(outbox.delivery_key))
-            }
-        },
-    }
-}
-
-fn aborted_report(
-    request: &TransactionRequest,
-    code: RefusalCode,
-    at: IntentAddress,
-) -> FoldReport {
-    FoldReport {
-        outcome: FoldOutcome::Aborted { code, at },
-        mappings: request
-            .addressed_intents()
-            .map(|(address, _)| IntentMapping {
-                address,
-                disposition: IntentDisposition::TransactionAborted,
-            })
-            .collect(),
-    }
-}
-
-/// A private final-effect candidate. It is intentionally not part of the
-/// public API: callers cannot smuggle a derived effect past intent evaluation.
-#[derive(Clone)]
-enum CandidateEffect {
-    Ref(RefName, RefEffect),
-    Forge(ForgeStreamId, Vec<ForgeEventKind>),
-    Retention(RetentionRoot, RetentionEffect),
-    Outbox(OutboxDeliveryKey, Digest),
-}
-
-impl CandidateEffect {
-    fn target(&self) -> EffectTarget {
-        match self {
-            Self::Ref(name, _) => EffectTarget::Ref(name.clone()),
-            Self::Forge(stream, _) => EffectTarget::ForgeStream(*stream),
-            Self::Retention(root, _) => EffectTarget::Retention(*root),
-            Self::Outbox(key, _) => EffectTarget::Outbox(*key),
-        }
-    }
-}
-
-/// Constructs a normal form while refusing ambiguous duplicate targets before
-/// a map could silently choose a value by insertion order.
-#[derive(Default)]
-struct NormalFormCollector {
-    targets: BTreeSet<EffectTarget>,
-    effects: NetEffects,
-}
-
-impl NormalFormCollector {
-    fn insert(&mut self, candidate: CandidateEffect) -> Result<(), RefusalCode> {
-        if !self.targets.insert(candidate.target()) {
-            return Err(RefusalCode::ConflictingSemanticEffects);
-        }
-        match candidate {
-            CandidateEffect::Ref(name, effect) => {
-                self.effects.refs.insert(name, effect);
-            }
-            CandidateEffect::Forge(stream, events) => {
-                self.effects.forge.insert(stream, events);
-            }
-            CandidateEffect::Retention(root, effect) => {
-                self.effects.retention.insert(root, effect);
-            }
-            CandidateEffect::Outbox(key, parameters) => {
-                self.effects.outbox.insert(key, parameters);
-            }
-        }
-        Ok(())
-    }
-
-    fn finish(self) -> NetEffects {
-        self.effects
-    }
-}
-
-fn normal_form_from_scratch(
-    basis: FoldBasis<'_>,
-    scratch: &Scratch,
-) -> Result<NetEffects, RefusalCode> {
-    let mut collector = NormalFormCollector::default();
-
-    for (name, value) in &scratch.refs {
-        if basis.refs.get(name) != Some(value) {
-            collector.insert(CandidateEffect::Ref(name.clone(), RefEffect::Set(*value)))?;
-        }
-    }
-    for name in basis.refs.keys() {
-        if !scratch.refs.contains_key(name) {
-            collector.insert(CandidateEffect::Ref(name.clone(), RefEffect::Delete))?;
-        }
-    }
-    for (stream, events) in &scratch.forge_events {
-        if !events.is_empty() {
-            collector.insert(CandidateEffect::Forge(*stream, events.clone()))?;
-        }
-    }
-    for root in &scratch.retention {
-        if !basis.retention.contains(root) {
-            collector.insert(CandidateEffect::Retention(*root, RetentionEffect::Add))?;
-        }
-    }
-    for root in basis.retention {
-        if !scratch.retention.contains(root) {
-            collector.insert(CandidateEffect::Retention(*root, RetentionEffect::Remove))?;
-        }
-    }
-    for (key, parameters) in &scratch.outbox {
-        if basis.outbox.get(key) != Some(parameters) {
-            collector.insert(CandidateEffect::Outbox(*key, *parameters))?;
-        }
-    }
-
-    Ok(collector.finish())
-}
-
-fn retire_absorbed(
-    effects: &NetEffects,
-    contributed: &BTreeMap<EffectTarget, usize>,
-    mappings: &mut [IntentMapping],
-) {
-    for (index, mapping) in mappings.iter_mut().enumerate() {
-        let IntentDisposition::Surviving(target) = &mapping.disposition else {
-            continue;
-        };
-        let target_changed = target_is_surviving(effects, target);
-        if matches!(target, EffectTarget::ForgeStream(_)) {
-            if !target_changed {
-                mapping.disposition = IntentDisposition::Absorbed(AbsorptionReason::IdentityEffect);
-            }
-            continue;
-        }
-        let is_last_writer = contributed.get(target) == Some(&index);
-        mapping.disposition = match (target_changed, is_last_writer) {
-            (true, true) => continue,
-            (true, false) => {
-                IntentDisposition::Absorbed(AbsorptionReason::OverwrittenBySucceedingIntent)
-            }
-            (false, true) => IntentDisposition::Absorbed(AbsorptionReason::IdentityEffect),
-            (false, false) => IntentDisposition::Absorbed(AbsorptionReason::InverseCancelled),
-        };
-    }
-}
-
 fn target_is_surviving(effects: &NetEffects, target: &EffectTarget) -> bool {
     match target {
         EffectTarget::Ref(name) => effects.refs.contains_key(name),
@@ -530,7 +235,6 @@ fn validate_report(request: &TransactionRequest, report: &FoldReport) -> Result<
             if !effect_targets(effects).is_subset(&survivors) {
                 return Err(RefusalCode::InternalInvariantBreach);
             }
-            canonicalize_effects(effects)?;
         }
     }
     Ok(())
@@ -552,23 +256,6 @@ fn effect_targets(effects: &NetEffects) -> BTreeSet<EffectTarget> {
         )
         .chain(effects.outbox.keys().copied().map(EffectTarget::Outbox))
         .collect()
-}
-
-fn canonicalize_effects(effects: &NetEffects) -> Result<NetEffects, RefusalCode> {
-    let mut collector = NormalFormCollector::default();
-    for (name, effect) in &effects.refs {
-        collector.insert(CandidateEffect::Ref(name.clone(), *effect))?;
-    }
-    for (stream, events) in &effects.forge {
-        collector.insert(CandidateEffect::Forge(*stream, events.clone()))?;
-    }
-    for (root, effect) in &effects.retention {
-        collector.insert(CandidateEffect::Retention(*root, *effect))?;
-    }
-    for (key, parameters) in &effects.outbox {
-        collector.insert(CandidateEffect::Outbox(*key, *parameters))?;
-    }
-    Ok(collector.finish())
 }
 
 fn write_effects(out: &mut Encoder, effects: &NetEffects) -> Result<(), CodecRefusal> {
@@ -765,18 +452,23 @@ const fn absorption_code(reason: AbsorptionReason) -> u8 {
 mod tests {
     use super::*;
 
-    use fgit_reference::effect::ReferenceFolder;
+    use std::collections::BTreeMap;
+
     use fgit_reference::harness::{IdentityMint, RequestBuilder, label};
     use fgit_reference::intent::{
-        ForgeEntityId, ForgeIntent, IdempotencyKey, OutboxIntent, Statement,
+        ForgeEntityId, ForgeIntent, ForgeStreamPosition, IdempotencyKey, Intent, IntentIndex,
+        OutboxIntent, RefIntent, Statement, StatementIndex,
     };
     use fgit_reference::refs::ExpectedRefState;
     use fgit_reference::state::{
         GenesisConfiguration, PolicySnapshot, PrincipalCapabilities, RepositoryState,
     };
+    use fgit_types::hash::Digest;
     use fgit_types::label::{SchemaFamily, SchemaId};
-    use fgit_types::native::{GitHashAlgorithm, GitOidSha1};
+    use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1};
     use fgit_types::numeric::{PolicyEpoch, RegistryEpoch};
+    use fgit_types::refs::RefName;
+    use fgit_types::vocabulary::MismatchPolicy;
 
     type EmptyBasis = (
         BTreeMap<RefName, GitOid>,
@@ -893,19 +585,24 @@ mod tests {
     }
 
     #[test]
-    fn normal_form_is_idempotent() {
+    fn repeated_evaluation_produces_identical_normal_form() {
         let request = simple_request();
         let (refs, forge, retention, outbox) = empty_basis();
-        let effects = folded(
-            IntentEvaluator.evaluate(basis_of(&refs, &forge, &retention, &outbox), &request),
+        let basis = basis_of(&refs, &forge, &retention, &outbox);
+        let first = IntentEvaluator.evaluate(basis, &request);
+        let second =
+            IntentEvaluator.evaluate(basis_of(&refs, &forge, &retention, &outbox), &request);
+
+        assert_eq!(first, second, "a pinned normal-form fold must be pure");
+        assert_eq!(
+            canonical_fold_bytes(&request, &first).expect("first report is valid"),
+            canonical_fold_bytes(&request, &second).expect("second report is valid"),
+            "canonical normal form must be idempotent under repeated evaluation"
         );
-        let once = canonicalize_effects(&effects).expect("folded effects are canonical");
-        let twice = canonicalize_effects(&once).expect("canonical normal form remains valid");
-        assert_eq!(twice, once, "fold(fold(x)) must equal fold(x)");
     }
 
     #[test]
-    fn independent_input_orders_have_identical_canonical_normal_form() {
+    fn shuffled_independent_intents_have_identical_canonical_normal_form() {
         let intents = vec![
             update("refs/heads/main", ExpectedRefState::Absent, oid(1)),
             update("refs/heads/dev", ExpectedRefState::Absent, oid(2)),
@@ -1106,43 +803,59 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_surviving_target_is_refused_not_overwritten() {
-        let target = name("refs/heads/main");
-        let mut collector = NormalFormCollector::default();
-        collector
-            .insert(CandidateEffect::Ref(target.clone(), RefEffect::Set(oid(1))))
-            .expect("first target is unique");
+    fn public_report_validator_refuses_duplicate_surviving_target() {
+        let request = request(vec![Statement {
+            mismatch_policy: MismatchPolicy::TxnAbort,
+            intents: vec![
+                update("refs/heads/main", ExpectedRefState::Absent, oid(1)),
+                update("refs/heads/main", ExpectedRefState::Exact(oid(1)), oid(2)),
+            ],
+        }]);
+        let (refs, forge, retention, outbox) = empty_basis();
+        let mut report =
+            IntentEvaluator.evaluate(basis_of(&refs, &forge, &retention, &outbox), &request);
+        report.mappings[0].disposition =
+            IntentDisposition::Surviving(EffectTarget::Ref(name("refs/heads/main")));
+
         assert_eq!(
-            collector.insert(CandidateEffect::Ref(target, RefEffect::Set(oid(2)))),
+            IntentEvaluator.validate_report(&request, &report),
             Err(RefusalCode::ConflictingSemanticEffects)
         );
     }
 
     #[test]
-    fn ambiguous_duplicate_outbox_value_is_refused() {
+    fn ambiguous_duplicate_outbox_value_aborts_through_public_evaluator() {
         let mut mint = IdentityMint::new(81);
         let key = OutboxDeliveryKey::new(label("delivery"));
-        let mut collector = NormalFormCollector::default();
-        collector
-            .insert(CandidateEffect::Outbox(key, mint.digest()))
-            .expect("first delivery key is unique");
-        assert_eq!(
-            collector.insert(CandidateEffect::Outbox(key, mint.digest())),
-            Err(RefusalCode::ConflictingSemanticEffects)
-        );
-    }
+        let first_parameters = mint.digest();
+        let replacement_parameters = mint.digest();
+        let request = request(vec![Statement {
+            mismatch_policy: MismatchPolicy::TxnAbort,
+            intents: vec![
+                Intent::Outbox(OutboxIntent {
+                    delivery_key: key,
+                    parameters: first_parameters,
+                }),
+                Intent::Outbox(OutboxIntent {
+                    delivery_key: key,
+                    parameters: replacement_parameters,
+                }),
+            ],
+        }]);
+        let (refs, forge, retention, outbox) = empty_basis();
+        let report =
+            IntentEvaluator.evaluate(basis_of(&refs, &forge, &retention, &outbox), &request);
 
-    #[test]
-    fn candidate_insertion_order_does_not_change_normal_form() {
-        let first = CandidateEffect::Ref(name("refs/heads/main"), RefEffect::Set(oid(1)));
-        let second = CandidateEffect::Ref(name("refs/heads/dev"), RefEffect::Set(oid(2)));
-        let mut left = NormalFormCollector::default();
-        left.insert(first.clone()).expect("unique target");
-        left.insert(second.clone()).expect("unique target");
-        let mut right = NormalFormCollector::default();
-        right.insert(second).expect("unique target");
-        right.insert(first).expect("unique target");
-        assert_eq!(left.finish(), right.finish());
+        assert_eq!(
+            report.outcome,
+            FoldOutcome::Aborted {
+                code: RefusalCode::EffectIdempotencyKeyReuse,
+                at: IntentAddress {
+                    statement: StatementIndex(0),
+                    intent: IntentIndex(1),
+                },
+            }
+        );
     }
 
     #[test]
@@ -1152,24 +865,34 @@ mod tests {
         let parameters = mint.digest();
         let request = request(vec![Statement {
             mismatch_policy: MismatchPolicy::TxnAbort,
-            intents: vec![Intent::Outbox(OutboxIntent {
-                delivery_key: key,
-                parameters,
-            })],
+            intents: vec![
+                Intent::Outbox(OutboxIntent {
+                    delivery_key: key,
+                    parameters,
+                }),
+                Intent::Outbox(OutboxIntent {
+                    delivery_key: key,
+                    parameters,
+                }),
+            ],
         }]);
-        let (refs, forge, retention, mut outbox) = empty_basis();
-        outbox.insert(key, parameters);
+        let (refs, forge, retention, outbox) = empty_basis();
         let report =
             IntentEvaluator.evaluate(basis_of(&refs, &forge, &retention, &outbox), &request);
-        assert_eq!(report.effects(), Some(&NetEffects::default()));
         assert_eq!(
-            report.mappings[0].disposition,
+            report
+                .effects()
+                .and_then(|effects| effects.outbox.get(&key)),
+            Some(&parameters)
+        );
+        assert_eq!(
+            report.mappings[1].disposition,
             IntentDisposition::Absorbed(AbsorptionReason::DuplicateIdenticalDelivery)
         );
     }
 
     #[test]
-    fn model_state_projection_agrees_with_reference_folder() {
+    fn evaluate_state_reads_the_authority_head_projection() {
         let mut mint = IdentityMint::new(31);
         let tenant = mint.tenant();
         let repository = mint.repository();
@@ -1201,21 +924,18 @@ mod tests {
             vec![update("refs/heads/main", ExpectedRefState::Absent, oid(1))],
         )
         .build(&mut mint);
-        let roots = state.roots();
-        let reference = ReferenceFolder.fold(
-            FoldBasis {
-                refs: &roots.refs,
-                forge_positions: &roots.forge_positions,
-                retention: &roots.retention,
-                outbox: &roots.outbox,
-            },
-            &request,
+        let report = IntentEvaluator.evaluate_state(&state, &request);
+        assert_eq!(
+            report
+                .effects()
+                .and_then(|effects| effects.refs.get(&name("refs/heads/main"))),
+            Some(&RefEffect::Set(oid(1)))
         );
-        assert_eq!(IntentEvaluator.evaluate_state(&state, &request), reference);
+        assert_eq!(IntentEvaluator.validate_report(&request, &report), Ok(()));
     }
 
     #[test]
-    fn bounded_generated_intents_agree_with_reference_oracle() {
+    fn bounded_generated_intents_produce_total_deterministic_reports() {
         for seed in 0_u8..64 {
             let initial = oid(seed.wrapping_add(1));
             let replacement = oid(seed.wrapping_add(65));
@@ -1244,11 +964,20 @@ mod tests {
             }]);
             let (mut refs, forge, retention, outbox) = empty_basis();
             refs.insert(name("refs/heads/main"), initial);
-            let basis = basis_of(&refs, &forge, &retention, &outbox);
-            let reference = ReferenceFolder.fold(basis, &request);
-            let production =
+            let first =
                 IntentEvaluator.evaluate(basis_of(&refs, &forge, &retention, &outbox), &request);
-            assert_eq!(production, reference, "oracle mismatch for seed {seed}");
+            let second =
+                IntentEvaluator.evaluate(basis_of(&refs, &forge, &retention, &outbox), &request);
+            assert_eq!(first, second, "nondeterministic result for seed {seed}");
+            assert!(
+                first.is_total_for(&request),
+                "incomplete result for seed {seed}"
+            );
+            assert_eq!(
+                IntentEvaluator.validate_report(&request, &first),
+                Ok(()),
+                "invalid normal form for seed {seed}"
+            );
         }
     }
 }
