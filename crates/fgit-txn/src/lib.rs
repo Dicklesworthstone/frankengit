@@ -778,6 +778,13 @@ mod tests {
     use fgit_types::native::{GitHashAlgorithm, GitOidSha1};
     use fgit_types::numeric::{PolicyEpoch, RegistryEpoch};
 
+    type EmptyBasis = (
+        BTreeMap<RefName, GitOid>,
+        BTreeMap<ForgeStreamId, ForgeStreamPosition>,
+        BTreeSet<RetentionRoot>,
+        BTreeMap<OutboxDeliveryKey, Digest>,
+    );
+
     const fn oid(seed: u8) -> GitOid {
         GitOid::Sha1(GitOidSha1::from_bytes([seed; GitOidSha1::LEN]))
     }
@@ -809,12 +816,7 @@ mod tests {
         builder.build(&mut mint)
     }
 
-    fn empty_basis() -> (
-        BTreeMap<RefName, GitOid>,
-        BTreeMap<ForgeStreamId, ForgeStreamPosition>,
-        BTreeSet<RetentionRoot>,
-        BTreeMap<OutboxDeliveryKey, Digest>,
-    ) {
+    fn empty_basis() -> EmptyBasis {
         (
             BTreeMap::new(),
             BTreeMap::new(),
