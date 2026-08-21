@@ -36,7 +36,7 @@ macro_rules! derived {
     };
 }
 
-fn repository() -> RepositoryId {
+const fn repository() -> RepositoryId {
     RepositoryId::from_bytes([7; OPAQUE_ID_LEN])
 }
 

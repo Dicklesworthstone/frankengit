@@ -40,11 +40,11 @@ macro_rules! derived {
     };
 }
 
-fn tenant() -> TenantId {
+const fn tenant() -> TenantId {
     TenantId::from_bytes([3; OPAQUE_ID_LEN])
 }
 
-fn repository() -> RepositoryId {
+const fn repository() -> RepositoryId {
     RepositoryId::from_bytes([7; OPAQUE_ID_LEN])
 }
 

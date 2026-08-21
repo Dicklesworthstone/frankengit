@@ -39,11 +39,11 @@ fn head_id() -> RepositoryAuthorityHeadId {
     )
 }
 
-fn repository() -> RepositoryId {
+const fn repository() -> RepositoryId {
     RepositoryId::from_bytes([7; OPAQUE_ID_LEN])
 }
 
-fn policy() -> PolicySnapshot {
+const fn policy() -> PolicySnapshot {
     PolicySnapshot {
         epoch: PolicyEpoch::FIRST,
         protected_scopes: BTreeSet::new(),

@@ -896,7 +896,7 @@ fn aborting_a_workspace_records_its_incomplete_outputs() {
 fn trivial_acknowledgement_is_the_evidence_type_of_every_internal_class() {
     /// Only compiles when `K::AckEvidence` really is [`TrivialAck`], and only
     /// returns when the value round-trips through the associated type.
-    fn round_trip<K: InternalEffect>() -> K::AckEvidence {
+    const fn round_trip<K: InternalEffect>() -> K::AckEvidence {
         TrivialAck
     }
     assert_eq!(round_trip::<ObjectAdmissionPermit>(), TrivialAck);

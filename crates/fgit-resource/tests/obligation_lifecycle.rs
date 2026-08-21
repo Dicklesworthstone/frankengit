@@ -309,7 +309,11 @@ fn the_external_path_stays_committed_until_acknowledgement() {
         attempt: 1,
     });
     assert_eq!(settled.state(), ObligationState::Acknowledged);
-    assert!(handle.outstanding().is_empty());
+    assert_eq!(
+        handle.outstanding(),
+        [],
+        "an acknowledged effect leaves the region owing nothing"
+    );
     let outcome = ledger.close();
     assert!(outcome.is_quiescent(), "{outcome:?}");
 }
@@ -374,8 +378,7 @@ fn reserving_without_a_required_grade_is_refused_and_returns_the_budget() {
         .expect("capacity covers it");
     let error = ledger
         .reserve::<ObjectAdmissionPermit>(admission_reservation(), thin)
-        .err()
-        .expect("a reservation missing a required grade is refused");
+        .expect_err("a reservation missing a required grade is refused");
     assert_eq!(
         error,
         fgit_resource::custody::ReserveError::MissingGrade {
@@ -483,7 +486,7 @@ fn dropping_a_reserved_obligation_is_a_typed_leak_and_aborting_it_is_not() {
         reason: AdmissionAbortReason::Cancelled,
     });
     assert_eq!(settled.state(), ObligationState::Aborted);
-    assert!(twin.leaks().is_empty());
+    assert_eq!(twin.leaks(), [], "the settled twin leaked nothing");
     let outcome = twin.close();
     assert!(outcome.is_quiescent(), "{outcome:?}");
 }
@@ -562,7 +565,7 @@ fn dropping_an_unacknowledged_effect_record_is_a_typed_leak() {
         attempt: 1,
     });
     assert_eq!(settled.state(), ObligationState::Acknowledged);
-    assert!(twin.leaks().is_empty());
+    assert_eq!(twin.leaks(), [], "the settled twin leaked nothing");
     let outcome = twin.close();
     assert!(outcome.is_quiescent(), "{outcome:?}");
 

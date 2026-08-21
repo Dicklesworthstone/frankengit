@@ -37,7 +37,7 @@ impl Prng {
         z ^ (z >> 31)
     }
 
-    fn below(&mut self, bound: u64) -> u64 {
+    const fn below(&mut self, bound: u64) -> u64 {
         if bound == 0 {
             0
         } else {

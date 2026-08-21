@@ -78,7 +78,7 @@ struct Receiver {
 }
 
 impl Receiver {
-    fn weak(window_capacity: usize) -> Self {
+    const fn weak(window_capacity: usize) -> Self {
         Self {
             idempotency: DownstreamIdempotency::Weak,
             window: VecDeque::new(),
@@ -93,7 +93,7 @@ impl Receiver {
         }
     }
 
-    fn strong() -> Self {
+    const fn strong() -> Self {
         Self {
             idempotency: DownstreamIdempotency::Strong,
             window: VecDeque::new(),
@@ -108,22 +108,22 @@ impl Receiver {
         }
     }
 
-    fn losing_acknowledgements(mut self, count: u32) -> Self {
+    const fn losing_acknowledgements(mut self, count: u32) -> Self {
         self.lose_acknowledgements = count;
         self
     }
 
-    fn failing_transiently(mut self, count: u32) -> Self {
+    const fn failing_transiently(mut self, count: u32) -> Self {
         self.transient_failures = count;
         self
     }
 
-    fn rejecting_permanently(mut self) -> Self {
+    const fn rejecting_permanently(mut self) -> Self {
         self.permanent_rejection = true;
         self
     }
 
-    fn breaking_its_probe_contract(mut self) -> Self {
+    const fn breaking_its_probe_contract(mut self) -> Self {
         self.lies_on_probe = true;
         self
     }
@@ -477,7 +477,11 @@ fn an_exhausted_retry_budget_escalates_instead_of_looping() {
         plan.transitions().len() <= 6,
         "the loop is bounded by the policy, not by the downstream"
     );
-    assert!(receiver.accepted.is_empty());
+    assert_eq!(
+        receiver.accepted,
+        [],
+        "an exhausted budget never delivered anything"
+    );
     let outcome = scenario.ledger.close();
     assert!(!outcome.is_quiescent(), "{outcome:?}");
 }
