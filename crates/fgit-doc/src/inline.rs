@@ -649,8 +649,13 @@ impl Scanner<'_> {
             });
         }
         if !bracket.image {
+            // A link may not contain another link, so every remaining bracket
+            // opener becomes inert. Image openers are unaffected: an image
+            // inside a link is legal.
             for opener in &mut self.brackets {
-                opener.active = false;
+                if !opener.image {
+                    opener.active = false;
+                }
             }
         }
         Ok(target.end)
@@ -831,10 +836,10 @@ impl Scanner<'_> {
         };
         entry.count = entry.count.saturating_sub(used);
         let node = entry.node;
-        let empty = entry.count == 0;
-        let is_closer = entry.can_close && !entry.can_open;
-        let _ = is_closer;
-        if empty {
+        // A run whose characters are all consumed leaves no literal text, so
+        // it stops being part of the inline sequence. Its stack entry stays,
+        // with a zero count, and is skipped by both loops.
+        if entry.count == 0 {
             self.chain.unlink(node);
         }
     }
@@ -910,12 +915,15 @@ fn emit(
         let span = ctx
             .chars
             .span(buffer.map_start(node.start), buffer.map_end(node.end));
-        let Some(kind) = node_kind(ctx, buffer, node, span) else {
-            continue;
+        // A node whose kind cannot be reconstructed is transparent rather
+        // than fatal: its children are attached to its parent, so no text is
+        // dropped on a path that should be unreachable anyway.
+        let target = match node_kind(ctx, buffer, node, span) {
+            Some(kind) => ctx.add(kind, span, Some(target))?,
+            None => target,
         };
-        let created = ctx.add(kind, span, Some(target))?;
         for child in node.children.iter().rev() {
-            stack.push((*child, created, level.saturating_add(1)));
+            stack.push((*child, target, level.saturating_add(1)));
         }
     }
     Ok(())
