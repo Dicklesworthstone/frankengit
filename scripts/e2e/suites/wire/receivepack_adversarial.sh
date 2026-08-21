@@ -43,11 +43,12 @@ readonly TEST_NAME='receivepack_adversarial'
 readonly WIRE_PROBES=9
 readonly ADMISSION_PROBES=4
 readonly RACE_PROBES=6
+readonly PROPAGATION_PROBES=3
 
 main() {
-  local wire_exit=0 admission_exit=0 race_exit=0
-  local wire_out='' admission_out='' race_out=''
-  local wire_passed=0 admission_passed=0 race_passed=0
+  local wire_exit=0 admission_exit=0 race_exit=0 propagation_exit=0
+  local wire_out='' admission_out='' race_out='' propagation_out=''
+  local wire_passed=0 admission_passed=0 race_passed=0 propagation_passed=0
 
   fge_phase setup
   local artifacts=''
@@ -79,6 +80,14 @@ main() {
   race_exit=${race_exit:-0}
   race_out="${FGE_LAST_STDOUT:-}"
 
+  # ---- composition: do the session's configured pack bounds reach the reader?
+  fge_capture propagation-probes env \
+    RCH_CARGO_WRAPPER_BYPASS=1 \
+    cargo test --locked -p fgit-wire --test receivepack_limits_propagation \
+    || propagation_exit=$?
+  propagation_exit=${propagation_exit:-0}
+  propagation_out="${FGE_LAST_STDOUT:-}"
+
   fge_phase assert
   fge_assert_exit 'FG-019C-E2E-001' 0 "${wire_exit}" \
     'the wire-layer adversarial corpus passes'
@@ -86,12 +95,15 @@ main() {
     'the admission-boundary corpus passes'
   fge_assert_exit 'FG-019C-E2E-003' 0 "${race_exit}" \
     'the disconnect-matrix and race corpus passes'
+  fge_assert_exit 'FG-019C-E2E-004' 0 "${propagation_exit}" \
+    'the pack-limit propagation corpus passes'
 
   # Counts, not just exits. A corpus that stopped running probes would exit 0
   # and satisfy the two assertions above while proving nothing.
   wire_passed="$(printf '%s' "${wire_out}" | grep -c '^test .* ok$' || printf '0')"
   admission_passed="$(printf '%s' "${admission_out}" | grep -c '^test .* ok$' || printf '0')"
   race_passed="$(printf '%s' "${race_out}" | grep -c '^test .* ok$' || printf '0')"
+  propagation_passed="$(printf '%s' "${propagation_out}" | grep -c '^test .* ok$' || printf '0')"
 
   fge_assert_eq 'FG-019C-E2E-010' "${WIRE_PROBES}" "${wire_passed}" \
     'every wire-layer probe ran and passed, so the corpus did not shrink'
@@ -99,6 +111,8 @@ main() {
     'every admission-boundary probe ran and passed'
   fge_assert_eq 'FG-019C-E2E-012' "${RACE_PROBES}" "${race_passed}" \
     'every disconnect-matrix and race probe ran and passed'
+  fge_assert_eq 'FG-019C-E2E-013' "${PROPAGATION_PROBES}" "${propagation_passed}" \
+    'every pack-limit propagation probe ran and passed'
 
   # The two load-bearing probes named explicitly, so a rename or deletion is a
   # failure rather than a silent reduction in what this lane covers.
@@ -123,15 +137,23 @@ main() {
   fge_assert_contains 'FG-019C-E2E-026' "${race_out}" \
     'the_authority_mechanics_do_not_depend_on_which_adapter_drove_them' \
     'the publication-route agnosticism probe is present in the run'
+  fge_assert_contains 'FG-019C-E2E-027' "${propagation_out}" \
+    'a_tightened_session_bound_refuses_the_very_pack_a_permissive_one_accepts' \
+    'the same-bytes paired-twin propagation probe is present in the run'
+  fge_assert_contains 'FG-019C-E2E-028' "${propagation_out}" \
+    'each_probed_bound_is_refused_on_its_own_terms' \
+    'the distinct-discriminant probe proving bounds are separately consulted is present'
 
   # Preserve both outputs whatever happened, so a failure is diagnosable from
   # the run's artifacts alone rather than needing a re-run.
   printf '%s\n' "${wire_out}" > "${artifacts}/wire-probes.txt"
   printf '%s\n' "${admission_out}" > "${artifacts}/admission-probes.txt"
   printf '%s\n' "${race_out}" > "${artifacts}/race-probes.txt"
+  printf '%s\n' "${propagation_out}" > "${artifacts}/propagation-probes.txt"
   fge_artifact "${artifacts}/wire-probes.txt" receivepack-wire-probes
   fge_artifact "${artifacts}/admission-probes.txt" receivepack-admission-probes
   fge_artifact "${artifacts}/race-probes.txt" receivepack-race-probes
+  fge_artifact "${artifacts}/propagation-probes.txt" receivepack-propagation-probes
 }
 
 fge_init fg019c-receivepack-adversarial
@@ -143,6 +165,7 @@ fge_context blocked_hidden_refs 'the hidden-ref acceptance line is BLOCKED on a 
 fge_context claim_class 'BOUNDED MODEL, not invariant. The disconnect results range over seven fault kinds crossed with every operation position a clean admission reaches. They do not quantify over all schedules'
 fge_context projection_bound 'RETRACTION, ProudJaguar 9209: the test adapters are NOT conforming projections. snapshot ignores the PublicationBasis and AuthenticatedHead it is handed, and materialize_commit mints roots from seed bytes rather than from state, so three adapters are three variants of ONE unbound adapter and quantifying over them buys nothing about ref semantics. Every claim resting on ref state or on a session observing the successor basis is WITHDRAWN. What survives never depended on the adapter: faults are injected in the store beneath it, and the assertions are about whether a transaction can be RESOLVED and whether it is DECIDED ONCE, never about what was decided'
 fge_context stuck_state_is_detectable 'the forbidden stuck-intermediate class is proven reachable and recognised by driving the exported reconcile_outcome to its fail-closed accelerator-conflict arm, with an agreeing-reads twin, so the matrix assertion can fail in the direction that matters'
+fge_context bomb_packs_through_the_push_path 'covered as a COMPOSITION question rather than by re-testing fgit-pack: the same real pack is pushed twice through ReceivePack, changing only one field of ReceiveLimits.pack, and must be refused when tightened and accepted when permissive, with the reader error naming the CONFIGURED value. A receive path that validated with PackLimits::default() would leave every fgit-pack bomb test green while silently ignoring every operator-configured bound. Three bounds probed (max_entries, max_object_bytes, max_total_expanded_bytes); delta and inflate-work bounds are NOT covered'
 fge_context line3_not_discharged 'acceptance line 3 (exactly-one-winner over ref state with correct per-loser statuses) is NOT discharged by this lane. Only the narrower decide-once property is covered: one sealed transaction acquires at most one terminal decision under a duplicated CAS or a lost response. Ref contention needs a head-bound projection, which is a product slice with an owner'
 fge_context non_claim 'in-process probes of two state machines; nothing here is differential evidence against upstream Git, and nothing speaks for a real network peer'
 main
