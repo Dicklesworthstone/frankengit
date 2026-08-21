@@ -70,6 +70,11 @@ fn command(old: &str, new: &str, name: &str, capabilities: Option<&str>) -> Pack
         line.push(0);
         line.extend_from_slice(capabilities.as_bytes());
     }
+    Packet::Data(line)
+}
+
+fn certificate_command(old: &str, new: &str, name: &str) -> Packet {
+    let mut line = format!("{old} {new} {name}").into_bytes();
     line.push(b'\n');
     Packet::Data(line)
 }
@@ -136,6 +141,32 @@ fn command_goldens_preserve_create_delete_and_expected_old_semantics() {
 }
 
 #[test]
+fn raw_git_send_pack_command_without_lf_is_accepted() {
+    // Byte-for-byte command-section prefix captured from pinned Git 2.54.0
+    // `send-pack --stateless-rpc`: it has no trailing LF and its NUL
+    // capability payload begins with one ASCII space.
+    const GIT_254_SEND_PACK_PREFIX: &[u8] = b"00bf0000000000000000000000000000000000000000 5e93bc56297a8be0bac50c4ad180d2cbb0551cf7 refs/heads/pushed\0 report-status-v2 side-band-64k quiet object-format=sha1 agent=git/2.54.0-Linux0000";
+    assert_eq!(GIT_254_SEND_PACK_PREFIX.len(), 191);
+
+    let server = b"report-status report-status-v2 delete-refs side-band-64k quiet atomic ofs-delta object-format=sha1 agent=git/2.54.0-Linux";
+    let mut machine = ReceivePack::new(context(server)).expect("receive context");
+    let transition = machine
+        .push_bytes(GIT_254_SEND_PACK_PREFIX)
+        .expect("captured Git command section");
+
+    let Some(ReceiveEvent::RequestReady(request)) = transition.events.first() else {
+        panic!("captured Git command flush must expose the parsed request");
+    };
+    assert_eq!(request.commands.len(), 1);
+    assert_eq!(request.commands[0].ref_name, b"refs/heads/pushed");
+    assert!(request.has_capability(b"report-status-v2"));
+    assert!(request.has_capability(b"side-band-64k"));
+    assert!(request.has_capability(b"object-format"));
+    assert!(request.has_capability(b"agent"));
+    assert_eq!(machine.phase(), ReceivePhase::Pack);
+}
+
+#[test]
 fn packet_and_raw_pack_same_read_are_bounded_then_handed_off_without_retention() {
     let mut machine = ReceivePack::new(context(b"report-status")).expect("machine");
     let command = command(OLD, NEW, "refs/heads/main", Some("report-status"));
@@ -174,11 +205,8 @@ fn same_read_push_options_second_flush_then_pack_is_quarantined() {
     let mut transcript = encode_packet(&command, &WireLimits::default()).expect("command encode");
     transcript.extend_from_slice(b"0000");
     transcript.extend_from_slice(
-        &encode_packet(
-            &Packet::Data(b"review=42\n".to_vec()),
-            &WireLimits::default(),
-        )
-        .expect("push-option encode"),
+        &encode_packet(&Packet::Data(b"review=42".to_vec()), &WireLimits::default())
+            .expect("push-option encode"),
     );
     transcript.extend_from_slice(b"0000");
     transcript.extend_from_slice(&empty_sha1_pack());
@@ -335,7 +363,7 @@ fn negotiated_receive_capabilities_drive_push_options_and_sideband_status() {
     assert_eq!(first_flush.events.len(), 0);
     assert_eq!(machine.phase(), ReceivePhase::PushOptions);
     machine
-        .push_packet(Packet::Data(b"review=42\n".to_vec()))
+        .push_packet(Packet::Data(b"review=42".to_vec()))
         .expect("push option");
     let second_flush = machine
         .push_packet(Packet::Flush)
@@ -364,7 +392,7 @@ fn negotiated_receive_capabilities_drive_push_options_and_sideband_status() {
 fn signed_push_nonce_profile_parses_and_mismatches_are_typed() {
     let mut machine = ReceivePack::new(signed_context(b"nonce-1")).expect("machine");
     machine
-        .push_packet(Packet::Data(b"push-cert\0push-cert delete-refs\n".to_vec()))
+        .push_packet(Packet::Data(b"push-cert\0 push-cert delete-refs".to_vec()))
         .expect("certificate prelude");
     for line in [
         b"certificate version 0.1\n".as_slice(),
@@ -378,7 +406,7 @@ fn signed_push_nonce_profile_parses_and_mismatches_are_typed() {
             .expect("certificate header");
     }
     machine
-        .push_packet(command(OLD, ZERO, "refs/heads/delete", None))
+        .push_packet(certificate_command(OLD, ZERO, "refs/heads/delete"))
         .expect("signed delete command");
     for line in [
         b"-----BEGIN PGP SIGNATURE-----\n".as_slice(),
@@ -397,7 +425,7 @@ fn signed_push_nonce_profile_parses_and_mismatches_are_typed() {
 
     let mut mismatch = ReceivePack::new(signed_context(b"nonce-1")).expect("machine");
     mismatch
-        .push_packet(Packet::Data(b"push-cert\0push-cert\n".to_vec()))
+        .push_packet(Packet::Data(b"push-cert\0 push-cert\n".to_vec()))
         .expect("certificate prelude");
     for line in [
         b"certificate version 0.1\n".as_slice(),
@@ -435,12 +463,61 @@ fn planted_protocol_negatives_refuse_before_admission_or_unbounded_storage() {
         ReceivePack::new(context(b"report-status atomic")).expect("machine");
     assert!(matches!(
         repeated_capability_separator.push_packet(Packet::Data(
-            format!("{OLD} {NEW} refs/heads/main\0report-status\0atomic\n").into_bytes(),
+            format!("{OLD} {NEW} refs/heads/main\0report-status\0atomic").into_bytes(),
         )),
         Err(ReceiveError::MalformedCommand { .. })
     ));
     assert_eq!(repeated_capability_separator.phase(), ReceivePhase::Refused);
     assert_eq!(repeated_capability_separator.quarantine_len(), 0);
+
+    let mut newline_terminated_command = ReceivePack::new(context(b"")).expect("machine");
+    newline_terminated_command
+        .push_packet(Packet::Data(
+            format!("{OLD} {NEW} refs/heads/main\n").into_bytes(),
+        ))
+        .expect("one legacy terminal LF is accepted");
+    assert_eq!(newline_terminated_command.phase(), ReceivePhase::Commands);
+
+    let mut embedded_newline_command = ReceivePack::new(context(b"")).expect("machine");
+    assert!(matches!(
+        embedded_newline_command.push_packet(Packet::Data(
+            format!("{OLD} {NEW} refs/heads/main\ntrailing").into_bytes(),
+        )),
+        Err(ReceiveError::Wire(WireError::MalformedRequestLine { .. }))
+    ));
+    assert_eq!(embedded_newline_command.phase(), ReceivePhase::Refused);
+
+    let mut repeated_leading_capability_separator =
+        ReceivePack::new(context(b"report-status")).expect("machine");
+    assert_eq!(
+        repeated_leading_capability_separator.push_packet(command(
+            OLD,
+            NEW,
+            "refs/heads/main",
+            Some("  report-status"),
+        )),
+        Err(ReceiveError::Wire(WireError::EmptyCapability))
+    );
+    assert_eq!(
+        repeated_leading_capability_separator.phase(),
+        ReceivePhase::Refused
+    );
+
+    let mut wrong_object_format =
+        ReceivePack::new(context(b"object-format=sha1")).expect("machine");
+    assert_eq!(
+        wrong_object_format.push_packet(command(
+            OLD,
+            NEW,
+            "refs/heads/main",
+            Some(" object-format=sha256"),
+        )),
+        Err(ReceiveError::ObjectFormatMismatch {
+            expected: GitObjectFormat::Sha1,
+            observed: Some(b"sha256".to_vec()),
+        })
+    );
+    assert_eq!(wrong_object_format.phase(), ReceivePhase::Refused);
 
     let mut delete_without_capability = ReceivePack::new(context(b"")).expect("machine");
     delete_without_capability

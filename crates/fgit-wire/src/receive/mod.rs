@@ -112,6 +112,8 @@ pub enum ReceiveCapability {
     PushOptions,
     /// Accept a bounded `agent=<value>` client identification.
     Agent,
+    /// Bind the client capability selection to this repository's object format.
+    ObjectFormat,
     /// Permit a command whose new object ID is all zeroes.
     DeleteRefs,
     /// Parse a signed push-certificate profile and its nonce.
@@ -129,6 +131,7 @@ impl ReceiveCapability {
             b"ofs-delta" => Some(Self::OfsDelta),
             b"push-options" => Some(Self::PushOptions),
             b"agent" => Some(Self::Agent),
+            b"object-format" => Some(Self::ObjectFormat),
             b"delete-refs" => Some(Self::DeleteRefs),
             b"push-cert" => Some(Self::PushCert),
             _ => None,
@@ -176,7 +179,7 @@ impl ReceiveContext {
         signed_push: SignedPushProfile,
     ) -> Result<Self, ReceiveError> {
         limits.validate()?;
-        validate_server_capabilities(&server_capabilities, &signed_push)?;
+        validate_server_capabilities(&server_capabilities, &signed_push, object_format)?;
         Ok(Self {
             object_format,
             server_capabilities,
@@ -532,7 +535,7 @@ impl ReceivePack {
             self.start_certificate(line)?;
             return Ok(ReceiveTransition::default());
         }
-        let line = command_line_without_lf(&line)?;
+        let line = command_packet_text(&line)?;
         let (command, capabilities) =
             parse_command_line(line, self.context.object_format, &self.context.limits)?;
         if let Some(capabilities) = capabilities {
@@ -543,6 +546,7 @@ impl ReceivePack {
                 capabilities,
                 &self.context.server_capabilities,
                 &self.context.limits.wire,
+                self.context.object_format,
             )?;
         }
         self.push_command(command)?;
@@ -579,7 +583,7 @@ impl ReceivePack {
     ) -> Result<ReceiveTransition, ReceiveError> {
         match packet {
             Packet::Data(line) => {
-                let option = line_without_lf(&line).map_err(ReceiveError::Wire)?;
+                let option = command_packet_text(&line)?;
                 validate_push_option(option, &self.context.limits)?;
                 if self.push_options.len() == self.context.limits.max_push_options {
                     return Err(ReceiveError::TooManyPushOptions {
@@ -612,9 +616,7 @@ impl ReceivePack {
     }
 
     fn start_certificate(&mut self, line: Vec<u8>) -> Result<(), ReceiveError> {
-        let Some(line) = line.strip_suffix(b"\n") else {
-            return Err(ReceiveError::Wire(WireError::MissingLineFeed));
-        };
+        let line = command_packet_text(&line)?;
         let Some(raw_capabilities) = line.strip_prefix(b"push-cert\0") else {
             return Err(ReceiveError::MalformedCertificate);
         };
@@ -627,6 +629,7 @@ impl ReceivePack {
             raw_capabilities,
             &self.context.server_capabilities,
             &self.context.limits.wire,
+            self.context.object_format,
         )?;
         if !self.has_client_capability(b"push-cert") {
             return Err(ReceiveError::SignedPushCapabilityMissing);
@@ -1096,16 +1099,16 @@ fn parse_command_line<'line>(
     Ok((ReceiveCommand { old, new, ref_name }, capabilities))
 }
 
-/// Removes the request newline while preserving the one `NUL` separator that
-/// introduces capabilities on the first `receive-pack` command.
+/// Validates a receive-pack command-section pkt-line payload.
 ///
-/// Shared request lines reject every `NUL` byte, but `receive-pack` v0/v1 uses one
-/// between the command triple and its capability list. [`parse_command_line`]
-/// validates that this permissive framing cannot admit a second separator.
-fn command_line_without_lf(line: &[u8]) -> Result<&[u8], ReceiveError> {
-    let Some((&b'\n', text)) = line.split_last() else {
-        return Err(ReceiveError::Wire(WireError::MissingLineFeed));
-    };
+/// Git's `send-pack` writes command, capability-prelude, and push-option
+/// pkt-line payloads without a trailing LF. Older clients may include one
+/// terminal LF. This differs from certificates, advertisements, and
+/// report-status records, which retain their own line endings. The first
+/// command may contain one `NUL` separator; that rule is enforced by
+/// [`parse_command_line`].
+fn command_packet_text(line: &[u8]) -> Result<&[u8], ReceiveError> {
+    let text = line.strip_suffix(b"\n").unwrap_or(line);
     if text.contains(&b'\n') || text.contains(&b'\r') {
         return Err(ReceiveError::Wire(WireError::MalformedRequestLine {
             line: line.to_vec(),
@@ -1129,6 +1132,7 @@ fn negotiate_capabilities(
     raw: &[u8],
     server: &Capabilities,
     limits: &WireLimits,
+    object_format: GitObjectFormat,
 ) -> Result<Vec<Capability>, ReceiveError> {
     if raw.is_empty() {
         return Err(ReceiveError::Wire(WireError::EmptyCapability));
@@ -1149,7 +1153,7 @@ fn negotiate_capabilities(
                 capability: capability.name.clone(),
             });
         }
-        validate_capability_value(kind, capability)?;
+        validate_capability_value(kind, capability, object_format)?;
         result.push(capability.clone());
     }
     Ok(result)
@@ -1158,6 +1162,7 @@ fn negotiate_capabilities(
 fn validate_server_capabilities(
     capabilities: &Capabilities,
     signed_push: &SignedPushProfile,
+    object_format: GitObjectFormat,
 ) -> Result<(), ReceiveError> {
     for capability in capabilities.entries() {
         let kind = ReceiveCapability::parse(&capability.name).ok_or_else(|| {
@@ -1175,7 +1180,7 @@ fn validate_server_capabilities(
                 });
             }
         }
-        validate_capability_value(kind, capability)?;
+        validate_capability_value(kind, capability, object_format)?;
     }
     Ok(())
 }
@@ -1183,6 +1188,7 @@ fn validate_server_capabilities(
 fn validate_capability_value(
     kind: ReceiveCapability,
     capability: &Capability,
+    object_format: GitObjectFormat,
 ) -> Result<(), ReceiveError> {
     match kind {
         ReceiveCapability::Agent => {
@@ -1193,6 +1199,14 @@ fn validate_capability_value(
             }
         }
         ReceiveCapability::PushCert => {}
+        ReceiveCapability::ObjectFormat => {
+            if capability.value.as_deref() != Some(object_format.as_str().as_bytes()) {
+                return Err(ReceiveError::ObjectFormatMismatch {
+                    expected: object_format,
+                    observed: capability.value.clone(),
+                });
+            }
+        }
         _ if capability.value.is_some() => {
             return Err(ReceiveError::CapabilityValueForbidden {
                 capability: capability.name.clone(),
@@ -1223,7 +1237,11 @@ pub fn advertise_receive_pack(
     refs: Vec<AdvertisedRef>,
     context: &ReceiveContext,
 ) -> Result<Vec<Packet>, ReceiveError> {
-    validate_server_capabilities(&context.server_capabilities, &context.signed_push)?;
+    validate_server_capabilities(
+        &context.server_capabilities,
+        &context.signed_push,
+        context.object_format,
+    )?;
     if !refs.is_empty() {
         return V1Advertisement::new(
             refs,
@@ -1523,6 +1541,11 @@ pub enum ReceiveError {
     CapabilityValueRequired { capability: Vec<u8> },
     /// A capability that has no value grammar carried one.
     CapabilityValueForbidden { capability: Vec<u8> },
+    /// The negotiated `object-format` differs from the repository's typed OID domain.
+    ObjectFormatMismatch {
+        expected: GitObjectFormat,
+        observed: Option<Vec<u8>>,
+    },
     /// The client placed capabilities after the first command.
     CapabilitiesNotFirstCommand,
     /// No update command was supplied before flush.
@@ -1597,6 +1620,10 @@ impl Display for ReceiveError {
             Self::CapabilityValueForbidden { capability } => write!(
                 formatter,
                 "receive capability forbids a value {capability:?}"
+            ),
+            Self::ObjectFormatMismatch { expected, observed } => write!(
+                formatter,
+                "receive object format mismatch: expected {expected}, observed {observed:?}"
             ),
             Self::CapabilitiesNotFirstCommand => {
                 formatter.write_str("receive capabilities occur after the first command")
