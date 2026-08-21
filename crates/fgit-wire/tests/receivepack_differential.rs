@@ -128,10 +128,10 @@ fn split_first_ref_line(bytes: &[u8]) -> Result<RefLine, String> {
         payload = &payload[..payload.len() - 1];
     }
     let nul = payload.iter().position(|byte| *byte == 0);
-    let (before_nul, capabilities) = match nul {
-        Some(index) => (payload[..index].to_vec(), payload[index + 1..].to_vec()),
-        None => (payload.to_vec(), Vec::new()),
-    };
+    let (before_nul, capabilities) = nul.map_or_else(
+        || (payload.to_vec(), Vec::new()),
+        |index| (payload[..index].to_vec(), payload[index + 1..].to_vec()),
+    );
     Ok(RefLine {
         declared_len,
         remainder_is_flush: &bytes[declared_len..] == b"0000",
@@ -434,7 +434,7 @@ fn the_comparator_rejects_an_advertisement_whose_declared_length_is_wrong() {
 
     // Lower the declared length by one: the packet now claims to end one byte
     // early, so the remainder can no longer be the terminating flush.
-    let mut corrupted = honest.clone();
+    let mut corrupted = honest;
     let declared = honest_line.declared_len;
     let shortened = format!("{:04x}", declared - 1);
     corrupted[..4].copy_from_slice(shortened.as_bytes());

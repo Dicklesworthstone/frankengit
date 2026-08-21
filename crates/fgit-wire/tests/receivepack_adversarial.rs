@@ -34,7 +34,7 @@
 //!   about a real network peer, and nothing here is differential evidence
 //!   against upstream Git — that is the oracle lane's job, and it is separate.
 //! * The seal/outcome-race dimensions of this bead reach the authority layer,
-//!   where TurquoiseDog has two open P0 findings at `8fed725`. Anything this
+//!   where the pack owner has two open P0 findings at `8fed725`. Anything this
 //!   file discovers there is corroboration of theirs, not a second finding.
 
 use fgit_wire::receive::ReceiveContext;
@@ -318,7 +318,7 @@ fn cancelling_at_every_checkpoint_leaves_no_stuck_intermediate() {
         observed_phases.push(phase);
 
         // The owner's stated contract, applied exactly rather than loosely.
-        // ProudJaguar: a structural cancel must yield Err(Cancelled), phase
+        // Per the wire owner: a structural cancel must yield Err(Cancelled), phase
         // Refused, and an empty quarantine. An earlier version of this test
         // accepted ANY error and also accepted phase Pack, which would have
         // passed on a machine that cancelled into a mid-stream state while
@@ -385,9 +385,7 @@ fn cancelling_at_every_checkpoint_leaves_no_stuck_intermediate() {
          the cancellation contract at all"
     );
     assert!(
-        observed_phases
-            .iter()
-            .any(|phase| *phase == ReceivePhase::Complete),
+        observed_phases.contains(&ReceivePhase::Complete),
         "no budget in the sweep completed; the matrix never reached the success path"
     );
 }
@@ -435,8 +433,10 @@ fn a_terminal_machine_refuses_reuse_instead_of_accepting_a_second_request() {
 /// request, which is why the twin at the boundary is the load-bearing half.
 #[test]
 fn the_command_ceiling_accepts_the_bound_and_refuses_one_past_it() {
-    let mut limits = ReceiveLimits::default();
-    limits.max_commands = 3;
+    let limits = ReceiveLimits {
+        max_commands: 3,
+        ..ReceiveLimits::default()
+    };
 
     // At the bound: accepted.
     let mut at_bound = ReceivePack::new(context_with(limits.clone())).expect("machine");

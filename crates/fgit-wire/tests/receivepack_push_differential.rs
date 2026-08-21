@@ -124,7 +124,7 @@ const CAPS_ATOMIC: &str = "report-status delete-refs atomic";
 #[derive(Clone)]
 struct Object {
     id: ObjectId,
-    object_type: ObjectType,
+    kind: ObjectType,
     body: Vec<u8>,
     references: Vec<ObjectId>,
 }
@@ -147,7 +147,7 @@ fn blob(content: &[u8]) -> Object {
     let body = content.to_vec();
     Object {
         id: ObjectId::from(native_object_oid::<Sha1>(ObjectType::Blob, &body)),
-        object_type: ObjectType::Blob,
+        kind: ObjectType::Blob,
         body,
         references: Vec::new(),
     }
@@ -164,7 +164,7 @@ fn tree(name: &str, blob_id: ObjectId) -> Object {
     body.extend_from_slice(&raw_oid_bytes(blob_id));
     Object {
         id: ObjectId::from(native_object_oid::<Sha1>(ObjectType::Tree, &body)),
-        object_type: ObjectType::Tree,
+        kind: ObjectType::Tree,
         body,
         references: vec![blob_id],
     }
@@ -190,7 +190,7 @@ fn commit(tree_id: ObjectId) -> Object {
     body.extend_from_slice(b"fg019c push differential\n");
     Object {
         id: ObjectId::from(native_object_oid::<Sha1>(ObjectType::Commit, &body)),
-        object_type: ObjectType::Commit,
+        kind: ObjectType::Commit,
         body,
         references: vec![tree_id],
     }
@@ -210,7 +210,7 @@ impl CanonicalObjectSource for ClosureSource {
             .unwrap_or_else(|| panic!("closure is missing an object it referenced: {id:?}"));
         Ok(CanonicalPackObject::new(
             object.id,
-            object.object_type,
+            object.kind,
             object.body.clone(),
             object.references.clone(),
             u64::try_from(index).unwrap_or(u64::MAX),
@@ -640,8 +640,12 @@ fn our_report_status_frames_what_git_frames() {
     // one path twice.
     cells.push((
         "oracle_reached_both_verdicts",
-        if oracle_accepted.get(1).map(|line| line.starts_with(b"ok ")) == Some(true)
-            && oracle_refused.get(1).map(|line| line.starts_with(b"ng ")) == Some(true)
+        if oracle_accepted
+            .get(1)
+            .is_some_and(|line| line.starts_with(b"ok "))
+            && oracle_refused
+                .get(1)
+                .is_some_and(|line| line.starts_with(b"ng "))
         {
             Verdict::Match
         } else {
@@ -668,7 +672,7 @@ fn our_report_status_frames_what_git_frames() {
         },
     );
     fs::write(
-        &output.join("fgit-accepted.txt"),
+        output.join("fgit-accepted.txt"),
         oracle_accepted
             .iter()
             .chain(ours_accepted.iter())
@@ -743,7 +747,7 @@ fn our_report_status_frames_what_git_frames() {
 
     // RULED, and the direction reversed. This cell recorded a divergence:
     // Git accepted a delete whose client did not echo `delete-refs`, and our
-    // machine refused it as `DeleteRefsNotNegotiated`. ProudJaguar ruled that a
+    // machine refused it as `DeleteRefsNotNegotiated`. The wire owner ruled that a
     // **compatibility defect in ours** — the Git protocol-capabilities
     // documentation makes `delete-refs` a SERVER advertisement telling the
     // client it may send zero-id deletes, not something the client echoes back.

@@ -2,7 +2,8 @@
 //! FG-019c: bomb packs through the *push path* — do a receive session's
 //! configured pack bounds actually reach the pack reader?
 //!
-//! Independent adversary over ProudJaguar's `fgit-wire`. Nothing here modifies
+//! Independent adversary over `fgit-wire`, which this file does not own. Nothing
+//! here modifies
 //! `crates/fgit-wire/src/**`; every probe drives the public API.
 //!
 //! ## The gap this closes, and why it falls between two owners
@@ -237,10 +238,10 @@ fn push(pack: &[u8], limits: ReceiveLimits) -> PushOutcome {
 
     let mut handoff = AcceptingHandoff::default();
     let mut cancellation = NeverCancels;
-    let result = match buffering {
-        Some(error) => Err(error),
-        None => machine.finish_with_handoff(&mut handoff, &mut cancellation),
-    };
+    let result = buffering.map_or_else(
+        || machine.finish_with_handoff(&mut handoff, &mut cancellation),
+        Err,
+    );
 
     PushOutcome {
         result,
@@ -251,7 +252,7 @@ fn push(pack: &[u8], limits: ReceiveLimits) -> PushOutcome {
 }
 
 /// The pack error a refusal carried, or `None` if it refused for another reason.
-fn pack_error(outcome: &PushOutcome) -> Option<&PackError> {
+const fn pack_error(outcome: &PushOutcome) -> Option<&PackError> {
     match &outcome.result {
         Err(ReceiveError::Pack(error)) => Some(error),
         _ => None,
@@ -411,14 +412,23 @@ fn the_probe_pack_is_large_enough_for_every_bound_to_be_reachable() {
         "the probe pack carries {} entries, not the {BLOB_COUNT} the bounds assume",
         outcome.handoff.entries
     );
-    assert!(
-        BLOB_COUNT > 1,
-        "max_entries = 1 is only a tightening if the pack has more than one entry"
-    );
-    assert!(
-        BLOB_BYTES / 2 > 0 && BLOB_BYTES > BLOB_BYTES / 2,
-        "max_object_bytes must be tightened to a positive value below the blob size"
-    );
+    // These two compare CONSTANTS, so as runtime assertions they could never
+    // fail — a tautological guard dressed as a non-vacuity check, which clippy
+    // caught and which is exactly the shape this corpus exists to refuse. They
+    // are compile-time assertions now, so a future edit to either constant that
+    // made the corpus degenerate fails the BUILD rather than passing silently.
+    const {
+        assert!(
+            BLOB_COUNT > 1,
+            "max_entries = 1 is only a tightening if the pack has more than one entry"
+        );
+    }
+    const {
+        assert!(
+            BLOB_BYTES / 2 > 0 && BLOB_BYTES > BLOB_BYTES / 2,
+            "max_object_bytes must be tightened to a positive value below the blob size"
+        );
+    }
 
     // Every probe must actually TIGHTEN against the default it is compared
     // with. If `PackLimits::default()` ever moved down to meet one of these
@@ -441,7 +451,7 @@ fn the_probe_pack_is_large_enough_for_every_bound_to_be_reachable() {
 
 /// Whether `tightened` lowers at least one bound below `defaults` and raises
 /// none.
-fn is_strictly_tighter(defaults: &PackLimits, tightened: &PackLimits) -> bool {
+const fn is_strictly_tighter(defaults: &PackLimits, tightened: &PackLimits) -> bool {
     let lowered = tightened.max_entries < defaults.max_entries
         || tightened.max_object_bytes < defaults.max_object_bytes
         || tightened.max_total_expanded_bytes < defaults.max_total_expanded_bytes
