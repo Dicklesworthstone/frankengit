@@ -62,6 +62,18 @@ An `AuthorityStore` profile declares and proves:
 
 Provider listing consistency is irrelevant to authority. Canonical recovery starts from known root keys and follows authenticated links.
 
+### Provider admission decision: no ETag-only authority
+
+FG-006a deliberately excludes a provider whose only conditional handle is a
+content-derived ETag. The capability probe requires a dedicated 16-byte opaque
+version token that is newly issued when byte-identical content is restored,
+plus exact historical reads by that token; this records both no-ABA evidence
+and the receipt authentication boundary. This is an admission boundary, not a
+claim about the token width of arbitrary provider APIs: a provider may satisfy
+the profile with an independently verified generation handle. Reconsider the
+exclusion only with a provider-specific conformance result covering the probe
+sequence, gateway path, and region/configuration recorded in its receipt.
+
 ### 3.1 Embedded profile
 
 The single-node self-hosted profile implements the same trait with FrankenSQLite:
