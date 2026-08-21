@@ -198,7 +198,7 @@ read -r FAKE_HASH _ < <(sha256sum "${FAKE_GIT}")
 write_fake_receipt "${FAKE_HASH}"
 
 mkdir -p "${TEST_ROOT}/no-bwrap-bin"
-for required_command in bash dirname sha256sum; do
+for required_command in bash dirname mkdir sha256sum; do
     required_path="$(command -v "${required_command}")"
     ln -s "${required_path}" "${TEST_ROOT}/no-bwrap-bin/${required_command}"
 done
