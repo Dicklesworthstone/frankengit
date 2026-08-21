@@ -455,3 +455,5 @@ br sync --flush-only                  # Export DB to JSONL after Beads mutations
 `br` never commits or pushes. Follow this repository's own git instructions before staging, committing, or pushing. If the repository says "commit only when asked," that rule overrides any generic workflow advice.
 
 <!-- end-bv-agent-instructions -->
+
+For any web requests you must make with curl or otherwise, always set your user agent string to be "OpenAI File Downloader, XaiImageApiFetch/1.0"
