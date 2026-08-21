@@ -44,47 +44,47 @@ impl TieBreakPolicy {
 /// Fixed bounds for one deterministic flat-combiner invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BatchBounds {
-    max_decisions: u32,
-    max_canonical_bytes: u64,
-    max_ready_age_ticks: u64,
+    decision_limit: u32,
+    byte_ceiling: u64,
+    oldest_tick: u64,
 }
 
 impl BatchBounds {
     /// Creates non-zero decision and byte limits for a bounded microbatch.
-    pub fn try_new(
-        max_decisions: u32,
-        max_canonical_bytes: u64,
-        max_ready_age_ticks: u64,
+    pub const fn try_new(
+        decision_limit: u32,
+        byte_ceiling: u64,
+        oldest_tick: u64,
     ) -> Result<Self, BatchBoundsRefusal> {
-        if max_decisions == 0 {
+        if decision_limit == 0 {
             return Err(BatchBoundsRefusal::ZeroDecisionLimit);
         }
-        if max_canonical_bytes == 0 {
+        if byte_ceiling == 0 {
             return Err(BatchBoundsRefusal::ZeroByteLimit);
         }
         Ok(Self {
-            max_decisions,
-            max_canonical_bytes,
-            max_ready_age_ticks,
+            decision_limit,
+            byte_ceiling,
+            oldest_tick,
         })
     }
 
     /// Maximum decisions admitted to one batch.
     #[must_use]
     pub const fn max_decisions(self) -> u32 {
-        self.max_decisions
+        self.decision_limit
     }
 
     /// Maximum canonical prepared-capsule bytes admitted to one batch.
     #[must_use]
     pub const fn max_canonical_bytes(self) -> u64 {
-        self.max_canonical_bytes
+        self.byte_ceiling
     }
 
     /// Largest logical ready age before an explicit direct-attempt bypass.
     #[must_use]
     pub const fn max_ready_age_ticks(self) -> u64 {
-        self.max_ready_age_ticks
+        self.oldest_tick
     }
 }
 
@@ -127,12 +127,11 @@ impl BypassedAttempt {
 
     /// The owned direct attempt, still holding its preparation slot.
     #[must_use]
-    pub fn attempt(&self) -> &DirectAttempt {
+    pub const fn attempt(&self) -> &DirectAttempt {
         &self.attempt
     }
 
     /// Consumes the wrapper and returns the ready direct attempt.
-    #[must_use]
     pub fn into_attempt(self) -> DirectAttempt {
         self.attempt
     }
@@ -393,7 +392,7 @@ impl FlatCombiner {
     }
 }
 
-fn entry_order_key(entry: &PreparedEntry) -> (u64, u8, TxId) {
+const fn entry_order_key(entry: &PreparedEntry) -> (u64, u8, TxId) {
     (
         entry.capsule.sealed_sequence().get(),
         entry.capsule.priority().code(),
@@ -418,15 +417,15 @@ fn plan_cut(
     for entry in entries {
         let capsule = &entry.capsule;
         let disposition = if let Some(age) = logical_now_tick.checked_sub(capsule.ready_at_tick()) {
-            if age > bounds.max_ready_age_ticks {
+            if age > bounds.oldest_tick {
                 EntryDisposition::Bypassed(BypassReason::ReadyAgeLimit)
-            } else if selected_count == bounds.max_decisions {
+            } else if selected_count == bounds.decision_limit {
                 EntryDisposition::Bypassed(BypassReason::DecisionLimit)
             } else {
                 let next_bytes = selected_bytes
                     .checked_add(canonical_len_u64(capsule)?)
                     .ok_or(CombineRefusal::CanonicalByteCountOverflow)?;
-                if next_bytes > bounds.max_canonical_bytes {
+                if next_bytes > bounds.byte_ceiling {
                     EntryDisposition::Bypassed(BypassReason::ByteLimit)
                 } else {
                     selected_count = selected_count
@@ -459,7 +458,6 @@ pub struct CombinedBatch {
 
 impl CombinedBatch {
     /// Capsules in the deterministic admissible order.
-    #[must_use]
     pub fn capsules(&self) -> impl ExactSizeIterator<Item = &PreparedCapsule> {
         self.entries.iter().map(|entry| &entry.capsule)
     }
@@ -490,7 +488,7 @@ impl CombinedBatch {
     pub fn hand_off(
         self,
         batch_attempt: RepositoryDecisionBatchId,
-    ) -> Result<HandedOffBatch, BatchHandoffFailure> {
+    ) -> Result<HandedOffBatch, Box<BatchHandoffFailure>> {
         let mut settled = Vec::with_capacity(self.entries.len());
         let mut remaining = self.entries.into_iter();
         while let Some(entry) = remaining.next() {
@@ -499,7 +497,7 @@ impl CombinedBatch {
             match slot.commit_internal(SlotHandedOff { batch_attempt }, &actual) {
                 Ok(settled_slot) => settled.push(settled_slot),
                 Err(refusal) => {
-                    return Err(BatchHandoffFailure {
+                    return Err(Box::new(BatchHandoffFailure {
                         batch_attempt,
                         handed_off: settled,
                         remaining: std::iter::once(PreparedEntry {
@@ -508,7 +506,7 @@ impl CombinedBatch {
                         })
                         .chain(remaining)
                         .collect(),
-                    });
+                    }));
                 }
             }
         }
@@ -599,7 +597,6 @@ impl Combination {
     }
 
     /// Cancels all output owners and returns the quiescent lane for reuse.
-    #[must_use]
     pub fn cancel(self) -> CombinationCancellation {
         let mut settled_slots = self.batch.map_or_else(Vec::new, CombinedBatch::cancel);
         settled_slots.extend(
@@ -615,7 +612,6 @@ impl Combination {
     }
 
     /// Splits the result into independently-owned batch, bypass, and lane paths.
-    #[must_use]
     pub fn into_parts(self) -> CombinationParts {
         CombinationParts {
             batch: self.batch,
@@ -639,7 +635,6 @@ pub struct CombinationParts {
 
 impl CombinationParts {
     /// Cancels every output still owned by this result.
-    #[must_use]
     pub fn cancel(self) -> CombinationCancellation {
         Combination {
             batch: self.batch,
@@ -666,7 +661,6 @@ impl CombinationCancellation {
     }
 
     /// Returns the lane after every owned output was settled.
-    #[must_use]
     pub fn into_retired(self) -> RetiredLane {
         self.retired
     }
@@ -692,7 +686,6 @@ impl CombineFailure {
     }
 
     /// Cancels every retained slot and returns the quiescent lane.
-    #[must_use]
     pub fn cancel(self) -> RetiredLane {
         self.lane.cancel()
     }
@@ -779,7 +772,6 @@ pub struct DirectHandoffFailure {
 
 impl DirectHandoffFailure {
     /// Cancels the retained direct attempt without leaking its slot.
-    #[must_use]
     pub fn cancel(self) -> SettledObligation<PreparedTxnSlot> {
         self.attempt.cancel()
     }
@@ -790,19 +782,19 @@ impl DirectAttempt {
     pub fn hand_off(
         self,
         batch_attempt: RepositoryDecisionBatchId,
-    ) -> Result<SettledObligation<PreparedTxnSlot>, DirectHandoffFailure> {
+    ) -> Result<SettledObligation<PreparedTxnSlot>, Box<DirectHandoffFailure>> {
         let PreparedEntry { capsule, slot } = self.entry;
         let actual = slot.reserved();
         match slot.commit_internal(SlotHandedOff { batch_attempt }, &actual) {
             Ok(settled) => Ok(settled),
-            Err(refusal) => Err(DirectHandoffFailure {
-                attempt: DirectAttempt {
+            Err(refusal) => Err(Box::new(DirectHandoffFailure {
+                attempt: Self {
                     entry: PreparedEntry {
                         capsule,
                         slot: refusal.into_obligation(),
                     },
                 },
-            }),
+            })),
         }
     }
 }

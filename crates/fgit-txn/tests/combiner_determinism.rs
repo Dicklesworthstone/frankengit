@@ -120,7 +120,7 @@ fn combine(
 #[test]
 fn seed_shuffled_inputs_preserve_batch_composition_and_decision_path() {
     let bounds = BatchBounds::try_new(8, 4_096, 10).expect("valid bounds");
-    let source = vec![
+    let source = [
         capsule(5, 2, 1),
         capsule(1, 3, 2),
         capsule(4, 1, 3),
@@ -151,7 +151,7 @@ fn seed_shuffled_inputs_preserve_batch_composition_and_decision_path() {
         }
         let cancellation = combination.cancel();
         assert_eq!(cancellation.settled_slots().len(), 4);
-        assert!(ledger.leaks().is_empty());
+        assert_eq!(ledger.leaks(), Vec::new());
         assert!(ledger.close().is_quiescent());
     }
 }
@@ -183,7 +183,7 @@ fn overlapping_witnesses_form_one_ordered_conflict_component() {
 
     let cancellation = combination.cancel();
     assert_eq!(cancellation.settled_slots().len(), 3);
-    assert!(ledger.leaks().is_empty());
+    assert_eq!(ledger.leaks(), Vec::new());
     assert!(ledger.close().is_quiescent());
 }
 
@@ -191,6 +191,7 @@ fn overlapping_witnesses_form_one_ordered_conflict_component() {
 fn direct_bypass_matches_the_same_capsule_on_the_combined_path() {
     let bounds = BatchBounds::try_new(1, 4_096, 10).expect("valid bounds");
     let candidate = capsule(9, 2, 9);
+    let candidate_id = candidate.capsule_id();
     let lower_sequence = capsule(8, 1, 8);
     let bypass_ledger = ledger(1_200);
     let combination = combine(
@@ -201,15 +202,10 @@ fn direct_bypass_matches_the_same_capsule_on_the_combined_path() {
     );
     assert_eq!(combination.bypasses().len(), 1);
     let bypassed_id = combination.bypasses()[0].attempt().capsule().capsule_id();
-    assert_eq!(bypassed_id, candidate.capsule_id());
+    assert_eq!(bypassed_id, candidate_id);
 
     let direct_ledger = ledger(1_201);
-    let direct = combine(
-        &direct_ledger,
-        LaneId::new(23),
-        vec![candidate.clone()],
-        bounds,
-    );
+    let direct = combine(&direct_ledger, LaneId::new(23), vec![candidate], bounds);
     let combined_id = direct
         .batch()
         .expect("one capsule fits a batch")
@@ -221,8 +217,8 @@ fn direct_bypass_matches_the_same_capsule_on_the_combined_path() {
 
     let _cancelled = combination.cancel();
     let _cancelled = direct.cancel();
-    assert!(bypass_ledger.leaks().is_empty());
-    assert!(direct_ledger.leaks().is_empty());
+    assert_eq!(bypass_ledger.leaks(), Vec::new());
+    assert_eq!(direct_ledger.leaks(), Vec::new());
     assert!(bypass_ledger.close().is_quiescent());
     assert!(direct_ledger.close().is_quiescent());
 }
@@ -258,7 +254,7 @@ fn byte_and_logical_age_cuts_are_explicit_bypasses() {
 
     let _cancelled = byte_limited.cancel();
     let _cancelled = age_limited.cancel();
-    assert!(ledger.leaks().is_empty());
+    assert_eq!(ledger.leaks(), Vec::new());
     assert!(ledger.close().is_quiescent());
 }
 
@@ -287,6 +283,6 @@ fn invalid_batch_bound_refuses_and_matching_bound_hands_slots_to_batch() {
         .hand_off(batch_id(11))
         .expect("reserved internal slot can transfer to the batch attempt");
     assert_eq!(handed_off.settled_slots().len(), 1);
-    assert!(ledger.leaks().is_empty());
+    assert_eq!(ledger.leaks(), Vec::new());
     assert!(ledger.close().is_quiescent());
 }

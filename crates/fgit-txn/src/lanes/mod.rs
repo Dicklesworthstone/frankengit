@@ -259,7 +259,10 @@ pub struct LaneCapacity {
 
 impl LaneCapacity {
     /// Creates a non-empty bounded lane capacity.
-    pub fn try_new(max_capsules: usize, max_canonical_bytes: usize) -> Result<Self, LaneRefusal> {
+    pub const fn try_new(
+        max_capsules: usize,
+        max_canonical_bytes: usize,
+    ) -> Result<Self, LaneRefusal> {
         if max_capsules == 0 {
             return Err(LaneRefusal::ZeroCapsuleCapacity);
         }
@@ -341,20 +344,20 @@ pub enum LaneRefusal {
 #[must_use]
 #[derive(Debug)]
 pub struct OverflowedCapsule {
-    capsule: PreparedCapsule,
+    capsule: Box<PreparedCapsule>,
 }
 
 impl OverflowedCapsule {
     /// The capsule requiring a secondary lane or direct-attempt bypass.
     #[must_use]
-    pub fn capsule(&self) -> &PreparedCapsule {
+    pub const fn capsule(&self) -> &PreparedCapsule {
         &self.capsule
     }
 
     /// Consumes the explicit overflow result and returns its capsule.
     #[must_use]
     pub fn into_capsule(self) -> PreparedCapsule {
-        self.capsule
+        *self.capsule
     }
 }
 
@@ -362,7 +365,7 @@ impl OverflowedCapsule {
 #[must_use]
 #[derive(Debug)]
 pub struct AppendRefusal {
-    capsule: PreparedCapsule,
+    capsule: Box<PreparedCapsule>,
     refusal: LaneRefusal,
 }
 
@@ -376,7 +379,7 @@ impl AppendRefusal {
     /// Returns the capsule without creating a ready-slot obligation.
     #[must_use]
     pub fn into_capsule(self) -> PreparedCapsule {
-        self.capsule
+        *self.capsule
     }
 }
 
@@ -402,7 +405,6 @@ pub struct WritableLane {
 
 impl WritableLane {
     /// Creates an empty append-only lane.
-    #[must_use]
     pub const fn new(id: LaneId, capacity: LaneCapacity) -> Self {
         Self {
             id,
@@ -442,7 +444,9 @@ impl WritableLane {
         if self.pending.len() == self.capacity.max_capsules
             || next_bytes > self.capacity.max_canonical_bytes
         {
-            return Err(AppendFailure::Overflow(OverflowedCapsule { capsule }));
+            return Err(AppendFailure::Overflow(OverflowedCapsule {
+                capsule: Box::new(capsule),
+            }));
         }
         if self
             .pending
@@ -450,7 +454,7 @@ impl WritableLane {
             .any(|existing| existing.transaction_id == capsule.transaction_id)
         {
             return Err(AppendFailure::Refused(AppendRefusal {
-                capsule,
+                capsule: Box::new(capsule),
                 refusal: LaneRefusal::DuplicateTransaction,
             }));
         }
@@ -460,7 +464,6 @@ impl WritableLane {
     }
 
     /// Cancels preparation before any ready-slot obligation was reserved.
-    #[must_use]
     pub fn cancel(self) -> RetiredLane {
         RetiredLane {
             id: self.id,
@@ -518,8 +521,8 @@ impl WritableLane {
                     lane: Self {
                         id,
                         capacity,
-                        canonical_bytes,
                         pending,
+                        canonical_bytes,
                     },
                     slots,
                     refusal: LaneRefusal::DuplicateTransaction,
@@ -595,7 +598,6 @@ impl SealFailure {
     }
 
     /// Aborts every retained slot and returns the still-writable lane.
-    #[must_use]
     pub fn abort_cancelled(self) -> WritableLane {
         for slot in self.slots {
             let _settled = slot.abort_unused(SlotAbandoned {
@@ -629,13 +631,11 @@ impl SealedLane {
     }
 
     /// Ready capsules in transaction-ID order, independent of caller map order.
-    #[must_use]
     pub fn capsules(&self) -> impl ExactSizeIterator<Item = &PreparedCapsule> {
         self.entries.iter().map(|entry| &entry.capsule)
     }
 
     /// Transfers exclusive ownership of the ready buffer to a combiner.
-    #[must_use]
     pub fn begin_combining(self) -> CombiningLane {
         CombiningLane {
             id: self.id,
@@ -645,7 +645,6 @@ impl SealedLane {
     }
 
     /// Cancellation before combining abandons every ready slot.
-    #[must_use]
     pub fn cancel(self) -> RetiredLane {
         abort_entries(self.entries, NoCandidateReason::Cancelled);
         RetiredLane {
@@ -678,7 +677,6 @@ impl CombiningLane {
     }
 
     /// Cancellation during combining abandons every still-owned slot.
-    #[must_use]
     pub fn cancel(self) -> RetiredLane {
         abort_entries(self.entries, NoCandidateReason::Cancelled);
         RetiredLane {
@@ -698,7 +696,6 @@ pub struct RetiredLane {
 
 impl RetiredLane {
     /// Creates a retired lane after a combiner transferred every entry.
-    #[must_use]
     pub(crate) const fn from_combiner(id: LaneId, capacity: LaneCapacity) -> Self {
         Self { id, capacity }
     }
@@ -716,13 +713,11 @@ impl RetiredLane {
     }
 
     /// Cancellation after retirement preserves the quiescent reusable state.
-    #[must_use]
     pub const fn cancel(self) -> Self {
         self
     }
 
     /// Reopens a quiescent lane with its original fixed capacity.
-    #[must_use]
     pub const fn reopen(self) -> WritableLane {
         WritableLane::new(self.id, self.capacity)
     }
@@ -741,25 +736,25 @@ impl DirectAttempt {
         lane: LaneId,
         capsule: PreparedCapsule,
         slot: ReservedPreparedSlot,
-    ) -> Result<Self, DirectAttemptRefusal> {
+    ) -> Result<Self, Box<DirectAttemptRefusal>> {
         let reservation = slot.reservation();
         let observed_lane = LaneId::new(reservation.lane);
         if observed_lane != lane {
-            return Err(DirectAttemptRefusal {
+            return Err(Box::new(DirectAttemptRefusal {
                 capsule,
                 slot,
                 refusal: LaneRefusal::SlotLaneMismatch {
                     expected: lane,
                     observed: observed_lane,
                 },
-            });
+            }));
         }
         if reservation.transaction != capsule.transaction_id {
-            return Err(DirectAttemptRefusal {
+            return Err(Box::new(DirectAttemptRefusal {
                 capsule,
                 slot,
                 refusal: LaneRefusal::SlotTransactionMismatch,
-            });
+            }));
         }
         Ok(Self {
             entry: PreparedEntry { capsule, slot },
@@ -768,12 +763,11 @@ impl DirectAttempt {
 
     /// The direct-attempt capsule.
     #[must_use]
-    pub fn capsule(&self) -> &PreparedCapsule {
+    pub const fn capsule(&self) -> &PreparedCapsule {
         &self.entry.capsule
     }
 
     /// Cancellation abandons the slot instead of dropping it.
-    #[must_use]
     pub fn cancel(self) -> SettledObligation<PreparedTxnSlot> {
         self.entry.slot.abort_unused(SlotAbandoned {
             reason: NoCandidateReason::Cancelled,

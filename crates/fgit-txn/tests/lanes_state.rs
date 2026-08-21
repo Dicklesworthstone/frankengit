@@ -107,7 +107,7 @@ fn cancellation_at_each_lane_state_settles_all_slots() {
     let retired = combining.cancel();
     assert_eq!(retired.cancel().state(), LaneState::Retired);
 
-    assert!(ledger.leaks().is_empty());
+    assert_eq!(ledger.leaks(), Vec::new());
     assert!(ledger.close().is_quiescent());
 }
 
@@ -140,7 +140,7 @@ fn overflow_is_explicit_and_direct_attempt_cancellation_returns_its_slot() {
     );
     let _retired = lane.cancel();
 
-    assert!(ledger.leaks().is_empty());
+    assert_eq!(ledger.leaks(), Vec::new());
     assert!(ledger.close().is_quiescent());
 }
 
@@ -165,6 +165,6 @@ fn sealing_refuses_mismatched_slots_but_matching_slots_proceed() {
         .expect("near-identical matching slot must proceed");
     let _retired = sealed.cancel();
 
-    assert!(ledger.leaks().is_empty());
+    assert_eq!(ledger.leaks(), Vec::new());
     assert!(ledger.close().is_quiescent());
 }
