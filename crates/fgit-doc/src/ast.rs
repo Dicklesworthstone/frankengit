@@ -374,7 +374,7 @@ impl Document {
 
     /// Number of lines in the source.
     #[must_use]
-    pub fn line_count(&self) -> usize {
+    pub const fn line_count(&self) -> usize {
         self.lines.line_count()
     }
 

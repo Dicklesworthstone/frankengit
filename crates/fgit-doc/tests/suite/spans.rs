@@ -350,3 +350,40 @@ fn span_hull_covers_both_operands() {
     assert!(!first.contains(second));
     assert!(first.contains(first));
 }
+
+#[test]
+fn a_later_ordered_item_starts_a_new_item_rather_than_continuing_the_previous_one() {
+    // Inside an open list, `3.` after `2.` is the next item. The rule that an
+    // ordered marker may only interrupt a paragraph when it starts at one
+    // governs where a list BEGINS, and must not reach inside one.
+    for source in ["1. one\n2. two\n", "2. a\n3. b\n", "7. a\n8. b\n9. c\n"] {
+        let document = parse(source)
+            .unwrap_or_else(|refusal| panic!("{source:?}: {refusal}"))
+            .into_document();
+        let list = first_node_of_kind(&document, "list")
+            .unwrap_or_else(|| panic!("{source:?}: no list node"));
+        let items = document
+            .node(list)
+            .map(|node| node.children().len())
+            .unwrap_or_default();
+        assert_eq!(
+            items,
+            source.lines().count(),
+            "{source:?}: one item per marker line"
+        );
+    }
+
+    // The permitted counterpart: the interrupt rule still holds where it
+    // belongs, so prose beginning with a year is not swallowed by a list.
+    let prose = parse("Released in\n2024. It went well.\n")
+        .expect("prose parses")
+        .into_document();
+    assert_eq!(prose.roots().len(), 1);
+    assert_eq!(
+        prose
+            .node(prose.roots()[0])
+            .map(|node| node.kind().tag())
+            .unwrap_or_default(),
+        "paragraph"
+    );
+}

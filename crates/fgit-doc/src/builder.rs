@@ -74,7 +74,7 @@ pub struct Ctx<'src> {
 }
 
 impl<'src> Ctx<'src> {
-    pub fn new(source: &'src str, chars: &'src CharIndex, limits: StructuralLimits) -> Self {
+    pub const fn new(source: &'src str, chars: &'src CharIndex, limits: StructuralLimits) -> Self {
         Self {
             source,
             chars,

@@ -548,7 +548,10 @@ fn scan_item(
             end += 1;
             continue;
         }
-        if previous_is_text && !starts_new_block(ctx, candidate) {
+        if previous_is_text
+            && !starts_new_block(ctx, candidate)
+            && !continues_same_list(ctx, candidate, marker)
+        {
             collected.push(candidate);
             end += 1;
             continue;
@@ -565,6 +568,25 @@ fn scan_item(
         interior_blank,
         trailing_blank,
     }
+}
+
+/// Whether a line opens another item of the list that is already open.
+///
+/// The rule that an ordered marker may only interrupt a paragraph when it
+/// starts at one governs a list *beginning*, not a list *continuing*: inside an
+/// open list, `3.` after `2.` is the next item, never lazy continuation text.
+/// [`starts_new_block`] cannot know that, so the item scan asks this instead.
+fn continues_same_list(ctx: &Ctx<'_>, line: LineSlice, marker: Marker) -> bool {
+    let (indent_columns, content_start) = measure_indent(ctx.source, line.start);
+    if indent_columns >= 4 {
+        return false;
+    }
+    let rest = ctx.source.get(content_start..line.end).unwrap_or("");
+    if is_thematic_break(rest) {
+        return false;
+    }
+    list_marker(rest, indent_columns, content_start)
+        .is_some_and(|next| next.ordered == marker.ordered && next.character == marker.character)
 }
 
 fn list(
