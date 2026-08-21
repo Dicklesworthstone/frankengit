@@ -302,6 +302,7 @@ mod tests {
             max_total_expanded_bytes: 400,
             max_expansion_ratio: 400,
             max_delta_work: 400,
+            max_inflate_work: 400,
             max_index_entries: 2,
         }
     }

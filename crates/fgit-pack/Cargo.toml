@@ -9,4 +9,5 @@ publish = false
 workspace = true
 
 [dependencies]
+fgit-deflate.workspace = true
 fgit-types.workspace = true

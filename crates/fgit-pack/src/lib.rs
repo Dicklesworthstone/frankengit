@@ -8,6 +8,7 @@
 mod delta;
 mod idx;
 mod pack;
+mod reader;
 
 pub use delta::{
     DeltaBase, DeltaObject, ExternalBaseLookup, PackObject, ScalarResolver, apply_delta,
@@ -19,6 +20,7 @@ pub use pack::{
     decode_entry_header, decode_ofs_delta_base, parse_delta_base, parse_pack_header,
     split_pack_trailer, validate_object_count, validate_pack_trailer,
 };
+pub use reader::{QuarantinedEntry, QuarantinedPack, parse_quarantined_pack, read_verified_pack};
 
 use std::error::Error;
 use std::fmt;
@@ -59,6 +61,7 @@ pub struct PackLimits {
     pub max_total_expanded_bytes: usize,
     pub max_expansion_ratio: usize,
     pub max_delta_work: usize,
+    pub max_inflate_work: u64,
     pub max_index_entries: usize,
 }
 
@@ -73,6 +76,7 @@ impl Default for PackLimits {
             max_total_expanded_bytes: 128 * 1024 * 1024,
             max_expansion_ratio: 128,
             max_delta_work: 256 * 1024 * 1024,
+            max_inflate_work: 512 * 1024 * 1024,
             max_index_entries: 1_000_000,
         }
     }
@@ -219,6 +223,12 @@ pub enum PackError {
         declared: u32,
         actual: u32,
     },
+    InflatedEntrySizeMismatch {
+        declared: usize,
+        actual: usize,
+    },
+    Inflate(fgit_deflate::InflateRefusal),
+    TrailingPackData,
     AllocationFailed {
         requested: usize,
     },
