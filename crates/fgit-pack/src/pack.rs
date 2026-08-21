@@ -352,6 +352,25 @@ mod tests {
     }
 
     #[test]
+    fn input_and_entry_count_limits_refuse_before_entry_parsing() {
+        let mut tiny_input = limits();
+        tiny_input.max_input_bytes = 11;
+        assert!(matches!(
+            parse_pack_header(b"PACK\0\0\0\x02\0\0\0\0", &tiny_input),
+            Err(PackError::InputLimit { .. })
+        ));
+        let mut tiny_count = limits();
+        tiny_count.max_entries = 1;
+        assert_eq!(
+            parse_pack_header(b"PACK\0\0\0\x02\0\0\0\x02", &tiny_count),
+            Err(PackError::EntryCountLimit {
+                actual: 2,
+                limit: 1,
+            })
+        );
+    }
+
+    #[test]
     fn object_count_mismatch_refuses_before_promotion() {
         let header = PackHeader { object_count: 2 };
         assert_eq!(

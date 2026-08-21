@@ -475,4 +475,39 @@ mod tests {
             Err(PackError::TrailingPackData)
         );
     }
+
+    #[test]
+    fn reader_refuses_total_expansion_and_inflate_work_bombs() {
+        let mut total_limited = limits();
+        total_limited.max_total_expanded_bytes = 2;
+        assert_eq!(
+            parse_quarantined_pack(
+                &two_entry_ofs_pack(),
+                ObjectFormat::Sha1,
+                &total_limited,
+                &mut always,
+            ),
+            Err(PackError::TotalExpandedLimit {
+                actual: 3,
+                limit: 2,
+            })
+        );
+
+        let mut work_limited = limits();
+        work_limited.max_inflate_work = 1;
+        assert!(matches!(
+            parse_quarantined_pack(
+                &exact_pack(&pack_entry(3, b"blob")),
+                ObjectFormat::Sha1,
+                &work_limited,
+                &mut always,
+            ),
+            Err(PackError::Inflate(
+                fgit_deflate::InflateRefusal::ResourceLimit {
+                    resource: fgit_deflate::Resource::WorkUnits,
+                    ..
+                }
+            ))
+        ));
+    }
 }

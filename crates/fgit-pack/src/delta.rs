@@ -652,6 +652,18 @@ mod tests {
     }
 
     #[test]
+    fn expired_deadline_refuses_before_delta_allocation() {
+        fn expired() -> bool {
+            false
+        }
+
+        assert_eq!(
+            apply_delta(b"a", &[1, 1, 0x91, 0, 1], &unlimited(), &mut expired),
+            Err(PackError::DeadlineExceeded)
+        );
+    }
+
+    #[test]
     fn scalar_resolves_ofs_and_thin_ref_deltas() {
         let external_id = object_id_from_bytes(ObjectFormat::Sha1, &[9; 20]).expect("test ID");
         let in_pack_id = object_id_from_bytes(ObjectFormat::Sha1, &[4; 20]).expect("test ID");
