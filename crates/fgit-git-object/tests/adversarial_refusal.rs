@@ -241,11 +241,11 @@ fn campaign_inputs() -> Vec<Vec<u8>> {
             match mutation % 5 {
                 0 => {
                     if input.is_empty() {
-                        input.push(u8::try_from(word).expect("low byte fits"));
+                        input.push(word.to_le_bytes()[0]);
                     } else {
                         let index = usize::try_from(word % input.len() as u64)
                             .expect("bounded index fits usize");
-                        input[index] ^= u8::try_from(word >> 8).expect("low byte fits");
+                        input[index] ^= word.to_le_bytes()[1];
                     }
                 }
                 1 => {
