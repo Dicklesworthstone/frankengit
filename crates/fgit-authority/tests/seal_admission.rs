@@ -127,9 +127,14 @@ fn a_rejected_reuse_leaves_no_seal_behind() {
         "a pre-seal rejection is not repository history and must leave no seal"
     );
     assert!(
-        read_seal(&store, tenant(), repository(), original.derive().expect("derivable").0)
-            .expect("a readable slot")
-            .is_some(),
+        read_seal(
+            &store,
+            tenant(),
+            repository(),
+            original.derive().expect("derivable").0
+        )
+        .expect("a readable slot")
+        .is_some(),
         "the original seal must survive the rejected reuse"
     );
 }

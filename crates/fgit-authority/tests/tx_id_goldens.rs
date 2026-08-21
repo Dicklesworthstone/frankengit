@@ -457,10 +457,7 @@ fn a_mixed_object_format_request_is_refused_and_a_matching_one_proceeds() {
         Vec::new(),
     )
     .expect_err("a sha1 object id under a sha256 repository has no single meaning");
-    assert!(matches!(
-        mixed,
-        RequestRefusal::ObjectFormatMismatch { .. }
-    ));
+    assert!(matches!(mixed, RequestRefusal::ObjectFormatMismatch { .. }));
 
     SemanticRequest::build(
         schema(),
