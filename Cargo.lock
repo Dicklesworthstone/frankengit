@@ -474,6 +474,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-chronicle"
+version = "0.0.1"
+dependencies = [
+ "fgit-authority",
+ "fgit-codec",
+ "fgit-types",
+]
+
+[[package]]
 name = "fgit-codec"
 version = "0.0.1"
 dependencies = [
@@ -561,6 +570,16 @@ name = "fgit-runtime"
 version = "0.0.1"
 dependencies = [
  "asupersync",
+]
+
+[[package]]
+name = "fgit-treefs"
+version = "0.1.0"
+dependencies = [
+ "fgit-crypto",
+ "fgit-git-object",
+ "fgit-resource",
+ "fgit-types",
 ]
 
 [[package]]
