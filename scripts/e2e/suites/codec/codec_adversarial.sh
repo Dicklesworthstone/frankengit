@@ -110,8 +110,23 @@ ca_verifier_exit=$FGE_LAST_EXIT
 
 # The verifier must not have grown a dependency on the crate it checks. That is
 # the entire basis of its independence, so it is asserted rather than trusted.
+#
+# Asserted two ways, because the obvious way is vacuous. Extracting a
+# `[dependencies]` section and searching it proves nothing while the crate has
+# no such section — and it would miss a `[dependencies.fgit-codec]` table form
+# even once it did. So: scan the WHOLE manifest for any `fgit-` mention other
+# than the crate's own name, and separately check the resolved lockfile entry,
+# which is the closed-world truth rather than a statement of intent.
 ca_manifest="$CA_REPO/crates/fgit-codec-verify/Cargo.toml"
-ca_deps=$(sed -n '/^\[dependencies\]/,/^\[/p' "$ca_manifest" || true)
+ca_foreign=$(grep -n 'fgit-' "$ca_manifest" | grep -v 'name = "fgit-codec-verify"' || true)
+
+# The lockfile entry for a package with no dependencies has no `dependencies`
+# key at all; one that acquired any would gain the key and the names.
+ca_lock_entry=$(awk '
+  /^name = "fgit-codec-verify"$/ { inside = 1 }
+  inside { print }
+  inside && /^\[\[package\]\]$/ && ++seen > 0 { exit }
+' "$CA_REPO/Cargo.lock" | sed '/^\[\[package\]\]$/d')
 
 fge_phase assert
 
@@ -128,12 +143,12 @@ fge_assert_exit FG-002C-E2E-014 0 "$ca_bridge_exit" \
 fge_assert_exit FG-002C-E2E-015 0 "$ca_verifier_exit" \
   'an implementation sharing no code re-derives the same identities'
 
-fge_assert_not_contains FG-002C-E2E-016 "$ca_deps" 'fgit-codec' \
-  'the independent verifier does not depend on the crate it verifies'
-fge_assert_not_contains FG-002C-E2E-017 "$ca_deps" 'fgit-types' \
-  'the independent verifier does not share type definitions either'
-fge_assert_not_contains FG-002C-E2E-018 "$ca_deps" 'fgit-crypto' \
-  'the independent verifier does not share the digest implementation'
+fge_assert_eq FG-002C-E2E-016 '' "$ca_foreign" \
+  'the verifier manifest names no fgit-* crate other than itself'
+fge_assert_not_contains FG-002C-E2E-017 "$ca_lock_entry" 'dependencies' \
+  'the resolved lockfile entry for the verifier has no dependencies at all'
+fge_assert_contains FG-002C-E2E-018 "$ca_lock_entry" 'fgit-codec-verify' \
+  'the lockfile entry examined is actually the verifier'
 
 fge_assert_cmd FG-002C-E2E-019 'the verifier crate forbids unsafe code' \
   grep -qF '#![forbid(unsafe_code)]' "$CA_REPO/crates/fgit-codec-verify/src/lib.rs"
