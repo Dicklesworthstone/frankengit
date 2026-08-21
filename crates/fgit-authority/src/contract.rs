@@ -160,9 +160,18 @@ pub trait AuthorityStore {
     /// verify with still carrying the §5.2 race — and the acceptance tests for
     /// that defect could never pass.
     ///
-    /// All-or-nothing: either every entry in `outcomes` is durable **and** the
+    /// All-or-nothing: either every entry in `outcomes` is written **and** the
     /// head carries `new_body`, or neither is. An implementation MUST refuse
     /// when `witness.bound_to() != expected`.
+    ///
+    /// **"Written" is the §5.4 *visible* epoch, not the *durable* one.** It
+    /// means the entries and the head became canonically observable as one
+    /// indivisible store transaction. It does **not** mean the selected
+    /// durability profile has completed — this operation neither drives that
+    /// nor reports it, and a caller must not read a successful return as an
+    /// acknowledgement of durability. See [`PublicationOutcome::Published`].
+    ///
+    /// [`PublicationOutcome::Published`]: crate::PublicationOutcome::Published
     ///
     /// # Default
     ///

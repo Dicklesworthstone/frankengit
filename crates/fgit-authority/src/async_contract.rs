@@ -209,9 +209,19 @@ pub trait AsyncAuthorityStore: Sync {
     ///
     /// # The contract
     ///
-    /// All-or-nothing. Either every entry in `outcomes` is durable **and** the
+    /// All-or-nothing. Either every entry in `outcomes` is written **and** the
     /// head carries `new_body`, or neither is and the head still carries
-    /// `expected`. **If a caller can observe the new head, the outcome records
+    /// `expected`.
+    ///
+    /// **"Written" is the §5.4 *visible* epoch, not the *durable* one.** It
+    /// means the entries and the head became canonically observable as one
+    /// indivisible store transaction. It does **not** mean the selected
+    /// durability profile has completed — this operation neither drives that
+    /// nor reports it, and a caller must not read a successful return as an
+    /// acknowledgement of durability. See [`PublicationOutcome::Published`].
+    ///
+    /// [`PublicationOutcome::Published`]: crate::PublicationOutcome::Published
+    /// **If a caller can observe the new head, the outcome records
     /// are necessarily observable** — that is the whole point, and it is what
     /// makes the lost-response window unrepresentable rather than merely
     /// narrow.
