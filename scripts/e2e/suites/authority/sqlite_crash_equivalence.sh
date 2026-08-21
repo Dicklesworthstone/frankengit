@@ -64,8 +64,13 @@ done
 
 # A campaign that drifted back to ":memory:" cannot reopen anything, so the
 # whole restart claim would evaporate while every assertion still passed.
+# Comment lines are stripped first. The campaign's own module doc EXPLAINS why
+# it avoids ":memory:", so a whole-file grep fires on the documentation and
+# reports a defect that is not there -- which is what it did on this lane's
+# first real run. The question is whether the campaign USES an in-memory
+# database, not whether it mentions one.
 sq_in_memory=''
-if grep -qF '":memory:"' "$SQ_CAMPAIGN"; then
+if grep -v '^[[:space:]]*//' "$SQ_CAMPAIGN" | grep -qF '":memory:"'; then
   sq_in_memory='yes'
 fi
 
@@ -144,11 +149,29 @@ if [ "$sq_tests" -lt 15 ]; then
     "only $sq_tests tests in the campaign; the dispatch names more scenarios than that"
 fi
 
-# The honest limit of this lane, recorded rather than left for a reader to
-# infer from a green run: the injected-fault half of FG-005b is ABSENT, not
-# passing. run_fault_conformance is bound S: FaultableAuthorityStore and
-# MemoryAuthorityStore is the only implementation in the workspace, so
-# ambiguity, duplication and lost-request-versus-lost-response are unproved for
-# this backend until the profile grows an injection point.
-fge_step non-claim \
-  'AF-01..AF-08 are not run against this backend: FsqliteAuthorityStore does not implement FaultableAuthorityStore'
+# ---------------------------------------------------------- the support matrix
+#
+# FG-005b's acceptance says the report publishes the support matrix and that
+# any unproved cell is "unsupported/non-pass and is admission-capped in
+# production". These three cells are unproved, so they are recorded as TYPED
+# UNSUPPORTED assertions rather than as a prose note.
+#
+# That makes this lane's terminal status non-pass, and it should: the harness
+# treats an unsupported assertion as non-pass precisely so a partially proved
+# profile cannot report a clean green. An earlier version of this file wrote
+# the same facts as an `fge_step` and the lane reported PASS -- true of every
+# assertion it ran, and misleading about the profile as a whole. A support
+# matrix with holes in it must not look like a support matrix without them.
+#
+# Each of these converts to a pass the moment the named API exists. None is a
+# defect in the implementation; all three are absent capability in the surface
+# available to a verifier.
+
+fge_unsupported FG-005B-E2E-020 \
+  'AF-01..AF-08 injected faults: run_fault_conformance is bound S: FaultableAuthorityStore and MemoryAuthorityStore is the only impl in the workspace, so ambiguity, duplication and lost-request-vs-lost-response are unprovable for this backend by anyone'
+
+fge_unsupported FG-005B-E2E-021 \
+  'cancellation mid-operation: the conformance bridge blocks per operation, so a cancel cannot be interleaved with an operation in flight; this needs a harness able to hold several operations open, not another test'
+
+fge_unsupported FG-005B-E2E-022 \
+  'checkpoint under load: FsqliteAuthorityStore publishes exactly eight methods and none is a checkpoint operation, so this cell cannot be driven from outside the crate at all'
