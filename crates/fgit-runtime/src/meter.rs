@@ -11,6 +11,16 @@
 //! is the runtime's ([`asupersync::Budget::meet`]); what lives here is the
 //! classification, the finite defaults, and the refusal that fires when code
 //! tries to hand itself more than it inherited.
+//!
+//! # Timeouts, not deadlines
+//!
+//! [`Budget::deadline`] is an *absolute* [`Time`], so a policy cannot store
+//! one: a node that started yesterday would hand every request a deadline
+//! that passed yesterday. Class defaults are therefore [`ClassLimits`] holding
+//! a timeout, and the absolute deadline is computed at mint time against the
+//! runtime's clock via [`BudgetPolicy::budget_at`].
+
+use std::time::Duration;
 
 use asupersync::Budget;
 use asupersync::types::id::Time;
@@ -79,121 +89,165 @@ impl BudgetClass {
     }
 }
 
-/// Whether a budget leaves any dimension unbounded.
+/// A class's limits, expressed relative to the moment work starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClassLimits {
+    /// How long work of this class may take. `None` means no time limit.
+    pub timeout: Option<Duration>,
+    /// Poll quota.
+    pub poll_quota: u32,
+    /// Cost quota. `None` means no cost limit.
+    pub cost_quota: Option<u64>,
+    /// Scheduling priority; higher is tighter in the runtime's lattice.
+    pub priority: u8,
+}
+
+impl ClassLimits {
+    /// Finite limits.
+    #[must_use]
+    pub const fn finite(timeout: Duration, poll_quota: u32, cost_quota: u64) -> Self {
+        Self {
+            timeout: Some(timeout),
+            poll_quota,
+            cost_quota: Some(cost_quota),
+            priority: 0,
+        }
+    }
+
+    /// The unbounded limits. Admissible only for the node root.
+    #[must_use]
+    pub const fn unbounded() -> Self {
+        Self {
+            timeout: None,
+            poll_quota: u32::MAX,
+            cost_quota: None,
+            priority: 0,
+        }
+    }
+
+    /// Whether these limits leave every dimension unbounded.
+    #[must_use]
+    pub const fn is_unbounded(self) -> bool {
+        self.timeout.is_none() && self.cost_quota.is_none() && self.poll_quota == u32::MAX
+    }
+
+    /// Resolve to an absolute budget starting at `now`.
+    #[must_use]
+    pub fn at(self, now: Time) -> Budget {
+        let mut budget = Budget::new()
+            .with_poll_quota(self.poll_quota)
+            .with_priority(self.priority);
+        if let Some(cost) = self.cost_quota {
+            budget = budget.with_cost_quota(cost);
+        } else {
+            budget.cost_quota = None;
+        }
+        match self.timeout {
+            Some(timeout) => budget.tightened_by_timeout(now, timeout),
+            None => {
+                budget.deadline = None;
+                budget
+            }
+        }
+    }
+}
+
+/// Whether a budget leaves every dimension unbounded.
 ///
 /// A budget is unbounded when it has no deadline, no cost quota, and the
 /// saturating poll quota. That is exactly [`Budget::INFINITE`]'s shape, but
 /// this checks the shape rather than comparing to the constant so a budget
 /// assembled field-by-field cannot smuggle an infinite default past the gate.
 #[must_use]
-pub fn is_unbounded(budget: Budget) -> bool {
+pub const fn is_unbounded(budget: Budget) -> bool {
     budget.deadline.is_none() && budget.cost_quota.is_none() && budget.poll_quota == u32::MAX
 }
 
-/// The finite default budgets the node hands to each work class.
+/// The finite default limits the node hands to each work class.
 ///
 /// These are profile inputs, not magic numbers scattered through call sites:
 /// the whole point is that a reviewer can read one table and see that no work
 /// class inherits an accidental infinite budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BudgetPolicy {
-    /// Root budget. May be unbounded only when `unbounded_root` is set.
-    root: Budget,
-    /// Whether the operator explicitly selected an unbounded node root.
+    root: ClassLimits,
     unbounded_root: bool,
-    request: Budget,
-    parser: Budget,
-    transfer: Budget,
-    database: Budget,
-    background: Budget,
-    shutdown: Budget,
+    request: ClassLimits,
+    parser: ClassLimits,
+    transfer: ClassLimits,
+    database: ClassLimits,
+    background: ClassLimits,
+    shutdown: ClassLimits,
 }
 
 impl BudgetPolicy {
     /// The default finite policy.
     ///
-    /// Every class is bounded on at least the deadline and poll dimensions,
-    /// including the root: the default node root is *not* infinite. An
-    /// operator who wants an unbounded root must ask for it by name through
+    /// Every class is bounded on time, polls, and cost — including the root:
+    /// the default node root is *not* infinite. An operator who wants an
+    /// unbounded root must ask for it by name through
     /// [`with_unbounded_root`](Self::with_unbounded_root), which is the
     /// "named node-root policy" the profile requires.
     #[must_use]
-    pub fn finite_defaults() -> Self {
+    pub const fn finite_defaults() -> Self {
         Self {
-            root: Budget::new()
-                .with_deadline(Time::from_secs(86_400))
-                .with_poll_quota(u32::MAX - 1)
-                .with_cost_quota(u64::MAX / 2),
+            root: ClassLimits::finite(Duration::from_secs(86_400), u32::MAX - 1, u64::MAX / 2),
             unbounded_root: false,
-            request: Budget::new()
-                .with_deadline(Time::from_secs(30))
-                .with_poll_quota(100_000)
-                .with_cost_quota(1_000_000),
-            parser: Budget::new()
-                .with_deadline(Time::from_secs(10))
-                .with_poll_quota(50_000)
-                .with_cost_quota(500_000),
-            transfer: Budget::new()
-                .with_deadline(Time::from_secs(300))
-                .with_poll_quota(1_000_000)
-                .with_cost_quota(50_000_000),
-            database: Budget::new()
-                .with_deadline(Time::from_secs(15))
-                .with_poll_quota(50_000)
-                .with_cost_quota(1_000_000),
-            background: Budget::new()
-                .with_deadline(Time::from_secs(3_600))
-                .with_poll_quota(10_000_000)
-                .with_cost_quota(100_000_000),
-            shutdown: Budget::new()
-                .with_deadline(Time::from_secs(30))
-                .with_poll_quota(100_000)
-                .with_cost_quota(1_000_000),
+            request: ClassLimits::finite(Duration::from_secs(30), 100_000, 1_000_000),
+            parser: ClassLimits::finite(Duration::from_secs(10), 50_000, 500_000),
+            transfer: ClassLimits::finite(Duration::from_secs(300), 1_000_000, 50_000_000),
+            database: ClassLimits::finite(Duration::from_secs(15), 50_000, 1_000_000),
+            background: ClassLimits::finite(Duration::from_secs(3_600), 10_000_000, 100_000_000),
+            shutdown: ClassLimits::finite(Duration::from_secs(30), 100_000, 1_000_000),
         }
     }
 
     /// Select the named unbounded node-root policy.
     ///
-    /// This is the only supported way to obtain [`Budget::INFINITE`] anywhere
-    /// in the node, and it applies to the root region alone. Child classes
-    /// stay finite and still meet against the root.
+    /// This is the only supported way to obtain unbounded limits anywhere in
+    /// the node, and it applies to the root region alone. Child classes stay
+    /// finite and still meet against the root.
     #[must_use]
     pub const fn with_unbounded_root(mut self) -> Self {
-        self.root = Budget::INFINITE;
+        self.root = ClassLimits::unbounded();
         self.unbounded_root = true;
         self
     }
 
-    /// Override one finite class budget.
+    /// Override one class's limits.
     ///
-    /// Returns [`RuntimeRefusal::UnboundedServiceBudget`] when the supplied
-    /// budget is unbounded and the class is not permitted to be.
-    pub fn with_class_budget(
+    /// # Errors
+    ///
+    /// [`RuntimeRefusal::UnboundedServiceBudget`] when the supplied limits are
+    /// unbounded and the class is not permitted to be.
+    pub const fn with_class_limits(
         mut self,
         class: BudgetClass,
-        budget: Budget,
+        limits: ClassLimits,
     ) -> Result<Self, RuntimeRefusal> {
-        if is_unbounded(budget) && !class.may_be_unbounded() {
-            return Err(RuntimeRefusal::UnboundedServiceBudget { class: class.code() });
+        if limits.is_unbounded() && !class.may_be_unbounded() {
+            return Err(RuntimeRefusal::UnboundedServiceBudget {
+                class: class.code(),
+            });
         }
         match class {
             BudgetClass::NodeRoot => {
-                self.unbounded_root = is_unbounded(budget);
-                self.root = budget;
+                self.unbounded_root = limits.is_unbounded();
+                self.root = limits;
             }
-            BudgetClass::Request => self.request = budget,
-            BudgetClass::Parser => self.parser = budget,
-            BudgetClass::Transfer => self.transfer = budget,
-            BudgetClass::Database => self.database = budget,
-            BudgetClass::BackgroundController => self.background = budget,
-            BudgetClass::ShutdownCleanup => self.shutdown = budget,
+            BudgetClass::Request => self.request = limits,
+            BudgetClass::Parser => self.parser = limits,
+            BudgetClass::Transfer => self.transfer = limits,
+            BudgetClass::Database => self.database = limits,
+            BudgetClass::BackgroundController => self.background = limits,
+            BudgetClass::ShutdownCleanup => self.shutdown = limits,
         }
         Ok(self)
     }
 
-    /// The budget for a class, before meeting with any parent.
+    /// The limits for a class, before meeting with any parent.
     #[must_use]
-    pub const fn budget_for(&self, class: BudgetClass) -> Budget {
+    pub const fn limits_for(&self, class: BudgetClass) -> ClassLimits {
         match class {
             BudgetClass::NodeRoot => self.root,
             BudgetClass::Request => self.request,
@@ -205,35 +259,47 @@ impl BudgetPolicy {
         }
     }
 
+    /// The absolute budget for a class, for work starting at `now`.
+    #[must_use]
+    pub fn budget_at(&self, now: Time, class: BudgetClass) -> Budget {
+        self.limits_for(class).at(now)
+    }
+
+    /// The absolute budget for a class, met against the node root.
+    ///
+    /// This is the shape every non-root class actually receives: its own
+    /// limits, tightened by whatever the root allows.
+    #[must_use]
+    pub fn derived_budget_at(&self, now: Time, class: BudgetClass) -> Budget {
+        if class == BudgetClass::NodeRoot {
+            return self.budget_at(now, class);
+        }
+        self.budget_at(now, BudgetClass::NodeRoot)
+            .meet(self.budget_at(now, class))
+    }
+
     /// Whether the operator selected an unbounded node root.
     #[must_use]
     pub const fn has_unbounded_root(&self) -> bool {
         self.unbounded_root
     }
 
-    /// Verify that no class that must be finite carries an unbounded budget.
+    /// Verify that no class that must be finite carries unbounded limits.
     ///
     /// This is the invariant behind the acceptance line "no request, parser,
     /// transfer, database, or background controller inherits an accidental
-    /// infinite budget". It is checked when a profile is built, so an
-    /// unbounded service budget cannot reach a running node.
+    /// infinite budget". It is checked when a profile is built, so unbounded
+    /// service limits cannot reach a running node.
     pub fn verify_finite(&self) -> Result<(), RuntimeRefusal> {
         for class in BudgetClass::finite_classes() {
-            if is_unbounded(self.budget_for(class)) {
-                return Err(RuntimeRefusal::UnboundedServiceBudget { class: class.code() });
+            let limits = self.limits_for(class);
+            if limits.is_unbounded() || limits.timeout.is_none() || limits.cost_quota.is_none() {
+                return Err(RuntimeRefusal::UnboundedServiceBudget {
+                    class: class.code(),
+                });
             }
         }
         Ok(())
-    }
-
-    /// Derive the effective budget for a class beneath a parent budget.
-    ///
-    /// The class default is met against the parent, so a child can only ever
-    /// be tighter. This never refuses: the class defaults are authored to be
-    /// tighter than any legitimate root, and meeting is total.
-    #[must_use]
-    pub fn derive(&self, parent: Budget, class: BudgetClass) -> Budget {
-        parent.meet(self.budget_for(class))
     }
 }
 
@@ -296,12 +362,7 @@ pub fn widened_dimension(parent: Budget, requested: Budget) -> Option<BudgetDime
 /// [`RuntimeRefusal::BudgetExhausted`] naming the empty dimension.
 pub fn ensure_headroom(budget: Budget, now: Time) -> Result<(), RuntimeRefusal> {
     let remaining = budget.remaining(now);
-    if remaining.deadline.is_some_and(|left| left.is_zero()) {
-        return Err(RuntimeRefusal::BudgetExhausted {
-            dimension: Exhaustion::Deadline,
-        });
-    }
-    if budget.deadline.is_some() && remaining.deadline.is_none() {
+    if budget.deadline.is_some() && remaining.deadline.is_none_or(|left| left == Duration::ZERO) {
         return Err(RuntimeRefusal::BudgetExhausted {
             dimension: Exhaustion::Deadline,
         });
@@ -323,36 +384,66 @@ pub fn ensure_headroom(budget: Budget, now: Time) -> Result<(), RuntimeRefusal> 
 mod tests {
     use super::*;
 
+    const NOW: Time = Time::from_secs(1_000);
+
     fn parent() -> Budget {
         Budget::new()
-            .with_deadline(Time::from_secs(30))
+            .with_deadline(Time::from_secs(1_030))
             .with_poll_quota(1_000)
             .with_cost_quota(10_000)
             .with_priority(10)
     }
 
     #[test]
+    fn class_limits_resolve_relative_to_the_supplied_clock() {
+        // The bug this shape exists to prevent: a policy that stores an
+        // absolute deadline hands out an already-expired budget on a node
+        // that has been up for a while.
+        let policy = BudgetPolicy::finite_defaults();
+
+        for now in [Time::from_secs(0), Time::from_secs(1_000_000)] {
+            let budget = policy.budget_at(now, BudgetClass::Request);
+            let deadline = budget.deadline.expect("requests are time-bounded");
+            assert!(
+                deadline > now,
+                "a request minted at {now:?} must not already be expired ({deadline:?})"
+            );
+            ensure_headroom(budget, now).expect("a freshly minted request has headroom");
+        }
+    }
+
+    #[test]
+    fn request_timeout_is_exactly_the_configured_duration() {
+        let policy = BudgetPolicy::finite_defaults();
+        let budget = policy.budget_at(NOW, BudgetClass::Request);
+        assert_eq!(budget.deadline, Some(Time::from_secs(1_030)));
+    }
+
+    #[test]
     fn no_finite_class_defaults_to_an_infinite_budget() {
         let policy = BudgetPolicy::finite_defaults();
-        // The acceptance line, checked exhaustively over every finite class.
         for class in BudgetClass::finite_classes() {
-            let budget = policy.budget_for(class);
+            let limits = policy.limits_for(class);
             assert!(
-                !is_unbounded(budget),
-                "class `{}` must not default to an unbounded budget",
+                !limits.is_unbounded(),
+                "class `{}` must not default to unbounded limits",
                 class.code()
             );
             assert!(
-                budget.deadline.is_some(),
-                "class `{}` must carry a deadline",
+                limits.timeout.is_some(),
+                "class `{}` must carry a timeout",
                 class.code()
             );
             assert!(
-                budget.cost_quota.is_some(),
+                limits.cost_quota.is_some(),
                 "class `{}` must carry a cost quota",
                 class.code()
             );
-            assert!(budget.poll_quota < u32::MAX);
+            assert!(limits.poll_quota < u32::MAX);
+
+            let budget = policy.budget_at(NOW, class);
+            assert!(!is_unbounded(budget));
+            assert!(budget.deadline.is_some());
         }
         policy.verify_finite().expect("defaults are finite");
     }
@@ -361,72 +452,92 @@ mod tests {
     fn default_node_root_is_finite_and_unbounded_root_is_opt_in() {
         let policy = BudgetPolicy::finite_defaults();
         assert!(!policy.has_unbounded_root());
-        assert!(!is_unbounded(policy.budget_for(BudgetClass::NodeRoot)));
+        assert!(!policy.limits_for(BudgetClass::NodeRoot).is_unbounded());
 
         // Paired permitted case: the named root policy may be unbounded.
         let named = BudgetPolicy::finite_defaults().with_unbounded_root();
         assert!(named.has_unbounded_root());
-        assert!(is_unbounded(named.budget_for(BudgetClass::NodeRoot)));
+        assert!(named.limits_for(BudgetClass::NodeRoot).is_unbounded());
+        assert!(is_unbounded(named.budget_at(NOW, BudgetClass::NodeRoot)));
         // ...and selecting it does not loosen any child class.
         named.verify_finite().expect("child classes stay finite");
+        assert!(!is_unbounded(
+            named.derived_budget_at(NOW, BudgetClass::Request)
+        ));
     }
 
     #[test]
-    fn unbounded_budget_for_a_finite_class_is_refused() {
+    fn unbounded_limits_for_a_finite_class_are_refused() {
         let refusal = BudgetPolicy::finite_defaults()
-            .with_class_budget(BudgetClass::Request, Budget::INFINITE)
+            .with_class_limits(BudgetClass::Request, ClassLimits::unbounded())
             .expect_err("an infinite request budget must be refused");
         assert_eq!(
             refusal,
             RuntimeRefusal::UnboundedServiceBudget { class: "request" }
         );
 
-        // Paired permitted case: a finite override of the same class proceeds.
+        // Paired permitted case: finite limits for the same class proceed.
         let policy = BudgetPolicy::finite_defaults()
-            .with_class_budget(
+            .with_class_limits(
                 BudgetClass::Request,
-                Budget::new()
-                    .with_deadline(Time::from_secs(5))
-                    .with_poll_quota(10)
-                    .with_cost_quota(10),
+                ClassLimits::finite(Duration::from_secs(5), 10, 10),
             )
-            .expect("a finite request budget is permitted");
-        assert_eq!(policy.budget_for(BudgetClass::Request).poll_quota, 10);
+            .expect("finite request limits are permitted");
+        assert_eq!(policy.limits_for(BudgetClass::Request).poll_quota, 10);
     }
 
     #[test]
     fn every_finite_class_is_covered_by_verify_finite() {
-        // Planted negative for each class individually, so a future variant
-        // that is silently dropped from the check fails this test.
+        // Planted negative per class, so a future variant silently dropped
+        // from the check fails here.
         for class in BudgetClass::finite_classes() {
             let mut policy = BudgetPolicy::finite_defaults();
             match class {
-                BudgetClass::Request => policy.request = Budget::INFINITE,
-                BudgetClass::Parser => policy.parser = Budget::INFINITE,
-                BudgetClass::Transfer => policy.transfer = Budget::INFINITE,
-                BudgetClass::Database => policy.database = Budget::INFINITE,
-                BudgetClass::BackgroundController => policy.background = Budget::INFINITE,
-                BudgetClass::ShutdownCleanup => policy.shutdown = Budget::INFINITE,
+                BudgetClass::Request => policy.request = ClassLimits::unbounded(),
+                BudgetClass::Parser => policy.parser = ClassLimits::unbounded(),
+                BudgetClass::Transfer => policy.transfer = ClassLimits::unbounded(),
+                BudgetClass::Database => policy.database = ClassLimits::unbounded(),
+                BudgetClass::BackgroundController => policy.background = ClassLimits::unbounded(),
+                BudgetClass::ShutdownCleanup => policy.shutdown = ClassLimits::unbounded(),
                 BudgetClass::NodeRoot => unreachable!("not a finite class"),
             }
-            let refusal = policy
-                .verify_finite()
-                .expect_err("an unbounded finite class must be refused");
             assert_eq!(
-                refusal,
-                RuntimeRefusal::UnboundedServiceBudget { class: class.code() }
+                policy
+                    .verify_finite()
+                    .expect_err("unbounded finite class must be refused"),
+                RuntimeRefusal::UnboundedServiceBudget {
+                    class: class.code()
+                }
             );
         }
     }
 
     #[test]
+    fn a_class_missing_only_its_timeout_is_still_refused() {
+        // Partial unboundedness is the easy miss: cost and polls are set, so
+        // `is_unbounded` is false, but the work can still run forever.
+        let mut policy = BudgetPolicy::finite_defaults();
+        policy.transfer = ClassLimits {
+            timeout: None,
+            poll_quota: 1_000,
+            cost_quota: Some(1_000),
+            priority: 0,
+        };
+        assert_eq!(
+            policy
+                .verify_finite()
+                .expect_err("no timeout is unbounded time"),
+            RuntimeRefusal::UnboundedServiceBudget { class: "transfer" }
+        );
+    }
+
+    #[test]
     fn child_budget_widening_is_refused_on_every_dimension() {
         let parent = parent();
-
         let cases = [
             (
                 Budget::new()
-                    .with_deadline(Time::from_secs(60))
+                    .with_deadline(Time::from_secs(1_060))
                     .with_poll_quota(1_000)
                     .with_cost_quota(10_000)
                     .with_priority(10),
@@ -441,7 +552,7 @@ mod tests {
             ),
             (
                 Budget::new()
-                    .with_deadline(Time::from_secs(30))
+                    .with_deadline(Time::from_secs(1_030))
                     .with_poll_quota(2_000)
                     .with_cost_quota(10_000)
                     .with_priority(10),
@@ -449,7 +560,7 @@ mod tests {
             ),
             (
                 Budget::new()
-                    .with_deadline(Time::from_secs(30))
+                    .with_deadline(Time::from_secs(1_030))
                     .with_poll_quota(1_000)
                     .with_cost_quota(20_000)
                     .with_priority(10),
@@ -457,14 +568,14 @@ mod tests {
             ),
             (
                 Budget::new()
-                    .with_deadline(Time::from_secs(30))
+                    .with_deadline(Time::from_secs(1_030))
                     .with_poll_quota(1_000)
                     .with_priority(10),
                 BudgetDimension::CostQuota,
             ),
             (
                 Budget::new()
-                    .with_deadline(Time::from_secs(30))
+                    .with_deadline(Time::from_secs(1_030))
                     .with_poll_quota(1_000)
                     .with_cost_quota(10_000)
                     .with_priority(1),
@@ -489,16 +600,15 @@ mod tests {
     #[test]
     fn child_budget_tightening_is_permitted_and_meets() {
         let parent = parent();
-        // Near-identical to the refused cases above, but tighter on every
-        // dimension, so it must proceed.
+        // Near-identical to the refused cases above, but tighter everywhere.
         let requested = Budget::new()
-            .with_deadline(Time::from_secs(5))
+            .with_deadline(Time::from_secs(1_005))
             .with_poll_quota(100)
             .with_cost_quota(1_000)
             .with_priority(20);
 
         let child = derive_child(parent, requested).expect("tightening is permitted");
-        assert_eq!(child.deadline, Some(Time::from_secs(5)));
+        assert_eq!(child.deadline, Some(Time::from_secs(1_005)));
         assert_eq!(child.poll_quota, 100);
         assert_eq!(child.cost_quota, Some(1_000));
         assert_eq!(child.priority, 20);
@@ -517,7 +627,7 @@ mod tests {
         let mid = derive_child(
             root,
             Budget::new()
-                .with_deadline(Time::from_secs(20))
+                .with_deadline(Time::from_secs(1_020))
                 .with_poll_quota(500)
                 .with_cost_quota(5_000)
                 .with_priority(10),
@@ -526,14 +636,13 @@ mod tests {
         let leaf = derive_child(
             mid,
             Budget::new()
-                .with_deadline(Time::from_secs(10))
+                .with_deadline(Time::from_secs(1_010))
                 .with_poll_quota(250)
                 .with_cost_quota(2_500)
                 .with_priority(10),
         )
         .expect("tighter still");
 
-        // A grandchild can never exceed the root on any dimension.
         assert!(leaf.deadline <= root.deadline);
         assert!(leaf.poll_quota <= root.poll_quota);
         assert!(leaf.cost_quota <= root.cost_quota);
@@ -544,27 +653,40 @@ mod tests {
     }
 
     #[test]
-    fn class_derivation_meets_against_the_parent() {
+    fn derived_class_budgets_never_exceed_the_root() {
         let policy = BudgetPolicy::finite_defaults();
-        let tight_parent = Budget::new()
-            .with_deadline(Time::from_secs(1))
-            .with_poll_quota(7)
-            .with_cost_quota(9);
-
         for class in BudgetClass::finite_classes() {
-            let derived = policy.derive(tight_parent, class);
-            assert!(derived.poll_quota <= 7, "class {} exceeded parent", class.code());
-            assert!(derived.deadline <= Some(Time::from_secs(1)));
-            assert!(derived.cost_quota <= Some(9));
+            let root = policy.budget_at(NOW, BudgetClass::NodeRoot);
+            let derived = policy.derived_budget_at(NOW, class);
+            assert!(derived.poll_quota <= root.poll_quota, "{}", class.code());
+            assert!(derived.deadline <= root.deadline, "{}", class.code());
+            assert!(derived.cost_quota <= root.cost_quota, "{}", class.code());
+            assert!(!is_unbounded(derived));
         }
     }
 
     #[test]
+    fn a_class_looser_than_the_root_is_clamped_by_derivation() {
+        // The background controller's hour is longer than a five-minute root.
+        let policy = BudgetPolicy::finite_defaults()
+            .with_class_limits(
+                BudgetClass::NodeRoot,
+                ClassLimits::finite(Duration::from_secs(300), 1_000, 1_000),
+            )
+            .expect("a finite root is permitted");
+
+        let derived = policy.derived_budget_at(NOW, BudgetClass::BackgroundController);
+        assert_eq!(derived.deadline, Some(Time::from_secs(1_300)));
+        assert_eq!(derived.poll_quota, 1_000);
+        assert_eq!(derived.cost_quota, Some(1_000));
+    }
+
+    #[test]
     fn exhausted_dimensions_are_refused_and_headroom_proceeds() {
-        let now = Time::from_secs(10);
+        let now = Time::from_secs(1_000);
 
         let no_polls = Budget::new()
-            .with_deadline(Time::from_secs(30))
+            .with_deadline(Time::from_secs(1_030))
             .with_poll_quota(0)
             .with_cost_quota(10);
         assert_eq!(
@@ -575,7 +697,7 @@ mod tests {
         );
 
         let no_cost = Budget::new()
-            .with_deadline(Time::from_secs(30))
+            .with_deadline(Time::from_secs(1_030))
             .with_poll_quota(10)
             .with_cost_quota(0);
         assert_eq!(
@@ -586,7 +708,7 @@ mod tests {
         );
 
         let past_deadline = Budget::new()
-            .with_deadline(Time::from_secs(1))
+            .with_deadline(Time::from_secs(999))
             .with_poll_quota(10)
             .with_cost_quota(10);
         assert_eq!(
@@ -596,9 +718,9 @@ mod tests {
             }
         );
 
-        // Paired permitted case: a budget with headroom on every dimension.
+        // Paired permitted case: headroom on every dimension.
         let healthy = Budget::new()
-            .with_deadline(Time::from_secs(30))
+            .with_deadline(Time::from_secs(1_030))
             .with_poll_quota(10)
             .with_cost_quota(10);
         ensure_headroom(healthy, now).expect("headroom on every dimension");
@@ -607,7 +729,6 @@ mod tests {
     #[test]
     fn unbounded_shape_is_detected_without_comparing_to_the_constant() {
         assert!(is_unbounded(Budget::INFINITE));
-        // Assembled field-by-field rather than via the constant.
         let assembled = Budget {
             deadline: None,
             poll_quota: u32::MAX,
@@ -615,7 +736,8 @@ mod tests {
             priority: 3,
         };
         assert!(is_unbounded(assembled));
-        // One bounded dimension is enough to be bounded.
-        assert!(!is_unbounded(Budget::INFINITE.with_poll_quota(u32::MAX - 1)));
+        assert!(!is_unbounded(
+            Budget::INFINITE.with_poll_quota(u32::MAX - 1)
+        ));
     }
 }

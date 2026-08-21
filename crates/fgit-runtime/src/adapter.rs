@@ -46,7 +46,12 @@ impl OutcomeClass {
     /// Every class, for exhaustive checks.
     #[must_use]
     pub const fn all() -> [Self; 4] {
-        [Self::Success, Self::Refusal, Self::Cancelled, Self::Panicked]
+        [
+            Self::Success,
+            Self::Refusal,
+            Self::Cancelled,
+            Self::Panicked,
+        ]
     }
 }
 
@@ -356,13 +361,13 @@ mod tests {
 
     #[test]
     fn cancellation_after_an_observed_effect_is_ambiguous() {
-        let lifted = ServiceOutcome::<u32, &str>::from_outcome_after_effect(
-            cancelled_outcome(),
-            "rcr-8f21",
-        );
+        let lifted =
+            ServiceOutcome::<u32, &str>::from_outcome_after_effect(cancelled_outcome(), "rcr-8f21");
         assert!(lifted.must_resolve_commit());
         assert_eq!(
-            lifted.ambiguity().and_then(CommitAmbiguity::idempotency_key),
+            lifted
+                .ambiguity()
+                .and_then(CommitAmbiguity::idempotency_key),
             Some("rcr-8f21")
         );
     }
@@ -370,16 +375,16 @@ mod tests {
     #[test]
     fn commit_ambiguity_survives_a_mapping_pipeline() {
         // The whole point: ambiguity must not be lost by intermediate steps.
-        let lifted = ServiceOutcome::<u32, &str>::from_outcome_after_effect(
-            cancelled_outcome(),
-            "rcr-8f21",
-        )
-        .map_success(|value| value + 1)
-        .map_refusal(|error| format!("wrapped: {error}"));
+        let lifted =
+            ServiceOutcome::<u32, &str>::from_outcome_after_effect(cancelled_outcome(), "rcr-8f21")
+                .map_success(|value| value + 1)
+                .map_refusal(|error| format!("wrapped: {error}"));
 
         assert!(lifted.must_resolve_commit());
         assert_eq!(
-            lifted.ambiguity().and_then(CommitAmbiguity::idempotency_key),
+            lifted
+                .ambiguity()
+                .and_then(CommitAmbiguity::idempotency_key),
             Some("rcr-8f21")
         );
     }
@@ -388,10 +393,8 @@ mod tests {
     fn success_and_refusal_are_never_ambiguous() {
         // Ambiguity is a property of cancellation only: a completed operation
         // has an answer, so marking it ambiguous must be a no-op.
-        let success = ServiceOutcome::<u32, &str>::from_outcome_after_effect(
-            Outcome::Ok(1),
-            "rcr-1",
-        );
+        let success =
+            ServiceOutcome::<u32, &str>::from_outcome_after_effect(Outcome::Ok(1), "rcr-1");
         assert!(!success.must_resolve_commit());
         assert_eq!(success.ambiguity(), None);
 
@@ -409,10 +412,9 @@ mod tests {
             Outcome::Panicked(PanicPayload::new("boom")),
         ] {
             let class = ServiceOutcome::from_outcome(outcome.clone()).classify();
-            let restored =
-                ServiceOutcome::<u32, &str>::from_outcome(
-                    ServiceOutcome::from_outcome(outcome).into_outcome(),
-                );
+            let restored = ServiceOutcome::<u32, &str>::from_outcome(
+                ServiceOutcome::from_outcome(outcome).into_outcome(),
+            );
             assert_eq!(restored.classify(), class);
         }
     }

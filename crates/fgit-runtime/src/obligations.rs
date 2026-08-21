@@ -159,7 +159,10 @@ impl LeakPolicy {
     ///
     /// [`RuntimeRefusal::LeakRecoveryUncontrolled`] naming the first missing
     /// control.
-    pub fn recovering(controls: LeakControls, sinks: RecoverySinks) -> Result<Self, RuntimeRefusal> {
+    pub fn recovering(
+        controls: LeakControls,
+        sinks: RecoverySinks,
+    ) -> Result<Self, RuntimeRefusal> {
         Ok(Self::Recovering { controls, sinks })
     }
 
@@ -301,11 +304,9 @@ mod tests {
     #[test]
     fn recover_with_full_controls_is_accepted_and_escalates() {
         // The near-identical permitted twin: same response, controls supplied.
-        let policy = LeakPolicy::from_response(
-            ObligationLeakResponse::Recover,
-            Some((controls(), sinks())),
-        )
-        .expect("Recover with the full control set is admissible");
+        let policy =
+            LeakPolicy::from_response(ObligationLeakResponse::Recover, Some((controls(), sinks())))
+                .expect("Recover with the full control set is admissible");
 
         assert!(!policy.is_fail_fast());
         assert_eq!(policy.response(), ObligationLeakResponse::Recover);
@@ -317,8 +318,7 @@ mod tests {
 
     #[test]
     fn unbounded_cleanup_budget_is_rejected() {
-        let refusal = LeakControls::new(Budget::INFINITE, 8)
-            .expect_err("cleanup must be bounded");
+        let refusal = LeakControls::new(Budget::INFINITE, 8).expect_err("cleanup must be bounded");
         assert_eq!(
             refusal,
             RuntimeRefusal::LeakRecoveryUncontrolled {

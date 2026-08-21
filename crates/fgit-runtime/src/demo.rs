@@ -227,10 +227,7 @@ mod tests {
             .and_then(ServiceOutcome::success)
             .expect("one member resolved");
         assert_eq!(resolved.name, "refs/heads/main");
-        assert_eq!(
-            resolved.target,
-            "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736"
-        );
+        assert_eq!(resolved.target, "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736");
 
         // And the two refusals kept their distinct domain reasons.
         let mut reasons: Vec<String> = outcomes
@@ -244,8 +241,7 @@ mod tests {
         assert_eq!(
             reasons,
             vec![
-                "malformed reference `bad name`: reference names may not contain spaces"
-                    .to_owned(),
+                "malformed reference `bad name`: reference names may not contain spaces".to_owned(),
                 "unknown reference `refs/heads/gone`".to_owned(),
             ]
         );
@@ -361,7 +357,9 @@ mod tests {
         assert!(cx.budget().deadline.is_some());
 
         let outcomes = node
-            .block_on(async { resolve_batch(&cx, 4, names(&["refs/heads/main"]), table_resolver).await })
+            .block_on(async {
+                resolve_batch(&cx, 4, names(&["refs/heads/main"]), table_resolver).await
+            })
             .expect("admitted");
         assert_eq!(BatchSummary::of(&outcomes).succeeded, 1);
         assert!(node.join_root(Duration::from_secs(5)));

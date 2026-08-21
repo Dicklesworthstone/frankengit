@@ -7,7 +7,7 @@
 
 use crate::ast::Document;
 use crate::block;
-use crate::build::{Ctx, check_line_lengths, split_lines};
+use crate::builder::{Ctx, check_line_lengths, split_lines};
 use crate::diagnostic::Diagnostic;
 use crate::limits::{Refusal, RefusalKind};
 use crate::profile::ParseProfile;

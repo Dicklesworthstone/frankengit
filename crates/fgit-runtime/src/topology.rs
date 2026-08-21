@@ -26,9 +26,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use asupersync::Budget;
 use asupersync::app::AppSpec;
 use asupersync::supervision::{ChildSpec, ChildStart, StartTieBreak};
+use asupersync::types::id::Time;
 
 use crate::grant::CapabilityProfile;
-use crate::meter::{BudgetClass, BudgetPolicy};
+use crate::meter::{BudgetClass, BudgetPolicy, ClassLimits};
 use crate::refuse::{RuntimeRefusal, TopologyDefect};
 
 /// The canonical shutdown phases, in the order the profile fixes.
@@ -263,18 +264,19 @@ impl NodeSpec {
     ///
     /// The supervisor receives the same dependency edges this module
     /// validated, plus a per-service shutdown budget drawn from the node's
-    /// budget policy. Start bodies are supplied by the caller: this crate
-    /// declares topology and policy, it does not fabricate service behaviour.
+    /// budget policy and resolved against `now`. Start bodies are supplied by
+    /// the caller: this crate declares topology and policy, it does not
+    /// fabricate service behaviour.
     ///
     /// # Errors
     ///
     /// Whatever [`compile`](Self::compile) refuses, refused here first.
-    pub fn to_app_spec<F>(&self, mut start_for: F) -> Result<AppSpec, RuntimeRefusal>
+    pub fn to_app_spec<F>(&self, now: Time, mut start_for: F) -> Result<AppSpec, RuntimeRefusal>
     where
         F: FnMut(&ServiceSpec) -> Box<dyn ChildStart>,
     {
         let plan = self.compile()?;
-        let root_budget = self.policy.budget_for(BudgetClass::NodeRoot);
+        let root_budget = self.policy.budget_at(now, BudgetClass::NodeRoot);
 
         let mut spec = AppSpec::new(self.name.clone())
             .with_budget(root_budget)
@@ -291,7 +293,10 @@ impl NodeSpec {
                 .expect("plan order is drawn from the declared services");
 
             let mut child = ChildSpec::new(service.name.clone(), BoxedStart(start_for(service)))
-                .with_shutdown_budget(self.policy.budget_for(BudgetClass::ShutdownCleanup));
+                .with_shutdown_budget(
+                    self.policy
+                        .derived_budget_at(now, BudgetClass::ShutdownCleanup),
+                );
             for dependency in &service.depends_on {
                 child = child.depends_on(dependency.clone());
             }
@@ -359,11 +364,19 @@ impl StartPlan {
         ShutdownPhase::sequence().to_vec()
     }
 
-    /// The effective budget for a service, derived beneath the node root.
+    /// The effective budget for a service class, for work starting at `now`.
+    ///
+    /// Class limits are timeouts, so the caller supplies the clock reading
+    /// rather than the plan baking in an absolute deadline.
     #[must_use]
-    pub fn budget_for(&self, class: BudgetClass) -> Budget {
-        self.policy
-            .derive(self.policy.budget_for(BudgetClass::NodeRoot), class)
+    pub fn budget_at(&self, now: Time, class: BudgetClass) -> Budget {
+        self.policy.derived_budget_at(now, class)
+    }
+
+    /// The declared limits for a service class.
+    #[must_use]
+    pub const fn limits_for(&self, class: BudgetClass) -> ClassLimits {
+        self.policy.limits_for(class)
     }
 }
 
@@ -390,25 +403,18 @@ mod tests {
             |_scope: &asupersync::cx::Scope<'static, asupersync::types::policy::FailFast>,
              _state: &mut RuntimeState,
              _cx: &asupersync::cx::Cx|
-             -> Result<TaskId, SpawnError> {
-                Err(SpawnError::RuntimeUnavailable)
-            },
+             -> Result<TaskId, SpawnError> { Err(SpawnError::RuntimeUnavailable) },
         )
     }
 
     fn node() -> NodeSpec {
         NodeSpec::new("fgit-node", BudgetPolicy::finite_defaults())
-            .service(ServiceSpec::new(
-                "store",
-                BudgetClass::Database,
-                caps(),
-            ))
+            .service(ServiceSpec::new("store", BudgetClass::Database, caps()))
             .service(
                 ServiceSpec::new("authority", BudgetClass::Database, caps()).depends_on("store"),
             )
             .service(
-                ServiceSpec::new("protocol", BudgetClass::Request, caps())
-                    .depends_on("authority"),
+                ServiceSpec::new("protocol", BudgetClass::Request, caps()).depends_on("authority"),
             )
             .service(
                 ServiceSpec::new("projection", BudgetClass::BackgroundController, caps())
@@ -445,8 +451,7 @@ mod tests {
                     .depends_on("store"),
             )
             .service(
-                ServiceSpec::new("protocol", BudgetClass::Request, caps())
-                    .depends_on("authority"),
+                ServiceSpec::new("protocol", BudgetClass::Request, caps()).depends_on("authority"),
             )
             .service(
                 ServiceSpec::new("authority", BudgetClass::Database, caps()).depends_on("store"),
@@ -582,7 +587,10 @@ mod tests {
             RuntimeRefusal::TopologyInvalid {
                 defect: TopologyDefect::DependencyCycle(members),
             } => {
-                assert_eq!(members, vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]);
+                assert_eq!(
+                    members,
+                    vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
+                );
             }
             other => panic!("expected a dependency cycle, got {other:?}"),
         }
@@ -617,7 +625,7 @@ mod tests {
         let spec = node();
         let plan = spec.compile().expect("valid topology");
         let app = spec
-            .to_app_spec(|_service| never_starts())
+            .to_app_spec(Time::from_secs(0), |_service| never_starts())
             .expect("valid topology compiles to an app spec");
         let compiled = app.compile().expect("the supervisor accepts the topology");
 
@@ -640,26 +648,30 @@ mod tests {
         let refusal = NodeSpec::new("cyclic", BudgetPolicy::finite_defaults())
             .service(ServiceSpec::new("a", BudgetClass::Request, caps()).depends_on("b"))
             .service(ServiceSpec::new("b", BudgetClass::Request, caps()).depends_on("a"))
-            .to_app_spec(|_service| never_starts())
+            .to_app_spec(Time::from_secs(0), |_service| never_starts())
             .expect_err("an invalid topology never reaches the supervisor");
-        assert!(matches!(
-            refusal,
-            RuntimeRefusal::TopologyInvalid { .. }
-        ));
+        assert!(matches!(refusal, RuntimeRefusal::TopologyInvalid { .. }));
     }
 
     #[test]
     fn service_budgets_are_finite_and_bounded_by_the_root() {
+        let now = Time::from_secs(1_000);
         let plan = node().compile().expect("valid");
-        let root = plan.budget_for(BudgetClass::NodeRoot);
+        let root = plan.budget_at(now, BudgetClass::NodeRoot);
         for service in node().services() {
-            let budget = plan.budget_for(service.budget_class());
+            let budget = plan.budget_at(now, service.budget_class());
             assert!(
                 !crate::meter::is_unbounded(budget),
                 "service `{}` must have a finite budget",
                 service.name()
             );
             assert!(budget.poll_quota <= root.poll_quota);
+            assert!(budget.deadline <= root.deadline);
+            assert!(
+                plan.limits_for(service.budget_class()).timeout.is_some(),
+                "service `{}` must have a timeout",
+                service.name()
+            );
         }
     }
 

@@ -5,7 +5,7 @@
 //! checked before every descent.
 
 use crate::ast::{CodeBlockInfo, Heading, HeadingStyle, ListInfo, NodeId, NodeKind};
-use crate::build::{
+use crate::builder::{
     Ctx, LineSlice, measure_indent, span_of_lines, strip_columns, trim_trailing_blanks,
 };
 use crate::diagnostic::DiagnosticCode;

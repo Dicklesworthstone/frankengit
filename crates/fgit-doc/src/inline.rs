@@ -19,7 +19,7 @@
 //!   characters count as ordinary text characters.
 
 use crate::ast::{AutolinkInfo, AutolinkKind, LinkInfo, NodeId, NodeKind};
-use crate::build::{Ctx, LineSlice};
+use crate::builder::{Ctx, LineSlice};
 use crate::diagnostic::DiagnosticCode;
 use crate::limits::{Refusal, RefusalKind, as_u64, usize_of};
 use crate::span::Span;

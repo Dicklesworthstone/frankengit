@@ -15,15 +15,16 @@
 
 use std::time::Duration;
 
+use asupersync::Budget;
 use asupersync::cx::Cx;
 use asupersync::runtime::config::{
     BlockingPoolConfig, RuntimeConfig, SchedulerPlacementMode, SpawnAdmissionMode,
 };
 use asupersync::runtime::{Runtime, RuntimeHandle};
-use asupersync::Budget;
+use asupersync::types::id::Time;
 
 use crate::grant::CapabilityProfile;
-use crate::meter::{BudgetClass, BudgetPolicy};
+use crate::meter::{BudgetClass, BudgetPolicy, ClassLimits};
 use crate::obligations::LeakPolicy;
 use crate::refuse::RuntimeRefusal;
 
@@ -287,7 +288,7 @@ impl RuntimeProfile {
                 .escalation()
                 .map(|escalation| escalation.threshold),
             budget_defaults: BudgetClass::finite_classes()
-                .map(|class| (class.code(), self.budgets.budget_for(class))),
+                .map(|class| (class.code(), self.budgets.limits_for(class))),
             unbounded_root: self.budgets.has_unbounded_root(),
         }
     }
@@ -299,7 +300,9 @@ impl RuntimeProfile {
         config.spawn_admission = self.spawn_admission;
         config.scheduler_placement_mode = self.scheduler_placement;
         config.thread_stack_size = self.thread_stack_size;
-        config.thread_name_prefix.clone_from(&self.thread_name_prefix);
+        config
+            .thread_name_prefix
+            .clone_from(&self.thread_name_prefix);
         config.global_queue_limit = self.global_queue_limit;
         config.enable_parking = self.enable_parking;
         config.poll_budget = self.poll_budget;
@@ -388,8 +391,8 @@ pub struct ProfileIdentity {
     pub leak_policy: &'static str,
     /// Leak escalation threshold, when the policy escalates.
     pub leak_escalation_threshold: Option<u64>,
-    /// Default budget per finite work class.
-    pub budget_defaults: [(&'static str, Budget); 6],
+    /// Default limits per finite work class.
+    pub budget_defaults: [(&'static str, ClassLimits); 6],
     /// Whether the node root is unbounded.
     pub unbounded_root: bool,
 }
@@ -416,7 +419,10 @@ impl ProfileIdentity {
         ));
         out.push_str(&format!("|target={}-{}", self.target_arch, self.target_os));
         out.push_str(&format!("|workers={}", self.worker_threads));
-        out.push_str(&format!("|host_parallelism={}", self.host_derived_parallelism));
+        out.push_str(&format!(
+            "|host_parallelism={}",
+            self.host_derived_parallelism
+        ));
         out.push_str(&format!("|admission={}", self.spawn_admission));
         out.push_str(&format!("|placement={}", self.scheduler_placement));
         out.push_str(&format!("|stack={}", self.thread_stack_size));
@@ -434,18 +440,19 @@ impl ProfileIdentity {
                 .map_or_else(|| "none".to_owned(), |threshold| threshold.to_string())
         ));
         out.push_str(&format!("|unbounded_root={}", self.unbounded_root));
-        for (class, budget) in &self.budget_defaults {
+        for (class, limits) in &self.budget_defaults {
             out.push_str(&format!(
                 "|budget.{}={}:{}:{}:{}",
                 class,
-                budget
-                    .deadline
-                    .map_or_else(|| "none".to_owned(), |time| format!("{time:?}")),
-                budget.poll_quota,
-                budget
+                limits.timeout.map_or_else(
+                    || "none".to_owned(),
+                    |timeout| format!("{}ms", timeout.as_millis())
+                ),
+                limits.poll_quota,
+                limits
                     .cost_quota
                     .map_or_else(|| "none".to_owned(), |quota| quota.to_string()),
-                budget.priority
+                limits.priority
             ));
         }
         out
@@ -514,15 +521,26 @@ impl NodeRuntime {
             .map_err(|_| RuntimeRefusal::RuntimeUnavailable)
     }
 
-    /// The effective budget for a work class beneath the node root.
+    /// The runtime's current logical time.
+    ///
+    /// Read through a quota-only context because the clock is a runtime-owned
+    /// capability: there is no ambient wall clock in canonical evaluation, and
+    /// this crate does not introduce one.
+    #[must_use]
+    pub fn now(&self) -> Time {
+        self.runtime
+            .request_cx_with_budget(Budget::new().with_poll_quota(1))
+            .now()
+    }
+
+    /// The effective budget for a work class beneath the node root, for work
+    /// starting now.
+    ///
+    /// Class limits are timeouts, so the absolute deadline is resolved against
+    /// the runtime clock at mint time rather than baked into the policy.
     #[must_use]
     pub fn budget_for(&self, class: BudgetClass) -> Budget {
-        let root = self.profile.budgets.budget_for(BudgetClass::NodeRoot);
-        if class == BudgetClass::NodeRoot {
-            root
-        } else {
-            self.profile.budgets.derive(root, class)
-        }
+        self.profile.budgets.derived_budget_at(self.now(), class)
     }
 
     /// Run a future to completion on the calling thread.
@@ -702,10 +720,14 @@ mod tests {
 
     #[test]
     fn profile_identity_is_deterministic() {
-        let first = RuntimeProfile::production(3).identity().canonical_descriptor();
+        let first = RuntimeProfile::production(3)
+            .identity()
+            .canonical_descriptor();
         for _ in 0..8 {
             assert_eq!(
-                RuntimeProfile::production(3).identity().canonical_descriptor(),
+                RuntimeProfile::production(3)
+                    .identity()
+                    .canonical_descriptor(),
                 first
             );
         }
@@ -714,10 +736,18 @@ mod tests {
     #[test]
     fn distinct_profiles_have_distinct_identities() {
         let descriptors = [
-            RuntimeProfile::production(2).identity().canonical_descriptor(),
-            RuntimeProfile::production(4).identity().canonical_descriptor(),
-            RuntimeProfile::verification().identity().canonical_descriptor(),
-            RuntimeProfile::deterministic().identity().canonical_descriptor(),
+            RuntimeProfile::production(2)
+                .identity()
+                .canonical_descriptor(),
+            RuntimeProfile::production(4)
+                .identity()
+                .canonical_descriptor(),
+            RuntimeProfile::verification()
+                .identity()
+                .canonical_descriptor(),
+            RuntimeProfile::deterministic()
+                .identity()
+                .canonical_descriptor(),
         ];
         let mut unique = descriptors.to_vec();
         unique.sort_unstable();
@@ -741,7 +771,7 @@ mod tests {
     fn an_unbounded_service_budget_never_reaches_a_runtime() {
         let mut budgets = BudgetPolicy::finite_defaults();
         budgets = budgets
-            .with_class_budget(BudgetClass::NodeRoot, Budget::INFINITE)
+            .with_class_limits(BudgetClass::NodeRoot, ClassLimits::unbounded())
             .expect("the root may be unbounded");
 
         // Root unbounded is fine...
@@ -750,10 +780,10 @@ mod tests {
             .validate()
             .expect("an unbounded root is a named policy");
 
-        // ...but a finite class never is. `with_class_budget` refuses first,
+        // ...but a finite class never is. `with_class_limits` refuses first,
         // so construct the defect the only other way it could arise.
         let refusal = BudgetPolicy::finite_defaults()
-            .with_class_budget(BudgetClass::Transfer, Budget::INFINITE)
+            .with_class_limits(BudgetClass::Transfer, ClassLimits::unbounded())
             .expect_err("an unbounded transfer budget is refused at the policy");
         assert_eq!(
             refusal,
@@ -839,9 +869,7 @@ mod tests {
 
     #[test]
     fn every_class_context_is_bounded_beneath_the_root() {
-        let node = RuntimeProfile::deterministic()
-            .build()
-            .expect("builds");
+        let node = RuntimeProfile::deterministic().build().expect("builds");
         let root = node.budget_for(BudgetClass::NodeRoot);
 
         for class in BudgetClass::finite_classes() {

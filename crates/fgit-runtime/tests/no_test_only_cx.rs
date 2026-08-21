@@ -28,8 +28,8 @@ fn production_sources() -> Vec<PathBuf> {
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = fs::read_dir(dir)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()));
+    let entries =
+        fs::read_dir(dir).unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()));
     for entry in entries {
         let path = entry.expect("readable directory entry").path();
         if path.is_dir() {

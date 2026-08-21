@@ -268,10 +268,9 @@ impl fmt::Display for RuntimeRefusal {
                 f,
                 "obligation leak policy `{policy}` cannot satisfy region closure"
             ),
-            Self::LeakRecoveryUncontrolled { missing } => write!(
-                f,
-                "obligation leak policy `Recover` requires `{missing}`"
-            ),
+            Self::LeakRecoveryUncontrolled { missing } => {
+                write!(f, "obligation leak policy `Recover` requires `{missing}`")
+            }
             Self::BudgetExhausted { dimension } => {
                 write!(f, "budget dimension `{dimension}` is already exhausted")
             }
@@ -341,9 +340,7 @@ mod tests {
             .is_retryable()
         );
         assert!(!RuntimeRefusal::CapabilityWidening { missing: "io" }.is_retryable());
-        assert!(
-            !RuntimeRefusal::LeakPolicyInsufficient { policy: "Log" }.is_retryable()
-        );
+        assert!(!RuntimeRefusal::LeakPolicyInsufficient { policy: "Log" }.is_retryable());
         // Paired permitted case: admission pressure is the one retryable class.
         assert!(RuntimeRefusal::AdmissionRefused { limit: 4 }.is_retryable());
     }

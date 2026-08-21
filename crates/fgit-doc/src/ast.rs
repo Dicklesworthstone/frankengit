@@ -32,6 +32,11 @@ impl NodeId {
     pub const fn index(self) -> u32 {
         self.0
     }
+
+    /// Builds an identifier from an arena position.
+    pub(crate) fn from_index(index: usize) -> Self {
+        Self(crate::limits::offset_u32(index))
+    }
 }
 
 /// Whether a heading was written with leading hashes or an underline.
@@ -489,7 +494,7 @@ impl Builder {
                 as_u64(self.nodes.len().saturating_add(1)),
             ));
         }
-        let id = NodeId(crate::limits::offset_u32(self.nodes.len()));
+        let id = NodeId::from_index(self.nodes.len());
         self.nodes.push(Node {
             kind,
             span,

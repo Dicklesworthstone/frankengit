@@ -381,7 +381,11 @@ mod tests {
 
         assert_eq!(narrowed.runtime_mask(), mask_of::<IoAndTime>());
         assert!(narrowed.authority().contains(AuthorityCapability::Database));
-        assert!(!narrowed.authority().contains(AuthorityCapability::Publication));
+        assert!(
+            !narrowed
+                .authority()
+                .contains(AuthorityCapability::Publication)
+        );
     }
 
     #[test]
@@ -403,7 +407,10 @@ mod tests {
                 Ownership::Owned,
             )
             .expect_err("a child cannot regain a masked capability");
-        assert_eq!(refusal, RuntimeRefusal::CapabilityWidening { missing: "io" });
+        assert_eq!(
+            refusal,
+            RuntimeRefusal::CapabilityWidening { missing: "io" }
+        );
         assert!(!refusal.is_retryable());
 
         // Paired permitted case: the same child narrowing to what it holds.
