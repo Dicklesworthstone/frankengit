@@ -289,6 +289,33 @@ run_thin_case() {
     'the thin differential records its denominator receipt'
 }
 
+run_large_offset_case() {
+  local algorithm=$1
+  local corpus=$2
+  local work_root=$3
+  local artifact_directory="${work_root}/findings-${algorithm}-large-offset"
+  local differential_exit=0
+  local prefix="FG-016C-E2E-${algorithm}-large-offset"
+
+  fge_capture "differential-${algorithm}-large-offset" \
+    env RCH_CARGO_WRAPPER_BYPASS=1 \
+    "FGIT_PACK_DIFFERENTIAL_CORPUS=${corpus}" \
+    "FGIT_PACK_DIFFERENTIAL_ARTIFACT_DIR=${artifact_directory}" \
+    cargo test --locked -p fgit-pack --test differential_oracle \
+      attested_oracle_entry_exercises_idx_v2_large_offset_indirection -- --ignored --nocapture || differential_exit=$?
+  fge_assert_exit "${prefix}-001" 0 "${differential_exit}" \
+    'an attested upstream entry survives a synthetic idx-v2 large-offset indirection'
+  fge_assert_file "${prefix}-002" "${artifact_directory}/verdict.ndjson" \
+    'the large-offset indirection cell records its scope-limited receipt'
+  if [[ -f "${artifact_directory}/verdict.ndjson" ]]; then
+    local verdict=''
+    verdict="$(<"${artifact_directory}/verdict.ndjson")"
+    fge_assert_contains "${prefix}-003" "${verdict}" \
+      'synthetic_idx_v2_large_offset_indirection' \
+      'the receipt states that the cell is idx indirection, not a >2GiB pack claim'
+  fi
+}
+
 fge_init fg016c-pack-differential
 fge_context bead frankengit-fg016c-pack-differential-md7
 fge_context evidence_class E3
@@ -304,6 +331,8 @@ run_case sha256 ofs "${work_root}"
 run_case sha256 ref "${work_root}"
 run_thin_case sha1 "${work_root}/sha1-ref" "${work_root}"
 run_thin_case sha256 "${work_root}/sha256-ref" "${work_root}"
+run_large_offset_case sha1 "${work_root}/sha1-ofs" "${work_root}"
+run_large_offset_case sha256 "${work_root}/sha256-ofs" "${work_root}"
 
 fuzz_exit=0
 fge_capture deterministic-pack-fuzz \
