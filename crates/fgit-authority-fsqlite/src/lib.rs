@@ -80,45 +80,53 @@
 //! backstops that cannot prove quiescent shutdown — the awaited `close(&Cx)` is
 //! the only path this crate will use.
 //!
-//! # Permanent non-claim: checkpoint under load
+//! # Non-claim: checkpoint under load is UNOBSERVED, not absent
 //!
 //! This crate makes **no claim of any strength** about WAL checkpointing while
-//! the store is under load, and it never will at this dependency version. The
-//! §3.5 envelope matrix lists checkpoint-under-load as one of its six
-//! scenarios; that cell is **externally undriveable**, and the reason is in
-//! `fsqlite`, not in this crate's surface.
+//! the store is under load. The §3.5 envelope matrix lists
+//! checkpoint-under-load as one of its six scenarios, and that cell is
+//! **live and untested** — which is a risk to record, not a box to tick.
 //!
-//! Measured against `fsqlite` 0.3.7 (exhaustive scan of every occurrence of
-//! `checkpoint` in its sources):
+//! **Checkpoints do happen here, under load, without anyone asking.**
+//! `fsqlite` drives them itself on an open connection during ordinary writes:
 //!
-//! * the sole WAL-checkpoint trigger is `Command::Close { checkpoint: bool }`;
-//! * `Command::Checkpoint` does not exist;
-//! * the only public function whose name contains `checkpoint` is
-//!   `close_without_checkpoint_sync`, which *suppresses* it;
-//!   `close_sync_with_checkpoint` is private.
+//! * `fsqlite-wal::execute_checkpoint` checkpoints a live WAL and closes
+//!   nothing;
+//! * `fsqlite-core`'s `wal_adapter` calls it;
+//! * `maybe_run_adaptive_autocheckpoint` runs on the connection's normal
+//!   paths, governed by `PRAGMA wal_autocheckpoint` and an adaptive page
+//!   target.
 //!
-//! So **every public path that checkpoints also terminates the connection, and
-//! terminating it ends the load.** The scenario is not one we declined to
-//! expose — it is unreachable by construction, and no method added to
-//! [`FsqliteAuthorityStore`] could reach it. Adding one would be a surface that
-//! cannot do what its name says.
+//! What is missing is on **our** side, and it is narrower than "no checkpoint
+//! exists": [`FsqliteAuthorityStore`] publishes no checkpoint operation, and
+//! its closed statement set contains no `PRAGMA`, so this crate can neither
+//! **trigger** a checkpoint nor **observe** that one occurred. A behaviour that
+//! runs in production and cannot be driven from the test surface earns no
+//! claim — and, more importantly, is not thereby made safe.
 //!
-//! Two things this non-claim deliberately does *not* say. It does not say
-//! checkpointing is untested — `fsqlite` tests its own close-time paths. And it
-//! does not say checkpoints never occur under load; it says we cannot **drive**
-//! one, so we cannot observe or bound the behaviour, and an unobservable
-//! behaviour earns no claim.
+//! **An earlier version of this section said the opposite** — that every
+//! checkpointing path also closes the connection, so the scenario was
+//! unreachable by construction. That was wrong, and wrong in the dangerous
+//! direction: it turned an occurring, unobserved behaviour into an
+//! impossibility. It came from scanning the `fsqlite` facade crate alone and
+//! calling that exhaustive; `fsqlite` is a facade over fifteen crates and the
+//! WAL lives in `fsqlite-wal`. Recorded here because the retracted claim is
+//! more instructive than the corrected one: *exhaustive* is a statement about
+//! a search boundary, and the boundary has to be proved before the scan is
+//! worth anything.
 //!
-//! Not the same mechanism, despite the shared word: `Cx::checkpoint()` and
-//! `checkpoint_or_interrupt` in `fsqlite` are **cancellation** polls (§3.3).
-//! They have nothing to do with the WAL, and reading them as coverage of this
-//! cell would be a false green.
+//! Still true, and still worth stating: `Cx::checkpoint()` and
+//! `checkpoint_or_interrupt` are **cancellation** polls (§3.3), unrelated to
+//! the WAL. Counting them as coverage of this cell would be a false green.
 //!
-//! Recorded as `NEG-022` in `registries/negative_evidence.tsv` with its revisit
-//! condition: if `fsqlite` ever publishes a checkpoint operation callable on an
-//! open connection, this non-claim is retired and the under-load drill joins
-//! the FG-005b matrix. Until then, a reader who infers coverage of this cell
-//! from anything in this crate is reading something that is not here.
+//! Recorded as `NEG-022` in `registries/negative_evidence.tsv`. The cell
+//! becomes testable if this crate gains a way to drive or observe a checkpoint
+//! — a typed operation over `fsqlite-wal::execute_checkpoint` (already inside
+//! the closed dependency universe as DEP-205), or `PRAGMA wal_autocheckpoint`
+//! admitted into the closed statement set so the threshold is at least
+//! configurable and assertable. Until then, a reader who infers coverage of
+//! this cell from anything in this crate is reading something that is not
+//! here.
 //!
 //! [`AuthorityStore`]: fgit_authority::AuthorityStore
 //! [`FsqliteAuthorityStore`]: crate::FsqliteAuthorityStore

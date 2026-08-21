@@ -37,17 +37,28 @@
 //! attempt — and says nothing about what happens once one is running. Two of
 //! the six scenarios §3.5 lists (checkpoint under load, and process
 //! crash/reopen/recovery) are behavioural; the crash/reopen half is covered by
-//! `crash_equivalence.rs`, and checkpoint-under-load cannot be driven at all.
+//! `crash_equivalence.rs`, and checkpoint-under-load cannot be driven at all
+//! from this crate — though it **does happen**.
 //!
-//! That last one used to be recorded here as "the store publishes no checkpoint
-//! operation", which invites the wrong repair: add one. It is not reachable
-//! from `fsqlite` either. Its sole WAL-checkpoint trigger is
-//! `Command::Close { checkpoint: bool }` — there is no `Command::Checkpoint` —
-//! so every public path that checkpoints also closes the connection, and
-//! closing it ends the load. No method added to `FsqliteAuthorityStore` can
-//! reach the cell. This is a permanent typed non-claim, not a gap: see
-//! `NEG-022` in `registries/negative_evidence.tsv` and the crate-level docs,
-//! which carry the measurement and the revisit condition.
+//! That cell has now carried two wrong reasons, and both invited a wrong
+//! repair. It was first recorded as "the store publishes no checkpoint
+//! operation", which invites *add one*. I replaced that with "every public
+//! path that checkpoints also closes the connection, so the scenario is
+//! unreachable", which invites *stop worrying* — and that one was worse,
+//! because it was false. It came from scanning the `fsqlite` facade alone
+//! while the WAL lives in `fsqlite-wal`.
+//!
+//! What is actually true: `fsqlite` checkpoints a live WAL by itself, on an
+//! open connection, during ordinary writes — `fsqlite-wal::execute_checkpoint`
+//! closes nothing, `fsqlite-core`'s `wal_adapter` calls it, and
+//! `maybe_run_adaptive_autocheckpoint` runs on normal connection paths under
+//! `PRAGMA wal_autocheckpoint`. So the scenario is **live and unobserved**:
+//! `FsqliteAuthorityStore` publishes no checkpoint operation and admits no
+//! `PRAGMA`, so this crate can neither trigger a checkpoint nor detect that one
+//! happened. That is a gap worth keeping open, not a non-claim to file away.
+//! See `NEG-022` in `registries/negative_evidence.tsv` and the crate-level
+//! docs, which carry the corrected measurement and what would make the cell
+//! testable.
 
 use fgit_authority_fsqlite::{
     ConcurrencyEnvelope, EnvelopeRefusal, MAX_ADMITTED_AUTOCOMMIT_WRITERS, WriterTopology,
