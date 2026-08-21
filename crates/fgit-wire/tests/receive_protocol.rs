@@ -6,8 +6,8 @@ use fgit_wire::receive::{
     SignedPushProfile, UnpackStatus, advertise_receive_pack, report_status,
 };
 use fgit_wire::{
-    AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, Packet, WireError, WireLimits,
-    encode_packet,
+    AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, Packet, PktLineDecoder, WireError,
+    WireLimits, encode_packet,
 };
 
 const OLD: &str = "1111111111111111111111111111111111111111";
@@ -145,13 +145,21 @@ fn raw_git_send_pack_command_without_lf_is_accepted() {
     // Byte-for-byte command-section prefix captured from pinned Git 2.54.0
     // `send-pack --stateless-rpc`: it has no trailing LF and its NUL
     // capability payload begins with one ASCII space.
-    const GIT_254_SEND_PACK_PREFIX: &[u8] = b"00bf0000000000000000000000000000000000000000 5e93bc56297a8be0bac50c4ad180d2cbb0551cf7 refs/heads/pushed\0 report-status-v2 side-band-64k quiet object-format=sha1 agent=git/2.54.0-Linux0000";
+    const GIT_254_SEND_PACK_PREFIX: &[u8] = b"00bf00b70000000000000000000000000000000000000000 5e93bc56297a8be0bac50c4ad180d2cbb0551cf7 refs/heads/pushed\0 report-status-v2 side-band-64k quiet object-format=sha1 agent=git/2.54.0-Linux0000";
     assert_eq!(GIT_254_SEND_PACK_PREFIX.len(), 191);
 
     let server = b"report-status report-status-v2 delete-refs side-band-64k quiet atomic ofs-delta object-format=sha1 agent=git/2.54.0-Linux";
     let mut machine = ReceivePack::new(context(server)).expect("receive context");
+    let mut stateless_rpc_envelope =
+        PktLineDecoder::new(WireLimits::default()).expect("outer pkt-line decoder");
+    let envelope_packets = stateless_rpc_envelope
+        .push(GIT_254_SEND_PACK_PREFIX)
+        .expect("captured stateless-RPC envelope");
+    let [Packet::Data(receive_request)] = envelope_packets.as_slice() else {
+        panic!("capture has exactly one stateless-RPC request envelope");
+    };
     let transition = machine
-        .push_bytes(GIT_254_SEND_PACK_PREFIX)
+        .push_bytes(receive_request)
         .expect("captured Git command section");
 
     let Some(ReceiveEvent::RequestReady(request)) = transition.events.first() else {
