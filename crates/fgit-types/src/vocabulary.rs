@@ -272,6 +272,12 @@ pub enum RefusalCode {
     /// This exists so the one condition operators most need to see is reported
     /// as itself instead of failing closed as a nearby class.
     InternalInvariantBreach,
+    /// A canonical body's framing, lengths, tags, or collection ordering
+    /// failed validation, so the bytes have no single well-defined value.
+    CanonicalFramingInvalid,
+    /// A canonical body exceeded a declared decode bound: a length, an element
+    /// count, or a nesting depth. The bound is checked before allocation.
+    CanonicalBoundExceeded,
 }
 
 impl RefusalCode {
@@ -336,6 +342,8 @@ impl RefusalCode {
         Self::ConflictingSemanticEffects,
         Self::DurabilityProfileUnavailable,
         Self::InternalInvariantBreach,
+        Self::CanonicalFramingInvalid,
+        Self::CanonicalBoundExceeded,
     ];
 
     /// Stable wire code point.
@@ -401,6 +409,8 @@ impl RefusalCode {
             Self::ConflictingSemanticEffects => 0x021b,
             Self::DurabilityProfileUnavailable => 0x021c,
             Self::InternalInvariantBreach => 0x021d,
+            Self::CanonicalFramingInvalid => 0x021e,
+            Self::CanonicalBoundExceeded => 0x021f,
         }
     }
 
@@ -467,6 +477,8 @@ impl RefusalCode {
             Self::ConflictingSemanticEffects => "ConflictingSemanticEffects",
             Self::DurabilityProfileUnavailable => "DurabilityProfileUnavailable",
             Self::InternalInvariantBreach => "InternalInvariantBreach",
+            Self::CanonicalFramingInvalid => "CanonicalFramingInvalid",
+            Self::CanonicalBoundExceeded => "CanonicalBoundExceeded",
         }
     }
 

@@ -1346,6 +1346,26 @@ mod tests {
     }
 
     #[test]
+    fn build_read_rebuild_round_trips_canonical_segment() {
+        let digest = FixtureDigest;
+        let segment = segment_with(&[b'a', b'b', b'c']);
+        let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, &limits())
+            .expect("fixture segment must be readable");
+        let mut builder = MicrosegmentBuilder::new(&digest, limits());
+        for index in 0..reader.len() {
+            let record = reader.record(index).expect("record index must be valid");
+            builder
+                .push(SegmentRecordInput {
+                    envelope: record.envelope.clone(),
+                    payload: record.payload.to_vec(),
+                })
+                .expect("verified record must rebuild");
+        }
+        let rebuilt = builder.build().expect("rebuilt segment must be valid");
+        assert_eq!(rebuilt.as_bytes(), segment.as_bytes());
+    }
+
+    #[test]
     fn envelope_round_trips_with_every_identity_bearing_field() {
         let envelope = ObjectEnvelope::new(
             vec![b'n'],

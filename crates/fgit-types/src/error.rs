@@ -127,7 +127,7 @@ impl TypeRefusal {
         use crate::vocabulary::RefusalCode;
         match self {
             Self::LengthOutOfRange { .. } | Self::ValueOutOfRange { .. } => {
-                RefusalCode::ResourceBudgetExceeded
+                RefusalCode::CanonicalBoundExceeded
             }
             Self::ByteNotPermitted { .. }
             | Self::CodePointUnknown { .. }

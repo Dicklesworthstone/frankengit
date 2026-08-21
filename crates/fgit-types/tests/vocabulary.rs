@@ -48,7 +48,7 @@ fn an_unknown_refusal_code_point_is_refused_rather_than_defaulted() {
         }
     );
     // Permitted counterpart: the highest allocated code point still resolves.
-    assert!(RefusalCode::from_code_point(0x021d).is_ok());
+    assert!(RefusalCode::from_code_point(0x021f).is_ok());
 }
 
 #[test]
@@ -60,8 +60,8 @@ fn the_two_ranges_split_agent_protocol_from_ref_transaction_dimensions() {
     let ref_txn = RefusalCode::ALL.len() - agent;
     assert_eq!(agent, 30, "the agent-protocol taxonomy has thirty members");
     assert_eq!(
-        ref_txn, 29,
-        "the ref-transaction and admission dimensions have twenty-nine members"
+        ref_txn, 31,
+        "the ref-transaction and admission dimensions have thirty-one members"
     );
     assert!(RefusalCode::IntentExpired.is_agent_protocol_dimension());
     assert!(!RefusalCode::ExpectedOldRefMismatch.is_agent_protocol_dimension());
