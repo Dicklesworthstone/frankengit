@@ -24,6 +24,15 @@
 //!   relationship with the database; it does not lose the operating system's
 //!   page cache or interrupt an `fsync`. Torn writes and lost sectors are a
 //!   different harness, and nothing here should be read as covering them.
+//! * **"Survives a kill" is not "durable" in the §5.4 sense.** That section
+//!   separates *staged*, *visible*, and *durable*, and forbids conflating
+//!   object existence, canonical visibility, and completion of the selected
+//!   durability profile. What these tests show is that state remains
+//!   canonically visible after the process stops touching the database — the
+//!   middle epoch. Completion of a durability profile means surviving loss of
+//!   the page cache, which the point above says this harness does not test.
+//!   The word "durability" appears in a few comments below as ordinary
+//!   English; nowhere in this file is it the §5.4 epoch.
 //! * **Every kill here FOLLOWS a completed operation.** `Crashable::kill` runs
 //!   after the call it is paired with has returned, so what is under test is
 //!   what a finished operation left behind, not an operation interrupted
@@ -237,7 +246,7 @@ fn generation(value: u64) -> HeadGeneration {
 const GENESIS: &[u8] = b"head-generation-1";
 const ADVANCED: &[u8] = b"head-generation-2";
 
-// ------------------------------------------------------- durability of bodies
+// ------------------------------------------ bodies survive an unclean shutdown
 
 #[test]
 fn a_body_written_before_a_kill_is_readable_after_reopen() {
