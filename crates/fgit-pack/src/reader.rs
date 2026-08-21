@@ -258,7 +258,13 @@ fn inflate_one_member(
 fn inflate_limits(limits: &PackLimits, declared_size: usize) -> InflateLimits {
     InflateLimits {
         max_input_bytes: limits.max_input_bytes,
-        max_pending_input_bytes: 2,
+        // `inflate_one_member` supplies one byte at a time so it can return the
+        // exact pack boundary. The decoder may nevertheless need to retain a
+        // complete zlib or dynamic-Huffman header before it can consume any
+        // input. The pack-wide input ceiling is therefore also the bounded
+        // retained-input ceiling; `Inflater` grows this buffer incrementally
+        // and fallibly rather than preallocating it.
+        max_pending_input_bytes: limits.max_input_bytes,
         max_output_bytes: declared_size.max(1),
         max_expansion_ratio: Some(match u32::try_from(limits.max_expansion_ratio) {
             Ok(value) => value.max(1),
@@ -481,15 +487,18 @@ mod tests {
     fn object_count_mismatches_refuse_before_a_quarantined_pack_is_returned() {
         let mut too_many_declared = exact_pack(&pack_entry(3, b"blob"));
         too_many_declared[11] = 2;
-        assert!(matches!(
+        assert_eq!(
             parse_quarantined_pack(
                 &too_many_declared,
                 ObjectFormat::Sha1,
                 &limits(),
                 &mut always,
             ),
-            Err(PackError::Truncated { .. })
-        ));
+            Err(PackError::ObjectCountMismatch {
+                declared: 2,
+                actual: 1,
+            })
+        );
 
         let mut too_many_actual = pack_entry(3, b"one");
         too_many_actual.extend_from_slice(&pack_entry(3, b"two"));

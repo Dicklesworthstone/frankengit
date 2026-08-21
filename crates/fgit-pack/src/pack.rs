@@ -346,8 +346,18 @@ mod tests {
             parse_pack_header(b"PACK", &limits()),
             Err(PackError::Truncated { .. })
         ));
-        assert!(matches!(
+        assert_eq!(
             decode_entry_header(&[0x38], &limits(), &mut always),
+            Ok((
+                PackEntryHeader {
+                    kind: EntryKind::Blob,
+                    declared_size: 8,
+                },
+                1,
+            ))
+        );
+        assert!(matches!(
+            decode_entry_header(&[0xb8], &limits(), &mut always),
             Err(PackError::Truncated { .. })
         ));
     }

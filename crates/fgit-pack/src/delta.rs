@@ -872,7 +872,7 @@ mod tests {
     #[test]
     fn copy_size_zero_means_65536() {
         let base = vec![0x34; 0x1_0000];
-        let delta = [0x80, 0x80, 0x04, 0x80];
+        let delta = [0x80, 0x80, 0x04, 0x80, 0x80, 0x04, 0x80];
         assert_eq!(
             apply_delta(&base, &delta, &unlimited(), &mut always),
             Ok(base)
