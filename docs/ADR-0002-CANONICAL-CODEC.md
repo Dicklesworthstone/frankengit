@@ -120,12 +120,19 @@ A signature whose committed identity is not in the carried body's domain cannot 
 
 ```rust
 trait BodyIdentity {
-    fn identify(&self, domain: DomainTag, schema: SchemaId, canonical_body: &[u8])
-        -> InternalObjectId;
+    fn identify(&self, domain: DomainTag, schema: SchemaId, codec_version: CodecVersion,
+                canonical_body: &[u8]) -> Result<InternalObjectId, CodecRefusal>;
 }
 ```
 
-Its shape is deliberate. Handing `fgit-crypto` the three components rather than a pre-assembled buffer is what stops a second, silently divergent preimage framing from growing inside this crate — which is precisely the failure that a "canonical" codec cannot afford, because two preimages mean two identities for one body.
+Its shape is deliberate. Handing `fgit-crypto` the components rather than a pre-assembled buffer is what stops a second, silently divergent preimage framing from growing inside this crate — which is precisely the failure that a "canonical" codec cannot afford, because two preimages mean two identities for one body.
+
+Two details of that signature were wrong in the first draft. Both were real defects rather than taste, so they are recorded rather than quietly corrected:
+
+- **It must be fallible.** One call site takes its domain from a *decoded frame*, which is untrusted input. An infallible signature leaves an implementor two options for a tag the registry never allocated — panic, or mint an identity nothing can verify — and makes neither visible to the caller. An unregistered domain is now a typed refusal.
+- **It must carry the codec version.** The preimage has three fields but the *identity* has four, and an implementor not given the fourth has to invent it, silently mislabelling any body encoded under a different minor. `body_id_of_frame` passes the frame's own codec version, so relaying a body written by a newer minor does not restamp it.
+
+A typed variant, `body_id_of_frame_as::<B>`, additionally pins a frame's domain and schema to an expected body type before identifying it. The registry's refusals catch an unregistered tag and a wrong digest; neither can catch a *registered* tag on the wrong body type, because neither ever sees `B`. The untyped form remains for relay, indexing, and repair, where the caller genuinely does not know what it holds.
 
 `fgit-crypto` owns the preimage framing, the digest algorithms, the code-point-to-construction registry, output lengths, migration, signature schemes, and verification. `fgit-types` owns the *shape* of a digest — an opaque registry code point plus bounded bytes — so every protocol body is expressible before any algorithm is chosen, and choosing one later cannot change a body's shape.
 
@@ -158,6 +165,8 @@ Its shape is deliberate. Handing `fgit-crypto` the three components rather than 
 7. A body carrying fields from a higher minor can be relayed without changing its identity.
 8. Attaching, removing, or replacing a signature never changes the identity of the body it signs.
 9. Every codec refusal maps to exactly one member of the closed protocol refusal vocabulary, deterministically, so a decode failure and the refusal recorded in the decision stream cannot disagree.
+10. A domain no identity registry knows yields a refusal, never a computed identity.
+11. Pinning a frame to an expected body type changes whether an identity is produced, never which identity is produced.
 
 ## Rejected alternatives
 
@@ -198,7 +207,8 @@ Coverage as committed:
 - bound assertions that accept a value exactly at each bound and refuse the value one past it;
 - the signed-envelope property: three envelopes carrying one body with zero, one, and two signatures agree on the carried body's bytes and identity while differing as envelopes;
 - a framing-independence assertion: the identity computed from a body equals the identity computed from its frame, and the frame is strictly larger than the bytes that were identified;
-- a domain-separation assertion: the same canonical bytes under two domains produce two identities.
+- a domain-separation assertion: the same canonical bytes under two domains produce two identities;
+- cross-crate bridge assertions: an identity this crate produces is one `fgit-crypto` verifies and rejects against a different body; the corpus framing equals the production framing; every body domain has a registry row; the corpus algorithm slot lies inside the range `fgit-crypto` reserves for harnesses; and a registered domain on the wrong body type is refused when the caller states what it expects.
 
 **The committed golden bytes were derived from this specification by a second implementation, written separately from the encoder and discarded afterwards.** The suite therefore compares two independent readings of the format rather than the encoder confirming itself. That is a weaker guarantee than an independently maintained verifier and is the reason FG-002c exists.
 
@@ -206,7 +216,7 @@ Coverage as committed:
 
 - **No cryptographic claim is made anywhere in this crate.** It computes no digest and verifies no signature.
 - **The corpus digest is not a cryptographic digest.** The committed identities were computed with a fully specified non-cryptographic function reserved to the corpus, so the identity path could be exercised before `fgit-crypto` published its registry. It has no collision-resistance property. What the corpus proves is that a body's identity depends on exactly its domain, schema, and canonical bytes and on nothing else; it proves nothing about digest strength. Production identities are computed by `fgit-crypto` through the `BodyIdentity` seam, and binding the corpus to real algorithm slots is FG-002b work.
-- **The corpus re-implements the `fgit-crypto` preimage framing rather than importing it.** That is what makes the committed identities a cross-check of that framing instead of a copy of it, but it also means the two could drift: nothing in this crate's suite fails if `fgit-crypto` changes its preimage. Closing that gap is a cross-crate test and belongs to FG-002b or FG-002c.
+- **The corpus re-implements the `fgit-crypto` preimage framing rather than importing it**, which is what makes the committed identities a cross-check of that framing instead of a copy of it. An earlier revision of this ADR recorded the resulting drift risk as an open non-claim; **that gap is now closed** by `the_corpus_preimage_framing_matches_the_production_framing`, which compares the two implementations directly across several domains and bodies. Note what the neighbouring test does *not* do: an identity round-tripped through construction and verification cannot detect framing drift, because both routes use the same framing. Only a direct comparison of the two implementations can.
 - **The one-byte-string-per-value property is a design property supported by tests, not a proof.** No exhaustive search or mechanized argument has been performed. It is not claimed for any body type not represented in the corpus.
 - **Forward compatibility is claimed only for additive minor versions.** A higher major is refused, by design, and no claim of any kind is made about decoding one.
 - **Bound values are engineering defaults, not measured limits.** They were chosen for canonical protocol bodies and have not been derived from a workload.
