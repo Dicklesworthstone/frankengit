@@ -96,6 +96,7 @@
 //!   evidence about the model. Connecting it to an implementation requires the
 //!   trace-refinement discipline of §40.5, which is a different bead.
 
+pub mod campaign;
 pub mod capsule;
 pub mod decision;
 pub mod effect;

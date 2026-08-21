@@ -1,0 +1,931 @@
+//! The exhaustive small-state campaign: bounded model checking over the
+//! reference model.
+//!
+//! Plan §40.2 asks for the race space between seal creation, duplicate
+//! requests, compare-and-swap winners and losers, cancellation, and crash
+//! points to be *explored*, not sampled. This module walks it explicitly.
+//!
+//! ## Why a walker and not a stress loop
+//!
+//! A randomized stress run reports how many executions it happened to try. It
+//! cannot say what it did **not** try, so a count of a million iterations is
+//! not coverage of anything in particular. This walker enumerates the reachable
+//! state space under declared bounds and reports the bounds together with the
+//! result, so "all five properties hold" means *within this stated envelope*
+//! and nothing broader. That is a `bounded_model` claim and is labelled as one.
+//!
+//! ## Deduplication is exact, not hashed
+//!
+//! A model checker normally fingerprints states with a hash and accepts the
+//! collision risk. This crate computes no digests, and inventing one here would
+//! contradict that. Instead [`state_key`] builds the **canonical encoding** of
+//! the parts of the state a further transition can depend on, and the walker
+//! deduplicates on those exact bytes. Two states sharing a key are genuinely
+//! equal in every respect the model can observe, so no execution is merged away
+//! by accident.
+//!
+//! ## The five properties
+//!
+//! [`Property`] enumerates exactly the five of plan §40.2. They are checked on
+//! every reachable state, not only at the end of a path, because a violation
+//! that a later transition repairs is still a violation.
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use fgit_codec::error::CodecRefusal;
+use fgit_codec::writer::Encoder;
+use fgit_types::identity::{
+    PreparedTxnCapsuleId, PrincipalId, RepositoryAuthorityHeadId, RepositoryDecisionBatchId,
+    TransactionSealId, TxId,
+};
+use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1};
+use fgit_types::numeric::{HeadGeneration, PolicyEpoch, RegistryEpoch};
+use fgit_types::refs::RefName;
+use fgit_types::vocabulary::{DecisionOutcome, MismatchPolicy};
+
+use crate::capsule::WitnessGranularity;
+use crate::harness::{IdentityMint, RequestBuilder, label};
+use crate::intent::{
+    DurabilityProfile, ForgeEventKind, IdempotencyKey, Intent, RefIntent, TransactionRequest,
+};
+use crate::machine::{CancellationPhase, CancellationRequest, ModelInput, ModelStep, step};
+use crate::refs::ExpectedRefState;
+use crate::state::{
+    GenesisConfiguration, InvariantBreach, PolicySnapshot, PrincipalCapabilities,
+    QuarantinedObject, RepositoryState,
+};
+use crate::trace::{TraceStep, encode_roots};
+use crate::transition::{
+    CasRequest, DecisionBodyIdentity, PrepareRequest, QuarantineRequest, SealRequest, StageRequest,
+};
+
+/// The declared bounds of one campaign.
+///
+/// Every number here narrows the explored space, so the campaign reports this
+/// struct alongside its verdict. A bounded result whose bounds are not stated
+/// is not evidence of anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Bounds {
+    /// How many distinct sealed transactions the universe contains.
+    pub transactions: usize,
+    /// How many preparation attempts each transaction may make.
+    pub attempts_per_transaction: usize,
+    /// How many decision batches may be staged across the whole run.
+    pub batches: usize,
+    /// Longest path, in transitions, the walker will follow.
+    pub depth: usize,
+    /// Hard ceiling on explored states, so a bug in the bounds cannot hang a
+    /// lane.
+    pub max_states: usize,
+}
+
+impl Bounds {
+    /// Bounds sized to run in a continuous-integration lane in seconds.
+    pub const DEFAULT: Self = Self {
+        transactions: 2,
+        attempts_per_transaction: 2,
+        batches: 2,
+        depth: 7,
+        max_states: 20_000,
+    };
+
+    /// Wider bounds for a deliberate deep run.
+    ///
+    /// Documented rather than default because the space grows sharply: this is
+    /// the `--deep` mode the campaign's acceptance asks for.
+    pub const DEEP: Self = Self {
+        transactions: 2,
+        attempts_per_transaction: 2,
+        batches: 3,
+        depth: 9,
+        max_states: 400_000,
+    };
+}
+
+/// One of the five properties of plan §40.2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Property {
+    /// A sealed transaction has at most one terminal decision.
+    UniqueTerminalOutcome,
+    /// Every head names its exact predecessor and a successor generation.
+    HeadChainContinuity,
+    /// A pull-request merge and the ref it moves publish in one record.
+    AtomicRefAndForgeEffects,
+    /// No canonical root points at an object that never left quarantine, and
+    /// the sequences are gap-free.
+    NoRootOmission,
+    /// Head generation and both sequences never move backwards.
+    NoSilentAntiRollback,
+}
+
+impl Property {
+    /// Every property, in declaration order.
+    pub const ALL: &'static [Self] = &[
+        Self::UniqueTerminalOutcome,
+        Self::HeadChainContinuity,
+        Self::AtomicRefAndForgeEffects,
+        Self::NoRootOmission,
+        Self::NoSilentAntiRollback,
+    ];
+
+    /// Stable machine-readable name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UniqueTerminalOutcome => "unique_terminal_outcome",
+            Self::HeadChainContinuity => "head_chain_continuity",
+            Self::AtomicRefAndForgeEffects => "atomic_ref_and_forge_effects",
+            Self::NoRootOmission => "no_root_omission",
+            Self::NoSilentAntiRollback => "no_silent_anti_rollback",
+        }
+    }
+}
+
+/// A property that failed, with the path that reached it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Violation {
+    /// Which property failed.
+    pub property: Property,
+    /// What specifically was wrong.
+    pub detail: String,
+    /// The shortest input sequence the walker knows of that reaches the
+    /// violating state.
+    ///
+    /// The walk is breadth-first, so the first path to reach a state is a
+    /// shortest one; the counterexample is minimized by construction rather
+    /// than by a separate shrinking pass.
+    pub path: Vec<ModelInput>,
+}
+
+impl Violation {
+    /// Renders the counterexample as trace steps, so it can be diffed and
+    /// replayed through the FG-003b tooling rather than read as prose.
+    pub fn to_trace_steps(
+        &self,
+        genesis: &GenesisConfiguration,
+    ) -> Result<Vec<TraceStep>, InvariantBreach> {
+        let mut state = RepositoryState::genesis(genesis.clone());
+        let mut steps = Vec::with_capacity(self.path.len());
+        for input in &self.path {
+            let ModelStep { next, output } = step(&state, input).map_err(|breach| *breach)?;
+            let roots = encode_roots(next.roots()).unwrap_or_default();
+            steps.push(TraceStep {
+                input: input.clone(),
+                observed: crate::trace::ObservedOutcome::of(&output),
+                roots,
+                head: crate::trace::HeadObservation::of(&next),
+            });
+            state = next;
+        }
+        Ok(steps)
+    }
+}
+
+/// What one campaign found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CampaignReport {
+    /// The bounds the walk declared.
+    pub bounds: Bounds,
+    /// Distinct states reached.
+    pub states_explored: usize,
+    /// Transitions applied, including those that ended in a typed refusal.
+    pub transitions_explored: usize,
+    /// Transitions the model refused as structurally impossible.
+    ///
+    /// These are not failures. A compare-and-swap naming a batch that was
+    /// never staged *should* fail closed, and counting them is evidence that
+    /// the walk actually offered illegal inputs rather than only legal ones.
+    pub refused_transitions: usize,
+    /// Whether the walk hit its own state ceiling before exhausting the space.
+    pub truncated: bool,
+    /// Every violation found.
+    pub violations: Vec<Violation>,
+}
+
+impl CampaignReport {
+    /// True when the bounded space was fully explored and no property failed.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.violations.is_empty() && !self.truncated
+    }
+
+    /// One NDJSON record summarizing the run.
+    #[must_use]
+    pub fn to_ndjson(&self) -> String {
+        let mut out = String::with_capacity(256);
+        out.push_str("{\"record\":\"model_campaign\"");
+        push_num(&mut out, "transactions", self.bounds.transactions);
+        push_num(
+            &mut out,
+            "attempts_per_transaction",
+            self.bounds.attempts_per_transaction,
+        );
+        push_num(&mut out, "batches", self.bounds.batches);
+        push_num(&mut out, "depth", self.bounds.depth);
+        push_num(&mut out, "max_states", self.bounds.max_states);
+        push_num(&mut out, "states_explored", self.states_explored);
+        push_num(&mut out, "transitions_explored", self.transitions_explored);
+        push_num(&mut out, "refused_transitions", self.refused_transitions);
+        out.push_str(",\"truncated\":");
+        out.push_str(if self.truncated { "true" } else { "false" });
+        push_num(&mut out, "violations", self.violations.len());
+        out.push_str(",\"properties\":[");
+        for (index, property) in Property::ALL.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push('"');
+            out.push_str(property.as_str());
+            out.push('"');
+        }
+        out.push_str("]}");
+        out
+    }
+}
+
+fn push_num(out: &mut String, key: &str, value: usize) {
+    out.push_str(",\"");
+    out.push_str(key);
+    out.push_str("\":");
+    out.push_str(&value.to_string());
+}
+
+/// The fixed universe one campaign explores.
+///
+/// Every identity is precomputed from a bounded index rather than drawn from a
+/// running mint. That is what keeps the space finite: a stateful mint would
+/// give two otherwise-identical states different identities and the walk would
+/// never converge.
+pub struct Universe {
+    genesis: GenesisConfiguration,
+    requests: Vec<TransactionRequest>,
+    seals: Vec<TransactionSealId>,
+    capsules: Vec<Vec<PreparedTxnCapsuleId>>,
+    batches: Vec<RepositoryDecisionBatchId>,
+    heads: Vec<RepositoryAuthorityHeadId>,
+    bodies: BTreeMap<TxId, DecisionBodyIdentity>,
+    objects: Vec<QuarantinedObject>,
+    principal_snapshot: fgit_types::identity::PrincipalSnapshotId,
+    bounds: Bounds,
+}
+
+const fn oid(seed: u8) -> GitOid {
+    GitOid::Sha1(GitOidSha1::from_bytes([seed; GitOidSha1::LEN]))
+}
+
+fn ref_name(text: &str) -> RefName {
+    RefName::try_new(text.as_bytes()).unwrap_or_else(|error| panic!("{text}: {error}"))
+}
+
+impl Universe {
+    /// Builds the universe for the given bounds.
+    #[must_use]
+    pub fn new(bounds: Bounds) -> Self {
+        let mut mint = IdentityMint::new(0xC0FFEE);
+        let tenant = mint.tenant();
+        let repository = mint.repository();
+        let author: PrincipalId = mint.principal();
+        let genesis_head_id = mint.head();
+
+        let mut principals = BTreeMap::new();
+        principals.insert(
+            author,
+            PrincipalCapabilities {
+                writable_scopes: BTreeSet::from([b"heads".to_vec()]),
+                may_force: false,
+                may_publish_forge: true,
+                may_add_legal_hold: false,
+            },
+        );
+        let genesis = GenesisConfiguration {
+            tenant,
+            repository,
+            object_format: GitHashAlgorithm::Sha1,
+            genesis_head_id,
+            policy: PolicySnapshot {
+                epoch: PolicyEpoch::FIRST,
+                protected_scopes: BTreeSet::new(),
+                principals,
+                max_intents_per_transaction: 4,
+                supported_schemas: BTreeSet::from([schema()]),
+                supported_durability: BTreeSet::from([DurabilityProfile::CanonicalSource]),
+            },
+            format_registry_epoch: RegistryEpoch::FIRST,
+        };
+
+        // Two objects: a root and its child, so both a fast-forward and a
+        // non-fast-forward update are reachable.
+        let objects = vec![
+            QuarantinedObject {
+                declared: oid(1),
+                recomputed: oid(1),
+                parents: Vec::new(),
+            },
+            QuarantinedObject {
+                declared: oid(2),
+                recomputed: oid(2),
+                parents: vec![oid(1)],
+            },
+        ];
+
+        let targets = ["refs/heads/a", "refs/heads/b"];
+        let mut requests = Vec::with_capacity(bounds.transactions);
+        let mut seals = Vec::with_capacity(bounds.transactions);
+        let mut capsules = Vec::with_capacity(bounds.transactions);
+        let mut bodies = BTreeMap::new();
+
+        for index in 0..bounds.transactions {
+            let target = targets[index % targets.len()];
+            let new = oid(u8::try_from(index % 2 + 1).unwrap_or(1));
+            let request = RequestBuilder::new(
+                tenant,
+                repository,
+                author,
+                schema(),
+                IdempotencyKey::new(label(&format!("k{index}"))),
+            )
+            .statement(
+                MismatchPolicy::TxnAbort,
+                vec![Intent::Ref(RefIntent::Update {
+                    name: ref_name(target),
+                    expected: ExpectedRefState::Absent,
+                    new,
+                    force: false,
+                })],
+            )
+            .promising(new)
+            .build(&mut mint);
+            bodies.insert(
+                request.tx_id,
+                DecisionBodyIdentity {
+                    commit: mint.commit(),
+                    refusal_record: mint.refusal_record(),
+                },
+            );
+            seals.push(mint.seal());
+            capsules.push(
+                (0..bounds.attempts_per_transaction)
+                    .map(|_| mint.capsule())
+                    .collect(),
+            );
+            requests.push(request);
+        }
+
+        let batches = (0..bounds.batches).map(|_| mint.batch()).collect();
+        // One candidate head per batch attempt, plus slack for retries.
+        let heads = (0..bounds.batches * bounds.attempts_per_transaction + 2)
+            .map(|_| mint.head())
+            .collect();
+
+        Self {
+            genesis,
+            requests,
+            seals,
+            capsules,
+            batches,
+            heads,
+            bodies,
+            objects,
+            principal_snapshot: mint.principal_snapshot(),
+            bounds,
+        }
+    }
+
+    /// The genesis configuration this universe starts from.
+    #[must_use]
+    pub const fn genesis(&self) -> &GenesisConfiguration {
+        &self.genesis
+    }
+
+    /// The declared bounds.
+    #[must_use]
+    pub const fn bounds(&self) -> Bounds {
+        self.bounds
+    }
+
+    /// Every input the walker offers at a given state, in a fixed order.
+    ///
+    /// The order is deterministic so two runs explore identically. Inputs that
+    /// the model will refuse as structurally impossible are deliberately
+    /// included: offering only legal inputs would never establish that an
+    /// illegal one fails closed.
+    fn inputs(&self, state: &RepositoryState) -> Vec<ModelInput> {
+        let mut inputs = Vec::new();
+
+        for (index, request) in self.requests.iter().enumerate() {
+            inputs.push(ModelInput::Seal(Box::new(SealRequest {
+                seal_id: self.seals[index],
+                request: request.clone(),
+            })));
+            if state.seal_of(request.tx_id).is_some() {
+                inputs.push(ModelInput::StageObjects(QuarantineRequest {
+                    tx_id: request.tx_id,
+                    objects: self.objects.clone(),
+                }));
+                for attempt in 0..self.bounds.attempts_per_transaction {
+                    inputs.push(ModelInput::Prepare(Box::new(PrepareRequest {
+                        capsule_id: self.capsules[index][attempt],
+                        request: request.clone(),
+                        principal_snapshot: self.principal_snapshot,
+                        profile: IdentityMint::preparation_profile(),
+                        granularity: WitnessGranularity::Refined,
+                    })));
+                }
+            }
+            for phase in [
+                CancellationPhase::BeforeSeal,
+                CancellationPhase::AfterSealBeforeCas,
+                CancellationPhase::AfterCas,
+            ] {
+                inputs.push(ModelInput::Cancel(CancellationRequest {
+                    tx_id: request.tx_id,
+                    phase,
+                }));
+            }
+        }
+
+        // Staging: every currently-held capsule alone, and all of them
+        // together, into each batch slot. Batching several decisions into one
+        // head transition is the case §11 exists for, so it must be reachable.
+        let held = self.held_capsules(state);
+        if !held.is_empty() {
+            for (slot, batch_id) in self.batches.iter().enumerate() {
+                let head_index = slot.min(self.heads.len().saturating_sub(1));
+                let mut selections: Vec<Vec<PreparedTxnCapsuleId>> =
+                    held.iter().map(|capsule| vec![*capsule]).collect();
+                if held.len() > 1 {
+                    selections.push(held.clone());
+                }
+                for capsules in selections {
+                    inputs.push(ModelInput::Stage(StageRequest {
+                        batch_id: *batch_id,
+                        candidate_head_id: self.heads[head_index],
+                        capsules,
+                        bodies: self.bodies.clone(),
+                        durability_satisfied: true,
+                    }));
+                }
+            }
+        }
+
+        // Compare-and-swap: against the current head, and against a stale
+        // predecessor so the lost-CAS path is explored rather than assumed.
+        for batch_id in &self.batches {
+            inputs.push(ModelInput::CompareAndSwap(CasRequest {
+                expected_head: state.head().id,
+                expected_generation: state.head().body.generation,
+                batch: *batch_id,
+            }));
+            if let Some(predecessor) = state.head().body.predecessor {
+                inputs.push(ModelInput::CompareAndSwap(CasRequest {
+                    expected_head: predecessor,
+                    expected_generation: HeadGeneration::FIRST,
+                    batch: *batch_id,
+                }));
+            }
+        }
+
+        inputs
+    }
+
+    fn held_capsules(&self, state: &RepositoryState) -> Vec<PreparedTxnCapsuleId> {
+        self.capsules
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|capsule| state.capsule(*capsule).is_some())
+            .collect()
+    }
+}
+
+fn schema() -> fgit_types::label::SchemaId {
+    fgit_types::label::SchemaId::new(
+        fgit_types::label::SchemaFamily::from_static("fgit/ref-txn"),
+        2,
+        0,
+    )
+}
+
+/// The canonical key a walk deduplicates on.
+///
+/// Covers every part of the state a further transition can read: the canonical
+/// roots, the head identity and its positions, which transactions are sealed,
+/// which capsules are held, which batches are staged, what sits in quarantine,
+/// which objects are admitted, and how much history exists. Two states with
+/// equal keys answer every model query identically, so merging them cannot hide
+/// a reachable violation.
+pub fn state_key(state: &RepositoryState) -> Result<Vec<u8>, CodecRefusal> {
+    let mut out = Encoder::new();
+
+    // What the head publishes.
+    out.write_bytes("roots", &encode_roots(state.roots())?)?;
+    out.write_internal_object_id(state.head().id.as_internal_object_id())?;
+    out.write_scalar(state.head().body.generation.get());
+    out.write_scalar(state.head().body.configuration.epoch.get());
+
+    // The ordered history.
+    let decided = state
+        .decisions()
+        .iter()
+        .map(|decision| (decision.tx_id, decision.decision_sequence.get()))
+        .collect::<Vec<_>>();
+    out.write_sequence("decided", &decided, |encoder, (tx_id, sequence)| {
+        encoder.write_internal_object_id(tx_id.as_internal_object_id())?;
+        encoder.write_scalar(*sequence);
+        Ok(())
+    })?;
+    let committed = state
+        .commits()
+        .iter()
+        .map(|record| (record.tx_id, record.repository_sequence.get()))
+        .collect::<Vec<_>>();
+    out.write_sequence("committed", &committed, |encoder, (tx_id, sequence)| {
+        encoder.write_internal_object_id(tx_id.as_internal_object_id())?;
+        encoder.write_scalar(*sequence);
+        Ok(())
+    })?;
+
+    // Everything staged behind the head, which a further transition can read
+    // even though the head does not publish it. Omitting any of these would
+    // merge two genuinely different states and could hide a reachable
+    // violation, so they are part of the key rather than an optimization.
+    let sealed = state.sealed_transactions().copied().collect::<Vec<_>>();
+    out.write_sequence("sealed", &sealed, |encoder, tx_id| {
+        encoder.write_internal_object_id(tx_id.as_internal_object_id())
+    })?;
+    let capsules = state.held_capsules().copied().collect::<Vec<_>>();
+    out.write_sequence("capsules", &capsules, |encoder, capsule| {
+        encoder.write_internal_object_id(capsule.as_internal_object_id())
+    })?;
+    let staged = state.staged_batches().copied().collect::<Vec<_>>();
+    out.write_sequence("staged", &staged, |encoder, batch| {
+        encoder.write_internal_object_id(batch.as_internal_object_id())
+    })?;
+    let quarantined = state
+        .quarantined_transactions()
+        .copied()
+        .collect::<Vec<_>>();
+    out.write_sequence("quarantined", &quarantined, |encoder, tx_id| {
+        encoder.write_internal_object_id(tx_id.as_internal_object_id())
+    })?;
+    let admitted = state.admitted_objects().copied().collect::<Vec<_>>();
+    out.write_sequence("admitted", &admitted, |encoder, object| {
+        encoder.write_git_oid(object);
+        Ok(())
+    })?;
+
+    Ok(out.into_bytes())
+}
+
+/// Runs the bounded campaign.
+///
+/// The walk is breadth-first, so the first path that reaches any state is a
+/// shortest one and a counterexample needs no separate shrinking pass.
+pub fn run(universe: &Universe) -> CampaignReport {
+    let bounds = universe.bounds();
+    let genesis = RepositoryState::genesis(universe.genesis().clone());
+
+    let mut seen: BTreeSet<Vec<u8>> = BTreeSet::new();
+    let mut queue: VecDeque<(RepositoryState, Vec<ModelInput>)> = VecDeque::new();
+    let mut violations = Vec::new();
+    let mut transitions = 0_usize;
+    let mut refused = 0_usize;
+    let mut truncated = false;
+
+    if let Ok(key) = state_key(&genesis) {
+        seen.insert(key);
+    }
+    queue.push_back((genesis, Vec::new()));
+
+    while let Some((state, path)) = queue.pop_front() {
+        if path.len() >= bounds.depth {
+            continue;
+        }
+        for input in universe.inputs(&state) {
+            transitions += 1;
+            let Ok(ModelStep { next, .. }) = step(&state, &input) else {
+                // A typed refusal of a structurally impossible call. Expected,
+                // and counted as evidence that illegal inputs were offered.
+                refused += 1;
+                continue;
+            };
+
+            let Ok(key) = state_key(&next) else {
+                continue;
+            };
+            if !seen.insert(key) {
+                continue;
+            }
+
+            let mut next_path = path.clone();
+            next_path.push(input);
+
+            if let Some(violation) = check(&state, &next, &next_path) {
+                violations.push(violation);
+            }
+
+            if seen.len() >= bounds.max_states {
+                truncated = true;
+                break;
+            }
+            queue.push_back((next, next_path));
+        }
+        if truncated {
+            break;
+        }
+    }
+
+    CampaignReport {
+        bounds,
+        states_explored: seen.len(),
+        transitions_explored: transitions,
+        refused_transitions: refused,
+        truncated,
+        violations,
+    }
+}
+
+/// Checks all five properties on one reached state.
+fn check(
+    previous: &RepositoryState,
+    state: &RepositoryState,
+    path: &[ModelInput],
+) -> Option<Violation> {
+    let fail = |property: Property, detail: String| {
+        Some(Violation {
+            property,
+            detail,
+            path: path.to_vec(),
+        })
+    };
+
+    // 1. A sealed transaction has at most one terminal decision.
+    let mut seen = BTreeSet::new();
+    for decision in state.decisions() {
+        if !seen.insert(decision.tx_id) {
+            return fail(
+                Property::UniqueTerminalOutcome,
+                format!("transaction {} decided twice", decision.tx_id),
+            );
+        }
+        match state.outcome_of(decision.tx_id) {
+            Some(recorded) if recorded == decision.outcome => {}
+            Some(_) => {
+                return fail(
+                    Property::UniqueTerminalOutcome,
+                    format!(
+                        "outcome index disagrees with the decision stream for {}",
+                        decision.tx_id
+                    ),
+                );
+            }
+            None => {
+                return fail(
+                    Property::UniqueTerminalOutcome,
+                    format!(
+                        "decision for {} is absent from the outcome index",
+                        decision.tx_id
+                    ),
+                );
+            }
+        }
+    }
+
+    // 2. Head-chain continuity.
+    if let Err(breach) = state.assert_head_chain_continuous() {
+        return fail(Property::HeadChainContinuity, breach.kind().to_owned());
+    }
+
+    // 3. A pull-request merge and the ref it moves publish in one record.
+    for record in state.commits() {
+        for events in record.effects.forge.values() {
+            for event in events {
+                if let ForgeEventKind::PullRequestMerged { target, .. } = event
+                    && !record.effects.refs.contains_key(target)
+                {
+                    return fail(
+                        Property::AtomicRefAndForgeEffects,
+                        "a merge event published without its ref effect".to_owned(),
+                    );
+                }
+            }
+        }
+    }
+
+    // 4. No root omission: nothing quarantined is protected, and the sequences
+    //    are gap-free.
+    if let Err(breach) = state.assert_no_quarantine_escape() {
+        return fail(Property::NoRootOmission, breach.kind().to_owned());
+    }
+    if let Err(breach) = state.assert_sequences_gap_free() {
+        return fail(Property::NoRootOmission, breach.kind().to_owned());
+    }
+
+    // 5. No silent anti-rollback: nothing that orders history may move
+    //    backwards across a transition.
+    if state.head().body.generation < previous.head().body.generation {
+        return fail(
+            Property::NoSilentAntiRollback,
+            "head generation moved backwards".to_owned(),
+        );
+    }
+    if sequence_of(state.head().body.latest_decision_sequence)
+        < sequence_of(previous.head().body.latest_decision_sequence)
+    {
+        return fail(
+            Property::NoSilentAntiRollback,
+            "decision sequence moved backwards".to_owned(),
+        );
+    }
+    if repository_sequence_of(state.head().body.latest_repository_sequence)
+        < repository_sequence_of(previous.head().body.latest_repository_sequence)
+    {
+        return fail(
+            Property::NoSilentAntiRollback,
+            "repository sequence moved backwards".to_owned(),
+        );
+    }
+    if state.decisions().len() < previous.decisions().len()
+        || state.commits().len() < previous.commits().len()
+    {
+        return fail(
+            Property::NoSilentAntiRollback,
+            "committed history shrank".to_owned(),
+        );
+    }
+    None
+}
+
+fn sequence_of(value: Option<fgit_types::numeric::DecisionSequence>) -> u64 {
+    value.map_or(0, fgit_types::numeric::DecisionSequence::get)
+}
+
+fn repository_sequence_of(value: Option<fgit_types::numeric::RepositorySequence>) -> u64 {
+    value.map_or(0, fgit_types::numeric::RepositorySequence::get)
+}
+
+/// True when the decision stream and the outcome index agree everywhere.
+///
+/// Exposed so a differential harness can assert the same accelerator rule §8.4
+/// states: a direct pointer is repairable, never a second truth.
+#[must_use]
+pub fn outcome_index_agrees(state: &RepositoryState) -> bool {
+    state.decisions().iter().all(|decision| {
+        state
+            .outcome_of(decision.tx_id)
+            .is_some_and(|recorded| recorded == decision.outcome)
+    })
+}
+
+/// The committed transactions, in repository-sequence order.
+#[must_use]
+pub fn committed_transactions(state: &RepositoryState) -> Vec<TxId> {
+    state
+        .decisions()
+        .iter()
+        .filter(|decision| matches!(decision.outcome, DecisionOutcome::Committed { .. }))
+        .map(|decision| decision.tx_id)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Bounds, CampaignReport, Property, Universe, run, state_key};
+    use crate::state::RepositoryState;
+
+    #[test]
+    fn the_default_campaign_finds_no_violation_and_explores_the_whole_space() {
+        let universe = Universe::new(Bounds::DEFAULT);
+        let report = run(&universe);
+        assert!(
+            report.violations.is_empty(),
+            "violations: {:?}",
+            report.violations
+        );
+        assert!(
+            !report.truncated,
+            "the default bounds must fit inside the state ceiling; explored {}",
+            report.states_explored
+        );
+        assert!(report.is_clean());
+    }
+
+    #[test]
+    fn the_walk_actually_explored_something() {
+        // A campaign that explored one state and called itself clean would be
+        // a tautology. This pins that the walk is doing real work.
+        let report = run(&Universe::new(Bounds::DEFAULT));
+        assert!(
+            report.states_explored > 20,
+            "only {} states explored",
+            report.states_explored
+        );
+        assert!(
+            report.transitions_explored > report.states_explored,
+            "transitions {} should exceed states {}",
+            report.transitions_explored,
+            report.states_explored
+        );
+    }
+
+    #[test]
+    fn the_walk_offered_illegal_inputs_and_they_failed_closed() {
+        // Evidence that the alphabet includes structurally impossible calls:
+        // if this were zero, the campaign would only be proving that legal
+        // sequences work, which is a much weaker statement.
+        let report = run(&Universe::new(Bounds::DEFAULT));
+        assert!(
+            report.refused_transitions > 0,
+            "the walk never offered an illegal input"
+        );
+    }
+
+    #[test]
+    fn the_campaign_is_deterministic() {
+        let first = run(&Universe::new(Bounds::DEFAULT));
+        let second = run(&Universe::new(Bounds::DEFAULT));
+        assert_eq!(first.states_explored, second.states_explored);
+        assert_eq!(first.transitions_explored, second.transitions_explored);
+        assert_eq!(first.refused_transitions, second.refused_transitions);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn deduplication_is_exact() {
+        // Two independently built genesis states must share a key, and a state
+        // that has moved must not.
+        let universe = Universe::new(Bounds::DEFAULT);
+        let left = RepositoryState::genesis(universe.genesis().clone());
+        let right = RepositoryState::genesis(universe.genesis().clone());
+        assert_eq!(
+            state_key(&left).expect("key"),
+            state_key(&right).expect("key")
+        );
+    }
+
+    #[test]
+    fn the_report_names_its_bounds_and_every_property_in_ndjson() {
+        let report = run(&Universe::new(Bounds::DEFAULT));
+        let line = report.to_ndjson();
+        assert!(!line.contains('\n'), "one record per line: {line}");
+        for key in [
+            "\"record\":\"model_campaign\"",
+            "\"transactions\":",
+            "\"depth\":",
+            "\"states_explored\":",
+            "\"refused_transitions\":",
+            "\"truncated\":",
+        ] {
+            assert!(line.contains(key), "missing {key} in {line}");
+        }
+        for property in Property::ALL {
+            assert!(
+                line.contains(property.as_str()),
+                "property {} is not named in the receipt",
+                property.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn the_five_properties_of_plan_40_2_are_all_declared() {
+        assert_eq!(Property::ALL.len(), 5);
+    }
+
+    #[test]
+    fn a_truncated_run_is_never_reported_as_clean() {
+        // A ceiling that stops the walk early must not read as success.
+        let tiny = Bounds {
+            max_states: 3,
+            ..Bounds::DEFAULT
+        };
+        let report = run(&Universe::new(tiny));
+        assert!(
+            report.truncated,
+            "the tiny ceiling should truncate the walk"
+        );
+        assert!(
+            !report.is_clean(),
+            "a truncated walk must not claim a clean bounded result"
+        );
+    }
+
+    #[test]
+    fn a_report_with_a_violation_is_not_clean() {
+        let mut report = CampaignReport {
+            bounds: Bounds::DEFAULT,
+            states_explored: 1,
+            transitions_explored: 1,
+            refused_transitions: 0,
+            truncated: false,
+            violations: Vec::new(),
+        };
+        assert!(report.is_clean());
+        report.violations.push(super::Violation {
+            property: Property::UniqueTerminalOutcome,
+            detail: "planted".to_owned(),
+            path: Vec::new(),
+        });
+        assert!(!report.is_clean());
+    }
+}

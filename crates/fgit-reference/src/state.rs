@@ -785,6 +785,30 @@ impl RepositoryState {
         self.staged.keys()
     }
 
+    /// Every sealed transaction, in identity order.
+    ///
+    /// Read-only enumeration exists because an oracle's consumers — the
+    /// bounded campaign in particular — need to fingerprint the *whole*
+    /// observable state, not only the part the head publishes.
+    pub fn sealed_transactions(&self) -> impl Iterator<Item = &TxId> {
+        self.seals.keys()
+    }
+
+    /// Every prepared capsule the model currently holds, in identity order.
+    pub fn held_capsules(&self) -> impl Iterator<Item = &PreparedTxnCapsuleId> {
+        self.capsules.keys()
+    }
+
+    /// Every transaction with a non-empty quarantine, in identity order.
+    pub fn quarantined_transactions(&self) -> impl Iterator<Item = &TxId> {
+        self.quarantine.keys()
+    }
+
+    /// Every object promoted out of quarantine, in identity order.
+    pub fn admitted_objects(&self) -> impl Iterator<Item = &GitOid> {
+        self.objects.keys()
+    }
+
     /// A published batch.
     #[must_use]
     pub fn batch(&self, id: RepositoryDecisionBatchId) -> Option<&DecisionBatch> {
