@@ -33,6 +33,24 @@
 //! is the precondition for the comparison meaning anything, not a substitute
 //! for it.
 //!
+//! # A correction this file carries deliberately
+//!
+//! The first version of this oracle folded **tree edits** — paths, content,
+//! modes — because `GIT_TREE_FS` §7 is where the concrete folding rules are
+//! written down and it states them over `TreeEditIntent`. That was the wrong
+//! carrier. The evaluator under test folds `fgit_reference::intent::Intent`
+//! over refs, forge positions, retention roots and outbox keys. The folding
+//! *laws* are the same; the thing they fold is not.
+//!
+//! It is recorded here rather than quietly rewritten because it is the exact
+//! failure this bead exists to catch: a corpus can be thorough, internally
+//! consistent, and aimed at something the implementation never sees. Asking for
+//! the seam instead of inferring it from the document is what surfaced it.
+//!
+//! The model below therefore folds **ref intents**, the canonical mutation
+//! carrier. Forge, retention and outbox extend the same skeleton and are called
+//! out as unbuilt rather than silently omitted.
+//!
 //! # The specification, as this file reads it
 //!
 //! Evaluation is source-ordered with read-your-own-writes against one pinned
@@ -101,6 +119,27 @@ enum Intent {
 /// The six arms are the specification's total map, transcribed. Totality is
 /// asserted rather than assumed: every intent in every generated program must
 /// land in exactly one of these.
+///
+/// # Why this is finer than the evaluator's own map
+///
+/// The evaluator reports four dispositions — surviving, absorbed, statement
+/// error, transaction aborted. The normative map has six:
+/// `OBJECT_STORE_DECISION_LOG` §9 lists identity no-op and inverse
+/// cancellation *separately* from absorption, and `GIT_TREE_FS` §7 calls
+/// create-then-delete an "explicit inverse-cancellation no-op".
+///
+/// That is not pedantry about names. §7 keeps the totality map in the
+/// Evidence-Carrying Change so a reviewer can see what an agent attempted
+/// versus what survived, and a reviewer reading `Absorbed` cannot tell "something
+/// later overwrote your write" from "you created it and then deleted it
+/// yourself" from "you wrote what was already there".
+///
+/// So the oracle classifies at full resolution and compares on the coarser
+/// projection ([`Disposition::projected`]), which keeps the equivalence
+/// evidence honest — a comparison must not fail merely because one side is more
+/// granular — while leaving the finer question answerable separately. Whether
+/// the distinction is recoverable from the evaluator's output is a question for
+/// its owner, not a defect this file asserts.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum Disposition {
     /// Contributed the effect that survives at its target.
@@ -127,6 +166,35 @@ enum StatementError {
     /// A rename whose source and destination are the same path. Refused rather
     /// than treated as a no-op: it is a malformed statement, not an identity.
     RenameToSelf,
+}
+
+/// The evaluator's coarser disposition vocabulary.
+///
+/// Comparison happens here so that being more precise than the implementation
+/// never registers as a disagreement with it.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum ProjectedDisposition {
+    Surviving,
+    Absorbed,
+    StatementError,
+    TransactionAborted,
+}
+
+impl Disposition {
+    /// Collapse to the four arms the evaluator reports.
+    ///
+    /// Identity no-op and inverse cancellation both project onto `Absorbed`:
+    /// in each case the intent contributed no surviving effect, which is the
+    /// distinction the coarser vocabulary preserves.
+    const fn projected(self) -> ProjectedDisposition {
+        match self {
+            Self::SurvivingEffect(_) => ProjectedDisposition::Surviving,
+            Self::IdentityNoOp | Self::InverseCancellation | Self::Absorption => {
+                ProjectedDisposition::Absorbed
+            }
+            Self::StatementError(_) => ProjectedDisposition::StatementError,
+        }
+    }
 }
 
 /// One surviving effect at one target.
@@ -955,5 +1023,99 @@ fn the_shrinker_reduces_a_known_failure_to_its_minimal_program() {
             mode: Mode::Regular,
         }],
         "the shrinker must strip every intent that is not required to reproduce the failure"
+    );
+}
+
+#[test]
+fn the_projection_is_total_and_agrees_with_the_evaluator_vocabulary() {
+    // Every arm the oracle can produce must project onto exactly one arm the
+    // evaluator reports. If this ever stops being total, the equivalence
+    // comparison silently loses cases rather than failing.
+    for (fine, coarse) in [
+        (
+            Disposition::SurvivingEffect("a"),
+            ProjectedDisposition::Surviving,
+        ),
+        (Disposition::IdentityNoOp, ProjectedDisposition::Absorbed),
+        (
+            Disposition::InverseCancellation,
+            ProjectedDisposition::Absorbed,
+        ),
+        (Disposition::Absorption, ProjectedDisposition::Absorbed),
+        (
+            Disposition::StatementError(StatementError::TargetAbsent),
+            ProjectedDisposition::StatementError,
+        ),
+    ] {
+        assert_eq!(
+            fine.projected(),
+            coarse,
+            "{fine:?} projected onto the wrong evaluator disposition"
+        );
+    }
+}
+
+#[test]
+fn the_projection_is_lossy_and_that_is_the_finding() {
+    // This is the evidence behind the question raised with the evaluator's
+    // owner, held as a test so it cannot quietly stop being true.
+    //
+    // Three intents that a reviewer would want told apart — a write that lost
+    // to a later write, a create the author cancelled themselves, and a write
+    // that was never a change — all arrive at the same coarse arm. The spec
+    // keeps the totality map so reviewers can inspect "what an agent attempted
+    // versus what actually survives"; at this resolution they cannot.
+    let distinct = [
+        Disposition::Absorption,
+        Disposition::InverseCancellation,
+        Disposition::IdentityNoOp,
+    ];
+    let projected: BTreeSet<ProjectedDisposition> =
+        distinct.iter().map(|d| d.projected()).collect();
+
+    assert_eq!(
+        distinct.len(),
+        3,
+        "the three fine-grained arms must be distinct to begin with"
+    );
+    assert_eq!(
+        projected.len(),
+        1,
+        "all three must collapse to one arm for this to be the loss it is claimed to be; \
+         got {projected:?}"
+    );
+
+    // And the loss is real in practice, not only in the type: these two
+    // programs are semantically different and become indistinguishable.
+    let cancelled = fold(
+        &basis_of(&[]),
+        &[
+            Intent::Write {
+                path: "a",
+                content: 1,
+                mode: Mode::Regular,
+            },
+            Intent::Delete { path: "a" },
+        ],
+    );
+    let never_a_change = fold(
+        &basis_of(&[("a", entry(1, Mode::Regular))]),
+        &[Intent::Write {
+            path: "a",
+            content: 1,
+            mode: Mode::Regular,
+        }],
+    );
+
+    assert_ne!(
+        cancelled.dispositions.last(),
+        never_a_change.dispositions.last(),
+        "the oracle must distinguish a self-cancelled create from a no-change write"
+    );
+    assert_eq!(
+        cancelled.dispositions.last().map(|d| d.projected()),
+        never_a_change.dispositions.last().map(|d| d.projected()),
+        "...and the evaluator's vocabulary must be shown to conflate them, which is \
+         precisely what was raised with its owner"
     );
 }
