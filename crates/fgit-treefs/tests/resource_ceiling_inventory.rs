@@ -59,7 +59,7 @@ fn fixture() -> (MemorySource, BaseView<Sha1>, TreeCapability, Overlay) {
     let root = source.insert(GitObjectKind::Tree, Vec::new());
     let repository = RepositoryId::from_bytes([0x66; 16]);
     let base = BaseView::new(
-        repository.clone(),
+        repository,
         RepositoryCommitId::from_digest(
             DigestAlgorithmId::try_new(1).expect("registered fixture algorithm"),
             CodecVersion::new(1, 0),
