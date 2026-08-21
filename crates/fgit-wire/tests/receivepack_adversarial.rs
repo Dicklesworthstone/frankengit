@@ -314,31 +314,58 @@ fn cancelling_at_every_checkpoint_leaves_no_stuck_intermediate() {
         let mut handoff = CountingHandoff::default();
         let mut cancel = CancelAfter::new(budget);
         let outcome = machine.finish_with_handoff(&mut handoff, &mut cancel);
-
-        if outcome.is_err() {
-            observed_cancellation = true;
-        }
         let phase = machine.phase();
         observed_phases.push(phase);
 
-        assert!(
-            matches!(
-                phase,
-                ReceivePhase::Refused | ReceivePhase::Complete | ReceivePhase::Pack
-            ),
-            "budget {budget}: cancellation left the machine in {phase:?}, which is \
-             neither finished nor resumable"
-        );
-
-        // Whatever happened, nothing may be retained once the machine is
-        // terminal. A terminal state holding quarantine bytes is the leak.
-        if matches!(phase, ReceivePhase::Refused | ReceivePhase::Complete) {
-            assert_eq!(
-                machine.quarantine_len(),
-                0,
-                "budget {budget}: terminal in {phase:?} while still holding {} bytes",
-                machine.quarantine_len()
-            );
+        // The owner's stated contract, applied exactly rather than loosely.
+        // ProudJaguar: a structural cancel must yield Err(Cancelled), phase
+        // Refused, and an empty quarantine. An earlier version of this test
+        // accepted ANY error and also accepted phase Pack, which would have
+        // passed on a machine that cancelled into a mid-stream state while
+        // still holding bytes — looser than the contract it claimed to check.
+        match outcome {
+            Err(ReceiveError::Cancelled) => {
+                observed_cancellation = true;
+                assert_eq!(
+                    phase,
+                    ReceivePhase::Refused,
+                    "budget {budget}: cancelled but left the machine in {phase:?}"
+                );
+                assert_eq!(
+                    machine.quarantine_len(),
+                    0,
+                    "budget {budget}: cancelled while still holding {} bytes",
+                    machine.quarantine_len()
+                );
+            }
+            Ok(_completion) => {
+                assert_eq!(
+                    phase,
+                    ReceivePhase::Complete,
+                    "budget {budget}: succeeded but left the machine in {phase:?}"
+                );
+                assert_eq!(
+                    machine.quarantine_len(),
+                    0,
+                    "budget {budget}: completed while still holding {} bytes",
+                    machine.quarantine_len()
+                );
+            }
+            Err(other) => {
+                // A different typed refusal is permitted, but it must still be
+                // terminal and must still have discarded.
+                assert_eq!(
+                    phase,
+                    ReceivePhase::Refused,
+                    "budget {budget}: refused with {other:?} but left {phase:?}"
+                );
+                assert_eq!(
+                    machine.quarantine_len(),
+                    0,
+                    "budget {budget}: refused with {other:?} while holding {} bytes",
+                    machine.quarantine_len()
+                );
+            }
         }
 
         // The handoff must never be called more than once: a second call would
@@ -354,7 +381,8 @@ fn cancelling_at_every_checkpoint_leaves_no_stuck_intermediate() {
     // proved only that an uncancelled push works.
     assert!(
         observed_cancellation,
-        "no budget in the sweep produced a cancellation; the matrix tested nothing"
+        "no budget in the sweep produced Err(Cancelled); the matrix never exercised \
+         the cancellation contract at all"
     );
     assert!(
         observed_phases
