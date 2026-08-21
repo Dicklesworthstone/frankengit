@@ -15,15 +15,15 @@ fn store() -> MemoryAuthorityStore {
     MemoryAuthorityStore::new(StoreInstanceId::from_raw(1))
 }
 
-fn tenant() -> TenantId {
+const fn tenant() -> TenantId {
     TenantId::from_bytes([0x11; 16])
 }
 
-fn repository() -> RepositoryId {
+const fn repository() -> RepositoryId {
     RepositoryId::from_bytes([0x22; 16])
 }
 
-fn principal() -> PrincipalId {
+const fn principal() -> PrincipalId {
     PrincipalId::from_bytes([0x33; 16])
 }
 

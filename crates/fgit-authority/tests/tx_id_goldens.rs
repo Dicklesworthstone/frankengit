@@ -14,23 +14,23 @@ use fgit_types::label::{AsciiSlug, SchemaFamily, SchemaId};
 use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1};
 use fgit_types::refs::RefName;
 
-fn schema() -> SchemaId {
+const fn schema() -> SchemaId {
     SchemaId::new(SchemaFamily::from_static("receive-pack"), 1, 0)
 }
 
-fn tenant() -> TenantId {
+const fn tenant() -> TenantId {
     TenantId::from_bytes([0x11; 16])
 }
 
-fn repository() -> RepositoryId {
+const fn repository() -> RepositoryId {
     RepositoryId::from_bytes([0x22; 16])
 }
 
-fn principal() -> PrincipalId {
+const fn principal() -> PrincipalId {
     PrincipalId::from_bytes([0x33; 16])
 }
 
-fn oid(byte: u8) -> GitOid {
+const fn oid(byte: u8) -> GitOid {
     GitOid::Sha1(GitOidSha1::from_bytes([byte; 20]))
 }
 
@@ -38,7 +38,7 @@ fn ref_name(text: &str) -> RefName {
     RefName::try_new(text.as_bytes()).expect("an admissible ref name")
 }
 
-fn slug(text: &'static str) -> AsciiSlug {
+const fn slug(text: &'static str) -> AsciiSlug {
     AsciiSlug::from_static(text)
 }
 
@@ -276,7 +276,7 @@ fn every_identity_input_outside_the_request_changes_the_identity() {
     other_repository.repository_id = RepositoryId::from_bytes([0x99; 16]);
     let mut other_principal = base.clone();
     other_principal.authenticated_principal_id = PrincipalId::from_bytes([0x99; 16]);
-    let mut other_key = base.clone();
+    let mut other_key = base;
     other_key.idempotency_key = IdempotencyKey::new(b"client-key-0002".to_vec()).expect("bounded");
 
     for (field, variant) in [

@@ -80,7 +80,7 @@ impl PlantedStore {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn check_body(&self, body: &[u8]) -> Result<(), AuthorityFailure> {
+    const fn check_body(&self, body: &[u8]) -> Result<(), AuthorityFailure> {
         if body.len() > self.limits.body_bytes {
             return Err(AuthorityFailure::Refused(AuthorityRefusal::BodyTooLarge {
                 len: body.len(),
@@ -225,14 +225,14 @@ impl AuthorityStore for PlantedStore {
             return Err(AuthorityFailure::Refused(AuthorityRefusal::HeadAbsent));
         };
         let current_generation = slot.generation;
-        let stale = slot.token != expected;
+        let token_superseded = slot.token != expected;
 
         let honour = match self.defect {
             Defect::IgnoresExpectedToken | Defect::AcceptsStaleToken => true,
             Defect::AcceptsForgedToken
             | Defect::ContentDerivedToken
             | Defect::AllowsGenerationRollback
-            | Defect::None => !stale,
+            | Defect::None => !token_superseded,
         };
         if !honour {
             return Ok(CasOutcome::PredecessorMismatch);
