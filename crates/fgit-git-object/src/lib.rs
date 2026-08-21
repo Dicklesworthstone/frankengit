@@ -11,7 +11,9 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-pub use fgit_crypto::{GitHashAlgorithm, GitObjectHasher, GitObjectKind as ObjectType, GitOid};
+pub use fgit_crypto::{
+    GitHashAlgorithm, GitObjectHasher, GitObjectKind as ObjectType, GitOid, NativeObjectIdentity,
+};
 pub use fgit_deflate::{CancellationProbe, InflateLimits, InflateRefusal, StreamProgress};
 
 /// Parser policy for an object that is being imported or newly created.
@@ -1432,15 +1434,15 @@ mod tests {
 
     #[test]
     fn native_oid_algorithm_markers_cannot_alias() {
-        let sha1: GitOid<Sha1> = native_object_oid(ObjectType::Blob, b"same body");
-        let sha256: GitOid<Sha256> = native_object_oid(ObjectType::Blob, b"same body");
+        let sha1: GitOid<Sha1> = native_object_oid::<Sha1>(ObjectType::Blob, b"same body");
+        let sha256: GitOid<Sha256> = native_object_oid::<Sha256>(ObjectType::Blob, b"same body");
         assert_eq!(sha1.as_bytes().len(), 20);
         assert_eq!(sha256.as_bytes().len(), 32);
     }
 
     #[test]
     fn incremental_hasher_commits_the_same_framed_native_object() {
-        let expected: GitOid<Sha1> = native_object_oid(ObjectType::Blob, b"hello");
+        let expected: GitOid<Sha1> = native_object_oid::<Sha1>(ObjectType::Blob, b"hello");
         let mut hasher = native_object_hasher::<Sha1>(ObjectType::Blob, 5)
             .expect("a bounded usize fits the native length field");
         hasher.update(b"he").expect("first chunk fits declaration");
