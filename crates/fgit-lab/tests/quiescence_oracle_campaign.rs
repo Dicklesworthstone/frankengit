@@ -142,7 +142,7 @@ fn opaque(tag: u8) -> OpaqueHandle {
     OpaqueHandle::new(&[tag; 20]).expect("twenty bytes is a valid opaque handle")
 }
 
-fn region(value: u64) -> RegionId {
+const fn region(value: u64) -> RegionId {
     RegionId::new(value)
 }
 
