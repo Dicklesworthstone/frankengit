@@ -3,6 +3,10 @@
 
 use std::collections::BTreeSet;
 
+use fgit_authority::{
+    AuthorityStore, CasOutcome, HeadGeneration, HeadInit, HeadKey, MemoryAuthorityStore,
+    StoreInstanceId,
+};
 use fgit_resource::kinds::{LaneSlot, PreparedTxnSlot};
 use fgit_resource::{
     Grade, LeakDisposition, ObligationLedger, RegionId, ReservedObligation, ResourceVector,
@@ -147,6 +151,37 @@ fn publication_inputs(
     inputs
 }
 
+fn terminal_authority_outcomes(inputs: &[PreparedAttemptOutcome]) -> Vec<(u64, Vec<u8>)> {
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(94));
+    let key = HeadKey::new(b"txn/schedule-permutation".to_vec())
+        .expect("a bounded authority head key is valid");
+    let mut receipt = match store
+        .initialize_head(&key, HeadGeneration::FIRST, b"authority-root")
+        .expect("initial head creation proceeds")
+    {
+        HeadInit::Created(receipt) => receipt,
+        outcome => panic!("fresh authority head creation must succeed, observed {outcome:?}"),
+    };
+    let mut outcomes = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let generation = receipt
+            .generation()
+            .next()
+            .expect("the bounded test cannot exhaust head generations");
+        receipt = match store
+            .compare_exchange_head(&key, receipt.token(), generation, input.canonical_bytes())
+            .expect("canonical publication input reaches authority")
+        {
+            CasOutcome::Committed(receipt) => receipt,
+            CasOutcome::PredecessorMismatch => {
+                panic!("the canonical publication order must retain the exact predecessor")
+            }
+        };
+        outcomes.push((receipt.generation().get(), receipt.body().to_vec()));
+    }
+    outcomes
+}
+
 #[test]
 fn seed_shuffled_inputs_preserve_batch_composition_and_publication_inputs() {
     let bounds = BatchBounds::try_new(8, 4_096, 10).expect("valid bounds");
@@ -198,6 +233,7 @@ fn schedule_permutations_preserve_publication_inputs_across_combined_and_bypass_
     let source = [capsule(1, 1), capsule(2, 2), capsule(3, 3), capsule(4, 4)];
     let seeds = [0xA11C_E001_u64, 0xA11C_E002, 0xA11C_E003, 0xA11C_E004];
     let mut expected_inputs = None;
+    let mut expected_terminal_outcomes = None;
     let mut observed_input_orders = BTreeSet::new();
     for (offset, seed) in seeds.into_iter().enumerate() {
         let ledger = ledger(1_050 + u64::try_from(offset).expect("small test offset"));
@@ -230,6 +266,7 @@ fn schedule_permutations_preserve_publication_inputs_across_combined_and_bypass_
             "bypass output must not expose schedule order"
         );
         let observed_inputs = publication_inputs(&combination);
+        let observed_terminal_outcomes = terminal_authority_outcomes(&observed_inputs);
         if let Some(expected_inputs) = &expected_inputs {
             assert_eq!(
                 &observed_inputs, expected_inputs,
@@ -237,6 +274,14 @@ fn schedule_permutations_preserve_publication_inputs_across_combined_and_bypass_
             );
         } else {
             expected_inputs = Some(observed_inputs);
+        }
+        if let Some(expected_terminal_outcomes) = &expected_terminal_outcomes {
+            assert_eq!(
+                &observed_terminal_outcomes, expected_terminal_outcomes,
+                "pre-combiner permutations must produce identical authority terminal outcomes"
+            );
+        } else {
+            expected_terminal_outcomes = Some(observed_terminal_outcomes);
         }
         let cancellation = combination.cancel();
         assert_eq!(cancellation.settled_slots().len(), 4);

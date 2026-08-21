@@ -183,6 +183,12 @@ impl PreparedAttemptOutcome {
     pub const fn transaction_id(&self) -> TxId {
         self.transaction_id
     }
+
+    /// Validated canonical capsule bytes handed to the publication stage.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical_bytes
+    }
 }
 
 impl PreparedCapsule {
