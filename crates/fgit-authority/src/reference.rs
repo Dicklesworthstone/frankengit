@@ -30,6 +30,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use crate::async_contract::DuplicateAbsenceWitness;
 use crate::contract::{AuthorityLimits, AuthorityStore, FaultableAuthorityStore};
 use crate::injection::{
     DuplicateDelivery, EffectLog, EffectRecord, FaultKind, FaultLog, FaultPlan, FaultPosition,
@@ -508,6 +509,111 @@ impl AuthorityStore for MemoryAuthorityStore {
                         occupancy: state.issuance.len(),
                         limit: limits.version_tokens,
                     });
+                }
+                let token = mint(state, instance);
+                state.issuance.insert(
+                    token,
+                    IssuedVersion {
+                        key: key.clone(),
+                        generation: new_generation,
+                        body: new_body.to_vec(),
+                    },
+                );
+                let slot = HeadSlot {
+                    token,
+                    generation: new_generation,
+                    body: new_body.to_vec(),
+                };
+                let receipt = receipt_for(key, &slot);
+                state.heads.insert(key.clone(), slot);
+                Ok(Applied::changed(CasOutcome::Committed(receipt)))
+            },
+        )
+    }
+
+    fn publish_head_with_outcomes(
+        &self,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+        outcomes: &[(ImmutableKey, Vec<u8>)],
+        witness: &DuplicateAbsenceWitness,
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        // The witness must be bound to the token this replacement conditions
+        // on; one minted against a different head proves nothing about this
+        // one. Checked before the lock is taken, since it needs no state.
+        if witness.bound_to() != expected {
+            return Err(AuthorityFailure::Refused(
+                AuthorityRefusal::TokenKeyMismatch,
+            ));
+        }
+        let limits = self.limits;
+        let instance = self.instance;
+        self.run(
+            AuthorityOpKind::CompareExchangeHead,
+            &|state: &mut State| {
+                // VALIDATE EVERYTHING FIRST, MUTATE ONLY AT THE END.
+                //
+                // This ordering is the atomicity, and it is easy to get wrong:
+                // writing the outcome entries and *then* discovering a
+                // predecessor mismatch would leave them behind with the head
+                // unmoved — a partially applied publication, which is the exact
+                // state this operation exists to make impossible. Nothing below
+                // touches `state` until every check has passed.
+                check_body(limits, new_body)?;
+                for (_, bytes) in outcomes {
+                    check_body(limits, bytes)?;
+                }
+
+                let Some(issued) = state.issuance.get(&expected) else {
+                    return Err(AuthorityRefusal::UnknownVersionToken);
+                };
+                if &issued.key != key {
+                    return Err(AuthorityRefusal::TokenKeyMismatch);
+                }
+                let Some(slot) = state.heads.get(key) else {
+                    return Err(AuthorityRefusal::HeadAbsent);
+                };
+                if slot.token != expected {
+                    // Ordinary lost race, and nothing has been written.
+                    return Ok(Applied::unchanged(CasOutcome::PredecessorMismatch));
+                }
+                if new_generation <= slot.generation {
+                    return Err(AuthorityRefusal::NonMonotoneGeneration {
+                        current: slot.generation,
+                        proposed: new_generation,
+                    });
+                }
+
+                // Outcome entries must be absent or byte-identical. A slot
+                // holding different bytes is a second terminal decision for a
+                // transaction that already has one: fail closed, write nothing.
+                let mut to_insert: Vec<(ImmutableKey, Vec<u8>)> = Vec::new();
+                for (outcome_key, bytes) in outcomes {
+                    match state.immutable.get(outcome_key) {
+                        Some(existing) if existing.as_slice() == bytes.as_slice() => {}
+                        Some(_) => return Err(AuthorityRefusal::TokenBodyMismatch),
+                        None => to_insert.push((outcome_key.clone(), bytes.clone())),
+                    }
+                }
+                if state.immutable.len().saturating_add(to_insert.len()) > limits.immutable_slots {
+                    return Err(AuthorityRefusal::CapacityExhausted {
+                        occupancy: state.immutable.len(),
+                        limit: limits.immutable_slots,
+                    });
+                }
+                if state.issuance.len() >= limits.version_tokens {
+                    return Err(AuthorityRefusal::CapacityExhausted {
+                        occupancy: state.issuance.len(),
+                        limit: limits.version_tokens,
+                    });
+                }
+
+                // Every check has passed. From here nothing can fail, so the
+                // outcome entries and the head move together or not at all.
+                for (outcome_key, bytes) in to_insert {
+                    state.immutable.insert(outcome_key, bytes);
                 }
                 let token = mint(state, instance);
                 state.issuance.insert(

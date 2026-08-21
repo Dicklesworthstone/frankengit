@@ -51,7 +51,8 @@ use fgit_types::HeadGeneration;
 
 use crate::tokens::AuthorityVersionToken;
 use crate::vocabulary::{
-    CasOutcome, HeadInit, HeadRead, HeadReadReceipt, ImmutableRead, PutOutcome,
+    AuthorityFailure, AuthorityRefusal, CasOutcome, HeadInit, HeadRead, HeadReadReceipt,
+    ImmutableRead,
 };
 
 /// Namespace prefix of a per-identity outcome accelerator slot.
@@ -380,7 +381,16 @@ pub enum DuplicateScan {
     /// against — the only way to obtain one.
     Absent(DuplicateAbsenceWitness),
     /// At least one transaction is already terminal, with its decision.
-    Found(Vec<(TxId, TerminalOutcome)>),
+    ///
+    /// Carries the observed token for the same reason [`Self::Absent`] does:
+    /// the caller cannot classify this without knowing whether the head it
+    /// walked is still the head it intends to replace.
+    Found {
+        /// The head token this walk observed.
+        observed: AuthorityVersionToken,
+        /// The transactions already terminal, with their decisions.
+        decided: Vec<(TxId, TerminalOutcome)>,
+    },
 }
 
 /// Walk the authenticated decision stream for prior decisions on `tx_ids`.
@@ -450,7 +460,10 @@ where
             DuplicateAbsenceWitness::minted_against(observed),
         ))
     } else {
-        Ok(DuplicateScan::Found(found))
+        Ok(DuplicateScan::Found {
+            observed,
+            decided: found,
+        })
     }
 }
 
@@ -670,20 +683,78 @@ pub struct PublishedBatch {
 /// including the empty loss case — carry that weight.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PublicationOutcome {
-    /// The batch is canonical and the accelerator entries are written.
+    /// The batch is canonical and its terminal outcomes are observable.
+    ///
+    /// Both became true at the same instant: see [`publish_decisions`].
     Published(Box<PublishedBatch>),
     /// The head moved before the conditional replacement landed.
     ///
     /// Nothing was published; the staged bodies remain staged and unreferenced.
     PredecessorMismatch,
+    /// At least one transaction in the batch was already terminal.
+    ///
+    /// This is the §5.2 "at most one terminal decision" rule holding, and it is
+    /// decided from the authenticated decision stream rather than from the
+    /// accelerator. Nothing was published; the carried decisions are the ones
+    /// that already stand, so a caller can answer with the original outcome
+    /// instead of re-deciding a transaction that is already resolved.
+    AlreadyDecided {
+        /// The transactions that already have a terminal decision, with it.
+        decided: Vec<(TxId, TerminalOutcome)>,
+    },
 }
 
-/// Stage a batch and its head, replace the head, then index the decisions.
+/// Name the accelerator entry that disagrees with the authenticated stream.
 ///
-/// The order is the one §8.3 and §8.4 require: bodies are staged first and are
-/// unreachable canonically until the conditional replacement makes them
-/// canonical, and the accelerator is written only afterwards, from decisions
-/// that are already canonical.
+/// Called only after the store has already refused the publication, so this
+/// decides nothing: it turns an opaque token refusal into the specific
+/// conflict, which is what a caller needs in order to act. If no disagreement
+/// can be reproduced the refusal is propagated unchanged rather than guessed at.
+fn accelerator_conflict_for<S>(
+    store: &S,
+    tenant_id: TenantId,
+    batch: &RepositoryDecisionBatchBody,
+) -> OutcomeFailure
+where
+    S: AuthorityStore + ?Sized,
+{
+    for decision in &batch.decisions {
+        let proposed = TerminalOutcome {
+            decision_sequence: decision.decision_sequence,
+            outcome: decision.outcome,
+        };
+        match indexed_outcome(store, tenant_id, batch.repository_id, decision.tx_id) {
+            Ok(OutcomeLookup::Decided(existing)) if existing != proposed => {
+                return OutcomeFailure::AcceleratorConflict {
+                    indexed: Box::new(existing),
+                    replayed: Box::new(proposed),
+                };
+            }
+            Ok(_) => {}
+            Err(failure) => return failure,
+        }
+    }
+    OutcomeFailure::Seal(Box::new(SealFailure::Store(AuthorityFailure::Refused(
+        AuthorityRefusal::TokenBodyMismatch,
+    ))))
+}
+
+/// Stage a batch and its head, then publish the head and its terminal outcomes
+/// as one indivisible transition.
+///
+/// The staging order is the one §8.3 and §8.4 require: bodies are staged first
+/// and are unreachable canonically until the conditional replacement makes them
+/// canonical. The publication itself is a single linearization point, which is
+/// what §5.2 means by effects that belong together publishing in one RCR — the
+/// head transition and the terminal outcome entries commit together or not at
+/// all. Publishing the head first and indexing afterwards would leave a window
+/// in which a transaction is canonically decided but its decision is not yet
+/// observable, and a crash inside that window would strand it there.
+///
+/// Duplicate detection reads the authenticated decision stream, never the
+/// accelerator: the accelerator is a derived index that the head's version
+/// token does not cover, so its state cannot decide whether a transaction is
+/// already terminal.
 pub fn publish_decisions<S>(
     store: &S,
     head_key: &HeadKey,
@@ -714,36 +785,100 @@ where
 
     let generation = HeadGeneration::try_new(head.generation.get())
         .map_err(|refusal| OutcomeFailure::Codec(refusal.into()))?;
-    let receipt = match store.compare_exchange_head(head_key, expected, generation, &head_bytes)? {
-        CasOutcome::Committed(receipt) => receipt,
-        CasOutcome::PredecessorMismatch => return Ok(PublicationOutcome::PredecessorMismatch),
+
+    // Requirement 2. The question "is this transaction already decided?" is
+    // answered from the authenticated decision stream reachable from the head,
+    // not from the presence or absence of an accelerator entry. The accelerator
+    // is a projection (§5.1): the head's version token says nothing about it, so
+    // a missing entry does not prove a transaction is undecided.
+    let tx_ids: Vec<TxId> = batch
+        .decisions
+        .iter()
+        .map(|decision| decision.tx_id)
+        .collect();
+    let witness = match scan_for_existing_decisions(store, head_key, &tx_ids)? {
+        DuplicateScan::Found { observed, decided } => {
+            // Staleness dominates duplication, and the order is not cosmetic.
+            // If the head already moved, this batch lost a race and the winner
+            // consumed the positions it chose; reporting the duplicates as a
+            // pre-replacement `AlreadyDecided` would tell the caller its basis
+            // is still current when it is not, and it would replan against a
+            // head that no longer exists.
+            if observed != expected {
+                return Ok(PublicationOutcome::PredecessorMismatch);
+            }
+            // §5.2 draws the line at *semantics*, not at recurrence: replaying
+            // a decision that already stands is an idempotent retry, while
+            // presenting a different decision for the same sealed transaction
+            // is the one-terminal-decision rule being broken and fails closed.
+            for (tx_id, existing) in &decided {
+                let Some(proposed) = batch
+                    .decisions
+                    .iter()
+                    .find(|decision| decision.tx_id == *tx_id)
+                    .map(|decision| TerminalOutcome {
+                        decision_sequence: decision.decision_sequence,
+                        outcome: decision.outcome,
+                    })
+                else {
+                    continue;
+                };
+                if proposed != *existing {
+                    return Err(OutcomeFailure::AcceleratorConflict {
+                        indexed: Box::new(existing.clone()),
+                        replayed: Box::new(proposed),
+                    });
+                }
+            }
+            return Ok(PublicationOutcome::AlreadyDecided { decided });
+        }
+        DuplicateScan::Absent(witness) => witness,
     };
 
-    let mut indexed = 0_usize;
+    // The walk is sound only if it observed the very head this publication is
+    // about to replace. A witness minted against some other token proves
+    // nothing about the state the conditional replacement will act on, so a
+    // mismatch here is the same loss as losing the replacement itself.
+    if witness.bound_to() != expected {
+        return Ok(PublicationOutcome::PredecessorMismatch);
+    }
+
+    let mut entries: Vec<(ImmutableKey, Vec<u8>)> = Vec::with_capacity(batch.decisions.len());
     for decision in &batch.decisions {
         let key = outcome_key(tenant_id, batch.repository_id, decision.tx_id)?;
         let entry = TerminalOutcome {
             decision_sequence: decision.decision_sequence,
             outcome: decision.outcome,
         };
-        // Put-if-absent is what enforces at most one terminal decision per
-        // sealed transaction: a second, different decision cannot overwrite the
-        // first, it conflicts.
-        match store.put_if_absent(&key, &encode_outcome(&entry)?)? {
-            PutOutcome::Created | PutOutcome::IdenticalRetry => indexed = indexed.saturating_add(1),
-            PutOutcome::Conflict => {
-                let existing =
-                    match indexed_outcome(store, tenant_id, batch.repository_id, decision.tx_id)? {
-                        OutcomeLookup::Decided(existing) => existing,
-                        OutcomeLookup::Undecided => entry,
-                    };
-                return Err(OutcomeFailure::AcceleratorConflict {
-                    indexed: Box::new(existing),
-                    replayed: Box::new(entry),
-                });
-            }
-        }
+        entries.push((key, encode_outcome(&entry)?));
     }
+    let indexed = entries.len();
+
+    // One linearization point: the entries and the head move together.
+    let published = store.publish_head_with_outcomes(
+        head_key,
+        expected,
+        generation,
+        &head_bytes,
+        &entries,
+        &witness,
+    );
+    let receipt = match published {
+        Ok(CasOutcome::Committed(receipt)) => receipt,
+        Ok(CasOutcome::PredecessorMismatch) => {
+            return Ok(PublicationOutcome::PredecessorMismatch);
+        }
+        // The store refuses when an outcome slot already holds different bytes.
+        // The stream walk found no decision, so this is an accelerator entry
+        // that disagrees with the authenticated stream. Reading the index HERE
+        // decides nothing — the refusal already happened — it only names which
+        // entry disagreed, so the caller gets the specific conflict instead of
+        // an opaque token refusal.
+        Err(AuthorityFailure::Refused(AuthorityRefusal::TokenBodyMismatch)) => {
+            return Err(accelerator_conflict_for(store, tenant_id, batch));
+        }
+        Err(failure) => return Err(failure.into()),
+    };
 
     Ok(PublicationOutcome::Published(Box::new(PublishedBatch {
         head: receipt,

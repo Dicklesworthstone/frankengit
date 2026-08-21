@@ -31,7 +31,7 @@ use crate::injection::{EffectLog, FaultLog, FaultPlan};
 use crate::keys::{HeadKey, ImmutableKey};
 use fgit_types::HeadGeneration;
 
-use crate::async_contract::{AsyncAuthorityStore, DuplicateAbsenceWitness};
+use crate::async_contract::DuplicateAbsenceWitness;
 use crate::tokens::{AuthorityVersionToken, StoreInstanceId};
 use crate::vocabulary::{
     AmbiguityReason, AuthenticatedHead, AuthorityFailure, AuthorityOp, AuthorityRefusal,

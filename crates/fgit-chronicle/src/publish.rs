@@ -101,9 +101,14 @@ pub enum LostCandidate {
 /// Stage, replace, and index a verified publication.
 ///
 /// Delegates the protocol to `fgit_authority::publish_decisions`, which stages
-/// bodies before the head and writes the accelerator only after the head has
-/// moved. On a lost race the candidate is classified against the accelerator
-/// so the caller learns whether it may replan.
+/// bodies before the head and then publishes the head and its terminal outcome
+/// entries as a single indivisible transition (§5.2). On a lost race the
+/// candidate is classified so the caller learns whether it may replan.
+///
+/// A transaction that is already terminal is now detected upstream, inside
+/// `publish_decisions`, by walking the authenticated decision stream before the
+/// head is touched. That arrives here as [`PublicationVerdict::Superseded`]
+/// with the decisions that already stand, and no head movement was attempted.
 ///
 /// The failure travels unboxed: `fgit-authority` now keeps `OutcomeFailure`
 /// inside the workspace error-payload bound, so the indirection this path
@@ -141,6 +146,12 @@ where
             publication,
             tenant_id,
         )?)),
+        // Deliberately NOT routed through `classify_loss`. The head did not
+        // move, so this is not a lost race and the batch's positions are still
+        // valid; classifying it as one would tell the caller to discard them.
+        PublicationOutcome::AlreadyDecided { decided } => {
+            Ok(PublicationVerdict::AlreadyDecided { decided })
+        }
     }
 }
 
