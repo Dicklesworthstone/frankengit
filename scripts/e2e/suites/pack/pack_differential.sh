@@ -170,6 +170,8 @@ generate_thin_case() {
   local algorithm=''
   local base_oid=''
   local head_oid=''
+  local base_commit=''
+  local head_commit=''
   local oracle_root=''
 
   [[ -f "${full_corpus}/receipt.tsv" && ! -e "${thin_corpus}" ]] || return 64
@@ -177,8 +179,14 @@ generate_thin_case() {
   algorithm="$(receipt_value "${full_corpus}/receipt.tsv" algorithm)"
   base_oid="$(manifest_oid "${full_corpus}/manifest.tsv" bodies/base-blob.body)"
   head_oid="$(manifest_oid "${full_corpus}/manifest.tsv" bodies/head-blob.body)"
+  base_commit="$(manifest_oid "${full_corpus}/manifest.tsv" bodies/base-commit.body)"
+  head_commit="$(manifest_oid "${full_corpus}/manifest.tsv" bodies/head-commit.body)"
   mkdir -p "${thin_corpus}/bodies"
-  printf '%s\n^%s\n' "${head_oid}" "${base_oid}" | \
+  # A blob-only input has no graph edge to the excluded blob, so pinned Git
+  # legitimately emits a full blob even with --thin.  The commit range makes
+  # the excluded base an edge object and produces the REF_DELTA this corpus
+  # is intended to exercise.
+  printf '%s\n^%s\n' "${head_commit}" "${base_commit}" | \
     "${ORACLE}" capture "${PIN_ID}" "${run_directory}" repo pack-thin -- \
       pack-objects --thin --stdout --revs --window=10 --depth=10
   cp -- "${run_directory}/transcripts/pack-thin/stdout.bin" "${thin_corpus}/thin.pack"
@@ -192,7 +200,7 @@ generate_thin_case() {
     printf 'schema=frankengit.pack-differential-corpus.v1\n'
     printf 'algorithm=%s\n' "${algorithm}"
     printf 'case_kind=thin_ref_delta\n'
-    printf 'corpus_denominator=1\n'
+    printf 'corpus_denominator=3\n'
     printf 'oracle_pin=%s\n' "${PIN_ID}"
     printf 'oracle_attestation=operator-receipt-copied\n'
     printf 'non_claim=E3 corpus evidence only; no full Git compatibility claim\n'

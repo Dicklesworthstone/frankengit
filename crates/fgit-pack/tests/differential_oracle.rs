@@ -540,6 +540,16 @@ fn pinned_oracle_thin_pack_requires_its_caller_supplied_base() -> Result<(), Dif
             "oracle thin corpus did not contain REF_DELTA",
         ));
     }
+    if !quarantined.entries().iter().any(|entry| {
+        matches!(
+            entry.delta_base.as_ref(),
+            Some(ParsedDeltaBase::Ref { base, .. }) if base == &external.id
+        )
+    }) {
+        return Err(DifferentialError::new(
+            "oracle thin corpus did not reference the recorded external base",
+        ));
+    }
     let offsets = quarantined
         .entries()
         .iter()
