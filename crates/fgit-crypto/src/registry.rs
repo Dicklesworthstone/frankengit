@@ -406,6 +406,15 @@ pub enum IdentityDomain {
     /// its own evidence, which means the record is a body with an identity
     /// rather than a log line.
     KeyLifecycleReceipt,
+    /// One restore report body.
+    ///
+    /// NORMATIVE_PROTOCOL_CONTRACTS section 23: *"Older-state recovery is an
+    /// explicit audited restore that advances a new authority generation."*
+    /// An audited action that advances a generation needs a record, and a
+    /// record with an identity is a body. The specification does not name the
+    /// body itself; this row exists on the strength of the audit requirement,
+    /// with FG-010a as the consumer building it.
+    RestoreReport,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -613,6 +622,12 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/key-lifecycle-receipt/v1",
         None,
     ),
+    owned_row(
+        32,
+        IdentityDomain::RestoreReport,
+        "frankengit/restore-report/v1",
+        Some("DUR-004"),
+    ),
 ];
 
 const fn pinned_row(
@@ -728,6 +743,7 @@ impl IdentityDomain {
         Self::DocumentAnchor,
         Self::SignedEnvelope,
         Self::KeyLifecycleReceipt,
+        Self::RestoreReport,
     ];
 
     /// Position of this domain in [`DOMAIN_REGISTRY`].
