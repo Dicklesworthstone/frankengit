@@ -58,6 +58,7 @@ const _: () = {
     assert!(size_of::<fgit_authority::OutcomeFailure>() <= LIMIT);
 };
 
+pub mod archive;
 pub mod assemble;
 pub mod audit;
 pub mod capsule;
@@ -66,6 +67,7 @@ pub mod publish;
 pub mod recovery;
 pub mod refusal;
 
+pub use archive::{BackupExportBundleBody, RestoreReportBody};
 pub use assemble::{PublicationPlan, VerifiedPublication};
 pub use audit::{batch_identity, verify_pair};
 pub use capsule::{
