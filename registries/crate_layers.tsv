@@ -8,6 +8,9 @@ fgit-authority	L2	L0,L1,L2	authority	active
 fgit-authority-fsqlite	L2	L0,L1,L2	authority	active
 fgit-benchmark	L2	L0,L1,L2	performance-verification	active
 fgit-chronicle	L2	L0,L1,L2	decision-log	active
+# The closed claim lattice is a foundational pure value/type gate; it owns no
+# cryptographic construction or evidence storage and has no first-party edges.
+fgit-claim	L0	none	claims-evidence	active
 fgit-cli	L4	L0,L1,L2,L3,L4	cli	active
 # Amendment: codec's canonical framing computes digests; identity hashes are
 # constitutionally owned by fgit-crypto, so codec sits above crypto.
