@@ -328,10 +328,10 @@ pub fn render_batch(
             let Some(input) = inputs.get(position) else {
                 continue;
             };
-            let outcome = match input.skip {
-                Some(reason) => InputOutcome::Skipped(reason),
-                None => render_one(input.source, profile, surface),
-            };
+            let outcome = input.skip.map_or_else(
+                || render_one(input.source, profile, surface),
+                InputOutcome::Skipped,
+            );
             if let Some(slot) = outcomes.get_mut(position) {
                 *slot = Some(outcome);
             }

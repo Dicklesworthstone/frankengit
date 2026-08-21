@@ -28,7 +28,7 @@
 use crate::ast::{Document, NodeId};
 use crate::limits::{Limits, Refusal, RefusalKind, as_u64, offset_u32, usize_of};
 use crate::profile::ProfileId;
-use crate::render::{normalize_text, subtree_text};
+use crate::render::{hex_digit, normalize_text, subtree_text};
 use crate::span::Span;
 
 /// Longest host-supplied source object identity this crate stores.
@@ -88,7 +88,9 @@ impl AnchorId {
     pub fn to_hex(&self) -> String {
         let mut out = String::with_capacity(self.0.len() * 2);
         for byte in self.0.iter() {
-            out.push_str(&format!("{byte:02x}"));
+            let value = u32::from(*byte);
+            out.push(hex_digit(value >> 4));
+            out.push(hex_digit(value));
         }
         out
     }

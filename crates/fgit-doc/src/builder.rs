@@ -6,7 +6,7 @@ use crate::limits::{Refusal, RefusalKind, StructuralLimits, usize_of};
 use crate::span::{CharIndex, Span};
 
 /// Column width of one tab stop when measuring block indentation.
-pub(crate) const TAB_WIDTH: usize = 4;
+pub const TAB_WIDTH: usize = 4;
 
 /// One source line, or the remainder of one after a container prefix is stripped.
 ///
@@ -15,14 +15,14 @@ pub(crate) const TAB_WIDTH: usize = 4;
 /// prefix only ever moves `start` forward, so every `LineSlice` remains an
 /// exact region of the original source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct LineSlice {
-    pub(crate) start: usize,
-    pub(crate) end: usize,
-    pub(crate) term_end: usize,
+pub struct LineSlice {
+    pub start: usize,
+    pub end: usize,
+    pub term_end: usize,
 }
 
 /// Splits a source into lines, accepting all three common terminators.
-pub(crate) fn split_lines(source: &str) -> Vec<LineSlice> {
+pub fn split_lines(source: &str) -> Vec<LineSlice> {
     let bytes = source.as_bytes();
     let mut lines = Vec::new();
     let mut start = 0_usize;
@@ -65,16 +65,16 @@ pub(crate) fn split_lines(source: &str) -> Vec<LineSlice> {
 }
 
 /// Parser state shared by the block and inline phases.
-pub(crate) struct Ctx<'src> {
-    pub(crate) source: &'src str,
-    pub(crate) chars: &'src CharIndex,
-    pub(crate) limits: StructuralLimits,
-    pub(crate) builder: Builder,
-    pub(crate) diagnostics: Vec<Diagnostic>,
+pub struct Ctx<'src> {
+    pub source: &'src str,
+    pub chars: &'src CharIndex,
+    pub limits: StructuralLimits,
+    pub builder: Builder,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 impl<'src> Ctx<'src> {
-    pub(crate) fn new(source: &'src str, chars: &'src CharIndex, limits: StructuralLimits) -> Self {
+    pub fn new(source: &'src str, chars: &'src CharIndex, limits: StructuralLimits) -> Self {
         Self {
             source,
             chars,
@@ -84,11 +84,11 @@ impl<'src> Ctx<'src> {
         }
     }
 
-    pub(crate) fn span(&self, start: usize, end: usize) -> Span {
+    pub fn span(&self, start: usize, end: usize) -> Span {
         self.chars.span(start, end)
     }
 
-    pub(crate) fn add(
+    pub fn add(
         &mut self,
         kind: NodeKind,
         span: Span,
@@ -97,12 +97,12 @@ impl<'src> Ctx<'src> {
         self.builder.add(kind, span, parent)
     }
 
-    pub(crate) fn diagnose(&mut self, code: DiagnosticCode, span: Span) {
+    pub fn diagnose(&mut self, code: DiagnosticCode, span: Span) {
         self.diagnostics.push(Diagnostic { code, span });
     }
 
     /// Enforces the nesting ceiling before descending one more level.
-    pub(crate) fn check_depth(&self, depth: u32) -> Result<(), Refusal> {
+    pub fn check_depth(&self, depth: u32) -> Result<(), Refusal> {
         if depth > self.limits.max_depth {
             return Err(Refusal::exceeded(
                 RefusalKind::NestingTooDeep,
@@ -114,12 +114,12 @@ impl<'src> Ctx<'src> {
     }
 
     /// The exact text of a line's content.
-    pub(crate) fn line_text(&self, line: LineSlice) -> &'src str {
+    pub fn line_text(&self, line: LineSlice) -> &'src str {
         self.source.get(line.start..line.end).unwrap_or("")
     }
 
     /// Whether a line holds nothing but whitespace.
-    pub(crate) fn is_blank(&self, line: LineSlice) -> bool {
+    pub fn is_blank(&self, line: LineSlice) -> bool {
         self.line_text(line)
             .bytes()
             .all(|byte| byte.is_ascii_whitespace())
@@ -127,7 +127,7 @@ impl<'src> Ctx<'src> {
 }
 
 /// Measures leading indentation in columns and returns the byte offset after it.
-pub(crate) fn measure_indent(text: &str, start: usize) -> (usize, usize) {
+pub const fn measure_indent(text: &str, start: usize) -> (usize, usize) {
     let bytes = text.as_bytes();
     let mut columns = 0_usize;
     let mut index = start;
@@ -147,7 +147,7 @@ pub(crate) fn measure_indent(text: &str, start: usize) -> (usize, usize) {
 /// A tab that straddles the requested boundary is consumed whole. That is a
 /// documented deviation from strict tab expansion; it only ever discards
 /// whitespace, never content, and it is deterministic.
-pub(crate) fn strip_columns(source: &str, line: LineSlice, columns: usize) -> LineSlice {
+pub fn strip_columns(source: &str, line: LineSlice, columns: usize) -> LineSlice {
     let bytes = source.as_bytes();
     let mut taken = 0_usize;
     let mut index = line.start;
@@ -167,7 +167,7 @@ pub(crate) fn strip_columns(source: &str, line: LineSlice, columns: usize) -> Li
 }
 
 /// Trims trailing blank lines from a collected block range.
-pub(crate) fn trim_trailing_blanks(ctx: &Ctx<'_>, lines: &[LineSlice]) -> usize {
+pub fn trim_trailing_blanks(ctx: &Ctx<'_>, lines: &[LineSlice]) -> usize {
     let mut count = lines.len();
     while count > 0 {
         let Some(line) = lines.get(count - 1) else {
@@ -183,17 +183,14 @@ pub(crate) fn trim_trailing_blanks(ctx: &Ctx<'_>, lines: &[LineSlice]) -> usize 
 }
 
 /// The span covering a run of lines, from the first content byte to the last.
-pub(crate) fn span_of_lines(ctx: &Ctx<'_>, lines: &[LineSlice]) -> Option<Span> {
+pub fn span_of_lines(ctx: &Ctx<'_>, lines: &[LineSlice]) -> Option<Span> {
     let first = lines.first()?;
     let last = lines.last()?;
     Some(ctx.span(first.start, last.end))
 }
 
 /// Enforces the per-line ceiling before any line is examined.
-pub(crate) fn check_line_lengths(
-    lines: &[LineSlice],
-    limits: StructuralLimits,
-) -> Result<(), Refusal> {
+pub fn check_line_lengths(lines: &[LineSlice], limits: StructuralLimits) -> Result<(), Refusal> {
     let ceiling = usize_of(limits.max_line_bytes);
     for line in lines {
         let length = line.end.saturating_sub(line.start);

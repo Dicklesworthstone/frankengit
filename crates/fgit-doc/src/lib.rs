@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! One source-spanned document lineage for every FrankenGit surface.
+//! One source-spanned document lineage for every `FrankenGit` surface.
 //!
 //! `fgit-doc` parses issue, review, release, wiki, and policy text once into a
 //! single tree in which every node carries exact byte *and* codepoint spans

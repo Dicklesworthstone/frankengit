@@ -8,7 +8,7 @@
 use crate::ast::{UrlRejection, UrlVerdict};
 
 /// Longest destination this crate will treat as navigable.
-pub(crate) const MAX_URL_BYTES: usize = 4096;
+pub const MAX_URL_BYTES: usize = 4096;
 
 /// Schemes that may appear in a rendered navigable target.
 const NAVIGABLE_SCHEMES: [&str; 3] = ["http", "https", "mailto"];
@@ -18,7 +18,7 @@ const NAVIGABLE_SCHEMES: [&str; 3] = ["http", "https", "mailto"];
 /// A destination with no scheme is a relative reference and is accepted. A
 /// destination with a scheme is accepted only if the scheme is on the
 /// navigable allowlist, compared case-insensitively.
-pub(crate) fn classify(destination: &str) -> UrlVerdict {
+pub fn classify(destination: &str) -> UrlVerdict {
     let trimmed = destination.trim_matches(is_url_trim);
     if trimmed.len() > MAX_URL_BYTES {
         return UrlVerdict::Rejected(UrlRejection::TooLong);
@@ -26,23 +26,20 @@ pub(crate) fn classify(destination: &str) -> UrlVerdict {
     if trimmed.chars().any(is_url_forbidden) {
         return UrlVerdict::Rejected(UrlRejection::ControlCharacter);
     }
-    match scheme_of(trimmed) {
-        None => UrlVerdict::Allowed,
-        Some(scheme) => {
-            if NAVIGABLE_SCHEMES
-                .iter()
-                .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
-            {
-                UrlVerdict::Allowed
-            } else {
-                UrlVerdict::Rejected(UrlRejection::DisallowedScheme)
-            }
+    scheme_of(trimmed).map_or(UrlVerdict::Allowed, |scheme| {
+        if NAVIGABLE_SCHEMES
+            .iter()
+            .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
+        {
+            UrlVerdict::Allowed
+        } else {
+            UrlVerdict::Rejected(UrlRejection::DisallowedScheme)
         }
-    }
+    })
 }
 
 /// Applies the destination policy to an autolink, which must be absolute.
-pub(crate) fn classify_autolink(destination: &str) -> UrlVerdict {
+pub fn classify_autolink(destination: &str) -> UrlVerdict {
     match classify(destination) {
         UrlVerdict::Rejected(reason) => UrlVerdict::Rejected(reason),
         UrlVerdict::Allowed => {
@@ -56,7 +53,7 @@ pub(crate) fn classify_autolink(destination: &str) -> UrlVerdict {
 }
 
 /// Whether a destination looks like a bare email address.
-pub(crate) fn is_email_like(candidate: &str) -> bool {
+pub fn is_email_like(candidate: &str) -> bool {
     let mut parts = candidate.split('@');
     let (Some(local), Some(domain), None) = (parts.next(), parts.next(), parts.next()) else {
         return false;
@@ -91,7 +88,7 @@ fn scheme_of(destination: &str) -> Option<&str> {
 }
 
 /// Characters trimmed from both ends before the policy is applied.
-fn is_url_trim(value: char) -> bool {
+const fn is_url_trim(value: char) -> bool {
     value.is_ascii_whitespace() || value.is_control()
 }
 
@@ -99,6 +96,6 @@ fn is_url_trim(value: char) -> bool {
 ///
 /// Control characters and raw whitespace are the classic scheme-smuggling
 /// vehicle, so they are rejected rather than stripped.
-fn is_url_forbidden(value: char) -> bool {
+const fn is_url_forbidden(value: char) -> bool {
     value.is_control() || value.is_whitespace()
 }

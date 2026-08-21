@@ -1,8 +1,6 @@
 //! Span fidelity: every node's span is the exact source region it describes.
 
-mod common;
-
-use common::{
+use crate::common::{
     assert_no_content_lost, assert_span_integrity, corpus, first_node_of_kind, parse_case,
     prose_round_trip_corpus,
 };

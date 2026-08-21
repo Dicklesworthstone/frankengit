@@ -1,8 +1,6 @@
 //! Review anchors: stable identity, and one explicit outcome per remap.
 
-mod common;
-
-use common::default_profile;
+use crate::common::default_profile;
 use fgit_doc::ast::Document;
 use fgit_doc::{
     Anchor, Limits, NodeId, RefusalKind, RemapOutcome, SourceObjectId, StructuralLimits, parse,

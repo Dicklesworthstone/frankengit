@@ -77,13 +77,13 @@ impl Rendered {
 
     /// Length of the rendered output in bytes.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.output.len()
     }
 
     /// Whether the rendered output is empty.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.output.is_empty()
     }
 }
@@ -100,7 +100,7 @@ pub(crate) struct Sink {
 }
 
 impl Sink {
-    pub(crate) fn new(limit: usize) -> Self {
+    pub(crate) const fn new(limit: usize) -> Self {
         Self {
             output: String::new(),
             limit,
@@ -268,6 +268,19 @@ fn block_child(document: &Document, id: NodeId) -> bool {
     document.node(id).is_some_and(|node| node.kind().is_block())
 }
 
+/// One lowercase hexadecimal digit for the low nibble of a value.
+///
+/// Used by the canonical `JSON` escaper and by identity display, both of which
+/// must not allocate an intermediate string per character.
+#[must_use]
+pub(crate) fn hex_digit(value: u32) -> char {
+    const DIGITS: [char; 16] = [
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+    ];
+    let index = usize::try_from(value & 0xf).unwrap_or(0);
+    DIGITS.get(index).copied().unwrap_or('0')
+}
+
 /// Collapses every run of whitespace to one space and trims the ends.
 #[must_use]
 pub fn normalize_text(text: &str) -> String {
@@ -319,7 +332,6 @@ fn plain_block(document: &Document, id: NodeId, sink: &mut Sink) -> Result<(), R
             sink.write(" ")?;
             plain_inlines(document, node.children(), sink)
         }
-        NodeKind::Paragraph => plain_inlines(document, node.children(), sink),
         NodeKind::ThematicBreak => sink.write("---"),
         NodeKind::CodeBlock(_) | NodeKind::RawHtmlBlock => {
             for (position, line) in verbatim_lines(document, id).iter().enumerate() {
@@ -337,6 +349,8 @@ fn plain_block(document: &Document, id: NodeId, sink: &mut Sink) -> Result<(), R
             result
         }
         NodeKind::List(info) => plain_list(document, id, info, sink),
+        // Paragraphs and every remaining inline container render as their
+        // inline content with no structural decoration of their own.
         _ => plain_inlines(document, node.children(), sink),
     }
 }
@@ -367,10 +381,9 @@ fn plain_list(
         let indent = " ".repeat(marker.len());
         let saved = sink.push_prefix(&indent);
         let children = document.node(*item).map(|entry| entry.children().to_vec());
-        let result = match children {
-            Some(list) => plain_blocks(document, &list, sink, !info.tight),
-            None => Ok(()),
-        };
+        let result = children.map_or(Ok(()), |list| {
+            plain_blocks(document, &list, sink, !info.tight)
+        });
         sink.pop_prefix(saved);
         result?;
     }

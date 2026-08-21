@@ -1,8 +1,6 @@
 //! Render profiles: safety, structure, and pinnable output.
 
-mod common;
-
-use common::{corpus, parse_case, render_all};
+use crate::common::{corpus, parse_case, render_all};
 use fgit_doc::{Limits, RefusalKind, RenderProfile, parse, render};
 
 fn html_of(source: &str) -> String {

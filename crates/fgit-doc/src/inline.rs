@@ -306,7 +306,7 @@ struct Scanner<'a> {
 }
 
 /// Parses the inline content of one block into AST children of `parent`.
-pub(crate) fn parse_inlines(
+pub fn parse_inlines(
     ctx: &mut Ctx<'_>,
     parent: NodeId,
     lines: &[LineSlice],
@@ -820,8 +820,8 @@ impl Scanner<'_> {
             let mixed = candidate.can_close || closer.can_open;
             let combined = candidate.original + closer.original;
             if mixed
-                && combined % 3 == 0
-                && (candidate.original % 3 != 0 || closer.original % 3 != 0)
+                && combined.is_multiple_of(3)
+                && !(candidate.original.is_multiple_of(3) && closer.original.is_multiple_of(3))
             {
                 continue;
             }
@@ -998,7 +998,7 @@ fn node_kind(
 }
 
 /// Removes backslash escapes from a raw destination before policy checks.
-pub(crate) fn decode_escapes(raw: &str) -> String {
+pub fn decode_escapes(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut characters = raw.chars();
     while let Some(value) = characters.next() {

@@ -342,7 +342,7 @@ impl Document {
 
     /// Number of nodes in the arena.
     #[must_use]
-    pub fn node_count(&self) -> usize {
+    pub const fn node_count(&self) -> usize {
         self.nodes.len()
     }
 
@@ -473,7 +473,7 @@ pub(crate) struct Builder {
 }
 
 impl Builder {
-    pub(crate) fn new(max_nodes: u32) -> Self {
+    pub(crate) const fn new(max_nodes: u32) -> Self {
         Self {
             nodes: Vec::new(),
             roots: Vec::new(),

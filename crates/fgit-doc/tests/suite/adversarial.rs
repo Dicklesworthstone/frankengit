@@ -3,14 +3,12 @@
 //! Every forbidden case below is paired with a near-identical permitted case,
 //! so the suite proves the positive capability as well as the refusal.
 
-mod common;
-
 use fgit_doc::{
     Limits, ParseProfile, RefusalKind, RenderProfile, StructuralLimits, parse, parse_bytes,
     parse_with, render,
 };
 
-fn profile_with(structural: StructuralLimits) -> ParseProfile {
+const fn profile_with(structural: StructuralLimits) -> ParseProfile {
     ParseProfile::with_limits(Limits {
         structural,
         ..Limits::DEFAULT
@@ -178,7 +176,7 @@ fn hostile_sources_produce_a_document_or_a_typed_refusal_but_never_a_panic() {
     for source in hostile_sources() {
         match parse(&source) {
             Ok(parsed) => {
-                common::assert_span_integrity("hostile", parsed.document());
+                crate::common::assert_span_integrity("hostile", parsed.document());
                 for profile in RenderProfile::all() {
                     let _ = render(parsed.document(), profile, Limits::DEFAULT);
                 }
@@ -228,7 +226,10 @@ fn generated_marker_soup_never_panics_and_keeps_its_spans_honest() {
             continue;
         };
         if let Ok(parsed) = parse(source) {
-            common::assert_span_integrity(&format!("generated-{iteration}"), parsed.document());
+            crate::common::assert_span_integrity(
+                &format!("generated-{iteration}"),
+                parsed.document(),
+            );
             for profile in RenderProfile::all() {
                 let _ = render(parsed.document(), profile, Limits::DEFAULT);
             }

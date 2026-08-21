@@ -6,9 +6,9 @@
 
 use crate::ast::{Document, NodeId, NodeKind, UrlVerdict};
 use crate::limits::Refusal;
-use crate::render::{Sink, literal};
+use crate::render::{Sink, hex_digit, literal};
 
-pub(crate) fn render_json(document: &Document, sink: &mut Sink) -> Result<(), Refusal> {
+pub fn render_json(document: &Document, sink: &mut Sink) -> Result<(), Refusal> {
     let profile = document.profile();
     sink.write("{\"profile\":{\"family\":\"")?;
     sink.write(profile.family.tag())?;
@@ -154,7 +154,10 @@ fn quote(text: &str) -> String {
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
             value if value < ' ' || value == '\u{7f}' => {
-                out.push_str(&format!("\\u{:04x}", u32::from(value)));
+                let code = u32::from(value);
+                out.push_str("\\u00");
+                out.push(hex_digit(code >> 4));
+                out.push(hex_digit(code));
             }
             value => out.push(value),
         }

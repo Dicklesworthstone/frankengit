@@ -1,13 +1,16 @@
 //! Batch rendering: derived worker budgets, and one receipt line per input.
 
-mod common;
-
 use fgit_doc::{
     BatchInput, BatchPlan, InputOutcome, Limits, ParseProfile, RefusalKind, RenderProfile,
     VarianceClass, WorkloadProfile, batch::SkipReason, render_batch, worker_count,
 };
 
-fn workload(cpu_cap: u32, memory: u64, per_job: u64, variance: VarianceClass) -> WorkloadProfile {
+const fn workload(
+    cpu_cap: u32,
+    memory: u64,
+    per_job: u64,
+    variance: VarianceClass,
+) -> WorkloadProfile {
     WorkloadProfile {
         cpu_cap,
         memory_budget_bytes: memory,

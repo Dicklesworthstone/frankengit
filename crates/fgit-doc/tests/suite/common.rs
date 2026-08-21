@@ -1,8 +1,4 @@
 //! Shared corpus and structural invariant checks for the `fgit-doc` suites.
-//!
-//! Every integration test binary compiles this module in full, so helpers used
-//! by only some suites are legitimately unused in the others.
-#![allow(dead_code)]
 
 use fgit_doc::ast::{Document, NodeKind};
 use fgit_doc::{Limits, NodeId, ParseProfile, RenderProfile, Span, parse, render};
@@ -282,7 +278,7 @@ pub fn assert_span_integrity(name: &str, document: &Document) {
 ///
 /// Every other byte is document content, so finding one outside every recorded
 /// span means the parser silently dropped text.
-fn is_structural(value: char) -> bool {
+const fn is_structural(value: char) -> bool {
     value.is_whitespace()
         || value.is_ascii_digit()
         || matches!(
@@ -380,6 +376,6 @@ pub fn first_node_of_kind(document: &Document, tag: &str) -> Option<NodeId> {
 }
 
 /// The default profile, restated so tests do not depend on a literal.
-pub fn default_profile() -> ParseProfile {
+pub const fn default_profile() -> ParseProfile {
     ParseProfile::DEFAULT
 }

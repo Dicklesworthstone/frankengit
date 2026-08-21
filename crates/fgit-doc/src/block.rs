@@ -13,7 +13,7 @@ use crate::inline;
 use crate::limits::Refusal;
 
 /// Parses a run of lines as the block children of `parent`.
-pub(crate) fn parse_blocks(
+pub fn parse_blocks(
     ctx: &mut Ctx<'_>,
     lines: &[LineSlice],
     parent: Option<NodeId>,
@@ -122,10 +122,8 @@ fn atx_heading(text: &str) -> Option<AtxHeading> {
     if hashes == 0 || hashes > 6 {
         return None;
     }
-    match bytes.get(hashes) {
-        None => {}
-        Some(b' ' | b'\t') => {}
-        Some(_) => return None,
+    if !matches!(bytes.get(hashes), None | Some(b' ' | b'\t')) {
+        return None;
     }
     let mut start = hashes;
     while matches!(bytes.get(start), Some(b' ' | b'\t')) {
@@ -599,10 +597,7 @@ fn list(
     let mut loose = false;
     let mut last_end = open_line.end;
     let mut after = cursor.saturating_add(1);
-    loop {
-        let Some(line) = lines.get(position).copied() else {
-            break;
-        };
+    while let Some(line) = lines.get(position).copied() {
         let (_, marker_start) = measure_indent(ctx.source, line.start);
         let scan = scan_item(ctx, lines, position, marker, line);
         loose = loose || scan.interior_blank;

@@ -1,8 +1,6 @@
 //! Determinism: identical inputs render to identical bytes, every time.
 
-mod common;
-
-use common::{corpus, parse_case, render_all};
+use crate::common::{corpus, parse_case, render_all};
 use fgit_doc::{
     Anchor, BatchInput, Limits, ParseProfile, RenderProfile, SourceObjectId, VarianceClass,
     WorkloadProfile, render_batch,

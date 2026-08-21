@@ -198,7 +198,7 @@ impl LineTable {
         }
     }
 
-    pub(crate) fn line_count(&self) -> usize {
+    pub(crate) const fn line_count(&self) -> usize {
         self.starts.len()
     }
 }
