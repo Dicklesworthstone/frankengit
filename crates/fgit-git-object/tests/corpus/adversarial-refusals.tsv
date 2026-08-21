@@ -1,0 +1,20 @@
+# schema=frankengit.object-adversarial-refusal-corpus.v1
+# campaign=deterministic-structured-mutation-v1
+# campaign_seed=0x0f15c0de5eed1234
+# bounded_input_bytes=96
+# Fields: label<TAB>target<TAB>profile<TAB>limits<TAB>escaped_input<TAB>expected<TAB>classification<TAB>oracle_evidence
+# `git_accepts_we_refuse` is a deliberately surfaced compatibility divergence,
+# not a refused fixture or a compatibility claim.  Its oracle result was
+# observed using the pinned git-2.54.0 fsck --strict lane.
+loose-missing-nul	loose	strict	default	blob 1	MissingLooseHeaderTerminator	refusal_stable	not_applicable
+loose-object-budget	loose	strict	object32	blob 33\0	ObjectTooLarge	refusal_stable	not_applicable
+loose-noncanonical-length	loose	strict	default	blob 01\0x	NonCanonicalLooseLength	refusal_stable	not_applicable
+tree-truncated-reference	tree	strict	default	100644 name\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0	TruncatedTreeReference	refusal_stable	not_applicable
+tree-entry-budget	tree	strict	tree1	100644 a\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x3100644 b\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0	TooManyTreeEntries	refusal_stable	not_applicable
+commit-embedded-nul	commit	strict	default	tree 0000000000000000000000000000000000000000\nauthor A <a@b> 1 +0000\ncommitter A <a@b> 1 +0000\n\nm\0	NulInStrictCommit	refusal_stable	not_applicable
+commit-header-order	commit	strict	default	author A <a@b> 1 +0000\ntree 0000000000000000000000000000000000000000\ncommitter A <a@b> 1 +0000\n\nm	StrictCommitHeaderOrder	refusal_stable	not_applicable
+commit-deep-continuations	commit	strict	headers4	tree 0000000000000000000000000000000000000000\nauthor A <a@b> 1 +0000\ncommitter A <a@b> 1 +0000\ngpgsig first\n second\n third\n\nm	HeaderLimitExceeded	refusal_stable	not_applicable
+tag-missing-tagger	tag	strict	default	object 0000000000000000000000000000000000000000\ntype commit\ntag release\n\nmessage	MissingOrDuplicateTagHeader	refusal_stable	not_applicable
+epoch-zero-strict-divergence	commit	strict	default	tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor Epoch Zero <epoch@example.com> 0 +0000\ncommitter Epoch Zero <epoch@example.com> 0 +0000\n\nmessage\n	MalformedSignatureDate	git_accepts_we_refuse	git-2.54.0-fsck-strict-accepts:ad9ebc4102db7fd671a2fcdb2f7f1f62b7e90f60
+epoch-zero-import	commit	import	default	tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor Epoch Zero <epoch@example.com> 0 +0000\ncommitter Epoch Zero <epoch@example.com> 0 +0000\n\nmessage\n	ok	git_accepts_import_accepts	git-2.54.0-fsck-strict-accepts:ad9ebc4102db7fd671a2fcdb2f7f1f62b7e90f60
+blob-embedded-nul	object-blob	strict	default	binary\0blob	ok	accepted_control	not_applicable
