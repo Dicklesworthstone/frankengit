@@ -168,29 +168,60 @@ enum StatementError {
     RenameToSelf,
 }
 
-/// The evaluator's coarser disposition vocabulary.
+/// Why an intent contributed no surviving effect.
 ///
-/// Comparison happens here so that being more precise than the implementation
-/// never registers as a disagreement with it.
+/// These are the evaluator's own `AbsorptionReason` arms. Two of them —
+/// `PreconditionMismatchNoOp` and `DuplicateIdenticalDelivery` — have no
+/// counterpart in this oracle yet, because the ref-only model does not carry
+/// mismatch policies or outbox delivery keys. They are listed rather than
+/// omitted so the gap is visible instead of being mistaken for coverage.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum AbsorptionReason {
+    IdentityEffect,
+    InverseCancelled,
+    OverwrittenBySucceedingIntent,
+    /// Not yet produced by this oracle: needs mismatch policies.
+    PreconditionMismatchNoOp,
+    /// Not yet produced by this oracle: needs outbox delivery keys.
+    DuplicateIdenticalDelivery,
+}
+
+/// The evaluator's disposition vocabulary, reason included.
+///
+/// An earlier version of this type collapsed every no-op into a bare
+/// `Absorbed`, on the assumption that the evaluator reported only four arms and
+/// therefore could not distinguish them. **That assumption was wrong**, and the
+/// mistake is recorded rather than erased: the public carrier is
+/// `Absorbed(AbsorptionReason)`, so the six-way resolution the specification
+/// asks for is fully recoverable from the evaluator's own output.
+///
+/// The lesson is worth more than the code. The oracle was about to report a
+/// spec-versus-implementation divergence that did not exist, on the strength of
+/// a type signature read without its payload. Asking the owner rather than
+/// filing the finding is the only reason it was caught.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum ProjectedDisposition {
     Surviving,
-    Absorbed,
+    Absorbed(AbsorptionReason),
     StatementError,
     TransactionAborted,
 }
 
 impl Disposition {
-    /// Collapse to the four arms the evaluator reports.
+    /// Map onto the evaluator's vocabulary, preserving the reason.
     ///
-    /// Identity no-op and inverse cancellation both project onto `Absorbed`:
-    /// in each case the intent contributed no surviving effect, which is the
-    /// distinction the coarser vocabulary preserves.
+    /// Information-preserving on purpose: each no-op arm carries a distinct
+    /// `AbsorptionReason`, so a comparison against the evaluator tests the
+    /// distinction rather than discarding it.
     const fn projected(self) -> ProjectedDisposition {
         match self {
             Self::SurvivingEffect(_) => ProjectedDisposition::Surviving,
-            Self::IdentityNoOp | Self::InverseCancellation | Self::Absorption => {
-                ProjectedDisposition::Absorbed
+            Self::IdentityNoOp => ProjectedDisposition::Absorbed(AbsorptionReason::IdentityEffect),
+            Self::InverseCancellation => {
+                ProjectedDisposition::Absorbed(AbsorptionReason::InverseCancelled)
+            }
+            Self::Absorption => {
+                ProjectedDisposition::Absorbed(AbsorptionReason::OverwrittenBySucceedingIntent)
             }
             Self::StatementError(_) => ProjectedDisposition::StatementError,
         }
@@ -1027,21 +1058,28 @@ fn the_shrinker_reduces_a_known_failure_to_its_minimal_program() {
 }
 
 #[test]
-fn the_projection_is_total_and_agrees_with_the_evaluator_vocabulary() {
-    // Every arm the oracle can produce must project onto exactly one arm the
-    // evaluator reports. If this ever stops being total, the equivalence
-    // comparison silently loses cases rather than failing.
+fn the_projection_preserves_every_no_op_reason() {
+    // Each arm must map to a *distinct* evaluator arm. An earlier version
+    // collapsed all three no-ops into a bare `Absorbed`, which would have made
+    // an equivalence comparison agree with the evaluator while testing none of
+    // the distinction the specification asks for.
     for (fine, coarse) in [
         (
             Disposition::SurvivingEffect("a"),
             ProjectedDisposition::Surviving,
         ),
-        (Disposition::IdentityNoOp, ProjectedDisposition::Absorbed),
+        (
+            Disposition::IdentityNoOp,
+            ProjectedDisposition::Absorbed(AbsorptionReason::IdentityEffect),
+        ),
         (
             Disposition::InverseCancellation,
-            ProjectedDisposition::Absorbed,
+            ProjectedDisposition::Absorbed(AbsorptionReason::InverseCancelled),
         ),
-        (Disposition::Absorption, ProjectedDisposition::Absorbed),
+        (
+            Disposition::Absorption,
+            ProjectedDisposition::Absorbed(AbsorptionReason::OverwrittenBySucceedingIntent),
+        ),
         (
             Disposition::StatementError(StatementError::TargetAbsent),
             ProjectedDisposition::StatementError,
@@ -1056,15 +1094,18 @@ fn the_projection_is_total_and_agrees_with_the_evaluator_vocabulary() {
 }
 
 #[test]
-fn the_projection_is_lossy_and_that_is_the_finding() {
-    // This is the evidence behind the question raised with the evaluator's
-    // owner, held as a test so it cannot quietly stop being true.
+fn the_projection_is_injective_so_the_comparison_has_teeth() {
+    // The corrected form of a finding this file previously got wrong.
     //
-    // Three intents that a reviewer would want told apart — a write that lost
-    // to a later write, a create the author cancelled themselves, and a write
-    // that was never a change — all arrive at the same coarse arm. The spec
-    // keeps the totality map so reviewers can inspect "what an agent attempted
-    // versus what actually survives"; at this resolution they cannot.
+    // The oracle briefly asserted that the evaluator's vocabulary *conflated*
+    // the no-op reasons, and was about to report a spec-versus-implementation
+    // divergence on that basis. It was wrong: the public carrier is
+    // `Absorbed(AbsorptionReason)`, and the reason distinguishes identity from
+    // inverse-cancellation from overwrite. The divergence did not exist.
+    //
+    // What survives is the property that made the question worth asking: the
+    // three semantically different outcomes must stay distinguishable through
+    // the projection, or a comparison built on it proves nothing about them.
     let distinct = [
         Disposition::Absorption,
         Disposition::InverseCancellation,
@@ -1072,21 +1113,15 @@ fn the_projection_is_lossy_and_that_is_the_finding() {
     ];
     let projected: BTreeSet<ProjectedDisposition> =
         distinct.iter().map(|d| d.projected()).collect();
-
-    assert_eq!(
-        distinct.len(),
-        3,
-        "the three fine-grained arms must be distinct to begin with"
-    );
     assert_eq!(
         projected.len(),
-        1,
-        "all three must collapse to one arm for this to be the loss it is claimed to be; \
-         got {projected:?}"
+        distinct.len(),
+        "the projection must not merge distinct no-op reasons; got {projected:?}"
     );
 
-    // And the loss is real in practice, not only in the type: these two
-    // programs are semantically different and become indistinguishable.
+    // And it holds on real programs, not only on hand-built values: a
+    // self-cancelled create and a write that was never a change must remain
+    // distinguishable after projection.
     let cancelled = fold(
         &basis_of(&[]),
         &[
@@ -1106,16 +1141,53 @@ fn the_projection_is_lossy_and_that_is_the_finding() {
             mode: Mode::Regular,
         }],
     );
-
     assert_ne!(
-        cancelled.dispositions.last(),
-        never_a_change.dispositions.last(),
-        "the oracle must distinguish a self-cancelled create from a no-change write"
-    );
-    assert_eq!(
         cancelled.dispositions.last().map(|d| d.projected()),
         never_a_change.dispositions.last().map(|d| d.projected()),
-        "...and the evaluator's vocabulary must be shown to conflate them, which is \
-         precisely what was raised with its owner"
+        "a self-cancelled create and a no-change write must stay distinct after projection"
+    );
+}
+
+#[test]
+fn the_evaluator_arms_this_oracle_cannot_yet_reach_are_named() {
+    // Two of the evaluator's absorption reasons have no counterpart here:
+    // `PreconditionMismatchNoOp` needs mismatch policies and
+    // `DuplicateIdenticalDelivery` needs outbox delivery keys, neither of which
+    // the ref-only model carries. Naming them keeps the gap visible; an oracle
+    // that silently produced four of six reasons would look complete.
+    let unreachable = [
+        AbsorptionReason::PreconditionMismatchNoOp,
+        AbsorptionReason::DuplicateIdenticalDelivery,
+    ];
+    let reachable: BTreeSet<AbsorptionReason> = [
+        Disposition::IdentityNoOp,
+        Disposition::InverseCancellation,
+        Disposition::Absorption,
+    ]
+    .iter()
+    .filter_map(|d| match d.projected() {
+        ProjectedDisposition::Absorbed(reason) => Some(reason),
+        _ => None,
+    })
+    .collect();
+
+    for arm in unreachable {
+        assert!(
+            !reachable.contains(&arm),
+            "{arm:?} is now reachable; extend the model and remove it from the unreachable list \
+             rather than leaving this test asserting a stale gap"
+        );
+    }
+    assert_eq!(
+        reachable.len(),
+        3,
+        "the ref-only model should reach exactly three absorption reasons"
+    );
+    // TransactionAborted is likewise unmodelled: it needs statement-level
+    // mismatch policies escalating to TxnAbort.
+    assert_ne!(
+        ProjectedDisposition::TransactionAborted,
+        ProjectedDisposition::StatementError,
+        "the abort arm exists in the vocabulary even though no program here reaches it"
     );
 }
