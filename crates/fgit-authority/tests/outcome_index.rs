@@ -1297,3 +1297,88 @@ fn the_exposed_identity_helpers_match_the_hand_derivation() {
         "different batches must have different identities"
     );
 }
+
+/// An absent accelerator must not admit a second terminal decision.
+///
+/// This is the property the FG-007b recovery verifiers protect, with its
+/// premise CONSTRUCTED rather than crash-produced. A fault at publication can
+/// no longer leave the head ahead of its outcomes — that is what the atomic
+/// primitive removed — so the wiped-index state is built the way it can still
+/// legitimately arise: an index that was never written, rebuilt, or GC'd, and
+/// the older publisher that `compare_exchange_head` still serves.
+///
+/// The distinction matters because the property is unchanged and still load
+/// bearing. Only the route to the starting state changed.
+#[test]
+fn an_absent_accelerator_still_refuses_a_second_terminal_decision() {
+    let store = store();
+    let genesis = genesis_head();
+    initialize_repository(&store, &head_slot(), &genesis).expect("genesis");
+
+    // Publish WITHOUT the accelerator: stage the bodies, move the head.
+    let first = batch(&genesis, 1, vec![committed(tx(0xA1), 1, 0x51)]);
+    let head = successor_head(&genesis, batch_id_of(&first), 2);
+    let batch_slot = body_key(IdentityDomain::RepositoryDecisionBatch, &first).expect("a key");
+    store
+        .put_if_absent(&batch_slot, &encode_body(&first).expect("encodable"))
+        .expect("staging the batch");
+    let head_slot_by_id = body_key(IdentityDomain::RepositoryAuthorityHead, &head).expect("a key");
+    let head_bytes = encode_body(&head).expect("encodable");
+    store
+        .put_if_absent(&head_slot_by_id, &head_bytes)
+        .expect("staging the head");
+    let HeadRead::Present(receipt) = store.read_head(&head_slot()).expect("a readable head") else {
+        panic!("genesis must be published");
+    };
+    let CasOutcome::Committed(_) = store
+        .compare_exchange_head(
+            &head_slot(),
+            receipt.token(),
+            HeadGeneration::try_new(2).expect("positive"),
+            &head_bytes,
+        )
+        .expect("the conditional replacement")
+    else {
+        panic!("the replacement must publish");
+    };
+
+    // The premise: decided in the stream, absent from the accelerator.
+    assert_eq!(
+        indexed_outcome(&store, tenant(), repository(), tx(0xA1)).expect("index read"),
+        OutcomeLookup::Undecided,
+        "this case is only meaningful while the accelerator is genuinely empty"
+    );
+    assert!(
+        matches!(
+            replay_outcome(&store, &head_slot(), tx(0xA1)).expect("stream replay"),
+            OutcomeLookup::Decided(_)
+        ),
+        "and only meaningful while the stream genuinely carries the decision"
+    );
+
+    // A second publisher, different decision, same sealed transaction. It reads
+    // an absent accelerator; the walk must still find the standing decision.
+    let second = batch(&head, 2, vec![refused(tx(0xA1), 2, 0x5F)]);
+    let second_head = successor_head(&head, batch_id_of(&second), 3);
+    let outcome = publish_decisions(
+        &store,
+        &head_slot(),
+        current_token(&store),
+        &second,
+        &second_head,
+        tenant(),
+    );
+
+    assert!(
+        matches!(outcome, Err(OutcomeFailure::AcceleratorConflict { .. })),
+        "accelerator absence must never be read as 'not decided' when the \
+         authenticated stream says otherwise: {outcome:?}"
+    );
+
+    // And the head did not move, so nothing was published on the way to that.
+    assert_eq!(
+        head_generation_now(&store),
+        2,
+        "a refused duplicate must not have crossed the head-CAS boundary"
+    );
+}
