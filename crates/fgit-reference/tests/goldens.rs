@@ -61,7 +61,7 @@ use fgit_types::vocabulary::MismatchPolicy;
 // Fixture
 // ---------------------------------------------------------------------------
 
-fn schema() -> SchemaId {
+const fn schema() -> SchemaId {
     SchemaId::new(SchemaFamily::from_static("fgit/ref-txn"), 2, 0)
 }
 
@@ -760,7 +760,7 @@ fn a_divergence_names_the_step_the_input_and_both_roots_and_is_ndjson() {
     let divergence = diff(&reference, &candidate).expect("a planted change is found");
     assert_eq!(divergence.step_index, tampered);
     assert_eq!(divergence.kind, DivergenceKind::Roots);
-    assert!(!divergence.input_kind.is_empty());
+    assert_ne!(divergence.input_kind, "");
     assert_ne!(divergence.expected_roots, divergence.actual_roots);
 
     let line = divergence.to_ndjson();
@@ -791,7 +791,7 @@ fn diffing_a_truncated_candidate_reports_the_first_missing_step() {
     candidate.steps.truncate(1);
     let divergence = diff(&reference, &candidate).expect("a missing step is a divergence");
     assert_eq!(divergence.step_index, 1);
-    assert!(divergence.actual_roots.is_empty());
+    assert_eq!(divergence.actual_roots, "");
 }
 
 #[test]
@@ -869,7 +869,7 @@ fn a_truncated_trace_is_refused_rather_than_partially_accepted() {
     let bytes = encode(&history_simple_commit()).expect("encode");
     for cut in [1_usize, bytes.len() / 2, bytes.len() - 1] {
         let error = decode(&bytes[..cut]).expect_err("a truncated frame must be refused");
-        assert!(!error.to_string().is_empty());
+        assert_ne!(error.to_string(), "");
     }
     // The permitted twin: the whole frame decodes.
     assert!(decode(&bytes).is_ok());
