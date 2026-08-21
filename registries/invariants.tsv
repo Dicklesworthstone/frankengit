@@ -16,3 +16,4 @@ INV-013	context	one Context Packet names every source generation and omission cl
 INV-014	workspace	TreeFS never resolves a repository path outside its capability root	path adversarial corpus	yes	specified
 INV-015	release	no partial target matrix receives an authoritative release manifest	DSR cancel/resume/failure matrix	yes	specified
 INV-016	memory-safety	every first-party crate forbids unsafe and production has no foreign Git or database runtime	workspace and binary audit	yes	specified
+INV-017	claims-evidence	public verified claim status requires an admissible evidence class, a named invariant, and current exact artifact commitments	claims registry checker demotion fixtures	yes	implemented

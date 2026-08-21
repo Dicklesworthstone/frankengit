@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+mod claims;
 mod enabled_macros;
 
 const REGISTRY_MARKER_V1: &str = "# franken-registry-v1";
@@ -37,6 +38,8 @@ enum CheckSet {
     Constitution,
     Constellation,
     CrateGraph,
+    Claims,
+    ClaimsStatus,
     LayerReport,
     LedgerPolicy,
     LedgerFsqlitePolicy,
@@ -53,13 +56,15 @@ impl CheckSet {
             "constitution" => Ok(Self::Constitution),
             "constellation" => Ok(Self::Constellation),
             "crate-graph" => Ok(Self::CrateGraph),
+            "claims" => Ok(Self::Claims),
+            "claims-status" => Ok(Self::ClaimsStatus),
             "layer-report" => Ok(Self::LayerReport),
             "ledger-policy" => Ok(Self::LedgerPolicy),
             "ledger-fsqlite-policy" => Ok(Self::LedgerFsqlitePolicy),
             "ledger-constellation" => Ok(Self::LedgerConstellation),
             "ledger-unsafe" => Ok(Self::LedgerUnsafe),
             other => Err(format!(
-                "unknown command `{other}`; expected all, docs, registries, constitution, constellation, crate-graph, layer-report, ledger-policy, ledger-fsqlite-policy, ledger-constellation, or ledger-unsafe"
+                "unknown command `{other}`; expected all, docs, registries, constitution, constellation, crate-graph, claims, claims-status, layer-report, ledger-policy, ledger-fsqlite-policy, ledger-constellation, or ledger-unsafe"
             )),
         }
     }
@@ -183,6 +188,18 @@ fn main() -> ExitCode {
             }
         };
     }
+    if invocation.check_set == CheckSet::ClaimsStatus {
+        return match claims::render_status(&root) {
+            Ok(output) => {
+                print!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("claim-status generation failed: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
     if invocation.check_set == CheckSet::LayerReport {
         let mut report = Report::new();
         let layer_report = evaluate_crate_layers(&root, &mut report);
@@ -204,6 +221,9 @@ fn main() -> ExitCode {
     } else if invocation.check_set == CheckSet::CrateGraph {
         check_workspace_crate_graph(&root, &mut report);
         check_forbidden_artifacts(&root, &mut report);
+    } else if invocation.check_set == CheckSet::Claims {
+        claims::check(&root, &mut report);
+        claims::check_readme(&root, &mut report);
     } else {
         check_required_files(&root, &mut report);
         if invocation.check_set.includes_registries() {
@@ -211,6 +231,7 @@ fn main() -> ExitCode {
         }
         if invocation.check_set.includes_docs() {
             check_markdown(&root, &mut report);
+            claims::check_readme(&root, &mut report);
             check_workflows(&root, &mut report);
             check_contract_phrases(&root, &mut report);
         }
@@ -317,6 +338,7 @@ fn check_required_files(root: &Path, report: &mut Report) {
         "registries/README.md",
         "registries/calm_operations.tsv",
         "registries/claim_classes.tsv",
+        "registries/claims.tsv",
         "registries/crate_layers.tsv",
         "registries/dependency_policy.tsv",
         "registries/durable_objects.tsv",
@@ -362,6 +384,25 @@ fn registry_schemas() -> BTreeMap<&'static str, &'static [&'static str]> {
                 "required_evidence",
                 "forbidden_upgrade",
                 "status",
+            ][..],
+        ),
+        (
+            "claims.tsv",
+            &[
+                "id",
+                "claim_class",
+                "scope",
+                "owner_invariant",
+                "required_artifacts",
+                "evidence_class",
+                "status",
+                "source_revision",
+                "toolchain",
+                "target_profile",
+                "assumptions",
+                "non_claims",
+                "revalidation",
+                "fallback_wording",
             ][..],
         ),
         (
@@ -593,6 +634,7 @@ fn check_registries(root: &Path, report: &mut Report) {
             }
         }
     }
+    claims::check(root, report);
 }
 
 fn is_known_status(value: &str) -> bool {
