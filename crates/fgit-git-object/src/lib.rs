@@ -1150,6 +1150,23 @@ mod tests {
         vec![byte; width]
     }
 
+    fn decode_hex(text: &str) -> Vec<u8> {
+        let text = text.trim();
+        assert_eq!(text.len() % 2, 0, "fixture contains whole bytes");
+        text.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]))
+            .collect()
+    }
+
+    fn hex_nibble(byte: u8) -> u8 {
+        match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => panic!("checked-in fixture contains only lowercase hexadecimal"),
+        }
+    }
+
     #[test]
     fn fragmented_loose_header_and_payload_round_trip_exactly() {
         let framed = b"blob 5\0hello";
@@ -1185,6 +1202,53 @@ mod tests {
             parse_loose_framed(b"blob 1\0xy", limits()),
             Err(ObjectError::TrailingLooseBytes)
         );
+    }
+
+    #[test]
+    fn checked_in_zlib_loose_blob_decodes_after_trailer_verification() {
+        let compressed = decode_hex(include_str!("../tests/corpus/blob-hello.zlib.hex"));
+        let object = parse_zlib_loose(&compressed, InflateLimits::GIT_OBJECT, limits())
+            .expect("checked-in zlib member and its trailer are valid");
+        assert_eq!(object.object_type, ObjectType::Blob);
+        assert_eq!(object.body, b"hello");
+        assert_eq!(
+            object
+                .emit_framed_bytes(&limits())
+                .expect("parsed loose object remains internally consistent"),
+            b"blob 5\0hello"
+        );
+    }
+
+    #[test]
+    fn planted_malformed_corpus_maps_to_typed_refusals() {
+        let loose = decode_hex(include_str!("../tests/corpus/malformed/loose-trailing.hex"));
+        assert_eq!(
+            parse_loose_framed(&loose, limits()),
+            Err(ObjectError::TrailingLooseBytes)
+        );
+        assert!(parse_loose_framed(b"blob 1\0x", limits()).is_ok());
+
+        let tree = decode_hex(include_str!(
+            "../tests/corpus/malformed/tree-truncated-reference.hex"
+        ));
+        assert_eq!(
+            parse_tree(&tree, AcceptanceProfile::StrictCreate, &limits()),
+            Err(ObjectError::TruncatedTreeReference)
+        );
+        let valid_tree = vec![TreeEntry {
+            mode: b"100644".to_vec(),
+            name: b"a".to_vec(),
+            object_id: oid(1, 20),
+        }];
+        assert!(emit_tree(&valid_tree, AcceptanceProfile::StrictCreate, &limits()).is_ok());
+
+        let bad_date = include_bytes!("../tests/corpus/malformed/commit-malformed-date.body");
+        assert_eq!(
+            parse_commit(bad_date, AcceptanceProfile::StrictCreate, &limits()),
+            Err(ObjectError::MalformedSignatureDate)
+        );
+        let permitted_date = b"tree 1111111111111111111111111111111111111111\nauthor A <a@x> 1 +0000\ncommitter C <c@x> 1 +0000\n\nmessage";
+        assert!(parse_commit(permitted_date, AcceptanceProfile::StrictCreate, &limits()).is_ok());
     }
 
     #[test]
@@ -1253,6 +1317,26 @@ mod tests {
         assert_eq!(
             parse_tree(&body, AcceptanceProfile::StrictCreate, &limits()),
             Err(ObjectError::TreeEntriesOutOfOrder)
+        );
+    }
+
+    #[test]
+    fn profile_matrix_import_preserves_legacy_mode_and_name() {
+        let legacy = vec![TreeEntry {
+            mode: b"100600".to_vec(),
+            name: b"legacy/name".to_vec(),
+            object_id: oid(4, 20),
+        }];
+        let body = emit_tree(&legacy, AcceptanceProfile::GitCompatibleImport, &limits())
+            .expect("import profile preserves bounded legacy entry bytes");
+        assert_eq!(
+            parse_tree(&body, AcceptanceProfile::GitCompatibleImport, &limits())
+                .expect("import profile parses the same entry"),
+            legacy
+        );
+        assert_eq!(
+            parse_tree(&body, AcceptanceProfile::StrictCreate, &limits()),
+            Err(ObjectError::NonCanonicalTreeMode)
         );
     }
 
