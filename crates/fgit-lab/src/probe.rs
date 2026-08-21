@@ -258,20 +258,19 @@ impl CoverageReport {
     /// A canonical, stable, single-line rendering for a campaign report.
     #[must_use]
     pub fn canonical_line(&self) -> String {
-        let mut out = String::from("fgit-lab-coverage-v1");
-        out.push_str(&format!(
-            "|declared={}|exercised={}|unexercised={}",
-            self.declared_count(),
-            self.exercised.len(),
-            self.unexercised.len()
-        ));
+        let mut parts = vec![
+            "fgit-lab-coverage-v1".to_owned(),
+            format!("declared={}", self.declared_count()),
+            format!("exercised={}", self.exercised.len()),
+            format!("unexercised={}", self.unexercised.len()),
+        ];
         for (id, hits) in &self.exercised {
-            out.push_str(&format!("|hit:{id}={hits}"));
+            parts.push(format!("hit:{id}={hits}"));
         }
         for id in &self.unexercised {
-            out.push_str(&format!("|miss:{id}"));
+            parts.push(format!("miss:{id}"));
         }
-        out
+        parts.join("|")
     }
 }
 

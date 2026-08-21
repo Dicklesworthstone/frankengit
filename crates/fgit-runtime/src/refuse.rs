@@ -1,4 +1,4 @@
-//! Stable refusal and exhaustion vocabulary for the FrankenGit node runtime.
+//! Stable refusal and exhaustion vocabulary for the `FrankenGit` node runtime.
 //!
 //! Every way the runtime profile can decline to proceed is one variant here
 //! with one stable machine code. The codes are part of the observable contract:
@@ -17,7 +17,7 @@ use core::fmt;
 /// ([`asupersync::types::cancel::CancelKind::Deadline`],
 /// [`PollQuota`](asupersync::types::cancel::CancelKind::PollQuota),
 /// [`CostBudget`](asupersync::types::cancel::CancelKind::CostBudget)) so a
-/// refusal raised by FrankenGit policy and a cancellation raised by the
+/// refusal raised by `FrankenGit` policy and a cancellation raised by the
 /// scheduler describe the same dimension with the same word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Exhaustion {

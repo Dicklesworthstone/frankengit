@@ -8,7 +8,7 @@
 //! sessions and database commands, finalize or transfer obligations, close
 //! database workers explicitly, flush evidence, then join the node root.
 //!
-//! The ordering computation here is FrankenGit's own and is pure, so it is
+//! The ordering computation here is `FrankenGit`'s own and is pure, so it is
 //! testable without a running runtime. It is also cross-checked against
 //! Asupersync's compiled supervisor order in this module's tests: the two
 //! independent computations must agree, which is what makes
@@ -307,7 +307,7 @@ impl NodeSpec {
     }
 }
 
-fn invalid(defect: TopologyDefect) -> RuntimeRefusal {
+const fn invalid(defect: TopologyDefect) -> RuntimeRefusal {
     RuntimeRefusal::TopologyInvalid { defect }
 }
 
@@ -434,7 +434,7 @@ impl ShutdownDriver {
     {
         let expected = self
             .next_phase()
-            .ok_or(RuntimeRefusal::ShutdownOutOfOrder {
+            .ok_or_else(|| RuntimeRefusal::ShutdownOutOfOrder {
                 expected: "none",
                 actual: phase.code(),
             })?;

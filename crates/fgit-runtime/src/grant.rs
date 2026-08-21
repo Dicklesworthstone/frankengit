@@ -4,11 +4,11 @@
 //!
 //! The runtime layer is Asupersync's: [`CapMask`] tracks spawn, time, random,
 //! I/O, and remote authority, and the type-level [`CapSet`] makes widening a
-//! compile error via [`SubsetOf`]. FrankenGit does not reimplement that; it
+//! compile error via [`SubsetOf`]. `FrankenGit` does not reimplement that; it
 //! uses it, and adds the refusal that turns a *runtime* narrowing request
 //! into a typed no rather than a silent clamp.
 //!
-//! The authority layer is FrankenGit's own. Publication, object write,
+//! The authority layer is `FrankenGit`'s own. Publication, object write,
 //! network, database, secret, runner, and billing authority are not runtime
 //! concepts — they are repository concepts — so the node tracks them
 //! separately. The rule the profile states, "no detached task may retain
@@ -300,7 +300,10 @@ impl CapabilityProfile {
 
 /// Name the first runtime capability requested but not held.
 fn first_missing_runtime_bit(held: CapMask, requested: CapMask) -> &'static str {
-    const BITS: [(&str, fn() -> CapMask); 5] = [
+    /// One named capability bit and the mask that isolates it.
+    type NamedBit = (&'static str, fn() -> CapMask);
+
+    const BITS: [NamedBit; 5] = [
         ("spawn", || {
             <CapSet<true, false, false, false, false> as CapSetRuntimeMask>::MASK
         }),
@@ -332,7 +335,7 @@ fn first_missing_runtime_bit(held: CapMask, requested: CapMask) -> &'static str 
 /// subsystem can declare its capability row in the type system and still hand
 /// the node a value to narrow against.
 #[must_use]
-pub fn mask_of<C: CapSetRuntimeMask>() -> CapMask {
+pub const fn mask_of<C: CapSetRuntimeMask>() -> CapMask {
     C::MASK
 }
 

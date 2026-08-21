@@ -174,30 +174,24 @@ impl LabSchedule {
     /// reproducible by someone else.
     #[must_use]
     pub fn canonical_line(&self) -> String {
-        let mut out = String::from("fgit-lab-schedule-v1");
-        out.push_str(&format!(
-            "|seed={}",
-            self.seed
-                .map_or_else(|| "none".to_owned(), |seed| seed.to_string())
-        ));
-        out.push_str(&format!(
-            "|participants={}",
-            self.participants
-                .iter()
+        let names = |list: &[StepId]| {
+            list.iter()
                 .map(StepId::as_str)
                 .collect::<Vec<_>>()
                 .join(",")
-        ));
-        out.push_str(&format!("|steps={}", self.order.len()));
-        out.push_str(&format!(
-            "|order={}",
-            self.order
-                .iter()
-                .map(StepId::as_str)
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
-        out
+        };
+        [
+            "fgit-lab-schedule-v1".to_owned(),
+            format!(
+                "seed={}",
+                self.seed
+                    .map_or_else(|| "none".to_owned(), |seed| seed.to_string())
+            ),
+            format!("participants={}", names(&self.participants)),
+            format!("steps={}", self.order.len()),
+            format!("order={}", names(&self.order)),
+        ]
+        .join("|")
     }
 }
 

@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! FrankenGit's deterministic protocol laboratory.
+//! `FrankenGit`'s deterministic protocol laboratory.
 //!
 //! The lab exists so a protocol campaign can be *replayed*. Everything a run
 //! depends on is an explicit input — the seed, the schedule, the profile

@@ -7,7 +7,7 @@
 //! work, database commands, shutdown cleanup — receives a finite,
 //! profile-owned budget.
 //!
-//! This module owns the FrankenGit half of that contract. The lattice itself
+//! This module owns the `FrankenGit` half of that contract. The lattice itself
 //! is the runtime's ([`asupersync::Budget::meet`]); what lives here is the
 //! classification, the finite defaults, and the refusal that fires when code
 //! tries to hand itself more than it inherited.
@@ -191,13 +191,13 @@ impl BudgetPolicy {
     #[must_use]
     pub const fn finite_defaults() -> Self {
         Self {
-            root: ClassLimits::finite(Duration::from_secs(86_400), u32::MAX - 1, u64::MAX / 2),
+            root: ClassLimits::finite(Duration::from_hours(24), u32::MAX - 1, u64::MAX / 2),
             unbounded_root: false,
             request: ClassLimits::finite(Duration::from_secs(30), 100_000, 1_000_000),
             parser: ClassLimits::finite(Duration::from_secs(10), 50_000, 500_000),
             transfer: ClassLimits::finite(Duration::from_secs(300), 1_000_000, 50_000_000),
             database: ClassLimits::finite(Duration::from_secs(15), 50_000, 1_000_000),
-            background: ClassLimits::finite(Duration::from_secs(3_600), 10_000_000, 100_000_000),
+            background: ClassLimits::finite(Duration::from_hours(1), 10_000_000, 100_000_000),
             shutdown: ClassLimits::finite(Duration::from_secs(30), 100_000, 1_000_000),
         }
     }

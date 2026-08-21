@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
-//! FrankenGit's Asupersync runtime profile.
+//! `FrankenGit`'s Asupersync runtime profile.
 //!
-//! This crate is the single place where FrankenGit decides *how* it runs on
+//! This crate is the single place where `FrankenGit` decides *how* it runs on
 //! the one admitted runtime. It does not wrap Asupersync or hide its
 //! semantics: budgets, contexts, outcomes, scopes, and obligations stay
 //! Asupersync types with Asupersync meanings. What lives here is the policy
@@ -10,7 +10,7 @@
 //! - [`meter`]: the budget classes, their finite defaults, and the child
 //!   derivation rule that refuses widening instead of silently clamping it;
 //! - [`grant`]: capability narrowing across both the runtime capability mask
-//!   and FrankenGit's own repository authority set;
+//!   and `FrankenGit`'s own repository authority set;
 //! - [`obligations`]: the obligation-leak policy admissible for each profile
 //!   class, with `Silent` and bare `Log` refused;
 //! - [`boot`]: the named runtime profile inputs, the evidence-safe profile

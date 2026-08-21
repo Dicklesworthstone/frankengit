@@ -211,12 +211,14 @@ impl OracleReport {
     /// A canonical, stable, single-line rendering.
     #[must_use]
     pub fn canonical_line(&self) -> String {
-        let mut out = String::from("fgit-lab-oracle-v1");
-        out.push_str(&format!("|peak_tasks={}", self.peak_tasks));
+        let mut parts = vec![
+            "fgit-lab-oracle-v1".to_owned(),
+            format!("peak_tasks={}", self.peak_tasks),
+        ];
         for (settlement, count) in &self.settlements {
-            out.push_str(&format!("|{}={}", settlement.code(), count));
+            parts.push(format!("{}={}", settlement.code(), count));
         }
-        out
+        parts.join("|")
     }
 }
 

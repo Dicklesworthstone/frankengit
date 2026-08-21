@@ -78,7 +78,7 @@ impl ProfileClass {
     }
 }
 
-/// The named runtime inputs for a FrankenGit node.
+/// The named runtime inputs for a `FrankenGit` node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeProfile {
     class: ProfileClass,
@@ -295,26 +295,27 @@ impl RuntimeProfile {
 
     /// Translate this profile into an Asupersync runtime configuration.
     fn to_config(&self) -> RuntimeConfig {
-        let mut config = RuntimeConfig::default();
-        config.worker_threads = self.worker_threads;
-        config.spawn_admission = self.spawn_admission;
-        config.scheduler_placement_mode = self.scheduler_placement;
-        config.thread_stack_size = self.thread_stack_size;
-        config
-            .thread_name_prefix
-            .clone_from(&self.thread_name_prefix);
-        config.global_queue_limit = self.global_queue_limit;
-        config.enable_parking = self.enable_parking;
-        config.poll_budget = self.poll_budget;
-        config.blocking = BlockingPoolConfig {
+        let defaults = RuntimeConfig::default();
+        let mut blocking = BlockingPoolConfig {
             min_threads: self.blocking_min_threads,
             max_threads: self.blocking_max_threads,
-            ..config.blocking
+            ..defaults.blocking
         };
-        config.blocking.normalize();
-        config.obligation_leak_response = self.leak_policy.response();
-        config.leak_escalation = self.leak_policy.escalation();
-        config
+        blocking.normalize();
+        RuntimeConfig {
+            worker_threads: self.worker_threads,
+            spawn_admission: self.spawn_admission,
+            scheduler_placement_mode: self.scheduler_placement,
+            thread_stack_size: self.thread_stack_size,
+            thread_name_prefix: self.thread_name_prefix.clone(),
+            global_queue_limit: self.global_queue_limit,
+            enable_parking: self.enable_parking,
+            poll_budget: self.poll_budget,
+            blocking,
+            obligation_leak_response: self.leak_policy.response(),
+            leak_escalation: self.leak_policy.escalation(),
+            ..defaults
+        }
     }
 
     /// Build the node runtime.
@@ -405,44 +406,42 @@ impl ProfileIdentity {
     /// carry, but it makes no collision-resistance claim.
     #[must_use]
     pub fn canonical_descriptor(&self) -> String {
-        let mut out = String::new();
-        out.push_str("fgit-runtime-profile-v1");
-        out.push_str(&format!("|class={}", self.class.code()));
-        out.push_str(&format!("|asupersync={}", self.asupersync_version));
-        out.push_str(&format!(
-            "|features={}",
-            if self.asupersync_features.is_empty() {
-                "none".to_owned()
-            } else {
-                self.asupersync_features.join(",")
-            }
-        ));
-        out.push_str(&format!("|target={}-{}", self.target_arch, self.target_os));
-        out.push_str(&format!("|workers={}", self.worker_threads));
-        out.push_str(&format!(
-            "|host_parallelism={}",
-            self.host_derived_parallelism
-        ));
-        out.push_str(&format!("|admission={}", self.spawn_admission));
-        out.push_str(&format!("|placement={}", self.scheduler_placement));
-        out.push_str(&format!("|stack={}", self.thread_stack_size));
-        out.push_str(&format!("|queue={}", self.global_queue_limit));
-        out.push_str(&format!(
-            "|blocking={}..{}",
-            self.blocking_min_threads, self.blocking_max_threads
-        ));
-        out.push_str(&format!("|parking={}", self.enable_parking));
-        out.push_str(&format!("|poll={}", self.poll_budget));
-        out.push_str(&format!("|leak={}", self.leak_policy));
-        out.push_str(&format!(
-            "|leak_escalation={}",
-            self.leak_escalation_threshold
-                .map_or_else(|| "none".to_owned(), |threshold| threshold.to_string())
-        ));
-        out.push_str(&format!("|unbounded_root={}", self.unbounded_root));
+        let mut parts = vec![
+            "fgit-runtime-profile-v1".to_owned(),
+            format!("class={}", self.class.code()),
+            format!("asupersync={}", self.asupersync_version),
+            format!(
+                "features={}",
+                if self.asupersync_features.is_empty() {
+                    "none".to_owned()
+                } else {
+                    self.asupersync_features.join(",")
+                }
+            ),
+            format!("target={}-{}", self.target_arch, self.target_os),
+            format!("workers={}", self.worker_threads),
+            format!("host_parallelism={}", self.host_derived_parallelism),
+            format!("admission={}", self.spawn_admission),
+            format!("placement={}", self.scheduler_placement),
+            format!("stack={}", self.thread_stack_size),
+            format!("queue={}", self.global_queue_limit),
+            format!(
+                "blocking={}..{}",
+                self.blocking_min_threads, self.blocking_max_threads
+            ),
+            format!("parking={}", self.enable_parking),
+            format!("poll={}", self.poll_budget),
+            format!("leak={}", self.leak_policy),
+            format!(
+                "leak_escalation={}",
+                self.leak_escalation_threshold
+                    .map_or_else(|| "none".to_owned(), |threshold| threshold.to_string())
+            ),
+            format!("unbounded_root={}", self.unbounded_root),
+        ];
         for (class, limits) in &self.budget_defaults {
-            out.push_str(&format!(
-                "|budget.{}={}:{}:{}:{}",
+            parts.push(format!(
+                "budget.{}={}:{}:{}:{}",
                 class,
                 limits.timeout.map_or_else(
                     || "none".to_owned(),
@@ -455,11 +454,11 @@ impl ProfileIdentity {
                 limits.priority
             ));
         }
-        out
+        parts.join("|")
     }
 }
 
-/// A running FrankenGit node runtime.
+/// A running `FrankenGit` node runtime.
 ///
 /// Owns the Asupersync [`Runtime`] and is the only production source of
 /// request contexts in this crate.

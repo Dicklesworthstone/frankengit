@@ -294,7 +294,10 @@ mod tests {
         let outcomes = node
             .block_on(async { resolve_batch(&cx, 4, Vec::new(), table_resolver).await })
             .expect("an empty batch is admitted");
-        assert!(outcomes.is_empty());
+        assert!(
+            outcomes.is_empty(),
+            "an empty batch must yield no member outcomes, got {outcomes:?}"
+        );
         assert_eq!(BatchSummary::of(&outcomes).total(), 0);
         drop(cx);
         assert!(node.join_root(Duration::from_secs(5)));

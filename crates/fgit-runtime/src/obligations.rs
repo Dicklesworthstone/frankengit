@@ -46,7 +46,10 @@ impl LeakControls {
     ///
     /// - [`RuntimeRefusal::LeakRecoveryUncontrolled`] when the cleanup budget
     ///   is unbounded, or when the escalation threshold is zero.
-    pub fn new(cleanup_budget: Budget, escalation_threshold: u64) -> Result<Self, RuntimeRefusal> {
+    pub const fn new(
+        cleanup_budget: Budget,
+        escalation_threshold: u64,
+    ) -> Result<Self, RuntimeRefusal> {
         if is_unbounded(cleanup_budget) {
             return Err(RuntimeRefusal::LeakRecoveryUncontrolled {
                 missing: "bounded_cleanup",
@@ -159,7 +162,7 @@ impl LeakPolicy {
     ///
     /// [`RuntimeRefusal::LeakRecoveryUncontrolled`] naming the first missing
     /// control.
-    pub fn recovering(
+    pub const fn recovering(
         controls: LeakControls,
         sinks: RecoverySinks,
     ) -> Result<Self, RuntimeRefusal> {
@@ -210,7 +213,7 @@ impl LeakPolicy {
     /// A recovering policy always escalates to `Panic`: recovery is a bounded
     /// concession to availability, not a permanent operating mode.
     #[must_use]
-    pub fn escalation(&self) -> Option<LeakEscalation> {
+    pub const fn escalation(&self) -> Option<LeakEscalation> {
         match self {
             Self::FailFast => None,
             Self::Recovering { controls, .. } => Some(LeakEscalation::new(

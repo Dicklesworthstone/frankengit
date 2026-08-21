@@ -432,19 +432,20 @@ impl HazardScript {
     /// A canonical, stable, single-line rendering.
     #[must_use]
     pub fn canonical_line(&self) -> String {
-        let mut out = String::from("fgit-lab-hazards-v1");
-        out.push_str(&format!(
-            "|seed={}",
-            self.seed
-                .map_or_else(|| "none".to_owned(), |seed| seed.to_string())
-        ));
-        out.push_str(&format!("|storage={}", self.storage.directives().len()));
-        out.push_str(&format!("|hazards={}", self.hazards.len()));
+        let mut parts = vec![
+            "fgit-lab-hazards-v1".to_owned(),
+            format!(
+                "seed={}",
+                self.seed
+                    .map_or_else(|| "none".to_owned(), |seed| seed.to_string())
+            ),
+            format!("storage={}", self.storage.directives().len()),
+            format!("hazards={}", self.hazards.len()),
+        ];
         for hazard in &self.hazards {
-            out.push('|');
-            out.push_str(&hazard.canonical());
+            parts.push(hazard.canonical());
         }
-        out
+        parts.join("|")
     }
 }
 
