@@ -1059,6 +1059,9 @@ fn find_unsafe_construct(text: &str) -> Option<String> {
 
 fn check_manifests(root: &Path, report: &mut Report) {
     let allowed = load_allowed_dependency_patterns(root, report);
+    let workspace_manifests = workspace_manifest_paths(root, report)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     let mut files = Vec::new();
     collect_files(root, &mut files);
 
@@ -1085,7 +1088,9 @@ fn check_manifests(root: &Path, report: &mut Report) {
 
         check_manifest_overrides(&display, &text, report);
 
-        check_manifest_dependency_sources(root, path, &display, &text, report);
+        if path == &root.join("Cargo.toml") || workspace_manifests.contains(path) {
+            check_manifest_dependency_sources(root, path, &display, &text, report);
+        }
 
         for dependency in manifest_dependency_names(&text) {
             if !allowed
@@ -2724,7 +2729,11 @@ mod tests {
             "[workspace.dependencies]\nfgit-runtime = { path = \"crates/fgit-runtime\" }",
             &mut report,
         );
-        assert!(report.errors.is_empty(), "unexpected errors: {:?}", report.errors);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
 
         let mut report = Report::new();
         check_manifest_overrides("fixtures/Cargo.toml", "[patch.crates-io]", &mut report);
