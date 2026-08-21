@@ -1,0 +1,8 @@
+# FG-020b benchmark evidence v1; measured canonical microsegment bytes and explicit request-count models.
+# Non-claim: loose and pack columns are uncompressed/no-delta framing baselines, not an end-to-end storage or latency result.
+# corpus_id uniquely binds deterministic fixture generation: namespace=economics-v1; SHA-1 OID bytes repeat 1..N; blob payload byte repeats its OID value.
+corpus_id	object_count	payload_bytes_each	microsegment_bytes	loose_canonical_bytes	pack_uncompressed_no_delta_bytes	sequential_loose_requests	sequential_microsegment_requests	sequential_pack_requests	random_four_loose_requests	random_four_microsegment_requests	random_four_pack_requests	claim_class
+monorepo-history-window-v1	32	128	12028	4384	4192	32	1	1	4	1	1	benchmark
+many-small-tenant-v1	16	8	4156	240	176	16	1	1	4	1	1	benchmark
+binary-heavy-replay-v1	4	4096	17484	16424	16428	4	1	1	4	1	1	benchmark
+agent-write-burst-v1	8	32	2332	320	304	8	1	1	4	1	1	benchmark
