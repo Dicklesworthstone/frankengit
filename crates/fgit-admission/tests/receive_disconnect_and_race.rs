@@ -34,42 +34,52 @@
 //! either side would make the accelerator a second source of truth. A
 //! transaction in that state can be neither retried nor reported.
 //!
-//! ## Why a test-authored projection is legitimate here, given that I said it was not
+//! ## The adapters here are NOT conforming projections, and that bounds this file
 //!
-//! I previously reported this work blocked on a public `AdmissionProjection`,
-//! and the crate owner agreed with the reason: `materialize_commit` and
-//! `materialize_refusal` carry real semantics, so an adversary asserting
-//! against a projection it also authored is not an independent adversary.
+//! An earlier version of this file argued that quantifying over several
+//! *conforming* projections made its results independent of any one of them.
+//! **The crate owner refuted that and the argument is withdrawn.** Two defects:
 //!
-//! That objection is about asserting a projection's *behaviour*. It is not an
-//! objection to using a projection as a *driver* for properties that hold
-//! whatever the projection does. So every assertion in this file is quantified
-//! over [`family`] — several conforming projections that disagree with each
-//! other about ref state, about digests, and about whether a commit is allowed
-//! at all — and asserts only what is identical across all of them. A property
-//! that survives the whole family cannot be an artefact of any one member.
+//! * [`UnboundAdapter::snapshot`] ignores both the `PublicationBasis` and the
+//!   `AuthenticatedHead` it is handed. The trait requires a projection "rooted
+//!   in exactly this authenticated head" and forbids a local ref table as the
+//!   basis for a decision; a fixed map returned regardless of which head was
+//!   asked about is that forbidden shape.
+//! * `materialize_commit` mints roots from seed bytes, derived from nothing.
 //!
-//! Two further reasons this is sound rather than convenient:
+//! I also claimed `validate_commit_materialization` meant "admission does not
+//! trust the projection". **Overstated.** It binds *identity* — `tx_id`,
+//! request digest, closure root — and checks the record is self-consistent
+//! with the roots supplied beside it. It cannot check that those roots describe
+//! the projection's state, so it does not cure the missing head-binding.
 //!
-//! * `admit_one` does not trust the projection. `validate_commit_materialization`
-//!   rejects a record whose `tx_id`, request digest, closure root, ref root,
-//!   forge root, or policy epoch disagrees with the sealed request
-//!   (`MaterializationMismatch`), so a projection cannot forge the identity the
-//!   assertions here are about.
-//! * Faults are injected in the *store*, below the projection entirely.
+//! Three unbound adapters are three variants of *one* unbound adapter, so
+//! quantifying over them buys nothing about ref semantics. Every claim that
+//! rested on ref state, or on one session observing the successor basis, is
+//! withdrawn. What survives never depended on the adapter: **faults are
+//! injected in the store, below it entirely**, and the assertions are about
+//! whether a transaction can be *resolved* and whether it is *decided once* —
+//! never about what was decided.
 //!
 //! ## Non-claims, stated so nothing here is later cited as more than it is
 //!
 //! * **This is a bounded-model result, not an invariant.** It ranges over the
-//!   projections in [`family`] and the fault directives in [`directives`],
-//!   crossed with every operation position a clean admission reaches. It does
-//!   not quantify over all projections or all schedules.
-//! * **No member of [`family`] is the production projection**, which does not
-//!   exist yet. Ref-policy questions — whether a losing push is refused
-//!   `ExpectedOldRefMismatch` or permitted — are that projection's to answer,
-//!   and are not answered here. What is evidenced is the *wiring*: that a
-//!   losing command's authenticated terminal decision is what reaches
-//!   `report-status`, never a pack receipt or a successful staging write.
+//!   fault directives in [`directives`], crossed with every operation position
+//!   a clean admission reaches. It does not quantify over all schedules.
+//! * **Acceptance line 3 is NOT discharged here.** Exactly-one-winner over ref
+//!   state needs a head-bound projection. What these probes cover is the
+//!   narrower decide-once property: one sealed transaction acquires at most one
+//!   terminal decision under a duplicated CAS or a lost response.
+//! * **No adapter here is the production projection**, so no ref-policy
+//!   question — whether a losing push is refused `ExpectedOldRefMismatch` or
+//!   permitted — is answered.
+//! * **Backend applicability: every result here is against
+//!   [`MemoryAuthorityStore`], the reference backend, and says nothing about
+//!   `FsqliteAuthorityStore`, which is the production one.** The fault engine
+//!   this corpus drives exists only on the reference store, so "no disconnect
+//!   leaves a stuck intermediate" is a statement about the reference
+//!   implementation of the authority contract. The production backend has its
+//!   own crash suite and its own applicability limits.
 //! * Hidden-ref probes remain unwritten and unwritable:
 //!   `RefusalCode::HiddenRefUnauthorized` (0x0206) is defined in `fgit-types`
 //!   and classified in `fgit-reference` but produced by nothing in the tree.
@@ -114,7 +124,7 @@ type OutboxMap = BTreeMap<OutboxDeliveryKey, Digest>;
 type RetentionSet = BTreeSet<RetentionRoot>;
 
 // ---------------------------------------------------------------------------
-// The projection family
+// The unbound adapters
 // ---------------------------------------------------------------------------
 
 /// A conforming [`AdmissionProjection`] that is deliberately not the production
@@ -244,10 +254,15 @@ impl UnboundAdapter {
     }
 }
 
-/// The family every assertion in this file is quantified over.
+/// The adapters the store-level probes are driven through.
 ///
-/// The three members disagree about the starting ref table and about whether a
-/// folded transaction may commit, so they drive genuinely different paths
+/// They take different routes through `admit_one`, which is useful for
+/// exercising the publication paths beneath them. It is **not** an independence
+/// argument: they are three variants of one unbound adapter, so agreement
+/// between them is not evidence about projection semantics.
+///
+/// The three differ in starting ref table and in whether a folded transaction
+/// may commit, so they drive genuinely different paths
 /// through `admit_one`: commit-and-publish, fold-abort-and-refuse, and
 /// materializer-refuse-and-publish-refusal.
 fn adapters() -> Vec<UnboundAdapter> {
