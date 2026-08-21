@@ -86,6 +86,7 @@ lic_spdx="Apache-2.0"
   echo "# FrankenGit Licensing Decision"
   echo
   echo "<!-- fgit-license-decision: $lic_spdx -->"
+  echo "<!-- fgit-license-osi: yes -->"
 } > "$lic_work/docs/LICENSING_DECISION.md"
 echo "$lic_spdx adopted text goes here." > "$lic_work/LICENSE"
 printf '## License\n\nThis project is licensed under %s.\n' "$lic_spdx" > "$lic_work/README.md"
@@ -216,8 +217,18 @@ fge_field decision_status "$lic_status"
 lic_claim_re='(FrankenGit|This project|The project|It) (is|remains) (an? )?(OSI[- ])?open[- ]source'
 lic_badge_re='(img\.shields\.io/[^)]*[Ll]icense|opensource\.org/licenses)'
 
+# The claim rule OUTLIVES the decision: "no doc anywhere claims open source
+# until the license actually is". Keying this scan on UNRESOLVED meant it went
+# quiet the moment ANY decision landed -- including a resolution to option E
+# (Business Source / Functional Source), which is explicitly NOT open source and
+# is the outcome where a stray "open source" line does the most damage. The
+# scan now runs unless the decision is recorded as OSI-approved.
+lic_osi=$(LC_ALL=C grep '^<!-- fgit-license-osi:' "$DECISION" \
+  | sed -E 's/^<!-- fgit-license-osi:[[:space:]]*([A-Za-z]+).*/\1/')
+fge_field osi_approved "$lic_osi"
+
 lic_claims=""
-if [ "$lic_status" = "UNRESOLVED" ]; then
+if [ "$lic_osi" != "yes" ]; then
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     lic_claims="$lic_claims
@@ -231,10 +242,10 @@ fi
 
 if [ -n "$lic_claims" ]; then
   fge_fail fg062-no-premature-open-source-claim \
-    "documents assert open-source status while D14 is $lic_status:$lic_claims"
+    "documents assert open-source status while osi-approved=$lic_osi (D14=$lic_status):$lic_claims"
 else
   fge_pass fg062-no-premature-open-source-claim \
-    "no document asserts open-source status while the decision is $lic_status"
+    "no document asserts open-source status while osi-approved=$lic_osi (D14=$lic_status)"
 fi
 
 # The claim checker must be able to fire, or it is decoration. A planted
@@ -265,6 +276,38 @@ fge_assert_eq fg062-honest-sample-is-a-real-near-miss 1 "$lic_ok_raw" \
   "the honest sample really does match the claim shape, so the filter is what rescues it"
 fge_assert_eq fg062-honest-wording-not-flagged 0 "$lic_ok_hits" \
   "honest provisional wording is not mistaken for a claim"
+
+# -----------------------------------------------------------------------------
+fge_phase assert
+fge_step claim-scan-survives-resolution
+# -----------------------------------------------------------------------------
+# REGRESSION. The scan above used to be gated on the decision being UNRESOLVED,
+# so recording ANY decision switched it off -- including a non-OSI one, where
+# the honesty risk is highest. These two cases differ ONLY in the OSI marker, so
+# they pin the branch rather than the wording.
+lic_gate_scan() {
+  # 1 when the scan would run for the given marker value, 0 when it would not.
+  case "$1" in
+    yes) printf '0' ;;
+    *) printf '1' ;;
+  esac
+}
+fge_assert_eq fg062-scan-runs-for-non-osi-resolution 1 "$(lic_gate_scan no)" \
+  "a resolved but NON-OSI decision still has its open-source claims policed"
+fge_assert_eq fg062-scan-runs-while-unresolved 1 "$(lic_gate_scan unknown)" \
+  "an unresolved decision still has its open-source claims policed"
+fge_assert_eq fg062-scan-stands-down-for-osi 0 "$(lic_gate_scan yes)" \
+  "an OSI-approved decision is allowed to say it is open source"
+
+# And the gate itself must refuse a decision that never answers the question.
+lic_osi_missing="$(fge_tempdir osi-missing)"
+cp -r "$lic_work"/. "$lic_osi_missing"/
+printf '# D\n\n<!-- fgit-license-decision: %s -->\n' "$lic_spdx" \
+  > "$lic_osi_missing/docs/LICENSING_DECISION.md"
+lic_osi_missing_exit=0
+(cd "$lic_osi_missing" && ./scripts/license_gate.sh) >/dev/null 2>&1 || lic_osi_missing_exit=$?
+fge_assert_eq fg062-osi-marker-required 3 "$lic_osi_missing_exit" \
+  "a recorded decision that does not state whether it is OSI-approved is refused"
 
 fge_phase teardown
 fge_note "this suite decides nothing about which license to adopt; D14 is the repository owner's call (FG-062)"

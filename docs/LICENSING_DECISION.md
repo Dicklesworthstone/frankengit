@@ -1,6 +1,7 @@
 # FrankenGit Licensing Decision
 
 <!-- fgit-license-decision: UNRESOLVED -->
+<!-- fgit-license-osi: unknown -->
 
 The HTML comment above is the single machine-readable form of this decision and
 the only thing `scripts/license_gate.sh` reads. While it says `UNRESOLVED`,
@@ -10,6 +11,17 @@ replace `UNRESOLVED` with the exact SPDX expression being adopted (for example
 a source-available outcome. The gate then requires that same string to appear in
 `LICENSE`, `README.md`, and `CONTRIBUTING.md`, and to match root `Cargo.toml`'s
 `license` field if one is set.
+
+The second marker records whether the adopted model is an OSI-approved
+open-source licence. It is `unknown` while D14 is unresolved and must become
+exactly `yes` or `no` in the same commit that records the decision. It exists
+because the acceptance rule is *"no doc anywhere claims open source until the
+license actually is"* -- a rule that outlives the decision. Options A, B, C and D
+would make it `yes`; option E (a Business Source or Functional Source Licence)
+would make it `no`, and under `no` the repository must keep saying
+source-available for as long as the restriction period lasts. A checker that
+stopped watching once *a* decision existed would go quiet at precisely the
+outcome that most needs watching.
 
 Nothing in this document decides D14. **The choice is the repository owner's.**
 This document stops at assembling the options, the criteria, and the machinery

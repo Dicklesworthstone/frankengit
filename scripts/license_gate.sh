@@ -26,6 +26,7 @@ cd "$ROOT" || exit 2
 
 DECISION_DOC="docs/LICENSING_DECISION.md"
 MARKER_PREFIX="<!-- fgit-license-decision:"
+OSI_PREFIX="<!-- fgit-license-osi:"
 
 fail=0
 note() { printf 'license-gate: %s\n' "$1" >&2; }
@@ -63,6 +64,28 @@ case "$status" in
 esac
 
 note "decision marker: $status"
+
+# A recorded decision must also say whether it is OSI-approved. The claim rule
+# ("no doc claims open source until the license actually is") outlives the
+# decision, so the answer has to be recorded rather than inferred from the SPDX
+# string -- inferring it would mean this gate maintaining its own opinion of the
+# OSI list, which is exactly the kind of second source of truth the project
+# refuses elsewhere.
+osi_count=$(LC_ALL=C grep -c "^$OSI_PREFIX" "$DECISION_DOC" || true)
+if [ "$osi_count" -ne 1 ]; then
+  note "REFUSED: expected exactly one '$OSI_PREFIX ...' line in $DECISION_DOC, found $osi_count."
+  exit 3
+fi
+osi=$(LC_ALL=C grep "^$OSI_PREFIX" "$DECISION_DOC" | sed -E 's/^<!-- fgit-license-osi:[[:space:]]*([A-Za-z]+).*/\1/')
+case "$osi" in
+  yes | no) ;;
+  *)
+    note "REFUSED: a recorded decision must set the OSI marker to exactly 'yes' or 'no'; found '$osi'."
+    note "  It is 'unknown' only while D14 is unresolved. See FG-062."
+    exit 3
+    ;;
+esac
+note "osi-approved: $osi"
 
 # ------------------------------------------------- surfaces must agree exactly
 #
