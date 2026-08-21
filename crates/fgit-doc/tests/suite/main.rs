@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! The `fgit-doc` integration suite.
 //!
 //! Every group is a module of one binary rather than a binary of its own, so
