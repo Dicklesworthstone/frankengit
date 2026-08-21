@@ -17,11 +17,12 @@ pub use fgit_deflate::{CancellationProbe, InflateLimits, InflateRefusal, StreamP
 /// Parser policy for an object that is being imported or newly created.
 ///
 /// `StrictCreate` accepts only object shapes FrankenGit will create: canonical
-/// loose lengths, canonical Git modes/tree order, safe tree names, a header
-/// separator, and required commit/tag headers with bounded dates. The import
-/// profile preserves bounded unusual headers, missing commit/tag separators,
-/// unordered tree entries, non-canonical octal modes, and unsafe names as raw
-/// bytes for quarantine/conformance handling. Both profiles refuse ambiguous
+/// Git modes/tree order, safe tree names, a header separator, and required
+/// commit/tag headers with bounded dates. The import profile preserves bounded
+/// unusual headers, missing commit/tag separators, unordered tree entries,
+/// non-canonical octal modes, and unsafe names as raw bytes for
+/// quarantine/conformance handling. Loose framing itself is canonical and is
+/// validated independently of this profile. Both profiles refuse ambiguous
 /// framing, unterminated entries, invalid reference widths, and budget excess.
 /// Differential coverage of every pinned upstream-version edge is FG-015b.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -262,8 +263,13 @@ pub struct LooseObject {
 
 impl LooseObject {
     /// Emits the native loose-object framing without zlib compression.
-    #[must_use]
     pub fn emit_framed_bytes(&self, limits: &ParseLimits) -> Result<Vec<u8>, ObjectError> {
+        if self.declared_size != self.body.len() {
+            return Err(ObjectError::LooseLengthMismatch {
+                declared: self.declared_size,
+                actual: self.body.len(),
+            });
+        }
         emit_loose_framed(self.object_type, &self.body, limits)
     }
 }
@@ -678,19 +684,19 @@ pub fn emit_object_body(
     limits: &ParseLimits,
 ) -> Result<Vec<u8>, ObjectError> {
     match object {
-        ParsedObject::Blob(body) => Ok(body.clone()),
+        ParsedObject::Blob(body) => checked_body_copy(body, limits),
         ParsedObject::Tree(entries) => emit_tree(entries, profile, limits),
         ParsedObject::Commit(commit) => {
             if profile == AcceptanceProfile::StrictCreate {
-                validate_strict_commit(commit.headers())?;
+                validate_strict_commit(commit.headers(), limits)?;
             }
-            Ok(commit.raw.clone())
+            checked_body_copy(&commit.raw, limits)
         }
         ParsedObject::Tag(tag) => {
             if profile == AcceptanceProfile::StrictCreate {
-                validate_strict_tag(tag.headers())?;
+                validate_strict_tag(tag.headers(), limits)?;
             }
-            Ok(tag.raw.clone())
+            checked_body_copy(&tag.raw, limits)
         }
     }
 }
@@ -788,7 +794,7 @@ pub fn parse_commit(
 ) -> Result<Commit, ObjectError> {
     let (headers, message_start) = parse_headers(body, profile, limits)?;
     if profile == AcceptanceProfile::StrictCreate {
-        validate_strict_commit(&headers)?;
+        validate_strict_commit(&headers, limits)?;
     }
     Ok(Commit {
         raw: copy_bytes(body)?,
@@ -805,7 +811,7 @@ pub fn parse_tag(
 ) -> Result<Tag, ObjectError> {
     let (headers, message_start) = parse_headers(body, profile, limits)?;
     if profile == AcceptanceProfile::StrictCreate {
-        validate_strict_tag(&headers)?;
+        validate_strict_tag(&headers, limits)?;
     }
     Ok(Tag {
         raw: copy_bytes(body)?,
@@ -922,8 +928,14 @@ fn parse_headers(
     if header_bytes.is_empty() {
         return Ok((headers, message_start));
     }
+    let mut line_count = 0_usize;
     for line in header_bytes.split(|byte| *byte == b'\n') {
-        if headers.len() >= limits.max_header_lines || line.len() > limits.max_header_line_bytes {
+        line_count = line_count
+            .checked_add(1)
+            .ok_or(ObjectError::HeaderLimitExceeded {
+                limit: limits.max_header_lines,
+            })?;
+        if line_count > limits.max_header_lines || line.len() > limits.max_header_line_bytes {
             return Err(ObjectError::HeaderLimitExceeded {
                 limit: limits.max_header_lines,
             });
@@ -967,7 +979,10 @@ fn is_strict_header_name(name: &[u8]) -> bool {
         .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
-fn validate_strict_commit(headers: &[HeaderField]) -> Result<(), ObjectError> {
+fn validate_strict_commit(
+    headers: &[HeaderField],
+    limits: &ParseLimits,
+) -> Result<(), ObjectError> {
     let mut tree_count = 0;
     let mut author_count = 0;
     let mut committer_count = 0;
@@ -975,9 +990,9 @@ fn validate_strict_commit(headers: &[HeaderField]) -> Result<(), ObjectError> {
         match header.name.as_slice() {
             b"tree" => {
                 tree_count += 1;
-                validate_native_reference(&header.value)?;
+                validate_native_reference(&header.value, limits.tree_reference_bytes)?;
             }
-            b"parent" => validate_native_reference(&header.value)?,
+            b"parent" => validate_native_reference(&header.value, limits.tree_reference_bytes)?,
             b"author" => {
                 author_count += 1;
                 validate_signature_date(&header.value)?;
@@ -1003,7 +1018,7 @@ fn validate_strict_commit(headers: &[HeaderField]) -> Result<(), ObjectError> {
     Ok(())
 }
 
-fn validate_strict_tag(headers: &[HeaderField]) -> Result<(), ObjectError> {
+fn validate_strict_tag(headers: &[HeaderField], limits: &ParseLimits) -> Result<(), ObjectError> {
     let mut object_count = 0;
     let mut type_count = 0;
     let mut tag_count = 0;
@@ -1012,7 +1027,7 @@ fn validate_strict_tag(headers: &[HeaderField]) -> Result<(), ObjectError> {
         match header.name.as_slice() {
             b"object" => {
                 object_count += 1;
-                validate_native_reference(&header.value)?;
+                validate_native_reference(&header.value, limits.tree_reference_bytes)?;
             }
             b"type" => {
                 type_count += 1;
@@ -1047,8 +1062,14 @@ fn validate_strict_tag(headers: &[HeaderField]) -> Result<(), ObjectError> {
     Ok(())
 }
 
-fn validate_native_reference(value: &[u8]) -> Result<(), ObjectError> {
-    if matches!(value.len(), 40 | 64) && value.iter().all(u8::is_ascii_hexdigit) {
+fn validate_native_reference(value: &[u8], object_id_bytes: usize) -> Result<(), ObjectError> {
+    let expected_hex_bytes =
+        object_id_bytes
+            .checked_mul(2)
+            .ok_or(ObjectError::UnsupportedTreeReferenceWidth {
+                width: object_id_bytes,
+            })?;
+    if value.len() == expected_hex_bytes && value.iter().all(u8::is_ascii_hexdigit) {
         Ok(())
     } else {
         Err(ObjectError::MalformedObjectReference)
@@ -1062,7 +1083,10 @@ fn validate_signature_date(value: &[u8]) -> Result<(), ObjectError> {
     let timezone = fields.next().ok_or(ObjectError::MalformedSignatureDate)?;
     let timestamp = fields.next().ok_or(ObjectError::MalformedSignatureDate)?;
     let identity_prefix = fields.next().ok_or(ObjectError::MalformedSignatureDate)?;
-    if !identity_prefix.ends_with(b">") || !timestamp.iter().all(u8::is_ascii_digit) {
+    if !identity_prefix.ends_with(b">")
+        || timestamp.is_empty()
+        || !timestamp.iter().all(u8::is_ascii_digit)
+    {
         return Err(ObjectError::MalformedSignatureDate);
     }
     if timezone.len() != 5
@@ -1071,12 +1095,31 @@ fn validate_signature_date(value: &[u8]) -> Result<(), ObjectError> {
     {
         return Err(ObjectError::MalformedSignatureDate);
     }
+    let _timestamp = parse_decimal_u64(timestamp)?;
     let hours = usize::from(timezone[1] - b'0') * 10 + usize::from(timezone[2] - b'0');
     let minutes = usize::from(timezone[3] - b'0') * 10 + usize::from(timezone[4] - b'0');
     if hours > 23 || minutes > 59 {
         return Err(ObjectError::MalformedSignatureDate);
     }
     Ok(())
+}
+
+fn parse_decimal_u64(bytes: &[u8]) -> Result<u64, ObjectError> {
+    bytes.iter().try_fold(0_u64, |value, byte| {
+        value
+            .checked_mul(10)
+            .and_then(|current| current.checked_add(u64::from(*byte - b'0')))
+            .ok_or(ObjectError::MalformedSignatureDate)
+    })
+}
+
+fn checked_body_copy(body: &[u8], limits: &ParseLimits) -> Result<Vec<u8>, ObjectError> {
+    if body.len() > limits.max_object_bytes {
+        return Err(ObjectError::ObjectTooLarge {
+            limit: limits.max_object_bytes,
+        });
+    }
+    copy_bytes(body)
 }
 
 fn copy_bytes(bytes: &[u8]) -> Result<Vec<u8>, ObjectError> {
@@ -1175,7 +1218,7 @@ mod tests {
             Ordering::Less
         );
         assert_eq!(
-            compare_tree_entries(&entries[2], &entries[3]),
+            compare_tree_entries(&entries[1], &entries[2]),
             Ordering::Less
         );
         let body = emit_tree(&entries, AcceptanceProfile::StrictCreate, &limits())
@@ -1267,6 +1310,27 @@ mod tests {
             parse_tree(&body, AcceptanceProfile::StrictCreate, &sha256_limits)
                 .expect("32-byte parser accepts"),
             entries
+        );
+
+        let sha256_reference = "a".repeat(64);
+        let sha256_commit = format!(
+            "tree {sha256_reference}\nauthor A <a@x> 1 +0000\ncommitter C <c@x> 1 +0000\n\nmessage"
+        );
+        assert!(
+            parse_commit(
+                sha256_commit.as_bytes(),
+                AcceptanceProfile::StrictCreate,
+                &sha256_limits
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            parse_commit(
+                sha256_commit.as_bytes(),
+                AcceptanceProfile::StrictCreate,
+                &limits()
+            ),
+            Err(ObjectError::MalformedObjectReference)
         );
     }
 
