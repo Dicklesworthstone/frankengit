@@ -45,8 +45,7 @@ impl OutputStageReceipt {
         Ok(Self { states })
     }
 
-    #[must_use]
-    fn len(&self) -> usize {
+    const fn len(&self) -> usize {
         self.states.len()
     }
 }
@@ -226,7 +225,6 @@ impl UnpublishedCompaction {
     }
 
     /// Recovers the staged output for a fresh, authenticated re-plan.
-    #[must_use]
     pub fn into_staged(self) -> StagedCompaction {
         self.staged
     }
@@ -247,7 +245,6 @@ impl IndeterminateCompaction {
     }
 
     /// Recovers staged data without claiming it was not published.
-    #[must_use]
     pub fn into_staged(self) -> StagedCompaction {
         self.staged
     }
@@ -331,7 +328,7 @@ pub struct DurabilityReceipt {
 impl DurabilityReceipt {
     /// Constructs a receipt to be supplied by the selected placement profile.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         generation: GenerationId,
         profile: CompactionProfile,
         states: Vec<PublicationState>,
@@ -545,7 +542,7 @@ impl fmt::Display for RetentionRefusal {
 
 impl std::error::Error for RetentionRefusal {}
 
-fn output_count(record: &CompactionRecord) -> usize {
+const fn output_count(record: &CompactionRecord) -> usize {
     record.outputs.pack_roots.len()
         + record.outputs.segment_manifests.len()
         + record.outputs.index_roots.len()

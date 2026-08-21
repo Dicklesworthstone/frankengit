@@ -48,7 +48,7 @@ const fn tenant() -> TenantId {
     TenantId::from_bytes([0x72; OPAQUE_ID_LEN])
 }
 
-fn object() -> GitOid {
+const fn object() -> GitOid {
     GitOid::Sha1(GitOidSha1::from_bytes([0x73; GitOidSha1::LEN]))
 }
 

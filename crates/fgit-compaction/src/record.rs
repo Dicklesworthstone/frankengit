@@ -98,7 +98,7 @@ impl DecisionRange {
     fn read(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
         let first = DecisionSequence::try_new(input.read_scalar::<u64>("range.first")?)?;
         let last = DecisionSequence::try_new(input.read_scalar::<u64>("range.last")?)?;
-        Self::new(first, last).map_err(CompactionRefusal::into_codec)
+        Self::new(first, last).map_err(|_| CompactionRefusal::into_codec())
     }
 }
 
@@ -277,7 +277,7 @@ impl SourceOutputTotalityMap {
 
     fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         self.validate_shape()
-            .map_err(CompactionRefusal::into_codec)?;
+            .map_err(|_| CompactionRefusal::into_codec())?;
         out.write_canonical_set("CompactionRecord.totality", &self.entries, |out, entry| {
             entry.write(out)
         })
@@ -285,7 +285,7 @@ impl SourceOutputTotalityMap {
 
     fn read(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
         let entries = input.read_canonical_set("CompactionRecord.totality", TotalityEntry::read)?;
-        Self::new(entries).map_err(CompactionRefusal::into_codec)
+        Self::new(entries).map_err(|_| CompactionRefusal::into_codec())
     }
 }
 
@@ -325,7 +325,7 @@ impl CompactionOutputs {
 
     fn write(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         self.validate_shape()
-            .map_err(CompactionRefusal::into_codec)?;
+            .map_err(|_| CompactionRefusal::into_codec())?;
         out.write_canonical_set(
             "CompactionRecord.pack_roots",
             &self.pack_roots,
@@ -360,7 +360,7 @@ impl CompactionOutputs {
         };
         outputs
             .validate_shape()
-            .map_err(CompactionRefusal::into_codec)?;
+            .map_err(|_| CompactionRefusal::into_codec())?;
         Ok(outputs)
     }
 }
@@ -413,7 +413,9 @@ impl LogicalEquivalenceProof {
             output_logical_root: input.read_digest()?,
             proof_root: input.read_digest()?,
         };
-        proof.verify().map_err(CompactionRefusal::into_codec)?;
+        proof
+            .verify()
+            .map_err(|_| CompactionRefusal::into_codec())?;
         Ok(proof)
     }
 }
@@ -489,7 +491,8 @@ impl CompactionRecord {
     where
         I: BodyIdentity + ?Sized,
     {
-        self.validate().map_err(CompactionRefusal::into_codec)?;
+        self.validate()
+            .map_err(|_| CompactionRefusal::into_codec())?;
         let raw = body_id(identity, self)?;
         GenerationId::from_internal_object_id(raw).map_err(CodecRefusal::from)
     }
@@ -516,7 +519,8 @@ impl CanonicalBody for CompactionRecord {
     const SCHEMA_MINOR: u16 = COMPACTION_SCHEMA_MINOR;
 
     fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
-        self.validate().map_err(CompactionRefusal::into_codec)?;
+        self.validate()
+            .map_err(|_| CompactionRefusal::into_codec())?;
         out.write_internal_object_id(self.input_head.as_internal_object_id())?;
         out.write_scalar(self.input_head_generation.get());
         self.decision_range.write(out);
@@ -572,7 +576,9 @@ impl CanonicalBody for CompactionRecord {
             resource_receipt_root,
             rejected_layout_evidence_root,
         };
-        record.validate().map_err(CompactionRefusal::into_codec)?;
+        record
+            .validate()
+            .map_err(|_| CompactionRefusal::into_codec())?;
         Ok(record)
     }
 }
@@ -605,7 +611,7 @@ pub enum CompactionRefusal {
 }
 
 impl CompactionRefusal {
-    const fn into_codec(self) -> CodecRefusal {
+    const fn into_codec() -> CodecRefusal {
         CodecRefusal::ValueUnrepresentable {
             field: "CompactionRecord invariant",
             observed: 1,
