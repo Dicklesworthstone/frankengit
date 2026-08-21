@@ -100,7 +100,9 @@ mod body_identity;
 mod commitment;
 mod corpus;
 mod defense;
+mod derive;
 mod hashing;
+mod mac;
 mod native;
 mod registry;
 mod screened;
@@ -124,7 +126,9 @@ pub use defense::{
     BlockVerdict, CollisionDefenseError, CollisionEvidence, CollisionVerdict, Sha1BlockContext,
     Sha1CollisionDetector,
 };
+pub use derive::{MAX_OUTPUT_BYTES, OutputTooLong, derive, derive_key, expand, extract};
 pub use hashing::{DigestHasher, Sha1Hasher, Sha256Hasher, sha1_digest, sha256_digest};
+pub use mac::{HmacSha256, TAG_BYTES, hmac_sha256, verify_mac};
 pub use native::{
     GitHashAlgorithm, GitHashError, GitObjectHasher, GitObjectKind, GitOid, NativeObjectIdentity,
     Sha1, Sha256, git_object_id, parse_git_oid,
