@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 fgit-crypto.workspace = true
 fgit-git-object.workspace = true
+fgit-pack.workspace = true
 fgit-types.workspace = true
 
 [lints]

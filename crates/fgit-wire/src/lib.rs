@@ -19,13 +19,15 @@
 //! are instead checked against the repository's canonical permitted closure,
 //! matching the protocol-v2 distinction.
 //!
-//! Explicitly unsupported, and refused rather than delegated, are receive-pack
-//! and push, unknown v2 commands/capabilities, unbounded negotiation sets,
-//! malformed `deepen` and filter grammar, object-info/bundle-uri/server-option
-//! commands, and transport/service-discovery framing.  A runtime adapter owns
-//! socket cancellation, while a pack implementation owns pack bytes and the
-//! eventual thin-pack or delta construction; neither can change these parsed
-//! request commitments.
+//! The [`receive`] module separately implements bounded v0/v1 receive-pack
+//! request parsing and structural pack quarantine; authoritative ref admission
+//! and publication remain outside this crate. Explicitly unsupported, and
+//! refused rather than delegated, are unknown v2 commands/capabilities,
+//! unbounded negotiation sets, malformed `deepen` and filter grammar,
+//! object-info/bundle-uri/server-option commands, and transport/service-
+//! discovery framing. A runtime adapter owns socket cancellation, while a pack
+//! implementation owns pack bytes and the eventual thin-pack or delta
+//! construction; neither can change these parsed request commitments.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -34,6 +36,9 @@ pub use fgit_crypto::{AnyGitOid, GitObjectFormat};
 pub use fgit_git_object::ObjectType;
 
 use fgit_types::RefName;
+
+/// Bounded SANS-I/O receive-pack parsing and structural pack quarantine.
+pub mod receive;
 
 /// The largest pkt-line frame permitted by Git's common protocol.
 pub const MAX_PKT_LINE_BYTES: usize = 65_520;
