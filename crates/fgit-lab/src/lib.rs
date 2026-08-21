@@ -58,6 +58,7 @@ pub mod plan;
 pub mod probe;
 pub mod refuse;
 pub mod rng;
+pub mod store;
 pub mod tick;
 pub mod verdict;
 
@@ -68,5 +69,6 @@ pub use plan::{LabSchedule, StepCursor, StepId};
 pub use probe::{CoverageReport, FailpointId, FailpointRegistry};
 pub use refuse::LabRefusal;
 pub use rng::SeededEntropy;
+pub use store::{AuthorityCampaign, CampaignOutcome, ScriptedClient, TraceObserver};
 pub use tick::{LabTime, VirtualClock};
 pub use verdict::{ObligationOracle, OracleReport, QuiescenceOracle};
