@@ -431,6 +431,17 @@ fn planted_protocol_negatives_refuse_before_admission_or_unbounded_storage() {
         Err(ReceiveError::Wire(WireError::InvalidRefName))
     );
 
+    let mut repeated_capability_separator =
+        ReceivePack::new(context(b"report-status atomic")).expect("machine");
+    assert!(matches!(
+        repeated_capability_separator.push_packet(Packet::Data(
+            format!("{OLD} {NEW} refs/heads/main\0report-status\0atomic\n").into_bytes(),
+        )),
+        Err(ReceiveError::MalformedCommand { .. })
+    ));
+    assert_eq!(repeated_capability_separator.phase(), ReceivePhase::Refused);
+    assert_eq!(repeated_capability_separator.quarantine_len(), 0);
+
     let mut delete_without_capability = ReceivePack::new(context(b"")).expect("machine");
     delete_without_capability
         .push_packet(command(OLD, ZERO, "refs/heads/delete", None))

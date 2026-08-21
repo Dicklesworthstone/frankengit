@@ -532,7 +532,7 @@ impl ReceivePack {
             self.start_certificate(line)?;
             return Ok(ReceiveTransition::default());
         }
-        let line = line_without_lf(&line).map_err(ReceiveError::Wire)?;
+        let line = command_line_without_lf(&line)?;
         let (command, capabilities) =
             parse_command_line(line, self.context.object_format, &self.context.limits)?;
         if let Some(capabilities) = capabilities {
@@ -1092,6 +1092,24 @@ fn parse_command_line<'line>(
     let new = parse_object_id(new, format).map_err(ReceiveError::Wire)?;
     let ref_name = parse_update_ref_name(ref_name, limits)?;
     Ok((ReceiveCommand { old, new, ref_name }, capabilities))
+}
+
+/// Removes the request newline while preserving the one `NUL` separator that
+/// introduces capabilities on the first `receive-pack` command.
+///
+/// Shared request lines reject every `NUL` byte, but `receive-pack` v0/v1 uses one
+/// between the command triple and its capability list. [`parse_command_line`]
+/// validates that this permissive framing cannot admit a second separator.
+fn command_line_without_lf(line: &[u8]) -> Result<&[u8], ReceiveError> {
+    let Some((&b'\n', text)) = line.split_last() else {
+        return Err(ReceiveError::Wire(WireError::MissingLineFeed));
+    };
+    if text.contains(&b'\n') || text.contains(&b'\r') {
+        return Err(ReceiveError::Wire(WireError::MalformedRequestLine {
+            line: line.to_vec(),
+        }));
+    }
+    Ok(text)
 }
 
 fn parse_update_ref_name(value: &[u8], limits: &ReceiveLimits) -> Result<Vec<u8>, ReceiveError> {
