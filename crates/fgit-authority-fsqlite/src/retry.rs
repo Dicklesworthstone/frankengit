@@ -309,6 +309,81 @@ pub enum RetryOutcome<T> {
     Exhausted(RetryExhausted),
 }
 
+/// What the retry law says to do once one whole attempt has failed.
+///
+/// This is the law itself, lifted out of the driver that runs it. There are two
+/// drivers: the synchronous [`retry_whole_transaction`] below, and the
+/// runtime-aware one in the engine binding, which must *await* its wait instead
+/// of blocking a worker thread. A second transcription of the policy would
+/// drift from the first the moment either changed — and a retry policy that
+/// disagrees with itself across two call paths is precisely how an operation
+/// ends up replayed after an indeterminate outcome. Both drivers call this.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetryVerdict {
+    /// The snapshot is too old; the caller must re-read and start over.
+    FreshSnapshotRequired,
+    /// The outcome is unknown, so the transaction may not be replayed: a blind
+    /// retry could duplicate an effect that already committed.
+    OutcomeIndeterminate,
+    /// The class is outside the transient family and no retry is admitted.
+    Permanent,
+    /// The attempt bound or the parent deadline ran out.
+    Exhausted(RetryExhausted),
+    /// Wait, then run the whole transaction again from the beginning.
+    Retry {
+        /// Ticks to wait before the next attempt.
+        delay_ticks: u64,
+        /// The budget with that wait already spent.
+        budget: RetryBudget,
+    },
+}
+
+/// Apply the retry law to one failed attempt.
+///
+/// `elapsed_ticks` is what the driver has already waited, carried in rather
+/// than tracked here so the function stays a pure decision.
+#[must_use]
+pub const fn decide_after_failure(
+    budget: RetryBudget,
+    backoff: BackoffPlan,
+    attempt_number: u32,
+    elapsed_ticks: u64,
+    class: TransientClass,
+) -> RetryVerdict {
+    match class {
+        TransientClass::FreshSnapshotRequired => RetryVerdict::FreshSnapshotRequired,
+        TransientClass::OutcomeIndeterminate => RetryVerdict::OutcomeIndeterminate,
+        TransientClass::Permanent => RetryVerdict::Permanent,
+        retryable => {
+            if attempt_number >= budget.max_attempts() {
+                return RetryVerdict::Exhausted(RetryExhausted {
+                    attempts: budget.max_attempts(),
+                    elapsed_ticks,
+                    last_class: retryable,
+                    seed: backoff.seed(),
+                    remediation: "the attempt bound was reached; reduce writer concurrency to \
+                                  the admitted envelope or raise the attempt budget",
+                });
+            }
+            let delay = backoff.delay_ticks(attempt_number + 1);
+            if !budget.admits(delay) {
+                return RetryVerdict::Exhausted(RetryExhausted {
+                    attempts: attempt_number,
+                    elapsed_ticks,
+                    last_class: retryable,
+                    seed: backoff.seed(),
+                    remediation: "the parent deadline would be exceeded by another attempt; \
+                                  reduce contention or raise the budget",
+                });
+            }
+            RetryVerdict::Retry {
+                delay_ticks: delay,
+                budget: budget.spend(delay),
+            }
+        }
+    }
+}
+
 /// Run one whole logical transaction, retrying only the admitted classes.
 ///
 /// `attempt` performs the **entire** transaction and returns either its value
@@ -330,53 +405,47 @@ where
 {
     let mut budget = budget;
     let mut elapsed = 0_u64;
-    let mut last_class = TransientClass::Permanent;
 
     for attempt_number in 1..=budget.max_attempts() {
-        match attempt(attempt_number) {
+        let class = match attempt(attempt_number) {
             Ok(value) => return RetryOutcome::Completed(value),
-            Err(TransientClass::FreshSnapshotRequired) => {
+            Err(class) => class,
+        };
+        match decide_after_failure(budget, backoff, attempt_number, elapsed, class) {
+            RetryVerdict::FreshSnapshotRequired => {
                 return RetryOutcome::FreshSnapshotRequired {
                     attempts: attempt_number,
                 };
             }
-            Err(TransientClass::OutcomeIndeterminate) => {
+            RetryVerdict::OutcomeIndeterminate => {
                 return RetryOutcome::OutcomeIndeterminate {
                     attempts: attempt_number,
                 };
             }
-            Err(TransientClass::Permanent) => {
+            RetryVerdict::Permanent => {
                 return RetryOutcome::Permanent {
                     attempts: attempt_number,
                 };
             }
-            Err(class) => {
-                last_class = class;
-                if attempt_number == budget.max_attempts() {
-                    break;
-                }
-                let delay = backoff.delay_ticks(attempt_number + 1);
-                if !budget.admits(delay) {
-                    return RetryOutcome::Exhausted(RetryExhausted {
-                        attempts: attempt_number,
-                        elapsed_ticks: elapsed,
-                        last_class,
-                        seed: backoff.seed(),
-                        remediation: "the parent deadline would be exceeded by another \
-                                      attempt; reduce contention or raise the budget",
-                    });
-                }
-                sleep(delay);
-                elapsed = elapsed.saturating_add(delay);
-                budget = budget.spend(delay);
+            RetryVerdict::Exhausted(exhausted) => return RetryOutcome::Exhausted(exhausted),
+            RetryVerdict::Retry {
+                delay_ticks,
+                budget: next,
+            } => {
+                sleep(delay_ticks);
+                elapsed = elapsed.saturating_add(delay_ticks);
+                budget = next;
             }
         }
     }
 
+    // Reached only if the attempt bound is zero, which `RetryBudget::new`
+    // floors at one; kept as a value rather than a panic because this crate
+    // has no panicking path.
     RetryOutcome::Exhausted(RetryExhausted {
         attempts: budget.max_attempts(),
         elapsed_ticks: elapsed,
-        last_class,
+        last_class: TransientClass::Permanent,
         seed: backoff.seed(),
         remediation: "the attempt bound was reached; reduce writer concurrency to the \
                       admitted envelope or raise the attempt budget",

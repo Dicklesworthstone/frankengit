@@ -635,6 +635,7 @@ dependencies = [
  "fgit-codec",
  "fgit-types",
  "fsqlite",
+ "fsqlite-types",
 ]
 
 [[package]]

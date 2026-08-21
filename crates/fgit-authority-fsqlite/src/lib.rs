@@ -9,24 +9,35 @@
 //! projection, and no SQL commit in this crate publishes repository state
 //! except the one that *is* the embedded authority operation.
 //!
-//! # What is here, and what is deliberately not here yet
+//! # What is here
 //!
-//! The backend binding needs `fsqlite`, whose transitive closure has to be
-//! admitted to the closed dependency universe before it may enter the build.
-//! That admission is in flight, so this crate currently contains the half of
-//! the profile that does not depend on the engine at all:
+//! The engine-independent half of the profile:
 //!
-//! * [`schema`] — the exact DDL and the exact parameterized statement set;
-//! * [`token`] — per-write, ABA-safe version tokens that survive kill/reopen;
-//! * [`retry`] — the whole-transaction retry law and the closed transient family;
-//! * [`envelope`] — the declared concurrency envelope and its admission refusal.
+//! * `schema` — the exact DDL and the exact parameterized statement set;
+//! * `token` — per-write, ABA-safe version tokens that survive kill/reopen;
+//! * `retry` — the whole-transaction retry law and the closed transient family;
+//! * `envelope` — the declared concurrency envelope and its admission refusal;
 //!
-//! Each is a real, tested vertical slice with its final shape, not a
-//! placeholder waiting to be filled in. The remaining piece — the
-//! `AsyncConnection`-owning worker that executes the statement set — lands in
-//! one commit together with the `fsqlite` dependency and its registry rows.
-//! **This crate does not implement [`AuthorityStore`] yet**, and says so rather
-//! than shipping a stub that claims to.
+//! and, since the `fsqlite` closure was admitted at `ffcf5f6`, the engine
+//! binding itself: [`FsqliteAuthorityStore`], which executes that statement set
+//! over an `AsyncConnection`.
+//!
+//! # What this crate does and does not claim about [`AuthorityStore`]
+//!
+//! The binding's operations are **async inherent methods**, because the engine
+//! is async: `Connection` is `!Send`, so `fsqlite` owns it on a dedicated
+//! worker and every operation is a round trip through a command channel. The
+//! [`AuthorityStore`] trait is synchronous by design — it is the semantic
+//! contract, and the linearizability checker must call it without a runtime.
+//!
+//! Those two are bridged by a blocking adapter in this crate's **test** tree,
+//! and the placement bounds what may be claimed. A `block_on`-per-operation
+//! bridge cannot model cancellation arriving *during* an operation. So the
+//! honest claim this crate supports is that **the unchanged FG-004 suite passes
+//! against the fsqlite binding under a synchronous harness** — not that the
+//! binding is conformant under cancellation. Cancellation behaviour is fg005b's
+//! crash and equivalence matrix, and it needs a harness that can actually
+//! deliver a cancel mid-operation.
 //!
 //! # The measured dependency this crate is waiting on
 //!
@@ -72,6 +83,7 @@
 //! [`AuthorityStore`]: fgit_authority::AuthorityStore
 
 mod classify;
+mod engine;
 mod envelope;
 mod interpret;
 mod lifecycle;
@@ -82,6 +94,7 @@ mod schema;
 mod token;
 
 pub use crate::classify::{classify_franken_error, is_retryable_engine_error};
+pub use crate::engine::{EngineError, FsqliteAuthorityStore, run_with_retry};
 pub use crate::envelope::{
     ConcurrencyEnvelope, EnvelopeRefusal, MAX_ADMITTED_AUTOCOMMIT_WRITERS, WriterTopology,
 };
@@ -102,8 +115,8 @@ pub use crate::portable::{
     MAX_EXPORT_ISSUANCE, bundle_head_generation, export_bundle, import_bundle,
 };
 pub use crate::retry::{
-    BackoffPlan, MAX_TRANSIENT_ATTEMPTS, RetryBudget, RetryExhausted, RetryOutcome, TransientClass,
-    classify_is_retryable, retry_whole_transaction,
+    BackoffPlan, MAX_TRANSIENT_ATTEMPTS, RetryBudget, RetryExhausted, RetryOutcome, RetryVerdict,
+    TransientClass, classify_is_retryable, decide_after_failure, retry_whole_transaction,
 };
 pub use crate::schema::{
     HEAD_SLOT_TABLE, IMMUTABLE_BODY_TABLE, SCHEMA_VERSION, STORE_IDENTITY_TABLE, SchemaStatement,

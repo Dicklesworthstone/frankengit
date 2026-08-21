@@ -13,6 +13,11 @@ fgit-types.workspace = true
 # Admitted at ffcf5f6 (DEP-176..218). default-features = false is load-bearing:
 # the default set pulls json, fts5, rtree, icu, misc and the uring profile.
 fsqlite = { version = "0.3.7", default-features = false, features = ["native", "async-api"] }
+# Needed only to NAME `Cx` in signatures: fsqlite re-exports SqliteValue, Row,
+# Connection and FrankenError, but not Cx, which lives at fsqlite_types::cx.
+# Already in the fsqlite closure and covered by the same DEP-176..218 rows, so
+# this adds no admission surface.
+fsqlite-types = { version = "0.3.7", default-features = false, features = ["native"] }
 
 [lints]
 workspace = true
