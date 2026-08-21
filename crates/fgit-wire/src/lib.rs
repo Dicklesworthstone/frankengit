@@ -37,6 +37,8 @@ pub use fgit_git_object::ObjectType;
 
 use fgit_types::RefName;
 
+/// Bounded shallow-history and partial-clone closure computation.
+pub mod closure;
 /// Bounded SANS-I/O receive-pack parsing and structural pack quarantine.
 pub mod receive;
 
@@ -229,6 +231,10 @@ pub enum WireError {
     NegativeDepth,
     /// A deepen depth was not decimal ASCII or overflowed its target width.
     InvalidDepth,
+    /// A `deepen-since` timestamp was not a non-negative decimal Unix time.
+    InvalidTimestamp,
+    /// A `deepen-not` ref was not available from the canonical advertisement.
+    UnknownDeepenNotRef { name: Vec<u8> },
     /// A filter grammar was unsupported or malformed.
     InvalidFilter { filter: Vec<u8> },
     /// A filter contained more parts than the configured ceiling.
@@ -343,6 +349,10 @@ impl Display for WireError {
             }
             Self::NegativeDepth => formatter.write_str("deepen depth cannot be negative"),
             Self::InvalidDepth => formatter.write_str("invalid deepen depth"),
+            Self::InvalidTimestamp => formatter.write_str("invalid deepen-since timestamp"),
+            Self::UnknownDeepenNotRef { name } => {
+                write!(formatter, "unknown deepen-not ref {name:?}")
+            }
             Self::InvalidFilter { filter } => write!(formatter, "invalid object filter {filter:?}"),
             Self::TooManyFilterParts { limit } => {
                 write!(formatter, "too many filter parts; limit {limit}")
@@ -523,7 +533,7 @@ impl PktLineDecoder {
         Ok(Some((packet, consumed)))
     }
 
-    fn check_packet_count(&self, decoded_count: usize) -> Result<(), WireError> {
+    const fn check_packet_count(&self, decoded_count: usize) -> Result<(), WireError> {
         if decoded_count == self.limits.max_packets_per_push {
             return Err(WireError::PacketCountExceeded {
                 limit: self.limits.max_packets_per_push,
@@ -533,7 +543,7 @@ impl PktLineDecoder {
     }
 
     /// Refuses a byte stream that ends between packet boundaries.
-    pub fn finish(&self) -> Result<(), WireError> {
+    pub const fn finish(&self) -> Result<(), WireError> {
         if self.pending.is_empty() {
             Ok(())
         } else {
@@ -575,9 +585,7 @@ pub fn encode_packet(packet: &Packet, limits: &WireLimits) -> Result<Vec<u8>, Wi
     limits.validate()?;
     let payload = match packet {
         Packet::Data(payload) => Some(payload.as_slice()),
-        Packet::Flush => None,
-        Packet::Delimiter => None,
-        Packet::ResponseEnd => None,
+        Packet::Flush | Packet::Delimiter | Packet::ResponseEnd => None,
     };
     let special = match packet {
         Packet::Flush => Some(*b"0000"),
@@ -654,7 +662,7 @@ fn add_output_packet(
     Ok(())
 }
 
-fn format_packet_length(length: usize) -> [u8; 4] {
+const fn format_packet_length(length: usize) -> [u8; 4] {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     [
         HEX[(length >> 12) & 0xf],
@@ -698,10 +706,9 @@ impl Capability {
             });
         }
         let split = token.iter().position(|byte| *byte == b'=');
-        let (name, value) = match split {
-            Some(index) => (&token[..index], Some(&token[index + 1..])),
-            None => (token, None),
-        };
+        let (name, value) = split.map_or((token, None), |index| {
+            (&token[..index], Some(&token[index + 1..]))
+        });
         if name.is_empty() {
             return Err(WireError::EmptyCapability);
         }
@@ -905,7 +912,7 @@ fn line_without_lf(line: &[u8]) -> Result<&[u8], WireError> {
     Ok(text)
 }
 
-fn packet_name(packet: &Packet) -> &'static str {
+const fn packet_name(packet: &Packet) -> &'static str {
     match packet {
         Packet::Data(_) => "data",
         Packet::Flush => "flush",
@@ -934,7 +941,7 @@ impl SidebandBand {
         }
     }
 
-    fn parse(byte: u8) -> Result<Self, WireError> {
+    const fn parse(byte: u8) -> Result<Self, WireError> {
         match byte {
             1 => Ok(Self::PackData),
             2 => Ok(Self::Progress),
@@ -1023,7 +1030,7 @@ pub enum ObjectFilter {
     /// Request a sparse specification object.
     SparseObject(AnyGitOid),
     /// Conjunction of filter terms.
-    Combine(Vec<ObjectFilter>),
+    Combine(Vec<Self>),
 }
 
 /// Parses one bounded upload-pack `filter` value.
@@ -1047,12 +1054,12 @@ fn parse_filter_at_depth(
     if let Some(value) = text.strip_prefix(b"blob:limit=") {
         return parse_unsigned(value)
             .map(ObjectFilter::BlobLimit)
-            .map_err(|_| WireError::InvalidFilter {
+            .map_err(|()| WireError::InvalidFilter {
                 filter: text.to_vec(),
             });
     }
     if let Some(value) = text.strip_prefix(b"tree:") {
-        let depth = parse_unsigned(value).map_err(|_| WireError::InvalidFilter {
+        let depth = parse_unsigned(value).map_err(|()| WireError::InvalidFilter {
             filter: text.to_vec(),
         })?;
         return u32::try_from(depth)
@@ -1146,8 +1153,17 @@ fn parse_depth(text: &[u8]) -> Result<u32, WireError> {
     if text.starts_with(b"-") {
         return Err(WireError::NegativeDepth);
     }
-    let depth = parse_unsigned(text).map_err(|_| WireError::InvalidDepth)?;
-    u32::try_from(depth).map_err(|_| WireError::InvalidDepth)
+    let depth = parse_unsigned(text).map_err(|()| WireError::InvalidDepth)?;
+    let depth = u32::try_from(depth).map_err(|_| WireError::InvalidDepth)?;
+    if depth == 0 {
+        return Err(WireError::InvalidDepth);
+    }
+    Ok(depth)
+}
+
+fn parse_timestamp(text: &[u8]) -> Result<i64, WireError> {
+    let timestamp = parse_unsigned(text).map_err(|()| WireError::InvalidTimestamp)?;
+    i64::try_from(timestamp).map_err(|_| WireError::InvalidTimestamp)
 }
 
 fn parse_object_id(text: &[u8], algorithm: GitObjectFormat) -> Result<AnyGitOid, WireError> {
@@ -1251,6 +1267,13 @@ pub trait UploadPackRepository {
     fn contains_want(&self, oid: AnyGitOid) -> bool;
     /// Whether a client `have` is already common with the advertised closure.
     fn is_common(&self, oid: AnyGitOid) -> bool;
+    /// Resolves one canonical advertised ref for a `deepen-not` control.
+    fn resolve_ref(&self, name: &[u8]) -> Option<AnyGitOid> {
+        self.advertised_refs()
+            .iter()
+            .find(|reference| reference.name == name)
+            .map(|reference| reference.oid)
+    }
     /// Canonical symbolic-ref target, if the supplied ref is symbolic.
     fn symref_target(&self, _name: &[u8]) -> Option<&[u8]> {
         None
@@ -1274,6 +1297,10 @@ pub struct PackRequest {
     pub shallows: Vec<AnyGitOid>,
     /// Optional depth boundary requested by the client.
     pub deepen: Option<u32>,
+    /// Optional lower committer-time boundary requested by the client.
+    pub deepen_since: Option<i64>,
+    /// Ref tips whose reachable history is excluded from deepening.
+    pub deepen_not: Vec<AnyGitOid>,
     /// Optional parsed partial-clone filter.
     pub filter: Option<ObjectFilter>,
     /// Whether the pack must be multiplexed through sideband-64k.
@@ -1320,7 +1347,7 @@ pub struct Transition {
 }
 
 impl Transition {
-    fn empty() -> Self {
+    const fn empty() -> Self {
         Self {
             output: Vec::new(),
             events: Vec::new(),
@@ -1525,10 +1552,12 @@ fn parse_v1_ref_line<'a>(
     object_format: GitObjectFormat,
     limits: &WireLimits,
 ) -> Result<(AdvertisedRef, Option<&'a [u8]>), WireError> {
-    let (body, capabilities) = match line.iter().position(|byte| *byte == 0) {
-        Some(offset) => (&line[..offset], Some(&line[offset + 1..])),
-        None => (line, None),
-    };
+    let (body, capabilities) = line
+        .iter()
+        .position(|byte| *byte == 0)
+        .map_or((line, None), |offset| {
+            (&line[..offset], Some(&line[offset + 1..]))
+        });
     let Some(space) = body.iter().position(|byte| *byte == b' ') else {
         return Err(WireError::MalformedRequestLine {
             line: line.to_vec(),
@@ -1563,10 +1592,10 @@ fn validate_advertised_refs(
             });
         }
         parse_ref_name(&reference.name, limits)?;
-        if let Some(previous_name) = previous {
-            if previous_name >= reference.name.as_slice() {
-                return Err(WireError::UnsortedOrDuplicateAdvertisement);
-            }
+        if let Some(previous_name) = previous
+            && previous_name >= reference.name.as_slice()
+        {
+            return Err(WireError::UnsortedOrDuplicateAdvertisement);
         }
         previous = Some(&reference.name);
     }
@@ -1599,6 +1628,8 @@ pub struct LegacyUploadPack {
     haves: Vec<AnyGitOid>,
     shallows: Vec<AnyGitOid>,
     deepen: Option<u32>,
+    deepen_since: Option<i64>,
+    deepen_not: Vec<AnyGitOid>,
     filter: Option<ObjectFilter>,
     ack_mode: AckMode,
     sideband_64k: bool,
@@ -1634,6 +1665,8 @@ impl LegacyUploadPack {
             haves: Vec::new(),
             shallows: Vec::new(),
             deepen: None,
+            deepen_since: None,
+            deepen_not: Vec::new(),
             filter: None,
             ack_mode: AckMode::None,
             sideband_64k: false,
@@ -1661,7 +1694,7 @@ impl LegacyUploadPack {
     }
 
     /// Refuses a transport that ended inside a pkt-line frame.
-    pub fn finish(&self) -> Result<(), WireError> {
+    pub const fn finish(&self) -> Result<(), WireError> {
         self.decoder.finish()
     }
 
@@ -1722,12 +1755,36 @@ impl LegacyUploadPack {
         }
         if let Some(rest) = line.strip_prefix(b"deepen ") {
             self.require_capability(b"shallow")?;
-            if self.deepen.is_some() {
+            if self.deepen.is_some() || self.deepen_since.is_some() {
                 return Err(WireError::MalformedRequestLine {
                     line: line.to_vec(),
                 });
             }
             self.deepen = Some(parse_depth(rest)?);
+            return Ok(Transition::empty());
+        }
+        if let Some(rest) = line.strip_prefix(b"deepen-since ") {
+            self.require_capability(b"shallow")?;
+            if self.deepen.is_some() || self.deepen_since.is_some() {
+                return Err(WireError::MalformedRequestLine {
+                    line: line.to_vec(),
+                });
+            }
+            self.deepen_since = Some(parse_timestamp(rest)?);
+            return Ok(Transition::empty());
+        }
+        if let Some(rest) = line.strip_prefix(b"deepen-not ") {
+            self.require_capability(b"shallow")?;
+            let name = parse_ref_name(rest, &self.limits)?;
+            let oid = repository
+                .resolve_ref(&name)
+                .ok_or(WireError::UnknownDeepenNotRef { name })?;
+            push_unique_oid(
+                "deepen-not",
+                oid,
+                &mut self.deepen_not,
+                self.limits.max_shallows,
+            )?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"filter ") {
@@ -1754,10 +1811,12 @@ impl LegacyUploadPack {
         rest: &[u8],
         repository: &impl UploadPackRepository,
     ) -> Result<Transition, WireError> {
-        let (oid_text, capability_text) = match rest.iter().position(|byte| *byte == b' ') {
-            Some(offset) => (&rest[..offset], Some(&rest[offset + 1..])),
-            None => (rest, None),
-        };
+        let (oid_text, capability_text) = rest
+            .iter()
+            .position(|byte| *byte == b' ')
+            .map_or((rest, None), |offset| {
+                (&rest[..offset], Some(&rest[offset + 1..]))
+            });
         let oid = parse_object_id(oid_text, repository.object_format())?;
         if !repository
             .advertised_refs()
@@ -1797,7 +1856,7 @@ impl LegacyUploadPack {
             push_unique_oid("have", oid, &mut self.haves, self.limits.max_haves)?;
             if repository.is_common(oid) {
                 self.last_common = Some(oid);
-                return self.common_ack_transition(oid);
+                return Ok(self.common_ack_transition(oid));
             }
             return Ok(Transition::empty());
         }
@@ -1806,7 +1865,7 @@ impl LegacyUploadPack {
                 return Err(WireError::MissingWant);
             }
             self.state = LegacyState::Complete;
-            let mut transition = self.final_ack_transition()?;
+            let mut transition = self.final_ack_transition();
             transition
                 .events
                 .push(WireEvent::PackRequested(self.pack_request()));
@@ -1852,7 +1911,7 @@ impl LegacyUploadPack {
         }
     }
 
-    fn common_ack_transition(&self, oid: AnyGitOid) -> Result<Transition, WireError> {
+    fn common_ack_transition(&self, oid: AnyGitOid) -> Transition {
         let output = match self.ack_mode {
             AckMode::None => Vec::new(),
             AckMode::MultiAck => vec![line_packet(
@@ -1862,16 +1921,16 @@ impl LegacyUploadPack {
                 format!("ACK {oid_hex} common\n", oid_hex = oid_hex(oid)).into_bytes(),
             )],
         };
-        Ok(Transition {
+        Transition {
             output,
             events: vec![WireEvent::Common(oid)],
-        })
+        }
     }
 
-    fn final_ack_transition(&self) -> Result<Transition, WireError> {
-        let output = match self.last_common {
-            None => vec![line_packet(b"NAK\n")],
-            Some(oid) => match self.ack_mode {
+    fn final_ack_transition(&self) -> Transition {
+        let output = self.last_common.map_or_else(
+            || vec![line_packet(b"NAK\n")],
+            |oid| match self.ack_mode {
                 AckMode::MultiAckDetailed => vec![line_packet(
                     format!("ACK {oid_hex} ready\n", oid_hex = oid_hex(oid)).into_bytes(),
                 )],
@@ -1879,11 +1938,11 @@ impl LegacyUploadPack {
                     format!("ACK {oid_hex}\n", oid_hex = oid_hex(oid)).into_bytes(),
                 )],
             },
-        };
-        Ok(Transition {
+        );
+        Transition {
             output,
             events: Vec::new(),
-        })
+        }
     }
 
     fn pack_request(&self) -> PackRequest {
@@ -1893,6 +1952,8 @@ impl LegacyUploadPack {
             haves: self.haves.clone(),
             shallows: self.shallows.clone(),
             deepen: self.deepen,
+            deepen_since: self.deepen_since,
+            deepen_not: self.deepen_not.clone(),
             filter: self.filter.clone(),
             sideband_64k: self.sideband_64k,
             thin_pack: self.thin_pack,
@@ -1953,6 +2014,8 @@ pub struct V2UploadPack {
     haves: Vec<AnyGitOid>,
     shallows: Vec<AnyGitOid>,
     deepen: Option<u32>,
+    deepen_since: Option<i64>,
+    deepen_not: Vec<AnyGitOid>,
     filter: Option<ObjectFilter>,
     sideband_all: bool,
     thin_pack: bool,
@@ -1980,6 +2043,8 @@ impl V2UploadPack {
             haves: Vec::new(),
             shallows: Vec::new(),
             deepen: None,
+            deepen_since: None,
+            deepen_not: Vec::new(),
             filter: None,
             sideband_all: false,
             thin_pack: false,
@@ -2009,7 +2074,7 @@ impl V2UploadPack {
     }
 
     /// Refuses a transport that ended inside a pkt-line frame.
-    pub fn finish(&self) -> Result<(), WireError> {
+    pub const fn finish(&self) -> Result<(), WireError> {
         self.decoder.finish()
     }
 
@@ -2179,12 +2244,36 @@ impl V2UploadPack {
         }
         if let Some(rest) = line.strip_prefix(b"deepen ") {
             self.require_fetch_feature(b"shallow")?;
-            if self.deepen.is_some() {
+            if self.deepen.is_some() || self.deepen_since.is_some() {
                 return Err(WireError::MalformedRequestLine {
                     line: line.to_vec(),
                 });
             }
             self.deepen = Some(parse_depth(rest)?);
+            return Ok(Transition::empty());
+        }
+        if let Some(rest) = line.strip_prefix(b"deepen-since ") {
+            self.require_fetch_feature(b"shallow")?;
+            if self.deepen.is_some() || self.deepen_since.is_some() {
+                return Err(WireError::MalformedRequestLine {
+                    line: line.to_vec(),
+                });
+            }
+            self.deepen_since = Some(parse_timestamp(rest)?);
+            return Ok(Transition::empty());
+        }
+        if let Some(rest) = line.strip_prefix(b"deepen-not ") {
+            self.require_fetch_feature(b"shallow")?;
+            let name = parse_ref_name(rest, &self.limits)?;
+            let oid = repository
+                .resolve_ref(&name)
+                .ok_or(WireError::UnknownDeepenNotRef { name })?;
+            push_unique_oid(
+                "deepen-not",
+                oid,
+                &mut self.deepen_not,
+                self.limits.max_shallows,
+            )?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"filter ") {
@@ -2265,29 +2354,29 @@ impl V2UploadPack {
                 .map_err(|_| WireError::AllocationFailure)?;
             line.push(b' ');
             line.extend_from_slice(&reference.name);
-            if self.symrefs {
-                if let Some(target) = repository.symref_target(&reference.name) {
-                    parse_ref_name(target, &self.limits)?;
-                    line.try_reserve(target.len().saturating_add(16))
-                        .map_err(|_| WireError::AllocationFailure)?;
-                    line.extend_from_slice(b" symref-target:");
-                    line.extend_from_slice(target);
-                }
+            if self.symrefs
+                && let Some(target) = repository.symref_target(&reference.name)
+            {
+                parse_ref_name(target, &self.limits)?;
+                line.try_reserve(target.len().saturating_add(16))
+                    .map_err(|_| WireError::AllocationFailure)?;
+                line.extend_from_slice(b" symref-target:");
+                line.extend_from_slice(target);
             }
-            if self.peel {
-                if let Some(peeled) = repository.peeled(reference.oid) {
-                    if peeled.algorithm() != repository.object_format() {
-                        return Err(WireError::ObjectFormatMismatch {
-                            expected: repository.object_format(),
-                            observed: peeled.algorithm(),
-                        });
-                    }
-                    let peeled = oid_hex(peeled);
-                    line.try_reserve(peeled.len().saturating_add(8))
-                        .map_err(|_| WireError::AllocationFailure)?;
-                    line.extend_from_slice(b" peeled:");
-                    line.extend_from_slice(peeled.as_bytes());
+            if self.peel
+                && let Some(peeled) = repository.peeled(reference.oid)
+            {
+                if peeled.algorithm() != repository.object_format() {
+                    return Err(WireError::ObjectFormatMismatch {
+                        expected: repository.object_format(),
+                        observed: peeled.algorithm(),
+                    });
                 }
+                let peeled = oid_hex(peeled);
+                line.try_reserve(peeled.len().saturating_add(8))
+                    .map_err(|_| WireError::AllocationFailure)?;
+                line.extend_from_slice(b" peeled:");
+                line.extend_from_slice(peeled.as_bytes());
             }
             line.push(b'\n');
             if line.len() + 4 > self.limits.max_packet_bytes {
@@ -2377,6 +2466,8 @@ impl V2UploadPack {
                 haves: self.haves.clone(),
                 shallows: self.shallows.clone(),
                 deepen: self.deepen,
+                deepen_since: self.deepen_since,
+                deepen_not: self.deepen_not.clone(),
                 filter: self.filter.clone(),
                 sideband_64k: true,
                 thin_pack: self.thin_pack,
