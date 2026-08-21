@@ -536,3 +536,145 @@ fn the_runtime_reaches_quiescence_after_every_store_in_this_file() {
         "the runtime did not reach quiescence after an explicit close"
     );
 }
+
+// ------------------------------------------------------- planted wrong backends
+//
+// A differential that has never been shown to fail is not evidence. These
+// backends are deliberately wrong in one specific way each, and the same
+// `scripted_history` comparison that passes above must reject every one of
+// them. Without this section, `the_engine_and_the_reference_produce_the_same
+// _scripted_history` could be comparing two identical piles of nothing.
+//
+// The defects are planted in a wrapper over the reference, never in
+// `fgit-authority-fsqlite/src`. A verifier who edits the implementation to
+// prove his own test works has proved nothing about the implementation.
+
+/// Which single law the wrapped backend breaks.
+#[derive(Clone, Copy, Debug)]
+enum Defect {
+    /// Honours a token that was already consumed: two writers each believe
+    /// they published over the same predecessor.
+    SecondWinner,
+    /// Acknowledges an immutable write it never performed.
+    DroppedWrite,
+    /// Reports a fresh creation where the body was already present, which
+    /// hides a rewrite behind an idempotent-looking answer.
+    RetryReportedAsCreate,
+}
+
+struct Planted {
+    inner: MemoryAuthorityStore,
+    defect: Defect,
+}
+
+impl Planted {
+    fn new(defect: Defect) -> Self {
+        Self {
+            inner: MemoryAuthorityStore::new(StoreInstanceId::from_raw(1)),
+            defect,
+        }
+    }
+}
+
+impl AuthorityStore for Planted {
+    fn instance_id(&self) -> StoreInstanceId {
+        self.inner.instance_id()
+    }
+
+    fn limits(&self) -> AuthorityLimits {
+        self.inner.limits()
+    }
+
+    fn put_if_absent(
+        &self,
+        key: &ImmutableKey,
+        body: &[u8],
+    ) -> Result<PutOutcome, AuthorityFailure> {
+        match self.defect {
+            Defect::DroppedWrite => Ok(PutOutcome::Created),
+            Defect::RetryReportedAsCreate => {
+                let _ = self.inner.put_if_absent(key, body)?;
+                Ok(PutOutcome::Created)
+            }
+            Defect::SecondWinner => self.inner.put_if_absent(key, body),
+        }
+    }
+
+    fn read_immutable(&self, key: &ImmutableKey) -> Result<ImmutableRead, AuthorityFailure> {
+        self.inner.read_immutable(key)
+    }
+
+    fn initialize_head(
+        &self,
+        key: &HeadKey,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> Result<fgit_authority::HeadInit, AuthorityFailure> {
+        self.inner.initialize_head(key, generation, body)
+    }
+
+    fn read_head(&self, key: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
+        self.inner.read_head(key)
+    }
+
+    fn compare_exchange_head(
+        &self,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        let honest = self
+            .inner
+            .compare_exchange_head(key, expected, new_generation, new_body)?;
+        match (self.defect, &honest) {
+            // Re-run the exchange against the CURRENT token so the loser is
+            // told it won. This is the second-winner bug exactly: the store
+            // still moves, but a consumed predecessor was accepted.
+            (Defect::SecondWinner, CasOutcome::PredecessorMismatch) => {
+                let current = match self.inner.read_head(key)? {
+                    HeadRead::Present(receipt) => receipt.token(),
+                    HeadRead::Absent => return Ok(honest),
+                };
+                self.inner
+                    .compare_exchange_head(key, current, new_generation, new_body)
+            }
+            _ => Ok(honest),
+        }
+    }
+
+    fn authenticate_head_receipt(
+        &self,
+        receipt: &fgit_authority::HeadReadReceipt,
+    ) -> Result<fgit_authority::AuthenticatedHead, AuthorityFailure> {
+        self.inner.authenticate_head_receipt(receipt)
+    }
+}
+
+#[test]
+fn the_differential_rejects_every_planted_backend() {
+    // The control: an unplanted reference must agree with itself, or a
+    // difference below would prove nothing about the defect.
+    let control_a = MemoryAuthorityStore::new(StoreInstanceId::from_raw(1));
+    let control_b = MemoryAuthorityStore::new(StoreInstanceId::from_raw(1));
+    assert_eq!(
+        scripted_history(&control_a),
+        scripted_history(&control_b),
+        "two clean reference stores must produce identical histories; without this the \
+         rejections below could be noise rather than detection"
+    );
+    let honest = scripted_history(&control_a);
+
+    for defect in [
+        Defect::SecondWinner,
+        Defect::DroppedWrite,
+        Defect::RetryReportedAsCreate,
+    ] {
+        let planted = scripted_history(&Planted::new(defect));
+        assert_ne!(
+            honest, planted,
+            "the differential failed to notice a planted {defect:?}; a comparison that cannot \
+             fail is not evidence that the engine agrees with the reference"
+        );
+    }
+}
