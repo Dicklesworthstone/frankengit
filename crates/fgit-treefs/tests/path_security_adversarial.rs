@@ -20,7 +20,7 @@ use fgit_treefs::capability::{
 use fgit_treefs::export::{ExportLimits, ExportPlanner};
 use fgit_treefs::intent::{IntentLog, TreeEditIntent};
 use fgit_treefs::overlay::{ContentId, ContentRef, EntryClass, FileMode, Overlay, OverlayEntry};
-use fgit_treefs::path::{PathPolicy, TreePath};
+use fgit_treefs::path::{PathPolicy, PathRefusal, TreePath};
 use fgit_types::identity::RepositoryCommitId;
 use fgit_types::{ByteCount, CodecVersion, DigestAlgorithmId, DigestBytes, RepositoryId};
 use std::cell::Cell;
@@ -287,6 +287,33 @@ fn opaque_and_unicode_spellings_preserve_raw_identity_without_path_rewriting() {
 
     // A genuine traversal near-twin remains refused even among opaque names.
     assert!(TreePath::parse_default(b"src/\xff/../private").is_err());
+}
+
+/// Host adapters must detect an ASCII case alias without rewriting either Git
+/// spelling, while path bytes that Git cannot represent receive their exact
+/// parser-level refusal before a view can materialize anything from them.
+#[test]
+fn case_aliases_and_unrepresentable_bytes_are_detected_before_materialization() {
+    let mixed_case = path(b"docs/Readme.md");
+    let folded_case = path(b"docs/readme.md");
+    assert!(mixed_case.case_aliases(&folded_case));
+    assert_ne!(
+        mixed_case, folded_case,
+        "alias detection must not rewrite Git names"
+    );
+
+    assert!(matches!(
+        TreePath::parse_default(b"docs/nul\0name"),
+        Err(PathRefusal::NulByte { .. })
+    ));
+    assert!(matches!(
+        TreePath::parse_default(b"docs/control\x1fname"),
+        Err(PathRefusal::ControlByte { byte: 0x1f, .. })
+    ));
+
+    // Near-twin: opaque but representable Git bytes remain raw path identity.
+    let opaque = TreePath::parse_default(b"docs/\xffname").expect("opaque Git bytes parse");
+    assert_eq!(opaque.as_bytes(), b"docs/\xffname");
 }
 
 fn overlay_contains(overlay: &Overlay, needle: &[u8]) -> bool {
