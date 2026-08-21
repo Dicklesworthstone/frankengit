@@ -100,8 +100,13 @@ main() {
     mkdir -p "${run_directory}/work/pack"
     cp "${pack_path}" "${run_directory}/work/pack/${corpus}.pack"
 
+    # Wrapped in fge_capture so the receipt publishes the EXACT argv, its
+    # digest, and its exit code. Calling the oracle bare would leave the one
+    # command the acceptance claim rests on invisible in the evidence, which is
+    # how a claim ends up inherited rather than demonstrated.
     index_exit=0
-    "${ORACLE}" capture "${PIN_ID}" "${run_directory}" pack "index-${corpus}" -- \
+    fge_capture "index-${corpus}" \
+      "${ORACLE}" capture "${PIN_ID}" "${run_directory}" pack "index-${corpus}" -- \
       index-pack --strict "${corpus}.pack" || index_exit=$?
 
     fge_phase assert
@@ -145,8 +150,9 @@ main() {
       print $out $bytes; close $out;
     ' "${corrupt_source}" "${run_directory}/work/pack/corrupt.pack"
 
-    "${ORACLE}" run "${PIN_ID}" "${run_directory}" pack -- \
-      index-pack --strict corrupt.pack >/dev/null 2>&1 || corrupt_exit=$?
+    fge_capture 'index-negative-control' \
+      "${ORACLE}" run "${PIN_ID}" "${run_directory}" pack -- \
+      index-pack --strict corrupt.pack || corrupt_exit=$?
 
     fge_phase assert
     fge_assert_ne 'FG-017B-E2E-040' 0 "${corrupt_exit}" \
@@ -179,5 +185,7 @@ fge_context oracle_pin "${PIN_ID}"
 fge_context claim_scope 'client acceptance is evidenced for exactly the pins offered here; with one pin installed this is single-version evidence and must not be read as cross-version compatibility'
 fge_context non_claim 'this lane says nothing about pack SIZE or SPEED relative to upstream git pack-objects; that is the separate benchmark artifact, and the frozen STORED_V1 profile uses stored DEFLATE blocks by design'
 fge_context non_claim_reader 'our own reader round-trip lives in cargo test -p fgit-pack --test writer_roundtrip and is evidence of FrankenGit agreeing with FrankenGit; only this lane involves a foreign consumer'
+fge_context client_command 'git index-pack --strict <corpus>.pack, executed by scripts/e2e/oracle/oracle.sh inside the Bubblewrap sandbox; every invocation is captured with its exact argv, digest and exit code in this run receipt rather than described in prose'
+fge_context inherits_nothing 'this lane demonstrates client acceptance from its own captured commands; it does not inherit or restate the audit1 observation recorded in fg017a close reason'
 fge_context discrimination 'a corrupted pack is offered on the same path as a negative control; if the pinned client accepted it, every acceptance assertion here would be meaningless and the lane fails'
 main

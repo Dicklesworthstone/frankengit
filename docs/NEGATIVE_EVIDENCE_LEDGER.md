@@ -72,7 +72,10 @@ Section 3 records what design review rejected before code existed. This subsecti
     |---|---|---|---|---|
     | compressible (long runs) | 197 520 | 197 901 | 1 513 | **130.80×** |
     | similar (near-identical revisions) | 166 550 | 8 467 | 2 098 | **4.04×** |
+    | **history (twelve commits, trees, revisions)** | **28 408** | **5 997** | **3 553** | **1.69×** |
     | incompressible (pseudo-random) | 197 568 | 197 949 | 197 623 | **1.00×** |
+
+    **Read the history row, not the headline.** The 130× is a synthetic worst case built from long byte runs. On a real commit history — commits, per-revision trees, a stable subdirectory, successive blob revisions, which is the shape an actual fetch carries — the penalty is **1.69×**. An earlier revision of this entry published only the synthetic figure and thereby overstated the practical cost; the history corpus was added on the writer owner's recommendation and this row was corrected before the bead was verified.
 
     The monotone ordering is the mechanism evidence: the gap collapses to framing overhead exactly where DEFLATE has nothing to remove, so the loss *is* compression rather than something else wearing its clothes. Our own delta selection is doing real work — 166 KB to 8.5 KB on the `similar` corpus, a 20× reduction — and git still wins there 4× by deltifying *and* compressing.
 

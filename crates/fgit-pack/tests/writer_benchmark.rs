@@ -260,11 +260,86 @@ fn corpus_similar() -> BenchCorpus {
     }
 }
 
+fn commit(tree_id: ObjectId, parents: &[ObjectId], message: &str) -> BenchObject {
+    let mut body = Vec::new();
+    body.extend_from_slice(b"tree ");
+    body.extend_from_slice(hex_oid(tree_id).as_bytes());
+    body.push(b'\n');
+    let mut references = vec![tree_id];
+    for parent in parents {
+        body.extend_from_slice(b"parent ");
+        body.extend_from_slice(hex_oid(*parent).as_bytes());
+        body.push(b'\n');
+        references.push(*parent);
+    }
+    // Fixed timestamp: a clock would make pack bytes differ between runs and
+    // make every size number here unreproducible.
+    body.extend_from_slice(b"author FrankenGit Bench <bench@invalid.example> 1700000000 +0000\n");
+    body.extend_from_slice(
+        b"committer FrankenGit Bench <bench@invalid.example> 1700000000 +0000\n",
+    );
+    body.push(b'\n');
+    body.extend_from_slice(message.as_bytes());
+    body.push(b'\n');
+    let id = ObjectId::from(native_object_oid::<Sha1>(ObjectType::Commit, &body));
+    BenchObject {
+        id,
+        object_type: ObjectType::Commit,
+        body,
+        references,
+    }
+}
+
+/// A real commit history, which the other three corpora are not.
+///
+/// The bead asks for "representative histories", and blobs under one tree are
+/// not a history: they exercise no commit or parent-chain packing at all.
+/// TurquoiseDog, who owns the writer, recommended this shape directly. Twelve
+/// revisions of a file plus a stable subdirectory, each with its own tree and
+/// commit, so the pack carries commits, multiple trees, and successive blob
+/// revisions the way a real fetch would.
+fn corpus_history() -> BenchCorpus {
+    let mut objects = Vec::new();
+    let nested = blob(b"stable nested content\n".to_vec());
+    let sub = tree(&[("100644", "nested.txt".to_owned(), nested.id)]);
+    objects.push(nested.clone());
+    objects.push(sub.clone());
+
+    let mut parents: Vec<ObjectId> = Vec::new();
+    let mut head = None;
+    for revision in 0..12_u32 {
+        let mut content = String::new();
+        for line in 0..120 {
+            content.push_str(&format!("document line {line}\n"));
+        }
+        content.push_str(&format!("revision {revision}\n"));
+        let file = blob(content.into_bytes());
+        let root = tree(&[
+            ("100644", "file.txt".to_owned(), file.id),
+            ("40000", "sub".to_owned(), sub.id),
+        ]);
+        let point = commit(root.id, &parents, &format!("revision {revision}"));
+        parents = vec![point.id];
+        head = Some(point.id);
+        objects.push(file);
+        objects.push(root);
+        objects.push(point);
+    }
+
+    BenchCorpus {
+        name: "history",
+        regime: "a real twelve-commit history: commits, per-revision trees, a stable subdirectory, and successive blob revisions",
+        objects,
+        roots: vec![head.expect("the history has at least one commit")],
+    }
+}
+
 fn all_corpora() -> Vec<BenchCorpus> {
     vec![
         corpus_compressible(),
         corpus_incompressible(),
         corpus_similar(),
+        corpus_history(),
     ]
 }
 

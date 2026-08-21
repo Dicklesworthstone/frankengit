@@ -40,7 +40,7 @@ REPOSITORY_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd -P)"
 readonly TEST_NAME='pack_writer_benchmark'
 readonly ORACLE="${REPOSITORY_ROOT}/scripts/e2e/oracle/oracle.sh"
 readonly PIN_ID='git-2.54.0'
-readonly CORPORA=(compressible incompressible similar)
+readonly CORPORA=(compressible incompressible similar history)
 FGIT_SAMPLES=''
 
 # Iterations of git pack-objects per corpus. Matches the producer's arm size so
