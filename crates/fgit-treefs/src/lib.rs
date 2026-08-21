@@ -45,6 +45,7 @@ pub mod journal;
 pub mod obligation;
 pub mod overlay;
 pub mod path;
+pub mod proposal;
 pub mod snapshot;
 
 pub use base::{BaseEntry, BaseError, BaseView, ObjectSource, ObjectSourceError};
@@ -66,6 +67,9 @@ pub use overlay::{
     OverlayLookup, OverlayStats,
 };
 pub use path::{HostProfile, MAX_PATH_BYTES, PathPolicy, PathRefusal, TreePath};
+pub use proposal::{
+    ExpectedRef, PositionReceipt, ProposalRefusal, ProposedRefIntent, ProposedTransaction,
+};
 pub use snapshot::{
     AntiRollbackRefusal, EpochRefusal, EpochSet, OverlayRoot, SessionRecord, WorkspaceEpoch,
     WorkspaceSnapshotBody,
