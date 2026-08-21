@@ -122,6 +122,15 @@ fge_run sqlite-envelope-law-independent \
   cargo test --locked -p fgit-authority-fsqlite --test envelope_law_independent || true
 sq_envelope_exit=$FGE_LAST_EXIT
 
+# FG-005c: the checkpoint-under-load cell. NPC 5.2 names checkpoint a required
+# kill/restart boundary and calls an unexercised matrix cell a terminal
+# non-pass, so this cell cannot be closed by a typed non-claim however careful.
+# Whether it was even producible was answered wrongly three times by reading
+# source before PRAGMA journal_mode settled it; see frankengit-g6s8.
+fge_run sqlite-checkpoint-under-load \
+  cargo test --locked -p fgit-authority-fsqlite --test checkpoint_under_load || true
+sq_checkpoint_exit=$FGE_LAST_EXIT
+
 fge_phase assert
 
 fge_assert_exit FG-005B-E2E-010 0 "$sq_campaign_exit" \
@@ -132,6 +141,8 @@ fge_assert_exit FG-005B-E2E-012 0 "$sq_lifecycle_exit" \
   'the lifecycle evidence still passes alongside it'
 fge_assert_exit FG-005B-E2E-018 0 "$sq_retry_exit" \
   'the spec-derived retry law agrees with the implementation'
+fge_assert_exit FG-005C-E2E-001 0 "$sq_checkpoint_exit" \
+  'the checkpoint-under-load kill/restart boundary is exercised, not documented away'
 fge_assert_exit FG-005B-E2E-019 0 "$sq_envelope_exit" \
   'the spec-derived concurrency envelope agrees with the implementation'
 
@@ -211,5 +222,4 @@ done < "$SQ_REPO/crates/fgit-authority-fsqlite/src/engine.rs"
 fge_assert_eq FG-005B-E2E-023 '0' "$sq_stashed_context" \
   'the store holds no per-store context, so a per-request cancel can still reach an operation'
 
-fge_unsupported FG-005B-E2E-022 \
-  'checkpoint under load: not covered here, but now MEASURED rather than argued. WAL is on (a -wal sidecar grew 70KB to 3.15MB under write load, which cannot happen otherwise), so the cell is live. It did NOT fire at 200 writes / 3MB. The gate is wal_frames_estimate >= an adaptive target derived from PRAGMA wal_autocheckpoint (fsqlite-core/src/connection.rs:50837), so a drill sets the pragma low rather than guessing at volume, and the sidecar size is the signal that a checkpoint actually happened. The trap: the target is multiplied by 1.5 when the write rate exceeds 512 frames/sec, so heavier load makes a checkpoint LESS likely, which is why my probe never saw one. Owned by frankengit-g6s8 (RainyLotus)'
+fge_context covered 'checkpoint under load: EXERCISED by checkpoint_under_load.rs, not documented away. NPC 5.2 names checkpoint a required kill/restart boundary and calls an unexercised matrix cell a terminal non-pass, so a typed non-claim could never have closed it however carefully worded. The drill kills at a boundary with bodies written both before and after it, and requires every one back after reopen. It DRIVES the checkpoint from a second connection rather than waiting on the adaptive threshold, because the earlier probe recorded here measured that automatic checkpointing did not fire at 200 writes / 3MB and that the target is multiplied by 1.5 above 512 frames/sec, so heavier load makes an automatic checkpoint LESS likely. The boundary is witnessed rather than assumed: PRAGMA wal_checkpoint must report a non-empty log with every frame backfilled, and a companion case proves that number tracks this store writes rather than being a constant. Whether the cell was even producible was answered wrongly three times by READING source before PRAGMA journal_mode measured wal; two drafts of the witness were also wrong and were caught by their own absence half rather than by review. See frankengit-g6s8 and NEG-022'
