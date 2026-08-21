@@ -16,7 +16,9 @@ use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use fgit_authority::{AuthorityLimits, HeadInit, HeadKey, HeadRead, StoreInstanceId, body_key};
+use fgit_authority::{
+    AuthenticatedHead, AuthorityLimits, HeadInit, HeadKey, HeadRead, StoreInstanceId, body_key,
+};
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
 use fgit_codec::{schema::RepositoryAuthorityHeadBody, wire::encode_body};
 use fgit_crypto::{GitObjectKind, IdentityDomain, git_object_id, git_payload_commitment};
@@ -55,6 +57,8 @@ pub enum NodeRefusal {
     Runtime(RuntimeRefusal),
     /// Authority-head staging or initialization refused or was ambiguous.
     Authority(fgit_authority::OutcomeFailure),
+    /// A non-initializing open found no canonical authority head.
+    AuthorityHeadAbsent,
     /// The operator-selected storage root cannot name the embedded database.
     StoragePathEncoding,
     /// The derived authority-head key was outside the bounded key vocabulary.
@@ -66,6 +70,13 @@ pub enum NodeRefusal {
         /// The initialization failure observed before cleanup.
         initialization: Box<NodeRefusal>,
         /// The failure while awaiting the authority worker's close.
+        cleanup: Box<NodeRefusal>,
+    },
+    /// A non-initializing open failed and then could not prove clean teardown.
+    ExistingOpenCleanup {
+        /// The refusal observed while opening or authenticating the head.
+        opening: Box<NodeRefusal>,
+        /// The refusal while draining the partially opened node.
         cleanup: Box<NodeRefusal>,
     },
     /// The local immutable object fabric refused the requested operation.
@@ -91,6 +102,9 @@ impl Display for NodeRefusal {
             Self::InvalidWorkerCount => formatter.write_str("node worker count must be non-zero"),
             Self::Runtime(error) => Display::fmt(error, formatter),
             Self::Authority(error) => Display::fmt(error, formatter),
+            Self::AuthorityHeadAbsent => {
+                formatter.write_str("node authority head is absent; run fg init before doctor")
+            }
             Self::StoragePathEncoding => formatter.write_str(
                 "node storage root cannot be represented as a UTF-8 embedded authority path",
             ),
@@ -104,6 +118,10 @@ impl Display for NodeRefusal {
             } => write!(
                 formatter,
                 "authority initialization failed ({initialization}) and explicit cleanup failed ({cleanup})"
+            ),
+            Self::ExistingOpenCleanup { opening, cleanup } => write!(
+                formatter,
+                "non-initializing node open failed ({opening}) and explicit cleanup failed ({cleanup})"
             ),
             Self::Fabric(error) => Display::fmt(error, formatter),
             Self::ObjectTooLarge { offered, maximum } => {
@@ -134,11 +152,13 @@ impl Error for NodeRefusal {
             Self::Authority(error) => Some(error),
             Self::HeadKey(error) => Some(error),
             Self::AuthorityInitializationCleanup { initialization, .. } => Some(initialization),
+            Self::ExistingOpenCleanup { opening, .. } => Some(opening),
             Self::Fabric(error) => Some(error),
             Self::Resource(error) => Some(error),
             Self::Identity(error) => Some(error),
             Self::EmptyStorageRoot
             | Self::InvalidWorkerCount
+            | Self::AuthorityHeadAbsent
             | Self::HeadInitializationConflict
             | Self::StoragePathEncoding
             | Self::ObjectTooLarge { .. }
@@ -216,6 +236,33 @@ pub enum NodeInitialization {
     IdenticalRetry,
 }
 
+/// Bounded, authenticated observations made by [`OneNode::doctor`].
+///
+/// This is deliberately narrower than a replay proof. It authenticates the
+/// current authority receipt and, when the caller names one native object,
+/// re-verifies that object's immutable envelope, native identity, and payload
+/// commitment. It neither enumerates physical storage nor reconstructs an RCR
+/// chain; those capabilities remain owned by the future materializer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorReport {
+    authority_head: AuthenticatedHead,
+    sampled_object: Option<GitOid>,
+}
+
+impl DoctorReport {
+    /// The current authority receipt authenticated by the embedded store.
+    #[must_use]
+    pub const fn authority_head(&self) -> &AuthenticatedHead {
+        &self.authority_head
+    }
+
+    /// The exact object independently re-verified by this invocation, if any.
+    #[must_use]
+    pub const fn sampled_object(&self) -> Option<GitOid> {
+        self.sampled_object
+    }
+}
+
 /// In-process authority/fabric bootstrap for the future one-node server assembly.
 ///
 /// This type deliberately does not claim a transport service: the currently
@@ -245,6 +292,51 @@ impl OneNode {
     /// such as [`Self::read_authority_head`] remain async over the runtime-owned
     /// database context.
     pub fn init(config: NodeConfig) -> Result<(Self, NodeInitialization), NodeRefusal> {
+        let genesis = genesis_head(config.repository_id);
+        let node = Self::open_components(config)?;
+        let initialization = match initialize_embedded_repository(
+            &node.runtime,
+            &node.authority,
+            &node.authority_cx,
+            &node.head_key,
+            &genesis,
+        ) {
+            Ok(HeadInit::Created(_)) => Ok(NodeInitialization::Created),
+            Ok(HeadInit::IdenticalRetry(_)) => Ok(NodeInitialization::IdenticalRetry),
+            Ok(HeadInit::Conflict) => Err(NodeRefusal::HeadInitializationConflict),
+            Err(error) => Err(error),
+        };
+        match initialization {
+            Ok(initialization) => Ok((node, initialization)),
+            Err(initialization) => {
+                let cleanup = node.shutdown();
+                match cleanup {
+                    Ok(()) => Err(initialization),
+                    Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
+                        initialization: Box::new(initialization),
+                        cleanup: Box::new(cleanup),
+                    }),
+                }
+            }
+        }
+    }
+
+    /// Opens an already initialized node without synthesizing a canonical head.
+    ///
+    /// The embedded engine must establish its fixed local schema before it can
+    /// read, but this method never calls `initialize_head`: an absent head is a
+    /// typed refusal. A successful return has authenticated the current head
+    /// receipt against the store's issuance record.
+    pub fn open_existing(config: NodeConfig) -> Result<Self, NodeRefusal> {
+        let node = Self::open_components(config)?;
+        let opened = node.runtime().block_on(node.authenticate_authority_head());
+        match opened {
+            Ok(_) => Ok(node),
+            Err(opening) => Err(close_after_existing_open_failure(node, opening)),
+        }
+    }
+
+    fn open_components(config: NodeConfig) -> Result<Self, NodeRefusal> {
         if config.storage_root.as_os_str().is_empty() {
             return Err(NodeRefusal::EmptyStorageRoot);
         }
@@ -272,13 +364,12 @@ impl OneNode {
         .map_err(NodeRefusal::Fabric)?;
 
         let head_key = head_key(config.repository_id)?;
-        let genesis = genesis_head(config.repository_id);
         let authority_native_cx = runtime.request_cx(BudgetClass::Database);
         let authority_cx = FsqliteCx::new();
         // The database context retains this clone, making the binding to the
         // node-owned runtime explicit rather than relying on task-local state.
         authority_cx.set_native_cx(authority_native_cx);
-        let mut authority = runtime
+        let authority = runtime
             .block_on(FsqliteAuthorityStore::open(
                 &authority_cx,
                 authority_path,
@@ -286,50 +377,19 @@ impl OneNode {
                 AuthorityLimits::default(),
             ))
             .map_err(authority_engine_refusal)?;
-        let initialization = match initialize_embedded_repository(
-            &runtime,
-            &authority,
-            &authority_cx,
-            &head_key,
-            &genesis,
-        ) {
-            Ok(HeadInit::Created(_)) => Ok(NodeInitialization::Created),
-            Ok(HeadInit::IdenticalRetry(_)) => Ok(NodeInitialization::IdenticalRetry),
-            Ok(HeadInit::Conflict) => Err(NodeRefusal::HeadInitializationConflict),
-            Err(error) => Err(error),
-        };
-        let initialization = match initialization {
-            Ok(initialization) => initialization,
-            Err(initialization) => {
-                let cleanup = runtime
-                    .block_on(authority.close(&authority_cx))
-                    .map_err(authority_engine_refusal);
-                return match cleanup {
-                    Ok(()) => Err(initialization),
-                    Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
-                        initialization: Box::new(initialization),
-                        cleanup: Box::new(cleanup),
-                    }),
-                };
-            }
-        };
-
-        Ok((
-            Self {
-                runtime,
-                authority,
-                authority_cx,
-                head_key,
-                fabric,
-                tenant_id: config.tenant_id,
-                repository_id: config.repository_id,
-                namespace,
-                object_format: config.object_format,
-                max_object_bytes: config.max_object_bytes,
-                segment_limits: config.segment_limits,
-            },
-            initialization,
-        ))
+        Ok(Self {
+            runtime,
+            authority,
+            authority_cx,
+            head_key,
+            fabric,
+            tenant_id: config.tenant_id,
+            repository_id: config.repository_id,
+            namespace,
+            object_format: config.object_format,
+            max_object_bytes: config.max_object_bytes,
+            segment_limits: config.segment_limits,
+        })
     }
 
     /// Returns the runtime responsible for request contexts and lifecycle.
@@ -356,6 +416,42 @@ impl OneNode {
             .read_head(&self.authority_cx, &self.head_key)
             .await
             .map_err(authority_engine_refusal)
+    }
+
+    /// Re-reads and authenticates the current authority-head receipt.
+    ///
+    /// Authentication proves the store issued the exact key, token,
+    /// generation, and body presented in the read receipt. It does not prove
+    /// that this receipt is current after the read, so callers still need CAS
+    /// for publication.
+    pub async fn authenticate_authority_head(&self) -> Result<AuthenticatedHead, NodeRefusal> {
+        let HeadRead::Present(receipt) = self.read_authority_head().await? else {
+            return Err(NodeRefusal::AuthorityHeadAbsent);
+        };
+        self.authority
+            .authenticate_head_receipt(&self.authority_cx, &receipt)
+            .await
+            .map_err(authority_engine_refusal)
+    }
+
+    /// Performs the currently published bounded doctor checks.
+    ///
+    /// `sampled_object` is caller-selected rather than discovered from a
+    /// directory listing. It is accepted only in this node's declared native
+    /// Git identity domain, then read through fabric's verified-whole-read
+    /// boundary. No sample means authority-head authentication only.
+    pub async fn doctor(
+        &self,
+        sampled_object: Option<GitOid>,
+    ) -> Result<DoctorReport, NodeRefusal> {
+        let authority_head = self.authenticate_authority_head().await?;
+        if let Some(identity) = sampled_object {
+            let _ = self.read_git_object(identity)?;
+        }
+        Ok(DoctorReport {
+            authority_head,
+            sampled_object,
+        })
     }
 
     /// Awaits authority-worker closure and then joins the owning runtime.
@@ -429,10 +525,25 @@ impl OneNode {
 
     /// Reads one exact immutable Git object from the local fabric.
     pub fn read_git_object(&self, identity: GitOid) -> Result<VerifiedObject, NodeRefusal> {
+        if identity.algorithm() != self.object_format {
+            return Err(NodeRefusal::Fabric(
+                StoreRefusal::NativeObjectIdentityMismatch,
+            ));
+        }
         self.fabric
             .read_whole(identity)
             .map(|read| read.object)
             .map_err(NodeRefusal::Fabric)
+    }
+}
+
+fn close_after_existing_open_failure(node: OneNode, opening: NodeRefusal) -> NodeRefusal {
+    match node.shutdown() {
+        Ok(()) => opening,
+        Err(cleanup) => NodeRefusal::ExistingOpenCleanup {
+            opening: Box::new(opening),
+            cleanup: Box::new(cleanup),
+        },
     }
 }
 
@@ -566,7 +677,7 @@ mod tests {
     use fgit_authority::HeadRead;
     use fgit_types::{RepositoryId, TenantId};
 
-    use super::{NodeConfig, NodeInitialization, OneNode};
+    use super::{NodeConfig, NodeInitialization, NodeRefusal, OneNode};
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -625,5 +736,47 @@ mod tests {
             .expect("reopened head reads");
         assert_eq!(second_head, first_head);
         second.shutdown().expect("reopened node closes cleanly");
+    }
+
+    #[test]
+    fn doctor_authenticates_the_head_and_rechecks_a_named_object() {
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf());
+        let (node, _) = OneNode::init(config.clone()).expect("node opens");
+        let stored = node
+            .put_git_object(fgit_git_object::ObjectType::Blob, b"doctor sample".to_vec())
+            .expect("sample stores");
+        let report = node
+            .runtime()
+            .block_on(node.doctor(Some(stored.identity())))
+            .expect("doctor authenticates and verifies the named sample");
+        assert_eq!(report.sampled_object(), Some(stored.identity()));
+        assert_eq!(
+            report.authority_head().receipt().generation(),
+            fgit_types::HeadGeneration::FIRST
+        );
+        node.shutdown().expect("node closes cleanly");
+
+        let reopened = OneNode::open_existing(config).expect("existing head opens");
+        let reopened_report = reopened
+            .runtime()
+            .block_on(reopened.doctor(None))
+            .expect("doctor authenticates reopened head");
+        assert_eq!(
+            reopened_report.authority_head().receipt().generation(),
+            fgit_types::HeadGeneration::FIRST
+        );
+        reopened.shutdown().expect("reopened node closes cleanly");
+    }
+
+    #[test]
+    fn open_existing_refuses_an_absent_authority_head() {
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf());
+
+        assert!(matches!(
+            OneNode::open_existing(config),
+            Err(NodeRefusal::AuthorityHeadAbsent)
+        ));
     }
 }
