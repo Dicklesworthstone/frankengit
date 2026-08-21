@@ -257,6 +257,66 @@ else
   fge_fail fg027b-html-inert "active content reached a rendered surface:$doc_bad"
 fi
 
+# -----------------------------------------------------------------------------
+fge_phase assert
+fge_step golden-content-preservation
+# -----------------------------------------------------------------------------
+# INDEPENDENT check on the golden SET itself, not on the renderer.
+#
+# The 74 goldens were produced by the very code they are meant to hold to
+# account, so their agreement with that code proves nothing about content
+# fidelity: a renderer that silently dropped a word would have blessed its own
+# omission. This check never runs the crate. It reads each frozen source,
+# extracts every ASCII word of four or more letters, and requires each one to
+# survive into at least one of that document's four rendered surfaces. Words
+# rather than bytes, because the surfaces legitimately differ in markup,
+# punctuation and ordering -- but none of them may lose a word.
+doc_lost=""
+doc_words_checked=0
+for id in "${doc_corpus_ids[@]}"; do
+  doc_all_surfaces=""
+  for suffix in $DOC_PROFILES; do
+    if [ -f "$DOC_GOLD/surfaces/$id.$suffix" ]; then
+      doc_all_surfaces="$doc_all_surfaces$(cat "$DOC_GOLD/surfaces/$id.$suffix")"
+    fi
+  done
+  [ -n "$doc_all_surfaces" ] || continue
+  while IFS= read -r word; do
+    [ -n "$word" ] || continue
+    doc_words_checked=$((doc_words_checked + 1))
+    case $doc_all_surfaces in
+      *"$word"*) ;;
+      *) doc_lost="$doc_lost $id:$word" ;;
+    esac
+  done < <(LC_ALL=C grep -oE '[A-Za-z]{4,}' "$DOC_GOLD/corpus/$id.mdin" | LC_ALL=C sort -u)
+done
+fge_field source_words_checked "$doc_words_checked"
+
+# Vacuity guard, scaled to the corpus rather than to a guessed constant: a
+# broken extraction yields near zero, and requiring four distinct words per
+# document cannot be defeated by shrinking the corpus. Measured floor across the
+# current twelve documents is five (002-headings); the total is 148.
+doc_words_floor=$(( ${#doc_corpus_ids[@]} * 4 ))
+if [ "$doc_words_checked" -lt "$doc_words_floor" ]; then
+  fge_fail fg027b-golden-content-preserved \
+    "only $doc_words_checked words were checked against a floor of $doc_words_floor; the extraction is broken and this check is vacuous"
+elif [ -z "$doc_lost" ]; then
+  fge_pass fg027b-golden-content-preserved \
+    "$doc_words_checked distinct source words all survive into a rendered surface"
+else
+  fge_fail fg027b-golden-content-preserved "source words absent from every surface:$doc_lost"
+fi
+
+# The check must be able to fail, or it is decoration: a word present in no
+# source must be reported absent from the same haystack the check searches.
+doc_word_absent=0
+case $doc_all_surfaces in
+  *zzzabsentzzz*) ;;
+  *) doc_word_absent=1 ;;
+esac
+fge_assert_eq fg027b-content-check-can-fail 1 "$doc_word_absent" \
+  "a word present in no surface is detectably absent"
+
 # The checker must be able to fail on EVERY path it claims to guard, or a pass
 # from it means nothing. One payload per rejection reason.
 doc_planted_missed=""
