@@ -289,6 +289,26 @@ oracle_write_receipt() {
     } > "${install_dir}/receipt.tsv"
 }
 
+oracle_verify_release_version() {
+    local source_dir="$1"
+    local version_file=""
+    local source_version=""
+
+    # Git release archives carry `version`; source checkouts commonly carry
+    # `GIT-VERSION-FILE`. Prefer the checkout spelling when both are present,
+    # but never treat a missing or symlinked version file as equivalent.
+    if [[ -f "${source_dir}/GIT-VERSION-FILE" && ! -L "${source_dir}/GIT-VERSION-FILE" ]]; then
+        version_file="${source_dir}/GIT-VERSION-FILE"
+    elif [[ -f "${source_dir}/version" && ! -L "${source_dir}/version" ]]; then
+        version_file="${source_dir}/version"
+    else
+        oracle_die "REFUSED" "source archive has no regular GIT-VERSION-FILE or release version file for pin ${PIN_ID}"
+    fi
+    source_version="$(tr -d '\r\n' < "${version_file}")"
+    [[ "${source_version}" == "${PIN_VERSION}" ]] || \
+        oracle_die "REFUSED" "source archive version file does not match pin ${PIN_ID}"
+}
+
 oracle_build() {
     local jobs="${FGIT_ORACLE_JOBS:-1}"
     local root=""
@@ -317,7 +337,7 @@ oracle_build() {
     oracle_assert_archive_paths_are_safe "${archive_path}"
     tar -xJf "${archive_path}" -C "${source_root}"
     [[ -d "${source_dir}" ]] || oracle_die "REFUSED" "source archive did not produce its canonical top-level directory"
-    [[ "$(tr -d '\r\n' < "${source_dir}/GIT-VERSION-FILE")" == "${PIN_VERSION}" ]] || oracle_die "REFUSED" "source archive version file does not match pin ${PIN_ID}"
+    oracle_verify_release_version "${source_dir}"
 
     # Source acquisition is deliberately outside this command. The build itself
     # executes in a networkless, mount-isolated Bubblewrap namespace.
