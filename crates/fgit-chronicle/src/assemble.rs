@@ -1,0 +1,256 @@
+//! The builder that cannot express an ill-formed publication.
+
+use fgit_codec::schema::{
+    RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecision,
+    RepositoryDecisionBatchBody,
+};
+use fgit_types::{
+    DecisionOutcome, DecisionSequence, RefusalCode, RefusalRecordId, RepositoryCommitId,
+    RepositoryDecisionBatchId, RepositorySequence, TxId,
+};
+
+use crate::audit::verify_pair;
+use crate::origin::{PublicationBasis, ResultingRoots};
+use crate::refusal::ChronicleRefusal;
+
+/// A publication under construction.
+///
+/// The plan assigns every sequence position itself. A caller records *that* a
+/// transaction was refused or committed and never *where* it lands, so a gap
+/// or a repeat is not a rejected input — it is an unrepresentable one.
+#[must_use = "a publication plan produces nothing until it is sealed"]
+#[derive(Clone, Debug)]
+pub struct PublicationPlan {
+    basis: PublicationBasis,
+    decisions: Vec<RepositoryDecision>,
+    records: Vec<RepositoryCommitRecord>,
+    next_decision: DecisionSequence,
+    next_repository: RepositorySequence,
+    parent_rcr: Option<RepositoryCommitId>,
+    exhausted: Option<ChronicleRefusal>,
+}
+
+impl PublicationPlan {
+    /// Opens a plan against one authenticated predecessor head.
+    pub fn open(basis: PublicationBasis) -> Result<Self, ChronicleRefusal> {
+        let next_decision = basis.open_decision_sequence()?;
+        let next_repository = basis.open_repository_sequence()?;
+        let parent_rcr = basis.body().latest_committed_rcr_id;
+        Ok(Self {
+            basis,
+            decisions: Vec::new(),
+            records: Vec::new(),
+            next_decision,
+            next_repository,
+            parent_rcr,
+            exhausted: None,
+        })
+    }
+
+    /// The basis this plan is prepared against.
+    #[must_use]
+    pub const fn basis(&self) -> &PublicationBasis {
+        &self.basis
+    }
+
+    /// How many terminal decisions the plan holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.decisions.len()
+    }
+
+    /// Whether the plan would refuse to seal for want of a decision.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.decisions.is_empty()
+    }
+
+    /// Records a refusal.
+    ///
+    /// A refusal consumes decision sequence. It takes no commit record, and
+    /// there is no method on this path that could give it one.
+    pub fn refuse(
+        &mut self,
+        tx_id: TxId,
+        code: RefusalCode,
+        refusal_record_id: RefusalRecordId,
+    ) -> &mut Self {
+        let sequence = self.take_decision_sequence();
+        self.decisions.push(RepositoryDecision {
+            tx_id,
+            decision_sequence: sequence,
+            outcome: DecisionOutcome::Refused {
+                code,
+                refusal_record_id,
+            },
+        });
+        self
+    }
+
+    /// Records a commit and the record that carries it.
+    ///
+    /// The plan stamps the record's repository sequence and parent, so the
+    /// committed chain is contiguous and correctly linked by construction.
+    /// `record` is otherwise taken as given: this crate does not compute roots.
+    pub fn commit(
+        &mut self,
+        repository_commit_id: RepositoryCommitId,
+        mut record: RepositoryCommitRecord,
+    ) -> &mut Self {
+        let sequence = self.take_decision_sequence();
+        let repository_sequence = self.take_repository_sequence();
+        record.repository_sequence = repository_sequence;
+        record.parent_rcr_id = self.parent_rcr;
+        self.parent_rcr = Some(repository_commit_id);
+        self.decisions.push(RepositoryDecision {
+            tx_id: record.tx_id,
+            decision_sequence: sequence,
+            outcome: DecisionOutcome::Committed {
+                repository_commit_id,
+            },
+        });
+        self.records.push(record);
+        self
+    }
+
+    /// Builds the batch and its successor head.
+    ///
+    /// The result is verified by [`verify_pair`] before it is returned, so the
+    /// builder and the total checker can never disagree about what well formed
+    /// means.
+    pub fn seal(
+        self,
+        batch_id: RepositoryDecisionBatchId,
+        roots: ResultingRoots,
+    ) -> Result<VerifiedPublication, ChronicleRefusal> {
+        if let Some(refusal) = self.exhausted {
+            return Err(refusal);
+        }
+        if self.decisions.is_empty() {
+            return Err(ChronicleRefusal::EmptyBatch);
+        }
+        let previous = self.basis.body();
+        let first_decision_sequence = self.basis.open_decision_sequence()?;
+        let tail = self
+            .decisions
+            .last()
+            .map(|decision| decision.decision_sequence)
+            .ok_or(ChronicleRefusal::EmptyBatch)?;
+        let latest_repository_sequence = self
+            .records
+            .last()
+            .map_or(previous.latest_repository_sequence, |record| {
+                Some(record.repository_sequence)
+            });
+        let latest_committed_rcr_id = self.parent_rcr;
+
+        let batch = RepositoryDecisionBatchBody {
+            repository_id: previous.repository_id,
+            predecessor_head_id: self.basis.id(),
+            predecessor_head_generation: self.basis.generation(),
+            first_decision_sequence,
+            decisions: self.decisions,
+            committed_rcrs: self.records,
+            resulting_ref_root: roots.ref_root,
+            resulting_forge_position_root: roots.forge_position_root,
+            resulting_outcome_index_root: roots.outcome_index_root,
+            resulting_retention_root: roots.retention_root,
+            resulting_outbox_root: roots.outbox_root,
+            resulting_policy_epoch: roots.policy_epoch,
+            batch_evidence_root: roots.batch_evidence_root,
+        };
+
+        let head = RepositoryAuthorityHeadBody {
+            repository_id: previous.repository_id,
+            generation: self.basis.successor_generation()?,
+            predecessor_head_id: Some(self.basis.id()),
+            decision_tail_id: Some(batch_id),
+            latest_decision_sequence: Some(tail),
+            latest_committed_rcr_id,
+            latest_repository_sequence,
+            ref_root: roots.ref_root,
+            forge_position_root: roots.forge_position_root,
+            outcome_index_root: roots.outcome_index_root,
+            retention_root: roots.retention_root,
+            outbox_root: roots.outbox_root,
+            configuration_root: previous.configuration_root,
+            policy_epoch: roots.policy_epoch,
+            format_registry_epoch: previous.format_registry_epoch,
+            last_checkpoint_id: previous.last_checkpoint_id,
+        };
+
+        verify_pair(&self.basis, &batch, &head)?;
+        Ok(VerifiedPublication {
+            basis: self.basis,
+            batch,
+            head,
+        })
+    }
+
+    fn take_decision_sequence(&mut self) -> DecisionSequence {
+        let current = self.next_decision;
+        match current.next() {
+            Ok(next) => self.next_decision = next,
+            Err(_) => {
+                self.exhausted = Some(ChronicleRefusal::SequenceExhausted {
+                    counter: "decision sequence",
+                });
+            }
+        }
+        current
+    }
+
+    fn take_repository_sequence(&mut self) -> RepositorySequence {
+        let current = self.next_repository;
+        match current.next() {
+            Ok(next) => self.next_repository = next,
+            Err(_) => {
+                self.exhausted = Some(ChronicleRefusal::SequenceExhausted {
+                    counter: "repository sequence",
+                });
+            }
+        }
+        current
+    }
+}
+
+/// A batch and head pair that passed every chronicle invariant.
+///
+/// Holding one is the evidence a publisher needs; it cannot be constructed
+/// except by sealing a plan, so a caller cannot fabricate the claim.
+#[must_use = "a verified publication is evidence; publish it or drop the attempt deliberately"]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedPublication {
+    basis: PublicationBasis,
+    batch: RepositoryDecisionBatchBody,
+    head: RepositoryAuthorityHeadBody,
+}
+
+impl VerifiedPublication {
+    /// The basis this publication succeeds.
+    #[must_use]
+    pub const fn basis(&self) -> &PublicationBasis {
+        &self.basis
+    }
+
+    /// The decision batch to stage.
+    #[must_use]
+    pub const fn batch(&self) -> &RepositoryDecisionBatchBody {
+        &self.batch
+    }
+
+    /// The successor head to propose.
+    #[must_use]
+    pub const fn head(&self) -> &RepositoryAuthorityHeadBody {
+        &self.head
+    }
+
+    /// Whether this publication commits anything.
+    ///
+    /// A refusal-only publication advances the decision sequence and leaves
+    /// every committed root where it was.
+    #[must_use]
+    pub fn is_refusal_only(&self) -> bool {
+        self.batch.committed_rcrs.is_empty()
+    }
+}
