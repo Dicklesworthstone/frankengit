@@ -7,7 +7,9 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::future::Future;
 
+use asupersync::{Cx, Outcome};
 use fgit_codec::{CodecRefusal, DecodeLimits, Decoder, Encoder};
 use fgit_resource::kinds::AdmissionRefusal;
 use fgit_resource::{
@@ -85,6 +87,14 @@ pub enum StoreRefusal {
     },
     MalformedStoredObject,
     StoredObjectMismatch,
+    InvalidStreamingBudget,
+    StreamingBudgetExceeded {
+        offered: u64,
+        maximum: u64,
+    },
+    RuntimeCheckpointRejected,
+    RuntimeSpawnUnavailable,
+    RuntimeJoinConsumed,
     StorageIo {
         operation: StorageOperation,
         kind: std::io::ErrorKind,
@@ -169,6 +179,19 @@ impl fmt::Display for StoreRefusal {
             Self::StoredObjectMismatch => {
                 formatter.write_str("stored immutable body disagrees with its exact key")
             }
+            Self::InvalidStreamingBudget => formatter
+                .write_str("verified stream budget must have positive byte and chunk bounds"),
+            Self::StreamingBudgetExceeded { .. } => {
+                formatter.write_str("verified stream exceeds its caller-owned byte budget")
+            }
+            Self::RuntimeCheckpointRejected => {
+                formatter.write_str("runtime checkpoint rejected the object-fabric operation")
+            }
+            Self::RuntimeSpawnUnavailable => {
+                formatter.write_str("runtime cannot own the local blocking operation")
+            }
+            Self::RuntimeJoinConsumed => formatter
+                .write_str("runtime task result was consumed before object-fabric observation"),
             Self::StorageIo { operation, kind } => {
                 write!(formatter, "local storage {operation} failed: {kind}")
             }
@@ -764,6 +787,113 @@ pub struct WholeObjectRead {
     pub placement: PlacementReceipt,
 }
 
+/// Caller-owned bounds for one verified object stream.
+///
+/// The local V1 backend verifies the complete immutable body before it emits
+/// its first chunk. This deliberately favors the no-unverified-range rule;
+/// later backends may verify committed sub-object chunks without changing this
+/// stream contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedStreamBudget {
+    maximum_bytes: u64,
+    chunk_bytes: usize,
+}
+
+impl VerifiedStreamBudget {
+    /// Builds a finite stream budget.
+    pub fn new(maximum_bytes: u64, chunk_bytes: usize) -> Result<Self, StoreRefusal> {
+        if maximum_bytes == 0 || chunk_bytes == 0 {
+            return Err(StoreRefusal::InvalidStreamingBudget);
+        }
+        Ok(Self {
+            maximum_bytes,
+            chunk_bytes,
+        })
+    }
+
+    #[must_use]
+    pub const fn maximum_bytes(&self) -> u64 {
+        self.maximum_bytes
+    }
+
+    #[must_use]
+    pub const fn chunk_bytes(&self) -> usize {
+        self.chunk_bytes
+    }
+}
+
+/// One immutable, already-authenticated payload chunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedStreamChunk<'a> {
+    pub object_identity: GitOid,
+    pub offset: u64,
+    pub bytes: &'a [u8],
+    pub placement: PlacementReceipt,
+}
+
+/// A bounded emission cursor over one fully verified immutable object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedObjectStream {
+    whole: WholeObjectRead,
+    cursor: usize,
+    chunk_bytes: usize,
+}
+
+impl VerifiedObjectStream {
+    /// Begins chunked emission only after exact-body verification has completed.
+    pub fn new(whole: WholeObjectRead, budget: VerifiedStreamBudget) -> Result<Self, StoreRefusal> {
+        let offered = u64::try_from(whole.object.payload().len())
+            .map_err(|_| StoreRefusal::LengthOverflow)?;
+        if offered > budget.maximum_bytes() {
+            return Err(StoreRefusal::StreamingBudgetExceeded {
+                offered,
+                maximum: budget.maximum_bytes(),
+            });
+        }
+        Ok(Self {
+            whole,
+            cursor: 0,
+            chunk_bytes: budget.chunk_bytes(),
+        })
+    }
+
+    /// Emits at most one bounded authenticated chunk, observing cancellation
+    /// before every externally visible emission.
+    pub fn next_chunk<'a, Caps>(
+        &'a mut self,
+        cx: &Cx<Caps>,
+    ) -> Outcome<Option<VerifiedStreamChunk<'a>>, StoreRefusal> {
+        if let Some(outcome) = checkpoint_outcome(cx) {
+            return outcome;
+        }
+        let payload = self.whole.object.payload();
+        if self.cursor == payload.len() {
+            return Outcome::Ok(None);
+        }
+        let end = self
+            .cursor
+            .saturating_add(self.chunk_bytes)
+            .min(payload.len());
+        let offset = match u64::try_from(self.cursor) {
+            Ok(offset) => offset,
+            Err(_) => return Outcome::Err(StoreRefusal::LengthOverflow),
+        };
+        let chunk = VerifiedStreamChunk {
+            object_identity: self.whole.object.identity(),
+            offset,
+            bytes: &payload[self.cursor..end],
+            placement: self.whole.placement.clone(),
+        };
+        self.cursor = end;
+        Outcome::Ok(Some(chunk))
+    }
+
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.cursor == self.whole.object.payload().len()
+    }
+}
+
 /// A verified range response. A backend must refuse instead of returning bytes
 /// when it cannot authenticate the requested sub-object range.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -963,6 +1093,33 @@ pub trait ImmutableObjectFabric {
         registry: &R,
         identity: GitOid,
     ) -> Result<DeletionReceipt, StoreRefusal>;
+}
+
+/// Runtime-owned object-fabric operations.
+///
+/// The synchronous trait remains the exact storage algebra. This companion
+/// trait is the request-path boundary: every effectful implementation accepts
+/// a runtime-owned [`Cx`] first and preserves all four Asupersync outcome arms
+/// instead of collapsing cancellation or containment into `StoreRefusal`.
+pub trait RuntimeImmutableObjectFabric: ImmutableObjectFabric {
+    /// Reads, verifies, and opens a bounded object stream through one owned
+    /// runtime operation.
+    fn open_verified_stream<'a>(
+        &'a self,
+        cx: &'a Cx,
+        identity: GitOid,
+        budget: VerifiedStreamBudget,
+    ) -> impl Future<Output = Outcome<VerifiedObjectStream, StoreRefusal>> + 'a;
+}
+
+pub(crate) fn checkpoint_outcome<T, Caps>(cx: &Cx<Caps>) -> Option<Outcome<T, StoreRefusal>> {
+    if cx.checkpoint().is_ok() {
+        return None;
+    }
+    match cx.cancel_reason() {
+        Some(reason) => Some(Outcome::Cancelled(reason)),
+        None => Some(Outcome::Err(StoreRefusal::RuntimeCheckpointRejected)),
+    }
 }
 
 /// A deliberately rebuildable, non-authoritative OID-to-manifest accelerator.

@@ -10,6 +10,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use asupersync::runtime::JoinError;
+use asupersync::{Cx, Outcome};
 use fgit_resource::kinds::{
     AdmissionAbandoned, AdmissionAbortReason, AdmittedObject, ObjectAdmission,
     ObjectAdmissionPermit, ObjectClass, StructureVerdict,
@@ -20,8 +22,9 @@ use fgit_types::{CANONICAL_CODEC_VERSION, Digest, GitOid, ObjectEnvelopeId, Segm
 use crate::fabric::{
     AuthenticatedRetentionRegistry, DeletionReceipt, FabricCapabilities, FabricCapability,
     ImmutableObjectFabric, ObjectRange, PlacementAdmission, PlacementBackend, PlacementReceipt,
-    PublicationState, PutIfAbsent, RetentionRootProposal, SegmentManifest, StorageOperation,
-    StoreRefusal, VerifiedObject, VerifiedRangeRead, WholeObjectRead,
+    PublicationState, PutIfAbsent, RetentionRootProposal, RuntimeImmutableObjectFabric,
+    SegmentManifest, StorageOperation, StoreRefusal, VerifiedObject, VerifiedObjectStream,
+    VerifiedRangeRead, VerifiedStreamBudget, WholeObjectRead, checkpoint_outcome,
 };
 use crate::{ENVELOPE_SCHEMA, ObjectEnvelope, ObjectKind, SegmentLimits};
 
@@ -38,6 +41,7 @@ pub struct LocalFilesystemConfig {
     encryption_dependency: OpaqueHandle,
     max_stored_object_bytes: u64,
     envelope_limits: SegmentLimits,
+    crash_point: Option<LocalCrashPoint>,
 }
 
 impl LocalFilesystemConfig {
@@ -58,12 +62,42 @@ impl LocalFilesystemConfig {
             encryption_dependency,
             max_stored_object_bytes,
             envelope_limits,
+            crash_point: None,
         }
+    }
+
+    /// Installs one deterministic interruption point for a fault drill.
+    ///
+    /// This is opt-in and defaults to no interruption. It exists so crash
+    /// tests exercise the same publication code as a live local backend
+    /// instead of a `cfg(test)` shadow path. An interrupted operation never
+    /// reports placement success; a reopen may observe only absence or the
+    /// exact immutable object body.
+    #[must_use]
+    pub const fn with_crash_injection(mut self, crash_point: LocalCrashPoint) -> Self {
+        self.crash_point = Some(crash_point);
+        self
     }
 }
 
+/// Exact interruption boundaries in the local body-first/root-last protocol.
+///
+/// These points are used by deterministic fault drills. They deliberately
+/// span body write, body sync, immutable-root link, directory sync, and
+/// cleanup so a test cannot claim a crash matrix from only one early write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalCrashPoint {
+    BeforeStageWrite,
+    AfterStageWrite,
+    AfterStageSync,
+    BeforeImmutablePublish,
+    AfterImmutablePublish,
+    AfterPublishDirectorySync,
+    BeforeStageCleanup,
+}
+
 /// A body-first, root-last local object-fabric backend.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LocalFilesystemFabric {
     root: PathBuf,
     namespace: Vec<u8>,
@@ -71,16 +105,7 @@ pub struct LocalFilesystemFabric {
     encryption_dependency: OpaqueHandle,
     max_stored_object_bytes: u64,
     envelope_limits: SegmentLimits,
-    #[cfg(test)]
     crash_point: Option<LocalCrashPoint>,
-}
-
-/// A deterministic test-only interruption point in local publication.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalCrashPoint {
-    AfterStageWrite,
-    BeforeImmutablePublish,
 }
 
 impl LocalFilesystemFabric {
@@ -105,8 +130,7 @@ impl LocalFilesystemFabric {
             encryption_dependency: config.encryption_dependency,
             max_stored_object_bytes: config.max_stored_object_bytes,
             envelope_limits: config.envelope_limits,
-            #[cfg(test)]
-            crash_point: None,
+            crash_point: config.crash_point,
         };
         for directory in [
             fabric.root.clone(),
@@ -125,12 +149,6 @@ impl LocalFilesystemFabric {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
-    }
-
-    #[cfg(test)]
-    const fn with_crash_point(mut self, crash_point: LocalCrashPoint) -> Self {
-        self.crash_point = Some(crash_point);
-        self
     }
 
     fn staging_dir(&self) -> PathBuf {
@@ -297,6 +315,8 @@ impl LocalFilesystemFabric {
         let (path, mut stage) = self
             .fresh_stage()
             .map_err(PlacementAttemptError::before_write)?;
+        self.crash_if(LocalCrashPoint::BeforeStageWrite)
+            .map_err(PlacementAttemptError::before_write)?;
         stage
             .write_all(OBJECT_MAGIC)
             .and_then(|()| stage.write_all(&envelope_len.to_be_bytes()))
@@ -308,12 +328,13 @@ impl LocalFilesystemFabric {
                     error,
                 ))
             })?;
-        #[cfg(test)]
-        self.crash_if(LocalCrashPointName::AfterStageWrite)
+        self.crash_if(LocalCrashPoint::AfterStageWrite)
             .map_err(PlacementAttemptError::after_write)?;
         stage.sync_all().map_err(|error| {
             PlacementAttemptError::after_write(storage_error(StorageOperation::SyncStage, error))
         })?;
+        self.crash_if(LocalCrashPoint::AfterStageSync)
+            .map_err(PlacementAttemptError::after_write)?;
         Ok(path)
     }
 
@@ -322,8 +343,7 @@ impl LocalFilesystemFabric {
         stage: &Path,
         object: &VerifiedObject,
     ) -> Result<ImmutableWrite, StoreRefusal> {
-        #[cfg(test)]
-        self.crash_if(LocalCrashPointName::BeforeImmutablePublish)?;
+        self.crash_if(LocalCrashPoint::BeforeImmutablePublish)?;
         let final_path = self.object_path(object.identity());
         let parent = final_path
             .parent()
@@ -331,7 +351,10 @@ impl LocalFilesystemFabric {
         Self::create_directory(parent)?;
         match fs::hard_link(stage, &final_path) {
             Ok(()) => {
+                self.crash_if(LocalCrashPoint::AfterImmutablePublish)?;
                 sync_directory(parent)?;
+                self.crash_if(LocalCrashPoint::AfterPublishDirectorySync)?;
+                self.crash_if(LocalCrashPoint::BeforeStageCleanup)?;
                 let _cleanup = fs::remove_file(stage);
                 Ok(ImmutableWrite::Created)
             }
@@ -365,15 +388,22 @@ impl LocalFilesystemFabric {
             .ok_or(StoreRefusal::MalformedStoredObject)?;
         Self::create_directory(parent)?;
         let (stage_path, mut stage) = self.fresh_stage()?;
+        self.crash_if(LocalCrashPoint::BeforeStageWrite)?;
         stage
             .write_all(body)
             .map_err(|error| storage_error(StorageOperation::WriteStage, error))?;
+        self.crash_if(LocalCrashPoint::AfterStageWrite)?;
         stage
             .sync_all()
             .map_err(|error| storage_error(StorageOperation::SyncStage, error))?;
+        self.crash_if(LocalCrashPoint::AfterStageSync)?;
+        self.crash_if(LocalCrashPoint::BeforeImmutablePublish)?;
         match fs::hard_link(&stage_path, final_path) {
             Ok(()) => {
+                self.crash_if(LocalCrashPoint::AfterImmutablePublish)?;
                 sync_directory(parent)?;
+                self.crash_if(LocalCrashPoint::AfterPublishDirectorySync)?;
+                self.crash_if(LocalCrashPoint::BeforeStageCleanup)?;
                 let _cleanup = fs::remove_file(stage_path);
                 Ok(ImmutableWrite::Created)
             }
@@ -389,15 +419,20 @@ impl LocalFilesystemFabric {
         }
     }
 
-    #[cfg(test)]
-    fn crash_if(&self, point: LocalCrashPointName) -> Result<(), StoreRefusal> {
-        let expected = match point {
-            LocalCrashPointName::AfterStageWrite => LocalCrashPoint::AfterStageWrite,
-            LocalCrashPointName::BeforeImmutablePublish => LocalCrashPoint::BeforeImmutablePublish,
-        };
-        if self.crash_point == Some(expected) {
+    fn crash_if(&self, point: LocalCrashPoint) -> Result<(), StoreRefusal> {
+        if self.crash_point == Some(point) {
+            let operation = match point {
+                LocalCrashPoint::BeforeStageWrite | LocalCrashPoint::AfterStageWrite => {
+                    StorageOperation::WriteStage
+                }
+                LocalCrashPoint::AfterStageSync => StorageOperation::SyncStage,
+                LocalCrashPoint::BeforeImmutablePublish
+                | LocalCrashPoint::AfterImmutablePublish => StorageOperation::PublishImmutableBody,
+                LocalCrashPoint::AfterPublishDirectorySync => StorageOperation::SyncDirectory,
+                LocalCrashPoint::BeforeStageCleanup => StorageOperation::PublishImmutableBody,
+            };
             return Err(StoreRefusal::StorageIo {
-                operation: StorageOperation::WriteStage,
+                operation,
                 kind: std::io::ErrorKind::Interrupted,
             });
         }
@@ -631,6 +666,48 @@ impl ImmutableObjectFabric for LocalFilesystemFabric {
     }
 }
 
+impl RuntimeImmutableObjectFabric for LocalFilesystemFabric {
+    fn open_verified_stream<'a>(
+        &'a self,
+        cx: &'a Cx,
+        identity: GitOid,
+        budget: VerifiedStreamBudget,
+    ) -> impl std::future::Future<Output = Outcome<VerifiedObjectStream, StoreRefusal>> + 'a {
+        async move {
+            if let Some(outcome) = checkpoint_outcome(cx) {
+                return outcome;
+            }
+            let fabric = self.clone();
+            let mut task = match cx.spawn_blocking(move |child_cx| {
+                if child_cx.checkpoint().is_err() {
+                    return Err(StoreRefusal::RuntimeCheckpointRejected);
+                }
+                fabric.read_whole(identity)
+            }) {
+                Ok(task) => task,
+                Err(_) => return Outcome::Err(StoreRefusal::RuntimeSpawnUnavailable),
+            };
+            match task.join(cx).await {
+                Ok(Ok(whole)) => {
+                    if let Some(outcome) = checkpoint_outcome(cx) {
+                        return outcome;
+                    }
+                    match VerifiedObjectStream::new(whole, budget) {
+                        Ok(stream) => Outcome::Ok(stream),
+                        Err(error) => Outcome::Err(error),
+                    }
+                }
+                Ok(Err(error)) => Outcome::Err(error),
+                Err(JoinError::Cancelled(reason)) => Outcome::Cancelled(reason),
+                Err(JoinError::Panicked(payload)) => Outcome::Panicked(payload),
+                Err(JoinError::PolledAfterCompletion) => {
+                    Outcome::Err(StoreRefusal::RuntimeJoinConsumed)
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImmutableWrite {
     Created,
@@ -657,13 +734,6 @@ impl PlacementAttemptError {
             body_write_started: true,
         }
     }
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LocalCrashPointName {
-    AfterStageWrite,
-    BeforeImmutablePublish,
 }
 
 fn payload_identity(kind: ObjectKind, payload: &[u8]) -> Result<Digest, StoreRefusal> {
@@ -755,6 +825,7 @@ impl LocalFilesystemFabric {
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use asupersync::{CancelKind, Cx, Outcome};
     use fgit_resource::{LeakDisposition, ObligationLedger, RegionCloseOutcome, RegionId};
     use fgit_types::{
         DigestAlgorithmId, DigestBytes, GitHashAlgorithm, PublicationEpoch,
@@ -833,6 +904,21 @@ mod tests {
             limits(),
         ))
         .expect("test fabric must open")
+    }
+
+    fn fabric_with_crash(root: PathBuf, point: LocalCrashPoint) -> LocalFilesystemFabric {
+        LocalFilesystemFabric::open(
+            LocalFilesystemConfig::new(
+                root,
+                vec![b'n'],
+                OpaqueHandle::new(b"rack-a").expect("test failure domain must fit"),
+                OpaqueHandle::new(b"key-a").expect("test key dependency must fit"),
+                4096,
+                limits(),
+            )
+            .with_crash_injection(point),
+        )
+        .expect("fault-injected test fabric must open")
     }
 
     fn object(payload: &[u8]) -> VerifiedObject {
@@ -931,14 +1017,51 @@ mod tests {
     }
 
     #[test]
-    fn crash_points_leave_only_non_authoritative_staging_residue() {
+    fn verified_stream_emits_only_verified_chunks_and_preserves_cancellation() {
+        let root = TestRoot::new();
+        let fabric = fabric(root.path());
+        let object = object(b"payload");
+        let ledger = ledger();
+        fabric
+            .put_if_absent(object.clone(), admission(&ledger, &object))
+            .expect("local placement must succeed");
+        let whole = fabric
+            .read_whole(object.identity())
+            .expect("whole body must verify before stream construction");
+        let mut stream = VerifiedObjectStream::new(
+            whole,
+            VerifiedStreamBudget::new(7, 3).expect("finite stream budget must be valid"),
+        )
+        .expect("verified body within budget must open a stream");
+        let active = Cx::detached_cancel_context();
+        let first = stream.next_chunk(&active);
+        assert!(matches!(
+            first,
+            Outcome::Ok(Some(chunk)) if chunk.bytes == b"pay" && chunk.offset == 0
+        ));
+        let cancelled = Cx::detached_cancel_context();
+        cancelled.cancel_with(CancelKind::User, Some("fabric stream test"));
+        assert!(matches!(
+            stream.next_chunk(&cancelled),
+            Outcome::Cancelled(_)
+        ));
+        assert_quiescent(ledger);
+    }
+
+    #[test]
+    fn full_crash_matrix_leaves_only_absent_or_complete_immutable_objects() {
         for point in [
+            LocalCrashPoint::BeforeStageWrite,
             LocalCrashPoint::AfterStageWrite,
+            LocalCrashPoint::AfterStageSync,
             LocalCrashPoint::BeforeImmutablePublish,
+            LocalCrashPoint::AfterImmutablePublish,
+            LocalCrashPoint::AfterPublishDirectorySync,
+            LocalCrashPoint::BeforeStageCleanup,
         ] {
             let root = TestRoot::new();
             let object = object(b"payload");
-            let crashing = fabric(root.path()).with_crash_point(point);
+            let crashing = fabric_with_crash(root.path(), point);
             let ledger = ledger();
             assert!(matches!(
                 crashing.put_if_absent(object.clone(), admission(&ledger, &object)),
@@ -949,10 +1072,22 @@ mod tests {
             ));
             assert_quiescent(ledger);
             let reopened = fabric(root.path());
-            assert_eq!(
-                reopened.read_whole(object.identity()),
-                Err(StoreRefusal::ObjectAbsent)
-            );
+            match reopened.read_whole(object.identity()) {
+                Err(StoreRefusal::ObjectAbsent) => {}
+                Ok(whole) => assert_eq!(whole.object, object),
+                Err(error) => panic!(
+                    "crash point {point:?} exposed neither absence nor the exact immutable body: {error}"
+                ),
+            }
+            let staged = fs::read_dir(reopened.staging_dir())
+                .expect("local staging directory must remain readable after interruption");
+            for entry in staged {
+                let entry = entry.expect("staging entry must remain inspectable");
+                assert!(
+                    entry.file_name().to_string_lossy().ends_with(".stage"),
+                    "only non-authoritative stage residue may remain"
+                );
+            }
         }
     }
 
