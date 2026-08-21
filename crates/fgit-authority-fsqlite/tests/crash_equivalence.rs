@@ -1188,19 +1188,18 @@ fn an_abandoned_store_releases_its_descriptors_too() {
 // Its doc names the window it closes: "a crash or a lost response cannot leave
 // the head advanced with outcome records missing."
 //
-// The ids below are derived through `fgit_codec::body_id` with
-// `CryptoBodyIdentity`, which takes the domain from the body's own
-// `CanonicalBody::DOMAIN`. That matters beyond convenience: it is the same
-// derivation production uses, so these fixtures cannot encode a
-// domain/algorithm pairing the registry forbids -- the algorithm is not a
-// value a fixture author picks.
+// The ids below come from `fgit_authority`'s own `authority_head_identity` and
+// `decision_batch_identity`. That matters beyond convenience: these are the
+// functions the publication itself calls, so a fixture cannot derive an id by
+// a parallel route that drifts from the one the code under test uses. It also
+// means the algorithm is never a value a fixture author picks, so these
+// fixtures cannot encode a domain/algorithm pairing the registry forbids.
 
-use fgit_authority::{outcome_key, publish_decisions_async};
-use fgit_codec::RepositoryDecision;
-use fgit_codec::{
-    CryptoBodyIdentity, RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody, body_id,
-    encode_body,
+use fgit_authority::{
+    authority_head_identity, decision_batch_identity, outcome_key, publish_decisions_async,
 };
+use fgit_codec::RepositoryDecision;
+use fgit_codec::{RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody, encode_body};
 use fgit_types::hash::DigestAlgorithmId;
 use fgit_types::identity::{
     RefusalRecordId, RepositoryAuthorityHeadId, RepositoryDecisionBatchId, TxId,
@@ -1219,17 +1218,11 @@ fn tenant_id() -> TenantId {
 }
 
 fn head_body_id(head: &RepositoryAuthorityHeadBody) -> RepositoryAuthorityHeadId {
-    RepositoryAuthorityHeadId::from_internal_object_id(
-        body_id(&CryptoBodyIdentity, head).expect("a head body has an identity"),
-    )
-    .expect("the authority-head domain")
+    authority_head_identity(head).expect("a head body has an identity")
 }
 
 fn batch_body_id(batch: &RepositoryDecisionBatchBody) -> RepositoryDecisionBatchId {
-    RepositoryDecisionBatchId::from_internal_object_id(
-        body_id(&CryptoBodyIdentity, batch).expect("a batch body has an identity"),
-    )
-    .expect("the decision-batch domain")
+    decision_batch_identity(batch).expect("a batch body has an identity")
 }
 
 /// A fixture digest.
