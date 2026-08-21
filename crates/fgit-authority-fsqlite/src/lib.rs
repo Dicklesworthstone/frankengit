@@ -75,6 +75,7 @@ mod classify;
 mod envelope;
 mod interpret;
 mod lifecycle;
+mod marshal;
 mod portable;
 mod retry;
 mod schema;
@@ -92,6 +93,9 @@ pub use crate::interpret::{
 pub use crate::lifecycle::{
     CANCELLATION_PHASES, CancellationOutcome, CancellationPhase, LifecycleError, TransactionEvent,
     TransactionState, WorkerEvent, WorkerState, classify_cancellation,
+};
+pub use crate::marshal::{
+    MarshalError, blob, read_blob, read_optional_unsigned, read_unsigned, unsigned,
 };
 pub use crate::portable::{
     BundleRefusal, ExportBundle, ExportedBody, ExportedHead, ExportedIssuance, MAX_EXPORT_BODIES,
