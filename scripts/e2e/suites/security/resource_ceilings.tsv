@@ -1,0 +1,33 @@
+# FG-066b executable inventory of untrusted-input resource ceilings.
+#
+# This is evidence metadata consumed by resource_ceilings.sh; it is not a
+# production policy authority.  Production callers own the actual limits named
+# here.  Every `implemented` row has a concrete, paired trip/pass corpus below.
+#
+# Columns: surface<TAB>state<TAB>dimension<TAB>bound<TAB>corpus
+git-object-framing	implemented	decompressed_object_bytes	ParseLimits::max_object_bytes	fgit-git-object/adversarial_refusal
+git-object-framing	implemented	loose_header_bytes	ParseLimits::max_loose_header_bytes	fgit-git-object/adversarial_refusal
+pack-quarantine	implemented	compressed_input_bytes	PackLimits::max_input_bytes	fgit-pack/bombs_reader
+pack-quarantine	implemented	entry_count	PackLimits::max_entries	fgit-pack/bombs_reader
+pack-quarantine	implemented	object_bytes	PackLimits::max_object_bytes	fgit-pack/bombs_reader
+pack-quarantine	implemented	aggregate_expanded_bytes	PackLimits::max_total_expanded_bytes	fgit-pack/bombs_reader
+pack-quarantine	implemented	inflate_expansion_ratio	PackLimits::max_expansion_ratio	fgit-pack/bombs_reader
+wire-receive-pack	implemented	command_count	ReceiveLimits::max_commands	fgit-wire/receivepack_adversarial
+wire-receive-pack	implemented	quarantine_bytes	ReceiveLimits::max_quarantine_bytes	fgit-wire/receivepack_adversarial
+wire-receive-pack	implemented	propagated_pack_limits	ReceiveLimits::pack	fgit-wire/receivepack_limits_propagation
+document-renderer	implemented	input_bytes	Limits::max_input_bytes	fgit-doc/suite::adversarial
+document-renderer	implemented	line_bytes	StructuralLimits::max_line_bytes	fgit-doc/suite::adversarial
+document-renderer	implemented	node_count	StructuralLimits::max_nodes	fgit-doc/suite::adversarial
+document-renderer	implemented	nesting_depth	StructuralLimits::max_depth	fgit-doc/suite::adversarial
+document-renderer	implemented	inline_delimiters	StructuralLimits::max_inline_delimiters	fgit-doc/suite::adversarial
+treefs-export	implemented	base_object_bytes	ParseLimits::max_object_bytes	fgit-treefs/export_budgets
+treefs-export	implemented	constructed_object_count	ExportLimits::max_objects	fgit-treefs/resource_ceiling_inventory
+treefs-export	implemented	constructed_total_bytes	ExportLimits::max_total_bytes	fgit-treefs/export_budgets
+treefs-export	implemented	tree_entry_count	ExportLimits::max_tree_entries	fgit-treefs/export_budgets
+workflow-yaml	non-admitted	parser	no executable production parser in this checkout	-
+package-parser	non-admitted	parser	no executable production parser in this checkout	-
+webhook-payload	non-admitted	parser	no executable production parser in this checkout	-
+atp-transfer-block	non-admitted	transport	no executable ATP transport block intake in this checkout	-
+lfs-pointer	non-admitted	parser	no executable production parser in this checkout	-
+policy-language	non-admitted	parser	no executable production parser in this checkout	-
+api-body	non-admitted	transport	no admitted request-body transport in this checkout	-
