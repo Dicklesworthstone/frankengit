@@ -38,11 +38,13 @@ blake3 = { version = "1.8.7", features = ["pure"] }
 chacha20poly1305 = { version = "0.11.0", default-features = false }
 ed25519-dalek = { version = "2.2.0", default-features = false }
 fgit-admission = { path = "crates/fgit-admission" }
+fgit-atp-git = { path = "crates/fgit-atp-git" }
 fgit-authority = { path = "crates/fgit-authority" }
 fgit-authority-fsqlite = { path = "crates/fgit-authority-fsqlite" }
 fgit-benchmark = { path = "crates/fgit-benchmark" }
 fgit-chronicle = { path = "crates/fgit-chronicle" }
 fgit-claim = { path = "crates/fgit-claim" }
+fgit-compaction = { path = "crates/fgit-compaction" }
 fgit-codec = { path = "crates/fgit-codec" }
 fgit-crypto = { path = "crates/fgit-crypto" }
 fgit-deflate = { path = "crates/fgit-deflate" }

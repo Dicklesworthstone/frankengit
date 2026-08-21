@@ -4,6 +4,7 @@
 # means that the crate currently admits no first-party dependency layer.
 crate	layer	allowed_dependency_layers	owner	status
 fgit-admission	L4	L0,L1,L2,L3,L4	receive-pack-admission	active
+fgit-atp-git	L3	L0,L1,L2,L3	transport	active
 fgit-authority	L2	L0,L1,L2	authority	active
 fgit-authority-fsqlite	L2	L0,L1,L2	authority	active
 fgit-benchmark	L2	L0,L1,L2	performance-verification	active
@@ -16,6 +17,7 @@ fgit-cli	L4	L0,L1,L2,L3,L4	cli	active
 # constitutionally owned by fgit-crypto, so codec sits above crypto.
 fgit-codec	L2	L0,L1,L2	canonical-codec	active
 fgit-codec-verify	L0	none	canonical-codec	active
+fgit-compaction	L3	L0,L1,L2,L3	compaction	active
 fgit-crypto	L1	L0,L1	crypto	active
 fgit-deflate	L1	L0,L1	pack	active
 fgit-diff	L2	L0,L1,L2	git-core	active

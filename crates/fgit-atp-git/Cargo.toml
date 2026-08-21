@@ -1,0 +1,13 @@
+[package]
+name = "fgit-atp-git"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+fgit-crypto.workspace = true
+fgit-object-fabric.workspace = true
+fgit-types.workspace = true
+
+[lints]
+workspace = true

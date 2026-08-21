@@ -619,6 +619,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-atp-git"
+version = "0.1.0"
+dependencies = [
+ "fgit-crypto",
+ "fgit-object-fabric",
+ "fgit-types",
+]
+
+[[package]]
 name = "fgit-authority"
 version = "0.0.1"
 dependencies = [
@@ -682,6 +691,17 @@ dependencies = [
 [[package]]
 name = "fgit-codec-verify"
 version = "0.0.1"
+
+[[package]]
+name = "fgit-compaction"
+version = "0.1.0"
+dependencies = [
+ "fgit-authority",
+ "fgit-chronicle",
+ "fgit-codec",
+ "fgit-object-fabric",
+ "fgit-types",
+]
 
 [[package]]
 name = "fgit-crypto"
