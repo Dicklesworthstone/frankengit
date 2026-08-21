@@ -11,13 +11,12 @@ use fgit_txn::combiner::{
     BatchBounds, BatchBoundsRefusal, BypassReason, CombinationParts, FlatCombiner,
 };
 use fgit_txn::lanes::{
-    ConflictWitness, LaneCapacity, LaneId, PreparedCapsule, PriorityClass, WitnessDomain,
-    WritableLane,
+    ConflictWitness, LaneCapacity, LaneId, PreparedAttemptOutcome, PreparedCapsule, PriorityClass,
+    WitnessDomain, WritableLane,
 };
 use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::identity::{PreparedTxnCapsuleId, RepositoryDecisionBatchId, TxId};
-use fgit_types::numeric::DecisionSequence;
 
 fn tx_id(tag: u8) -> TxId {
     TxId::from_digest(
@@ -43,7 +42,7 @@ fn batch_id(tag: u8) -> RepositoryDecisionBatchId {
     )
 }
 
-fn capsule(tag: u8, sequence: u64, witness: u8) -> PreparedCapsule {
+fn capsule(tag: u8, witness: u8) -> PreparedCapsule {
     let mut witnesses = BTreeSet::new();
     witnesses.insert(
         ConflictWitness::try_new(WitnessDomain::Reference, vec![witness])
@@ -52,7 +51,6 @@ fn capsule(tag: u8, sequence: u64, witness: u8) -> PreparedCapsule {
     PreparedCapsule::try_new(
         capsule_id(tag),
         tx_id(tag),
-        DecisionSequence::try_new(sequence).expect("positive sequence is valid"),
         if tag.is_multiple_of(2) {
             PriorityClass::Interactive
         } else {
@@ -133,15 +131,26 @@ fn seeded_shuffle<T: Clone>(source: &[T], mut seed: u64) -> Vec<T> {
         .collect()
 }
 
+fn publication_inputs(
+    combination: &fgit_txn::combiner::Combination,
+) -> Vec<PreparedAttemptOutcome> {
+    let mut inputs = combination
+        .batch()
+        .map_or_else(Vec::new, |batch| batch.canonical_attempt_outcomes());
+    inputs.extend(
+        combination
+            .bypasses()
+            .iter()
+            .map(|bypass| bypass.attempt().canonical_attempt_outcome()),
+    );
+    inputs.sort_by_key(PreparedAttemptOutcome::transaction_id);
+    inputs
+}
+
 #[test]
-fn seed_shuffled_inputs_preserve_batch_composition_and_decision_path() {
+fn seed_shuffled_inputs_preserve_batch_composition_and_publication_inputs() {
     let bounds = BatchBounds::try_new(8, 4_096, 10).expect("valid bounds");
-    let source = [
-        capsule(5, 2, 1),
-        capsule(1, 3, 2),
-        capsule(4, 1, 3),
-        capsule(2, 3, 4),
-    ];
+    let source = [capsule(5, 1), capsule(1, 2), capsule(4, 3), capsule(2, 4)];
     let seeds = [0x0D15_EA5E_u64, 0x0D15_EA5F, 0x0D15_EA60, 0x0D15_EA61];
     let mut expected = None;
     let mut observed_input_orders = BTreeSet::new();
@@ -164,7 +173,7 @@ fn seed_shuffled_inputs_preserve_batch_composition_and_decision_path() {
                 .capsules()
                 .map(|capsule| capsule.transaction_id())
                 .collect::<Vec<_>>(),
-            batch.decision_path(),
+            batch.canonical_attempt_outcomes(),
             batch.conflict_graph().edges().to_vec(),
         );
         if let Some(expected) = &expected {
@@ -184,13 +193,70 @@ fn seed_shuffled_inputs_preserve_batch_composition_and_decision_path() {
 }
 
 #[test]
+fn schedule_permutations_preserve_publication_inputs_across_combined_and_bypass_paths() {
+    let bounds = BatchBounds::try_new(2, 4_096, 10).expect("valid bounds");
+    let source = [capsule(1, 1), capsule(2, 2), capsule(3, 3), capsule(4, 4)];
+    let seeds = [0xA11C_E001_u64, 0xA11C_E002, 0xA11C_E003, 0xA11C_E004];
+    let mut expected_inputs = None;
+    let mut observed_input_orders = BTreeSet::new();
+    for (offset, seed) in seeds.into_iter().enumerate() {
+        let ledger = ledger(1_050 + u64::try_from(offset).expect("small test offset"));
+        let shuffled = seeded_shuffle(&source, seed);
+        observed_input_orders.insert(
+            shuffled
+                .iter()
+                .map(PreparedCapsule::transaction_id)
+                .collect::<Vec<_>>(),
+        );
+        let combination = combine(&ledger, LaneId::new(19), shuffled, bounds);
+        let batch = combination
+            .batch()
+            .expect("two entries fit the combined path");
+        assert_eq!(
+            batch
+                .capsules()
+                .map(PreparedCapsule::transaction_id)
+                .collect::<Vec<_>>(),
+            vec![tx_id(2), tx_id(4)],
+            "the derived schedule admits the two interactive capsules"
+        );
+        assert_eq!(
+            combination
+                .bypasses()
+                .iter()
+                .map(|bypass| bypass.attempt().capsule().transaction_id())
+                .collect::<Vec<_>>(),
+            vec![tx_id(1), tx_id(3)],
+            "bypass output must not expose schedule order"
+        );
+        let observed_inputs = publication_inputs(&combination);
+        if let Some(expected_inputs) = &expected_inputs {
+            assert_eq!(
+                &observed_inputs, expected_inputs,
+                "pre-combiner permutations must hand publication byte-identical inputs"
+            );
+        } else {
+            expected_inputs = Some(observed_inputs);
+        }
+        let cancellation = combination.cancel();
+        assert_eq!(cancellation.settled_slots().len(), 4);
+        assert_eq!(ledger.leaks(), Vec::new());
+        assert!(ledger.close().is_quiescent());
+    }
+    assert!(
+        observed_input_orders.len() > 1,
+        "the test must exercise multiple pre-combiner permutations"
+    );
+}
+
+#[test]
 fn overlapping_witnesses_form_one_ordered_conflict_component() {
     let ledger = ledger(1_100);
     let bounds = BatchBounds::try_new(8, 4_096, 10).expect("valid bounds");
     let combination = combine(
         &ledger,
         LaneId::new(21),
-        vec![capsule(1, 2, 7), capsule(2, 1, 7), capsule(3, 3, 8)],
+        vec![capsule(1, 7), capsule(2, 7), capsule(3, 8)],
         bounds,
     );
     let batch = combination.batch().expect("all inputs fit the batch");
@@ -199,13 +265,13 @@ fn overlapping_witnesses_form_one_ordered_conflict_component() {
     assert_eq!(graph.components().len(), 2);
     assert_eq!(
         graph.ordered_transaction_ids(),
-        &[tx_id(2), tx_id(1), tx_id(3)],
-        "sealed decision sequence is the first tie-break key"
+        &[tx_id(1), tx_id(2), tx_id(3)],
+        "the conflict graph must not reveal the internal scheduling order"
     );
     assert_eq!(
         graph.components()[0].transaction_ids(),
-        &[tx_id(2), tx_id(1)],
-        "members retain the admissible batch order rather than map order"
+        &[tx_id(1), tx_id(2)],
+        "members are exposed in canonical transaction-ID order"
     );
 
     let cancellation = combination.cancel();
@@ -217,13 +283,13 @@ fn overlapping_witnesses_form_one_ordered_conflict_component() {
 #[test]
 fn direct_bypass_matches_the_same_capsule_on_the_combined_path() {
     let bounds = BatchBounds::try_new(1, 4_096, 10).expect("valid bounds");
-    let candidate = capsule(9, 2, 9);
-    let lower_sequence = capsule(8, 1, 8);
+    let candidate = capsule(9, 9);
+    let higher_priority = capsule(8, 8);
     let bypass_ledger = ledger(1_200);
     let combination = combine(
         &bypass_ledger,
         LaneId::new(22),
-        vec![candidate.clone(), lower_sequence],
+        vec![candidate.clone(), higher_priority],
         bounds,
     );
     assert_eq!(combination.bypasses().len(), 1);
@@ -257,7 +323,7 @@ fn byte_and_logical_age_cuts_are_explicit_bypasses() {
     let byte_limited = combine(
         &ledger,
         LaneId::new(25),
-        vec![capsule(11, 1, 11), capsule(12, 2, 12)],
+        vec![capsule(11, 11), capsule(12, 12)],
         BatchBounds::try_new(8, 8, 10).expect("valid byte-bound batch"),
     );
     assert_eq!(
@@ -270,7 +336,7 @@ fn byte_and_logical_age_cuts_are_explicit_bypasses() {
     let age_limited = combine(
         &ledger,
         LaneId::new(26),
-        vec![capsule(13, 1, 13)],
+        vec![capsule(13, 13)],
         BatchBounds::try_new(8, 4_096, 4).expect("valid age-bound batch"),
     );
     assert!(age_limited.batch().is_none());
@@ -297,7 +363,7 @@ fn invalid_batch_bound_refuses_and_matching_bound_hands_slots_to_batch() {
     let combination = combine(
         &ledger,
         LaneId::new(24),
-        vec![capsule(10, 1, 10)],
+        vec![capsule(10, 10)],
         BatchBounds::try_new(1, 16, 10).expect("matching non-zero bound proceeds"),
     );
     let CombinationParts {

@@ -14,7 +14,6 @@ use fgit_txn::lanes::{
 use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::identity::{PreparedTxnCapsuleId, TxId};
-use fgit_types::numeric::DecisionSequence;
 
 fn tx_id(tag: u8) -> TxId {
     TxId::from_digest(
@@ -32,7 +31,7 @@ fn capsule_id(tag: u8) -> PreparedTxnCapsuleId {
     )
 }
 
-fn capsule(tag: u8, sequence: u64) -> PreparedCapsule {
+fn capsule(tag: u8, ready_at_tick: u64) -> PreparedCapsule {
     let mut witnesses = BTreeSet::new();
     witnesses.insert(
         ConflictWitness::try_new(WitnessDomain::RepositoryHead, vec![tag])
@@ -41,9 +40,8 @@ fn capsule(tag: u8, sequence: u64) -> PreparedCapsule {
     PreparedCapsule::try_new(
         capsule_id(tag),
         tx_id(tag),
-        DecisionSequence::try_new(sequence).expect("positive sequence is valid"),
         PriorityClass::Normal,
-        sequence,
+        ready_at_tick,
         vec![tag; 8],
         witnesses,
     )

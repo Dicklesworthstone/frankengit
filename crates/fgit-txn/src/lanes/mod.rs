@@ -10,7 +10,6 @@ use std::collections::BTreeSet;
 use fgit_resource::kinds::{NoCandidateReason, PreparedTxnSlot, SlotAbandoned};
 use fgit_resource::{ReservedObligation, SettledObligation};
 use fgit_types::identity::{PreparedTxnCapsuleId, TxId};
-use fgit_types::numeric::DecisionSequence;
 
 /// The largest witness key accepted by one prepared capsule.
 pub const MAX_WITNESS_KEY_BYTES: usize = 256;
@@ -54,9 +53,8 @@ pub enum LaneState {
 
 /// Transaction priority in the version-one combiner policy.
 ///
-/// Smaller variants win the priority portion of the tie-break. The sealed
-/// decision sequence still dominates this class, so priority never changes a
-/// pre-existing sealed order.
+/// Smaller variants win the combiner's derived scheduling hint. This priority
+/// is not an authority decision order and has no publication semantics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PriorityClass {
     /// An operator-initiated safety or recovery transaction.
@@ -70,7 +68,7 @@ pub enum PriorityClass {
 }
 
 impl PriorityClass {
-    /// Stable code carried in a decision-path hash.
+    /// Stable code used by the derived scheduler.
     #[must_use]
     pub const fn code(self) -> u8 {
         match self {
@@ -102,7 +100,7 @@ pub enum WitnessDomain {
 }
 
 impl WitnessDomain {
-    /// Stable code carried in a decision-path hash.
+    /// Stable code for a bounded witness domain.
     #[must_use]
     pub const fn code(self) -> u8 {
         match self {
@@ -157,7 +155,6 @@ impl ConflictWitness {
 pub struct PreparedCapsule {
     capsule_id: PreparedTxnCapsuleId,
     transaction_id: TxId,
-    sealed_sequence: DecisionSequence,
     priority: PriorityClass,
     ready_at_tick: u64,
     canonical_bytes: Vec<u8>,
@@ -180,12 +177,19 @@ pub struct PreparedAttemptOutcome {
     witnesses: BTreeSet<ConflictWitness>,
 }
 
+impl PreparedAttemptOutcome {
+    /// Stable transaction identity for canonical publication-input ordering.
+    #[must_use]
+    pub const fn transaction_id(&self) -> TxId {
+        self.transaction_id
+    }
+}
+
 impl PreparedCapsule {
     /// Creates a bounded, immutable prepared capsule descriptor.
     pub fn try_new(
         capsule_id: PreparedTxnCapsuleId,
         transaction_id: TxId,
-        sealed_sequence: DecisionSequence,
         priority: PriorityClass,
         ready_at_tick: u64,
         canonical_bytes: Vec<u8>,
@@ -206,7 +210,6 @@ impl PreparedCapsule {
         Ok(Self {
             capsule_id,
             transaction_id,
-            sealed_sequence,
             priority,
             ready_at_tick,
             canonical_bytes,
@@ -224,12 +227,6 @@ impl PreparedCapsule {
     #[must_use]
     pub const fn transaction_id(&self) -> TxId {
         self.transaction_id
-    }
-
-    /// The sealed decision sequence used by the deterministic combiner policy.
-    #[must_use]
-    pub const fn sealed_sequence(&self) -> DecisionSequence {
-        self.sealed_sequence
     }
 
     /// The user-visible priority class.

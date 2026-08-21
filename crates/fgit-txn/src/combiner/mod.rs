@@ -1,44 +1,30 @@
 //! Deterministic flat combining over sealed preparation lanes.
 //!
 //! The combiner is a healthy-path optimization, never an authority lease. It
-//! returns a canonical order and a decision-path digest; publication remains a
-//! later exact-predecessor head compare-and-set. Time is an explicit logical
-//! tick from the owning runtime receipt, so a recorded lane can be replayed
-//! without consulting a wall clock.
+//! selects a bounded healthy-path work shape; publication remains a later
+//! exact-predecessor head compare-and-set. Time is an explicit logical tick
+//! from the owning runtime receipt, so a recorded lane can be replayed without
+//! consulting a wall clock.
 
 use std::collections::BTreeSet;
 
-use fgit_codec::Encoder;
-use fgit_crypto::sha256_digest;
 use fgit_resource::SettledObligation;
 use fgit_resource::kinds::{NoCandidateReason, PreparedTxnSlot, SlotHandedOff};
-use fgit_types::identity::{InternalObjectId, RepositoryDecisionBatchId, TxId};
+use fgit_types::identity::{RepositoryDecisionBatchId, TxId};
 
 use crate::lanes::{
     CombiningLane, DirectAttempt, PreparedCapsule, PreparedEntry, RetiredLane, abort_entries,
 };
 
-/// Wire revision for the decision-path hash preimage.
-pub const DECISION_PATH_FORMAT_VERSION: u16 = 1;
-
-/// Crate-local schema tag for the decision-path witness preimage.
-const DECISION_PATH_SCHEMA_TAG: &str = "fgit-txn/decision-path/v1";
-
-/// The closed, replayable order policy used by this flat combiner.
+/// The closed, derived scheduling hint used internally by this flat combiner.
+///
+/// This only selects the healthy-path combined versus bypass work shape. It
+/// is not an authority order, is not encoded in publication material, and is
+/// not recoverable from published state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TieBreakPolicy {
-    /// Sealed decision sequence, then priority class, then transaction ID.
-    SealedSequencePriorityTxIdV1,
-}
-
-impl TieBreakPolicy {
-    /// Stable code included in every decision-path hash.
-    #[must_use]
-    pub const fn code(self) -> u8 {
-        match self {
-            Self::SealedSequencePriorityTxIdV1 => 1,
-        }
-    }
+enum ScheduleOrder {
+    /// Priority class, then transaction identity.
+    PriorityClassThenTxIdV1,
 }
 
 /// Fixed bounds for one deterministic flat-combiner invocation.
@@ -179,14 +165,14 @@ pub struct ConflictComponent {
 }
 
 impl ConflictComponent {
-    /// Transaction IDs in the combiner's admissible order.
+    /// Transaction IDs in canonical transaction-ID order.
     #[must_use]
     pub fn transaction_ids(&self) -> &[TxId] {
         &self.transaction_ids
     }
 }
 
-/// Ordered conflict graph over the combined portion of one lane.
+/// Canonically represented conflict graph over the combined portion of one lane.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConflictGraph {
     ordered_transaction_ids: Vec<TxId>,
@@ -196,10 +182,11 @@ pub struct ConflictGraph {
 
 impl ConflictGraph {
     fn from_entries(entries: &[&PreparedEntry]) -> Self {
-        let ordered_transaction_ids = entries
+        let mut ordered_transaction_ids = entries
             .iter()
             .map(|entry| entry.capsule.transaction_id())
             .collect::<Vec<_>>();
+        ordered_transaction_ids.sort_unstable();
         let mut edges = Vec::new();
         for (offset, left) in entries.iter().enumerate() {
             for right in &entries[offset + 1..] {
@@ -224,7 +211,7 @@ impl ConflictGraph {
         }
     }
 
-    /// Transactions in the deterministic admissible order.
+    /// Transactions in canonical transaction-ID order.
     #[must_use]
     pub fn ordered_transaction_ids(&self) -> &[TxId] {
         &self.ordered_transaction_ids
@@ -276,32 +263,23 @@ fn components_for(nodes: &[TxId], edges: &[ConflictEdge]) -> Vec<ConflictCompone
     components
 }
 
-/// SHA-256 digest of the versioned, canonical decision path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DecisionPathHash([u8; 32]);
-
-impl DecisionPathHash {
-    /// Hash bytes in SHA-256's native fixed width.
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
 /// Stateless deterministic flat combiner configuration.
+///
+/// The pre-combiner schedule is a derived scheduling hint only: it is not
+/// recoverable from published state and carries no semantics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FlatCombiner {
     bounds: BatchBounds,
-    tie_break: TieBreakPolicy,
+    schedule_order: ScheduleOrder,
 }
 
 impl FlatCombiner {
-    /// Creates the version-one combiner with its closed tie-break policy.
+    /// Creates the version-one combiner with its closed derived schedule.
     #[must_use]
     pub const fn new(bounds: BatchBounds) -> Self {
         Self {
             bounds,
-            tie_break: TieBreakPolicy::SealedSequencePriorityTxIdV1,
+            schedule_order: ScheduleOrder::PriorityClassThenTxIdV1,
         }
     }
 
@@ -309,12 +287,6 @@ impl FlatCombiner {
     #[must_use]
     pub const fn bounds(self) -> BatchBounds {
         self.bounds
-    }
-
-    /// The declared deterministic ordering policy.
-    #[must_use]
-    pub const fn tie_break(self) -> TieBreakPolicy {
-        self.tie_break
     }
 
     /// Cuts and orders a sealed lane using only its stable capsule fields.
@@ -331,7 +303,7 @@ impl FlatCombiner {
             capacity,
             mut entries,
         } = lane;
-        entries.sort_by_key(entry_order_key);
+        entries.sort_by_key(|entry| entry_order_key(self.schedule_order, entry));
         let dispositions = match plan_cut(&entries, self.bounds, logical_now_tick) {
             Ok(dispositions) => dispositions,
             Err(refusal) => {
@@ -353,20 +325,6 @@ impl FlatCombiner {
             })
             .collect::<Vec<_>>();
         let graph = ConflictGraph::from_entries(&selected_entries);
-        let decision_path = match decision_path_hash(self.tie_break, &selected_entries, &graph) {
-            Ok(hash) => hash,
-            Err(refusal) => {
-                return Err(CombineFailure::new(
-                    CombiningLane {
-                        id,
-                        capacity,
-                        entries,
-                    },
-                    refusal,
-                ));
-            }
-        };
-
         let mut combined_entries = Vec::with_capacity(selected_entries.len());
         let mut bypasses = Vec::with_capacity(entries.len() - selected_entries.len());
         for (entry, disposition) in entries.into_iter().zip(dispositions) {
@@ -378,11 +336,12 @@ impl FlatCombiner {
                 }),
             }
         }
+        combined_entries.sort_by_key(|entry| entry.capsule.transaction_id());
+        bypasses.sort_by_key(|attempt| attempt.attempt.capsule().transaction_id());
         let retired = RetiredLane::from_combiner(id, capacity);
         let batch = (!combined_entries.is_empty()).then_some(CombinedBatch {
             entries: combined_entries,
             graph,
-            decision_path,
         });
         Ok(Combination {
             batch,
@@ -392,12 +351,13 @@ impl FlatCombiner {
     }
 }
 
-const fn entry_order_key(entry: &PreparedEntry) -> (u64, u8, TxId) {
-    (
-        entry.capsule.sealed_sequence().get(),
-        entry.capsule.priority().code(),
-        entry.capsule.transaction_id(),
-    )
+const fn entry_order_key(schedule_order: ScheduleOrder, entry: &PreparedEntry) -> (u8, TxId) {
+    match schedule_order {
+        ScheduleOrder::PriorityClassThenTxIdV1 => (
+            entry.capsule.priority().code(),
+            entry.capsule.transaction_id(),
+        ),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -453,11 +413,12 @@ fn canonical_len_u64(capsule: &PreparedCapsule) -> Result<u64, CombineRefusal> {
 pub struct CombinedBatch {
     entries: Vec<PreparedEntry>,
     graph: ConflictGraph,
-    decision_path: DecisionPathHash,
 }
 
 impl CombinedBatch {
-    /// Capsules in the deterministic admissible order.
+    /// Capsules in canonical transaction-ID order.
+    ///
+    /// The private pre-combiner schedule is intentionally not observable here.
     pub fn capsules(&self) -> impl ExactSizeIterator<Item = &PreparedCapsule> {
         self.entries.iter().map(|entry| &entry.capsule)
     }
@@ -466,12 +427,6 @@ impl CombinedBatch {
     #[must_use]
     pub const fn conflict_graph(&self) -> &ConflictGraph {
         &self.graph
-    }
-
-    /// Hash witnessing the selected order, graph, and tie-break policy.
-    #[must_use]
-    pub const fn decision_path(&self) -> DecisionPathHash {
-        self.decision_path
     }
 
     /// Immutable prepared outcomes selected for the combined path.
@@ -691,7 +646,7 @@ impl CombineFailure {
         Self { lane, refusal }
     }
 
-    /// The exact condition that prevented a replayable combined decision path.
+    /// The exact condition that prevented a replayable combined attempt.
     #[must_use]
     pub const fn refusal(&self) -> CombineRefusal {
         self.refusal
@@ -710,69 +665,6 @@ pub enum CombineRefusal {
     CanonicalByteCountOverflow,
     /// Selected decision count overflowed despite the bounded policy.
     DecisionCountOverflow,
-    /// A codec count exceeded the format's fixed `u32` length field.
-    CodecCountOverflow,
-}
-
-fn decision_path_hash(
-    tie_break: TieBreakPolicy,
-    entries: &[&PreparedEntry],
-    graph: &ConflictGraph,
-) -> Result<DecisionPathHash, CombineRefusal> {
-    let mut encoder = Encoder::new();
-    encoder
-        .write_bytes(
-            "decision_path_schema_tag",
-            DECISION_PATH_SCHEMA_TAG.as_bytes(),
-        )
-        .map_err(|_| CombineRefusal::CodecCountOverflow)?;
-    encoder.write_scalar(DECISION_PATH_FORMAT_VERSION);
-    encoder.write_raw_byte(tie_break.code());
-    write_count(&mut encoder, entries.len())?;
-    for entry in entries {
-        write_identity(
-            &mut encoder,
-            entry.capsule.transaction_id().as_internal_object_id(),
-        )?;
-        write_identity(
-            &mut encoder,
-            entry.capsule.capsule_id().as_internal_object_id(),
-        )?;
-        encoder.write_scalar(entry.capsule.sealed_sequence().get());
-        encoder.write_raw_byte(entry.capsule.priority().code());
-        encoder.write_scalar(canonical_len_u64(&entry.capsule)?);
-    }
-    write_count(&mut encoder, graph.edges.len())?;
-    for edge in &graph.edges {
-        write_identity(&mut encoder, edge.first.as_internal_object_id())?;
-        write_identity(&mut encoder, edge.second.as_internal_object_id())?;
-    }
-    write_count(&mut encoder, graph.components.len())?;
-    for component in &graph.components {
-        write_count(&mut encoder, component.transaction_ids.len())?;
-        for transaction in &component.transaction_ids {
-            write_identity(&mut encoder, transaction.as_internal_object_id())?;
-        }
-    }
-    Ok(DecisionPathHash(sha256_digest(encoder.as_bytes())))
-}
-
-fn write_count(encoder: &mut Encoder, value: usize) -> Result<(), CombineRefusal> {
-    let value = u32::try_from(value).map_err(|_| CombineRefusal::CodecCountOverflow)?;
-    encoder.write_scalar(value);
-    Ok(())
-}
-
-fn write_identity(encoder: &mut Encoder, id: &InternalObjectId) -> Result<(), CombineRefusal> {
-    encoder.write_scalar(id.algorithm().code_point());
-    encoder
-        .write_bytes("decision_path_domain", id.domain().as_bytes())
-        .map_err(|_| CombineRefusal::CodecCountOverflow)?;
-    encoder.write_scalar(id.codec_version().major());
-    encoder.write_scalar(id.codec_version().minor());
-    encoder
-        .write_bytes("decision_path_digest", id.digest().as_bytes())
-        .map_err(|_| CombineRefusal::CodecCountOverflow)
 }
 
 /// A direct-attempt handoff refusal retaining the live slot.
