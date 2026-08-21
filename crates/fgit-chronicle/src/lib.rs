@@ -63,6 +63,7 @@ pub mod audit;
 pub mod capsule;
 pub mod origin;
 pub mod publish;
+pub mod recovery;
 pub mod refusal;
 
 pub use assemble::{PublicationPlan, VerifiedPublication};
@@ -73,4 +74,5 @@ pub use capsule::{
 };
 pub use origin::{PublicationBasis, ResultingRoots};
 pub use publish::{CanonicalBatchReceipt, LostCandidate, PublicationVerdict, publish};
+pub use recovery::{AuditedRestore, CapsuleVerification, HaltReason, RecoveryPlan, plan_recovery};
 pub use refusal::ChronicleRefusal;

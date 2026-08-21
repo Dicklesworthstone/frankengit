@@ -151,6 +151,23 @@ pub enum ChronicleRefusal {
     CapsuleBodyNotStaged,
     /// The capsule's identity could not be computed.
     CapsuleIdentityUnavailable,
+    /// A restore was authorized against a plan that did not halt.
+    ///
+    /// Recovery that could proceed on its own must not be overridden by a
+    /// manual restore: that would let an operator discard live history
+    /// while nothing was actually wrong.
+    RestoreNotHalted,
+    /// A restore would not advance the authority generation.
+    ///
+    /// A restore moves the authority forward to a position carrying older
+    /// content. Re-entering a generation the repository has already left
+    /// would make the rewind invisible to anyone who saw the old one.
+    RestoreDoesNotAdvance {
+        /// Generation being abandoned.
+        abandoned: HeadGeneration,
+        /// Generation the restore proposed.
+        proposed: HeadGeneration,
+    },
     /// A capsule declares a backup profile this build does not define.
     BackupProfileUnknown {
         /// The discriminant that was read.
@@ -271,6 +288,18 @@ impl fmt::Display for ChronicleRefusal {
             Self::CapsuleIdentityUnavailable => {
                 f.write_str("the capsule's identity could not be computed")
             }
+            Self::RestoreNotHalted => f.write_str(
+                "recovery did not halt, so there is nothing for a manual restore to override",
+            ),
+            Self::RestoreDoesNotAdvance {
+                abandoned,
+                proposed,
+            } => write!(
+                f,
+                "a restore to generation {} would not advance past the abandoned generation {}",
+                proposed.get(),
+                abandoned.get()
+            ),
             Self::BackupProfileUnknown { observed } => {
                 write!(f, "backup profile {observed} is not defined by this build")
             }
