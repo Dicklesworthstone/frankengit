@@ -945,6 +945,17 @@ fn parse_headers(
         None if profile == AcceptanceProfile::GitCompatibleImport => (body, body.len(), false),
         None => return Err(ObjectError::MissingHeaderMessageSeparator),
     };
+    // A Git-compatible object with no header/message separator still has its
+    // final header newline.  `split` would otherwise manufacture an empty
+    // header after that newline, despite there being no empty separator line
+    // in the original body.  Preserve the raw body and its `message_start`,
+    // but parse only the actual header lines.
+    let header_bytes =
+        if !has_message_separator && profile == AcceptanceProfile::GitCompatibleImport {
+            header_bytes.strip_suffix(b"\n").unwrap_or(header_bytes)
+        } else {
+            header_bytes
+        };
     let mut headers: Vec<HeaderField> = Vec::new();
     if header_bytes.is_empty() {
         return Ok((headers, message_start, has_message_separator));
@@ -1793,7 +1804,7 @@ mod tests {
 
     #[test]
     fn import_accepts_missing_separator_but_strict_refuses() {
-        let body = b"tree 1111111111111111111111111111111111111111\nauthor A <a@x> 1 +0000\ncommitter C <c@x> 1 +0000";
+        let body = b"tree 1111111111111111111111111111111111111111\nauthor A <a@x> 1 +0000\ncommitter C <c@x> 1 +0000\n";
         assert!(parse_commit(body, AcceptanceProfile::GitCompatibleImport, &limits()).is_ok());
         assert_eq!(
             parse_commit(body, AcceptanceProfile::StrictCreate, &limits()),
