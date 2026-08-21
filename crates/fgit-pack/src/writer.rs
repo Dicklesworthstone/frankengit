@@ -254,6 +254,13 @@ impl PackPlanner {
         roots: &[ObjectId],
         deadline: &mut impl Deadline,
     ) -> Result<PackPlan, PackWriteError> {
+        if self.profile.max_delta_depth > self.limits.max_delta_depth {
+            return Err(PackError::DeltaDepthLimit {
+                depth: self.profile.max_delta_depth,
+                limit: self.limits.max_delta_depth,
+            }
+            .into());
+        }
         let mut pending = roots.to_vec();
         pending.sort_unstable();
         pending.dedup();
@@ -317,7 +324,12 @@ impl PackPlanner {
         }
 
         objects.sort_unstable_by(compare_pack_objects);
-        let entries = select_deltas(&objects, self.profile, deadline)?;
+        let entries = select_deltas(
+            &objects,
+            self.profile,
+            self.limits.max_delta_fanout,
+            deadline,
+        )?;
         Ok(PackPlan {
             format: self.format,
             profile: self.profile,
@@ -341,6 +353,8 @@ pub enum PackWriteError {
         /// Identity carried by the object source result.
         returned: ObjectId,
     },
+    /// A requested edge in the canonical closure had no immutable object body.
+    MissingCanonicalObject(ObjectId),
     /// A generated pack would exceed the caller's declared output budget.
     OutputLimit {
         /// Bytes that would have been emitted.
@@ -444,6 +458,7 @@ impl PackEntryEncoder for DeterministicPackEncoder {
         deadline: &mut dyn Deadline,
         emit: &mut dyn FnMut(&[u8]) -> Result<(), PackWriteError>,
     ) -> Result<DeflateReceipt, PackWriteError> {
+        checkpoint(deadline)?;
         let mut encoder = Deflater::new(self.limits, self.profile)?;
         emit(&encoder.take_output())?;
         for chunk in input.chunks(ENCODER_INPUT_CHUNK_BYTES) {
@@ -518,6 +533,7 @@ impl PackWriter {
         encoder: &mut impl PackEntryEncoder,
         sink: &mut impl PackArtifactSink,
     ) -> Result<PackWriteReceipt, PackWriteError> {
+        validate_plan_for_writer(plan, &self.limits)?;
         let count = u32::try_from(plan.entries.len()).map_err(|_| PackError::EntryCountLimit {
             actual: u32::MAX,
             limit: self.limits.max_entries,
@@ -533,7 +549,8 @@ impl PackWriter {
         let mut staged = StagedArtifact::new(sink, temporary);
         let mut emitter =
             StreamingEmitter::new(&mut staged, plan.format, self.limits.max_input_bytes);
-        emitter.emit_hashed(&pack_header(count), deadline)?;
+        checkpoint(deadline)?;
+        emitter.emit_hashed(&pack_header(count))?;
 
         let mut offsets = Vec::new();
         offsets
@@ -564,8 +581,8 @@ impl PackWriter {
                     let distance = offset
                         .checked_sub(base_offset)
                         .ok_or(PackError::InvalidOfsDelta)?;
-                    emitter.emit_hashed(&encode_entry_header(6, delta.program.len())?, deadline)?;
-                    emitter.emit_hashed(&encode_ofs_delta_distance(distance)?, deadline)?;
+                    emitter.emit_hashed(&encode_entry_header(6, delta.program.len())?)?;
+                    emitter.emit_hashed(&encode_ofs_delta_distance(distance)?)?;
                     delta_count = delta_count
                         .checked_add(1)
                         .ok_or(PackError::IntegerOverflow {
@@ -574,22 +591,20 @@ impl PackWriter {
                     delta.program.as_slice()
                 }
                 None => {
-                    emitter.emit_hashed(
-                        &encode_entry_header(
-                            entry.object.object_type.type_code(),
-                            entry.object.body.len(),
-                        )?,
-                        deadline,
-                    )?;
+                    emitter.emit_hashed(&encode_entry_header(
+                        entry.object.object_type.type_code(),
+                        entry.object.body.len(),
+                    )?)?;
                     entry.object.body.as_slice()
                 }
             };
-            let receipt = encoder.encode_entry(payload, deadline, &mut |bytes| {
-                emitter.emit_hashed(bytes, deadline)
-            })?;
+            let receipt =
+                encoder.encode_entry(payload, deadline, &mut |bytes| emitter.emit_hashed(bytes))?;
             compression.push(receipt);
         }
         let checksum = emitter.finish_and_emit_trailer(deadline)?;
+        let output_bytes = emitter.bytes_written();
+        drop(emitter);
         staged.promote()?;
         Ok(PackWriteReceipt {
             profile: plan.profile,
@@ -597,7 +612,7 @@ impl PackWriter {
             object_count: count,
             delta_count,
             total_object_bytes: plan.total_object_bytes,
-            output_bytes: emitter.bytes_written(),
+            output_bytes,
             compression,
         })
     }
@@ -613,6 +628,65 @@ fn ensure_format(format: ObjectFormat, id: ObjectId) -> Result<(), PackWriteErro
         }
         .into())
     }
+}
+
+fn validate_plan_for_writer(plan: &PackPlan, limits: &PackLimits) -> Result<(), PackWriteError> {
+    let count = u32::try_from(plan.entries.len()).map_err(|_| PackError::EntryCountLimit {
+        actual: u32::MAX,
+        limit: limits.max_entries,
+    })?;
+    if count > limits.max_entries {
+        return Err(PackError::EntryCountLimit {
+            actual: count,
+            limit: limits.max_entries,
+        }
+        .into());
+    }
+    if plan.total_object_bytes > limits.max_total_expanded_bytes {
+        return Err(PackError::TotalExpandedLimit {
+            actual: plan.total_object_bytes,
+            limit: limits.max_total_expanded_bytes,
+        }
+        .into());
+    }
+    let mut fanout = Vec::new();
+    fanout
+        .try_reserve(plan.entries.len())
+        .map_err(|_| PackError::AllocationFailed {
+            requested: plan.entries.len(),
+        })?;
+    for (index, entry) in plan.entries.iter().enumerate() {
+        limits.object_size(entry.object.body.len())?;
+        fanout.push(0_usize);
+        let Some(delta) = entry.delta.as_ref() else {
+            continue;
+        };
+        limits.object_size(delta.program.len())?;
+        if delta.base_index >= index {
+            return Err(PackError::MissingDeltaBase.into());
+        }
+        if delta.depth > limits.max_delta_depth {
+            return Err(PackError::DeltaDepthLimit {
+                depth: delta.depth,
+                limit: limits.max_delta_depth,
+            }
+            .into());
+        }
+        fanout[delta.base_index] =
+            fanout[delta.base_index]
+                .checked_add(1)
+                .ok_or(PackError::IntegerOverflow {
+                    context: "pack plan delta fanout",
+                })?;
+        if fanout[delta.base_index] > limits.max_delta_fanout {
+            return Err(PackError::DeltaFanoutLimit {
+                fanout: fanout[delta.base_index],
+                limit: limits.max_delta_fanout,
+            }
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn object_parse_limits(format: ObjectFormat, pack_limits: &PackLimits) -> ParseLimits {
@@ -638,10 +712,17 @@ fn compare_pack_objects(
 fn select_deltas(
     objects: &[CanonicalPackObject],
     profile: PackWriteProfile,
+    max_delta_fanout: usize,
     deadline: &mut impl Deadline,
 ) -> Result<Vec<PackPlanEntry>, PackWriteError> {
-    let mut entries = Vec::new();
+    let mut entries: Vec<PackPlanEntry> = Vec::new();
     entries
+        .try_reserve(objects.len())
+        .map_err(|_| PackError::AllocationFailed {
+            requested: objects.len(),
+        })?;
+    let mut fanout = Vec::new();
+    fanout
         .try_reserve(objects.len())
         .map_err(|_| PackError::AllocationFailed {
             requested: objects.len(),
@@ -654,6 +735,9 @@ fn select_deltas(
             checkpoint(deadline)?;
             let base = &entries[base_index];
             if base.object.object_type != object.object_type {
+                continue;
+            }
+            if fanout[base_index] >= max_delta_fanout {
                 continue;
             }
             let base_depth = base.delta.as_ref().map_or(0, PlannedDelta::depth);
@@ -687,6 +771,15 @@ fn select_deltas(
             object: object.clone(),
             delta: selected,
         });
+        fanout.push(0);
+        if let Some(delta) = entries.last().and_then(PackPlanEntry::delta) {
+            fanout[delta.base_index] =
+                fanout[delta.base_index]
+                    .checked_add(1)
+                    .ok_or(PackError::IntegerOverflow {
+                        context: "planned delta fanout",
+                    })?;
+        }
     }
     Ok(entries)
 }
@@ -987,28 +1080,30 @@ impl PackStreamHasher {
     }
 }
 
-struct StreamingEmitter<'a, S>
+struct StreamingEmitter<'artifact, 'sink, S>
 where
     S: PackArtifactSink,
 {
-    staged: &'a mut StagedArtifact<'a, S>,
+    staged: &'artifact mut StagedArtifact<'sink, S>,
     hasher: Option<PackStreamHasher>,
+    format: ObjectFormat,
     output_limit: usize,
     bytes_written: usize,
 }
 
-impl<'a, S> StreamingEmitter<'a, S>
+impl<'artifact, 'sink, S> StreamingEmitter<'artifact, 'sink, S>
 where
     S: PackArtifactSink,
 {
     fn new(
-        staged: &'a mut StagedArtifact<'a, S>,
+        staged: &'artifact mut StagedArtifact<'sink, S>,
         format: ObjectFormat,
         output_limit: usize,
     ) -> Self {
         Self {
             staged,
             hasher: Some(PackStreamHasher::new(format)),
+            format,
             output_limit,
             bytes_written: 0,
         }
@@ -1018,12 +1113,7 @@ where
         self.bytes_written
     }
 
-    fn emit_hashed(
-        &mut self,
-        bytes: &[u8],
-        deadline: &mut impl Deadline,
-    ) -> Result<(), PackWriteError> {
-        checkpoint(deadline)?;
+    fn emit_hashed(&mut self, bytes: &[u8]) -> Result<(), PackWriteError> {
         self.emit(bytes)?;
         self.hasher
             .as_mut()
@@ -1039,13 +1129,8 @@ where
         checkpoint(deadline)?;
         let hasher = self.hasher.take().ok_or(PackWriteError::PromotionRefused)?;
         let checksum = hasher.finish();
-        let format = match checksum.len() {
-            20 => ObjectFormat::Sha1,
-            32 => ObjectFormat::Sha256,
-            _ => return Err(PackWriteError::PromotionRefused),
-        };
         self.emit(&checksum)?;
-        object_id_from_bytes(format, &checksum).map_err(Into::into)
+        object_id_from_bytes(self.format, &checksum).map_err(Into::into)
     }
 
     fn emit(&mut self, bytes: &[u8]) -> Result<(), PackWriteError> {
@@ -1154,7 +1239,7 @@ mod tests {
             self.objects
                 .get(id)
                 .cloned()
-                .ok_or(PackWriteError::TemporaryArtifactRefused)
+                .ok_or(PackWriteError::MissingCanonicalObject(*id))
         }
     }
 
@@ -1174,6 +1259,11 @@ mod tests {
         let (bytes, receipt) = PackWriter::new(limits())
             .write(&plan, &mut always)
             .expect("stored deterministic pack");
+        let (second_bytes, second_receipt) = PackWriter::new(limits())
+            .write(&plan, &mut always)
+            .expect("second deterministic pack");
+        assert_eq!(bytes, second_bytes);
+        assert_eq!(receipt, second_receipt);
         assert_eq!(
             receipt.checksum.as_bytes(),
             &[
@@ -1196,8 +1286,8 @@ mod tests {
             &NativeChecksumVerifier,
         )
         .expect("writer output accepted by reader");
-        assert_eq!(parsed.entries.len(), 1);
-        assert_eq!(parsed.entries[0].inflated, b"");
+        assert_eq!(parsed.entries().len(), 1);
+        assert_eq!(parsed.entries()[0].inflated, b"");
         assert_eq!(receipt.profile.delta_window, 32);
         assert_eq!(receipt.profile.max_delta_depth, 8);
     }
@@ -1216,6 +1306,26 @@ mod tests {
         let right = planned(vec![commit, second, first]);
         assert_eq!(left, right);
         assert_eq!(left.entries()[0].object().object_type(), ObjectType::Commit);
+    }
+
+    #[test]
+    fn closure_walker_loads_canonical_references_once() {
+        let child = object(ObjectType::Blob, b"closure child", 1, 3);
+        let mut tree_body = b"100644 child\0".to_vec();
+        tree_body.extend_from_slice(child.id().as_bytes());
+        let tree_id = fgit_crypto::git_object_id(ObjectFormat::Sha1, ObjectType::Tree, &tree_body);
+        let tree =
+            CanonicalPackObject::new(tree_id, ObjectType::Tree, tree_body, vec![child.id()], 2, 1);
+        let source = FixtureSource::with(vec![tree.clone(), child.clone()]);
+        let plan = PackPlanner::new(ObjectFormat::Sha1, PackWriteProfile::STORED_V1, limits())
+            .plan(&source, &[tree.id()], &mut always)
+            .expect("canonical tree closure");
+        assert_eq!(plan.entries().len(), 2);
+        assert!(
+            plan.entries()
+                .iter()
+                .any(|entry| entry.object().id() == child.id())
+        );
     }
 
     #[test]
@@ -1239,9 +1349,42 @@ mod tests {
         )
         .expect("delta pack reader round trip");
         assert!(matches!(
-            parsed.entries[1].header.kind,
+            parsed.entries()[1].header.kind,
             crate::EntryKind::OfsDelta
         ));
+        let resolved = crate::apply_delta(
+            plan.entries()[0].object().body(),
+            delta.program(),
+            &limits(),
+            &mut always,
+        )
+        .expect("writer delta program resolves through pack delta engine");
+        assert_eq!(resolved, plan.entries()[1].object().body());
+    }
+
+    #[test]
+    fn delta_window_excludes_older_candidates_with_a_stable_nearest_base() {
+        let first = object(ObjectType::Blob, b"aaaaaaaaaaaaaaaaaaaa--same-suffix", 3, 1);
+        let second = object(ObjectType::Blob, b"aaaaaaaaaaaaaaaaaaaaXXsame-suffix", 2, 1);
+        let third = object(ObjectType::Blob, b"aaaaaaaaaaaaaaaaaaaaYYsame-suffix", 1, 1);
+        let profile = PackWriteProfile {
+            id: "window-one-test",
+            delta_window: 1,
+            ..PackWriteProfile::STORED_V1
+        };
+        let roots = vec![first.id(), second.id(), third.id()];
+        let plan = PackPlanner::new(ObjectFormat::Sha1, profile, limits())
+            .plan(
+                &FixtureSource::with(vec![third, first, second]),
+                &roots,
+                &mut always,
+            )
+            .expect("window-bounded plan");
+        assert_eq!(
+            plan.entries()[2].delta().map(PlannedDelta::base_index),
+            Some(1)
+        );
+        assert_eq!(plan.entries()[2].delta().map(PlannedDelta::depth), Some(2));
     }
 
     #[derive(Default)]
@@ -1299,7 +1442,7 @@ mod tests {
     #[test]
     fn cancellation_at_header_and_member_boundaries_never_promotes_an_artifact() {
         let plan = planned(vec![object(ObjectType::Blob, b"member bytes", 1, 1)]);
-        for successes in [0, 2, 5, 10] {
+        for successes in [0, 1, 3] {
             let mut sink = RecordingSink::default();
             let mut encoder = DeterministicPackEncoder::new(
                 DeflateLimits::GIT_OBJECT,
@@ -1336,14 +1479,22 @@ mod tests {
             1,
             1,
         );
-        let source = FixtureSource::with(vec![malformed]);
+        struct MisidentifiedSource(CanonicalPackObject);
+
+        impl CanonicalObjectSource for MisidentifiedSource {
+            fn load(&self, _id: &ObjectId) -> Result<CanonicalPackObject, PackWriteError> {
+                Ok(self.0.clone())
+            }
+        }
+
+        let source = MisidentifiedSource(malformed);
         assert!(matches!(
             PackPlanner::new(ObjectFormat::Sha1, PackWriteProfile::STORED_V1, limits()).plan(
                 &source,
                 &[valid.id()],
                 &mut always,
             ),
-            Err(PackWriteError::TemporaryArtifactRefused)
+            Err(PackWriteError::SourceIdentityMismatch { .. })
         ));
 
         let plan = planned(vec![valid]);
@@ -1352,6 +1503,17 @@ mod tests {
         assert!(matches!(
             PackWriter::new(tiny_limits).write(&plan, &mut always),
             Err(PackWriteError::OutputLimit { .. })
+        ));
+
+        let mut shallower = limits();
+        shallower.max_delta_depth = PackWriteProfile::STORED_V1.max_delta_depth - 1;
+        assert!(matches!(
+            PackPlanner::new(ObjectFormat::Sha1, PackWriteProfile::STORED_V1, shallower,).plan(
+                &FixtureSource::with(vec![]),
+                &[],
+                &mut always
+            ),
+            Err(PackWriteError::Pack(PackError::DeltaDepthLimit { .. }))
         ));
     }
 

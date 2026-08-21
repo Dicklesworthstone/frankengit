@@ -147,7 +147,7 @@ where
     }
 }
 
-pub(crate) fn checkpoint(deadline: &mut impl Deadline) -> Result<(), PackError> {
+pub(crate) fn checkpoint(deadline: &mut (impl Deadline + ?Sized)) -> Result<(), PackError> {
     if deadline.checkpoint() {
         Ok(())
     } else {
