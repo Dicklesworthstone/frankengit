@@ -1,6 +1,7 @@
 # ADR-0003: Own the Hashes That Compute Git Object Identity, Reuse Every Other Primitive
 
-- **Status:** proposed; resolves open decision D8 (cryptography and key policy) from `COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md` section 47
+- **Status:** **accepted** 2026-08-21; resolves open decision D8 (cryptography and key policy) from `COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md` section 47
+- **Acceptance record:** accepted by GoldLotus as the wave-1 orchestrator ruling for D8 (Agent Mail 7476, 2026-08-21), selecting option C. The evidence cited in the ruling was `fgit-crypto` at `bd92f01` — 96 tests passing, 0 failing, across 7 targets — together with the independent code audit's re-verification of all 38 FIPS known-answer vectors, which returned zero findings. Amended the same day during implementation: see *Amendment 1*. The amendment corrects a mechanism this ADR prescribed that does not enforce what it claims, and selects the concrete signature scheme and AEAD that the original text deferred.
 - **Date:** 2026-08-21
 - **Decision owners:** FrankenGit cryptography registry and key management
 - **Scope:** which cryptographic primitives FrankenGit implements versus admits as dependencies, the key-purpose and rotation model, encryption-domain separation, and cryptographic erasure
@@ -124,6 +125,15 @@ drops one, the row justifying our use survives and the failure is loud.
 either become a real pattern under this decision or be retired, rather than
 remaining a row that looks like policy and enforces nothing.
 
+> **Superseded in part by Amendment 1 (2026-08-21).** The two paragraphs above
+> prescribe a *second* row alongside the transitive one. Implementation showed
+> that a second row is silently inert, so the mechanism changed. The
+> requirement did not: "the runtime pulled this in" and "the identity layer
+> depends on this deliberately" must stay separately auditable, and Amendment 1
+> meets that requirement a different way. The original text is kept rather than
+> rewritten, because the reason a reader should distrust a duplicate row is the
+> same reason this paragraph already gives for distrusting `DEP-004`.
+
 ## Key model
 
 ### Purposes
@@ -189,6 +199,155 @@ bytes and not only of the annotations.
 - Owning four hash-side implementations means owning their correctness
   permanently, including under future toolchain changes.
 
+## Amendment 1 (2026-08-21): concrete selection, and a correction to the registry mechanism
+
+Accepting this ADR authorised two things it had deferred: the direct-admission
+registry rows, and the choice of a signature scheme and an AEAD. Carrying them
+out surfaced a defect in the mechanism the ADR itself prescribed, which is
+recorded first because it changes how the rest of this amendment is written.
+
+### The correction: one reclassified row, not two rows
+
+The superseded text asked for a direct-admission row to be **added alongside**
+the existing transitive row. Against the checker as built, that does nothing.
+
+`tools/registry-check/src/main.rs::active_policy_for_package` resolves a
+package to exactly one policy row, preferring an exact `crate_pattern` match,
+then the longest pattern, then the **lowest `id`**. Two active rows with
+`crate_pattern = ed25519-dalek` therefore resolve to `DEP-051` permanently: any
+row added later carries a higher `DEP-NNN` and is never selected. The
+unsafe-ledger comparison in `report_unsafe_ledger_policy_mismatches` reads only
+the winning row. A second row would be a row that looks like policy and
+enforces nothing — the exact failure this ADR already names in `DEP-004`, which
+is why the paragraph diagnosing `DEP-004` is kept above rather than deleted.
+
+The corrected mechanism is **one authoritative row per directly used crate,
+reclassified rather than duplicated**: `decision` becomes
+`allow_direct_first_party`, and `rationale` records the direct first-party
+justification *and* the transitive origin. This preserves what the original
+mechanism was for. If the runtime's feature closure later drops one of these
+crates, the row justifying our own use is the row that is actually consulted,
+so the justification survives and the failure is loud.
+
+### The residual gap, recorded rather than papered over
+
+Reclassification makes the row honest. It does not make it a gate, and this
+amendment does not claim that it does.
+
+`check_manifests` requires only that every dependency named in a manifest match
+*some* active row whose `decision` begins with `allow`. Nothing requires a
+crate named directly in a first-party manifest to hold a row whose decision
+authorises *direct* use. Under the current checker, `ed25519-dalek` in
+`fgit-crypto`'s manifest would pass on the strength of the transitive row alone.
+`allow_direct_first_party` is therefore an auditable statement of intent, not an
+enforced boundary, and dependency smuggling stays possible.
+
+Closing it is a small check — for each first-party manifest dependency, require
+the resolved row's decision to authorise direct use — but it lives in
+`tools/registry-check/**`, which this ADR does not own. Recorded as a follow-up
+for the registry-checker owner rather than implemented here, and recorded as a
+known gap rather than left for a reader to discover.
+
+### Signatures: Ed25519, via `ed25519-dalek` 2.2.0 (DEP-051)
+
+**Rejected alternative: ECDSA over P-256** (`p256`). It is the more widely
+interoperable choice and the one a compliance regime is likelier to name. It
+was rejected because its dominant real-world failure mode is nonce handling: a
+repeated or biased per-signature nonce discloses the private key, and that
+failure is silent, produces valid signatures, and is invisible to
+known-answer vectors. Ed25519 derives its nonce deterministically from the key
+and message (RFC 8032 section 5.1.6), so the failure mode is absent by
+construction rather than avoided by care. It also admits no new crate, where
+`p256` would.
+
+Ed25519's own known sharp edge is signature malleability and the
+divergence between verification definitions across implementations. It is
+recorded here rather than left implicit: `ed25519-dalek` 2.x verifies with the
+stricter `verify_strict`-style checks available, and FrankenGit treats a
+signature as evidence of authorship only, never as evidence of trustworthiness
+— the separation plan section 35.6 requires.
+
+**Feature closure: `default-features = false`, no additional features.** This is
+load-bearing, not tidiness. `default` enables `zeroize`, and `rand_core` enables
+in-crate key generation; either adds a dependency edge to `ed25519-dalek` and
+moves `Cargo.lock` for all sixteen agents sharing this checkout. Neither is
+needed.
+
+**Key material is derived, not generated.** An Ed25519 signing key comes from
+`derive_key` (HKDF-SHA-256) with purpose, epoch and scope in the length-prefixed
+`info`, and is then handed to `SigningKey::from_bytes`. Key generation stays
+inside FrankenGit's own domain separation and the crate is used only as the
+primitive. This is why the `rand_core` feature is unnecessary rather than merely
+declined.
+
+**Audit surface, stated as measured and not as assurance.** `ed25519-dalek`
+resolves `curve25519-dalek` 4.1.3, which contains `unsafe` in its SIMD backends,
+runs a build script through `rustc_version`, and pulls the
+`curve25519-dalek-derive` proc macro. None of it has been audited by this
+project. The unsafe ledger classifies it `ledgered_transitive`, and this
+amendment claims exactly that and nothing stronger. Selecting a reused primitive
+is a decision about *where correctness risk is concentrated*, not a claim that
+the risk is gone.
+
+**Removal path.** The scheme is reached only through the code point registered
+in `fgit_crypto::schemes`, and signature bytes are carried in a
+domain-separated envelope that names the scheme. Replacing Ed25519 means
+allocating a second code point and retiring the first; existing signatures stay
+verifiable under the retired row for as long as its status says so. No caller
+names `ed25519_dalek` types.
+
+### AEAD: XChaCha20-Poly1305, via `chacha20poly1305` 0.11.0 (DEP-031)
+
+**Rejected alternative: AES-256-GCM** (`aes-gcm`, DEP-016). It is the
+standardised choice (NIST SP 800-38D) where XChaCha20-Poly1305 has only a
+CFRG draft, and that is a real cost, recorded plainly. It was rejected on nonce
+economics. AES-GCM's 96-bit nonce forces one of two options at tenant scale:
+maintain a durable per-key counter, which is persistent state that must survive
+restore, replication and rollback and is therefore exactly the kind of state
+this project treats as authority; or use random nonces and accept a birthday
+bound around 2^32 messages under one key. Nonce reuse in GCM is
+catastrophic rather than degrading — it discloses the authentication subkey and
+forfeits integrity for every message under that key, not just the colliding
+pair.
+
+XChaCha20-Poly1305's 192-bit nonce makes a random nonce safe with no counter
+and no stored state, which is why it is chosen: it removes a durable-state
+obligation from the encryption path rather than adding one. It is also
+constant-time on every target without depending on hardware AES.
+
+The draft-status cost is accepted for a specific reason: this is
+encryption at rest between FrankenGit and itself. There is no third party to
+interoperate with, the algorithm is reached through a versioned registry code
+point, and the construction is HChaCha20 key derivation followed by
+RFC 8439 ChaCha20-Poly1305 — the underlying primitive is standardised even
+though the extended-nonce composition is not. Were an interoperability or
+compliance requirement to appear, that is a new code point, not a rewrite.
+
+**Feature closure: `default-features = false`.** Same reasoning as above; the
+in-place `AeadInOut` interface needs no `alloc` and no `getrandom`, so the
+resolution does not move.
+
+**Domain binding is cryptographic, not annotational.** The key-domain framing
+— tenant, repository, purpose, epoch — is supplied as the AEAD's associated
+data, so a ciphertext moved across key domains fails authentication rather than
+decrypting into something a caller might use. This is what makes plan sections
+12.5 and 13.7 — *"a ciphertext copied across incompatible key domains is not a
+valid placement"* — true of the bytes.
+
+### Non-claims specific to this amendment
+
+- Selecting these primitives is not a claim that they are correct, and not a
+  claim that this project has reviewed them. It is a claim about where the
+  risk sits and who carries it.
+- `default-features = false` is chosen to avoid moving `Cargo.lock`, but Cargo
+  unifies features across the graph: another crate in this workspace may enable
+  features on these crates, and the build will then have them. First-party code
+  here therefore uses only the featureless API, and no claim is made that the
+  compiled feature set equals the requested one.
+- No side-channel claim is made about either selection.
+- No claim is made that `allow_direct_first_party` is enforced. See the
+  residual gap above.
+
 ## Non-claims
 
 This ADR does not claim that reuse makes the reused crates correct, that
@@ -196,9 +355,9 @@ FIPS vectors make the owned implementations constant-time, or that the
 construction/primitive distinction is a bright line in general — it is a
 defensible line *here*, given what the constitution already assigns us.
 
-It does not select a specific signature scheme or AEAD. It says where they
-come from; which ones, and with what feature closure, is the admission review
-that follows this decision.
+The body of this ADR does not select a specific signature scheme or AEAD; it
+says only where they come from. Amendment 1 makes that selection, and the
+non-claims attached to it are stated there rather than here.
 
 The owned implementations carry claim class E1 (local exact): published
 known-answer vectors, reproduced by this code, derived from an implementation
