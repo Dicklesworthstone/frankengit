@@ -49,7 +49,7 @@ pub mod path;
 pub mod proposal;
 pub mod snapshot;
 
-pub use base::{BaseEntry, BaseError, BaseView, ObjectSource, ObjectSourceError};
+pub use base::{BaseEntry, BaseError, BaseView, DirectoryListing, ObjectSource, ObjectSourceError};
 pub use capability::{
     CapabilityRefusal, ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId, WriteGrant,
 };

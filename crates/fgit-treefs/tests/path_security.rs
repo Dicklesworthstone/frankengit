@@ -286,7 +286,7 @@ fn structural_accessors_are_consistent() {
 
     let top = TreePath::parse_default(b"solo").unwrap();
     assert!(top.parent().is_none());
-    assert!(top.ancestors().is_empty());
+    assert_eq!(top.ancestors(), Vec::new());
     assert_eq!(top.file_name(), b"solo");
 }
 

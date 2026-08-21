@@ -218,6 +218,10 @@ impl From<ObjectError> for BaseError {
     }
 }
 
+/// One directory's immediate children: raw entry-name bytes paired with the
+/// typed entry the base holds there.
+pub type DirectoryListing<A> = Vec<(Vec<u8>, BaseEntry<A>)>;
+
 /// An immutable view of repository state pinned to one exact commit.
 ///
 /// The view is `Clone` and carries no interior mutability: two workspaces may
@@ -381,7 +385,7 @@ impl<A: GitHashAlgorithm> BaseView<A> {
         capability: &mut TreeCapability,
         directory: Option<&TreePath>,
         now: u64,
-    ) -> Result<Vec<(Vec<u8>, BaseEntry<A>)>, BaseError> {
+    ) -> Result<DirectoryListing<A>, BaseError> {
         let (tree_oid, scope) = match directory {
             None => (self.base_tree_oid, None),
             Some(path) => match self.resolve(source, capability, path, now)? {
