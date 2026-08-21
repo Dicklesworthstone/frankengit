@@ -52,7 +52,12 @@ run_fast() {
   echo_step "Checking workspace"
   cargo check --workspace --all-targets --locked
   echo_step "Running workspace tests"
-  cargo test --workspace --all-targets --locked
+  # --no-fail-fast is mandatory: without it, cargo stops after the first test
+  # binary that fails and never runs the rest, so a single red test (e.g. an
+  # in-development EXPECTED-RED) silently masks every acceptance test that would
+  # have run after it. That truncation produced a false-green orchestrator close
+  # of the fg007b/§5.2 acceptance suite; the flag makes every failure visible.
+  cargo test --workspace --all-targets --locked --no-fail-fast
   echo_step "Running Clippy"
   cargo clippy --workspace --all-targets --locked -- -D warnings
 }
