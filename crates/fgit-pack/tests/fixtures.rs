@@ -4,7 +4,8 @@ use fgit_pack::PackLimits;
 
 pub const SHA1_TRAILER: [u8; 20] = [0xaa; 20];
 
-pub fn limits() -> PackLimits {
+#[must_use]
+pub const fn limits() -> PackLimits {
     PackLimits {
         max_input_bytes: 32 * 1024,
         max_entries: 16,
@@ -20,10 +21,12 @@ pub fn limits() -> PackLimits {
     }
 }
 
-pub fn always() -> bool {
+#[must_use]
+pub const fn always() -> bool {
     true
 }
 
+#[must_use]
 pub fn pack_with_entries(entries: &[Vec<u8>]) -> Vec<u8> {
     let count = u32::try_from(entries.len()).expect("test pack entry count fits u32");
     let mut pack = b"PACK\0\0\0\x02".to_vec();
@@ -35,10 +38,12 @@ pub fn pack_with_entries(entries: &[Vec<u8>]) -> Vec<u8> {
     pack
 }
 
+#[must_use]
 pub fn entry(kind: u8, payload: &[u8]) -> Vec<u8> {
     declared_entry(kind, payload.len(), &zlib_stored(payload))
 }
 
+#[must_use]
 pub fn declared_entry(kind: u8, declared_size: usize, member: &[u8]) -> Vec<u8> {
     let mut entry = entry_header(kind, declared_size);
     entry.extend_from_slice(member);

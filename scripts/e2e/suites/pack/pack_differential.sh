@@ -240,7 +240,8 @@ run_case() {
     env RCH_CARGO_WRAPPER_BYPASS=1 \
     "FGIT_PACK_DIFFERENTIAL_CORPUS=${corpus}" \
     "FGIT_PACK_DIFFERENTIAL_ARTIFACT_DIR=${artifact_directory}" \
-    cargo test --locked -p fgit-pack --test differential_oracle -- --ignored --nocapture || differential_exit=$?
+    cargo test --locked -p fgit-pack --test differential_oracle \
+      pinned_oracle_pack_matches_all_manifest_bytes_oids_and_idx_entries -- --ignored --nocapture || differential_exit=$?
   fge_assert_exit "${prefix}-005" 0 "${differential_exit}" \
     'the Rust reader reproduces every oracle object, OID, and idx association'
   fge_assert_file "${prefix}-006" "${artifact_directory}/verdict.ndjson" \
@@ -342,5 +343,6 @@ fge_capture deterministic-pack-fuzz \
 fge_phase assert
 fge_assert_exit FG-016C-E2E-FUZZ-001 0 "${fuzz_exit}" \
   'the seeded pack mutation corpus returns only acceptance or typed refusal'
-fge_assert_contains FG-016C-E2E-FUZZ-002 "${FGE_LAST_STDOUT}" \
+fuzz_output=$FGE_LAST_STDOUT$'\n'$FGE_LAST_STDERR
+fge_assert_contains FG-016C-E2E-FUZZ-002 "${fuzz_output}" \
   '"corpus_denominator":256' 'the fuzz receipt states its exact denominator'

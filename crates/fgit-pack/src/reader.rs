@@ -7,9 +7,10 @@ use crate::{
     split_pack_trailer, validate_object_count, validate_pack_trailer,
 };
 
-/// An inflated pack entry that is still quarantine data. Its type, trailer,
-/// index association, and native object ID have not yet been jointly
-/// authenticated, so this value is never canonical object storage.
+/// An inflated pack entry that is still quarantine data.
+///
+/// Its type, trailer, index association, and native object ID have not yet
+/// been jointly authenticated, so this value is never canonical object storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuarantinedEntry {
     pub offset: u64,
@@ -74,9 +75,10 @@ impl QuarantinedPack {
     }
 }
 
-/// Performs structural pack framing and entry inflation but deliberately does
-/// not authenticate the trailer. This is useful only within a caller-owned
-/// quarantine diagnostic path; [`read_verified_pack`] is the admission API.
+/// Performs structural pack framing and entry inflation without authentication.
+///
+/// This is useful only within a caller-owned quarantine diagnostic path;
+/// [`read_verified_pack`] is the admission API.
 pub fn parse_quarantined_pack(
     input: &[u8],
     format: ObjectFormat,
@@ -186,9 +188,10 @@ pub fn parse_quarantined_pack(
     })
 }
 
-/// Verifies the native pack trailer before parsing any pack entry. All
-/// resulting payloads remain quarantined until their object headers/types and
-/// reconstructed native OIDs are checked by the object-verification layer.
+/// Verifies the native pack trailer before parsing any pack entry.
+///
+/// All resulting payloads remain quarantined until their object headers/types
+/// and reconstructed native OIDs are checked by the object-verification layer.
 pub fn read_verified_pack(
     input: &[u8],
     format: ObjectFormat,
@@ -200,7 +203,7 @@ pub fn read_verified_pack(
     parse_quarantined_pack(input, format, limits, deadline)
 }
 
-fn delta_base_len(base: &ParsedDeltaBase) -> usize {
+const fn delta_base_len(base: &ParsedDeltaBase) -> usize {
     match base {
         ParsedDeltaBase::Ofs { consumed, .. } | ParsedDeltaBase::Ref { consumed, .. } => *consumed,
     }
@@ -266,17 +269,15 @@ fn inflate_limits(limits: &PackLimits, declared_size: usize) -> InflateLimits {
         // and fallibly rather than preallocating it.
         max_pending_input_bytes: limits.max_input_bytes,
         max_output_bytes: declared_size.max(1),
-        max_expansion_ratio: Some(match u32::try_from(limits.max_expansion_ratio) {
-            Ok(value) => value.max(1),
-            Err(_) => u32::MAX,
-        }),
+        max_expansion_ratio: Some(
+            u32::try_from(limits.max_expansion_ratio)
+                .unwrap_or(u32::MAX)
+                .max(1),
+        ),
         max_window_bytes: fgit_deflate::RFC1951_MAX_WINDOW_BYTES,
         max_huffman_symbols: 320,
         max_collection_elements: 320,
-        max_work_units: match u64::try_from(limits.max_inflate_work) {
-            Ok(value) => value,
-            Err(_) => u64::MAX,
-        },
+        max_work_units: limits.max_inflate_work,
     }
 }
 

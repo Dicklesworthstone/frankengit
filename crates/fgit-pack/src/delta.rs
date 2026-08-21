@@ -33,13 +33,13 @@ pub enum PackObject {
 }
 
 impl PackObject {
-    fn offset(&self) -> u64 {
+    const fn offset(&self) -> u64 {
         match self {
             Self::Base { offset, .. } | Self::Delta(DeltaObject { offset, .. }) => *offset,
         }
     }
 
-    fn id(&self) -> Option<&ObjectId> {
+    const fn id(&self) -> Option<&ObjectId> {
         match self {
             Self::Base { id, .. } | Self::Delta(DeltaObject { id, .. }) => id.as_ref(),
         }
@@ -118,7 +118,7 @@ where
         self.resolve_object(object, 0, &mut stack, &mut accounting, deadline)
     }
 
-    /// Resolves a known native ID. This supports a REF_DELTA root without
+    /// Resolves a known native ID. This supports a `REF_DELTA` root without
     /// forcing callers to expose their offset index.
     pub fn resolve_id(
         &self,
@@ -285,10 +285,11 @@ where
     }
 }
 
-/// A bounded cache over the scalar resolver. It preserves the scalar
-/// resolver's logical expansion/work charging, so a cache hit cannot turn a
-/// resource refusal into success; it only avoids recomputing already-proven
-/// delta bytes.
+/// A bounded cache over the scalar resolver.
+///
+/// It preserves the scalar resolver's logical expansion/work charging, so a
+/// cache hit cannot turn a resource refusal into success; it only avoids
+/// recomputing already-proven delta bytes.
 pub struct CachedResolver<'objects, 'lookup, L> {
     scalar: ScalarResolver<'objects, 'lookup, L>,
     entries: Vec<CacheEntry>,
@@ -514,12 +515,12 @@ fn clone_pack_object(
     match object {
         PackObject::Base { offset, id, data } => Ok(PackObject::Base {
             offset: *offset,
-            id: id.clone(),
+            id: *id,
             data: copy_bytes(data, deadline)?,
         }),
         PackObject::Delta(delta) => Ok(PackObject::Delta(DeltaObject {
             offset: delta.offset,
-            id: delta.id.clone(),
+            id: delta.id,
             base: delta.base.clone(),
             program: copy_bytes(&delta.program, deadline)?,
         })),
@@ -924,7 +925,7 @@ mod tests {
             PackObject::Delta(DeltaObject {
                 offset: 36,
                 id: None,
-                base: DeltaBase::Ref(external_id.clone()),
+                base: DeltaBase::Ref(external_id),
                 program: vec![3, 3, 0x91, 0, 3],
             }),
         ];

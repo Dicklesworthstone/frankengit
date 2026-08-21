@@ -17,7 +17,7 @@ pub enum EntryKind {
 }
 
 impl EntryKind {
-    fn from_type_code(code: u8) -> Result<Self, PackError> {
+    const fn from_type_code(code: u8) -> Result<Self, PackError> {
         match code {
             1 => Ok(Self::Commit),
             2 => Ok(Self::Tree),
@@ -82,10 +82,11 @@ pub fn parse_pack_header(input: &[u8], limits: &PackLimits) -> Result<PackHeader
     Ok(PackHeader { object_count })
 }
 
-/// Refuses an entry stream whose actually decoded count differs from the
-/// fixed count committed in its pack header. Callers invoke this only after
-/// every entry boundary/inflated member has been bounded and validated.
-pub fn validate_object_count(header: PackHeader, actual: u32) -> Result<(), PackError> {
+/// Refuses an entry stream whose decoded count differs from its header count.
+///
+/// Callers invoke this only after every entry boundary and inflated member has
+/// been bounded and validated.
+pub const fn validate_object_count(header: PackHeader, actual: u32) -> Result<(), PackError> {
     if header.object_count == actual {
         Ok(())
     } else {
@@ -209,7 +210,7 @@ pub fn decode_entry_header(
     ))
 }
 
-/// Decodes the backwards OFS_DELTA distance and returns its absolute base
+/// Decodes the backwards `OFS_DELTA` distance and returns its absolute base
 /// offset. A base at or after the current entry is always invalid.
 pub fn decode_ofs_delta_base(
     current_offset: u64,

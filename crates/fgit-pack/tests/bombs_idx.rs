@@ -85,7 +85,7 @@ fn idx_crc_and_pack_count_mismatches_refuse_index_association() {
         Ok(())
     );
 
-    let mut corrupt_entry = raw_entry.clone();
+    let mut corrupt_entry = raw_entry;
     corrupt_entry[0] ^= 1;
     assert!(matches!(
         validate_idx_entry_crc(

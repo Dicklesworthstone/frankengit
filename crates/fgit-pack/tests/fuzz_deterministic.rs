@@ -50,7 +50,7 @@ impl Lcg {
         Self { state: seed }
     }
 
-    fn next(&mut self) -> u64 {
+    const fn next(&mut self) -> u64 {
         self.state = self
             .state
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -125,12 +125,13 @@ fn mutate(mut pack: Vec<u8>, kind: MutationKind, random: &mut Lcg) -> Vec<u8> {
 }
 
 fn bounded_limits() -> PackLimits {
-    let mut limits = PackLimits::default();
-    limits.max_entries = 32;
-    limits.max_object_bytes = 4 * 1024;
-    limits.max_total_expanded_bytes = 8 * 1024;
-    limits.max_input_bytes = 16 * 1024;
-    limits
+    PackLimits {
+        max_entries: 32,
+        max_object_bytes: 4 * 1024,
+        max_total_expanded_bytes: 8 * 1024,
+        max_input_bytes: 16 * 1024,
+        ..PackLimits::default()
+    }
 }
 
 #[test]

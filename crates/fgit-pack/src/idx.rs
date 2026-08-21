@@ -48,9 +48,10 @@ pub struct IdxEntry {
     pub pack_offset: u64,
 }
 
-/// Validates the CRC-32 committed by one idx entry against the exact raw pack
-/// entry bytes. The caller supplies the framed byte span so this function does
-/// not infer an entry boundary from sorted-by-OID index order.
+/// Validates the CRC-32 committed by one idx entry against exact raw pack bytes.
+///
+/// The caller supplies the framed byte span so this function does not infer an
+/// entry boundary from sorted-by-OID index order.
 ///
 /// The input boundary and each byte of CRC work are bounded before any output
 /// can be exposed. CRC validation is an integrity check for quarantine/index
@@ -313,7 +314,7 @@ impl IdxV2 {
                         })?;
                 read_u64(input, large_position, "idx large offset")?
             };
-            previous = Some(oid.clone());
+            previous = Some(oid);
             raw_offset_words.push(raw_offset);
             entries.push(IdxEntry {
                 oid,
@@ -388,12 +389,12 @@ impl IdxV2 {
     }
 
     #[must_use]
-    pub fn pack_checksum(&self) -> &ObjectId {
+    pub const fn pack_checksum(&self) -> &ObjectId {
         &self.pack_checksum
     }
 
     #[must_use]
-    pub fn index_checksum(&self) -> &ObjectId {
+    pub const fn index_checksum(&self) -> &ObjectId {
         &self.index_checksum
     }
 
@@ -539,10 +540,7 @@ fn parse_fanout(
     if count_usize > limits.max_index_entries {
         return Err(PackError::EntryCountLimit {
             actual: count,
-            limit: match u32::try_from(limits.max_index_entries) {
-                Ok(value) => value,
-                Err(_) => u32::MAX,
-            },
+            limit: u32::try_from(limits.max_index_entries).unwrap_or(u32::MAX),
         });
     }
     Ok((values, count))
@@ -651,7 +649,7 @@ mod tests {
         let parsed =
             IdxV2::parse(&bytes, ObjectFormat::Sha1, &limits(), &mut always).expect("valid idx");
         assert_eq!(parsed.entries().len(), 2);
-        assert_eq!(parsed.to_bytes(&limits(), &mut always), Ok(bytes.clone()));
+        assert_eq!(parsed.to_bytes(&limits(), &mut always), Ok(bytes));
         let oid = object_id_from_bytes(
             ObjectFormat::Sha1,
             &[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],

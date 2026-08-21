@@ -50,7 +50,7 @@ pub struct CanonicalPackObject {
 impl CanonicalPackObject {
     /// Creates a canonical-object record for deterministic pack planning.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         id: ObjectId,
         object_type: ObjectType,
         body: Vec<u8>,
@@ -181,13 +181,13 @@ pub struct PackPlanEntry {
 impl PackPlanEntry {
     /// The verified canonical object represented by this entry.
     #[must_use]
-    pub fn object(&self) -> &CanonicalPackObject {
+    pub const fn object(&self) -> &CanonicalPackObject {
         &self.object
     }
 
     /// The selected OFS-delta program, if this entry is not a base object.
     #[must_use]
-    pub fn delta(&self) -> Option<&PlannedDelta> {
+    pub const fn delta(&self) -> Option<&PlannedDelta> {
         self.delta.as_ref()
     }
 }
@@ -238,7 +238,7 @@ pub struct PackPlanner {
 impl PackPlanner {
     /// Creates a planner with explicit native format, profile, and bounds.
     #[must_use]
-    pub fn new(format: ObjectFormat, profile: PackWriteProfile, limits: PackLimits) -> Self {
+    pub const fn new(format: ObjectFormat, profile: PackWriteProfile, limits: PackLimits) -> Self {
         Self {
             format,
             profile,
@@ -504,7 +504,7 @@ pub struct PackWriter {
 impl PackWriter {
     /// Creates a writer whose output budget is `limits.max_input_bytes`.
     #[must_use]
-    pub fn new(limits: PackLimits) -> Self {
+    pub const fn new(limits: PackLimits) -> Self {
         Self { limits }
     }
 
@@ -604,7 +604,6 @@ impl PackWriter {
         }
         let checksum = emitter.finish_and_emit_trailer(deadline)?;
         let output_bytes = emitter.bytes_written();
-        drop(emitter);
         staged.promote()?;
         Ok(PackWriteReceipt {
             profile: plan.profile,
@@ -1015,7 +1014,7 @@ impl<'a, S> StagedArtifact<'a, S>
 where
     S: PackArtifactSink,
 {
-    fn new(sink: &'a mut S, temporary: S::Temporary) -> Self {
+    const fn new(sink: &'a mut S, temporary: S::Temporary) -> Self {
         Self {
             sink,
             temporary: Some(temporary),
@@ -1058,7 +1057,7 @@ enum PackStreamHasher {
 }
 
 impl PackStreamHasher {
-    fn new(format: ObjectFormat) -> Self {
+    const fn new(format: ObjectFormat) -> Self {
         match format {
             ObjectFormat::Sha1 => Self::Sha1(Sha1Hasher::new()),
             ObjectFormat::Sha256 => Self::Sha256(Sha256Hasher::new()),
@@ -1095,7 +1094,7 @@ impl<'artifact, 'sink, S> StreamingEmitter<'artifact, 'sink, S>
 where
     S: PackArtifactSink,
 {
-    fn new(
+    const fn new(
         staged: &'artifact mut StagedArtifact<'sink, S>,
         format: ObjectFormat,
         output_limit: usize,
@@ -1109,7 +1108,7 @@ where
         }
     }
 
-    fn bytes_written(&self) -> usize {
+    const fn bytes_written(&self) -> usize {
         self.bytes_written
     }
 
@@ -1459,8 +1458,8 @@ mod tests {
             );
             assert!(matches!(
                 result,
-                Err(PackWriteError::Pack(PackError::DeadlineExceeded))
-                    | Err(PackWriteError::Deflate(DeflateRefusal::Cancelled))
+                Err(PackWriteError::Pack(PackError::DeadlineExceeded)
+                    | PackWriteError::Deflate(DeflateRefusal::Cancelled))
             ));
             assert!(sink.promoted.is_none());
             assert_eq!(sink.aborts, 1);

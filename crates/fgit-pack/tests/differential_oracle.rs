@@ -400,7 +400,7 @@ fn pinned_oracle_pack_matches_all_manifest_bytes_oids_and_idx_entries()
             &mut || true,
         )
         .map_err(|error| DifferentialError::new(format!("idx CRC refusal: {error}")))?;
-        let previous_offset = ids_at_offset.insert(entry.pack_offset, entry.oid.clone());
+        let previous_offset = ids_at_offset.insert(entry.pack_offset, entry.oid);
         let previous_id = offsets_at_id.insert(oid_text(&entry.oid), entry.pack_offset);
         if previous_offset.is_some() || previous_id.is_some() {
             return Err(DifferentialError::new(
@@ -423,14 +423,14 @@ fn pinned_oracle_pack_matches_all_manifest_bytes_oids_and_idx_entries()
 
     let entries = quarantined.entries().to_vec();
     let objects = quarantined
-        .into_scalar_objects(|offset| ids_at_offset.get(&offset).cloned())
+        .into_scalar_objects(|offset| ids_at_offset.get(&offset).copied())
         .map_err(|error| DifferentialError::new(format!("scalar conversion refusal: {error}")))?;
-    let resolver = ScalarResolver::new(&objects, &(), &limits, &mut || true).map_err(|error| {
+    let scalar = ScalarResolver::new(&objects, &(), &limits, &mut || true).map_err(|error| {
         DifferentialError::new(format!("resolver construction refusal: {error}"))
     })?;
     let mut observed_delta = false;
     for index_entry in index.entries() {
-        let resolved = resolver
+        let reconstructed = scalar
             .resolve_offset(index_entry.pack_offset, &mut || true)
             .map_err(|error| {
                 DifferentialError::new(format!("delta resolution refusal: {error}"))
@@ -444,7 +444,7 @@ fn pinned_oracle_pack_matches_all_manifest_bytes_oids_and_idx_entries()
                 expected.body_path.display()
             ))
         })?;
-        if resolved != expected_body {
+        if reconstructed != expected_body {
             return Err(DifferentialError::new(
                 "resolved object bytes disagree with oracle body",
             ));
@@ -461,7 +461,7 @@ fn pinned_oracle_pack_matches_all_manifest_bytes_oids_and_idx_entries()
                 "resolved object type disagrees with oracle manifest",
             ));
         }
-        if fgit_crypto::git_object_id(format, inherited_type, &resolved) != index_entry.oid {
+        if fgit_crypto::git_object_id(format, inherited_type, &reconstructed) != index_entry.oid {
             return Err(DifferentialError::new(
                 "resolved object native OID disagrees with idx",
             ));

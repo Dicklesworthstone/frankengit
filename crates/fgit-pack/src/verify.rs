@@ -32,7 +32,7 @@ fn digest_matches(body: &[u8], trailer: &[u8], format: ObjectFormat) -> bool {
 /// Resolves the native Git type carried by a non-delta pack entry. Delta
 /// entries intentionally refuse here: their type belongs to the resolved
 /// base chain, never to their delta instruction bytes.
-pub fn object_type_from_base_entry(kind: EntryKind) -> Result<ObjectType, PackError> {
+pub const fn object_type_from_base_entry(kind: EntryKind) -> Result<ObjectType, PackError> {
     match kind {
         EntryKind::Commit => Ok(ObjectType::Commit),
         EntryKind::Tree => Ok(ObjectType::Tree),
@@ -42,9 +42,10 @@ pub fn object_type_from_base_entry(kind: EntryKind) -> Result<ObjectType, PackEr
     }
 }
 
-/// Parses and authenticates a native Git object before returning its structured
-/// representation. A caller resolving a delta supplies its inherited base
-/// type; this function never guesses it from delta bytes.
+/// Parses and authenticates a native Git object before returning it.
+///
+/// A caller resolving a delta supplies its inherited base type; this function
+/// never guesses it from delta bytes.
 pub fn verify_native_object(
     format: ObjectFormat,
     object_type: ObjectType,

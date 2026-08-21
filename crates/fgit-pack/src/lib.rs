@@ -99,7 +99,7 @@ impl Default for PackLimits {
 }
 
 impl PackLimits {
-    pub(crate) fn input(&self, actual: usize) -> Result<(), PackError> {
+    pub(crate) const fn input(&self, actual: usize) -> Result<(), PackError> {
         if actual > self.max_input_bytes {
             return Err(PackError::InputLimit {
                 actual,
@@ -109,7 +109,7 @@ impl PackLimits {
         Ok(())
     }
 
-    pub(crate) fn object_size(&self, actual: usize) -> Result<(), PackError> {
+    pub(crate) const fn object_size(&self, actual: usize) -> Result<(), PackError> {
         if actual > self.max_object_bytes {
             return Err(PackError::ObjectSizeLimit {
                 actual,
@@ -119,10 +119,12 @@ impl PackLimits {
         Ok(())
     }
 
-    pub(crate) fn checked_ratio(&self, expanded: usize, source: usize) -> Result<(), PackError> {
-        let permitted = source
-            .checked_mul(self.max_expansion_ratio)
-            .unwrap_or(usize::MAX);
+    pub(crate) const fn checked_ratio(
+        &self,
+        expanded: usize,
+        source: usize,
+    ) -> Result<(), PackError> {
+        let permitted = source.saturating_mul(self.max_expansion_ratio);
         if expanded > permitted {
             return Err(PackError::ExpansionRatioLimit {
                 expanded,
