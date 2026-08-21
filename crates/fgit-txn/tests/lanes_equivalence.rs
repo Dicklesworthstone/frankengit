@@ -139,7 +139,7 @@ fn combine(ledger: &ObligationLedger, capsules: &[PreparedCapsule]) -> Combinati
         .expect("bounded canonical inputs combine")
 }
 
-/// SplitMix64. Seeded and logged, so a divergence is replayable.
+/// `SplitMix64`. Seeded and logged, so a divergence is replayable.
 fn seeded_shuffle<T: Clone>(source: &[T], mut seed: u64) -> Vec<T> {
     let mut indices = (0..source.len()).collect::<Vec<_>>();
     for end in (1..indices.len()).rev() {

@@ -64,7 +64,7 @@ use fgit_types::vocabulary::{MismatchPolicy, RefusalCode};
 // Fixtures
 // ---------------------------------------------------------------------------
 
-fn schema() -> SchemaId {
+const fn schema() -> SchemaId {
     SchemaId::new(SchemaFamily::from_static("fgit/ref-txn"), 2, 0)
 }
 
@@ -186,10 +186,10 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
             }
 
             let index = dispositions.len();
-            let before = after.get(&name).cloned();
+            let before = after.get(&name).copied();
             match ref_intent {
                 RefIntent::Update { new, .. } => {
-                    after.insert(name.clone(), new.clone());
+                    after.insert(name.clone(), *new);
                 }
                 RefIntent::Delete { .. } => {
                     after.remove(&name);
@@ -207,7 +207,7 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
             // effect and demotes the intent that actually produced it to
             // `OverwrittenBySucceedingIntent` — by an intent that overwrote
             // nothing.
-            let did_change = before != after.get(&name).cloned();
+            let did_change = before != after.get(&name).copied();
             identity_at_evaluation.push(!did_change);
             if did_change {
                 last_writer.insert(name.clone(), index);
@@ -256,14 +256,14 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
                 refs.insert(name.clone(), RefEffect::Delete);
             }
             Some(now) if now != before => {
-                refs.insert(name.clone(), RefEffect::Set(now.clone()));
+                refs.insert(name.clone(), RefEffect::Set(*now));
             }
             Some(_) => {}
         }
     }
     for (name, now) in &after {
         if !basis.contains_key(name) {
-            refs.insert(name.clone(), RefEffect::Set(now.clone()));
+            refs.insert(name.clone(), RefEffect::Set(*now));
         }
     }
 
@@ -361,7 +361,7 @@ impl Rng {
     const fn new(seed: u64) -> Self {
         Self(seed)
     }
-    fn next_u64(&mut self) -> u64 {
+    const fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -404,22 +404,22 @@ fn generate_request(
         IdempotencyKey::new(label(key)),
     );
 
-    for _ in 0..rng.below(3) + 1 {
+    for _ in 0..=rng.below(3) {
         let policy = match rng.below(3) {
             0 => MismatchPolicy::NoOp,
             1 => MismatchPolicy::StatementError,
             _ => MismatchPolicy::TxnAbort,
         };
         let mut intents = Vec::new();
-        for _ in 0..rng.below(3) + 1 {
+        for _ in 0..=rng.below(3) {
             let name = alphabet[rng.below(alphabet.len())].clone();
             // Half the time use the true current value so the precondition
             // holds; otherwise a deliberately wrong one.
             let expected = match rng.below(3) {
                 0 => ExpectedRefState::Any,
-                1 => basis.get(&name).map_or(ExpectedRefState::Absent, |o| {
-                    ExpectedRefState::Exact(o.clone())
-                }),
+                1 => basis
+                    .get(&name)
+                    .map_or(ExpectedRefState::Absent, |o| ExpectedRefState::Exact(*o)),
                 _ => ExpectedRefState::Exact(oid(200)),
             };
             intents.push(Intent::Ref(if rng.below(4) == 0 {
@@ -443,7 +443,7 @@ fn generate_request(
 // Equivalence
 // ---------------------------------------------------------------------------
 
-const CORPUS_SEED: u64 = 0x5EED_0008_B00B_1E5;
+const CORPUS_SEED: u64 = 0x05EE_D000_8B00_B1E5;
 
 /// Default programs per property for a bare `cargo test`.
 ///
@@ -460,7 +460,7 @@ const CAMPAIGN_PROGRAMS: usize = 100_000;
 /// The bead's acceptance asks for >= 10^5 seeded programs. Running that on
 /// every `cargo test --workspace` would be antisocial, and a hard bound would
 /// make a bare workspace run slow for everyone — the same breakage class
-/// YellowLotus avoided on fg005b by gating the demanding assertion behind an
+/// `YellowLotus` avoided on fg005b by gating the demanding assertion behind an
 /// environment variable that only the e2e lane sets.
 ///
 /// So: `FG008B_CORPUS` selects the size. Unset means the fast default; the e2e
@@ -515,9 +515,9 @@ fn the_oracle_and_the_evaluator_agree_on_every_generated_program() {
     for i in 0..programs() {
         let seed = CORPUS_SEED.wrapping_add(i as u64);
         let mut rng = Rng::new(seed);
-        let mut mint = IdentityMint::new(seed);
+        let mut identity_mint = IdentityMint::new(seed);
         let basis = generate_basis(&mut rng);
-        let request = generate_request(&mut rng, &mut mint, &basis, "corpus");
+        let request = generate_request(&mut rng, &mut identity_mint, &basis, "corpus");
 
         let forge_positions = BTreeMap::new();
         let retention = BTreeSet::new();
@@ -530,22 +530,22 @@ fn the_oracle_and_the_evaluator_agree_on_every_generated_program() {
         };
 
         let report = evaluator.evaluate(fold_basis, &request);
-        let mine = oracle_fold(&basis, &request);
+        let oracle = oracle_fold(&basis, &request);
 
         match &report.outcome {
             FoldOutcome::Folded(effects) => {
                 assert!(
-                    !mine.aborted,
+                    !oracle.aborted,
                     "seed {seed:#x}: the evaluator folded, the oracle aborted"
                 );
                 assert_eq!(
-                    effects.refs, mine.refs,
+                    effects.refs, oracle.refs,
                     "seed {seed:#x}: surviving ref effects disagree"
                 );
             }
             FoldOutcome::Aborted { .. } => {
                 assert!(
-                    mine.aborted,
+                    oracle.aborted,
                     "seed {seed:#x}: the evaluator aborted, the oracle folded"
                 );
             }
@@ -558,13 +558,13 @@ fn the_oracle_and_the_evaluator_agree_on_every_generated_program() {
             .collect();
         assert_eq!(
             theirs.len(),
-            mine.dispositions.len(),
+            oracle.dispositions.len(),
             "seed {seed:#x}: totality disagrees — {} mappings vs {} dispositions",
             theirs.len(),
-            mine.dispositions.len()
+            oracle.dispositions.len()
         );
         assert_eq!(
-            theirs, mine.dispositions,
+            theirs, oracle.dispositions,
             "seed {seed:#x}: intent dispositions disagree (absorption reasons included)"
         );
         agreements += 1;
@@ -586,23 +586,23 @@ fn the_oracle_maps_every_source_intent() {
     for i in 0..programs() {
         let seed = CORPUS_SEED.wrapping_add(i as u64);
         let mut rng = Rng::new(seed);
-        let mut mint = IdentityMint::new(seed);
+        let mut identity_mint = IdentityMint::new(seed);
         let basis = generate_basis(&mut rng);
-        let request = generate_request(&mut rng, &mut mint, &basis, "totality");
+        let request = generate_request(&mut rng, &mut identity_mint, &basis, "totality");
 
         let total: usize = request
             .statements
             .iter()
             .map(|statement| statement.intents.len())
             .sum();
-        let mine = oracle_fold(&basis, &request);
+        let oracle = oracle_fold(&basis, &request);
 
         assert_eq!(
-            mine.dispositions.len(),
+            oracle.dispositions.len(),
             total,
             "seed {seed:#x}: {total} source intents produced {} dispositions; an intent that \
              never ran still has a fate",
-            mine.dispositions.len()
+            oracle.dispositions.len()
         );
     }
 }
@@ -615,11 +615,11 @@ fn the_corpus_reaches_the_dispositions_it_claims_to_test() {
     // agreement is agreement about something.
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for i in 0..programs() {
-        let seed = CORPUS_SEED.wrapping_add(i as u64);
-        let mut rng = Rng::new(seed);
-        let mut mint = IdentityMint::new(seed);
+        let case_seed = CORPUS_SEED.wrapping_add(i as u64);
+        let mut rng = Rng::new(case_seed);
+        let mut identity_mint = IdentityMint::new(case_seed);
         let basis = generate_basis(&mut rng);
-        let request = generate_request(&mut rng, &mut mint, &basis, "coverage");
+        let request = generate_request(&mut rng, &mut identity_mint, &basis, "coverage");
         for disposition in oracle_fold(&basis, &request).dispositions {
             seen.insert(match disposition {
                 OracleDisposition::Surviving(_) => "surviving".to_owned(),
@@ -652,11 +652,11 @@ fn the_unmodelled_arms_are_named_rather_than_quietly_absent() {
     // absorption reasons would look complete; this makes the gap a statement.
     let mut seen: BTreeSet<AbsorptionReason> = BTreeSet::new();
     for i in 0..programs() {
-        let seed = CORPUS_SEED.wrapping_add(i as u64);
-        let mut rng = Rng::new(seed);
-        let mut mint = IdentityMint::new(seed);
+        let case_seed = CORPUS_SEED.wrapping_add(i as u64);
+        let mut rng = Rng::new(case_seed);
+        let mut identity_mint = IdentityMint::new(case_seed);
         let basis = generate_basis(&mut rng);
-        let request = generate_request(&mut rng, &mut mint, &basis, "gaps");
+        let request = generate_request(&mut rng, &mut identity_mint, &basis, "gaps");
         for disposition in oracle_fold(&basis, &request).dispositions {
             if let OracleDisposition::Absorbed(reason) = disposition {
                 seen.insert(reason);
@@ -761,14 +761,16 @@ fn the_corpus_size_control_actually_controls_the_corpus() {
     // asserts the mapping rather than mutating it.
     assert_eq!(DEFAULT_PROGRAMS, 500);
     assert_eq!(CAMPAIGN_PROGRAMS, 100_000);
-    assert!(
-        CAMPAIGN_PROGRAMS >= 100_000,
-        "the acceptance asks for at least 10^5 seeded programs"
-    );
-    assert!(
-        DEFAULT_PROGRAMS < CAMPAIGN_PROGRAMS,
-        "the default must be the cheap one; if they are equal the gate is pointless"
-    );
+    const {
+        assert!(
+            CAMPAIGN_PROGRAMS >= 100_000,
+            "the acceptance asks for at least 10^5 seeded programs"
+        );
+        assert!(
+            DEFAULT_PROGRAMS < CAMPAIGN_PROGRAMS,
+            "the default must be the cheap one; if they are equal the gate is pointless"
+        );
+    }
     // And the currently-selected size must be one of the two, so a stray value
     // in the environment shows up as a failure here rather than as a quietly
     // different corpus everywhere else.
@@ -782,9 +784,9 @@ fn the_corpus_size_control_actually_controls_the_corpus() {
 
 /// The seed whose program exhibits the open provenance question.
 ///
-/// Pinned per GoldLotus's instruction so the case survives as a regression
+/// Pinned per `GoldLotus`'s instruction so the case survives as a regression
 /// artifact regardless of how the contract rules.
-const PROVENANCE_AMBIGUITY_SEED: u64 = 0x5EED_0008_B00B_1F2;
+const PROVENANCE_AMBIGUITY_SEED: u64 = 0x05EE_D000_8B00_B1F2;
 
 #[test]
 fn the_provenance_ambiguity_is_pinned_and_reproducible() {
@@ -820,9 +822,9 @@ fn the_provenance_ambiguity_is_pinned_and_reproducible() {
     // So this is recorded as an open contract question, not resolved by
     // whichever side happens to be more convenient to change.
     let mut rng = Rng::new(PROVENANCE_AMBIGUITY_SEED);
-    let mut mint = IdentityMint::new(PROVENANCE_AMBIGUITY_SEED);
+    let mut identity_mint = IdentityMint::new(PROVENANCE_AMBIGUITY_SEED);
     let basis = generate_basis(&mut rng);
-    let request = generate_request(&mut rng, &mut mint, &basis, "corpus");
+    let request = generate_request(&mut rng, &mut identity_mint, &basis, "corpus");
 
     // The program must still exhibit the shape, or this pin has rotted into a
     // test of nothing.
@@ -853,11 +855,11 @@ fn the_provenance_ambiguity_is_pinned_and_reproducible() {
         },
         &request,
     );
-    let mine = oracle_fold(&basis, &request);
+    let oracle = oracle_fold(&basis, &request);
 
     if let FoldOutcome::Folded(effects) = &report.outcome {
         assert_eq!(
-            effects.refs, mine.refs,
+            effects.refs, oracle.refs,
             "the pinned case must differ ONLY in provenance; the net effects have diverged, \
              which makes this a different and more serious disagreement"
         );

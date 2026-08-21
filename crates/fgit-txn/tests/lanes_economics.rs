@@ -24,7 +24,7 @@
 //! host CPU-time measurement, and it is labelled as such in the artifact. The
 //! latency figures are wall time from the runner on one unpinned host, so they
 //! are an A/A-gated comparison between two implementations in one process, not
-//! a throughput claim about FrankenGit. Section 7 asks for the equivalence
+//! a throughput claim about `FrankenGit`. Section 7 asks for the equivalence
 //! obligation, the A/A control and the raw samples; it does not license
 //! calling any of this an invariant.
 
@@ -460,7 +460,7 @@ fn combining_raises_decisions_per_cas_above_the_aa_noise_floor() {
     // to be present so a reader can recompute the tails.
     assert_eq!(artifact.baseline.len(), MIN_SAMPLES_PER_VARIANT);
     assert_eq!(artifact.candidate.len(), MIN_SAMPLES_PER_VARIANT);
-    assert!(!artifact.to_ndjson().is_empty());
+    assert_ne!(artifact.to_ndjson(), "");
 }
 
 #[test]
