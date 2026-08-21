@@ -626,7 +626,6 @@ fn apply_delta_with_accounting(
             limit: limits.max_object_bytes,
         });
     }
-    limits.checked_ratio(declared_result, delta.len())?;
     accounting.ensure_expanded(declared_result, limits)?;
     checkpoint(deadline)?;
     let mut result = Vec::new();
@@ -985,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn size_ratio_and_fanout_bombs_refuse() {
+    fn size_and_fanout_bombs_refuse() {
         let delta = [10, 10, 0x91, 0, 10];
         let mut size_limited = unlimited();
         size_limited.max_object_bytes = 9;
@@ -993,13 +992,6 @@ mod tests {
             apply_delta(&[1; 10], &delta, &size_limited, &mut always),
             Err(PackError::ObjectSizeLimit { .. } | PackError::DeltaResultSizeLimit { .. })
         ));
-        let mut ratio_limited = unlimited();
-        ratio_limited.max_expansion_ratio = 1;
-        assert!(matches!(
-            apply_delta(&[1; 10], &delta, &ratio_limited, &mut always),
-            Err(PackError::ExpansionRatioLimit { .. })
-        ));
-
         let fanout_objects = [
             PackObject::Base {
                 offset: 1,
@@ -1031,30 +1023,51 @@ mod tests {
 
     #[test]
     fn cached_and_scalar_resolvers_agree_over_generated_delta_packs() {
-        for seed in 1_u8..=32 {
-            let length = usize::from(seed % 31 + 1);
-            let base = (0..length)
+        for seed in 1_u8..=64 {
+            let length = usize::from(seed % 63 + 1);
+            let base_a = (0..length)
                 .map(|index| seed.wrapping_add(u8::try_from(index).expect("small fixture")))
                 .collect::<Vec<_>>();
-            let length_byte = u8::try_from(length).expect("small fixture");
-            let program = vec![length_byte, length_byte, 0x91, 0, length_byte];
+            let base_b = (0..(length / 2 + 1))
+                .map(|index| {
+                    seed.wrapping_mul(3)
+                        .wrapping_add(u8::try_from(index).expect("small fixture"))
+                })
+                .collect::<Vec<_>>();
+            let mut a1 = base_a.clone();
+            a1.push(seed ^ 0x55);
+            let mut a2 = a1.clone();
+            a2.push(seed ^ 0xaa);
+            let mut b1 = base_b.clone();
+            b1.push(seed.wrapping_add(1));
             let objects = [
                 PackObject::Base {
                     offset: 12,
                     id: None,
-                    data: base.clone(),
+                    data: base_a.clone(),
                 },
-                PackObject::Delta(DeltaObject {
+                PackObject::Base {
                     offset: 24,
                     id: None,
-                    base: DeltaBase::Ofs(12),
-                    program: program.clone(),
-                }),
+                    data: base_b.clone(),
+                },
                 PackObject::Delta(DeltaObject {
                     offset: 36,
                     id: None,
                     base: DeltaBase::Ofs(12),
-                    program,
+                    program: copy_then_insert(&base_a, seed ^ 0x55),
+                }),
+                PackObject::Delta(DeltaObject {
+                    offset: 48,
+                    id: None,
+                    base: DeltaBase::Ofs(36),
+                    program: copy_then_insert(&a1, seed ^ 0xaa),
+                }),
+                PackObject::Delta(DeltaObject {
+                    offset: 60,
+                    id: None,
+                    base: DeltaBase::Ofs(24),
+                    program: copy_then_insert(&base_b, seed.wrapping_add(1)),
                 }),
             ];
             let limits = unlimited();
@@ -1062,15 +1075,26 @@ mod tests {
                 .expect("generated scalar graph");
             let mut cached = CachedResolver::new(&objects, &(), &limits, &mut always)
                 .expect("generated cached graph");
-            assert_eq!(
-                cached.resolve_offset(24, &mut always),
-                scalar.resolve_offset(24, &mut always)
-            );
-            assert_eq!(
-                cached.resolve_offset(36, &mut always),
-                scalar.resolve_offset(36, &mut always)
-            );
+            for (offset, expected) in [(12, base_a), (24, base_b), (36, a1), (48, a2), (60, b1)] {
+                let scalar_result = scalar
+                    .resolve_offset(offset, &mut always)
+                    .expect("generated scalar graph resolves");
+                assert_eq!(scalar_result, expected);
+                assert_eq!(
+                    cached.resolve_offset(offset, &mut always),
+                    Ok(scalar_result),
+                    "cached resolver diverged for seed {seed} offset {offset}"
+                );
+            }
         }
+    }
+
+    fn copy_then_insert(base: &[u8], byte: u8) -> Vec<u8> {
+        let base_length = u8::try_from(base.len()).expect("generated base stays compact");
+        let result_length = base_length
+            .checked_add(1)
+            .expect("generated result stays compact");
+        vec![base_length, result_length, 0x91, 0, base_length, 1, byte]
     }
 
     struct SingleBase {

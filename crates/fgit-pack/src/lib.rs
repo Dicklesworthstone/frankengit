@@ -73,6 +73,12 @@ pub struct PackLimits {
     pub max_delta_depth: usize,
     pub max_delta_fanout: usize,
     pub max_total_expanded_bytes: usize,
+    /// Maximum output/input ratio accepted while streaming one DEFLATE member.
+    ///
+    /// This does not apply to delta programs: a delta copy instruction can
+    /// legitimately reconstruct a large object from a few bytes. Delta
+    /// reconstruction is instead bounded by object, aggregate, depth, and
+    /// work limits before its result allocation.
     pub max_expansion_ratio: usize,
     pub max_delta_work: usize,
     pub max_inflate_work: u64,
@@ -89,7 +95,11 @@ impl Default for PackLimits {
             max_delta_depth: 64,
             max_delta_fanout: 4096,
             max_total_expanded_bytes: 128 * 1024 * 1024,
-            max_expansion_ratio: 128,
+            // Git 2.54.0 corpus evidence includes a 2,757:1 delta and an
+            // incremental inflater observation of 2,582:1. Keep a bounded
+            // DEFLATE admission policy without treating ordinary Git output
+            // as a bomb; object and aggregate byte limits remain independent.
+            max_expansion_ratio: 16 * 1024,
             max_delta_work: 256 * 1024 * 1024,
             max_inflate_work: 512 * 1024 * 1024,
             max_cached_bytes: 128 * 1024 * 1024,
@@ -114,22 +124,6 @@ impl PackLimits {
             return Err(PackError::ObjectSizeLimit {
                 actual,
                 limit: self.max_object_bytes,
-            });
-        }
-        Ok(())
-    }
-
-    pub(crate) const fn checked_ratio(
-        &self,
-        expanded: usize,
-        source: usize,
-    ) -> Result<(), PackError> {
-        let permitted = source.saturating_mul(self.max_expansion_ratio);
-        if expanded > permitted {
-            return Err(PackError::ExpansionRatioLimit {
-                expanded,
-                source,
-                ratio: self.max_expansion_ratio,
             });
         }
         Ok(())
@@ -226,11 +220,6 @@ pub enum PackError {
     MissingDeltaBase,
     DuplicateObjectOffset(u64),
     DuplicateObjectId,
-    ExpansionRatioLimit {
-        expanded: usize,
-        source: usize,
-        ratio: usize,
-    },
     DeltaWorkLimit {
         attempted: usize,
         limit: usize,

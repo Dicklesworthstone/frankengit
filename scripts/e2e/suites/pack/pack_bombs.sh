@@ -33,12 +33,12 @@ idx_output=$FGE_LAST_STDOUT$'\n'$FGE_LAST_STDERR
 
 fge_phase assert
 fge_assert_exit FG-016B-E2E-001 0 "$reader_exit" \
-  'reader input, size, ratio, and trailer bomb corpus succeeds'
+  'reader input, size, caller-tightened-ratio, and trailer corpus succeeds'
 fge_assert_contains FG-016B-E2E-002 "$reader_output" \
   'declared_size_and_aggregate_bombs_trip_before_entry_output_allocation' \
   'reader corpus records pre-allocation declared-size accounting'
 fge_assert_exit FG-016B-E2E-003 0 "$resolver_exit" \
-  'OFS/REF chain, fanout, thin-base, ratio, and work bomb corpus succeeds'
+  'OFS/REF chain, fanout, thin-base, and work bomb corpus succeeds'
 fge_assert_contains FG-016B-E2E-004 "$resolver_output" \
   'ref_cycle_and_thin_base_refusals_have_resolvable_near_neighbors' \
   'resolver corpus records cyclic REF and missing thin-base refusal coverage'

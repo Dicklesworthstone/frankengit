@@ -236,6 +236,7 @@ run_case() {
     return 0
   fi
 
+  mkdir -p -- "${artifact_directory}"
   fge_capture "differential-${algorithm}-${delta_kind}" \
     env RCH_CARGO_WRAPPER_BYPASS=1 \
     "FGIT_PACK_DIFFERENTIAL_CORPUS=${corpus}" \
@@ -278,6 +279,7 @@ run_thin_case() {
     fge_fail "${prefix}-004" 'pinned oracle unavailable; no ambient Git fallback is permitted'
     return 0
   fi
+  mkdir -p -- "${artifact_directory}"
   fge_capture "differential-${algorithm}-thin" \
     env RCH_CARGO_WRAPPER_BYPASS=1 \
     "FGIT_PACK_DIFFERENTIAL_CORPUS=${corpus}" \
@@ -298,6 +300,7 @@ run_large_offset_case() {
   local differential_exit=0
   local prefix="FG-016C-E2E-${algorithm}-large-offset"
 
+  mkdir -p -- "${artifact_directory}"
   fge_capture "differential-${algorithm}-large-offset" \
     env RCH_CARGO_WRAPPER_BYPASS=1 \
     "FGIT_PACK_DIFFERENTIAL_CORPUS=${corpus}" \
@@ -342,7 +345,13 @@ fge_capture deterministic-pack-fuzz \
 
 fge_phase assert
 fge_assert_exit FG-016C-E2E-FUZZ-001 0 "${fuzz_exit}" \
-  'the seeded pack mutation corpus returns only acceptance or typed refusal'
+  'the signed seeded pack mutation corpus returns only acceptance or typed refusal'
 fuzz_output=$FGE_LAST_STDOUT$'\n'$FGE_LAST_STDERR
 fge_assert_contains FG-016C-E2E-FUZZ-002 "${fuzz_output}" \
   '"corpus_denominator":256' 'the fuzz receipt states its exact denominator'
+fge_assert_contains FG-016C-E2E-FUZZ-003 "${fuzz_output}" \
+  '"re_signed_structural_cases":205' \
+  'every non-trailer case carried a recomputed native pack trailer'
+fge_assert_contains FG-016C-E2E-FUZZ-004 "${fuzz_output}" \
+  '"delta_resolver_cases":52' \
+  're-signed payload mutations traversed inflation and the OFS delta resolver'

@@ -4,8 +4,8 @@ mod fixtures;
 
 use fgit_deflate::{DeflateLimits, DeflateProfile, InflateRefusal, Resource, deflate_zlib};
 use fgit_pack::{
-    ObjectFormat, PackError, PackTrailerVerifier, QuarantinedPack, parse_quarantined_pack,
-    read_verified_pack,
+    ObjectFormat, PackError, PackLimits, PackTrailerVerifier, QuarantinedPack,
+    parse_quarantined_pack, read_verified_pack,
 };
 
 struct ExactTrailer;
@@ -151,13 +151,18 @@ fn entry_and_input_budgets_refuse_before_a_quarantined_pack_is_constructed() {
 }
 
 #[test]
-fn ratio_bomb_refuses_during_inflate_and_a_permitted_member_quarantines() {
-    let payload = vec![0_u8; 2_048];
+fn caller_tightened_ratio_refuses_during_inflate_and_default_policy_accepts() {
+    // This is the same highly compressible shape that exposed the former
+    // default 128:1 ceiling against Git-produced packs. A caller can still
+    // tighten its own policy to one-to-one, but the compatibility default must
+    // admit the bounded member before any quarantine object becomes visible.
+    let payload = vec![0_u8; 256 * 1024];
     let member = deflate_zlib(&payload, DeflateLimits::GIT_OBJECT, DeflateProfile::DEFAULT)
         .expect("deterministic test bomb member");
     let pack = fixtures::pack_with_entries(&[fixtures::declared_entry(3, payload.len(), &member)]);
 
     let mut ratio_limited = fixtures::limits();
+    ratio_limited.max_input_bytes = pack.len();
     ratio_limited.max_object_bytes = payload.len();
     ratio_limited.max_total_expanded_bytes = payload.len();
     ratio_limited.max_expansion_ratio = 1;
@@ -175,14 +180,13 @@ fn ratio_bomb_refuses_during_inflate_and_a_permitted_member_quarantines() {
         }))
     ));
 
-    ratio_limited.max_expansion_ratio = 256;
     let parsed = parse_quarantined_pack(
         &pack,
         ObjectFormat::Sha1,
-        &ratio_limited,
+        &PackLimits::default(),
         &mut fixtures::always,
     )
-    .expect("the same member is accepted under the declared compatibility ratio");
+    .expect("the same bounded member is accepted under the default compatibility policy");
     assert_eq!(parsed.entries()[0].inflated, payload);
 }
 

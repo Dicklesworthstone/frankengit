@@ -3,8 +3,8 @@
 mod fixtures;
 
 use fgit_pack::{
-    DeltaObject, ExternalBaseLookup, ObjectFormat, ObjectId, PackError, PackObject, ScalarResolver,
-    apply_delta, parse_quarantined_pack,
+    DeltaObject, ExternalBaseLookup, ObjectFormat, ObjectId, PackError, PackLimits, PackObject,
+    ScalarResolver, apply_delta, parse_quarantined_pack,
 };
 use fgit_types::native::GitOidSha1;
 
@@ -219,30 +219,26 @@ fn ref_cycle_and_thin_base_refusals_have_resolvable_near_neighbors() {
 }
 
 #[test]
-fn raw_delta_size_ratio_and_chain_work_bombs_refuse_before_result_allocation() {
-    let base = vec![0_u8; 200];
-    let copy_all = vec![0xc8, 0x01, 0xc8, 0x01, 0x90, 0xc8];
+fn raw_delta_size_and_chain_work_bombs_refuse_before_result_allocation() {
+    // A Git delta program is not compressed input: this nine-byte copy
+    // instruction reconstructs 30,733 bytes, a shape produced by Git 2.54.0.
+    let base = vec![0_u8; 30_733];
+    let copy_all = vec![0x8d, 0xf0, 0x01, 0x8d, 0xf0, 0x01, 0xb0, 0x0d, 0x78];
 
-    let mut ratio_limited = fixtures::limits();
-    ratio_limited.max_object_bytes = base.len();
-    ratio_limited.max_total_expanded_bytes = base.len() * 2;
-    ratio_limited.max_expansion_ratio = 1;
+    let accepted = apply_delta(
+        &base,
+        &copy_all,
+        &PackLimits::default(),
+        &mut fixtures::always,
+    );
     assert_eq!(
-        apply_delta(&base, &copy_all, &ratio_limited, &mut fixtures::always),
-        Err(PackError::ExpansionRatioLimit {
-            expanded: base.len(),
-            source: copy_all.len(),
-            ratio: 1,
-        })
+        accepted,
+        Ok(base.clone()),
+        "ordinary high-copy delta remains admissible under the default resource policy"
     );
 
-    ratio_limited.max_expansion_ratio = 64;
-    assert_eq!(
-        apply_delta(&base, &copy_all, &ratio_limited, &mut fixtures::always),
-        Ok(base.clone())
-    );
-
-    let mut total_limited = ratio_limited.clone();
+    let mut total_limited = fixtures::limits();
+    total_limited.max_object_bytes = base.len();
     total_limited.max_total_expanded_bytes = base.len() * 2 - 1;
     assert_eq!(
         apply_delta(&base, &copy_all, &total_limited, &mut fixtures::always),
@@ -252,7 +248,9 @@ fn raw_delta_size_ratio_and_chain_work_bombs_refuse_before_result_allocation() {
         })
     );
 
-    let mut work_limited = ratio_limited;
+    let mut work_limited = fixtures::limits();
+    work_limited.max_object_bytes = base.len();
+    work_limited.max_total_expanded_bytes = base.len() * 2;
     work_limited.max_delta_work = base.len() - 1;
     assert_eq!(
         apply_delta(&base, &copy_all, &work_limited, &mut fixtures::always),
