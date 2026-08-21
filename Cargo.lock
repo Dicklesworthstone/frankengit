@@ -737,6 +737,7 @@ dependencies = [
  "fgit-resource",
  "fgit-runtime",
  "fgit-types",
+ "fgit-wire",
  "fsqlite-types",
 ]
 

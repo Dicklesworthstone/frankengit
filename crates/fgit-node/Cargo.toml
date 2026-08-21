@@ -17,6 +17,7 @@ fgit-object-fabric.workspace = true
 fgit-resource.workspace = true
 fgit-runtime.workspace = true
 fgit-types.workspace = true
+fgit-wire.workspace = true
 # This names the FrankenSQLite context held for the authority store lifetime.
 # It is already in the admitted fsqlite authority closure (DEP-202), so this
 # direct edge adds no new dependency surface.

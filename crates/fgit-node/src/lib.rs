@@ -13,6 +13,8 @@
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::io::{self, Read, Write};
+use std::net::{Shutdown, TcpListener};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -36,6 +38,11 @@ use fgit_runtime::{BudgetClass, NodeRuntime, RuntimeProfile, RuntimeRefusal};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, GitHashAlgorithm, GitOid, HeadGeneration, PolicyEpoch,
     RegistryEpoch, RepositoryId, TenantId,
+};
+use fgit_wire::{
+    Capabilities, LegacyUploadPack, PackPayloadSource, PackRequest, Packet, PktLineDecoder,
+    UploadPackRepository, UploadPackVersion, V1Advertisement, WireError, WireEvent, WireLimits,
+    encode_packets, sideband_pack_chunk,
 };
 use fsqlite_types::cx::Cx as FsqliteCx;
 
@@ -167,6 +174,606 @@ impl Error for NodeRefusal {
             | Self::RuntimeContainment => None,
         }
     }
+}
+
+/// A repository path accepted by the git-daemon transport boundary.
+///
+/// This is an opaque authority lookup key, never a filesystem path.  The
+/// daemon grammar requires an absolute slash-prefixed path, while the path
+/// validator rejects empty, dot, parent, and control-byte components before a
+/// future authority-backed resolver sees it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitDaemonRepositoryPath(Vec<u8>);
+
+impl GitDaemonRepositoryPath {
+    /// Returns the exact wire bytes of the validated authority lookup key.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    fn parse(path: &[u8]) -> Result<Self, GitDaemonTransportRefusal> {
+        if path.is_empty() {
+            return Err(GitDaemonTransportRefusal::InvalidRepositoryPath {
+                reason: GitDaemonPathRefusal::Empty,
+            });
+        }
+        if !path.starts_with(b"/") {
+            return Err(GitDaemonTransportRefusal::InvalidRepositoryPath {
+                reason: GitDaemonPathRefusal::NotAbsolute,
+            });
+        }
+        for component in path[1..].split(|byte| *byte == b'/') {
+            if component.is_empty() {
+                return Err(GitDaemonTransportRefusal::InvalidRepositoryPath {
+                    reason: GitDaemonPathRefusal::EmptyComponent,
+                });
+            }
+            if component == b"." {
+                return Err(GitDaemonTransportRefusal::InvalidRepositoryPath {
+                    reason: GitDaemonPathRefusal::DotComponent,
+                });
+            }
+            if component == b".." {
+                return Err(GitDaemonTransportRefusal::InvalidRepositoryPath {
+                    reason: GitDaemonPathRefusal::ParentComponent,
+                });
+            }
+            if component.iter().any(|byte| byte.is_ascii_control()) {
+                return Err(GitDaemonTransportRefusal::InvalidRepositoryPath {
+                    reason: GitDaemonPathRefusal::ControlByte,
+                });
+            }
+        }
+        Ok(Self(path.to_vec()))
+    }
+}
+
+/// Why a git-daemon repository lookup key was refused before authority lookup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitDaemonPathRefusal {
+    /// The service request did not name a repository.
+    Empty,
+    /// Git-daemon requires the repository name to begin with `/`.
+    NotAbsolute,
+    /// A repeated slash or trailing slash created an empty path component.
+    EmptyComponent,
+    /// A `.` component would admit an alternate spelling of the same key.
+    DotComponent,
+    /// A `..` component could be interpreted as a filesystem traversal.
+    ParentComponent,
+    /// A path component included an ASCII control byte.
+    ControlByte,
+}
+
+impl Display for GitDaemonPathRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("repository path is empty"),
+            Self::NotAbsolute => formatter.write_str("repository path is not absolute"),
+            Self::EmptyComponent => formatter.write_str("repository path has an empty component"),
+            Self::DotComponent => formatter.write_str("repository path has a dot component"),
+            Self::ParentComponent => formatter.write_str("repository path has a parent component"),
+            Self::ControlByte => formatter.write_str("repository path has a control byte"),
+        }
+    }
+}
+
+impl Error for GitDaemonPathRefusal {}
+
+/// The parsed git-daemon opening request for the supported upload-pack lane.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitDaemonRequest {
+    repository_path: GitDaemonRepositoryPath,
+}
+
+impl GitDaemonRequest {
+    /// Returns the canonical authority lookup key requested by the client.
+    #[must_use]
+    pub const fn repository_path(&self) -> &GitDaemonRepositoryPath {
+        &self.repository_path
+    }
+}
+
+/// Typed failure at the git-daemon transport boundary.
+#[derive(Debug)]
+pub enum GitDaemonTransportRefusal {
+    /// The byte stream could not be read or written at a named transport step.
+    Io {
+        /// The operation that encountered the I/O failure.
+        operation: &'static str,
+        /// The source I/O failure.
+        source: io::Error,
+    },
+    /// The service-request pkt-line had malformed length syntax.
+    InvalidGreetingLength,
+    /// The service-request pkt-line used a control record instead of data.
+    GreetingControlPacket,
+    /// The service-request pkt-line was shorter than its four-byte framing header.
+    GreetingPacketTooSmall { declared: usize },
+    /// The service-request pkt-line exceeds the declared bounded wire profile.
+    GreetingPacketTooLarge { declared: usize, maximum: usize },
+    /// The complete request did not decode to exactly one pkt-line data record.
+    InvalidGreetingPacketSequence { packets: usize },
+    /// The service request omitted the NUL separator after the command and path.
+    MissingGreetingTerminator,
+    /// The command/path record had no ASCII-space separator.
+    MalformedServiceRequest,
+    /// The requested daemon service is not upload-pack.
+    UnsupportedService { service_bytes: usize },
+    /// The client requested a protocol generation outside this V0 milestone.
+    UnsupportedProtocolVersion { version_bytes: usize },
+    /// More than one version parameter appeared in the service request.
+    DuplicateProtocolVersion,
+    /// The path cannot name a canonical repository lookup key.
+    InvalidRepositoryPath {
+        /// The precise lexical refusal.
+        reason: GitDaemonPathRefusal,
+    },
+    /// A complete pkt-line negotiation was not supplied before transport EOF.
+    IncompleteNegotiation,
+    /// The existing wire state machine rejected a bounded protocol input/output.
+    Wire(WireError),
+}
+
+impl Display for GitDaemonTransportRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { operation, source } => write!(formatter, "git-daemon {operation}: {source}"),
+            Self::InvalidGreetingLength => {
+                formatter.write_str("git-daemon greeting has a non-hex pkt-line length")
+            }
+            Self::GreetingControlPacket => {
+                formatter.write_str("git-daemon greeting must be one data pkt-line")
+            }
+            Self::GreetingPacketTooSmall { declared } => {
+                write!(
+                    formatter,
+                    "git-daemon greeting packet is too short: {declared}"
+                )
+            }
+            Self::GreetingPacketTooLarge { declared, maximum } => write!(
+                formatter,
+                "git-daemon greeting packet is {declared} bytes, above {maximum}"
+            ),
+            Self::InvalidGreetingPacketSequence { packets } => write!(
+                formatter,
+                "git-daemon greeting must contain one data packet, found {packets}"
+            ),
+            Self::MissingGreetingTerminator => {
+                formatter.write_str("git-daemon greeting lacks the NUL service terminator")
+            }
+            Self::MalformedServiceRequest => {
+                formatter.write_str("git-daemon greeting lacks a command/path separator")
+            }
+            Self::UnsupportedService { service_bytes } => write!(
+                formatter,
+                "git-daemon requested an unsupported service ({service_bytes} bytes)"
+            ),
+            Self::UnsupportedProtocolVersion { version_bytes } => write!(
+                formatter,
+                "git-daemon requested an unsupported protocol version ({version_bytes} bytes)"
+            ),
+            Self::DuplicateProtocolVersion => {
+                formatter.write_str("git-daemon greeting specifies protocol version more than once")
+            }
+            Self::InvalidRepositoryPath { reason } => Display::fmt(reason, formatter),
+            Self::IncompleteNegotiation => formatter
+                .write_str("git-daemon transport ended before a complete upload-pack request"),
+            Self::Wire(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for GitDaemonTransportRefusal {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::InvalidRepositoryPath { reason } => Some(reason),
+            Self::Wire(error) => Some(error),
+            Self::InvalidGreetingLength
+            | Self::GreetingControlPacket
+            | Self::GreetingPacketTooSmall { .. }
+            | Self::GreetingPacketTooLarge { .. }
+            | Self::InvalidGreetingPacketSequence { .. }
+            | Self::MissingGreetingTerminator
+            | Self::MalformedServiceRequest
+            | Self::UnsupportedService { .. }
+            | Self::UnsupportedProtocolVersion { .. }
+            | Self::DuplicateProtocolVersion
+            | Self::IncompleteNegotiation => None,
+        }
+    }
+}
+
+/// A transport or canonical-pack-construction failure from one served session.
+#[derive(Debug)]
+pub enum GitDaemonServeError<PackError> {
+    /// The socket/stdin transport or wire protocol was refused.
+    Transport(GitDaemonTransportRefusal),
+    /// The authority-backed canonical pack builder declined the selected request.
+    Pack(PackError),
+}
+
+impl<PackError: Display> Display for GitDaemonServeError<PackError> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(error) => Display::fmt(error, formatter),
+            Self::Pack(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl<PackError: Error + 'static> Error for GitDaemonServeError<PackError> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Transport(error) => Some(error),
+            Self::Pack(error) => Some(error),
+        }
+    }
+}
+
+/// Evidence that one legacy upload-pack request was completely emitted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitDaemonSessionReceipt {
+    request: GitDaemonRequest,
+    pack_request: PackRequest,
+}
+
+impl GitDaemonSessionReceipt {
+    /// Returns the parsed git-daemon service request.
+    #[must_use]
+    pub const fn request(&self) -> &GitDaemonRequest {
+        &self.request
+    }
+
+    /// Returns the exact wire-validated fetch request sent to the pack builder.
+    #[must_use]
+    pub const fn pack_request(&self) -> &PackRequest {
+        &self.pack_request
+    }
+}
+
+/// Parses one complete git-daemon opening pkt-line.
+///
+/// Only legacy V0 `git-upload-pack` is accepted for the first-clone vertical
+/// slice. Service selection and repository path validation belong here; pkt
+/// line syntax remains owned by `fgit-wire`'s published decoder.
+pub fn parse_git_daemon_request(
+    frame: &[u8],
+    limits: WireLimits,
+) -> Result<GitDaemonRequest, GitDaemonTransportRefusal> {
+    let mut decoder = PktLineDecoder::new(limits).map_err(GitDaemonTransportRefusal::Wire)?;
+    let packets = decoder
+        .push(frame)
+        .map_err(GitDaemonTransportRefusal::Wire)?;
+    decoder.finish().map_err(GitDaemonTransportRefusal::Wire)?;
+    let [Packet::Data(payload)] = packets.as_slice() else {
+        if packets
+            .iter()
+            .any(|packet| !matches!(packet, Packet::Data(_)))
+        {
+            return Err(GitDaemonTransportRefusal::GreetingControlPacket);
+        }
+        return Err(GitDaemonTransportRefusal::InvalidGreetingPacketSequence {
+            packets: packets.len(),
+        });
+    };
+    parse_git_daemon_request_payload(payload)
+}
+
+/// Serves one bounded legacy V0 git-daemon upload-pack session.
+///
+/// The caller supplies an authority-backed `UploadPackRepository` snapshot and
+/// constructs the pack only after the verified wire machine emits
+/// [`WireEvent::PackRequested`]. This adapter deliberately owns neither a ref
+/// map nor an object catalog: a future `OneNode` binding must resolve the
+/// requested path through the authenticated authority head and use the
+/// canonical pack planner/writer for `build_pack`.
+///
+/// The first-clone lane advertises exactly the supplied capabilities. Its
+/// intended caller passes an empty capability set, yielding raw `PACK` bytes
+/// after the final negotiated ACK/NAK. When a later caller explicitly enables
+/// `side-band-64k`, this adapter preserves the wire crate's bounded
+/// pull/write ordering and emits a terminal flush after the payload.
+pub fn serve_git_daemon_upload_pack<R, W, BuildPack, Payload, PackError>(
+    reader: &mut R,
+    writer: &mut W,
+    repository: &impl UploadPackRepository,
+    capabilities: Capabilities,
+    limits: WireLimits,
+    mut build_pack: BuildPack,
+) -> Result<GitDaemonSessionReceipt, GitDaemonServeError<PackError>>
+where
+    R: Read,
+    W: Write,
+    BuildPack: FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, PackError>,
+    Payload: PackPayloadSource,
+{
+    let request =
+        read_git_daemon_request(reader, &limits).map_err(GitDaemonServeError::Transport)?;
+    let advertisement = V1Advertisement::new(
+        repository.advertised_refs().to_vec(),
+        capabilities.clone(),
+        repository.object_format(),
+        &limits,
+    )
+    .map_err(|error| GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error)))?;
+    write_packet_group(
+        writer,
+        &advertisement.encode(&limits).map_err(|error| {
+            GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
+        })?,
+        &limits,
+    )
+    .map_err(GitDaemonServeError::Transport)?;
+
+    let mut machine = LegacyUploadPack::new(UploadPackVersion::V0, capabilities, limits.clone())
+        .map_err(|error| GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error)))?;
+    let mut input = [0_u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut input).map_err(|source| {
+            GitDaemonServeError::Transport(GitDaemonTransportRefusal::Io {
+                operation: "read upload-pack negotiation",
+                source,
+            })
+        })?;
+        if read == 0 {
+            machine.finish().map_err(|error| {
+                GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
+            })?;
+            return Err(GitDaemonServeError::Transport(
+                GitDaemonTransportRefusal::IncompleteNegotiation,
+            ));
+        }
+
+        let transition = machine
+            .push_bytes(&input[..read], repository)
+            .map_err(|error| {
+                GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
+            })?;
+        write_packet_group(writer, &transition.output, &limits)
+            .map_err(GitDaemonServeError::Transport)?;
+
+        for event in transition.events {
+            let WireEvent::PackRequested(pack_request) = event else {
+                continue;
+            };
+            if !machine.is_complete() {
+                return Err(GitDaemonServeError::Transport(
+                    GitDaemonTransportRefusal::IncompleteNegotiation,
+                ));
+            }
+            let mut payload =
+                build_pack(&request, &pack_request).map_err(GitDaemonServeError::Pack)?;
+            emit_pack_payload(writer, &mut payload, &pack_request, &limits)
+                .map_err(GitDaemonServeError::Transport)?;
+            return Ok(GitDaemonSessionReceipt {
+                request,
+                pack_request,
+            });
+        }
+    }
+}
+
+/// Accepts and completes one git-daemon upload-pack connection.
+///
+/// A node-owned listener loop owns repetition, shutdown requests, and the
+/// in-flight-session drain. This one-shot primitive performs the protocol
+/// session and sends the server write-half EOF after raw V0 pack bytes, which
+/// is the completion marker required by legacy clients.
+pub fn serve_git_daemon_tcp_once<BuildPack, Payload, PackError>(
+    listener: &TcpListener,
+    repository: &impl UploadPackRepository,
+    capabilities: Capabilities,
+    limits: WireLimits,
+    build_pack: BuildPack,
+) -> Result<GitDaemonSessionReceipt, GitDaemonServeError<PackError>>
+where
+    BuildPack: FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, PackError>,
+    Payload: PackPayloadSource,
+{
+    let (mut stream, _) = listener.accept().map_err(|source| {
+        GitDaemonServeError::Transport(GitDaemonTransportRefusal::Io {
+            operation: "accept git-daemon connection",
+            source,
+        })
+    })?;
+    let mut writer = stream.try_clone().map_err(|source| {
+        GitDaemonServeError::Transport(GitDaemonTransportRefusal::Io {
+            operation: "duplicate git-daemon connection for response writes",
+            source,
+        })
+    })?;
+    let receipt = serve_git_daemon_upload_pack(
+        &mut stream,
+        &mut writer,
+        repository,
+        capabilities,
+        limits,
+        build_pack,
+    )?;
+    writer.shutdown(Shutdown::Write).map_err(|source| {
+        GitDaemonServeError::Transport(GitDaemonTransportRefusal::Io {
+            operation: "send git-daemon response EOF",
+            source,
+        })
+    })?;
+    Ok(receipt)
+}
+
+fn parse_git_daemon_request_payload(
+    payload: &[u8],
+) -> Result<GitDaemonRequest, GitDaemonTransportRefusal> {
+    let Some(terminator) = payload.iter().position(|byte| *byte == 0) else {
+        return Err(GitDaemonTransportRefusal::MissingGreetingTerminator);
+    };
+    let service_and_path = &payload[..terminator];
+    let parameters = &payload[terminator + 1..];
+    if !parameters.is_empty() && !parameters.ends_with(&[0]) {
+        return Err(GitDaemonTransportRefusal::MissingGreetingTerminator);
+    }
+    let Some(separator) = service_and_path.iter().position(|byte| *byte == b' ') else {
+        return Err(GitDaemonTransportRefusal::MalformedServiceRequest);
+    };
+    let service = &service_and_path[..separator];
+    if service != b"git-upload-pack" {
+        return Err(GitDaemonTransportRefusal::UnsupportedService {
+            service_bytes: service.len(),
+        });
+    }
+    let repository_path = GitDaemonRepositoryPath::parse(&service_and_path[separator + 1..])?;
+
+    let mut requested_version_bytes = None;
+    for parameter in parameters.split(|byte| *byte == 0) {
+        if parameter.is_empty() {
+            continue;
+        }
+        let Some(version) = parameter.strip_prefix(b"version=") else {
+            continue;
+        };
+        if requested_version_bytes.is_some() {
+            return Err(GitDaemonTransportRefusal::DuplicateProtocolVersion);
+        }
+        requested_version_bytes = Some(version.len());
+    }
+    if let Some(version_bytes) = requested_version_bytes {
+        return Err(GitDaemonTransportRefusal::UnsupportedProtocolVersion { version_bytes });
+    }
+    Ok(GitDaemonRequest { repository_path })
+}
+
+fn read_git_daemon_request(
+    reader: &mut impl Read,
+    limits: &WireLimits,
+) -> Result<GitDaemonRequest, GitDaemonTransportRefusal> {
+    let mut header = [0_u8; 4];
+    reader
+        .read_exact(&mut header)
+        .map_err(|source| GitDaemonTransportRefusal::Io {
+            operation: "read git-daemon greeting header",
+            source,
+        })?;
+    let declared = git_daemon_packet_length(header)?;
+    if declared < 4 {
+        return Err(GitDaemonTransportRefusal::GreetingControlPacket);
+    }
+    if declared > limits.max_packet_bytes {
+        return Err(GitDaemonTransportRefusal::GreetingPacketTooLarge {
+            declared,
+            maximum: limits.max_packet_bytes,
+        });
+    }
+    let mut frame = Vec::new();
+    frame
+        .try_reserve_exact(declared)
+        .map_err(|_| GitDaemonTransportRefusal::Wire(WireError::AllocationFailure))?;
+    frame.extend_from_slice(&header);
+    let payload_length = declared
+        .checked_sub(header.len())
+        .ok_or(GitDaemonTransportRefusal::GreetingPacketTooSmall { declared })?;
+    let original_length = frame.len();
+    frame.resize(declared, 0);
+    reader
+        .read_exact(&mut frame[original_length..original_length + payload_length])
+        .map_err(|source| GitDaemonTransportRefusal::Io {
+            operation: "read git-daemon greeting payload",
+            source,
+        })?;
+    parse_git_daemon_request(&frame, limits.clone())
+}
+
+fn git_daemon_packet_length(header: [u8; 4]) -> Result<usize, GitDaemonTransportRefusal> {
+    let mut declared = 0_usize;
+    for byte in header {
+        let digit = match byte {
+            b'0'..=b'9' => usize::from(byte - b'0'),
+            b'a'..=b'f' => usize::from(byte - b'a') + 10,
+            b'A'..=b'F' => usize::from(byte - b'A') + 10,
+            _ => return Err(GitDaemonTransportRefusal::InvalidGreetingLength),
+        };
+        declared = declared
+            .checked_mul(16)
+            .and_then(|value| value.checked_add(digit))
+            .ok_or(GitDaemonTransportRefusal::InvalidGreetingLength)?;
+    }
+    Ok(declared)
+}
+
+fn write_packet_group(
+    writer: &mut impl Write,
+    packets: &[Packet],
+    limits: &WireLimits,
+) -> Result<(), GitDaemonTransportRefusal> {
+    let bytes = encode_packets(packets, limits).map_err(GitDaemonTransportRefusal::Wire)?;
+    writer
+        .write_all(&bytes)
+        .map_err(|source| GitDaemonTransportRefusal::Io {
+            operation: "write git-daemon pkt-line response",
+            source,
+        })?;
+    writer
+        .flush()
+        .map_err(|source| GitDaemonTransportRefusal::Io {
+            operation: "flush git-daemon pkt-line response",
+            source,
+        })
+}
+
+fn emit_pack_payload(
+    writer: &mut impl Write,
+    payload: &mut impl PackPayloadSource,
+    request: &PackRequest,
+    limits: &WireLimits,
+) -> Result<(), GitDaemonTransportRefusal> {
+    let maximum_chunk_bytes = if request.options.sideband_64k() {
+        limits
+            .max_packet_bytes
+            .checked_sub(5)
+            .ok_or(GitDaemonTransportRefusal::Wire(WireError::InvalidLimit {
+                field: "max_packet_bytes for sideband pack source",
+            }))?
+    } else {
+        limits.max_packet_bytes
+    };
+    loop {
+        let Some(chunk) = payload
+            .next_chunk(maximum_chunk_bytes)
+            .map_err(GitDaemonTransportRefusal::Wire)?
+        else {
+            break;
+        };
+        if chunk.len() > maximum_chunk_bytes {
+            return Err(GitDaemonTransportRefusal::Wire(
+                WireError::PackChunkTooLarge {
+                    observed: chunk.len(),
+                    limit: maximum_chunk_bytes,
+                },
+            ));
+        }
+        if request.options.sideband_64k() {
+            let packets =
+                sideband_pack_chunk(&chunk, limits).map_err(GitDaemonTransportRefusal::Wire)?;
+            write_packet_group(writer, &packets, limits)?;
+        } else {
+            writer
+                .write_all(&chunk)
+                .map_err(|source| GitDaemonTransportRefusal::Io {
+                    operation: "write raw git pack payload",
+                    source,
+                })?;
+            writer
+                .flush()
+                .map_err(|source| GitDaemonTransportRefusal::Io {
+                    operation: "flush raw git pack payload",
+                    source,
+                })?;
+        }
+    }
+    if request.options.sideband_64k() {
+        write_packet_group(writer, &[Packet::Flush], limits)?;
+    }
+    Ok(())
 }
 
 /// Explicit inputs for initializing one embedded node.
@@ -670,14 +1277,23 @@ fn placement_resources(object_bytes: u64) -> ResourceVector {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
     use std::fs;
+    use std::io::{Cursor, Read};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use fgit_authority::HeadRead;
     use fgit_types::{RepositoryId, TenantId};
+    use fgit_wire::{
+        AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, PackPayloadSource, Packet,
+        UploadPackRepository, WireError, WireLimits, encode_packets,
+    };
 
-    use super::{NodeConfig, NodeInitialization, NodeRefusal, OneNode};
+    use super::{
+        GitDaemonServeError, GitDaemonTransportRefusal, NodeConfig, NodeInitialization,
+        NodeRefusal, OneNode, parse_git_daemon_request, serve_git_daemon_upload_pack,
+    };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -712,6 +1328,205 @@ mod tests {
             TenantId::from_bytes([0x11; 16]),
             RepositoryId::from_bytes([0x22; 16]),
         )
+    }
+
+    #[derive(Clone, Debug)]
+    struct FixtureRepository {
+        refs: Vec<AdvertisedRef>,
+    }
+
+    impl FixtureRepository {
+        fn single_main_ref() -> Self {
+            let limits = WireLimits::default();
+            let oid = AnyGitOid::from_hex(
+                GitObjectFormat::Sha1,
+                "1111111111111111111111111111111111111111",
+            )
+            .expect("fixed SHA-1 object id");
+            let reference =
+                AdvertisedRef::new(oid, b"refs/heads/main", &limits).expect("fixed valid ref");
+            Self {
+                refs: vec![reference],
+            }
+        }
+    }
+
+    impl UploadPackRepository for FixtureRepository {
+        fn object_format(&self) -> GitObjectFormat {
+            GitObjectFormat::Sha1
+        }
+
+        fn advertised_refs(&self) -> &[AdvertisedRef] {
+            &self.refs
+        }
+
+        fn contains_want(&self, oid: AnyGitOid) -> bool {
+            self.refs.iter().any(|reference| reference.oid == oid)
+        }
+
+        fn is_common(&self, _oid: AnyGitOid) -> bool {
+            false
+        }
+    }
+
+    struct FixturePack {
+        bytes: Option<Vec<u8>>,
+    }
+
+    impl PackPayloadSource for FixturePack {
+        fn next_chunk(&mut self, maximum_chunk_bytes: usize) -> Result<Option<Vec<u8>>, WireError> {
+            let Some(chunk) = self.bytes.take() else {
+                return Ok(None);
+            };
+            if chunk.len() > maximum_chunk_bytes {
+                return Err(WireError::PackChunkTooLarge {
+                    observed: chunk.len(),
+                    limit: maximum_chunk_bytes,
+                });
+            }
+            Ok(Some(chunk))
+        }
+    }
+
+    struct FragmentedReader {
+        bytes: Vec<u8>,
+        offset: usize,
+        fragment_bytes: usize,
+    }
+
+    impl FragmentedReader {
+        fn new(bytes: Vec<u8>, fragment_bytes: usize) -> Self {
+            Self {
+                bytes,
+                offset: 0,
+                fragment_bytes,
+            }
+        }
+    }
+
+    impl Read for FragmentedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.offset == self.bytes.len() {
+                return Ok(0);
+            }
+            let available = self.bytes.len() - self.offset;
+            let length = available.min(self.fragment_bytes).min(buffer.len());
+            buffer[..length].copy_from_slice(&self.bytes[self.offset..self.offset + length]);
+            self.offset += length;
+            Ok(length)
+        }
+    }
+
+    fn daemon_greeting(payload: &[u8]) -> Vec<u8> {
+        encode_packets(&[Packet::Data(payload.to_vec())], &WireLimits::default())
+            .expect("fixed greeting encodes")
+    }
+
+    #[test]
+    fn git_daemon_parser_accepts_a_v0_upload_pack_path() {
+        let greeting = daemon_greeting(b"git-upload-pack /demo.git\0host=example.test\0");
+        let request = parse_git_daemon_request(&greeting, WireLimits::default())
+            .expect("v0 upload-pack greeting is accepted");
+
+        assert_eq!(request.repository_path().as_bytes(), b"/demo.git");
+    }
+
+    #[test]
+    fn git_daemon_parser_refuses_a_non_upload_pack_service() {
+        let greeting = daemon_greeting(b"git-receive-pack /demo.git\0host=example.test\0");
+
+        assert!(matches!(
+            parse_git_daemon_request(&greeting, WireLimits::default()),
+            Err(GitDaemonTransportRefusal::UnsupportedService { .. })
+        ));
+    }
+
+    #[test]
+    fn git_daemon_parser_refuses_a_truncated_pkt_line() {
+        assert!(matches!(
+            parse_git_daemon_request(b"0033git-upload-pack /demo.git", WireLimits::default()),
+            Err(GitDaemonTransportRefusal::Wire(
+                WireError::TruncatedPacket { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn git_daemon_session_writes_advertisement_ack_then_raw_pack_after_done() {
+        let repository = FixtureRepository::single_main_ref();
+        let want = repository.refs[0].oid.to_string();
+        let mut client_bytes = daemon_greeting(b"git-upload-pack /demo.git\0host=example.test\0");
+        client_bytes.extend(
+            encode_packets(
+                &[
+                    Packet::Data(format!("want {want}\n").into_bytes()),
+                    Packet::Flush,
+                    Packet::Data(b"done\n".to_vec()),
+                ],
+                &WireLimits::default(),
+            )
+            .expect("fixed upload-pack negotiation encodes"),
+        );
+        let mut reader = FragmentedReader::new(client_bytes, 3);
+        let mut writer = Cursor::new(Vec::new());
+
+        let receipt = serve_git_daemon_upload_pack(
+            &mut reader,
+            &mut writer,
+            &repository,
+            Capabilities::default(),
+            WireLimits::default(),
+            |request, pack_request| -> Result<FixturePack, Infallible> {
+                assert_eq!(request.repository_path().as_bytes(), b"/demo.git");
+                assert_eq!(pack_request.wants, vec![repository.refs[0].oid]);
+                Ok(FixturePack {
+                    bytes: Some(b"PACK\0fixture".to_vec()),
+                })
+            },
+        )
+        .expect("complete V0 negotiation emits the canonical-pack payload");
+
+        assert_eq!(receipt.request().repository_path().as_bytes(), b"/demo.git");
+        assert_eq!(receipt.pack_request().wants, vec![repository.refs[0].oid]);
+        let bytes = writer.into_inner();
+        let pack_offset = bytes
+            .windows(b"PACK".len())
+            .position(|window| window == b"PACK")
+            .expect("raw pack follows the upload-pack negotiation");
+        assert_eq!(&bytes[pack_offset..], b"PACK\0fixture");
+        assert_eq!(
+            bytes[..pack_offset]
+                .windows(b"NAK\n".len())
+                .filter(|window| *window == b"NAK\n")
+                .count(),
+            2,
+            "want flush and final done each emit their negotiated NAK before raw pack bytes"
+        );
+    }
+
+    #[test]
+    fn git_daemon_session_refuses_eof_before_done_without_constructing_a_pack() {
+        let repository = FixtureRepository::single_main_ref();
+        let mut reader = Cursor::new(daemon_greeting(b"git-upload-pack /demo.git\0"));
+        let mut writer = Cursor::new(Vec::new());
+
+        let result = serve_git_daemon_upload_pack(
+            &mut reader,
+            &mut writer,
+            &repository,
+            Capabilities::default(),
+            WireLimits::default(),
+            |_request, _pack_request| -> Result<FixturePack, Infallible> {
+                panic!("a pack must not be constructed before a complete request")
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(GitDaemonServeError::Transport(
+                GitDaemonTransportRefusal::IncompleteNegotiation
+            ))
+        ));
     }
 
     #[test]
