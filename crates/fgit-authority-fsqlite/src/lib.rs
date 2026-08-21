@@ -73,6 +73,7 @@
 
 mod envelope;
 mod interpret;
+mod lifecycle;
 mod portable;
 mod retry;
 mod schema;
@@ -85,6 +86,10 @@ pub use crate::interpret::{
     CasStep, DisambiguationRefusal, HeadInitStep, ObservedHead, PutStep, compare_stored_body,
     disambiguate_compare_exchange, interpret_compare_exchange, interpret_head_create,
     interpret_put_if_absent,
+};
+pub use crate::lifecycle::{
+    CANCELLATION_PHASES, CancellationOutcome, CancellationPhase, LifecycleError, TransactionEvent,
+    TransactionState, WorkerEvent, WorkerState, classify_cancellation,
 };
 pub use crate::portable::{
     BundleRefusal, ExportBundle, ExportedBody, ExportedHead, ExportedIssuance, MAX_EXPORT_BODIES,
