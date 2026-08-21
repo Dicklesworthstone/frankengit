@@ -42,6 +42,7 @@ for sq_needle in \
   'scripted_history' \
   'fn contend' \
   'Defect::SecondWinner' \
+  'instance_id()' \
   'fn kill' \
   'std::env::temp_dir'; do
   if ! grep -qF "$sq_needle" "$SQ_CAMPAIGN"; then
@@ -99,11 +100,11 @@ fge_assert_eq FG-005B-E2E-014 '' "$sq_reaches_into_src" \
 fge_assert_eq FG-005B-E2E-015 '' "$sq_in_memory" \
   'the campaign opens real files, never ":memory:", or it cannot reopen anything'
 
-if [ "$sq_kills" -lt 6 ]; then
+if [ "$sq_kills" -lt 9 ]; then
   fge_fail FG-005B-E2E-016 \
-    "only $sq_kills kill/reopen sites; the crash matrix requires at least six"
+    "only $sq_kills kill/reopen sites; the crash matrix requires at least nine"
 fi
-if [ "$sq_tests" -lt 11 ]; then
+if [ "$sq_tests" -lt 14 ]; then
   fge_fail FG-005B-E2E-017 \
     "only $sq_tests tests in the campaign; the dispatch names more scenarios than that"
 fi

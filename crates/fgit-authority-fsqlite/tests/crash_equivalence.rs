@@ -828,3 +828,88 @@ fn a_kill_during_contention_still_leaves_exactly_one_winner() {
         );
     }
 }
+
+// --------------------------------------------------- identity across a reopen
+//
+// `establish` reads the identity row and returns the RECORDED instance when
+// one exists, ignoring the id the caller proposed. That is the right rule --
+// a database's identity belongs to the database, not to whoever opened it --
+// and it is the rule these tests pin, because the failure mode is quiet.
+//
+// A store that adopted the proposed id would let a caller rename a database
+// by reopening it. Tokens are per-instance, so a renamed store either starts
+// honouring tokens issued to a different instance or stops honouring its own,
+// and both are authenticity failures that no single-connection test would
+// notice.
+
+#[test]
+fn a_reopened_store_keeps_its_recorded_identity_not_the_proposed_one() {
+    let scratch = Scratch::new("identity-across-reopen");
+    let node = node();
+
+    let first = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+    assert_eq!(
+        first.instance_id(),
+        StoreInstanceId::from_raw(1),
+        "a fresh database adopts the proposed identity"
+    );
+    first.init_head(&head_key(), generation(1), GENESIS);
+    first.kill();
+
+    // Reopen proposing a DIFFERENT identity. The recorded one must win.
+    let second = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(7));
+    assert_eq!(
+        second.instance_id(),
+        StoreInstanceId::from_raw(1),
+        "a reopened database keeps its recorded identity; adopting the proposed one would let a \
+         caller rename a store by opening it, and tokens are scoped per instance"
+    );
+}
+
+#[test]
+fn a_token_taken_before_a_kill_still_wins_after_a_mismatched_reopen() {
+    // The other half of the identity rule, and the one that would actually
+    // corrupt state: an UNCONSUMED token from before the kill must still be
+    // honoured after reopening under a different proposed id, because the
+    // instance did not really change. If a mismatched reopen invalidated live
+    // tokens, a crash plus a careless caller would strand a legitimate writer.
+    let scratch = Scratch::new("token-across-mismatched-reopen");
+    let node = node();
+    let key = head_key();
+
+    let first = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+    first.init_head(&key, generation(1), GENESIS);
+    let token = first.token(&key);
+    first.kill();
+
+    let second = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(7));
+    let outcome = second.exchange(&key, token, generation(2), ADVANCED);
+    assert!(
+        matches!(outcome, Ok(CasOutcome::Committed(_))),
+        "an unconsumed token must survive a kill and a mismatched reopen: the recorded instance \
+         never changed, so the token was never for a different store; got {outcome:?}"
+    );
+}
+
+#[test]
+fn a_fresh_database_at_a_new_path_does_not_inherit_another_stores_head() {
+    // The control for the two tests above. If every store shared state, they
+    // would pass for the wrong reason -- so this pins that identity and
+    // durability are per-database and that Scratch really does hand out clean
+    // files.
+    let occupied = Scratch::new("occupied");
+    let empty = Scratch::new("empty");
+    let node = node();
+
+    let first = Crashable::open(&node, occupied.as_str(), StoreInstanceId::from_raw(1));
+    first.init_head(&head_key(), generation(1), GENESIS);
+    first.kill();
+
+    let other = Crashable::open(&node, empty.as_str(), StoreInstanceId::from_raw(1));
+    assert_eq!(
+        other.read_head(&head_key()).expect("the head reads"),
+        HeadRead::Absent,
+        "a database at a different path must start empty; if it did not, every durability \
+         assertion in this file could be reading another test's state"
+    );
+}
