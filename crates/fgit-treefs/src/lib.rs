@@ -41,6 +41,7 @@ pub mod base;
 pub mod capability;
 pub mod export;
 pub mod intent;
+pub mod journal;
 pub mod obligation;
 pub mod overlay;
 pub mod path;
@@ -55,6 +56,7 @@ pub use intent::{
     BasisEntry, IntentError, IntentEvaluation, IntentLog, NetEffect, NoOpReason, TreeEditIntent,
     TreeNetEffect,
 };
+pub use journal::{CancellationState, ExportJournal, ExportPhase, JournalRefusal, JournalStep};
 pub use obligation::{
     WorkspaceAbortReason, WorkspaceLease, WorkspaceLeaseAbort, WorkspaceLeaseCommit,
     WorkspaceLeaseReservation,
