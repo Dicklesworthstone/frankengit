@@ -845,7 +845,7 @@ pub struct VerifiedStreamBudget {
 
 impl VerifiedStreamBudget {
     /// Builds a finite stream budget.
-    pub fn new(maximum_bytes: u64, chunk_bytes: usize) -> Result<Self, StoreRefusal> {
+    pub const fn new(maximum_bytes: u64, chunk_bytes: usize) -> Result<Self, StoreRefusal> {
         if maximum_bytes == 0 || chunk_bytes == 0 {
             return Err(StoreRefusal::InvalidStreamingBudget);
         }
@@ -1160,10 +1160,10 @@ pub(crate) fn checkpoint_outcome<T, Caps>(cx: &Cx<Caps>) -> Option<Outcome<T, St
     if cx.checkpoint().is_ok() {
         return None;
     }
-    match cx.cancel_reason() {
-        Some(reason) => Some(Outcome::Cancelled(reason)),
-        None => Some(Outcome::Err(StoreRefusal::RuntimeCheckpointRejected)),
-    }
+    cx.cancel_reason().map_or_else(
+        || Some(Outcome::Err(StoreRefusal::RuntimeCheckpointRejected)),
+        |reason| Some(Outcome::Cancelled(reason)),
+    )
 }
 
 /// A deliberately rebuildable, non-authoritative OID-to-manifest accelerator.

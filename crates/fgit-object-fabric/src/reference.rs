@@ -149,7 +149,7 @@ impl ReferenceMemoryFabric {
         })
     }
 
-    fn staged_epochs() -> PublicationState {
+    const fn staged_epochs() -> PublicationState {
         PublicationState::new(true, false, false)
     }
 }
@@ -392,28 +392,26 @@ impl ImmutableObjectFabric for ReferenceMemoryFabric {
 }
 
 impl RuntimeImmutableObjectFabric for ReferenceMemoryFabric {
-    fn open_verified_stream<'a>(
-        &'a self,
-        cx: &'a Cx,
+    fn open_verified_stream(
+        &self,
+        cx: &Cx,
         identity: GitOid,
         budget: VerifiedStreamBudget,
-    ) -> impl std::future::Future<Output = Outcome<VerifiedObjectStream, StoreRefusal>> + 'a {
-        async move {
-            if let Some(outcome) = checkpoint_outcome(cx) {
-                return outcome;
-            }
-            let whole = match self.read_whole(identity) {
-                Ok(whole) => whole,
-                Err(error) => return Outcome::Err(error),
-            };
-            if let Some(outcome) = checkpoint_outcome(cx) {
-                return outcome;
-            }
-            match VerifiedObjectStream::new(whole, budget) {
-                Ok(stream) => Outcome::Ok(stream),
-                Err(error) => Outcome::Err(error),
-            }
+    ) -> std::future::Ready<Outcome<VerifiedObjectStream, StoreRefusal>> {
+        if let Some(outcome) = checkpoint_outcome(cx) {
+            return std::future::ready(outcome);
         }
+        let whole = match self.read_whole(identity) {
+            Ok(whole) => whole,
+            Err(error) => return std::future::ready(Outcome::Err(error)),
+        };
+        if let Some(outcome) = checkpoint_outcome(cx) {
+            return std::future::ready(outcome);
+        }
+        std::future::ready(match VerifiedObjectStream::new(whole, budget) {
+            Ok(stream) => Outcome::Ok(stream),
+            Err(error) => Outcome::Err(error),
+        })
     }
 }
 
