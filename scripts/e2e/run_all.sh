@@ -99,6 +99,10 @@ RA_OUT=''
 RA_TIMEOUT=900
 RA_ATTEMPTS=1
 RA_LIST=0
+# Whether --dir was supplied. Script ids are named relative to an explicitly
+# requested discovery root, and relative to the repository for the default one;
+# see ra_script_id.
+RA_DIR_EXPLICIT=0
 declare -a RA_EXPLICIT=()
 
 RA_SCHEMA='frankengit.e2e.suite.v1'
@@ -112,6 +116,7 @@ while [ "$#" -gt 0 ]; do
   case $1 in
     --dir)
       RA_SUITE_DIR=${2-}
+      RA_DIR_EXPLICIT=1
       shift 2
       ;;
     --out)
@@ -181,15 +186,30 @@ ra_discover() {
 }
 
 ra_script_id() {
-  local p=$1 id
-  # Repo-relative first, so in-tree ids are stable and human-meaningful. A
-  # script outside the repo is named relative to the discovery root instead of
-  # having its whole absolute path mangled into the id.
-  case $p in
-    "$RA_REPO_ROOT"/*) id=${p#"$RA_REPO_ROOT"/} ;;
-    "$RA_SUITE_DIR"/*) id=${p#"$RA_SUITE_DIR"/} ;;
-    *) id=$(basename "$p") ;;
-  esac
+  local p=$1 id=''
+  # An explicitly requested discovery root wins, because the caller has just
+  # said which tree it is asking about and expects to be answered in those
+  # terms. Testing the repository first instead meant that a --dir anywhere
+  # inside the repo -- an artifact fixture tree under target/, say -- matched the
+  # repo branch and mangled its entire path into the id. That was FG-000A-PORT-013.
+  #
+  # The default root deliberately does NOT take this branch. Its ids are
+  # repo-relative (`suites-<area>-<name>`), they are published in the suite
+  # receipt, and FG-091 layers set-equality on those exact strings, so renaming
+  # them to make one test pass would break a downstream contract to fix a local
+  # symptom.
+  if [ "${RA_DIR_EXPLICIT:-0}" -eq 1 ]; then
+    case $p in
+      "$RA_SUITE_DIR"/*) id=${p#"$RA_SUITE_DIR"/} ;;
+    esac
+  fi
+  if [ -z "$id" ]; then
+    case $p in
+      "$RA_REPO_ROOT"/*) id=${p#"$RA_REPO_ROOT"/} ;;
+      "$RA_SUITE_DIR"/*) id=${p#"$RA_SUITE_DIR"/} ;;
+      *) id=$(basename "$p") ;;
+    esac
+  fi
   id=${id#scripts/e2e/}
   id=${id%.sh}
   id=${id//\//-}

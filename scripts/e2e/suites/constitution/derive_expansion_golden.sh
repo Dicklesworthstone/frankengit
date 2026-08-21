@@ -38,21 +38,6 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPO_ROOT="$(cd "$E2E_ROOT/../.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
-# lib.sh takes `revision_dirty` from this variable and defaults it to `false`;
-# it deliberately does not guess. Nothing in the tree sets it, so every evidence
-# record emitted so far asserts a clean worktree unconditionally. Reported to
-# the orchestrator as a harness defect against fg000a rather than patched here,
-# because scripts/e2e/lib.sh is frozen and shared. This suite at least tells the
-# truth about its own runs.
-if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-  if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; then
-    FGE_REVISION_DIRTY=true
-  else
-    FGE_REVISION_DIRTY=false
-  fi
-  export FGE_REVISION_DIRTY
-fi
-
 fge_init
 
 fge_phase setup
