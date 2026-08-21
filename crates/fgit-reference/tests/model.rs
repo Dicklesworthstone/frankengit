@@ -3600,6 +3600,73 @@ fn a_later_coincidental_restatement_absorbs_and_the_earlier_intent_survives() {
     );
 }
 
+/// The other half of §13's uniformity clause: scratch arising from the **basis**
+/// rather than from an earlier intent.
+///
+/// The ruling classifies an intent as the identity no-op "regardless of whether
+/// that scratch state arose from the basis or from the earlier intent", and
+/// that uniformity *is* the substantive content — it is what makes the
+/// predicate local to `(requested after-state, scratch at evaluation)` instead
+/// of a function of history the intent cannot observe. Testing only the
+/// earlier-intent half would leave the uniformity itself unasserted, so a model
+/// that special-cased the basis would pass.
+///
+/// Here a single intent restates the value the basis already holds. There is no
+/// earlier intent at all, so nothing could have produced a transition, and the
+/// transaction is a committed no-op rather than a refusal.
+#[test]
+fn an_intent_restating_the_basis_value_is_the_same_identity_no_op() {
+    let mut fixture = Fixture::new(53);
+    let mut refs = BTreeMap::new();
+    refs.insert(name("refs/heads/main"), oid(1));
+    let forge = BTreeMap::new();
+    let retention = BTreeSet::new();
+    let outbox = BTreeMap::new();
+    let basis = FoldBasis {
+        refs: &refs,
+        forge_positions: &forge,
+        retention: &retention,
+        outbox: &outbox,
+    };
+
+    let request = fixture
+        .request(fixture.author, "k1")
+        .statement(
+            MismatchPolicy::TxnAbort,
+            vec![update(
+                "refs/heads/main",
+                ExpectedRefState::Exact(oid(1)),
+                oid(1),
+                false,
+            )],
+        )
+        .build(&mut fixture.mint);
+
+    let report = ReferenceFolder.fold(basis, &request);
+    assert!(report.is_total_for(&request));
+    let effects = report.effects().expect("the fold did not abort");
+    assert!(
+        effects.is_empty(),
+        "restating the basis value publishes nothing: {effects:?}"
+    );
+
+    let dispositions: Vec<&IntentDisposition> = report
+        .mappings
+        .iter()
+        .map(|mapping| &mapping.disposition)
+        .collect();
+    assert_eq!(dispositions.len(), 1);
+    assert!(
+        matches!(
+            dispositions[0],
+            IntentDisposition::Absorbed(AbsorptionReason::IdentityEffect)
+        ),
+        "a basis-derived identity must absorb with the SAME reason as an \
+         intent-derived one, or the classification is not uniform; it was {:?}",
+        dispositions[0]
+    );
+}
+
 /// The contrast twin: a later intent requesting a **different** after-state is a
 /// real overwrite, and there the earlier intent is the absorbed one.
 ///
