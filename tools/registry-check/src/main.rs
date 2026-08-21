@@ -1532,14 +1532,19 @@ fn extract_workspace_string_list(text: &str, key: &str) -> Vec<String> {
         if !collecting {
             continue;
         }
-        let Some(value) = line
-            .strip_prefix(key)
-            .and_then(|rest| rest.trim_start().strip_prefix('='))
-        else {
-            continue;
-        };
-        body.push_str(value);
-        if !value.contains(']') {
+        if body.is_empty() {
+            let Some(value) = line
+                .strip_prefix(key)
+                .and_then(|rest| rest.trim_start().strip_prefix('='))
+            else {
+                continue;
+            };
+            body.push_str(value);
+        } else {
+            body.push(' ');
+            body.push_str(line);
+        }
+        if !body.contains(']') {
             continue;
         }
         let Some(open) = body.find('[') else {
@@ -2843,5 +2848,18 @@ mod tests {
         );
         assert!(metadata.build_scripts.contains("asupersync"));
         assert!(metadata.proc_macros.contains("derive-risk"));
+    }
+
+    #[test]
+    fn workspace_member_parser_accepts_multiline_membership_lists() {
+        let manifest = "[workspace]\nmembers = [\n  \"crates/fgit-types\",\n  \"tools/registry-check\",\n]\ndefault-members = [\n  \"crates/fgit-types\",\n]\n";
+        assert_eq!(
+            extract_workspace_string_list(manifest, "members"),
+            vec!["crates/fgit-types", "tools/registry-check"]
+        );
+        assert_eq!(
+            extract_workspace_string_list(manifest, "default-members"),
+            vec!["crates/fgit-types"]
+        );
     }
 }
