@@ -8,11 +8,10 @@
 //! you hold. Every forbidden case is paired with the near-identical permitted
 //! case that proceeds.
 
-use core::num::NonZeroU32;
 use core::panic::AssertUnwindSafe;
 use fgit_resource::algebra::{Grade, ResourceVector};
 use fgit_resource::custody::{
-    LeakClass, LeakPolicy, LedgerHandle, LifecycleError, LifecycleEvent, ObligationLedger,
+    LeakClass, LeakDisposition, LedgerHandle, LifecycleError, LifecycleEvent, ObligationLedger,
     ObligationState, RegionCloseOutcome,
 };
 use fgit_resource::ids::{IdempotencyKey, OpaqueHandle, RegionId};
@@ -57,15 +56,6 @@ const fn oid(tag: u8) -> GitOid {
 
 fn opaque(tag: u8) -> OpaqueHandle {
     OpaqueHandle::new(&[tag; 20]).expect("twenty bytes is a valid opaque handle")
-}
-
-const fn recover() -> LeakPolicy {
-    LeakPolicy::Recover {
-        escalation_threshold: match NonZeroU32::new(3) {
-            Some(value) => value,
-            None => NonZeroU32::MIN,
-        },
-    }
 }
 
 fn admission_reservation() -> ObjectAdmission {
@@ -246,7 +236,11 @@ fn every_class_agrees_with_its_kind_about_external_observation() {
 #[test]
 fn the_internal_path_commits_and_settles_in_one_call() {
     let capacity = admission_budget();
-    let ledger = ObligationLedger::root(RegionId::new(10), recover(), capacity);
+    let ledger = ObligationLedger::root(
+        RegionId::new(10),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
     let grant = ledger
         .grant(admission_budget())
         .expect("capacity covers it");
@@ -284,7 +278,11 @@ fn the_internal_path_commits_and_settles_in_one_call() {
 
 #[test]
 fn the_external_path_stays_committed_until_acknowledgement() {
-    let ledger = ObligationLedger::root(RegionId::new(11), recover(), outbox_budget());
+    let ledger = ObligationLedger::root(
+        RegionId::new(11),
+        LeakDisposition::RecordAndContinue,
+        outbox_budget(),
+    );
     let grant = ledger.grant(outbox_budget()).expect("capacity covers it");
     let obligation = ledger
         .reserve::<OutboxEffectPermit>(outbox_reservation(DownstreamIdempotency::Strong), grant)
@@ -318,7 +316,11 @@ fn the_external_path_stays_committed_until_acknowledgement() {
 
 #[test]
 fn a_settlement_that_would_mint_budget_is_refused_and_its_twin_proceeds() {
-    let ledger = ObligationLedger::root(RegionId::new(12), recover(), admission_budget());
+    let ledger = ObligationLedger::root(
+        RegionId::new(12),
+        LeakDisposition::RecordAndContinue,
+        admission_budget(),
+    );
     let grant = ledger
         .grant(admission_budget())
         .expect("capacity covers it");
@@ -360,7 +362,11 @@ fn a_settlement_that_would_mint_budget_is_refused_and_its_twin_proceeds() {
 #[test]
 fn reserving_without_a_required_grade_is_refused_and_returns_the_budget() {
     let capacity = ResourceVector::from_grades(&[(Grade::Bytes, 256), (Grade::Objects, 2)]);
-    let ledger = ObligationLedger::root(RegionId::new(13), recover(), capacity);
+    let ledger = ObligationLedger::root(
+        RegionId::new(13),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
 
     // Planted negative: bytes but no object slot.
     let thin = ledger
@@ -417,7 +423,11 @@ fn leaked_classes(handle: &LedgerHandle) -> Vec<LeakClass> {
 #[test]
 fn dropping_a_reserved_obligation_is_a_typed_leak_and_aborting_it_is_not() {
     let capacity = admission_budget();
-    let ledger = ObligationLedger::root(RegionId::new(20), recover(), capacity);
+    let ledger = ObligationLedger::root(
+        RegionId::new(20),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
     let handle = ledger.handle();
     {
         let grant = ledger
@@ -460,7 +470,11 @@ fn dropping_a_reserved_obligation_is_a_typed_leak_and_aborting_it_is_not() {
     }
 
     // Near-identical permitted case: the same reservation, aborted instead.
-    let twin = ObligationLedger::root(RegionId::new(21), recover(), capacity);
+    let twin = ObligationLedger::root(
+        RegionId::new(21),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
     let grant = twin.grant(admission_budget()).expect("capacity covers it");
     let obligation = twin
         .reserve::<ObjectAdmissionPermit>(admission_reservation(), grant)
@@ -476,7 +490,11 @@ fn dropping_a_reserved_obligation_is_a_typed_leak_and_aborting_it_is_not() {
 
 #[test]
 fn dropping_a_committed_obligation_is_a_distinct_typed_leak() {
-    let ledger = ObligationLedger::root(RegionId::new(22), recover(), outbox_budget());
+    let ledger = ObligationLedger::root(
+        RegionId::new(22),
+        LeakDisposition::RecordAndContinue,
+        outbox_budget(),
+    );
     let handle = ledger.handle();
     {
         let grant = ledger.grant(outbox_budget()).expect("capacity covers it");
@@ -499,7 +517,11 @@ fn dropping_a_committed_obligation_is_a_distinct_typed_leak() {
 
 #[test]
 fn dropping_an_unacknowledged_effect_record_is_a_typed_leak() {
-    let ledger = ObligationLedger::root(RegionId::new(23), recover(), outbox_budget());
+    let ledger = ObligationLedger::root(
+        RegionId::new(23),
+        LeakDisposition::RecordAndContinue,
+        outbox_budget(),
+    );
     let handle = ledger.handle();
     {
         let grant = ledger.grant(outbox_budget()).expect("capacity covers it");
@@ -518,7 +540,11 @@ fn dropping_an_unacknowledged_effect_record_is_a_typed_leak() {
     );
 
     // Near-identical permitted case: the same deferral, then acknowledged.
-    let twin = ObligationLedger::root(RegionId::new(24), recover(), outbox_budget());
+    let twin = ObligationLedger::root(
+        RegionId::new(24),
+        LeakDisposition::RecordAndContinue,
+        outbox_budget(),
+    );
     let grant = twin.grant(outbox_budget()).expect("capacity covers it");
     let obligation = twin
         .reserve::<OutboxEffectPermit>(outbox_reservation(DownstreamIdempotency::Weak), grant)
@@ -547,7 +573,11 @@ fn dropping_an_unacknowledged_effect_record_is_a_typed_leak() {
 #[test]
 fn dropping_a_ledger_without_closing_it_is_a_typed_leak() {
     let handle = {
-        let ledger = ObligationLedger::root(RegionId::new(25), recover(), admission_budget());
+        let ledger = ObligationLedger::root(
+            RegionId::new(25),
+            LeakDisposition::RecordAndContinue,
+            admission_budget(),
+        );
         let handle = ledger.handle();
         // Dropped on purpose: quiescence must be proved by close, not assumed.
         drop(ledger);
@@ -560,8 +590,12 @@ fn dropping_a_ledger_without_closing_it_is_a_typed_leak() {
 }
 
 #[test]
-fn the_fail_fast_policy_panics_on_a_leak_and_leaves_a_record() {
-    let ledger = ObligationLedger::root(RegionId::new(26), LeakPolicy::Panic, admission_budget());
+fn the_fail_fast_disposition_panics_on_a_leak_and_leaves_a_record() {
+    let ledger = ObligationLedger::root(
+        RegionId::new(26),
+        LeakDisposition::FailFast,
+        admission_budget(),
+    );
     let handle = ledger.handle();
     let grant = ledger
         .grant(admission_budget())
@@ -598,7 +632,7 @@ fn the_fail_fast_policy_panics_on_a_leak_and_leaves_a_record() {
     assert_eq!(
         handle.leaks().len(),
         1,
-        "the settled twin adds no leak under the fail-fast policy"
+        "the settled twin adds no leak under the fail-fast disposition"
     );
 
     let outcome = ledger.close();
@@ -610,7 +644,11 @@ fn the_fail_fast_policy_panics_on_a_leak_and_leaves_a_record() {
 
 #[test]
 fn closing_with_a_live_obligation_reports_containment_rather_than_quiescence() {
-    let ledger = ObligationLedger::root(RegionId::new(27), recover(), outbox_budget());
+    let ledger = ObligationLedger::root(
+        RegionId::new(27),
+        LeakDisposition::RecordAndContinue,
+        outbox_budget(),
+    );
     let grant = ledger.grant(outbox_budget()).expect("capacity covers it");
     let obligation = ledger
         .reserve::<OutboxEffectPermit>(outbox_reservation(DownstreamIdempotency::Strong), grant)

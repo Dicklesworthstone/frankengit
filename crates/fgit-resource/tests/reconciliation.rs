@@ -9,7 +9,9 @@ use core::num::NonZeroU32;
 use std::collections::VecDeque;
 
 use fgit_resource::algebra::{Grade, ResourceVector};
-use fgit_resource::custody::{LeakPolicy, ObligationLedger, ObligationState, RegionCloseOutcome};
+use fgit_resource::custody::{
+    LeakDisposition, ObligationLedger, ObligationState, RegionCloseOutcome,
+};
 use fgit_resource::ids::{IdempotencyKey, OpaqueHandle, RegionId};
 use fgit_resource::kinds::{DownstreamAck, EffectDispatched, OutboxDispatch, OutboxEffectPermit};
 use fgit_resource::settlement::{
@@ -45,15 +47,6 @@ const fn principal(tag: u8) -> PrincipalId {
 
 fn opaque(tag: u8) -> OpaqueHandle {
     OpaqueHandle::new(&[tag; 20]).expect("twenty bytes is a valid opaque handle")
-}
-
-const fn policy() -> LeakPolicy {
-    LeakPolicy::Recover {
-        escalation_threshold: match NonZeroU32::new(2) {
-            Some(value) => value,
-            None => NonZeroU32::MIN,
-        },
-    }
 }
 
 fn budget() -> ResourceVector {
@@ -200,7 +193,11 @@ struct Scenario {
 }
 
 fn deferred_effect(region: u64, strength: DownstreamIdempotency) -> Scenario {
-    let ledger = ObligationLedger::root(RegionId::new(region), policy(), budget());
+    let ledger = ObligationLedger::root(
+        RegionId::new(region),
+        LeakDisposition::RecordAndContinue,
+        budget(),
+    );
     let grant = ledger
         .grant(budget())
         .expect("capacity covers the dispatch");

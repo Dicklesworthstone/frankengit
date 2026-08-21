@@ -11,33 +11,39 @@ use crate::algebra::{BudgetGrant, Grade, GradeDisposition, ResourceError, Resour
 use crate::ids::{GrantId, ObligationId, RegionId};
 use crate::twophase::{ObligationClass, ObligationKind, ReservedObligation};
 use core::fmt;
-use core::num::NonZeroU32;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// What a region does when an obligation or grant is dropped unresolved.
+/// What a ledger does at the moment a value is dropped unresolved.
 ///
-/// There is deliberately no `Silent` and no log-only variant. The integration
-/// profile forbids a silent leak outright and states that logging alone cannot
-/// satisfy region closure, so neither is representable here: both surviving
-/// variants leave a durable [`LeakRecord`] in the ledger and both make region
-/// close report a [`ContainmentFailure`].
+/// This is the *recording* half of leak handling, and it is deliberately
+/// narrow. Both variants leave a durable [`LeakRecord`] and both make region
+/// close report a [`ContainmentFailure`], so there is no silent and no
+/// log-only choice to make here.
+///
+/// The *profile* half — the bounded cleanup budget, escalation threshold,
+/// durable leak sink, and health-degradation signal that the integration
+/// profile requires before a service may run in a recovering mode — belongs to
+/// `fgit-runtime`, which configures the runtime's obligation table and refuses
+/// an uncontrolled recovering profile. `fgit-resource` cannot certify those
+/// controls and does not pretend to: selecting
+/// [`LeakDisposition::RecordAndContinue`] is only admissible underneath a
+/// runtime profile that supplies them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LeakPolicy {
-    /// Fail fast. Verification and release profiles use this.
+pub enum LeakDisposition {
+    /// Record the leak and raise immediately.
     ///
-    /// The panic is raised after the ledger lock is released and is suppressed
-    /// while the thread is already unwinding, so a leak discovered during
-    /// another failure's cleanup degrades to a durable record instead of
-    /// aborting the process and destroying the original diagnosis.
-    Panic,
-    /// Record, degrade, and escalate. Availability-oriented services may use
-    /// this only with a durable leak record and a bounded escalation
-    /// threshold, both of which this variant requires.
-    Recover {
-        /// Leak count at which the region must be escalated by its operator.
-        escalation_threshold: NonZeroU32,
-    },
+    /// Verification and release profiles use this. The panic is raised after
+    /// the ledger lock is released and is suppressed while the thread is
+    /// already unwinding, so a leak discovered during another failure's
+    /// cleanup degrades to a durable record instead of aborting the process
+    /// and destroying the original diagnosis.
+    FailFast,
+    /// Record the leak and let the region keep running.
+    ///
+    /// The record still blocks quiescence at region close; escalation is the
+    /// runtime profile's decision, not the ledger's.
+    RecordAndContinue,
 }
 
 /// The kind of value that was dropped without resolution.
@@ -751,7 +757,7 @@ impl LedgerState {
 #[derive(Debug)]
 struct LedgerInner {
     region: RegionId,
-    policy: LeakPolicy,
+    disposition: LeakDisposition,
     parent: Option<LedgerHandle>,
     state: Mutex<LedgerState>,
 }
@@ -776,10 +782,10 @@ impl LedgerHandle {
         self.0.region
     }
 
-    /// The region's leak policy.
+    /// How this region records a dropped value.
     #[must_use]
-    pub fn policy(&self) -> LeakPolicy {
-        self.0.policy
+    pub fn disposition(&self) -> LeakDisposition {
+        self.0.disposition
     }
 
     /// Current accounting.
@@ -936,8 +942,8 @@ impl LedgerHandle {
 
     fn record_leak(&self, subject: LeakSubject, class: LeakClass) {
         let record = self.with_state(|state| state.record_leak(subject, class));
-        if self.0.policy == LeakPolicy::Panic && !std::thread::panicking() {
-            panic!("obligation leak under fail-fast policy: {record}");
+        if self.0.disposition == LeakDisposition::FailFast && !std::thread::panicking() {
+            panic!("obligation leak under the fail-fast disposition: {record}");
         }
     }
 }
@@ -993,7 +999,7 @@ impl Drop for LeakGuard {
 
 /// The owner of one region's obligations and budget.
 ///
-/// A ledger is created with an explicit capacity and leak policy, hands out
+/// A ledger is created with an explicit capacity and leak disposition, hands out
 /// [`BudgetGrant`] values, converts grants into obligations, and must be closed
 /// explicitly. Dropping it without [`ObligationLedger::close`] is itself a leak.
 #[must_use = "a region ledger must be closed explicitly so that quiescence is proved, not assumed"]
@@ -1009,10 +1015,10 @@ impl ObligationLedger {
     /// A root capacity is the declared boundary of the algebra: it is the one
     /// place an amount comes from nowhere, and it is a named profile input
     /// rather than an ambient default.
-    pub fn root(region: RegionId, policy: LeakPolicy, capacity: ResourceVector) -> Self {
+    pub fn root(region: RegionId, disposition: LeakDisposition, capacity: ResourceVector) -> Self {
         Self::from_inner(LedgerInner {
             region,
-            policy,
+            disposition,
             parent: None,
             state: Mutex::new(LedgerState::fresh(region, capacity)),
         })
@@ -1034,7 +1040,12 @@ impl ObligationLedger {
     /// child region cannot mint authority or budget from nothing" is enforced:
     /// the child's capacity is exactly the parent budget handed to it, and the
     /// parent records that amount as delegated until the child closes.
-    pub fn child(&self, region: RegionId, policy: LeakPolicy, grant: BudgetGrant) -> Self {
+    pub fn child(
+        &self,
+        region: RegionId,
+        disposition: LeakDisposition,
+        grant: BudgetGrant,
+    ) -> Self {
         let capacity = grant.amount();
         let (id, _, parent) = grant.into_parts();
         parent.with_state(|state| {
@@ -1043,7 +1054,7 @@ impl ObligationLedger {
         });
         Self::from_inner(LedgerInner {
             region,
-            policy,
+            disposition,
             parent: Some(parent),
             state: Mutex::new(LedgerState::fresh(region, capacity)),
         })

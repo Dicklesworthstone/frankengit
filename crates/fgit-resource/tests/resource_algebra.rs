@@ -5,9 +5,8 @@
 //! that produced it. They are property tests over a bounded input space, which
 //! is bounded-model evidence, not a proof.
 
-use core::num::NonZeroU32;
 use fgit_resource::algebra::{Grade, GradeDisposition, ResourceError, ResourceVector};
-use fgit_resource::custody::{LeakPolicy, ObligationLedger, RegionCloseOutcome};
+use fgit_resource::custody::{LeakDisposition, ObligationLedger, RegionCloseOutcome};
 use fgit_resource::ids::RegionId;
 
 /// Checked-in seeds. A failure reproduces by running this file unchanged.
@@ -290,21 +289,16 @@ fn masking_partitions_an_amount_by_disposition() {
     assert_eq!(returnable.get(Grade::MoneyMicros), 0);
 }
 
-const fn recover_policy() -> LeakPolicy {
-    LeakPolicy::Recover {
-        escalation_threshold: match NonZeroU32::new(4) {
-            Some(value) => value,
-            None => NonZeroU32::MIN,
-        },
-    }
-}
-
 #[test]
 fn grant_split_and_absorb_preserve_the_pool_identity() {
     for seed in SEEDS {
         let mut rng = Prng::new(seed);
         let capacity = random_vector(&mut rng, 100_000);
-        let ledger = ObligationLedger::root(RegionId::new(seed), recover_policy(), capacity);
+        let ledger = ObligationLedger::root(
+            RegionId::new(seed),
+            LeakDisposition::RecordAndContinue,
+            capacity,
+        );
         let mut held = Vec::new();
 
         for step in 0..96_u32 {
@@ -432,7 +426,11 @@ fn grant_split_and_absorb_preserve_the_pool_identity() {
 #[test]
 fn a_dropped_grant_returns_its_budget_and_records_a_leak() {
     let capacity = ResourceVector::single(Grade::Bytes, 500);
-    let ledger = ObligationLedger::root(RegionId::new(77), recover_policy(), capacity);
+    let ledger = ObligationLedger::root(
+        RegionId::new(77),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
     {
         let grant = ledger
             .grant(ResourceVector::single(Grade::Bytes, 300))
@@ -467,10 +465,14 @@ fn a_dropped_grant_returns_its_budget_and_records_a_leak() {
 #[test]
 fn a_child_region_cannot_mint_budget_and_returns_what_it_did_not_spend() {
     let capacity = ResourceVector::from_grades(&[(Grade::Bytes, 1_000), (Grade::CpuMicros, 400)]);
-    let parent = ObligationLedger::root(RegionId::new(1), recover_policy(), capacity);
+    let parent = ObligationLedger::root(
+        RegionId::new(1),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
     let funding = ResourceVector::from_grades(&[(Grade::Bytes, 600), (Grade::CpuMicros, 100)]);
     let grant = parent.grant(funding).expect("parent can fund the child");
-    let child = parent.child(RegionId::new(2), recover_policy(), grant);
+    let child = parent.child(RegionId::new(2), LeakDisposition::RecordAndContinue, grant);
 
     assert_eq!(
         child.snapshot().capacity(),

@@ -7,10 +7,9 @@
 //! exercised with the forbidden case and with the near-identical permitted case
 //! that proceeds.
 
-use core::num::NonZeroU32;
 use fgit_resource::algebra::{Grade, ResourceVector};
 use fgit_resource::custody::{
-    LeakPolicy, ObligationLedger, ObligationState, RegionCloseOutcome, ReserveError,
+    LeakDisposition, ObligationLedger, ObligationState, RegionCloseOutcome, ReserveError,
 };
 use fgit_resource::ids::{IdempotencyKey, IdentityError, OpaqueHandle, RegionId};
 use fgit_resource::kinds::{
@@ -140,15 +139,6 @@ fn opaque(tag: u8) -> OpaqueHandle {
     OpaqueHandle::new(&[tag; 20]).expect("twenty bytes is a valid opaque handle")
 }
 
-const fn policy() -> LeakPolicy {
-    LeakPolicy::Recover {
-        escalation_threshold: match NonZeroU32::new(2) {
-            Some(value) => value,
-            None => NonZeroU32::MIN,
-        },
-    }
-}
-
 /// One unit of every grade the class requires, and nothing else.
 fn minimal_budget<K: ObligationKind>() -> ResourceVector {
     let pairs: Vec<(Grade, u64)> = K::REQUIRED_GRADES
@@ -181,7 +171,11 @@ fn required_grades_are_load_bearing<K>(
         K::CLASS
     );
     let capacity = minimal_budget::<K>();
-    let ledger = ObligationLedger::root(RegionId::new(region), policy(), capacity);
+    let ledger = ObligationLedger::root(
+        RegionId::new(region),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
 
     for missing in K::REQUIRED_GRADES.iter().copied() {
         let grant = ledger
@@ -227,7 +221,11 @@ where
     K: InternalEffect,
 {
     let capacity = minimal_budget::<K>();
-    let ledger = ObligationLedger::root(RegionId::new(region), policy(), capacity);
+    let ledger = ObligationLedger::root(
+        RegionId::new(region),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
     let grant = ledger.grant(capacity).expect("capacity is grantable");
     let obligation = ledger
         .reserve::<K>(reservation, grant)
@@ -255,7 +253,11 @@ fn external_round_trip<K>(
     K: ExternallyObserved,
 {
     let capacity = minimal_budget::<K>();
-    let ledger = ObligationLedger::root(RegionId::new(region), policy(), capacity);
+    let ledger = ObligationLedger::root(
+        RegionId::new(region),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
     let handle = ledger.handle();
     let grant = ledger.grant(capacity).expect("capacity is grantable");
     let obligation = ledger
@@ -775,7 +777,11 @@ fn a_statistical_estimate_cannot_bill_past_its_ceiling() {
 #[test]
 fn a_lost_head_cas_race_is_ordinary_control_flow() {
     let capacity = minimal_budget::<HeadCasAttempt>();
-    let ledger = ObligationLedger::root(RegionId::new(90), policy(), capacity);
+    let ledger = ObligationLedger::root(
+        RegionId::new(90),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
     let grant = ledger.grant(capacity).expect("capacity is grantable");
     let obligation = ledger
         .reserve::<HeadCasAttempt>(
@@ -814,7 +820,11 @@ fn a_lost_head_cas_race_is_ordinary_control_flow() {
     assert!(outcome.is_quiescent(), "{outcome:?}");
 
     // Near-identical permitted case: the same attempt wins instead.
-    let winner_ledger = ObligationLedger::root(RegionId::new(91), policy(), capacity);
+    let winner_ledger = ObligationLedger::root(
+        RegionId::new(91),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
     let grant = winner_ledger
         .grant(capacity)
         .expect("capacity is grantable");
@@ -846,7 +856,11 @@ fn a_lost_head_cas_race_is_ordinary_control_flow() {
 #[test]
 fn aborting_a_workspace_records_its_incomplete_outputs() {
     let capacity = minimal_budget::<WorkspaceLease>();
-    let ledger = ObligationLedger::root(RegionId::new(95), policy(), capacity);
+    let ledger = ObligationLedger::root(
+        RegionId::new(95),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
     let grant = ledger.grant(capacity).expect("capacity is grantable");
     let obligation = ledger
         .reserve::<WorkspaceLease>(

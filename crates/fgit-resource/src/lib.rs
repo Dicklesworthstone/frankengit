@@ -52,8 +52,11 @@
 //! committed obligation, unacknowledged-effect record, budget grant, or ledger
 //! becomes a typed [`LeakRecord`](custody::LeakRecord) and a
 //! [`ContainmentFailure`](custody::ContainmentFailure) at region close. There
-//! is no silent path: [`LeakPolicy`](custody::LeakPolicy) has no `Silent`
-//! variant and no log-only variant to select.
+//! is no silent path: [`LeakDisposition`](custody::LeakDisposition) has no
+//! `Silent` variant and no log-only variant to select. The escalation profile
+//! that must sit above a recording region — bounded cleanup, threshold, leak
+//! sink, health signal — belongs to `fgit-runtime`, which owns the runtime's
+//! obligation table; this crate owns the record.
 //!
 //! # Conservation
 //!
@@ -95,7 +98,7 @@ pub use algebra::{
     ResourceVector,
 };
 pub use custody::{
-    ContainmentFailure, LeakClass, LeakPolicy, LeakRecord, LeakSubject, LedgerHandle,
+    ContainmentFailure, LeakClass, LeakDisposition, LeakRecord, LeakSubject, LedgerHandle,
     LifecycleError, LifecycleEvent, ObligationLedger, ObligationState, OutstandingObligation,
     PoolSnapshot, QuiescenceReceipt, RegionCloseOutcome, ReserveError,
 };
