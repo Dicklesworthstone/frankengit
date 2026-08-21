@@ -4770,6 +4770,28 @@ mod tests {
     }
 
     #[test]
+    fn layer_registry_refuses_an_orphaned_first_party_row() {
+        let workspace = fixture_workspace_in("layers", "clean");
+        let path = workspace.root.join(CRATE_LAYERS_FILE);
+        let registry = fs::read_to_string(&path).expect("read layer registry fixture");
+        let with_orphan = registry.replace(
+            "fgit-product\tL4\tL0,L1,L2,L3,L4\tproduct\tactive\n",
+            concat!(
+                "fgit-orphan\tL0\tnone\torphan\tactive\n",
+                "fgit-product\tL4\tL0,L1,L2,L3,L4\tproduct\tactive\n"
+            ),
+        );
+        fs::write(&path, with_orphan).expect("write over-complete layer registry");
+
+        let mut report = Report::new();
+        let _ = evaluate_crate_layers(&workspace.root, &mut report);
+        assert_error(
+            &report,
+            "crate-layer registry declares non-workspace crate `fgit-orphan`",
+        );
+    }
+
+    #[test]
     fn planted_unsafe_ffi_assembly_build_proc_and_nested_lock_are_refused() {
         let workspace = fixture_workspace_in("crate_graph", "forbidden_surfaces");
         let mut report = Report::new();
