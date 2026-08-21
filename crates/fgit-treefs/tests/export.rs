@@ -1022,3 +1022,122 @@ fn an_entry_naming_a_missing_body_is_refused_not_omitted() {
             .is_ok()
     );
 }
+
+// ---------------------------------------------------------------------------
+// reference materialization (oracle-only)
+// ---------------------------------------------------------------------------
+
+/// Every object is rendered at Git's two-character fan-out path, and the bytes
+/// are the canonical `<type> <size>\0<body>` stream.
+#[test]
+fn materialization_uses_gits_fanout_path_and_canonical_framing() {
+    let (source, root) = fixture();
+    let view = base(root);
+    let mut cap = capability();
+    let mut overlay = Overlay::new();
+    let id = overlay.intern(b"hello\n".to_vec());
+    overlay.put(
+        path(b"src/greet.txt"),
+        OverlayEntry::File {
+            content: fgit_treefs::overlay::ContentRef::Overlay(id),
+            mode: FileMode::Regular,
+            class: EntryClass::Content,
+        },
+    );
+
+    let plan = planner()
+        .plan(&view, &source, &mut cap, &overlay, 0, &never_cancelled())
+        .expect("export succeeds");
+    let layout =
+        fgit_treefs::materialize::materialize(&plan, &limits()).expect("the plan materializes");
+
+    assert_eq!(layout.len(), plan.object_count());
+    for object in layout.objects() {
+        let hex = object.oid_hex();
+        assert_eq!(
+            object.relative_path(),
+            format!("objects/{}/{}", &hex[..2], &hex[2..]),
+            "Git splits the identity after two hex characters"
+        );
+        assert_eq!(
+            object.compression(),
+            fgit_treefs::materialize::Compression::NoneCanonicalStream,
+            "the adapter states plainly that it has not deflated anything"
+        );
+        // The framed stream is "<type> <size>\0<body>" and nothing else.
+        let framed = object.framed_bytes();
+        let nul = framed
+            .iter()
+            .position(|byte| *byte == 0)
+            .expect("a loose frame has a NUL separator");
+        let header = std::str::from_utf8(&framed[..nul]).expect("the header is ASCII");
+        let declared: usize = header
+            .split(' ')
+            .nth(1)
+            .expect("the header declares a size")
+            .parse()
+            .expect("the declared size is a number");
+        assert_eq!(
+            declared,
+            framed.len() - nul - 1,
+            "the declared size matches the body that follows"
+        );
+    }
+}
+
+/// Materialization is deterministic and its identities match the plan's.
+#[test]
+fn materialization_is_deterministic_and_agrees_with_the_plan() {
+    let (source, root) = fixture();
+    let view = base(root);
+    let mut cap = capability();
+    let overlay = Overlay::new();
+
+    let plan = planner()
+        .plan(&view, &source, &mut cap, &overlay, 0, &never_cancelled())
+        .expect("export succeeds");
+
+    let once = fgit_treefs::materialize::materialize(&plan, &limits()).expect("materializes");
+    let twice = fgit_treefs::materialize::materialize(&plan, &limits()).expect("materializes");
+    assert_eq!(once, twice, "the same plan renders identically every time");
+
+    let mut hex = String::new();
+    use std::fmt::Write as _;
+    for byte in plan.root_tree().digest_bytes() {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    assert_eq!(
+        once.root_tree_hex(),
+        hex,
+        "the layout names the same root tree the plan does"
+    );
+    assert!(
+        once.paths().iter().all(|p| p.starts_with("objects/")),
+        "every path is repository-relative under objects/"
+    );
+}
+
+/// An empty plan still materializes: the empty tree is a real object.
+#[test]
+fn an_empty_workspace_materializes_the_empty_tree() {
+    let mut source = MemorySource::default();
+    let root = source.tree(&[]);
+    let view = base(root);
+    let mut cap = capability();
+    let overlay = Overlay::new();
+
+    let plan = planner()
+        .plan(&view, &source, &mut cap, &overlay, 0, &never_cancelled())
+        .expect("an empty workspace exports");
+    let layout = fgit_treefs::materialize::materialize(&plan, &limits()).expect("materializes");
+
+    assert!(
+        !layout.is_empty(),
+        "the empty tree is still one real object"
+    );
+    assert_eq!(
+        layout.objects()[0].framed_bytes(),
+        b"tree 0\0",
+        "Git's empty tree frames as 'tree 0' with an empty body"
+    );
+}
