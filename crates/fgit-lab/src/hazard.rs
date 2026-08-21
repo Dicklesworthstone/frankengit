@@ -481,7 +481,11 @@ mod tests {
             ObjectStoreFault::LimitExceeded,
             ObjectStoreFault::StaleGeneration { behind: 1 },
         ] {
-            assert!(!fault.is_retryable(), "{} must not be retryable", fault.code());
+            assert!(
+                !fault.is_retryable(),
+                "{} must not be retryable",
+                fault.code()
+            );
         }
 
         assert!(ObjectStoreFault::WriteAmbiguous.is_ambiguous());

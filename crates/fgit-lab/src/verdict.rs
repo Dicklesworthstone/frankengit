@@ -240,10 +240,7 @@ mod tests {
             .expect("nothing outstanding, so the region is quiescent");
         assert!(region.is_closed());
         assert_eq!(report.peak_tasks(), 1);
-        assert_eq!(
-            report.settlements(),
-            &[(Settlement::Committed, 1)][..]
-        );
+        assert_eq!(report.settlements(), &[(Settlement::Committed, 1)][..]);
         assert_eq!(
             report.canonical_line(),
             "fgit-lab-oracle-v1|peak_tasks=1|committed=1"
@@ -274,10 +271,7 @@ mod tests {
         assert!(region.is_closed());
         assert_eq!(
             report.settlements(),
-            &[
-                (Settlement::Aborted, 1),
-                (Settlement::Transferred, 1)
-            ][..]
+            &[(Settlement::Aborted, 1), (Settlement::Transferred, 1)][..]
         );
     }
 
@@ -310,7 +304,10 @@ mod tests {
         obligations.settled("outbox/1", Settlement::Committed);
 
         assert_eq!(obligations.outstanding(), 0);
-        assert_eq!(obligations.double_settlements(), &["outbox/1".to_owned()][..]);
+        assert_eq!(
+            obligations.double_settlements(),
+            &["outbox/1".to_owned()][..]
+        );
         assert!(!obligations.is_clean());
 
         // A double settlement blocks close even though nothing is outstanding,

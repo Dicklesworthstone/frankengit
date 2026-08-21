@@ -503,7 +503,11 @@ mod tests {
         let total = lines.len();
         lines.sort();
         lines.dedup();
-        assert_eq!(lines.len(), total, "event renderings must be distinguishable");
+        assert_eq!(
+            lines.len(),
+            total,
+            "event renderings must be distinguishable"
+        );
     }
 
     #[test]
@@ -517,7 +521,10 @@ mod tests {
         .canonical_line();
         // The acceptance line: capability masks and finite budgets are present
         // in traces, not merely applied somewhere off-record.
-        assert_eq!(line, "context\tt2\tclass=parser\tcaps=0b1010\tpoll_quota=50000");
+        assert_eq!(
+            line,
+            "context\tt2\tclass=parser\tcaps=0b1010\tpoll_quota=50000"
+        );
     }
 
     #[test]

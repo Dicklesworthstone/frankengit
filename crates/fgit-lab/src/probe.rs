@@ -40,8 +40,7 @@ impl FailpointId {
     #[must_use]
     pub fn is_under(&self, prefix: &str) -> bool {
         self.0 == prefix
-            || (self.0.starts_with(prefix)
-                && self.0.as_bytes().get(prefix.len()) == Some(&b'.'))
+            || (self.0.starts_with(prefix) && self.0.as_bytes().get(prefix.len()) == Some(&b'.'))
     }
 }
 
@@ -91,9 +90,7 @@ impl FailpointRegistry {
         description: impl Into<String>,
     ) -> Result<(), LabRefusal> {
         if self.points.contains_key(&id) {
-            return Err(LabRefusal::FailpointRedeclared {
-                name: id.0.clone(),
-            });
+            return Err(LabRefusal::FailpointRedeclared { name: id.0.clone() });
         }
         self.points.insert(
             id,
@@ -141,9 +138,7 @@ impl FailpointRegistry {
                 point.armed = true;
                 Ok(())
             }
-            None => Err(LabRefusal::FailpointUndeclared {
-                name: id.0.clone(),
-            }),
+            None => Err(LabRefusal::FailpointUndeclared { name: id.0.clone() }),
         }
     }
 
@@ -158,9 +153,7 @@ impl FailpointRegistry {
                 point.armed = false;
                 Ok(())
             }
-            None => Err(LabRefusal::FailpointUndeclared {
-                name: id.0.clone(),
-            }),
+            None => Err(LabRefusal::FailpointUndeclared { name: id.0.clone() }),
         }
     }
 
@@ -185,9 +178,7 @@ impl FailpointRegistry {
                 point.hits = point.hits.saturating_add(1);
                 Ok(point.armed)
             }
-            None => Err(LabRefusal::FailpointUndeclared {
-                name: id.0.clone(),
-            }),
+            None => Err(LabRefusal::FailpointUndeclared { name: id.0.clone() }),
         }
     }
 
@@ -226,11 +217,7 @@ impl FailpointRegistry {
             Ok(report)
         } else {
             Err(LabRefusal::FailpointsUnexercised {
-                unexercised: report
-                    .unexercised
-                    .iter()
-                    .map(|id| id.0.clone())
-                    .collect(),
+                unexercised: report.unexercised.iter().map(|id| id.0.clone()).collect(),
             })
         }
     }
@@ -351,7 +338,10 @@ mod tests {
     fn redeclaring_a_name_is_refused() {
         let mut registry = registry();
         let refusal = registry
-            .declare(FailpointId::new("packet.sideband.truncate"), "something else")
+            .declare(
+                FailpointId::new("packet.sideband.truncate"),
+                "something else",
+            )
             .expect_err("a name may only be declared once");
         assert_eq!(
             refusal,
@@ -362,7 +352,10 @@ mod tests {
 
         // Paired permitted case: a fresh name declares fine.
         registry
-            .declare(FailpointId::new("packet.sideband.reorder"), "frames reordered")
+            .declare(
+                FailpointId::new("packet.sideband.reorder"),
+                "frames reordered",
+            )
             .expect("a new name is permitted");
         assert_eq!(registry.len(), 4);
     }
@@ -379,9 +372,7 @@ mod tests {
             }
         );
         assert_eq!(
-            registry
-                .should_fire(&unknown)
-                .expect_err("hit must refuse"),
+            registry.should_fire(&unknown).expect_err("hit must refuse"),
             LabRefusal::FailpointUndeclared {
                 name: "storage.not.declared".to_owned()
             }

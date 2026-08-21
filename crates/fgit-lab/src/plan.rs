@@ -53,10 +53,7 @@ impl LabSchedule {
     ///
     /// [`LabRefusal::UnknownParticipant`] if a name repeats — a duplicate
     /// participant makes "whose turn is it" ambiguous.
-    pub fn round_robin(
-        participants: Vec<StepId>,
-        rounds: usize,
-    ) -> Result<Self, LabRefusal> {
+    pub fn round_robin(participants: Vec<StepId>, rounds: usize) -> Result<Self, LabRefusal> {
         Self::validate_participants(&participants)?;
         let mut order = Vec::with_capacity(participants.len().saturating_mul(rounds));
         for _ in 0..rounds {
@@ -77,11 +74,7 @@ impl LabSchedule {
     /// # Errors
     ///
     /// [`LabRefusal::UnknownParticipant`] if a name repeats.
-    pub fn seeded(
-        participants: Vec<StepId>,
-        steps: usize,
-        seed: u64,
-    ) -> Result<Self, LabRefusal> {
+    pub fn seeded(participants: Vec<StepId>, steps: usize, seed: u64) -> Result<Self, LabRefusal> {
         Self::validate_participants(&participants)?;
         let mut entropy = SeededEntropy::from_seed(seed);
         let mut order = Vec::with_capacity(steps);
@@ -336,11 +329,9 @@ mod tests {
 
     #[test]
     fn duplicate_participants_are_refused() {
-        let refusal = LabSchedule::round_robin(
-            vec![StepId::new("writer-a"), StepId::new("writer-a")],
-            1,
-        )
-        .expect_err("a duplicate participant makes turn order ambiguous");
+        let refusal =
+            LabSchedule::round_robin(vec![StepId::new("writer-a"), StepId::new("writer-a")], 1)
+                .expect_err("a duplicate participant makes turn order ambiguous");
         assert_eq!(
             refusal,
             LabRefusal::UnknownParticipant {
@@ -408,8 +399,7 @@ mod tests {
     fn a_quoted_explicit_schedule_replays_the_seeded_one_exactly() {
         // The reduction workflow: find it with a seed, check it in explicitly.
         let seeded = LabSchedule::seeded(participants(), 12, 31).expect("valid");
-        let quoted =
-            LabSchedule::explicit(participants(), seeded.order().to_vec()).expect("valid");
+        let quoted = LabSchedule::explicit(participants(), seeded.order().to_vec()).expect("valid");
         assert_eq!(seeded.order(), quoted.order());
     }
 }
