@@ -1,0 +1,21 @@
+[package]
+name = "fgit-node"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+description = "One-process FrankenGit node assembly over published subsystem contracts."
+
+[dependencies]
+fgit-authority.workspace = true
+fgit-codec.workspace = true
+fgit-crypto.workspace = true
+fgit-git-object.workspace = true
+fgit-object-fabric.workspace = true
+fgit-resource.workspace = true
+fgit-runtime.workspace = true
+fgit-types.workspace = true
+
+[lints]
+workspace = true

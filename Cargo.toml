@@ -21,8 +21,8 @@ repository = "https://github.com/Dicklesworthstone/frankengit"
 # allow_first_party) — not the unpublished external path dependency that
 # AGENTS.md section 3.3 forbids for a release-facing crate.
 [workspace.dependencies]
-fgit-authority = { path = "crates/fgit-authority" }
 fgit-admission = { path = "crates/fgit-admission" }
+fgit-authority = { path = "crates/fgit-authority" }
 fgit-chronicle = { path = "crates/fgit-chronicle" }
 fgit-codec = { path = "crates/fgit-codec" }
 fgit-crypto = { path = "crates/fgit-crypto" }
@@ -31,6 +31,7 @@ fgit-diff = { path = "crates/fgit-diff" }
 fgit-doc = { path = "crates/fgit-doc" }
 fgit-git-object = { path = "crates/fgit-git-object" }
 fgit-lab = { path = "crates/fgit-lab" }
+fgit-node = { path = "crates/fgit-node" }
 fgit-object-fabric = { path = "crates/fgit-object-fabric" }
 fgit-pack = { path = "crates/fgit-pack" }
 fgit-raptorq = { path = "crates/fgit-raptorq" }
@@ -40,6 +41,7 @@ fgit-runtime = { path = "crates/fgit-runtime" }
 fgit-txn = { path = "crates/fgit-txn" }
 fgit-types = { path = "crates/fgit-types" }
 fgit-wire = { path = "crates/fgit-wire" }
+fgit-cli = { path = "crates/fgit-cli" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
