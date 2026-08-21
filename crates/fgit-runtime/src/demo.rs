@@ -246,6 +246,7 @@ mod tests {
             ]
         );
 
+        drop(cx);
         assert!(node.join_root(Duration::from_secs(5)));
     }
 
@@ -282,6 +283,7 @@ mod tests {
             .expect("a batch at the bound is admitted");
         assert_eq!(BatchSummary::of(&outcomes).succeeded, 2);
 
+        drop(cx);
         assert!(node.join_root(Duration::from_secs(5)));
     }
 
@@ -294,6 +296,7 @@ mod tests {
             .expect("an empty batch is admitted");
         assert!(outcomes.is_empty());
         assert_eq!(BatchSummary::of(&outcomes).total(), 0);
+        drop(cx);
         assert!(node.join_root(Duration::from_secs(5)));
     }
 
@@ -362,6 +365,7 @@ mod tests {
             })
             .expect("admitted");
         assert_eq!(BatchSummary::of(&outcomes).succeeded, 1);
+        drop(cx);
         assert!(node.join_root(Duration::from_secs(5)));
     }
 }

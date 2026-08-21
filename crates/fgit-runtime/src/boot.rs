@@ -864,6 +864,11 @@ mod tests {
             .expect("the runtime is alive");
         assert!(parser_cx.budget().deadline.is_some());
 
+        // Request contexts are released before the root is joined: a live
+        // request context outliving shutdown is exactly what the drain phase
+        // exists to prevent.
+        drop(request_cx);
+        drop(parser_cx);
         assert!(node.join_root(Duration::from_secs(5)));
     }
 
