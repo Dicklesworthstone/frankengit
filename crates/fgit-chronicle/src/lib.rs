@@ -67,5 +67,5 @@ pub mod refusal;
 pub use assemble::{PublicationPlan, VerifiedPublication};
 pub use audit::{batch_identity, verify_pair};
 pub use origin::{PublicationBasis, ResultingRoots};
-pub use publish::{LostCandidate, PublicationVerdict, publish};
+pub use publish::{CanonicalBatchReceipt, LostCandidate, PublicationVerdict, publish};
 pub use refusal::ChronicleRefusal;

@@ -21,16 +21,27 @@ pub enum PublicationVerdict {
     ///
     /// This is the linearization point: every decision in the batch became
     /// canonical at once, together with the roots the head publishes.
-    Published {
-        /// The head this publication established.
-        head: HeadReadReceipt,
-        /// The batch that became canonical.
-        batch: RepositoryDecisionBatchId,
-        /// Accelerator entries written after the head moved.
-        indexed: usize,
-    },
+    ///
+    /// The payload is boxed because a published head carries canonical bytes
+    /// and a domain-pinned identity, while the losing arm carries almost
+    /// nothing. Inlining it would make every lost race pay for the width of a
+    /// win. `fgit-authority` boxes its own publication payload for the same
+    /// reason, so the two layers agree in shape.
+    Published(Box<CanonicalBatchReceipt>),
     /// The head moved first. Nothing this candidate staged is referenced.
     Lost(LostCandidate),
+}
+
+/// Evidence that one decision batch became canonical.
+#[must_use]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalBatchReceipt {
+    /// The head this publication established.
+    pub head: HeadReadReceipt,
+    /// The batch that became canonical.
+    pub batch: RepositoryDecisionBatchId,
+    /// Accelerator entries written after the head moved.
+    pub indexed: usize,
 }
 
 /// What a candidate may conclude after losing the race.
@@ -89,11 +100,13 @@ where
         tenant_id,
     )?;
     match outcome {
-        PublicationOutcome::Published(published) => Ok(PublicationVerdict::Published {
-            head: published.head,
-            batch: published.batch_id,
-            indexed: published.indexed,
-        }),
+        PublicationOutcome::Published(published) => Ok(PublicationVerdict::Published(Box::new(
+            CanonicalBatchReceipt {
+                head: published.head,
+                batch: published.batch_id,
+                indexed: published.indexed,
+            },
+        ))),
         PublicationOutcome::PredecessorMismatch => Ok(PublicationVerdict::Lost(classify_loss(
             store,
             publication,

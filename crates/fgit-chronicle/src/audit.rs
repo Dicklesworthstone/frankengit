@@ -226,12 +226,11 @@ fn verify_successor(
             observed: head.latest_decision_sequence,
         });
     }
-    let expected_repository_sequence: Option<RepositorySequence> = batch
-        .committed_rcrs
-        .last()
-        .map_or(basis.body().latest_repository_sequence, |record| {
-            Some(record.repository_sequence)
-        });
+    let expected_repository_sequence: Option<RepositorySequence> =
+        batch.committed_rcrs.last().map_or_else(
+            || basis.body().latest_repository_sequence,
+            |record| Some(record.repository_sequence),
+        );
     if head.latest_repository_sequence != expected_repository_sequence {
         return Err(ChronicleRefusal::ResultingRootMismatch {
             field: "latest_repository_sequence",

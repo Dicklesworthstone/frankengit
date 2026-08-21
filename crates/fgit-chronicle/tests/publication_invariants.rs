@@ -107,8 +107,8 @@ fn refusal_only_roots() -> ResultingRoots {
     }
 }
 
-fn seal(plan: PublicationPlan, roots: ResultingRoots) -> VerifiedPublication {
-    plan.seal(&CryptoBodyIdentity, roots)
+fn seal(plan: PublicationPlan, roots: &ResultingRoots) -> VerifiedPublication {
+    plan.seal(&CryptoBodyIdentity, *roots)
         .expect("a plan built through the builder is well formed")
 }
 
@@ -130,7 +130,7 @@ fn the_builder_assigns_contiguous_decision_sequence_from_the_basis() {
         RefusalCode::QuotaExceeded,
         derived!(RefusalRecordId, 0x55),
     );
-    let published = seal(plan, committed_roots());
+    let published = seal(plan, &committed_roots());
     let batch = published.batch();
 
     assert_eq!(batch.first_decision_sequence, DecisionSequence::FIRST);
@@ -164,7 +164,7 @@ fn the_builder_assigns_contiguous_decision_sequence_from_the_basis() {
 fn the_successor_head_binds_the_batch_and_the_predecessor() {
     let mut plan = PublicationPlan::open(basis()).expect("genesis basis opens");
     plan.commit(derived!(RepositoryCommitId, 0x60), record(0x61));
-    let published = seal(plan, committed_roots());
+    let published = seal(plan, &committed_roots());
     let head = published.head();
 
     assert_eq!(head.predecessor_head_id, Some(basis().id()));
@@ -200,7 +200,7 @@ fn a_refusal_only_batch_consumes_decision_sequence_and_nothing_else() {
         RefusalCode::ProtectedRefTransitionDenied,
         derived!(RefusalRecordId, 0x71),
     );
-    let published = seal(plan, refusal_only_roots());
+    let published = seal(plan, &refusal_only_roots());
 
     assert!(published.is_refusal_only());
     let head = published.head();
@@ -216,7 +216,11 @@ fn a_refusal_only_batch_consumes_decision_sequence_and_nothing_else() {
         head.forge_position_root, previous.forge_position_root,
         "forge root untouched"
     );
-    assert!(published.batch().committed_rcrs.is_empty());
+    assert_eq!(
+        published.batch().committed_rcrs,
+        [],
+        "a refusal-only batch carries no commit record"
+    );
 }
 
 #[test]
@@ -239,13 +243,13 @@ fn a_second_batch_continues_the_first_without_a_gap() {
         RefusalCode::QuotaExceeded,
         derived!(RefusalRecordId, 0x83),
     );
-    let first = seal(plan, committed_roots());
+    let first = seal(plan, &committed_roots());
 
     let next_basis = PublicationBasis::new(
         derived!(RepositoryAuthorityHeadId, 0x84),
         first.head().clone(),
     );
-    let mut plan = PublicationPlan::open(next_basis.clone()).expect("successor basis opens");
+    let mut plan = PublicationPlan::open(next_basis).expect("successor basis opens");
     plan.commit(derived!(RepositoryCommitId, 0x85), record(0x86));
     let second = plan
         .seal(&CryptoBodyIdentity, committed_roots())
@@ -290,7 +294,7 @@ fn well_formed_pair() -> (
 ) {
     let mut plan = PublicationPlan::open(basis()).expect("genesis basis opens");
     plan.commit(derived!(RepositoryCommitId, 0x90), record(0x91));
-    let published = seal(plan, committed_roots());
+    let published = seal(plan, &committed_roots());
     (basis(), published.batch().clone(), published.head().clone())
 }
 
@@ -408,7 +412,7 @@ fn a_refusal_only_batch_that_moved_the_ref_root_is_refused() {
         RefusalCode::QuotaExceeded,
         derived!(RefusalRecordId, 0xB1),
     );
-    let published = seal(plan, refusal_only_roots());
+    let published = seal(plan, &refusal_only_roots());
     let basis = basis();
     let mut batch = published.batch().clone();
     let mut head = published.head().clone();
@@ -498,7 +502,7 @@ fn a_head_naming_another_batch_is_refused_and_the_bound_twin_is_not() {
     let rebuilt = {
         let mut plan = PublicationPlan::open(basis.clone()).expect("the basis opens");
         plan.commit(derived!(RepositoryCommitId, 0x90), record(0x91));
-        seal(plan, committed_roots())
+        seal(plan, &committed_roots())
     };
     assert_eq!(
         verify_pair(&CryptoBodyIdentity, &basis, rebuilt.batch(), rebuilt.head()),

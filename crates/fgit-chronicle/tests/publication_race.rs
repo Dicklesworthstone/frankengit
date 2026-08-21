@@ -165,9 +165,10 @@ fn a_winning_publication_makes_every_decision_canonical_at_once() {
     )
     .expect("publication runs");
 
-    let PublicationVerdict::Published { batch, indexed, .. } = verdict else {
+    let PublicationVerdict::Published(receipt) = verdict else {
         panic!("an uncontended publication wins: {verdict:?}");
     };
+    let (batch, indexed) = (receipt.batch, receipt.indexed);
     assert_eq!(
         Some(batch),
         publication.head().decision_tail_id,
@@ -204,7 +205,7 @@ fn a_losing_publication_exposes_nothing_and_may_replan() {
 
     let stale = current_token(&store);
     let won = publish(&store, &head_key(), stale, &winner, tenant()).expect("the winner publishes");
-    assert!(matches!(won, PublicationVerdict::Published { .. }));
+    assert!(matches!(won, PublicationVerdict::Published(_)));
 
     let head_after_win = match store.read_head(&head_key()).expect("the head reads") {
         HeadRead::Present(receipt) => receipt,
@@ -251,7 +252,7 @@ fn a_loser_whose_transaction_was_already_decided_is_superseded() {
 
     let stale = current_token(&store);
     let won = publish(&store, &head_key(), stale, &winner, tenant()).expect("the winner publishes");
-    assert!(matches!(won, PublicationVerdict::Published { .. }));
+    assert!(matches!(won, PublicationVerdict::Published(_)));
 
     let verdict = publish(&store, &head_key(), stale, &loser, tenant()).expect("the loser runs");
     match verdict {
@@ -295,7 +296,7 @@ fn a_refusal_only_publication_advances_the_head_without_committing() {
         tenant(),
     )
     .expect("publication runs");
-    assert!(matches!(verdict, PublicationVerdict::Published { .. }));
+    assert!(matches!(verdict, PublicationVerdict::Published(_)));
 
     match store.read_head(&head_key()).expect("the head reads") {
         HeadRead::Present(receipt) => assert!(receipt.generation() > HeadGeneration::FIRST),
