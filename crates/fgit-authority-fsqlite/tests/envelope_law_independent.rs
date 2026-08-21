@@ -37,8 +37,17 @@
 //! attempt — and says nothing about what happens once one is running. Two of
 //! the six scenarios §3.5 lists (checkpoint under load, and process
 //! crash/reopen/recovery) are behavioural; the crash/reopen half is covered by
-//! `crash_equivalence.rs`, and checkpoint-under-load cannot be driven at all
-//! because the store publishes no checkpoint operation.
+//! `crash_equivalence.rs`, and checkpoint-under-load cannot be driven at all.
+//!
+//! That last one used to be recorded here as "the store publishes no checkpoint
+//! operation", which invites the wrong repair: add one. It is not reachable
+//! from `fsqlite` either. Its sole WAL-checkpoint trigger is
+//! `Command::Close { checkpoint: bool }` — there is no `Command::Checkpoint` —
+//! so every public path that checkpoints also closes the connection, and
+//! closing it ends the load. No method added to `FsqliteAuthorityStore` can
+//! reach the cell. This is a permanent typed non-claim, not a gap: see
+//! `NEG-022` in `registries/negative_evidence.tsv` and the crate-level docs,
+//! which carry the measurement and the revisit condition.
 
 use fgit_authority_fsqlite::{
     ConcurrencyEnvelope, EnvelopeRefusal, MAX_ADMITTED_AUTOCOMMIT_WRITERS, WriterTopology,
