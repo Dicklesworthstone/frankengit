@@ -43,9 +43,9 @@
 //! ticks are virtual.
 
 use fgit_authority::{
-    AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityRefusal, AuthorityVersionToken,
-    CasOutcome, HeadGeneration, HeadInit, HeadKey, HeadRead, HeadReadReceipt, ImmutableKey,
-    ImmutableRead, PutOutcome, StoreInstanceId,
+    AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityRefusal,
+    AuthorityVersionToken, CasOutcome, HeadGeneration, HeadInit, HeadKey, HeadRead,
+    HeadReadReceipt, ImmutableKey, ImmutableRead, PutOutcome, StoreInstanceId,
 };
 use fsqlite::{AsyncConnection, FrankenError, Row, SqliteValue};
 use fsqlite_types::cx::{Cx, cap};
@@ -911,5 +911,97 @@ where
 
     RetryOutcome::Permanent {
         attempts: budget.max_attempts(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The production trait impl (t7ip condition 2).
+//
+// The inherent methods above ARE the implementation; this impl is the published
+// surface over them, so there is exactly one body per operation and no place for
+// the two to drift. Every method here is a delegation plus the error mapping to
+// the contract vocabulary.
+// ---------------------------------------------------------------------------
+
+impl AsyncAuthorityStore for FsqliteAuthorityStore {
+    /// FrankenSQLite's own capability context at full capability.
+    ///
+    /// Not asupersync's `Cx` — the two are distinct types bridged by
+    /// `set_native_cx`. Threaded per call, never stored on the store, so
+    /// per-request budget and cancellation reach the operation.
+    type Context = Cx;
+
+    fn instance_id(&self) -> StoreInstanceId {
+        Self::instance_id(self)
+    }
+
+    fn limits(&self) -> AuthorityLimits {
+        Self::limits(self)
+    }
+
+    async fn put_if_absent(
+        &self,
+        cx: &Self::Context,
+        key: &ImmutableKey,
+        body: &[u8],
+    ) -> Result<PutOutcome, AuthorityFailure> {
+        Self::put_if_absent(self, cx, key, body)
+            .await
+            .map_err(EngineError::into_failure)
+    }
+
+    async fn read_immutable(
+        &self,
+        cx: &Self::Context,
+        key: &ImmutableKey,
+    ) -> Result<ImmutableRead, AuthorityFailure> {
+        Self::read_immutable(self, cx, key)
+            .await
+            .map_err(EngineError::into_failure)
+    }
+
+    async fn initialize_head(
+        &self,
+        cx: &Self::Context,
+        key: &HeadKey,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> Result<HeadInit, AuthorityFailure> {
+        Self::initialize_head(self, cx, key, generation, body)
+            .await
+            .map_err(EngineError::into_failure)
+    }
+
+    async fn read_head(
+        &self,
+        cx: &Self::Context,
+        key: &HeadKey,
+    ) -> Result<HeadRead, AuthorityFailure> {
+        Self::read_head(self, cx, key)
+            .await
+            .map_err(EngineError::into_failure)
+    }
+
+    async fn compare_exchange_head(
+        &self,
+        cx: &Self::Context,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        Self::compare_exchange_head(self, cx, key, expected, new_generation, new_body)
+            .await
+            .map_err(EngineError::into_failure)
+    }
+
+    async fn authenticate_head_receipt(
+        &self,
+        cx: &Self::Context,
+        receipt: &HeadReadReceipt,
+    ) -> Result<AuthenticatedHead, AuthorityFailure> {
+        Self::authenticate_head_receipt(self, cx, receipt)
+            .await
+            .map_err(EngineError::into_failure)
     }
 }

@@ -62,6 +62,7 @@
 //! because neither proves non-commit.
 
 mod admission;
+mod async_contract;
 mod contract;
 pub mod history;
 mod identity;
@@ -81,6 +82,7 @@ pub use crate::admission::{
     ADMISSION_KEY_PREFIX, AdmissionInstant, AdmissionOutcome, AdmissionReceiptBody, admission_key,
     read_admission, record_admission,
 };
+pub use crate::async_contract::AsyncAuthorityStore;
 pub use crate::contract::{
     AuthorityLimits, AuthorityStore, CasResolution, FaultableAuthorityStore, PutResolution,
     ambiguity_of, refusal_of, resolve_ambiguous_cas, resolve_ambiguous_put,
