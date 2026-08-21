@@ -1,0 +1,11 @@
+Backslash spellings of a protocol-relative destination, all of which a browser
+folds to //evil.example because the URL standard treats a backslash as a
+separator for special schemes:
+
+[forward](//evil.example/a) and [mixed](/\evil.example/b) and
+[reverse](\/evil.example/c) and [double](\\evil.example/d).
+
+![image](/\evil.example/pixel.png)
+
+Same-shape destinations that are NOT protocol-relative and must survive:
+[rooted](/rooted/path), [dotted](./relative), [inner](/a\b).

@@ -586,3 +586,54 @@ fn a_protocol_relative_destination_is_refused_and_a_rooted_one_is_not() {
     let image = html_of("![alt](//evil.example/pixel.png)\n");
     assert!(!image.contains("src="), "{image}");
 }
+
+#[test]
+fn backslash_spellings_of_protocol_relative_are_refused_too() {
+    // The URL standard folds a backslash to a forward slash for every special
+    // scheme, so all three of these resolve exactly like `//evil.example` and
+    // land off-origin. Refusing only the `//` spelling would catch the obvious
+    // one and admit the three an attacker would actually reach for.
+    //
+    // The source spellings look redundant and are not: a backslash before an
+    // ASCII punctuation character is a CommonMark escape, so `\/` in source
+    // decodes to a plain `/` and is an ordinary rooted path. To put a LITERAL
+    // backslash in the destination the source must escape it as `\\`. That is
+    // why the second and third cases carry doubled backslashes while the first
+    // does not — `\e` is not an escape, so its backslash survives as written.
+    for hostile in [
+        "[click](/\\evil.example/steal)\n",
+        "[click](\\\\/evil.example/steal)\n",
+        "[click](\\\\\\\\evil.example/steal)\n",
+    ] {
+        let rendered = html_of(hostile);
+        assert!(
+            !rendered.contains("href"),
+            "{hostile:?} must not become a target: {rendered}"
+        );
+        assert!(
+            rendered.contains("data-fgit-doc-rejected=\"protocol_relative\""),
+            "{hostile:?} must name its rejection: {rendered}"
+        );
+    }
+
+    // Paired permitted cases of the SAME SHAPE, so the fix cannot be satisfied
+    // by refusing every destination containing a separator or a backslash.
+    // One leading separator of either kind is an ordinary rooted path, and a
+    // backslash anywhere after the second character is just a path character.
+    for permitted in [
+        ("[a](/rooted/path)\n", "/rooted/path"),
+        ("[a](/a\\b)\n", "/a\\b"),
+        ("[a](./a\\b)\n", "./a\\b"),
+    ] {
+        let rendered = html_of(permitted.0);
+        assert!(
+            rendered.contains(&format!("href=\"{}\"", permitted.1)),
+            "{:?} must keep its target: {rendered}",
+            permitted.0
+        );
+    }
+
+    // Images take the same policy as links.
+    let image = html_of("![alt](/\\evil.example/pixel.png)\n");
+    assert!(!image.contains("src="), "{image}");
+}

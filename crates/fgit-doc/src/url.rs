@@ -26,12 +26,7 @@ pub fn classify(destination: &str) -> UrlVerdict {
     if trimmed.chars().any(is_url_forbidden) {
         return UrlVerdict::Rejected(UrlRejection::ControlCharacter);
     }
-    // A protocol-relative destination carries no scheme, so the allowlist above
-    // would wave it through as a relative reference -- but a browser resolves
-    // `//host/path` against the PAGE's scheme and lands off-origin. It is an
-    // absolute destination wearing a relative costume, and the one case where
-    // "no scheme" does not mean "same document".
-    if trimmed.starts_with("//") {
+    if is_protocol_relative(trimmed) {
         return UrlVerdict::Rejected(UrlRejection::ProtocolRelative);
     }
     scheme_of(trimmed).map_or(UrlVerdict::Allowed, |scheme| {
@@ -77,6 +72,28 @@ pub fn is_email_like(candidate: &str) -> bool {
             .all(|value| value.is_ascii_alphanumeric() || value == '.' || value == '-')
         && !domain.starts_with('.')
         && !domain.ends_with('.')
+}
+
+/// Whether a destination resolves against the page scheme instead of the page.
+///
+/// A protocol-relative destination carries no scheme, so a scheme allowlist
+/// waves it through as an ordinary relative reference -- but a browser resolves
+/// `//host/path` against the PAGE's scheme and lands off-origin. It is an
+/// absolute destination wearing a relative costume, and the one case where
+/// "carries no scheme" does not mean "same document".
+///
+/// The `URL` standard folds a backslash to a forward slash for every special
+/// scheme, so `/\host`, `\/host` and `\\host` all resolve exactly like
+/// `//host`. Matching only on `//` would refuse the obvious spelling and admit
+/// the three that matter, which is worse than not checking at all. A single
+/// leading separator of either kind is an ordinary rooted path and stays
+/// allowed.
+fn is_protocol_relative(destination: &str) -> bool {
+    let mut characters = destination.chars();
+    matches!(
+        (characters.next(), characters.next()),
+        (Some('/' | '\\'), Some('/' | '\\'))
+    )
 }
 
 /// Leading scheme of a destination, without its colon.

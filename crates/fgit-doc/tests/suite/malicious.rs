@@ -264,8 +264,15 @@ fn destination_is_navigable(value: &str) -> bool {
     let decoded = decode_attribute_once(value);
     let trimmed = decoded.trim();
     // Protocol-relative destinations resolve against the PAGE's scheme and land
-    // off-origin, so "carries no scheme" does not make them same-document.
-    if trimmed.starts_with("//") {
+    // off-origin, so "carries no scheme" does not make them same-document. The
+    // URL standard folds a backslash to a forward slash for special schemes, so
+    // `/\host`, `\/host` and `\\host` all resolve exactly like `//host`;
+    // matching only `//` would admit the three spellings that matter.
+    let mut leading = trimmed.chars();
+    if matches!(
+        (leading.next(), leading.next()),
+        (Some('/' | '\\'), Some('/' | '\\'))
+    ) {
         return false;
     }
     let Some((scheme, _)) = trimmed.split_once(':') else {
@@ -418,6 +425,9 @@ fn the_allowlist_checker_rejects_content_the_renderer_could_never_emit() {
         "<p><iframe srcdoc=\"x\"></iframe></p>",
         "<p><a href=\"&#106;avascript:alert(1)\">x</a></p>",
         "<p><a href=\"//evil.example/x\">x</a></p>",
+        "<p><a href=\"/\\evil.example/x\">x</a></p>",
+        "<p><a href=\"\\/evil.example/x\">x</a></p>",
+        "<p><a href=\"\\\\evil.example/x\">x</a></p>",
     ] {
         let outcome = std::panic::catch_unwind(|| assert_no_active_content("planted", planted));
         assert!(

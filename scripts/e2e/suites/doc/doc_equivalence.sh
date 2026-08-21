@@ -123,11 +123,16 @@ doc_violation() {
       value=${value//'&gt;'/'>'}
       value=${value//'&quot;'/'"'}
       value=${value//'&#x27;'/"'"}
-      case $value in
-        //*)
+      # The URL standard folds a backslash to a forward slash for special
+      # schemes, so /\host, \/host and \\host all resolve exactly like
+      # //host. Matching only // would admit the three spellings that matter.
+      case ${value:0:1}${value:1:1} in
+        '//' | '/\' | '\/' | '\\')
           printf 'protocol-relative destination on <%s>' "$name"
           return 0
           ;;
+      esac
+      case $value in
       esac
       case $value in
         *:*)
@@ -339,6 +344,9 @@ doc_plant datauri '<p><img src="data:text/html,x" /></p>'
 doc_plant vbscript '<p><a href="VBScript:msgbox(1)">x</a></p>'
 doc_plant numeric_entity '<p><a href="&#106;avascript:alert(1)">x</a></p>'
 doc_plant protocol_relative '<p><a href="//evil.example/x">x</a></p>'
+doc_plant backslash_rel_a '<p><a href="/\evil.example/x">x</a></p>'
+doc_plant backslash_rel_b '<p><a href="\/evil.example/x">x</a></p>'
+doc_plant backslash_rel_c '<p><a href="\\evil.example/x">x</a></p>'
 if [ -z "$doc_planted_missed" ]; then
   fge_pass fg027b-checker-can-fail "the allowlist rejected every planted payload:$doc_planted_caught"
 else
