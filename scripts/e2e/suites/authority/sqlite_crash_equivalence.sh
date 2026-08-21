@@ -97,6 +97,13 @@ fge_run sqlite-retry-law-independent \
   cargo test --locked -p fgit-authority-fsqlite --test retry_law_independent
 sq_retry_exit=$FGE_LAST_EXIT
 
+# The concurrency envelope derived from §3.5 rather than from the constant the
+# crate's own tests assert against. An off-by-one in
+# MAX_ADMITTED_AUTOCOMMIT_WRITERS is invisible to a test that reads it.
+fge_run sqlite-envelope-law-independent \
+  cargo test --locked -p fgit-authority-fsqlite --test envelope_law_independent
+sq_envelope_exit=$FGE_LAST_EXIT
+
 fge_phase assert
 
 fge_assert_exit FG-005B-E2E-010 0 "$sq_campaign_exit" \
@@ -107,6 +114,8 @@ fge_assert_exit FG-005B-E2E-012 0 "$sq_lifecycle_exit" \
   'the lifecycle evidence still passes alongside it'
 fge_assert_exit FG-005B-E2E-018 0 "$sq_retry_exit" \
   'the spec-derived retry law agrees with the implementation'
+fge_assert_exit FG-005B-E2E-019 0 "$sq_envelope_exit" \
+  'the spec-derived concurrency envelope agrees with the implementation'
 
 fge_assert_eq FG-005B-E2E-013 '' "$sq_missing" \
   'every mechanism the campaign depends on is still present in it'
