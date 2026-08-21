@@ -17,6 +17,9 @@ enum CheckSet {
     Docs,
     Registries,
     Constitution,
+    Constellation,
+    LedgerPolicy,
+    LedgerConstellation,
 }
 
 impl CheckSet {
@@ -26,8 +29,11 @@ impl CheckSet {
             "docs" => Ok(Self::Docs),
             "registries" => Ok(Self::Registries),
             "constitution" => Ok(Self::Constitution),
+            "constellation" => Ok(Self::Constellation),
+            "ledger-policy" => Ok(Self::LedgerPolicy),
+            "ledger-constellation" => Ok(Self::LedgerConstellation),
             other => Err(format!(
-                "unknown check set `{other}`; expected all, docs, registries, or constitution"
+                "unknown command `{other}`; expected all, docs, registries, constitution, constellation, ledger-policy, or ledger-constellation"
             )),
         }
     }
@@ -42,6 +48,10 @@ impl CheckSet {
 
     const fn includes_constitution(self) -> bool {
         matches!(self, Self::All | Self::Constitution)
+    }
+
+    const fn is_ledger(self) -> bool {
+        matches!(self, Self::LedgerPolicy | Self::LedgerConstellation)
     }
 }
 
@@ -129,23 +139,40 @@ fn main() -> ExitCode {
         },
         None => workspace_root(),
     };
+    if invocation.check_set.is_ledger() {
+        return match generate_admission_ledger(&root, invocation.check_set) {
+            Ok(output) => {
+                print!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("admission ledger generation failed: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let mut report = Report::new();
-    check_required_files(&root, &mut report);
-    if invocation.check_set.includes_registries() {
-        check_registries(&root, &mut report);
-    }
-    if invocation.check_set.includes_docs() {
-        check_markdown(&root, &mut report);
-        check_workflows(&root, &mut report);
-        check_contract_phrases(&root, &mut report);
-    }
-    if invocation.check_set.includes_constitution() {
-        check_rust_sources(&root, &mut report);
-        check_manifests(&root, &mut report);
+    if invocation.check_set == CheckSet::Constellation {
+        check_constellation_manifests(&root, &mut report);
         check_constellation(&root, &mut report);
-        check_toolchain(&root, &mut report);
+    } else {
+        check_required_files(&root, &mut report);
+        if invocation.check_set.includes_registries() {
+            check_registries(&root, &mut report);
+        }
+        if invocation.check_set.includes_docs() {
+            check_markdown(&root, &mut report);
+            check_workflows(&root, &mut report);
+            check_contract_phrases(&root, &mut report);
+        }
+        if invocation.check_set.includes_constitution() {
+            check_rust_sources(&root, &mut report);
+            check_manifests(&root, &mut report);
+            check_constellation(&root, &mut report);
+            check_toolchain(&root, &mut report);
+        }
+        check_forbidden_artifacts(&root, &mut report);
     }
-    check_forbidden_artifacts(&root, &mut report);
 
     report.errors.sort();
     report.errors.dedup();
@@ -1164,6 +1191,23 @@ fn check_manifest_overrides(display: &str, text: &str, report: &mut Report) {
     }
 }
 
+/// The focused E2E command exercises only release-source and override
+/// prohibitions. The normal `constitution` command remains the authoritative
+/// whole-tree lane and additionally enforces every registered dependency.
+fn check_constellation_manifests(root: &Path, report: &mut Report) {
+    let mut paths = workspace_manifest_paths(root, report);
+    paths.push(root.join("Cargo.toml"));
+    for path in paths {
+        let display = relative(root, &path);
+        let Ok(text) = fs::read_to_string(&path) else {
+            report.error(format!("cannot read manifest {display}"));
+            continue;
+        };
+        check_manifest_overrides(&display, &text, report);
+        check_manifest_dependency_sources(root, &path, &display, &text, report);
+    }
+}
+
 /// Refuse every local or floating Git dependency in a release-facing
 /// manifest. Cargo accepts these forms, but neither can be represented as a
 /// reproducible, registry-resolvable release source. This is deliberately a
@@ -1244,13 +1288,33 @@ fn is_first_party_workspace_path(
     let Ok(root_manifest) = fs::read_to_string(root.join("Cargo.toml")) else {
         return false;
     };
-    let member_declared = extract_workspace_string_list(&root_manifest, "members")
-        .iter()
-        .any(|member| member == path);
-    let default_member_declared = extract_workspace_string_list(&root_manifest, "default-members")
-        .iter()
-        .any(|member| member == path);
+    let member_declared = workspace_member_path_is_declared(
+        &extract_workspace_string_list(&root_manifest, "members"),
+        path,
+    );
+    let default_member_declared = workspace_member_path_is_declared(
+        &extract_workspace_string_list(&root_manifest, "default-members"),
+        path,
+    );
     member_declared && default_member_declared
+}
+
+/// Cargo workspace globs are legitimate only for direct child crate
+/// directories here. Supporting exactly that documented shape keeps the
+/// first-party path exemption narrow while allowing the root's `crates/*`
+/// membership form to mean the same thing as its expanded member list.
+fn workspace_member_path_is_declared(members: &[String], path: &str) -> bool {
+    members.iter().any(|member| {
+        if member == path {
+            return true;
+        }
+        let Some(parent) = member.strip_suffix("/*") else {
+            return false;
+        };
+        path.strip_prefix(parent)
+            .and_then(|tail| tail.strip_prefix('/'))
+            .is_some_and(|tail| !tail.is_empty() && !tail.contains('/'))
+    })
 }
 
 fn looks_like_dependency_declaration(line: &str) -> bool {
@@ -1295,6 +1359,7 @@ struct LockPackage {
     version: String,
     source: Option<String>,
     checksum: Option<String>,
+    dependencies: Vec<String>,
 }
 
 /// Cargo.lock is TOML, but this deliberately handles only its package-array
@@ -1303,6 +1368,7 @@ struct LockPackage {
 fn parse_lock_packages(text: &str) -> Result<Vec<LockPackage>, String> {
     let mut packages = Vec::new();
     let mut current: Option<LockPackage> = None;
+    let mut reading_dependencies = false;
 
     for (line_number, raw_line) in text.lines().enumerate() {
         let line = raw_line.split('#').next().unwrap_or("").trim();
@@ -1321,12 +1387,30 @@ fn parse_lock_packages(text: &str) -> Result<Vec<LockPackage>, String> {
                 version: String::new(),
                 source: None,
                 checksum: None,
+                dependencies: Vec::new(),
             });
+            reading_dependencies = false;
             continue;
         }
         let Some(package) = current.as_mut() else {
             continue;
         };
+        if reading_dependencies {
+            if line == "]" {
+                reading_dependencies = false;
+                continue;
+            }
+            if let Some(value) = extract_string_value(line.trim_end_matches(',')) {
+                package
+                    .dependencies
+                    .push(lock_dependency_name(&value).to_owned());
+            }
+            continue;
+        }
+        if line == "dependencies = [" {
+            reading_dependencies = true;
+            continue;
+        }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
@@ -1348,6 +1432,582 @@ fn parse_lock_packages(text: &str) -> Result<Vec<LockPackage>, String> {
         packages.push(package);
     }
     Ok(packages)
+}
+
+fn lock_dependency_name(value: &str) -> &str {
+    value.split_ascii_whitespace().next().unwrap_or(value)
+}
+
+/// Emits deterministic, reviewable policy rows for the exact package closure
+/// rooted at the one admitted runtime. It deliberately emits rows rather than
+/// editing the registry: a reviewer can inspect every generated rationale and
+/// policy before the rows are applied under the registry reservation.
+fn generate_admission_ledger(root: &Path, command: CheckSet) -> Result<String, String> {
+    let lock_text = fs::read_to_string(root.join("Cargo.lock"))
+        .map_err(|error| format!("cannot read Cargo.lock: {error}"))?;
+    let packages = parse_lock_packages(&lock_text)?;
+    let runtime = packages
+        .iter()
+        .filter(|package| package.name == "asupersync")
+        .collect::<Vec<_>>();
+    if runtime.len() != 1 {
+        return Err(format!(
+            "expected exactly one asupersync package before ledger generation, observed {}",
+            runtime.len()
+        ));
+    }
+    if command == CheckSet::LedgerConstellation {
+        return generate_constellation_ledger(&packages, &cargo_metadata(root)?);
+    }
+    let closure = dependency_closure(&packages, "asupersync");
+    let baseline_allowed = baseline_dependency_patterns(root)?;
+    let metadata = cargo_metadata(root)?;
+    let parent_edges = direct_parent_edges(&packages, &closure);
+    let unresolved = packages
+        .iter()
+        .filter(|package| closure.contains(&package.name))
+        .filter(|package| package.source.is_some())
+        .filter(|package| {
+            !baseline_allowed
+                .iter()
+                .any(|pattern| dependency_pattern_matches(pattern, &package.name))
+        })
+        .map(|package| package.name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut output = String::new();
+    for (next_id, name) in (next_admission_policy_id(root)?..).zip(&unresolved) {
+        let packages_for_name = packages
+            .iter()
+            .filter(|package| package.name == *name)
+            .collect::<Vec<_>>();
+        let feature_policy = resolved_feature_policy(&packages_for_name, &metadata);
+        let parent = parent_edges.get(name).map_or("asupersync", String::as_str);
+        let unsafe_policy = generated_unsafe_policy(name);
+        let ffi_policy = generated_ffi_policy(name);
+        writeln!(
+            output,
+            "DEP-{next_id:03}\t{name}\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.4.9_transitive_direct_parent_{parent}\t{feature_policy}\t{unsafe_policy}\t{ffi_policy}\tactive"
+        )
+        .map_err(|error| format!("cannot render policy row: {error}"))?;
+    }
+    Ok(output)
+}
+
+/// Generated rows must remain reproducible after they have been admitted. The
+/// baseline is therefore every active allow row except the generator's own
+/// `allow_transitive_admitted_runtime` decision; using the full active registry
+/// would make a second invocation emit nothing and hide drift.
+fn baseline_dependency_patterns(root: &Path) -> Result<Vec<String>, String> {
+    let text = fs::read_to_string(root.join("registries/dependency_policy.tsv"))
+        .map_err(|error| format!("cannot read dependency policy registry: {error}"))?;
+    let mut patterns = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() || line.starts_with('#') || line.starts_with("id\t") {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != 10 {
+            continue;
+        }
+        if fields[9] == "active"
+            && fields[3].starts_with("allow")
+            && fields[3] != "allow_transitive_admitted_runtime"
+        {
+            patterns.push(fields[1].to_owned());
+        }
+    }
+    Ok(patterns)
+}
+
+fn dependency_closure(packages: &[LockPackage], root_name: &str) -> BTreeSet<String> {
+    let mut by_name = BTreeMap::<String, Vec<&LockPackage>>::new();
+    for package in packages {
+        by_name
+            .entry(package.name.clone())
+            .or_default()
+            .push(package);
+    }
+    let mut closure = BTreeSet::from([root_name.to_owned()]);
+    let mut pending = vec![root_name.to_owned()];
+    while let Some(name) = pending.pop() {
+        for package in by_name.get(&name).into_iter().flatten() {
+            for dependency in &package.dependencies {
+                if closure.insert(dependency.clone()) {
+                    pending.push(dependency.clone());
+                }
+            }
+        }
+    }
+    closure
+}
+
+fn direct_parent_edges(
+    packages: &[LockPackage],
+    closure: &BTreeSet<String>,
+) -> BTreeMap<String, String> {
+    let mut parents = BTreeMap::new();
+    for package in packages {
+        if !closure.contains(&package.name) {
+            continue;
+        }
+        for dependency in &package.dependencies {
+            if closure.contains(dependency) {
+                parents
+                    .entry(dependency.clone())
+                    .or_insert_with(|| package.name.clone());
+            }
+        }
+    }
+    parents
+}
+
+/// IDs for a deterministic generated admission block begin immediately after
+/// the hand-maintained policy rows, not after the block itself. This makes the
+/// generator idempotent and makes any resolved-closure addition a visible row
+/// insertion instead of silently moving every following policy ID.
+fn next_admission_policy_id(root: &Path) -> Result<usize, String> {
+    let text = fs::read_to_string(root.join("registries/dependency_policy.tsv"))
+        .map_err(|error| format!("cannot read dependency policy registry: {error}"))?;
+    let largest = text
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            (fields.len() == 10 && fields[3] != "allow_transitive_admitted_runtime")
+                .then_some(fields[0])
+        })
+        .filter_map(|id| id.strip_prefix("DEP-"))
+        .filter_map(|number| number.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0);
+    Ok(largest + 1)
+}
+
+fn resolved_feature_policy(packages: &[&LockPackage], metadata: &MetadataSnapshot) -> String {
+    let mut features = BTreeSet::new();
+    for package in packages {
+        if let Some(resolved) = metadata
+            .feature_closures
+            .get(&(package.name.clone(), package.version.clone()))
+        {
+            features.extend(resolved.iter().cloned());
+        }
+    }
+    if features.is_empty() {
+        "resolved_none".to_owned()
+    } else {
+        format!(
+            "resolved_{}",
+            features.into_iter().collect::<Vec<_>>().join("+")
+        )
+    }
+}
+
+fn generated_unsafe_policy(name: &str) -> &'static str {
+    if name.contains("derive")
+        || name.contains("macro")
+        || name.starts_with("wasm")
+        || matches!(
+            name,
+            "quote"
+                | "syn"
+                | "proc-macro2"
+                | "pastey"
+                | "rustversion"
+                | "windows-implement"
+                | "windows-interface"
+        )
+    {
+        "proc_macro_transitive"
+    } else if matches!(
+        name,
+        "libc" | "nix" | "ntapi" | "rustix" | "socket2" | "windows" | "windows-sys" | "winapi"
+    ) || name.starts_with("windows-")
+        || name.starts_with("winapi")
+        || name.starts_with("objc2")
+        || matches!(
+            name,
+            "dispatch2" | "wasi" | "r-efi" | "redox_syscall" | "hermit-abi"
+        )
+    {
+        "os_abi"
+    } else {
+        "ledgered_transitive_unaudited"
+    }
+}
+
+fn generated_ffi_policy(name: &str) -> &'static str {
+    if generated_unsafe_policy(name) == "os_abi" {
+        "os_abi_shim_no_foreign_engine"
+    } else {
+        "no_foreign_engine_declared"
+    }
+}
+
+/// Renders the four currently resolved FrankenSuite rows from Cargo's lock and
+/// metadata rather than accepting human-invented evidence digests. The public
+/// contract fingerprint is a canonical source-level inventory of public-item
+/// candidates; it is deliberately not a claim that this lexical pass is a
+/// semantic Rust API proof. The unsafe digest similarly records a canonical
+/// lexical inventory over the package's resolved transitive closure.
+fn generate_constellation_ledger(
+    packages: &[LockPackage],
+    metadata: &MetadataSnapshot,
+) -> Result<String, String> {
+    let mut output = String::new();
+    for package in packages
+        .iter()
+        .filter(|package| is_constellation_package(&package.name))
+    {
+        let source = package.source.as_deref().ok_or_else(|| {
+            format!(
+                "constellation package `{}` has no release source",
+                package.name
+            )
+        })?;
+        if !source.starts_with("registry+") {
+            return Err(format!(
+                "constellation package `{}` is not a registry release: `{source}`",
+                package.name
+            ));
+        }
+        let checksum = package
+            .checksum
+            .as_deref()
+            .filter(|checksum| is_hex_digest(checksum, 64))
+            .ok_or_else(|| {
+                format!(
+                    "constellation package `{}` has no 64-hex checksum",
+                    package.name
+                )
+            })?;
+        let package_source = metadata
+            .package_sources
+            .get(&(package.name.clone(), package.version.clone()))
+            .ok_or_else(|| {
+                format!(
+                    "cargo metadata lacks source evidence for constellation package `{}` {}",
+                    package.name, package.version
+                )
+            })?;
+        if package_source.license == "missing" {
+            return Err(format!(
+                "cargo metadata lacks license evidence for constellation package `{}` {}",
+                package.name, package.version
+            ));
+        }
+        let features = metadata
+            .feature_closures
+            .get(&(package.name.clone(), package.version.clone()))
+            .ok_or_else(|| {
+                format!(
+                    "cargo metadata lacks resolved features for constellation package `{}` {}",
+                    package.name, package.version
+                )
+            })?;
+        let public_contract_fingerprint = public_contract_fingerprint(package, metadata)?;
+        let transitive_unsafe_digest = transitive_unsafe_digest(package, packages, metadata)?;
+        let build_scripts = if metadata.build_scripts.contains(&package.name) {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let proc_macros = if metadata.proc_macros.contains(&package.name) {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let default_features = if package.name == "asupersync" {
+            "disabled"
+        } else {
+            "not_applicable"
+        };
+        let features = canonical_feature_list(features);
+        writeln!(
+            output,
+            "{}\t{source}\t{}\tnot_applicable\t{checksum}\t{features}\t{default_features}\t{public_contract_fingerprint}\tall-cargo-lock-targets\t{}\t{build_scripts}\t{proc_macros}\t{transitive_unsafe_digest}\tadmitted\tdocs/DEPENDENCY_AND_MEMORY_SAFETY_CONSTITUTION.md#7-dependency-admission-procedure",
+            package.name, package.version, package_source.license,
+        )
+        .map_err(|error| format!("cannot render constellation row: {error}"))?;
+    }
+    if output.is_empty() {
+        return Err("Cargo.lock has no resolved constellation package".to_owned());
+    }
+    Ok(output)
+}
+
+fn canonical_feature_list(features: &BTreeSet<String>) -> String {
+    if features.is_empty() {
+        "none".to_owned()
+    } else {
+        features.iter().cloned().collect::<Vec<_>>().join(",")
+    }
+}
+
+fn public_contract_fingerprint(
+    package: &LockPackage,
+    metadata: &MetadataSnapshot,
+) -> Result<String, String> {
+    let source = package_source(package, metadata)?;
+    let source_root = source_root(source)?;
+    let files = rust_source_files(&source_root)?;
+    let mut inventory = format!(
+        "frankengit.public-contract-candidate-inventory.v1\n{}@{}\n",
+        package.name, package.version
+    );
+    for path in files {
+        let text = fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read source `{}`: {error}", path.display()))?;
+        let display = relative(&source_root, &path);
+        for (line_number, line) in text.lines().enumerate() {
+            let candidate = line.trim();
+            if is_public_contract_candidate(candidate) {
+                writeln!(inventory, "{display}:{}:{candidate}", line_number + 1)
+                    .map_err(|error| format!("cannot render public inventory: {error}"))?;
+            }
+        }
+    }
+    Ok(sha256_hex(inventory.as_bytes()))
+}
+
+fn transitive_unsafe_digest(
+    package: &LockPackage,
+    packages: &[LockPackage],
+    metadata: &MetadataSnapshot,
+) -> Result<String, String> {
+    let closure = dependency_closure(packages, &package.name);
+    let mut inventory = format!(
+        "frankengit.transitive-lexical-unsafe-inventory.v1\nroot={}@{}\n",
+        package.name, package.version
+    );
+    for dependency in packages
+        .iter()
+        .filter(|dependency| closure.contains(&dependency.name))
+    {
+        let source = dependency.source.as_deref().unwrap_or("workspace");
+        let checksum = dependency.checksum.as_deref().unwrap_or("not_applicable");
+        writeln!(
+            inventory,
+            "package={}@{}\tsource={source}\tchecksum={checksum}",
+            dependency.name, dependency.version
+        )
+        .map_err(|error| format!("cannot render unsafe inventory package: {error}"))?;
+        let source_root = source_root(package_source(dependency, metadata)?)?;
+        for path in rust_source_files(&source_root)? {
+            let text = fs::read_to_string(&path)
+                .map_err(|error| format!("cannot read source `{}`: {error}", path.display()))?;
+            let display = relative(&source_root, &path);
+            for (line_number, line) in text.lines().enumerate() {
+                if let Some(token) = find_unsafe_construct(line) {
+                    writeln!(
+                        inventory,
+                        "lexical-candidate={}@{}:{display}:{}:{token}",
+                        dependency.name,
+                        dependency.version,
+                        line_number + 1
+                    )
+                    .map_err(|error| format!("cannot render unsafe inventory item: {error}"))?;
+                }
+            }
+        }
+    }
+    Ok(sha256_hex(inventory.as_bytes()))
+}
+
+fn package_source<'a>(
+    package: &LockPackage,
+    metadata: &'a MetadataSnapshot,
+) -> Result<&'a PackageSource, String> {
+    metadata
+        .package_sources
+        .get(&(package.name.clone(), package.version.clone()))
+        .ok_or_else(|| {
+            format!(
+                "cargo metadata lacks source evidence for package `{}` {}",
+                package.name, package.version
+            )
+        })
+}
+
+fn source_root(source: &PackageSource) -> Result<PathBuf, String> {
+    let root = source
+        .manifest_path
+        .parent()
+        .ok_or_else(|| {
+            format!(
+                "manifest `{}` has no parent",
+                source.manifest_path.display()
+            )
+        })?
+        .join("src");
+    if !root.is_dir() {
+        return Err(format!(
+            "package source directory `{}` is missing",
+            root.display()
+        ));
+    }
+    Ok(root)
+}
+
+fn rust_source_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    collect_files(root, &mut files);
+    files.retain(|path| path.extension() == Some(OsStr::new("rs")));
+    files.sort();
+    if files.is_empty() {
+        return Err(format!(
+            "package source directory `{}` has no Rust files",
+            root.display()
+        ));
+    }
+    Ok(files)
+}
+
+fn is_public_contract_candidate(line: &str) -> bool {
+    line.starts_with("pub ") || line.starts_with("pub(")
+}
+
+const SHA256_INITIAL: [u32; 8] = [
+    0x6a09_e667,
+    0xbb67_ae85,
+    0x3c6e_f372,
+    0xa54f_f53a,
+    0x510e_527f,
+    0x9b05_688c,
+    0x1f83_d9ab,
+    0x5be0_cd19,
+];
+
+const SHA256_ROUND_CONSTANTS: [u32; 64] = [
+    0x428a_2f98,
+    0x7137_4491,
+    0xb5c0_fbcf,
+    0xe9b5_dba5,
+    0x3956_c25b,
+    0x59f1_11f1,
+    0x923f_82a4,
+    0xab1c_5ed5,
+    0xd807_aa98,
+    0x1283_5b01,
+    0x2431_85be,
+    0x550c_7dc3,
+    0x72be_5d74,
+    0x80de_b1fe,
+    0x9bdc_06a7,
+    0xc19b_f174,
+    0xe49b_69c1,
+    0xefbe_4786,
+    0x0fc1_9dc6,
+    0x240c_a1cc,
+    0x2de9_2c6f,
+    0x4a74_84aa,
+    0x5cb0_a9dc,
+    0x76f9_88da,
+    0x983e_5152,
+    0xa831_c66d,
+    0xb003_27c8,
+    0xbf59_7fc7,
+    0xc6e0_0bf3,
+    0xd5a7_9147,
+    0x06ca_6351,
+    0x1429_2967,
+    0x27b7_0a85,
+    0x2e1b_2138,
+    0x4d2c_6dfc,
+    0x5338_0d13,
+    0x650a_7354,
+    0x766a_0abb,
+    0x81c2_c92e,
+    0x9272_2c85,
+    0xa2bf_e8a1,
+    0xa81a_664b,
+    0xc24b_8b70,
+    0xc76c_51a3,
+    0xd192_e819,
+    0xd699_0624,
+    0xf40e_3585,
+    0x106a_a070,
+    0x19a4_c116,
+    0x1e37_6c08,
+    0x2748_774c,
+    0x34b0_bcb5,
+    0x391c_0cb3,
+    0x4ed8_aa4a,
+    0x5b9c_ca4f,
+    0x682e_6ff3,
+    0x748f_82ee,
+    0x78a5_636f,
+    0x84c8_7814,
+    0x8cc7_0208,
+    0x90be_fffa,
+    0xa450_6ceb,
+    0xbef9_a3f7,
+    0xc671_78f2,
+];
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let bit_length = u64::try_from(bytes.len())
+        .unwrap_or(u64::MAX)
+        .wrapping_mul(8);
+    let mut padded = bytes.to_vec();
+    padded.push(0x80);
+    while padded.len().rem_euclid(64) != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_length.to_be_bytes());
+
+    let mut state = SHA256_INITIAL;
+    for chunk in padded.chunks_exact(64) {
+        let mut words = [0_u32; 64];
+        for (index, bytes) in chunk.chunks_exact(4).take(16).enumerate() {
+            words[index] = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        }
+        for index in 16..words.len() {
+            let sigma0 = words[index - 15].rotate_right(7)
+                ^ words[index - 15].rotate_right(18)
+                ^ (words[index - 15] >> 3);
+            let sigma1 = words[index - 2].rotate_right(17)
+                ^ words[index - 2].rotate_right(19)
+                ^ (words[index - 2] >> 10);
+            words[index] = words[index - 16]
+                .wrapping_add(sigma0)
+                .wrapping_add(words[index - 7])
+                .wrapping_add(sigma1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
+        for (index, constant) in SHA256_ROUND_CONSTANTS.iter().enumerate() {
+            let sigma1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let choose = (e & f) ^ ((!e) & g);
+            let temp1 = h
+                .wrapping_add(sigma1)
+                .wrapping_add(choose)
+                .wrapping_add(*constant)
+                .wrapping_add(words[index]);
+            let sigma0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let majority = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = sigma0.wrapping_add(majority);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+        state[4] = state[4].wrapping_add(e);
+        state[5] = state[5].wrapping_add(f);
+        state[6] = state[6].wrapping_add(g);
+        state[7] = state[7].wrapping_add(h);
+    }
+    let mut output = String::with_capacity(64);
+    for word in state {
+        write!(output, "{word:08x}").expect("writing to a String cannot fail");
+    }
+    output
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1400,8 +2060,8 @@ struct ConstellationEntry {
     public_contract_fingerprint: String,
     target_support: String,
     license: String,
-    build_scripts: BTreeSet<String>,
-    proc_macros: BTreeSet<String>,
+    build_scripts: String,
+    proc_macros: String,
     transitive_unsafe_digest: String,
     evidence_class: String,
     removal_update_path: String,
@@ -1486,8 +2146,8 @@ fn parse_constellation_lock(text: &str) -> Result<ConstellationLock, String> {
             public_contract_fingerprint: fields[7].to_owned(),
             target_support: fields[8].to_owned(),
             license: fields[9].to_owned(),
-            build_scripts: parse_canonical_list(fields[10], "build_scripts", line_number + 1)?,
-            proc_macros: parse_canonical_list(fields[11], "proc_macros", line_number + 1)?,
+            build_scripts: fields[10].to_owned(),
+            proc_macros: fields[11].to_owned(),
             transitive_unsafe_digest: fields[12].to_owned(),
             evidence_class: fields[13].to_owned(),
             removal_update_path: fields[14].to_owned(),
@@ -1546,21 +2206,38 @@ fn workspace_manifest_paths(root: &Path, report: &mut Report) -> Vec<PathBuf> {
     let mut members = extract_workspace_string_list(&text, "members");
     members.sort();
     members.dedup();
-    members
-        .into_iter()
-        .map(|member| root.join(member).join("Cargo.toml"))
-        .filter(|path| {
-            if path.is_file() {
-                true
-            } else {
+    let mut manifests = Vec::new();
+    for member in members {
+        if let Some(parent) = member.strip_suffix("/*") {
+            let directory = root.join(parent);
+            let Ok(entries) = fs::read_dir(&directory) else {
                 report.error(format!(
-                    "workspace member lacks Cargo.toml: {}",
-                    relative(root, path)
+                    "workspace member glob directory cannot be read: {}",
+                    relative(root, &directory)
                 ));
-                false
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path().join("Cargo.toml");
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) && path.is_file() {
+                    manifests.push(path);
+                }
             }
-        })
-        .collect()
+            continue;
+        }
+        let path = root.join(member).join("Cargo.toml");
+        if path.is_file() {
+            manifests.push(path);
+        } else {
+            report.error(format!(
+                "workspace member lacks Cargo.toml: {}",
+                relative(root, &path)
+            ));
+        }
+    }
+    manifests.sort();
+    manifests.dedup();
+    manifests
 }
 
 fn extract_workspace_string_list(text: &str, key: &str) -> Vec<String> {
@@ -1728,6 +2405,13 @@ struct MetadataSnapshot {
     feature_closures: BTreeMap<(String, String), BTreeSet<String>>,
     build_scripts: BTreeSet<String>,
     proc_macros: BTreeSet<String>,
+    package_sources: BTreeMap<(String, String), PackageSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackageSource {
+    manifest_path: PathBuf,
+    license: String,
 }
 
 fn cargo_metadata(root: &Path) -> Result<MetadataSnapshot, String> {
@@ -1758,6 +2442,18 @@ fn parse_cargo_metadata(text: &str) -> Result<MetadataSnapshot, String> {
     for package in json_array_objects(text, "packages")? {
         let name = json_string_field(package, "name")
             .ok_or_else(|| "cargo metadata package lacks name".to_owned())?;
+        let version = json_string_field(package, "version")
+            .ok_or_else(|| format!("cargo metadata package `{name}` lacks version"))?;
+        let manifest_path = json_string_field(package, "manifest_path")
+            .ok_or_else(|| format!("cargo metadata package `{name}` lacks manifest_path"))?;
+        let license = json_string_field(package, "license").unwrap_or_else(|| "missing".to_owned());
+        snapshot.package_sources.insert(
+            (name.clone(), version),
+            PackageSource {
+                manifest_path: PathBuf::from(manifest_path),
+                license,
+            },
+        );
         for target in json_array_objects(package, "targets")? {
             let kinds = json_string_array_field(target, "kind")?;
             if kinds.contains("custom-build") {
@@ -1975,8 +2671,8 @@ fn check_constellation_model(
         .iter()
         .filter(|dependency| is_constellation_package(&dependency.package))
         .collect::<Vec<_>>();
-    check_runtime_universe(&packages, report);
-    check_forbidden_constellation_surfaces(&packages, &dependencies, report);
+    check_runtime_universe(packages, report);
+    check_forbidden_constellation_surfaces(packages, dependencies, report);
 
     if constellation.state == ConstellationState::Dormant {
         if selected.is_empty() && linked.is_empty() && constellation.entries.is_empty() {
@@ -2011,7 +2707,55 @@ fn check_constellation_model(
         );
         return;
     };
-    check_constellation_exact(&constellation, &packages, &dependencies, metadata, report);
+    check_constellation_exact(constellation, packages, dependencies, metadata, report);
+    check_generated_constellation_evidence(constellation, packages, metadata, report);
+}
+
+/// Admission records are not arbitrary digest-shaped strings: whenever Cargo
+/// supplied package source paths, reconstruct the deterministic evidence and
+/// require the checked-in rows to match it exactly. Hand-built unit metadata
+/// deliberately omits package paths, so those small model tests exercise the
+/// independent schema checks without depending on the local Cargo cache.
+fn check_generated_constellation_evidence(
+    constellation: &ConstellationLock,
+    packages: &[LockPackage],
+    metadata: &MetadataSnapshot,
+    report: &mut Report,
+) {
+    if constellation.state != ConstellationState::Admitted || metadata.package_sources.is_empty() {
+        return;
+    }
+    let rows = match generate_constellation_ledger(packages, metadata) {
+        Ok(rows) => rows,
+        Err(error) => {
+            report.error(format!(
+                "cannot reconstruct constellation admission evidence: {error}"
+            ));
+            return;
+        }
+    };
+    let generated = format!(
+        "{CONSTELLATION_MARKER}\nstate\tadmitted\n{}\n{rows}",
+        CONSTELLATION_COLUMNS.join("\t")
+    );
+    let expected = match parse_constellation_lock(&generated) {
+        Ok(lock) => lock,
+        Err(error) => {
+            report.error(format!(
+                "generated constellation admission evidence is malformed: {error}"
+            ));
+            return;
+        }
+    };
+    for (package, expected_entry) in expected.entries {
+        match constellation.entries.get(&package) {
+            Some(actual) if actual == &expected_entry => {}
+            Some(_) => report.error(format!(
+                "constellation generated-evidence drift for `{package}`; rerun `fgit-registry-check ledger-constellation`"
+            )),
+            None => {}
+        }
+    }
 }
 
 fn check_runtime_universe(packages: &[LockPackage], report: &mut Report) {
@@ -2118,7 +2862,6 @@ fn check_constellation_exact(
         };
         check_constellation_entry(entry, package, dependencies, metadata, report);
     }
-    check_global_codegen_inventory(constellation, metadata, report);
 }
 
 fn check_constellation_entry(
@@ -2210,6 +2953,28 @@ fn check_constellation_entry(
             ));
         }
     }
+    let expected_build_script = if metadata.build_scripts.contains(&package.name) {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    if entry.build_scripts != expected_build_script {
+        report.error(format!(
+            "constellation build-script evidence drift for `{}`: metadata is {expected_build_script}, constellation is {}",
+            package.name, entry.build_scripts
+        ));
+    }
+    let expected_proc_macro = if metadata.proc_macros.contains(&package.name) {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    if entry.proc_macros != expected_proc_macro {
+        report.error(format!(
+            "constellation proc-macro evidence drift for `{}`: metadata is {expected_proc_macro}, constellation is {}",
+            package.name, entry.proc_macros
+        ));
+    }
     check_entry_evidence(entry, package, report);
 }
 
@@ -2220,6 +2985,18 @@ fn check_entry_evidence(entry: &ConstellationEntry, package: &LockPackage, repor
     ) {
         report.error(format!(
             "constellation default_features for `{}` must be enabled, disabled, or not_applicable",
+            package.name
+        ));
+    }
+    if !matches!(entry.build_scripts.as_str(), "enabled" | "disabled") {
+        report.error(format!(
+            "constellation build_scripts for `{}` must be enabled or disabled",
+            package.name
+        ));
+    }
+    if !matches!(entry.proc_macros.as_str(), "enabled" | "disabled") {
+        report.error(format!(
+            "constellation proc_macros for `{}` must be enabled or disabled",
             package.name
         ));
     }
@@ -2258,27 +3035,6 @@ fn check_entry_evidence(entry: &ConstellationEntry, package: &LockPackage, repor
             "constellation removal/update path is missing for `{}`",
             package.name
         ));
-    }
-}
-
-fn check_global_codegen_inventory(
-    constellation: &ConstellationLock,
-    metadata: &MetadataSnapshot,
-    report: &mut Report,
-) {
-    for entry in constellation.entries.values() {
-        if entry.build_scripts != metadata.build_scripts {
-            report.error(format!(
-                "constellation build-script inventory drift for `{}`: metadata {:?}, constellation {:?}",
-                entry.package, metadata.build_scripts, entry.build_scripts
-            ));
-        }
-        if entry.proc_macros != metadata.proc_macros {
-            report.error(format!(
-                "constellation proc-macro inventory drift for `{}`: metadata {:?}, constellation {:?}",
-                entry.package, metadata.proc_macros, entry.proc_macros
-            ));
-        }
     }
 }
 
@@ -2494,7 +3250,7 @@ fn collect_files(root: &Path, output: &mut Vec<PathBuf>) {
 /// Checker fixtures intentionally contain malformed Cargo manifests, locks,
 /// and Rust snippets. They are executable test data, never production source,
 /// so the live self-check must not interpret their planted violations as a
-/// violation in the FrankenGit tree.
+/// violation in the `FrankenGit` tree.
 fn is_registry_checker_fixture_dir(path: &Path) -> bool {
     path.file_name() == Some(OsStr::new("fixtures"))
         && path.parent().and_then(Path::file_name) == Some(OsStr::new("tests"))
@@ -2840,12 +3596,12 @@ mod tests {
             .get_mut(&("asupersync".to_owned(), "0.4.9".to_owned()))
             .expect("fixture feature closure")
             .insert("unexpected".to_owned());
-        metadata.build_scripts.insert("build-risk".to_owned());
-        metadata.proc_macros.insert("macro-risk".to_owned());
+        metadata.build_scripts.insert("asupersync".to_owned());
+        metadata.proc_macros.insert("asupersync".to_owned());
         let report = report_for_fixture(&workspace, Some(&metadata));
         assert_error(&report, "constellation feature closure drift");
-        assert_error(&report, "constellation build-script inventory drift");
-        assert_error(&report, "constellation proc-macro inventory drift");
+        assert_error(&report, "constellation build-script evidence drift");
+        assert_error(&report, "constellation proc-macro evidence drift");
 
         replace_fixture_file(
             &workspace,
@@ -2884,7 +3640,7 @@ mod tests {
     #[test]
     fn cargo_metadata_parser_extracts_feature_and_codegen_closures() {
         let metadata = parse_cargo_metadata(
-            r#"{"packages":[{"name":"asupersync","targets":[{"kind":["lib"]},{"kind":["custom-build"]}]},{"name":"derive-risk","targets":[{"kind":["proc-macro"]}]}],"resolve":{"nodes":[{"id":"registry+https://index#asupersync@0.4.9","features":["lab","net"]}]}}"#,
+            r#"{"packages":[{"name":"asupersync","version":"0.4.9","manifest_path":"/registry/asupersync/Cargo.toml","license":"MIT","targets":[{"kind":["lib"]},{"kind":["custom-build"]}]},{"name":"derive-risk","version":"1.0.0","manifest_path":"/registry/derive-risk/Cargo.toml","license":"Apache-2.0","targets":[{"kind":["proc-macro"]}]}],"resolve":{"nodes":[{"id":"registry+https://index#asupersync@0.4.9","features":["lab","net"]}]}}"#,
         )
         .expect("parse metadata");
         assert_eq!(
@@ -2895,6 +3651,39 @@ mod tests {
         );
         assert!(metadata.build_scripts.contains("asupersync"));
         assert!(metadata.proc_macros.contains("derive-risk"));
+        assert_eq!(
+            metadata
+                .package_sources
+                .get(&("asupersync".to_owned(), "0.4.9".to_owned()))
+                .map(|source| source.license.as_str()),
+            Some("MIT")
+        );
+    }
+
+    #[test]
+    fn admission_inventory_hash_is_standard_sha256() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn generated_policy_classification_marks_os_and_wasm_surfaces() {
+        assert_eq!(generated_unsafe_policy("libc"), "os_abi");
+        assert_eq!(generated_unsafe_policy("windows-sys"), "os_abi");
+        assert_eq!(
+            generated_unsafe_policy("wasm-bindgen"),
+            "proc_macro_transitive"
+        );
+        assert_eq!(
+            generated_ffi_policy("windows-sys"),
+            "os_abi_shim_no_foreign_engine"
+        );
     }
 
     #[test]

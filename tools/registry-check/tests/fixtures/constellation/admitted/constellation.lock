@@ -1,4 +1,4 @@
 # franken-constellation-v1
 state	admitted
 package	source	version	revision	checksum	features	default_features	public_contract_fingerprint	target_support	license	build_scripts	proc_macros	transitive_unsafe_digest	evidence_class	removal_update_path
-asupersync	registry+https://github.com/rust-lang/crates.io-index	0.4.9	not_applicable	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa	none	disabled	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb	native-tier-1	MIT OR Apache-2.0	none	none	cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc	admitted	docs/removal/asupersync.md
+asupersync	registry+https://github.com/rust-lang/crates.io-index	0.4.9	not_applicable	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa	none	disabled	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb	native-tier-1	MIT OR Apache-2.0	disabled	disabled	cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc	admitted	docs/removal/asupersync.md

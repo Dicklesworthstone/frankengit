@@ -1125,48 +1125,64 @@ fge_replay_command() { printf '%s' "$FGE_REPLAY_CMD"; }
 # A short mkdir-based mutex. mkdir is the one portable atomic create-or-fail
 # primitive available to a shell. The holder PID is recorded so a lock left
 # behind by a killed writer is broken rather than deadlocking the run.
-fge__lock_acquire() {
-  local lock=$FGE_STATE_DIR/.seqlock spins=500 holder
-  while [ "$spins" -gt 0 ]; do
-    if mkdir "$lock" 2>/dev/null; then
-      printf '%s' "$BASHPID" >"$lock/pid" 2>/dev/null || true
-      return 0
-    fi
-    holder=''
-    read -r holder <"$lock/pid" 2>/dev/null || true
-    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
-      rm -rf "$lock" 2>/dev/null || true
-      continue
-    fi
-    spins=$((spins - 1))
-    read -r -t 0.01 -u 9 _ 2>/dev/null || true
-  done
-  rm -rf "$lock" 2>/dev/null || true
-  mkdir -p "$lock" 2>/dev/null || true
-  return 0
-}
-
-fge__lock_release() { rm -rf "$FGE_STATE_DIR/.seqlock" 2>/dev/null || true; }
-
-# Allocates the next logical sequence number. Allocation is the only critical
-# section; the record bytes are written outside the lock through an O_APPEND
-# descriptor. Validators therefore check that the seq values of a log form
-# exactly {1..N}: a lost record shows up as a gap even though records may be
-# appended out of order under concurrency.
+# Sequence allocation is a lock-free test-and-set.
+#
+# The obvious mkdir-mutex-plus-counter is what this replaced, and it was
+# subtly, intermittently wrong. Any such mutex needs a way to break a lock left
+# behind by a killed writer, and "read the holder pid, check it is dead, remove
+# the directory" is an ABA race: between the read and the removal the holder
+# can finish normally and a THIRD writer can take the lock, which the breaker
+# then deletes out from under it. Two writers then hold the lock and are handed
+# the same sequence number. A 24-writer probe reproduced it in two runs out of
+# three, and the harness's own concurrency assertions caught it.
+#
+# So there is no lock. Each writer claims a number by creating seq.d/<n> with
+# O_EXCL (`set -C` plus `>`), which the kernel makes atomic: exactly one writer
+# can win each n, and a loser simply tries n+1. Correctness rests on O_EXCL
+# alone -- no ownership, no liveness check, nothing to leak, and a writer killed
+# mid-allocation leaves at most one claimed number behind, which shows up as
+# the sequence gap it genuinely is.
+#
+# seqhint is a pure accelerator: a stale or missing hint costs extra attempts
+# and never affects correctness.
 fge__next_seq() {
-  local n=''
-  fge__lock_acquire
-  # `read` reports failure at EOF on a file with no trailing newline while
-  # still having assigned the value, so the value is validated rather than the
-  # exit status trusted.
-  read -r n <"$FGE_STATE_DIR/seq" 2>/dev/null || true
-  [[ $n =~ ^[0-9]+$ ]] || n=0
-  n=$((n + 1))
-  printf '%s\n' "$n" >"$FGE_STATE_DIR/seq"
-  fge__lock_release
+  local n='' had_noclobber=0
+  read -r n <"$FGE_STATE_DIR/seqhint" 2>/dev/null || true
+  [[ $n =~ ^[0-9]+$ ]] || n=1
+  [ "$n" -ge 1 ] || n=1
+  case $- in
+    *C*) had_noclobber=1 ;;
+  esac
+  set -C
+  while ! { : >"$FGE_STATE_DIR/seq.d/$n"; } 2>/dev/null; do
+    n=$((n + 1))
+  done
+  [ "$had_noclobber" -eq 1 ] || set +C
+  printf '%s\n' "$((n + 1))" >|"$FGE_STATE_DIR/seqhint" 2>/dev/null || true
   FGE__SEQ=$n
 }
 FGE__SEQ=0
+
+# A sub-second wait with no fork and no GNU-only `sleep 0.01`.
+#
+# fd 9 is a FIFO opened read-write, so a timed read genuinely blocks for the
+# timeout. Pointing it at a regular file, as an earlier revision did, is the
+# trap: `read -t` on a regular file returns instantly at EOF, which turned this
+# into a busy-spin, exhausted the retry budget in microseconds and let
+# concurrent writers force the lock -- handing two of them the same sequence
+# number. The harness self-test caught it; the comment is here so it is not
+# reintroduced.
+fge__tick() {
+  if [ "$FGE_TICK_KIND" = fifo ]; then
+    read -r -t 0.01 -u 9 _ 2>/dev/null || true
+  else
+    # POSIX sleep only guarantees integer seconds, so a filesystem without
+    # FIFOs pays a whole second per contended retry rather than spinning.
+    sleep 1 2>/dev/null || true
+  fi
+}
+FGE_TICK_KIND=none
+
 
 fge__resources_into() {
   FGE__J+='"resources":{'
@@ -1423,6 +1439,8 @@ fge__build_env_json() {
   FGE__J+=','
   fge__jstr time_resolution "$FGE_TIME_RES"
   FGE__J+=','
+  fge__jstr tick "$FGE_TICK_KIND"
+  FGE__J+=','
   fge__jstr tz 'UTC'
   FGE__J+=','
   fge__jstr locale "${LC_ALL:-inherited}"
@@ -1515,15 +1533,19 @@ fge_init() {
   FGE_STATE_DIR="$FGE_ARTIFACT_DIR/.state"
   mkdir -p "$FGE_STATE_DIR"
   : >"$FGE_STATE_DIR/assertions.tsv"
-  printf '0\n' >"$FGE_STATE_DIR/seq"
-  : >"$FGE_STATE_DIR/.tick"
-
+  mkdir -p "$FGE_STATE_DIR/seq.d"
+  printf '1\n' >"$FGE_STATE_DIR/seqhint"
   FGE_LOG="$FGE_ARTIFACT_DIR/e2e.ndjson"
   : >"$FGE_LOG"
   exec {FGE_LOG_FD}>>"$FGE_LOG"
-  # fd 9 is a read end that never delivers data; `read -t` on it is the
-  # harness's sub-second sleep and costs no fork.
-  exec 9<>"$FGE_STATE_DIR/.tick"
+
+  # fd 9 must be a FIFO for fge__tick to actually wait; see its comment.
+  rm -f "$FGE_STATE_DIR/.tick"
+  if mkfifo "$FGE_STATE_DIR/.tick" 2>/dev/null && exec 9<>"$FGE_STATE_DIR/.tick"; then
+    FGE_TICK_KIND=fifo
+  else
+    FGE_TICK_KIND=sleep
+  fi
 
   fge__build_env_json
   FGE_INITIALIZED=1
@@ -2349,9 +2371,14 @@ fge__on_exit() {
   wall_ns=$(fge__now_ns)
   wall_ms=$(((wall_ns - FGE_START_NS) / 1000000))
 
-  local rec_count=''
-  read -r rec_count <"$FGE_STATE_DIR/seq" 2>/dev/null || true
-  [[ $rec_count =~ ^[0-9]+$ ]] || rec_count=0
+  # Counted from the claimed sequence numbers themselves, not from a hint: the
+  # terminal record's own number is the highest claim, so the count it declares
+  # is exactly what a validator will find in the log if nothing was lost.
+  local rec_count=0 _claim
+  for _claim in "$FGE_STATE_DIR"/seq.d/*; do
+    [ -e "$_claim" ] || continue
+    rec_count=$((rec_count + 1))
+  done
   rec_count=$((rec_count + 1))
 
   fge_resource_mark

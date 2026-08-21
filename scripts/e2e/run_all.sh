@@ -168,9 +168,13 @@ ra_discover() {
 
 ra_script_id() {
   local p=$1 id
+  # Repo-relative first, so in-tree ids are stable and human-meaningful. A
+  # script outside the repo is named relative to the discovery root instead of
+  # having its whole absolute path mangled into the id.
   case $p in
     "$RA_REPO_ROOT"/*) id=${p#"$RA_REPO_ROOT"/} ;;
-    *) id=$p ;;
+    "$RA_SUITE_DIR"/*) id=${p#"$RA_SUITE_DIR"/} ;;
+    *) id=$(basename "$p") ;;
   esac
   id=${id#scripts/e2e/}
   id=${id%.sh}
@@ -269,6 +273,7 @@ RA_V_STATUS=''
 RA_V_EXIT=''
 RA_V_CONTAINMENT=''
 RA_V_CLEANUP=''
+RA_V_TIMEOUTS=0
 RA_V_ZERO=''
 RA_V_FIRST=''
 RA_V_WALL=''
@@ -290,6 +295,7 @@ ra_validate_log() {
   RA_V_EXIT=''
   RA_V_CONTAINMENT=''
   RA_V_CLEANUP=''
+  RA_V_TIMEOUTS=0
   RA_V_ZERO=''
   RA_V_FIRST=''
   RA_V_WALL=''
@@ -401,7 +407,7 @@ ra_validate_log() {
   local need
   for need in status exit_code assertions_discovered assertion_ids passed_ids \
     failed_ids skipped_ids unsupported_ids error_ids duplicate_ids \
-    first_attempt_status cleanup_state containment zero_assertions wall_ms; do
+    first_attempt_status cleanup_state containment zero_assertions timeouts wall_ms; do
     if [ -z "${T[$need]+x}" ]; then
       RA_V_DISPOSITION=malformed_log
       RA_V_DETAIL="terminal object is missing '$need'"
@@ -413,6 +419,7 @@ ra_validate_log() {
   RA_V_EXIT=${T[exit_code]}
   RA_V_CONTAINMENT=$(fge_json_unquote "${T[containment]}")
   RA_V_CLEANUP=$(fge_json_unquote "${T[cleanup_state]}")
+  RA_V_TIMEOUTS=${T[timeouts]}
   RA_V_ZERO=${T[zero_assertions]}
   RA_V_FIRST=$(fge_json_unquote "${T[first_attempt_status]}")
   RA_V_WALL=${T[wall_ms]}
@@ -633,6 +640,12 @@ for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
       elif [ "$RA_V_CONTAINMENT" != ok ]; then
         disposition=containment
         detail='orphaned processes or unresolved obligations'
+      elif [ "$RA_V_TIMEOUTS" != 0 ]; then
+        # The script's own budget fired even though the runner's did not. Both
+        # are timeouts; conflating either with a plain assertion failure would
+        # hide the resource story behind a correctness story.
+        disposition=timeout
+        detail='the script reported its own timeout'
       elif [ "$RA_V_CLEANUP" = failed ]; then
         disposition=cleanup_failed
         detail='a registered cleanup action failed'

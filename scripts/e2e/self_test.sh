@@ -95,6 +95,75 @@ expect_case() {
 }
 
 # ---------------------------------------------------------------------------
+# The fixture's OWN terminal record, read straight from its NDJSON log.
+#
+# run_all re-derives most non-pass conditions independently of lib.sh, which is
+# deliberate defence in depth -- but it means a self-test that only inspects
+# run_all's verdict cannot see lib.sh's verdict go wrong. Mutation testing
+# confirmed exactly that: weakening lib.sh's skip, zero-assertion and cleanup
+# rules left the suite green because run_all still caught each one. These
+# assertions pin the library's own judgement so both layers are load-bearing.
+# ---------------------------------------------------------------------------
+FIX_STATUS=''
+FIX_EXIT=''
+FIX_CLEANUP=''
+FIX_ZERO=''
+FIX_CONTAINMENT=''
+FIX_SKIPPED=''
+FIX_UNSUPPORTED=''
+FIX_OBLIG=''
+FIX_DUPS=''
+FIX_LOG=''
+
+# fixture_terminal CASE_OUT SCRIPT_ID [ATTEMPT]
+fixture_terminal() {
+  local case_out=$1 script_id=$2 attempt=${3:-1}
+  FIX_LOG="$case_out/run/scripts/$script_id/attempt-$attempt/e2e.ndjson"
+  FIX_STATUS=''
+  FIX_EXIT=''
+  FIX_CLEANUP=''
+  FIX_ZERO=''
+  FIX_CONTAINMENT=''
+  FIX_SKIPPED=''
+  FIX_UNSUPPORTED=''
+  FIX_OBLIG=''
+  FIX_DUPS=''
+  [ -f "$FIX_LOG" ] || return 1
+  local line
+  line=$(grep '"kind":"terminal"' "$FIX_LOG" 2>/dev/null | tail -1)
+  [ -n "$line" ] || return 1
+  fge_json_top "$line" || return 1
+  local term=${FGE_JSON[terminal]-}
+  [ -n "$term" ] || return 1
+  fge_json_top "$term" || return 1
+  FIX_STATUS=$(fge_json_unquote "${FGE_JSON[status]-}")
+  FIX_EXIT=${FGE_JSON[exit_code]-}
+  FIX_CLEANUP=$(fge_json_unquote "${FGE_JSON[cleanup_state]-}")
+  FIX_ZERO=${FGE_JSON[zero_assertions]-}
+  FIX_CONTAINMENT=$(fge_json_unquote "${FGE_JSON[containment]-}")
+  FIX_SKIPPED=${FGE_JSON[skipped]-}
+  FIX_UNSUPPORTED=${FGE_JSON[unsupported]-}
+  FIX_OBLIG=${FGE_JSON[obligations_outstanding]-}
+  FIX_DUPS=${FGE_JSON[duplicate_ids]-}
+  return 0
+}
+
+# assert_fixture_fails ID_PREFIX SCRIPT_ID DESC
+# The library itself must call the run a failure and exit nonzero.
+assert_fixture_fails() {
+  local idp=$1 sid=$2 desc=$3
+  if ! fixture_terminal "$CASE_OUT" "$sid"; then
+    fge_fail "${idp}-LIBTERM" "could not read the terminal record for $sid"
+    return 0
+  fi
+  fge_assert_eq "${idp}-LIBSTATUS" fail "$FIX_STATUS" \
+    "lib.sh itself marks $desc a failure"
+  fge_assert_ne "${idp}-LIBEXIT" 0 "$FIX_EXIT" \
+    "lib.sh itself exits nonzero for $desc"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # permitted controls: the harness must NOT cry wolf
 # ---------------------------------------------------------------------------
 fge_phase action
@@ -116,15 +185,64 @@ fge_assert_eq FG-000A-ST-RECEIPT-STATUS pass "$CASE_SUITE_STATUS" \
 # planted negatives, one disposition each
 # ---------------------------------------------------------------------------
 expect_case FG-000A-ST-CMDFAIL  command-failure    1 failed           neg_command_failure.sh
+assert_fixture_fails FG-000A-ST-CMDFAIL selftests-fixtures-neg_command_failure 'a failed command'
+
 expect_case FG-000A-ST-MISMATCH assert-mismatch    1 failed           neg_assert_mismatch.sh
+assert_fixture_fails FG-000A-ST-MISMATCH selftests-fixtures-neg_assert_mismatch 'a mismatched assertion'
+
 expect_case FG-000A-ST-ZERO     zero-assertions    1 zero_assertions  neg_zero_assertions.sh
+assert_fixture_fails FG-000A-ST-ZERO selftests-fixtures-neg_zero_assertions 'a run that proved nothing'
+fge_assert_eq FG-000A-ST-ZERO-LIBFLAG true "$FIX_ZERO" \
+  'lib.sh raises zero_assertions in its own terminal record'
+
 expect_case FG-000A-ST-DUP      duplicate-id       1 duplicate_ids    neg_duplicate_id.sh
+assert_fixture_fails FG-000A-ST-DUP selftests-fixtures-neg_duplicate_id 'a duplicated acceptance id'
+fge_assert_eq FG-000A-ST-DUP-LIBIDS '["FG-000A-DUP-001"]' "$FIX_DUPS" \
+  'lib.sh names the duplicated id in its own terminal record'
+
 expect_case FG-000A-ST-CLEANUP  cleanup-failure    1 cleanup_failed   neg_cleanup_failure.sh
+assert_fixture_fails FG-000A-ST-CLEANUP selftests-fixtures-neg_cleanup_failure 'a failing cleanup'
+fge_assert_eq FG-000A-ST-CLEANUP-LIBSTATE failed "$FIX_CLEANUP" \
+  'lib.sh records cleanup_state=failed'
+
 expect_case FG-000A-ST-SKIP     skipped-assertion  1 skipped          neg_skip.sh
+assert_fixture_fails FG-000A-ST-SKIP selftests-fixtures-neg_skip 'a skipped assertion'
+fge_assert_eq FG-000A-ST-SKIP-LIBCOUNT 1 "$FIX_SKIPPED" \
+  'lib.sh counts the skipped assertion'
+
 expect_case FG-000A-ST-UNSUP    unsupported-result 1 unsupported      neg_unsupported.sh
+assert_fixture_fails FG-000A-ST-UNSUP selftests-fixtures-neg_unsupported 'an unsupported result'
+fge_assert_eq FG-000A-ST-UNSUP-LIBCOUNT 1 "$FIX_UNSUPPORTED" \
+  'lib.sh counts the unsupported assertion'
+
 expect_case FG-000A-ST-OBLIG    obligation-leak    1 containment      neg_obligation_leak.sh
+assert_fixture_fails FG-000A-ST-OBLIG selftests-fixtures-neg_obligation_leak 'a leaked obligation'
+fge_assert_eq FG-000A-ST-OBLIG-LIBCONT failed "$FIX_CONTAINMENT" \
+  'lib.sh reports containment failure for an unresolved obligation'
+fge_assert_eq FG-000A-ST-OBLIG-LIBCOUNT 1 "$FIX_OBLIG" \
+  'lib.sh counts the outstanding obligation'
+
 expect_case FG-000A-ST-ORPHAN   orphan-child       1 containment      neg_orphan_child.sh
+assert_fixture_fails FG-000A-ST-ORPHAN selftests-fixtures-neg_orphan_child 'an orphaned child'
+fge_assert_eq FG-000A-ST-ORPHAN-LIBCONT failed "$FIX_CONTAINMENT" \
+  'lib.sh reports containment failure for a child that ignored SIGTERM'
+
 expect_case FG-000A-ST-COLLIDE  artifact-collision 1 failed           neg_artifact_collision.sh
+assert_fixture_fails FG-000A-ST-COLLIDE selftests-fixtures-neg_artifact_collision 'an artifact name collision'
+
+# The permitted control's own terminal record is the counterpart of every
+# assert_fixture_fails above: clean on exactly the fields they see dirty.
+run_case control-terminal 60 1 pos_control.sh
+if fixture_terminal "$CASE_OUT" selftests-fixtures-pos_control; then
+  fge_assert_eq FG-000A-ST-CTL-LIBSTATUS pass "$FIX_STATUS" 'the control run is a pass'
+  fge_assert_eq FG-000A-ST-CTL-LIBEXIT   0    "$FIX_EXIT"   'the control run exits 0'
+  fge_assert_eq FG-000A-ST-CTL-LIBZERO   false "$FIX_ZERO"  'the control run proved something'
+  fge_assert_eq FG-000A-ST-CTL-LIBCONT   ok   "$FIX_CONTAINMENT" 'the control run contains its children'
+  fge_assert_eq FG-000A-ST-CTL-LIBDUPS   '[]' "$FIX_DUPS"   'the control run has no duplicate ids'
+  fge_assert_eq FG-000A-ST-CTL-LIBSKIP   0    "$FIX_SKIPPED" 'the control run skips nothing'
+else
+  fge_fail FG-000A-ST-CTL-LIBTERM 'could not read the control terminal record'
+fi
 
 # Log-shape negatives.
 expect_case FG-000A-ST-MALFORM  malformed-ndjson   1 malformed_log    corrupt_malformed.sh
