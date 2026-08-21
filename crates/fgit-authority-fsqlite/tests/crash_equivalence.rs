@@ -61,7 +61,12 @@ impl Scratch {
     /// concurrent runs. Neither draws on wall time or a system generator, so a
     /// failure replays against the same name.
     fn new(label: &str) -> Self {
-        let mut path = std::env::temp_dir();
+        Self::in_base(&std::env::temp_dir(), label)
+    }
+
+    /// The same scratch database, on a caller-chosen filesystem.
+    fn in_base(base: &std::path::Path, label: &str) -> Self {
+        let mut path = base.to_path_buf();
         path.push(format!("fgit-fg005b-{}-{label}.db", std::process::id()));
         let scratch = Self { path };
         scratch.remove();
@@ -912,4 +917,133 @@ fn a_fresh_database_at_a_new_path_does_not_inherit_another_stores_head() {
         "a database at a different path must start empty; if it did not, every durability \
          assertion in this file could be reading another test's state"
     );
+}
+
+// --------------------------------------------------- the filesystem matrix
+//
+// "Every claimed target filesystem/profile" is an acceptance line, and a
+// crash matrix that only ever ran on one filesystem has not tested it. The
+// durability semantics that matter here -- what survives an unclean shutdown
+// -- are exactly the semantics that differ between a page-cache-only
+// filesystem and a journaling or copy-on-write one.
+//
+// The trap this section is built to avoid: running the same fixtures against
+// two PATHS proves nothing if both live on the same filesystem. So the bases
+// are deduplicated by device id, and the test refuses to pass unless it
+// genuinely exercised more than one device. Set FG005B_FS_BASES (colon
+// separated) to declare the environment deliberately -- a single entry is an
+// explicit statement that only one filesystem is available here, rather than
+// an accident that quietly halves the coverage.
+//
+// Unix only: the device-id check is the whole mechanism, and without it this
+// test cannot tell two filesystems from two directories.
+
+#[cfg(unix)]
+fn distinct_bases() -> Vec<(PathBuf, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let declared = std::env::var("FG005B_FS_BASES").unwrap_or_default();
+    let candidates: Vec<PathBuf> = if declared.is_empty() {
+        // /dev/shm is a distinct tmpfs from /tmp on essentially every Linux
+        // host, so discovery does not depend on this repo's layout.
+        vec![
+            std::env::temp_dir(),
+            PathBuf::from("/data/tmp"),
+            PathBuf::from("/dev/shm"),
+        ]
+    } else {
+        declared.split(':').map(PathBuf::from).collect()
+    };
+
+    let mut seen = Vec::new();
+    for base in candidates {
+        if !base.is_dir() {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&base) else {
+            continue;
+        };
+        let device = meta.dev();
+        // Two directories on one filesystem are one filesystem. Counting them
+        // twice is how this cell would report coverage it does not have.
+        if seen.iter().any(|(_, known)| *known == device) {
+            continue;
+        }
+        seen.push((base, device));
+    }
+    seen
+}
+
+#[cfg(unix)]
+#[test]
+fn the_crash_matrix_holds_on_every_distinct_filesystem() {
+    let bases = distinct_bases();
+
+    // Two demands, deliberately split.
+    //
+    // Always: at least one filesystem, or the loop below runs zero times and
+    // the test passes having asserted nothing.
+    //
+    // Under FG005B_FS_STRICT: at least TWO distinct devices, which is the
+    // actual coverage claim. That demand lives behind a flag the e2e lane
+    // sets rather than in every `cargo test --workspace` run, because a host
+    // with a single filesystem is a reason to report thin coverage -- not a
+    // reason to fail the workspace suite for every other agent sharing this
+    // checkout.
+    assert!(
+        !bases.is_empty(),
+        "no usable filesystem found; the loop below would assert nothing"
+    );
+    if std::env::var("FG005B_FS_STRICT").is_ok() {
+        assert!(
+            bases.len() >= 2,
+            "only {} distinct filesystem(s) exercised: {:?}. Two paths on one device are one \
+             filesystem, so this cell would otherwise report coverage it does not have. Set \
+             FG005B_FS_BASES to name distinct bases, or unset FG005B_FS_STRICT to accept thin \
+             coverage deliberately.",
+            bases.len(),
+            bases.iter().map(|(base, _)| base).collect::<Vec<_>>()
+        );
+    }
+
+    let node = node();
+    let key = head_key();
+
+    for (base, device) in &bases {
+        let scratch = Scratch::in_base(base, "fs-matrix");
+
+        let first = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+        first.init_head(&key, generation(1), GENESIS);
+        let token = first.token(&key);
+        let committed = matches!(
+            first.exchange(&key, token, generation(2), ADVANCED),
+            Ok(CasOutcome::Committed(_))
+        );
+        first.kill();
+
+        let second = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+        let receipt = match second.read_head(&key).expect("the head reads") {
+            HeadRead::Present(receipt) => receipt,
+            HeadRead::Absent => {
+                panic!("the head did not survive an unclean shutdown on {base:?} (device {device})")
+            }
+        };
+
+        let observed = receipt.body().to_vec();
+        assert!(
+            observed == GENESIS || observed == ADVANCED,
+            "old-complete or new-complete must hold on {base:?} (device {device}), got \
+             {observed:?}"
+        );
+        assert_eq!(
+            receipt.generation(),
+            generation(if observed == ADVANCED { 2 } else { 1 }),
+            "body and generation must agree on {base:?} (device {device})"
+        );
+        assert!(
+            !committed || observed == ADVANCED,
+            "an acknowledged commit rolled back on {base:?} (device {device}): durability must \
+             not depend on which filesystem the store happens to sit on"
+        );
+    }
 }

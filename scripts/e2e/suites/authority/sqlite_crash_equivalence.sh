@@ -43,6 +43,7 @@ for sq_needle in \
   'fn contend' \
   'Defect::SecondWinner' \
   'instance_id()' \
+  'distinct_bases' \
   'fn kill' \
   'std::env::temp_dir'; do
   if ! grep -qF "$sq_needle" "$SQ_CAMPAIGN"; then
@@ -69,6 +70,11 @@ sq_kills=$(grep -c '\.kill()' "$SQ_CAMPAIGN" || true)
 fge_step campaign-shape "campaign: $sq_tests tests, $sq_kills kill/reopen sites"
 
 fge_phase action
+
+# The filesystem-matrix cell only makes its coverage claim under this flag.
+# A bare `cargo test --workspace` stays lenient so a single-filesystem host
+# reports thin coverage here instead of failing the suite for everyone.
+export FG005B_FS_STRICT=1
 
 fge_run sqlite-crash-equivalence \
   cargo test --locked -p fgit-authority-fsqlite --test crash_equivalence
@@ -104,7 +110,7 @@ if [ "$sq_kills" -lt 9 ]; then
   fge_fail FG-005B-E2E-016 \
     "only $sq_kills kill/reopen sites; the crash matrix requires at least nine"
 fi
-if [ "$sq_tests" -lt 14 ]; then
+if [ "$sq_tests" -lt 15 ]; then
   fge_fail FG-005B-E2E-017 \
     "only $sq_tests tests in the campaign; the dispatch names more scenarios than that"
 fi
