@@ -215,7 +215,7 @@ impl TreeCapability {
     /// vacuous case is "no access", never "all access", so a construction bug
     /// fails closed.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         workspace_id: WorkspaceId,
         repository_id: RepositoryId,
         read_prefixes: Vec<TreePath>,
@@ -238,14 +238,14 @@ impl TreeCapability {
 
     /// Sets the symlink policy.
     #[must_use]
-    pub fn with_symlink_policy(mut self, policy: SymlinkPolicy) -> Self {
+    pub const fn with_symlink_policy(mut self, policy: SymlinkPolicy) -> Self {
         self.symlink_policy = policy;
         self
     }
 
     /// Sets the total fetch-byte ceiling.
     #[must_use]
-    pub fn with_fetch_budget(mut self, budget: ByteCount) -> Self {
+    pub const fn with_fetch_budget(mut self, budget: ByteCount) -> Self {
         self.max_fetch_bytes = budget.get();
         self
     }
@@ -339,7 +339,7 @@ impl TreeCapability {
     }
 
     /// Charges a served object against the budgets.
-    pub fn charge_fetch(&mut self, bytes: u64) -> Result<(), CapabilityRefusal> {
+    pub const fn charge_fetch(&mut self, bytes: u64) -> Result<(), CapabilityRefusal> {
         let next_files = self.fetched_files.saturating_add(1);
         if next_files > self.max_file_count {
             return Err(CapabilityRefusal::FileBudgetExceeded {
@@ -407,17 +407,17 @@ impl TreeCapability {
         })
     }
 
-    fn check_live(&self, now: u64) -> Result<(), CapabilityRefusal> {
+    const fn check_live(&self, now: u64) -> Result<(), CapabilityRefusal> {
         if self.revoked {
             return Err(CapabilityRefusal::Revoked);
         }
-        if let Some(expires_at) = self.expires_at {
-            if now >= expires_at {
-                return Err(CapabilityRefusal::Expired {
-                    expires_at,
-                    observed: now,
-                });
-            }
+        if let Some(expires_at) = self.expires_at
+            && now >= expires_at
+        {
+            return Err(CapabilityRefusal::Expired {
+                expires_at,
+                observed: now,
+            });
         }
         Ok(())
     }

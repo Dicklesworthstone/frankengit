@@ -43,7 +43,7 @@ use fgit_git_object::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Git's mode bytes for a directory, as FrankenGit writes them.
+/// Git's mode bytes for a directory, as `FrankenGit` writes them.
 const MODE_TREE: &[u8] = b"40000";
 /// Git's mode bytes for a symlink.
 const MODE_SYMLINK: &[u8] = b"120000";
@@ -252,7 +252,6 @@ impl<A: GitHashAlgorithm> ExportPlan<A> {
     }
 
     /// Objects this export would create, in identity order.
-    #[must_use]
     pub fn objects(&self) -> impl Iterator<Item = &ExportedObject<A>> {
         self.objects.values()
     }
@@ -432,7 +431,7 @@ impl ExportPlanner {
             .unwrap_or_else(|| {
                 // An entirely empty workspace exports Git's empty tree.
                 let object = ExportedObject::<A>::new(GitObjectKind::Tree, Vec::new());
-                let oid = object.oid.clone();
+                let oid = object.oid;
                 objects.insert(object.oid.digest_bytes().to_vec(), object);
                 oid
             });
@@ -568,22 +567,22 @@ impl ExportPlanner {
                     object_id: oid.digest_bytes().to_vec(),
                 },
                 Resolved::Directory => {
-                    let child = match directory {
-                        None => TreePath::parse(&name, base.path_policy()),
-                        Some(here) => here.join(&name, base.path_policy()),
-                    }
-                    .map_err(|refusal| ExportRefusal::Base(refusal.to_string()))?;
+                    let child = directory
+                        .map_or_else(
+                            || TreePath::parse(&name, base.path_policy()),
+                            |here| here.join(&name, base.path_policy()),
+                        )
+                        .map_err(|refusal| ExportRefusal::Base(refusal.to_string()))?;
                     match rebuilt.get(&child) {
                         Some(oid) => TreeEntry {
                             mode: MODE_TREE.to_vec(),
                             name,
                             object_id: oid.digest_bytes().to_vec(),
                         },
-                        // Untouched subtree: reuse the base identity verbatim.
-                        None => match base.list(source, capability, Some(&child), now) {
-                            Ok(_) => continue,
-                            Err(_) => continue,
-                        },
+                        // Untouched subtree: it keeps its base identity and is
+                        // not re-emitted, so it contributes nothing here
+                        // whether or not the base can still list it.
+                        None => continue,
                     }
                 }
             };
@@ -612,7 +611,7 @@ impl ExportPlanner {
             &self.parse_limits,
         )?;
         let object = ExportedObject::<A>::new(GitObjectKind::Tree, body);
-        let oid = object.oid.clone();
+        let oid = object.oid;
         objects.insert(object.oid.digest_bytes().to_vec(), object);
         Ok(Some(oid))
     }
@@ -622,10 +621,10 @@ fn resolved_from_base<A: GitHashAlgorithm>(entry: &BaseEntry<A>) -> Resolved<A> 
     match entry {
         BaseEntry::File { oid, mode } => Resolved::File {
             mode: mode.clone(),
-            oid: oid.clone(),
+            oid: *oid,
         },
-        BaseEntry::Symlink { oid } => Resolved::Symlink { oid: oid.clone() },
-        BaseEntry::Submodule { oid } => Resolved::Gitlink { oid: oid.clone() },
+        BaseEntry::Symlink { oid } => Resolved::Symlink { oid: *oid },
+        BaseEntry::Submodule { oid } => Resolved::Gitlink { oid: *oid },
         BaseEntry::Directory { .. } => Resolved::Directory,
     }
 }

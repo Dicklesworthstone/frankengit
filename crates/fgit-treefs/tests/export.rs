@@ -2,7 +2,7 @@
 //!
 //! The load-bearing assertions here are the round trip and the refusals:
 //! exporting an untouched workspace must reproduce the base tree *identity*
-//! (not merely an equivalent tree), and nothing in TreeFS may claim visibility,
+//! (not merely an equivalent tree), and nothing in `TreeFS` may claim visibility,
 //! durability, or a commit outcome.
 
 use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1};
@@ -100,7 +100,7 @@ fn fixture() -> (MemorySource, Oid) {
     (source, root)
 }
 
-fn repository_id() -> RepositoryId {
+const fn repository_id() -> RepositoryId {
     RepositoryId::from_bytes([7; 16])
 }
 
@@ -116,7 +116,7 @@ fn base(root: Oid) -> BaseView<Sha1> {
     BaseView::new(
         repository_id(),
         rcr_id(),
-        root.clone(),
+        root,
         root,
         limits(),
         PathPolicy::default(),
@@ -153,7 +153,7 @@ fn never_cancelled() -> impl Fn() -> bool {
 #[test]
 fn exporting_an_untouched_workspace_reproduces_the_base_tree_oid() {
     let (source, root) = fixture();
-    let view = base(root.clone());
+    let view = base(root);
     let mut cap = capability();
     let overlay = Overlay::new();
 
@@ -176,7 +176,7 @@ fn exporting_an_untouched_workspace_reproduces_the_base_tree_oid() {
 #[test]
 fn exported_tree_bytes_parse_back_to_the_same_entries() {
     let (source, root) = fixture();
-    let view = base(root.clone());
+    let view = base(root);
     let mut cap = capability();
     let mut overlay = Overlay::new();
     let id = overlay.intern(b"changed\n".to_vec());
@@ -245,7 +245,7 @@ fn export_is_deterministic_across_repeated_runs() {
         let bodies: Vec<Vec<u8>> = plan.objects().map(|o| o.body().to_vec()).collect();
         match &first_root {
             None => {
-                first_root = Some(plan.root_tree().clone());
+                first_root = Some(*plan.root_tree());
                 first_bodies = bodies;
             }
             Some(expected) => {
@@ -530,7 +530,7 @@ fn durability_and_visibility_claims_are_always_refused() {
     }
 }
 
-/// Once proposed, TreeFS refuses to decide the outcome itself.
+/// Once proposed, `TreeFS` refuses to decide the outcome itself.
 #[test]
 fn outcome_is_locally_decidable_only_before_proposal() {
     let mut journal = ExportJournal::open(WorkspaceId::from_bytes([1; 16]));
@@ -651,7 +651,7 @@ fn journal_records_its_lease_reservation() {
 
 fn seal_a_proposal() -> (ProposedTransaction<Sha1>, Oid) {
     let (source, root) = fixture();
-    let view = base(root.clone());
+    let view = base(root);
     let mut cap = capability();
     let mut overlay = Overlay::new();
     let id = overlay.intern(b"new content\n".to_vec());
@@ -670,14 +670,14 @@ fn seal_a_proposal() -> (ProposedTransaction<Sha1>, Oid) {
     let receipt = PositionReceipt {
         repository_id: repository_id(),
         base_rcr_id: rcr_id(),
-        base_tree_oid: root.clone(),
-        proposed_tree_oid: plan.root_tree().clone(),
+        base_tree_oid: root,
+        proposed_tree_oid: *plan.root_tree(),
         touched_paths: overlay.touched_paths(),
     };
     let intents = vec![ProposedRefIntent {
         name: b"refs/heads/main".to_vec(),
-        expected: ExpectedRef::Exactly { oid: root.clone() },
-        new: plan.root_tree().clone(),
+        expected: ExpectedRef::Exactly { oid: root },
+        new: *plan.root_tree(),
     }];
     let proposal =
         ProposedTransaction::seal(WorkspaceId::from_bytes([1; 16]), &plan, receipt, intents)
@@ -704,7 +704,7 @@ fn a_proposal_cannot_publish_itself() {
 #[test]
 fn sealing_refuses_malformed_proposals() {
     let (source, root) = fixture();
-    let view = base(root.clone());
+    let view = base(root);
     let mut cap = capability();
     let overlay = Overlay::new();
     let plan = planner()
@@ -714,8 +714,8 @@ fn sealing_refuses_malformed_proposals() {
     let receipt = || PositionReceipt {
         repository_id: repository_id(),
         base_rcr_id: rcr_id(),
-        base_tree_oid: root.clone(),
-        proposed_tree_oid: plan.root_tree().clone(),
+        base_tree_oid: root,
+        proposed_tree_oid: *plan.root_tree(),
         touched_paths: Vec::new(),
     };
     let workspace = WorkspaceId::from_bytes([1; 16]);
@@ -729,12 +729,12 @@ fn sealing_refuses_malformed_proposals() {
         ProposedRefIntent {
             name: b"refs/heads/main".to_vec(),
             expected: ExpectedRef::Absent,
-            new: plan.root_tree().clone(),
+            new: *plan.root_tree(),
         },
         ProposedRefIntent {
             name: b"refs/heads/main".to_vec(),
             expected: ExpectedRef::Absent,
-            new: plan.root_tree().clone(),
+            new: *plan.root_tree(),
         },
     ];
     assert!(matches!(
@@ -749,7 +749,7 @@ fn sealing_refuses_malformed_proposals() {
     let one = vec![ProposedRefIntent {
         name: b"refs/heads/main".to_vec(),
         expected: ExpectedRef::Absent,
-        new: plan.root_tree().clone(),
+        new: *plan.root_tree(),
     }];
     assert!(matches!(
         ProposedTransaction::seal(workspace, &plan, wrong_tree, one.clone()),
@@ -801,7 +801,7 @@ fn directory_entries_sort_as_though_they_ended_in_a_slash() {
         entry(b"100644", b"a.txt", &sibling),
     ]);
 
-    let view = base(root.clone());
+    let view = base(root);
     let mut cap = TreeCapability::new(
         WorkspaceId::from_bytes([1; 16]),
         repository_id(),

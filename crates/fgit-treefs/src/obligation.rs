@@ -4,7 +4,7 @@
 //! the way to a published snapshot, reserved budget. AGENTS.md §3.2 requires
 //! such an effect to be a typed obligation with reserve/commit/abort rather
 //! than a value that is merely dropped, and `fgit-resource` owns that
-//! machinery. This module binds TreeFS to it instead of inventing a parallel
+//! machinery. This module binds `TreeFS` to it instead of inventing a parallel
 //! lifecycle.
 //!
 //! The class is [`ObligationClass::WorkspaceLease`] — "one workspace overlay

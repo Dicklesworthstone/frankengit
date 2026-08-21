@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Git TreeFS core: immutable base views, capability-scoped copy-on-write
+//! Git `TreeFS` core: immutable base views, capability-scoped copy-on-write
 //! overlays, a typed edit-intent log, and workspace snapshots with explicit
 //! staged/visible/durable epochs.
 //!
@@ -24,7 +24,7 @@
 //! # What this crate is not
 //!
 //! It does not fetch objects: the object-source boundary is a trait the caller
-//! implements, so TreeFS decides *what* to read and *whether it is authorised*,
+//! implements, so `TreeFS` decides *what* to read and *whether it is authorised*,
 //! then verifies what comes back. FUSE and sparse-directory adapters and
 //! export-to-Git belong to FG-026c and FG-052 and are deliberately absent.
 //!
@@ -42,6 +42,7 @@ pub mod capability;
 pub mod export;
 pub mod intent;
 pub mod journal;
+pub mod materialize;
 pub mod obligation;
 pub mod overlay;
 pub mod path;
@@ -58,6 +59,7 @@ pub use intent::{
     TreeNetEffect,
 };
 pub use journal::{CancellationState, ExportJournal, ExportPhase, JournalRefusal, JournalStep};
+pub use materialize::{Compression, LooseObject, MaterializeRefusal, ReferenceLayout, materialize};
 pub use obligation::{
     WorkspaceAbortReason, WorkspaceLease, WorkspaceLeaseAbort, WorkspaceLeaseCommit,
     WorkspaceLeaseReservation,

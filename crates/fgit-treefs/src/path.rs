@@ -1,7 +1,7 @@
 //! Canonical repository path bytes and the refusals that keep them inside a
 //! workspace root.
 //!
-//! Path handling is the security core of TreeFS (`docs/GIT_TREE_FS.md` §3.3,
+//! Path handling is the security core of `TreeFS` (`docs/GIT_TREE_FS.md` §3.3,
 //! §5, §15). Everything else in this crate is capability-relative to a
 //! [`TreePath`], so a path that normalises wrongly is not a cosmetic bug: it is
 //! a workspace escape. The parser is therefore total and refuses by name rather

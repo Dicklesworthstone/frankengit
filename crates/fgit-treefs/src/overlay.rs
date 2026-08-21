@@ -66,7 +66,7 @@ impl Display for ContentId {
     }
 }
 
-/// A Git file mode, as the closed set TreeFS will create.
+/// A Git file mode, as the closed set `TreeFS` will create.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum FileMode {
     /// `100644`.
@@ -86,9 +86,9 @@ impl FileMode {
         }
     }
 
-    /// Parses canonical mode bytes, refusing anything TreeFS will not create.
+    /// Parses canonical mode bytes, refusing anything `TreeFS` will not create.
     #[must_use]
-    pub fn from_octal_bytes(bytes: &[u8]) -> Option<Self> {
+    pub const fn from_octal_bytes(bytes: &[u8]) -> Option<Self> {
         match bytes {
             b"100644" => Some(Self::Regular),
             b"100755" => Some(Self::Executable),

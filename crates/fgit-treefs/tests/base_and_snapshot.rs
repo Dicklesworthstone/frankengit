@@ -125,7 +125,7 @@ fn fixture() -> (MemorySource, Oid) {
     (source, root)
 }
 
-fn repository_id() -> RepositoryId {
+const fn repository_id() -> RepositoryId {
     RepositoryId::from_bytes([7; 16])
 }
 
@@ -141,7 +141,7 @@ fn base(root: Oid) -> BaseView<Sha1> {
     BaseView::new(
         repository_id(),
         rcr_id(),
-        root.clone(),
+        root,
         root,
         limits(),
         PathPolicy::default(),
@@ -434,7 +434,7 @@ fn snapshot_at(root: Oid, overlay: &Overlay, epochs: EpochSet) -> WorkspaceSnaps
         WorkspaceId::from_bytes([1; 16]),
         repository_id(),
         rcr_id(),
-        root.clone(),
+        root,
         root,
         OverlayRoot::of(overlay),
         epochs,
@@ -457,7 +457,7 @@ fn snapshots_are_immutable_against_later_overlay_edits() {
         },
     );
 
-    let snapshot = snapshot_at(root.clone(), &overlay, EpochSet::new().stage());
+    let snapshot = snapshot_at(root, &overlay, EpochSet::new().stage());
     let bytes_before = snapshot.canonical_bytes().expect("snapshot encodes");
     let digest_before = snapshot.snapshot_digest().expect("snapshot digests");
 
@@ -521,8 +521,8 @@ fn session_refuses_rollback_but_accepts_advance() {
     let (_, root) = fixture();
     let overlay = Overlay::new();
 
-    let first = snapshot_at(root.clone(), &overlay, EpochSet::new().stage());
-    let second = snapshot_at(root.clone(), &overlay, EpochSet::new().stage().stage());
+    let first = snapshot_at(root, &overlay, EpochSet::new().stage());
+    let second = snapshot_at(root, &overlay, EpochSet::new().stage().stage());
 
     let mut session = SessionRecord::open(first.clone());
     assert_eq!(session.adopted_count(), 1);
@@ -551,15 +551,15 @@ fn session_refuses_rollback_but_accepts_advance() {
 fn session_refuses_foreign_workspace_and_base() {
     let (_, root) = fixture();
     let overlay = Overlay::new();
-    let first = snapshot_at(root.clone(), &overlay, EpochSet::new().stage());
+    let first = snapshot_at(root, &overlay, EpochSet::new().stage());
     let mut session = SessionRecord::open(first);
 
     let foreign_workspace = WorkspaceSnapshotBody::new(
         WorkspaceId::from_bytes([2; 16]),
         repository_id(),
         rcr_id(),
-        root.clone(),
-        root.clone(),
+        root,
+        root,
         OverlayRoot::of(&overlay),
         EpochSet::new().stage().stage(),
     );
@@ -573,7 +573,7 @@ fn session_refuses_foreign_workspace_and_base() {
         WorkspaceId::from_bytes([1; 16]),
         repository_id(),
         rcr_id(),
-        other_root.clone(),
+        other_root,
         other_root,
         OverlayRoot::of(&overlay),
         EpochSet::new().stage().stage(),

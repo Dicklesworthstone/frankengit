@@ -6,7 +6,7 @@
 //!
 //! # Why this crate does not fetch
 //!
-//! [`ObjectSource`] is a trait the caller implements. TreeFS decides *what* to
+//! [`ObjectSource`] is a trait the caller implements. `TreeFS` decides *what* to
 //! read and *whether the capability permits it*, then verifies what comes back.
 //! Owning the transport here would drag the fabric, ATP, and a runtime into a
 //! pure tree model, and would put the authorisation decision and the fetch in
@@ -235,7 +235,7 @@ pub struct BaseView<A: GitHashAlgorithm> {
 impl<A: GitHashAlgorithm> BaseView<A> {
     /// Pins a base view to an exact repository state.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         repository_id: RepositoryId,
         base_rcr_id: RepositoryCommitId,
         base_commit_oid: GitOid<A>,
@@ -326,7 +326,7 @@ impl<A: GitHashAlgorithm> BaseView<A> {
         path: &TreePath,
         now: u64,
     ) -> Result<BaseEntry<A>, BaseError> {
-        let mut tree_oid = self.base_tree_oid.clone();
+        let mut tree_oid = self.base_tree_oid;
         let mut walked: Option<TreePath> = None;
 
         let components: Vec<&[u8]> = path.components().collect();
@@ -351,7 +351,7 @@ impl<A: GitHashAlgorithm> BaseView<A> {
                 .find(|entry| entry.name == component)
                 .ok_or_else(|| BaseError::NotFound { path: here.clone() })?;
 
-            let entry = self.classify(&found)?;
+            let entry = classify(&found)?;
 
             if index == last_index {
                 return Ok(entry);
@@ -383,14 +383,14 @@ impl<A: GitHashAlgorithm> BaseView<A> {
         now: u64,
     ) -> Result<Vec<(Vec<u8>, BaseEntry<A>)>, BaseError> {
         let (tree_oid, scope) = match directory {
-            None => (self.base_tree_oid.clone(), None),
+            None => (self.base_tree_oid, None),
             Some(path) => match self.resolve(source, capability, path, now)? {
                 BaseEntry::Directory { oid } => (oid, Some(path.clone())),
                 _ => return Err(BaseError::NotADirectory { path: path.clone() }),
             },
         };
 
-        let probe = scope.clone().unwrap_or(TreePath::parse(
+        let probe = scope.unwrap_or(TreePath::parse(
             b".treefs-root",
             &PathPolicy {
                 refuse_git_metadata: false,
@@ -408,25 +408,30 @@ impl<A: GitHashAlgorithm> BaseView<A> {
 
         let mut out = Vec::with_capacity(entries.len());
         for entry in entries {
-            let classified = self.classify(&entry)?;
+            let classified = classify(&entry)?;
             out.push((entry.name.clone(), classified));
         }
         Ok(out)
     }
+}
 
-    fn classify(&self, entry: &TreeEntry) -> Result<BaseEntry<A>, BaseError> {
-        let oid = oid_from_bytes::<A>(&entry.object_id)?;
-        let mode: &[u8] = &entry.mode;
-        Ok(match mode {
-            b"40000" | b"040000" => BaseEntry::Directory { oid },
-            b"120000" => BaseEntry::Symlink { oid },
-            b"160000" => BaseEntry::Submodule { oid },
-            _ => BaseEntry::File {
-                oid,
-                mode: entry.mode.clone(),
-            },
-        })
-    }
+/// Classifies one raw tree entry into a typed base entry.
+///
+/// A free function rather than a method: it reads nothing from the view, and a
+/// `&self` it never touches would imply a dependence on view state that is not
+/// there.
+fn classify<A: GitHashAlgorithm>(entry: &TreeEntry) -> Result<BaseEntry<A>, BaseError> {
+    let oid = oid_from_bytes::<A>(&entry.object_id)?;
+    let mode: &[u8] = &entry.mode;
+    Ok(match mode {
+        b"40000" | b"040000" => BaseEntry::Directory { oid },
+        b"120000" => BaseEntry::Symlink { oid },
+        b"160000" => BaseEntry::Submodule { oid },
+        _ => BaseEntry::File {
+            oid,
+            mode: entry.mode.clone(),
+        },
+    })
 }
 
 /// Converts raw native reference bytes into a typed identity.

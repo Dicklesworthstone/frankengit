@@ -267,13 +267,13 @@ impl IntentEvaluation {
 
     /// How many intents were evaluated.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.outcomes.len()
     }
 
     /// Whether nothing was evaluated.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.outcomes.is_empty()
     }
 
@@ -354,13 +354,13 @@ impl IntentLog {
 
     /// How many intents are recorded.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.intents.len()
     }
 
     /// Whether the log is empty.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.intents.is_empty()
     }
 
@@ -413,9 +413,12 @@ fn supersede(
     index: usize,
     inverse: bool,
 ) {
-    if let Some(previous) = owner.insert(path.clone(), index) {
-        if let Some(slot) = evaluation.outcomes.get_mut(previous) {
-            if matches!(slot, NetEffect::Survives { .. }) {
+    if let Some(previous) = owner.insert(path.clone(), index)
+        && let Some(slot) = evaluation.outcomes.get_mut(previous)
+        && matches!(slot, NetEffect::Survives { .. })
+    {
+        {
+            {
                 *slot = NetEffect::NoOp(if inverse {
                     NoOpReason::InverseCancellation { by_index: index }
                 } else {
@@ -462,10 +465,10 @@ fn apply_one(
                 mode: *mode,
                 class: entry_class.clone(),
             };
-            if let OverlayLookup::Present(existing) = overlay.lookup(path) {
-                if existing == &candidate {
-                    return NetEffect::NoOp(NoOpReason::AlreadyIdentical);
-                }
+            if let OverlayLookup::Present(existing) = overlay.lookup(path)
+                && existing == &candidate
+            {
+                return NetEffect::NoOp(NoOpReason::AlreadyIdentical);
             }
             supersede(owner, evaluation, path, index, false);
             overlay.put(path.clone(), candidate);
@@ -478,10 +481,10 @@ fn apply_one(
             NetEffect::Survives { path: path.clone() }
         }
         TreeEditIntent::CreateDirectory { path } => {
-            if let OverlayLookup::Present(existing) = overlay.lookup(path) {
-                if !matches!(existing, OverlayEntry::Directory) {
-                    return NetEffect::Error(IntentError::PathTypeConflict { path: path.clone() });
-                }
+            if let OverlayLookup::Present(existing) = overlay.lookup(path)
+                && !matches!(existing, OverlayEntry::Directory)
+            {
+                return NetEffect::Error(IntentError::PathTypeConflict { path: path.clone() });
             }
             supersede(owner, evaluation, path, index, false);
             overlay.put(path.clone(), OverlayEntry::Directory);

@@ -1,4 +1,4 @@
-//! Path-security corpus for TreeFS.
+//! Path-security corpus for `TreeFS`.
 //!
 //! Every planted negative is paired with a near-identical permitted case that
 //! proceeds. A refusal-only suite would pass just as well against a parser that

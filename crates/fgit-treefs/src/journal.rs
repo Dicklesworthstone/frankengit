@@ -15,7 +15,7 @@
 //! # The rule this module exists to enforce
 //!
 //! **No valid partial publication before authority selection.** Objects reach
-//! [`ExportPhase::Staged`] and stop. Nothing in TreeFS can move them to visible
+//! [`ExportPhase::Staged`] and stop. Nothing in `TreeFS` can move them to visible
 //! or durable, because a workspace never holds publication authority — only a
 //! successful conditional replace of the exact predecessor authority head
 //! publishes anything (AGENTS.md §5.1), and that happens elsewhere.
@@ -50,7 +50,7 @@ pub enum ExportPhase {
     /// unreferenced by any authority and therefore collectable.
     Staged,
     /// The proposal is sealed and handed to the transaction layer. A crash here
-    /// leaves a proposal that either was or was not accepted — TreeFS cannot
+    /// leaves a proposal that either was or was not accepted — `TreeFS` cannot
     /// tell, and must not guess.
     Proposed,
     /// The lease settled, one way or the other. Terminal.
@@ -87,7 +87,7 @@ impl ExportPhase {
         matches!(self, Self::Staged | Self::Proposed | Self::Settled)
     }
 
-    /// Whether TreeFS can still decide the outcome by itself.
+    /// Whether `TreeFS` can still decide the outcome by itself.
     ///
     /// False from [`Self::Proposed`] onwards: once a proposal is handed over,
     /// only the authority layer knows whether it was accepted, and a client
@@ -177,7 +177,7 @@ pub enum JournalRefusal {
         /// The phase the export actually reached.
         phase: ExportPhase,
     },
-    /// TreeFS was asked to decide an outcome only the authority layer knows.
+    /// `TreeFS` was asked to decide an outcome only the authority layer knows.
     OutcomeNotLocallyDecidable {
         /// The phase the export reached.
         phase: ExportPhase,
@@ -254,7 +254,7 @@ pub struct ExportJournal {
 impl ExportJournal {
     /// Opens a journal at [`ExportPhase::Unstarted`].
     #[must_use]
-    pub fn open(workspace_id: WorkspaceId) -> Self {
+    pub const fn open(workspace_id: WorkspaceId) -> Self {
         Self {
             workspace_id,
             phase: ExportPhase::Unstarted,
@@ -288,7 +288,7 @@ impl ExportJournal {
     /// The epochs this export has reached.
     ///
     /// `visible` and `durable` stay at zero for the whole life of an export,
-    /// because TreeFS cannot advance them.
+    /// because `TreeFS` cannot advance them.
     #[must_use]
     pub const fn epochs(&self) -> EpochSet {
         self.epochs
@@ -373,7 +373,7 @@ impl ExportJournal {
 
     /// Answers whether the exported work is durable.
     ///
-    /// Always a refusal. TreeFS stages; it never makes anything durable, and a
+    /// Always a refusal. `TreeFS` stages; it never makes anything durable, and a
     /// method that could return `true` here would be a lie waiting to happen.
     pub const fn assert_durable(&self) -> Result<(), JournalRefusal> {
         Err(JournalRefusal::NotDurable { phase: self.phase })
@@ -387,7 +387,7 @@ impl ExportJournal {
         Err(JournalRefusal::NotVisible { phase: self.phase })
     }
 
-    /// Whether TreeFS can still decide this export's outcome alone.
+    /// Whether `TreeFS` can still decide this export's outcome alone.
     pub const fn local_outcome(&self) -> Result<ExportPhase, JournalRefusal> {
         if self.phase.outcome_is_locally_decidable() {
             Ok(self.phase)
