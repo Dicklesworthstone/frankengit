@@ -191,7 +191,7 @@ pub trait AsyncAuthorityStore: Sync {
     /// Publish terminal outcome entries **and** replace the head in ONE
     /// linearization point.
     ///
-    /// This is the primitive GoldLotus's §5.2 atomicity ruling requires, and it
+    /// This is the primitive the §5.2 atomicity ruling requires, and it
     /// exists because the obvious composition of the other two operations is
     /// unsound.
     ///

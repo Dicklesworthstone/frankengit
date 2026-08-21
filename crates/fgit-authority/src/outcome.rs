@@ -439,10 +439,7 @@ where
     let mut walked = 0_usize;
     let mut found: Vec<(TxId, TerminalOutcome)> = Vec::new();
 
-    loop {
-        let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? else {
-            break;
-        };
+    while let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? {
         let batch = read_batch_body(store, batch_id)?;
         for tx_id in tx_ids {
             if let Some(outcome) = scan_batch_for(&batch, *tx_id) {
@@ -747,7 +744,7 @@ where
 /// so the two surfaces cannot answer the same situation differently — the
 /// drivers differ only in how they perform I/O, never in what they conclude.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum DuplicateVerdict {
+enum DuplicateVerdict {
     /// The walk observed a head other than the one being replaced.
     Lost,
     /// Every decision that already stands is the one being replayed.
@@ -787,7 +784,7 @@ fn proposed_outcome(batch: &RepositoryDecisionBatchBody, tx_id: TxId) -> Option<
 /// retry and is exactly what a lost response produces; presenting a *different*
 /// decision for the same sealed transaction is the one-terminal-decision rule
 /// being broken, and fails closed.
-pub(crate) fn classify_duplicates(
+fn classify_duplicates(
     observed: AuthorityVersionToken,
     expected: AuthorityVersionToken,
     decided: &[(TxId, TerminalOutcome)],
@@ -803,7 +800,7 @@ pub(crate) fn classify_duplicates(
         };
         if proposed != *existing {
             return DuplicateVerdict::Conflict {
-                indexed: Box::new(existing.clone()),
+                indexed: Box::new(*existing),
                 replayed: Box::new(proposed),
             };
         }
@@ -863,7 +860,7 @@ pub fn authority_head_identity(
 /// Public because a caller that builds a batch must be able to name it without
 /// reconstructing the derivation: the identity domain and codec version are
 /// this crate's to know, and a caller that spells them out is duplicating a
-/// rule it cannot be held to. Requested by YellowLotus for the fsqlite crash
+/// rule it cannot be held to. Requested for the fsqlite crash
 /// matrix, where the alternative was a dev-dependency on `fgit-crypto` solely
 /// to name an `IdentityDomain`.
 ///
@@ -1068,10 +1065,7 @@ where
     let mut walked = 0_usize;
     let mut found: Vec<(TxId, TerminalOutcome)> = Vec::new();
 
-    loop {
-        let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? else {
-            break;
-        };
+    while let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? {
         let batch = read_batch_body_async(store, cx, batch_id).await?;
         for tx_id in tx_ids {
             if let Some(outcome) = scan_batch_for(&batch, *tx_id) {

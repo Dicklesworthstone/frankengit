@@ -710,14 +710,8 @@ impl AsyncAuthorityStore for AsyncView {
 
 /// Drive an already-resolved future to its value.
 fn poll_ready<F: Future>(future: F) -> F::Output {
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
-    struct NoopWake;
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    use std::task::{Context, Poll, Waker};
+    let mut context = Context::from_waker(Waker::noop());
     let mut future = Box::pin(future);
     match future.as_mut().poll(&mut context) {
         Poll::Ready(value) => value,
@@ -810,7 +804,7 @@ fn current_token(store: &MemoryAuthorityStore) -> AuthorityVersionToken {
 }
 
 /// A token that no longer names the current head.
-fn stale_token(store: &MemoryAuthorityStore) -> AuthorityVersionToken {
+const fn stale_token(store: &MemoryAuthorityStore) -> AuthorityVersionToken {
     let _ = store;
     AuthorityVersionToken::from_opaque_bytes([0x7E; 16])
 }
@@ -1198,7 +1192,7 @@ fn an_ordinal_within_kind_directive_is_unmoved_by_operations_before_it() {
 
 /// A restart after a crashed publication must retry to the SAME decision.
 ///
-/// GoldLotus's open question on the three remaining recovery verifiers: once
+/// The open question on the three remaining recovery verifiers: once
 /// they are firing again, do they also need the retry/restart read-back to fall
 /// through to stream replay, or is retargeting enough? This answers the
 /// property directly rather than waiting on the retarget.

@@ -202,7 +202,7 @@ impl FaultDirective {
     /// zero-based and both reset when a new plan is installed.
     #[must_use]
     pub fn selects(&self, absolute: OpIndex, within_kind: OpIndex, kind: AuthorityOpKind) -> bool {
-        if !self.applies_to.is_none_or(|only| only == kind) {
+        if self.applies_to.is_some_and(|only| only != kind) {
             return false;
         }
         match self.counting {
