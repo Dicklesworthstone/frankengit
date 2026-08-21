@@ -219,6 +219,27 @@ fn root_grant_is_not_a_path_grant_and_outside_scope_never_fetches() {
     ));
 }
 
+/// Root traversal is internally necessary to reach an authorised descendant,
+/// but it must not turn a raw root listing into an existence oracle for sibling
+/// names. A caller with only `docs` may learn `docs` exists; it may not learn
+/// that `src` exists merely because the base tree is rooted above both.
+#[test]
+fn root_listing_filters_outside_scope_names_before_disclosure() {
+    let (source, root) = fixture();
+    let view = view(root);
+    let mut cap = capability(vec![path(b"docs")], vec![]);
+
+    let listing = view
+        .list(&source, &mut cap, None, 0)
+        .expect("the authorised root traversal itself succeeds");
+    let names: Vec<Vec<u8>> = listing.into_iter().map(|(name, _)| name).collect();
+    assert_eq!(
+        names,
+        vec![b"docs".to_vec()],
+        "a root listing must filter siblings outside the TreeCapability before any caller can disclose them"
+    );
+}
+
 /// A parent with ten bytes total after spending two has eight remaining across
 /// its delegation tree. Issuing two children must not let them each consume the
 /// same remaining eight bytes.
