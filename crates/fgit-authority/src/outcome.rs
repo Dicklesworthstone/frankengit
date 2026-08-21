@@ -93,9 +93,9 @@ pub enum OutcomeFailure {
     /// second source of truth, which §8.4 forbids by name.
     AcceleratorConflict {
         /// What the accelerator claims.
-        indexed: TerminalOutcome,
+        indexed: Box<TerminalOutcome>,
         /// What the stream proves.
-        replayed: TerminalOutcome,
+        replayed: Box<TerminalOutcome>,
     },
     /// A body the stream references is not present.
     StreamBodyMissing {
@@ -108,7 +108,7 @@ pub enum OutcomeFailure {
         limit: usize,
     },
     /// Sealing, storage, identity, or codec failed underneath.
-    Seal(SealFailure),
+    Seal(Box<SealFailure>),
     /// A canonical body could not be encoded or decoded.
     Codec(CodecRefusal),
 }
@@ -136,7 +136,7 @@ impl std::error::Error for OutcomeFailure {}
 
 impl From<SealFailure> for OutcomeFailure {
     fn from(failure: SealFailure) -> Self {
-        Self::Seal(failure)
+        Self::Seal(Box::new(failure))
     }
 }
 
@@ -148,13 +148,13 @@ impl From<CodecRefusal> for OutcomeFailure {
 
 impl From<crate::identity::IdentityRefusal> for OutcomeFailure {
     fn from(refusal: crate::identity::IdentityRefusal) -> Self {
-        Self::Seal(SealFailure::Identity(refusal))
+        Self::Seal(Box::new(SealFailure::Identity(Box::new(refusal))))
     }
 }
 
 impl From<crate::vocabulary::AuthorityFailure> for OutcomeFailure {
     fn from(failure: crate::vocabulary::AuthorityFailure) -> Self {
-        Self::Seal(SealFailure::Store(failure))
+        Self::Seal(Box::new(SealFailure::Store(failure)))
     }
 }
 
@@ -362,21 +362,24 @@ where
             Ok(OutcomeLookup::Decided(left))
         }
         (OutcomeLookup::Decided(indexed), OutcomeLookup::Decided(replayed)) => {
-            Err(OutcomeFailure::AcceleratorConflict { indexed, replayed })
+            Err(OutcomeFailure::AcceleratorConflict {
+                indexed: Box::new(indexed),
+                replayed: Box::new(replayed),
+            })
         }
         // An accelerator that claims a decision the stream does not contain is
         // the dangerous direction, and it is the one that fails closed.
         (OutcomeLookup::Decided(indexed), OutcomeLookup::Undecided) => {
             Err(OutcomeFailure::AcceleratorConflict {
-                indexed,
-                replayed: indexed,
+                indexed: Box::new(indexed),
+                replayed: Box::new(indexed),
             })
         }
     }
 }
 
 /// The schema pinning the outcome-index tree construction.
-fn outcome_index_schema() -> fgit_types::label::SchemaId {
+const fn outcome_index_schema() -> fgit_types::label::SchemaId {
     fgit_types::label::SchemaId::new(
         fgit_types::label::SchemaFamily::from_static("outcome-index"),
         1,
@@ -467,18 +470,26 @@ where
     Ok(store.initialize_head(head_key, generation, &bytes)?)
 }
 
+/// What one successful publication established.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublishedBatch {
+    /// The head this publication established.
+    pub head: HeadReadReceipt,
+    /// The batch that became canonical.
+    pub batch_id: RepositoryDecisionBatchId,
+    /// How many accelerator entries this publication added.
+    pub indexed: usize,
+}
+
 /// The outcome of publishing one decision batch.
+///
+/// The success payload is boxed: a published head carries canonical bytes and a
+/// domain-pinned identity, so inlining it would make every returned value —
+/// including the empty loss case — carry that weight.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PublicationOutcome {
     /// The batch is canonical and the accelerator entries are written.
-    Published {
-        /// The head this publication established.
-        head: HeadReadReceipt,
-        /// The batch that became canonical.
-        batch_id: RepositoryDecisionBatchId,
-        /// How many accelerator entries this publication added.
-        indexed: usize,
-    },
+    Published(Box<PublishedBatch>),
     /// The head moved before the conditional replacement landed.
     ///
     /// Nothing was published; the staged bodies remain staged and unreferenced.
@@ -545,16 +556,18 @@ where
                         OutcomeLookup::Undecided => entry,
                     };
                 return Err(OutcomeFailure::AcceleratorConflict {
-                    indexed: existing,
-                    replayed: entry,
+                    indexed: Box::new(existing),
+                    replayed: Box::new(entry),
                 });
             }
         }
     }
 
-    Ok(PublicationOutcome::Published {
+    Ok(PublicationOutcome::Published(Box::new(PublishedBatch {
         head: receipt,
         batch_id,
         indexed,
-    })
+    })))
 }
+
+const _: () = assert!(size_of::<OutcomeFailure>() <= crate::request::MAX_ERROR_BYTES);

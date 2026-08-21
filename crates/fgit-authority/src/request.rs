@@ -54,14 +54,14 @@ pub enum RequestRefusal {
     /// Merging them would invent a policy the client did not state.
     RefCommandDuplicated {
         /// The ref named twice.
-        name: RefName,
+        name: Box<RefName>,
     },
     /// Two scoped entries share a namespace and key.
     ScopedEntryDuplicated {
         /// The namespace named twice.
-        namespace: AsciiSlug,
+        namespace: Box<AsciiSlug>,
         /// The key named twice.
-        key: AsciiSlug,
+        key: Box<AsciiSlug>,
     },
     /// An object id does not belong to the repository's declared object format.
     ///
@@ -219,7 +219,7 @@ impl RefCommand {
         })
     }
 
-    fn object_ids(&self) -> [Option<GitOid>; 2] {
+    const fn object_ids(&self) -> [Option<GitOid>; 2] {
         let old = match self.expected_old {
             ExpectedOld::Exactly(oid) => Some(oid),
             ExpectedOld::Absent | ExpectedOld::Unspecified => None,
@@ -363,7 +363,7 @@ impl SemanticRequest {
         for window in ref_commands.windows(2) {
             if window[0].name == window[1].name {
                 return Err(RequestRefusal::RefCommandDuplicated {
-                    name: window[0].name.clone(),
+                    name: Box::new(window[0].name.clone()),
                 });
             }
         }
@@ -376,8 +376,8 @@ impl SemanticRequest {
         for window in scoped_entries.windows(2) {
             if window[0].namespace == window[1].namespace && window[0].key == window[1].key {
                 return Err(RequestRefusal::ScopedEntryDuplicated {
-                    namespace: window[0].namespace,
-                    key: window[0].key,
+                    namespace: Box::new(window[0].namespace),
+                    key: Box::new(window[0].key),
                 });
             }
         }
@@ -429,7 +429,11 @@ impl SemanticRequest {
     }
 }
 
-fn check_bound(field: &'static str, observed: usize, limit: usize) -> Result<(), RequestRefusal> {
+const fn check_bound(
+    field: &'static str,
+    observed: usize,
+    limit: usize,
+) -> Result<(), RequestRefusal> {
     if observed > limit {
         return Err(RequestRefusal::BoundExceeded {
             field,
@@ -476,3 +480,13 @@ impl CanonicalBody for SemanticRequest {
         })
     }
 }
+
+/// `clippy::result_large_err` refuses an `Err` variant past this many bytes,
+/// and it is right to: a fat error is copied through every `?` on the happy
+/// path's error edge. `fgit-types` stores digests and labels as inline bounded
+/// arrays, so anything carrying an identity or a domain tag crosses it and has
+/// to be boxed. These assertions fail the build rather than the lint, so the
+/// types cannot grow back quietly.
+pub(crate) const MAX_ERROR_BYTES: usize = 128;
+
+const _: () = assert!(size_of::<RequestRefusal>() <= MAX_ERROR_BYTES);

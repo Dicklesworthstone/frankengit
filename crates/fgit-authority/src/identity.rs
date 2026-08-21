@@ -50,9 +50,9 @@ pub enum IdentityRefusal {
     /// bodies end up sharing an identity, so it is refused rather than trusted.
     DomainMismatch {
         /// The domain the body declares.
-        expected: DomainTag,
+        expected: Box<DomainTag>,
         /// The domain the caller supplied.
-        observed: DomainTag,
+        observed: Box<DomainTag>,
     },
     /// The idempotency key exceeds its declared bound.
     IdempotencyKeyTooLong {
@@ -64,7 +64,7 @@ pub enum IdentityRefusal {
     /// The canonical encoder refused.
     Codec(CodecRefusal),
     /// The semantic request was not admissible.
-    Request(RequestRefusal),
+    Request(Box<RequestRefusal>),
 }
 
 impl core::fmt::Display for IdentityRefusal {
@@ -96,7 +96,7 @@ impl From<CodecRefusal> for IdentityRefusal {
 
 impl From<RequestRefusal> for IdentityRefusal {
     fn from(refusal: RequestRefusal) -> Self {
-        Self::Request(refusal)
+        Self::Request(Box::new(refusal))
     }
 }
 
@@ -141,7 +141,7 @@ impl IdempotencyKey {
     }
 }
 
-fn idempotency_key_schema() -> SchemaId {
+const fn idempotency_key_schema() -> SchemaId {
     SchemaId::new(SchemaFamily::from_static("idempotency-key"), 1, 0)
 }
 
@@ -159,8 +159,8 @@ pub fn canonical_body_id<B: CanonicalBody>(
 ) -> Result<InternalObjectId, IdentityRefusal> {
     if domain.domain_tag() != B::DOMAIN {
         return Err(IdentityRefusal::DomainMismatch {
-            expected: B::DOMAIN,
-            observed: domain.domain_tag(),
+            expected: Box::new(B::DOMAIN),
+            observed: Box::new(domain.domain_tag()),
         });
     }
     debug_assert_eq!(
@@ -246,3 +246,5 @@ pub fn derive_tx_id(preimage: &TxIdPreimage) -> Result<TxId, IdentityRefusal> {
     )?;
     TxId::from_internal_object_id(id).map_err(|refusal| IdentityRefusal::Codec(refusal.into()))
 }
+
+const _: () = assert!(size_of::<IdentityRefusal>() <= crate::request::MAX_ERROR_BYTES);

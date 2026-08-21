@@ -92,7 +92,7 @@ fn a_key_reused_with_a_different_request_is_rejected_before_any_seal() {
     let SealFailure::Rejected(rejection) = failure else {
         panic!("expected a pre-decision rejection, observed {failure:?}");
     };
-    let RequestRejection::IdempotencyKeyReuse { bound, attempted } = rejection;
+    let RequestRejection::IdempotencyKeyReuse { bound, attempted } = *rejection;
     assert_eq!(
         bound,
         admitted.tx_id(),

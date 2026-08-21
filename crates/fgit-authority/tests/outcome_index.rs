@@ -197,7 +197,7 @@ fn published_repository() -> (MemoryAuthorityStore, RepositoryAuthorityHeadBody)
         tenant(),
     )
     .expect("publication");
-    assert!(matches!(outcome, PublicationOutcome::Published { .. }));
+    assert!(matches!(outcome, PublicationOutcome::Published(_)));
     (store, head)
 }
 

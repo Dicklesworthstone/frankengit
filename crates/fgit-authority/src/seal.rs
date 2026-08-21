@@ -91,11 +91,11 @@ impl std::error::Error for RequestRejection {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SealFailure {
     /// The request was rejected before a seal could exist.
-    Rejected(RequestRejection),
+    Rejected(Box<RequestRejection>),
     /// The store refused or could not answer.
     Store(AuthorityFailure),
     /// An identity could not be derived.
-    Identity(IdentityRefusal),
+    Identity(Box<IdentityRefusal>),
     /// A canonical body could not be encoded or decoded.
     Codec(CodecRefusal),
     /// A derived slot key was not admissible.
@@ -136,7 +136,7 @@ impl From<AuthorityFailure> for SealFailure {
 
 impl From<IdentityRefusal> for SealFailure {
     fn from(refusal: IdentityRefusal) -> Self {
-        Self::Identity(refusal)
+        Self::Identity(Box::new(refusal))
     }
 }
 
@@ -346,12 +346,12 @@ where
                     });
                 }
             };
-            Err(SealFailure::Rejected(
+            Err(SealFailure::Rejected(Box::new(
                 RequestRejection::IdempotencyKeyReuse {
                     bound,
                     attempted: tx_id,
                 },
-            ))
+            )))
         }
     }
 }
@@ -421,3 +421,5 @@ where
         }
     }
 }
+
+const _: () = assert!(size_of::<SealFailure>() <= crate::request::MAX_ERROR_BYTES);
