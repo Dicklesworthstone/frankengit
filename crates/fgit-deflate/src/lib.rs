@@ -491,7 +491,7 @@ impl BitReader {
         Some(value)
     }
 
-    fn align_to_byte(&mut self) -> bool {
+    const fn align_to_byte(&mut self) -> bool {
         let skipped = (8 - (self.bit_position % 8)) % 8;
         if self.available_bits() < skipped {
             return false;
@@ -510,7 +510,7 @@ impl BitReader {
         self.discarded_bytes += u64::try_from(consumed_whole_bytes).unwrap_or(u64::MAX);
     }
 
-    fn has_remaining_bytes(&self) -> bool {
+    const fn has_remaining_bytes(&self) -> bool {
         self.available_bits() != 0
     }
 
@@ -1228,14 +1228,14 @@ impl Inflater {
         self.reserve_pending_output(length)?;
         for _ in 0..length {
             let index = self.window.len() - distance;
-            let byte =
-                self.window
-                    .get(index)
-                    .copied()
-                    .ok_or_else(|| InflateRefusal::DistanceTooFar {
-                        distance,
-                        available: self.window.len(),
-                    })?;
+            let byte = self
+                .window
+                .get(index)
+                .copied()
+                .ok_or(InflateRefusal::DistanceTooFar {
+                    distance,
+                    available: self.window.len(),
+                })?;
             self.emit_byte_unchecked(byte);
         }
         Ok(())
@@ -1654,8 +1654,9 @@ impl Deflater {
                 .max_pending_input_bytes
                 .saturating_sub(self.pending_input.len());
             let take = remaining.len().min(capacity);
-            self.reserve_pending_input(take)?;
             let accepted_chunk = &remaining[..take];
+            self.charge_work_units(control, take)?;
+            self.reserve_pending_input(take)?;
             self.pending_input.extend_from_slice(accepted_chunk);
             for &byte in accepted_chunk {
                 self.adler32.update(byte);
@@ -2020,7 +2021,7 @@ impl Deflater {
                 projected,
             ));
         }
-        self.writer.try_reserve(additional).map_err(|_| {
+        self.writer.try_reserve(additional).map_err(|()| {
             deflate_resource_limit(
                 Resource::Allocation,
                 self.limits.max_output_bytes,
@@ -2030,10 +2031,20 @@ impl Deflater {
     }
 
     fn charge_work(&mut self, control: &mut impl CancellationProbe) -> Result<(), DeflateRefusal> {
+        self.charge_work_units(control, 1)
+    }
+
+    fn charge_work_units(
+        &mut self,
+        control: &mut impl CancellationProbe,
+        units: usize,
+    ) -> Result<(), DeflateRefusal> {
         if control.is_cancelled() {
             return Err(DeflateRefusal::Cancelled);
         }
-        let observed = self.work_units.saturating_add(1);
+        let observed = self
+            .work_units
+            .saturating_add(u64::try_from(units).unwrap_or(u64::MAX));
         if observed > self.limits.max_work_units {
             return Err(DeflateRefusal::ResourceLimit {
                 resource: Resource::WorkUnits,
@@ -2687,10 +2698,10 @@ mod tests {
             Ok(Some((258, 1)))
         );
 
-        let encoded = deflate_zlib(&input, deflate_limits(), DeflateProfile::DEFAULT)
+        let member = deflate_zlib(&input, deflate_limits(), DeflateProfile::DEFAULT)
             .unwrap_or_else(|error| panic!("all-zero input: {error}"));
-        assert!(encoded.len() < input.len(), "maximum match must compress");
-        assert_eq!(inflate_zlib(&encoded, limits()), Ok(input));
+        assert!(member.len() < input.len(), "maximum match must compress");
+        assert_eq!(inflate_zlib(&member, limits()), Ok(input));
     }
 
     #[test]
@@ -2766,7 +2777,7 @@ mod tests {
         ));
         assert!(!encoder.is_finished());
         assert_eq!(encoder.receipt(), None);
-        assert!(encoder.take_output().is_empty());
+        assert_eq!(encoder.take_output(), Vec::new());
         assert_eq!(encoder.finish(), Err(DeflateRefusal::RefusedAfterFailure));
 
         let permitted = deflate_zlib(input, deflate_limits(), DeflateProfile::FAST_STORED)
@@ -2809,7 +2820,7 @@ mod tests {
                 ..
             })
         ));
-        assert!(encoder.take_output().is_empty());
+        assert_eq!(encoder.take_output(), Vec::new());
 
         let work_limited = DeflateLimits {
             max_work_units: 1,
@@ -2824,7 +2835,7 @@ mod tests {
                 ..
             })
         ));
-        assert!(work_encoder.take_output().is_empty());
+        assert_eq!(work_encoder.take_output(), Vec::new());
 
         let permitted = deflate_zlib(b"three", deflate_limits(), DeflateProfile::FAST_STORED)
             .unwrap_or_else(|error| panic!("near-identical permitted member: {error}"));
@@ -2853,7 +2864,7 @@ mod tests {
             Err(DeflateRefusal::Cancelled)
         );
         assert_eq!(encoder.receipt(), None);
-        assert!(encoder.take_output().is_empty());
+        assert_eq!(encoder.take_output(), Vec::new());
     }
 
     #[test]
