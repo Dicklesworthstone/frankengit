@@ -542,3 +542,625 @@ impl RegionCloseOutcome {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct LedgerEntry {
+    class: ObligationClass,
+    state: ObligationState,
+    reserved: ResourceVector,
+    charged: ResourceVector,
+}
+
+#[derive(Debug)]
+struct LedgerState {
+    region: RegionId,
+    capacity: ResourceVector,
+    available: ResourceVector,
+    consumed: ResourceVector,
+    delegated: ResourceVector,
+    grants: BTreeMap<GrantId, ResourceVector>,
+    entries: BTreeMap<ObligationId, LedgerEntry>,
+    leaks: Vec<LeakRecord>,
+    next_grant: u64,
+    next_obligation: u64,
+    leak_ordinal: u64,
+    closed: bool,
+}
+
+/// Folds a sequence of amounts, refusing to lose budget on overflow.
+///
+/// Overflow cannot occur for well-formed ledgers because every live amount was
+/// carved out of `capacity`; the saturating fallback keeps a corrupted ledger
+/// observable through [`PoolSnapshot::is_conserved`] instead of panicking
+/// inside a lock.
+fn sum_amounts<'a>(amounts: impl Iterator<Item = &'a ResourceVector>) -> ResourceVector {
+    amounts.fold(ResourceVector::ZERO, |total, amount| {
+        total.combine(amount).unwrap_or(total)
+    })
+}
+
+impl LedgerState {
+    fn granted(&self) -> ResourceVector {
+        sum_amounts(self.grants.values())
+    }
+
+    fn reserved(&self) -> ResourceVector {
+        sum_amounts(self.entries.values().map(|entry| &entry.reserved))
+    }
+
+    fn snapshot(&self) -> PoolSnapshot {
+        PoolSnapshot {
+            capacity: self.capacity,
+            available: self.available,
+            granted: self.granted(),
+            reserved: self.reserved(),
+            consumed: self.consumed,
+            delegated: self.delegated,
+        }
+    }
+
+    fn allocate_grant_id(&mut self) -> GrantId {
+        self.next_grant = self.next_grant.saturating_add(1);
+        GrantId::new(self.region, self.next_grant)
+    }
+
+    fn allocate_obligation_id(&mut self) -> ObligationId {
+        self.next_obligation = self.next_obligation.saturating_add(1);
+        ObligationId::new(self.region, self.next_obligation)
+    }
+
+    /// Moves `amount` out of the available pool into a fresh grant.
+    fn carve(&mut self, amount: ResourceVector) -> Result<GrantId, ResourceError> {
+        let (_, rest) = self.available.split(&amount)?;
+        self.available = rest;
+        let id = self.allocate_grant_id();
+        self.grants.insert(id, amount);
+        Ok(id)
+    }
+
+    /// Retires a grant and returns the amount it held.
+    fn retire(&mut self, id: GrantId) -> ResourceVector {
+        self.grants.remove(&id).unwrap_or(ResourceVector::ZERO)
+    }
+
+    fn give_back(&mut self, amount: ResourceVector) {
+        self.available = self.available.combine(&amount).unwrap_or(self.available);
+    }
+
+    fn record_leak(&mut self, subject: LeakSubject, class: LeakClass) -> LeakRecord {
+        self.leak_ordinal = self.leak_ordinal.saturating_add(1);
+        let mut reclaimed = ResourceVector::ZERO;
+        let mut obligation = None;
+        match subject {
+            LeakSubject::Grant(id) => {
+                reclaimed = self.retire(id);
+                self.give_back(reclaimed);
+            }
+            LeakSubject::Obligation(id) => {
+                if let Some(entry) = self.entries.get_mut(&id) {
+                    obligation = Some(entry.class);
+                    reclaimed = entry.reserved;
+                    entry.reserved = ResourceVector::ZERO;
+                    entry.state = entry
+                        .state
+                        .apply(LifecycleEvent::Leak)
+                        .unwrap_or(entry.state);
+                }
+                self.give_back(reclaimed);
+            }
+            LeakSubject::Region(_) => {}
+        }
+        let record = LeakRecord {
+            subject,
+            class,
+            obligation,
+            reclaimed,
+            ordinal: self.leak_ordinal,
+        };
+        self.leaks.push(record);
+        record
+    }
+
+    fn fresh(region: RegionId, capacity: ResourceVector) -> Self {
+        Self {
+            region,
+            capacity,
+            available: capacity,
+            consumed: ResourceVector::ZERO,
+            delegated: ResourceVector::ZERO,
+            grants: BTreeMap::new(),
+            entries: BTreeMap::new(),
+            leaks: Vec::new(),
+            next_grant: 0,
+            next_obligation: 0,
+            leak_ordinal: 0,
+            closed: false,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LedgerInner {
+    region: RegionId,
+    policy: LeakPolicy,
+    parent: Option<LedgerHandle>,
+    state: Mutex<LedgerState>,
+}
+
+/// A cloneable reference to one region's ledger.
+///
+/// Obligations and grants hold a handle so that dropping one can never be
+/// silent. A handle grants no authority: it records settlement and reads
+/// accounting, but it cannot create budget.
+#[derive(Clone, Debug)]
+pub struct LedgerHandle(Arc<LedgerInner>);
+
+impl LedgerHandle {
+    fn with_state<R>(&self, action: impl FnOnce(&mut LedgerState) -> R) -> R {
+        let mut state = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
+        action(&mut state)
+    }
+
+    /// The region this handle belongs to.
+    #[must_use]
+    pub fn region(&self) -> RegionId {
+        self.0.region
+    }
+
+    /// The region's leak policy.
+    #[must_use]
+    pub fn policy(&self) -> LeakPolicy {
+        self.0.policy
+    }
+
+    /// Current accounting.
+    #[must_use]
+    pub fn snapshot(&self) -> PoolSnapshot {
+        self.with_state(LedgerState::snapshot)
+    }
+
+    /// Runtime state of one obligation, if the region knows it.
+    #[must_use]
+    pub fn state_of(&self, id: ObligationId) -> Option<ObligationState> {
+        self.with_state(|state| state.entries.get(&id).map(|entry| entry.state))
+    }
+
+    /// Consumable budget charged to one obligation at settlement.
+    #[must_use]
+    pub fn charged_to(&self, id: ObligationId) -> Option<ResourceVector> {
+        self.with_state(|state| state.entries.get(&id).map(|entry| entry.charged))
+    }
+
+    /// Every leak recorded so far, in order.
+    #[must_use]
+    pub fn leaks(&self) -> Vec<LeakRecord> {
+        self.with_state(|state| state.leaks.clone())
+    }
+
+    /// Obligations the region still owes work for.
+    #[must_use]
+    pub fn outstanding(&self) -> Vec<OutstandingObligation> {
+        self.with_state(|state| collect_outstanding(state, ObligationState::is_outstanding))
+    }
+
+    fn new_guard(&self, subject: LeakSubject, class: LeakClass) -> LeakGuard {
+        LeakGuard {
+            handle: self.clone(),
+            subject,
+            class,
+            armed: true,
+        }
+    }
+
+    pub(crate) fn grant_from(&self, id: GrantId, amount: ResourceVector) -> BudgetGrant {
+        BudgetGrant::from_parts(
+            id,
+            amount,
+            self.new_guard(LeakSubject::Grant(id), LeakClass::BudgetGrantDropped),
+        )
+    }
+
+    /// Rewrites `old` to `rest` and registers `part` as a fresh grant.
+    pub(crate) fn divide_grant(
+        &self,
+        old: GrantId,
+        part: ResourceVector,
+        rest: ResourceVector,
+    ) -> BudgetGrant {
+        let carved = self.with_state(|state| {
+            state.grants.insert(old, rest);
+            let carved = state.allocate_grant_id();
+            state.grants.insert(carved, part);
+            carved
+        });
+        self.grant_from(carved, part)
+    }
+
+    /// Retires `source` and rewrites `target` to hold `total`.
+    pub(crate) fn absorb_grant(&self, target: GrantId, source: GrantId, total: ResourceVector) {
+        self.with_state(|state| {
+            state.retire(source);
+            state.grants.insert(target, total);
+        });
+    }
+
+    pub(crate) fn release_grant(&self, id: GrantId) {
+        self.with_state(|state| {
+            let amount = state.retire(id);
+            state.give_back(amount);
+        });
+    }
+
+    /// Budget one obligation still holds, if the region knows it.
+    #[must_use]
+    pub fn reserved_for(&self, id: ObligationId) -> Option<ResourceVector> {
+        self.with_state(|state| state.entries.get(&id).map(|entry| entry.reserved))
+    }
+
+    pub(crate) fn commit_reservation(
+        &self,
+        id: ObligationId,
+        actual: &ResourceVector,
+    ) -> Result<ObligationState, LifecycleError> {
+        self.settle(id, LifecycleEvent::Commit, actual)
+    }
+
+    pub(crate) fn abort_reservation(
+        &self,
+        id: ObligationId,
+        spent: &ResourceVector,
+    ) -> Result<ObligationState, LifecycleError> {
+        self.settle(id, LifecycleEvent::Abort, spent)
+    }
+
+    fn settle(
+        &self,
+        id: ObligationId,
+        event: LifecycleEvent,
+        spent: &ResourceVector,
+    ) -> Result<ObligationState, LifecycleError> {
+        self.with_state(|state| {
+            let entry = *state
+                .entries
+                .get(&id)
+                .ok_or(LifecycleError::UnknownObligation(id))?;
+            let next = entry.state.apply(event)?;
+            let charged = spent.mask(GradeDisposition::Consumable);
+            let (_, returned) = entry
+                .reserved
+                .split(spent)
+                .and_then(|_| entry.reserved.split(&charged))
+                .map_err(LifecycleError::ChargeExceedsReservation)?;
+            state.consumed = state.consumed.combine(&charged).unwrap_or(state.consumed);
+            state.give_back(returned);
+            if let Some(slot) = state.entries.get_mut(&id) {
+                slot.state = next;
+                slot.charged = charged;
+                slot.reserved = ResourceVector::ZERO;
+            }
+            Ok(next)
+        })
+    }
+
+    /// Applies a lifecycle event that moves no budget.
+    ///
+    /// Crate-private on purpose: the owned two-phase values in
+    /// [`crate::twophase`] are the ledger's only writer, so an external caller
+    /// cannot desynchronize the runtime state from the type state. Journal
+    /// replay and other reconstruction paths use the pure, public
+    /// [`ObligationState::apply`] instead.
+    pub(crate) fn mark(
+        &self,
+        id: ObligationId,
+        event: LifecycleEvent,
+    ) -> Result<ObligationState, LifecycleError> {
+        self.with_state(|state| {
+            let entry = state
+                .entries
+                .get_mut(&id)
+                .ok_or(LifecycleError::UnknownObligation(id))?;
+            let next = entry.state.apply(event)?;
+            entry.state = next;
+            Ok(next)
+        })
+    }
+
+    fn record_leak(&self, subject: LeakSubject, class: LeakClass) {
+        let record = self.with_state(|state| state.record_leak(subject, class));
+        if self.0.policy == LeakPolicy::Panic && !std::thread::panicking() {
+            panic!("obligation leak under fail-fast policy: {record}");
+        }
+    }
+}
+
+fn collect_outstanding(
+    state: &LedgerState,
+    predicate: fn(ObligationState) -> bool,
+) -> Vec<OutstandingObligation> {
+    state
+        .entries
+        .iter()
+        .filter(|(_, entry)| predicate(entry.state))
+        .map(|(id, entry)| OutstandingObligation {
+            id: *id,
+            class: entry.class,
+            state: entry.state,
+            reserved: entry.reserved,
+        })
+        .collect()
+}
+
+/// Drop-time leak detector attached to every value that owns responsibility.
+#[derive(Debug)]
+pub(crate) struct LeakGuard {
+    handle: LedgerHandle,
+    subject: LeakSubject,
+    class: LeakClass,
+    armed: bool,
+}
+
+impl LeakGuard {
+    pub(crate) fn handle(&self) -> LedgerHandle {
+        self.handle.clone()
+    }
+
+    pub(crate) const fn subject(&self) -> LeakSubject {
+        self.subject
+    }
+
+    pub(crate) const fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    pub(crate) const fn rearm_as(&mut self, class: LeakClass) {
+        self.class = class;
+        self.armed = true;
+    }
+}
+
+impl Drop for LeakGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.handle.record_leak(self.subject, self.class);
+        }
+    }
+}
+
+/// The owner of one region's obligations and budget.
+///
+/// A ledger is created with an explicit capacity and leak policy, hands out
+/// [`BudgetGrant`] values, converts grants into obligations, and must be closed
+/// explicitly. Dropping it without [`ObligationLedger::close`] is itself a leak.
+#[must_use = "a region ledger must be closed explicitly so that quiescence is proved, not assumed"]
+#[derive(Debug)]
+pub struct ObligationLedger {
+    handle: LedgerHandle,
+    guard: LeakGuard,
+}
+
+impl ObligationLedger {
+    /// Creates a root region with an explicit capacity.
+    ///
+    /// A root capacity is the declared boundary of the algebra: it is the one
+    /// place an amount comes from nowhere, and it is a named profile input
+    /// rather than an ambient default.
+    pub fn root(region: RegionId, policy: LeakPolicy, capacity: ResourceVector) -> Self {
+        Self::from_inner(LedgerInner {
+            region,
+            policy,
+            parent: None,
+            state: Mutex::new(LedgerState::fresh(region, capacity)),
+        })
+    }
+
+    fn from_inner(inner: LedgerInner) -> Self {
+        let region = inner.region;
+        let handle = LedgerHandle(Arc::new(inner));
+        let guard = handle.new_guard(
+            LeakSubject::Region(region),
+            LeakClass::LedgerDroppedWithoutClose,
+        );
+        Self { handle, guard }
+    }
+
+    /// Creates a child region funded entirely by `grant`.
+    ///
+    /// This is the only constructor for a non-root region, which is how "a
+    /// child region cannot mint authority or budget from nothing" is enforced:
+    /// the child's capacity is exactly the parent budget handed to it, and the
+    /// parent records that amount as delegated until the child closes.
+    pub fn child(&self, region: RegionId, policy: LeakPolicy, grant: BudgetGrant) -> Self {
+        let capacity = grant.amount();
+        let (id, _, parent) = grant.into_parts();
+        parent.with_state(|state| {
+            state.retire(id);
+            state.delegated = state
+                .delegated
+                .combine(&capacity)
+                .unwrap_or(state.delegated);
+        });
+        Self::from_inner(LedgerInner {
+            region,
+            policy,
+            parent: Some(parent),
+            state: Mutex::new(LedgerState::fresh(region, capacity)),
+        })
+    }
+
+    /// A cloneable handle to this region's ledger.
+    #[must_use]
+    pub fn handle(&self) -> LedgerHandle {
+        self.handle.clone()
+    }
+
+    /// The region identifier.
+    #[must_use]
+    pub fn region(&self) -> RegionId {
+        self.handle.region()
+    }
+
+    /// Current accounting.
+    #[must_use]
+    pub fn snapshot(&self) -> PoolSnapshot {
+        self.handle.snapshot()
+    }
+
+    /// Every leak recorded so far.
+    #[must_use]
+    pub fn leaks(&self) -> Vec<LeakRecord> {
+        self.handle.leaks()
+    }
+
+    /// Obligations the region still owes work for.
+    #[must_use]
+    pub fn outstanding(&self) -> Vec<OutstandingObligation> {
+        self.handle.outstanding()
+    }
+
+    /// Removes `amount` from the available pool and hands back a grant.
+    pub fn grant(&self, amount: ResourceVector) -> Result<BudgetGrant, ResourceError> {
+        let id = self.handle.with_state(|state| state.carve(amount))?;
+        Ok(self.handle.grant_from(id, amount))
+    }
+
+    /// Converts a grant into a reserved obligation of kind `K`.
+    ///
+    /// The grant must be non-zero in every grade the class declares required;
+    /// on refusal the grant is released back to the pool, so a refusal never
+    /// destroys budget.
+    pub fn reserve<K: ObligationKind>(
+        &self,
+        reservation: K::Reservation,
+        grant: BudgetGrant,
+    ) -> Result<ReservedObligation<K>, ReserveError> {
+        let amount = grant.amount();
+        if self.handle.with_state(|state| state.closed) {
+            grant.release();
+            return Err(ReserveError::RegionClosed(self.handle.region()));
+        }
+        let missing = K::REQUIRED_GRADES
+            .iter()
+            .copied()
+            .find(|grade| amount.get(*grade) == 0);
+        if let Some(grade) = missing {
+            grant.release();
+            return Err(ReserveError::MissingGrade {
+                class: K::CLASS,
+                grade,
+            });
+        }
+        let (grant_id, _, handle) = grant.into_parts();
+        let id = handle.with_state(|state| {
+            state.retire(grant_id);
+            let id = state.allocate_obligation_id();
+            state.entries.insert(
+                id,
+                LedgerEntry {
+                    class: K::CLASS,
+                    state: ObligationState::Reserved,
+                    reserved: amount,
+                    charged: ResourceVector::ZERO,
+                },
+            );
+            id
+        });
+        let guard = handle.new_guard(
+            LeakSubject::Obligation(id),
+            LeakClass::ReservedObligationDropped,
+        );
+        Ok(ReservedObligation::from_parts(id, reservation, guard))
+    }
+
+    /// Closes the region and reports quiescence or a typed containment failure.
+    ///
+    /// Closing observes; it does not cancel. Cancellation is request, then
+    /// drain, then finalize, and the caller performs those steps before
+    /// closing. A region that closes with live obligations reports them rather
+    /// than pretending they settled.
+    pub fn close(self) -> RegionCloseOutcome {
+        let Self { handle, mut guard } = self;
+        guard.disarm();
+        let report = handle.with_state(|state| {
+            state.closed = true;
+            CloseReport {
+                unsettled: collect_outstanding(state, |value| {
+                    matches!(
+                        value,
+                        ObligationState::Reserved
+                            | ObligationState::Committed
+                            | ObligationState::DeferredExternally
+                    )
+                }),
+                escalated: collect_outstanding(state, |value| {
+                    value == ObligationState::Escalated
+                }),
+                leaks: state.leaks.clone(),
+                consumed: state.consumed,
+                returned: state.available.combine(&state.granted()).unwrap_or(state.available),
+                settled: u64::try_from(
+                    state
+                        .entries
+                        .values()
+                        .filter(|entry| entry.state.is_terminal())
+                        .count(),
+                )
+                .unwrap_or(u64::MAX),
+                capacity: state.capacity,
+            }
+        });
+        if let Some(parent) = handle.0.parent.clone() {
+            settle_child_into_parent(&parent, report.capacity, report.consumed);
+        }
+        if report.unsettled.is_empty() && report.escalated.is_empty() && report.leaks.is_empty() {
+            RegionCloseOutcome::Quiescent(QuiescenceReceipt {
+                region: handle.region(),
+                settled: report.settled,
+                consumed: report.consumed,
+                returned: report.returned,
+            })
+        } else {
+            RegionCloseOutcome::ContainmentFailure(ContainmentFailure {
+                region: handle.region(),
+                unsettled: report.unsettled,
+                escalated: report.escalated,
+                leaks: report.leaks,
+                consumed: report.consumed,
+            })
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CloseReport {
+    unsettled: Vec<OutstandingObligation>,
+    escalated: Vec<OutstandingObligation>,
+    leaks: Vec<LeakRecord>,
+    consumed: ResourceVector,
+    returned: ResourceVector,
+    settled: u64,
+    capacity: ResourceVector,
+}
+
+/// Returns a closed child's unspent capacity to its parent.
+///
+/// The parent's accounting identity is restored exactly: the delegated amount
+/// is cleared, the child's consumption is adopted, and the difference returns
+/// to the parent's available pool. A child that leaked still returns its
+/// budget, because a leak is a lifecycle failure and not an accounting hole.
+fn settle_child_into_parent(
+    parent: &LedgerHandle,
+    capacity: ResourceVector,
+    consumed: ResourceVector,
+) {
+    parent.with_state(|state| {
+        let (_, remaining_delegation) = state
+            .delegated
+            .split(&capacity)
+            .unwrap_or((capacity, ResourceVector::ZERO));
+        state.delegated = remaining_delegation;
+        state.consumed = state.consumed.combine(&consumed).unwrap_or(state.consumed);
+        let unspent = capacity
+            .split(&consumed)
+            .map_or(ResourceVector::ZERO, |(_, rest)| rest);
+        state.give_back(unspent);
+    });
+}

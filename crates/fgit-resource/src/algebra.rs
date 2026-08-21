@@ -354,40 +354,44 @@ impl BudgetGrant {
         self.amount
     }
 
-    /// Divides this grant into a part and a remainder.
+    /// Carves `part` out of this grant and hands it back as a new grant.
     ///
-    /// The division is conservation-checked by [`ResourceVector::split`], and
-    /// the ledger retires this grant and registers both halves in one
-    /// accounting step, so no observer ever sees minted or lost budget. On
-    /// refusal the grant is handed back unchanged.
-    pub fn split(self, part: &ResourceVector) -> Result<(Self, Self), (Self, ResourceError)> {
-        let (taken, left) = match self.amount.split(part) {
-            Ok(halves) => halves,
-            Err(error) => return Err((self, error)),
-        };
-        let (id, _, handle) = self.into_parts();
-        Ok(handle.resplit_grant(id, taken, left))
+    /// Conservation is structural: [`ResourceVector::split`] refuses any part
+    /// that exceeds this grant in any grade, and the ledger rewrites this
+    /// grant to the remainder and registers the part in the same accounting
+    /// step. A refusal leaves this grant untouched, so no budget is created or
+    /// destroyed on either path.
+    pub fn split_off(&mut self, part: &ResourceVector) -> Result<Self, ResourceError> {
+        let (taken, rest) = self.amount.split(part)?;
+        let handle = self.guard.handle();
+        let carved = handle.divide_grant(self.id, taken, rest);
+        self.amount = rest;
+        Ok(carved)
     }
 
-    /// Composes two grants from the same ledger into one.
+    /// Absorbs `other` into this grant, composing their grades.
     ///
-    /// Grades compose through [`ResourceVector::combine`]. On overflow both
-    /// grants are handed back unchanged, so a refusal never destroys budget.
-    pub fn combine(self, other: Self) -> Result<Self, (Self, Self, ResourceError)> {
+    /// On overflow refusal `other` is released back to the pool rather than
+    /// dropped, so a refusal never destroys budget and never leaks.
+    pub fn absorb(&mut self, other: Self) -> Result<(), ResourceError> {
         let total = match self.amount.combine(&other.amount) {
             Ok(total) => total,
-            Err(error) => return Err((self, other, error)),
+            Err(error) => {
+                let _receipt = other.release();
+                return Err(error);
+            }
         };
-        let (left, _, handle) = self.into_parts();
-        let (right, _, _) = other.into_parts();
-        Ok(handle.merge_grants(left, right, total))
+        let (source, _, handle) = other.into_parts();
+        handle.absorb_grant(self.id, source, total);
+        self.amount = total;
+        Ok(())
     }
 
     /// Returns the whole amount to the ledger pool.
     pub fn release(self) -> ReleaseReceipt {
         let amount = self.amount;
         let (id, _, handle) = self.into_parts();
-        handle.release_grant(id, amount);
+        handle.release_grant(id);
         ReleaseReceipt { id, amount }
     }
 
