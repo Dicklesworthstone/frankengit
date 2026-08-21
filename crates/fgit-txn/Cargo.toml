@@ -8,7 +8,9 @@ publish = false
 
 [dependencies]
 fgit-codec.workspace = true
+fgit-crypto.workspace = true
 fgit-reference.workspace = true
+fgit-resource.workspace = true
 fgit-types.workspace = true
 
 [lints]

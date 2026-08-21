@@ -28,6 +28,9 @@
 //! The production evaluator is independently implemented here and is compared
 //! in tests with `fgit-reference`'s deliberately simple `ReferenceFolder`.
 
+pub mod combiner;
+pub mod lanes;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_codec::{CodecRefusal, Encoder};

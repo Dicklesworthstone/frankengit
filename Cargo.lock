@@ -599,7 +599,9 @@ name = "fgit-txn"
 version = "0.0.1"
 dependencies = [
  "fgit-codec",
+ "fgit-crypto",
  "fgit-reference",
+ "fgit-resource",
  "fgit-types",
 ]
 
