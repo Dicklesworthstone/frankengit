@@ -31,6 +31,7 @@ use crate::injection::{EffectLog, FaultLog, FaultPlan};
 use crate::keys::{HeadKey, ImmutableKey};
 use fgit_types::HeadGeneration;
 
+use crate::async_contract::{AsyncAuthorityStore, DuplicateAbsenceWitness};
 use crate::tokens::{AuthorityVersionToken, StoreInstanceId};
 use crate::vocabulary::{
     AmbiguityReason, AuthenticatedHead, AuthorityFailure, AuthorityOp, AuthorityRefusal,
@@ -127,6 +128,49 @@ pub trait AuthorityStore {
         new_generation: HeadGeneration,
         new_body: &[u8],
     ) -> Result<CasOutcome, AuthorityFailure>;
+
+    /// Publish terminal outcome entries **and** replace the head in ONE
+    /// linearization point.
+    ///
+    /// The synchronous mirror of
+    /// [`AsyncAuthorityStore::publish_head_with_outcomes`], with identical
+    /// semantics. It exists on this surface too because the deterministic
+    /// verification lane drives *this* trait: the linearizability checker and
+    /// the seal-race campaign run against the in-memory reference, so a fix
+    /// that landed only on the production surface would leave the backend we
+    /// verify with still carrying the §5.2 race — and the acceptance tests for
+    /// that defect could never pass.
+    ///
+    /// All-or-nothing: either every entry in `outcomes` is durable **and** the
+    /// head carries `new_body`, or neither is. An implementation MUST refuse
+    /// when `witness.bound_to() != expected`.
+    ///
+    /// # Default
+    ///
+    /// Refuses with [`AuthorityRefusal::OperationUnsupported`]. A backend that
+    /// cannot publish atomically says so honestly rather than failing to
+    /// compile; one that delegated to a separate CAS-then-writes path would
+    /// satisfy this signature while providing none of the atomicity, which is
+    /// worse than refusing because a test could pass against it.
+    ///
+    /// # Errors
+    ///
+    /// [`CasOutcome::PredecessorMismatch`] when the head no longer carries
+    /// `expected`, with nothing written.
+    fn publish_head_with_outcomes(
+        &self,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+        outcomes: &[(ImmutableKey, Vec<u8>)],
+        witness: &DuplicateAbsenceWitness,
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        let _ = (key, expected, new_generation, new_body, outcomes, witness);
+        Err(AuthorityFailure::Refused(
+            AuthorityRefusal::OperationUnsupported,
+        ))
+    }
 
     /// Confirm that this store issued `receipt` exactly as presented.
     ///
