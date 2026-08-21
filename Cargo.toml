@@ -34,6 +34,7 @@ fgit-pack = { path = "crates/fgit-pack" }
 fgit-reference = { path = "crates/fgit-reference" }
 fgit-resource = { path = "crates/fgit-resource" }
 fgit-runtime = { path = "crates/fgit-runtime" }
+fgit-txn = { path = "crates/fgit-txn" }
 fgit-types = { path = "crates/fgit-types" }
 fgit-wire = { path = "crates/fgit-wire" }
 
