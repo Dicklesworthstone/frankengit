@@ -13,7 +13,7 @@
 
 use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1};
 use fgit_git_object::{AcceptanceProfile, ParseLimits, TreeEntry, emit_tree};
-use fgit_treefs::base::{BaseView, ObjectSource, ObjectSourceError};
+use fgit_treefs::base::{BaseError, BaseView, ObjectSource, ObjectSourceError};
 use fgit_treefs::capability::{ReadGrant, TreeCapability, WorkspaceId};
 use fgit_treefs::export::{ExportLimits, ExportPlanner, ExportRefusal};
 use fgit_treefs::overlay::{ContentRef, EntryClass, FileMode, Overlay, OverlayEntry};
@@ -374,4 +374,89 @@ fn a_path_that_is_both_a_file_and_a_directory_is_refused() {
         allowed.is_ok(),
         "two bodies under the same directory are perfectly legal; got {allowed:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// object size bound
+// ---------------------------------------------------------------------------
+
+/// An object larger than the parse ceiling is refused before it is parsed.
+///
+/// `BaseView::read_object` checks the length of what the source returned against
+/// `ParseLimits::max_object_bytes` and refuses before handing the bytes to the
+/// parser. This is the resource bound AGENTS.md §14 asks about — enforced before
+/// the work, not after it — and it had no test, so nothing established that a
+/// hostile or corrupt source could not simply hand over an enormous tree and have
+/// it parsed anyway.
+#[test]
+fn an_object_over_the_parse_ceiling_is_refused_and_a_generous_ceiling_admits_it() {
+    let (source, root) = fixture();
+
+    let tight = BaseView::<Sha1>::new(
+        RepositoryId::from_bytes([7; 16]),
+        RepositoryCommitId::from_digest(
+            DigestAlgorithmId::try_new(1).expect("algorithm 1 is registered"),
+            CodecVersion::new(1, 0),
+            DigestBytes::try_new(&[9_u8; 32]).expect("fixture digest is a legal width"),
+        ),
+        root,
+        root,
+        ParseLimits {
+            max_object_bytes: 8,
+            ..ParseLimits::default()
+        },
+        PathPolicy::default(),
+    );
+    let mut cap = wide_capability();
+
+    let refused = tight.resolve(&source, &mut cap, &path(b"src/lib.rs"), 0);
+    assert!(
+        matches!(
+            refused,
+            Err(BaseError::Source(ObjectSourceError::TooLarge { .. }))
+        ),
+        "a tree larger than the 8 byte ceiling must be refused as too large; got {refused:?}"
+    );
+
+    // The permitted twin: the identical read under the default ceiling.
+    let roomy = view(root);
+    let mut cap2 = wide_capability();
+    let allowed = roomy.resolve(&source, &mut cap2, &path(b"src/lib.rs"), 0);
+    assert!(
+        allowed.is_ok(),
+        "the same read under the default ceiling proceeds; got {allowed:?}"
+    );
+}
+
+/// The size refusal names the observed size and the ceiling.
+#[test]
+fn the_size_refusal_names_what_it_measured() {
+    let (source, root) = fixture();
+    let tight = BaseView::<Sha1>::new(
+        RepositoryId::from_bytes([7; 16]),
+        RepositoryCommitId::from_digest(
+            DigestAlgorithmId::try_new(1).expect("algorithm 1 is registered"),
+            CodecVersion::new(1, 0),
+            DigestBytes::try_new(&[9_u8; 32]).expect("fixture digest is a legal width"),
+        ),
+        root,
+        root,
+        ParseLimits {
+            max_object_bytes: 8,
+            ..ParseLimits::default()
+        },
+        PathPolicy::default(),
+    );
+    let mut cap = wide_capability();
+
+    match tight.resolve(&source, &mut cap, &path(b"src/lib.rs"), 0) {
+        Err(BaseError::Source(ObjectSourceError::TooLarge { observed, limit })) => {
+            assert_eq!(limit, 8, "the refusal names the configured ceiling");
+            assert!(
+                observed > limit,
+                "observed {observed} must actually exceed limit {limit}"
+            );
+        }
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
 }

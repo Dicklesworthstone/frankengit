@@ -458,6 +458,25 @@ pub enum AntiRollbackRefusal {
     /// The proposed snapshot is pinned to a different base.
     BaseMismatch,
     /// The proposed snapshot violates the epoch invariant.
+    ///
+    /// DELIBERATELY UNREACHABLE TODAY, and recorded as such so it is not mistaken
+    /// for an oversight. An `EpochSet` cannot be built in a violating state
+    /// through the public API: `try_new` refuses one, `stage` only ever advances
+    /// `staged`, and `publish`/`sync` refuse to overtake the epoch above them. So
+    /// no caller in this crate can hand `adopt` a body that fails
+    /// `invariant_holds`.
+    ///
+    /// It is kept because that guarantee is structural, not eternal. The moment a
+    /// snapshot body can arrive DECODED — from `fgit-codec` bytes on disk or over
+    /// a wire — the invariant stops being enforced by construction and starts
+    /// depending on whoever produced those bytes. Checking it at adopt time is
+    /// the difference between trusting a decoder and verifying it.
+    ///
+    /// Two other refusal variants in this crate looked like this and were not
+    /// defensive at all: `ExportRefusal::PathTypeConflict` and
+    /// `CapabilityRefusal::RepositoryMismatch` were both reachable conditions
+    /// with no check behind them. This one was checked against the public API
+    /// before being left alone; the distinction is the point.
     Epoch(EpochRefusal),
 }
 
