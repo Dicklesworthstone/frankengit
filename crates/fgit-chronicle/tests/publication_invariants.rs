@@ -8,6 +8,7 @@ use fgit_chronicle::{
     ChronicleRefusal, PublicationBasis, PublicationPlan, ResultingRoots, VerifiedPublication,
     verify_pair,
 };
+use fgit_codec::CryptoBodyIdentity;
 use fgit_codec::schema::{
     RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecisionBatchBody,
 };
@@ -107,7 +108,7 @@ fn refusal_only_roots() -> ResultingRoots {
 }
 
 fn seal(plan: PublicationPlan, roots: ResultingRoots) -> VerifiedPublication {
-    plan.seal(derived!(RepositoryDecisionBatchId, 0x40), roots)
+    plan.seal(&CryptoBodyIdentity, roots)
         .expect("a plan built through the builder is well formed")
 }
 
@@ -219,10 +220,7 @@ fn an_empty_plan_refuses_to_seal() {
     let plan = PublicationPlan::open(basis()).expect("genesis basis opens");
     assert!(plan.is_empty());
     assert_eq!(
-        plan.seal(
-            derived!(RepositoryDecisionBatchId, 0x40),
-            refusal_only_roots()
-        ),
+        plan.seal(&CryptoBodyIdentity, refusal_only_roots()),
         Err(ChronicleRefusal::EmptyBatch),
         "a batch that decides nothing consumes no sequence and publishes nothing"
     );
@@ -246,7 +244,7 @@ fn a_second_batch_continues_the_first_without_a_gap() {
     let mut plan = PublicationPlan::open(next_basis.clone()).expect("successor basis opens");
     plan.commit(derived!(RepositoryCommitId, 0x85), record(0x86));
     let second = plan
-        .seal(derived!(RepositoryDecisionBatchId, 0x87), committed_roots())
+        .seal(&CryptoBodyIdentity, committed_roots())
         .expect("the successor batch is well formed");
 
     assert_eq!(
@@ -295,7 +293,10 @@ fn well_formed_pair() -> (
 #[test]
 fn a_well_formed_pair_verifies() {
     let (basis, batch, head) = well_formed_pair();
-    assert_eq!(verify_pair(&basis, &batch, &head), Ok(()));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
 }
 
 #[test]
@@ -313,7 +314,7 @@ fn a_decision_sequence_gap_is_refused_and_the_contiguous_twin_is_not() {
             },
         });
     assert_eq!(
-        verify_pair(&basis, &batch, &head),
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
         Err(ChronicleRefusal::DecisionSequenceNotContiguous {
             index: 1,
             expected: DecisionSequence::try_new(2).expect("two is a valid position"),
@@ -329,7 +330,10 @@ fn a_decision_sequence_gap_is_refused_and_the_contiguous_twin_is_not() {
     let mut head = head;
     head.latest_decision_sequence =
         Some(DecisionSequence::try_new(2).expect("two is a valid position"));
-    assert_eq!(verify_pair(&basis, &batch, &head), Ok(()));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
 }
 
 #[test]
@@ -337,13 +341,16 @@ fn a_batch_prepared_against_another_head_is_refused() {
     let (basis, mut batch, head) = well_formed_pair();
     batch.predecessor_head_id = derived!(RepositoryAuthorityHeadId, 0xA0);
     assert_eq!(
-        verify_pair(&basis, &batch, &head),
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
         Err(ChronicleRefusal::PredecessorHeadMismatch)
     );
 
     // Near-identical permitted case: bound to the basis it was built against.
     batch.predecessor_head_id = basis.id();
-    assert_eq!(verify_pair(&basis, &batch, &head), Ok(()));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
 }
 
 #[test]
@@ -351,7 +358,7 @@ fn a_head_that_does_not_advance_the_generation_is_refused() {
     let (basis, batch, mut head) = well_formed_pair();
     head.generation = basis.generation();
     assert_eq!(
-        verify_pair(&basis, &batch, &head),
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
         Err(ChronicleRefusal::GenerationNotAdvancing {
             predecessor: basis.generation(),
             successor: basis.generation(),
@@ -361,7 +368,10 @@ fn a_head_that_does_not_advance_the_generation_is_refused() {
 
     // Near-identical permitted case: one generation later.
     head.generation = basis.successor_generation().expect("generation advances");
-    assert_eq!(verify_pair(&basis, &batch, &head), Ok(()));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
 }
 
 #[test]
@@ -370,12 +380,15 @@ fn a_head_that_names_the_wrong_tail_position_is_refused() {
     head.latest_decision_sequence =
         Some(DecisionSequence::try_new(9).expect("nine is a valid position"));
     assert!(matches!(
-        verify_pair(&basis, &batch, &head),
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
         Err(ChronicleRefusal::DecisionTailSequenceMismatch { .. })
     ));
 
     head.latest_decision_sequence = Some(DecisionSequence::FIRST);
-    assert_eq!(verify_pair(&basis, &batch, &head), Ok(()));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
 }
 
 #[test]
@@ -395,7 +408,7 @@ fn a_refusal_only_batch_that_moved_the_ref_root_is_refused() {
     batch.resulting_ref_root = digest(0xB2);
     head.ref_root = digest(0xB2);
     assert_eq!(
-        verify_pair(&basis, &batch, &head),
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
         Err(ChronicleRefusal::RefusalOnlyBatchAdvancedCommittedState {
             field: "resulting_ref_root"
         }),
@@ -405,7 +418,10 @@ fn a_refusal_only_batch_that_moved_the_ref_root_is_refused() {
     // Near-identical permitted case: the same refusal leaving the root alone.
     batch.resulting_ref_root = genesis_head().ref_root;
     head.ref_root = genesis_head().ref_root;
-    assert_eq!(verify_pair(&basis, &batch, &head), Ok(()));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
 }
 
 #[test]
@@ -413,7 +429,7 @@ fn a_batch_and_head_that_disagree_about_a_root_are_refused() {
     let (basis, batch, mut head) = well_formed_pair();
     head.outbox_root = digest(0xC0);
     assert_eq!(
-        verify_pair(&basis, &batch, &head),
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
         Err(ChronicleRefusal::ResultingRootMismatch {
             field: "outbox_root"
         }),
@@ -421,7 +437,10 @@ fn a_batch_and_head_that_disagree_about_a_root_are_refused() {
     );
 
     head.outbox_root = batch.resulting_outbox_root;
-    assert_eq!(verify_pair(&basis, &batch, &head), Ok(()));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
 }
 
 #[test]
@@ -429,11 +448,50 @@ fn a_commit_record_count_that_disagrees_with_the_decisions_is_refused() {
     let (basis, mut batch, head) = well_formed_pair();
     batch.committed_rcrs.clear();
     assert_eq!(
-        verify_pair(&basis, &batch, &head),
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
         Err(ChronicleRefusal::CommitRecordCountMismatch {
             committed_decisions: 1,
             records: 0,
         }),
         "every committed decision owns exactly one record"
+    );
+}
+
+#[test]
+fn a_head_naming_another_batch_is_refused_and_the_bound_twin_is_not() {
+    let (basis, batch, mut head) = well_formed_pair();
+
+    // Planted negative: the head names a batch that is not the one it
+    // publishes. fgit-authority does not check this — confirmed by its owner —
+    // so without this refusal the pair would reach the conditional replacement
+    // and become canonical while pointing at somebody else's batch.
+    head.decision_tail_id = Some(derived!(RepositoryDecisionBatchId, 0xD0));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::DecisionTailMismatch),
+        "a head must name the batch whose bytes it publishes"
+    );
+
+    // Planted negative: naming no batch at all.
+    head.decision_tail_id = None;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::DecisionTailNotBound)
+    );
+
+    // Near-identical permitted case: the identity recomputed from the batch.
+    let rebuilt = {
+        let mut plan = PublicationPlan::open(basis.clone()).expect("the basis opens");
+        plan.commit(derived!(RepositoryCommitId, 0x90), record(0x91));
+        seal(plan, committed_roots())
+    };
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, rebuilt.batch(), rebuilt.head()),
+        Ok(()),
+        "a head built by the plan names the batch the plan built"
+    );
+    assert!(
+        rebuilt.head().decision_tail_id.is_some(),
+        "the plan computes the tail identity rather than accepting one"
     );
 }

@@ -90,6 +90,18 @@ pub enum ChronicleRefusal {
     },
     /// The successor head does not name the batch it publishes.
     DecisionTailNotBound,
+    /// The successor head names a batch other than the one it publishes.
+    ///
+    /// `fgit-authority` does not check this — confirmed by its owner — so a
+    /// head naming somebody else's batch would otherwise reach the conditional
+    /// replacement and become canonical.
+    DecisionTailMismatch,
+    /// The batch's identity could not be computed.
+    ///
+    /// A body whose domain the identity registry does not know has no
+    /// identity, and publishing one would produce a head pointing at a value
+    /// nothing else could verify.
+    BatchIdentityUnavailable,
     /// The successor head does not name its predecessor.
     SuccessorPredecessorNotBound,
     /// The successor head's latest decision position is not the batch tail.
@@ -190,6 +202,12 @@ impl fmt::Display for ChronicleRefusal {
             ),
             Self::DecisionTailNotBound => {
                 f.write_str("the successor head does not name the batch it publishes")
+            }
+            Self::DecisionTailMismatch => {
+                f.write_str("the successor head names a batch other than the one it publishes")
+            }
+            Self::BatchIdentityUnavailable => {
+                f.write_str("the batch's identity could not be computed")
             }
             Self::SuccessorPredecessorNotBound => {
                 f.write_str("the successor head does not name its predecessor")

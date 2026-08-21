@@ -13,13 +13,14 @@ use fgit_chronicle::{
     LostCandidate, PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots,
     VerifiedPublication, publish,
 };
+use fgit_codec::CryptoBodyIdentity;
 use fgit_codec::schema::{RepositoryAuthorityHeadBody, RepositoryCommitRecord};
 use fgit_crypto::IdentityDomain;
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, HeadGeneration, OPAQUE_ID_LEN,
     PolicyEpoch, PrincipalSnapshotId, RefusalCode, RefusalRecordId, RegistryEpoch,
-    RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryDecisionBatchId, RepositoryId,
-    RepositorySequence, TenantId, TxId,
+    RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, RepositorySequence, TenantId,
+    TxId,
 };
 
 fn digest(tag: u8) -> Digest {
@@ -117,10 +118,10 @@ fn opened() -> (MemoryAuthorityStore, PublicationBasis) {
     (store, PublicationBasis::new(id, head))
 }
 
-fn candidate(basis: &PublicationBasis, commit_tag: u8, batch_tag: u8) -> VerifiedPublication {
+fn candidate(basis: &PublicationBasis, commit_tag: u8) -> VerifiedPublication {
     let mut plan = PublicationPlan::open(basis.clone()).expect("the basis opens");
     plan.commit(derived!(RepositoryCommitId, commit_tag), record(commit_tag));
-    plan.seal(derived!(RepositoryDecisionBatchId, batch_tag), roots())
+    plan.seal(&CryptoBodyIdentity, roots())
         .expect("the plan is well formed")
 }
 
@@ -141,7 +142,7 @@ fn staged(store: &MemoryAuthorityStore, key: &ImmutableKey) -> bool {
 #[test]
 fn a_winning_publication_makes_every_decision_canonical_at_once() {
     let (store, basis) = opened();
-    let publication = candidate(&basis, 0x40, 0x41);
+    let publication = candidate(&basis, 0x40);
     let tx = publication
         .batch()
         .decisions
@@ -167,7 +168,11 @@ fn a_winning_publication_makes_every_decision_canonical_at_once() {
     let PublicationVerdict::Published { batch, indexed, .. } = verdict else {
         panic!("an uncontended publication wins: {verdict:?}");
     };
-    assert_eq!(batch, derived!(RepositoryDecisionBatchId, 0x41));
+    assert_eq!(
+        Some(batch),
+        publication.head().decision_tail_id,
+        "the head names exactly the batch that was published"
+    );
     assert_eq!(
         indexed, 1,
         "the one decision is indexed after the head moved"
@@ -191,8 +196,8 @@ fn a_winning_publication_makes_every_decision_canonical_at_once() {
 fn a_losing_publication_exposes_nothing_and_may_replan() {
     let (store, basis) = opened();
     // Two candidates prepared against the same basis: only one can publish.
-    let winner = candidate(&basis, 0x50, 0x51);
-    let loser = candidate(&basis, 0x60, 0x61);
+    let winner = candidate(&basis, 0x50);
+    let loser = candidate(&basis, 0x60);
     let loser_tx = loser.batch().decisions.first().expect("one decision").tx_id;
     let loser_batch_key =
         body_key(IdentityDomain::RepositoryDecisionBatch, loser.batch()).expect("a body key");
@@ -240,8 +245,8 @@ fn a_losing_publication_exposes_nothing_and_may_replan() {
 fn a_loser_whose_transaction_was_already_decided_is_superseded() {
     let (store, basis) = opened();
     // Both candidates carry the SAME transaction; the winner decides it.
-    let winner = candidate(&basis, 0x70, 0x71);
-    let loser = candidate(&basis, 0x70, 0x72);
+    let winner = candidate(&basis, 0x70);
+    let loser = candidate(&basis, 0x70);
     let tx = loser.batch().decisions.first().expect("one decision").tx_id;
 
     let stale = current_token(&store);
@@ -273,7 +278,7 @@ fn a_refusal_only_publication_advances_the_head_without_committing() {
     );
     let publication = plan
         .seal(
-            derived!(RepositoryDecisionBatchId, 0x82),
+            &CryptoBodyIdentity,
             ResultingRoots {
                 outcome_index_root: digest(0x32),
                 ..ResultingRoots::carried_forward(&basis, digest(0x35))

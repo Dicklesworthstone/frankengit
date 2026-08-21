@@ -1,15 +1,16 @@
 //! The builder that cannot express an ill-formed publication.
 
+use fgit_codec::attest::BodyIdentity;
 use fgit_codec::schema::{
     RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecision,
     RepositoryDecisionBatchBody,
 };
 use fgit_types::{
     DecisionOutcome, DecisionSequence, RefusalCode, RefusalRecordId, RepositoryCommitId,
-    RepositoryDecisionBatchId, RepositorySequence, TxId,
+    RepositorySequence, TxId,
 };
 
-use crate::audit::verify_pair;
+use crate::audit::{batch_identity, verify_pair};
 use crate::origin::{PublicationBasis, ResultingRoots};
 use crate::refusal::ChronicleRefusal;
 
@@ -115,14 +116,23 @@ impl PublicationPlan {
 
     /// Builds the batch and its successor head.
     ///
+    /// The batch's identity is computed from the batch this call just built,
+    /// never accepted from the caller, so the head cannot name somebody else's
+    /// batch. That binding is worth enforcing here because `fgit-authority`
+    /// does not check it: a head naming the wrong batch would otherwise reach
+    /// the conditional replacement and become canonical.
+    ///
     /// The result is verified by [`verify_pair`] before it is returned, so the
     /// builder and the total checker can never disagree about what well formed
     /// means.
-    pub fn seal(
+    pub fn seal<I>(
         self,
-        batch_id: RepositoryDecisionBatchId,
+        identity: &I,
         roots: ResultingRoots,
-    ) -> Result<VerifiedPublication, ChronicleRefusal> {
+    ) -> Result<VerifiedPublication, ChronicleRefusal>
+    where
+        I: BodyIdentity + ?Sized,
+    {
         if let Some(refusal) = self.exhausted {
             return Err(refusal);
         }
@@ -160,6 +170,8 @@ impl PublicationPlan {
             batch_evidence_root: roots.batch_evidence_root,
         };
 
+        let batch_id = batch_identity(identity, &batch)?;
+
         let head = RepositoryAuthorityHeadBody {
             repository_id: previous.repository_id,
             generation: self.basis.successor_generation()?,
@@ -179,7 +191,7 @@ impl PublicationPlan {
             last_checkpoint_id: previous.last_checkpoint_id,
         };
 
-        verify_pair(&self.basis, &batch, &head)?;
+        verify_pair(identity, &self.basis, &batch, &head)?;
         Ok(VerifiedPublication {
             basis: self.basis,
             batch,

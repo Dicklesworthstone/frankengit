@@ -1,7 +1,10 @@
 //! Total verification of a batch and head pair that arrives as data.
 
+use fgit_codec::attest::{BodyIdentity, body_id};
 use fgit_codec::schema::{RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody};
-use fgit_types::{DecisionOutcome, DecisionSequence, RepositorySequence};
+use fgit_types::{
+    DecisionOutcome, DecisionSequence, RepositoryDecisionBatchId, RepositorySequence,
+};
 
 use crate::origin::PublicationBasis;
 use crate::refusal::ChronicleRefusal;
@@ -11,17 +14,59 @@ use crate::refusal::ChronicleRefusal;
 /// Total: it never panics and never partially reports. The first violation
 /// wins, because a caller acting on one broken position gains nothing from
 /// knowing about a second.
-pub fn verify_pair(
+///
+/// `identity` recomputes the batch's identity from its bytes rather than
+/// trusting what the head claims. That check matters most exactly where the
+/// pair was not built here — a batch replayed from a journal or read back out
+/// of the store — because `fgit-authority` does not verify that
+/// `decision_tail_id` names the batch being published.
+pub fn verify_pair<I>(
+    identity: &I,
     basis: &PublicationBasis,
     batch: &RepositoryDecisionBatchBody,
     head: &RepositoryAuthorityHeadBody,
-) -> Result<(), ChronicleRefusal> {
+) -> Result<(), ChronicleRefusal>
+where
+    I: BodyIdentity + ?Sized,
+{
     verify_identity(basis, batch, head)?;
     let tail = verify_decision_sequence(basis, batch)?;
     verify_commit_records(basis, batch)?;
     verify_successor(basis, batch, head, tail)?;
+    verify_tail_binding(identity, batch, head)?;
     verify_roots(batch, head)?;
     verify_refusal_only(basis, batch)
+}
+
+/// Recomputes the batch identity and holds the head to it.
+fn verify_tail_binding<I>(
+    identity: &I,
+    batch: &RepositoryDecisionBatchBody,
+    head: &RepositoryAuthorityHeadBody,
+) -> Result<(), ChronicleRefusal>
+where
+    I: BodyIdentity + ?Sized,
+{
+    let computed = batch_identity(identity, batch)?;
+    if head.decision_tail_id == Some(computed) {
+        Ok(())
+    } else {
+        Err(ChronicleRefusal::DecisionTailMismatch)
+    }
+}
+
+/// The identity of a decision batch, computed from its canonical bytes.
+pub(crate) fn batch_identity<I>(
+    identity: &I,
+    batch: &RepositoryDecisionBatchBody,
+) -> Result<RepositoryDecisionBatchId, ChronicleRefusal>
+where
+    I: BodyIdentity + ?Sized,
+{
+    let object =
+        body_id(identity, batch).map_err(|_| ChronicleRefusal::BatchIdentityUnavailable)?;
+    RepositoryDecisionBatchId::from_internal_object_id(object)
+        .map_err(|_| ChronicleRefusal::BatchIdentityUnavailable)
 }
 
 fn verify_identity(
