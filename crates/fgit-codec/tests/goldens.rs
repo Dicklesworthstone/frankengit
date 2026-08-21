@@ -45,6 +45,18 @@ fn round_trip<B: CanonicalBody + PartialEq + std::fmt::Debug>(case: &GoldenCase)
 /// Asserts the recorded identity is what the corpus digest produces.
 fn check_body_id(case: &GoldenCase) {
     let Some(expected) = case.body_id.as_ref() else {
+        // A malformed frame has no well-defined identity, so a planted defect
+        // legitimately carries no `body_id` line. A VALID vector always does,
+        // and the skip must not cover that case: an unconditional early return
+        // means a valid golden whose `body_id` line was lost -- by a hand edit
+        // or a regeneration bug -- stops being identity-checked while this
+        // suite keeps reporting green. The check would silently stop checking.
+        assert_ne!(
+            case.kind, "valid",
+            "{}: a valid golden must record the identity its bytes produce; without it this \
+             check silently does nothing",
+            case.name
+        );
         return;
     };
     let observed = body_id_of_frame(&CorpusIdentity, &case.bytes, DecodeLimits::DEFAULT)
