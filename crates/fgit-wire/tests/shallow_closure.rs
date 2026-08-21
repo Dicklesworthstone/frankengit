@@ -2,7 +2,7 @@
 
 use fgit_wire::closure::{
     ClosureError, ClosureLimits, ClosureObject, ClosureObjectId, ClosureTreeEntry, CommitNode,
-    ObjectClosureRepository, compute_lazy_fetch_closure, compute_pack_closure,
+    ObjectClosureRepository, compute_authenticated_lazy_fetch_closure, compute_pack_closure,
 };
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, ObjectFilter, ObjectType, PackOptions,
@@ -281,9 +281,17 @@ fn combined_filters_mark_authenticated_omissions_and_reject_leaks() {
 #[test]
 fn lazy_fetch_follow_up_completes_an_omitted_blob() {
     let graph = FixtureGraph::with_filter_tree();
-    let follow_up =
-        compute_lazy_fetch_closure(&graph, &[oid(SMALL_BLOB)], &ClosureLimits::default())
-            .expect("lazy promisor follow-up");
+    let mut request = request(vec![oid(TOP)]);
+    request.filter = Some(ObjectFilter::BlobNone);
+    let original = compute_pack_closure(&graph, &request, &ClosureLimits::default())
+        .expect("filtered promisor closure");
+    let follow_up = compute_authenticated_lazy_fetch_closure(
+        &graph,
+        &original,
+        &[oid(SMALL_BLOB)],
+        &ClosureLimits::default(),
+    )
+    .expect("lazy promisor follow-up");
 
     assert_eq!(
         follow_up.objects,
@@ -293,6 +301,36 @@ fn lazy_fetch_follow_up_completes_an_omitted_blob() {
         }]
     );
     assert!(follow_up.promisor.omissions.is_empty());
+}
+
+#[test]
+fn lazy_fetch_refuses_non_promised_or_tampered_omissions() {
+    let graph = FixtureGraph::with_filter_tree();
+    let mut request = request(vec![oid(TOP)]);
+    request.filter = Some(ObjectFilter::BlobNone);
+    let mut original = compute_pack_closure(&graph, &request, &ClosureLimits::default())
+        .expect("filtered promisor closure");
+
+    assert_eq!(
+        compute_authenticated_lazy_fetch_closure(
+            &graph,
+            &original,
+            &[oid(TOP)],
+            &ClosureLimits::default(),
+        ),
+        Err(ClosureError::UnexpectedLazyFetchWant { oid: oid(TOP) })
+    );
+
+    original.promisor.omissions.clear();
+    assert_eq!(
+        compute_authenticated_lazy_fetch_closure(
+            &graph,
+            &original,
+            &[oid(SMALL_BLOB)],
+            &ClosureLimits::default(),
+        ),
+        Err(ClosureError::UnauthenticatedPromisorManifest)
+    );
 }
 
 #[test]

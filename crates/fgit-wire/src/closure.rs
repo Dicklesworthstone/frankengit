@@ -231,6 +231,29 @@ impl PackClosure {
             .map(|omission| omission.oid)
             .collect()
     }
+
+    /// Refuses a lazy fetch that is not bound to this authenticated omission set.
+    ///
+    /// A caller must retain the manifest that accompanied the filtered pack and
+    /// validate its requested follow-up objects before asking a pack writer to
+    /// materialize them.  This prevents an arbitrary object request from being
+    /// represented as completion of an earlier partial clone.
+    pub fn validate_lazy_fetch_wants(&self, wants: &[AnyGitOid]) -> Result<(), ClosureError> {
+        if !self.promisor.is_authenticated() {
+            return Err(ClosureError::UnauthenticatedPromisorManifest);
+        }
+        for oid in wants {
+            if !self
+                .promisor
+                .omissions
+                .iter()
+                .any(|omission| omission.oid == *oid)
+            {
+                return Err(ClosureError::UnexpectedLazyFetchWant { oid: *oid });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Typed refusal from bounded shallow or partial-clone computation.
@@ -263,6 +286,13 @@ pub enum ClosureError {
         /// Leaked object type.
         object_type: ObjectType,
     },
+    /// The promisor omission sequence no longer matches its commitment.
+    UnauthenticatedPromisorManifest,
+    /// A lazy-fetch request named an object not omitted by the filtered pack.
+    UnexpectedLazyFetchWant {
+        /// Object identity that is not present in the committed omission set.
+        oid: AnyGitOid,
+    },
 }
 
 impl Display for ClosureError {
@@ -285,6 +315,15 @@ impl Display for ClosureError {
             }
             Self::FilteredObjectLeak { oid, object_type } => {
                 write!(formatter, "filtered pack leaked {object_type:?} {oid:?}")
+            }
+            Self::UnauthenticatedPromisorManifest => {
+                formatter.write_str("promisor omission manifest is not authenticated")
+            }
+            Self::UnexpectedLazyFetchWant { oid } => {
+                write!(
+                    formatter,
+                    "lazy fetch object {oid:?} was not omitted by the pack"
+                )
             }
         }
     }
@@ -316,8 +355,22 @@ pub fn compute_pack_closure(
     })
 }
 
-/// Completes a lazy promisor fetch without reusing the original filter.
-pub fn compute_lazy_fetch_closure(
+/// Completes authenticated promisor omissions without reapplying the original filter.
+///
+/// `wants` must be drawn from `original`'s committed omission list.  The
+/// returned closure deliberately has no filter, because it supplies the
+/// missing objects that were explicitly promised by the prior response.
+pub fn compute_authenticated_lazy_fetch_closure(
+    repository: &impl ObjectClosureRepository,
+    original: &PackClosure,
+    wants: &[AnyGitOid],
+    limits: &ClosureLimits,
+) -> Result<PackClosure, ClosureError> {
+    original.validate_lazy_fetch_wants(wants)?;
+    compute_lazy_fetch_closure(repository, wants, limits)
+}
+
+fn compute_lazy_fetch_closure(
     repository: &impl ObjectClosureRepository,
     wants: &[AnyGitOid],
     limits: &ClosureLimits,
