@@ -573,9 +573,32 @@ impl ExportPlanner {
             if !at_this_level {
                 continue;
             }
-            level
-                .entry(child.file_name().to_vec())
-                .or_insert(Resolved::Directory { base_oid: None });
+            let name = child.file_name().to_vec();
+            match level.get(&name) {
+                // Something non-directory already occupies this name while a
+                // rebuilt subtree also wants it: the path is a file AND a
+                // directory. Git cannot represent that, so the export refuses
+                // rather than picking a winner.
+                //
+                // Silently keeping one would drop the other, and which one
+                // survived would depend on insertion order -- AGENTS.md §5.3
+                // forbids both preserving ambiguous duplicate values and letting
+                // map order decide an outcome. Before this check the file won and
+                // the entire rebuilt subtree vanished from the export with no
+                // refusal, which is the same silent data loss the differential
+                // caught twice elsewhere.
+                Some(
+                    Resolved::File { .. } | Resolved::Symlink { .. } | Resolved::Gitlink { .. },
+                ) => {
+                    return Err(ExportRefusal::PathTypeConflict {
+                        path: child.clone(),
+                    });
+                }
+                Some(Resolved::Directory { .. }) => {}
+                None => {
+                    level.insert(name, Resolved::Directory { base_oid: None });
+                }
+            }
         }
 
         // Resolve subdirectory identities from the bottom-up pass. A directory
