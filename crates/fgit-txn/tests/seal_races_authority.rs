@@ -611,6 +611,73 @@ fn rejected_second_terminal_decision_never_becomes_canonical() {
 }
 
 #[test]
+fn missing_accelerator_after_a_lost_response_cannot_admit_a_second_terminal() {
+    // This is the race a read-before-CAS check cannot close.  Publisher B's
+    // CAS linearizes its decision, but its response is lost before the derived
+    // accelerator write.  Publisher A then sees B's new head and an absent
+    // accelerator; a non-atomic precheck would admit A's different decision
+    // and create a second terminal decision in authenticated history.
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7016));
+    let request = attempt(b"lost-response-then-duplicate", 0xA1);
+    let admitted = seal_request(&store, &request).expect("seal");
+    let (first_expected, first_batch, first_head) = prepare_publication(&store, admitted.tx_id());
+
+    store.install_fault_plan(FaultPlan::explicit(vec![
+        FaultDirective::new(OpIndex::from_raw(2), FaultKind::LoseResponse)
+            .only_for(AuthorityOpKind::CompareExchangeHead),
+    ]));
+    let first_failure = publish_decisions(
+        &store,
+        &authority_head_key(),
+        first_expected,
+        &first_batch,
+        &first_head,
+        tenant(),
+    )
+    .expect_err("the first caller loses its post-CAS response");
+    assert!(is_lost_authority_response(&first_failure));
+
+    store.install_fault_plan(FaultPlan::none());
+    let HeadRead::Present(receipt) = store
+        .read_head(&authority_head_key())
+        .expect("B's committed successor is readable")
+    else {
+        panic!("B's CAS must have linearized");
+    };
+    assert_eq!(
+        receipt.body(),
+        fgit_codec::wire::encode_body(&first_head).expect("head bytes")
+    );
+    assert_eq!(
+        indexed_outcome(&store, tenant(), repository(), admitted.tx_id())
+            .expect("B's behind accelerator is readable"),
+        OutcomeLookup::Undecided,
+        "the precheck window is real: accelerator absence does not prove B did not commit"
+    );
+
+    let duplicate_batch = batch(&first_head, admitted.tx_id(), 2, 0x52);
+    let duplicate_head = successor_head(&first_head, batch_id_of(&duplicate_batch), 2);
+    let duplicate = publish_decisions(
+        &store,
+        &authority_head_key(),
+        receipt.token(),
+        &duplicate_batch,
+        &duplicate_head,
+        tenant(),
+    );
+    assert!(
+        duplicate.is_err(),
+        "a missing derived accelerator must not admit a second terminal decision"
+    );
+    assert_eq!(
+        replay_outcome(&store, &authority_head_key(), admitted.tx_id())
+            .expect("authenticated replay remains singular"),
+        expected_commit(1, 0x51),
+        "the second candidate must never become reachable from the authority head"
+    );
+}
+
+#[test]
 fn cancellation_never_fabricates_a_noncommit_at_any_authority_phase() {
     // The synchronous authority contract does not inject runtime cancellation;
     // it supplies this explicit ambiguous result to the runtime adapter.  Pair
