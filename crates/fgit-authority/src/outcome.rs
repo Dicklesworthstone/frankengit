@@ -834,8 +834,44 @@ fn head_generation(head: &RepositoryAuthorityHeadBody) -> Result<HeadGeneration,
         .map_err(|refusal| OutcomeFailure::Codec(refusal.into()))
 }
 
+/// The identity an authority head publishes under.
+///
+/// The counterpart of [`decision_batch_identity`]; see it for why this is
+/// public. A head body is addressed by this identity in the immutable store, so
+/// a caller staging one needs the same derivation the publication uses, and
+/// must get it from the same place rather than a parallel copy.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::StreamBodyMissing`] when the body cannot be encoded to a
+/// canonical identity.
+pub fn authority_head_identity(
+    head: &RepositoryAuthorityHeadBody,
+) -> Result<RepositoryAuthorityHeadId, OutcomeFailure> {
+    RepositoryAuthorityHeadId::from_internal_object_id(canonical_body_id(
+        IdentityDomain::RepositoryAuthorityHead,
+        CANONICAL_CODEC_VERSION,
+        head,
+    )?)
+    .map_err(|_| OutcomeFailure::StreamBodyMissing {
+        link: "authority head identity",
+    })
+}
+
 /// The identity a decision batch publishes under.
-fn decision_batch_identity(
+///
+/// Public because a caller that builds a batch must be able to name it without
+/// reconstructing the derivation: the identity domain and codec version are
+/// this crate's to know, and a caller that spells them out is duplicating a
+/// rule it cannot be held to. Requested by YellowLotus for the fsqlite crash
+/// matrix, where the alternative was a dev-dependency on `fgit-crypto` solely
+/// to name an `IdentityDomain`.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::StreamBodyMissing`] when the body cannot be encoded to a
+/// canonical identity.
+pub fn decision_batch_identity(
     batch: &RepositoryDecisionBatchBody,
 ) -> Result<RepositoryDecisionBatchId, OutcomeFailure> {
     RepositoryDecisionBatchId::from_internal_object_id(canonical_body_id(

@@ -587,7 +587,8 @@ fn the_empty_index_has_a_defined_root_of_its_own() {
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
     AuthorityVersionToken, DuplicateAbsenceWitness, HeadInit, HeadReadReceipt, ImmutableKey,
-    ImmutableRead, PutOutcome, publish_decisions_async,
+    ImmutableRead, PutOutcome, authority_head_identity, decision_batch_identity,
+    publish_decisions_async,
 };
 use fgit_types::numeric::HeadGeneration as AsyncHeadGeneration;
 use std::future::Future;
@@ -1263,5 +1264,36 @@ fn a_restart_after_a_crashed_publication_retries_to_the_same_terminal_outcome() 
     assert!(
         matches!(resolved, OutcomeLookup::Decided(_)),
         "the transaction is terminal and must resolve as such: {resolved:?}"
+    );
+}
+
+/// The exposed identity helpers must agree with the derivation they replace.
+///
+/// They exist so a caller need not name an `IdentityDomain` or a codec version
+/// to address a body it just built. That is only safe if they produce exactly
+/// what the hand derivation produces, so this pins them against the fixtures'
+/// own `head_id_of` / `batch_id_of`, which spell the derivation out in full.
+#[test]
+fn the_exposed_identity_helpers_match_the_hand_derivation() {
+    let genesis = genesis_head();
+    assert_eq!(
+        authority_head_identity(&genesis).expect("a derivable head identity"),
+        head_id_of(&genesis),
+        "the exposed head identity must be the one publication uses"
+    );
+
+    let first = batch(&genesis, 1, vec![committed(tx(0xA1), 1, 0x51)]);
+    assert_eq!(
+        decision_batch_identity(&first).expect("a derivable batch identity"),
+        batch_id_of(&first),
+        "the exposed batch identity must be the one publication uses"
+    );
+
+    // Distinct bodies must not collide, or agreement above would be trivial.
+    let second = batch(&genesis, 2, vec![refused(tx(0xB2), 2, 0x52)]);
+    assert_ne!(
+        decision_batch_identity(&first).expect("an identity"),
+        decision_batch_identity(&second).expect("an identity"),
+        "different batches must have different identities"
     );
 }
