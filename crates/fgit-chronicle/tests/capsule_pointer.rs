@@ -475,10 +475,19 @@ fn signing_a_capsule_does_not_change_which_capsule_it_is() {
     );
 
     // Attach a signature that commits over that identity.
+    //
+    // The scheme code point is `0xfff1`, inside
+    // `fgit_crypto::SIGNATURE_SCHEME_RESERVED_CODE_POINTS` (0xfff0..=0xffff),
+    // and it must stay there. Code point 1 is production Ed25519 as of ADR-0003
+    // Amendment 1; a fixture sitting on it would be a made-up signature wearing
+    // a real scheme's number, which is how a test starts passing for the wrong
+    // reason. `0xfff1` is the shared convention across both the signature and
+    // digest namespaces, so one number means "never real" everywhere.
     envelope
         .attach(
             DetachedSignature {
-                scheme: SignatureSchemeId::try_new(1).expect("scheme one is valid"),
+                scheme: SignatureSchemeId::try_new(0xfff1)
+                    .expect("harness-reserved scheme point is valid"),
                 key_id: b"test-key".to_vec(),
                 body_id: *unsigned_id.as_internal_object_id(),
                 signature: vec![0xAB; 64],
@@ -528,7 +537,8 @@ fn a_signature_over_another_domain_cannot_be_grafted_on() {
         envelope
             .attach(
                 DetachedSignature {
-                    scheme: SignatureSchemeId::try_new(1).expect("scheme one is valid"),
+                    scheme: SignatureSchemeId::try_new(0xfff1)
+                        .expect("harness-reserved scheme point is valid"),
                     key_id: b"test-key".to_vec(),
                     body_id: *foreign.as_internal_object_id(),
                     signature: vec![0xCD; 64],
@@ -550,7 +560,8 @@ fn a_signature_over_another_domain_cannot_be_grafted_on() {
         envelope
             .attach(
                 DetachedSignature {
-                    scheme: SignatureSchemeId::try_new(1).expect("scheme one is valid"),
+                    scheme: SignatureSchemeId::try_new(0xfff1)
+                        .expect("harness-reserved scheme point is valid"),
                     key_id: b"test-key".to_vec(),
                     body_id: *own.as_internal_object_id(),
                     signature: vec![0xCD; 64],
