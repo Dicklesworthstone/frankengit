@@ -298,7 +298,7 @@ pub struct VerifyReport {
 impl VerifyReport {
     /// True when nothing disagreed.
     #[must_use]
-    pub fn is_clean(&self) -> bool {
+    pub const fn is_clean(&self) -> bool {
         self.failures.is_empty()
     }
 }
@@ -332,8 +332,8 @@ fn parse_golden(path: &Path) -> Result<GoldenRecord, VerifyError> {
             .ok_or_else(|| VerifyError::Corpus(format!("{name}: malformed line {line:?}")))?;
         let value = value.trim();
         match key.trim() {
-            "schema" => record.schema = value.to_owned(),
-            "kind" => record.kind = value.to_owned(),
+            "schema" => value.clone_into(&mut record.schema),
+            "kind" => value.clone_into(&mut record.kind),
             "mutation" => record.mutation = Some(value.to_owned()),
             "expect" => record.expect = Some(value.to_owned()),
             "body_id" => record.body_id = Some(value.to_owned()),
@@ -433,7 +433,9 @@ pub fn verify_corpus(directory: &Path) -> Result<VerifyReport, VerifyError> {
 }
 
 fn verify_valid(record: &GoldenRecord, frame: &Frame, report: &mut VerifyReport) {
-    let mut ok = true;
+    // Confirmed means "recorded nothing against it", derived from the failure
+    // list rather than tracked in a flag the checks below could forget to set.
+    let before = report.failures.len();
     if let Some(expected) = record.frame_len
         && expected != record.bytes.len()
     {
@@ -442,7 +444,6 @@ fn verify_valid(record: &GoldenRecord, frame: &Frame, report: &mut VerifyReport)
             record.name,
             record.bytes.len()
         ));
-        ok = false;
     }
     if let Some(expected) = record.canonical_body_len
         && expected != frame.payload.len()
@@ -452,7 +453,6 @@ fn verify_valid(record: &GoldenRecord, frame: &Frame, report: &mut VerifyReport)
             record.name,
             frame.payload.len()
         ));
-        ok = false;
     }
     if let Some(expected) = record.body_id.as_ref() {
         let derived = derive_body_id(frame, CORPUS_ALGORITHM_CODE_POINT);
@@ -461,7 +461,6 @@ fn verify_valid(record: &GoldenRecord, frame: &Frame, report: &mut VerifyReport)
                 "{}: identity records {expected}, re-derives to {derived}",
                 record.name
             ));
-            ok = false;
         }
     }
     if record.schema != frame.family {
@@ -469,9 +468,8 @@ fn verify_valid(record: &GoldenRecord, frame: &Frame, report: &mut VerifyReport)
             "{}: schema {} does not match the frame's family {}",
             record.name, record.schema, frame.family
         ));
-        ok = false;
     }
-    if ok {
+    if report.failures.len() == before {
         report.valid_confirmed += 1;
     }
 }

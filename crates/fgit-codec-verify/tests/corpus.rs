@@ -77,14 +77,21 @@ fn every_canonical_vector_records_a_frame_length_and_an_identity() {
 
 #[test]
 fn every_planted_defect_that_targets_the_frame_is_also_rejected_here() {
-    // Header-level defects must be visible to any conforming reader. A
-    // payload-interior defect is legitimately invisible to a frame parser, so
-    // it is not asserted on — and the corpus currently plants none.
+    // Only defects a reader can judge WITHOUT knowing what was expected belong
+    // here: a bad magic, a codec major this reader does not implement, a
+    // truncated payload, a trailing byte.
+    //
+    // `schema_major_bumped` and `domain_swapped` are deliberately NOT in this
+    // list, and an earlier version of this test wrongly included the first.
+    // A frame reader has no expectation to compare a schema major or a domain
+    // against — it learns both from the frame itself — so both produce a
+    // perfectly well-formed frame that simply names something else. Refusing
+    // them belongs to the typed decoder that knows what it asked for, and
+    // those two are asserted separately below.
     let records = load_corpus(&corpus_dir()).expect("the corpus loads");
     let frame_level = [
         "magic_corrupted",
         "codec_major_bumped",
-        "schema_major_bumped",
         "payload_truncated",
         "trailing_byte_appended",
     ];
@@ -107,6 +114,37 @@ fn every_planted_defect_that_targets_the_frame_is_also_rejected_here() {
     assert!(
         checked >= 20,
         "expected many frame-level defects, saw {checked}"
+    );
+}
+
+#[test]
+fn a_bumped_schema_major_parses_but_declares_a_version_this_reader_does_not_know() {
+    // The counterpart to the exclusion above. The mutation is well formed, so
+    // a frame reader must accept it and report the bumped version rather than
+    // guess; the refusal is the typed decoder's, because only it knows which
+    // major it wanted.
+    let records = load_corpus(&corpus_dir()).expect("the corpus loads");
+    let mut checked = 0;
+    for record in records
+        .iter()
+        .filter(|record| record.mutation.as_deref() == Some("schema_major_bumped"))
+    {
+        let frame = parse_frame(&record.bytes).unwrap_or_else(|error| {
+            panic!(
+                "{}: a bumped schema major is still a well-formed frame: {error}",
+                record.name
+            )
+        });
+        assert_ne!(
+            frame.schema_major, 1,
+            "{}: the bump should have moved the schema major off 1",
+            record.name
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 5,
+        "expected a bumped-schema-major case per schema, saw {checked}"
     );
 }
 
