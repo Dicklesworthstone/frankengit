@@ -63,7 +63,9 @@ pub mod tick;
 pub mod verdict;
 
 pub use harness::{Lab, LabConfig, LabRun, ReplayClass};
-pub use hazard::{ObjectStoreFault, PacketFault};
+pub use hazard::{
+    CancelPhase, ExecutionFault, HazardScript, ObjectStoreFault, PacketFault, ScheduledHazard,
+};
 pub use journal::{LogicalTrace, ReplayMismatch, TraceEvent, TraceFingerprint};
 pub use plan::{LabSchedule, StepCursor, StepId};
 pub use probe::{CoverageReport, FailpointId, FailpointRegistry};
@@ -71,4 +73,4 @@ pub use refuse::LabRefusal;
 pub use rng::SeededEntropy;
 pub use store::{AuthorityCampaign, CampaignOutcome, ScriptedClient, TraceObserver};
 pub use tick::{LabTime, VirtualClock};
-pub use verdict::{ObligationOracle, OracleReport, QuiescenceOracle};
+pub use verdict::{ObligationOracle, OracleReport, QuiescenceOracle, Settlement};

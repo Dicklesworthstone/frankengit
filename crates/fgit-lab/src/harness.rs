@@ -16,7 +16,7 @@
 
 use asupersync::cx::cap::{CapMask, CapSet, CapSetRuntimeMask};
 use fgit_runtime::grant::{AuthoritySet, CapabilityProfile, Ownership};
-use fgit_runtime::{BudgetClass, ProfileIdentity, RuntimeProfile};
+use fgit_runtime::{BudgetClass, NodeRuntime, ProfileIdentity, RuntimeProfile};
 
 use crate::hazard::HazardScript;
 use crate::journal::{LogicalTrace, TraceEvent};
@@ -195,6 +195,20 @@ impl LabConfig {
             AuthoritySet::all(),
             Ownership::Owned,
         )
+    }
+
+    /// Build the runtime this configuration describes.
+    ///
+    /// The lab does not fabricate a context: a run that wants a real `Cx`
+    /// takes one from this runtime through `fgit-runtime`'s production
+    /// factory, which is the only admitted way to mint one.
+    ///
+    /// # Errors
+    ///
+    /// [`fgit_runtime::RuntimeRefusal`] if the profile is inadmissible or the
+    /// runtime cannot start.
+    pub fn build_runtime(&self) -> Result<NodeRuntime, fgit_runtime::RuntimeRefusal> {
+        self.profile.clone().build()
     }
 
     /// A canonical, stable, single-line rendering of the whole configuration.
@@ -425,6 +439,22 @@ impl Lab {
             class: class.code(),
             capability_mask: <LabCaps as CapSetRuntimeMask>::MASK.bits(),
             poll_quota: budget.poll_quota,
+        });
+    }
+
+    /// Record a context that was actually minted by the runtime.
+    ///
+    /// Unlike [`record_context`](Self::record_context), which records the
+    /// profile's declared budget for a class, this reads the budget off a live
+    /// [`Cx`] produced by `fgit-runtime`'s production factory. That is the
+    /// difference between a trace asserting what the budget *should* be and
+    /// one recording what a request actually carried.
+    pub fn record_minted_context(&mut self, cx: &asupersync::cx::Cx, class: BudgetClass) {
+        self.trace.record(TraceEvent::ContextMinted {
+            at: self.clock.now(),
+            class: class.code(),
+            capability_mask: <LabCaps as CapSetRuntimeMask>::MASK.bits(),
+            poll_quota: cx.budget().poll_quota,
         });
     }
 
@@ -784,6 +814,57 @@ mod tests {
         assert!(text.contains(&format!("caps={:#06b}", lab_capability_mask().bits())));
         // Finite budget, present in the trace rather than assumed.
         assert!(!text.contains("poll_quota=4294967295"));
+    }
+
+    #[test]
+    fn a_real_runtime_owned_context_appears_in_the_trace() {
+        // The acceptance line asks for a runtime-owned Cx in traces, not a
+        // computed stand-in. This mints one through fgit-runtime's production
+        // factory and records the budget it actually carries.
+        use std::time::Duration;
+
+        let config = config(31);
+        let node = config
+            .build_runtime()
+            .expect("the deterministic profile builds");
+        let cx = node.request_cx(BudgetClass::Request);
+        let live_quota = cx.budget().poll_quota;
+
+        let mut lab = Lab::start(config);
+        lab.record_minted_context(&cx, BudgetClass::Request);
+
+        let text = String::from_utf8(lab.trace().canonical_bytes()).expect("utf-8");
+        assert!(text.contains(&format!("poll_quota={live_quota}")));
+        assert!(text.contains("class=request"));
+        // A real request context is bounded, which is what makes it safe to
+        // hand to a subject under test.
+        assert!(live_quota < u32::MAX);
+        assert!(cx.budget().deadline.is_some());
+
+        drop(cx);
+        assert!(node.join_root(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn the_recorded_budget_matches_the_profile_for_every_class() {
+        use std::time::Duration;
+
+        let config = config(32);
+        let node = config.build_runtime().expect("builds");
+        for class in BudgetClass::finite_classes() {
+            let cx = node.request_cx(class);
+            let mut lab = Lab::start(config.clone());
+            lab.record_minted_context(&cx, class);
+            let text = String::from_utf8(lab.trace().canonical_bytes()).expect("utf-8");
+            assert!(
+                text.contains(&format!("class={}", class.code())),
+                "class {} missing from trace",
+                class.code()
+            );
+            assert!(!text.contains("poll_quota=4294967295"));
+            drop(cx);
+        }
+        assert!(node.join_root(Duration::from_secs(5)));
     }
 
     #[test]

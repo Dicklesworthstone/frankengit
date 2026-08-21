@@ -12,6 +12,7 @@
 //! whole fault configuration lives so it can be quoted and replayed.
 
 use fgit_authority::{FaultPlan, OpIndex};
+use fgit_runtime::Exhaustion;
 
 use crate::rng::SeededEntropy;
 
@@ -144,6 +145,109 @@ impl ObjectStoreFault {
     }
 }
 
+/// A fault against a work unit's own execution, rather than against a
+/// resource it talks to.
+///
+/// The bead requires storage, packet, **budget**, **cancellation**, **panic**,
+/// and obligation faults to compose. The first two are resource-facing and
+/// live above; these three are execution-facing, and they are modelled
+/// separately because they arrive through a different channel: the runtime
+/// imposes them on the task, rather than a peer returning them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExecutionFault {
+    /// A budget dimension is driven to empty.
+    BudgetExhausted {
+        /// Which dimension runs out.
+        dimension: Exhaustion,
+    },
+    /// Cancellation is requested during a named phase.
+    ///
+    /// The phase matters: cancelling during `finalize` is the case that can
+    /// strand an obligation, and it is not the same experiment as cancelling
+    /// during `request`.
+    Cancelled {
+        /// `request`, `drain`, or `finalize`.
+        phase: CancelPhase,
+    },
+    /// The work unit panics and the panic is contained.
+    PanicContained,
+}
+
+/// The cancellation phase a fault targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CancelPhase {
+    /// Cancellation requested before draining begins.
+    Request,
+    /// Cancellation lands while in-flight work is draining.
+    Drain,
+    /// Cancellation lands during finalization, where obligations settle.
+    Finalize,
+}
+
+impl CancelPhase {
+    /// Stable machine code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Drain => "drain",
+            Self::Finalize => "finalize",
+        }
+    }
+
+    /// The phases in their fixed order.
+    #[must_use]
+    pub const fn sequence() -> [Self; 3] {
+        [Self::Request, Self::Drain, Self::Finalize]
+    }
+
+    /// Whether a fault in this phase can strand an obligation.
+    ///
+    /// Only `Finalize` can: before it, obligations have not begun settling, so
+    /// cancelling loses no responsibility that was not already unclaimed.
+    #[must_use]
+    pub const fn can_strand_an_obligation(self) -> bool {
+        matches!(self, Self::Finalize)
+    }
+}
+
+impl ExecutionFault {
+    /// Stable machine code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::BudgetExhausted { .. } => "exec.budget_exhausted",
+            Self::Cancelled { .. } => "exec.cancelled",
+            Self::PanicContained => "exec.panic_contained",
+        }
+    }
+
+    /// Which `Outcome` arm a caller should see.
+    ///
+    /// Budget exhaustion and cancellation both surface as cancellation; a
+    /// contained panic surfaces as the panic arm. Collapsing either into the
+    /// domain-error arm is the failure this mapping exists to prevent.
+    #[must_use]
+    pub const fn expected_outcome(self) -> &'static str {
+        match self {
+            Self::BudgetExhausted { .. } | Self::Cancelled { .. } => "cancelled",
+            Self::PanicContained => "panicked",
+        }
+    }
+
+    /// A canonical rendering for the trace.
+    #[must_use]
+    pub fn canonical(self) -> String {
+        match self {
+            Self::BudgetExhausted { dimension } => {
+                format!("exec.budget_exhausted:{}", dimension.code())
+            }
+            Self::Cancelled { phase } => format!("exec.cancelled:{}", phase.code()),
+            Self::PanicContained => "exec.panic_contained".to_owned(),
+        }
+    }
+}
+
 /// One scheduled fault, at one logical operation index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduledHazard {
@@ -161,6 +265,13 @@ pub enum ScheduledHazard {
         /// The fault.
         fault: ObjectStoreFault,
     },
+    /// An execution fault against the work unit itself.
+    Execution {
+        /// Operation index at which it fires.
+        at: OpIndex,
+        /// The fault.
+        fault: ExecutionFault,
+    },
 }
 
 impl ScheduledHazard {
@@ -168,7 +279,9 @@ impl ScheduledHazard {
     #[must_use]
     pub const fn at(self) -> OpIndex {
         match self {
-            Self::Packet { at, .. } | Self::ObjectStore { at, .. } => at,
+            Self::Packet { at, .. } | Self::ObjectStore { at, .. } | Self::Execution { at, .. } => {
+                at
+            }
         }
     }
 
@@ -178,6 +291,7 @@ impl ScheduledHazard {
         match self {
             Self::Packet { at, fault } => format!("{}@{}", fault.canonical(), at.raw()),
             Self::ObjectStore { at, fault } => format!("{}@{}", fault.canonical(), at.raw()),
+            Self::Execution { at, fault } => format!("{}@{}", fault.canonical(), at.raw()),
         }
     }
 }
@@ -520,6 +634,117 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), object.len());
+    }
+
+    #[test]
+    fn execution_faults_map_to_the_right_outcome_arm() {
+        // Budget exhaustion and cancellation are both cancellation; a
+        // contained panic is its own arm. Neither may become a domain error.
+        for dimension in [
+            Exhaustion::Deadline,
+            Exhaustion::PollQuota,
+            Exhaustion::CostQuota,
+        ] {
+            let fault = ExecutionFault::BudgetExhausted { dimension };
+            assert_eq!(fault.expected_outcome(), "cancelled");
+            assert_ne!(fault.expected_outcome(), "refusal");
+        }
+        for phase in CancelPhase::sequence() {
+            assert_eq!(
+                ExecutionFault::Cancelled { phase }.expected_outcome(),
+                "cancelled"
+            );
+        }
+        assert_eq!(
+            ExecutionFault::PanicContained.expected_outcome(),
+            "panicked"
+        );
+        assert_ne!(
+            ExecutionFault::PanicContained.expected_outcome(),
+            ExecutionFault::Cancelled {
+                phase: CancelPhase::Drain
+            }
+            .expected_outcome()
+        );
+    }
+
+    #[test]
+    fn only_finalize_cancellation_can_strand_an_obligation() {
+        assert!(CancelPhase::Finalize.can_strand_an_obligation());
+        // Paired permitted cases: the earlier phases cannot.
+        assert!(!CancelPhase::Request.can_strand_an_obligation());
+        assert!(!CancelPhase::Drain.can_strand_an_obligation());
+    }
+
+    #[test]
+    fn all_six_fault_classes_compose_at_one_operation_index() {
+        // The acceptance line: storage, packet, budget, cancellation, panic,
+        // and obligation faults compose. Storage is the FaultPlan; obligation
+        // is the oracle; the other four are scheduled hazards, and they can
+        // all land on the same operation.
+        let at = OpIndex::from_raw(3);
+        let script = HazardScript::explicit(
+            FaultPlan::seeded(1, 8, 2),
+            vec![
+                ScheduledHazard::Packet {
+                    at,
+                    fault: PacketFault::Truncate { after_bytes: 12 },
+                },
+                ScheduledHazard::ObjectStore {
+                    at,
+                    fault: ObjectStoreFault::WriteAmbiguous,
+                },
+                ScheduledHazard::Execution {
+                    at,
+                    fault: ExecutionFault::BudgetExhausted {
+                        dimension: Exhaustion::Deadline,
+                    },
+                },
+                ScheduledHazard::Execution {
+                    at,
+                    fault: ExecutionFault::Cancelled {
+                        phase: CancelPhase::Finalize,
+                    },
+                },
+                ScheduledHazard::Execution {
+                    at,
+                    fault: ExecutionFault::PanicContained,
+                },
+            ],
+        );
+
+        assert_eq!(script.at(at).len(), 5);
+        assert!(!script.storage().is_empty());
+
+        let line = script.canonical_line();
+        for expected in [
+            "packet.truncate:12@3",
+            "object.write_ambiguous@3",
+            "exec.budget_exhausted:deadline@3",
+            "exec.cancelled:finalize@3",
+            "exec.panic_contained@3",
+        ] {
+            assert!(line.contains(expected), "missing {expected} in {line}");
+        }
+    }
+
+    #[test]
+    fn execution_fault_codes_are_unique() {
+        let codes = [
+            ExecutionFault::BudgetExhausted {
+                dimension: Exhaustion::Deadline,
+            }
+            .code(),
+            ExecutionFault::Cancelled {
+                phase: CancelPhase::Request,
+            }
+            .code(),
+            ExecutionFault::PanicContained.code(),
+        ];
+        let mut sorted = codes.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), codes.len());
     }
 
     #[test]
