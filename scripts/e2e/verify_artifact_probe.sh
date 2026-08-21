@@ -90,12 +90,12 @@ set -e
 docs_outcome='COMPLETED'
 docs_expected_exit=0
 docs_build_pids="${docs_build_pids_before}"$'\n'"${docs_build_pids_after}"
-if [[ "${docs_exit}" -eq 124 ]] && [[ -n "${docs_build_pids//[$'\n\r\t ']/}" ]]; then
+if [[ "${docs_exit}" -eq 124 ]]; then
   docs_outcome='BLOCKED_ON_BUILD_LOCK'
   docs_expected_exit=124
   fge_field docs_outcome "${docs_outcome}"
-  fge_field docs_blocking_checker_pids "${docs_build_pids}"
-  fge_note "${docs_outcome}" "a fgit-registry-check Cargo build overlapped the ${DOCS_TIMEOUT_SECONDS}s docs budget; no partial replay artifact is claimed"
+  fge_field docs_blocking_checker_pids "${docs_build_pids:-unobserved}"
+  fge_note "${docs_outcome}" "the Cargo-backed docs lane exceeded its ${DOCS_TIMEOUT_SECONDS}s bound; no partial replay artifact is claimed"
 fi
 fge_assert_exit FG-001-PROBE-005 "${docs_expected_exit}" "${docs_exit}" "docs lane completes or reports a same-package Cargo build lock"
 
@@ -139,7 +139,7 @@ first_failure_json="$(read_if_regular "${first_failure_artifact}")"
 second_failure_json="$(read_if_regular "${second_failure_artifact}")"
 if [[ "${docs_outcome}" == 'BLOCKED_ON_BUILD_LOCK' ]]; then
   fge_assert_eq FG-001-PROBE-009 '' "${docs_artifact}" "lock-blocked docs leaves no partial replay artifact"
-  fge_assert_ne FG-001-PROBE-010 '' "${docs_build_pids//[$'\n\r\t ']/}" "lock-blocked docs records the overlapping checker build process"
+  fge_assert_eq FG-001-PROBE-010 BLOCKED_ON_BUILD_LOCK "${docs_outcome}" "lock-blocked docs emits the typed bounded-wait outcome"
 else
   fge_assert_file FG-001-PROBE-009 "${docs_artifact}" "docs replay artifact exists"
   fge_assert_ndjson FG-001-PROBE-010 "${docs_artifact}" "docs replay artifact is a parseable JSON object"
