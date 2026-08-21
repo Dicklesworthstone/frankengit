@@ -143,7 +143,7 @@ fn idempotency_key_reuse_is_a_rejection_not_a_refusal() {
 
 fn commit_id() -> RepositoryCommitId {
     RepositoryCommitId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("valid slot"),
+        DigestAlgorithmId::try_new(2).expect("valid slot"),
         CANONICAL_CODEC_VERSION,
         DigestBytes::try_new(&[0x01; 32]).expect("valid digest"),
     )
@@ -151,7 +151,7 @@ fn commit_id() -> RepositoryCommitId {
 
 fn refusal_record_id() -> RefusalRecordId {
     RefusalRecordId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("valid slot"),
+        DigestAlgorithmId::try_new(2).expect("valid slot"),
         CANONICAL_CODEC_VERSION,
         DigestBytes::try_new(&[0x02; 32]).expect("valid digest"),
     )
@@ -229,7 +229,7 @@ fn every_construction_refusal_maps_to_a_live_refusal_code() {
             observed: fgit_types::native::GitHashAlgorithm::Sha256,
         },
         TypeRefusal::DigestLengthMismatch {
-            algorithm: DigestAlgorithmId::try_new(1).expect("valid slot"),
+            algorithm: DigestAlgorithmId::try_new(2).expect("valid slot"),
             expected: 32,
             observed: 20,
         },

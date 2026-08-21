@@ -135,7 +135,7 @@ opaque_id!(
 /// use fgit_types::identity::InternalObjectId;
 /// use fgit_types::CANONICAL_CODEC_VERSION;
 /// let _ = InternalObjectId {
-///     algorithm: DigestAlgorithmId::try_new(1).unwrap(),
+///     algorithm: DigestAlgorithmId::try_new(2).unwrap(),
 ///     codec_version: CANONICAL_CODEC_VERSION,
 ///     digest: DigestBytes::try_new(&[0_u8; 32]).unwrap(),
 /// };
@@ -148,7 +148,7 @@ opaque_id!(
 /// use fgit_types::identity::{InternalObjectId, TxId};
 /// use fgit_types::CANONICAL_CODEC_VERSION;
 /// let id = InternalObjectId::new(
-///     DigestAlgorithmId::try_new(1).unwrap(),
+///     DigestAlgorithmId::try_new(2).unwrap(),
 ///     TxId::DOMAIN_TAG,
 ///     CANONICAL_CODEC_VERSION,
 ///     DigestBytes::try_new(&[0_u8; 32]).unwrap(),

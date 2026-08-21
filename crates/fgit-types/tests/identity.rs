@@ -14,7 +14,13 @@ use fgit_types::numeric::CodecVersion;
 use fgit_types::{CANONICAL_CODEC_VERSION, TypeRefusal};
 
 fn algorithm() -> DigestAlgorithmId {
-    DigestAlgorithmId::try_new(1).expect("code point 1 is a valid algorithm slot")
+    // Code point 2, not 1. `fgit-crypto`'s registry records 1 as sha1 with usage
+    // GitIdentityOnly -- "never an internal body identity" -- while 2 is sha256,
+    // GitAndInternalIdentity, and 32 bytes, which is the digest length these
+    // fixtures actually carry. This crate takes no dependency on that registry, so
+    // the choice is a convention here rather than an enforced rule; the earlier
+    // value taught a combination the registry forbids.
+    DigestAlgorithmId::try_new(2).expect("code point 2 is a valid algorithm slot")
 }
 
 fn digest(fill: u8) -> DigestBytes {
@@ -93,12 +99,16 @@ fn codec_version_participates_in_internal_identity() {
 fn algorithm_participates_in_internal_identity() {
     let bytes = digest(0x77);
     let first = TransactionSealId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("valid slot"),
+        DigestAlgorithmId::try_new(2).expect("valid slot"),
         CANONICAL_CODEC_VERSION,
         bytes,
     );
+    // A DIFFERENT algorithm over the same digest bytes: the whole point is that
+    // the algorithm participates in identity, so the two sides must not be the
+    // same code point. (An earlier edit moved both off the sha1 slot at once and
+    // collapsed the contrast, which this assertion caught.)
     let second = TransactionSealId::from_digest(
-        DigestAlgorithmId::try_new(2).expect("valid slot"),
+        DigestAlgorithmId::try_new(3).expect("valid slot"),
         CANONICAL_CODEC_VERSION,
         bytes,
     );
@@ -189,7 +199,7 @@ fn internal_identity_display_names_all_four_components() {
     );
     assert_eq!(
         id.to_string(),
-        "frankengit/ref-txn/v2/v1.0/alg:1/abababababababababababababababab"
+        "frankengit/ref-txn/v2/v1.0/alg:2/abababababababababababababababab"
     );
 }
 
