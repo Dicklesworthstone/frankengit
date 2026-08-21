@@ -524,20 +524,6 @@ impl Builder {
         }
     }
 
-    pub(crate) fn span_of(&self, id: NodeId) -> Option<Span> {
-        self.nodes.get(usize_of(id.0)).map(|node| node.span)
-    }
-
-    pub(crate) fn children_of(&self, id: NodeId) -> &[NodeId] {
-        self.nodes
-            .get(usize_of(id.0))
-            .map_or(&[] as &[NodeId], |node| node.children())
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.nodes.len()
-    }
-
     pub(crate) fn finish(self, source: &str, profile: ProfileId, lines: LineTable) -> Document {
         Document {
             source: Box::from(source),

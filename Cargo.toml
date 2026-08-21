@@ -4,8 +4,8 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/fgit-authority", "crates/fgit-deflate", "crates/fgit-diff", "crates/fgit-object-fabric", "crates/fgit-pack", "crates/fgit-types", "tools/registry-check"]
-default-members = ["crates/fgit-authority", "crates/fgit-deflate", "crates/fgit-diff", "crates/fgit-object-fabric", "crates/fgit-pack", "crates/fgit-types", "tools/registry-check"]
+members = ["crates/fgit-authority", "crates/fgit-deflate", "crates/fgit-diff", "crates/fgit-doc", "crates/fgit-object-fabric", "crates/fgit-pack", "crates/fgit-types", "tools/registry-check"]
+default-members = ["crates/fgit-authority", "crates/fgit-deflate", "crates/fgit-diff", "crates/fgit-doc", "crates/fgit-object-fabric", "crates/fgit-pack", "crates/fgit-types", "tools/registry-check"]
 
 [workspace.package]
 edition = "2024"

@@ -26,6 +26,15 @@ pub struct StructuralLimits {
 }
 
 impl StructuralLimits {
+    /// Hardest nesting depth any profile may configure.
+    ///
+    /// Renderers walk containers recursively, so an unbounded configured depth
+    /// would move a hostile-input hazard from the parser to the renderer. The
+    /// cap keeps every recursive walk in this crate within a few hundred small
+    /// frames, and a profile that asks for more is refused at parse time
+    /// rather than accepted and crashed later.
+    pub const HARD_MAX_DEPTH: u32 = 256;
+
     /// Structural ceilings applied when the caller does not choose others.
     pub const DEFAULT: Self = Self {
         max_line_bytes: 64 * 1024,
@@ -80,6 +89,18 @@ impl Limits {
         max_anchor_context_bytes: 256,
         max_batch_inputs: 100_000,
     };
+
+    /// Checks the configured depth against [`StructuralLimits::HARD_MAX_DEPTH`].
+    pub fn check_configuration(&self) -> Result<(), Refusal> {
+        if self.structural.max_depth > StructuralLimits::HARD_MAX_DEPTH {
+            return Err(Refusal::exceeded(
+                RefusalKind::NestingTooDeep,
+                u64::from(StructuralLimits::HARD_MAX_DEPTH),
+                u64::from(self.structural.max_depth),
+            ));
+        }
+        Ok(())
+    }
 
     /// Checks a source length against [`Limits::max_input_bytes`].
     pub fn check_input_len(&self, observed: usize) -> Result<(), Refusal> {

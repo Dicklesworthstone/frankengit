@@ -15,6 +15,10 @@ name = "fgit-diff"
 version = "0.0.1"
 
 [[package]]
+name = "fgit-doc"
+version = "0.0.0"
+
+[[package]]
 name = "fgit-object-fabric"
 version = "0.1.0"
 dependencies = [

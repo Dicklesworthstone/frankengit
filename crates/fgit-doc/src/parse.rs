@@ -47,6 +47,7 @@ pub fn parse(source: &str) -> Result<ParseOutput, Refusal> {
 
 /// Parses a source text with a caller-chosen profile.
 pub fn parse_with(source: &str, profile: ParseProfile) -> Result<ParseOutput, Refusal> {
+    profile.limits.check_configuration()?;
     profile.limits.check_input_len(source.len())?;
     let lines = split_lines(source);
     check_line_lengths(&lines, profile.limits.structural)?;
