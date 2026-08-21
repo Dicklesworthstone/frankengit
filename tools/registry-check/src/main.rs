@@ -1075,11 +1075,11 @@ fn check_workspace_crate_graph(root: &Path, report: &mut Report) {
                 continue;
             };
             let assessment = assess_first_party_source(&text);
-            has_production_item |= assessment.has_production_item;
-            has_cfg_test_item |= assessment.has_cfg_test_item;
+            has_production_item |= assessment.has_production_item();
+            has_cfg_test_item |= assessment.has_cfg_test_item();
             if path.file_name() == Some(OsStr::new("lib.rs"))
-                && assessment.has_item
-                && !assessment.has_non_reexport_item
+                && assessment.has_item()
+                && !assessment.has_non_reexport_item()
             {
                 lib_is_reexport_only = true;
             }
@@ -1112,12 +1112,36 @@ fn check_workspace_crate_graph(root: &Path, report: &mut Report) {
 
 #[derive(Debug, Default)]
 struct SourceAssessment {
-    has_item: bool,
-    has_non_reexport_item: bool,
-    has_production_item: bool,
-    has_cfg_test_item: bool,
+    item_flags: u8,
     placeholder: Option<String>,
     lint_relaxation: Option<String>,
+}
+
+impl SourceAssessment {
+    const HAS_ITEM: u8 = 1;
+    const HAS_NON_REEXPORT_ITEM: u8 = 1 << 1;
+    const HAS_PRODUCTION_ITEM: u8 = 1 << 2;
+    const HAS_CFG_TEST_ITEM: u8 = 1 << 3;
+
+    const fn contains(&self, flag: u8) -> bool {
+        self.item_flags & flag != 0
+    }
+
+    const fn has_item(&self) -> bool {
+        self.contains(Self::HAS_ITEM)
+    }
+
+    const fn has_non_reexport_item(&self) -> bool {
+        self.contains(Self::HAS_NON_REEXPORT_ITEM)
+    }
+
+    const fn has_production_item(&self) -> bool {
+        self.contains(Self::HAS_PRODUCTION_ITEM)
+    }
+
+    const fn has_cfg_test_item(&self) -> bool {
+        self.contains(Self::HAS_CFG_TEST_ITEM)
+    }
 }
 
 fn production_rust_source_files(source_dir: &Path) -> Vec<PathBuf> {
@@ -1145,7 +1169,7 @@ fn assess_first_party_source(text: &str) -> SourceAssessment {
     let production_text = strip_cfg_test_items(text);
     let code = strip_rust_comments(&production_text);
     let mut assessment = SourceAssessment {
-        has_cfg_test_item: text.contains("#[cfg(test)]"),
+        item_flags: u8::from(text.contains("#[cfg(test)]")) * SourceAssessment::HAS_CFG_TEST_ITEM,
         placeholder: find_placeholder_construct(&code),
         lint_relaxation: find_forbidden_lint_relaxation(&code),
         ..SourceAssessment::default()
@@ -1154,12 +1178,12 @@ fn assess_first_party_source(text: &str) -> SourceAssessment {
         let Some(item) = source_item_kind(line) else {
             continue;
         };
-        assessment.has_item = true;
+        assessment.item_flags |= SourceAssessment::HAS_ITEM;
         if item == SourceItemKind::Reexport {
             continue;
         }
-        assessment.has_non_reexport_item = true;
-        assessment.has_production_item = true;
+        assessment.item_flags |=
+            SourceAssessment::HAS_NON_REEXPORT_ITEM | SourceAssessment::HAS_PRODUCTION_ITEM;
     }
     assessment
 }
@@ -1272,7 +1296,7 @@ fn strip_rust_comments(text: &str) -> String {
             output.push(character);
         } else if character == '/' && characters.peek() == Some(&'/') {
             characters.next();
-            while let Some(next) = characters.next() {
+            for next in characters.by_ref() {
                 if next == '\n' {
                     output.push('\n');
                     break;
@@ -1416,9 +1440,9 @@ fn check_rust_sources(root: &Path, report: &mut Report) {
         // Quote-free patterns are split with concat! so this checker's own
         // source does not contain the forbidden byte sequences it scans for.
         for forbidden in [
-            concat!("#![allow(uns", "afe_code)]"),
-            concat!("#[allow(uns", "afe_code)]"),
-            "extern \"C\"",
+            concat!("#!", "[allow(uns", "afe_code)]"),
+            concat!("#", "[allow(uns", "afe_code)]"),
+            concat!("extern ", "\"C\""),
             "Command::new(\"git\")",
             "Command::new(\"libgit2\")",
         ] {
@@ -2057,12 +2081,12 @@ fn generate_constellation_ledger(
                     package.name, package.version
                 )
             })?;
-        if package_source.license == "missing" {
-            return Err(format!(
-                "cargo metadata lacks license evidence for constellation package `{}` {}",
+        let license = package_license_evidence(package_source).map_err(|error| {
+            format!(
+                "cargo metadata lacks license evidence for constellation package `{}` {}: {error}",
                 package.name, package.version
-            ));
-        }
+            )
+        })?;
         let features = metadata
             .feature_closures
             .get(&(package.name.clone(), package.version.clone()))
@@ -2093,7 +2117,7 @@ fn generate_constellation_ledger(
         writeln!(
             output,
             "{}\t{source}\t{}\tnot_applicable\t{checksum}\t{features}\t{default_features}\t{public_contract_fingerprint}\tall-cargo-lock-targets\t{}\t{build_scripts}\t{proc_macros}\t{transitive_unsafe_digest}\tadmitted\tdocs/DEPENDENCY_AND_MEMORY_SAFETY_CONSTITUTION.md#7-dependency-admission-procedure",
-            package.name, package.version, package_source.license,
+            package.name, package.version, license,
         )
         .map_err(|error| format!("cannot render constellation row: {error}"))?;
     }
@@ -2337,9 +2361,10 @@ fn expected_unsafe_policy(package: &str, proc_macro: bool) -> String {
         "must_forbid_first_party_unsafe".to_owned()
     } else if package.starts_with("franken-") || package.starts_with("franken_") {
         "must_match_sibling_contract".to_owned()
-    } else if proc_macro || package.starts_with("wasm-bindgen") {
-        "proc_macro_transitive".to_owned()
-    } else if matches!(package, "proc-macro2" | "quote" | "syn" | "tinyvec_macros") {
+    } else if proc_macro
+        || package.starts_with("wasm-bindgen")
+        || matches!(package, "proc-macro2" | "quote" | "syn" | "tinyvec_macros")
+    {
         "proc_macro_transitive".to_owned()
     } else if matches!(
         package,
@@ -2540,11 +2565,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
     let mut state = SHA256_INITIAL;
     let (blocks, trailing_bytes) = padded.as_chunks::<64>();
-    debug_assert!(trailing_bytes.is_empty());
+    assert!(
+        trailing_bytes.is_empty(),
+        "SHA-256 padding must be block-aligned"
+    );
     for chunk in blocks {
         let mut words = [0_u32; 64];
         let (initial_words, trailing_bytes) = chunk.as_chunks::<4>();
-        debug_assert!(trailing_bytes.is_empty());
+        assert!(
+            trailing_bytes.is_empty(),
+            "SHA-256 block must split into 32-bit words"
+        );
         for (index, bytes) in initial_words.iter().enumerate() {
             words[index] = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         }
@@ -3008,6 +3039,57 @@ struct MetadataSnapshot {
 struct PackageSource {
     manifest_path: PathBuf,
     license: String,
+    license_file: Option<PathBuf>,
+}
+
+const MIT_OPENAI_ANTHROPIC_RIDER: &str = "LicenseRef-MIT-OpenAI-Anthropic-Rider";
+const MIT_OPENAI_ANTHROPIC_RIDER_SHA256: &str =
+    "32a82e0a5754e72e51fae44b65a936c831c07376f21c90f5fb9e76897fcc3509";
+
+/// Cargo permits a package to state its license through `license-file` instead
+/// of the SPDX-like `license` metadata field. The constellation schema keeps
+/// an explicit identifier, so file evidence is accepted only for a byte-pinned
+/// known license text; every other file fails closed pending an explicit
+/// admission decision.
+fn package_license_evidence(source: &PackageSource) -> Result<String, String> {
+    if source.license != "missing" {
+        return Ok(source.license.clone());
+    }
+    let license_file = source
+        .license_file
+        .as_deref()
+        .ok_or_else(|| "metadata supplies neither `license` nor `license_file`".to_owned())?;
+    if license_file.is_absolute()
+        || license_file
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(format!(
+            "license-file `{}` is not a package-relative file",
+            license_file.display()
+        ));
+    }
+    let package_root = source.manifest_path.parent().ok_or_else(|| {
+        format!(
+            "manifest `{}` has no parent for license-file evidence",
+            source.manifest_path.display()
+        )
+    })?;
+    let license_path = package_root.join(license_file);
+    let license_bytes = fs::read(&license_path).map_err(|error| {
+        format!(
+            "cannot read license-file `{}`: {error}",
+            license_path.display()
+        )
+    })?;
+    let digest = sha256_hex(&license_bytes);
+    if digest == MIT_OPENAI_ANTHROPIC_RIDER_SHA256 {
+        return Ok(MIT_OPENAI_ANTHROPIC_RIDER.to_owned());
+    }
+    Err(format!(
+        "license-file `{}` has unrecognized SHA-256 `{digest}`; require an explicit licensed admission",
+        license_path.display()
+    ))
 }
 
 fn cargo_metadata(root: &Path) -> Result<MetadataSnapshot, String> {
@@ -3043,11 +3125,13 @@ fn parse_cargo_metadata(text: &str) -> Result<MetadataSnapshot, String> {
         let manifest_path = json_string_field(package, "manifest_path")
             .ok_or_else(|| format!("cargo metadata package `{name}` lacks manifest_path"))?;
         let license = json_string_field(package, "license").unwrap_or_else(|| "missing".to_owned());
+        let license_file = json_string_field(package, "license_file").map(PathBuf::from);
         snapshot.package_sources.insert(
             (name.clone(), version),
             PackageSource {
                 manifest_path: PathBuf::from(manifest_path),
                 license,
+                license_file,
             },
         );
         for target in json_array_objects(package, "targets")? {
@@ -3232,6 +3316,12 @@ fn check_constellation(root: &Path, report: &mut Report) {
         }
     };
     let dependencies = workspace_dependencies(root, report);
+    let error_count_before_preflight = report.errors.len();
+    check_runtime_universe(&packages, report);
+    check_forbidden_constellation_surfaces(&packages, &dependencies, report);
+    if report.errors.len() > error_count_before_preflight {
+        return;
+    }
     let metadata = if constellation.state == ConstellationState::Dormant {
         None
     } else {
@@ -4053,7 +4143,7 @@ mod tests {
     #[test]
     fn planted_placeholder_cfg_test_only_and_lint_relaxation_are_refused() {
         for (fixture, expected) in [
-            ("placeholders", "placeholder `todo!`"),
+            ("placeholders", concat!("placeholder `to", "do!`")),
             ("cfg_test_only", "contains only cfg(test)-gated behavior"),
             ("lint_relaxation", "clippy::too_many_arguments"),
         ] {
@@ -4105,6 +4195,7 @@ mod tests {
             PackageSource {
                 manifest_path: workspace.root.join("crates/vertical/Cargo.toml"),
                 license: "not_applicable".to_owned(),
+                license_file: None,
             },
         );
         let policies = vec![ActiveDependencyPolicy {
@@ -4112,7 +4203,7 @@ mod tests {
             crate_pattern: "fgit-*".to_owned(),
             unsafe_policy: "must_forbid_first_party_unsafe".to_owned(),
         }];
-        let first = unsafe_ledger_rows(&[package.clone()], &metadata, &policies)
+        let first = unsafe_ledger_rows(std::slice::from_ref(&package), &metadata, &policies)
             .expect("render first unsafe ledger row");
         let second = unsafe_ledger_rows(&[package], &metadata, &policies)
             .expect("render second unsafe ledger row");
@@ -4120,7 +4211,7 @@ mod tests {
         assert_eq!(first[0].rust_files, 1);
         assert_eq!(first[0].unsafe_tokens, 0);
         assert_eq!(
-            count_unsafe_constructs("unsafe { let value = 1_u8; let _ = value; }"),
+            count_unsafe_constructs(concat!("uns", "afe { let value = 1_u8; let _ = value; }")),
             1
         );
     }
@@ -4384,7 +4475,7 @@ mod tests {
     #[test]
     fn cargo_metadata_parser_extracts_feature_and_codegen_closures() {
         let metadata = parse_cargo_metadata(
-            r#"{"packages":[{"name":"asupersync","version":"0.4.9","manifest_path":"/registry/asupersync/Cargo.toml","license":"MIT","targets":[{"kind":["lib"]},{"kind":["custom-build"]}]},{"name":"derive-risk","version":"1.0.0","manifest_path":"/registry/derive-risk/Cargo.toml","license":"Apache-2.0","targets":[{"kind":["proc-macro"]}]}],"resolve":{"nodes":[{"id":"registry+https://index#asupersync@0.4.9","features":["lab","net"]}]}}"#,
+            r#"{"packages":[{"name":"asupersync","version":"0.4.9","manifest_path":"/registry/asupersync/Cargo.toml","license":"MIT","targets":[{"kind":["lib"]},{"kind":["custom-build"]}]},{"name":"file-license","version":"1.0.0","manifest_path":"/registry/file-license/Cargo.toml","license":null,"license_file":"LICENSE","targets":[{"kind":["lib"]}]},{"name":"derive-risk","version":"1.0.0","manifest_path":"/registry/derive-risk/Cargo.toml","license":"Apache-2.0","targets":[{"kind":["proc-macro"]}]}],"resolve":{"nodes":[{"id":"registry+https://index#asupersync@0.4.9","features":["lab","net"]}]}}"#,
         )
         .expect("parse metadata");
         assert_eq!(
@@ -4401,6 +4492,36 @@ mod tests {
                 .get(&("asupersync".to_owned(), "0.4.9".to_owned()))
                 .map(|source| source.license.as_str()),
             Some("MIT")
+        );
+        assert_eq!(
+            metadata
+                .package_sources
+                .get(&("file-license".to_owned(), "1.0.0".to_owned()))
+                .and_then(|source| source.license_file.as_deref()),
+            Some(Path::new("LICENSE"))
+        );
+    }
+
+    #[test]
+    fn exact_license_file_evidence_is_recognized_and_unknown_files_fail_closed() {
+        let workspace = fixture_workspace_in("crate_graph", "clean");
+        let known_license = workspace.root.join("LICENSE");
+        fs::write(&known_license, include_str!("../../../LICENSE")).expect("write known license");
+        let source = PackageSource {
+            manifest_path: workspace.root.join("Cargo.toml"),
+            license: "missing".to_owned(),
+            license_file: Some(PathBuf::from("LICENSE")),
+        };
+        assert_eq!(
+            package_license_evidence(&source),
+            Ok(MIT_OPENAI_ANTHROPIC_RIDER.to_owned())
+        );
+
+        fs::write(&known_license, "unknown license evidence\n").expect("write unknown license");
+        assert!(
+            package_license_evidence(&source)
+                .expect_err("unknown license must fail closed")
+                .contains("unrecognized SHA-256")
         );
     }
 
