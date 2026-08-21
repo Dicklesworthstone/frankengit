@@ -38,7 +38,9 @@ use crate::derive::derive_key;
 use crate::keys::{KeyEpoch, KeyPurpose, SecretKey, SignatureCapable};
 use crate::mac::TAG_BYTES;
 use crate::registry::IdentityDomain;
-use crate::schemes::ED25519_CODE_POINT;
+use crate::schemes::{
+    ED25519_CODE_POINT, SignatureSchemeError, SignatureSchemeRow, resolve_signature_scheme,
+};
 use fgit_types::label::{SchemaFamily, SchemaId};
 
 /// Bytes in an Ed25519 signature.
@@ -96,6 +98,39 @@ pub enum SignatureError {
         /// The scheme code point the envelope declared.
         code_point: u16,
     },
+    /// The envelope names a code point reserved for harness and corpus use.
+    ///
+    /// Distinct from [`Self::UnsupportedScheme`] because the two mean opposite
+    /// things about the future: an unimplemented scheme might be admitted
+    /// later, while a reserved one never will. A verifier reporting this is
+    /// telling an operator it is looking at fixture material.
+    SchemeReservedForHarness {
+        /// The scheme code point the envelope declared.
+        code_point: u16,
+    },
+    /// The signature is not the width the registered scheme defines.
+    ///
+    /// Cheap, and deliberately not sufficient on its own: a constant-byte
+    /// payload of the right width passes this and still fails verification.
+    /// It exists so a decoder can reject impossible bodies before any curve
+    /// operation, not so a caller can treat width as authenticity.
+    SignatureLengthMismatch {
+        /// The scheme the envelope declared.
+        code_point: u16,
+        /// Width the registry defines.
+        expected: usize,
+        /// Width the envelope carried.
+        observed: usize,
+    },
+    /// The verifying key is not the width the registered scheme defines.
+    VerifyingKeyLengthMismatch {
+        /// The scheme the envelope declared.
+        code_point: u16,
+        /// Width the registry defines.
+        expected: usize,
+        /// Width the envelope carried.
+        observed: usize,
+    },
     /// The envelope was produced under a key other than the one supplied.
     ///
     /// Reported before any curve operation, and reported distinctly, so
@@ -120,6 +155,26 @@ impl fmt::Display for SignatureError {
             Self::UnsupportedScheme { code_point } => write!(
                 formatter,
                 "signature scheme code point {code_point:#06x} is not implemented by this build"
+            ),
+            Self::SchemeReservedForHarness { code_point } => write!(
+                formatter,
+                "signature scheme code point {code_point:#06x} is reserved for harness use and is never a production scheme"
+            ),
+            Self::SignatureLengthMismatch {
+                code_point,
+                expected,
+                observed,
+            } => write!(
+                formatter,
+                "scheme {code_point:#06x} defines a {expected}-byte signature; the envelope carried {observed}"
+            ),
+            Self::VerifyingKeyLengthMismatch {
+                code_point,
+                expected,
+                observed,
+            } => write!(
+                formatter,
+                "scheme {code_point:#06x} defines a {expected}-byte public key; the envelope carried {observed}"
             ),
             Self::KeyMismatch => formatter
                 .write_str("the envelope was produced under a different key than the one supplied"),
@@ -176,6 +231,65 @@ impl DetachedSignature {
         }
     }
 
+    /// Rebuild an envelope from wire fields, checked against the registry.
+    ///
+    /// The counterpart to [`Self::from_parts`], for a decoder carrying
+    /// variable-length bytes rather than fixed arrays. It consults
+    /// [`crate::resolve_signature_scheme`] and refuses a code point naming no
+    /// scheme, a code point reserved for harness use, and a signature or key
+    /// that is not the width the registered scheme defines.
+    ///
+    /// # Why the check lives here and not in a decoder's constructor
+    ///
+    /// `fgit-codec`'s `SignatureSchemeId::try_new` is a `const fn` and is
+    /// deliberately total. A registry lookup there would break every caller in
+    /// a `const` context and — the reason that actually matters — it would
+    /// refuse the reserved range, making the harness code points
+    /// *unconstructible* and forbidding the very refuge fixtures were asked to
+    /// move into. `YellowLotus` caught that: the remedy I first proposed would
+    /// have destroyed the thing it was meant to protect.
+    ///
+    /// So decoding stays permissive and the check sits at the layer that
+    /// already needs a trust anchor and already concludes something. A corpus
+    /// body still round-trips through a decoder; it simply cannot be presented
+    /// as a signature to verify.
+    pub fn from_wire(
+        scheme: u16,
+        purpose: KeyPurpose,
+        epoch: KeyEpoch,
+        key_commitment: [u8; TAG_BYTES],
+        verifying_key: &[u8],
+        signature: &[u8],
+    ) -> Result<Self, SignatureError> {
+        let row = resolve_scheme(scheme)?;
+        if signature.len() != row.signature_len {
+            return Err(SignatureError::SignatureLengthMismatch {
+                code_point: scheme,
+                expected: row.signature_len,
+                observed: signature.len(),
+            });
+        }
+        if verifying_key.len() != row.public_key_len {
+            return Err(SignatureError::VerifyingKeyLengthMismatch {
+                code_point: scheme,
+                expected: row.public_key_len,
+                observed: verifying_key.len(),
+            });
+        }
+        let mut key = [0_u8; PUBLIC_KEY_BYTES];
+        key.copy_from_slice(verifying_key);
+        let mut bytes = [0_u8; SIGNATURE_BYTES];
+        bytes.copy_from_slice(signature);
+        Ok(Self {
+            scheme,
+            purpose,
+            epoch,
+            key_commitment,
+            verifying_key: key,
+            signature: bytes,
+        })
+    }
+
     /// The signature scheme code point.
     #[must_use]
     pub const fn scheme(&self) -> u16 {
@@ -229,11 +343,7 @@ impl DetachedSignature {
         schema: SchemaId,
         body: &[u8],
     ) -> Result<(), SignatureError> {
-        if self.scheme != ED25519_CODE_POINT {
-            return Err(SignatureError::UnsupportedScheme {
-                code_point: self.scheme,
-            });
-        }
+        resolve_scheme(self.scheme)?;
         if &self.verifying_key != trusted.as_bytes() {
             return Err(SignatureError::KeyMismatch);
         }
@@ -350,6 +460,26 @@ impl<P: SignatureCapable> SecretKey<P> {
             self.material(),
             SIGNING_SEED_INFO,
         ))
+    }
+}
+
+/// Resolve a wire scheme code point into the row this build implements.
+///
+/// One place, so `verify_with` and [`DetachedSignature::from_wire`] cannot
+/// drift into disagreeing about which code points are acceptable.
+fn resolve_scheme(code_point: u16) -> Result<&'static SignatureSchemeRow, SignatureError> {
+    match resolve_signature_scheme(code_point) {
+        Ok(row) if code_point == ED25519_CODE_POINT => Ok(row),
+        // Registered, but this build binds no construction to it. Reaching
+        // here means the registry grew a row without an implementation, which
+        // is a build to refuse rather than to guess at.
+        Ok(_) => Err(SignatureError::UnsupportedScheme { code_point }),
+        Err(SignatureSchemeError::ReservedForHarness { code_point }) => {
+            Err(SignatureError::SchemeReservedForHarness { code_point })
+        }
+        Err(SignatureSchemeError::Unregistered { code_point }) => {
+            Err(SignatureError::UnsupportedScheme { code_point })
+        }
     }
 }
 

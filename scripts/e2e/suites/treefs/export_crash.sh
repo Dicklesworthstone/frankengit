@@ -150,8 +150,63 @@ a/inner.txt:100644:blob inside a
 a-b.txt:100644:blob at a-b.txt' \
   'a/inner.txt:100644:blob inside a changed'
 
+# Gitlinks cannot be written into a worktree -- there is no file to create, only
+# an index entry naming a commit that need not exist. They are collected here and
+# applied with update-index after `git add -A`, which would otherwise not see
+# them at all.
+PENDING_GITLINKS=""
+
+# A symlink whose text escapes the tree. The escape is the point: Git stores the
+# text as a blob and TreeFS must reproduce that byte for byte WITHOUT ever
+# following it. An implementation that resolved the link would produce different
+# bytes here and be caught.
+add_case symlink_escape \
+  'src/lib.rs:100644:fn main() {}
+src/escape:120000:../../../etc/passwd' \
+  'src/escape:120000:../../../../etc/shadow'
+
+# A symlink promoted to a regular file and a file demoted to a symlink: the mode
+# transition is where an exporter that keys on path rather than on entry kind
+# gets it wrong.
+add_case symlink_to_file \
+  'link:120000:target.txt
+target.txt:100644:target body' \
+  'link:100644:no longer a link'
+
+# A gitlink: mode 160000 naming a commit with no object behind it. It is the one
+# entry kind whose target legitimately does not exist in the store, so an
+# exporter that validates every referenced oid would wrongly refuse it.
+# The gitlink is repeated in the edit spec even though it does not change. It
+# has to be: a gitlink has no directory in the worktree, so the edit pass's
+# `git add -A` sees it as a deletion and drops it from the index, and Git's
+# "expected" tree then loses an entry the caller never touched. Without this the
+# corpus asks Git the wrong question and FrankenGit -- which correctly carries an
+# untouched base gitlink forward -- gets reported as the defect. Verified by
+# decoding both trees: base had `vendor`, expected had only `src`.
+#
+# Restated, the case now tests what it is for: an untouched base gitlink must
+# survive a rebuild of the tree around it.
+add_case gitlink \
+  'src/lib.rs:100644:fn main() {}
+vendor:160000:1111111111111111111111111111111111111111' \
+  'src/lib.rs:100644:fn main() { changed }
+vendor:160000:1111111111111111111111111111111111111111'
+
+# Names chosen so a byte-wise sort and a locale-aware sort disagree, plus the
+# directory-sorts-as-if-slashed rule at depth. Unicode is stored as raw bytes:
+# TreeFS preserves the spelling it was given and never normalises.
+add_case hostile_names \
+  'z.txt:100644:z
+é.txt:100644:e-acute
+a b.txt:100644:space in name
+A.txt:100644:capital
+a.txt:100644:lower
+a/deep.txt:100644:inside dir a' \
+  'a/deep.txt:100644:inside dir a changed'
+
 write_case_files() {
   local work=$1 spec=$2 line rel mode content
+  PENDING_GITLINKS=""
   [ -n "$spec" ] || return 0
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -164,10 +219,52 @@ write_case_files() {
       continue
     fi
     mkdir -p -- "$(dirname -- "$work/$rel")"
-    printf '%s\n' "$content" >|"$work/$rel"
-    if [ "$mode" = 100755 ]; then chmod 755 -- "$work/$rel"; else chmod 644 -- "$work/$rel"; fi
+    case $mode in
+      120000)
+        # The body of a symlink object is the link TEXT, not the target's
+        # content. `content` is therefore stored verbatim and deliberately
+        # points outside the tree in one case: repository symlinks are data,
+        # never host traversal authority (GIT_TREE_FS §15).
+        rm -f -- "$work/$rel"
+        ln -s -- "$content" "$work/$rel"
+        ;;
+      160000)
+        # A gitlink names a commit that is not in this repository's object
+        # store. Recorded for update-index rather than written to disk.
+        PENDING_GITLINKS="$PENDING_GITLINKS$rel:$content"$'\n'
+        ;;
+      100755 | *)
+        # rm FIRST. Shell redirection follows symlinks, so writing over an
+        # existing symlink would put the bytes in the link's TARGET and leave
+        # the link itself untouched -- the symlink_to_file case would then have
+        # silently corrupted its own fixture and reported an exporter defect
+        # that did not exist.
+        rm -f -- "$work/$rel"
+        printf '%s\n' "$content" >|"$work/$rel"
+        if [ "$mode" = 100755 ]; then
+          chmod 755 -- "$work/$rel"
+        else
+          chmod 644 -- "$work/$rel"
+        fi
+        ;;
+    esac
   done <<EOF
 $spec
+EOF
+}
+
+# Applies any gitlink entries recorded by the last write_case_files call.
+apply_gitlinks() {
+  local name=$1 line rel commit
+  [ -n "$PENDING_GITLINKS" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    rel=${line%%:*}
+    commit=${line#*:}
+    oracle_git "$name" update-index --add --cacheinfo "160000,$commit,$rel" \
+      >/dev/null 2>&1 || true
+  done <<EOF
+$PENDING_GITLINKS
 EOF
 }
 
@@ -189,6 +286,7 @@ build_corpus() {
 
     write_case_files "$work" "${CASE_BASE[$name]}"
     oracle_git "$name" add -A >/dev/null 2>&1 || true
+    apply_gitlinks "$name"
     base_root="$(oracle_git_out "$name" "$name-base-tree" write-tree)" || {
       corpus_failures="$corpus_failures $name:base-write-tree"
       continue
@@ -196,6 +294,7 @@ build_corpus() {
 
     write_case_files "$work" "${CASE_EDIT[$name]}"
     oracle_git "$name" add -A >/dev/null 2>&1 || true
+    apply_gitlinks "$name"
     expected_root="$(oracle_git_out "$name" "$name-expected-tree" write-tree)" || {
       corpus_failures="$corpus_failures $name:expected-write-tree"
       continue

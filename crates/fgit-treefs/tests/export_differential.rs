@@ -291,30 +291,63 @@ fn apply_edits(
             continue;
         }
 
-        // The shell generator writes each file with `printf '%s\n'`, so the blob
-        // Git hashed ends in a newline. Reproduce that exactly or every content
-        // identity differs by one byte and the whole corpus fails for a reason
-        // that has nothing to do with tree encoding.
-        let mut body = content.as_bytes().to_vec();
-        body.push(b'\n');
-        let interned = overlay.intern(body);
-        let file_mode = match mode {
-            "100644" => FileMode::Regular,
-            "100755" => FileMode::Executable,
+        match mode {
+            // A symlink's body is the link TEXT, stored verbatim with NO
+            // trailing newline -- `ln -s` records exactly the bytes it was
+            // given. Appending the newline that regular files get would move
+            // every symlink blob identity by one byte, and the failure would
+            // look like a tree-encoding bug rather than the fixture bug it is.
+            //
+            // The text is stored, never followed. One corpus case deliberately
+            // points outside the tree: repository symlinks are data, not host
+            // traversal authority (GIT_TREE_FS §15), so reproducing the escaping
+            // text byte for byte is the correct behaviour, not a vulnerability.
+            "120000" => {
+                let target = overlay.intern(content.as_bytes().to_vec());
+                overlay.put(path, OverlayEntry::Symlink { target });
+            }
+            // A gitlink names a commit that is NOT in this repository's object
+            // store, which is the whole point of the case: it is the one entry
+            // kind whose referenced oid legitimately has no object behind it.
+            "160000" => {
+                let commit = GitOidSha1::from_hex(content.trim()).map_err(|refusal| {
+                    DifferentialError::new(format!("gitlink commit {content:?}: {refusal:?}"))
+                })?;
+                overlay.put(
+                    path,
+                    OverlayEntry::Submodule {
+                        commit: commit.as_bytes().to_vec(),
+                    },
+                );
+            }
+            "100644" | "100755" => {
+                // The shell generator writes each file with `printf '%s\n'`, so
+                // the blob Git hashed ends in a newline. Reproduce that exactly
+                // or every content identity differs by one byte and the whole
+                // corpus fails for a reason unrelated to tree encoding.
+                let mut body = content.as_bytes().to_vec();
+                body.push(b'\n');
+                let interned = overlay.intern(body);
+                let file_mode = if mode == "100755" {
+                    FileMode::Executable
+                } else {
+                    FileMode::Regular
+                };
+                overlay.put(
+                    path,
+                    OverlayEntry::File {
+                        content: ContentRef::Overlay(interned),
+                        mode: file_mode,
+                        class: EntryClass::Content,
+                    },
+                );
+            }
             other => {
                 return Err(DifferentialError::new(format!(
                     "edit mode {other:?} is not covered by this corpus"
                 )));
             }
-        };
-        overlay.put(
-            path,
-            OverlayEntry::File {
-                content: ContentRef::Overlay(interned),
-                mode: file_mode,
-                class: EntryClass::Content,
-            },
-        );
+        }
     }
     Ok(())
 }

@@ -458,3 +458,169 @@ fn a_fixture_shaped_signature_has_the_registered_length_and_still_fails_verifica
         "the genuine signature must still verify, or the refusal above is vacuous"
     );
 }
+
+// --- the checked wire constructor -------------------------------------------
+//
+// `YellowLotus`'s correction, turned into tests. My first proposal put a registry
+// lookup inside fgit-codec's `SignatureSchemeId::try_new`, which would have
+// refused the reserved range and made the harness code points unconstructible
+// — forbidding the refuge I had just told them to move their fixtures into.
+// The check belongs at the layer that concludes something.
+
+#[test]
+fn from_wire_accepts_a_genuine_envelope_and_it_still_verifies() {
+    // The permitted twin for every refusal below.
+    let key = capsule_key();
+    let genuine = key.sign(IdentityDomain::RepositoryCapsule, schema(), BODY);
+
+    let rebuilt = DetachedSignature::from_wire(
+        genuine.scheme(),
+        genuine.purpose(),
+        genuine.epoch(),
+        *genuine.key_commitment(),
+        genuine.declared_verifying_key().as_bytes(),
+        genuine.signature(),
+    )
+    .expect("a genuine envelope passes the registry check");
+
+    assert_eq!(rebuilt, genuine);
+    assert_eq!(
+        rebuilt.verify_with(
+            &key.verifying_key(),
+            IdentityDomain::RepositoryCapsule,
+            schema(),
+            BODY
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn from_wire_refuses_the_exact_hazard_that_started_this() {
+    // A 32-byte payload at Ed25519's code point: impossible, and previously
+    // accepted by anything that only checked the code point was non-zero.
+    let key = capsule_key();
+    let genuine = key.sign(IdentityDomain::RepositoryCapsule, schema(), BODY);
+
+    assert_eq!(
+        DetachedSignature::from_wire(
+            ED25519_CODE_POINT,
+            genuine.purpose(),
+            genuine.epoch(),
+            *genuine.key_commitment(),
+            genuine.declared_verifying_key().as_bytes(),
+            &[0xa0; 32],
+        ),
+        Err(SignatureError::SignatureLengthMismatch {
+            code_point: ED25519_CODE_POINT,
+            expected: 64,
+            observed: 32,
+        })
+    );
+}
+
+#[test]
+fn from_wire_refuses_a_wrong_width_verifying_key() {
+    let key = capsule_key();
+    let genuine = key.sign(IdentityDomain::RepositoryCapsule, schema(), BODY);
+
+    assert_eq!(
+        DetachedSignature::from_wire(
+            ED25519_CODE_POINT,
+            genuine.purpose(),
+            genuine.epoch(),
+            *genuine.key_commitment(),
+            &[0x01; 16],
+            genuine.signature(),
+        ),
+        Err(SignatureError::VerifyingKeyLengthMismatch {
+            code_point: ED25519_CODE_POINT,
+            expected: 32,
+            observed: 16,
+        })
+    );
+}
+
+#[test]
+fn the_harness_range_is_refused_distinctly_from_an_unregistered_scheme() {
+    // The two mean opposite things about the future, so a verifier must not
+    // collapse them: an unregistered point might be admitted later, a reserved
+    // one never will.
+    let key = capsule_key();
+    let genuine = key.sign(IdentityDomain::RepositoryCapsule, schema(), BODY);
+    let reserved = *SIGNATURE_SCHEME_RESERVED_CODE_POINTS.start();
+
+    assert_eq!(
+        DetachedSignature::from_wire(
+            reserved,
+            genuine.purpose(),
+            genuine.epoch(),
+            *genuine.key_commitment(),
+            genuine.declared_verifying_key().as_bytes(),
+            genuine.signature(),
+        ),
+        Err(SignatureError::SchemeReservedForHarness {
+            code_point: reserved
+        })
+    );
+    assert_eq!(
+        DetachedSignature::from_wire(
+            0x0100,
+            genuine.purpose(),
+            genuine.epoch(),
+            *genuine.key_commitment(),
+            genuine.declared_verifying_key().as_bytes(),
+            genuine.signature(),
+        ),
+        Err(SignatureError::UnsupportedScheme { code_point: 0x0100 })
+    );
+}
+
+#[test]
+fn the_reserved_range_stays_constructible_so_fixtures_are_not_forbidden() {
+    // The whole point of `YellowLotus`'s correction. A corpus body at 0xfff1 must
+    // remain representable and round-trippable — otherwise the range fixtures
+    // were told to move into would be uninhabitable — while still being
+    // refused the moment anything tries to conclude authorship from it.
+    let key = capsule_key();
+    let genuine = key.sign(IdentityDomain::RepositoryCapsule, schema(), BODY);
+    let fixture_point = 0xfff1;
+    assert!(SIGNATURE_SCHEME_RESERVED_CODE_POINTS.contains(&fixture_point));
+
+    // Constructible: from_parts is total, so a fixture exists as a value.
+    let fixture = DetachedSignature::from_parts(
+        fixture_point,
+        genuine.purpose(),
+        genuine.epoch(),
+        *genuine.key_commitment(),
+        *genuine.declared_verifying_key().as_bytes(),
+        [0xa0; 64],
+    );
+    assert_eq!(fixture.scheme(), fixture_point);
+
+    // But it can never be verified, and the refusal names the reservation
+    // rather than pretending the scheme is merely unknown.
+    assert_eq!(
+        fixture.verify_with(
+            &key.verifying_key(),
+            IdentityDomain::RepositoryCapsule,
+            schema(),
+            BODY
+        ),
+        Err(SignatureError::SchemeReservedForHarness {
+            code_point: fixture_point
+        })
+    );
+
+    // And the genuine envelope is unaffected, so the refusal above is not a
+    // verifier that broke outright.
+    assert_eq!(
+        genuine.verify_with(
+            &key.verifying_key(),
+            IdentityDomain::RepositoryCapsule,
+            schema(),
+            BODY
+        ),
+        Ok(())
+    );
+}
