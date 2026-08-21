@@ -213,19 +213,19 @@ impl CapabilityProfile {
 
     /// The runtime capability mask.
     #[must_use]
-    pub const fn runtime_mask(&self) -> CapMask {
+    pub const fn runtime_mask(self) -> CapMask {
         self.runtime
     }
 
     /// The repository authority set.
     #[must_use]
-    pub const fn authority(&self) -> AuthoritySet {
+    pub const fn authority(self) -> AuthoritySet {
         self.authority
     }
 
     /// The ownership shape.
     #[must_use]
-    pub const fn ownership(&self) -> Ownership {
+    pub const fn ownership(self) -> Ownership {
         self.ownership
     }
 
@@ -243,7 +243,7 @@ impl CapabilityProfile {
     /// - [`RuntimeRefusal::DetachedAuthorityRetained`] when the child is
     ///   detached and would retain authority.
     pub fn narrow(
-        &self,
+        self,
         runtime: CapMask,
         authority: AuthoritySet,
         ownership: Ownership,
@@ -272,7 +272,7 @@ impl CapabilityProfile {
     /// This is the constructive counterpart to the detached-authority refusal.
     /// Detached work is not forbidden — retaining authority while detached is.
     #[must_use]
-    pub const fn detached(&self) -> Self {
+    pub const fn detached(self) -> Self {
         Self {
             runtime: self.runtime,
             authority: AuthoritySet::none(),
@@ -286,7 +286,7 @@ impl CapabilityProfile {
     ///
     /// [`RuntimeRefusal::DetachedAuthorityRetained`] naming the first retained
     /// capability in declaration order.
-    pub fn verify_detached_holds_no_authority(&self) -> Result<(), RuntimeRefusal> {
+    pub fn verify_detached_holds_no_authority(self) -> Result<(), RuntimeRefusal> {
         if self.ownership == Ownership::Detached
             && let Some(capability) = self.authority.held().first()
         {
