@@ -19,18 +19,28 @@
 //! here: a range no production scheme may occupy, asserted at compile time,
 //! and a refusal that names the reservation rather than saying "unknown".
 //!
-//! # Honest statement of what this does today
+//! # What is registered, and the fixture hazard that comes with it
 //!
-//! **No signature scheme is registered.** ADR-0003 proposes where signature
-//! primitives come from and has not been accepted, so admitting a scheme now
-//! would either pre-empt that decision or record one that has to be withdrawn.
-//! Every code point therefore resolves to a refusal.
+//! ADR-0003 is accepted and Amendment 1 selects **Ed25519** (RFC 8032), so
+//! code point 1 is now allocated to it. That allocation is the one the module
+//! warned about above: `fgit-codec`'s fixtures already carry scheme 1 with a
+//! 64-byte payload, and 64 bytes is exactly an Ed25519 signature. Those
+//! fixtures are now *shaped* like real signatures.
 //!
-//! That is the correct behaviour rather than a placeholder: there genuinely is
-//! no admitted scheme, and the status quo — a decoder accepting any non-zero
-//! `u16` as a scheme — is strictly worse than refusing all of them. The
-//! resolver, its two distinct refusals, and the reservation are final; only
-//! the row set is empty, and filling it is a data change.
+//! Allocating elsewhere to dodge them was rejected. A permanent gap at code
+//! point 1, explicable only by test data that existed in August 2026, is worse
+//! than the hazard — and it would leave the hazard anyway, since some
+//! allocation eventually collides with some fixture.
+//!
+//! What removes the hazard is that resolving a scheme no longer yields only a
+//! length. [`SignatureSchemeRow::signature_len`] exists for framing, but
+//! [`crate::DetachedSignature::verify_with`] is the only path that concludes
+//! anything, and it requires a caller-supplied trust anchor and the original
+//! body. A fixture of 64 constant bytes passes a length check and fails
+//! verification, which is the correct outcome and the reason a length check
+//! was never sufficient. The owner of `fgit-codec` has been notified to move
+//! its fixtures into [`SIGNATURE_SCHEME_RESERVED_CODE_POINTS`], which is what
+//! that range is for.
 
 use core::fmt;
 use core::ops::RangeInclusive;
@@ -60,11 +70,29 @@ pub struct SignatureSchemeRow {
     pub status: RowStatus,
 }
 
+/// Code point of Ed25519, the scheme selected by ADR-0003 Amendment 1.
+pub const ED25519_CODE_POINT: u16 = 1;
+
 /// The registered signature schemes.
 ///
-/// Empty until ADR-0003 is accepted. See the module documentation: this is a
-/// recorded absence, not an oversight.
-pub const SIGNATURE_SCHEME_REGISTRY: &[SignatureSchemeRow] = &[];
+/// One row. A second row is a wire-format change and an ADR amendment, not an
+/// addition a contributor makes in passing.
+pub const SIGNATURE_SCHEME_REGISTRY: &[SignatureSchemeRow] = &[SignatureSchemeRow {
+    code_point: ED25519_CODE_POINT,
+    name: "ed25519",
+    signature_len: 64,
+    public_key_len: 32,
+    status: RowStatus::Active,
+}];
+
+// The registry is the wire contract, and `signing` is the implementation of
+// it. If they disagree the mismatch is a decoding bug that only shows up on a
+// real signature, so it is pinned at compile time instead.
+const _: () = {
+    assert!(SIGNATURE_SCHEME_REGISTRY.len() == 1);
+    assert!(SIGNATURE_SCHEME_REGISTRY[0].signature_len == crate::signing::SIGNATURE_BYTES);
+    assert!(SIGNATURE_SCHEME_REGISTRY[0].public_key_len == crate::signing::PUBLIC_KEY_BYTES);
+};
 
 // A production scheme must never occupy the harness range. Vacuous while the
 // registry is empty, and the point is that it stops being vacuous on the first

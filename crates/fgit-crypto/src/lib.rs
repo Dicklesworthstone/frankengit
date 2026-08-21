@@ -109,6 +109,7 @@ mod native;
 mod registry;
 mod schemes;
 mod screened;
+mod signing;
 
 #[cfg(any(test, feature = "test-double"))]
 pub mod testing;
@@ -132,9 +133,9 @@ pub use defense::{
 pub use derive::{MAX_OUTPUT_BYTES, OutputTooLong, derive, derive_key, expand, extract};
 pub use hashing::{DigestHasher, Sha1Hasher, Sha256Hasher, sha1_digest, sha256_digest};
 pub use keys::{
-    AuthorityAdmin, Capsule, Evidence, Identity, KEY_BYTES, KeyEpoch, KeyId, KeyPurpose,
-    KeyPurposeMarker, KeyScope, MacCapable, PackageRelease, PurposeMismatch, Recovery, RootSecret,
-    SecretKey, StoredKey, TenantEncryption, Webhook, derivation_info,
+    AuthorityAdmin, Capsule, EncryptionCapable, Evidence, Identity, KEY_BYTES, KeyEpoch, KeyId,
+    KeyPurpose, KeyPurposeMarker, KeyScope, MacCapable, PackageRelease, PurposeMismatch, Recovery,
+    RootSecret, SecretKey, SignatureCapable, StoredKey, TenantEncryption, Webhook, derivation_info,
 };
 pub use lifecycle::{
     KeyHistory, KeyLifecycle, KeyLifecycleError, KeyRecord, LifecycleReceipt, RECEIPT_SCHEMA,
@@ -150,11 +151,15 @@ pub use registry::{
     DigestAlgorithm, DomainRow, IdentityDomain, InternalDigestAlgorithm, RowStatus,
 };
 pub use schemes::{
-    SIGNATURE_SCHEME_REGISTRY, SIGNATURE_SCHEME_RESERVED_CODE_POINTS, SignatureSchemeError,
-    SignatureSchemeRow, is_allocatable, resolve_signature_scheme,
+    ED25519_CODE_POINT, SIGNATURE_SCHEME_REGISTRY, SIGNATURE_SCHEME_RESERVED_CODE_POINTS,
+    SignatureSchemeError, SignatureSchemeRow, is_allocatable, resolve_signature_scheme,
 };
 pub use screened::{
     Sha1IdentityProfile, screened_sha1_digest, screened_sha1_git_oid, sha1_git_oid_with_profile,
+};
+pub use signing::{
+    DetachedSignature, ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_FAMILY, PUBLIC_KEY_BYTES, SIGNATURE_BYTES,
+    SignatureError, VerifyingKey,
 };
 
 // Identity *values* belong to `fgit-types`; they are re-exported here so a
