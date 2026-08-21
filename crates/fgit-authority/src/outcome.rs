@@ -48,7 +48,9 @@ use crate::seal::{SealFailure, body_key};
 use fgit_types::HeadGeneration;
 
 use crate::tokens::AuthorityVersionToken;
-use crate::vocabulary::{CasOutcome, HeadRead, HeadReadReceipt, ImmutableRead, PutOutcome};
+use crate::vocabulary::{
+    CasOutcome, HeadInit, HeadRead, HeadReadReceipt, ImmutableRead, PutOutcome,
+};
 
 /// Namespace prefix of a per-identity outcome accelerator slot.
 pub const OUTCOME_KEY_PREFIX: &[u8] = b"fg/outcome/v1/";
@@ -370,6 +372,27 @@ where
             })
         }
     }
+}
+
+/// Create a repository's genesis head, staging its body by identity.
+///
+/// The counterpart of [`publish_decisions`]: replay resolves a head by its
+/// identity, so every head body has to be addressable that way, including the
+/// first one.
+pub fn initialize_repository<S>(
+    store: &S,
+    head_key: &HeadKey,
+    head: &RepositoryAuthorityHeadBody,
+) -> Result<HeadInit, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let key = body_key(IdentityDomain::RepositoryAuthorityHead, head)?;
+    let bytes = encode_body(head)?;
+    store.put_if_absent(&key, &bytes)?;
+    let generation = HeadGeneration::try_new(head.generation.get())
+        .map_err(|refusal| OutcomeFailure::Codec(refusal.into()))?;
+    Ok(store.initialize_head(head_key, generation, &bytes)?)
 }
 
 /// The outcome of publishing one decision batch.
