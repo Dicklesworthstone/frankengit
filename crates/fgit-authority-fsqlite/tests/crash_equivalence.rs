@@ -105,6 +105,28 @@ struct Crashable<'a> {
 }
 
 impl<'a> Crashable<'a> {
+    fn try_open(
+        node: &'a NodeRuntime,
+        path: &str,
+        instance: StoreInstanceId,
+    ) -> Result<Self, EngineError> {
+        let native = node.request_cx(BudgetClass::Request);
+        let cx = FsqliteCx::new();
+        cx.set_native_cx(native.clone());
+        let store = node.block_on(FsqliteAuthorityStore::open(
+            &cx,
+            path.to_owned(),
+            instance,
+            AuthorityLimits::default(),
+        ))?;
+        Ok(Self {
+            node,
+            cx,
+            store,
+            _native: native,
+        })
+    }
+
     fn open(node: &'a NodeRuntime, path: &str, instance: StoreInstanceId) -> Self {
         let native = node.request_cx(BudgetClass::Request);
         let cx = FsqliteCx::new();
@@ -1046,4 +1068,114 @@ fn the_crash_matrix_holds_on_every_distinct_filesystem() {
              not depend on which filesystem the store happens to sit on"
         );
     }
+}
+
+// ----------------------------------------------------- descriptors and workers
+//
+// The acceptance line: "explicit close/join leaves zero DB workers, threads,
+// descriptors, transactions, reservations, or ambiguous effects."
+//
+// `the_runtime_reaches_quiescence_after_every_store_in_this_file` covers the
+// join half. This covers the descriptor half, which nothing else does and
+// which a single open/close cannot show: one leaked descriptor per store is
+// invisible once and obvious eight times. A long-lived node that opens and
+// closes stores -- reopening after a crash, cycling profiles, running a
+// recovery drill -- exhausts its descriptor limit and then fails at something
+// unrelated, which is the worst shape of bug to diagnose.
+//
+// Linux only: /proc/self/fd is the mechanism.
+
+#[cfg(target_os = "linux")]
+fn open_descriptors() -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .expect("/proc/self/fd is readable on linux")
+        .count()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn repeated_open_and_close_cycles_do_not_leak_descriptors() {
+    const CYCLES: usize = 8;
+    let node = node();
+
+    // One warm-up cycle first. The first open may populate caches or lazily
+    // start a worker that legitimately outlives it, and counting that as a
+    // leak would make this test fail for a reason that is not a leak.
+    {
+        let scratch = Scratch::new("fd-warmup");
+        let store = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+        store.init_head(&head_key(), generation(1), GENESIS);
+        store.close().expect("the store closes cleanly");
+    }
+
+    let baseline = open_descriptors();
+
+    for cycle in 0..CYCLES {
+        // A distinct path per cycle. Reusing one label deletes and recreates
+        // the same database file inside a single process, which is a
+        // different scenario (and one this crate refuses); the subject here
+        // is descriptor accounting across many stores, not path reuse.
+        let scratch = Scratch::new(&format!("fd-cycle-{cycle}"));
+        let store = Crashable::try_open(&node, scratch.as_str(), StoreInstanceId::from_raw(1))
+            .unwrap_or_else(|error| {
+                panic!("cycle {cycle} could not open a store on a reused node: {error:?}")
+            });
+        store.init_head(&head_key(), generation(1), GENESIS);
+        let token = store.token(&head_key());
+        store
+            .exchange(&head_key(), token, generation(2), ADVANCED)
+            .expect("the exchange resolves");
+        store
+            .close()
+            .unwrap_or_else(|error| panic!("cycle {cycle} failed to close cleanly: {error:?}"));
+    }
+
+    let after = open_descriptors();
+
+    // A tolerance rather than equality: the test harness itself may open a
+    // file between the two samples, and a flaky leak detector gets muted
+    // rather than fixed. The bound is well under CYCLES, so a genuine
+    // one-descriptor-per-store leak (which would show +8) cannot hide inside
+    // it.
+    assert!(
+        after <= baseline + 2,
+        "descriptors grew from {baseline} to {after} across {CYCLES} open/close cycles; a leak \
+         of one per store exhausts a long-lived node's limit and then fails at something \
+         unrelated"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_abandoned_store_releases_its_descriptors_too() {
+    // The killed path, not the closed one. A crash-and-reopen loop is exactly
+    // what this crate's recovery story asks a node to do repeatedly, so if
+    // only the AWAITED close released descriptors, recovery itself would be
+    // the thing that exhausts them.
+    const CYCLES: usize = 8;
+    let node = node();
+
+    {
+        let scratch = Scratch::new("fd-kill-warmup");
+        let store = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+        store.init_head(&head_key(), generation(1), GENESIS);
+        store.kill();
+    }
+
+    let baseline = open_descriptors();
+
+    for cycle in 0..CYCLES {
+        let scratch = Scratch::new(&format!("fd-kill-cycle-{cycle}"));
+        let store = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+        store.init_head(&head_key(), generation(1), GENESIS);
+        store.kill();
+    }
+
+    let after = open_descriptors();
+    assert!(
+        after <= baseline + 2,
+        "descriptors grew from {baseline} to {after} across {CYCLES} kill/reopen cycles; recovery \
+         is the path a node takes most often after a crash, so a leak here is worst exactly when \
+         the system is already degraded"
+    );
 }
