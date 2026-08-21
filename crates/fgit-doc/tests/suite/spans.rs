@@ -267,3 +267,86 @@ fn consecutive_headings_each_get_their_own_node() {
         .collect::<Vec<_>>();
     assert_eq!(texts, vec!["# One", "## Two", "### Three"]);
 }
+
+#[test]
+fn leaf_kinds_never_carry_children() {
+    for case in corpus() {
+        let document = parse_case(&case);
+        for (id, _) in document.preorder() {
+            let Some(node) = document.node(id) else {
+                continue;
+            };
+            if node.kind().is_leaf() {
+                assert!(
+                    node.children().is_empty(),
+                    "{}: leaf kind {:?} carries {} children",
+                    case.name,
+                    node.kind().tag(),
+                    node.children().len()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_subtree_traversal_visits_exactly_that_subtree() {
+    for case in corpus() {
+        let document = parse_case(&case);
+        for (root, _) in document.preorder() {
+            let Some(node) = document.node(root) else {
+                continue;
+            };
+            let visited = document.subtree(root).map(|(id, _)| id).collect::<Vec<_>>();
+            assert_eq!(
+                visited.first().copied(),
+                Some(root),
+                "{}: a subtree traversal starts at its own root",
+                case.name
+            );
+            for id in &visited {
+                let span = document
+                    .node(*id)
+                    .map(fgit_doc::ast::Node::span)
+                    .expect("visited nodes exist");
+                assert!(
+                    node.span().contains(span),
+                    "{}: subtree traversal escaped the root span",
+                    case.name
+                );
+            }
+            let mut unique = visited.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(
+                unique.len(),
+                visited.len(),
+                "{}: a subtree traversal visited a node twice",
+                case.name
+            );
+        }
+    }
+}
+
+#[test]
+fn span_hull_covers_both_operands() {
+    let document = parse("first paragraph\n\nsecond paragraph\n")
+        .expect("document parses")
+        .into_document();
+    let first = document
+        .node(document.roots()[0])
+        .map(fgit_doc::ast::Node::span)
+        .expect("first root");
+    let second = document
+        .node(document.roots()[1])
+        .map(fgit_doc::ast::Node::span)
+        .expect("second root");
+    let hull = first.hull(second);
+    assert!(hull.contains(first) && hull.contains(second));
+    assert_eq!(hull.byte_start(), first.byte_start());
+    assert_eq!(hull.byte_end(), second.byte_end());
+    assert_eq!(hull.char_start(), first.char_start());
+    assert_eq!(hull.char_end(), second.char_end());
+    assert!(!first.contains(second));
+    assert!(first.contains(first));
+}

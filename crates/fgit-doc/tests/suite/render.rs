@@ -323,3 +323,34 @@ fn nested_containers_render_with_stable_prefixes() {
         "<blockquote>\n<ul>\n<li>a</li>\n<li>b</li>\n</ul>\n</blockquote>\n"
     );
 }
+
+#[test]
+fn the_compact_profile_keeps_one_node_on_one_line_under_hostile_text() {
+    let document = parse("a\\\\b and a\ttab\n")
+        .expect("document parses")
+        .into_document();
+    let compact = render(&document, RenderProfile::CompactMachine, Limits::DEFAULT)
+        .expect("compact render succeeds")
+        .into_string();
+    assert_eq!(
+        compact.lines().count(),
+        1,
+        "one node must stay one line: {compact:?}"
+    );
+    assert!(
+        compact.contains("\\\\"),
+        "a literal backslash is escaped: {compact:?}"
+    );
+
+    let fenced = parse("```\nline one\nline two\n```\n")
+        .expect("document parses")
+        .into_document();
+    let output = render(&fenced, RenderProfile::CompactMachine, Limits::DEFAULT)
+        .expect("compact render succeeds")
+        .into_string();
+    assert_eq!(
+        output.lines().count(),
+        3,
+        "a fence header plus one line per code line: {output:?}"
+    );
+}

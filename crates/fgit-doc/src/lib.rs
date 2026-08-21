@@ -8,7 +8,12 @@
 //! that one tree, so a source location cannot mean one thing in a browser and
 //! another in an agent context packet.
 //!
-//! # What this crate guarantees
+//! # Invariants this crate maintains
+//!
+//! These are invariant claims about the implementation, held by the crate's
+//! integration suite. They are not proofs, and the cross-platform half of the
+//! determinism claim is argued from the mechanism below rather than measured
+//! on a second platform.
 //!
 //! - **Span fidelity.** A leaf node's span slices the source to exactly that
 //!   leaf's text; a container's span is the exact source extent of the whole

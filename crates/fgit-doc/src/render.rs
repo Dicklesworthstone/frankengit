@@ -1,11 +1,13 @@
 //! Render profiles: pure functions from one document to one byte string.
 //!
-//! Every profile reads the same tree and the same source. No profile consults
-//! the clock, the environment, a hash map iteration order, or a floating point
-//! value, so a fixed document renders to identical bytes on every run and every
-//! platform. Output is bounded: the sink refuses as soon as the configured
-//! output ceiling is passed, so a small hostile input cannot expand without
-//! limit.
+//! Every profile reads the same tree and the same source, and none of them
+//! consults the clock, the environment, a hash map iteration order, an unstable
+//! sort, or a floating point value. A fixed document therefore renders to
+//! identical bytes on every run; the same follows across platforms by
+//! construction, from the absence of those inputs rather than from a measured
+//! second-platform run. Output is bounded: the sink refuses as soon as the
+//! configured output ceiling is passed, so a small hostile input cannot expand
+//! without limit.
 
 use crate::ast::{Document, Heading, ListInfo, NodeId, NodeKind};
 use crate::html;
