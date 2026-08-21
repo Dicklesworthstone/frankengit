@@ -824,8 +824,10 @@ impl LocalFilesystemFabric {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
-    use asupersync::{CancelKind, Cx, Outcome};
+    use asupersync::runtime::RuntimeBuilder;
+    use asupersync::{Budget, CancelKind, Cx, Outcome};
     use fgit_resource::{LeakDisposition, ObligationLedger, RegionCloseOutcome, RegionId};
     use fgit_types::{
         DigestAlgorithmId, DigestBytes, GitHashAlgorithm, PublicationEpoch,
@@ -1046,6 +1048,77 @@ mod tests {
             Outcome::Cancelled(_)
         ));
         assert_quiescent(ledger);
+    }
+
+    #[test]
+    fn open_verified_stream_runs_runtime_blocking_read_then_emits_verified_chunks() {
+        let root = TestRoot::new();
+        let fabric = fabric(root.path());
+        let object = object(b"payload");
+        let ledger = ledger();
+        fabric
+            .put_if_absent(object.clone(), admission(&ledger, &object))
+            .expect("local placement must succeed");
+
+        let runtime = RuntimeBuilder::current_thread()
+            .blocking_threads(1, 1)
+            .build()
+            .expect("test runtime must build");
+        let seed = runtime
+            .request_cx_with_budget(Budget::new().with_poll_quota(1_024).with_cost_quota(1_024));
+        let cx = runtime.request_cx_with_budget(seed.budget_for_timeout(Duration::from_secs(1)));
+        let mut stream = match runtime.block_on(fabric.open_verified_stream(
+            &cx,
+            object.identity(),
+            VerifiedStreamBudget::new(7, 3).expect("finite stream budget must be valid"),
+        )) {
+            Outcome::Ok(stream) => stream,
+            outcome => {
+                panic!("runtime-owned blocking read must open a verified stream: {outcome:?}")
+            }
+        };
+        assert!(matches!(
+            stream.next_chunk(&cx),
+            Outcome::Ok(Some(chunk)) if chunk.bytes == b"pay" && chunk.offset == 0
+        ));
+        assert!(matches!(
+            stream.next_chunk(&cx),
+            Outcome::Ok(Some(chunk)) if chunk.bytes == b"loa" && chunk.offset == 3
+        ));
+        assert!(matches!(
+            stream.next_chunk(&cx),
+            Outcome::Ok(Some(chunk)) if chunk.bytes == b"d" && chunk.offset == 6
+        ));
+        assert!(matches!(stream.next_chunk(&cx), Outcome::Ok(None)));
+        drop(cx);
+        drop(seed);
+        assert!(runtime.shutdown_timeout(Duration::from_secs(1)));
+        assert_quiescent(ledger);
+    }
+
+    #[test]
+    fn open_verified_stream_refuses_a_cancelled_runtime_request_before_spawn() {
+        let root = TestRoot::new();
+        let fabric = fabric(root.path());
+        let runtime = RuntimeBuilder::current_thread()
+            .blocking_threads(1, 1)
+            .build()
+            .expect("test runtime must build");
+        let seed = runtime
+            .request_cx_with_budget(Budget::new().with_poll_quota(1_024).with_cost_quota(1_024));
+        let cx = runtime.request_cx_with_budget(seed.budget_for_timeout(Duration::from_secs(1)));
+        cx.cancel_with(CancelKind::User, Some("cancel before local stream open"));
+        assert!(matches!(
+            runtime.block_on(fabric.open_verified_stream(
+                &cx,
+                object(b"payload").identity(),
+                VerifiedStreamBudget::new(7, 3).expect("finite stream budget must be valid"),
+            )),
+            Outcome::Cancelled(_)
+        ));
+        drop(cx);
+        drop(seed);
+        assert!(runtime.shutdown_timeout(Duration::from_secs(1)));
     }
 
     #[test]
