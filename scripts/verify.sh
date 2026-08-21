@@ -10,12 +10,13 @@ cd "$ROOT"
 #   dirty, dirty_status, dirty_status_sha256, dirty_diff_sha256,
 #   rustc_version, cargo_version, exit_code, wall_time_ms,
 #   stdout_sha256, stderr_sha256, captured_output_format,
-#   captured_output_sha256.
+#   captured_output_file, captured_output_sha256.
 # 'captured_output_sha256' hashes the exact bytes of the two captured streams
 # under the explicit v1 framing "stdout\0<bytes>\0stderr\0<bytes>". Evidence
-# writing is observational: any failure only warns on stderr and never replaces
-# the lane's exit status. '--no-artifact' suppresses this wrapper for tight
-# local loops.
+# writing retains that exact framed byte stream in the sibling
+# 'captured_output_file'. Any evidence-write failure only warns on stderr and
+# never replaces the lane's exit status. '--no-artifact' suppresses this wrapper
+# for tight local loops.
 readonly VERIFY_ARTIFACT_SCHEMA="frankengit.verify-replay.v1"
 readonly VERIFY_ARTIFACT_SCHEMA_VERSION=1
 
@@ -187,16 +188,14 @@ capture_source_state() {
   fi
 }
 
-capture_output_sha256() {
+emit_captured_output() {
   local stdout_path="$1"
   local stderr_path="$2"
 
-  {
-    printf 'stdout\0'
-    cat -- "${stdout_path}"
-    printf '\0stderr\0'
-    cat -- "${stderr_path}"
-  } | sha256_stdin
+  printf 'stdout\0'
+  cat -- "${stdout_path}"
+  printf '\0stderr\0'
+  cat -- "${stderr_path}"
 }
 
 artifact_timestamp_utc() {
@@ -234,7 +233,9 @@ write_replay_artifact() {
   local artifact_root="${VERIFY_ARTIFACT_DIR:-${ROOT}/evidence/verify}"
   local timestamp=""
   local artifact_path=""
-  local temporary_path=""
+  local output_path=""
+  local temporary_artifact_path=""
+  local temporary_output_path=""
   local wall_time_ms=0
   local stdout_sha256=""
   local stderr_sha256=""
@@ -245,6 +246,7 @@ write_replay_artifact() {
     return 0
   fi
   artifact_path="${artifact_root}/${timestamp}-${lane_name}.json"
+  output_path="${artifact_root}/${timestamp}-${lane_name}.output"
   wall_time_ms=$(((finished_ns - started_ns) / 1000000))
 
   if ! stdout_sha256="$(sha256_file "${stdout_path}")"; then
@@ -255,20 +257,31 @@ write_replay_artifact() {
     artifact_warning 'cannot hash captured stderr'
     return 0
   fi
-  if ! captured_output_sha256="$(capture_output_sha256 "${stdout_path}" "${stderr_path}")"; then
-    artifact_warning 'cannot hash captured output'
-    return 0
-  fi
   if ! mkdir -p "${artifact_root}"; then
     artifact_warning "cannot create ${artifact_root}"
     return 0
   fi
-  if [[ -e "${artifact_path}" ]]; then
-    artifact_warning "refusing to overwrite ${artifact_path}"
+  if [[ -e "${artifact_path}" || -e "${output_path}" ]]; then
+    artifact_warning "refusing to overwrite ${artifact_path} or its captured output"
     return 0
   fi
-  if ! temporary_path="$(mktemp "${artifact_root}/.verify-artifact.XXXXXXXX")"; then
+  if ! temporary_output_path="$(mktemp "${artifact_root}/.verify-output.XXXXXXXX")"; then
+    artifact_warning "cannot allocate captured output for ${artifact_path}"
+    return 0
+  fi
+  if ! emit_captured_output "${stdout_path}" "${stderr_path}" > "${temporary_output_path}"; then
+    artifact_warning "cannot retain captured output for ${artifact_path}"
+    rm -f -- "${temporary_output_path}" || true
+    return 0
+  fi
+  if ! captured_output_sha256="$(sha256_file "${temporary_output_path}")"; then
+    artifact_warning 'cannot hash retained captured output'
+    rm -f -- "${temporary_output_path}" || true
+    return 0
+  fi
+  if ! temporary_artifact_path="$(mktemp "${artifact_root}/.verify-artifact.XXXXXXXX")"; then
     artifact_warning "cannot allocate an artifact in ${artifact_root}"
+    rm -f -- "${temporary_output_path}" || true
     return 0
   fi
 
@@ -291,15 +304,21 @@ write_replay_artifact() {
     printf '"stdout_sha256":"%s",' "${stdout_sha256}"
     printf '"stderr_sha256":"%s",' "${stderr_sha256}"
     printf '"captured_output_format":"stdout\\u0000<bytes>\\u0000stderr\\u0000<bytes>",'
+    printf '"captured_output_file":"%s",' "$(json_escape "${timestamp}-${lane_name}.output")"
     printf '"captured_output_sha256":"%s"}\n' "${captured_output_sha256}"
-  } > "${temporary_path}"; then
+  } > "${temporary_artifact_path}"; then
     artifact_warning "cannot write ${artifact_path}"
-    rm -f -- "${temporary_path}" || true
+    rm -f -- "${temporary_artifact_path}" "${temporary_output_path}" || true
     return 0
   fi
-  if ! mv -- "${temporary_path}" "${artifact_path}"; then
+  if ! mv -- "${temporary_output_path}" "${output_path}"; then
+    artifact_warning "cannot publish captured output for ${artifact_path}"
+    rm -f -- "${temporary_artifact_path}" "${temporary_output_path}" || true
+    return 0
+  fi
+  if ! mv -- "${temporary_artifact_path}" "${artifact_path}"; then
     artifact_warning "cannot publish ${artifact_path}"
-    rm -f -- "${temporary_path}" || true
+    rm -f -- "${temporary_artifact_path}" "${output_path}" || true
     return 0
   fi
 }
