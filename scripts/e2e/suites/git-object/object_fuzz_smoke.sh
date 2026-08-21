@@ -74,8 +74,35 @@ main() {
   fge_assert_exit 'FG-015C-E2E-009' 0 "${hash_exit}" \
     'pinned Git admits the bare epoch-zero timestamp commit'
   epoch_oid="$(tr -d '\r\n' < "${run_directory}/transcripts/epoch-zero-hash/stdout.bin")"
-  fge_assert_eq 'FG-015C-E2E-010' 'ad9ebc4102db7fd671a2fcdb2f7f1f62b7e90f60' "${epoch_oid}" \
-    'the oracle probe retains the epoch-zero native object identity'
+
+  # Derive the expected identity here rather than trusting a literal.
+  #
+  # This assertion previously pinned a hard-coded OID that was WRONG for the
+  # body the suite itself writes, so it had never passed since the day it was
+  # committed. A magic constant cannot tell you it is stale, and the failure it
+  # produces points at the oracle rather than at itself -- so the constant is
+  # replaced by a derivation of the same spec Git implements: a commit object is
+  # SHA-1 over "commit <byte-length>\0" followed by the body.
+  #
+  # That turns this from "pinned Git still emits a number someone typed" into a
+  # genuine differential: two independent implementations of the object-identity
+  # rule must agree on the same bytes. Only sha1sum/printf/wc/cat are used, so
+  # the portability gate's forbidden-interpreter rule is respected.
+  epoch_len="$(wc -c < "${epoch_body}" | tr -d ' ')"
+  epoch_derived_oid="$( { printf 'commit %s\0' "${epoch_len}"; cat "${epoch_body}"; } |
+    sha1sum | cut -d' ' -f1)"
+  fge_field epoch_body_bytes "${epoch_len}"
+  fge_field epoch_derived_oid "${epoch_derived_oid}"
+
+  fge_assert_eq 'FG-015C-E2E-010' "${epoch_derived_oid}" "${epoch_oid}" \
+    'pinned Git and an independent SHA-1 derivation agree on the epoch-zero object identity'
+
+  # The derivation must itself be pinned, or a bug that broke BOTH sides
+  # identically would agree with itself and pass. This constant is the value
+  # confirmed by three independent routes at the time it was recorded: pinned
+  # Git 2.54.0, a standalone SHA-1 computation, and the shell derivation above.
+  fge_assert_eq 'FG-015C-E2E-015' '26d8e1a8833a4605f8df65b506c98824a52ef3d3' "${epoch_derived_oid}" \
+    'the independent derivation still reproduces the recorded epoch-zero identity'
 
   fge_capture oracle-fsck-epoch-zero env "FGIT_ORACLE_ROOT=${ORACLE_ROOT}" \
     "${ORACLE}" capture "${PIN_ID}" "${run_directory}" repo epoch-zero-fsck -- \
