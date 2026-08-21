@@ -1,5 +1,20 @@
 # FrankenGit Licensing Decision
 
+<!-- fgit-license-decision: UNRESOLVED -->
+
+The HTML comment above is the single machine-readable form of this decision and
+the only thing `scripts/license_gate.sh` reads. While it says `UNRESOLVED`,
+`./scripts/verify.sh release` refuses with exit 3. To record the decision,
+replace `UNRESOLVED` with the exact SPDX expression being adopted (for example
+`Apache-2.0`, or `AGPL-3.0-only`), or with a named non-OSI model identifier for
+a source-available outcome. The gate then requires that same string to appear in
+`LICENSE`, `README.md`, and `CONTRIBUTING.md`, and to match root `Cargo.toml`'s
+`license` field if one is set.
+
+Nothing in this document decides D14. **The choice is the repository owner's.**
+This document stops at assembling the options, the criteria, and the machinery
+that makes deferral visible instead of silent.
+
 **Status:** launch-blocking decision; no automatic license change has been made.  
 **Current truth:** source-available under the repository's custom MIT-style rider, not OSI-approved open source.
 
@@ -61,6 +76,38 @@ This affects adoption, Linux-distribution packaging, cloud marketplaces, enterpr
 4. License protocol specifications and conformance fixtures permissively unless an explicit contrary decision is made.
 5. Add license-header, dependency-license, artifact-license, and source-bundle checks to local DSR release lanes.
 6. Ensure installers, SBOMs, package metadata, websites, and README badges use the exact selected terms.
+
+## Recording the decision (what "landing it" requires)
+
+The decision is not landed when it is chosen; it is landed when every surface
+states it. All of the following change in ONE commit, because a release shipping
+a `LICENSE` and a `README` that disagree about the terms is worse than one that
+has not decided:
+
+| Surface | What must change |
+|---|---|
+| `docs/LICENSING_DECISION.md` | the `fgit-license-decision:` marker, plus rationale and the exact adopted texts |
+| `LICENSE` | replaced wholesale with the adopted text; the rider is removed, not amended |
+| `README.md` | the `## License` section states the adopted terms and drops the provisional wording |
+| `CONTRIBUTING.md` | inbound contributor terms, which must be settled before third-party code is accepted |
+| root `Cargo.toml` | `license` (SPDX) or a `license-file` pointing at the adopted `LICENSE` |
+| release lane | nothing: `scripts/license_gate.sh` starts passing on its own once the above agree |
+
+If the adopted model differs per component — option D splits a reciprocal server
+from permissive clients, SDKs, schemas, and conformance kits — each component's
+`Cargo.toml` carries its own `license` and this document records the split
+explicitly. The gate checks the root expression; a per-component split requires
+extending it in the same commit that introduces the split, which is part of
+landing the decision rather than a follow-up.
+
+## Why deferral is enforced rather than remembered
+
+`./scripts/verify.sh release` already refuses today, but only because no
+releasable binary exists. That refusal disappears the moment FG-035/FG-091 make
+releases real. A launch-blocking requirement riding on an unrelated temporary
+refusal is not enforced — it has merely never been tested. The D14 gate is
+therefore separate and runs first, so lifting the dormancy refusal cannot
+silently lift this one with it.
 
 ## Provisional documentation rule
 

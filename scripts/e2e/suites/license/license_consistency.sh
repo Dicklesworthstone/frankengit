@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# =============================================================================
+# e2e: FG-062 D14 license gate and consistency  --  suites/license/license_consistency.sh
+# Owner bead: frankengit-fg062-license-decision-cr5e
+#
+# D14 (the license model) is launch-blocking: risk R18 and definition-of-done
+# item 18 both say the project must not ship, and must not be described as open
+# source, until the licensing is genuinely settled. Two failure modes matter and
+# neither is visible in a diff review:
+#
+#   1. a release happens while the decision is still deferred. `verify.sh
+#      release` refuses today, but only because no releasable binary exists --
+#      a TEMPORARY refusal that FG-035/FG-091 will remove. A launch-blocking
+#      requirement riding on it would evaporate at the exact moment it starts
+#      to matter, so the D14 gate is separate and is checked here on its own.
+#   2. the repository claims to be open source before it is. The current
+#      LICENSE is MIT text plus a rider denying rights to named parties, which
+#      is not OSI-approved by construction.
+#
+# Every refusal below is paired with the near-identical permitted case, and the
+# resolved-decision path is exercised against a COPY of the real licensing
+# surface -- the gate must be shown to pass, not merely to refuse, or all it
+# proves is that it says no.
+#
+# NON-CLAIMS, stated rather than implied:
+#   - the open-source-claim check is a phrase checker over prose. It knows the
+#     assertion phrasings listed below and a determined rewording passes it. It
+#     is a tripwire against accidental drift, not a proof of honesty.
+#   - this suite takes NO position on which license should be adopted. That is
+#     the repository owner's decision (FG-062 says so explicitly); the suite
+#     only enforces that deferral is loud and that a recorded decision is
+#     stated identically everywhere.
+# =============================================================================
+set -euo pipefail
+
+LIC_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+LIC_REPO=$(cd "$LIC_DIR/../../../.." && pwd)
+# shellcheck source=/dev/null
+. "$LIC_REPO/scripts/e2e/lib.sh"
+
+fge_init fg062-license-consistency
+fge_context bead frankengit-fg062-license-decision-cr5e
+fge_context scope 'docs/LICENSING_DECISION.md LICENSE README.md CONTRIBUTING.md scripts/license_gate.sh'
+
+GATE="$LIC_REPO/scripts/license_gate.sh"
+DECISION="$LIC_REPO/docs/LICENSING_DECISION.md"
+
+fge_phase setup
+fge_step surface-present
+
+for f in "$GATE" "$DECISION" "$LIC_REPO/LICENSE" "$LIC_REPO/README.md" "$LIC_REPO/CONTRIBUTING.md"; do
+  [ -f "$f" ] || fge_die "required licensing surface missing: $f"
+done
+fge_field gate_present 1
+
+# -----------------------------------------------------------------------------
+fge_phase assert
+fge_step gate-refuses-while-deferred
+# -----------------------------------------------------------------------------
+# The live repository state. While the marker says UNRESOLVED the gate MUST
+# refuse with the typed code 3, not merely warn and not exit 0.
+lic_exit=0
+"$GATE" >/dev/null 2>&1 || lic_exit=$?
+fge_field live_gate_exit "$lic_exit"
+fge_assert_eq fg062-gate-refuses-deferred 3 "$lic_exit" \
+  "the D14 gate refuses with a typed exit while the decision is deferred"
+
+lic_marker_count=$(LC_ALL=C grep -c '^<!-- fgit-license-decision:' "$DECISION" || true)
+fge_assert_eq fg062-one-canonical-marker 1 "$lic_marker_count" \
+  "exactly one canonical decision marker exists; two markers is an argument, not a decision"
+
+# -----------------------------------------------------------------------------
+fge_phase assert
+fge_step gate-passes-when-resolved-and-consistent
+# -----------------------------------------------------------------------------
+# The PAIRED PERMITTED CASE, and the one that matters most: a gate only ever
+# observed refusing might refuse unconditionally. This builds a resolved,
+# fully-consistent surface in a scratch tree and requires exit 0.
+lic_work="$(fge_tempdir resolved)"
+mkdir -p "$lic_work/docs" "$lic_work/scripts"
+cp "$GATE" "$lic_work/scripts/license_gate.sh"
+chmod +x "$lic_work/scripts/license_gate.sh"
+
+lic_spdx="Apache-2.0"
+{
+  echo "# FrankenGit Licensing Decision"
+  echo
+  echo "<!-- fgit-license-decision: $lic_spdx -->"
+} > "$lic_work/docs/LICENSING_DECISION.md"
+echo "$lic_spdx adopted text goes here." > "$lic_work/LICENSE"
+printf '## License\n\nThis project is licensed under %s.\n' "$lic_spdx" > "$lic_work/README.md"
+printf '## Licensing\n\nInbound contributions are under %s.\n' "$lic_spdx" > "$lic_work/CONTRIBUTING.md"
+printf '[workspace.package]\nlicense = "%s"\n' "$lic_spdx" > "$lic_work/Cargo.toml"
+
+lic_ok_exit=0
+(cd "$lic_work" && ./scripts/license_gate.sh) >/dev/null 2>&1 || lic_ok_exit=$?
+fge_assert_eq fg062-gate-passes-when-consistent 0 "$lic_ok_exit" \
+  "a recorded decision stated identically on every surface releases the gate"
+
+# -----------------------------------------------------------------------------
+fge_phase assert
+fge_step gate-catches-each-inconsistent-surface
+# -----------------------------------------------------------------------------
+# One surface at a time is made to disagree, from the SAME tree that just
+# passed. That isolates the check: a failure here cannot be blamed on the
+# fixture, because the only difference is the one file being corrupted.
+lic_missed=""
+for surface in LICENSE README.md CONTRIBUTING.md; do
+  lic_case="$(fge_tempdir "bad-$surface")"
+  cp -r "$lic_work"/. "$lic_case"/
+  printf 'this surface says nothing about the adopted terms\n' > "$lic_case/$surface"
+  lic_bad_exit=0
+  (cd "$lic_case" && ./scripts/license_gate.sh) >/dev/null 2>&1 || lic_bad_exit=$?
+  [ "$lic_bad_exit" -eq 3 ] || lic_missed="$lic_missed $surface(exit=$lic_bad_exit)"
+done
+
+# Cargo metadata implying different terms is the quietest disagreement of all:
+# nothing a human reads changes, but packaging and SBOMs do.
+lic_case="$(fge_tempdir bad-cargo)"
+cp -r "$lic_work"/. "$lic_case"/
+printf '[workspace.package]\nlicense = "MIT"\n' > "$lic_case/Cargo.toml"
+lic_bad_exit=0
+(cd "$lic_case" && ./scripts/license_gate.sh) >/dev/null 2>&1 || lic_bad_exit=$?
+[ "$lic_bad_exit" -eq 3 ] || lic_missed="$lic_missed Cargo.toml(exit=$lic_bad_exit)"
+
+if [ -n "$lic_missed" ]; then
+  fge_fail fg062-gate-catches-inconsistency "surfaces the gate failed to catch:$lic_missed"
+else
+  fge_pass fg062-gate-catches-inconsistency \
+    "each of LICENSE, README.md, CONTRIBUTING.md and Cargo.toml is caught when it alone disagrees"
+fi
+
+# -----------------------------------------------------------------------------
+fge_phase assert
+fge_step no-premature-open-source-claim
+# -----------------------------------------------------------------------------
+# The repository may DISCUSS open source freely -- the decision document is
+# nothing but that discussion. What it may not do is ASSERT that FrankenGit is
+# open source while the marker is unresolved.
+#
+# This is the act-versus-mention distinction, and getting it wrong is the bug
+# class this repository has now hit four times (twice in the doc lane, once in
+# the ADR lane where the checker flagged the very ADR describing the rule).
+# So the pattern matches ASSERTION SHAPES -- "FrankenGit is open source", "an
+# open-source project", an OSI badge -- and never the bare token.
+lic_status=$(LC_ALL=C grep '^<!-- fgit-license-decision:' "$DECISION" \
+  | sed -E 's/^<!-- fgit-license-decision:[[:space:]]*([A-Za-z0-9_.+-]+).*/\1/')
+fge_field decision_status "$lic_status"
+
+lic_claim_re='(FrankenGit|This project|The project|It) (is|remains) (an? )?(OSI[- ])?open[- ]source'
+lic_badge_re='(img\.shields\.io/[^)]*[Ll]icense|opensource\.org/licenses)'
+
+lic_claims=""
+if [ "$lic_status" = "UNRESOLVED" ]; then
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    lic_claims="$lic_claims
+    $hit"
+  done < <(LC_ALL=C grep -rnEI "$lic_claim_re|$lic_badge_re" \
+      --include='*.md' "$LIC_REPO" 2>/dev/null \
+    | grep -v '/target/' \
+    | grep -v 'scripts/e2e/suites/license/' \
+    | LC_ALL=C grep -viE 'not (an? )?(osi|open)|is not|never|until|intends?|would be|cannot' || true)
+fi
+
+if [ -n "$lic_claims" ]; then
+  fge_fail fg062-no-premature-open-source-claim \
+    "documents assert open-source status while D14 is $lic_status:$lic_claims"
+else
+  fge_pass fg062-no-premature-open-source-claim \
+    "no document asserts open-source status while the decision is $lic_status"
+fi
+
+# The claim checker must be able to fire, or it is decoration. A planted
+# assertion in a scratch file must be seen by the SAME pattern.
+lic_scratch="$(fge_tempdir claims)"
+lic_plant="$lic_scratch/planted.md"
+printf 'FrankenGit is an open-source project you can trust.\n' > "$lic_plant"
+lic_plant_hits=$(LC_ALL=C grep -cEI "$lic_claim_re" "$lic_plant" || true)
+fge_assert_eq fg062-claim-check-can-fail 1 "$lic_plant_hits" \
+  "a planted open-source assertion is detected by the same pattern"
+
+# ...and the paired permitted case. This sample is chosen so it DOES match the
+# claim shape and must be rescued by the negation filter -- a sample that simply
+# fails to match would prove nothing about the filter at all, which is the
+# quieter way this kind of test ends up decorative.
+#
+# Both greps are guarded: under `set -euo pipefail` a grep that matches nothing
+# exits 1 and takes the whole suite down, so "no hits" must be expressible as a
+# result rather than a crash.
+lic_ok="$lic_scratch/honest.md"
+printf 'The project is open source only after D14 is resolved; until then it is not.\n' > "$lic_ok"
+lic_ok_raw=$( { LC_ALL=C grep -cEI "$lic_claim_re" "$lic_ok" || true; } )
+lic_ok_hits=$( { LC_ALL=C grep -EI "$lic_claim_re" "$lic_ok" || true; } \
+  | { LC_ALL=C grep -viE 'not (an? )?(osi|open)|is not|never|until|intends?|would be|cannot' || true; } \
+  | grep -c . || true)
+fge_field honest_sample_raw_match "$lic_ok_raw"
+fge_assert_eq fg062-honest-sample-is-a-real-near-miss 1 "$lic_ok_raw" \
+  "the honest sample really does match the claim shape, so the filter is what rescues it"
+fge_assert_eq fg062-honest-wording-not-flagged 0 "$lic_ok_hits" \
+  "honest provisional wording is not mistaken for a claim"
+
+fge_phase teardown
+fge_note "this suite decides nothing about which license to adopt; D14 is the repository owner's call (FG-062)"

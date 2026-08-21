@@ -62,6 +62,15 @@ run_full() {
 }
 
 run_release() {
+  # D14 (license model) is launch-blocking, and it is checked FIRST and on its
+  # own. The dormancy refusal below is TEMPORARY: FG-035/FG-091 remove it the
+  # day a releasable binary exists. A launch-blocking licensing requirement that
+  # rode on that refusal would silently disappear at exactly the moment it
+  # starts to matter, so it does not ride on it. See FG-062 and
+  # docs/LICENSING_DECISION.md; the gate exits 3 while the decision is deferred.
+  echo_step "Checking the D14 license gate"
+  "$ROOT/scripts/license_gate.sh"
+
   refuse_dormant "No releasable FrankenGit binary or complete native target matrix exists yet"
 }
 
