@@ -341,7 +341,21 @@ impl<A: GitHashAlgorithm> BaseView<A> {
                 None => TreePath::parse(component, &self.path_policy)?,
                 Some(prefix) => prefix.join(component, &self.path_policy)?,
             };
-            let grant = capability.authorize_read(&here, now)?;
+            // A scope refusal names the path the CALLER asked for, not the
+            // ancestor component the walk happened to stop at. Reporting the
+            // component leaked where the boundary sits: a holder of `docs`
+            // probing `src/lib.rs` learned that the refusal came at `src`,
+            // which is a coarse existence oracle for top-level names. The
+            // refusal is unchanged in kind and timing -- still before any
+            // source read -- only in what it discloses.
+            let grant = capability
+                .authorize_read(&here, now)
+                .map_err(|refusal| match refusal {
+                    CapabilityRefusal::ReadOutsideScope { .. } => {
+                        CapabilityRefusal::ReadOutsideScope { path: path.clone() }
+                    }
+                    other => other,
+                })?;
             let body = self.read_object(source, &tree_oid, GitObjectKind::Tree, &grant)?;
             capability.charge_fetch(body.len() as u64)?;
             let entries = parse_tree(
@@ -356,6 +370,17 @@ impl<A: GitHashAlgorithm> BaseView<A> {
                 .ok_or_else(|| BaseError::NotFound { path: here.clone() })?;
 
             let entry = classify(&found)?;
+
+            // The symlink policy is enforced HERE, on the resolving path, not
+            // only where a cooperative caller remembers to call check_symlink.
+            // A `Refuse` capability that still hands back BaseEntry::Symlink is
+            // not refusing; it is delegating the refusal to whoever asked, and
+            // an attacker is not obliged to ask politely. This fires whether the
+            // symlink is the target or merely on the way, so the policy cannot
+            // be stepped around by resolving a descendant instead.
+            if matches!(entry, BaseEntry::Symlink { .. }) {
+                capability.check_symlink(&here)?;
+            }
 
             if index == last_index {
                 return Ok(entry);
@@ -410,6 +435,23 @@ impl<A: GitHashAlgorithm> BaseView<A> {
 
         let mut out = Vec::with_capacity(entries.len());
         for entry in entries {
+            // Reaching the root tree is necessary to get to any authorised
+            // descendant, but the listing must not become an existence oracle
+            // for the siblings alongside it. A caller holding only `docs` may
+            // learn that `docs` exists; it may not learn that `src` does merely
+            // because the base tree is rooted above both. authorize_root's own
+            // documentation said this filtering was the caller's to do, and
+            // this is the caller.
+            //
+            // Filtering happens BEFORE classify, so an unauthorised name is not
+            // even parsed into a typed entry on its way to being discarded.
+            let child = match &scope {
+                Some(prefix) => prefix.join(&entry.name, &self.path_policy)?,
+                None => TreePath::parse(&entry.name, &self.path_policy)?,
+            };
+            if !capability.admits_disclosure(&child) {
+                continue;
+            }
             let classified = classify(&entry)?;
             out.push((entry.name.clone(), classified));
         }

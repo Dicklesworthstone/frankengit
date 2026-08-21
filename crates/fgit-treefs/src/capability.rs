@@ -16,6 +16,7 @@
 use crate::path::TreePath;
 use core::fmt::{self, Display, Formatter};
 use fgit_types::{ByteCount, RepositoryId};
+use std::sync::{Arc, Mutex};
 
 /// Identity of one workspace.
 ///
@@ -217,6 +218,76 @@ impl WriteGrant {
     }
 }
 
+/// Consumption shared across one delegation tree.
+///
+/// The budget belongs to the tree, not to each capability in it. Copying the
+/// counter into every child let two siblings each spend the same remaining
+/// allowance, so a parent holding ten bytes with two already spent could issue
+/// two children that between them spent sixteen. Narrowing scope must never
+/// multiply spend, and a budget that resets per delegation is not a budget.
+///
+/// Held behind `Arc<Mutex<..>>` so the two counters move together: files and
+/// bytes are checked as one decision, and a partial update would let a refused
+/// charge still consume the file slot.
+#[derive(Clone, Debug, Default)]
+struct FetchLedger {
+    counters: Arc<Mutex<FetchCounters>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FetchCounters {
+    bytes: u64,
+    files: u64,
+}
+
+impl FetchLedger {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reads the tree-wide totals.
+    ///
+    /// A poisoned mutex is recovered rather than propagated: the counters are
+    /// plain integers with no invariant a panic could have broken mid-update,
+    /// and turning a budget check into a panic would be a worse failure than
+    /// the one that poisoned it.
+    fn get(&self) -> FetchCounters {
+        *self
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Charges the tree-wide totals if both ceilings admit the charge.
+    fn charge(&self, bytes: u64, max_bytes: u64, max_files: u64) -> Result<(), FetchCounters> {
+        let mut guard = self
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next_files = guard.files.saturating_add(1);
+        if next_files > max_files {
+            return Err(*guard);
+        }
+        let next_bytes = guard.bytes.saturating_add(bytes);
+        if next_bytes > max_bytes {
+            return Err(*guard);
+        }
+        guard.files = next_files;
+        guard.bytes = next_bytes;
+        Ok(())
+    }
+}
+
+/// Two ledgers are equal when they hold the same totals. Identity of the shared
+/// cell is not part of capability equality; what it has spent is.
+impl PartialEq for FetchLedger {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
+}
+
+impl Eq for FetchLedger {}
+
 /// A workspace access capability.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TreeCapability {
@@ -229,8 +300,13 @@ pub struct TreeCapability {
     max_file_count: u64,
     expires_at: Option<u64>,
     revoked: bool,
+    /// What THIS capability has charged, including what it inherited when it was
+    /// attenuated. Reported in refusals so a holder sees its own position.
     fetched_bytes: u64,
     fetched_files: u64,
+    /// What the whole delegation tree has charged. This is what the ceilings are
+    /// enforced against.
+    ledger: FetchLedger,
 }
 
 impl TreeCapability {
@@ -239,8 +315,10 @@ impl TreeCapability {
     /// An empty read-prefix list authorises nothing. That is deliberate: the
     /// vacuous case is "no access", never "all access", so a construction bug
     /// fails closed.
+    // Not `const`: the shared fetch ledger is heap-allocated, and a budget that
+    // is shared across a delegation tree cannot be built in a const context.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         workspace_id: WorkspaceId,
         repository_id: RepositoryId,
         read_prefixes: Vec<TreePath>,
@@ -258,6 +336,7 @@ impl TreeCapability {
             revoked: false,
             fetched_bytes: 0,
             fetched_files: 0,
+            ledger: FetchLedger::new(),
         }
     }
 
@@ -391,25 +470,51 @@ impl TreeCapability {
     }
 
     /// Charges a served object against the budgets.
-    pub const fn charge_fetch(&mut self, bytes: u64) -> Result<(), CapabilityRefusal> {
-        let next_files = self.fetched_files.saturating_add(1);
-        if next_files > self.max_file_count {
-            return Err(CapabilityRefusal::FileBudgetExceeded {
-                consumed: self.fetched_files,
-                budget: self.max_file_count,
-            });
+    pub fn charge_fetch(&mut self, bytes: u64) -> Result<(), CapabilityRefusal> {
+        // Enforced against the SHARED tree totals, reported against this
+        // capability's own. The ceiling belongs to the delegation tree, so a
+        // sibling's spend has to be visible here; the refusal still names what
+        // this holder itself has consumed, because that is the position it can
+        // reason about.
+        match self
+            .ledger
+            .charge(bytes, self.max_fetch_bytes, self.max_file_count)
+        {
+            Ok(()) => {
+                self.fetched_files = self.fetched_files.saturating_add(1);
+                self.fetched_bytes = self.fetched_bytes.saturating_add(bytes);
+                Ok(())
+            }
+            Err(totals) => {
+                if totals.files.saturating_add(1) > self.max_file_count {
+                    Err(CapabilityRefusal::FileBudgetExceeded {
+                        consumed: self.fetched_files,
+                        budget: self.max_file_count,
+                    })
+                } else {
+                    Err(CapabilityRefusal::FetchBudgetExceeded {
+                        consumed: self.fetched_bytes,
+                        requested: bytes,
+                        budget: self.max_fetch_bytes,
+                    })
+                }
+            }
         }
-        let next_bytes = self.fetched_bytes.saturating_add(bytes);
-        if next_bytes > self.max_fetch_bytes {
-            return Err(CapabilityRefusal::FetchBudgetExceeded {
-                consumed: self.fetched_bytes,
-                requested: bytes,
-                budget: self.max_fetch_bytes,
-            });
-        }
-        self.fetched_files = next_files;
-        self.fetched_bytes = next_bytes;
-        Ok(())
+    }
+
+    /// Whether this capability may reveal that `path` exists.
+    ///
+    /// Reaching the root tree is necessary to get to any authorised descendant,
+    /// but that traversal must not turn a raw listing into an existence oracle
+    /// for names outside the capability. A path is disclosable when it is in
+    /// scope, or when it is an ancestor of something in scope -- a holder of
+    /// `docs/readme.md` already knows `docs` exists, so naming it reveals
+    /// nothing it did not have.
+    #[must_use]
+    pub fn admits_disclosure(&self, path: &TreePath) -> bool {
+        self.read_prefixes
+            .iter()
+            .any(|prefix| path.starts_with(prefix) || prefix.starts_with(path))
     }
 
     /// Checks a symlink encounter against the policy.
@@ -462,6 +567,12 @@ impl TreeCapability {
             // restore spend.
             fetched_bytes: self.fetched_bytes,
             fetched_files: self.fetched_files,
+            // The child SHARES the parent's ledger rather than copying it.
+            // Carrying the counter forward alone was not enough: it stopped one
+            // child from starting fresh, but let two siblings each spend the
+            // same remaining allowance, which is the same widening reached by
+            // going sideways instead of down.
+            ledger: self.ledger.clone(),
         })
     }
 
