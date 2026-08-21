@@ -661,38 +661,17 @@ impl AsyncAuthorityStore for AsyncView {
         async move { outcome }
     }
 
-    /// Refused, loudly, because this view cannot honour the contract.
-    ///
-    /// The §5.2 ruling requires this operation to be all-or-nothing: if the new
-    /// head is observable then its terminal-outcome records necessarily are
-    /// too. `MemoryAuthorityStore` composes a head CAS and separate puts, so a
-    /// delegating implementation here would be NON-atomic while satisfying the
-    /// signature - a test backend that looks like it publishes atomically and
-    /// does not. That is worse than no implementation, because a future test
-    /// could pass against it and be read as evidence the window is closed.
-    ///
-    /// This view exists solely to drive `read_immutable` for the sync/async
-    /// pointer-advance equivalence test, so nothing legitimately reaches this
-    /// method. If something ever does, failing loudly is the honest outcome.
-    /// The real atomic implementation is the fsqlite backend's, which runs the
-    /// whole sequence inside one engine transaction.
-    fn publish_head_with_outcomes(
-        &self,
-        _cx: &(),
-        _key: &HeadKey,
-        _expected: AuthorityVersionToken,
-        _new_generation: HeadGeneration,
-        _new_body: &[u8],
-        _outcomes: &[(ImmutableKey, Vec<u8>)],
-    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
-        async {
-            panic!(
-                "AsyncView is a read-only equivalence fixture: it cannot publish \
-                 atomically over MemoryAuthorityStore, and a non-atomic stand-in \
-                 would misrepresent the FG-007b window as closed"
-            )
-        }
-    }
+    // `publish_head_with_outcomes` is deliberately NOT overridden here.
+    //
+    // The trait's default refuses with `AuthorityRefusal::OperationUnsupported`,
+    // which is exactly what an explicit override in this view would say. That
+    // matters rather than merely being convenient: this view wraps
+    // `MemoryAuthorityStore`, which composes a head CAS and separate puts, so
+    // any delegating implementation would be NON-atomic while satisfying the
+    // signature - a fixture that looks like it publishes atomically and does
+    // not, which a later test could pass against and be read as evidence the
+    // FG-007b window is closed. Inheriting the refusal keeps the safe answer
+    // as the one you get by doing nothing.
 }
 
 /// Minimal driver for futures that are ready on first poll.
