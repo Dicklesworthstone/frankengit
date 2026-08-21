@@ -252,3 +252,98 @@ fn the_admitted_feature_set_is_the_one_the_crate_documents() {
         "the crate root must state the default feature set is off"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The BLAKE3 force point (FG-069a / GoldLotus ruling 7613).
+//
+// This crate declares `blake3` and never imports it. That is deliberate: the
+// edge exists so Cargo's feature unification applies `pure` across the fsqlite
+// closure, which is what keeps blake3 off its host-assembled path. An unused
+// dependency is also precisely the thing a later reader deletes while tidying,
+// and deleting this one silently restores native assembly with nothing failing.
+// So it is pinned here.
+// ---------------------------------------------------------------------------
+
+/// The workspace manifest, which is where the `pure` feature is actually set.
+///
+/// This crate inherits with `blake3.workspace = true`, so the feature list lives
+/// two directories up. Read rather than assumed: a guard that only checked the
+/// local line would pass while the feature it exists to pin had been dropped.
+fn workspace_manifest() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("Cargo.toml");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+}
+
+#[test]
+fn the_blake3_force_point_is_declared_by_this_crate() {
+    let manifest = manifest();
+    let names: Vec<String> = dependency_lines(&manifest)
+        .iter()
+        .filter_map(|line| dependency_name(line))
+        .collect();
+    assert!(
+        !names.is_empty(),
+        "the guard parsed no dependency lines, so it is watching nothing"
+    );
+    assert!(
+        names.iter().any(|name| name == "blake3"),
+        "the blake3 edge is gone. It is not unused: it is the force point that \
+         applies `pure` across the fsqlite closure, and without it blake3 links \
+         its host-assembled path again. Restore it rather than deleting this test"
+    );
+}
+
+#[test]
+fn the_workspace_blake3_entry_still_carries_pure() {
+    let workspace = workspace_manifest();
+    assert!(
+        workspace.contains("[workspace.dependencies]"),
+        "the workspace manifest has no [workspace.dependencies] table; this guard \
+         read the wrong file and proves nothing"
+    );
+
+    let line = workspace
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("blake3"))
+        .expect("the workspace must declare blake3; this crate inherits it");
+
+    assert!(
+        line.contains("\"pure\""),
+        "the workspace blake3 entry no longer enables `pure`, so the force point \
+         this crate carries has nothing to force: {line}"
+    );
+}
+
+#[test]
+fn neon_is_never_enabled_because_it_panics_the_build() {
+    // Not a style rule. blake3's build.rs aborts outright:
+    //
+    //     if is_pure() && is_neon() { panic!("It doesn't make sense to enable
+    //     both \"pure\" and \"neon\"."); }
+    //
+    // Feature unification is additive and graph-wide, so a `neon` enabled
+    // anywhere combines with our `pure` and kills the build rather than
+    // degrading to a slower hash. Caught here for the two manifests we own; a
+    // `neon` arriving from a third-party crate needs the resolved-graph check,
+    // for the same reason this file cannot see `linux-asupersync-uring`.
+    for (label, text) in [
+        ("this crate", manifest()),
+        ("the workspace", workspace_manifest()),
+    ] {
+        for line in text.lines().map(str::trim) {
+            if line.starts_with('#') || !line.starts_with("blake3") {
+                continue;
+            }
+            assert!(
+                !line.contains("\"neon\""),
+                "{label} enables blake3/neon alongside `pure`; blake3's build script \
+                 panics on that combination rather than picking one: {line}"
+            );
+        }
+    }
+}
