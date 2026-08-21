@@ -12,8 +12,9 @@ use fgit_types::vocabulary::DecisionOutcome;
 
 use crate::state::{InvariantBreach, ModelResult, RepositoryState};
 use crate::transition::{
-    CasOutcome, CasRequest, DecisionVerdict, PrepareRequest, QuarantineRequest, SealOutcome,
-    SealRequest, StageRequest, compare_and_swap, decide, prepare, seal, stage, stage_objects,
+    CasOutcome, CasRequest, ConfigurationOutcome, ConfigurationRequest, DecisionVerdict,
+    PrepareRequest, QuarantineRequest, SealOutcome, SealRequest, StageRequest, compare_and_swap,
+    decide, prepare, publish_configuration, seal, stage, stage_objects,
 };
 
 /// When a client cancelled, relative to the head compare-and-swap.
@@ -96,6 +97,8 @@ pub enum ModelInput {
     Stage(StageRequest),
     /// Attempt the one linearizable head replacement (§10.16).
     CompareAndSwap(CasRequest),
+    /// Pin a new policy and configuration snapshot (§15.9, §22).
+    PublishConfiguration(Box<ConfigurationRequest>),
     /// Cancel, in a named phase (§14).
     Cancel(CancellationRequest),
 }
@@ -118,6 +121,8 @@ pub enum ModelOutput {
     Staged(RepositoryDecisionBatchId),
     /// A head compare-and-swap was attempted.
     HeadTransition(CasOutcome),
+    /// A configuration head transition was attempted.
+    ConfigurationTransition(ConfigurationOutcome),
     /// A cancellation was processed.
     Cancelled(CancellationReport),
 }
@@ -190,6 +195,13 @@ pub fn step(state: &RepositoryState, input: &ModelInput) -> ModelResult<ModelSte
             Ok(ModelStep {
                 next,
                 output: ModelOutput::HeadTransition(outcome),
+            })
+        }
+        ModelInput::PublishConfiguration(request) => {
+            let (next, outcome) = publish_configuration(state, request)?;
+            Ok(ModelStep {
+                next,
+                output: ModelOutput::ConfigurationTransition(outcome),
             })
         }
         ModelInput::Cancel(request) => Ok(cancel(state, *request)),

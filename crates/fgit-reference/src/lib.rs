@@ -105,6 +105,7 @@ pub mod machine;
 pub mod refs;
 pub mod refusal;
 pub mod state;
+pub mod trace;
 pub mod transition;
 
 pub use harness::{IdentityMint, label};

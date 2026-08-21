@@ -477,6 +477,7 @@ dependencies = [
 name = "fgit-codec"
 version = "0.0.1"
 dependencies = [
+ "fgit-crypto",
  "fgit-types",
 ]
 
@@ -540,6 +541,7 @@ dependencies = [
 name = "fgit-reference"
 version = "0.0.1"
 dependencies = [
+ "fgit-codec",
  "fgit-types",
 ]
 
@@ -559,6 +561,15 @@ name = "fgit-runtime"
 version = "0.0.1"
 dependencies = [
  "asupersync",
+]
+
+[[package]]
+name = "fgit-txn"
+version = "0.0.1"
+dependencies = [
+ "fgit-codec",
+ "fgit-reference",
+ "fgit-types",
 ]
 
 [[package]]
