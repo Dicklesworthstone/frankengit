@@ -60,8 +60,8 @@ use crate::machine::{
 };
 use crate::refs::ExpectedRefState;
 use crate::state::{
-    GenesisConfiguration, InvariantBreach, PolicySnapshot, PrincipalCapabilities, QuarantinedObject,
-    RepositoryRoots, RepositoryState,
+    GenesisConfiguration, InvariantBreach, PolicySnapshot, PrincipalCapabilities,
+    QuarantinedObject, RepositoryRoots, RepositoryState,
 };
 use crate::transition::{
     CasOutcome, CasRequest, ConfigurationOutcome, ConfigurationRequest, DecisionBodyIdentity,
@@ -131,10 +131,12 @@ impl core::fmt::Display for TraceError {
 impl std::error::Error for TraceError {}
 
 fn malformed<T>(field: &'static str, observed: u64) -> Result<T, CodecRefusal> {
-    Err(CodecRefusal::from(fgit_types::TypeRefusal::CodePointUnknown {
-        field,
-        observed: u32::try_from(observed).unwrap_or(u32::MAX),
-    }))
+    Err(CodecRefusal::from(
+        fgit_types::TypeRefusal::CodePointUnknown {
+            field,
+            observed: u32::try_from(observed).unwrap_or(u32::MAX),
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -560,7 +562,8 @@ fn read_scope_set(
     input: &mut Decoder<'_>,
     field: &'static str,
 ) -> Result<BTreeSet<Vec<u8>>, CodecRefusal> {
-    let scopes = input.read_canonical_set(field, |decoder| Ok(decoder.read_bytes("scope")?.to_vec()))?;
+    let scopes =
+        input.read_canonical_set(field, |decoder| Ok(decoder.read_bytes("scope")?.to_vec()))?;
     Ok(scopes.into_iter().collect())
 }
 
@@ -662,9 +665,8 @@ fn read_genesis(input: &mut Decoder<'_>) -> Result<GenesisConfiguration, CodecRe
     let object_format = input.read_git_hash_algorithm()?;
     let genesis_head_id = read_head_id(input)?;
     let policy = read_policy(input)?;
-    let format_registry_epoch =
-        RegistryEpoch::try_new(input.read_scalar::<u64>("RegistryEpoch")?)
-            .map_err(CodecRefusal::from)?;
+    let format_registry_epoch = RegistryEpoch::try_new(input.read_scalar::<u64>("RegistryEpoch")?)
+        .map_err(CodecRefusal::from)?;
     Ok(GenesisConfiguration {
         tenant,
         repository,
@@ -1158,7 +1160,9 @@ impl ObservedOutcome {
         match output {
             ModelOutput::Sealed(SealOutcome::Created(_)) => Self::SealCreated,
             ModelOutput::Sealed(SealOutcome::ExistingRetry(_)) => Self::SealRetry,
-            ModelOutput::Sealed(SealOutcome::Rejected(code)) => Self::SealRejected(code.code_point()),
+            ModelOutput::Sealed(SealOutcome::Rejected(code)) => {
+                Self::SealRejected(code.code_point())
+            }
             ModelOutput::ObjectsQuarantined { held } => {
                 Self::ObjectsQuarantined(u64::try_from(*held).unwrap_or(u64::MAX))
             }
@@ -1307,7 +1311,10 @@ impl HeadObservation {
 
 fn write_head_observation(out: &mut Encoder, head: HeadObservation) {
     out.write_scalar(head.generation.get());
-    out.write_scalar(head.latest_decision_sequence.map_or(0, DecisionSequence::get));
+    out.write_scalar(
+        head.latest_decision_sequence
+            .map_or(0, DecisionSequence::get),
+    );
     out.write_scalar(
         head.latest_repository_sequence
             .map_or(0, RepositorySequence::get),
@@ -1449,9 +1456,10 @@ impl TraceRecorder {
             roots,
             head,
         });
-        Ok(self.steps.last().unwrap_or_else(|| {
-            unreachable!("a step was just pushed, so the vector is not empty")
-        }))
+        Ok(self
+            .steps
+            .last()
+            .unwrap_or_else(|| unreachable!("a step was just pushed, so the vector is not empty")))
     }
 
     /// Finishes the recording.

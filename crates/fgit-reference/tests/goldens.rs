@@ -44,8 +44,8 @@ use fgit_reference::state::{
     GenesisConfiguration, PolicySnapshot, PrincipalCapabilities, QuarantinedObject, RepositoryRoots,
 };
 use fgit_reference::trace::{
-    DivergenceKind, GoldenTrace, ObservedOutcome, TraceRecorder, decode, decode_roots, diff, encode,
-    encode_roots, replay,
+    DivergenceKind, GoldenTrace, ObservedOutcome, TraceRecorder, decode, decode_roots, diff,
+    encode, encode_roots, replay,
 };
 use fgit_reference::transition::{
     CasRequest, DecisionBodyIdentity, PrepareRequest, QuarantineRequest, SealRequest, StageRequest,
@@ -144,7 +144,13 @@ impl Fixture {
         }
     }
 
-    fn request(&mut self, key: &str, target: &str, expected: ExpectedRefState, new: GitOid) -> TransactionRequest {
+    fn request(
+        &mut self,
+        key: &str,
+        target: &str,
+        expected: ExpectedRefState,
+        new: GitOid,
+    ) -> TransactionRequest {
         RequestBuilder::new(
             self.tenant,
             self.repository,
@@ -152,12 +158,18 @@ impl Fixture {
             schema(),
             IdempotencyKey::new(label(key)),
         )
-        .statement(MismatchPolicy::TxnAbort, vec![update(target, expected, new)])
+        .statement(
+            MismatchPolicy::TxnAbort,
+            vec![update(target, expected, new)],
+        )
         .promising(new)
         .build(&mut self.mint)
     }
 
-    fn bodies(&mut self, request: &TransactionRequest) -> BTreeMap<fgit_types::identity::TxId, DecisionBodyIdentity> {
+    fn bodies(
+        &mut self,
+        request: &TransactionRequest,
+    ) -> BTreeMap<fgit_types::identity::TxId, DecisionBodyIdentity> {
         let mut bodies = BTreeMap::new();
         bodies.insert(
             request.tx_id,
@@ -186,7 +198,13 @@ fn history_simple_commit() -> GoldenTrace {
     let new = oid(1);
     let request = fixture.request("k1", "refs/heads/main", ExpectedRefState::Absent, new);
 
-    apply_full_transaction(&mut recorder, &mut fixture, &request, &[object(new, &[])], true);
+    apply_full_transaction(
+        &mut recorder,
+        &mut fixture,
+        &request,
+        &[object(new, &[])],
+        true,
+    );
     recorder.finish()
 }
 
@@ -279,7 +297,12 @@ fn history_cas_loss_retry() -> GoldenTrace {
     let mut recorder = TraceRecorder::new(fixture.genesis.clone());
 
     // The transaction that will lose the race.
-    let loser = fixture.request("k-loser", "refs/heads/main", ExpectedRefState::Absent, oid(1));
+    let loser = fixture.request(
+        "k-loser",
+        "refs/heads/main",
+        ExpectedRefState::Absent,
+        oid(1),
+    );
     let loser_seal = fixture.mint.seal();
     recorder
         .apply(ModelInput::Seal(Box::new(SealRequest {
@@ -317,7 +340,12 @@ fn history_cas_loss_retry() -> GoldenTrace {
         .expect("stage");
 
     // A competing transaction takes the head first.
-    let winner = fixture.request("k-winner", "refs/heads/other", ExpectedRefState::Absent, oid(2));
+    let winner = fixture.request(
+        "k-winner",
+        "refs/heads/other",
+        ExpectedRefState::Absent,
+        oid(2),
+    );
     apply_full_transaction(
         &mut recorder,
         &mut fixture,
@@ -421,10 +449,7 @@ fn history_idempotent_duplicate() -> GoldenTrace {
     // A third presentation, now that the transaction is terminal.
     let seal_id = fixture.mint.seal();
     recorder
-        .apply(ModelInput::Seal(Box::new(SealRequest {
-            seal_id,
-            request,
-        })))
+        .apply(ModelInput::Seal(Box::new(SealRequest { seal_id, request })))
         .expect("seal after commit");
     recorder.finish()
 }
@@ -653,7 +678,10 @@ fn each_history_exercises_the_shape_its_name_claims() {
     // round-trip perfectly. These assertions are what stop a golden from
     // silently becoming a test of nothing.
     let simple = history_simple_commit();
-    assert_eq!(simple.steps.last().map(|step| step.observed), Some(ObservedOutcome::CasWon));
+    assert_eq!(
+        simple.steps.last().map(|step| step.observed),
+        Some(ObservedOutcome::CasWon)
+    );
     assert!(
         simple
             .steps
