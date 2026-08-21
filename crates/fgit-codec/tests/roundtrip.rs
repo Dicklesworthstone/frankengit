@@ -406,10 +406,19 @@ fn a_future_minor_is_readable_and_relayable_without_losing_identity() {
     assert!(matches!(refusal, CodecRefusal::TrailingBytes { .. }));
 
     // And the strict decoder refuses the future body outright, because it
-    // cannot hand back a value that would re-encode to different bytes.
+    // cannot hand back a value that would re-encode to the same bytes. It
+    // names the minor rather than the suffix: the version is the reason, and
+    // a higher minor is refused strictly even when it carries no new fields.
     let strict = decode_body::<TransactionSealBody>(&future, DecodeLimits::DEFAULT)
         .expect_err("the strict decoder must not silently drop unknown fields");
-    assert!(matches!(strict, CodecRefusal::TrailingBytes { .. }));
+    assert!(matches!(
+        strict,
+        CodecRefusal::SchemaMinorUnsupported {
+            observed: 1,
+            supported: 0,
+            ..
+        }
+    ));
 
     // Permitted counterpart: the same body at this build's own minor.
     assert!(

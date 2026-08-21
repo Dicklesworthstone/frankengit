@@ -36,6 +36,30 @@ pub enum CodecRefusal {
         /// Major version this build implements.
         supported: u16,
     },
+    /// The frame declares a codec minor version this build does not implement,
+    /// and the caller asked for a strict decode.
+    ///
+    /// Strict decoding accepts only the exact versions it can reproduce. A
+    /// body carrying a higher minor may be byte-compatible, but re-encoding it
+    /// here would emit this build's minor and so would not reproduce the
+    /// original bytes. Relaying such a body is what
+    /// [`crate::decode_body_preserving`] is for.
+    CodecMinorUnsupported {
+        /// Minor version the frame declares.
+        observed: u16,
+        /// Minor version this build implements.
+        supported: u16,
+    },
+    /// The body declares a schema minor version this build does not implement,
+    /// and the caller asked for a strict decode.
+    SchemaMinorUnsupported {
+        /// Domain separation tag of the body.
+        domain: Box<str>,
+        /// Minor version the body declares.
+        observed: u16,
+        /// Minor version this build implements.
+        supported: u16,
+    },
     /// The body declares a schema major version this build does not implement.
     SchemaMajorUnsupported {
         /// Domain separation tag of the body.
@@ -206,6 +230,16 @@ impl CodecRefusal {
         }
     }
 
+    /// Builds an unsupported-schema-minor refusal from the typed label.
+    #[must_use]
+    pub fn schema_minor_unsupported(domain: DomainTag, observed: u16, supported: u16) -> Self {
+        Self::SchemaMinorUnsupported {
+            domain: label(&domain),
+            observed,
+            supported,
+        }
+    }
+
     /// Builds an unsupported-schema-major refusal from the typed label.
     #[must_use]
     pub fn schema_major_unsupported(domain: DomainTag, observed: u16, supported: u16) -> Self {
@@ -222,6 +256,8 @@ impl CodecRefusal {
         match self {
             Self::MagicUnrecognized { .. } => "magic_unrecognized",
             Self::CodecMajorUnsupported { .. } => "codec_major_unsupported",
+            Self::CodecMinorUnsupported { .. } => "codec_minor_unsupported",
+            Self::SchemaMinorUnsupported { .. } => "schema_minor_unsupported",
             Self::SchemaMajorUnsupported { .. } => "schema_major_unsupported",
             Self::SchemaFamilyUnexpected { .. } => "schema_family_unexpected",
             Self::DomainUnexpected { .. } => "domain_unexpected",
@@ -251,6 +287,8 @@ impl CodecRefusal {
         match self {
             Self::MagicUnrecognized { .. }
             | Self::CodecMajorUnsupported { .. }
+            | Self::CodecMinorUnsupported { .. }
+            | Self::SchemaMinorUnsupported { .. }
             | Self::SchemaMajorUnsupported { .. }
             | Self::SchemaFamilyUnexpected { .. }
             | Self::DomainUnexpected { .. }
@@ -290,6 +328,21 @@ impl fmt::Display for CodecRefusal {
             } => write!(
                 formatter,
                 "codec major {observed} is unsupported; this build implements {supported}"
+            ),
+            Self::CodecMinorUnsupported {
+                observed,
+                supported,
+            } => write!(
+                formatter,
+                "codec minor {observed} is unsupported for a strict decode; this build implements {supported}"
+            ),
+            Self::SchemaMinorUnsupported {
+                domain,
+                observed,
+                supported,
+            } => write!(
+                formatter,
+                "{domain}: schema minor {observed} is unsupported for a strict decode; this build implements {supported}"
             ),
             Self::SchemaMajorUnsupported {
                 domain,

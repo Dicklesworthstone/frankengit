@@ -242,11 +242,30 @@ pub fn split_frame(
 
 /// Decodes a body strictly: the frame must declare exactly the versions this
 /// build implements, and the payload must contain no unknown suffix.
+///
+/// "Exactly" is the point. Anything this accepts must re-encode to the bytes it
+/// came from, so a higher minor is refused even when it happens to be
+/// byte-compatible: re-encoding it would stamp this build's minor and the
+/// bytes would not reproduce. [`decode_body_preserving`] is the path for a
+/// body a newer producer wrote.
 pub fn decode_body<B: CanonicalBody>(
     bytes: &[u8],
     limits: DecodeLimits,
 ) -> Result<B, CodecRefusal> {
     let decoded = decode_body_preserving::<B>(bytes, limits)?;
+    if decoded.codec_minor != CODEC_MINOR {
+        return Err(CodecRefusal::CodecMinorUnsupported {
+            observed: decoded.codec_minor,
+            supported: CODEC_MINOR,
+        });
+    }
+    if decoded.schema_minor != B::SCHEMA_MINOR {
+        return Err(CodecRefusal::schema_minor_unsupported(
+            B::DOMAIN,
+            decoded.schema_minor,
+            B::SCHEMA_MINOR,
+        ));
+    }
     if decoded.has_unknown_fields() {
         return Err(CodecRefusal::TrailingBytes {
             offset: u64::try_from(bytes.len() - decoded.unknown_suffix.len()).unwrap_or(u64::MAX),
