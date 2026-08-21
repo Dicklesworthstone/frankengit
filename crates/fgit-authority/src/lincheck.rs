@@ -84,7 +84,7 @@ impl Default for CheckLimits {
 
 impl CheckLimits {
     /// Validates limits before any checker work starts.
-    pub fn validate(self) -> Result<(), CheckLimitsError> {
+    pub const fn validate(self) -> Result<(), CheckLimitsError> {
         if self.max_completed_operations == 0 {
             return Err(CheckLimitsError::ZeroCompletedOperationBound);
         }
@@ -102,7 +102,7 @@ impl CheckLimits {
 }
 
 /// A checker configured with a fixed resource budget.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LinearizabilityChecker {
     limits: CheckLimits,
 }
@@ -143,7 +143,8 @@ impl LinearizabilityChecker {
             .collect::<Vec<_>>();
         let completed_operations = operations
             .iter()
-            .filter_map(|recorded| CompletedOperation::from_recorded(recorded))
+            .copied()
+            .filter_map(completed_from_recorded)
             .collect::<Vec<_>>();
 
         if completed_operations.len() > self.limits.max_completed_operations {
@@ -200,14 +201,6 @@ impl LinearizabilityChecker {
                     },
                 },
             },
-        }
-    }
-}
-
-impl Default for LinearizabilityChecker {
-    fn default() -> Self {
-        Self {
-            limits: CheckLimits::default(),
         }
     }
 }
@@ -385,26 +378,26 @@ struct CompletedOperation<'history, Operation, Response> {
     response: &'history Response,
 }
 
-impl<'history, Operation, Response> Copy for CompletedOperation<'history, Operation, Response> {}
+impl<Operation, Response> Copy for CompletedOperation<'_, Operation, Response> {}
 
-impl<'history, Operation, Response> Clone for CompletedOperation<'history, Operation, Response> {
+impl<Operation, Response> Clone for CompletedOperation<'_, Operation, Response> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'history, Operation, Response> CompletedOperation<'history, Operation, Response> {
-    fn from_recorded(recorded: &RecordedOperation<'history, Operation, Response>) -> Option<Self> {
-        match (recorded.response_event_index, recorded.response) {
-            (Some(response_event_index), Some(response)) => Some(Self {
-                id: recorded.id,
-                invocation_event_index: recorded.invocation_event_index,
-                response_event_index,
-                operation: recorded.operation,
-                response,
-            }),
-            _ => None,
-        }
+fn completed_from_recorded<'history, Operation, Response>(
+    recorded: RecordedOperation<'history, Operation, Response>,
+) -> Option<CompletedOperation<'history, Operation, Response>> {
+    match (recorded.response_event_index, recorded.response) {
+        (Some(response_event_index), Some(response)) => Some(CompletedOperation {
+            id: recorded.id,
+            invocation_event_index: recorded.invocation_event_index,
+            response_event_index,
+            operation: recorded.operation,
+            response,
+        }),
+        _ => None,
     }
 }
 
@@ -421,9 +414,9 @@ enum SearchOutcome {
     },
 }
 
-fn run_search<'history, Spec>(
+fn run_search<Spec>(
     specification: &Spec,
-    operations: &[CompletedOperation<'history, Spec::Operation, Spec::Response>],
+    operations: &[CompletedOperation<'_, Spec::Operation, Spec::Response>],
     max_search_nodes: usize,
 ) -> SearchOutcome
 where
@@ -571,9 +564,9 @@ fn build_predecessors<Operation, Response>(
         .collect()
 }
 
-fn minimize_conflict_window<'history, Spec>(
+fn minimize_conflict_window<Spec>(
     specification: &Spec,
-    completed_operations: &[CompletedOperation<'history, Spec::Operation, Spec::Response>],
+    completed_operations: &[CompletedOperation<'_, Spec::Operation, Spec::Response>],
     max_search_nodes: usize,
 ) -> (ConflictWindow, bool)
 where

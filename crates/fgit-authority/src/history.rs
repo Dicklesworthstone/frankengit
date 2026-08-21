@@ -1,4 +1,4 @@
-//! Canonical, bounded history input for AuthorityStore linearizability checks.
+//! Canonical, bounded history input for `AuthorityStore` linearizability checks.
 //!
 //! The vector order is the observer's total event order. `logical_time` is a
 //! strictly increasing, per-client clock; it deliberately does not invent an
@@ -45,7 +45,7 @@ pub struct HistoryEvent<Operation, Response> {
 impl<Operation, Response> HistoryEvent<Operation, Response> {
     /// Builds an invocation event.
     #[must_use]
-    pub fn invocation(
+    pub const fn invocation(
         client: ClientId,
         logical_time: LogicalTime,
         operation_id: OperationId,
@@ -61,7 +61,7 @@ impl<Operation, Response> HistoryEvent<Operation, Response> {
 
     /// Builds a response event.
     #[must_use]
-    pub fn response(
+    pub const fn response(
         client: ClientId,
         logical_time: LogicalTime,
         operation_id: OperationId,
@@ -221,7 +221,7 @@ struct OperationLifecycle {
 }
 
 /// A validated operation reconstructed from its invocation and response.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct RecordedOperation<'history, Operation, Response> {
     /// Stable operation identity.
     pub id: OperationId,
@@ -235,6 +235,14 @@ pub struct RecordedOperation<'history, Operation, Response> {
     pub operation: &'history Operation,
     /// Response observed in the history, if any.
     pub response: Option<&'history Response>,
+}
+
+impl<Operation, Response> Copy for RecordedOperation<'_, Operation, Response> {}
+
+impl<Operation, Response> Clone for RecordedOperation<'_, Operation, Response> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 /// A malformed history cannot be a trustworthy checker input.
