@@ -280,11 +280,25 @@ product.
 
 - First-party crates live at `crates/fgit-<name>/` with package name
   `fgit-<name>`; the constitutional checker stays at `tools/registry-check/`.
-  The workspace admits `crates/*` by glob, so every directory under
-  `crates/` MUST be a complete crate: create `src/lib.rs` (with
-  `#![forbid(unsafe_code)]`) before `Cargo.toml`, and add the crate's
-  `[workspace.dependencies]` path entry in the same commit (one-line edit
-  under an Agent Mail reservation). Consumers write `<crate>.workspace = true`.
+- The workspace admits `crates/*` by glob, so a directory under `crates/`
+  that lacks a `Cargo.toml` breaks **every** cargo command for **every**
+  agent in the shared checkout -- immediately, on disk, before any commit is
+  made. A missing `[workspace.dependencies]` line breaks only the crate that
+  needs it; a missing manifest under the glob breaks all sixteen. That
+  asymmetry sets the order, and it is the reverse of what this section used
+  to say.
+- A new crate is therefore created ALL AT ONCE, never incrementally.
+  `crates/fgit-<name>/Cargo.toml` and `crates/fgit-<name>/src/lib.rs` (with
+  `#![forbid(unsafe_code)]` as line 1) are written together, and the crate's
+  root `[workspace.dependencies]` path entry plus its
+  `registries/crate_layers.tsv` row land in the SAME commit (the root
+  `Cargo.toml` edit is one line, under an Agent Mail reservation). Consumers
+  write `<crate>.workspace = true`.
+- If a crate cannot be completed in one sitting, build it OUTSIDE `crates/`
+  and `git mv` it in once the manifest exists. Never leave a directory under
+  `crates/` without a manifest, not even for a minute: six wave-wide outages
+  in a single wave came from exactly that window, and each one was the
+  previously documented procedure being followed correctly.
 - Swarm agents share ONE checkout on `main`. Reserve shared files through
   Agent Mail before editing them (`Cargo.toml`, `registries/*.tsv`,
   `AGENTS.md`, `scripts/e2e/lib.sh`, `tools/registry-check/**`, another
