@@ -152,12 +152,11 @@ fn read_slug(input: &mut Decoder<'_>, field: &'static str) -> Result<AsciiSlug, 
     AsciiSlug::try_new(field, bytes).map_err(CodecRefusal::from)
 }
 
-fn write_usize(out: &mut Encoder, value: usize) -> Result<(), CodecRefusal> {
+fn write_usize(out: &mut Encoder, value: usize) {
     // `usize` is deliberately not a `CanonicalScalar`: its width is a property
     // of the host, and a canonical encoding may not have one. Widening to a
     // fixed `u64` is the only honest way to put a count on the wire.
     out.write_scalar(u64::try_from(value).unwrap_or(u64::MAX));
-    Ok(())
 }
 
 fn read_usize(input: &mut Decoder<'_>, field: &'static str) -> Result<usize, CodecRefusal> {
@@ -227,18 +226,16 @@ derived_id_codec!(
     "PrincipalSnapshotId"
 );
 
-fn write_tenant(out: &mut Encoder, id: TenantId) -> Result<(), CodecRefusal> {
+fn write_tenant(out: &mut Encoder, id: TenantId) {
     out.write_opaque_id(id.as_bytes());
-    Ok(())
 }
 
 fn read_tenant(input: &mut Decoder<'_>) -> Result<TenantId, CodecRefusal> {
     Ok(TenantId::from_bytes(input.read_opaque_id("TenantId")?))
 }
 
-fn write_repository(out: &mut Encoder, id: RepositoryId) -> Result<(), CodecRefusal> {
+fn write_repository(out: &mut Encoder, id: RepositoryId) {
     out.write_opaque_id(id.as_bytes());
-    Ok(())
 }
 
 fn read_repository(input: &mut Decoder<'_>) -> Result<RepositoryId, CodecRefusal> {
@@ -247,9 +244,8 @@ fn read_repository(input: &mut Decoder<'_>) -> Result<RepositoryId, CodecRefusal
     ))
 }
 
-fn write_principal(out: &mut Encoder, id: PrincipalId) -> Result<(), CodecRefusal> {
+fn write_principal(out: &mut Encoder, id: PrincipalId) {
     out.write_opaque_id(id.as_bytes());
-    Ok(())
 }
 
 fn read_principal(input: &mut Decoder<'_>) -> Result<PrincipalId, CodecRefusal> {
@@ -262,7 +258,7 @@ fn read_principal(input: &mut Decoder<'_>) -> Result<PrincipalId, CodecRefusal> 
 // Intent vocabulary
 // ---------------------------------------------------------------------------
 
-fn write_expected(out: &mut Encoder, expected: ExpectedRefState) -> Result<(), CodecRefusal> {
+fn write_expected(out: &mut Encoder, expected: ExpectedRefState) {
     match expected {
         ExpectedRefState::Absent => out.write_raw_byte(1),
         ExpectedRefState::Any => out.write_raw_byte(2),
@@ -271,7 +267,6 @@ fn write_expected(out: &mut Encoder, expected: ExpectedRefState) -> Result<(), C
             out.write_git_oid(&oid);
         }
     }
-    Ok(())
 }
 
 fn read_expected(input: &mut Decoder<'_>) -> Result<ExpectedRefState, CodecRefusal> {
@@ -300,10 +295,9 @@ fn read_retention_class(input: &mut Decoder<'_>) -> Result<RetentionClass, Codec
     }
 }
 
-fn write_retention_root(out: &mut Encoder, root: RetentionRoot) -> Result<(), CodecRefusal> {
+fn write_retention_root(out: &mut Encoder, root: RetentionRoot) {
     out.write_git_oid(&root.object);
     write_retention_class(out, root.class);
-    Ok(())
 }
 
 fn read_retention_root(input: &mut Decoder<'_>) -> Result<RetentionRoot, CodecRefusal> {
@@ -374,14 +368,14 @@ fn write_intent(out: &mut Encoder, intent: &Intent) -> Result<(), CodecRefusal> 
         }) => {
             out.write_raw_byte(1);
             out.write_ref_name(name)?;
-            write_expected(out, *expected)?;
+            write_expected(out, *expected);
             out.write_git_oid(new);
             out.write_bool(*force);
         }
         Intent::Ref(RefIntent::Delete { name, expected }) => {
             out.write_raw_byte(2);
             out.write_ref_name(name)?;
-            write_expected(out, *expected)?;
+            write_expected(out, *expected);
         }
         Intent::Forge(forge) => {
             out.write_raw_byte(3);
@@ -391,11 +385,11 @@ fn write_intent(out: &mut Encoder, intent: &Intent) -> Result<(), CodecRefusal> 
         }
         Intent::Retention(RetentionIntent::AddRoot(root)) => {
             out.write_raw_byte(4);
-            write_retention_root(out, *root)?;
+            write_retention_root(out, *root);
         }
         Intent::Retention(RetentionIntent::RemoveRoot(root)) => {
             out.write_raw_byte(5);
-            write_retention_root(out, *root)?;
+            write_retention_root(out, *root);
         }
         Intent::Outbox(outbox) => {
             out.write_raw_byte(6);
@@ -496,9 +490,9 @@ fn read_durability(input: &mut Decoder<'_>) -> Result<DurabilityProfile, CodecRe
 
 fn write_request(out: &mut Encoder, request: &TransactionRequest) -> Result<(), CodecRefusal> {
     write_tx_id(out, request.tx_id)?;
-    write_tenant(out, request.tenant)?;
-    write_repository(out, request.repository)?;
-    write_principal(out, request.principal)?;
+    write_tenant(out, request.tenant);
+    write_repository(out, request.repository);
+    write_principal(out, request.principal);
     out.write_schema_id(request.schema)?;
     write_slug(out, "IdempotencyKey", request.idempotency_key.label())?;
     out.write_digest(&request.canonical_request_digest)?;
@@ -602,10 +596,13 @@ fn write_policy(out: &mut Encoder, policy: &PolicySnapshot) -> Result<(), CodecR
     out.write_canonical_map(
         "principals",
         &principals,
-        |encoder, principal| write_principal(encoder, *principal),
+        |encoder, principal| {
+            write_principal(encoder, *principal);
+            Ok(())
+        },
         write_capabilities,
     )?;
-    write_usize(out, policy.max_intents_per_transaction)?;
+    write_usize(out, policy.max_intents_per_transaction);
     let schemas = policy.supported_schemas.iter().copied().collect::<Vec<_>>();
     out.write_canonical_set("supported_schemas", &schemas, |encoder, schema| {
         encoder.write_schema_id(*schema)
@@ -650,8 +647,8 @@ fn read_policy(input: &mut Decoder<'_>) -> Result<PolicySnapshot, CodecRefusal> 
 }
 
 fn write_genesis(out: &mut Encoder, genesis: &GenesisConfiguration) -> Result<(), CodecRefusal> {
-    write_tenant(out, genesis.tenant)?;
-    write_repository(out, genesis.repository)?;
+    write_tenant(out, genesis.tenant);
+    write_repository(out, genesis.repository);
     out.write_git_hash_algorithm(genesis.object_format);
     write_head_id(out, genesis.genesis_head_id)?;
     write_policy(out, &genesis.policy)?;
@@ -856,7 +853,8 @@ fn write_roots(out: &mut Encoder, roots: &RepositoryRoots) -> Result<(), CodecRe
 
     let retention = roots.retention.iter().copied().collect::<Vec<_>>();
     out.write_canonical_set("retention", &retention, |encoder, root| {
-        write_retention_root(encoder, *root)
+        write_retention_root(encoder, *root);
+        Ok(())
     })?;
 
     let outbox = roots
@@ -1853,7 +1851,7 @@ mod tests {
         let report = replay(&trace).expect("replay");
         assert!(report.is_faithful());
         assert_eq!(report.steps_replayed, 0);
-        assert!(report.to_ndjson().is_empty());
+        assert_eq!(report.to_ndjson(), "");
     }
 
     #[test]

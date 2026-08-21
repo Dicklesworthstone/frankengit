@@ -51,8 +51,8 @@ use crate::intent::{
 use crate::machine::{CancellationPhase, CancellationRequest, ModelInput, ModelStep, step};
 use crate::refs::ExpectedRefState;
 use crate::state::{
-    GenesisConfiguration, InvariantBreach, PolicySnapshot, PrincipalCapabilities,
-    QuarantinedObject, RepositoryState,
+    GenesisConfiguration, ModelResult, PolicySnapshot, PrincipalCapabilities, QuarantinedObject,
+    RepositoryState,
 };
 use crate::trace::{TraceStep, encode_roots};
 use crate::transition::{
@@ -160,14 +160,11 @@ pub struct Violation {
 impl Violation {
     /// Renders the counterexample as trace steps, so it can be diffed and
     /// replayed through the FG-003b tooling rather than read as prose.
-    pub fn to_trace_steps(
-        &self,
-        genesis: &GenesisConfiguration,
-    ) -> Result<Vec<TraceStep>, InvariantBreach> {
+    pub fn to_trace_steps(&self, genesis: &GenesisConfiguration) -> ModelResult<Vec<TraceStep>> {
         let mut state = RepositoryState::genesis(genesis.clone());
         let mut steps = Vec::with_capacity(self.path.len());
         for input in &self.path {
-            let ModelStep { next, output } = step(&state, input).map_err(|breach| *breach)?;
+            let ModelStep { next, output } = step(&state, input)?;
             let roots = encode_roots(next.roots()).unwrap_or_default();
             steps.push(TraceStep {
                 input: input.clone(),
@@ -205,7 +202,7 @@ pub struct CampaignReport {
 impl CampaignReport {
     /// True when the bounded space was fully explored and no property failed.
     #[must_use]
-    pub fn is_clean(&self) -> bool {
+    pub const fn is_clean(&self) -> bool {
         self.violations.is_empty() && !self.truncated
     }
 
@@ -281,7 +278,7 @@ impl Universe {
     /// Builds the universe for the given bounds.
     #[must_use]
     pub fn new(bounds: Bounds) -> Self {
-        let mut mint = IdentityMint::new(0xC0FFEE);
+        let mut mint = IdentityMint::new(0x00C0_FFEE);
         let tenant = mint.tenant();
         let repository = mint.repository();
         let author: PrincipalId = mint.principal();
@@ -498,7 +495,7 @@ impl Universe {
     }
 }
 
-fn schema() -> fgit_types::label::SchemaId {
+const fn schema() -> fgit_types::label::SchemaId {
     fgit_types::label::SchemaId::new(
         fgit_types::label::SchemaFamily::from_static("fgit/ref-txn"),
         2,
@@ -581,6 +578,7 @@ pub fn state_key(state: &RepositoryState) -> Result<Vec<u8>, CodecRefusal> {
 ///
 /// The walk is breadth-first, so the first path that reaches any state is a
 /// shortest one and a counterexample needs no separate shrinking pass.
+#[must_use]
 pub fn run(universe: &Universe) -> CampaignReport {
     let bounds = universe.bounds();
     let genesis = RepositoryState::genesis(universe.genesis().clone());
