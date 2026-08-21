@@ -278,7 +278,7 @@ fn write_finding(
     )))
 }
 
-fn diff_limits() -> DiffLimits {
+const fn diff_limits() -> DiffLimits {
     DiffLimits {
         max_input_bytes: 64 * 1024 * 1024,
         max_units: 2_000_000,
@@ -295,7 +295,7 @@ fn diff_options(profile: DiffProfile) -> DiffOptions {
     }
 }
 
-fn profile_name(profile: DiffProfile) -> &'static str {
+const fn profile_name(profile: DiffProfile) -> &'static str {
     match profile {
         DiffProfile::MyersMinimal => "myers",
         DiffProfile::Patience => "patience",

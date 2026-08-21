@@ -2510,7 +2510,7 @@ mod tests {
         deflate.push_bits(0, 5);
         deflate.push_bits(14, 4);
         for &index in super::CODE_LENGTH_ORDER.iter().take(18) {
-            let code_length = if index == 0 || index == 1 { 1 } else { 0 };
+            let code_length = u16::from(index == 0 || index == 1);
             deflate.push_bits(code_length, 3);
         }
         for _ in 0..256 {
@@ -2763,7 +2763,7 @@ mod tests {
 
         let mut incompressible = Vec::with_capacity(1024 * 1024 + 1);
         let mut seed = 0xa059_2174_5bce_d013_u64;
-        for _ in 0..(1024 * 1024 + 1) {
+        for _ in 0..=(1024 * 1024) {
             seed ^= seed << 7;
             seed ^= seed >> 9;
             seed ^= seed << 8;
