@@ -631,8 +631,10 @@ dependencies = [
 name = "fgit-authority-fsqlite"
 version = "0.0.1"
 dependencies = [
+ "asupersync",
  "fgit-authority",
  "fgit-codec",
+ "fgit-runtime",
  "fgit-types",
  "fsqlite",
  "fsqlite-types",
