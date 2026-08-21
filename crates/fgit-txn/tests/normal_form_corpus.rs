@@ -883,16 +883,32 @@ fn the_intent_refusal_taxonomy_is_bounded_and_its_gaps_are_named() {
     // corpus reaching one of four codes while claiming exhaustiveness is worse
     // than one that admits the gap.
     //
+    // Reasons verified at the emission sites in `fgit-reference/src/effect.rs`,
+    // not inferred from the code names. One of them was inferred first and was
+    // wrong, which is why they are now cited by mechanism:
+    //
     //   ExpectedOldRefMismatch     REACHED — every precondition mismatch under
     //                              MismatchPolicy::StatementError.
-    //   EffectIdempotencyKeyReuse  NOT reachable: needs outbox delivery keys.
-    //   ForgeTransitionInvalid     NOT reachable: needs forge intents and
-    //                              stream positions.
-    //   ResourceBudgetExceeded     NOT reachable: needs a declared budget the
-    //                              generator can exceed.
+    //   ForgeTransitionInvalid     Intent::Forge only, when the stream's
+    //                              current position != expected_position.
+    //   ResourceBudgetExceeded     Intent::Forge only, when the stream position
+    //                              is_exhausted(). NOTE: despite the name this
+    //                              is NOT a general budget or count refusal —
+    //                              it is forge-stream exhaustion specifically.
+    //                              An earlier version of this comment guessed
+    //                              "needs a declared budget the generator can
+    //                              exceed", which would have sent whoever
+    //                              extended this model looking for the wrong
+    //                              lever.
+    //   EffectIdempotencyKeyReuse  Intent::Outbox only, same delivery key with
+    //                              DIFFERENT canonical parameters. Same key
+    //                              with identical parameters is the separate
+    //                              Absorbed(DuplicateIdenticalDelivery) arm.
     //
     // All three gaps are the same gap: this model carries ref intents only.
-    // Closing them means extending the carrier, not adding assertions.
+    // Closing them means extending the carrier, not adding assertions — and
+    // adding forge plus outbox intents would close all three codes AND the
+    // DuplicateIdenticalDelivery absorption reason in one extension.
     let mut reached: BTreeSet<RefusalCode> = BTreeSet::new();
     for i in 0..programs() {
         let seed = CORPUS_SEED.wrapping_add(i as u64);
