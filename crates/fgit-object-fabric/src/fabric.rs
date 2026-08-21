@@ -226,15 +226,15 @@ impl PlacementReceipt {
         self.encryption_dependency
     }
 
-    fn canonical_bytes(&self) -> Vec<u8> {
+    fn canonical_bytes(&self) -> Result<Vec<u8>, StoreRefusal> {
         let mut bytes = Vec::with_capacity(
             4 + self.locator.len() + self.failure_domain.len() + self.encryption_dependency.len(),
         );
         bytes.push(self.backend.to_wire());
-        push_handle(&mut bytes, self.locator);
-        push_handle(&mut bytes, self.failure_domain);
-        push_handle(&mut bytes, self.encryption_dependency);
-        bytes
+        push_handle(&mut bytes, self.locator)?;
+        push_handle(&mut bytes, self.failure_domain)?;
+        push_handle(&mut bytes, self.encryption_dependency)?;
+        Ok(bytes)
     }
 }
 
@@ -380,7 +380,7 @@ impl SegmentManifest {
             u32::try_from(self.placements.len()).map_err(|_| StoreRefusal::TooManyPlacements)?,
         );
         for placement in &self.placements {
-            bytes.extend_from_slice(&placement.canonical_bytes());
+            bytes.extend_from_slice(&placement.canonical_bytes()?);
         }
         Ok(bytes)
     }
@@ -535,7 +535,7 @@ fn validate_manifest_parts(
         }
     }
     for pair in placements.windows(2) {
-        match pair[0].canonical_bytes().cmp(&pair[1].canonical_bytes()) {
+        match pair[0].canonical_bytes()?.cmp(&pair[1].canonical_bytes()?) {
             std::cmp::Ordering::Less => {}
             std::cmp::Ordering::Equal => return Err(StoreRefusal::DuplicatePlacement),
             std::cmp::Ordering::Greater => return Err(StoreRefusal::NonCanonicalPlacementOrder),
@@ -566,7 +566,10 @@ impl<'a> PlacementAdmission<'a> {
         self.ledger
     }
 
-    pub(crate) fn into_parts(self) -> (&'a ObligationLedger, BudgetGrant) {
+    /// Consumes this custody token so the backend can reserve and settle the
+    /// concrete `ObjectAdmissionPermit` around a physical placement write.
+    #[must_use]
+    pub fn into_parts(self) -> (&'a ObligationLedger, BudgetGrant) {
         (self.ledger, self.budget)
     }
 }
@@ -890,9 +893,10 @@ fn push_git_oid(output: &mut Vec<u8>, identity: GitOid) {
     output.extend_from_slice(identity.as_bytes());
 }
 
-fn push_handle(output: &mut Vec<u8>, handle: OpaqueHandle) {
-    output.push(u8::try_from(handle.len()).unwrap_or(u8::MAX));
+fn push_handle(output: &mut Vec<u8>, handle: OpaqueHandle) -> Result<(), StoreRefusal> {
+    output.push(u8::try_from(handle.len()).map_err(|_| StoreRefusal::LengthOverflow)?);
     output.extend_from_slice(handle.as_bytes());
+    Ok(())
 }
 
 struct ManifestCursor<'a> {
