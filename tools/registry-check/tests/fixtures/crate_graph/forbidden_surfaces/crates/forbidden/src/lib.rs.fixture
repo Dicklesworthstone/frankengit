@@ -1,0 +1,11 @@
+#![forbid(unsafe_code)]
+
+extern "C" {
+    fn foreign_symbol();
+}
+
+pub fn rejected_machine_code() {
+    unsafe {
+        core::arch::asm!("nop");
+    }
+}

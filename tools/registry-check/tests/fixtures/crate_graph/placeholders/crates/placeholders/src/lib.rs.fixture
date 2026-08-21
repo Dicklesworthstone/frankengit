@@ -1,5 +1,17 @@
 #![forbid(unsafe_code)]
 
-pub fn production_path() {
+pub fn todo_path() {
     todo!()
+}
+
+pub fn unimplemented_path() {
+    unimplemented!()
+}
+
+pub fn panic_path() {
+    panic!("TODO: implement production path")
+}
+
+pub fn unreachable_path() {
+    unreachable!("TODO: implement production path")
 }

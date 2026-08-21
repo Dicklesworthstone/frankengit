@@ -1,0 +1,2 @@
+# Planted nested lockfile: the root workspace owns the only lockfile.
+version = 4

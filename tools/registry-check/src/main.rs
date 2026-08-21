@@ -1083,7 +1083,7 @@ fn check_workspace_crate_graph(root: &Path, report: &mut Report) {
             {
                 lib_is_reexport_only = true;
             }
-            if let Some(placeholder) = assessment.placeholder {
+            for placeholder in assessment.placeholders {
                 report.error(format!(
                     "placeholder `{placeholder}` in non-test first-party source {display}"
                 ));
@@ -1113,7 +1113,7 @@ fn check_workspace_crate_graph(root: &Path, report: &mut Report) {
 #[derive(Debug, Default)]
 struct SourceAssessment {
     item_flags: u8,
-    placeholder: Option<String>,
+    placeholders: Vec<String>,
     lint_relaxation: Option<String>,
 }
 
@@ -1170,7 +1170,7 @@ fn assess_first_party_source(text: &str) -> SourceAssessment {
     let code = strip_rust_comments(&production_text);
     let mut assessment = SourceAssessment {
         item_flags: u8::from(text.contains("#[cfg(test)]")) * SourceAssessment::HAS_CFG_TEST_ITEM,
-        placeholder: find_placeholder_construct(&code),
+        placeholders: find_placeholder_constructs(&code),
         lint_relaxation: find_forbidden_lint_relaxation(&code),
         ..SourceAssessment::default()
     };
@@ -1312,21 +1312,22 @@ fn strip_rust_comments(text: &str) -> String {
     output
 }
 
-fn find_placeholder_construct(text: &str) -> Option<String> {
+fn find_placeholder_constructs(text: &str) -> Vec<String> {
+    let mut constructs = Vec::new();
     for (name, marker) in [
         ("todo", concat!("to", "do!")),
         ("unimplemented", concat!("un", "implemented!")),
     ] {
         if contains_macro_invocation(text, marker) {
-            return Some(format!("{name}!"));
+            constructs.push(format!("{name}!"));
         }
     }
     for name in ["panic", "unreachable"] {
         if contains_todo_message(text, name) {
-            return Some(format!("{name}!(\"TODO…\")"));
+            constructs.push(format!("{name}!(\"TODO…\")"));
         }
     }
-    None
+    constructs
 }
 
 fn contains_macro_invocation(text: &str, marker: &str) -> bool {
@@ -1437,6 +1438,9 @@ fn check_rust_sources(root: &Path, report: &mut Report) {
         if let Some(token) = find_unsafe_construct(&text) {
             report.error(format!("forbidden Rust construct `{token}` in {display}"));
         }
+        if let Some(token) = find_inline_assembly_construct(&text) {
+            report.error(format!("forbidden Rust construct `{token}` in {display}"));
+        }
         // Quote-free patterns are split with concat! so this checker's own
         // source does not contain the forbidden byte sequences it scans for.
         for forbidden in [
@@ -1488,6 +1492,18 @@ fn find_unsafe_construct(text: &str) -> Option<String> {
     None
 }
 
+fn find_inline_assembly_construct(text: &str) -> Option<String> {
+    for (name, marker) in [
+        ("asm", concat!("as", "m!")),
+        ("global_asm", concat!("global_as", "m!")),
+    ] {
+        if contains_macro_invocation(text, marker) {
+            return Some(format!("{name}!"));
+        }
+    }
+    None
+}
+
 fn check_manifests(root: &Path, report: &mut Report) {
     let allowed = load_allowed_dependency_patterns(root, report);
     let workspace_manifests = workspace_manifest_paths(root, report)
@@ -1506,16 +1522,7 @@ fn check_manifests(root: &Path, report: &mut Report) {
             continue;
         };
 
-        if text.lines().any(|line| {
-            let line = line.trim();
-            line.starts_with("build =")
-                || line.starts_with("links =")
-                || line == "proc-macro = true"
-        }) {
-            report.error(format!(
-                "manifest {display} declares a build script, native links, or first-party proc macro without a registered constitutional exception"
-            ));
-        }
+        check_first_party_manifest_declarations(&display, &text, report);
 
         check_manifest_overrides(&display, &text, report);
 
@@ -1536,6 +1543,17 @@ fn check_manifests(root: &Path, report: &mut Report) {
     }
 
     check_lockfile(root, &allowed, report);
+}
+
+fn check_first_party_manifest_declarations(display: &str, text: &str, report: &mut Report) {
+    if text.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("build =") || line.starts_with("links =") || line == "proc-macro = true"
+    }) {
+        report.error(format!(
+            "manifest {display} declares a build script, native links, or first-party proc macro without a registered constitutional exception"
+        ));
+    }
 }
 
 fn check_manifest_overrides(display: &str, text: &str, report: &mut Report) {
@@ -4144,6 +4162,9 @@ mod tests {
     fn planted_placeholder_cfg_test_only_and_lint_relaxation_are_refused() {
         for (fixture, expected) in [
             ("placeholders", concat!("placeholder `to", "do!`")),
+            ("placeholders", concat!("placeholder `un", "implemented!`")),
+            ("placeholders", "placeholder `panic!(\"TODO…\")`"),
+            ("placeholders", "placeholder `unreachable!(\"TODO…\")`"),
             ("cfg_test_only", "contains only cfg(test)-gated behavior"),
             ("lint_relaxation", "clippy::too_many_arguments"),
         ] {
@@ -4152,6 +4173,35 @@ mod tests {
             check_workspace_crate_graph(&workspace.root, &mut report);
             assert_error(&report, expected);
         }
+    }
+
+    #[test]
+    fn planted_unsafe_ffi_assembly_build_proc_and_nested_lock_are_refused() {
+        let workspace = fixture_workspace_in("crate_graph", "forbidden_surfaces");
+        let mut report = Report::new();
+        check_rust_sources(&workspace.root, &mut report);
+        check_forbidden_artifacts(&workspace.root, &mut report);
+        let manifest = fs::read_to_string(workspace.root.join("crates/forbidden/Cargo.toml"))
+            .expect("read planted manifest");
+        check_first_party_manifest_declarations(
+            "crates/forbidden/Cargo.toml",
+            &manifest,
+            &mut report,
+        );
+        for expected in [
+            concat!("uns", "afe {"),
+            concat!("extern ", "\"C\""),
+            concat!("as", "m!"),
+            "first-party build script",
+            "nested lockfile",
+            "first-party proc macro",
+        ] {
+            assert_error(&report, expected);
+        }
+        assert_eq!(
+            find_inline_assembly_construct(concat!("global_as", "m!(\"nop\");")),
+            Some(concat!("global_as", "m!").to_owned())
+        );
     }
 
     #[test]
@@ -4213,6 +4263,39 @@ mod tests {
         assert_eq!(
             count_unsafe_constructs(concat!("uns", "afe { let value = 1_u8; let _ = value; }")),
             1
+        );
+    }
+
+    #[test]
+    fn planted_generated_wasm_policy_drift_is_refused() {
+        let workspace = fixture_workspace_in("crate_graph", "clean");
+        let package = LockPackage {
+            name: "wasm-bindgen".to_owned(),
+            version: "0.2.0".to_owned(),
+            source: None,
+            checksum: None,
+            dependencies: Vec::new(),
+        };
+        let mut metadata = MetadataSnapshot::default();
+        metadata.package_sources.insert(
+            (package.name.clone(), package.version.clone()),
+            PackageSource {
+                manifest_path: workspace.root.join("crates/vertical/Cargo.toml"),
+                license: "not_applicable".to_owned(),
+                license_file: None,
+            },
+        );
+        let policies = vec![ActiveDependencyPolicy {
+            id: "DEP-WASM".to_owned(),
+            crate_pattern: "wasm-bindgen".to_owned(),
+            unsafe_policy: "ledgered_transitive".to_owned(),
+        }];
+        let rows = unsafe_ledger_rows(&[package], &metadata, &policies)
+            .expect("render planted WASM ledger row");
+        assert_eq!(rows[0].expected_policy, "proc_macro_transitive");
+        assert!(
+            !unsafe_policy_matches(&rows[0].expected_policy, &rows[0].registry_policy),
+            "generated WASM policy drift must be a typed mismatch"
         );
     }
 
