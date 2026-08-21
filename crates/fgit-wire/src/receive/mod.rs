@@ -436,8 +436,9 @@ impl ReceivePack {
         result
     }
 
-    /// Accepts a network fragment. Packet framing stops at the first command
-    /// flush, so a same-read raw `PACK` suffix enters only the quarantine buffer.
+    /// Accepts a network fragment. Packet framing stops at each section flush;
+    /// a same-read `PACK` suffix enters the quarantine buffer only after the
+    /// command and, when negotiated, push-options sections have completed.
     pub fn push_bytes(&mut self, input: &[u8]) -> Result<ReceiveTransition, ReceiveError> {
         let result = self.push_bytes_inner(input);
         if result.is_err() {
@@ -469,19 +470,27 @@ impl ReceivePack {
             self.append_pack_bytes(input)?;
             return Ok(ReceiveTransition::default());
         }
-        let boundary = self
-            .decoder
-            .push_until_flush(input)
-            .map_err(ReceiveError::Wire)?;
         let mut transition = ReceiveTransition::default();
-        for packet in boundary.packets {
-            transition.append(self.push_packet_inner(packet)?)?;
-        }
-        if boundary.found_flush && boundary.consumed < input.len() {
-            if self.phase != ReceivePhase::Pack {
+        let mut remaining = input;
+        while !remaining.is_empty() {
+            let boundary = self
+                .decoder
+                .push_until_flush(remaining)
+                .map_err(ReceiveError::Wire)?;
+            for packet in boundary.packets {
+                transition.append(self.push_packet_inner(packet)?)?;
+            }
+            remaining = &remaining[boundary.consumed..];
+            if !boundary.found_flush || remaining.is_empty() {
+                return Ok(transition);
+            }
+            if self.phase == ReceivePhase::Pack {
+                self.append_pack_bytes(remaining)?;
+                return Ok(transition);
+            }
+            if self.phase != ReceivePhase::PushOptions {
                 return Err(ReceiveError::UnexpectedPackBytes { state: self.phase });
             }
-            self.append_pack_bytes(&input[boundary.consumed..])?;
         }
         Ok(transition)
     }

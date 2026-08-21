@@ -163,6 +163,48 @@ fn packet_and_raw_pack_same_read_are_bounded_then_handed_off_without_retention()
 }
 
 #[test]
+fn same_read_push_options_second_flush_then_pack_is_quarantined() {
+    let mut machine = ReceivePack::new(context(b"report-status push-options")).expect("machine");
+    let command = command(
+        OLD,
+        NEW,
+        "refs/heads/main",
+        Some("report-status push-options"),
+    );
+    let mut transcript = encode_packet(&command, &WireLimits::default()).expect("command encode");
+    transcript.extend_from_slice(b"0000");
+    transcript.extend_from_slice(
+        &encode_packet(
+            &Packet::Data(b"review=42\n".to_vec()),
+            &WireLimits::default(),
+        )
+        .expect("push-option encode"),
+    );
+    transcript.extend_from_slice(b"0000");
+    transcript.extend_from_slice(&empty_sha1_pack());
+
+    let transition = machine
+        .push_bytes(&transcript)
+        .expect("same-read transcript");
+    assert_eq!(transition.events.len(), 1);
+    assert!(matches!(
+        transition.events.first(),
+        Some(ReceiveEvent::RequestReady(request)) if request.push_options == vec![b"review=42".to_vec()]
+    ));
+    assert_eq!(machine.phase(), ReceivePhase::Pack);
+    assert_eq!(machine.quarantine_len(), empty_sha1_pack().len());
+
+    let mut handoff = Handoff::default();
+    let mut continuing = || true;
+    let completion = machine
+        .finish_with_handoff(&mut handoff, &mut continuing)
+        .expect("validated quarantine handoff");
+    assert_eq!(completion.request.push_options, vec![b"review=42".to_vec()]);
+    assert!(handoff.saw_pack);
+    assert_eq!(machine.quarantine_len(), 0);
+}
+
+#[test]
 fn invalid_pack_and_cancelled_validation_discard_every_local_byte() {
     let mut malformed = ReceivePack::new(context(b"")).expect("machine");
     malformed
