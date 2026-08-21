@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Command-line driver for the benchmark harness's checked-in self-test.
 
 use std::{
