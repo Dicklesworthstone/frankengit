@@ -1114,7 +1114,7 @@ pub struct ChargeBound {
 
 impl ChargeBound {
     /// Binds actual usage, refusing anything above the reserved ceiling.
-    pub fn within(
+    pub const fn within(
         reservation: &ChargeReservation,
         actual_micros: u64,
     ) -> Result<Self, ChargeAboveCeiling> {

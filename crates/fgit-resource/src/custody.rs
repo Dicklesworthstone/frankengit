@@ -683,14 +683,16 @@ impl LedgerState {
     }
 
     /// Retires a grant and returns the amount it held.
+    ///
+    /// Retiring a grant the ledger does not hold is a defect, not an ordinary
+    /// outcome: every retire is reached from a live `BudgetGrant` whose leak
+    /// guard was disarmed in the same step. It is counted rather than ignored.
     fn retire(&mut self, id: GrantId) -> ResourceVector {
-        match self.grants.remove(&id) {
-            Some(amount) => amount,
-            None => {
-                self.note_fault();
-                ResourceVector::ZERO
-            }
+        let held = self.grants.remove(&id);
+        if held.is_none() {
+            self.note_fault();
         }
+        held.unwrap_or(ResourceVector::ZERO)
     }
 
     fn give_back(&mut self, amount: ResourceVector) {

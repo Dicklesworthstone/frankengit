@@ -86,6 +86,25 @@
 //! reports; it does not drain, cancel, or reap. Grades are integer amounts with
 //! declared overflow refusal, not a physical measurement of anything.
 
+/// Every refusal this crate returns stays small enough to travel in a
+/// `Result` without boxing.
+///
+/// The bound is the one the workspace lint set enforces for an error payload.
+/// It is asserted at compile time rather than reviewed, because the cheapest
+/// way to grow an error past it is to embed a `ResourceVector` — which is
+/// exactly why no refusal here carries one.
+const _: () = {
+    const LIMIT: usize = 128;
+    assert!(size_of::<algebra::ResourceError>() <= LIMIT);
+    assert!(size_of::<ids::IdentityError>() <= LIMIT);
+    assert!(size_of::<custody::LifecycleError>() <= LIMIT);
+    assert!(size_of::<custody::ReserveError>() <= LIMIT);
+    assert!(size_of::<kinds::AdmissionRefusal>() <= LIMIT);
+    assert!(size_of::<kinds::RepairRefusal>() <= LIMIT);
+    assert!(size_of::<kinds::ContextRefusal>() <= LIMIT);
+    assert!(size_of::<kinds::ChargeAboveCeiling>() <= LIMIT);
+};
+
 pub mod algebra;
 pub mod custody;
 pub mod ids;

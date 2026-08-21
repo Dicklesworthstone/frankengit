@@ -247,7 +247,6 @@ pub struct SettledObligation<K: ObligationKind> {
 
 impl<K: ObligationKind> SettledObligation<K> {
     /// The non-generic summary.
-    #[must_use]
     pub const fn summary(&self) -> SettlementSummary {
         self.summary
     }
@@ -550,7 +549,9 @@ impl<K: ObligationKind> SettlementRefused<K> {
     }
 
     /// Takes the reservation back so the caller can retry or abort it.
-    #[must_use]
+    ///
+    /// The returned reservation is still live and still leak-guarded, so a
+    /// caller that takes it back and drops it is recorded, not forgiven.
     pub fn into_obligation(self) -> ReservedObligation<K> {
         self.obligation
     }
