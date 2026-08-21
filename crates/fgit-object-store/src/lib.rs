@@ -942,31 +942,6 @@ where
         }
     }
 
-    /// Refuse the atomic composite rather than create the forbidden split window.
-    ///
-    /// A provider conditional write can replace the head, and immutable objects
-    /// can be written with PIA, but those two operations have no common
-    /// linearization point in this adapter. Sending either request here could
-    /// expose a head whose outcome records are absent, or durable outcomes that
-    /// no head ever makes canonical. `OperationUnsupported` is returned before any
-    /// transport request, so the refusal proves that no partial publication was
-    /// attempted. An object-store profile that supplies an atomic compound
-    /// primitive can implement this method without changing the ordinary CAS
-    /// profile above.
-    async fn publish_head_with_outcomes(
-        &self,
-        _cx: &Self::Context,
-        _key: &HeadKey,
-        _expected: AuthorityVersionToken,
-        _new_generation: HeadGeneration,
-        _new_body: &[u8],
-        _outcomes: &[(ImmutableKey, Vec<u8>)],
-    ) -> Result<CasOutcome, AuthorityFailure> {
-        Err(AuthorityFailure::Refused(
-            AuthorityRefusal::OperationUnsupported,
-        ))
-    }
-
     async fn authenticate_head_receipt(
         &self,
         cx: &Self::Context,
@@ -1687,41 +1662,6 @@ mod tests {
                 )
             ),
             Ok(CasOutcome::PredecessorMismatch)
-        );
-
-        let outcome = ImmutableKey::new(b"outcome/tx-1".to_vec()).expect("key");
-        let requests_before_publish = adapter.transport.requests().len();
-        assert_eq!(
-            run(
-                &runtime,
-                adapter.publish_head_with_outcomes(
-                    &cx,
-                    &head,
-                    second.token(),
-                    HeadGeneration::try_new(3).expect("generation"),
-                    b"head-v3",
-                    &[(outcome.clone(), b"terminal-outcome".to_vec())],
-                )
-            ),
-            Err(AuthorityFailure::Refused(
-                AuthorityRefusal::OperationUnsupported,
-            )),
-            "the adapter must refuse instead of synthesizing a non-atomic publication"
-        );
-        assert_eq!(
-            adapter.transport.requests().len(),
-            requests_before_publish,
-            "the atomic-publication refusal must not transmit a partial head or outcome write"
-        );
-        assert_eq!(
-            run(&runtime, adapter.read_immutable(&cx, &outcome)),
-            Ok(ImmutableRead::Absent),
-            "no refused outcome object may become durable"
-        );
-        assert_eq!(
-            run(&runtime, adapter.read_head(&cx, &head)),
-            Ok(HeadRead::Present(second)),
-            "no refused atomic publication may advance the authority head"
         );
 
         let requests = adapter.transport.requests();
