@@ -25,6 +25,20 @@
 # letter would have produced the worst outcome available: a suite that looks
 # registered and silently does nothing.
 #
+# RCH_CARGO_WRAPPER_BYPASS=1 is pinned on every cargo invocation below, and is
+# not optional. `~/.local/bin/cargo` is a wrapper that offloads the build to a
+# remote host unless that variable is set, and neither lib.sh nor run_all.sh
+# exports it — so without it this lane inherits whatever the caller happened to
+# have. When it offloads, the worker RUNS AND PASSES remotely while any artifact
+# it writes lands in the remote directory and never comes back: a green worker
+# and a vanished artifact, which then misattributes itself to whichever crate
+# was last touched. Diagnosed by ChartreuseHorizon, scope corrected by
+# JadeFalcon; this suite was one of seven exposed.
+#
+# Verify a change to these lines the only way that proves anything:
+#   env -u RCH_CARGO_WRAPPER_BYPASS bash scripts/e2e/suites/model/normal_form_corpus.sh
+# Running it with the variable already set proves nothing, which is the trap.
+#
 # Pure bash plus coreutils, per FG-000A-PORT-019. No awk, jq, python or perl.
 set -euo pipefail
 
@@ -92,12 +106,14 @@ fge_phase action
 # claim. The corpus refuses to start on an unparseable value rather than
 # silently falling back, so this lane cannot report a campaign it did not run.
 fge_run normal-form-corpus \
-  env FG008B_CORPUS=campaign cargo test --locked -p fgit-txn --test normal_form_corpus
+  env RCH_CARGO_WRAPPER_BYPASS=1 FG008B_CORPUS=campaign \
+  cargo test --locked -p fgit-txn --test normal_form_corpus
 nf_corpus_exit=$FGE_LAST_EXIT
 
 # The crate's existing evidence must keep passing alongside the new corpus: a
 # campaign that breaks the crate it verifies is not verification.
 fge_run txn-combiner-determinism \
+  env RCH_CARGO_WRAPPER_BYPASS=1 \
   cargo test --locked -p fgit-txn --test combiner_determinism
 nf_combiner_exit=$FGE_LAST_EXIT
 
@@ -115,7 +131,7 @@ fge_assert_eq FG-008B-E2E-013 '' "$nf_reaches_into_folder" \
 fge_assert_eq FG-008B-E2E-014 '' "$nf_collapses_reason" \
   'dispositions are compared including their absorption reason'
 
-fge_phase report
+fge_phase teardown
 
 # What this lane does and does not establish, stated here so a green receipt
 # cannot be read as more than it is.
