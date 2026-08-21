@@ -108,10 +108,11 @@ mod screened;
 pub mod testing;
 
 pub use body_identity::{
-    GIT_PAYLOAD_SCHEMA, GIT_PAYLOAD_SCHEMA_FAMILY, InternalIdentityError, git_payload_body,
-    git_payload_commitment, internal_algorithm_id, internal_digest, internal_digest_in_domain,
-    internal_digest_over_parts, internal_digest_value, internal_domain_tag, internal_id_preimage,
-    internal_id_preimage_header, internal_object_id, lowercase_hex, verify_internal_object_id,
+    GIT_PAYLOAD_SCHEMA, GIT_PAYLOAD_SCHEMA_FAMILY, InternalIdentityError, UnregisteredDomainTag,
+    git_payload_body, git_payload_commitment, internal_algorithm_id, internal_digest,
+    internal_digest_in_domain, internal_digest_over_parts, internal_digest_value,
+    internal_domain_tag, internal_id_preimage, internal_id_preimage_header, internal_object_id,
+    internal_object_id_for_tag, lowercase_hex, resolve_domain, verify_internal_object_id,
 };
 pub use corpus::{
     ALGORITHM_HEADER, DOMAIN_HEADER, REGISTRY_MARKER, export_algorithm_registry,
@@ -127,8 +128,8 @@ pub use native::{
     Sha1, Sha256, git_object_id, parse_git_oid,
 };
 pub use registry::{
-    ALGORITHM_REGISTRY, AlgorithmRow, AlgorithmUsage, DOMAIN_REGISTRY, DigestAlgorithm, DomainRow,
-    IdentityDomain, InternalDigestAlgorithm, RowStatus,
+    ALGORITHM_REGISTRY, AlgorithmRow, AlgorithmUsage, CORPUS_RESERVED_CODE_POINTS, DOMAIN_REGISTRY,
+    DigestAlgorithm, DomainRow, IdentityDomain, InternalDigestAlgorithm, RowStatus,
 };
 pub use screened::{
     Sha1IdentityProfile, screened_sha1_digest, screened_sha1_git_oid, sha1_git_oid_with_profile,

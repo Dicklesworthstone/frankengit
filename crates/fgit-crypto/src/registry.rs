@@ -96,6 +96,25 @@ pub enum DigestAlgorithm {
     Sha256,
 }
 
+/// Digest-algorithm code points reserved for non-cryptographic corpus and
+/// harness use, and never allocated by this registry.
+///
+/// `fgit-codec`'s golden corpus needs an algorithm slot for a fully specified
+/// non-cryptographic function that carries no collision-resistance claim, so
+/// that identity plumbing can be exercised without implying a security
+/// property. Keeping that slot out of the registry's own range is what stops
+/// a corpus identity from ever being mistaken for a real one.
+pub const CORPUS_RESERVED_CODE_POINTS: core::ops::RangeInclusive<u16> = 0xfff0..=0xffff;
+
+// A registered construction must never land in the corpus-reserved range.
+const _: () = {
+    let mut index = 0;
+    while index < ALGORITHM_REGISTRY.len() {
+        assert!(ALGORITHM_REGISTRY[index].code_point < 0xfff0);
+        index += 1;
+    }
+};
+
 impl DigestAlgorithm {
     /// Every registered construction, in code-point order.
     pub const ALL: &'static [Self] = &[Self::Sha1, Self::Sha256];
@@ -373,6 +392,13 @@ pub enum IdentityDomain {
     /// canonical body is the injective anchor preimage; the digest of that
     /// body is the anchor's stable identity across re-parses.
     DocumentAnchor,
+    /// One signed envelope body.
+    ///
+    /// The envelope carries a body together with detached attestations. Its
+    /// own identity is a body identity in its own right, distinct from the
+    /// identity of the body it wraps — adding or removing an attestation must
+    /// change the envelope's identity and must not change the wrapped body's.
+    SignedEnvelope,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -568,6 +594,12 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/doc-anchor/v1",
         None,
     ),
+    owned_row(
+        30,
+        IdentityDomain::SignedEnvelope,
+        "frankengit/signed-envelope/v1",
+        None,
+    ),
 ];
 
 const fn pinned_row(
@@ -681,6 +713,7 @@ impl IdentityDomain {
         Self::MerkleNode,
         Self::AdmissionReceipt,
         Self::DocumentAnchor,
+        Self::SignedEnvelope,
     ];
 
     /// Position of this domain in [`DOMAIN_REGISTRY`].

@@ -2,13 +2,14 @@
 //! case paired with the near-identical permitted case that proceeds.
 
 use fgit_crypto::{
-    ALGORITHM_REGISTRY, AlgorithmUsage, CodecVersion, DERIVED_ID_DOMAINS, DOMAIN_REGISTRY,
-    DigestAlgorithm, DigestBytes, GIT_PAYLOAD_SCHEMA, GitHashError, GitObjectFormat, GitObjectKind,
-    GitOid, IdentityDomain, InternalDigestAlgorithm, InternalIdentityError, InternalObjectId,
-    NativeObjectIdentity, RowStatus, SchemaFamily, SchemaId, Sha1, Sha256, git_object_id,
+    ALGORITHM_REGISTRY, AlgorithmUsage, CORPUS_RESERVED_CODE_POINTS, CodecVersion,
+    DERIVED_ID_DOMAINS, DOMAIN_REGISTRY, DigestAlgorithm, DigestBytes, DomainTag,
+    GIT_PAYLOAD_SCHEMA, GitHashError, GitObjectFormat, GitObjectKind, GitOid, IdentityDomain,
+    InternalDigestAlgorithm, InternalIdentityError, InternalObjectId, NativeObjectIdentity,
+    RowStatus, SchemaFamily, SchemaId, Sha1, Sha256, UnregisteredDomainTag, git_object_id,
     git_payload_body, git_payload_commitment, internal_digest_in_domain,
-    internal_digest_over_parts, internal_digest_value, internal_object_id, parse_git_oid,
-    verify_internal_object_id,
+    internal_digest_over_parts, internal_digest_value, internal_object_id,
+    internal_object_id_for_tag, parse_git_oid, resolve_domain, verify_internal_object_id,
 };
 
 const EMPTY_BLOB_SHA1: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
@@ -600,4 +601,63 @@ fn the_digest_value_shell_carries_the_registry_width() {
         assert_eq!(value.len(), domain.algorithm().digest_len());
         assert_eq!(value.len(), 32);
     }
+}
+
+// --- domain tags that arrive as untrusted data ------------------------------
+
+#[test]
+fn an_unregistered_domain_tag_is_refused_rather_than_hashed() {
+    // A decoder reads a domain tag out of bytes it does not trust. The step
+    // from "a tag arrived" to "this is a registered domain" must be able to
+    // refuse, or hostile input mints an identity under a tag the registry
+    // never allocated.
+    let foreign = DomainTag::try_new(b"frankengit/not-a-registered-domain/v1")
+        .expect("the tag is a well-formed label, just not a registered one");
+    assert_eq!(
+        resolve_domain(foreign),
+        Err(UnregisteredDomainTag {
+            tag: "frankengit/not-a-registered-domain/v1".to_owned()
+        })
+    );
+    assert!(
+        internal_object_id_for_tag(
+            foreign,
+            schema("frankengit.canonical-body"),
+            CodecVersion::new(1, 0),
+            b"body"
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_registered_domain_tag_resolves_to_the_same_identity_as_the_typed_path() {
+    // The permitted counterpart: identical call shape, a tag the registry does
+    // claim, and the result must be indistinguishable from naming the domain
+    // in source.
+    let schema = schema("frankengit.canonical-body");
+    let codec = CodecVersion::new(1, 0);
+    for domain in IdentityDomain::ALL.iter().copied() {
+        assert_eq!(resolve_domain(domain.domain_tag()), Ok(domain));
+        assert_eq!(
+            internal_object_id_for_tag(domain.domain_tag(), schema, codec, b"body"),
+            Ok(internal_object_id(domain, schema, codec, b"body")),
+            "{domain}"
+        );
+    }
+}
+
+#[test]
+fn registered_code_points_stay_out_of_the_corpus_reserved_range() {
+    // `fgit-codec`'s golden corpus parks a non-cryptographic function at
+    // 0xfff1. A registered construction landing in that range would let a
+    // corpus identity be mistaken for a real one.
+    for row in ALGORITHM_REGISTRY {
+        assert!(
+            !CORPUS_RESERVED_CODE_POINTS.contains(&row.code_point),
+            "{} must not occupy the corpus-reserved range",
+            row.name
+        );
+    }
+    assert!(CORPUS_RESERVED_CODE_POINTS.contains(&0xfff1));
 }

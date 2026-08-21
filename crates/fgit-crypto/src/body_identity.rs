@@ -60,6 +60,63 @@ pub const GIT_PAYLOAD_SCHEMA_FAMILY: &str = "frankengit.git-payload-commitment";
 pub const GIT_PAYLOAD_SCHEMA: SchemaId =
     SchemaId::new(SchemaFamily::from_static(GIT_PAYLOAD_SCHEMA_FAMILY), 1, 0);
 
+/// A domain tag that no registry row claims.
+///
+/// This exists because a decoder hands out tags it read from bytes it does not
+/// trust. `fgit-codec`'s frame header carries a `DomainTag`, and the identity
+/// of a decoded body is computed from it — so the step from "a tag arrived" to
+/// "this is a registered identity domain" must be able to refuse. Without a
+/// refusal there, hostile input either panics the identity path or gets an
+/// identity minted under a tag the registry never allocated.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnregisteredDomainTag {
+    /// The tag as it arrived.
+    pub tag: String,
+}
+
+impl fmt::Display for UnregisteredDomainTag {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "`{}` is not a registered identity domain",
+            self.tag
+        )
+    }
+}
+
+impl std::error::Error for UnregisteredDomainTag {}
+
+/// Resolve a domain tag that arrived as data into a registered domain.
+///
+/// The typed counterpart of [`IdentityDomain::from_tag`] for callers that must
+/// refuse rather than treat absence as `None` and carry on.
+pub fn resolve_domain(tag: DomainTag) -> Result<IdentityDomain, UnregisteredDomainTag> {
+    IdentityDomain::from_tag(tag.as_str()).ok_or_else(|| UnregisteredDomainTag {
+        tag: tag.as_str().to_owned(),
+    })
+}
+
+/// Compute a body identity from a domain tag that arrived as data.
+///
+/// Identical to [`internal_object_id`] once the tag resolves; the difference is
+/// that an unregistered tag is refused instead of hashed. Decoders should use
+/// this; code that names a domain in source should use the typed entry point,
+/// where an unregistered domain is not representable at all.
+pub fn internal_object_id_for_tag(
+    tag: DomainTag,
+    schema: SchemaId,
+    codec_version: CodecVersion,
+    canonical_body: &[u8],
+) -> Result<InternalObjectId, UnregisteredDomainTag> {
+    let domain = resolve_domain(tag)?;
+    Ok(internal_object_id(
+        domain,
+        schema,
+        codec_version,
+        canonical_body,
+    ))
+}
+
 /// Mismatch discovered while verifying an internal body identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InternalIdentityError {
