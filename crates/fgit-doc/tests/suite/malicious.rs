@@ -17,13 +17,24 @@ use fgit_doc::{
     parse_with, render,
 };
 
-/// Rendered output may not exceed this multiple of the input size, plus slack.
+/// Text-surface output may not exceed this multiple of the input size.
 ///
-/// The widest per-character expansion this crate can produce is a neutralised
+/// The widest per-character expansion these surfaces produce is a neutralised
 /// bidirectional control (three source bytes becoming a marked span), which is
 /// under twenty. The ceiling is set far above that so it tests the *shape* of
 /// the bound — linear — rather than the current constant.
 const OUTPUT_BYTES_PER_INPUT_BYTE: usize = 64;
+
+/// The canonical `JSON` surface is bounded per record, not per input byte.
+///
+/// Its size is dominated by fixed per-node framing — identifier, kind, parent,
+/// four span numbers, line, column, attributes, children — of roughly two
+/// hundred bytes, which a short document full of tiny nodes multiplies well
+/// past any sensible per-input-byte constant. Bounding it against the node
+/// count states the actual mechanism; composed with the node bound below,
+/// which is itself linear in the input, the surface stays linear in the input.
+/// Choosing a bigger per-input constant instead would have hidden that.
+const JSON_BYTES_PER_NODE: usize = 512;
 
 /// Node count may not exceed this multiple of the input size, plus slack.
 const NODES_PER_INPUT_BYTE: usize = 8;
@@ -45,7 +56,7 @@ fn malicious_cases() -> Vec<(String, Vec<u8>)> {
             entry
                 .file_name()
                 .to_str()
-                .is_some_and(|name| name.ends_with(".md"))
+                .is_some_and(|name| name.ends_with(".mdin"))
         })
         .map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -97,106 +108,153 @@ const ALLOWED_ATTRIBUTES: [&str; 8] = [
     "data-fgit-doc-rejected",
 ];
 
-/// Substrings that must never appear in a rendered surface, in any case.
-const FORBIDDEN_SUBSTRINGS: [&str; 12] = [
-    "<script",
-    "<style",
-    "<iframe",
-    "<object",
-    "<embed",
-    "<svg",
-    "<base",
-    "<meta",
-    "<form",
-    "srcdoc",
-    "formaction",
-    "javascript:",
-];
+/// Schemes a rendered destination may carry. Anything else is inert or absent.
+const NAVIGABLE_SCHEMES: [&str; 3] = ["http", "https", "mailto"];
 
-/// A conservative allowlist check over one rendered surface.
+/// One tag the renderer emitted, with its attributes.
+struct Tag {
+    name: String,
+    attributes: Vec<(String, String)>,
+}
+
+/// Every tag a rendered surface emitted.
 ///
-/// The renderer escapes every `<` that came from the source, so any `<` left in
-/// the output is a tag the renderer itself chose to emit. That makes a simple
-/// scan sufficient and, more importantly, makes any escape visible.
-fn assert_no_active_content(case: &str, html: &str) {
-    let lowered = html.to_ascii_lowercase();
-    for forbidden in FORBIDDEN_SUBSTRINGS {
-        assert!(
-            !lowered.contains(forbidden),
-            "{case}: rendered output contains {forbidden:?}"
-        );
-    }
-    assert!(
-        !lowered.contains("data:"),
-        "{case}: rendered output contains a data uri"
-    );
-    assert!(
-        !lowered.contains("vbscript:"),
-        "{case}: rendered output contains a vbscript uri"
-    );
-
+/// Source `<` is always escaped, so a `<` surviving into the output is a tag
+/// the renderer itself chose to emit. That is what makes scanning for `<` both
+/// sufficient and meaningful — and it is why this checker must be structural
+/// rather than a substring scan. A document *about* hostile markup renders that
+/// markup as escaped text, and escaped text legitimately contains the byte
+/// sequences `javascript:` and `onerror=`; only their appearance in a real
+/// emitted tag is a defect.
+fn emitted_tags(case: &str, html: &str) -> Vec<Tag> {
+    let mut tags = Vec::new();
     let mut rest = html;
     while let Some(open) = rest.find('<') {
         let after = rest.get(open + 1..).unwrap_or("");
-        let close = after.find('>').unwrap_or_else(|| {
-            panic!("{case}: an unterminated tag was emitted");
+        let close = after
+            .find('>')
+            .unwrap_or_else(|| panic!("{case}: an unterminated tag was emitted"));
+        let body = after.get(..close).unwrap_or("");
+        let trimmed = body.trim_start_matches('/').trim_end_matches('/').trim();
+        let name = trimmed
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let attribute_region = trimmed.get(name.len()..).unwrap_or("");
+        tags.push(Tag {
+            name,
+            attributes: parse_attributes(attribute_region),
         });
-        let inner = after.get(..close).unwrap_or("");
-        let trimmed = inner.trim_start_matches('/').trim_end_matches('/').trim();
-        let mut parts = trimmed.split_whitespace();
-        let name = parts.next().unwrap_or("").to_ascii_lowercase();
-        assert!(
-            ALLOWED_TAGS.contains(&name.as_str()) || ALLOWED_TARGET_TAGS.contains(&name.as_str()),
-            "{case}: rendered output emitted the tag {name:?}"
-        );
-        for attribute in attribute_names(inner) {
-            assert!(
-                !attribute.starts_with("on"),
-                "{case}: rendered output emitted the event attribute {attribute:?}"
-            );
-            assert!(
-                ALLOWED_ATTRIBUTES.contains(&attribute.as_str())
-                    || attribute == "data-fgit-doc-neutralised",
-                "{case}: rendered output emitted the attribute {attribute:?}"
-            );
-        }
         rest = after.get(close + 1..).unwrap_or("");
     }
+    tags
 }
 
-/// Attribute names inside one tag body, ignoring quoted values.
-fn attribute_names(inner: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut current = String::new();
-    let mut in_value = false;
-    let mut quote = '\0';
-    let mut seen_name = false;
-    for value in inner.chars() {
-        if in_value {
-            if value == quote {
-                in_value = false;
-            }
-            continue;
-        }
+/// Attribute name and value pairs inside one tag body.
+fn parse_attributes(region: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let mut characters = region.chars().peekable();
+    let mut name = String::new();
+    while let Some(value) = characters.next() {
         match value {
-            '"' | '\'' => {
-                in_value = true;
-                quote = value;
-            }
             '=' => {
-                if seen_name && !current.is_empty() {
-                    names.push(current.to_ascii_lowercase());
+                let mut text = String::new();
+                if matches!(characters.peek(), Some('"') | Some('\'')) {
+                    let quote = characters.next().unwrap_or('"');
+                    for inner in characters.by_ref() {
+                        if inner == quote {
+                            break;
+                        }
+                        text.push(inner);
+                    }
+                } else {
+                    while let Some(inner) = characters.peek() {
+                        if inner.is_whitespace() {
+                            break;
+                        }
+                        text.push(*inner);
+                        characters.next();
+                    }
                 }
-                current.clear();
+                if !name.is_empty() {
+                    pairs.push((name.to_ascii_lowercase(), text));
+                }
+                name.clear();
             }
             c if c.is_whitespace() => {
-                current.clear();
-                seen_name = true;
+                if !name.is_empty() {
+                    pairs.push((name.to_ascii_lowercase(), String::new()));
+                }
+                name.clear();
             }
-            c => current.push(c),
+            c => name.push(c),
         }
     }
-    names
+    if !name.is_empty() {
+        pairs.push((name.to_ascii_lowercase(), String::new()));
+    }
+    pairs
+}
+
+/// Whether an emitted destination may be navigated to.
+fn destination_is_navigable(value: &str) -> bool {
+    // The renderer escaped this value on the way in; judge what a browser will
+    // actually see, not what the file literally holds.
+    let decoded = value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'");
+    let trimmed = decoded.trim();
+    let Some((scheme, _)) = trimmed.split_once(':') else {
+        return true;
+    };
+    let looks_like_scheme = scheme
+        .chars()
+        .next()
+        .is_some_and(|value| value.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, '+' | '.' | '-'));
+    if !looks_like_scheme {
+        return true;
+    }
+    NAVIGABLE_SCHEMES
+        .iter()
+        .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
+}
+
+/// A conservative allowlist check over one rendered surface.
+fn assert_no_active_content(case: &str, html: &str) {
+    for tag in emitted_tags(case, html) {
+        assert!(
+            ALLOWED_TAGS.contains(&tag.name.as_str())
+                || ALLOWED_TARGET_TAGS.contains(&tag.name.as_str()),
+            "{case}: rendered output emitted the tag <{}>",
+            tag.name
+        );
+        for (name, value) in &tag.attributes {
+            assert!(
+                !name.starts_with("on"),
+                "{case}: <{}> carries the event attribute {name:?}",
+                tag.name
+            );
+            assert!(
+                ALLOWED_ATTRIBUTES.contains(&name.as_str()) || name == "data-fgit-doc-neutralised",
+                "{case}: <{}> carries the attribute {name:?}",
+                tag.name
+            );
+            if name == "href" || name == "src" {
+                assert!(
+                    destination_is_navigable(value),
+                    "{case}: <{}> carries the destination {value:?}",
+                    tag.name
+                );
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------- the corpus
@@ -236,9 +294,15 @@ fn every_malicious_case_ends_bounded_and_inert_or_refused() {
                     continue;
                 }
             };
+            let nodes = document.node_count();
+            let ceiling = if profile == RenderProfile::ApiJson {
+                JSON_BYTES_PER_NODE * nodes + OUTPUT_BYTES_PER_INPUT_BYTE * input + SIZE_SLACK
+            } else {
+                OUTPUT_BYTES_PER_INPUT_BYTE * input + SIZE_SLACK
+            };
             assert!(
-                rendered.len() <= OUTPUT_BYTES_PER_INPUT_BYTE * input + SIZE_SLACK,
-                "{name}/{}: {} output bytes from {input} input bytes is super-linear",
+                rendered.len() <= ceiling,
+                "{name}/{}: {} output bytes from {input} input bytes and {nodes} nodes exceeds the linear ceiling {ceiling}",
                 profile.tag(),
                 rendered.len()
             );
@@ -261,7 +325,7 @@ fn the_whole_golden_corpus_is_inert_too() {
         .flatten()
     {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.ends_with(".md") {
+        if !name.ends_with(".mdin") {
             continue;
         }
         let source = fs::read_to_string(entry.path()).expect("a corpus file is readable");

@@ -199,7 +199,7 @@ impl<E> RollbackReceipt<E> {
 
     /// Whether every already-written sibling was successfully undone.
     #[must_use]
-    pub fn contained(&self) -> bool {
+    pub const fn contained(&self) -> bool {
         self.rollback_failures.is_empty()
     }
 }
@@ -251,7 +251,7 @@ impl OutputReservation {
 
     /// How many outputs are staged.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.staged.len()
     }
 
@@ -260,7 +260,7 @@ impl OutputReservation {
     /// Always false: [`stage`] refuses an empty request set rather than
     /// producing an empty reservation.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.staged.is_empty()
     }
 

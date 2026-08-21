@@ -64,10 +64,11 @@ fn escape_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for value in text.chars() {
         if crate::unicode::is_bidi_control(value) {
-            out.push_str(&format!(
-                "<span {NEUTRALISED_ATTR}=\"bidi_control\">{}</span>",
-                crate::unicode::code_point_label(value)
-            ));
+            out.push_str("<span ");
+            out.push_str(NEUTRALISED_ATTR);
+            out.push_str("=\"bidi_control\">");
+            out.push_str(&crate::unicode::code_point_label(value));
+            out.push_str("</span>");
         } else {
             push_escaped(&mut out, value);
         }

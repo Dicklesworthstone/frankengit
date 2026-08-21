@@ -20,6 +20,12 @@ from **one** parse of its corpus document. That is the property the set exists
 to pin: if a surface ever re-parsed its input, its spans would drift from
 `shape/`, and `the_api_and_shape_surfaces_report_the_same_spans` would say so.
 
+Fixture inputs deliberately carry the `.mdin` extension rather than `.md`.
+They are hostile *inputs* — an unbalanced code fence, a deliberately broken
+relative link, `javascript:` destinations — and the repository-wide Markdown
+checker is right to reject those in a real document. Keeping them out of the
+`*.md` namespace lets that checker stay strict instead of growing an exclusion.
+
 ## Changing a golden
 
 A golden change is a change in observable behaviour, so it is never a cleanup

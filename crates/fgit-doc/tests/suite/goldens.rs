@@ -34,7 +34,7 @@ fn corpus_ids() -> Vec<String> {
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()))
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter_map(|name| name.strip_suffix(".md").map(str::to_owned))
+        .filter_map(|name| name.strip_suffix(".mdin").map(str::to_owned))
         .filter(|name| !name.ends_with(".edited"))
         .collect::<Vec<_>>();
     ids.sort();
@@ -43,7 +43,7 @@ fn corpus_ids() -> Vec<String> {
 }
 
 fn read_corpus(id: &str) -> String {
-    let path = goldens_root().join("corpus").join(format!("{id}.md"));
+    let path = goldens_root().join("corpus").join(format!("{id}.mdin"));
     fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
 }
@@ -243,7 +243,7 @@ fn every_surface_matches_its_golden() {
         );
         let edited_path = goldens_root()
             .join("corpus")
-            .join(format!("{id}.edited.md"));
+            .join(format!("{id}.edited.mdin"));
         if let Ok(edited_source) = fs::read_to_string(&edited_path) {
             let edited = parse(&edited_source)
                 .unwrap_or_else(|refusal| panic!("{id}.edited was refused: {refusal}"))

@@ -42,28 +42,25 @@ DOC_PROFILES="plain_text.txt html_safe.html compact_machine.txt api_json.json"
 # -----------------------------------------------------------------------------
 DOC_TAGS=" p h1 h2 h3 h4 h5 h6 br hr em strong code pre blockquote ul ol li span a img "
 DOC_ATTRS=" href title alt src rel class start data-fgit-doc-rejected data-fgit-doc-neutralised "
-DOC_FORBIDDEN='<script <style <iframe <object <embed <svg <base <meta <form <textarea srcdoc formaction javascript: vbscript: data:'
+DOC_SCHEMES=" http https mailto "
 
 # Prints the first violation found in a rendered file, or nothing.
+#
+# The check is STRUCTURAL, not a substring scan, and that distinction is the
+# whole point. This renderer's job includes displaying hostile markup as escaped
+# text, so a correct output legitimately contains the byte sequences
+# "javascript:" and "onerror=" inside a code block. Only their appearance in a
+# tag the renderer actually emitted is a defect. Source "<" is always escaped,
+# so every "<" surviving into the output is such a tag.
 doc_violation() {
-  local file=$1 lowered token name
-  lowered=$(tr 'A-Z' 'a-z' <"$file")
-  for token in $DOC_FORBIDDEN; do
-    case $lowered in
-      *"$token"*)
-        printf 'forbidden token %s' "$token"
-        return 0
-        ;;
-    esac
-  done
-  # An event-handler attribute is the classic escape; the renderer emits none.
-  if printf '%s' "$lowered" | grep -Eq '[[:space:]]on[a-z]+[[:space:]]*='; then
-    printf 'event handler attribute'
-    return 0
-  fi
-  # Every tag the file contains must be one the renderer is allowed to emit.
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
+  local file=$1 tag body name attr value scheme
+  while IFS= read -r tag; do
+    [ -n "$tag" ] || continue
+    body=${tag#<}
+    body=${body%>}
+    body=${body#/}
+    body=${body%/}
+    name=$(printf '%s' "$body" | awk '{print tolower($1)}')
     case $DOC_TAGS in
       *" $name "*) ;;
       *)
@@ -71,18 +68,50 @@ doc_violation() {
         return 0
         ;;
     esac
-  done < <(grep -o '<[/]\{0,1\}[a-zA-Z][a-zA-Z0-9]*' "$file" | tr -d '</' | tr 'A-Z' 'a-z' | sort -u)
-  # Every attribute must be allowlisted.
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    case $DOC_ATTRS in
-      *" $name "*) ;;
-      *)
-        printf 'unexpected attribute %s' "$name"
-        return 0
-        ;;
-    esac
-  done < <(grep -o '[a-zA-Z-]\{2,\}=' "$file" | tr -d '=' | tr 'A-Z' 'a-z' | sort -u)
+    while IFS= read -r attr; do
+      [ -n "$attr" ] || continue
+      case $attr in
+        on*)
+          printf 'event handler %s on <%s>' "$attr" "$name"
+          return 0
+          ;;
+      esac
+      case $DOC_ATTRS in
+        *" $attr "*) ;;
+        *)
+          printf 'unexpected attribute %s on <%s>' "$attr" "$name"
+          return 0
+          ;;
+      esac
+    done < <(printf '%s' "$body" | grep -o '[a-zA-Z][a-zA-Z0-9-]*=' | tr -d '=' |
+      tr 'A-Z' 'a-z' | sort -u)
+    while IFS= read -r value; do
+      [ -n "$value" ] || continue
+      value=${value//&amp;/&}
+      case $value in
+        *:*)
+          scheme=$(printf '%s' "${value%%:*}" | tr 'A-Z' 'a-z')
+          case $scheme in
+            [a-z]*)
+              case $scheme in
+                *[!a-z0-9+.-]*) ;;
+                *)
+                  case $DOC_SCHEMES in
+                    *" $scheme "*) ;;
+                    *)
+                      printf 'destination scheme %s: on <%s>' "$scheme" "$name"
+                      return 0
+                      ;;
+                  esac
+                  ;;
+              esac
+              ;;
+          esac
+          ;;
+      esac
+    done < <(printf '%s' "$body" | grep -o 'href="[^"]*"\|src="[^"]*"' |
+      sed 's/^[a-z]*="//; s/"$//')
+  done < <(grep -o '<[^>]*>' "$file" || true)
   return 0
 }
 
@@ -94,11 +123,11 @@ DOC_WORK=$(fge_tempdir doc-equivalence)
 doc_corpus_ids=()
 while IFS= read -r path; do
   base=${path##*/}
-  doc_corpus_ids+=("${base%.md}")
-done < <(find "$DOC_GOLD/corpus" -maxdepth 1 -name '*.md' ! -name '*.edited.md' | sort)
+  doc_corpus_ids+=("${base%.mdin}")
+done < <(find "$DOC_GOLD/corpus" -maxdepth 1 -name '*.mdin' ! -name '*.edited.mdin' | sort)
 
-doc_edited_count=$(find "$DOC_GOLD/corpus" -maxdepth 1 -name '*.edited.md' | wc -l | tr -d ' ')
-doc_malicious_count=$(find "$DOC_GOLD/malicious" -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')
+doc_edited_count=$(find "$DOC_GOLD/corpus" -maxdepth 1 -name '*.edited.mdin' | wc -l | tr -d ' ')
+doc_malicious_count=$(find "$DOC_GOLD/malicious" -maxdepth 1 -name '*.mdin' | wc -l | tr -d ' ')
 
 fge_field corpus_documents "${#doc_corpus_ids[@]}"
 fge_field edited_siblings "$doc_edited_count"
@@ -185,13 +214,30 @@ else
   fge_fail fg027b-html-inert "active content reached a rendered surface:$doc_bad"
 fi
 
-# The checker must be able to fail, or its pass means nothing.
-printf '%s\n' '<p><a href="javascript:alert(1)">x</a><script>y</script></p>' >"$DOC_WORK/planted.html"
-doc_planted=$(doc_violation "$DOC_WORK/planted.html")
-if [ -n "$doc_planted" ]; then
-  fge_pass fg027b-checker-can-fail "the allowlist rejects planted active content ($doc_planted)"
+# The checker must be able to fail on EVERY path it claims to guard, or a pass
+# from it means nothing. One payload per rejection reason.
+doc_planted_missed=""
+doc_planted_caught=""
+doc_plant() {
+  local label=$1 markup=$2 verdict
+  printf '%s\n' "$markup" >"$DOC_WORK/planted-$label.html"
+  verdict=$(doc_violation "$DOC_WORK/planted-$label.html")
+  if [ -n "$verdict" ]; then
+    doc_planted_caught="$doc_planted_caught $label($verdict)"
+  else
+    doc_planted_missed="$doc_planted_missed $label"
+  fi
+}
+doc_plant tag '<p><script>alert(1)</script></p>'
+doc_plant iframe '<p><iframe srcdoc="x"></iframe></p>'
+doc_plant handler '<p onclick="steal()">x</p>'
+doc_plant scheme '<p><a href="javascript:alert(1)">x</a></p>'
+doc_plant datauri '<p><img src="data:text/html,x" /></p>'
+doc_plant vbscript '<p><a href="VBScript:msgbox(1)">x</a></p>'
+if [ -z "$doc_planted_missed" ]; then
+  fge_pass fg027b-checker-can-fail "the allowlist rejected every planted payload:$doc_planted_caught"
 else
-  fge_fail fg027b-checker-can-fail "the allowlist accepted planted active content, so its verdicts are worthless"
+  fge_fail fg027b-checker-can-fail "the allowlist ACCEPTED planted active content, so its verdicts are worthless:$doc_planted_missed"
 fi
 
 # A raw bidirectional override must never survive into a rendered surface.
@@ -255,7 +301,7 @@ if [ "${#doc_corpus_ids[@]}" -lt 3 ]; then
 fi
 doc_staged=()
 for id in "${doc_corpus_ids[@]:0:3}"; do
-  cp "$DOC_GOLD/corpus/$id.md" "$DOC_STAGE/$id.body"
+  cp "$DOC_GOLD/corpus/$id.mdin" "$DOC_STAGE/$id.body"
   doc_staged+=("$id")
 done
 

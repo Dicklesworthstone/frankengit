@@ -98,6 +98,6 @@ const fn is_url_trim(value: char) -> bool {
 /// vehicle, and a bidirectional override can make a destination read as a
 /// different host than the one it resolves to. All three are rejected rather
 /// than stripped, because a stripped destination is a different destination.
-fn is_url_forbidden(value: char) -> bool {
+const fn is_url_forbidden(value: char) -> bool {
     value.is_control() || value.is_whitespace() || crate::unicode::is_bidi_control(value)
 }
