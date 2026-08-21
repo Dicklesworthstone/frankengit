@@ -99,8 +99,8 @@ use fgit_types::{
     RepositorySequence, TenantId, TxId,
 };
 use fgit_wire::receive::{
-    QuarantineReceipt, ReceiveCommandStatus, ReceiveContext, ReceiveEvent, ReceiveLimits,
-    ReceivePack, ReceiveRequest, SignedPushProfile,
+    QuarantineReceipt, ReceiveContext, ReceiveEvent, ReceiveLimits, ReceivePack, ReceiveRequest,
+    SignedPushProfile,
 };
 use fgit_wire::{Capabilities, GitObjectFormat, Packet, WireLimits};
 
@@ -123,7 +123,7 @@ type RetentionSet = BTreeSet<RetentionRoot>;
 /// whether they permit a commit at all. Nothing asserted in this file may
 /// depend on which member produced it.
 #[derive(Clone)]
-struct FamilyMember {
+struct UnboundAdapter {
     label: &'static str,
     refs: BTreeMap<RefName, GitOid>,
     forge_positions: ForgeMap,
@@ -135,7 +135,7 @@ struct FamilyMember {
     seed: u8,
 }
 
-impl FamilyMember {
+impl UnboundAdapter {
     fn new(label: &'static str, seed: u8) -> Self {
         Self {
             label,
@@ -164,7 +164,7 @@ impl FamilyMember {
     }
 }
 
-impl AdmissionProjection for FamilyMember {
+impl AdmissionProjection for UnboundAdapter {
     fn snapshot<'a>(
         &'a self,
         _basis: &PublicationBasis,
@@ -237,7 +237,7 @@ impl AdmissionProjection for FamilyMember {
     }
 }
 
-impl FamilyMember {
+impl UnboundAdapter {
     fn digest(&self, offset: u8) -> Digest {
         digest(self.seed.wrapping_add(offset))
     }
@@ -249,11 +249,11 @@ impl FamilyMember {
 /// folded transaction may commit, so they drive genuinely different paths
 /// through `admit_one`: commit-and-publish, fold-abort-and-refuse, and
 /// materializer-refuse-and-publish-refusal.
-fn family() -> Vec<FamilyMember> {
+fn adapters() -> Vec<UnboundAdapter> {
     vec![
-        FamilyMember::with_main("main-present", 0x20),
-        FamilyMember::new("main-absent", 0x50),
-        FamilyMember::with_main("commit-refused", 0x80)
+        UnboundAdapter::with_main("main-present", 0x20),
+        UnboundAdapter::new("main-absent", 0x50),
+        UnboundAdapter::with_main("commit-refused", 0x80)
             .refusing_commit(RefusalCode::ProtectedRefTransitionDenied),
     ]
 }
@@ -444,7 +444,7 @@ fn standing(store: &MemoryAuthorityStore, context: &AdmissionContext, tx_id: TxI
 fn session_tx_id(
     context: &AdmissionContext,
     validated: &ValidatedReceive,
-    member: &FamilyMember,
+    member: &UnboundAdapter,
 ) -> TxId {
     let store = store_with_genesis(context);
     admit_validated_receive(
@@ -466,7 +466,7 @@ fn session_tx_id(
 fn clean_operation_span(
     context: &AdmissionContext,
     validated: &ValidatedReceive,
-    member: &FamilyMember,
+    member: &UnboundAdapter,
 ) -> u64 {
     let store = store_with_genesis(context);
     let before = store.operations_started();
@@ -532,7 +532,7 @@ fn every_disconnect_at_every_phase_leaves_a_resolvable_transaction() {
     let mut examined = 0_usize;
     let mut observed = BTreeSet::new();
 
-    for member in family() {
+    for member in adapters() {
         let tx_id = session_tx_id(&context, &validated, &member);
         let span = clean_operation_span(&context, &validated, &member);
         assert!(
@@ -667,7 +667,7 @@ fn a_decision_that_landed_during_a_lost_response_is_not_decided_twice() {
     let mut landed = 0_usize;
     let mut pending = 0_usize;
 
-    for member in family() {
+    for member in adapters() {
         let tx_id = session_tx_id(&context, &validated, &member);
         let span = clean_operation_span(&context, &validated, &member);
 
@@ -794,7 +794,7 @@ fn a_duplicated_head_cas_does_not_decide_one_push_twice() {
     let mut raced = 0_usize;
     let mut compared = 0_usize;
 
-    for member in family() {
+    for member in adapters() {
         let tx_id = session_tx_id(&context, &validated, &member);
         let span = clean_operation_span(&context, &validated, &member);
 
@@ -853,54 +853,59 @@ fn a_duplicated_head_cas_does_not_decide_one_push_twice() {
     );
 }
 
-/// Two sessions pushing the same ref: exactly one may commit it, and the loser
-/// is reported from its own authenticated decision.
+/// Two sessions seal distinct transactions, and each is answered from its own
+/// authenticated decision.
 ///
-/// The second session is evaluated against a projection rooted in the head the
-/// first one produced — which is what `AdmissionProjection::snapshot` requires
-/// ("rooted in exactly this authenticated head") and what a real gateway would
-/// hand it. That is the only honest way to model a losing push here, and it is
-/// also the boundary of what this file may claim: *whether* the loser is
-/// refused is the production projection's policy. What is asserted is that the
-/// two sessions are distinct transactions, that each carries its own
-/// authenticated terminal decision, and that the status reaching `report-status`
-/// comes from that decision.
+/// **This test used to claim more and was wrong to.** It asserted that exactly
+/// one of two sessions deleting the same ref may commit it, and its own comment
+/// said the second session was "evaluated against a projection rooted in the
+/// head the first one produced". It was not: the adapter ignores the head it is
+/// handed, so the second session saw a different ref table only because this
+/// test passed it one. Exactly-one-winner was *staged by the fixture*, not
+/// demonstrated by the system, and ProudJaguar was right to refuse it.
+///
+/// What is left is what never depended on the adapter: two sessions with
+/// different idempotency keys are different transactions, and each one's
+/// reported outcome is the one the authenticated decision stream holds for its
+/// own `TxId`. Ref contention is not tested here and needs a head-bound
+/// projection.
 #[test]
-fn two_sessions_over_one_ref_get_distinct_transactions_and_authenticated_statuses() {
-    let winner_context = context(b"fg019c-race-winner");
-    let loser_context = context(b"fg019c-race-loser");
+fn two_sessions_seal_distinct_transactions_each_answered_from_its_own_decision() {
+    let first_context = context(b"fg019c-session-a");
+    let second_context = context(b"fg019c-session-b");
     let validated = delete_main();
-    let store = store_with_genesis(&winner_context);
+    let store = store_with_genesis(&first_context);
+    let adapter = UnboundAdapter::with_main("commits", 0x20);
 
-    // The first session sees `refs/heads/main` present and deletes it.
-    let winner = admit_validated_receive(
+    let first = admit_validated_receive(
         &store,
-        &winner_context,
+        &first_context,
         &validated,
         AdmissionLimits::default(),
-        &FamilyMember::with_main("race-winner", 0x20),
+        &adapter,
     )
     .expect("the first session reaches a terminal decision");
 
-    // The second session is handed a projection rooted in the resulting head,
-    // in which the ref the command expects is gone.
-    let loser = admit_validated_receive(
+    // The same adapter drives both. Handing the second a different ref table
+    // would stage the outcome rather than observe it, which is the error this
+    // test was narrowed to remove.
+    let second = admit_validated_receive(
         &store,
-        &loser_context,
+        &second_context,
         &validated,
         AdmissionLimits::default(),
-        &FamilyMember::new("race-loser", 0x50),
+        &adapter,
     )
     .expect("the second session reaches a terminal decision");
 
     assert_ne!(
-        winner.session.tx_ids[0], loser.session.tx_ids[0],
+        first.session.tx_ids[0], second.session.tx_ids[0],
         "two sessions with different idempotency keys must be different transactions"
     );
 
     for (label, result, context) in [
-        ("winner", &winner, &winner_context),
-        ("loser", &loser, &loser_context),
+        ("first", &first, &first_context),
+        ("second", &second, &second_context),
     ] {
         let tx_id = result.session.tx_ids[0];
         let resolved = resolve_outcome(
@@ -918,51 +923,36 @@ fn two_sessions_over_one_ref_get_distinct_transactions_and_authenticated_statuse
         );
     }
 
-    // Exactly one of the two committed the ref. The other reached a terminal
-    // refusal — a decision, not a dropped push.
-    let committed = [&winner, &loser]
-        .into_iter()
-        .filter(|result| {
-            matches!(
-                result.commands[0].terminal.outcome,
-                DecisionOutcome::Committed { .. }
-            )
-        })
-        .count();
+    // Each session reports exactly one status, and it is derived from that
+    // session's own authenticated terminal decision. WHICH status it is depends
+    // on ref policy owned by the absent head-bound projection, so it is not
+    // asserted; that one command yields one status derived from a decision at
+    // all is a property of `command_statuses`, which deliberately has no route
+    // from a pack receipt.
+    assert_eq!(first.command_statuses().len(), 1, "one command, one status");
     assert_eq!(
-        committed, 1,
-        "exactly one of two sessions deleting the same ref may commit it"
-    );
-
-    // The status that reaches report-status is derived from the authenticated
-    // terminal decision, which is the property `command_statuses` exists to
-    // guarantee — there is deliberately no route to it from a pack receipt.
-    let loser_status = loser.command_statuses();
-    assert_eq!(loser_status.len(), 1, "one command, one status");
-    assert!(
-        matches!(loser_status[0], ReceiveCommandStatus::Rejected { .. }),
-        "the losing push must be rejected in report-status, saw {:?}",
-        loser_status[0]
-    );
-    assert!(
-        matches!(winner.command_statuses()[0], ReceiveCommandStatus::Ok),
-        "the winning push must be reported ok"
+        second.command_statuses().len(),
+        1,
+        "one command, one status"
     );
 }
 
-/// The race result does not depend on which projection drove it.
+/// The session mechanics hold whichever adapter drove them.
 ///
-/// This is the load-bearing test for the whole file's method. If the assertions
-/// above were artefacts of one authored projection, running the same schedule
-/// across the family would disagree. Every member must produce the same
-/// *shape*: one transaction per session, distinct identities, and a terminal
-/// decision for each that the authenticated stream confirms.
+/// **This is deliberately no longer described as an independence argument.**
+/// Three unbound adapters are three variants of one unbound adapter, so their
+/// agreement is not evidence about projection semantics — ProudJaguar's point,
+/// and it is correct. What the test still earns is narrower and real: the
+/// session shape and the agreement between a reported outcome and the
+/// authenticated stream survive all three routes through `admit_one`
+/// (commit-and-publish, fold-abort-and-refuse, materializer-refuse), so those
+/// properties are not artefacts of one publication path.
 #[test]
-fn the_race_shape_is_invariant_across_the_projection_family() {
+fn the_authority_mechanics_do_not_depend_on_which_adapter_drove_them() {
     let validated = delete_main();
     let mut shapes = BTreeSet::new();
 
-    for member in family() {
+    for member in adapters() {
         let first_context = context(b"fg019c-invariance-a");
         let second_context = context(b"fg019c-invariance-b");
         let store = store_with_genesis(&first_context);
@@ -1019,6 +1009,6 @@ fn the_race_shape_is_invariant_across_the_projection_family() {
     assert_eq!(
         shapes.len(),
         1,
-        "the family disagreed about the shape of the race: {shapes:?}"
+        "the publication routes disagreed about the session shape: {shapes:?}"
     );
 }

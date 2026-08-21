@@ -121,8 +121,8 @@ main() {
     'a_decision_that_landed_during_a_lost_response_is_not_decided_twice' \
     'the decide-once probe over the push path is present in the run'
   fge_assert_contains 'FG-019C-E2E-026' "${race_out}" \
-    'the_race_shape_is_invariant_across_the_projection_family' \
-    'the projection-invariance probe that bounds every race claim is present in the run'
+    'the_authority_mechanics_do_not_depend_on_which_adapter_drove_them' \
+    'the publication-route agnosticism probe is present in the run'
 
   # Preserve both outputs whatever happened, so a failure is diagnosable from
   # the run's artifacts alone rather than needing a re-run.
@@ -138,10 +138,11 @@ fge_init fg019c-receivepack-adversarial
 fge_context bead frankengit-fg019c-receivepack-adversarial-sht
 fge_context evidence_class adversarial
 fge_context method 'independent adversary over ProudJaguar receive-pack (fgit-wire) and admission (fgit-admission); every probe drives the public API and no source of theirs is modified'
-fge_context covered 'quarantine discard proven non-vacuously (real bytes buffered then asserted gone); cancellation contract exactly as its owner specified; quota bound refused past and accepted at; pre-seal refusal boundary with its documented delete-only twin; authority-layer disconnect matrix over projection x fault-kind x every operation position a push reaches, classified from the authenticated decision stream; decide-once under a lost response; a duplicated head CAS does not decide one push twice; two sessions over one ref each reported from their own authenticated decision'
+fge_context covered 'quarantine discard proven non-vacuously (real bytes buffered then asserted gone); cancellation contract exactly as its owner specified; quota bound refused past and accepted at; pre-seal refusal boundary with its documented delete-only twin; authority-layer disconnect matrix over fault-kind x every operation position a push reaches, classified from the authenticated decision stream; decide-once under a lost response; a duplicated head CAS does not decide one push twice; two sessions each answered from their own authenticated decision'
 fge_context blocked_hidden_refs 'the hidden-ref acceptance line is BLOCKED on a missing capability, not on testing: RefusalCode::HiddenRefUnauthorized (0x0206) is defined in fgit-types and classified in fgit-reference but PRODUCED BY NOTHING; no layer knows principal ref visibility. Confirmed by ProudJaguar. No probe is written for it, because a red assertion against every layer and a green one pinning the absent control are both worse than none'
-fge_context claim_class 'BOUNDED MODEL, not invariant. The disconnect and race results range over three authored conforming projections and seven fault kinds, crossed with every operation position a clean admission reaches. They do not quantify over all projections or all schedules'
-fge_context projection_bound 'no public AdmissionProjection exists, so the corpus quantifies over a family of authored conforming projections and asserts ONLY what is identical across all of them. Ref-policy questions (whether a losing push is refused ExpectedOldRefMismatch or permitted) belong to the still-absent production projection and are NOT answered here; what is evidenced is that the status reaching report-status comes from the authenticated terminal decision, never from a pack receipt'
+fge_context claim_class 'BOUNDED MODEL, not invariant. The disconnect results range over seven fault kinds crossed with every operation position a clean admission reaches. They do not quantify over all schedules'
+fge_context projection_bound 'RETRACTION, ProudJaguar 9209: the test adapters are NOT conforming projections. snapshot ignores the PublicationBasis and AuthenticatedHead it is handed, and materialize_commit mints roots from seed bytes rather than from state, so three adapters are three variants of ONE unbound adapter and quantifying over them buys nothing about ref semantics. Every claim resting on ref state or on a session observing the successor basis is WITHDRAWN. What survives never depended on the adapter: faults are injected in the store beneath it, and the assertions are about whether a transaction can be RESOLVED and whether it is DECIDED ONCE, never about what was decided'
 fge_context stuck_state_is_detectable 'the forbidden stuck-intermediate class is proven reachable and recognised by driving the exported reconcile_outcome to its fail-closed accelerator-conflict arm, with an agreeing-reads twin, so the matrix assertion can fail in the direction that matters'
+fge_context line3_not_discharged 'acceptance line 3 (exactly-one-winner over ref state with correct per-loser statuses) is NOT discharged by this lane. Only the narrower decide-once property is covered: one sealed transaction acquires at most one terminal decision under a duplicated CAS or a lost response. Ref contention needs a head-bound projection, which is a product slice with an owner'
 fge_context non_claim 'in-process probes of two state machines; nothing here is differential evidence against upstream Git, and nothing speaks for a real network peer'
 main
