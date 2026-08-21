@@ -3743,7 +3743,12 @@ mod tests {
         fs::create_dir_all(destination).expect("create fixture destination");
         for entry in fs::read_dir(source).expect("read fixture source").flatten() {
             let from = entry.path();
-            let to = destination.join(entry.file_name());
+            let file_name = entry.file_name();
+            let fixture_name = file_name.to_string_lossy();
+            let target_name = fixture_name
+                .strip_suffix(".fixture")
+                .unwrap_or(&fixture_name);
+            let to = destination.join(target_name);
             if from.is_dir() {
                 copy_tree(&from, &to);
             } else {
