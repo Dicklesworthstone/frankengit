@@ -1,0 +1,18 @@
+# schema: frankengit.witness-refinement-corpus.v1
+# Seeded unsafe-refiner control selects one true-conflict row from this ordered corpus.
+# Each row binds the exact left/right witness, a reference-model write key for each
+# side, and the complete deterministic VOI cost tuple in micro-units.
+label	left_scope	right_scope	expected_conflict	left_write_key	right_write_key	saved	cpu	io	latency	risk	budget	posterior_successes	posterior_failures	expected_success_ppm	retry_age_ticks
+ref-main-versus-feature	exact-ref:refs/heads/main	exact-ref:refs/heads/feature	false	ref:refs/heads/main	ref:refs/heads/feature	100	10	10	10	10	40	0	64	15151	1
+ref-namespace-versus-tags	ref-namespace:refs/heads	exact-ref:refs/tags/v1	false	ref:refs/heads/main	ref:refs/tags/v1	100	10	10	10	10	40	0	64	15151	1
+ref-boundary-heads-not-headsup	ref-namespace:refs/heads	exact-ref:refs/headsup/feature	false	ref:refs/heads/main	ref:refs/headsup/feature	100	10	10	10	10	40	0	64	15151	1
+path-cargo-versus-readme	exact-path:Cargo.toml	exact-path:README.md	false	path:Cargo.toml	path:README.md	100	10	10	10	10	40	0	64	15151	1
+path-prefix-versus-tests	path-prefix:src	exact-path:tests/refinement.rs	false	path:src/lib.rs	path:tests/refinement.rs	100	10	10	10	10	40	0	64	15151	1
+policy-retention-versus-quota	policy:retention	policy:quota	false	policy:retention	policy:quota	100	10	10	10	10	40	0	64	15151	1
+forge-entity-siblings	forge-entity:pulls:42	forge-entity:pulls:43	false	forge:pulls:42	forge:pulls:43	100	10	10	10	10	40	0	64	15151	1
+ref-main-same-ref	exact-ref:refs/heads/main	exact-ref:refs/heads/main	true	ref:refs/heads/main	ref:refs/heads/main	100	10	10	10	10	40	0	64	15151	1
+ref-namespace-main	ref-namespace:refs/heads	exact-ref:refs/heads/main	true	ref:refs/heads/main	ref:refs/heads/main	100	10	10	10	10	40	0	64	15151	1
+path-lib-same-path	exact-path:src/lib.rs	exact-path:src/lib.rs	true	path:src/lib.rs	path:src/lib.rs	100	10	10	10	10	40	0	64	15151	1
+path-prefix-lib	path-prefix:src	exact-path:src/lib.rs	true	path:src/lib.rs	path:src/lib.rs	100	10	10	10	10	40	0	64	15151	1
+policy-retention-same-domain	policy:retention	policy:retention	true	policy:retention	policy:retention	100	10	10	10	10	40	0	64	15151	1
+forge-stream-entity	forge-stream:pulls	forge-entity:pulls:42	true	forge:pulls:42	forge:pulls:42	100	10	10	10	10	40	0	64	15151	1
