@@ -86,7 +86,7 @@ fn ready_request(machine: &mut ReceivePack) -> fgit_wire::receive::ReceiveReques
     let Some(ReceiveEvent::RequestReady(request)) = transition.events.first() else {
         panic!("flush must expose a parsed request");
     };
-    request.clone()
+    (**request).clone()
 }
 
 #[test]

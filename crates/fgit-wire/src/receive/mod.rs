@@ -119,7 +119,7 @@ pub enum ReceiveCapability {
 }
 
 impl ReceiveCapability {
-    fn parse(name: &[u8]) -> Option<Self> {
+    const fn parse(name: &[u8]) -> Option<Self> {
         match name {
             b"report-status" => Some(Self::ReportStatus),
             b"report-status-v2" => Some(Self::ReportStatusV2),
@@ -351,7 +351,7 @@ where
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReceiveEvent {
     /// The command and optional push-options sections are complete.
-    RequestReady(ReceiveRequest),
+    RequestReady(Box<ReceiveRequest>),
     /// A refused state discarded its transaction-local quarantine buffer.
     QuarantineDiscarded,
 }
@@ -569,7 +569,7 @@ impl ReceivePack {
         };
         Ok(ReceiveTransition {
             output: Vec::new(),
-            events: vec![ReceiveEvent::RequestReady(request)],
+            events: vec![ReceiveEvent::RequestReady(Box::new(request))],
         })
     }
 
@@ -601,7 +601,7 @@ impl ReceivePack {
                 };
                 Ok(ReceiveTransition {
                     output: Vec::new(),
-                    events: vec![ReceiveEvent::RequestReady(request)],
+                    events: vec![ReceiveEvent::RequestReady(Box::new(request))],
                 })
             }
             Packet::Delimiter | Packet::ResponseEnd => Err(ReceiveError::UnexpectedPacket {
@@ -856,7 +856,7 @@ enum CertificateProgress {
 }
 
 impl CertificateBuilder {
-    fn new(expected_nonce: Vec<u8>) -> Self {
+    const fn new(expected_nonce: Vec<u8>) -> Self {
         Self {
             expected_nonce,
             stage: CertificateStage::Headers,
@@ -1052,10 +1052,12 @@ fn parse_command_line<'line>(
     format: GitObjectFormat,
     limits: &ReceiveLimits,
 ) -> Result<(ReceiveCommand, Option<&'line [u8]>), ReceiveError> {
-    let (command, capabilities) = match line.iter().position(|byte| *byte == 0) {
-        Some(index) => (&line[..index], Some(&line[index + 1..])),
-        None => (line, None),
-    };
+    let (command, capabilities) = line
+        .iter()
+        .position(|byte| *byte == 0)
+        .map_or((line, None), |index| {
+            (&line[..index], Some(&line[index + 1..]))
+        });
     if command.contains(&0) || capabilities.is_some_and(|value| value.contains(&0)) {
         return Err(ReceiveError::MalformedCommand {
             line: line.to_vec(),
