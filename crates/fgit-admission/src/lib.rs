@@ -1483,6 +1483,84 @@ mod tests {
     }
 
     #[test]
+    fn atomic_staging_fault_leaves_every_command_undecided_then_retries() {
+        // The first seven operations bind the seal and probe its outcome; the
+        // next two authenticate the authoritative basis and projection.  The
+        // first `put_if_absent` in `publish_decisions` therefore stages the
+        // decision batch at operation nine.  A lost request there is
+        // deliberately before the publication CAS: the body may not be a
+        // decision merely because it was prepared for publication.
+        const STAGE_BATCH_OPERATION: OpIndex = OpIndex::from_raw(9);
+
+        let context = context();
+        let store = store_with_genesis(&context);
+        let projection = FixtureProjection::default();
+        let completion = completion(
+            vec![create(b"refs/heads/one", 35), create(b"refs/heads/two", 36)],
+            true,
+        );
+        let lowered = lower_session(&context, completion.request(), true)
+            .expect("atomic request lowers before the injected store failure");
+        let tx_id = derive_tx_id(&context, &lowered[0]).expect("transaction id derives");
+
+        store.install_fault_plan(FaultPlan::explicit(vec![
+            FaultDirective::new(STAGE_BATCH_OPERATION, FaultKind::LoseRequest)
+                .only_for(AuthorityOpKind::PutIfAbsent),
+        ]));
+
+        assert!(
+            admit_validated_receive(
+                &store,
+                &context,
+                &completion,
+                AdmissionLimits::default(),
+                &projection,
+            )
+            .is_err(),
+            "a before-effect staging loss cannot report a terminal receive result"
+        );
+        let faults = store.fault_log();
+        assert_eq!(faults.len(), 1);
+        assert_eq!(faults.records()[0].at, STAGE_BATCH_OPERATION);
+        assert_eq!(faults.records()[0].op_kind, AuthorityOpKind::PutIfAbsent);
+        assert!(!faults.records()[0].effect_reached);
+        assert_eq!(
+            resolve_outcome(
+                &store,
+                &context.head_key,
+                context.tenant_id,
+                context.repository_id,
+                tx_id,
+            )
+            .expect("undecided outcome lookup succeeds"),
+            OutcomeLookup::Undecided,
+            "an unstaged atomic candidate must not decide either wire command"
+        );
+        let head = match store.read_head(&context.head_key).expect("head reads") {
+            HeadRead::Present(receipt) => receipt,
+            HeadRead::Absent => panic!("the genesis head remains visible"),
+        };
+        let body: RepositoryAuthorityHeadBody =
+            decode_body(head.body(), fgit_codec::DecodeLimits::DEFAULT).expect("head decodes");
+        assert_eq!(body.latest_decision_sequence, None);
+        assert_eq!(body.latest_repository_sequence, None);
+
+        let retry = admit_validated_receive(
+            &store,
+            &context,
+            &completion,
+            AdmissionLimits::default(),
+            &projection,
+        )
+        .expect("the same atomic seal remains retryable after the staging loss");
+        assert_eq!(retry.session.tx_ids, vec![tx_id]);
+        assert!(retry.commands.iter().all(|command| {
+            command.tx_id == tx_id
+                && matches!(command.terminal.outcome, DecisionOutcome::Committed { .. })
+        }));
+    }
+
+    #[test]
     fn non_atomic_session_has_replayable_per_ref_outcomes() {
         let context = context();
         let store = store_with_genesis(&context);
