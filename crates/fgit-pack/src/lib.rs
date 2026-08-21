@@ -10,6 +10,7 @@ mod idx;
 mod pack;
 mod reader;
 mod verify;
+mod writer;
 
 pub use delta::{
     CachedResolver, DeltaBase, DeltaObject, ExternalBaseLookup, PackObject, ScalarResolver,
@@ -25,6 +26,11 @@ pub use pack::{
 pub use reader::{QuarantinedEntry, QuarantinedPack, parse_quarantined_pack, read_verified_pack};
 pub use verify::{
     NativeChecksumVerifier, object_type_from_base_entry, verify_base_entry, verify_native_object,
+};
+pub use writer::{
+    CanonicalObjectSource, CanonicalPackObject, DeterministicPackEncoder, PackArtifactSink,
+    PackEntryEncoder, PackPlan, PackPlanEntry, PackPlanner, PackWriteError, PackWriteProfile,
+    PackWriteReceipt, PackWriter, PlannedDelta,
 };
 
 use std::error::Error;

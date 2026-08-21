@@ -2,10 +2,10 @@
 
 use fgit_wire::GitObjectFormat;
 use fgit_wire::{
-    encode_packets, encode_sideband_64k, parse_filter, parse_sideband, AckMode, AdvertisedRef,
-    AnyGitOid, Capabilities, LegacyUploadPack, ObjectFilter, Packet, PktLineDecoder, SidebandBand,
-    UploadPackRepository, UploadPackVersion, V1Advertisement, V2UploadPack, WireError, WireEvent,
-    WireLimits,
+    encode_packets, encode_sideband_64k, parse_filter, parse_sideband, sideband_pack_from_source,
+    AckMode, AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, ObjectFilter,
+    PackPayloadSource, Packet, PktLineDecoder, SidebandBand, UploadPackRepository,
+    UploadPackVersion, V1Advertisement, V2UploadPack, WireError, WireEvent, WireLimits,
 };
 
 const WANT: &str = "1111111111111111111111111111111111111111";
@@ -15,6 +15,16 @@ const HAVE: &str = "2222222222222222222222222222222222222222";
 struct Repository {
     refs: Vec<AdvertisedRef>,
     common: AnyGitOid,
+}
+
+struct ChunkSource {
+    chunks: Vec<Vec<u8>>,
+}
+
+impl PackPayloadSource for ChunkSource {
+    fn next_chunk(&mut self, _maximum_chunk_bytes: usize) -> Result<Option<Vec<u8>>, WireError> {
+        Ok(self.chunks.pop())
+    }
 }
 
 impl Repository {
@@ -173,6 +183,8 @@ fn v2_fetch_transcript_requests_sideband_pack_after_done() {
         panic!("complete v2 request must ask for a pack");
     };
     assert_eq!(request.version, UploadPackVersion::V2);
+    assert_eq!(request.shallows.len(), 1);
+    assert_eq!(request.deepen, Some(3));
     assert_eq!(request.filter, Some(ObjectFilter::BlobNone));
 }
 
@@ -256,6 +268,27 @@ fn filters_sideband_and_hash_formats_preserve_explicit_domains() {
     )
     .expect("sha256");
     assert_ne!(sha1.algorithm(), sha256.algorithm());
+}
+
+#[test]
+fn deferred_pack_source_is_bounded_before_sideband_emission() {
+    let mut source = ChunkSource {
+        chunks: vec![b"PACK".to_vec()],
+    };
+    let packets =
+        sideband_pack_from_source(&mut source, &WireLimits::default()).expect("small source");
+    assert_eq!(
+        parse_sideband(&packets[0]).expect("sideband packet").band,
+        SidebandBand::PackData
+    );
+
+    let mut source = ChunkSource {
+        chunks: vec![vec![0_u8; fgit_wire::MAX_SIDEBAND_DATA_BYTES + 1]],
+    };
+    assert!(matches!(
+        sideband_pack_from_source(&mut source, &WireLimits::default()),
+        Err(WireError::PackChunkTooLarge { .. })
+    ));
 }
 
 #[test]

@@ -1,0 +1,1205 @@
+//! Immutable fabric contracts, deterministic location manifests, and retention hooks.
+//!
+//! This module deliberately has no bucket-listing operation. A caller rebuilds
+//! locator state only from the manifest identities named by an authenticated
+//! retention root; directory contents are physical residue, never authority.
+
+use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt;
+
+use fgit_resource::{BudgetGrant, IdentityError, ObligationLedger, OpaqueHandle};
+use fgit_types::{
+    CANONICAL_CODEC_VERSION, Digest, GitOid, PublicationEpoch, RepositoryAuthorityHeadId,
+    SchemaFamily, SchemaId, SegmentManifestId, TypeRefusal,
+};
+
+use crate::{
+    Commitment, CryptoDigest, DigestAlgorithm, FabricError, MicrosegmentReader, ObjectEnvelope,
+    ObjectKind,
+};
+
+const MANIFEST_MAGIC: &[u8; 4] = b"FGMF";
+const MANIFEST_VERSION: u16 = 1;
+const MANIFEST_SCHEMA: SchemaId = SchemaId::new(
+    SchemaFamily::from_static("frankengit.segment-manifest"),
+    1,
+    0,
+);
+
+/// Bounds used before a manifest decoder allocates or copies caller-controlled data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestLimits {
+    pub max_namespace_bytes: usize,
+    pub max_entries: u32,
+    pub max_placements: u32,
+}
+
+impl Default for ManifestLimits {
+    fn default() -> Self {
+        Self {
+            max_namespace_bytes: 256,
+            max_entries: 65_536,
+            max_placements: 256,
+        }
+    }
+}
+
+/// Typed refusal from object-fabric storage contracts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreRefusal {
+    EmptyNamespace,
+    NamespaceTooLarge,
+    TooManyEntries,
+    TooManyPlacements,
+    NonCanonicalObjectOrder,
+    DuplicateObjectIdentity,
+    NonCanonicalPlacementOrder,
+    DuplicatePlacement,
+    NonCanonicalManifestOrder,
+    NonCanonicalRetentionOrder,
+    InvalidMagic,
+    UnknownVersion(u16),
+    Truncated,
+    TrailingBytes,
+    LengthOverflow,
+    InvalidPlacementKind(u8),
+    ManifestIdentityMismatch,
+    ManifestRealityMismatch,
+    NativeObjectIdentityMismatch,
+    PayloadCommitmentMismatch,
+    PartialRangeUnverified,
+    RangeOutOfBounds,
+    RetentionRevalidationFailed,
+    DeletionRetained,
+    Fabric(FabricError),
+    Type(TypeRefusal),
+    OpaqueIdentity(IdentityError),
+}
+
+impl fmt::Display for StoreRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyNamespace => formatter.write_str("manifest namespace must not be empty"),
+            Self::NamespaceTooLarge => formatter.write_str("manifest namespace exceeds its bound"),
+            Self::TooManyEntries => formatter.write_str("manifest entry count exceeds its bound"),
+            Self::TooManyPlacements => {
+                formatter.write_str("manifest placement count exceeds its bound")
+            }
+            Self::NonCanonicalObjectOrder => {
+                formatter.write_str("manifest objects are not in canonical identity order")
+            }
+            Self::DuplicateObjectIdentity => {
+                formatter.write_str("manifest contains a duplicate object identity")
+            }
+            Self::NonCanonicalPlacementOrder => {
+                formatter.write_str("manifest placements are not in canonical order")
+            }
+            Self::DuplicatePlacement => {
+                formatter.write_str("manifest contains a duplicate placement")
+            }
+            Self::NonCanonicalManifestOrder => {
+                formatter.write_str("authenticated manifest identities are not in canonical order")
+            }
+            Self::NonCanonicalRetentionOrder => {
+                formatter.write_str("retention manifest identities are not in canonical order")
+            }
+            Self::InvalidMagic => formatter.write_str("manifest magic is invalid"),
+            Self::UnknownVersion(_) => formatter.write_str("manifest version is unsupported"),
+            Self::Truncated => formatter.write_str("manifest bytes are truncated"),
+            Self::TrailingBytes => formatter.write_str("manifest bytes contain a trailing suffix"),
+            Self::LengthOverflow => formatter.write_str("manifest length arithmetic overflowed"),
+            Self::InvalidPlacementKind(_) => {
+                formatter.write_str("placement backend kind is unsupported")
+            }
+            Self::ManifestIdentityMismatch => {
+                formatter.write_str("manifest bytes do not match their typed identity")
+            }
+            Self::ManifestRealityMismatch => {
+                formatter.write_str("manifest entry does not match the verified segment reality")
+            }
+            Self::NativeObjectIdentityMismatch => {
+                formatter.write_str("object bytes do not match the native Git identity")
+            }
+            Self::PayloadCommitmentMismatch => {
+                formatter.write_str("object bytes do not match the strong payload commitment")
+            }
+            Self::PartialRangeUnverified => {
+                formatter.write_str("partial range has no authenticated sub-object commitment")
+            }
+            Self::RangeOutOfBounds => formatter.write_str("requested range exceeds object bounds"),
+            Self::RetentionRevalidationFailed => {
+                formatter.write_str("authenticated retention root did not revalidate")
+            }
+            Self::DeletionRetained => {
+                formatter.write_str("authenticated retention registry still protects this object")
+            }
+            Self::Fabric(error) => fmt::Display::fmt(error, formatter),
+            Self::Type(error) => fmt::Display::fmt(error, formatter),
+            Self::OpaqueIdentity(error) => fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for StoreRefusal {}
+
+impl From<FabricError> for StoreRefusal {
+    fn from(error: FabricError) -> Self {
+        Self::Fabric(error)
+    }
+}
+
+impl From<TypeRefusal> for StoreRefusal {
+    fn from(error: TypeRefusal) -> Self {
+        Self::Type(error)
+    }
+}
+
+impl From<IdentityError> for StoreRefusal {
+    fn from(error: IdentityError) -> Self {
+        Self::OpaqueIdentity(error)
+    }
+}
+
+/// One supported physical placement backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum PlacementBackend {
+    LocalFilesystem = 1,
+}
+
+impl PlacementBackend {
+    const fn to_wire(self) -> u8 {
+        self as u8
+    }
+
+    fn from_wire(value: u8) -> Result<Self, StoreRefusal> {
+        match value {
+            1 => Ok(Self::LocalFilesystem),
+            _ => Err(StoreRefusal::InvalidPlacementKind(value)),
+        }
+    }
+}
+
+/// Immutable evidence for one verified object or segment placement.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PlacementReceipt {
+    backend: PlacementBackend,
+    locator: OpaqueHandle,
+    failure_domain: OpaqueHandle,
+    encryption_dependency: OpaqueHandle,
+}
+
+impl PlacementReceipt {
+    /// Builds a placement receipt from bounded opaque handles.
+    pub const fn new(
+        backend: PlacementBackend,
+        locator: OpaqueHandle,
+        failure_domain: OpaqueHandle,
+        encryption_dependency: OpaqueHandle,
+    ) -> Self {
+        Self {
+            backend,
+            locator,
+            failure_domain,
+            encryption_dependency,
+        }
+    }
+
+    #[must_use]
+    pub const fn backend(&self) -> PlacementBackend {
+        self.backend
+    }
+
+    #[must_use]
+    pub const fn locator(&self) -> OpaqueHandle {
+        self.locator
+    }
+
+    #[must_use]
+    pub const fn failure_domain(&self) -> OpaqueHandle {
+        self.failure_domain
+    }
+
+    #[must_use]
+    pub const fn encryption_dependency(&self) -> OpaqueHandle {
+        self.encryption_dependency
+    }
+
+    fn canonical_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(
+            4 + self.locator.len() + self.failure_domain.len() + self.encryption_dependency.len(),
+        );
+        bytes.push(self.backend.to_wire());
+        push_handle(&mut bytes, self.locator);
+        push_handle(&mut bytes, self.failure_domain);
+        push_handle(&mut bytes, self.encryption_dependency);
+        bytes
+    }
+}
+
+/// One object record named by an authenticated segment manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestEntry {
+    object_identity: GitOid,
+    record_offset: u64,
+    record_length: u32,
+    object_kind: ObjectKind,
+    payload_length: u64,
+    payload_commitment: Commitment,
+}
+
+impl ManifestEntry {
+    #[must_use]
+    pub const fn object_identity(&self) -> GitOid {
+        self.object_identity
+    }
+
+    #[must_use]
+    pub const fn record_offset(&self) -> u64 {
+        self.record_offset
+    }
+
+    #[must_use]
+    pub const fn record_length(&self) -> u32 {
+        self.record_length
+    }
+
+    #[must_use]
+    pub const fn object_kind(&self) -> ObjectKind {
+        self.object_kind
+    }
+
+    #[must_use]
+    pub const fn payload_length(&self) -> u64 {
+        self.payload_length
+    }
+
+    #[must_use]
+    pub const fn payload_commitment(&self) -> Commitment {
+        self.payload_commitment
+    }
+}
+
+/// Deterministic immutable segment metadata and its verified placements.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentManifest {
+    namespace: Vec<u8>,
+    segment_digest: Commitment,
+    entries: Vec<ManifestEntry>,
+    placements: Vec<PlacementReceipt>,
+}
+
+impl SegmentManifest {
+    /// Builds a manifest only when its identity-bearing collections are already canonical.
+    pub fn new(
+        namespace: Vec<u8>,
+        segment_digest: Commitment,
+        entries: Vec<ManifestEntry>,
+        placements: Vec<PlacementReceipt>,
+        limits: &ManifestLimits,
+    ) -> Result<Self, StoreRefusal> {
+        validate_manifest_parts(&namespace, &entries, &placements, limits)?;
+        Ok(Self {
+            namespace,
+            segment_digest,
+            entries,
+            placements,
+        })
+    }
+
+    /// Extracts an independently checkable manifest from a verified segment reader.
+    pub fn from_verified_segment<H: DigestAlgorithm>(
+        reader: &MicrosegmentReader<'_, H>,
+        placements: Vec<PlacementReceipt>,
+        limits: &ManifestLimits,
+    ) -> Result<Self, StoreRefusal> {
+        let mut entries = Vec::with_capacity(reader.len());
+        for index in 0..reader.len() {
+            let record = reader
+                .record(index)
+                .ok_or(StoreRefusal::ManifestRealityMismatch)?;
+            entries.push(entry_from_record(record)?);
+        }
+        Self::new(
+            reader.namespace().to_vec(),
+            reader.segment_digest(),
+            entries,
+            placements,
+            limits,
+        )
+    }
+
+    /// Rechecks every manifest entry against the independently verified segment reader.
+    pub fn verify_segment_reality<H: DigestAlgorithm>(
+        &self,
+        reader: &MicrosegmentReader<'_, H>,
+    ) -> Result<(), StoreRefusal> {
+        if self.namespace != reader.namespace() || self.segment_digest != reader.segment_digest() {
+            return Err(StoreRefusal::ManifestRealityMismatch);
+        }
+        if self.entries.len() != reader.len() {
+            return Err(StoreRefusal::ManifestRealityMismatch);
+        }
+        for (index, expected) in self.entries.iter().enumerate() {
+            let actual = reader
+                .record(index)
+                .ok_or(StoreRefusal::ManifestRealityMismatch)?;
+            if *expected != entry_from_record(actual)? {
+                return Err(StoreRefusal::ManifestRealityMismatch);
+            }
+        }
+        Ok(())
+    }
+
+    /// Canonical bytes of the manifest body, excluding its typed identity.
+    pub fn encode(&self) -> Result<Vec<u8>, StoreRefusal> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MANIFEST_MAGIC);
+        push_u16(&mut bytes, MANIFEST_VERSION);
+        push_u16(
+            &mut bytes,
+            u16::try_from(self.namespace.len()).map_err(|_| StoreRefusal::NamespaceTooLarge)?,
+        );
+        bytes.extend_from_slice(&self.namespace);
+        bytes.extend_from_slice(&self.segment_digest);
+        push_u32(
+            &mut bytes,
+            u32::try_from(self.entries.len()).map_err(|_| StoreRefusal::TooManyEntries)?,
+        );
+        for entry in &self.entries {
+            push_git_oid(&mut bytes, entry.object_identity);
+            push_u64(&mut bytes, entry.record_offset);
+            push_u32(&mut bytes, entry.record_length);
+            bytes.push(entry.object_kind.to_wire());
+            push_u64(&mut bytes, entry.payload_length);
+            bytes.extend_from_slice(&entry.payload_commitment);
+        }
+        push_u32(
+            &mut bytes,
+            u32::try_from(self.placements.len()).map_err(|_| StoreRefusal::TooManyPlacements)?,
+        );
+        for placement in &self.placements {
+            bytes.extend_from_slice(&placement.canonical_bytes());
+        }
+        Ok(bytes)
+    }
+
+    /// Decodes a bounded manifest and rechecks every canonical ordering rule.
+    pub fn decode(bytes: &[u8], limits: &ManifestLimits) -> Result<Self, StoreRefusal> {
+        let mut cursor = ManifestCursor::new(bytes);
+        cursor.expect_magic(MANIFEST_MAGIC)?;
+        let version = cursor.read_u16()?;
+        if version != MANIFEST_VERSION {
+            return Err(StoreRefusal::UnknownVersion(version));
+        }
+        let namespace_len = usize::from(cursor.read_u16()?);
+        if namespace_len == 0 {
+            return Err(StoreRefusal::EmptyNamespace);
+        }
+        if namespace_len > limits.max_namespace_bytes {
+            return Err(StoreRefusal::NamespaceTooLarge);
+        }
+        let namespace = cursor.take(namespace_len)?.to_vec();
+        let segment_digest = cursor.read_commitment()?;
+        let entry_count =
+            usize::try_from(cursor.read_u32()?).map_err(|_| StoreRefusal::TooManyEntries)?;
+        if entry_count
+            > usize::try_from(limits.max_entries).map_err(|_| StoreRefusal::TooManyEntries)?
+        {
+            return Err(StoreRefusal::TooManyEntries);
+        }
+        if entry_count > cursor.remaining() {
+            return Err(StoreRefusal::TooManyEntries);
+        }
+        let mut entries = Vec::with_capacity(entry_count);
+        for _ in 0..entry_count {
+            entries.push(ManifestEntry {
+                object_identity: cursor.read_git_oid()?,
+                record_offset: cursor.read_u64()?,
+                record_length: cursor.read_u32()?,
+                object_kind: ObjectKind::from_wire(cursor.read_u8()?)?,
+                payload_length: cursor.read_u64()?,
+                payload_commitment: cursor.read_commitment()?,
+            });
+        }
+        let placement_count =
+            usize::try_from(cursor.read_u32()?).map_err(|_| StoreRefusal::TooManyPlacements)?;
+        if placement_count
+            > usize::try_from(limits.max_placements).map_err(|_| StoreRefusal::TooManyPlacements)?
+        {
+            return Err(StoreRefusal::TooManyPlacements);
+        }
+        if placement_count > cursor.remaining() {
+            return Err(StoreRefusal::TooManyPlacements);
+        }
+        let mut placements = Vec::with_capacity(placement_count);
+        for _ in 0..placement_count {
+            placements.push(PlacementReceipt::new(
+                PlacementBackend::from_wire(cursor.read_u8()?)?,
+                cursor.read_handle()?,
+                cursor.read_handle()?,
+                cursor.read_handle()?,
+            ));
+        }
+        if !cursor.is_finished() {
+            return Err(StoreRefusal::TrailingBytes);
+        }
+        Self::new(namespace, segment_digest, entries, placements, limits)
+    }
+
+    /// Computes the `fgit-types` manifest identity under the frozen crypto registry.
+    pub fn identity(&self) -> Result<SegmentManifestId, StoreRefusal> {
+        let bytes = self.encode()?;
+        let identity = fgit_crypto::internal_object_id(
+            fgit_crypto::IdentityDomain::SegmentManifest,
+            MANIFEST_SCHEMA,
+            CANONICAL_CODEC_VERSION,
+            &bytes,
+        );
+        SegmentManifestId::from_internal_object_id(identity).map_err(StoreRefusal::from)
+    }
+
+    /// Decodes bytes only if they reproduce the caller-supplied typed identity.
+    pub fn decode_verified(
+        bytes: &[u8],
+        expected_identity: SegmentManifestId,
+        limits: &ManifestLimits,
+    ) -> Result<Self, StoreRefusal> {
+        let manifest = Self::decode(bytes, limits)?;
+        if manifest.identity()? != expected_identity {
+            return Err(StoreRefusal::ManifestIdentityMismatch);
+        }
+        Ok(manifest)
+    }
+
+    #[must_use]
+    pub fn namespace(&self) -> &[u8] {
+        &self.namespace
+    }
+
+    #[must_use]
+    pub const fn segment_digest(&self) -> Commitment {
+        self.segment_digest
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[ManifestEntry] {
+        &self.entries
+    }
+
+    #[must_use]
+    pub fn placements(&self) -> &[PlacementReceipt] {
+        &self.placements
+    }
+}
+
+fn entry_from_record(record: crate::RecordView<'_>) -> Result<ManifestEntry, StoreRefusal> {
+    Ok(ManifestEntry {
+        object_identity: record.envelope.object_identity(),
+        record_offset: u64::try_from(record.offset).map_err(|_| StoreRefusal::LengthOverflow)?,
+        record_length: u32::try_from(record.total_len).map_err(|_| StoreRefusal::LengthOverflow)?,
+        object_kind: record.envelope.object_kind(),
+        payload_length: record.envelope.declared_length(),
+        payload_commitment: record.envelope.payload_commitment(),
+    })
+}
+
+fn validate_manifest_parts(
+    namespace: &[u8],
+    entries: &[ManifestEntry],
+    placements: &[PlacementReceipt],
+    limits: &ManifestLimits,
+) -> Result<(), StoreRefusal> {
+    if namespace.is_empty() {
+        return Err(StoreRefusal::EmptyNamespace);
+    }
+    if namespace.len() > limits.max_namespace_bytes || namespace.len() > usize::from(u16::MAX) {
+        return Err(StoreRefusal::NamespaceTooLarge);
+    }
+    if entries.len()
+        > usize::try_from(limits.max_entries).map_err(|_| StoreRefusal::TooManyEntries)?
+    {
+        return Err(StoreRefusal::TooManyEntries);
+    }
+    if placements.len()
+        > usize::try_from(limits.max_placements).map_err(|_| StoreRefusal::TooManyPlacements)?
+    {
+        return Err(StoreRefusal::TooManyPlacements);
+    }
+    for pair in entries.windows(2) {
+        match pair[0].object_identity.cmp(&pair[1].object_identity) {
+            std::cmp::Ordering::Less => {}
+            std::cmp::Ordering::Equal => return Err(StoreRefusal::DuplicateObjectIdentity),
+            std::cmp::Ordering::Greater => return Err(StoreRefusal::NonCanonicalObjectOrder),
+        }
+    }
+    for pair in placements.windows(2) {
+        match pair[0].canonical_bytes().cmp(&pair[1].canonical_bytes()) {
+            std::cmp::Ordering::Less => {}
+            std::cmp::Ordering::Equal => return Err(StoreRefusal::DuplicatePlacement),
+            std::cmp::Ordering::Greater => return Err(StoreRefusal::NonCanonicalPlacementOrder),
+        }
+    }
+    Ok(())
+}
+
+/// Caller-supplied budget custody for one placement operation.
+///
+/// The local backend consumes this value to reserve an
+/// `fgit-resource::ObjectAdmissionPermit`; a write cannot silently escape the
+/// caller's region or resource accounting.
+#[must_use]
+pub struct PlacementAdmission<'a> {
+    ledger: &'a ObligationLedger,
+    budget: BudgetGrant,
+}
+
+impl<'a> PlacementAdmission<'a> {
+    #[must_use]
+    pub const fn new(ledger: &'a ObligationLedger, budget: BudgetGrant) -> Self {
+        Self { ledger, budget }
+    }
+
+    #[must_use]
+    pub fn ledger(&self) -> &ObligationLedger {
+        self.ledger
+    }
+
+    pub(crate) fn into_parts(self) -> (&'a ObligationLedger, BudgetGrant) {
+        (self.ledger, self.budget)
+    }
+}
+
+/// Exact object bytes that have been checked against their immutable envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedObject {
+    envelope: ObjectEnvelope,
+    payload: Vec<u8>,
+}
+
+impl VerifiedObject {
+    /// Verifies native Git identity, exact length, and the strong payload commitment.
+    pub fn new(envelope: ObjectEnvelope, payload: Vec<u8>) -> Result<Self, StoreRefusal> {
+        let declared_len =
+            u64::try_from(payload.len()).map_err(|_| StoreRefusal::LengthOverflow)?;
+        if envelope.declared_length() != declared_len {
+            return Err(StoreRefusal::PayloadCommitmentMismatch);
+        }
+        let digest = CryptoDigest;
+        if digest.payload_commitment(envelope.object_kind(), &payload)?
+            != envelope.payload_commitment()
+        {
+            return Err(StoreRefusal::PayloadCommitmentMismatch);
+        }
+        let object_kind = match envelope.object_kind() {
+            ObjectKind::Commit => fgit_crypto::GitObjectKind::Commit,
+            ObjectKind::Tree => fgit_crypto::GitObjectKind::Tree,
+            ObjectKind::Blob => fgit_crypto::GitObjectKind::Blob,
+            ObjectKind::Tag => fgit_crypto::GitObjectKind::Tag,
+            ObjectKind::Internal => return Err(StoreRefusal::NativeObjectIdentityMismatch),
+        };
+        let native = fgit_crypto::git_object_id(
+            envelope.object_identity().algorithm(),
+            object_kind,
+            &payload,
+        );
+        if native != envelope.object_identity() {
+            return Err(StoreRefusal::NativeObjectIdentityMismatch);
+        }
+        Ok(Self { envelope, payload })
+    }
+
+    #[must_use]
+    pub const fn identity(&self) -> GitOid {
+        self.envelope.object_identity()
+    }
+
+    #[must_use]
+    pub const fn envelope(&self) -> &ObjectEnvelope {
+        &self.envelope
+    }
+
+    #[must_use]
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
+/// A request for a subset of a verified object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectRange {
+    offset: u64,
+    length: u64,
+}
+
+impl ObjectRange {
+    pub fn new(offset: u64, length: u64, object_length: u64) -> Result<Self, StoreRefusal> {
+        let end = offset
+            .checked_add(length)
+            .ok_or(StoreRefusal::RangeOutOfBounds)?;
+        if end > object_length {
+            return Err(StoreRefusal::RangeOutOfBounds);
+        }
+        Ok(Self { offset, length })
+    }
+
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    #[must_use]
+    pub const fn length(&self) -> u64 {
+        self.length
+    }
+}
+
+/// A fully verified exact object read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WholeObjectRead {
+    pub object: VerifiedObject,
+    pub placement: PlacementReceipt,
+}
+
+/// A verified range response. A backend must refuse instead of returning bytes
+/// when it cannot authenticate the requested sub-object range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedRangeRead {
+    pub object_identity: GitOid,
+    pub range: ObjectRange,
+    pub bytes: Vec<u8>,
+    pub placement: PlacementReceipt,
+}
+
+/// The observable outcome of immutable conditional creation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PutIfAbsent {
+    Created {
+        placement: PlacementReceipt,
+        epochs: PublicationState,
+    },
+    AlreadyPresent {
+        placement: PlacementReceipt,
+        epochs: PublicationState,
+    },
+}
+
+/// A non-conflating report of object existence, canonical visibility, and durability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicationState {
+    staged: bool,
+    visible: bool,
+    durable: bool,
+}
+
+impl PublicationState {
+    #[must_use]
+    pub const fn new(staged: bool, visible: bool, durable: bool) -> Self {
+        Self {
+            staged,
+            visible,
+            durable,
+        }
+    }
+
+    #[must_use]
+    pub const fn contains(&self, epoch: PublicationEpoch) -> bool {
+        match epoch {
+            PublicationEpoch::Staged => self.staged,
+            PublicationEpoch::Visible => self.visible,
+            PublicationEpoch::Durable => self.durable,
+        }
+    }
+}
+
+/// Idempotent conditional-deletion evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeletionReceipt {
+    Deleted,
+    AlreadyAbsent,
+}
+
+/// Capability report used by callers to choose an explicit profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FabricCapabilities {
+    pub conditional_put_if_absent: bool,
+    pub verified_whole_reads: bool,
+    pub authenticated_partial_ranges: bool,
+    pub conditional_deletion: bool,
+    pub listing_is_authority: bool,
+}
+
+/// An authority-owned verifier for retention roots and deletion eligibility.
+///
+/// Implementations authenticate and revalidate against the current authority
+/// head. The local backend stores only the result; it never decides which
+/// objects are retained from filesystem state or a locator cache.
+pub trait AuthenticatedRetentionRegistry {
+    fn revalidate_root(&self, proposal: &RetentionRootProposal) -> Result<(), StoreRefusal>;
+
+    fn permits_placement_deletion(&self, object: GitOid) -> Result<(), StoreRefusal>;
+}
+
+/// A candidate retention-root update supplied by decision publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionRootProposal {
+    authority_head: RepositoryAuthorityHeadId,
+    retention_root: Digest,
+    manifests: Vec<SegmentManifestId>,
+}
+
+impl RetentionRootProposal {
+    pub fn new(
+        authority_head: RepositoryAuthorityHeadId,
+        retention_root: Digest,
+        manifests: Vec<SegmentManifestId>,
+    ) -> Result<Self, StoreRefusal> {
+        for pair in manifests.windows(2) {
+            if pair[0] >= pair[1] {
+                return Err(StoreRefusal::NonCanonicalRetentionOrder);
+            }
+        }
+        Ok(Self {
+            authority_head,
+            retention_root,
+            manifests,
+        })
+    }
+
+    #[must_use]
+    pub const fn authority_head(&self) -> RepositoryAuthorityHeadId {
+        self.authority_head
+    }
+
+    #[must_use]
+    pub const fn retention_root(&self) -> Digest {
+        self.retention_root
+    }
+
+    #[must_use]
+    pub fn manifests(&self) -> &[SegmentManifestId] {
+        &self.manifests
+    }
+}
+
+/// Final storage interface; it intentionally has no list operation.
+pub trait ImmutableObjectFabric {
+    fn capabilities(&self) -> FabricCapabilities;
+
+    fn put_if_absent(
+        &self,
+        object: VerifiedObject,
+        admission: PlacementAdmission<'_>,
+    ) -> Result<PutIfAbsent, StoreRefusal>;
+
+    fn read_whole(&self, identity: GitOid) -> Result<WholeObjectRead, StoreRefusal>;
+
+    fn read_range_verified(
+        &self,
+        identity: GitOid,
+        range: ObjectRange,
+    ) -> Result<VerifiedRangeRead, StoreRefusal>;
+
+    fn write_manifest(&self, manifest: &SegmentManifest)
+    -> Result<SegmentManifestId, StoreRefusal>;
+
+    fn read_manifest(&self, identity: SegmentManifestId) -> Result<SegmentManifest, StoreRefusal>;
+
+    fn publish_retention_root<R: AuthenticatedRetentionRegistry>(
+        &self,
+        registry: &R,
+        proposal: &RetentionRootProposal,
+    ) -> Result<PublicationState, StoreRefusal>;
+
+    fn delete_if_unretained<R: AuthenticatedRetentionRegistry>(
+        &self,
+        registry: &R,
+        identity: GitOid,
+    ) -> Result<DeletionReceipt, StoreRefusal>;
+}
+
+/// A deliberately rebuildable, non-authoritative OID-to-manifest accelerator.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LocatorCache {
+    locations: BTreeMap<GitOid, Vec<ManifestLocation>>,
+}
+
+/// One location discovered by reading an authenticated manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ManifestLocation {
+    pub manifest: SegmentManifestId,
+    pub entry_index: usize,
+}
+
+impl LocatorCache {
+    /// Discards only the derived accelerator. It has no effect on canonical retention.
+    pub fn wipe(&mut self) {
+        self.locations.clear();
+    }
+
+    /// Rebuilds solely from the canonical manifest identities supplied by a root reader.
+    pub fn rebuild_from_manifests(
+        &mut self,
+        manifests: &[SegmentManifest],
+    ) -> Result<(), StoreRefusal> {
+        self.wipe();
+        let mut previous = None;
+        for manifest in manifests {
+            let identity = manifest.identity()?;
+            if previous.is_some_and(|prior| prior >= identity) {
+                return Err(StoreRefusal::NonCanonicalManifestOrder);
+            }
+            previous = Some(identity);
+            for (entry_index, entry) in manifest.entries().iter().enumerate() {
+                self.locations
+                    .entry(entry.object_identity())
+                    .or_default()
+                    .push(ManifestLocation {
+                        manifest: identity,
+                        entry_index,
+                    });
+            }
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn locate(&self, object: GitOid) -> &[ManifestLocation] {
+        self.locations
+            .get(&object)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+}
+
+fn push_u16(output: &mut Vec<u8>, value: u16) {
+    output.extend_from_slice(&value.to_be_bytes());
+}
+
+fn push_u32(output: &mut Vec<u8>, value: u32) {
+    output.extend_from_slice(&value.to_be_bytes());
+}
+
+fn push_u64(output: &mut Vec<u8>, value: u64) {
+    output.extend_from_slice(&value.to_be_bytes());
+}
+
+fn push_git_oid(output: &mut Vec<u8>, identity: GitOid) {
+    push_u16(output, identity.algorithm().code_point());
+    output.extend_from_slice(identity.as_bytes());
+}
+
+fn push_handle(output: &mut Vec<u8>, handle: OpaqueHandle) {
+    output.push(u8::try_from(handle.len()).unwrap_or(u8::MAX));
+    output.extend_from_slice(handle.as_bytes());
+}
+
+struct ManifestCursor<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> ManifestCursor<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, position: 0 }
+    }
+
+    fn expect_magic(&mut self, expected: &[u8; 4]) -> Result<(), StoreRefusal> {
+        if self.take(4)? != expected {
+            return Err(StoreRefusal::InvalidMagic);
+        }
+        Ok(())
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], StoreRefusal> {
+        let end = self
+            .position
+            .checked_add(length)
+            .ok_or(StoreRefusal::LengthOverflow)?;
+        if end > self.bytes.len() {
+            return Err(StoreRefusal::Truncated);
+        }
+        let result = &self.bytes[self.position..end];
+        self.position = end;
+        Ok(result)
+    }
+
+    fn read_u8(&mut self) -> Result<u8, StoreRefusal> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn read_u16(&mut self) -> Result<u16, StoreRefusal> {
+        let bytes = self.take(2)?;
+        Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn read_u32(&mut self) -> Result<u32, StoreRefusal> {
+        let bytes = self.take(4)?;
+        Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn read_u64(&mut self) -> Result<u64, StoreRefusal> {
+        let bytes = self.take(8)?;
+        Ok(u64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
+    fn read_commitment(&mut self) -> Result<Commitment, StoreRefusal> {
+        let mut commitment = [0; 32];
+        commitment.copy_from_slice(self.take(32)?);
+        Ok(commitment)
+    }
+
+    fn read_git_oid(&mut self) -> Result<GitOid, StoreRefusal> {
+        let algorithm = fgit_types::GitHashAlgorithm::from_code_point(self.read_u16()?)?;
+        match algorithm {
+            fgit_types::GitHashAlgorithm::Sha1 => {
+                let mut bytes = [0; fgit_types::GitOidSha1::LEN];
+                bytes.copy_from_slice(self.take(fgit_types::GitOidSha1::LEN)?);
+                Ok(GitOid::Sha1(fgit_types::GitOidSha1::from_bytes(bytes)))
+            }
+            fgit_types::GitHashAlgorithm::Sha256 => {
+                let mut bytes = [0; fgit_types::GitOidSha256::LEN];
+                bytes.copy_from_slice(self.take(fgit_types::GitOidSha256::LEN)?);
+                Ok(GitOid::Sha256(fgit_types::GitOidSha256::from_bytes(bytes)))
+            }
+        }
+    }
+
+    fn read_handle(&mut self) -> Result<OpaqueHandle, StoreRefusal> {
+        let length = usize::from(self.read_u8()?);
+        OpaqueHandle::new(self.take(length)?).map_err(StoreRefusal::from)
+    }
+
+    const fn remaining(&self) -> usize {
+        self.bytes.len() - self.position
+    }
+
+    const fn is_finished(&self) -> bool {
+        self.remaining() == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fgit_types::{DigestAlgorithmId, DigestBytes, GitOidSha1};
+
+    use crate::{MicrosegmentBuilder, SegmentLimits, SegmentRecordInput};
+
+    fn manifest_limits() -> ManifestLimits {
+        ManifestLimits {
+            max_namespace_bytes: 16,
+            max_entries: 8,
+            max_placements: 8,
+        }
+    }
+
+    fn placement() -> PlacementReceipt {
+        PlacementReceipt::new(
+            PlacementBackend::LocalFilesystem,
+            OpaqueHandle::new(b"local-a").expect("fixture locator must fit"),
+            OpaqueHandle::new(b"rack-a").expect("fixture failure domain must fit"),
+            OpaqueHandle::new(b"key-a").expect("fixture key dependency must fit"),
+        )
+    }
+
+    fn oid(value: u8) -> GitOid {
+        GitOid::Sha1(GitOidSha1::from_bytes([value; GitOidSha1::LEN]))
+    }
+
+    fn manifest_entry(value: u8) -> ManifestEntry {
+        ManifestEntry {
+            object_identity: oid(value),
+            record_offset: u64::from(value),
+            record_length: 17,
+            object_kind: ObjectKind::Blob,
+            payload_length: 1,
+            payload_commitment: [value; 32],
+        }
+    }
+
+    fn digest(value: u8) -> Digest {
+        Digest::new(
+            DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
+            DigestBytes::try_new(&[value; 32]).expect("fixture digest must fit"),
+        )
+    }
+
+    fn manifest() -> SegmentManifest {
+        SegmentManifest::new(
+            vec![b'n'],
+            [9; 32],
+            vec![manifest_entry(b'a'), manifest_entry(b'b')],
+            vec![placement()],
+            &manifest_limits(),
+        )
+        .expect("fixture manifest must be canonical")
+    }
+
+    #[test]
+    fn deterministic_manifest_round_trip_reproduces_typed_identity() {
+        let manifest = manifest();
+        let bytes = manifest.encode().expect("manifest must encode");
+        let identity = manifest.identity().expect("manifest must have an identity");
+        assert_eq!(
+            SegmentManifest::decode_verified(&bytes, identity, &manifest_limits()),
+            Ok(manifest)
+        );
+    }
+
+    #[test]
+    fn manifest_refuses_unordered_entries_and_placements() {
+        assert_eq!(
+            SegmentManifest::new(
+                vec![b'n'],
+                [9; 32],
+                vec![manifest_entry(b'b'), manifest_entry(b'a')],
+                vec![placement()],
+                &manifest_limits(),
+            ),
+            Err(StoreRefusal::NonCanonicalObjectOrder)
+        );
+        let later = PlacementReceipt::new(
+            PlacementBackend::LocalFilesystem,
+            OpaqueHandle::new(b"z").expect("fixture locator must fit"),
+            OpaqueHandle::new(b"rack-a").expect("fixture failure domain must fit"),
+            OpaqueHandle::new(b"key-a").expect("fixture key dependency must fit"),
+        );
+        assert_eq!(
+            SegmentManifest::new(
+                vec![b'n'],
+                [9; 32],
+                vec![manifest_entry(b'a')],
+                vec![later, placement()],
+                &manifest_limits(),
+            ),
+            Err(StoreRefusal::NonCanonicalPlacementOrder)
+        );
+    }
+
+    #[test]
+    fn locator_wipe_and_rebuild_from_manifests_restores_locations() {
+        let manifest = manifest();
+        let mut cache = LocatorCache::default();
+        cache
+            .rebuild_from_manifests(std::slice::from_ref(&manifest))
+            .expect("canonical manifest list must rebuild the locator");
+        let expected = cache.locate(oid(b'a')).to_vec();
+        assert_eq!(expected.len(), 1);
+        cache.wipe();
+        assert!(cache.locate(oid(b'a')).is_empty());
+        cache
+            .rebuild_from_manifests(std::slice::from_ref(&manifest))
+            .expect("the same manifest must rebuild the wiped locator");
+        assert_eq!(cache.locate(oid(b'a')), expected.as_slice());
+    }
+
+    #[test]
+    fn manifest_reality_divergence_is_detected_not_trusted() {
+        let digest = CryptoDigest;
+        let limits = SegmentLimits::default();
+        let mut builder = MicrosegmentBuilder::new(&digest, limits.clone());
+        for value in [b'a', b'b'] {
+            let payload = [value];
+            let commitment = digest
+                .payload_commitment(ObjectKind::Blob, &payload)
+                .expect("native payload must commit");
+            let native = fgit_crypto::git_object_id(
+                fgit_types::GitHashAlgorithm::Sha1,
+                fgit_crypto::GitObjectKind::Blob,
+                &payload,
+            );
+            let envelope = ObjectEnvelope::new(
+                vec![b'n'],
+                native,
+                ObjectKind::Blob,
+                1,
+                commitment,
+                vec![b'c'],
+                [4; 32],
+                None,
+                &limits,
+            )
+            .expect("fixture envelope must be valid");
+            builder
+                .push(SegmentRecordInput {
+                    envelope,
+                    payload: payload.to_vec(),
+                })
+                .expect("fixture record must be valid");
+        }
+        let segment = builder.build().expect("fixture segment must build");
+        let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, &limits)
+            .expect("fixture segment must verify");
+        let mut manifest =
+            SegmentManifest::from_verified_segment(&reader, vec![placement()], &manifest_limits())
+                .expect("verified segment must produce a manifest");
+        manifest
+            .verify_segment_reality(&reader)
+            .expect("matching manifest must verify against segment reality");
+        manifest.entries[0].record_length += 1;
+        assert_eq!(
+            manifest.verify_segment_reality(&reader),
+            Err(StoreRefusal::ManifestRealityMismatch)
+        );
+    }
+
+    #[derive(Debug)]
+    struct FixtureRegistry {
+        expected_root: Digest,
+        allow_delete: bool,
+    }
+
+    impl AuthenticatedRetentionRegistry for FixtureRegistry {
+        fn revalidate_root(&self, proposal: &RetentionRootProposal) -> Result<(), StoreRefusal> {
+            if proposal.retention_root() == self.expected_root {
+                Ok(())
+            } else {
+                Err(StoreRefusal::RetentionRevalidationFailed)
+            }
+        }
+
+        fn permits_placement_deletion(&self, _object: GitOid) -> Result<(), StoreRefusal> {
+            if self.allow_delete {
+                Ok(())
+            } else {
+                Err(StoreRefusal::DeletionRetained)
+            }
+        }
+    }
+
+    #[test]
+    fn retention_root_requires_revalidation_before_maintenance() {
+        let manifest = manifest();
+        let proposal = RetentionRootProposal::new(
+            RepositoryAuthorityHeadId::from_digest(
+                DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
+                CANONICAL_CODEC_VERSION,
+                DigestBytes::try_new(&[3; 32]).expect("fixture digest must fit"),
+            ),
+            digest(4),
+            vec![manifest.identity().expect("fixture manifest must identify")],
+        )
+        .expect("fixture proposal must be canonical");
+        let current = FixtureRegistry {
+            expected_root: digest(4),
+            allow_delete: false,
+        };
+        assert_eq!(current.revalidate_root(&proposal), Ok(()));
+        assert_eq!(
+            current.permits_placement_deletion(oid(b'a')),
+            Err(StoreRefusal::DeletionRetained)
+        );
+        let stale = FixtureRegistry {
+            expected_root: digest(5),
+            allow_delete: true,
+        };
+        assert_eq!(
+            stale.revalidate_root(&proposal),
+            Err(StoreRefusal::RetentionRevalidationFailed)
+        );
+    }
+}

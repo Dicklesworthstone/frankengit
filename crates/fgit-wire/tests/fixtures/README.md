@@ -16,4 +16,5 @@ the pkt-line decoder; it is not part of the protocol transcript.
   `side-band-64k`, then flush, common `have`, and `done`.
 - `v2-ls-refs.pkt` is a complete `ls-refs` command request with a ref prefix.
 - `v2-fetch.pkt` is a complete `fetch` command request with an advertised
-  client capability, want/have negotiation, a filter, `done`, and flush.
+  client capability, want/have negotiation, shallow/deepen and filter syntax,
+  `done`, and flush.
