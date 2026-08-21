@@ -13,5 +13,9 @@ fgit-reference.workspace = true
 fgit-resource.workspace = true
 fgit-types.workspace = true
 
+[dev-dependencies]
+fgit-authority.workspace = true
+fgit-lab.workspace = true
+
 [lints]
 workspace = true
