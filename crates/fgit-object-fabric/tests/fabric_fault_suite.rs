@@ -41,10 +41,14 @@
 //! replication. These are drills against the *reference* backend's fault
 //! algebra; a durable backend owes the same properties and its own campaign.
 
+use asupersync::Outcome;
+use asupersync::runtime::{Runtime, RuntimeConfig};
+use asupersync::types::Budget;
 use fgit_object_fabric::fabric::{
     AuthenticatedRetentionRegistry, DeletionReceipt, ImmutableObjectFabric, ManifestLimits,
-    ObjectRange, PlacementAdmission, PutIfAbsent, ReferenceFaultPoint, RetentionRootProposal,
-    StoreRefusal, VerifiedObject,
+    ObjectRange, PlacementAdmission, PlacementBackend, PutIfAbsent, ReferenceFaultPoint,
+    RetentionRootProposal, RuntimeImmutableObjectFabric, StoreRefusal, VerifiedObject,
+    VerifiedStreamBudget,
 };
 use fgit_object_fabric::reference::{ReferenceMemoryConfig, ReferenceMemoryFabric};
 use fgit_object_fabric::{CryptoDigest, DigestAlgorithm, ObjectEnvelope, ObjectKind};
@@ -605,4 +609,201 @@ fn a_retention_root_the_registry_refuses_does_not_publish() {
         )
         .expect_err("a refused revalidation must not publish");
     assert_eq!(refusal, StoreRefusal::RetentionRevalidationFailed);
+}
+
+// ---------------------------------------------------------------------------
+// Failure-domain placement-record accuracy
+// ---------------------------------------------------------------------------
+
+/// A fabric in a named failure domain.
+fn fabric_in_domain(domain: &[u8]) -> ReferenceMemoryFabric {
+    let config = ReferenceMemoryConfig::new(
+        NAMESPACE.to_vec(),
+        handle(domain),
+        handle(b"encryption-dependency"),
+        1 << 20,
+        ManifestLimits::default(),
+    )
+    .expect("reference config must be valid");
+    ReferenceMemoryFabric::open(config).expect("reference fabric must open")
+}
+
+#[test]
+fn a_placement_record_names_the_domain_that_actually_holds_it() {
+    // Failure-domain loss is only survivable if the placement record says
+    // WHERE a copy lives. A receipt that reported the wrong domain — or the
+    // same domain for every backend — would make a domain-loss drill
+    // unfalsifiable: you could not tell which copies you had just lost.
+    let east = fabric_in_domain(b"failure-domain-east");
+    let west = fabric_in_domain(b"failure-domain-west");
+    let ledger_east = ledger();
+    let ledger_west = ledger();
+    let payload_bytes = b"replicated-body".to_vec();
+
+    let east_placement = match east
+        .put_if_absent(verified(&payload_bytes), admission(&ledger_east))
+        .expect("east write succeeds")
+    {
+        PutIfAbsent::Created { placement, .. } | PutIfAbsent::AlreadyPresent { placement, .. } => {
+            placement
+        }
+    };
+    let west_placement = match west
+        .put_if_absent(verified(&payload_bytes), admission(&ledger_west))
+        .expect("west write succeeds")
+    {
+        PutIfAbsent::Created { placement, .. } | PutIfAbsent::AlreadyPresent { placement, .. } => {
+            placement
+        }
+    };
+
+    assert_eq!(
+        east_placement.failure_domain(),
+        handle(b"failure-domain-east"),
+        "a placement must name the domain that actually holds it"
+    );
+    assert_eq!(
+        west_placement.failure_domain(),
+        handle(b"failure-domain-west")
+    );
+    assert_ne!(
+        east_placement.failure_domain(),
+        west_placement.failure_domain(),
+        "two domains must be distinguishable, or a domain-loss drill cannot say what was lost"
+    );
+
+    // The identical body is content-addressed to the identical id in both
+    // domains — which is exactly why the placement record, not the object id,
+    // is what tells you where a copy lives.
+    assert_eq!(
+        east.read_whole(oid_for(&payload_bytes))
+            .expect("east holds it")
+            .object
+            .payload(),
+        west.read_whole(oid_for(&payload_bytes))
+            .expect("west holds it")
+            .object
+            .payload()
+    );
+
+    // Losing east must not make west's copy unreadable, and must not silently
+    // rewrite west's placement record.
+    drop(east);
+    let after_loss = west
+        .read_whole(oid_for(&payload_bytes))
+        .expect("west survives the loss of east");
+    assert_eq!(
+        after_loss.placement.failure_domain(),
+        handle(b"failure-domain-west"),
+        "the surviving placement record must be unchanged by another domain's loss"
+    );
+
+    close_quiescent(ledger_east);
+    close_quiescent(ledger_west);
+}
+
+#[test]
+fn a_placement_record_names_the_backend_that_holds_it() {
+    // The reference backend must not impersonate the durable one. A receipt
+    // claiming LocalFilesystem from an in-memory store would let a caller
+    // treat non-durable evidence as durable placement.
+    let store = fabric(None);
+    let ledger = ledger();
+
+    let placement = match store
+        .put_if_absent(verified(b"backend-probe"), admission(&ledger))
+        .expect("write succeeds")
+    {
+        PutIfAbsent::Created { placement, .. } | PutIfAbsent::AlreadyPresent { placement, .. } => {
+            placement
+        }
+    };
+
+    assert_eq!(
+        placement.backend(),
+        PlacementBackend::MemoryReference,
+        "the non-durable reference profile must identify itself as such"
+    );
+    assert_ne!(
+        placement.backend(),
+        PlacementBackend::LocalFilesystem,
+        "an in-memory store must never claim a durable filesystem placement"
+    );
+
+    close_quiescent(ledger);
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation mid-stream
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cancellation_surfaces_as_cancelled_and_never_collapses_into_a_refusal() {
+    // `RuntimeImmutableObjectFabric` returns a four-valued `Outcome`, and its
+    // own docs say why: it "preserves all four Asupersync outcome arms instead
+    // of collapsing cancellation or containment into StoreRefusal".
+    //
+    // That distinction is load-bearing for a storage layer. A cancelled read
+    // reported as `Err(StoreRefusal)` tells a caller the STORE refused it,
+    // which is a statement about the data. Cancellation is a statement about
+    // the CALLER. Conflating them is how a retry loop concludes an object is
+    // corrupt when its own budget expired.
+    //
+    // Driven with a zero poll quota rather than an expired deadline: a budget
+    // with no polls left fails its first checkpoint deterministically, whereas
+    // a past deadline depends on where the runtime clock happens to start.
+    // This drives asupersync directly because `fgit-runtime` is not a
+    // dependency of this crate and adding one for a test would enlarge the
+    // graph to reach a runtime that is already here.
+    let runtime = Runtime::with_config(RuntimeConfig::default()).expect("a runtime builds");
+    let store = fabric(None);
+    let ledger = ledger();
+    let payload_bytes = b"stream-me".to_vec();
+
+    store
+        .put_if_absent(verified(&payload_bytes), admission(&ledger))
+        .expect("write succeeds");
+
+    let budget = VerifiedStreamBudget::new(1 << 16, 4096).expect("a bounded stream budget");
+    let exhausted = runtime.request_cx_with_budget(Budget::new().with_poll_quota(0));
+
+    let outcome = runtime.block_on(async {
+        store
+            .open_verified_stream(&exhausted, oid_for(&payload_bytes), budget)
+            .await
+    });
+
+    match outcome {
+        Outcome::Cancelled(_) => {}
+        Outcome::Err(refusal) => panic!(
+            "cancellation collapsed into a store refusal ({refusal:?}); a caller cannot tell \
+             'you ran out of budget' from 'this object is bad'"
+        ),
+        Outcome::Ok(_) => {
+            panic!("a context with no polls remaining must not complete a verified stream")
+        }
+        Outcome::Panicked(payload) => panic!("unexpected panic: {payload:?}"),
+    }
+
+    // Paired permitted case: a healthy context streams the same object, so the
+    // assertion above cannot pass against a fabric that cancels everything.
+    let healthy = runtime.request_cx_with_budget(
+        Budget::new()
+            .with_poll_quota(100_000)
+            .with_cost_quota(100_000),
+    );
+    let healthy_outcome = runtime.block_on(async {
+        store
+            .open_verified_stream(&healthy, oid_for(&payload_bytes), budget)
+            .await
+    });
+    assert!(
+        matches!(healthy_outcome, Outcome::Ok(_)),
+        "a healthy context must open the stream, got {healthy_outcome:?}"
+    );
+
+    drop(healthy);
+    drop(exhausted);
+    close_quiescent(ledger);
+    assert!(runtime.shutdown_timeout(std::time::Duration::from_secs(5)));
 }
