@@ -189,7 +189,11 @@ pub enum NodeInitialization {
     IdenticalRetry,
 }
 
-/// A real one-process server assembly with an authority head and object fabric.
+/// In-process authority/fabric bootstrap for the future one-node server assembly.
+///
+/// This type deliberately does not claim a transport service: the currently
+/// published wire crate is SANS-I/O and the canonical ref projection required
+/// for receive admission has not yet been published as a production surface.
 #[derive(Debug)]
 pub struct OneNode {
     runtime: NodeRuntime,

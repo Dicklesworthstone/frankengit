@@ -14,6 +14,9 @@ use fgit_types::{RepositoryId, TenantId};
 pub enum CliRefusal {
     /// The command line did not identify a supported command.
     Usage,
+    /// Serving cannot start until the canonical projection and socket gateway
+    /// are both published as production surfaces.
+    ServeUnavailable,
     /// The supplied tenant identity was not canonical lowercase hex.
     Tenant(fgit_types::TypeRefusal),
     /// The supplied repository identity was not canonical lowercase hex.
@@ -26,7 +29,10 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex>; fg serve is not yet available",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex>; fg serve",
+            ),
+            Self::ServeUnavailable => formatter.write_str(
+                "fg serve is unavailable: no published raw-socket gateway and canonical admission projection are available",
             ),
             Self::Tenant(error) => Display::fmt(error, formatter),
             Self::Repository(error) => Display::fmt(error, formatter),
@@ -40,26 +46,40 @@ impl Error for CliRefusal {
         match self {
             Self::Tenant(error) | Self::Repository(error) => Some(error),
             Self::Node(error) => Some(error),
-            Self::Usage => None,
+            Self::Usage | Self::ServeUnavailable => None,
         }
     }
 }
 
 /// Executes a bounded command invocation without ambient configuration.
 pub fn run(arguments: &[String]) -> Result<NodeInitialization, CliRefusal> {
-    let [command, storage_root, tenant, repository] = arguments else {
-        return Err(CliRefusal::Usage);
-    };
-    if command != "init" {
-        return Err(CliRefusal::Usage);
+    match arguments {
+        [command] if command == "serve" => Err(CliRefusal::ServeUnavailable),
+        [command, storage_root, tenant, repository] if command == "init" => {
+            let tenant_id = TenantId::from_hex(tenant).map_err(CliRefusal::Tenant)?;
+            let repository_id =
+                RepositoryId::from_hex(repository).map_err(CliRefusal::Repository)?;
+            let (_node, initialization) = OneNode::init(NodeConfig::new(
+                PathBuf::from(storage_root),
+                tenant_id,
+                repository_id,
+            ))
+            .map_err(CliRefusal::Node)?;
+            Ok(initialization)
+        }
+        _ => Err(CliRefusal::Usage),
     }
-    let tenant_id = TenantId::from_hex(tenant).map_err(CliRefusal::Tenant)?;
-    let repository_id = RepositoryId::from_hex(repository).map_err(CliRefusal::Repository)?;
-    let (_node, initialization) = OneNode::init(NodeConfig::new(
-        PathBuf::from(storage_root),
-        tenant_id,
-        repository_id,
-    ))
-    .map_err(CliRefusal::Node)?;
-    Ok(initialization)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CliRefusal, run};
+
+    #[test]
+    fn serve_is_a_typed_refusal_until_a_real_gateway_is_published() {
+        assert!(matches!(
+            run(&["serve".to_owned()]),
+            Err(CliRefusal::ServeUnavailable)
+        ));
+    }
 }
