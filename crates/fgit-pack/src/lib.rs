@@ -17,7 +17,10 @@ pub use delta::{
     apply_delta,
 };
 pub use fgit_types::native::{GitHashAlgorithm as ObjectFormat, GitOid as ObjectId};
-pub use idx::{IdxChecksumVerifier, IdxEntry, IdxV2, validate_idx_checksum};
+pub use idx::{
+    IdxChecksumVerifier, IdxEntry, IdxV2, validate_idx_checksum, validate_idx_entry_crc,
+    validate_idx_pack_count,
+};
 pub use pack::{
     EntryKind, PackEntryHeader, PackHeader, PackTrailerVerifier, ParsedDeltaBase,
     decode_entry_header, decode_ofs_delta_base, parse_delta_base, parse_pack_header,
@@ -232,6 +235,10 @@ pub enum PackError {
     },
     TrailerChecksumMismatch,
     IndexChecksumMismatch,
+    IndexEntryCrcMismatch {
+        expected: u32,
+        actual: u32,
+    },
     ObjectCountMismatch {
         declared: u32,
         actual: u32,

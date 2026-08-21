@@ -1,5 +1,6 @@
 use crate::{
-    Deadline, ObjectFormat, ObjectId, PackError, PackLimits, checkpoint, object_id_from_bytes,
+    Deadline, ObjectFormat, ObjectId, PackError, PackHeader, PackLimits, checkpoint,
+    object_id_from_bytes, validate_object_count,
 };
 
 const IDX_SIGNATURE: [u8; 4] = [0xff, b't', b'O', b'c'];
@@ -45,6 +46,61 @@ pub struct IdxEntry {
     pub oid: ObjectId,
     pub crc32: u32,
     pub pack_offset: u64,
+}
+
+/// Validates the CRC-32 committed by one idx entry against the exact raw pack
+/// entry bytes. The caller supplies the framed byte span so this function does
+/// not infer an entry boundary from sorted-by-OID index order.
+///
+/// The input boundary and each byte of CRC work are bounded before any output
+/// can be exposed. CRC validation is an integrity check for quarantine/index
+/// association; native pack and idx trailers still require their respective
+/// checksum verifiers.
+pub fn validate_idx_entry_crc(
+    entry: &IdxEntry,
+    packed_entry: &[u8],
+    limits: &PackLimits,
+    deadline: &mut impl Deadline,
+) -> Result<(), PackError> {
+    limits.input(packed_entry.len())?;
+    let actual = ieee_crc32(packed_entry, deadline)?;
+    if actual == entry.crc32 {
+        Ok(())
+    } else {
+        Err(PackError::IndexEntryCrcMismatch {
+            expected: entry.crc32,
+            actual,
+        })
+    }
+}
+
+/// Binds an idx v2 record count to the pack header it indexes. A mismatched
+/// index remains quarantine data and cannot provide object locations.
+pub fn validate_idx_pack_count(index: &IdxV2, header: PackHeader) -> Result<(), PackError> {
+    let actual = u32::try_from(index.entries.len()).map_err(|_| PackError::EntryCountLimit {
+        actual: u32::MAX,
+        limit: header.object_count,
+    })?;
+    validate_object_count(header, actual)
+}
+
+fn ieee_crc32(input: &[u8], deadline: &mut impl Deadline) -> Result<u32, PackError> {
+    const POLYNOMIAL: u32 = 0xedb8_8320;
+
+    let mut crc = u32::MAX;
+    for &byte in input {
+        checkpoint(deadline)?;
+        let mut low = (crc ^ u32::from(byte)) & 0xff;
+        for _ in 0..8 {
+            low = if low & 1 == 0 {
+                low >> 1
+            } else {
+                (low >> 1) ^ POLYNOMIAL
+            };
+        }
+        crc = (crc >> 8) ^ low;
+    }
+    Ok(!crc)
 }
 
 /// A structurally verified idx v2 file. Its checksums are preserved for a
