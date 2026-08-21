@@ -172,7 +172,7 @@ fge_unsupported FG-005B-E2E-020 \
   'AF-01..AF-08 injected faults: run_fault_conformance is bound S: FaultableAuthorityStore and MemoryAuthorityStore is the only impl in the workspace, so ambiguity, duplication and lost-request-vs-lost-response are unprovable for this backend by anyone'
 
 fge_unsupported FG-005B-E2E-021 \
-  'cancellation mid-operation: the conformance bridge blocks per operation, so a cancel cannot be interleaved with an operation in flight; this needs a harness able to hold several operations open, not another test'
+  'cancellation mid-operation: AsyncAuthorityStore now exists so a future CAN be held in flight, but AGENTS.md 3.2 says dropping a future is not a complete cancellation protocol (request -> drain -> finalize), and no drain/finalize surface is exposed that a test can drive; the phase semantics are modelled in fgit-authority-fsqlite/tests/lifecycle.rs but nothing drives a real cancel against a real in-flight operation'
 
 # The structural PRECONDITION for that cell, which IS checkable today.
 #
