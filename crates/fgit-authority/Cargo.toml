@@ -1,0 +1,10 @@
+[package]
+name = "fgit-authority"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

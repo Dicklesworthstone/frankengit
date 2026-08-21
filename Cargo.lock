@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "fgit-authority"
+version = "0.0.1"
+
+[[package]]
 name = "fgit-object-fabric"
 version = "0.1.0"
 dependencies = [

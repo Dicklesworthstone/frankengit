@@ -1,0 +1,321 @@
+//! The `AuthorityStore` contract and the ambiguity-resolution helpers.
+//!
+//! # What the contract deliberately omits
+//!
+//! There is no listing, enumeration, scan, or delete operation.  Recovery
+//! follows canonical roots from known keys and never depends on listing order
+//! or completeness (`NORMATIVE_PROTOCOL_CONTRACTS.md` §4 and
+//! `COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md` §13.8).  Omitting the
+//! capability outright is stronger than refusing it, so no backend can grow a
+//! listing-based recovery path by accident.
+//!
+//! # Where `Cx` enters
+//!
+//! This trait is synchronous and deterministic on purpose: it is the semantic
+//! core that the reference backend, the linearizability checker, and the fault
+//! campaign all share, and none of them wants a runtime in the loop.  The
+//! Asupersync surface (FG-011a, `fgit-runtime`) wraps each method in a
+//! `&Cx`-taking async operation and owns exactly three additional concerns:
+//!
+//! * budget and capability admission before transmission;
+//! * request-drain-finalize cancellation, where a cancellation observed after
+//!   transmission maps to [`AmbiguityReason::Cancelled`] and never to a
+//!   refusal;
+//! * deadline expiry, which maps to [`AmbiguityReason::Timeout`].
+//!
+//! No cancellation path may synthesise [`AuthorityRefusal::Unavailable`] for an
+//! in-flight request; that value is reserved for a request the endpoint
+//! demonstrably never processed.
+
+use crate::injection::{EffectLog, FaultLog, FaultPlan};
+use crate::keys::{HeadKey, ImmutableKey};
+use crate::tokens::{AuthorityVersionToken, HeadGeneration, StoreInstanceId};
+use crate::vocabulary::{
+    AmbiguityReason, AuthenticatedHead, AuthorityFailure, AuthorityOp, AuthorityRefusal,
+    AuthorityResponse, CasOutcome, HeadInit, HeadRead, HeadReadReceipt, ImmutableRead, PutOutcome,
+};
+
+/// The declared resource bounds of one backend profile.
+///
+/// Bounds are contract, not implementation detail: refusal behaviour at the
+/// boundary is part of what a conforming backend must reproduce.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AuthorityLimits {
+    /// Largest admissible body in bytes.
+    pub max_body_bytes: usize,
+    /// Largest number of occupied immutable slots.
+    pub max_immutable_entries: usize,
+    /// Largest number of occupied head slots.
+    pub max_head_entries: usize,
+    /// Largest number of version tokens one instance may issue.
+    pub max_issued_versions: usize,
+}
+
+impl Default for AuthorityLimits {
+    fn default() -> Self {
+        Self {
+            max_body_bytes: 1 << 20,
+            max_immutable_entries: 1 << 16,
+            max_head_entries: 1 << 12,
+            max_issued_versions: 1 << 20,
+        }
+    }
+}
+
+/// A backend that can carry canonical repository authority.
+///
+/// The obligations restated from `NORMATIVE_PROTOCOL_CONTRACTS.md` §4 are:
+///
+/// 1. strong put-if-absent for immutable bodies, with complete-or-absent writes;
+/// 2. read-after-write consistency for known keys;
+/// 3. linearizable conditional replacement of one head key;
+/// 4. no lost updates through gateways, proxies, failover, or replication;
+/// 5. version tokens that are unique per write and never content-derived;
+/// 6. a head read whose authenticity the store itself can confirm;
+/// 7. bounded, typed errors;
+/// 8. an endpoint and credential scope that another endpoint's tokens cannot cross;
+/// 9. recovery from a known root without listing.
+///
+/// Every one of these is exercised by [`crate::run_authority_conformance`], and
+/// a backend that stores bytes durably but fails any of them cannot carry
+/// canonical mutation.
+pub trait AuthorityStore {
+    /// Identity of this endpoint and credential scope.
+    fn instance_id(&self) -> StoreInstanceId;
+
+    /// The declared bounds this instance enforces.
+    fn limits(&self) -> AuthorityLimits;
+
+    /// Write an immutable body if and only if the slot is empty.
+    ///
+    /// The write is complete or absent: a partially written body is never
+    /// observable, so a retry after an ambiguous response either finds the
+    /// exact bytes or finds nothing.
+    fn put_if_absent(
+        &self,
+        key: &ImmutableKey,
+        body: &[u8],
+    ) -> Result<PutOutcome, AuthorityFailure>;
+
+    /// Read one immutable body by exact key.
+    fn read_immutable(&self, key: &ImmutableKey) -> Result<ImmutableRead, AuthorityFailure>;
+
+    /// Create the repository head slot if and only if it is empty.
+    fn initialize_head(
+        &self,
+        key: &HeadKey,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> Result<HeadInit, AuthorityFailure>;
+
+    /// Read the current head, its token, and its generation.
+    fn read_head(&self, key: &HeadKey) -> Result<HeadRead, AuthorityFailure>;
+
+    /// Replace the head if and only if it still carries `expected`.
+    ///
+    /// A successful call is the linearization point of the repository mutation
+    /// whose decision batch the new body commits to.  The store additionally
+    /// refuses a proposal whose generation does not strictly increase, so a
+    /// stale candidate cannot roll the head backwards even if it somehow held a
+    /// current token.
+    fn compare_exchange_head(
+        &self,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+    ) -> Result<CasOutcome, AuthorityFailure>;
+
+    /// Confirm that this store issued `receipt` exactly as presented.
+    ///
+    /// A receipt bearing a token the store never minted is refused with
+    /// [`AuthorityRefusal::UnknownVersionToken`]; a receipt whose bytes or
+    /// generation were altered after issuance is refused with
+    /// [`AuthorityRefusal::TokenBodyMismatch`] or
+    /// [`AuthorityRefusal::TokenGenerationMismatch`].  Success proves
+    /// authenticity, never currency.
+    fn authenticate_head_receipt(
+        &self,
+        receipt: &HeadReadReceipt,
+    ) -> Result<AuthenticatedHead, AuthorityFailure>;
+
+    /// Execute one operation in the uniform vocabulary.
+    ///
+    /// This is the entry point the linearizability checker and the fault
+    /// campaign drive; it is a total function from [`AuthorityOp`] to
+    /// [`AuthorityResponse`] with no panicking path.
+    fn execute(&self, op: &AuthorityOp) -> AuthorityResponse {
+        match op {
+            AuthorityOp::PutIfAbsent { key, body } => self.put_if_absent(key, body).map_or_else(
+                AuthorityFailure::into_response,
+                AuthorityResponse::PutIfAbsent,
+            ),
+            AuthorityOp::ReadImmutable { key } => self.read_immutable(key).map_or_else(
+                AuthorityFailure::into_response,
+                AuthorityResponse::ReadImmutable,
+            ),
+            AuthorityOp::InitializeHead {
+                key,
+                generation,
+                body,
+            } => self.initialize_head(key, *generation, body).map_or_else(
+                AuthorityFailure::into_response,
+                AuthorityResponse::InitializeHead,
+            ),
+            AuthorityOp::ReadHead { key } => self
+                .read_head(key)
+                .map_or_else(AuthorityFailure::into_response, AuthorityResponse::ReadHead),
+            AuthorityOp::CompareExchangeHead {
+                key,
+                expected,
+                new_generation,
+                new_body,
+            } => self
+                .compare_exchange_head(key, *expected, *new_generation, new_body)
+                .map_or_else(
+                    AuthorityFailure::into_response,
+                    AuthorityResponse::CompareExchangeHead,
+                ),
+            AuthorityOp::AuthenticateHeadReceipt { receipt } => {
+                self.authenticate_head_receipt(receipt).map_or_else(
+                    AuthorityFailure::into_response,
+                    AuthorityResponse::AuthenticateHeadReceipt,
+                )
+            }
+        }
+    }
+}
+
+/// A backend that can be driven through a deterministic fault script.
+///
+/// This is a reference and laboratory capability, not a production one: the
+/// campaigns in FG-004c and the lab core in FG-013a program a backend through
+/// this trait so that ambiguity, duplication, delay, and crash are reproducible
+/// from a seed rather than hoped for under load.
+pub trait FaultableAuthorityStore: AuthorityStore {
+    /// Replace the active fault plan and start a fresh script run.
+    ///
+    /// The operation counter the plan indexes, the logical clock, and both logs
+    /// reset; stored bodies, heads, and the issuance record persist, because a
+    /// new script is a new experiment against the same accumulated state.
+    fn install_fault_plan(&self, plan: FaultPlan);
+
+    /// Every fault the store has injected, in injection order.
+    fn fault_log(&self) -> FaultLog;
+
+    /// Every effect the store has reached, in application order.
+    ///
+    /// This is the ground truth a caller cannot see.  It exists so a campaign
+    /// can assert that an ambiguous response really did or really did not carry
+    /// an effect.
+    fn effect_log(&self) -> EffectLog;
+
+    /// Whether the store is currently refusing because of an injected crash.
+    fn is_crashed(&self) -> bool;
+
+    /// Bring a crashed endpoint back up.
+    fn restart(&self);
+}
+
+/// What an exact-key read taught us about an ambiguous conditional replacement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CasResolution {
+    /// The exact proposed generation and bytes are published.
+    ///
+    /// The caller's attempt, or a byte-identical one, linearized.
+    Applied(HeadReadReceipt),
+    /// The head is older than the proposal, so the attempt did not linearize.
+    NotApplied(HeadReadReceipt),
+    /// The head has moved past the proposal.
+    ///
+    /// Storage cannot say whether the attempt linearized and was then
+    /// superseded, or never linearized at all.  This is exactly the case
+    /// `NORMATIVE_PROTOCOL_CONTRACTS.md` §14 sends to a `TxId` lookup against
+    /// the authenticated outcome index.
+    Superseded(HeadReadReceipt),
+    /// The head slot does not exist, so nothing was published.
+    HeadAbsent,
+}
+
+/// What an exact-key read taught us about an ambiguous put-if-absent.
+///
+/// Immutable slots make this resolution complete, unlike [`CasResolution`]:
+/// a body either is or is not published, and it can never change afterwards.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PutResolution {
+    /// The exact body is published; the attempt, or an equivalent one, applied.
+    PresentIdentical,
+    /// A different body occupies the slot; the attempt cannot have applied.
+    PresentConflicting(Vec<u8>),
+    /// The slot is empty; the attempt did not apply.
+    Absent,
+}
+
+/// Resolve an ambiguous conditional replacement by exact-key read.
+///
+/// This is the storage half of the resolution protocol.  It never guesses: when
+/// the head has moved past the proposal it reports [`CasResolution::Superseded`]
+/// and leaves the decision to the outcome index.
+pub fn resolve_ambiguous_cas<S>(
+    store: &S,
+    key: &HeadKey,
+    proposed_generation: HeadGeneration,
+    proposed_body: &[u8],
+) -> Result<CasResolution, AuthorityFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    match store.read_head(key)? {
+        HeadRead::Absent => Ok(CasResolution::HeadAbsent),
+        HeadRead::Present(receipt) => {
+            let current = receipt.generation();
+            if current == proposed_generation && receipt.body() == proposed_body {
+                Ok(CasResolution::Applied(receipt))
+            } else if current < proposed_generation {
+                Ok(CasResolution::NotApplied(receipt))
+            } else {
+                Ok(CasResolution::Superseded(receipt))
+            }
+        }
+    }
+}
+
+/// Resolve an ambiguous put-if-absent by exact-key read.
+pub fn resolve_ambiguous_put<S>(
+    store: &S,
+    key: &ImmutableKey,
+    proposed_body: &[u8],
+) -> Result<PutResolution, AuthorityFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    match store.read_immutable(key)? {
+        ImmutableRead::Absent => Ok(PutResolution::Absent),
+        ImmutableRead::Present(body) => {
+            if body == proposed_body {
+                Ok(PutResolution::PresentIdentical)
+            } else {
+                Ok(PutResolution::PresentConflicting(body))
+            }
+        }
+    }
+}
+
+/// Convenience re-statement used by the conformance suite and by callers that
+/// want the refusal without matching two levels of enumeration.
+#[must_use]
+pub const fn refusal_of(failure: AuthorityFailure) -> Option<AuthorityRefusal> {
+    match failure {
+        AuthorityFailure::Refused(refusal) => Some(refusal),
+        AuthorityFailure::Ambiguous(_) => None,
+    }
+}
+
+/// The ambiguity reason, when the failure was ambiguous.
+#[must_use]
+pub const fn ambiguity_of(failure: AuthorityFailure) -> Option<AmbiguityReason> {
+    match failure {
+        AuthorityFailure::Ambiguous(reason) => Some(reason),
+        AuthorityFailure::Refused(_) => None,
+    }
+}
