@@ -1,0 +1,5 @@
+Accents: héllo wörld. Dashes: em — en –. Symbols: ✓ ✗ →.
+
+Emphasis around non-ASCII: *émphasis* and `códe`.
+
+A bidi override sneaks in here: a‮b and continues.

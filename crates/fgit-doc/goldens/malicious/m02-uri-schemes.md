@@ -1,0 +1,7 @@
+[javascript](javascript:alert&#40;1&#41;)
+[data html](data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==)
+[vbscript](vbscript:msgbox&#40;1&#41;)
+[mixed case](JaVaScRiPt:alert&#40;1&#41;)
+[tab smuggled](java&#9;script:alert&#40;1&#41;)
+[safe](https://example.com/ok)
+![data image](data:image/svg+xml,%3Csvg%20onload%3Dalert%281%29%3E)

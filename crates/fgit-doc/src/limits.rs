@@ -158,6 +158,29 @@ pub enum RefusalKind {
 }
 
 impl RefusalKind {
+    /// Every refusal this crate can produce, in declaration order.
+    ///
+    /// Exhaustive by construction: a new variant that is not added here fails
+    /// the crate's own coverage test, which is what keeps the evidence corpus
+    /// honest about tripping every bound.
+    pub const ALL: &'static [Self] = &[
+        Self::InputTooLarge,
+        Self::LineTooLong,
+        Self::TooManyNodes,
+        Self::NestingTooDeep,
+        Self::TooManyInlineDelimiters,
+        Self::OutputTooLarge,
+        Self::SourceNotUtf8,
+        Self::SourceIdTooLong,
+        Self::ProfileMismatch,
+        Self::UnknownNode,
+        Self::TooManyBatchInputs,
+        Self::WorkloadUnusable,
+        Self::OutputNameInvalid,
+        Self::DuplicateOutputName,
+        Self::TooManyOutputs,
+    ];
+
     /// Stable machine-readable tag, used in receipts and rendered output.
     #[must_use]
     pub const fn tag(self) -> &'static str {
