@@ -32,8 +32,9 @@ use fgit_codec::{
     CodecRefusal, DecodeLimits, Decoder, Encoder, RepositoryAuthorityHeadBody,
     RepositoryDecisionBatchBody, decode_body,
 };
-use fgit_crypto::IdentityDomain;
+use fgit_crypto::{IdentityDomain, internal_digest_over_parts};
 use fgit_types::CANONICAL_CODEC_VERSION;
+use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::{
     RefusalRecordId, RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryDecisionBatchId,
     RepositoryId, TenantId, TxId,
@@ -372,6 +373,77 @@ where
             })
         }
     }
+}
+
+/// The schema pinning the outcome-index tree construction.
+fn outcome_index_schema() -> fgit_types::label::SchemaId {
+    fgit_types::label::SchemaId::new(
+        fgit_types::label::SchemaFamily::from_static("outcome-index"),
+        1,
+        0,
+    )
+}
+
+/// The commitment over one repository's terminal-outcome index.
+///
+/// A binary Merkle tree over the index entries, sorted by leaf bytes so the
+/// root is a function of the *set* rather than of any insertion order. Leaves
+/// and interior nodes use the two separate registered Merkle domains, which is
+/// what stops an interior node's preimage being presented as a leaf.
+///
+/// An odd node at a level is promoted unchanged rather than paired with itself,
+/// because duplicating a node is the classic construction that lets two
+/// different multisets produce one root.
+///
+/// # Scope of this function
+///
+/// It computes the root. It does **not** gate publication. The
+/// `resulting_outcome_index_root` field on a batch is a value several crates
+/// must agree on, and the reference state machine is the other party to that
+/// agreement, so wiring this in as a publication precondition is a cross-crate
+/// decision rather than one this crate may take alone. The check is
+/// deliberately absent rather than unilaterally imposed.
+pub fn outcome_index_root(entries: &[(TxId, TerminalOutcome)]) -> Result<Digest, OutcomeFailure> {
+    let schema = outcome_index_schema();
+    let mut level: Vec<DigestBytes> = Vec::with_capacity(entries.len());
+    for (tx_id, outcome) in entries {
+        let encoded = encode_outcome(outcome)?;
+        level.push(internal_digest_over_parts(
+            IdentityDomain::MerkleLeaf,
+            schema,
+            &[tx_id.as_internal_object_id().digest().as_bytes(), &encoded],
+        ));
+    }
+    level.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+    let Some(mut root) = level.first().copied() else {
+        return Ok(Digest::new(
+            IdentityDomain::MerkleNode.algorithm().id(),
+            internal_digest_over_parts(IdentityDomain::MerkleNode, schema, &[]),
+        ));
+    };
+
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let (pairs, remainder) = level.as_chunks::<2>();
+        for [left, right] in pairs {
+            next.push(internal_digest_over_parts(
+                IdentityDomain::MerkleNode,
+                schema,
+                &[left.as_bytes(), right.as_bytes()],
+            ));
+        }
+        if let Some(odd) = remainder.first() {
+            next.push(*odd);
+        }
+        level = next;
+        root = level.first().copied().unwrap_or(root);
+    }
+
+    Ok(Digest::new(
+        IdentityDomain::MerkleNode.algorithm().id(),
+        root,
+    ))
 }
 
 /// Create a repository's genesis head, staging its body by identity.

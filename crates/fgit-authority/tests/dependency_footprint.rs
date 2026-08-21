@@ -29,6 +29,61 @@ use std::path::Path;
 /// contract change and needs a reason of the same kind.
 const PERMITTED: [&str; 3] = ["fgit-types", "fgit-codec", "fgit-crypto"];
 
+/// The dependency name a manifest line declares, if it declares one.
+///
+/// Cargo spells one dependency several ways, and they must all resolve to the
+/// same name:
+///
+/// ```text
+/// fgit-types.workspace = true          // dotted sub-key
+/// fgit-types = { workspace = true }    // inline table
+/// fgit-types = "1"                     // bare version
+/// ```
+///
+/// The dotted form is the one that caught this guard out: splitting on `=`
+/// alone yields `fgit-types.workspace`, which matches no permitted name and
+/// makes the guard fail for the wrong reason. A crate name cannot contain a
+/// dot, so everything from the first dot onwards is a sub-key.
+fn dependency_name(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
+        return None;
+    }
+    let (key, _) = line.split_once('=')?;
+    let key = key.trim().trim_matches('"');
+    let name = key.split_once('.').map_or(key, |(head, _)| head);
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
+#[test]
+fn the_dependency_name_parser_handles_every_cargo_spelling() {
+    assert_eq!(
+        dependency_name("fgit-types.workspace = true").as_deref(),
+        Some("fgit-types"),
+        "the dotted sub-key form must resolve to the crate name"
+    );
+    assert_eq!(
+        dependency_name("fgit-types = { workspace = true }").as_deref(),
+        Some("fgit-types")
+    );
+    assert_eq!(
+        dependency_name("fgit-types = \"0.0.1\"").as_deref(),
+        Some("fgit-types")
+    );
+    assert_eq!(
+        dependency_name("\"fgit-types\".workspace = true").as_deref(),
+        Some("fgit-types"),
+        "a quoted key is still the same dependency"
+    );
+    assert_eq!(dependency_name("# a comment"), None);
+    assert_eq!(dependency_name("[dependencies]"), None);
+    assert_eq!(dependency_name(""), None);
+    assert_eq!(dependency_name("no-equals-sign"), None);
+}
+
 #[test]
 fn the_crate_declares_only_its_permitted_dependencies() {
     let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
@@ -38,22 +93,27 @@ fn the_crate_declares_only_its_permitted_dependencies() {
     let mut declared = Vec::new();
     let mut in_dependency_section = false;
     for line in manifest.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            in_dependency_section = line == "[dependencies]"
-                || line == "[dev-dependencies]"
-                || line == "[build-dependencies]"
-                || line.starts_with("[target.");
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_dependency_section = trimmed == "[dependencies]"
+                || trimmed == "[dev-dependencies]"
+                || trimmed == "[build-dependencies]"
+                || trimmed.starts_with("[target.");
             continue;
         }
-        if !in_dependency_section || line.is_empty() || line.starts_with('#') {
+        if !in_dependency_section {
             continue;
         }
-        if let Some((name, _)) = line.split_once('=') {
-            declared.push(name.trim().trim_matches('"').to_owned());
+        if let Some(name) = dependency_name(trimmed) {
+            declared.push(name);
         }
     }
 
+    assert!(
+        !declared.is_empty(),
+        "the guard parsed no dependencies at all, which means it is watching nothing; \
+         the manifest declares at least {PERMITTED:?}"
+    );
     for name in &declared {
         assert!(
             PERMITTED.contains(&name.as_str()),

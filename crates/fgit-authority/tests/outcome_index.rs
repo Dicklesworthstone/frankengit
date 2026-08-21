@@ -482,3 +482,100 @@ fn encode_terminal_outcome(outcome: &TerminalOutcome) -> Vec<u8> {
     }
     out.into_bytes()
 }
+
+// --- the outcome-index root ------------------------------------------------
+
+fn entry(tx_byte: u8, sequence: u64, commit: u8) -> (TxId, TerminalOutcome) {
+    (
+        tx(tx_byte),
+        TerminalOutcome {
+            decision_sequence: DecisionSequence::try_new(sequence).expect("positive"),
+            outcome: DecisionOutcome::Committed {
+                repository_commit_id: commit_id(commit),
+            },
+        },
+    )
+}
+
+#[test]
+fn the_index_root_is_a_function_of_the_set_not_the_order() {
+    let ascending = [
+        entry(0xA1, 1, 0x51),
+        entry(0xB2, 2, 0x52),
+        entry(0xC3, 3, 0x53),
+    ];
+    let shuffled = [
+        entry(0xC3, 3, 0x53),
+        entry(0xA1, 1, 0x51),
+        entry(0xB2, 2, 0x52),
+    ];
+
+    let left = fgit_authority::outcome_index_root(&ascending).expect("a computable root");
+    let right = fgit_authority::outcome_index_root(&shuffled).expect("a computable root");
+    assert_eq!(left, right, "insertion order must not reach the root");
+    assert_eq!(
+        left,
+        fgit_authority::outcome_index_root(&ascending).expect("a computable root"),
+        "the root must be deterministic"
+    );
+}
+
+#[test]
+fn the_index_root_changes_with_any_entry() {
+    let base = [entry(0xA1, 1, 0x51), entry(0xB2, 2, 0x52)];
+    let baseline = fgit_authority::outcome_index_root(&base).expect("a computable root");
+
+    let changed_outcome = [entry(0xA1, 1, 0x5F), entry(0xB2, 2, 0x52)];
+    let changed_sequence = [entry(0xA1, 9, 0x51), entry(0xB2, 2, 0x52)];
+    let added = [
+        entry(0xA1, 1, 0x51),
+        entry(0xB2, 2, 0x52),
+        entry(0xC3, 3, 0x53),
+    ];
+
+    for (what, variant) in [
+        ("a changed commit", &changed_outcome[..]),
+        ("a changed sequence", &changed_sequence[..]),
+        ("an added entry", &added[..]),
+    ] {
+        assert_ne!(
+            baseline,
+            fgit_authority::outcome_index_root(variant).expect("a computable root"),
+            "{what} must change the index root"
+        );
+    }
+}
+
+#[test]
+fn an_odd_level_does_not_collide_with_its_even_prefix() {
+    // Promoting an odd node unchanged, rather than pairing it with itself, is
+    // what stops two different sets sharing a root. Three entries must not
+    // hash to the same root as the two-entry prefix that produced their first
+    // interior node.
+    let two = [entry(0xA1, 1, 0x51), entry(0xB2, 2, 0x52)];
+    let three = [
+        entry(0xA1, 1, 0x51),
+        entry(0xB2, 2, 0x52),
+        entry(0xC3, 3, 0x53),
+    ];
+    assert_ne!(
+        fgit_authority::outcome_index_root(&two).expect("a computable root"),
+        fgit_authority::outcome_index_root(&three).expect("a computable root")
+    );
+}
+
+#[test]
+fn the_empty_index_has_a_defined_root_of_its_own() {
+    let empty = fgit_authority::outcome_index_root(&[]).expect("a computable root");
+    let single =
+        fgit_authority::outcome_index_root(&[entry(0xA1, 1, 0x51)]).expect("a computable root");
+    assert_ne!(
+        empty, single,
+        "an empty index and a one-entry index must not share a root"
+    );
+    assert_eq!(
+        empty,
+        fgit_authority::outcome_index_root(&[]).expect("a computable root"),
+        "the empty root is a fixed value, not an accident"
+    );
+}

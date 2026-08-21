@@ -96,8 +96,8 @@ pub use crate::injection::{
 pub use crate::keys::{HeadKey, ImmutableKey, KeyError, MAX_KEY_BYTES};
 pub use crate::outcome::{
     MAX_REPLAY_BATCHES, OUTCOME_KEY_PREFIX, OutcomeFailure, OutcomeLookup, PublicationOutcome,
-    TerminalOutcome, indexed_outcome, initialize_repository, outcome_key, publish_decisions,
-    replay_outcome, resolve_outcome,
+    TerminalOutcome, indexed_outcome, initialize_repository, outcome_index_root, outcome_key,
+    publish_decisions, replay_outcome, resolve_outcome,
 };
 pub use crate::reference::{MemoryAuthorityStore, MemoryStoreConfig};
 pub use crate::request::{
