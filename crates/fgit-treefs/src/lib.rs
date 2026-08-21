@@ -37,9 +37,11 @@
 //! * Discovery is not authorisation, and a capability can only ever be
 //!   narrowed.
 
+pub mod base;
 pub mod capability;
 pub mod path;
 
+pub use base::{BaseEntry, BaseError, BaseView, ObjectSource, ObjectSourceError};
 pub use capability::{
     CapabilityRefusal, ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId, WriteGrant,
 };
