@@ -164,6 +164,22 @@ pub struct PreparedCapsule {
     witnesses: BTreeSet<ConflictWitness>,
 }
 
+/// Canonical pre-publication outcome of one prepared attempt.
+///
+/// This is deliberately not a terminal repository decision: the authority
+/// decision stream alone publishes those. It records the immutable capsule
+/// result that either the direct-attempt or combined path hands to the next
+/// authority-owned stage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedAttemptOutcome {
+    transaction_id: TxId,
+    capsule_id: PreparedTxnCapsuleId,
+    priority: PriorityClass,
+    ready_at_tick: u64,
+    canonical_bytes: Vec<u8>,
+    witnesses: BTreeSet<ConflictWitness>,
+}
+
 impl PreparedCapsule {
     /// Creates a bounded, immutable prepared capsule descriptor.
     pub fn try_new(
@@ -247,6 +263,19 @@ impl PreparedCapsule {
     #[must_use]
     pub const fn canonical_len(&self) -> usize {
         self.canonical_bytes.len()
+    }
+
+    /// Produces the path-independent immutable result handed to publication.
+    #[must_use]
+    pub fn canonical_attempt_outcome(&self) -> PreparedAttemptOutcome {
+        PreparedAttemptOutcome {
+            transaction_id: self.transaction_id,
+            capsule_id: self.capsule_id,
+            priority: self.priority,
+            ready_at_tick: self.ready_at_tick,
+            canonical_bytes: self.canonical_bytes.clone(),
+            witnesses: self.witnesses.clone(),
+        }
     }
 }
 
@@ -765,6 +794,12 @@ impl DirectAttempt {
     #[must_use]
     pub const fn capsule(&self) -> &PreparedCapsule {
         &self.entry.capsule
+    }
+
+    /// Returns the immutable prepared result for the direct-attempt path.
+    #[must_use]
+    pub fn canonical_attempt_outcome(&self) -> PreparedAttemptOutcome {
+        self.entry.capsule.canonical_attempt_outcome()
     }
 
     /// Cancellation abandons the slot instead of dropping it.

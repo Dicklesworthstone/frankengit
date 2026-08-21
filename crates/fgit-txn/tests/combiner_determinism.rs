@@ -117,6 +117,22 @@ fn combine(
         .expect("bounded canonical inputs combine")
 }
 
+fn seeded_shuffle<T: Clone>(source: &[T], mut seed: u64) -> Vec<T> {
+    let mut indices = (0..source.len()).collect::<Vec<_>>();
+    for end in (1..indices.len()).rev() {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let modulus = u64::try_from(end + 1).expect("test permutation length fits u64");
+        let index = usize::try_from(seed % modulus).expect("bounded index fits usize");
+        indices.swap(end, index);
+    }
+    indices
+        .into_iter()
+        .map(|index| source[index].clone())
+        .collect()
+}
+
 #[test]
 fn seed_shuffled_inputs_preserve_batch_composition_and_decision_path() {
     let bounds = BatchBounds::try_new(8, 4_096, 10).expect("valid bounds");
@@ -126,14 +142,21 @@ fn seed_shuffled_inputs_preserve_batch_composition_and_decision_path() {
         capsule(4, 1, 3),
         capsule(2, 3, 4),
     ];
-    let permutations = [[0, 1, 2, 3], [3, 2, 1, 0], [1, 3, 0, 2], [2, 0, 3, 1]];
+    let seeds = [0x0D15_EA5E_u64, 0x0D15_EA5F, 0x0D15_EA60, 0x0D15_EA61];
     let mut expected = None;
-    for (offset, permutation) in permutations.iter().enumerate() {
+    let mut observed_input_orders = BTreeSet::new();
+    for (offset, seed) in seeds.into_iter().enumerate() {
         let ledger = ledger(1_000 + u64::try_from(offset).expect("small test offset"));
-        let shuffled = permutation
-            .iter()
-            .map(|&index| source[index].clone())
-            .collect();
+        let shuffled = seeded_shuffle(&source, seed);
+        assert!(
+            observed_input_orders.insert(
+                shuffled
+                    .iter()
+                    .map(PreparedCapsule::transaction_id)
+                    .collect::<Vec<_>>(),
+            ),
+            "each test seed must produce a distinct input permutation"
+        );
         let combination = combine(&ledger, LaneId::new(20), shuffled, bounds);
         let batch = combination.batch().expect("all inputs fit the batch");
         let observed = (
@@ -154,6 +177,10 @@ fn seed_shuffled_inputs_preserve_batch_composition_and_decision_path() {
         assert_eq!(ledger.leaks(), Vec::new());
         assert!(ledger.close().is_quiescent());
     }
+    assert!(
+        observed_input_orders.len() > 1,
+        "the test must exercise more than one seed-derived order"
+    );
 }
 
 #[test]
@@ -191,7 +218,6 @@ fn overlapping_witnesses_form_one_ordered_conflict_component() {
 fn direct_bypass_matches_the_same_capsule_on_the_combined_path() {
     let bounds = BatchBounds::try_new(1, 4_096, 10).expect("valid bounds");
     let candidate = capsule(9, 2, 9);
-    let candidate_id = candidate.capsule_id();
     let lower_sequence = capsule(8, 1, 8);
     let bypass_ledger = ledger(1_200);
     let combination = combine(
@@ -201,19 +227,21 @@ fn direct_bypass_matches_the_same_capsule_on_the_combined_path() {
         bounds,
     );
     assert_eq!(combination.bypasses().len(), 1);
-    let bypassed_id = combination.bypasses()[0].attempt().capsule().capsule_id();
-    assert_eq!(bypassed_id, candidate_id);
+    let bypass_outcome = combination.bypasses()[0]
+        .attempt()
+        .canonical_attempt_outcome();
 
     let direct_ledger = ledger(1_201);
     let direct = combine(&direct_ledger, LaneId::new(23), vec![candidate], bounds);
-    let combined_id = direct
+    let combined_outcomes = direct
         .batch()
         .expect("one capsule fits a batch")
-        .capsules()
-        .next()
-        .expect("combined batch has its selected capsule")
-        .capsule_id();
-    assert_eq!(bypassed_id, combined_id);
+        .canonical_attempt_outcomes();
+    assert_eq!(combined_outcomes.len(), 1);
+    assert_eq!(
+        bypass_outcome, combined_outcomes[0],
+        "the real direct and combined paths must hand publication the same canonical prepared outcome"
+    );
 
     let _cancelled = combination.cancel();
     let _cancelled = direct.cancel();

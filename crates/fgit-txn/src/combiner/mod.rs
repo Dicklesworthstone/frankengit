@@ -474,6 +474,18 @@ impl CombinedBatch {
         self.decision_path
     }
 
+    /// Immutable prepared outcomes selected for the combined path.
+    ///
+    /// These are pre-publication outcomes only. Final `Committed` or
+    /// `Refused` decisions remain owned by the authority decision stream.
+    #[must_use]
+    pub fn canonical_attempt_outcomes(&self) -> Vec<crate::lanes::PreparedAttemptOutcome> {
+        self.entries
+            .iter()
+            .map(|entry| entry.capsule.canonical_attempt_outcome())
+            .collect()
+    }
+
     /// Cancels every still-owned slot before any decision batch is attempted.
     #[must_use]
     pub fn cancel(self) -> Vec<SettledObligation<PreparedTxnSlot>> {
