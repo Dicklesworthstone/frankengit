@@ -2,22 +2,23 @@
 
 //! One-process FrankenGit node assembly.
 //!
-//! This crate composes published subsystem boundaries only.  The authority
-//! backend used by this first slice is the faultable in-memory reference
-//! profile, so it is deliberately not presented as durable deployment
-//! authority.  Git object bodies, by contrast, are placed through the local
-//! immutable object-fabric backend and are never represented by a node-owned
-//! map.
+//! This crate composes published subsystem boundaries only.  It opens the
+//! admitted embedded `FrankenSQLite` authority profile on the node-owned
+//! Asupersync runtime and places Git object bodies through the local immutable
+//! object-fabric backend. Neither backend is represented by a node-owned map.
+//!
+//! Database opening and clean shutdown run through the owned runtime during
+//! node lifecycle transitions. Authority operations themselves remain async:
+//! no synchronous request-path adapter is introduced around the async engine.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use fgit_authority::{
-    AuthorityStore, HeadInit, HeadKey, HeadRead, MemoryAuthorityStore, StoreInstanceId,
-    initialize_repository,
-};
-use fgit_codec::schema::RepositoryAuthorityHeadBody;
+use fgit_authority::{AuthorityLimits, HeadInit, HeadKey, HeadRead, StoreInstanceId, body_key};
+use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
+use fgit_codec::{schema::RepositoryAuthorityHeadBody, wire::encode_body};
 use fgit_crypto::{GitObjectKind, IdentityDomain, git_object_id, git_payload_commitment};
 use fgit_git_object::ObjectType;
 use fgit_object_fabric::fabric::{
@@ -29,16 +30,19 @@ use fgit_resource::{
     Grade, LeakDisposition, ObligationLedger, RegionCloseOutcome, RegionId, ResourceError,
     ResourceVector,
 };
-use fgit_runtime::{NodeRuntime, RuntimeProfile, RuntimeRefusal};
+use fgit_runtime::{BudgetClass, NodeRuntime, RuntimeProfile, RuntimeRefusal};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, GitHashAlgorithm, GitOid, HeadGeneration, PolicyEpoch,
     RegistryEpoch, RepositoryId, TenantId,
 };
+use fsqlite_types::cx::Cx as FsqliteCx;
 
 const OBJECT_CODEC_NAMESPACE: &[u8] = b"git-object-body/v1";
 const HEAD_KEY_PREFIX: &[u8] = b"frankengit/node/head/";
 const FABRIC_NAMESPACE_PREFIX: &[u8] = b"frankengit/node/object/";
 const DEFAULT_MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
+const AUTHORITY_DATABASE_FILE: &str = "authority.fsqlite";
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Typed refusal from the node assembly boundary.
 #[derive(Debug)]
@@ -49,14 +53,21 @@ pub enum NodeRefusal {
     InvalidWorkerCount,
     /// The runtime could not establish its finite production profile.
     Runtime(RuntimeRefusal),
-    /// Authority-head staging or initialization refused.
+    /// Authority-head staging or initialization refused or was ambiguous.
     Authority(fgit_authority::OutcomeFailure),
+    /// The operator-selected storage root cannot name the embedded database.
+    StoragePathEncoding,
     /// The derived authority-head key was outside the bounded key vocabulary.
     HeadKey(fgit_authority::KeyError),
-    /// A newly constructed reference authority unexpectedly held another head.
+    /// A newly constructed durable authority unexpectedly held another head.
     HeadInitializationConflict,
-    /// The authority backend refused a head read.
-    AuthorityRead(fgit_authority::AuthorityFailure),
+    /// Authority initialization failed and its explicit worker cleanup failed too.
+    AuthorityInitializationCleanup {
+        /// The initialization failure observed before cleanup.
+        initialization: Box<NodeRefusal>,
+        /// The failure while awaiting the authority worker's close.
+        cleanup: Box<NodeRefusal>,
+    },
     /// The local immutable object fabric refused the requested operation.
     Fabric(StoreRefusal),
     /// Object bytes exceeded this node's configured storage bound.
@@ -67,6 +78,8 @@ pub enum NodeRefusal {
     Resource(ResourceError),
     /// A storage effect failed to settle its obligation region.
     ResourceContainment,
+    /// The node root did not quiesce within its bounded shutdown interval.
+    RuntimeContainment,
     /// A fixed node identity handle failed its bounded representation.
     Identity(fgit_resource::IdentityError),
 }
@@ -78,11 +91,20 @@ impl Display for NodeRefusal {
             Self::InvalidWorkerCount => formatter.write_str("node worker count must be non-zero"),
             Self::Runtime(error) => Display::fmt(error, formatter),
             Self::Authority(error) => Display::fmt(error, formatter),
+            Self::StoragePathEncoding => formatter.write_str(
+                "node storage root cannot be represented as a UTF-8 embedded authority path",
+            ),
             Self::HeadKey(error) => Display::fmt(error, formatter),
             Self::HeadInitializationConflict => {
-                formatter.write_str("reference authority head conflicts during initialization")
+                formatter.write_str("durable authority head conflicts during initialization")
             }
-            Self::AuthorityRead(error) => Display::fmt(error, formatter),
+            Self::AuthorityInitializationCleanup {
+                initialization,
+                cleanup,
+            } => write!(
+                formatter,
+                "authority initialization failed ({initialization}) and explicit cleanup failed ({cleanup})"
+            ),
             Self::Fabric(error) => Display::fmt(error, formatter),
             Self::ObjectTooLarge { offered, maximum } => {
                 write!(
@@ -97,6 +119,9 @@ impl Display for NodeRefusal {
             Self::ResourceContainment => {
                 formatter.write_str("object placement region did not reach quiescence")
             }
+            Self::RuntimeContainment => {
+                formatter.write_str("node runtime did not reach quiescence during shutdown")
+            }
             Self::Identity(error) => Display::fmt(error, formatter),
         }
     }
@@ -108,16 +133,18 @@ impl Error for NodeRefusal {
             Self::Runtime(error) => Some(error),
             Self::Authority(error) => Some(error),
             Self::HeadKey(error) => Some(error),
-            Self::AuthorityRead(error) => Some(error),
+            Self::AuthorityInitializationCleanup { initialization, .. } => Some(initialization),
             Self::Fabric(error) => Some(error),
             Self::Resource(error) => Some(error),
             Self::Identity(error) => Some(error),
             Self::EmptyStorageRoot
             | Self::InvalidWorkerCount
             | Self::HeadInitializationConflict
+            | Self::StoragePathEncoding
             | Self::ObjectTooLarge { .. }
             | Self::ObjectLengthOverflow
-            | Self::ResourceContainment => None,
+            | Self::ResourceContainment
+            | Self::RuntimeContainment => None,
         }
     }
 }
@@ -196,8 +223,8 @@ pub enum NodeInitialization {
 /// for receive admission has not yet been published as a production surface.
 #[derive(Debug)]
 pub struct OneNode {
-    runtime: NodeRuntime,
-    authority: MemoryAuthorityStore,
+    authority: FsqliteAuthorityStore,
+    authority_cx: FsqliteCx,
     head_key: HeadKey,
     fabric: LocalFilesystemFabric,
     tenant_id: TenantId,
@@ -206,14 +233,17 @@ pub struct OneNode {
     object_format: GitHashAlgorithm,
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
+    // Kept last so an unexpected drop releases the authority context before
+    // the runtime that owns its attached native context.
+    runtime: NodeRuntime,
 }
 
 impl OneNode {
-    /// Initializes the authority head and opens the bounded object-fabric namespace.
+    /// Opens the durable authority store and initializes its first head when absent.
     ///
-    /// The memory authority store is intentionally a reference/fault profile:
-    /// it proves one-process protocol composition but does not claim persistence
-    /// across node restart.
+    /// Runtime blocking here is only node lifecycle work. Request operations
+    /// such as [`Self::read_authority_head`] remain async over the runtime-owned
+    /// database context.
     pub fn init(config: NodeConfig) -> Result<(Self, NodeInitialization), NodeRefusal> {
         if config.storage_root.as_os_str().is_empty() {
             return Err(NodeRefusal::EmptyStorageRoot);
@@ -225,6 +255,7 @@ impl OneNode {
         let runtime = RuntimeProfile::production(config.worker_threads)
             .build()
             .map_err(NodeRefusal::Runtime)?;
+        let authority_path = authority_database_path(&config.storage_root)?;
         let namespace = object_namespace(config.repository_id);
         let failure_domain = fgit_resource::OpaqueHandle::new(b"node-local-filesystem")
             .map_err(NodeRefusal::Identity)?;
@@ -240,21 +271,54 @@ impl OneNode {
         ))
         .map_err(NodeRefusal::Fabric)?;
 
-        let authority = MemoryAuthorityStore::new(config.store_instance);
         let head_key = head_key(config.repository_id)?;
         let genesis = genesis_head(config.repository_id);
-        let initialization = match initialize_repository(&authority, &head_key, &genesis)
-            .map_err(NodeRefusal::Authority)?
-        {
-            HeadInit::Created(_) => NodeInitialization::Created,
-            HeadInit::IdenticalRetry(_) => NodeInitialization::IdenticalRetry,
-            HeadInit::Conflict => return Err(NodeRefusal::HeadInitializationConflict),
+        let authority_native_cx = runtime.request_cx(BudgetClass::Database);
+        let authority_cx = FsqliteCx::new();
+        // The database context retains this clone, making the binding to the
+        // node-owned runtime explicit rather than relying on task-local state.
+        authority_cx.set_native_cx(authority_native_cx);
+        let mut authority = runtime
+            .block_on(FsqliteAuthorityStore::open(
+                &authority_cx,
+                authority_path,
+                config.store_instance,
+                AuthorityLimits::default(),
+            ))
+            .map_err(authority_engine_refusal)?;
+        let initialization = match initialize_embedded_repository(
+            &runtime,
+            &authority,
+            &authority_cx,
+            &head_key,
+            &genesis,
+        ) {
+            Ok(HeadInit::Created(_)) => Ok(NodeInitialization::Created),
+            Ok(HeadInit::IdenticalRetry(_)) => Ok(NodeInitialization::IdenticalRetry),
+            Ok(HeadInit::Conflict) => Err(NodeRefusal::HeadInitializationConflict),
+            Err(error) => Err(error),
+        };
+        let initialization = match initialization {
+            Ok(initialization) => initialization,
+            Err(initialization) => {
+                let cleanup = runtime
+                    .block_on(authority.close(&authority_cx))
+                    .map_err(authority_engine_refusal);
+                return match cleanup {
+                    Ok(()) => Err(initialization),
+                    Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
+                        initialization: Box::new(initialization),
+                        cleanup: Box::new(cleanup),
+                    }),
+                };
+            }
         };
 
         Ok((
             Self {
                 runtime,
                 authority,
+                authority_cx,
                 head_key,
                 fabric,
                 tenant_id: config.tenant_id,
@@ -287,10 +351,27 @@ impl OneNode {
     }
 
     /// Reads the current authority-selected head; the object fabric is not authority.
-    pub fn read_authority_head(&self) -> Result<HeadRead, NodeRefusal> {
+    pub async fn read_authority_head(&self) -> Result<HeadRead, NodeRefusal> {
         self.authority
-            .read_head(&self.head_key)
-            .map_err(NodeRefusal::AuthorityRead)
+            .read_head(&self.authority_cx, &self.head_key)
+            .await
+            .map_err(authority_engine_refusal)
+    }
+
+    /// Awaits authority-worker closure and then joins the owning runtime.
+    ///
+    /// Callers that obtain a node must use this before dropping it so a clean
+    /// stop has an observed quiescence result instead of relying on the
+    /// database driver's drop-time backstop.
+    pub fn shutdown(mut self) -> Result<(), NodeRefusal> {
+        self.runtime
+            .block_on(self.authority.close(&self.authority_cx))
+            .map_err(authority_engine_refusal)?;
+        if self.runtime.join_root(SHUTDOWN_TIMEOUT) {
+            Ok(())
+        } else {
+            Err(NodeRefusal::RuntimeContainment)
+        }
     }
 
     /// Validates and immutably places one native Git object through object fabric.
@@ -381,6 +462,39 @@ fn head_key(repository_id: RepositoryId) -> Result<HeadKey, NodeRefusal> {
     HeadKey::new(bytes).map_err(NodeRefusal::HeadKey)
 }
 
+fn authority_database_path(storage_root: &Path) -> Result<String, NodeRefusal> {
+    storage_root
+        .join(AUTHORITY_DATABASE_FILE)
+        .into_os_string()
+        .into_string()
+        .map_err(|_| NodeRefusal::StoragePathEncoding)
+}
+
+fn authority_engine_refusal(error: EngineError) -> NodeRefusal {
+    NodeRefusal::Authority(error.into_failure().into())
+}
+
+fn initialize_embedded_repository(
+    runtime: &NodeRuntime,
+    authority: &FsqliteAuthorityStore,
+    authority_cx: &FsqliteCx,
+    head_key: &HeadKey,
+    genesis: &RepositoryAuthorityHeadBody,
+) -> Result<HeadInit, NodeRefusal> {
+    let immutable_key = body_key(IdentityDomain::RepositoryAuthorityHead, genesis)
+        .map_err(|error| NodeRefusal::Authority(error.into()))?;
+    let body = encode_body(genesis).map_err(|error| NodeRefusal::Authority(error.into()))?;
+    runtime
+        .block_on(authority.put_if_absent(authority_cx, &immutable_key, &body))
+        .map_err(authority_engine_refusal)?;
+    let generation = HeadGeneration::try_new(genesis.generation.get()).map_err(|error| {
+        NodeRefusal::Authority(fgit_authority::OutcomeFailure::Codec(error.into()))
+    })?;
+    runtime
+        .block_on(authority.initialize_head(authority_cx, head_key, generation, &body))
+        .map_err(authority_engine_refusal)
+}
+
 fn object_namespace(repository_id: RepositoryId) -> Vec<u8> {
     let mut namespace =
         Vec::with_capacity(FABRIC_NAMESPACE_PREFIX.len() + repository_id.as_bytes().len());
@@ -441,4 +555,75 @@ const fn crypto_object_kind(object_type: ObjectType) -> GitObjectKind {
 
 fn placement_resources(object_bytes: u64) -> ResourceVector {
     ResourceVector::from_grades(&[(Grade::Bytes, object_bytes.max(1)), (Grade::Objects, 1)])
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use fgit_authority::HeadRead;
+    use fgit_types::{RepositoryId, TenantId};
+
+    use super::{NodeConfig, NodeInitialization, OneNode};
+
+    static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+    struct ScratchDirectory {
+        root: PathBuf,
+    }
+
+    impl ScratchDirectory {
+        fn new() -> Self {
+            let sequence = NEXT_SCRATCH_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "frankengit-node-authority-{}-{sequence}",
+                std::process::id()
+            ));
+            Self { root }
+        }
+
+        fn path(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    impl Drop for ScratchDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn test_config(root: PathBuf) -> NodeConfig {
+        NodeConfig::new(
+            root,
+            TenantId::from_bytes([0x11; 16]),
+            RepositoryId::from_bytes([0x22; 16]),
+        )
+    }
+
+    #[test]
+    fn clean_restart_uses_the_same_durable_authority_head() {
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf());
+
+        let (first, first_init) = OneNode::init(config.clone()).expect("first node opens");
+        assert_eq!(first_init, NodeInitialization::Created);
+        let first_head = first
+            .runtime()
+            .block_on(first.read_authority_head())
+            .expect("first head reads");
+        assert!(matches!(&first_head, HeadRead::Present(_)));
+        first.shutdown().expect("first node closes cleanly");
+
+        let (second, second_init) = OneNode::init(config).expect("reopened node opens");
+        assert_eq!(second_init, NodeInitialization::IdenticalRetry);
+        let second_head = second
+            .runtime()
+            .block_on(second.read_authority_head())
+            .expect("reopened head reads");
+        assert_eq!(second_head, first_head);
+        second.shutdown().expect("reopened node closes cleanly");
+    }
 }

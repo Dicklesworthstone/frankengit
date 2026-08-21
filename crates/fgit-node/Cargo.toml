@@ -9,6 +9,7 @@ description = "One-process FrankenGit node assembly over published subsystem con
 
 [dependencies]
 fgit-authority.workspace = true
+fgit-authority-fsqlite.workspace = true
 fgit-codec.workspace = true
 fgit-crypto.workspace = true
 fgit-git-object.workspace = true
@@ -16,6 +17,10 @@ fgit-object-fabric.workspace = true
 fgit-resource.workspace = true
 fgit-runtime.workspace = true
 fgit-types.workspace = true
+# This names the FrankenSQLite context held for the authority store lifetime.
+# It is already in the admitted fsqlite authority closure (DEP-202), so this
+# direct edge adds no new dependency surface.
+fsqlite-types = { version = "0.3.7", default-features = false, features = ["native"] }
 
 [lints]
 workspace = true

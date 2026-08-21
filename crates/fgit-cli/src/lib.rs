@@ -59,12 +59,13 @@ pub fn run(arguments: &[String]) -> Result<NodeInitialization, CliRefusal> {
             let tenant_id = TenantId::from_hex(tenant).map_err(CliRefusal::Tenant)?;
             let repository_id =
                 RepositoryId::from_hex(repository).map_err(CliRefusal::Repository)?;
-            let (_node, initialization) = OneNode::init(NodeConfig::new(
+            let (node, initialization) = OneNode::init(NodeConfig::new(
                 PathBuf::from(storage_root),
                 tenant_id,
                 repository_id,
             ))
             .map_err(CliRefusal::Node)?;
+            node.shutdown().map_err(CliRefusal::Node)?;
             Ok(initialization)
         }
         _ => Err(CliRefusal::Usage),

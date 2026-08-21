@@ -718,6 +718,7 @@ name = "fgit-node"
 version = "0.0.1"
 dependencies = [
  "fgit-authority",
+ "fgit-authority-fsqlite",
  "fgit-codec",
  "fgit-crypto",
  "fgit-git-object",
@@ -725,6 +726,7 @@ dependencies = [
  "fgit-resource",
  "fgit-runtime",
  "fgit-types",
+ "fsqlite-types",
 ]
 
 [[package]]
