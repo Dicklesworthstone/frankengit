@@ -372,6 +372,8 @@ pub enum AdmissionError {
     MaterializationMismatch(&'static str),
     /// A terminal decision published but its TxId could not be resolved.
     PublishedOutcomeMissing,
+    /// A pre-CAS duplicate verdict omitted the terminal outcome for this request.
+    AlreadyDecidedOutcomeMissing,
     /// Bounded re-planning made no terminal decision.
     CasReplanLimitExceeded { limit: usize },
 }
@@ -418,6 +420,8 @@ impl Display for AdmissionError {
             Self::PublishedOutcomeMissing => {
                 formatter.write_str("published transaction has no authenticated terminal outcome")
             }
+            Self::AlreadyDecidedOutcomeMissing => formatter
+                .write_str("pre-CAS duplicate verdict omitted the authenticated terminal outcome"),
             Self::CasReplanLimitExceeded { limit } => {
                 write!(formatter, "head CAS re-plan limit {limit} exhausted")
             }
@@ -961,6 +965,20 @@ fn refusal_record_id(record: &RefusalRecordBody) -> Result<RefusalRecordId, Admi
         })
 }
 
+/// Selects the already-canonical terminal outcome for this publication's TxId.
+///
+/// A pre-CAS duplicate is a successful idempotent retry: returning a fresh
+/// lookup result or replanning it could conceal the existing terminal decision.
+fn already_decided_terminal(
+    tx_id: TxId,
+    decided: Vec<(TxId, fgit_authority::TerminalOutcome)>,
+) -> Result<fgit_authority::TerminalOutcome, AdmissionError> {
+    decided
+        .into_iter()
+        .find_map(|(decided_tx_id, terminal)| (decided_tx_id == tx_id).then_some(terminal))
+        .ok_or(AdmissionError::AlreadyDecidedOutcomeMissing)
+}
+
 fn outcome_after_publish<S>(
     store: &S,
     context: &AdmissionContext,
@@ -970,6 +988,12 @@ fn outcome_after_publish<S>(
 where
     S: AuthorityStore + ?Sized,
 {
+    let tx_id = publication
+        .batch()
+        .decisions
+        .first()
+        .map(|decision| decision.tx_id)
+        .ok_or(AdmissionError::PublishedOutcomeMissing)?;
     match publish(
         store,
         &context.head_key,
@@ -978,12 +1002,6 @@ where
         context.tenant_id,
     )? {
         PublicationVerdict::Published(_) | PublicationVerdict::Lost(_) => {
-            let tx_id = publication
-                .batch()
-                .decisions
-                .first()
-                .map(|decision| decision.tx_id)
-                .ok_or(AdmissionError::PublishedOutcomeMissing)?;
             match fgit_authority::resolve_outcome(
                 store,
                 &context.head_key,
@@ -994,6 +1012,9 @@ where
                 OutcomeLookup::Decided(terminal) => Ok(Some(terminal)),
                 OutcomeLookup::Undecided => Ok(None),
             }
+        }
+        PublicationVerdict::AlreadyDecided { decided } => {
+            Ok(Some(already_decided_terminal(tx_id, decided)?))
         }
     }
 }
@@ -1304,6 +1325,34 @@ mod tests {
             body.latest_repository_sequence,
             Some(RepositorySequence::FIRST)
         );
+    }
+
+    #[test]
+    fn already_decided_returns_the_existing_terminal_outcome_for_its_txid() {
+        let context = context();
+        let store = store_with_genesis(&context);
+        let projection = FixtureProjection::default();
+        let completion = completion(vec![create(b"refs/heads/main", 61)], true);
+        let admitted = admit_validated_receive(
+            &store,
+            &context,
+            &completion,
+            AdmissionLimits::default(),
+            &projection,
+        )
+        .expect("fixture admission commits once");
+
+        let tx_id = admitted.session.tx_ids[0];
+        let terminal = admitted.commands[0].terminal;
+        assert_eq!(
+            already_decided_terminal(tx_id, vec![(tx_id, terminal)])
+                .expect("a duplicate must surface its existing terminal outcome"),
+            terminal
+        );
+        assert!(matches!(
+            already_decided_terminal(tx_id, Vec::new()),
+            Err(AdmissionError::AlreadyDecidedOutcomeMissing)
+        ));
     }
 
     #[test]
