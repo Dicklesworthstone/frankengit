@@ -190,40 +190,6 @@ fn prepare_publication(
     (receipt.token(), decision_batch, decision_head)
 }
 
-/// Locate the authority transition in an identically constructed, unfaulted
-/// publication.  Fault plans count every store operation, while the intent of
-/// the recovery scenarios below is specifically to lose or crash *after* the
-/// head replacement.  A pre-CAS stream replay is allowed to add reads, so a
-/// hard-coded global operation index would silently stop injecting the fault.
-fn locate_publication_cas_index(key: &[u8], oid: u8) -> OpIndex {
-    let twin = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x70FF));
-    let admitted = seal_request(&twin, &attempt(key, oid)).expect("twin seal");
-    let (expected, decision_batch, decision_head) = prepare_publication(&twin, admitted.tx_id());
-
-    // `install_fault_plan` resets the operation/effect logs.  The subsequent
-    // index is therefore relative to exactly the publication the real test
-    // will fault, rather than to setup operations such as sealing or genesis.
-    twin.install_fault_plan(FaultPlan::none());
-    assert!(matches!(
-        publish_decisions(
-            &twin,
-            &authority_head_key(),
-            expected,
-            &decision_batch,
-            &decision_head,
-            tenant(),
-        )
-        .expect("unfaulted twin publication"),
-        PublicationOutcome::Published(_)
-    ));
-    twin.effect_log()
-        .records()
-        .iter()
-        .find(|record| record.op_kind == AuthorityOpKind::CompareExchangeHead)
-        .map(|record| record.at)
-        .expect("one publication must reach the authority head transition")
-}
-
 fn assert_cas_fault_reached(store: &MemoryAuthorityStore, expected: FaultKind) {
     let fault_log = store.fault_log();
     let mut cas_faults = fault_log
@@ -464,18 +430,18 @@ fn crash_after_seal_before_decision_preserves_a_retryable_undecided_transaction(
 
 #[test]
 fn lost_cas_response_retries_to_the_same_replayed_terminal_outcome() {
-    let cas_index = locate_publication_cas_index(b"lost-cas-response", 0xA1);
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7010));
     let request = attempt(b"lost-cas-response", 0xA1);
     let admitted = seal_request(&store, &request).expect("seal");
     let (expected, decision_batch, decision_head) = prepare_publication(&store, admitted.tx_id());
 
-    // Inject after the actual authority transition, even if protocol-required
+    // Inject after the first authority transition, even if protocol-required
     // reads change the global operation sequence.
-    store.install_fault_plan(FaultPlan::explicit(vec![
-        FaultDirective::new(cas_index, FaultKind::LoseResponse)
-            .only_for(AuthorityOpKind::CompareExchangeHead),
-    ]));
+    store.install_fault_plan(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
+        0,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::LoseResponse,
+    )]));
     let failure = publish_decisions(
         &store,
         &authority_head_key(),
@@ -540,21 +506,18 @@ fn lost_cas_response_retries_to_the_same_replayed_terminal_outcome() {
 
 #[test]
 fn crash_after_cas_restarts_to_the_same_terminal_outcome_without_an_index_entry() {
-    let cas_index = locate_publication_cas_index(b"crash-after-cas", 0xA1);
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7011));
     let request = attempt(b"crash-after-cas", 0xA1);
     let admitted = seal_request(&store, &request).expect("seal");
     let (expected, decision_batch, decision_head) = prepare_publication(&store, admitted.tx_id());
 
-    store.install_fault_plan(FaultPlan::explicit(vec![
-        FaultDirective::new(
-            cas_index,
-            FaultKind::Crash {
-                position: FaultPosition::AfterEffect,
-            },
-        )
-        .only_for(AuthorityOpKind::CompareExchangeHead),
-    ]));
+    store.install_fault_plan(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
+        0,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::Crash {
+            position: FaultPosition::AfterEffect,
+        },
+    )]));
     let failure = publish_decisions(
         &store,
         &authority_head_key(),
@@ -665,16 +628,16 @@ fn missing_accelerator_after_a_lost_response_cannot_admit_a_second_terminal() {
     // accelerator write.  Publisher A then sees B's new head and an absent
     // accelerator; a non-atomic precheck would admit A's different decision
     // and create a second terminal decision in authenticated history.
-    let cas_index = locate_publication_cas_index(b"lost-response-then-duplicate", 0xA1);
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7016));
     let request = attempt(b"lost-response-then-duplicate", 0xA1);
     let admitted = seal_request(&store, &request).expect("seal");
     let (first_expected, first_batch, first_head) = prepare_publication(&store, admitted.tx_id());
 
-    store.install_fault_plan(FaultPlan::explicit(vec![
-        FaultDirective::new(cas_index, FaultKind::LoseResponse)
-            .only_for(AuthorityOpKind::CompareExchangeHead),
-    ]));
+    store.install_fault_plan(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
+        0,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::LoseResponse,
+    )]));
     let first_failure = publish_decisions(
         &store,
         &authority_head_key(),
