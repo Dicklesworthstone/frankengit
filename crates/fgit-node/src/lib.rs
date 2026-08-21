@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fgit_authority::{
-    AuthenticatedHead, AuthorityLimits, HeadInit, HeadKey, HeadRead, StoreInstanceId, body_key,
+    AsyncAuthorityStore, AuthenticatedHead, AuthorityLimits, HeadInit, HeadKey, HeadRead,
+    StoreInstanceId, body_key,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
 use fgit_codec::{schema::RepositoryAuthorityHeadBody, wire::encode_body};
@@ -856,6 +857,28 @@ pub struct DoctorReport {
     sampled_object: Option<GitOid>,
 }
 
+/// Request-owned authority context for one node operation.
+///
+/// The embedded authority binding requires FrankenSQLite's capability context,
+/// while node request cancellation and budget ownership come from the
+/// node-owned Asupersync runtime. This wrapper keeps that bridge alive for the
+/// whole request without storing it on [`FsqliteAuthorityStore`] or reusing a
+/// node-lifetime database context for request work.
+///
+/// It intentionally exposes no direct database operation: node operations
+/// take this value explicitly, so a future raw-socket gateway can carry the
+/// same bounded request context through authenticated authority reads and the
+/// canonical admission projection. It does not itself materialize refs.
+pub struct NodeRequestContext {
+    authority: FsqliteCx,
+}
+
+impl NodeRequestContext {
+    fn authority(&self) -> &FsqliteCx {
+        &self.authority
+    }
+}
+
 impl DoctorReport {
     /// The current authority receipt authenticated by the embedded store.
     #[must_use]
@@ -878,7 +901,7 @@ impl DoctorReport {
 #[derive(Debug)]
 pub struct OneNode {
     authority: FsqliteAuthorityStore,
-    authority_cx: FsqliteCx,
+    lifecycle_cx: FsqliteCx,
     head_key: HeadKey,
     fabric: LocalFilesystemFabric,
     tenant_id: TenantId,
@@ -887,7 +910,7 @@ pub struct OneNode {
     object_format: GitHashAlgorithm,
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
-    // Kept last so an unexpected drop releases the authority context before
+    // Kept last so an unexpected drop releases the lifecycle context before
     // the runtime that owns its attached native context.
     runtime: NodeRuntime,
 }
@@ -904,7 +927,7 @@ impl OneNode {
         let initialization = match initialize_embedded_repository(
             &node.runtime,
             &node.authority,
-            &node.authority_cx,
+            &node.lifecycle_cx,
             &node.head_key,
             &genesis,
         ) {
@@ -971,14 +994,14 @@ impl OneNode {
         .map_err(NodeRefusal::Fabric)?;
 
         let head_key = head_key(config.repository_id)?;
-        let authority_native_cx = runtime.request_cx(BudgetClass::Database);
-        let authority_cx = FsqliteCx::new();
-        // The database context retains this clone, making the binding to the
-        // node-owned runtime explicit rather than relying on task-local state.
-        authority_cx.set_native_cx(authority_native_cx);
+        let lifecycle_native_cx = runtime.request_cx(BudgetClass::Database);
+        let lifecycle_cx = FsqliteCx::new();
+        // Opening and closing the dedicated authority worker are node lifecycle
+        // operations. Request reads deliberately mint their own contexts below.
+        lifecycle_cx.set_native_cx(lifecycle_native_cx);
         let authority = runtime
             .block_on(FsqliteAuthorityStore::open(
-                &authority_cx,
+                &lifecycle_cx,
                 authority_path,
                 config.store_instance,
                 AuthorityLimits::default(),
@@ -987,7 +1010,7 @@ impl OneNode {
         Ok(Self {
             runtime,
             authority,
-            authority_cx,
+            lifecycle_cx,
             head_key,
             fabric,
             tenant_id: config.tenant_id,
@@ -1017,12 +1040,41 @@ impl OneNode {
         self.repository_id
     }
 
-    /// Reads the current authority-selected head; the object fabric is not authority.
-    pub async fn read_authority_head(&self) -> Result<HeadRead, NodeRefusal> {
-        self.authority
-            .read_head(&self.authority_cx, &self.head_key)
+    /// Mints the bounded authority context for one node request.
+    ///
+    /// Each call creates a new FrankenSQLite context attached to a fresh
+    /// `BudgetClass::Request` Asupersync context. The returned value must stay
+    /// alive while its matching node operations are awaited; it is never saved
+    /// in the authority store or shared with another request.
+    #[must_use]
+    pub fn request_context(&self) -> NodeRequestContext {
+        let authority = FsqliteCx::new();
+        authority.set_native_cx(self.runtime.request_cx(BudgetClass::Request));
+        NodeRequestContext { authority }
+    }
+
+    /// Reads the current authority-selected head in `request`.
+    ///
+    /// The authority call is made through the production async contract. The
+    /// object fabric is not authority, and this does not decode the head body
+    /// into refs or provide an upload-pack repository.
+    pub async fn read_authority_head_in(
+        &self,
+        request: &NodeRequestContext,
+    ) -> Result<HeadRead, NodeRefusal> {
+        AsyncAuthorityStore::read_head(&self.authority, request.authority(), &self.head_key)
             .await
-            .map_err(authority_engine_refusal)
+            .map_err(authority_failure_refusal)
+    }
+
+    /// Reads the current authority-selected head with a fresh bounded context.
+    ///
+    /// Services that execute more than one authority operation for the same
+    /// request should call [`Self::request_context`] once and use
+    /// [`Self::read_authority_head_in`] instead.
+    pub async fn read_authority_head(&self) -> Result<HeadRead, NodeRefusal> {
+        let request = self.request_context();
+        self.read_authority_head_in(&request).await
     }
 
     /// Re-reads and authenticates the current authority-head receipt.
@@ -1031,14 +1083,27 @@ impl OneNode {
     /// generation, and body presented in the read receipt. It does not prove
     /// that this receipt is current after the read, so callers still need CAS
     /// for publication.
-    pub async fn authenticate_authority_head(&self) -> Result<AuthenticatedHead, NodeRefusal> {
-        let HeadRead::Present(receipt) = self.read_authority_head().await? else {
+    pub async fn authenticate_authority_head_in(
+        &self,
+        request: &NodeRequestContext,
+    ) -> Result<AuthenticatedHead, NodeRefusal> {
+        let HeadRead::Present(receipt) = self.read_authority_head_in(request).await? else {
             return Err(NodeRefusal::AuthorityHeadAbsent);
         };
-        self.authority
-            .authenticate_head_receipt(&self.authority_cx, &receipt)
-            .await
-            .map_err(authority_engine_refusal)
+        AsyncAuthorityStore::authenticate_head_receipt(
+            &self.authority,
+            request.authority(),
+            &receipt,
+        )
+        .await
+        .map_err(authority_failure_refusal)
+    }
+
+    /// Re-reads and authenticates the current authority-head receipt with a
+    /// fresh bounded request context.
+    pub async fn authenticate_authority_head(&self) -> Result<AuthenticatedHead, NodeRefusal> {
+        let request = self.request_context();
+        self.authenticate_authority_head_in(&request).await
     }
 
     /// Performs the currently published bounded doctor checks.
@@ -1047,11 +1112,12 @@ impl OneNode {
     /// directory listing. It is accepted only in this node's declared native
     /// Git identity domain, then read through fabric's verified-whole-read
     /// boundary. No sample means authority-head authentication only.
-    pub async fn doctor(
+    pub async fn doctor_in(
         &self,
+        request: &NodeRequestContext,
         sampled_object: Option<GitOid>,
     ) -> Result<DoctorReport, NodeRefusal> {
-        let authority_head = self.authenticate_authority_head().await?;
+        let authority_head = self.authenticate_authority_head_in(request).await?;
         if let Some(identity) = sampled_object {
             let _ = self.read_git_object(identity)?;
         }
@@ -1061,6 +1127,16 @@ impl OneNode {
         })
     }
 
+    /// Performs the currently published bounded doctor checks with a fresh
+    /// bounded request context.
+    pub async fn doctor(
+        &self,
+        sampled_object: Option<GitOid>,
+    ) -> Result<DoctorReport, NodeRefusal> {
+        let request = self.request_context();
+        self.doctor_in(&request, sampled_object).await
+    }
+
     /// Awaits authority-worker closure and then joins the owning runtime.
     ///
     /// Callers that obtain a node must use this before dropping it so a clean
@@ -1068,7 +1144,7 @@ impl OneNode {
     /// database driver's drop-time backstop.
     pub fn shutdown(mut self) -> Result<(), NodeRefusal> {
         self.runtime
-            .block_on(self.authority.close(&self.authority_cx))
+            .block_on(self.authority.close(&self.lifecycle_cx))
             .map_err(authority_engine_refusal)?;
         if self.runtime.join_root(SHUTDOWN_TIMEOUT) {
             Ok(())
@@ -1190,6 +1266,10 @@ fn authority_database_path(storage_root: &Path) -> Result<String, NodeRefusal> {
 
 fn authority_engine_refusal(error: EngineError) -> NodeRefusal {
     NodeRefusal::Authority(error.into_failure().into())
+}
+
+fn authority_failure_refusal(error: fgit_authority::AuthorityFailure) -> NodeRefusal {
+    NodeRefusal::Authority(error.into())
 }
 
 fn initialize_embedded_repository(
@@ -1595,18 +1675,20 @@ mod tests {
 
         let (first, first_init) = OneNode::init(config.clone()).expect("first node opens");
         assert_eq!(first_init, NodeInitialization::Created);
+        let first_request = first.request_context();
         let first_head = first
             .runtime()
-            .block_on(first.read_authority_head())
+            .block_on(first.read_authority_head_in(&first_request))
             .expect("first head reads");
         assert!(matches!(&first_head, HeadRead::Present(_)));
         first.shutdown().expect("first node closes cleanly");
 
         let (second, second_init) = OneNode::init(config).expect("reopened node opens");
         assert_eq!(second_init, NodeInitialization::IdenticalRetry);
+        let second_request = second.request_context();
         let second_head = second
             .runtime()
-            .block_on(second.read_authority_head())
+            .block_on(second.read_authority_head_in(&second_request))
             .expect("reopened head reads");
         assert_eq!(second_head, first_head);
         second.shutdown().expect("reopened node closes cleanly");
@@ -1620,9 +1702,10 @@ mod tests {
         let stored = node
             .put_git_object(fgit_git_object::ObjectType::Blob, b"doctor sample".to_vec())
             .expect("sample stores");
+        let request = node.request_context();
         let report = node
             .runtime()
-            .block_on(node.doctor(Some(stored.identity())))
+            .block_on(node.doctor_in(&request, Some(stored.identity())))
             .expect("doctor authenticates and verifies the named sample");
         assert_eq!(report.sampled_object(), Some(stored.identity()));
         assert_eq!(
@@ -1632,9 +1715,10 @@ mod tests {
         node.shutdown().expect("node closes cleanly");
 
         let reopened = OneNode::open_existing(config).expect("existing head opens");
+        let reopened_request = reopened.request_context();
         let reopened_report = reopened
             .runtime()
-            .block_on(reopened.doctor(None))
+            .block_on(reopened.doctor_in(&reopened_request, None))
             .expect("doctor authenticates reopened head");
         assert_eq!(
             reopened_report.authority_head().receipt().generation(),
