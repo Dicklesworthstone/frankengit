@@ -280,9 +280,11 @@ product.
 
 - First-party crates live at `crates/fgit-<name>/` with package name
   `fgit-<name>`; the constitutional checker stays at `tools/registry-check/`.
-  Add a new crate to both `members` and `default-members` in the root
-  `Cargo.toml` under an Agent Mail reservation (a one-line edit; commit it
-  at once and release the reservation).
+  The workspace admits `crates/*` by glob, so every directory under
+  `crates/` MUST be a complete crate: create `src/lib.rs` (with
+  `#![forbid(unsafe_code)]`) before `Cargo.toml`, and add the crate's
+  `[workspace.dependencies]` path entry in the same commit (one-line edit
+  under an Agent Mail reservation). Consumers write `<crate>.workspace = true`.
 - Swarm agents share ONE checkout on `main`. Reserve shared files through
   Agent Mail before editing them (`Cargo.toml`, `registries/*.tsv`,
   `AGENTS.md`, `scripts/e2e/lib.sh`, `tools/registry-check/**`, another
