@@ -149,6 +149,29 @@ fn a_signature_does_not_move_the_production_identity_either() {
 }
 
 #[test]
+fn the_corpus_algorithm_slot_stays_inside_the_range_fgit_crypto_reserved() {
+    // The corpus identity function is deliberately non-cryptographic and lives
+    // at a slot fgit-crypto has reserved for harness use. Asserting the two
+    // agree here means neither side can drift into the other's range without
+    // a test failing, rather than the reservation living only in two mails.
+    assert!(
+        fgit_crypto::CORPUS_RESERVED_CODE_POINTS.contains(&support::CORPUS_ALGORITHM_CODE_POINT),
+        "the corpus slot {:#06x} escaped the reserved range {:#06x}..={:#06x}",
+        support::CORPUS_ALGORITHM_CODE_POINT,
+        fgit_crypto::CORPUS_RESERVED_CODE_POINTS.start(),
+        fgit_crypto::CORPUS_RESERVED_CODE_POINTS.end(),
+    );
+    // And no registered construction may sit there.
+    assert!(
+        fgit_crypto::DigestAlgorithm::ALL
+            .iter()
+            .all(|algorithm| !fgit_crypto::CORPUS_RESERVED_CODE_POINTS
+                .contains(&algorithm.code_point())),
+        "a production algorithm landed in the corpus-reserved range"
+    );
+}
+
+#[test]
 fn every_body_domain_this_crate_uses_is_registered() {
     // A body whose domain has no registry row would be unidentifiable at
     // runtime; catching that here rather than at first use is the point.
