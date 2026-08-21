@@ -112,12 +112,12 @@ impl std::error::Error for CollisionDefenseError {}
 ///
 /// Monomorphising over this trait keeps the unscreened path free of dynamic
 /// dispatch while letting the screened path see real internal state.
-pub(crate) trait BlockObserver {
+pub trait BlockObserver {
     fn observe(&mut self, context: &Sha1BlockContext<'_>) -> BlockVerdict;
 }
 
 /// Observer used when no collision detector is installed.
-pub(crate) struct UnobservedBlocks;
+pub struct UnobservedBlocks;
 
 impl BlockObserver for UnobservedBlocks {
     #[inline]
@@ -127,8 +127,8 @@ impl BlockObserver for UnobservedBlocks {
 }
 
 /// Observer that forwards every block to an installed detector.
-pub(crate) struct DetectorObserver<'d> {
-    pub(crate) detector: &'d mut dyn Sha1CollisionDetector,
+pub struct DetectorObserver<'d> {
+    pub detector: &'d mut dyn Sha1CollisionDetector,
 }
 
 impl BlockObserver for DetectorObserver<'_> {

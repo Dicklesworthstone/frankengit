@@ -1,7 +1,7 @@
 //! Collision-detector doubles for tests.
 //!
 //! These are doubles, not detectors: none of them evaluates a disturbance
-//! vector. They exist to prove that the hook point in [`crate::defense`]
+//! vector. They exist to prove that the hook point in the `defense` module
 //! carries real internal state and that the screened path fails closed, and
 //! they are gated behind the non-default `test-double` feature so they cannot
 //! drift into a production feature graph.

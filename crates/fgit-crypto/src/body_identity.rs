@@ -1,6 +1,6 @@
 //! Domain-separated internal body identity.
 //!
-//! NORMATIVE_PROTOCOL_CONTRACTS section 3.2 fixes the construction:
+//! `NORMATIVE_PROTOCOL_CONTRACTS.md` section 3.2 fixes the construction:
 //!
 //! ```text
 //! InternalObjectId = H(domain_tag || schema_id || canonical_body_bytes)

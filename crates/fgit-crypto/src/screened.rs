@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn block_evidence_fails_closed() {
-        let content = vec![b'a'; 200];
+        let content = [b'a'; 200];
         let mut detector = SuspectAtBlock::new(1);
         let refused = screened_sha1_git_oid(GitObjectKind::Blob, &content, &mut detector)
             .expect_err("evidence must refuse the identity");
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn a_multi_block_message_is_shown_to_the_detector_in_order() {
-        let content = vec![b'a'; 200];
+        let content = [b'a'; 200];
         let mut detector = RecordingDouble::new();
         screened_sha1_digest(&content, &mut detector).expect("a recording detector is clean");
         let observed = detector.observed();

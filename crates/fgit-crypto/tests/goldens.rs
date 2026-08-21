@@ -71,6 +71,7 @@ fn fips_180_4_known_answer_vectors_hold_for_both_constructions() {
         "the digest corpus must not shrink silently"
     );
     for row in rows {
+        assert_eq!(row.len(), 5, "a digest vector row has five columns");
         let (identifier, spec, sha1_expected, sha256_expected) = (row[0], row[1], row[2], row[3]);
         let message = spec_bytes(spec);
         assert_eq!(
@@ -92,6 +93,7 @@ fn streaming_absorption_matches_one_shot_for_every_chunk_width() {
     // buffering bug cannot hide behind an aligned split.
     let widths = [1_usize, 3, 7, 31, 63, 64, 65, 127, 1000];
     for row in data_rows(DIGEST_VECTORS) {
+        assert_eq!(row.len(), 5, "a digest vector row has five columns");
         let message = spec_bytes(row[1]);
         if message.len() > 4096 {
             continue;
@@ -127,6 +129,7 @@ fn native_git_object_identities_match_the_golden_corpus() {
         "the object corpus must not shrink silently"
     );
     for row in rows {
+        assert_eq!(row.len(), 6, "an object vector row has six columns");
         let (identifier, label, spec, sha1_expected, sha256_expected) =
             (row[0], row[1], row[2], row[3], row[4]);
         let kind = GitObjectKind::from_label(label).expect("a corpus label is a Git object type");
@@ -150,6 +153,7 @@ fn native_git_object_identities_match_the_golden_corpus() {
 #[test]
 fn streaming_object_hashing_matches_the_golden_corpus() {
     for row in data_rows(GIT_OID_VECTORS) {
+        assert_eq!(row.len(), 6, "an object vector row has six columns");
         let kind = GitObjectKind::from_label(row[1]).expect("a corpus label is a Git object type");
         let content = spec_bytes(row[2]);
         let declared = u64::try_from(content.len()).expect("corpus bodies fit in u64");
@@ -194,6 +198,7 @@ fn internal_identity_preimages_and_digests_match_the_golden_corpus() {
         "the identity corpus must not shrink silently"
     );
     for row in rows {
+        assert_eq!(row.len(), 9, "an identity vector row has nine columns");
         let (identifier, tag, family, major, minor, spec, preimage_expected, digest_expected) = (
             row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7],
         );
@@ -225,18 +230,20 @@ fn length_prefixed_framing_separates_a_shifted_field_boundary() {
     // family and the body falls. Bare concatenation would give them the same
     // preimage; the length prefixes are what keep them apart.
     let rows = data_rows(INTERNAL_ID_VECTORS);
-    let shared = rows
-        .iter()
-        .find(|row| row[0] == "IV-002")
-        .expect("IV-002 is present");
-    let shifted = rows
-        .iter()
-        .find(|row| row[0] == "IV-008")
-        .expect("IV-008 is present");
+    let find = |identifier: &str| -> Vec<&str> {
+        rows.iter()
+            .find(|row| row.first() == Some(&identifier))
+            .expect("the requested corpus row is present")
+            .clone()
+    };
+    let shared = find("IV-002");
+    let shifted = find("IV-008");
+    assert_eq!(shared.len(), 9, "an identity vector row has nine columns");
+    assert_eq!(shifted.len(), 9, "an identity vector row has nine columns");
     assert_ne!(shared[6], shifted[6], "the two preimages must differ");
     assert_ne!(shared[7], shifted[7], "the two digests must differ");
 
-    let concatenated = |row: &Vec<&str>| {
+    let concatenated = |row: &[&str]| {
         format!(
             "{}{}{}",
             row[1],
@@ -245,8 +252,8 @@ fn length_prefixed_framing_separates_a_shifted_field_boundary() {
         )
     };
     assert_eq!(
-        concatenated(shared),
-        concatenated(shifted),
+        concatenated(&shared),
+        concatenated(&shifted),
         "the two rows are exactly the ambiguity a bare concatenation would collapse"
     );
 }

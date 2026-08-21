@@ -7,7 +7,7 @@
 //! shape as `registries/*.tsv`.
 //!
 //! The exported files are a drift guard, not a second source of truth: the
-//! enumerations in [`crate::registry`] remain authoritative, and the corpus
+//! enumerations in the `registry` module remain authoritative, and the corpus
 //! test fails when they move without the corpus moving with them.
 
 use crate::registry::{ALGORITHM_REGISTRY, DOMAIN_REGISTRY};

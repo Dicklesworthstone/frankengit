@@ -9,7 +9,7 @@
 //!
 //! The SHA-1 core additionally exposes every compression block to a
 //! [`BlockObserver`], which is how the collision-defense hook in
-//! [`crate::defense`] observes real internal state rather than a summary.
+//! the `defense` module observes real internal state rather than a summary.
 
 use crate::defense::{BlockObserver, BlockVerdict, Sha1BlockContext, UnobservedBlocks};
 
@@ -115,12 +115,14 @@ pub trait DigestHasher {
     type Output;
 
     /// Start a fresh digest state.
+    #[must_use]
     fn new() -> Self;
 
     /// Absorb the next contiguous chunk of the message.
     fn update(&mut self, chunk: &[u8]);
 
     /// Pad the message and produce the digest.
+    #[must_use]
     fn finish(self) -> Self::Output;
 }
 
@@ -407,7 +409,6 @@ impl DigestHasher for Sha256Hasher {
     }
 
     fn update(&mut self, chunk: &[u8]) {
-        self.message_bytes = self.message_bytes.wrapping_add(message_byte_count(chunk));
         let mut rest = chunk;
         while !rest.is_empty() {
             let free = BLOCK_BYTES - self.buffered;
@@ -421,6 +422,7 @@ impl DigestHasher for Sha256Hasher {
                 self.compress(&block);
             }
         }
+        self.message_bytes = self.message_bytes.wrapping_add(message_byte_count(chunk));
     }
 
     fn finish(mut self) -> Self::Output {

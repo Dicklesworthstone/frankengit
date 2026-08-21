@@ -10,6 +10,7 @@
 //! harness that only ever saw rejections could be passing because the compiler
 //! invocation itself is broken.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -188,7 +189,7 @@ fn newest_rlib(directory: &Path, prefix: &str) -> PathBuf {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if !name.starts_with(prefix) || !name.ends_with(".rlib") {
+        if !name.starts_with(prefix) || path.extension() != Some(OsStr::new("rlib")) {
             continue;
         }
         let modified = entry

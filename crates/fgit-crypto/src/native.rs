@@ -84,6 +84,7 @@ pub trait GitHashAlgorithm:
     type Oid: NativeObjectIdentity<Algorithm = Self>;
 
     /// Wrap a raw digest as the identity value.
+    #[must_use]
     fn oid_from_digest(digest: Self::Digest) -> Self::Oid;
 
     /// Parse the canonical lowercase hexadecimal form in this algorithm's
@@ -210,9 +211,11 @@ pub trait NativeObjectIdentity: Copy + Eq + fmt::Debug + Sized {
     }
 
     /// The raw digest bytes.
+    #[must_use]
     fn digest_bytes(&self) -> &[u8];
 
     /// Erase into the runtime-tagged form.
+    #[must_use]
     fn erase(self) -> AnyGitOid;
 }
 
@@ -384,7 +387,7 @@ pub fn git_object_id(format: GitObjectFormat, kind: GitObjectKind, content: &[u8
 
 /// The exact header Git writes before an object's content: type label, space,
 /// decimal length, and a terminating zero byte.
-pub(crate) fn object_header(kind: GitObjectKind, length: u64) -> Vec<u8> {
+pub fn object_header(kind: GitObjectKind, length: u64) -> Vec<u8> {
     let decimal = length.to_string();
     let mut header = Vec::with_capacity(kind.label().len() + decimal.len() + 2);
     header.extend_from_slice(kind.label().as_bytes());
