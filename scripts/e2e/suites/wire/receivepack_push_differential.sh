@@ -38,7 +38,7 @@ readonly ORACLE_ROOT="${FGIT_ORACLE_ROOT:-/data/tmp/frankengit-oracle}"
 readonly PIN_ID='git-2.54.0'
 readonly CORPUS_ENV='FGIT_PUSH_DIFF_CORPUS_DIR'
 readonly OUTPUT_ENV='FGIT_PUSH_DIFF_OUTPUT_DIR'
-readonly EXPECTED_CELLS=11
+readonly EXPECTED_CELLS=14
 
 RUN_DIRECTORY=''
 
@@ -79,6 +79,8 @@ seed_refs() {
   oracle_run ref-accepted target.git update-ref refs/heads/accepted "${second}" || return
   oracle_run ref-refused target.git update-ref refs/heads/refused "${second}" || return
   oracle_run ref-unnegotiated target.git update-ref refs/heads/unnegotiated "${second}" || return
+  oracle_run ref-atomic-valid target.git update-ref refs/heads/atomic-valid "${second}" || return
+  oracle_run ref-atomic-stale target.git update-ref refs/heads/atomic-stale "${second}" || return
 }
 
 # The bridge reads these; the shell can write them safely because an oid is hex
@@ -91,6 +93,7 @@ write_oids() {
     printf 'refs/heads/refused\t%s\n' "${second}"
     printf 'other-commit\t%s\n' "${first}"
     printf 'unnegotiated-commit\t%s\n' "${second}"
+    printf 'refs/heads/atomic-valid\t%s\n' "${second}"
   } > "${corpus}/oids.tsv"
 }
 
@@ -115,7 +118,7 @@ main() {
   local work_root='' corpus='' output='' verdict=''
   local verify_exit=0 create_exit=0 prepare_exit=0 seed_exit=0
   local emit_exit=0 push_exit=0 compare_exit=0 cells=0
-  local created_oid='' landed_exit=0
+  local created_oid='' landed_exit=0 survived_exit=0
   local first='' second=''
 
   fge_phase setup
@@ -177,7 +180,7 @@ main() {
     -- --ignored --exact emit_push_payloads_for_the_oracle || emit_exit=$?
   emit_exit=${emit_exit:-0}
   fge_assert_exit FG-019C-PUSH-006 0 "${emit_exit}" \
-    'the bridge writes four NUL-correct push payloads and a pack over a real object closure'
+    'the bridge writes five NUL-correct push payloads and a pack over a real object closure'
   if [[ "${emit_exit}" -ne 0 ]]; then
     fail_from FG-019C-PUSH-007
     return
@@ -187,9 +190,10 @@ main() {
   push_case "${corpus}" refused || push_exit=$?
   push_case "${corpus}" unnegotiated || push_exit=$?
   push_case "${corpus}" created || push_exit=$?
+  push_case "${corpus}" atomic || push_exit=$?
   push_exit=${push_exit:-0}
   fge_assert_exit FG-019C-PUSH-007 0 "${push_exit}" \
-    'the pinned oracle answers all four pushes over stdin, including the pack-carrying create'
+    'the pinned oracle answers all five pushes over stdin, including the pack-carrying create and the atomic pair'
   if [[ "${push_exit}" -ne 0 ]]; then
     fail_from FG-019C-PUSH-008
     return
@@ -247,12 +251,26 @@ main() {
   fge_assert_eq FG-019C-PUSH-012 "${EXPECTED_CELLS}" "${cells}" \
     'every comparison cell was classified, so the corpus did not shrink'
 
+  fge_assert_cmd FG-019C-PUSH-018 'an atomic push reports every command as failed, including the one that was valid on its own' \
+    grep -Fqx 'atomic_rejects_every_command_including_the_valid_one=match' "${verdict}"
+  fge_assert_cmd FG-019C-PUSH-019 'the atomic override is load-bearing: the first command really was the valid one' \
+    grep -Fqx 'atomic_override_is_load_bearing=match' "${verdict}"
+
+  # Reporting failure is not the same as not applying it. This observes the
+  # all-or-nothing EFFECT: the valid delete must not have taken.
+  survived_exit=0
+  oracle_capture atomic-survived target.git rev-parse refs/heads/atomic-valid || survived_exit=$?
+  survived_exit=${survived_exit:-0}
+  fge_assert_exit FG-019C-PUSH-020 0 "${survived_exit}" \
+    'the ref whose delete was valid still exists, so the aborted atomic transaction applied nothing'
+
   fge_artifact "${verdict}" push-differential-verdict
   fge_artifact "${corpus}/oracle-accepted.bin" oracle-push-accepted
   fge_artifact "${corpus}/oracle-refused.bin" oracle-push-refused
   fge_artifact "${corpus}/oracle-unnegotiated.bin" oracle-push-unnegotiated
   fge_artifact "${corpus}/oracle-created.bin" oracle-push-created
   fge_artifact "${corpus}/push-created.pkt" fgit-push-created-payload
+  fge_artifact "${corpus}/oracle-atomic.bin" oracle-push-atomic
 }
 
 fge_init fg019c-receivepack-push-differential
@@ -264,5 +282,6 @@ fge_context claim_boundary 'FRAMING, NOT DECISIONS. report_status encodes a verd
 fge_context defect_found_and_fixed 'THIS LANE FOUND A REAL COMPATIBILITY DEFECT. Our machine refused a delete whose client did not echo delete-refs while Git 2.54.0 accepted it. ProudJaguar ruled it a defect in OURS - the Git protocol-capabilities documentation makes delete-refs a SERVER advertisement telling the client it may send zero-id deletes, not a client echo - and repaired fgit-wire at ee5663e. The cell now requires the two sides to AGREE and treats a refusal as a regression. It is kept rather than deleted because once a defect is fixed, the probe that found it is the only thing that would notice it returning'
 fge_context measured_git_behaviour 'a delete with an UNRESOLVABLE old oid is not an expected-old mismatch: Git answers ok with warning: allowing deletion of corrupt ref. Only a resolvable-but-wrong oid reaches the check and yields ng <ref> incorrect old value provided. The corpus uses the latter'
 fge_context pack_carrying_push 'a CREATE carrying a real commit/tree/blob closure, planned and written by fgit-pack PackWriter, is pushed through the pinned receive-pack. Git accepting it is evidence about OUR pack bytes on the PUSH path, which index-pack --strict (fg017b) does not cover. The same bytes are then driven through our own ReceivePack and must surface all three closure objects, so the statement is two-sided'
+fge_context atomic_semantics 'the atomic cells compare SEMANTICS rather than framing: apply_atomic_status is our own logic and Git observed behaviour is the reference. Given one valid and one stale command under atomic, both must be reported failed - a server reporting ok for the valid one would tell the client a ref moved when the transaction aborted. A separate assertion observes the EFFECT by confirming the valid ref still exists afterwards, because reporting failure and not applying are different claims'
 fge_context non_claim 'FRAMING for delete verdicts, plus object-level acceptance for the create. This lane still does not claim fgit and Git agree about WHETHER any given push should succeed. Agreement is with ONE pinned Git version, not the protocol'
 main

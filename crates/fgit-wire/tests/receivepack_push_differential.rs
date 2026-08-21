@@ -108,6 +108,14 @@ const REFUSED_REF: &str = "refs/heads/refused";
 /// The ref a pack-carrying push creates. It must not already exist.
 const CREATED_REF: &str = "refs/heads/created";
 
+/// The two refs an atomic push touches: the first command is valid, the second
+/// is stale, and under `atomic` neither may apply.
+const ATOMIC_OK_REF: &str = "refs/heads/atomic-valid";
+const ATOMIC_STALE_REF: &str = "refs/heads/atomic-stale";
+
+/// What the client sends for the atomic case.
+const CAPS_ATOMIC: &str = "report-status delete-refs atomic";
+
 // ---------------------------------------------------------------------------
 // A real Git object closure, and a pack carrying it
 // ---------------------------------------------------------------------------
@@ -259,8 +267,13 @@ fn command_packet(old: &str, new: &str, ref_name: &str, caps: &str) -> Vec<u8> {
     payload.extend_from_slice(new.as_bytes());
     payload.push(b' ');
     payload.extend_from_slice(ref_name.as_bytes());
-    payload.push(0);
-    payload.extend_from_slice(caps.as_bytes());
+    // Only the FIRST command of a receive session carries capabilities. A
+    // second command with a NUL section would be a protocol error, so an empty
+    // `caps` writes no NUL at all.
+    if !caps.is_empty() {
+        payload.push(0);
+        payload.extend_from_slice(caps.as_bytes());
+    }
 
     let mut packet = format!("{:04x}", payload.len() + 4).into_bytes();
     packet.extend_from_slice(&payload);
@@ -347,6 +360,16 @@ fn emit_push_payloads_for_the_oracle() {
     created.extend_from_slice(&pack);
     fs::write(corpus.join("push-created.pkt"), &created).expect("write created payload");
     fs::write(corpus.join("created-oid.txt"), hex_oid(head_id)).expect("write created oid");
+
+    // Two deletes in ONE atomic push: the first command is valid, the second
+    // carries a stale expected-old. All-or-nothing means neither may apply and
+    // BOTH must be reported as failures — including the one that was fine.
+    let valid_old = oid_for(&oids, ATOMIC_OK_REF);
+    let stale_old = oid_for(&oids, "other-commit");
+    let mut atomic = command_packet(&valid_old, ZERO, ATOMIC_OK_REF, CAPS_ATOMIC);
+    atomic.extend_from_slice(&command_packet(&stale_old, ZERO, ATOMIC_STALE_REF, ""));
+    atomic.extend_from_slice(b"0000");
+    fs::write(corpus.join("push-atomic.pkt"), &atomic).expect("write atomic payload");
 }
 
 // ---------------------------------------------------------------------------
@@ -393,7 +416,7 @@ fn report_section(response: &[u8]) -> Vec<Vec<u8>> {
 fn try_request_from(payload: &[u8]) -> Result<ReceiveRequest, String> {
     let context = ReceiveContext::new(
         GitObjectFormat::Sha1,
-        Capabilities::parse_v1(b"report-status delete-refs", &WireLimits::default())
+        Capabilities::parse_v1(b"report-status delete-refs atomic", &WireLimits::default())
             .expect("server capabilities"),
         ReceiveLimits::default(),
         SignedPushProfile::Refuse,
@@ -424,7 +447,7 @@ fn try_request_from(payload: &[u8]) -> Result<ReceiveRequest, String> {
 fn request_from(payload: &[u8]) -> ReceiveRequest {
     let context = ReceiveContext::new(
         GitObjectFormat::Sha1,
-        Capabilities::parse_v1(b"report-status delete-refs", &WireLimits::default())
+        Capabilities::parse_v1(b"report-status delete-refs atomic", &WireLimits::default())
             .expect("server capabilities"),
         ReceiveLimits::default(),
         SignedPushProfile::Refuse,
@@ -497,7 +520,7 @@ impl ReceiveCancellation for NeverCancels {
 fn drive_full_push(payload: &[u8]) -> Result<usize, String> {
     let context = ReceiveContext::new(
         GitObjectFormat::Sha1,
-        Capabilities::parse_v1(b"report-status delete-refs", &WireLimits::default())
+        Capabilities::parse_v1(b"report-status delete-refs atomic", &WireLimits::default())
             .expect("server capabilities"),
         ReceiveLimits::default(),
         SignedPushProfile::Refuse,
@@ -796,6 +819,99 @@ fn our_report_status_frames_what_git_frames() {
         },
     ));
 
+    // ---- atomic all-or-nothing -------------------------------------------
+    // The only cell on this lane that compares SEMANTICS rather than framing:
+    // `apply_atomic_status` is our own logic, and Git's observed behaviour is
+    // the reference. Given one valid and one stale command under `atomic`, both
+    // must be reported as failures — a server that reported `ok` for the valid
+    // one would be telling the client a ref moved when the transaction aborted.
+    let atomic_payload = fs::read(corpus.join("push-atomic.pkt")).expect("atomic payload");
+    let atomic_response =
+        fs::read(corpus.join("oracle-atomic.bin")).expect("oracle atomic response");
+    let oracle_atomic = report_section(&atomic_response);
+
+    let ours_atomic = {
+        let request = request_from(&atomic_payload);
+        let packets = report_status(
+            &request,
+            UnpackStatus::Ok,
+            // The verdicts a decider would have produced: the first command is
+            // fine, the second is stale. Whether `apply_atomic_status` then
+            // overrides the first is exactly what this cell measures.
+            &[
+                ReceiveCommandStatus::Ok,
+                ReceiveCommandStatus::Rejected {
+                    message: b"stale info".to_vec(),
+                },
+            ],
+            &ReceiveLimits::default(),
+        )
+        .expect("atomic report-status encodes");
+        let bytes =
+            encode_packets(&packets, &WireLimits::default()).expect("atomic report packets");
+        let (lines, _end) = read_until_flush(&bytes, 0);
+        lines
+    };
+
+    cells.push((
+        "atomic_rejects_every_command_including_the_valid_one",
+        match (oracle_atomic.len(), ours_atomic.len()) {
+            (3, 3) => {
+                let oracle_all_ng = oracle_atomic[1..]
+                    .iter()
+                    .all(|line| line.starts_with(b"ng "));
+                let ours_all_ng = ours_atomic[1..].iter().all(|line| line.starts_with(b"ng "));
+                if oracle_all_ng && ours_all_ng {
+                    Verdict::Match
+                } else {
+                    Verdict::Defect(format!(
+                        "atomic must fail every command: oracle {:?} vs ours {:?}",
+                        oracle_atomic[1..]
+                            .iter()
+                            .map(|l| show(l))
+                            .collect::<Vec<_>>(),
+                        ours_atomic[1..].iter().map(|l| show(l)).collect::<Vec<_>>()
+                    ))
+                }
+            }
+            (oracle_len, ours_len) => Verdict::Defect(format!(
+                "expected three report lines each, got {oracle_len} and {ours_len}"
+            )),
+        },
+    ));
+
+    // Non-vacuity for the cell above: it only means something if the FIRST
+    // command was the valid one, so that `ng` on it is an override rather than
+    // a verdict it would have had anyway.
+    cells.push((
+        "atomic_override_is_load_bearing",
+        if oracle_atomic
+            .get(1)
+            .is_some_and(|line| line.starts_with(format!("ng {ATOMIC_OK_REF} ").as_bytes()))
+        {
+            Verdict::Match
+        } else {
+            Verdict::Defect(format!(
+                "the first atomic command must be the valid ref, reported ng by override; got {:?}",
+                oracle_atomic.get(1).map(|l| show(l))
+            ))
+        },
+    ));
+
+    cells.push((
+        "atomic_failure_wording",
+        if oracle_atomic.get(1) == ours_atomic.get(1) {
+            Verdict::Defect(
+                "our atomic failure wording is byte-identical to Git's, which would mean copying its text"
+                    .to_owned(),
+            )
+        } else {
+            Verdict::AcceptedDivergence(
+                "atomic-failure-text-is-server-specific;Git-says-atomic-transaction-failed-and-fgit-says-atomic-push-failed",
+            )
+        },
+    ));
+
     write_verdict(&output, &cells);
 
     let defects: Vec<&str> = cells
@@ -808,7 +924,7 @@ fn our_report_status_frames_what_git_frames() {
         "report-status diverges from pinned Git in: {defects:?}"
     );
     assert!(
-        cells.len() >= 11,
+        cells.len() >= 14,
         "only {} cells were classified",
         cells.len()
     );
