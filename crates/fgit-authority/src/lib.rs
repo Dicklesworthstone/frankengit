@@ -63,8 +63,10 @@
 
 mod contract;
 mod drive;
+pub mod history;
 mod injection;
 mod keys;
+pub mod lincheck;
 mod reference;
 mod suite;
 mod tokens;
