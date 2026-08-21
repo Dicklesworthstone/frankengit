@@ -423,22 +423,22 @@ impl Lab {
         Ok(fired)
     }
 
-    /// Record that a context was minted for a work class.
+    /// Record the *declared* context for a work class.
     ///
-    /// Records the capability mask and the poll quota, which is how the
-    /// acceptance requirement "capability masks and finite budgets are present
-    /// in traces" is satisfied by construction rather than by inspection.
+    /// Reads the class's declared limits directly rather than resolving them
+    /// into an absolute budget: a budget's poll quota does not depend on the
+    /// clock, so resolving one at a fabricated instant to read that one field
+    /// would put a fake time into the derivation for no gain. When a run has a
+    /// live context, prefer
+    /// [`record_minted_context`](Self::record_minted_context), which records
+    /// what the request actually carried.
     pub fn record_context(&mut self, class: BudgetClass) {
-        let budget = self
-            .config
-            .profile
-            .budgets()
-            .derived_budget_at(asupersync::types::id::Time::ZERO, class);
+        let limits = self.config.profile.budgets().limits_for(class);
         self.trace.record(TraceEvent::ContextMinted {
             at: self.clock.now(),
             class: class.code(),
             capability_mask: <LabCaps as CapSetRuntimeMask>::MASK.bits(),
-            poll_quota: budget.poll_quota,
+            poll_quota: limits.poll_quota,
         });
     }
 
