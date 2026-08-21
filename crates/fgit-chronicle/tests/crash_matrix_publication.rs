@@ -305,13 +305,21 @@ fn a_publication_whose_head_replacement_never_applies_publishes_nothing() {
 
 #[test]
 fn a_head_that_moved_without_answering_still_makes_its_decision_canonical() {
-    // THE WINDOW THE AUDIT NAMED. The replacement applied and the answer was
-    // lost, so the decision is canonical while the accelerator is empty. An
-    // accelerator-only reader would call this undecided and let the same
-    // sealed transaction be decided a second time.
+    // An ambiguous head replacement: the CAS applied and the answer was lost,
+    // so the caller cannot know whether it published.
     //
-    // Regression guard: green because RainyLotus fixed loss classification at
-    // 06b65dc. It turns red if resolution ever stops replaying the stream.
+    // This test originally guarded THE WINDOW THE AUDIT NAMED -- head advanced,
+    // accelerator empty -- where an accelerator-only reader would call a
+    // decided transaction undecided and let it be decided twice. That window
+    // no longer exists: publish_head_with_outcomes writes the outcome entries
+    // and the head replacement in one BEGIN/COMMIT, so it is structurally
+    // prevented rather than merely detected.
+    //
+    // What is still worth guarding, and what this now asserts: the decision is
+    // canonical by BOTH routes and they agree. Resolution must still prefer
+    // the stream, because the accelerator remains a rebuildable hint that a
+    // node may legitimately lack -- the crash route to that state is closed,
+    // the state itself is not.
     let (store, basis, token) = armed(
         FIRST_HEAD_REPLACEMENT,
         AuthorityOpKind::CompareExchangeHead,
@@ -333,10 +341,24 @@ fn a_head_that_moved_without_answering_still_makes_its_decision_canonical() {
         "the replacement applied, so the head must have advanced"
     );
 
-    assert_eq!(
-        indexed_outcome(&store, tenant(), repository(), tx).expect("the index reads"),
-        OutcomeLookup::Undecided,
-        "the fixture only means something while the accelerator is genuinely empty"
+    // WAS: an assertion that the accelerator is empty here. That window --
+    // head advanced, outcome entries not yet written -- is what
+    // publish_head_with_outcomes closed by putting the entries and the head
+    // replacement inside one BEGIN/COMMIT. It is no longer constructible by
+    // losing a response, and asserting it kept this test red against a
+    // deliberate improvement.
+    //
+    // The replacement assertion is stronger, not weaker: the accelerator must
+    // now AGREE with the stream rather than merely lag it. A disagreement in
+    // either direction is a defect -- an entry the head does not justify is as
+    // wrong as a decision the index has never heard of.
+    assert!(
+        matches!(
+            indexed_outcome(&store, tenant(), repository(), tx).expect("the index reads"),
+            OutcomeLookup::Decided(_)
+        ),
+        "the head moved, so the atomic publication must have written the outcome entry in the \
+         same transaction; an index lagging the head is the torn state that operation forbids"
     );
     assert!(
         matches!(
@@ -357,10 +379,17 @@ fn a_head_that_moved_without_answering_still_makes_its_decision_canonical() {
 
 #[test]
 fn a_publication_interrupted_inside_the_accelerator_leaves_every_decision_canonical() {
-    // Two decisions; the first accelerator write applies and its answer is
-    // lost, so the second never happens. One transaction is indexed and one is
-    // not, and both must still resolve as decided, because the head is the
-    // authority and the index is a hint.
+    // Two decisions in one batch. This test originally arranged for the first
+    // accelerator write to apply and the second to be lost, leaving one
+    // transaction indexed and one not, and asserted both still resolved as
+    // decided from the head.
+    //
+    // That interleaving is now impossible: the outcome entries are written
+    // with the head in a single transaction, so the accelerator is
+    // ALL-OR-NOTHING. Rather than delete a test whose scenario was designed
+    // out, it asserts the invariant that replaced it -- if the head moved,
+    // EVERY decision in the batch is indexed, and if it did not, none is.
+    // A partial index is now a defect rather than a tolerable lag.
     let (store, basis, token) = armed(
         FIRST_ACCELERATOR_WRITE,
         AuthorityOpKind::PutIfAbsent,
@@ -384,20 +413,41 @@ fn a_publication_interrupted_inside_the_accelerator_leaves_every_decision_canoni
 
     let _ = publish(&store, &head_key(), token, &candidate, tenant());
 
-    assert_ne!(
-        current_head(&store).generation,
-        HeadGeneration::FIRST,
-        "the head advanced, so both refusals are canonical"
+    let moved = current_head(&store).generation != HeadGeneration::FIRST;
+    let indexed = [0xc1_u8, 0xc2]
+        .into_iter()
+        .filter(|tag| {
+            matches!(
+                indexed_outcome(&store, tenant(), repository(), derived!(TxId, *tag))
+                    .expect("the index reads"),
+                OutcomeLookup::Decided(_)
+            )
+        })
+        .count();
+    assert_eq!(
+        indexed,
+        if moved { 2 } else { 0 },
+        "the accelerator must be all-or-nothing with the head: {indexed} of 2 decisions indexed \
+         while the head {} moved",
+        if moved { "had" } else { "had not" }
     );
+    // The stream must tell the same all-or-nothing story as the index. The
+    // original loop asserted every decision replays as decided unconditionally,
+    // which only held because the old protocol always got the head moved before
+    // the accelerator writes could be interrupted. It is conditional now
+    // because the fault can prevent publication outright, and a test that
+    // demands a decision from a batch that never published is asserting
+    // something the system never claimed.
     for tag in [0xc1_u8, 0xc2] {
         let tx = derived!(TxId, tag);
-        assert!(
-            matches!(
-                replay_outcome(&store, &head_key(), tx).expect("replay runs"),
-                OutcomeLookup::Decided(_)
-            ),
-            "decision {tag:#04x} is in the published batch, so it must replay as decided \
-             however far the accelerator got"
+        let replayed = matches!(
+            replay_outcome(&store, &head_key(), tx).expect("replay runs"),
+            OutcomeLookup::Decided(_)
+        );
+        assert_eq!(
+            replayed, moved,
+            "decision {tag:#04x} replays as decided={replayed} while the head moved={moved}; \
+             the head is the authority, so the stream must agree with it in both directions"
         );
     }
 }
