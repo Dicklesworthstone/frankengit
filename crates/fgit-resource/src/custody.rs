@@ -495,6 +495,7 @@ pub struct ContainmentFailure {
     leaks: Vec<LeakRecord>,
     consumed: ResourceVector,
     accounting_faults: u32,
+    outstanding_grants: u32,
 }
 
 impl ContainmentFailure {
@@ -533,17 +534,27 @@ impl ContainmentFailure {
     pub const fn accounting_faults(&self) -> u32 {
         self.accounting_faults
     }
+
+    /// Budget grants still held by a live value at close.
+    ///
+    /// A grant is not an obligation, but it is unspent budget somebody still
+    /// owns, so a region holding one has not reached quiescence either.
+    #[must_use]
+    pub const fn outstanding_grants(&self) -> u32 {
+        self.outstanding_grants
+    }
 }
 
 impl fmt::Display for ContainmentFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} containment failure: {} unsettled, {} escalated, {} leaked, {} accounting faults",
+            "{} containment failure: {} unsettled, {} escalated, {} leaked, {} grants outstanding, {} accounting faults",
             self.region,
             self.unsettled.len(),
             self.escalated.len(),
             self.leaks.len(),
+            self.outstanding_grants,
             self.accounting_faults
         )
     }
@@ -902,11 +913,17 @@ impl LedgerHandle {
                 .get(&id)
                 .ok_or(LifecycleError::UnknownObligation(id))?;
             let next = entry.state.apply(event)?;
+            // Refuse first on what the caller claimed to spend, so the error
+            // names the grade the caller got wrong. `charged` is `spent`
+            // narrowed to the consumable grades and therefore never exceeds
+            // it, so the second split reports the remainder and cannot fail.
+            if let Some(error) = entry.reserved.first_deficit(spent) {
+                return Err(LifecycleError::ChargeExceedsReservation(error));
+            }
             let charged = spent.mask(GradeDisposition::Consumable);
             let (_, returned) = entry
                 .reserved
-                .split(spent)
-                .and_then(|_| entry.reserved.split(&charged))
+                .split(&charged)
                 .map_err(LifecycleError::ChargeExceedsReservation)?;
             state.add_consumed(&charged);
             state.give_back(returned);
@@ -1042,22 +1059,34 @@ impl ObligationLedger {
     /// child region cannot mint authority or budget from nothing" is enforced:
     /// the child's capacity is exactly the parent budget handed to it, and the
     /// parent records that amount as delegated until the child closes.
+    ///
+    /// `grant` must come from this region. One from elsewhere retires nothing,
+    /// so the child is created with zero capacity and this ledger records an
+    /// accounting fault that blocks quiescence at close — rather than quietly
+    /// making the new region a child of the issuer, or crediting this region
+    /// with budget it never issued.
     pub fn child(
         &self,
         region: RegionId,
         disposition: LeakDisposition,
         grant: BudgetGrant,
     ) -> Self {
-        let capacity = grant.amount();
-        let (id, _, parent) = grant.into_parts();
-        parent.with_state(|state| {
-            state.retire(id);
-            state.add_delegated(&capacity);
+        // The receiver is the parent, not whichever ledger issued the grant,
+        // and the child's capacity is what this ledger actually retired — not
+        // what the grant claimed. A grant from another region therefore
+        // retires nothing, funds the child with nothing, and is recorded as an
+        // accounting fault here. It can neither reparent the child silently
+        // nor mint budget in a region that never issued it.
+        let (id, _, _) = grant.into_parts();
+        let capacity = self.handle.with_state(|state| {
+            let retired = state.retire(id);
+            state.add_delegated(&retired);
+            retired
         });
         Self::from_inner(LedgerInner {
             region,
             disposition,
-            parent: Some(parent),
+            parent: Some(self.handle.clone()),
             state: Mutex::new(LedgerState::fresh(region, capacity)),
         })
     }
@@ -1152,6 +1181,11 @@ impl ObligationLedger {
     /// drain, then finalize, and the caller performs those steps before
     /// closing. A region that closes with live obligations reports them rather
     /// than pretending they settled.
+    ///
+    /// Quiescence requires more than settled obligations: an unreleased
+    /// [`BudgetGrant`], a recorded leak, an escalated effect, or an accounting
+    /// fault each block it. Budget somebody still holds is budget the region
+    /// has not accounted for.
     pub fn close(self) -> RegionCloseOutcome {
         let Self { handle, mut guard } = self;
         guard.disarm();
@@ -1188,6 +1222,7 @@ impl ObligationLedger {
                 .unwrap_or(u64::MAX),
                 capacity: state.capacity,
                 accounting_faults: state.accounting_faults,
+                outstanding_grants: u32::try_from(state.grants.len()).unwrap_or(u32::MAX),
             }
         });
         if let Some(parent) = handle.0.parent.clone() {
@@ -1197,6 +1232,7 @@ impl ObligationLedger {
             && report.escalated.is_empty()
             && report.leaks.is_empty()
             && report.accounting_faults == 0
+            && report.outstanding_grants == 0
         {
             RegionCloseOutcome::Quiescent(QuiescenceReceipt {
                 region: handle.region(),
@@ -1212,6 +1248,7 @@ impl ObligationLedger {
                 leaks: report.leaks,
                 consumed: report.consumed,
                 accounting_faults: report.accounting_faults,
+                outstanding_grants: report.outstanding_grants,
             })
         }
     }
@@ -1227,6 +1264,7 @@ struct CloseReport {
     settled: u64,
     capacity: ResourceVector,
     accounting_faults: u32,
+    outstanding_grants: u32,
 }
 
 /// Returns a closed child's unspent capacity to its parent.

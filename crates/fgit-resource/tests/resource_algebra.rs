@@ -525,3 +525,92 @@ fn a_child_region_cannot_mint_budget_and_returns_what_it_did_not_spend() {
     let outcome = parent.close();
     assert!(outcome.is_quiescent(), "{outcome:?}");
 }
+
+#[test]
+fn funding_a_child_from_another_region_mints_nothing_and_is_reported() {
+    let capacity = ResourceVector::single(Grade::Bytes, 100);
+    let issuer = ObligationLedger::root(
+        RegionId::new(41),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
+    let receiver = ObligationLedger::root(
+        RegionId::new(42),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
+
+    // Planted negative: fund a child of `receiver` with a grant `issuer` made.
+    let foreign = issuer
+        .grant(ResourceVector::single(Grade::Bytes, 40))
+        .expect("the issuer can fund its own grant");
+    let stranger = receiver.child(
+        RegionId::new(43),
+        LeakDisposition::RecordAndContinue,
+        foreign,
+    );
+
+    assert!(
+        stranger.snapshot().capacity().is_zero(),
+        "a foreign grant funds nothing, so the child cannot spend what it was never given"
+    );
+    let after = receiver.snapshot();
+    assert_eq!(
+        after.accounting_faults(),
+        1,
+        "the receiver reports the foreign grant instead of accepting it"
+    );
+    assert!(
+        !after.is_conserved(),
+        "an accounting fault blocks the conservation claim"
+    );
+    assert_eq!(
+        after.available(),
+        capacity,
+        "no budget was minted in the region that never issued the grant"
+    );
+    assert!(after.delegated().is_zero(), "nothing was delegated");
+    let stranger_outcome = stranger.close();
+    assert!(
+        stranger_outcome.is_quiescent(),
+        "the unfunded child itself owes nothing; the fault belongs to its parent: {stranger_outcome:?}"
+    );
+    match receiver.close() {
+        RegionCloseOutcome::ContainmentFailure(failure) => {
+            assert_eq!(failure.accounting_faults(), 1);
+        }
+        RegionCloseOutcome::Quiescent(receipt) => {
+            panic!("an accounting fault must block quiescence: {receipt:?}")
+        }
+    }
+
+    // Near-identical permitted case: the same shape, funded by its own region.
+    let own = issuer
+        .grant(ResourceVector::single(Grade::Bytes, 40))
+        .expect("the issuer can fund its own grant");
+    let proper = issuer.child(RegionId::new(44), LeakDisposition::RecordAndContinue, own);
+    assert_eq!(
+        proper.snapshot().capacity(),
+        ResourceVector::single(Grade::Bytes, 40),
+        "a grant from the parent funds the child with exactly its amount"
+    );
+    assert_eq!(proper.snapshot().accounting_faults(), 0);
+    let outcome = proper.close();
+    assert!(outcome.is_quiescent(), "{outcome:?}");
+    // The issuer still holds the first grant: nothing retired it, and nobody
+    // can release it any more. That unspent budget is the other half of the
+    // same fault, and it blocks the issuer's quiescence too.
+    match issuer.close() {
+        RegionCloseOutcome::ContainmentFailure(failure) => {
+            assert_eq!(
+                failure.outstanding_grants(),
+                1,
+                "an unreleased grant is budget the region has not accounted for"
+            );
+            assert!(failure.leaks().is_empty(), "the grant was never dropped");
+        }
+        RegionCloseOutcome::Quiescent(receipt) => {
+            panic!("a region holding a live grant has not reached quiescence: {receipt:?}")
+        }
+    }
+}
