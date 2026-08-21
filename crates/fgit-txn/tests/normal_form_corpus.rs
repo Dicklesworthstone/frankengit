@@ -560,3 +560,82 @@ fn the_unmodelled_arms_are_named_rather_than_quietly_absent() {
          intents and remove this assertion rather than leaving it asserting a stale gap"
     );
 }
+
+#[test]
+fn identical_intents_receive_identical_dispositions() {
+    // The strongest form of the disagreement, and the one that needs no
+    // adjudication of which label is *correct*.
+    //
+    // N byte-identical intents -- same target, same precondition, same
+    // statement, same mismatch policy, same empty basis -- must all receive the
+    // same disposition. They are the same operation performed N times against
+    // the same state. Whatever the right label is, it cannot depend on an
+    // intent's position in the list.
+    //
+    // Observed from `IntentEvaluator::evaluate`:
+    //
+    //   1 delete  -> [IdentityEffect]
+    //   2 deletes -> [InverseCancelled, IdentityEffect]
+    //   3 deletes -> [InverseCancelled, InverseCancelled, IdentityEffect]
+    //
+    // Only the final intent is called an identity; the earlier ones are
+    // reported as inverse cancellations. Nothing was cancelled -- the ref was
+    // absent throughout and every delete was a no-op. The mechanism appears to
+    // be that non-final intents at a target are classified from the target's
+    // FINAL state (absent, therefore "cancelled") without also requiring that
+    // the intent changed something when it ran.
+    //
+    // This is deliberately framed as an internal-consistency property rather
+    // than as "IdentityEffect is right", because the author of this file has
+    // been wrong about these reasons three times and the property holds either
+    // way.
+    let evaluator = IntentEvaluator::new();
+    let name = ref_name("refs/heads/b");
+    let delete = || {
+        Intent::Ref(RefIntent::Delete {
+            name: name.clone(),
+            expected: ExpectedRefState::Any,
+        })
+    };
+
+    for count in 1_usize..=3 {
+        let mut mint = IdentityMint::new(11);
+        let request = RequestBuilder::new(
+            mint.tenant(),
+            mint.repository(),
+            mint.principal(),
+            schema(),
+            IdempotencyKey::new(label("identical")),
+        )
+        .statement(MismatchPolicy::NoOp, (0..count).map(|_| delete()).collect())
+        .build(&mut mint);
+
+        let basis = BTreeMap::new();
+        let forge = BTreeMap::new();
+        let retention = BTreeSet::new();
+        let outbox = BTreeMap::new();
+        let report = evaluator.evaluate(
+            FoldBasis {
+                refs: &basis,
+                forge_positions: &forge,
+                retention: &retention,
+                outbox: &outbox,
+            },
+            &request,
+        );
+
+        let dispositions: Vec<_> = report.mappings.iter().map(|m| &m.disposition).collect();
+        assert_eq!(
+            dispositions.len(),
+            count,
+            "{count} intents must produce {count} mappings"
+        );
+        let first = dispositions[0];
+        assert!(
+            dispositions.iter().all(|d| *d == first),
+            "{count} byte-identical intents against identical state received differing \
+             dispositions: {dispositions:?}. The same operation repeated cannot mean different \
+             things depending on its position"
+        );
+    }
+}
