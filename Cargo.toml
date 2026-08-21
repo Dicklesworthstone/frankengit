@@ -52,6 +52,7 @@ fgit-git-object = { path = "crates/fgit-git-object" }
 fgit-lab = { path = "crates/fgit-lab" }
 fgit-node = { path = "crates/fgit-node" }
 fgit-object-fabric = { path = "crates/fgit-object-fabric" }
+fgit-object-store = { path = "crates/fgit-object-store" }
 fgit-pack = { path = "crates/fgit-pack" }
 fgit-raptorq = { path = "crates/fgit-raptorq" }
 fgit-reference = { path = "crates/fgit-reference" }

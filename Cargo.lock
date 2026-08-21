@@ -721,6 +721,7 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fgit-authority",
+ "fgit-resource",
  "fgit-runtime",
 ]
 
@@ -751,6 +752,15 @@ dependencies = [
  "fgit-crypto",
  "fgit-resource",
  "fgit-types",
+]
+
+[[package]]
+name = "fgit-object-store"
+version = "0.1.0"
+dependencies = [
+ "asupersync",
+ "fgit-authority",
+ "fgit-crypto",
 ]
 
 [[package]]
@@ -815,6 +825,7 @@ name = "fgit-txn"
 version = "0.0.1"
 dependencies = [
  "fgit-authority",
+ "fgit-benchmark",
  "fgit-codec",
  "fgit-crypto",
  "fgit-lab",
