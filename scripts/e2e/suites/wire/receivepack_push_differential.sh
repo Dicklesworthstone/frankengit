@@ -214,8 +214,11 @@ main() {
     return
   fi
 
-  fge_assert_cmd FG-019C-PUSH-010 'the stricter-than-Git delete-refs divergence is recorded with its rationale rather than silently accommodated' \
-    grep -Fq 'delete_without_negotiated_capability=accepted-divergence-with-rationale:' "${verdict}"
+  fge_assert_cmd FG-019C-PUSH-010 'the stricter-than-Git delete-refs divergence is recorded as OBSERVED AND PENDING the fgit-wire owner ruling, not as accepted compatibility' \
+    grep -Fq 'delete_without_negotiated_capability=observed-divergence-pending-owner-ruling:' "${verdict}"
+  fge_assert_not_contains FG-019C-PUSH-017 "$(<"${verdict}")" \
+    'delete_without_negotiated_capability=accepted-divergence' \
+    'the pending divergence is never labelled accepted while its owner review is open'
   fge_assert_cmd FG-019C-PUSH-013 'pinned Git accepts a pack fgit-pack wrote, pushed through receive-pack rather than only index-pack' \
     grep -Fqx 'git_accepts_a_pack_our_writer_produced=match' "${verdict}"
   fge_assert_cmd FG-019C-PUSH-014 'our own machine accepts the very push Git accepted, pack included' \
@@ -258,7 +261,7 @@ fge_context evidence_class differential
 fge_context oracle_pin "${PIN_ID}"
 fge_context method 'emit NUL-correct push payloads from the Rust bridge, pipe each into a sandboxed pinned git receive-pack over stdin, capture its report-status, and compare framing against fgit report_status for the verdict GIT reached'
 fge_context claim_boundary 'FRAMING, NOT DECISIONS. report_status encodes a verdict; it does not decide one. Deciding needs the authority stack and the still-absent head-bound projection. The verdicts here come from GIT precisely so no fixture of ours stages the outcome. This lane must NEVER be cited as evidence that fgit and Git agree about WHETHER a push should succeed'
-fge_context measured_divergence 'Git 2.54.0 accepts a delete whose client omitted delete-refs; fgit refuses DeleteRefsNotNegotiated. fgit is STRICTER. Recorded as an accepted divergence for the wire owner to rule on, NOT silently widened, and the cell flips to a DEFECT if our machine ever starts accepting it so the record cannot go stale'
+fge_context measured_divergence 'Git 2.54.0 accepts a delete whose client omitted delete-refs; fgit refuses DeleteRefsNotNegotiated. fgit is STRICTER. Classified observed-divergence-pending-owner-ruling, NOT accepted: ProudJaguar owns fgit-wire and is reviewing the normative Git-protocol contracts before ruling, and calling it accepted in an artifact other people read would pre-empt that. fgit-wire source is unchanged. The cell flips to a DEFECT if our machine ever starts accepting it, so the record cannot go stale either way'
 fge_context measured_git_behaviour 'a delete with an UNRESOLVABLE old oid is not an expected-old mismatch: Git answers ok with warning: allowing deletion of corrupt ref. Only a resolvable-but-wrong oid reaches the check and yields ng <ref> incorrect old value provided. The corpus uses the latter'
 fge_context pack_carrying_push 'a CREATE carrying a real commit/tree/blob closure, planned and written by fgit-pack PackWriter, is pushed through the pinned receive-pack. Git accepting it is evidence about OUR pack bytes on the PUSH path, which index-pack --strict (fg017b) does not cover. The same bytes are then driven through our own ReceivePack and must surface all three closure objects, so the statement is two-sided'
 fge_context non_claim 'FRAMING for delete verdicts, plus object-level acceptance for the create. This lane still does not claim fgit and Git agree about WHETHER any given push should succeed. Agreement is with ONE pinned Git version, not the protocol'

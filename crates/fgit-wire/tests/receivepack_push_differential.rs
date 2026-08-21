@@ -523,7 +523,19 @@ fn drive_full_push(payload: &[u8]) -> Result<usize, String> {
 
 enum Verdict {
     Match,
+    /// A difference that is settled: each side is correct to differ, and no
+    /// owner ruling is outstanding.
     AcceptedDivergence(&'static str),
+    /// A difference **observed** against Git that the owning crate has not yet
+    /// ruled on.
+    ///
+    /// Deliberately distinct from `AcceptedDivergence`. ProudJaguar, who owns
+    /// `fgit-wire`, is reviewing the normative protocol contracts and asked
+    /// that this not be recast as accepted compatibility until that resolves.
+    /// Calling it "accepted" would pre-empt their ruling in a verdict artifact
+    /// other people read, so it gets its own vocabulary and its own suite
+    /// assertion.
+    ObservedPendingRuling(&'static str),
     Defect(String),
 }
 
@@ -533,6 +545,9 @@ impl Verdict {
             Self::Match => "match".to_owned(),
             Self::AcceptedDivergence(rationale) => {
                 format!("accepted-divergence-with-rationale:{rationale}")
+            }
+            Self::ObservedPendingRuling(rationale) => {
+                format!("observed-divergence-pending-owner-ruling:{rationale}")
             }
             Self::Defect(detail) => format!("defect:{detail}"),
         }
@@ -707,12 +722,12 @@ fn our_report_status_frames_what_git_frames() {
         "delete_without_negotiated_capability",
         match (oracle_unnegotiated.len(), &ours_unnegotiated) {
             (2, Err(reason)) if reason.contains("DeleteRefsNotNegotiated") => {
-                Verdict::AcceptedDivergence(
-                    "fgit-is-STRICTER-than-Git-here;Git-2.54.0-accepts-a-delete-whose-client-omitted-delete-refs-while-fgit-refuses-DeleteRefsNotNegotiated;recorded-for-the-wire-owner-not-silently-widened",
+                Verdict::ObservedPendingRuling(
+                    "Git-2.54.0-accepts-a-delete-whose-client-omitted-delete-refs;fgit-refuses-DeleteRefsNotNegotiated;fgit-is-STRICTER;NOT-yet-ruled-compatible-ProudJaguar-is-reviewing-the-normative-contracts;fgit-wire-source-unchanged",
                 )
             }
             (2, Ok(_)) => Verdict::Defect(
-                "our machine now accepts a delete without a negotiated delete-refs; the recorded divergence is stale and this cell must be re-decided"
+                "our machine now accepts a delete without a negotiated delete-refs; the recorded divergence is stale and this cell must be re-decided by the fgit-wire owner"
                     .to_owned(),
             ),
             (count, _) => Verdict::Defect(format!(
