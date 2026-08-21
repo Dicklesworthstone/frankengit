@@ -478,6 +478,7 @@ name = "fgit-authority-fsqlite"
 version = "0.0.1"
 dependencies = [
  "fgit-authority",
+ "fgit-codec",
  "fgit-types",
 ]
 
