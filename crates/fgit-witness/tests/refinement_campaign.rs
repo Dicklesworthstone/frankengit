@@ -160,15 +160,12 @@ fn reference_model_serializable(case: &ScheduleCase) -> bool {
 }
 
 fn campaign_seed() -> u64 {
-    match env::var("FGIT_WITNESS_CAMPAIGN_SEED") {
-        Ok(value) => {
-            let digits = value.strip_prefix("0x").unwrap_or(&value);
-            u64::from_str_radix(digits, 16).unwrap_or_else(|error| {
-                panic!("FGIT_WITNESS_CAMPAIGN_SEED must be hexadecimal: {error}")
-            })
-        }
-        Err(_) => DEFAULT_SEED,
-    }
+    env::var("FGIT_WITNESS_CAMPAIGN_SEED").map_or(DEFAULT_SEED, |value| {
+        let digits = value.strip_prefix("0x").unwrap_or(&value);
+        u64::from_str_radix(digits, 16).unwrap_or_else(|error| {
+            panic!("FGIT_WITNESS_CAMPAIGN_SEED must be hexadecimal: {error}")
+        })
+    })
 }
 
 fn pessimal_posterior() -> Posterior {
@@ -291,7 +288,10 @@ fn deterministic_refinement_safety_fairness_and_starvation_campaign() {
     // product behavior; it proves the campaign would fail if refinement made
     // the forbidden transition.
     let true_conflicts: Vec<_> = cases.iter().filter(|case| case.expected_conflict).collect();
-    let seeded_index = (seed as usize) % true_conflicts.len();
+    let conflict_count = u64::try_from(true_conflicts.len())
+        .expect("the platform cannot represent the corpus length as u64");
+    let seeded_index =
+        usize::try_from(seed % conflict_count).expect("the bounded corpus index must fit usize");
     let seeded_unsafe_label = &true_conflicts[seeded_index].label;
     let unsafe_offenders: Vec<_> = cases
         .iter()
