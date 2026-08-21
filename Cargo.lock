@@ -586,6 +586,7 @@ dependencies = [
 name = "fgit-treefs"
 version = "0.1.0"
 dependencies = [
+ "fgit-codec",
  "fgit-crypto",
  "fgit-git-object",
  "fgit-resource",

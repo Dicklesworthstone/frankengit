@@ -25,8 +25,9 @@
 use crate::capability::WorkspaceId;
 use crate::overlay::Overlay;
 use core::fmt::{self, Display, Formatter};
+use fgit_codec::{CodecRefusal, Encoder};
 use fgit_crypto::{DigestHasher, GitHashAlgorithm, GitOid, NativeObjectIdentity, Sha256};
-use fgit_types::{RepositoryCommitId, RepositoryId};
+use fgit_types::{CodecVersion, RepositoryCommitId, RepositoryId, SchemaFamily, SchemaId};
 
 /// A monotone workspace epoch counter.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -317,6 +318,15 @@ pub struct WorkspaceSnapshotBody<A: GitHashAlgorithm> {
 }
 
 impl<A: GitHashAlgorithm> WorkspaceSnapshotBody<A> {
+    /// The schema this body encodes under.
+    pub const SCHEMA: SchemaId = SchemaId::new(
+        SchemaFamily::from_static("frankengit.treefs.snapshot"),
+        1,
+        0,
+    );
+    /// The codec version this body encodes under.
+    pub const CODEC_VERSION: CodecVersion = CodecVersion::new(1, 0);
+
     /// Builds a snapshot.
     #[must_use]
     pub const fn new(
@@ -383,53 +393,36 @@ impl<A: GitHashAlgorithm> WorkspaceSnapshotBody<A> {
 
     /// The canonical bytes a golden is taken over.
     ///
-    /// Field order is fixed and every variable-length field is length-prefixed,
-    /// so the encoding is unambiguous and stable. This is a deliberately small
-    /// hand-owned framing rather than a derived one: a snapshot identity that
-    /// changes because a derive macro changed would silently invalidate every
-    /// stored receipt.
-    #[must_use]
-    pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(160);
-        out.extend_from_slice(b"frankengit.treefs.snapshot.v1\0");
-        out.extend_from_slice(self.workspace_id.as_bytes());
-        out.extend_from_slice(self.repository_id.as_bytes());
-        // A derived id is a domain-tagged digest, so all four of its parts
-        // are encoded: two ids that differ only in codec version or domain are
-        // different identities and must not collide in a snapshot golden.
-        let rcr = self.base_rcr_id.as_internal_object_id();
-        out.extend_from_slice(&rcr.algorithm().code_point().to_be_bytes());
-        out.extend_from_slice(&rcr.codec_version().major().to_be_bytes());
-        out.extend_from_slice(&rcr.codec_version().minor().to_be_bytes());
-        let rcr_domain = rcr.domain();
-        let rcr_domain_bytes = rcr_domain.as_bytes();
-        out.extend_from_slice(&(rcr_domain_bytes.len() as u64).to_be_bytes());
-        out.extend_from_slice(rcr_domain_bytes);
-        let rcr_digest = rcr.digest().as_bytes();
-        out.extend_from_slice(&(rcr_digest.len() as u64).to_be_bytes());
-        out.extend_from_slice(rcr_digest);
-        let commit = self.base_commit_oid.digest_bytes();
-        out.extend_from_slice(&(commit.len() as u64).to_be_bytes());
-        out.extend_from_slice(commit);
-        let tree = self.base_tree_oid.digest_bytes();
-        out.extend_from_slice(&(tree.len() as u64).to_be_bytes());
-        out.extend_from_slice(tree);
-        out.extend_from_slice(self.overlay_root.as_bytes());
-        out.extend_from_slice(&self.epochs.staged().get().to_be_bytes());
-        out.extend_from_slice(&self.epochs.visible().get().to_be_bytes());
-        out.extend_from_slice(&self.epochs.durable().get().to_be_bytes());
-        out
+    /// Encoded with `fgit-codec`'s [`Encoder`], not a framing of this crate's
+    /// own. ADR-0002 puts canonical encoding under one owner, and a second
+    /// hand-rolled framing here would be exactly the divergence that makes two
+    /// components disagree about what a snapshot *is* while both look correct.
+    /// Every variable-length field goes through a length-prefixing writer, so
+    /// the encoding is unambiguous.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, CodecRefusal> {
+        let mut encoder = Encoder::with_capacity(192);
+        encoder.write_schema_id(Self::SCHEMA)?;
+        encoder.write_codec_version(Self::CODEC_VERSION);
+        encoder.write_opaque_id(self.workspace_id.as_bytes());
+        encoder.write_opaque_id(self.repository_id.as_bytes());
+        encoder.write_internal_object_id(self.base_rcr_id.as_internal_object_id())?;
+        encoder.write_git_oid(&self.base_commit_oid.erase());
+        encoder.write_git_oid(&self.base_tree_oid.erase());
+        encoder.write_bytes("OverlayRoot", self.overlay_root.as_bytes())?;
+        encoder.write_scalar(self.epochs.staged().get());
+        encoder.write_scalar(self.epochs.visible().get());
+        encoder.write_scalar(self.epochs.durable().get());
+        Ok(encoder.into_bytes())
     }
 
     /// The snapshot's content identity, over [`Self::canonical_bytes`].
-    #[must_use]
-    pub fn snapshot_digest(&self) -> [u8; 32] {
+    pub fn snapshot_digest(&self) -> Result<[u8; 32], CodecRefusal> {
         let mut hasher = <Sha256 as GitHashAlgorithm>::Hasher::new();
-        hasher.update(&self.canonical_bytes());
+        hasher.update(&self.canonical_bytes()?);
         let digest = hasher.finish();
         let mut out = [0_u8; 32];
         out.copy_from_slice(digest.as_ref());
-        out
+        Ok(out)
     }
 }
 

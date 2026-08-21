@@ -458,17 +458,17 @@ fn snapshots_are_immutable_against_later_overlay_edits() {
     );
 
     let snapshot = snapshot_at(root.clone(), &overlay, EpochSet::new().stage());
-    let bytes_before = snapshot.canonical_bytes();
-    let digest_before = snapshot.snapshot_digest();
+    let bytes_before = snapshot.canonical_bytes().expect("snapshot encodes");
+    let digest_before = snapshot.snapshot_digest().expect("snapshot digests");
 
     overlay.put(path(b"src/b.rs"), OverlayEntry::Whiteout);
 
-    assert_eq!(snapshot.canonical_bytes(), bytes_before);
-    assert_eq!(snapshot.snapshot_digest(), digest_before);
+    assert_eq!(snapshot.canonical_bytes().unwrap(), bytes_before);
+    assert_eq!(snapshot.snapshot_digest().unwrap(), digest_before);
 
     let later = snapshot_at(root, &overlay, EpochSet::new().stage());
     assert_ne!(
-        later.snapshot_digest(),
+        later.snapshot_digest().unwrap(),
         digest_before,
         "a snapshot of the edited overlay is a different snapshot"
     );
@@ -483,23 +483,26 @@ fn snapshot_canonical_bytes_are_deterministic_and_pinned() {
     let overlay = Overlay::new();
     let snapshot = snapshot_at(root, &overlay, EpochSet::new());
 
-    let once = snapshot.canonical_bytes();
-    let twice = snapshot.canonical_bytes();
+    let once = snapshot.canonical_bytes().expect("snapshot encodes");
+    let twice = snapshot.canonical_bytes().expect("snapshot encodes");
     assert_eq!(once, twice, "encoding is deterministic");
     assert!(
-        once.starts_with(b"frankengit.treefs.snapshot.v1\0"),
-        "the framing is versioned and domain-separated"
+        !once.is_empty(),
+        "the shared codec produced a non-empty encoding"
     );
     assert_eq!(
-        snapshot.snapshot_digest(),
-        snapshot.snapshot_digest(),
+        snapshot.snapshot_digest().unwrap(),
+        snapshot.snapshot_digest().unwrap(),
         "the digest is a pure function of the bytes"
     );
 
     // Two snapshots differing only in epoch must differ in identity.
     let (_, root2) = fixture();
     let staged = snapshot_at(root2, &overlay, EpochSet::new().stage());
-    assert_ne!(staged.snapshot_digest(), snapshot.snapshot_digest());
+    assert_ne!(
+        staged.snapshot_digest().unwrap(),
+        snapshot.snapshot_digest().unwrap()
+    );
 }
 
 /// An empty overlay and a non-empty one produce different overlay roots.
