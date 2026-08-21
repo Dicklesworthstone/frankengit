@@ -357,6 +357,16 @@ derived_id!(
     "frankengit/generation/v1",
     "Identity of one immutable search, graph, policy, or workspace generation."
 );
+derived_id!(
+    AdmissionReceiptId,
+    "frankengit/admission-receipt/v1",
+    "Identity of one immutable admission receipt over a transaction seal."
+);
+derived_id!(
+    DocumentAnchorId,
+    "frankengit/doc-anchor/v1",
+    "Identity of one document anchor, which pins a region of a rendered document across edits."
+);
 
 /// Every domain separation tag this crate pins to a derived identity.
 ///
@@ -377,6 +387,8 @@ pub const DERIVED_ID_DOMAINS: &[&str] = &[
     ForgeEventId::DOMAIN,
     EvidenceRecordId::DOMAIN,
     GenerationId::DOMAIN,
+    AdmissionReceiptId::DOMAIN,
+    DocumentAnchorId::DOMAIN,
 ];
 
 /// An opaque backend conditional-write token.

@@ -165,6 +165,16 @@ pub enum CodecRefusal {
         /// Largest representable magnitude.
         limit: u64,
     },
+    /// A body's domain separation tag is not registered in the identity
+    /// registry, so no identity can be computed for it.
+    ///
+    /// This is a refusal rather than a fallback because computing an identity
+    /// under an unregistered domain would produce a value nothing else could
+    /// verify.
+    IdentityDomainUnregistered {
+        /// The unregistered tag.
+        domain: Box<str>,
+    },
     /// A decoded component was rejected by its own type.
     Type(TypeRefusal),
 }
@@ -185,6 +195,14 @@ impl CodecRefusal {
         Self::SchemaFamilyUnexpected {
             expected: label(&expected),
             observed: label(&observed),
+        }
+    }
+
+    /// Builds an unregistered-domain refusal from the typed label.
+    #[must_use]
+    pub fn identity_domain_unregistered(domain: DomainTag) -> Self {
+        Self::IdentityDomainUnregistered {
+            domain: label(&domain),
         }
     }
 
@@ -219,6 +237,7 @@ impl CodecRefusal {
             Self::CollectionDuplicate { .. } => "collection_duplicate",
             Self::VariantUnknown { .. } => "variant_unknown",
             Self::ValueUnrepresentable { .. } => "value_unrepresentable",
+            Self::IdentityDomainUnregistered { .. } => "identity_domain_unregistered",
             Self::Type(_) => "type_refusal",
         }
     }
@@ -234,7 +253,8 @@ impl CodecRefusal {
             | Self::CodecMajorUnsupported { .. }
             | Self::SchemaMajorUnsupported { .. }
             | Self::SchemaFamilyUnexpected { .. }
-            | Self::DomainUnexpected { .. } => RefusalCode::SchemaUnsupported,
+            | Self::DomainUnexpected { .. }
+            | Self::IdentityDomainUnregistered { .. } => RefusalCode::SchemaUnsupported,
             Self::InputTruncated { .. }
             | Self::TrailingBytes { .. }
             | Self::BooleanByteInvalid { .. }
@@ -361,6 +381,10 @@ impl fmt::Display for CodecRefusal {
             } => write!(
                 formatter,
                 "{field}: value {observed} exceeds the largest representable {limit}"
+            ),
+            Self::IdentityDomainUnregistered { domain } => write!(
+                formatter,
+                "domain {domain} is not registered in the identity registry"
             ),
             Self::Type(refusal) => write!(formatter, "{refusal}"),
         }

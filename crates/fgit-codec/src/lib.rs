@@ -3,6 +3,7 @@
 
 pub mod attest;
 pub mod bounds;
+pub mod bridge;
 pub mod error;
 pub mod reader;
 pub mod schema;
@@ -14,6 +15,7 @@ pub use attest::{
     body_id_of_frame,
 };
 pub use bounds::DecodeLimits;
+pub use bridge::CryptoBodyIdentity;
 pub use error::CodecRefusal;
 pub use reader::Decoder;
 pub use schema::{

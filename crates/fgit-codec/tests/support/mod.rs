@@ -2,6 +2,7 @@
 // fixtures the committed golden corpus was derived from.
 #![allow(dead_code)]
 
+use fgit_codec::CodecRefusal;
 use fgit_codec::attest::BodyIdentity;
 use fgit_codec::schema::{
     RefusalRecordBody, RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecision,
@@ -13,7 +14,7 @@ use fgit_types::identity::{
     RepositoryCapsuleId, RepositoryCommitId, RepositoryDecisionBatchId, TransactionSealId, TxId,
 };
 use fgit_types::numeric::{
-    DecisionSequence, HeadGeneration, PolicyEpoch, RegistryEpoch, RepositorySequence,
+    CodecVersion, DecisionSequence, HeadGeneration, PolicyEpoch, RegistryEpoch, RepositorySequence,
 };
 use fgit_types::{
     CANONICAL_CODEC_VERSION, DecisionOutcome, DomainTag, PrincipalId, RefusalCode, RepositoryId,
@@ -92,15 +93,16 @@ impl BodyIdentity for CorpusIdentity {
         &self,
         domain: DomainTag,
         schema: SchemaId,
+        codec_version: CodecVersion,
         canonical_body: &[u8],
-    ) -> InternalObjectId {
+    ) -> Result<InternalObjectId, CodecRefusal> {
         let preimage = identity_preimage(domain, schema, canonical_body);
-        InternalObjectId::new(
+        Ok(InternalObjectId::new(
             DigestAlgorithmId::try_new(CORPUS_ALGORITHM_CODE_POINT).expect("nonzero slot"),
             domain,
-            CANONICAL_CODEC_VERSION,
+            codec_version,
             self.digest(&preimage),
-        )
+        ))
     }
 }
 
@@ -114,7 +116,7 @@ impl SplitMix64 {
         Self(seed)
     }
 
-    pub fn next_u64(&mut self) -> u64 {
+    pub const fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);

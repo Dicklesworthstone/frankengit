@@ -212,7 +212,7 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    fn leave(&mut self) {
+    const fn leave(&mut self) {
         self.depth = self.depth.saturating_sub(1);
     }
 

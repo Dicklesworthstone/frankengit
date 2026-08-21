@@ -177,7 +177,7 @@ fn components_and_prefix_matching_respect_boundaries() {
 
 #[test]
 fn ordering_is_byte_order_over_the_name() {
-    let mut names = vec![
+    let mut names = [
         RefName::try_new(b"refs/tags/v1").expect("legal"),
         RefName::try_new(b"refs/heads/main").expect("legal"),
         RefName::try_new(b"refs/heads/dev").expect("legal"),

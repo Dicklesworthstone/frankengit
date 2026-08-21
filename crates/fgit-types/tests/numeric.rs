@@ -21,7 +21,7 @@ impl SplitMix64 {
         Self(seed)
     }
 
-    fn next_u64(&mut self) -> u64 {
+    const fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -83,6 +83,16 @@ fn canonical_scalars_round_trip_through_their_bit_form() {
     }
 }
 
+// Signedness is an associated constant, so these are compile-time facts
+// rather than runtime assertions; stating them as `const` makes that explicit
+// and keeps them checked.
+const _: () = assert!(!u8::SIGNED);
+const _: () = assert!(!u32::SIGNED);
+const _: () = assert!(!u64::SIGNED);
+const _: () = assert!(i8::SIGNED);
+const _: () = assert!(i32::SIGNED);
+const _: () = assert!(i64::SIGNED);
+
 #[test]
 fn canonical_scalar_widths_and_signedness_are_declared() {
     assert_eq!(u8::WIDTH, ScalarWidth::W1);
@@ -91,8 +101,6 @@ fn canonical_scalar_widths_and_signedness_are_declared() {
     assert_eq!(u64::WIDTH, ScalarWidth::W8);
     assert_eq!(i8::WIDTH, ScalarWidth::W1);
     assert_eq!(i64::WIDTH, ScalarWidth::W8);
-    assert!(!u32::SIGNED);
-    assert!(i32::SIGNED);
     assert_eq!(ScalarWidth::W1.byte_len(), 1);
     assert_eq!(ScalarWidth::W8.byte_len(), 8);
 }

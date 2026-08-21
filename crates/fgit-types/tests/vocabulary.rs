@@ -234,6 +234,11 @@ fn every_construction_refusal_maps_to_a_live_refusal_code() {
             observed: 20,
         },
     ];
+    // Every refusal must print distinguishably: two construction failures that
+    // render identically would be indistinguishable in a log, which is the
+    // property worth asserting rather than mere non-emptiness.
+    let mut rendered = BTreeSet::new();
+    let mut kinds = BTreeSet::new();
     for sample in samples {
         let code = sample.refusal_code();
         assert!(
@@ -241,7 +246,12 @@ fn every_construction_refusal_maps_to_a_live_refusal_code() {
             "{} mapped to a code outside the vocabulary",
             sample.kind()
         );
-        assert!(!sample.to_string().is_empty(), "refusal must be printable");
-        assert!(!sample.kind().is_empty());
+        assert!(
+            rendered.insert(sample.to_string()),
+            "two refusals render identically: {sample}"
+        );
+        kinds.insert(sample.kind());
     }
+    assert_eq!(rendered.len(), samples.len());
+    assert_eq!(kinds.len(), samples.len(), "two refusals share a kind");
 }

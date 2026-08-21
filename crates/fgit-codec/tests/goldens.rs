@@ -296,16 +296,22 @@ fn the_corpus_identity_depends_on_every_byte_and_on_the_domain() {
 
     // The same bytes under two domains are two identities. This is the
     // property domain separation exists for, so the corpus must show it.
-    let under_seal = CorpusIdentity.identify(
-        TransactionSealBody::DOMAIN,
-        TransactionSealBody::schema_id(),
-        &seal,
-    );
-    let under_rcr = CorpusIdentity.identify(
-        RepositoryCommitRecord::DOMAIN,
-        RepositoryCommitRecord::schema_id(),
-        &seal,
-    );
+    let under_seal = CorpusIdentity
+        .identify(
+            TransactionSealBody::DOMAIN,
+            TransactionSealBody::schema_id(),
+            fgit_types::CANONICAL_CODEC_VERSION,
+            &seal,
+        )
+        .expect("the corpus function knows every domain");
+    let under_rcr = CorpusIdentity
+        .identify(
+            RepositoryCommitRecord::DOMAIN,
+            RepositoryCommitRecord::schema_id(),
+            fgit_types::CANONICAL_CODEC_VERSION,
+            &seal,
+        )
+        .expect("the corpus function knows every domain");
     assert_ne!(under_seal, under_rcr);
     assert_ne!(under_seal.digest(), under_rcr.digest());
 }

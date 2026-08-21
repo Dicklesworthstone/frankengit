@@ -6,9 +6,9 @@ use std::collections::BTreeSet;
 
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
 use fgit_types::identity::{
-    AuthorityVersionToken, DERIVED_ID_DOMAINS, InternalObjectId, PrincipalId,
-    RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryDecisionBatchId, RequestId, TenantId,
-    TransactionSealId, TxId,
+    AdmissionReceiptId, AuthorityVersionToken, DERIVED_ID_DOMAINS, DocumentAnchorId,
+    InternalObjectId, PrincipalId, RepositoryAuthorityHeadId, RepositoryCommitId,
+    RepositoryDecisionBatchId, RequestId, TenantId, TransactionSealId, TxId,
 };
 use fgit_types::numeric::CodecVersion;
 use fgit_types::{CANONICAL_CODEC_VERSION, TypeRefusal};
@@ -191,4 +191,61 @@ fn internal_identity_display_names_all_four_components() {
         id.to_string(),
         "frankengit/ref-txn/v2/v1.0/alg:1/abababababababababababababababab"
     );
+}
+
+#[test]
+fn the_admission_receipt_identity_is_separate_from_the_seal_it_covers() {
+    // An admission receipt is a distinct immutable body over a seal id, not a
+    // field of the seal, so it needs its own domain. Sharing the seal's tag
+    // would let one be presented as the other.
+    assert_eq!(
+        AdmissionReceiptId::DOMAIN,
+        "frankengit/admission-receipt/v1"
+    );
+    let bytes = digest(0x33);
+    let receipt = AdmissionReceiptId::from_digest(algorithm(), CANONICAL_CODEC_VERSION, bytes);
+    let seal = TransactionSealId::from_digest(algorithm(), CANONICAL_CODEC_VERSION, bytes);
+    assert_ne!(
+        receipt.as_internal_object_id(),
+        seal.as_internal_object_id(),
+        "a receipt over a seal must not share the seal's identity"
+    );
+
+    // Permitted: adopting a digest from its own domain.
+    assert!(AdmissionReceiptId::from_internal_object_id(receipt.into_internal_object_id()).is_ok());
+    // Forbidden: adopting the seal's.
+    assert_eq!(
+        AdmissionReceiptId::from_internal_object_id(seal.into_internal_object_id())
+            .expect_err("a seal digest is not a receipt identity"),
+        TypeRefusal::DomainMismatch {
+            field: "AdmissionReceiptId",
+            expected: "frankengit/admission-receipt/v1",
+        }
+    );
+}
+
+#[test]
+fn the_document_anchor_identity_pins_its_own_domain() {
+    assert_eq!(DocumentAnchorId::DOMAIN, "frankengit/doc-anchor/v1");
+    let anchor = DocumentAnchorId::from_digest(algorithm(), CANONICAL_CODEC_VERSION, digest(0x44));
+    assert_eq!(
+        anchor.as_internal_object_id().domain(),
+        DocumentAnchorId::DOMAIN_TAG
+    );
+    assert!(DocumentAnchorId::from_internal_object_id(anchor.into_internal_object_id()).is_ok());
+    assert!(
+        DocumentAnchorId::from_internal_object_id(
+            TxId::from_digest(algorithm(), CANONICAL_CODEC_VERSION, digest(0x44))
+                .into_internal_object_id()
+        )
+        .is_err(),
+        "a transaction digest is not an anchor identity"
+    );
+}
+
+#[test]
+fn the_derived_identity_family_covers_sixteen_domains() {
+    // A count assertion so adding a domain-pinned id is a deliberate act that
+    // shows up here rather than slipping in unnoticed.
+    assert_eq!(DERIVED_ID_DOMAINS.len(), 16);
 }

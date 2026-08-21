@@ -217,9 +217,11 @@ fn a_repeated_element_is_refused_and_a_distinct_one_is_not() {
         refusal,
         CodecRefusal::CollectionDuplicate { field: "dupes", .. }
     ));
+    // A repeat has no canonical encoding, which is a canonicality failure and
+    // not a bound being exceeded. The earlier assertion named the wrong code.
     assert_eq!(
         refusal.refusal_code(),
-        fgit_types::RefusalCode::CanonicalBoundExceeded
+        fgit_types::RefusalCode::CanonicalFramingInvalid
     );
 
     // Permitted counterpart: the same shape with distinct elements.

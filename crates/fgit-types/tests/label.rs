@@ -81,7 +81,7 @@ fn ordering_is_lexicographic_over_the_logical_bytes() {
     assert_eq!(short, AsciiSlug::try_new("test", b"ab").expect("valid"));
     assert_ne!(short, long);
 
-    let mut sorted = vec![other, short, long];
+    let mut sorted = [other, short, long];
     sorted.sort_unstable();
     assert_eq!(
         sorted.iter().map(AsciiSlug::as_str).collect::<Vec<_>>(),

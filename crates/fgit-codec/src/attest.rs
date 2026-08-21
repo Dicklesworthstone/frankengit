@@ -25,13 +25,15 @@
 //! material.
 
 use fgit_types::identity::InternalObjectId;
+use fgit_types::numeric::CodecVersion;
 use fgit_types::{DomainTag, SchemaFamily, SchemaId};
 
 use crate::bounds::DecodeLimits;
 use crate::error::CodecRefusal;
 use crate::reader::Decoder;
 use crate::wire::{
-    CanonicalBody, canonical_body_bytes, decode_body, encode_body, peek_frame_domain, split_frame,
+    CODEC_MAJOR, CODEC_VERSION, CanonicalBody, canonical_body_bytes, decode_body, encode_body,
+    peek_frame_domain, split_frame,
 };
 use crate::writer::Encoder;
 
@@ -50,12 +52,17 @@ pub const MAX_CARRIED_BODY_LEN: usize = 8 * 1024 * 1024;
 /// a second preimage definition from growing here.
 pub trait BodyIdentity {
     /// The identity of one canonical body.
+    ///
+    /// Fallible because a domain this implementation's registry does not know
+    /// has no identity. Returning one anyway would produce a value nothing
+    /// else could verify, so an unregistered domain is a typed refusal.
     fn identify(
         &self,
         domain: DomainTag,
         schema: SchemaId,
+        codec_version: CodecVersion,
         canonical_body: &[u8],
-    ) -> InternalObjectId;
+    ) -> Result<InternalObjectId, CodecRefusal>;
 }
 
 /// The identity of a body.
@@ -69,7 +76,7 @@ where
     I: BodyIdentity + ?Sized,
 {
     let payload = canonical_body_bytes(body)?;
-    Ok(identity.identify(B::DOMAIN, B::schema_id(), &payload))
+    identity.identify(B::DOMAIN, B::schema_id(), CODEC_VERSION, &payload)
 }
 
 /// The identity of a frame already in byte form.
@@ -85,7 +92,14 @@ where
     I: BodyIdentity + ?Sized,
 {
     let (header, payload) = split_frame(frame, limits)?;
-    Ok(identity.identify(header.domain, header.schema, payload))
+    // The frame's own codec version travels with the identity, so relaying a
+    // body written by a newer minor does not restamp it as this build's.
+    identity.identify(
+        header.domain,
+        header.schema,
+        CodecVersion::new(CODEC_MAJOR, header.codec_minor),
+        payload,
+    )
 }
 
 /// Registry code point naming a signature scheme.
