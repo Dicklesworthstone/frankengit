@@ -15,6 +15,11 @@ fgit-types.workspace = true
 
 [dev-dependencies]
 fgit-authority.workspace = true
+# FG-014b: the plan section 38.4 proof contract (fingerprint, A/A control, raw
+# samples, tails) lives in this harness rather than being re-implemented per
+# crate. Test tree only -- fgit-txn's production code takes no benchmark
+# dependency.
+fgit-benchmark.workspace = true
 fgit-lab.workspace = true
 
 [lints]
