@@ -153,6 +153,48 @@ impl RegionVerdict {
     }
 }
 
+/// Refuse a capability-lease label that is not a safe public identifier.
+///
+/// Shape: one to sixty-four bytes of lowercase ASCII alphanumerics, separated
+/// by `.`, `:`, `-` or `_`, with no leading or trailing separator. Readable
+/// labels like `secret.database.primary` pass; whitespace, control characters,
+/// uppercase, and base64-shaped material do not.
+fn check_lease_label(label: &str) -> Result<(), LabRefusal> {
+    if label.is_empty() {
+        return Err(LabRefusal::UnsafeLeaseLabel {
+            reason: "a lease label may not be empty",
+        });
+    }
+    if label.len() > 64 {
+        return Err(LabRefusal::UnsafeLeaseLabel {
+            reason: "a lease label may not exceed 64 bytes; it names a lease, it is not the lease",
+        });
+    }
+    if !label.is_ascii() {
+        return Err(LabRefusal::UnsafeLeaseLabel {
+            reason: "a lease label must be ASCII",
+        });
+    }
+    let separators = ['.', ':', '-', '_'];
+    if label.starts_with(separators) || label.ends_with(separators) {
+        return Err(LabRefusal::UnsafeLeaseLabel {
+            reason: "a lease label may not start or end with a separator",
+        });
+    }
+    for byte in label.bytes() {
+        let character = char::from(byte);
+        let permitted = character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || separators.contains(&character);
+        if !permitted {
+            return Err(LabRefusal::UnsafeLeaseLabel {
+                reason: "a lease label may contain only lowercase ASCII, digits, and . : - _",
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Saturating narrowing, because a truncated count would understate a failure.
 fn narrow(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
@@ -198,8 +240,27 @@ impl RegionCloseObserver {
     }
 
     /// A capability lease was taken.
-    pub fn record_capability_lease(&mut self, lease: impl Into<String>) {
-        self.open_leases.insert(lease.into());
+    ///
+    /// The label is a **public identifier**: it appears verbatim in verdict
+    /// renderings and therefore in receipts. It must name the lease, never
+    /// carry its contents.
+    ///
+    /// # Errors
+    ///
+    /// [`LabRefusal::UnsafeLeaseLabel`] when the label is not a bounded,
+    /// lowercase, dot-or-colon separated identifier. `OliveFortress` asked for
+    /// this after observing that an `impl Into<String>` parameter let a caller
+    /// place secret material into a field that is later published.
+    ///
+    /// **Honest limit:** this makes accidental secret placement hard and
+    /// obvious, not impossible. A caller determined to pass a secret that
+    /// happens to be lowercase and hyphenated still can. The rule buys
+    /// "a key or token cannot be dropped in by mistake", and claiming more
+    /// than that would be the kind of overclaim this crate exists to refuse.
+    pub fn record_capability_lease(&mut self, lease: &str) -> Result<(), LabRefusal> {
+        check_lease_label(lease)?;
+        self.open_leases.insert(lease.to_owned());
+        Ok(())
     }
 
     /// A capability lease was released.
@@ -254,20 +315,33 @@ impl RegionCloseObserver {
             }
             RegionCloseOutcome::Quiescent(receipt) => {
                 let outstanding = self.outstanding();
-                if outstanding > 0 {
-                    // The ledger settled, but the lab still saw live work when
-                    // the bound ran out. Nothing leaked; the drain did not
-                    // finish. Reporting this as Quiescent would make the bound
-                    // decorative.
+                if outstanding == 0 {
+                    return Ok(RegionVerdict::Quiescent {
+                        region: receipt.region(),
+                        settled: receipt.settled(),
+                    });
+                }
+                // Work is still live. WHICH answer that deserves depends on
+                // whether the bound was actually reached.
+                //
+                // The first version of this method returned
+                // BoundedNonCooperative for any outstanding work, which
+                // contradicted this module's own documentation ("when the
+                // drain bound ran out") and made `drain_bound` nearly dead.
+                // OliveFortress caught it: an incomplete drain would have read
+                // as a terminal bounded outcome, so a campaign could stop
+                // draining early and call the result bounded.
+                if self.bound_exhausted() {
                     Ok(RegionVerdict::BoundedNonCooperative {
                         region: receipt.region(),
                         outstanding,
                         passes: self.passes,
                     })
                 } else {
-                    Ok(RegionVerdict::Quiescent {
-                        region: receipt.region(),
-                        settled: receipt.settled(),
+                    Err(LabRefusal::DrainIncomplete {
+                        outstanding,
+                        passes: self.passes,
+                        bound: self.drain_bound,
                     })
                 }
             }
@@ -324,7 +398,8 @@ mod tests {
     #[test]
     fn a_live_task_at_the_bound_is_bounded_non_cooperative_not_quiescent() {
         // The distinction the middle verdict exists for: the ledger settled,
-        // so nothing leaked, but the lab still had live work.
+        // so nothing leaked, but the lab still had live work AND the bound was
+        // exhausted. Both halves are required.
         let mut observer = RegionCloseObserver::new(region(2), 2);
         observer.record_task_live(StepId::new("stuck"));
         observer.record_drain_pass();
@@ -354,7 +429,9 @@ mod tests {
         // Leases count as outstanding alongside tasks: a lease still held is
         // work the region has not finished, even with no live task.
         let mut observer = RegionCloseObserver::new(region(3), 1);
-        observer.record_capability_lease("secret-lease-a");
+        observer
+            .record_capability_lease("secret.lease.a")
+            .expect("a safe label is accepted");
         observer.record_drain_pass();
 
         let verdict = observer
@@ -365,8 +442,10 @@ mod tests {
 
         // Paired permitted case: release it and the same shape is quiescent.
         let mut released = RegionCloseObserver::new(region(3), 1);
-        released.record_capability_lease("secret-lease-a");
-        released.record_lease_released("secret-lease-a");
+        released
+            .record_capability_lease("secret.lease.a")
+            .expect("a safe label is accepted");
+        released.record_lease_released("secret.lease.a");
         released.record_drain_pass();
         assert!(
             released
@@ -411,14 +490,67 @@ mod tests {
         stopped_early.record_task_live(StepId::new("live"));
         stopped_early.record_drain_pass();
         assert!(!stopped_early.bound_exhausted());
+        let refusal = stopped_early
+            .close(quiescent_outcome(6))
+            .expect_err("live work before the bound is not yet a terminal verdict");
+        assert_eq!(refusal.code(), "lab.region.drain_incomplete");
+    }
+
+    #[test]
+    fn live_work_before_the_bound_is_refused_rather_than_called_bounded() {
+        // OliveFortress's correction, pinned. Returning BoundedNonCooperative
+        // here would let a campaign stop draining after one pass and report a
+        // terminal bounded outcome - the bound would mean nothing.
+        let mut too_early = RegionCloseObserver::new(region(9), 4);
+        too_early.record_task_live(StepId::new("still-working"));
+        too_early.record_drain_pass();
+
+        let refusal = too_early
+            .close(quiescent_outcome(9))
+            .expect_err("an incomplete drain must refuse, not conclude");
+        assert_eq!(refusal.code(), "lab.region.drain_incomplete");
+        let rendered = refusal.to_string();
+        assert!(rendered.contains("1 of 4 passes"), "got {rendered}");
+
+        // Paired permitted case: the same state at the bound IS the terminal
+        // bounded verdict.
+        let mut at_bound = RegionCloseObserver::new(region(9), 1);
+        at_bound.record_task_live(StepId::new("still-working"));
+        at_bound.record_drain_pass();
         assert_eq!(
-            stopped_early
-                .close(quiescent_outcome(6))
-                .expect("folds")
-                .code(),
-            "bounded_non_cooperative",
-            "live work is non-cooperative whether or not the bound was exhausted"
+            at_bound.close(quiescent_outcome(9)).expect("folds").code(),
+            "bounded_non_cooperative"
         );
+    }
+
+    #[test]
+    fn an_unsafe_capability_lease_label_is_refused() {
+        // A label appears verbatim in receipts, so it names a lease and must
+        // never carry one. These are the shapes a secret arrives in.
+        let mut observer = RegionCloseObserver::new(region(10), 1);
+        for hostile in [
+            "",
+            "UPPERCASE-TOKEN",
+            "has whitespace",
+            "trailing-",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "way-too-long-to-be-a-label-and-long-enough-to-hide-a-key-inside-of-it-x",
+        ] {
+            let refusal = observer
+                .record_capability_lease(hostile)
+                .expect_err("an unsafe label must be refused");
+            assert_eq!(
+                refusal.code(),
+                "lab.region.unsafe_lease_label",
+                "label {hostile:?} must be refused as unsafe"
+            );
+        }
+
+        // Paired permitted case, or the refusals above would pass against a
+        // checker that rejected everything.
+        observer
+            .record_capability_lease("secret.database.primary")
+            .expect("a readable namespaced label is accepted");
     }
 
     #[test]

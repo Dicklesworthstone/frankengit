@@ -127,6 +127,29 @@ pub enum LabRefusal {
         /// The signature the replay actually produced.
         observed: String,
     },
+    /// A region close was evaluated before its drain bound was exhausted.
+    ///
+    /// `BoundedNonCooperative` is a *terminal* verdict: it means the lab
+    /// reached its declared bound and work was still live. Returning it while
+    /// passes remain would conflate "the drain is still in progress" with "the
+    /// drain gave up", and a campaign reading the first as the second would
+    /// stop draining early and call the result bounded.
+    DrainIncomplete {
+        /// Tasks and leases still live.
+        outstanding: u32,
+        /// Drain passes performed so far.
+        passes: u32,
+        /// The declared bound, not yet reached.
+        bound: u32,
+    },
+    /// A capability-lease label was not a safe public identifier.
+    ///
+    /// Labels appear verbatim in receipts and canonical lines, so a label is a
+    /// PUBLIC identifier and must never carry secret material.
+    UnsafeLeaseLabel {
+        /// Why the label was refused.
+        reason: &'static str,
+    },
     /// Close evidence was folded against a different region's observations.
     ///
     /// A verdict built from one region's ledger and another's lab observations
@@ -172,6 +195,8 @@ impl LabRefusal {
             Self::ReplayDrift { .. } => "lab.replay.drift",
             Self::CausalSignatureMismatch { .. } => "lab.replay.causal_signature_mismatch",
             Self::RegionEvidenceMismatch { .. } => "lab.region.evidence_mismatch",
+            Self::DrainIncomplete { .. } => "lab.region.drain_incomplete",
+            Self::UnsafeLeaseLabel { .. } => "lab.region.unsafe_lease_label",
             Self::DeterministicEvidenceForNativeClass { .. } => {
                 "lab.evidence.deterministic_for_native_class"
             }
@@ -273,6 +298,18 @@ impl fmt::Display for LabRefusal {
                 "replay reproduced a different failure: expected `{expected}`, observed \
                  `{observed}`"
             ),
+            Self::DrainIncomplete {
+                outstanding,
+                passes,
+                bound,
+            } => write!(
+                f,
+                "drain incomplete: {outstanding} outstanding after {passes} of {bound} passes; \
+                 a bounded non-cooperative verdict requires the bound to be exhausted"
+            ),
+            Self::UnsafeLeaseLabel { reason } => {
+                write!(f, "capability-lease label refused: {reason}")
+            }
             Self::RegionEvidenceMismatch { expected, observed } => write!(
                 f,
                 "region-close evidence mismatch: observer watched region {expected}, evidence \
