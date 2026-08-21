@@ -1,0 +1,327 @@
+//! The typed refusal a canonical encoder or decoder returns.
+//!
+//! Nothing here is an "internal error". Every variant names what was expected,
+//! what was observed, and where, so a rejected body can be diagnosed from a
+//! log line without re-running the decoder.
+
+use core::fmt;
+
+use fgit_types::{DomainTag, RefusalCode, TypeRefusal};
+
+/// Why a canonical body could not be encoded or decoded.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CodecRefusal {
+    /// The frame did not begin with the canonical magic.
+    MagicUnrecognized {
+        /// The four bytes actually present.
+        observed: [u8; 4],
+    },
+    /// The frame declares a codec major version this build does not implement.
+    ///
+    /// Refusing is the point: a newer major may reorder or reinterpret fields,
+    /// so guessing would produce a confidently wrong value.
+    CodecMajorUnsupported {
+        /// Major version the frame declares.
+        observed: u16,
+        /// Major version this build implements.
+        supported: u16,
+    },
+    /// The body declares a schema major version this build does not implement.
+    SchemaMajorUnsupported {
+        /// Domain separation tag of the body.
+        domain: DomainTag,
+        /// Major version the body declares.
+        observed: u16,
+        /// Major version this build implements.
+        supported: u16,
+    },
+    /// The frame's domain separation tag is not the one the caller asked to
+    /// decode, so the bytes belong to a different schema.
+    DomainUnexpected {
+        /// Domain the caller required.
+        expected: DomainTag,
+        /// Domain the frame declares.
+        observed: DomainTag,
+    },
+    /// The input ended before a value that the framing promised.
+    InputTruncated {
+        /// What was being read.
+        field: &'static str,
+        /// Bytes still required.
+        needed: u64,
+        /// Bytes still available.
+        available: u64,
+        /// Offset the read started at.
+        offset: u64,
+    },
+    /// Bytes remained after the body was fully decoded.
+    ///
+    /// A canonical body has exactly one byte string, so a suffix means these
+    /// are not that body's bytes.
+    TrailingBytes {
+        /// Offset where the body ended.
+        offset: u64,
+        /// Bytes left over.
+        remaining: u64,
+    },
+    /// A length exceeded its decode bound.
+    LengthBoundExceeded {
+        /// What was being read.
+        field: &'static str,
+        /// Length the input declares.
+        observed: u64,
+        /// Bound in force.
+        limit: u64,
+    },
+    /// An element count exceeded its decode bound.
+    CountBoundExceeded {
+        /// What was being read.
+        field: &'static str,
+        /// Count the input declares.
+        observed: u64,
+        /// Bound in force.
+        limit: u64,
+    },
+    /// Nesting exceeded its decode bound.
+    DepthBoundExceeded {
+        /// Bound in force.
+        limit: u32,
+        /// Offset where the bound was reached.
+        offset: u64,
+    },
+    /// A boolean byte was neither `0x00` nor `0x01`.
+    BooleanByteInvalid {
+        /// The byte present.
+        observed: u8,
+        /// Offset of the byte.
+        offset: u64,
+    },
+    /// An optional tag byte was neither `0x00` nor `0x01`.
+    OptionTagInvalid {
+        /// The byte present.
+        observed: u8,
+        /// Offset of the byte.
+        offset: u64,
+    },
+    /// A text value was not valid `UTF-8`.
+    TextNotUtf8 {
+        /// What was being read.
+        field: &'static str,
+        /// Offset of the text value.
+        offset: u64,
+    },
+    /// A canonical collection's elements were not in strictly ascending
+    /// encoded-byte order.
+    CollectionUnordered {
+        /// What was being read.
+        field: &'static str,
+        /// Index of the element that broke the order.
+        index: u64,
+        /// Offset of the collection.
+        offset: u64,
+    },
+    /// A canonical collection contained the same element or key twice.
+    CollectionDuplicate {
+        /// What was being read.
+        field: &'static str,
+        /// Index of the repeated element.
+        index: u64,
+        /// Offset of the collection.
+        offset: u64,
+    },
+    /// A variant tag did not name any member of a closed vocabulary.
+    VariantUnknown {
+        /// What was being read.
+        field: &'static str,
+        /// The unmatched tag.
+        observed: u32,
+        /// Offset of the tag.
+        offset: u64,
+    },
+    /// A value could not be built because it exceeds what the encoder can
+    /// represent, for example a byte string longer than a length prefix.
+    ValueUnrepresentable {
+        /// What was being written.
+        field: &'static str,
+        /// The offending magnitude.
+        observed: u64,
+        /// Largest representable magnitude.
+        limit: u64,
+    },
+    /// A decoded component was rejected by its own type.
+    Type(TypeRefusal),
+}
+
+impl CodecRefusal {
+    /// Stable machine-readable discriminant for logs and evidence records.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::MagicUnrecognized { .. } => "magic_unrecognized",
+            Self::CodecMajorUnsupported { .. } => "codec_major_unsupported",
+            Self::SchemaMajorUnsupported { .. } => "schema_major_unsupported",
+            Self::DomainUnexpected { .. } => "domain_unexpected",
+            Self::InputTruncated { .. } => "input_truncated",
+            Self::TrailingBytes { .. } => "trailing_bytes",
+            Self::LengthBoundExceeded { .. } => "length_bound_exceeded",
+            Self::CountBoundExceeded { .. } => "count_bound_exceeded",
+            Self::DepthBoundExceeded { .. } => "depth_bound_exceeded",
+            Self::BooleanByteInvalid { .. } => "boolean_byte_invalid",
+            Self::OptionTagInvalid { .. } => "option_tag_invalid",
+            Self::TextNotUtf8 { .. } => "text_not_utf8",
+            Self::CollectionUnordered { .. } => "collection_unordered",
+            Self::CollectionDuplicate { .. } => "collection_duplicate",
+            Self::VariantUnknown { .. } => "variant_unknown",
+            Self::ValueUnrepresentable { .. } => "value_unrepresentable",
+            Self::Type(_) => "type_refusal",
+        }
+    }
+
+    /// The protocol refusal this codec failure reports as.
+    ///
+    /// The mapping is total and deterministic, so a decode failure and the
+    /// refusal recorded in the decision stream never disagree.
+    #[must_use]
+    pub const fn refusal_code(&self) -> RefusalCode {
+        match self {
+            Self::MagicUnrecognized { .. }
+            | Self::CodecMajorUnsupported { .. }
+            | Self::SchemaMajorUnsupported { .. }
+            | Self::DomainUnexpected { .. } => RefusalCode::SchemaUnsupported,
+            Self::InputTruncated { .. }
+            | Self::TrailingBytes { .. }
+            | Self::BooleanByteInvalid { .. }
+            | Self::OptionTagInvalid { .. }
+            | Self::TextNotUtf8 { .. }
+            | Self::CollectionUnordered { .. }
+            | Self::CollectionDuplicate { .. }
+            | Self::VariantUnknown { .. } => RefusalCode::CanonicalFramingInvalid,
+            Self::LengthBoundExceeded { .. }
+            | Self::CountBoundExceeded { .. }
+            | Self::DepthBoundExceeded { .. }
+            | Self::ValueUnrepresentable { .. } => RefusalCode::CanonicalBoundExceeded,
+            Self::Type(refusal) => refusal.refusal_code(),
+        }
+    }
+}
+
+impl From<TypeRefusal> for CodecRefusal {
+    fn from(refusal: TypeRefusal) -> Self {
+        Self::Type(refusal)
+    }
+}
+
+impl fmt::Display for CodecRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MagicUnrecognized { observed } => {
+                write!(formatter, "frame magic unrecognized: {observed:02x?}")
+            }
+            Self::CodecMajorUnsupported {
+                observed,
+                supported,
+            } => write!(
+                formatter,
+                "codec major {observed} is unsupported; this build implements {supported}"
+            ),
+            Self::SchemaMajorUnsupported {
+                domain,
+                observed,
+                supported,
+            } => write!(
+                formatter,
+                "{domain}: schema major {observed} is unsupported; this build implements {supported}"
+            ),
+            Self::DomainUnexpected { expected, observed } => write!(
+                formatter,
+                "domain mismatch: expected {expected}, observed {observed}"
+            ),
+            Self::InputTruncated {
+                field,
+                needed,
+                available,
+                offset,
+            } => write!(
+                formatter,
+                "{field}: truncated at offset {offset}; needed {needed} bytes, {available} available"
+            ),
+            Self::TrailingBytes { offset, remaining } => write!(
+                formatter,
+                "{remaining} trailing bytes after the body ended at offset {offset}"
+            ),
+            Self::LengthBoundExceeded {
+                field,
+                observed,
+                limit,
+            } => write!(
+                formatter,
+                "{field}: declared length {observed} exceeds the bound {limit}"
+            ),
+            Self::CountBoundExceeded {
+                field,
+                observed,
+                limit,
+            } => write!(
+                formatter,
+                "{field}: declared count {observed} exceeds the bound {limit}"
+            ),
+            Self::DepthBoundExceeded { limit, offset } => write!(
+                formatter,
+                "nesting deeper than {limit} at offset {offset}"
+            ),
+            Self::BooleanByteInvalid { observed, offset } => write!(
+                formatter,
+                "boolean byte 0x{observed:02x} at offset {offset} is neither 0x00 nor 0x01"
+            ),
+            Self::OptionTagInvalid { observed, offset } => write!(
+                formatter,
+                "option tag 0x{observed:02x} at offset {offset} is neither 0x00 nor 0x01"
+            ),
+            Self::TextNotUtf8 { field, offset } => {
+                write!(formatter, "{field}: text at offset {offset} is not UTF-8")
+            }
+            Self::CollectionUnordered {
+                field,
+                index,
+                offset,
+            } => write!(
+                formatter,
+                "{field}: element {index} at offset {offset} is not in ascending canonical order"
+            ),
+            Self::CollectionDuplicate {
+                field,
+                index,
+                offset,
+            } => write!(
+                formatter,
+                "{field}: element {index} at offset {offset} repeats an earlier element"
+            ),
+            Self::VariantUnknown {
+                field,
+                observed,
+                offset,
+            } => write!(
+                formatter,
+                "{field}: unknown variant tag {observed} at offset {offset}"
+            ),
+            Self::ValueUnrepresentable {
+                field,
+                observed,
+                limit,
+            } => write!(
+                formatter,
+                "{field}: value {observed} exceeds the largest representable {limit}"
+            ),
+            Self::Type(refusal) => write!(formatter, "{refusal}"),
+        }
+    }
+}
+
+impl std::error::Error for CodecRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Type(refusal) => Some(refusal),
+            _ => None,
+        }
+    }
+}
