@@ -10,6 +10,8 @@
 //! enumerations in the `registry` module remain authoritative, and the corpus
 //! test fails when they move without the corpus moving with them.
 
+use core::fmt::Write as _;
+
 use crate::registry::{ALGORITHM_REGISTRY, DOMAIN_REGISTRY};
 
 /// Marker line every `FrankenGit` registry-shaped file begins with.
@@ -31,14 +33,16 @@ pub fn export_algorithm_registry() -> String {
     text.push_str(ALGORITHM_HEADER);
     text.push('\n');
     for row in ALGORITHM_REGISTRY {
-        text.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\n",
+        writeln!(
+            text,
+            "{}\t{}\t{}\t{}\t{}",
             row.code_point,
             row.name,
             row.digest_len,
             row.usage.token(),
             row.status.token()
-        ));
+        )
+        .expect("writing into a String cannot fail");
     }
     text
 }
@@ -52,15 +56,17 @@ pub fn export_domain_registry() -> String {
     text.push_str(DOMAIN_HEADER);
     text.push('\n');
     for row in DOMAIN_REGISTRY {
-        text.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\n",
+        writeln!(
+            text,
+            "{}\t{}\t{}\t{}\t{}\t{}",
             row.registry_id,
             row.tag,
             row.algorithm.digest_algorithm().name(),
             row.durable_object_row.unwrap_or("-"),
             row.derived_identity.unwrap_or("-"),
             row.status.token()
-        ));
+        )
+        .expect("writing into a String cannot fail");
     }
     text
 }

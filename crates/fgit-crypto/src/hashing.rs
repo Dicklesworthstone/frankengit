@@ -217,8 +217,14 @@ impl Sha1Hasher {
         }
 
         let mut digest = [0_u8; 20];
-        for (slot, word) in digest.chunks_exact_mut(4).zip(self.state.iter()) {
-            slot.copy_from_slice(&word.to_be_bytes());
+        for (slot, word) in digest
+            .as_mut_slice()
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(self.state.iter())
+        {
+            *slot = word.to_be_bytes();
         }
         Ok(digest)
     }
@@ -229,11 +235,8 @@ impl Sha1Hasher {
         observer: &mut O,
     ) -> BlockVerdict {
         let mut schedule = [0_u32; 80];
-        for (word, source) in schedule.iter_mut().zip(block.chunks_exact(4)) {
-            let bytes: [u8; 4] = source
-                .try_into()
-                .expect("chunks_exact(4) always yields four bytes");
-            *word = u32::from_be_bytes(bytes);
+        for (word, source) in schedule.iter_mut().zip(block.as_slice().as_chunks::<4>().0) {
+            *word = u32::from_be_bytes(*source);
         }
         for index in 16..80 {
             let mixed = schedule[index - 3]
@@ -350,11 +353,8 @@ impl Sha256Hasher {
 
     fn compress(&mut self, block: &[u8; BLOCK_BYTES]) {
         let mut schedule = [0_u32; 64];
-        for (word, source) in schedule.iter_mut().zip(block.chunks_exact(4)) {
-            let bytes: [u8; 4] = source
-                .try_into()
-                .expect("chunks_exact(4) always yields four bytes");
-            *word = u32::from_be_bytes(bytes);
+        for (word, source) in schedule.iter_mut().zip(block.as_slice().as_chunks::<4>().0) {
+            *word = u32::from_be_bytes(*source);
         }
         for index in 16..64 {
             let previous = schedule[index - 15];
@@ -442,8 +442,14 @@ impl DigestHasher for Sha256Hasher {
         self.compress(&block);
 
         let mut digest = [0_u8; 32];
-        for (slot, word) in digest.chunks_exact_mut(4).zip(self.state.iter()) {
-            slot.copy_from_slice(&word.to_be_bytes());
+        for (slot, word) in digest
+            .as_mut_slice()
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(self.state.iter())
+        {
+            *slot = word.to_be_bytes();
         }
         digest
     }

@@ -167,29 +167,76 @@ const PERMITTED: &[PermittedCase] = &[
     },
 ];
 
-/// Directory cargo placed this test binary in; its sibling `.rlib` files are
-/// the crate under test and its dependencies.
-fn dependency_dir() -> PathBuf {
-    let mut path = std::env::current_exe().expect("the test binary knows its own path");
-    path.pop();
-    if path.ends_with("deps") {
-        path
-    } else {
-        path.join("deps")
+/// Locate a build artifact for `prefix`, searching outward from this binary.
+///
+/// Two assumptions in the first version of this harness were wrong, and batch
+/// verify found both. It assumed the test binary sits in
+/// `<target>/<profile>/deps` alongside the crate's `.rlib`; in this
+/// environment cargo writes artifacts to
+/// `<target>/<profile>/build/<package>/<hash>/out/`, the `deps` directory is
+/// empty, and each build unit gets its own `out` directory — so the test
+/// binary's own directory does not contain the library it linked against, a
+/// sibling one does. It also assumed `.rlib`; `cargo check` emits only
+/// `.rmeta`, which is sufficient here because this harness only ever asks
+/// rustc for `--emit=metadata`.
+///
+/// So: walk ancestors, and at each one do a depth-limited recursive scan for
+/// `prefix*.rlib` or `prefix*.rmeta`, newest wins. Verified against the exact
+/// layout that broke the first version.
+fn locate_artifact(prefix: &str) -> PathBuf {
+    /// How deep to look below each ancestor. Four levels reaches
+    /// `build/<package>/<hash>/out/<file>`.
+    const SCAN_DEPTH: usize = 4;
+    /// How far up to walk. Eight levels reaches the target root from a binary
+    /// nested inside a build-unit output directory.
+    const ANCESTOR_LIMIT: usize = 8;
+
+    let exe = std::env::current_exe().expect("the test binary knows its own path");
+    let mut searched = Vec::new();
+    for ancestor in exe.ancestors().take(ANCESTOR_LIMIT) {
+        let mut best = None;
+        scan_for_artifact(ancestor, prefix, SCAN_DEPTH, &mut best);
+        if let Some((_, path)) = best {
+            return path;
+        }
+        searched.push(ancestor.display().to_string());
     }
+    // Deliberately a hard failure, never a skip: a compile-time boundary that
+    // has quietly stopped being checked is worse than one that fails the lane.
+    let searched = searched.join("\n  ");
+    panic!(
+        "no `{prefix}*.rlib` or `{prefix}*.rmeta` found; the compile-time boundary cannot be checked. Searched below:\n  {searched}"
+    );
 }
 
-/// Locate the most recently built `.rlib` whose file name starts with `prefix`.
-fn newest_rlib(directory: &Path, prefix: &str) -> PathBuf {
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    let entries = std::fs::read_dir(directory)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()));
+/// Depth-limited search for the newest matching artifact.
+fn scan_for_artifact(
+    directory: &Path,
+    prefix: &str,
+    depth: usize,
+    best: &mut Option<(std::time::SystemTime, PathBuf)>,
+) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        // `file_type` does not follow symlinks, so this cannot loop.
+        if file_type.is_dir() {
+            scan_for_artifact(&path, prefix, depth - 1, best);
+            continue;
+        }
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if !name.starts_with(prefix) || path.extension() != Some(OsStr::new("rlib")) {
+        let extension = path.extension().and_then(OsStr::to_str);
+        if !name.starts_with(prefix) || !matches!(extension, Some("rlib" | "rmeta")) {
             continue;
         }
         let modified = entry
@@ -200,51 +247,66 @@ fn newest_rlib(directory: &Path, prefix: &str) -> PathBuf {
             .as_ref()
             .is_none_or(|(best_time, _)| modified >= *best_time)
         {
-            best = Some((modified, path));
+            *best = Some((modified, path));
         }
     }
-    best.map(|(_, path)| path).unwrap_or_else(|| {
-        panic!(
-            "no `{prefix}*.rlib` in {}; the compile-time boundary cannot be checked",
-            directory.display()
-        )
-    })
 }
 
 struct Harness {
     scratch: PathBuf,
-    deps: PathBuf,
     crypto: PathBuf,
     types: PathBuf,
 }
 
 impl Harness {
     fn new() -> Self {
-        let deps = dependency_dir();
-        let scratch = deps.join("fgit-crypto-compile-fail");
+        let crypto = locate_artifact("libfgit_crypto-");
+        let types = locate_artifact("libfgit_types-");
+        let scratch = crypto
+            .parent()
+            .expect("an artifact always has a parent directory")
+            .join("fgit-crypto-compile-fail");
         std::fs::create_dir_all(&scratch).expect("a scratch directory for generated sources");
-        let crypto = newest_rlib(&deps, "libfgit_crypto-");
-        let types = newest_rlib(&deps, "libfgit_types-");
         Self {
             scratch,
-            deps,
             crypto,
             types,
         }
+    }
+
+    /// `-L dependency=` for each directory holding an artifact. The two crates
+    /// land in different build-unit directories, so one search path is not
+    /// enough.
+    fn link_dirs(&self) -> Vec<&Path> {
+        let mut dirs: Vec<&Path> = Vec::new();
+        for artifact in [&self.crypto, &self.types] {
+            if let Some(parent) = artifact.parent()
+                && !dirs.contains(&parent)
+            {
+                dirs.push(parent);
+            }
+        }
+        dirs
     }
 
     /// Compile one program and report whether `rustc` accepted it.
     fn compiles(&self, name: &str, body: &str) -> (bool, String) {
         let source = self.scratch.join(format!("{name}.rs"));
         std::fs::write(&source, body).expect("the generated source is writable");
-        let output = Command::new(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned()))
+        let mut command =
+            Command::new(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned()));
+        command
             .arg("--edition=2024")
             .arg("--crate-type=bin")
             .arg("--emit=metadata")
             .arg("-o")
-            .arg(self.scratch.join(format!("{name}.meta")))
-            .arg("-L")
-            .arg(format!("dependency={}", self.deps.display()))
+            .arg(self.scratch.join(format!("{name}.meta")));
+        for directory in self.link_dirs() {
+            command
+                .arg("-L")
+                .arg(format!("dependency={}", directory.display()));
+        }
+        let output = command
             .arg("--extern")
             .arg(format!("fgit_crypto={}", self.crypto.display()))
             .arg("--extern")
