@@ -2,10 +2,10 @@
 
 use fgit_wire::GitObjectFormat;
 use fgit_wire::{
-    encode_packets, encode_sideband_64k, parse_filter, parse_sideband, sideband_pack_chunk,
     AckMode, AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, ObjectFilter, Packet,
     PktLineDecoder, SidebandBand, UploadPackRepository, UploadPackVersion, V1Advertisement,
-    V2UploadPack, WireError, WireEvent, WireLimits,
+    V2UploadPack, WireError, WireEvent, WireLimits, encode_packets, encode_sideband_64k,
+    parse_filter, parse_sideband, sideband_pack_chunk,
 };
 
 const WANT: &str = "1111111111111111111111111111111111111111";
@@ -101,6 +101,46 @@ fn pkt_line_control_markers_preserve_flush_delimiter_and_response_end() {
         encode_packets(&packets, &WireLimits::default()).expect("controls encode"),
         bytes
     );
+}
+
+#[test]
+fn pkt_line_boundary_handoff_leaves_raw_pack_suffix_unbuffered() {
+    let input = b"0009done\n0000PACK\x00raw-pack-bytes";
+    let mut decoder = PktLineDecoder::new(WireLimits::default()).expect("default limits");
+    let result = decoder
+        .push_until_flush(input)
+        .expect("flush boundary accepted");
+
+    assert!(result.found_flush);
+    assert_eq!(
+        result.packets,
+        vec![Packet::Data(b"done\n".to_vec()), Packet::Flush]
+    );
+    assert_eq!(&input[result.consumed..], b"PACK\x00raw-pack-bytes");
+    assert_eq!(decoder.pending_len(), 0);
+    decoder
+        .finish()
+        .expect("no raw pack bytes retained as pkt-line");
+}
+
+#[test]
+fn pkt_line_boundary_handoff_preserves_a_fragmented_flush_offset() {
+    let mut decoder = PktLineDecoder::new(WireLimits::default()).expect("default limits");
+    let first = decoder
+        .push_until_flush(b"000")
+        .expect("partial header buffered");
+    assert!(!first.found_flush);
+    assert_eq!(first.consumed, 3);
+
+    let second_input = b"0PACK";
+    let second = decoder
+        .push_until_flush(second_input)
+        .expect("fragment completes flush");
+    assert!(second.found_flush);
+    assert_eq!(second.packets, vec![Packet::Flush]);
+    assert_eq!(second.consumed, 1);
+    assert_eq!(&second_input[second.consumed..], b"PACK");
+    assert_eq!(decoder.pending_len(), 0);
 }
 
 #[test]
@@ -236,14 +276,18 @@ fn v2_fetch_transcript_requests_sideband_pack_after_done() {
             &repository,
         )
         .expect("fetch transcript");
-    assert!(transition
-        .output
-        .iter()
-        .any(|packet| matches!(packet, Packet::Delimiter)));
-    assert!(transition
-        .output
-        .iter()
-        .any(|packet| matches!(packet, Packet::Data(line) if line == b"packfile\n")));
+    assert!(
+        transition
+            .output
+            .iter()
+            .any(|packet| matches!(packet, Packet::Delimiter))
+    );
+    assert!(
+        transition
+            .output
+            .iter()
+            .any(|packet| matches!(packet, Packet::Data(line) if line == b"packfile\n"))
+    );
     let Some(WireEvent::PackRequested(request)) = transition.events.last() else {
         panic!("complete v2 request must ask for a pack");
     };

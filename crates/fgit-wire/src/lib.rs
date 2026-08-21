@@ -138,6 +138,21 @@ pub enum Packet {
     ResponseEnd,
 }
 
+/// Packets decoded while searching for a receive-pack request flush.
+///
+/// When `found_flush` is true, `consumed` identifies the first byte after the
+/// marker in the supplied input. Callers can pass `&input[consumed..]` to a
+/// different protocol parser without copying it into [`PktLineDecoder`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PktLineFlushBoundary {
+    /// Complete decoded packets, including the terminating marker when found.
+    pub packets: Vec<Packet>,
+    /// Bytes consumed from this invocation's input slice.
+    pub consumed: usize,
+    /// Whether a `0000` flush occurred in this invocation.
+    pub found_flush: bool,
+}
+
 /// Typed refusal from packet syntax, bounded collection growth, or protocol state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WireError {
@@ -366,6 +381,60 @@ impl PktLineDecoder {
 
     /// Appends bytes and returns every complete packet now available.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Packet>, WireError> {
+        self.append(bytes)?;
+
+        let mut packets = Vec::new();
+        loop {
+            if self.pending.len() >= 4 {
+                self.check_packet_count(packets.len())?;
+            }
+            let Some((packet, consumed)) = self.decode_complete_packet()? else {
+                break;
+            };
+            self.pending.drain(..consumed);
+            packets.push(packet);
+        }
+        Ok(packets)
+    }
+
+    /// Decodes only through the first flush, leaving any later input outside
+    /// this decoder for the caller to process as another protocol phase.
+    ///
+    /// Unlike [`Self::push`], this method appends only bytes necessary to
+    /// complete the next pkt-line. This lets a receive-pack adapter retain a
+    /// borrowed `PACK` suffix rather than allocating or misparsing it as a
+    /// pkt-line. Partial pkt-lines still remain subject to
+    /// [`WireLimits::max_pending_bytes`].
+    pub fn push_until_flush(&mut self, bytes: &[u8]) -> Result<PktLineFlushBoundary, WireError> {
+        let mut consumed = 0_usize;
+        let mut packets = Vec::new();
+
+        loop {
+            self.fill_to_frame_boundary(bytes, &mut consumed)?;
+            if self.pending.len() >= 4 {
+                self.check_packet_count(packets.len())?;
+            }
+            let Some((packet, frame_len)) = self.decode_complete_packet()? else {
+                return Ok(PktLineFlushBoundary {
+                    packets,
+                    consumed,
+                    found_flush: false,
+                });
+            };
+            self.pending.drain(..frame_len);
+            let found_flush = matches!(packet, Packet::Flush);
+            packets.push(packet);
+            if found_flush {
+                return Ok(PktLineFlushBoundary {
+                    packets,
+                    consumed,
+                    found_flush: true,
+                });
+            }
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), WireError> {
         let available = self
             .limits
             .max_pending_bytes
@@ -379,47 +448,83 @@ impl PktLineDecoder {
             .try_reserve(bytes.len())
             .map_err(|_| WireError::AllocationFailure)?;
         self.pending.extend_from_slice(bytes);
+        Ok(())
+    }
 
-        let mut packets = Vec::new();
+    fn fill_to_frame_boundary(
+        &mut self,
+        bytes: &[u8],
+        consumed: &mut usize,
+    ) -> Result<(), WireError> {
         loop {
-            if self.pending.len() < 4 {
-                break;
-            }
-            if packets.len() == self.limits.max_packets_per_push {
-                return Err(WireError::PacketCountExceeded {
-                    limit: self.limits.max_packets_per_push,
-                });
-            }
-            let length = parse_packet_length(&self.pending[..4])?;
-            let packet = match length {
-                0 => Packet::Flush,
-                1 => Packet::Delimiter,
-                2 => Packet::ResponseEnd,
-                3 => return Err(WireError::ReservedPacketLength),
-                _ => {
-                    if length > self.limits.max_packet_bytes {
+            let target_len = if self.pending.len() < 4 {
+                4
+            } else {
+                let length = parse_packet_length(&self.pending[..4])?;
+                match length {
+                    0..=2 => 4,
+                    3 => return Err(WireError::ReservedPacketLength),
+                    _ if length > self.limits.max_packet_bytes => {
                         return Err(WireError::PacketTooLarge {
                             declared: length,
                             limit: self.limits.max_packet_bytes,
                         });
                     }
-                    if self.pending.len() < length {
-                        break;
-                    }
-                    let payload_len = length - 4;
-                    let mut payload = Vec::new();
-                    payload
-                        .try_reserve_exact(payload_len)
-                        .map_err(|_| WireError::AllocationFailure)?;
-                    payload.extend_from_slice(&self.pending[4..length]);
-                    Packet::Data(payload)
+                    _ => length,
                 }
             };
-            let consumed = if length < 4 { 4 } else { length };
-            self.pending.drain(..consumed);
-            packets.push(packet);
+
+            if self.pending.len() >= target_len || *consumed == bytes.len() {
+                return Ok(());
+            }
+
+            let needed = target_len - self.pending.len();
+            let available = bytes.len() - *consumed;
+            let take = needed.min(available);
+            self.append(&bytes[*consumed..*consumed + take])?;
+            *consumed += take;
         }
-        Ok(packets)
+    }
+
+    fn decode_complete_packet(&self) -> Result<Option<(Packet, usize)>, WireError> {
+        if self.pending.len() < 4 {
+            return Ok(None);
+        }
+        let length = parse_packet_length(&self.pending[..4])?;
+        let (packet, consumed) = match length {
+            0 => (Packet::Flush, 4),
+            1 => (Packet::Delimiter, 4),
+            2 => (Packet::ResponseEnd, 4),
+            3 => return Err(WireError::ReservedPacketLength),
+            _ => {
+                if length > self.limits.max_packet_bytes {
+                    return Err(WireError::PacketTooLarge {
+                        declared: length,
+                        limit: self.limits.max_packet_bytes,
+                    });
+                }
+                if self.pending.len() < length {
+                    return Ok(None);
+                }
+                let payload_len = length - 4;
+                let mut payload = Vec::new();
+                payload
+                    .try_reserve_exact(payload_len)
+                    .map_err(|_| WireError::AllocationFailure)?;
+                payload.extend_from_slice(&self.pending[4..length]);
+                (Packet::Data(payload), length)
+            }
+        };
+        Ok(Some((packet, consumed)))
+    }
+
+    fn check_packet_count(&self, decoded_count: usize) -> Result<(), WireError> {
+        if decoded_count == self.limits.max_packets_per_push {
+            return Err(WireError::PacketCountExceeded {
+                limit: self.limits.max_packets_per_push,
+            });
+        }
+        Ok(())
     }
 
     /// Refuses a byte stream that ends between packet boundaries.
