@@ -26,6 +26,14 @@ repository = "https://github.com/Dicklesworthstone/frankengit"
 # repeating it. Must stay equal to the version the crates that name it
 # directly already pin, and to the entry in Cargo.lock.
 asupersync = { version = "0.4.9", default-features = false }
+# Reused cryptographic primitives, admitted for direct first-party use by
+# ADR-0003 Amendment 1 (D8). `default-features = false` is load-bearing rather
+# than tidy: the default sets add dependency edges (`zeroize` for
+# ed25519-dalek, `getrandom` via aead for chacha20poly1305) and would move
+# Cargo.lock for every agent sharing this checkout. Signing keys are derived
+# through HKDF in fgit-crypto, so in-crate key generation is not needed.
+chacha20poly1305 = { version = "0.11.0", default-features = false }
+ed25519-dalek = { version = "2.2.0", default-features = false }
 fgit-admission = { path = "crates/fgit-admission" }
 fgit-authority = { path = "crates/fgit-authority" }
 fgit-chronicle = { path = "crates/fgit-chronicle" }

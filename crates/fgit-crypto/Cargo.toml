@@ -12,6 +12,12 @@ publish = false
 test-double = []
 
 [dependencies]
+# ADR-0003 Amendment 1: FrankenGit owns the Git identity hashes and reuses
+# every other primitive. Signatures are Ed25519 (DEP-051), AEAD is
+# XChaCha20-Poly1305 (DEP-031). Featureless API only -- see the amendment's
+# non-claim about Cargo feature unification.
+chacha20poly1305.workspace = true
+ed25519-dalek.workspace = true
 fgit-types.workspace = true
 
 [lints]

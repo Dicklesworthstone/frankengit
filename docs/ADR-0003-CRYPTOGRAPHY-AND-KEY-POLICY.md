@@ -184,7 +184,12 @@ bytes and not only of the annotations.
 ### Positive
 
 - The boundary is one sentence, so review is cheap and drift is visible.
-- Reuse costs zero new crates and does not move `Cargo.lock`.
+- Reuse costs zero new crates. Measured when the dependencies were wired:
+  249 resolved packages before and after, no version change and no new edge
+  anywhere in the graph. `Cargo.lock` does move, by exactly the two lines that
+  record `fgit-crypto`'s own dependency list — the original wording of this
+  bullet said it does not move at all, which was wrong, and is corrected here
+  rather than quietly softened.
 - The collision-defense hook stays implementable, because we own the SHA-1
   compression function it needs.
 - Purpose confusion is a compile error rather than a runtime check that a
