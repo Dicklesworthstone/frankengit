@@ -1011,7 +1011,7 @@ where
 // ---------------------------------------------------------------------------
 
 impl AsyncAuthorityStore for FsqliteAuthorityStore {
-    /// FrankenSQLite's own capability context at full capability.
+    /// `FrankenSQLite`'s own capability context at full capability.
     ///
     /// Not asupersync's `Cx` — the two are distinct types bridged by
     /// `set_native_cx`. Threaded per call, never stored on the store, so

@@ -359,13 +359,11 @@ fn a_token_taken_before_a_kill_cannot_win_a_second_exchange_after_reopen() {
 
     let second = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
     let replayed = second.exchange(&key, stale, generation(3), b"head-generation-3");
-    match replayed {
-        Ok(CasOutcome::Committed(_)) => panic!(
-            "a token consumed before the kill won again after reopen: the same predecessor was \
-             exchanged twice and both writers would believe they published"
-        ),
-        Ok(_) | Err(_) => {}
-    }
+    assert!(
+        !matches!(replayed, Ok(CasOutcome::Committed(_))),
+        "a token consumed before the kill won again after reopen: the same predecessor was \
+         exchanged twice and both writers would believe they published"
+    );
 }
 
 #[test]
@@ -1221,11 +1219,11 @@ use fgit_types::{
     PolicyEpoch, RefusalCode, RegistryEpoch, RepositoryId, RepositorySequence, TenantId,
 };
 
-fn repository_id() -> RepositoryId {
+const fn repository_id() -> RepositoryId {
     RepositoryId::from_bytes([7; OPAQUE_ID_LEN])
 }
 
-fn tenant_id() -> TenantId {
+const fn tenant_id() -> TenantId {
     TenantId::from_bytes([3; OPAQUE_ID_LEN])
 }
 

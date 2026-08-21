@@ -64,15 +64,24 @@ fn the_publication_future_crosses_threads<'a>(
 /// A test binary needs at least one test, and this one states the claim.
 #[test]
 fn the_production_publication_path_exists() {
-    // Naming the two obligations is what makes them live code. A lint
-    // exception would have silenced the unused warning just as well and would
-    // have been the wrong tool: §3.1 rules those out, and a suppressed warning
-    // is indistinguishable from a check that has quietly stopped meaning
-    // anything. Referencing them keeps the compiler on the hook.
-    let _admits = the_durable_store_admits_the_generic_publication;
-    let _sendable = the_publication_future_crosses_threads;
+    // Consuming the two obligations is what makes them live code, and a
+    // consuming call is what keeps them live without tripping a second lint:
+    // an underscore-prefixed binding of a side-effect-free value is itself
+    // refused, which is how the first shape of this test was written.
+    //
+    // A lint exception would have silenced either complaint and would have
+    // been the wrong tool both times: §3.1 rules those out, and a suppressed
+    // warning is indistinguishable from a check that has quietly stopped
+    // meaning anything.
+    discharge(the_durable_store_admits_the_generic_publication);
+    discharge(the_publication_future_crosses_threads);
 
     // Both are discharged by the compiler. If this binary built,
     // `publish_decisions_async` instantiates against the durable store and its
     // future is `Send`.
+}
+
+/// Consume a type-level obligation, so naming it counts as using it.
+fn discharge<T>(obligation: T) {
+    drop(obligation);
 }
