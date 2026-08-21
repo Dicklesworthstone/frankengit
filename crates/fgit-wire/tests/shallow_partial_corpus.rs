@@ -523,7 +523,7 @@ fn deepen_not_boundary_and_permitted_twin_match_reference() {
     let graph = CorpusGraph::history_criss_cross();
     let permitted = request(oid(TIP));
     let permitted_closure = assert_reference_case(&graph, &permitted);
-    assert!(permitted_closure.shallow_update.shallow.is_empty());
+    assert_eq!(permitted_closure.shallow_update.shallow, Vec::new());
 
     let mut excluded = request(oid(TIP));
     excluded.deepen_not = vec![oid(LEFT_MERGE)];
@@ -657,7 +657,7 @@ fn authenticated_lazy_follow_up_completes_promised_object_and_refuses_twin() {
             object_type: ObjectType::Blob,
         }]
     );
-    assert!(completed.promisor.omissions.is_empty());
+    assert_eq!(completed.promisor.omissions, Vec::new());
 
     assert_eq!(
         compute_authenticated_lazy_fetch_closure(
@@ -744,7 +744,7 @@ fn pinned_oracle_clone_cells_match_the_pure_closure() {
     blob_none.filter = Some(ObjectFilter::BlobNone);
     let original = compute_pack_closure(&partial, &blob_none, &ClosureLimits::default())
         .expect("blob:none closure");
-    assert!(!original.promisor.omissions.is_empty());
+    assert_ne!(original.promisor.omissions, Vec::new());
     let follow_up = compute_authenticated_lazy_fetch_closure(
         &partial,
         &original,

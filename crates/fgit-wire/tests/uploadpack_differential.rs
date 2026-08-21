@@ -121,7 +121,7 @@ fn pinned_git_uploadpack_transcripts_match_the_owned_wire_surface() {
     let v1_request = read(&corpus, "v1-fetch-request.pkt");
     let mut v1 = LegacyUploadPack::new(
         UploadPackVersion::V0,
-        advertisement.capabilities.clone(),
+        advertisement.capabilities,
         limits.clone(),
     )
     .expect("v0 request machine constructs");
@@ -161,7 +161,7 @@ fn pinned_git_uploadpack_transcripts_match_the_owned_wire_surface() {
     );
 
     let mut v2_fetch =
-        V2UploadPack::new(v2_capabilities, limits.clone()).expect("v2 fetch machine constructs");
+        V2UploadPack::new(v2_capabilities, limits).expect("v2 fetch machine constructs");
     let v2_fetch_transition = v2_fetch
         .push_bytes(&read(&corpus, "v2-fetch-request.pkt"), &repository)
         .expect("pinned Git v2 fetch request is accepted");

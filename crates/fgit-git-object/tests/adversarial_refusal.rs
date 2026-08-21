@@ -146,7 +146,7 @@ fn outcome<T>(result: Result<T, ObjectError>) -> String {
     match result {
         Ok(_) => "ok".to_owned(),
         Err(error) => format!("{error:?}")
-            .split(|byte: char| matches!(byte, ' ' | '{'))
+            .split([' ', '{'])
             .next()
             .expect("Debug ObjectError name is nonempty")
             .to_owned(),
@@ -191,7 +191,7 @@ fn refusal_corpus_is_stable_and_surfaces_the_epoch_zero_divergence() {
     }
 }
 
-fn bounded_campaign_limits() -> ParseLimits {
+const fn bounded_campaign_limits() -> ParseLimits {
     ParseLimits {
         max_object_bytes: 64,
         max_loose_header_bytes: 32,
@@ -202,7 +202,7 @@ fn bounded_campaign_limits() -> ParseLimits {
     }
 }
 
-fn bounded_inflate_limits() -> InflateLimits {
+const fn bounded_inflate_limits() -> InflateLimits {
     let mut limits = InflateLimits::GIT_OBJECT;
     limits.max_input_bytes = 128;
     limits.max_pending_input_bytes = 128;
@@ -212,7 +212,7 @@ fn bounded_inflate_limits() -> InflateLimits {
     limits
 }
 
-fn next_word(state: &mut u64) -> u64 {
+const fn next_word(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
     let mut word = *state;
     word = (word ^ (word >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);

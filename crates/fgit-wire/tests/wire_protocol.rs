@@ -332,7 +332,7 @@ fn legacy_terminal_flush_requires_no_done_and_accepts_the_negotiated_twin() {
     let transition = with_no_done
         .push_packet(&Packet::Flush, &repository)
         .expect("negotiated no-done permits terminal flush");
-    assert!(transition.output.is_empty());
+    assert_eq!(transition.output, Vec::new());
     assert!(matches!(
         transition.events.as_slice(),
         [WireEvent::PackRequested(_)]

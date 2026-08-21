@@ -193,7 +193,7 @@ fn packet_and_raw_pack_same_read_are_bounded_then_handed_off_without_retention()
         .finish_with_handoff(&mut handoff, &mut continuing)
         .expect("validated quarantine handoff");
     assert_eq!(completion.quarantine.object_count, 0);
-    assert_eq!(completion.quarantine.delete_only, false);
+    assert!(!completion.quarantine.delete_only);
     assert_eq!(handoff.calls, 1);
     assert!(handoff.saw_pack);
     assert_eq!(handoff.pack_entries, 0);
@@ -553,8 +553,10 @@ fn planted_protocol_negatives_refuse_before_admission_or_unbounded_storage() {
         ReceivePhase::Refused
     );
 
-    let mut limits = ReceiveLimits::default();
-    limits.max_quarantine_bytes = 4;
+    let mut limits = ReceiveLimits {
+        max_quarantine_bytes: 4,
+        ..ReceiveLimits::default()
+    };
     limits.pack.max_input_bytes = 4;
     let bounded_context = ReceiveContext::new(
         GitObjectFormat::Sha1,
@@ -617,7 +619,7 @@ fn receive_completion_carries_no_pack_and_delete_only_handoff_has_no_pack() {
     let ReceiveCompletion { quarantine, .. } = machine
         .finish_with_handoff(&mut handoff, &mut continuing)
         .expect("delete-only handoff");
-    assert_eq!(quarantine.delete_only, true);
+    assert!(quarantine.delete_only);
     assert_eq!(quarantine.pack_bytes, 0);
     assert!(!handoff.saw_pack);
     assert_eq!(handoff.calls, 1);

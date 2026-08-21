@@ -172,7 +172,7 @@ impl UploadPackRepository for NegotiationRepository {
     }
 }
 
-fn request(wants: Vec<AnyGitOid>) -> PackRequest {
+const fn request(wants: Vec<AnyGitOid>) -> PackRequest {
     PackRequest {
         version: UploadPackVersion::V2,
         wants,
@@ -365,7 +365,7 @@ fn lazy_fetch_follow_up_completes_an_omitted_blob() {
             object_type: ObjectType::Blob,
         }]
     );
-    assert!(follow_up.promisor.omissions.is_empty());
+    assert_eq!(follow_up.promisor.omissions, Vec::new());
 }
 
 #[test]
