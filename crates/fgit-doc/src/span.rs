@@ -36,61 +36,61 @@ impl Span {
 
     /// Inclusive byte offset of the first byte in the region.
     #[must_use]
-    pub const fn byte_start(&self) -> u32 {
+    pub const fn byte_start(self) -> u32 {
         self.byte_start
     }
 
     /// Exclusive byte offset one past the last byte in the region.
     #[must_use]
-    pub const fn byte_end(&self) -> u32 {
+    pub const fn byte_end(self) -> u32 {
         self.byte_end
     }
 
     /// Inclusive codepoint offset of the first character in the region.
     #[must_use]
-    pub const fn char_start(&self) -> u32 {
+    pub const fn char_start(self) -> u32 {
         self.char_start
     }
 
     /// Exclusive codepoint offset one past the last character in the region.
     #[must_use]
-    pub const fn char_end(&self) -> u32 {
+    pub const fn char_end(self) -> u32 {
         self.char_end
     }
 
     /// Byte range usable for slicing the source this span was built against.
     #[must_use]
-    pub fn byte_range(&self) -> Range<usize> {
+    pub fn byte_range(self) -> Range<usize> {
         usize_of(self.byte_start)..usize_of(self.byte_end)
     }
 
     /// Number of bytes in the region.
     #[must_use]
-    pub const fn byte_len(&self) -> u32 {
+    pub const fn byte_len(self) -> u32 {
         self.byte_end.saturating_sub(self.byte_start)
     }
 
     /// Number of codepoints in the region.
     #[must_use]
-    pub const fn char_len(&self) -> u32 {
+    pub const fn char_len(self) -> u32 {
         self.char_end.saturating_sub(self.char_start)
     }
 
     /// Whether the region covers no bytes.
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
+    pub const fn is_empty(self) -> bool {
         self.byte_start >= self.byte_end
     }
 
     /// Whether `self` fully covers `other`.
     #[must_use]
-    pub const fn contains(&self, other: Self) -> bool {
+    pub const fn contains(self, other: Self) -> bool {
         self.byte_start <= other.byte_start && other.byte_end <= self.byte_end
     }
 
     /// The smallest span covering both regions.
     #[must_use]
-    pub fn hull(&self, other: Self) -> Self {
+    pub fn hull(self, other: Self) -> Self {
         Self {
             byte_start: self.byte_start.min(other.byte_start),
             byte_end: self.byte_end.max(other.byte_end),

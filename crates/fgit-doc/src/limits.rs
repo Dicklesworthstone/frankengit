@@ -45,7 +45,7 @@ impl StructuralLimits {
 
     /// Canonical, injective byte encoding used inside profile identities.
     #[must_use]
-    pub fn canonical_bytes(&self) -> Vec<u8> {
+    pub fn canonical_bytes(self) -> Vec<u8> {
         let mut out = Vec::with_capacity(16);
         out.extend_from_slice(&self.max_line_bytes.to_be_bytes());
         out.extend_from_slice(&self.max_nodes.to_be_bytes());

@@ -133,7 +133,7 @@ fn write_attributes(
     }
 }
 
-fn verdict_tag(verdict: UrlVerdict) -> &'static str {
+const fn verdict_tag(verdict: UrlVerdict) -> &'static str {
     match verdict {
         UrlVerdict::Allowed => "allowed",
         UrlVerdict::Rejected(reason) => reason.tag(),

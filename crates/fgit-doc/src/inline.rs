@@ -1030,7 +1030,7 @@ fn char_at(text: &str, position: usize) -> Option<char> {
         .and_then(|suffix| suffix.chars().next())
 }
 
-fn is_punctuation(value: char) -> bool {
+const fn is_punctuation(value: char) -> bool {
     value.is_ascii_punctuation()
 }
 

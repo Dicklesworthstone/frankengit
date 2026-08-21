@@ -218,7 +218,7 @@ fn inline_node(document: &Document, id: NodeId, sink: &mut Sink) -> Result<(), R
                     escape(raw)
                 ))
             } else {
-                sink.write(&rejected(&info.verdict, &escape(raw)))
+                sink.write(&rejected(info.verdict, &escape(raw)))
             }
         }
         _ => inlines(document, node.children(), sink),
@@ -248,7 +248,7 @@ fn anchor(document: &Document, id: NodeId, info: LinkInfo, sink: &mut Sink) -> R
     } else {
         sink.write(&format!(
             "<span {REJECTED_ATTR}=\"{}\">",
-            rejection_tag(&info.verdict)
+            rejection_tag(info.verdict)
         ))?;
         inlines(document, node.children(), sink)?;
         sink.write("</span>")
@@ -275,18 +275,18 @@ fn image(document: &Document, id: NodeId, info: LinkInfo, sink: &mut Sink) -> Re
             )),
         }
     } else {
-        sink.write(&rejected(&info.verdict, &alternative))
+        sink.write(&rejected(info.verdict, &alternative))
     }
 }
 
-fn rejected(verdict: &crate::ast::UrlVerdict, body: &str) -> String {
+fn rejected(verdict: crate::ast::UrlVerdict, body: &str) -> String {
     format!(
         "<span {REJECTED_ATTR}=\"{}\">{body}</span>",
         rejection_tag(verdict)
     )
 }
 
-fn rejection_tag(verdict: &crate::ast::UrlVerdict) -> &'static str {
+const fn rejection_tag(verdict: crate::ast::UrlVerdict) -> &'static str {
     match verdict {
         crate::ast::UrlVerdict::Allowed => "none",
         crate::ast::UrlVerdict::Rejected(reason) => reason.tag(),
