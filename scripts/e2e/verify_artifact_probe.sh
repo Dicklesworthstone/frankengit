@@ -34,6 +34,8 @@ artifact_root="$(fge_tempdir verify-replay)"
 normal_root="${artifact_root}/normal"
 failure_root="${artifact_root}/failure"
 no_artifact_root="${artifact_root}/no-artifact"
+full_root="${artifact_root}/full"
+release_root="${artifact_root}/release"
 
 fge_phase action
 set +e
@@ -66,19 +68,37 @@ docs_exit=$?
 set -e
 fge_assert_exit FG-001-PROBE-005 0 "${docs_exit}" "docs lane succeeds with replay evidence enabled"
 
+set +e
+fge_capture full-refusal env VERIFY_ARTIFACT_DIR="${full_root}" "${VERIFY}" full
+full_exit=$?
+set -e
+fge_assert_exit FG-001-PROBE-020 3 "${full_exit}" "full lane retains its typed pre-implementation refusal"
+
+set +e
+fge_capture release-refusal env VERIFY_ARTIFACT_DIR="${release_root}" "${VERIFY}" release
+release_exit=$?
+set -e
+fge_assert_exit FG-001-PROBE-021 3 "${release_exit}" "release lane retains its typed pre-implementation refusal"
+
 shopt -s nullglob
 normal_artifacts=("${normal_root}"/*.json)
 failure_artifacts=("${failure_root}"/*.json)
 no_artifacts=("${no_artifact_root}"/*.json)
+full_artifacts=("${full_root}"/*.json)
+release_artifacts=("${release_root}"/*.json)
 shopt -u nullglob
 fge_phase assert
 fge_assert_eq FG-001-PROBE-006 1 "${#normal_artifacts[@]}" "docs lane emits exactly one artifact"
 fge_assert_eq FG-001-PROBE-007 2 "${#failure_artifacts[@]}" "each invalid-lane invocation emits an artifact"
 fge_assert_eq FG-001-PROBE-008 0 "${#no_artifacts[@]}" "no-artifact escape hatch emits no artifact"
+fge_assert_eq FG-001-PROBE-022 1 "${#full_artifacts[@]}" "full refusal emits exactly one artifact"
+fge_assert_eq FG-001-PROBE-023 1 "${#release_artifacts[@]}" "release refusal emits exactly one artifact"
 
 docs_artifact="${normal_artifacts[0]:-}"
 first_failure_artifact="${failure_artifacts[0]:-}"
 second_failure_artifact="${failure_artifacts[1]:-}"
+full_artifact="${full_artifacts[0]:-}"
+release_artifact="${release_artifacts[0]:-}"
 fge_assert_file FG-001-PROBE-009 "${docs_artifact}" "docs replay artifact exists"
 fge_assert_ndjson FG-001-PROBE-010 "${docs_artifact}" "docs replay artifact is a parseable JSON object"
 
@@ -93,6 +113,10 @@ fge_assert_contains FG-001-PROBE-015 "${docs_json}" '"rustc_version":"' "artifac
 fge_assert_contains FG-001-PROBE-016 "${docs_json}" '"cargo_version":"' "artifact records Cargo"
 fge_assert_contains FG-001-PROBE-017 "${docs_json}" '"captured_output_sha256":"' "artifact records captured output digest"
 fge_assert_contains FG-001-PROBE-018 "${first_failure_json}" '"exit_code":2' "artifact records preserved nonzero exit"
+full_json="$(read_if_regular "${full_artifact}")"
+release_json="$(read_if_regular "${release_artifact}")"
+fge_assert_contains FG-001-PROBE-024 "${full_json}" '"exit_code":3' "full artifact records the typed refusal"
+fge_assert_contains FG-001-PROBE-025 "${release_json}" '"exit_code":3' "release artifact records the typed refusal"
 
 first_diff_sha256="$(artifact_field_sha256 "${first_failure_json}" dirty_diff_sha256)"
 second_diff_sha256="$(artifact_field_sha256 "${second_failure_json}" dirty_diff_sha256)"
