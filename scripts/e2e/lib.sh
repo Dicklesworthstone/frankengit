@@ -100,6 +100,19 @@
 #   fge_run_ok is for, and it says so at the call site. The trap is only the
 #   combination: bare call, capture the exit, assert on it.
 #
+#   DO NOT "FIX" THIS BY GUARDING EVERYTHING. The two forms compose, and the
+#   composition is the point. Demonstrated by a planted failure in a real suite
+#   (fg015c, verified by its owner): the GUARDED site reported the root cause as
+#   assertions FG-015C-E2E-004 and -005, and a later UNGUARDED call then aborted
+#   the run once every remaining assertion depended on a fixture that had not
+#   been written. No diagnosis was lost -- the cause was already in the record
+#   before the abort -- and guarding that second call would have produced six
+#   more failures all restating one missing file.
+#
+#   So: guard where you will report the failure; leave bare where continuing
+#   would only produce noise. A suite that guards every call trades one accurate
+#   diagnosis for a cascade of derived ones.
+#
 #   fge_run          STEP CMD [ARG...]             run, time, record; returns cmd exit
 #                                                  (see the warning above)
 #   fge_run_ok       STEP CMD [ARG...]             as fge_run, fge_die on nonzero
