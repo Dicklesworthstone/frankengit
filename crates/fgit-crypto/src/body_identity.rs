@@ -289,6 +289,31 @@ pub fn internal_digest(algorithm: InternalDigestAlgorithm, preimage: &[u8]) -> V
 /// There is no overload that omits the domain: the closed [`IdentityDomain`]
 /// enumeration is a required argument, its tag is committed into the digest,
 /// and the tag is stamped onto the resulting identity.
+///
+/// Naming a domain produces an identity:
+///
+/// ```
+/// use fgit_crypto::{CodecVersion, IdentityDomain, SchemaFamily, SchemaId, internal_object_id};
+///
+/// let family = SchemaFamily::from_static("frankengit.canonical-body");
+/// let identity = internal_object_id(
+///     IdentityDomain::RefTransaction,
+///     SchemaId::new(family, 1, 0),
+///     CodecVersion::new(1, 0),
+///     b"body",
+/// );
+/// assert_eq!(identity.domain(), IdentityDomain::RefTransaction.domain_tag());
+/// ```
+///
+/// Omitting it does not compile, so an identity without a domain tag is not
+/// representable through this API:
+///
+/// ```compile_fail
+/// use fgit_crypto::{CodecVersion, SchemaFamily, SchemaId, internal_object_id};
+///
+/// let family = SchemaFamily::from_static("frankengit.canonical-body");
+/// let _ = internal_object_id(SchemaId::new(family, 1, 0), CodecVersion::new(1, 0), b"body");
+/// ```
 #[must_use]
 pub fn internal_object_id(
     domain: IdentityDomain,

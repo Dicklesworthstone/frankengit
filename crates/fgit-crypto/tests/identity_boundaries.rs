@@ -661,3 +661,64 @@ fn registered_code_points_stay_out_of_the_corpus_reserved_range() {
     }
     assert!(CORPUS_RESERVED_CODE_POINTS.contains(&0xfff1));
 }
+
+// --- permitted twins of the compile-time boundary ---------------------------
+//
+// Each forbidden case is a `compile_fail` doctest on the item it constrains.
+// These are the permitted counterparts as ordinary tests, named to match, so
+// the pairing is greppable and a boundary cannot be "proved" only by things
+// that fail to compile.
+
+#[test]
+fn same_format_equality() {
+    let first = GitOid::<Sha1>::of_object(GitObjectKind::Blob, b"");
+    let second = GitOid::<Sha1>::of_object(GitObjectKind::Blob, b"");
+    assert_eq!(first, second);
+}
+
+#[test]
+fn same_format_substitution() {
+    fn requires_wide(oid: GitOid<Sha256>) -> String {
+        oid.to_string()
+    }
+    assert_eq!(
+        requires_wide(GitOid::<Sha256>::of_object(GitObjectKind::Blob, b"")),
+        EMPTY_BLOB_SHA256
+    );
+}
+
+#[test]
+fn same_format_hasher() {
+    let hasher = GitOid::<Sha1>::object_hasher(GitObjectKind::Blob, 0);
+    let narrow: GitOid<Sha1> = hasher.finish().expect("an empty object is complete");
+    assert_eq!(narrow.to_string(), EMPTY_BLOB_SHA1);
+}
+
+#[test]
+fn hex_with_algorithm_context() {
+    let oid = parse_git_oid::<Sha1>(EMPTY_BLOB_SHA1).expect("a canonical identity");
+    assert_eq!(oid.to_string(), EMPTY_BLOB_SHA1);
+}
+
+#[test]
+fn internal_identity_with_a_domain() {
+    let identity = internal_object_id(
+        IdentityDomain::RefTransaction,
+        schema("frankengit.canonical-body"),
+        CodecVersion::new(1, 0),
+        b"body",
+    );
+    assert_eq!(
+        identity.domain(),
+        IdentityDomain::RefTransaction.domain_tag()
+    );
+}
+
+#[test]
+fn the_sealed_algorithm_set_admits_both_built_in_markers() {
+    fn algorithm_of<A: fgit_crypto::GitHashAlgorithm>() -> DigestAlgorithm {
+        A::ALGORITHM
+    }
+    assert_eq!(algorithm_of::<Sha1>(), DigestAlgorithm::Sha1);
+    assert_eq!(algorithm_of::<Sha256>(), DigestAlgorithm::Sha256);
+}

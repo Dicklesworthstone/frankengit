@@ -16,31 +16,13 @@
 //! assert_eq!(oid.to_string(), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
 //! ```
 //!
-//! Comparing the two formats does not compile:
-//!
-//! ```compile_fail
-//! use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1, Sha256};
-//!
-//! let narrow = GitOid::<Sha1>::of_object(GitObjectKind::Blob, b"");
-//! let wide = GitOid::<Sha256>::of_object(GitObjectKind::Blob, b"");
-//! let _ = narrow == wide;
-//! ```
-//!
-//! Neither does substituting one for the other:
-//!
-//! ```compile_fail
-//! use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1, Sha256};
-//!
-//! fn requires_sha256(_oid: GitOid<Sha256>) {}
-//! requires_sha256(GitOid::<Sha1>::of_object(GitObjectKind::Blob, b""));
-//! ```
-//!
-//! Hexadecimal parsing never guesses the algorithm from the input width; the
-//! typed entry point takes it as a type parameter, so this is ambiguous:
-//!
-//! ```compile_fail
-//! let _ = fgit_crypto::parse_git_oid("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
-//! ```
+//! The compile-time boundary is documented on the items it constrains:
+//! [`GitOid`] for comparison, [`NativeObjectIdentity::of_object`] for
+//! substitution, [`GitObjectHasher`] for finishing into the wrong format,
+//! [`parse_git_oid`] for hexadecimal without algorithm context, and
+//! [`GitHashAlgorithm`] for the sealed algorithm set. Every one of those
+//! `compile_fail` examples sits next to a permitted twin that does compile,
+//! so a case cannot pass because the snippet was malformed.
 
 use core::fmt;
 
@@ -64,6 +46,45 @@ pub mod closed {
 /// The trait is sealed: the algorithm set is closed, exactly like the
 /// [`DigestAlgorithm`] enumeration it mirrors. A downstream crate cannot add a
 /// third Git object format by implementing this trait.
+///
+/// The two built-in markers do satisfy it, which is the permitted counterpart
+/// to the sealed boundary below:
+///
+/// ```
+/// use fgit_crypto::{DigestAlgorithm, GitHashAlgorithm, Sha1, Sha256};
+///
+/// fn algorithm_of<A: GitHashAlgorithm>() -> DigestAlgorithm {
+///     A::ALGORITHM
+/// }
+/// assert_eq!(algorithm_of::<Sha1>(), DigestAlgorithm::Sha1);
+/// assert_eq!(algorithm_of::<Sha256>(), DigestAlgorithm::Sha256);
+/// ```
+///
+/// A downstream marker cannot join the set, because the sealing supertrait is
+/// unnameable outside this crate:
+///
+/// ```compile_fail
+/// use fgit_crypto::{DigestAlgorithm, GitHashAlgorithm};
+///
+/// #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+/// struct Md5;
+///
+/// impl GitHashAlgorithm for Md5 {
+///     const ALGORITHM: DigestAlgorithm = DigestAlgorithm::Sha1;
+///     const OBJECT_FORMAT: fgit_crypto::GitObjectFormat = fgit_crypto::GitObjectFormat::Sha1;
+///     const DIGEST_LEN: usize = 16;
+///     const HEX_LEN: usize = 32;
+///     type Digest = [u8; 16];
+///     type Hasher = fgit_crypto::Sha1Hasher;
+///     type Oid = fgit_crypto::GitOidSha1;
+///     fn oid_from_digest(_digest: Self::Digest) -> Self::Oid {
+///         fgit_crypto::GitOidSha1::from_bytes([0; 20])
+///     }
+///     fn parse_hex(_text: &str) -> Result<Self::Oid, fgit_types::TypeRefusal> {
+///         Ok(fgit_crypto::GitOidSha1::from_bytes([0; 20]))
+///     }
+/// }
+/// ```
 pub trait GitHashAlgorithm:
     closed::AlgorithmMarker + Copy + Clone + fmt::Debug + Eq + Ord + core::hash::Hash
 {
@@ -193,6 +214,24 @@ pub trait NativeObjectIdentity: Copy + Eq + fmt::Debug + Sized {
     ///
     /// The preimage is exactly Git's: type label, space, decimal content
     /// length, a zero byte, then the content.
+    ///
+    /// An identity may be passed where its own format is required:
+    ///
+    /// ```
+    /// use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha256};
+    ///
+    /// fn requires_wide(_oid: GitOid<Sha256>) {}
+    /// requires_wide(GitOid::<Sha256>::of_object(GitObjectKind::Blob, b""));
+    /// ```
+    ///
+    /// It may not be substituted for the other format:
+    ///
+    /// ```compile_fail
+    /// use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1, Sha256};
+    ///
+    /// fn requires_wide(_oid: GitOid<Sha256>) {}
+    /// requires_wide(GitOid::<Sha1>::of_object(GitObjectKind::Blob, b""));
+    /// ```
     #[must_use]
     fn of_object(kind: GitObjectKind, content: &[u8]) -> Self {
         let length = u64::try_from(content.len())
@@ -223,6 +262,27 @@ pub trait NativeObjectIdentity: Copy + Eq + fmt::Debug + Sized {
 ///
 /// This is an alias, not a new type: `GitOid<Sha1>` *is*
 /// `fgit_types::GitOidSha1`.
+///
+/// Two identities in the same format compare:
+///
+/// ```
+/// use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1};
+///
+/// let first = GitOid::<Sha1>::of_object(GitObjectKind::Blob, b"");
+/// let second = GitOid::<Sha1>::of_object(GitObjectKind::Blob, b"");
+/// assert!(first == second);
+/// ```
+///
+/// Two identities in different formats do not, and the failure is at compile
+/// time rather than a comparison that quietly answers `false`:
+///
+/// ```compile_fail
+/// use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1, Sha256};
+///
+/// let narrow = GitOid::<Sha1>::of_object(GitObjectKind::Blob, b"");
+/// let wide = GitOid::<Sha256>::of_object(GitObjectKind::Blob, b"");
+/// let _ = narrow == wide;
+/// ```
 pub type GitOid<A> = <A as GitHashAlgorithm>::Oid;
 
 /// Algorithm marker for the SHA-1 Git object format.
@@ -303,6 +363,24 @@ impl NativeObjectIdentity for GitOidSha256 {
 /// The declared length is committed into the header before any content byte,
 /// which is what makes a mis-declared length a typed refusal instead of a
 /// silently different object identity.
+///
+/// A hasher finishes into its own format's identity:
+///
+/// ```
+/// use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1};
+///
+/// let hasher = GitOid::<Sha1>::object_hasher(GitObjectKind::Blob, 0);
+/// let _narrow: GitOid<Sha1> = hasher.finish().unwrap();
+/// ```
+///
+/// It cannot finish into the other format's identity:
+///
+/// ```compile_fail
+/// use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1, Sha256};
+///
+/// let hasher = GitOid::<Sha1>::object_hasher(GitObjectKind::Blob, 0);
+/// let _wide: GitOid<Sha256> = hasher.finish().unwrap();
+/// ```
 #[derive(Clone, Debug)]
 pub struct GitObjectHasher<A: GitHashAlgorithm> {
     hasher: A::Hasher,
@@ -372,6 +450,22 @@ impl<A: GitHashAlgorithm> GitObjectHasher<A> {
 ///
 /// The algorithm is the type parameter; there is no spelling of this call that
 /// leaves it to be inferred from the input width.
+///
+/// With the algorithm named, parsing proceeds:
+///
+/// ```
+/// use fgit_crypto::{parse_git_oid, Sha1};
+///
+/// let oid = parse_git_oid::<Sha1>("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391").unwrap();
+/// assert_eq!(oid.to_string(), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+/// ```
+///
+/// Without it the call is ambiguous and does not compile, so no caller can
+/// let the input width choose the algorithm:
+///
+/// ```compile_fail
+/// let _ = fgit_crypto::parse_git_oid("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+/// ```
 pub fn parse_git_oid<A: GitHashAlgorithm>(text: &str) -> Result<A::Oid, TypeRefusal> {
     A::parse_hex(text)
 }
