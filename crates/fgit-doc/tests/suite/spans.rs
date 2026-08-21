@@ -387,3 +387,64 @@ fn a_later_ordered_item_starts_a_new_item_rather_than_continuing_the_previous_on
         "paragraph"
     );
 }
+
+#[test]
+fn parent_and_child_links_always_agree() {
+    // Arena corruption is invisible to span checks: a node can carry a perfect
+    // span while being linked to the wrong parent, or to none at all.
+    for case in corpus() {
+        let document = parse_case(&case);
+        for (id, _) in document.preorder() {
+            let Some(node) = document.node(id) else {
+                continue;
+            };
+            match node.parent() {
+                Some(parent) => {
+                    let listed = document
+                        .node(parent)
+                        .is_some_and(|entry| entry.children().contains(&id));
+                    assert!(
+                        listed,
+                        "{}: node {:?} names a parent that does not list it",
+                        case.name,
+                        node.kind().tag()
+                    );
+                }
+                None => assert!(
+                    document.roots().contains(&id),
+                    "{}: parentless node {:?} is not a document root",
+                    case.name,
+                    node.kind().tag()
+                ),
+            }
+            for child in node.children() {
+                assert_eq!(
+                    document.node(*child).and_then(fgit_doc::ast::Node::parent),
+                    Some(id),
+                    "{}: a child of {:?} names a different parent",
+                    case.name,
+                    node.kind().tag()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn every_arena_node_is_reachable_from_the_roots() {
+    // A node built and then orphaned would still be counted, still be rendered
+    // by anything that walks the arena directly, and never appear in a
+    // traversal. Nothing in this crate may leave one behind.
+    for case in corpus() {
+        let document = parse_case(&case);
+        let reachable = document.preorder().count();
+        assert_eq!(
+            reachable,
+            document.node_count(),
+            "{}: {} of {} arena nodes are unreachable from the roots",
+            case.name,
+            document.node_count() - reachable,
+            document.node_count()
+        );
+    }
+}

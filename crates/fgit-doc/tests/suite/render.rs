@@ -414,3 +414,56 @@ fn html_output_is_pinnable_for_the_constructs_that_span_lines_or_nest() {
         "an email autolink gains a mailto scheme"
     );
 }
+
+#[test]
+fn html_output_is_pinnable_for_the_link_and_fence_edge_cases() {
+    assert_eq!(
+        html_of("[a](<b>)\n"),
+        "<p><a href=\"b\" rel=\"nofollow noopener noreferrer\">a</a></p>\n",
+        "an angle-bracketed destination"
+    );
+    assert_eq!(
+        html_of("[a](<b c>)\n"),
+        "<p><span data-fgit-doc-rejected=\"control_character\">a</span></p>\n",
+        "raw whitespace in a destination is refused even inside angle brackets"
+    );
+    assert_eq!(
+        html_of("[a](b \"t\")\n"),
+        "<p><a href=\"b\" title=\"t\" rel=\"nofollow noopener noreferrer\">a</a></p>\n",
+        "a titled link"
+    );
+    assert_eq!(
+        html_of("[a](b(c))\n"),
+        "<p><a href=\"b(c)\" rel=\"nofollow noopener noreferrer\">a</a></p>\n",
+        "balanced parentheses inside a destination"
+    );
+    assert_eq!(
+        html_of("~~~\ncode\n~~~\n"),
+        "<pre><code>code\n</code></pre>\n",
+        "a tilde fence"
+    );
+    assert_eq!(
+        html_of("- ```\n  code\n  ```\n"),
+        "<ul>\n<li>\n<pre><code>code\n</code></pre>\n</li>\n</ul>\n",
+        "a fence inside a list item"
+    );
+}
+
+#[test]
+fn plain_text_drops_decoration_but_keeps_container_prefixes() {
+    assert_eq!(
+        plain_of("> ```\n> x\n> ```\n"),
+        "> x\n",
+        "plain text keeps the quote prefix and drops the fence markers"
+    );
+    assert_eq!(
+        plain_of("1. one\n2. two\n"),
+        "1. one\n2. two\n",
+        "ordered markers are renumbered from the recorded start"
+    );
+    assert_eq!(
+        plain_of("7. a\n8. b\n"),
+        "7. a\n8. b\n",
+        "a list starting past one keeps its numbering"
+    );
+}
