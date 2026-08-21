@@ -98,7 +98,7 @@ pub trait DigestAlgorithm {
 /// Canonical on-wire representation of an fgit-crypto digest commitment.
 pub type Commitment = [u8; COMMITMENT_BYTES];
 
-fn commitment_from_bytes(bytes: &[u8]) -> Result<Commitment, FabricError> {
+const fn commitment_from_bytes(bytes: &[u8]) -> Result<Commitment, FabricError> {
     if bytes.len() != COMMITMENT_BYTES {
         return Err(FabricError::CryptoDigestWidthMismatch);
     }
@@ -164,7 +164,7 @@ impl DigestAlgorithm for CryptoDigest {
     }
 }
 
-fn crypto_identity_parameters(
+const fn crypto_identity_parameters(
     domain: DigestDomain,
 ) -> Result<(IdentityDomain, SchemaId), FabricError> {
     match domain {
@@ -222,7 +222,7 @@ impl ObjectKind {
         }
     }
 
-    fn from_wire(value: u8) -> Result<Self, FabricError> {
+    const fn from_wire(value: u8) -> Result<Self, FabricError> {
         match value {
             1 => Ok(Self::Commit),
             2 => Ok(Self::Tree),
@@ -373,7 +373,7 @@ impl ObjectEnvelope {
 
     pub fn decode(bytes: &[u8], limits: &SegmentLimits) -> Result<Self, FabricError> {
         let mut cursor = Cursor::new(bytes);
-        cursor.expect_magic(ENVELOPE_MAGIC)?;
+        cursor.expect_magic(*ENVELOPE_MAGIC)?;
         let version = cursor.read_u16()?;
         if version != FORMAT_VERSION {
             return Err(FabricError::UnknownVersion(version));
@@ -427,34 +427,42 @@ impl ObjectEnvelope {
         Ok(output)
     }
 
+    #[must_use]
     pub fn namespace(&self) -> &[u8] {
         &self.namespace
     }
 
+    #[must_use]
     pub const fn object_identity(&self) -> GitOid {
         self.object_identity
     }
 
+    #[must_use]
     pub const fn object_kind(&self) -> ObjectKind {
         self.object_kind
     }
 
+    #[must_use]
     pub const fn declared_length(&self) -> u64 {
         self.declared_length
     }
 
+    #[must_use]
     pub const fn payload_commitment(&self) -> Commitment {
         self.payload_commitment
     }
 
+    #[must_use]
     pub fn codec_namespace(&self) -> &[u8] {
         &self.codec_namespace
     }
 
+    #[must_use]
     pub const fn logical_content_identity(&self) -> Commitment {
         self.logical_content_identity
     }
 
+    #[must_use]
     pub const fn manifest_reference(&self) -> Option<Commitment> {
         self.manifest_reference
     }
@@ -495,18 +503,22 @@ pub struct Microsegment {
 }
 
 impl Microsegment {
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
 
+    #[must_use]
     pub const fn segment_digest(&self) -> Commitment {
         self.segment_digest
     }
 
+    #[must_use]
     pub const fn merkle_root(&self) -> Commitment {
         self.merkle_root
     }
 
+    #[must_use]
     pub const fn record_count(&self) -> u32 {
         self.record_count
     }
@@ -523,7 +535,7 @@ pub struct MicrosegmentBuilder<'a, H> {
 }
 
 impl<'a, H: DigestAlgorithm> MicrosegmentBuilder<'a, H> {
-    pub fn new(hasher: &'a H, limits: SegmentLimits) -> Self {
+    pub const fn new(hasher: &'a H, limits: SegmentLimits) -> Self {
         Self {
             hasher,
             limits,
@@ -745,7 +757,7 @@ impl<'a, H: DigestAlgorithm> MicrosegmentReader<'a, H> {
             .checked_sub(FOOTER_BYTES)
             .ok_or(FabricError::Truncated)?;
         let mut header = Cursor::new(&bytes[..footer_offset]);
-        header.expect_magic(SEGMENT_MAGIC)?;
+        header.expect_magic(*SEGMENT_MAGIC)?;
         let version = header.read_u16()?;
         if version != FORMAT_VERSION {
             return Err(FabricError::UnknownVersion(version));
@@ -887,26 +899,32 @@ impl<'a, H: DigestAlgorithm> MicrosegmentReader<'a, H> {
         })
     }
 
+    #[must_use]
     pub fn namespace(&self) -> &[u8] {
         &self.namespace
     }
 
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         self.records.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
 
+    #[must_use]
     pub const fn merkle_root(&self) -> Commitment {
         self.merkle_root
     }
 
+    #[must_use]
     pub const fn segment_digest(&self) -> Commitment {
         self.segment_digest
     }
 
+    #[must_use]
     pub fn record(&self, index: usize) -> Option<RecordView<'_>> {
         self.records.get(index).and_then(|record| {
             let payload_end = record.payload_offset.checked_add(record.payload_len)?;
@@ -919,10 +937,12 @@ impl<'a, H: DigestAlgorithm> MicrosegmentReader<'a, H> {
         })
     }
 
+    #[must_use]
     pub fn lookup(&self, object_identity: GitOid) -> Option<RecordView<'_>> {
         self.lookup_with_witness(object_identity).record
     }
 
+    #[must_use]
     pub fn lookup_with_witness(&self, object_identity: GitOid) -> LookupResult<'_> {
         let mut lower = 0usize;
         let mut upper = self.records.len();
@@ -962,7 +982,7 @@ impl<'a, H: DigestAlgorithm> MicrosegmentReader<'a, H> {
         let mut cursor = index;
         let mut siblings = Vec::new();
         while level.len() > 1 {
-            let sibling_index = if cursor % 2 == 0 {
+            let sibling_index = if cursor.is_multiple_of(2) {
                 if cursor + 1 < level.len() {
                     cursor + 1
                 } else {
@@ -1023,8 +1043,16 @@ pub fn verify_merkle_proof<H: DigestAlgorithm>(
         if width <= 1 {
             return false;
         }
-        let right = if index % 2 == 0 { *sibling } else { current };
-        let left = if index % 2 == 0 { current } else { *sibling };
+        let right = if index.is_multiple_of(2) {
+            *sibling
+        } else {
+            current
+        };
+        let left = if index.is_multiple_of(2) {
+            current
+        } else {
+            *sibling
+        };
         let Ok(next) = hasher.digest(DigestDomain::MerkleNode, &[&left, &right]) else {
             return false;
         };
@@ -1132,7 +1160,7 @@ fn parse_footer(bytes: &[u8]) -> Result<Footer, FabricError> {
         return Err(FabricError::InvalidFooter);
     }
     let mut cursor = Cursor::new(bytes);
-    cursor.expect_magic(FOOTER_MAGIC)?;
+    cursor.expect_magic(*FOOTER_MAGIC)?;
     let version = cursor.read_u16()?;
     if version != FORMAT_VERSION {
         return Err(FabricError::UnknownVersion(version));
@@ -1160,7 +1188,7 @@ fn validate_index(
     limits: &SegmentLimits,
 ) -> Result<(), FabricError> {
     let mut cursor = Cursor::new(bytes);
-    cursor.expect_magic(INDEX_MAGIC)?;
+    cursor.expect_magic(*INDEX_MAGIC)?;
     if cursor.read_u32()? != record_count {
         return Err(FabricError::InvalidIndex);
     }
@@ -1316,7 +1344,7 @@ impl<'a> Cursor<'a> {
         self.position == self.bytes.len()
     }
 
-    fn expect_magic(&mut self, expected: &[u8; 4]) -> Result<(), FabricError> {
+    fn expect_magic(&mut self, expected: [u8; 4]) -> Result<(), FabricError> {
         if self.take(4)? != expected {
             return Err(FabricError::InvalidMagic);
         }
@@ -1419,8 +1447,7 @@ mod tests {
             match state.0 {
                 DigestDomain::Payload => [1; COMMITMENT_BYTES],
                 DigestDomain::MerkleLeaf => [2; COMMITMENT_BYTES],
-                DigestDomain::MerkleNode => [3; COMMITMENT_BYTES],
-                DigestDomain::Segment => [3; COMMITMENT_BYTES],
+                DigestDomain::MerkleNode | DigestDomain::Segment => [3; COMMITMENT_BYTES],
                 DigestDomain::LogicalObject => [4; COMMITMENT_BYTES],
             }
         }
@@ -1473,7 +1500,7 @@ mod tests {
     #[test]
     fn one_record_segment_matches_pinned_golden_and_round_trips() {
         let digest = FixtureDigest;
-        let segment = segment_with(&[b'o']);
+        let segment = segment_with(b"o");
         let expected = decode_hex(include_str!(
             "../tests/goldens/microsegment_v1_one_record.hex"
         ));
@@ -1497,7 +1524,7 @@ mod tests {
     #[test]
     fn build_read_rebuild_round_trips_canonical_segment() {
         let digest = FixtureDigest;
-        let segment = segment_with(&[b'a', b'b', b'c']);
+        let segment = segment_with(b"abc");
         let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, &limits())
             .expect("fixture segment must be readable");
         let mut builder = MicrosegmentBuilder::new(&digest, limits());
@@ -1658,8 +1685,8 @@ mod tests {
     #[test]
     fn deterministic_builds_are_byte_identical() {
         assert_eq!(
-            segment_with(&[b'a', b'b', b'c']).as_bytes(),
-            segment_with(&[b'a', b'b', b'c']).as_bytes()
+            segment_with(b"abc").as_bytes(),
+            segment_with(b"abc").as_bytes()
         );
     }
 
@@ -1692,7 +1719,7 @@ mod tests {
     #[test]
     fn every_record_merkle_proof_verifies() {
         let digest = FixtureDigest;
-        let segment = segment_with(&[b'a', b'b', b'c']);
+        let segment = segment_with(b"abc");
         let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, &limits())
             .expect("fixture segment must be readable");
         for index in 0..reader.len() {
@@ -1712,7 +1739,7 @@ mod tests {
     #[test]
     fn streaming_integrity_verification_accepts_arbitrary_chunk_boundaries() {
         let digest = FixtureDigest;
-        let segment = segment_with(&[b'a', b'b']);
+        let segment = segment_with(b"ab");
         let mut verifier =
             StreamingSegmentVerifier::new(&digest, segment.as_bytes().len(), &limits())
                 .expect("stream verifier must initialize");
@@ -1789,7 +1816,7 @@ mod tests {
     #[test]
     fn reader_refuses_truncated_footer_index_record_mismatch_and_corruption() {
         let digest = FixtureDigest;
-        let segment = segment_with(&[b'a', b'b']);
+        let segment = segment_with(b"ab");
         assert!(matches!(
             MicrosegmentReader::open(
                 &segment.as_bytes()[..segment.as_bytes().len() - 1],
@@ -1839,7 +1866,7 @@ mod tests {
     #[test]
     fn reader_refuses_noncanonical_order_and_mixed_namespace() {
         let digest = FixtureDigest;
-        let segment = segment_with(&[b'a', b'b']);
+        let segment = segment_with(b"ab");
         let records_start = SEGMENT_MAGIC.len() + 2 + 2 + 1 + 4;
         let mut noncanonical = segment.as_bytes().to_vec();
         let first_body_len = usize::try_from(u32::from_be_bytes(

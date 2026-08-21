@@ -273,7 +273,7 @@ impl PlacementBackend {
         self as u8
     }
 
-    fn from_wire(value: u8) -> Result<Self, StoreRefusal> {
+    const fn from_wire(value: u8) -> Result<Self, StoreRefusal> {
         match value {
             1 => Ok(Self::LocalFilesystem),
             _ => Err(StoreRefusal::InvalidPlacementKind(value)),
@@ -292,6 +292,7 @@ pub struct PlacementReceipt {
 
 impl PlacementReceipt {
     /// Builds a placement receipt from bounded opaque handles.
+    #[must_use]
     pub const fn new(
         backend: PlacementBackend,
         locator: OpaqueHandle,
@@ -488,7 +489,7 @@ impl SegmentManifest {
     /// Decodes a bounded manifest and rechecks every canonical ordering rule.
     pub fn decode(bytes: &[u8], limits: &ManifestLimits) -> Result<Self, StoreRefusal> {
         let mut cursor = ManifestCursor::new(bytes);
-        cursor.expect_magic(MANIFEST_MAGIC)?;
+        cursor.expect_magic(*MANIFEST_MAGIC)?;
         let version = cursor.read_u16()?;
         if version != MANIFEST_VERSION {
             return Err(StoreRefusal::UnknownVersion(version));
@@ -656,19 +657,17 @@ pub struct PlacementAdmission<'a> {
 }
 
 impl<'a> PlacementAdmission<'a> {
-    #[must_use]
     pub const fn new(ledger: &'a ObligationLedger, budget: BudgetGrant) -> Self {
         Self { ledger, budget }
     }
 
     #[must_use]
-    pub fn ledger(&self) -> &ObligationLedger {
+    pub const fn ledger(&self) -> &ObligationLedger {
         self.ledger
     }
 
     /// Consumes this custody token so the backend can reserve and settle the
     /// concrete `ObjectAdmissionPermit` around a physical placement write.
-    #[must_use]
     pub fn into_parts(self) -> (&'a ObligationLedger, BudgetGrant) {
         (self.ledger, self.budget)
     }
@@ -823,14 +822,35 @@ pub enum DeletionReceipt {
     AlreadyAbsent,
 }
 
+/// One capability an immutable storage backend may expose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FabricCapability {
+    ConditionalPutIfAbsent,
+    VerifiedWholeReads,
+    AuthenticatedPartialRanges,
+    ConditionalDeletion,
+}
+
 /// Capability report used by callers to choose an explicit profile.
+///
+/// Listing is intentionally absent: physical listings are never authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FabricCapabilities {
-    pub conditional_put_if_absent: bool,
-    pub verified_whole_reads: bool,
-    pub authenticated_partial_ranges: bool,
-    pub conditional_deletion: bool,
-    pub listing_is_authority: bool,
+    supported: &'static [FabricCapability],
+}
+
+impl FabricCapabilities {
+    /// Builds a capability report from its exact supported operation set.
+    #[must_use]
+    pub const fn new(supported: &'static [FabricCapability]) -> Self {
+        Self { supported }
+    }
+
+    /// Reports whether this backend provides one explicitly named capability.
+    #[must_use]
+    pub fn supports(&self, capability: FabricCapability) -> bool {
+        self.supported.contains(&capability)
+    }
 }
 
 /// An authority-owned verifier for retention roots and deletion eligibility.
@@ -1049,7 +1069,7 @@ impl<'a> ManifestCursor<'a> {
         }
     }
 
-    fn expect_magic(&mut self, expected: &[u8; 4]) -> Result<(), StoreRefusal> {
+    fn expect_magic(&mut self, expected: [u8; 4]) -> Result<(), StoreRefusal> {
         if self.take(4)? != expected {
             return Err(StoreRefusal::InvalidMagic);
         }
@@ -1222,7 +1242,7 @@ mod tests {
         let expected = cache.locate(oid(b'a')).to_vec();
         assert_eq!(expected.len(), 1);
         cache.wipe();
-        assert!(cache.locate(oid(b'a')).is_empty());
+        assert_eq!(cache.locate(oid(b'a')), []);
         cache
             .rebuild_from_manifests(std::slice::from_ref(&manifest))
             .expect("the same manifest must rebuild the wiped locator");
@@ -1234,7 +1254,7 @@ mod tests {
         let digest = CryptoDigest;
         let limits = SegmentLimits::default();
         let mut builder = MicrosegmentBuilder::new(&digest, limits.clone());
-        for value in [b'a', b'b'] {
+        for value in *b"ab" {
             let payload = [value];
             let commitment = digest
                 .payload_commitment(ObjectKind::Blob, &payload)

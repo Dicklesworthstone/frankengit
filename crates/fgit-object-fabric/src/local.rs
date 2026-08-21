@@ -18,10 +18,10 @@ use fgit_resource::{Grade, OpaqueHandle, ReservedObligation, ResourceVector};
 use fgit_types::{CANONICAL_CODEC_VERSION, Digest, GitOid, ObjectEnvelopeId, SegmentManifestId};
 
 use crate::fabric::{
-    AuthenticatedRetentionRegistry, DeletionReceipt, FabricCapabilities, ImmutableObjectFabric,
-    ObjectRange, PlacementAdmission, PlacementBackend, PlacementReceipt, PublicationState,
-    PutIfAbsent, RetentionRootProposal, SegmentManifest, StorageOperation, StoreRefusal,
-    VerifiedObject, VerifiedRangeRead, WholeObjectRead,
+    AuthenticatedRetentionRegistry, DeletionReceipt, FabricCapabilities, FabricCapability,
+    ImmutableObjectFabric, ObjectRange, PlacementAdmission, PlacementBackend, PlacementReceipt,
+    PublicationState, PutIfAbsent, RetentionRootProposal, SegmentManifest, StorageOperation,
+    StoreRefusal, VerifiedObject, VerifiedRangeRead, WholeObjectRead,
 };
 use crate::{ENVELOPE_SCHEMA, ObjectEnvelope, ObjectKind, SegmentLimits};
 
@@ -43,7 +43,7 @@ pub struct LocalFilesystemConfig {
 impl LocalFilesystemConfig {
     /// Creates a bounded filesystem profile rooted at an operator-selected directory.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         root: PathBuf,
         namespace: Vec<u8>,
         failure_domain: OpaqueHandle,
@@ -116,7 +116,7 @@ impl LocalFilesystemFabric {
             fabric.retention_bodies_dir(),
             fabric.retention_roots_dir(),
         ] {
-            fabric.create_directory(&directory)?;
+            Self::create_directory(&directory)?;
         }
         Ok(fabric)
     }
@@ -128,7 +128,7 @@ impl LocalFilesystemFabric {
     }
 
     #[cfg(test)]
-    fn with_crash_point(mut self, crash_point: LocalCrashPoint) -> Self {
+    const fn with_crash_point(mut self, crash_point: LocalCrashPoint) -> Self {
         self.crash_point = Some(crash_point);
         self
     }
@@ -175,7 +175,7 @@ impl LocalFilesystemFabric {
         ))
     }
 
-    fn create_directory(&self, directory: &Path) -> Result<(), StoreRefusal> {
+    fn create_directory(directory: &Path) -> Result<(), StoreRefusal> {
         fs::create_dir_all(directory)
             .map_err(|error| storage_error(StorageOperation::CreateDirectory, error))?;
         sync_directory(directory)
@@ -191,10 +191,7 @@ impl LocalFilesystemFabric {
         ))
     }
 
-    fn object_envelope_id(
-        &self,
-        object: &VerifiedObject,
-    ) -> Result<ObjectEnvelopeId, StoreRefusal> {
+    fn object_envelope_id(object: &VerifiedObject) -> Result<ObjectEnvelopeId, StoreRefusal> {
         let bytes = object.envelope().encode()?;
         let identity = fgit_crypto::internal_object_id(
             fgit_crypto::IdentityDomain::ObjectEnvelope,
@@ -254,7 +251,7 @@ impl LocalFilesystemFabric {
 
     fn fresh_stage(&self) -> Result<(PathBuf, File), StoreRefusal> {
         let directory = self.staging_dir();
-        self.create_directory(&directory)?;
+        Self::create_directory(&directory)?;
         for _ in 0..MAX_STAGE_ATTEMPTS {
             let sequence = NEXT_STAGE.fetch_add(1, Ordering::Relaxed);
             let path = directory.join(format!("{sequence:016x}.stage"));
@@ -311,6 +308,7 @@ impl LocalFilesystemFabric {
                     error,
                 ))
             })?;
+        #[cfg(test)]
         self.crash_if(LocalCrashPointName::AfterStageWrite)
             .map_err(PlacementAttemptError::after_write)?;
         stage.sync_all().map_err(|error| {
@@ -324,12 +322,13 @@ impl LocalFilesystemFabric {
         stage: &Path,
         object: &VerifiedObject,
     ) -> Result<ImmutableWrite, StoreRefusal> {
+        #[cfg(test)]
         self.crash_if(LocalCrashPointName::BeforeImmutablePublish)?;
         let final_path = self.object_path(object.identity());
         let parent = final_path
             .parent()
             .ok_or(StoreRefusal::MalformedStoredObject)?;
-        self.create_directory(parent)?;
+        Self::create_directory(parent)?;
         match fs::hard_link(stage, &final_path) {
             Ok(()) => {
                 sync_directory(parent)?;
@@ -364,7 +363,7 @@ impl LocalFilesystemFabric {
         let parent = final_path
             .parent()
             .ok_or(StoreRefusal::MalformedStoredObject)?;
-        self.create_directory(parent)?;
+        Self::create_directory(parent)?;
         let (stage_path, mut stage) = self.fresh_stage()?;
         stage
             .write_all(body)
@@ -390,37 +389,29 @@ impl LocalFilesystemFabric {
         }
     }
 
+    #[cfg(test)]
     fn crash_if(&self, point: LocalCrashPointName) -> Result<(), StoreRefusal> {
-        #[cfg(test)]
-        {
-            let expected = match point {
-                LocalCrashPointName::AfterStageWrite => LocalCrashPoint::AfterStageWrite,
-                LocalCrashPointName::BeforeImmutablePublish => {
-                    LocalCrashPoint::BeforeImmutablePublish
-                }
-            };
-            if self.crash_point == Some(expected) {
-                return Err(StoreRefusal::StorageIo {
-                    operation: StorageOperation::WriteStage,
-                    kind: std::io::ErrorKind::Interrupted,
-                });
-            }
+        let expected = match point {
+            LocalCrashPointName::AfterStageWrite => LocalCrashPoint::AfterStageWrite,
+            LocalCrashPointName::BeforeImmutablePublish => LocalCrashPoint::BeforeImmutablePublish,
+        };
+        if self.crash_point == Some(expected) {
+            return Err(StoreRefusal::StorageIo {
+                operation: StorageOperation::WriteStage,
+                kind: std::io::ErrorKind::Interrupted,
+            });
         }
-        #[cfg(not(test))]
-        let _ = point;
         Ok(())
     }
 }
 
 impl ImmutableObjectFabric for LocalFilesystemFabric {
     fn capabilities(&self) -> FabricCapabilities {
-        FabricCapabilities {
-            conditional_put_if_absent: true,
-            verified_whole_reads: true,
-            authenticated_partial_ranges: false,
-            conditional_deletion: true,
-            listing_is_authority: false,
-        }
+        FabricCapabilities::new(&[
+            FabricCapability::ConditionalPutIfAbsent,
+            FabricCapability::VerifiedWholeReads,
+            FabricCapability::ConditionalDeletion,
+        ])
     }
 
     fn put_if_absent(
@@ -437,7 +428,7 @@ impl ImmutableObjectFabric for LocalFilesystemFabric {
             let _released = budget.release();
             return Err(StoreRefusal::NamespaceMismatch);
         }
-        let placement_identity = match self.object_envelope_id(&object) {
+        let placement_identity = match Self::object_envelope_id(&object) {
             Ok(identity) => identity,
             Err(error) => {
                 let _released = budget.release();
@@ -557,7 +548,7 @@ impl ImmutableObjectFabric for LocalFilesystemFabric {
 
     fn read_whole(&self, identity: GitOid) -> Result<WholeObjectRead, StoreRefusal> {
         let object = self.load_object(identity)?;
-        let placement = self.placement_for(self.object_envelope_id(&object)?)?;
+        let placement = self.placement_for(Self::object_envelope_id(&object)?)?;
         Ok(WholeObjectRead { object, placement })
     }
 
@@ -668,6 +659,7 @@ impl PlacementAttemptError {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalCrashPointName {
     AfterStageWrite,
@@ -750,7 +742,7 @@ fn hex(source: &[u8]) -> String {
 }
 
 impl LocalFilesystemFabric {
-    fn envelope_limits_to_manifest_limits(&self) -> crate::fabric::ManifestLimits {
+    const fn envelope_limits_to_manifest_limits(&self) -> crate::fabric::ManifestLimits {
         crate::fabric::ManifestLimits {
             max_namespace_bytes: self.envelope_limits.max_namespace_bytes,
             max_entries: self.envelope_limits.max_records,
