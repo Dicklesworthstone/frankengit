@@ -82,6 +82,20 @@ pub fn parse_pack_header(input: &[u8], limits: &PackLimits) -> Result<PackHeader
     Ok(PackHeader { object_count })
 }
 
+/// Refuses an entry stream whose actually decoded count differs from the
+/// fixed count committed in its pack header. Callers invoke this only after
+/// every entry boundary/inflated member has been bounded and validated.
+pub fn validate_object_count(header: PackHeader, actual: u32) -> Result<(), PackError> {
+    if header.object_count == actual {
+        Ok(())
+    } else {
+        Err(PackError::ObjectCountMismatch {
+            declared: header.object_count,
+            actual,
+        })
+    }
+}
+
 /// Separates body bytes from the native hash trailer. It validates structure
 /// only; a caller from fgit-crypto must verify the trailer before an object is
 /// promoted out of quarantine.
@@ -334,6 +348,19 @@ mod tests {
             decode_entry_header(&[0x38], &limits(), &mut always),
             Err(PackError::Truncated { .. })
         ));
+    }
+
+    #[test]
+    fn object_count_mismatch_refuses_before_promotion() {
+        let header = PackHeader { object_count: 2 };
+        assert_eq!(
+            validate_object_count(header, 1),
+            Err(PackError::ObjectCountMismatch {
+                declared: 2,
+                actual: 1,
+            })
+        );
+        assert_eq!(validate_object_count(header, 2), Ok(()));
     }
 
     #[test]

@@ -123,6 +123,7 @@ impl ObjectKind {
 pub enum FabricError {
     EmptyNamespace,
     NamespaceTooLarge,
+    ZeroObjectIdentity,
     ObjectIdentityTooLarge,
     CodecNamespaceTooLarge,
     EnvelopeTooLarge,
@@ -155,6 +156,9 @@ impl fmt::Display for FabricError {
         let message = match self {
             Self::EmptyNamespace => "namespace must not be empty",
             Self::NamespaceTooLarge => "namespace exceeds its configured bound",
+            Self::ZeroObjectIdentity => {
+                "all-zero native object identity cannot name a stored object"
+            }
             Self::ObjectIdentityTooLarge => "object identity exceeds its configured bound",
             Self::CodecNamespaceTooLarge => "codec namespace exceeds its configured bound",
             Self::EnvelopeTooLarge => "envelope exceeds its configured bound",
@@ -1121,6 +1125,9 @@ fn validate_object_identity(
     object_identity: GitOid,
     limits: &SegmentLimits,
 ) -> Result<(), FabricError> {
+    if object_identity.is_zero() {
+        return Err(FabricError::ZeroObjectIdentity);
+    }
     if object_identity.as_bytes().len() > limits.max_object_identity_bytes {
         return Err(FabricError::ObjectIdentityTooLarge);
     }
@@ -1372,7 +1379,7 @@ mod tests {
     #[test]
     fn sorted_index_lookup_matches_linear_oracle_with_logarithmic_witness() {
         let digest = FixtureDigest;
-        let identities = (0u8..63).collect::<Vec<_>>();
+        let identities = (1u8..64).collect::<Vec<_>>();
         let segment = segment_with(&identities);
         let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, &limits())
             .expect("fixture segment must be readable");
@@ -1429,6 +1436,16 @@ mod tests {
             verifier.finish().expect("stream digest must verify"),
             segment.segment_digest()
         );
+
+        let mut corrupt = segment.as_bytes().to_vec();
+        let final_byte = corrupt.len() - 1;
+        corrupt[final_byte] ^= 1;
+        let mut verifier = StreamingSegmentVerifier::new(&digest, corrupt.len(), &limits())
+            .expect("stream verifier must initialize");
+        for chunk in corrupt.chunks(11) {
+            verifier.push(chunk).expect("chunk must be accepted");
+        }
+        assert_eq!(verifier.finish(), Err(FabricError::SegmentDigestMismatch));
     }
 
     #[test]
@@ -1465,6 +1482,20 @@ mod tests {
                 payload: vec![b'p'],
             }),
             Err(FabricError::PayloadCommitmentMismatch)
+        );
+        assert_eq!(
+            ObjectEnvelope::new(
+                vec![b'n'],
+                GitOid::Sha1(GitOidSha1::ZERO),
+                ObjectKind::Blob,
+                1,
+                [1; COMMITMENT_BYTES],
+                vec![b'c'],
+                [4; COMMITMENT_BYTES],
+                None,
+                &limits(),
+            ),
+            Err(FabricError::ZeroObjectIdentity)
         );
     }
 
@@ -1508,6 +1539,44 @@ mod tests {
         assert!(matches!(
             MicrosegmentReader::open(&footer_corrupt, &digest, &limits()),
             Err(FabricError::MerkleRootMismatch)
+        ));
+        let mut footer_digest_corrupt = segment.as_bytes().to_vec();
+        let footer_start = footer_digest_corrupt.len() - FOOTER_BYTES;
+        footer_digest_corrupt[footer_start + FOOTER_CORE_BYTES] ^= 1;
+        assert!(matches!(
+            MicrosegmentReader::open(&footer_digest_corrupt, &digest, &limits()),
+            Err(FabricError::SegmentDigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn reader_refuses_noncanonical_order_and_mixed_namespace() {
+        let digest = FixtureDigest;
+        let segment = segment_with(&[b'a', b'b']);
+        let records_start = SEGMENT_MAGIC.len() + 2 + 2 + 1 + 4;
+        let mut noncanonical = segment.as_bytes().to_vec();
+        let first_body_len = usize::try_from(u32::from_be_bytes(
+            noncanonical[records_start..records_start + 4]
+                .try_into()
+                .expect("record body length must be four bytes"),
+        ))
+        .expect("fixture record length must fit usize");
+        let first_record_len = first_body_len + 4;
+        let (first, second) = noncanonical[records_start..records_start + first_record_len * 2]
+            .split_at_mut(first_record_len);
+        first.swap_with_slice(second);
+        assert!(matches!(
+            MicrosegmentReader::open(&noncanonical, &digest, &limits()),
+            Err(FabricError::NonCanonicalRecordOrder)
+        ));
+
+        let mut mixed_namespace = segment.as_bytes().to_vec();
+        let envelope_start = records_start + 8;
+        let namespace_byte = envelope_start + ENVELOPE_MAGIC.len() + 2 + 2;
+        mixed_namespace[namespace_byte] ^= 1;
+        assert!(matches!(
+            MicrosegmentReader::open(&mixed_namespace, &digest, &limits()),
+            Err(FabricError::MixedNamespace)
         ));
     }
 

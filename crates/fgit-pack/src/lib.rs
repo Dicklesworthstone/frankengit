@@ -13,11 +13,11 @@ pub use delta::{
     DeltaBase, DeltaObject, ExternalBaseLookup, PackObject, ScalarResolver, apply_delta,
 };
 pub use fgit_types::native::{GitHashAlgorithm as ObjectFormat, GitOid as ObjectId};
-pub use idx::{IdxEntry, IdxV2};
+pub use idx::{IdxChecksumVerifier, IdxEntry, IdxV2, validate_idx_checksum};
 pub use pack::{
     EntryKind, PackEntryHeader, PackHeader, PackTrailerVerifier, ParsedDeltaBase,
     decode_entry_header, decode_ofs_delta_base, parse_delta_base, parse_pack_header,
-    split_pack_trailer, validate_pack_trailer,
+    split_pack_trailer, validate_object_count, validate_pack_trailer,
 };
 
 use std::error::Error;
@@ -214,6 +214,7 @@ pub enum PackError {
         limit: usize,
     },
     TrailerChecksumMismatch,
+    IndexChecksumMismatch,
     ObjectCountMismatch {
         declared: u32,
         actual: u32,

@@ -6,6 +6,39 @@ const IDX_SIGNATURE: [u8; 4] = [0xff, b't', b'O', b'c'];
 const IDX_V2: u32 = 2;
 const FANOUT_BYTES: usize = 256 * 4;
 
+/// Dependency-injected idx checksum verifier. The fgit-crypto adapter owns
+/// all native hash computation; this crate merely establishes the bounded
+/// byte boundary it must authenticate.
+pub trait IdxChecksumVerifier {
+    /// Returns true only when `trailer` is the native digest of `body` in the
+    /// supplied Git hash domain.
+    fn verify(&self, body: &[u8], trailer: &[u8], format: ObjectFormat) -> bool;
+}
+
+/// Verifies the trailing idx checksum before a structurally parsed index is
+/// admitted to an object lookup path.
+pub fn validate_idx_checksum(
+    input: &[u8],
+    format: ObjectFormat,
+    limits: &PackLimits,
+    verifier: &impl IdxChecksumVerifier,
+) -> Result<(), PackError> {
+    limits.input(input.len())?;
+    let checksum_len = format.digest_len();
+    let boundary = input
+        .len()
+        .checked_sub(checksum_len)
+        .ok_or(PackError::Truncated {
+            context: "idx checksum",
+        })?;
+    let (body, trailer) = input.split_at(boundary);
+    if verifier.verify(body, trailer, format) {
+        Ok(())
+    } else {
+        Err(PackError::IndexChecksumMismatch)
+    }
+}
+
 /// One validated idx v2 lookup record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdxEntry {
@@ -268,6 +301,20 @@ impl IdxV2 {
             pack_checksum,
             index_checksum,
         })
+    }
+
+    /// Verifies the checksum then parses the idx structure. This is the
+    /// quarantine-admission path; [`Self::parse`] remains useful to inspect a
+    /// refusal without treating its lookup records as trusted.
+    pub fn parse_verified(
+        input: &[u8],
+        format: ObjectFormat,
+        limits: &PackLimits,
+        deadline: &mut impl Deadline,
+        verifier: &impl IdxChecksumVerifier,
+    ) -> Result<Self, PackError> {
+        validate_idx_checksum(input, format, limits, verifier)?;
+        Self::parse(input, format, limits, deadline)
     }
 
     /// Finds a pack object in native ID sort order.
@@ -575,5 +622,34 @@ mod tests {
             IdxV2::parse(&unordered, ObjectFormat::Sha1, &limits(), &mut always),
             Err(PackError::InvalidIndexFanout | PackError::InvalidIndexOrdering)
         ));
+    }
+
+    #[test]
+    fn verified_index_refuses_corrupt_trailer() {
+        struct ExactTrailer;
+
+        impl IdxChecksumVerifier for ExactTrailer {
+            fn verify(&self, _body: &[u8], trailer: &[u8], _format: ObjectFormat) -> bool {
+                trailer == [0x22; 20]
+            }
+        }
+
+        let mut bytes = idx_with_entries(&[(1, 10, 44)], &[]);
+        assert!(
+            IdxV2::parse_verified(
+                &bytes,
+                ObjectFormat::Sha1,
+                &limits(),
+                &mut always,
+                &ExactTrailer,
+            )
+            .is_ok()
+        );
+        let last = bytes.len() - 1;
+        bytes[last] = 0;
+        assert_eq!(
+            validate_idx_checksum(&bytes, ObjectFormat::Sha1, &limits(), &ExactTrailer),
+            Err(PackError::IndexChecksumMismatch)
+        );
     }
 }
