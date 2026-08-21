@@ -118,7 +118,7 @@ impl ResultingRoots {
     /// A refusal-only batch starts here: it consumes decision sequence and
     /// records evidence, and it moves nothing else.
     #[must_use]
-    pub fn carried_forward(basis: &PublicationBasis, batch_evidence_root: Digest) -> Self {
+    pub const fn carried_forward(basis: &PublicationBasis, batch_evidence_root: Digest) -> Self {
         let head = basis.body();
         Self {
             ref_root: head.ref_root,

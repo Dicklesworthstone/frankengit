@@ -65,13 +65,18 @@ pub enum LostCandidate {
 /// bodies before the head and writes the accelerator only after the head has
 /// moved. On a lost race the candidate is classified against the accelerator
 /// so the caller learns whether it may replan.
+///
+/// The failure is boxed because `OutcomeFailure` is a wide enum: carrying it
+/// unboxed would make every success on this path pay for the widest error it
+/// could have returned. The size is asserted at compile time in the crate
+/// root, so this stays a decision rather than an accident.
 pub fn publish<S>(
     store: &S,
     head_key: &HeadKey,
     expected: AuthorityVersionToken,
     publication: &VerifiedPublication,
     tenant_id: TenantId,
-) -> Result<PublicationVerdict, OutcomeFailure>
+) -> Result<PublicationVerdict, Box<OutcomeFailure>>
 where
     S: AuthorityStore + ?Sized,
 {
@@ -111,7 +116,7 @@ fn classify_loss<S>(
     store: &S,
     publication: &VerifiedPublication,
     tenant_id: TenantId,
-) -> Result<LostCandidate, OutcomeFailure>
+) -> Result<LostCandidate, Box<OutcomeFailure>>
 where
     S: AuthorityStore + ?Sized,
 {

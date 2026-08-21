@@ -55,13 +55,13 @@ impl PublicationPlan {
 
     /// How many terminal decisions the plan holds.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.decisions.len()
     }
 
     /// Whether the plan would refuse to seal for want of a decision.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.decisions.is_empty()
     }
 
@@ -250,7 +250,7 @@ impl VerifiedPublication {
     /// A refusal-only publication advances the decision sequence and leaves
     /// every committed root where it was.
     #[must_use]
-    pub fn is_refusal_only(&self) -> bool {
+    pub const fn is_refusal_only(&self) -> bool {
         self.batch.committed_rcrs.is_empty()
     }
 }

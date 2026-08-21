@@ -42,6 +42,26 @@
 //! roots it carries are still only as good as the evaluation that produced
 //! them.
 
+/// Every refusal that leaves this crate stays small enough to travel in a
+/// `Result` without boxing.
+///
+/// The bound is the one the workspace lint set enforces for an error payload.
+/// `fgit_authority::OutcomeFailure` does *not* fit, which is why
+/// [`publish`](publish::publish) boxes it: a wide error would otherwise make
+/// every success on that path pay for the widest failure it could have
+/// returned. The negative assertion is kept so that if the upstream type ever
+/// shrinks, this box becomes removable and the build says so, instead of the
+/// indirection outliving its reason.
+const _: () = {
+    const LIMIT: usize = 128;
+    assert!(size_of::<refusal::ChronicleRefusal>() <= LIMIT);
+    assert!(size_of::<Box<fgit_authority::OutcomeFailure>>() <= LIMIT);
+    assert!(
+        size_of::<fgit_authority::OutcomeFailure>() > LIMIT,
+        "OutcomeFailure now fits unboxed; drop the Box in publish()"
+    );
+};
+
 pub mod assemble;
 pub mod audit;
 pub mod origin;
