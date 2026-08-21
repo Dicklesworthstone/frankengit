@@ -1044,9 +1044,9 @@ pub fn encode_sideband_64k(
 pub enum ObjectFilter {
     /// Omit all blobs.
     BlobNone,
-    /// Include blobs no larger than this byte count.
+    /// Include blobs strictly smaller than this byte count.
     BlobLimit(u64),
-    /// Include trees no deeper than this depth.
+    /// Include trees and blobs with depth strictly below this cutoff.
     TreeDepth(u32),
     /// Request a sparse path expression.
     SparsePath(Vec<u8>),
@@ -1678,6 +1678,95 @@ pub struct LegacyUploadPack {
     saw_want_capabilities: bool,
 }
 
+/// Bounded stateless-RPC envelope adapter for a legacy upload-pack request.
+///
+/// `git fetch-pack --stateless-rpc` puts the v0/v1 request pkt-line stream in
+/// an outer pkt-line data record, followed by an outer flush. The wrapped
+/// payload is still parsed by [`LegacyUploadPack`], so no client bytes are
+/// decoded through a fixture-only path. Responses remain inner protocol
+/// packets: the CGI/HTTP adapter that owns response framing must serialize
+/// them after it has selected the pack payload.
+#[derive(Clone, Debug)]
+pub struct StatelessRpcUploadPack {
+    envelope: PktLineDecoder,
+    request: LegacyUploadPack,
+    saw_payload: bool,
+    outer_closed: bool,
+}
+
+impl StatelessRpcUploadPack {
+    /// Wraps one v0/v1 request machine in a bounded stateless-RPC decoder.
+    pub fn new(request: LegacyUploadPack, limits: WireLimits) -> Result<Self, WireError> {
+        let envelope = PktLineDecoder::new(limits)?;
+        Ok(Self {
+            envelope,
+            request,
+            saw_payload: false,
+            outer_closed: false,
+        })
+    }
+
+    /// Feeds a raw stateless-RPC request envelope into the legacy state machine.
+    pub fn push_bytes(
+        &mut self,
+        bytes: &[u8],
+        repository: &impl UploadPackRepository,
+    ) -> Result<Transition, WireError> {
+        let packets = self.envelope.push(bytes)?;
+        let mut transition = Transition::empty();
+        for packet in packets {
+            if self.outer_closed {
+                return Err(WireError::IllegalTransition {
+                    state: "completed stateless-RPC upload-pack envelope",
+                    packet: packet_name(&packet),
+                });
+            }
+            match packet {
+                Packet::Data(payload) => {
+                    self.saw_payload = true;
+                    transition.append(self.request.push_bytes(&payload, repository)?)?;
+                }
+                Packet::Flush => {
+                    if !self.saw_payload {
+                        return Err(WireError::MissingWant);
+                    }
+                    if !self.request.is_complete() {
+                        transition.append(self.request.push_packet(&Packet::Flush, repository)?)?;
+                    }
+                    if !self.request.is_complete() {
+                        return Err(WireError::IllegalTransition {
+                            state: "stateless-RPC envelope closed before request completion",
+                            packet: "flush",
+                        });
+                    }
+                    self.outer_closed = true;
+                }
+                Packet::Delimiter | Packet::ResponseEnd => {
+                    return Err(WireError::IllegalTransition {
+                        state: "stateless-RPC upload-pack outer envelope",
+                        packet: packet_name(&packet),
+                    });
+                }
+            }
+        }
+        Ok(transition)
+    }
+
+    /// Refuses either an incomplete outer envelope or an incomplete inner request.
+    pub fn finish(&self) -> Result<(), WireError> {
+        self.envelope.finish()?;
+        self.request.finish()?;
+        if self.outer_closed && self.request.is_complete() {
+            Ok(())
+        } else {
+            Err(WireError::IllegalTransition {
+                state: "stateless-RPC request completion",
+                packet: "end of input",
+            })
+        }
+    }
+}
+
 impl LegacyUploadPack {
     /// Creates a v0 or v1 request machine.  V2 has a distinct command grammar.
     pub fn new(
@@ -1730,6 +1819,12 @@ impl LegacyUploadPack {
     /// Refuses a transport that ended inside a pkt-line frame.
     pub const fn finish(&self) -> Result<(), WireError> {
         self.decoder.finish()
+    }
+
+    /// Reports whether the request has reached its terminal negotiation state.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        matches!(self.state, LegacyState::Complete)
     }
 
     /// Feeds one already-decoded packet.

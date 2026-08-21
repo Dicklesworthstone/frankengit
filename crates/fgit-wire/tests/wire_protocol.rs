@@ -3,9 +3,9 @@
 use fgit_wire::GitObjectFormat;
 use fgit_wire::{
     AckMode, AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, ObjectFilter, Packet,
-    PktLineDecoder, SidebandBand, UploadPackRepository, UploadPackVersion, V1Advertisement,
-    V2UploadPack, WireError, WireEvent, WireLimits, encode_packets, encode_sideband_64k,
-    parse_filter, parse_sideband, sideband_pack_chunk,
+    PktLineDecoder, SidebandBand, StatelessRpcUploadPack, UploadPackRepository, UploadPackVersion,
+    V1Advertisement, V2UploadPack, WireError, WireEvent, WireLimits, encode_packets,
+    encode_sideband_64k, parse_filter, parse_sideband, sideband_pack_chunk,
 };
 
 const WANT: &str = "1111111111111111111111111111111111111111";
@@ -360,14 +360,17 @@ fn pinned_oracle_v0_no_done_depth_request_accepts_lf_free_deepen_and_two_flushes
         &WireLimits::default(),
     )
     .expect("oracle server capabilities");
-    let mut machine =
+    let request =
         LegacyUploadPack::new(UploadPackVersion::V0, caps, WireLimits::default()).expect("machine");
+    let mut machine = StatelessRpcUploadPack::new(request, WireLimits::default())
+        .expect("stateless-RPC envelope");
     let completed = machine
         .push_bytes(
             fixture_bytes(include_bytes!("fixtures/oracle-v0-depth-request.pkt")),
             &repository,
         )
         .expect("pinned Git 2.54.0 depth transcript");
+    machine.finish().expect("complete nested pkt-line stream");
     assert_eq!(completed.output.len(), 2);
     assert!(
         completed

@@ -267,10 +267,15 @@ fn combined_filters_mark_authenticated_omissions_and_reject_leaks() {
         .expect("filtered closure");
 
     assert!(closure.promisor.is_authenticated());
-    assert_eq!(object_ids(&closure), vec![oid(TOP), oid(ROOT_TREE)]);
+    assert_eq!(object_ids(&closure), vec![oid(TOP)]);
     assert_eq!(
         closure.lazy_fetch_wants(),
-        vec![oid(CHILD_TREE), oid(SMALL_BLOB), oid(LARGE_BLOB)]
+        vec![
+            oid(ROOT_TREE),
+            oid(CHILD_TREE),
+            oid(SMALL_BLOB),
+            oid(LARGE_BLOB),
+        ]
     );
     assert_eq!(
         closure.verify_pack_objects(&[ClosureObjectId {

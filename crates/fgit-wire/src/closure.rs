@@ -676,46 +676,27 @@ fn collect_object_frontier(
     filter: Option<&ObjectFilter>,
     limits: &ClosureLimits,
 ) -> Result<(Vec<ClosureObjectId>, Vec<PromisorOmission>), ClosureError> {
-    let mut visited = BTreeSet::new();
+    let mut paths = BTreeMap::<AnyGitOid, ObjectPath>::new();
     let mut objects = Vec::new();
     let mut omissions = Vec::new();
     let mut edge_count = 0_usize;
     while let Some((oid, parent, depth)) = frontier.pop() {
         ensure_format(repository, oid)?;
-        if visited.contains(&oid) {
+        let existing = paths.get(&oid);
+        if existing.is_some_and(|path| !is_preferred_path(depth, parent, path)) {
             continue;
         }
-        if visited.len() == limits.max_objects {
+        if existing.is_none() && paths.len() == limits.max_objects {
             return Err(limit_error("objects", limits.max_objects));
         }
-        visited.insert(oid);
         let object = repository.object(oid)?;
-        let object_type = object.object_type();
-        let reason = omission_reason(filter, &object, depth);
-        if let Some(reason) = reason {
-            omissions
-                .try_reserve(1)
-                .map_err(|_| limit_error("promisor omissions", limits.max_objects))?;
-            omissions.push(PromisorOmission {
-                oid,
-                object_type,
-                parent,
-                depth,
-                reason,
-            });
-            continue;
-        }
-        objects
-            .try_reserve(1)
-            .map_err(|_| limit_error("pack objects", limits.max_objects))?;
-        objects.push(ClosureObjectId { oid, object_type });
-        match object {
+        match &object {
             ClosureObject::Commit(commit) => {
                 ensure_format(repository, commit.tree)?;
-                frontier.push((commit.tree, Some(oid), 0));
-                for parent_commit in commit.parents.into_iter().rev() {
-                    ensure_format(repository, parent_commit)?;
-                    frontier.push((parent_commit, Some(oid), 0));
+                push_frontier(&mut frontier, (commit.tree, Some(oid), 0), limits)?;
+                for parent_commit in commit.parents.iter().rev() {
+                    ensure_format(repository, *parent_commit)?;
+                    push_frontier(&mut frontier, (*parent_commit, Some(oid), 0), limits)?;
                 }
             }
             ClosureObject::Tree(entries) => {
@@ -728,20 +709,75 @@ fn collect_object_frontier(
                 let next_depth = depth
                     .checked_add(1)
                     .ok_or(ClosureError::InconsistentGraph { oid })?;
-                for entry in entries.into_iter().rev() {
+                for entry in entries.iter().rev() {
                     ensure_format(repository, entry.oid)?;
-                    frontier.push((entry.oid, Some(oid), next_depth));
+                    push_frontier(&mut frontier, (entry.oid, Some(oid), next_depth), limits)?;
                 }
             }
             ClosureObject::Blob { .. } => {}
             ClosureObject::Tag { target } => {
-                ensure_format(repository, target)?;
-                frontier.push((target, Some(oid), depth));
+                ensure_format(repository, *target)?;
+                push_frontier(&mut frontier, (*target, Some(oid), depth), limits)?;
             }
         }
+        paths.insert(
+            oid,
+            ObjectPath {
+                object,
+                parent,
+                depth,
+            },
+        );
+    }
+    for (oid, path) in paths {
+        let object_type = path.object.object_type();
+        if let Some(reason) = omission_reason(filter, &path.object, path.depth) {
+            omissions
+                .try_reserve(1)
+                .map_err(|_| limit_error("promisor omissions", limits.max_objects))?;
+            omissions.push(PromisorOmission {
+                oid,
+                object_type,
+                parent: path.parent,
+                depth: path.depth,
+                reason,
+            });
+            continue;
+        }
+        objects
+            .try_reserve(1)
+            .map_err(|_| limit_error("pack objects", limits.max_objects))?;
+        objects.push(ClosureObjectId { oid, object_type });
     }
     objects.sort_by(compare_object_ids);
+    omissions.sort_by(compare_omissions);
     Ok((objects, omissions))
+}
+
+#[derive(Clone, Debug)]
+struct ObjectPath {
+    object: ClosureObject,
+    parent: Option<AnyGitOid>,
+    depth: u32,
+}
+
+fn is_preferred_path(depth: u32, parent: Option<AnyGitOid>, existing: &ObjectPath) -> bool {
+    depth < existing.depth || (depth == existing.depth && parent < existing.parent)
+}
+
+fn push_frontier(
+    frontier: &mut Vec<(AnyGitOid, Option<AnyGitOid>, u32)>,
+    value: (AnyGitOid, Option<AnyGitOid>, u32),
+    limits: &ClosureLimits,
+) -> Result<(), ClosureError> {
+    if frontier.len() >= limits.max_edges {
+        return Err(limit_error("object frontier", limits.max_edges));
+    }
+    frontier
+        .try_reserve(1)
+        .map_err(|_| limit_error("object frontier", limits.max_edges))?;
+    frontier.push(value);
+    Ok(())
 }
 
 fn omission_reason(
@@ -750,7 +786,9 @@ fn omission_reason(
     depth: u32,
 ) -> Option<OmissionReason> {
     let filter = filter?;
-    if object.object_type() == ObjectType::Tree && !tree_depth_permits(filter, depth) {
+    if matches!(object, ClosureObject::Tree(_) | ClosureObject::Blob { .. })
+        && !tree_depth_permits(filter, depth)
+    {
         return Some(OmissionReason::TreeDepth);
     }
     if matches!(object, ClosureObject::Blob { .. }) && !blob_permits(filter, object) {
@@ -761,7 +799,7 @@ fn omission_reason(
 
 fn tree_depth_permits(filter: &ObjectFilter, depth: u32) -> bool {
     match filter {
-        ObjectFilter::TreeDepth(maximum) => depth <= *maximum,
+        ObjectFilter::TreeDepth(exclusive_depth) => depth < *exclusive_depth,
         ObjectFilter::Combine(parts) => parts.iter().all(|part| tree_depth_permits(part, depth)),
         ObjectFilter::BlobNone
         | ObjectFilter::BlobLimit(_)
@@ -776,7 +814,7 @@ fn blob_permits(filter: &ObjectFilter, object: &ClosureObject) -> bool {
     };
     match filter {
         ObjectFilter::BlobNone => false,
-        ObjectFilter::BlobLimit(limit) => *size <= *limit,
+        ObjectFilter::BlobLimit(limit) => *size < *limit,
         ObjectFilter::TreeDepth(_)
         | ObjectFilter::SparsePath(_)
         | ObjectFilter::SparseObject(_) => true,
