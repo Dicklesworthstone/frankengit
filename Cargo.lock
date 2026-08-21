@@ -468,6 +468,8 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 name = "fgit-authority"
 version = "0.0.1"
 dependencies = [
+ "fgit-codec",
+ "fgit-crypto",
  "fgit-types",
 ]
 
@@ -506,10 +508,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-lab"
+version = "0.0.1"
+dependencies = [
+ "asupersync",
+ "fgit-authority",
+ "fgit-runtime",
+]
+
+[[package]]
 name = "fgit-object-fabric"
 version = "0.1.0"
 dependencies = [
  "fgit-crypto",
+ "fgit-resource",
  "fgit-types",
 ]
 
@@ -520,6 +532,13 @@ dependencies = [
  "fgit-crypto",
  "fgit-deflate",
  "fgit-git-object",
+ "fgit-types",
+]
+
+[[package]]
+name = "fgit-reference"
+version = "0.0.1"
+dependencies = [
  "fgit-types",
 ]
 

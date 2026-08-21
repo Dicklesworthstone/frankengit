@@ -1,11 +1,13 @@
 # FrankenGit workspace.
 # Engine crates enter only with a real vertical slice; no placeholder crates.
-# A crate and its `members`/`default-members` lines land in the SAME commit.
+# Every directory under crates/ is a workspace member via the glob, so it MUST be a complete
+# crate: create src/lib.rs (with #![forbid(unsafe_code)]) BEFORE Cargo.toml, and add the
+# crate's [workspace.dependencies] path entry below in the same commit.
 
 [workspace]
 resolver = "3"
-members = ["crates/fgit-authority", "crates/fgit-codec", "crates/fgit-crypto", "crates/fgit-deflate", "crates/fgit-diff", "crates/fgit-doc", "crates/fgit-git-object", "crates/fgit-object-fabric", "crates/fgit-pack", "crates/fgit-resource", "crates/fgit-runtime", "crates/fgit-types", "tools/registry-check"]
-default-members = ["crates/fgit-authority", "crates/fgit-codec", "crates/fgit-crypto", "crates/fgit-deflate", "crates/fgit-diff", "crates/fgit-doc", "crates/fgit-git-object", "crates/fgit-object-fabric", "crates/fgit-pack", "crates/fgit-resource", "crates/fgit-runtime", "crates/fgit-types", "tools/registry-check"]
+members = ["crates/*", "tools/registry-check"]
+default-members = ["crates/*", "tools/registry-check"]
 
 [workspace.package]
 edition = "2024"
@@ -20,16 +22,20 @@ repository = "https://github.com/Dicklesworthstone/frankengit"
 # AGENTS.md section 3.3 forbids for a release-facing crate.
 [workspace.dependencies]
 fgit-authority = { path = "crates/fgit-authority" }
+fgit-codec = { path = "crates/fgit-codec" }
 fgit-crypto = { path = "crates/fgit-crypto" }
 fgit-deflate = { path = "crates/fgit-deflate" }
 fgit-diff = { path = "crates/fgit-diff" }
 fgit-doc = { path = "crates/fgit-doc" }
 fgit-git-object = { path = "crates/fgit-git-object" }
+fgit-lab = { path = "crates/fgit-lab" }
 fgit-object-fabric = { path = "crates/fgit-object-fabric" }
 fgit-pack = { path = "crates/fgit-pack" }
+fgit-reference = { path = "crates/fgit-reference" }
 fgit-resource = { path = "crates/fgit-resource" }
 fgit-runtime = { path = "crates/fgit-runtime" }
 fgit-types = { path = "crates/fgit-types" }
+fgit-wire = { path = "crates/fgit-wire" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
