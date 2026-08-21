@@ -146,7 +146,7 @@ impl ExternalBaseLookup for OneExternalBase {
 }
 
 #[test]
-fn ref_cycles_and_absent_thin_bases_refuse_without_a_resolved_object() {
+fn ref_cycle_and_thin_base_refusals_have_resolvable_near_neighbors() {
     let first_id = oid(1);
     let second_id = oid(2);
     let cyclic = parsed_objects(&[
@@ -172,6 +172,26 @@ fn ref_cycles_and_absent_thin_bases_refuse_without_a_resolved_object() {
             Err(PackError::DeltaCycle)
         );
     }
+
+    let permitted_first_id = oid(1);
+    let permitted_second_id = oid(2);
+    let mut base_backed = parsed_objects(&[
+        delta_entry(7, permitted_second_id.as_bytes(), &copy_one_delta()),
+        fixtures::entry(3, b"x"),
+    ]);
+    if let PackObject::Delta(delta) = &mut base_backed[0] {
+        delta.id = Some(permitted_first_id);
+    }
+    if let PackObject::Base { id, .. } = &mut base_backed[1] {
+        *id = Some(permitted_second_id);
+    }
+    let limits = fixtures::limits();
+    let resolver = ScalarResolver::new(&base_backed, &(), &limits, &mut fixtures::always)
+        .expect("base-backed REF near-neighbor is structurally bounded");
+    assert_eq!(
+        resolver.resolve_offset(12, &mut fixtures::always),
+        Ok(b"x".to_vec())
+    );
 
     let missing_id = oid(3);
     let thin = parsed_objects(&[delta_entry(7, missing_id.as_bytes(), &copy_one_delta())]);

@@ -40,7 +40,7 @@ fge_assert_contains FG-016B-E2E-002 "$reader_output" \
 fge_assert_exit FG-016B-E2E-003 0 "$resolver_exit" \
   'OFS/REF chain, fanout, thin-base, ratio, and work bomb corpus succeeds'
 fge_assert_contains FG-016B-E2E-004 "$resolver_output" \
-  'ref_cycles_and_absent_thin_bases_refuse_without_a_resolved_object' \
+  'ref_cycle_and_thin_base_refusals_have_resolvable_near_neighbors' \
   'resolver corpus records cyclic REF and missing thin-base refusal coverage'
 fge_assert_exit FG-016B-E2E-005 0 "$idx_exit" \
   'idx CRC and pack-count association bomb corpus succeeds'
