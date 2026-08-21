@@ -383,7 +383,7 @@ impl Lab {
             .order()
             .get(self.steps)
             .cloned()
-            .ok_or(LabRefusal::ScheduleExhausted {
+            .ok_or_else(|| LabRefusal::ScheduleExhausted {
                 declared: self.config.schedule.len(),
             })?;
         self.trace.record(TraceEvent::Stepped {
@@ -598,7 +598,7 @@ pub const CANCELLATION_PHASES: [&str; 3] = ["request", "drain", "finalize"];
 
 /// The runtime capability mask a lab context carries.
 #[must_use]
-pub fn lab_capability_mask() -> CapMask {
+pub const fn lab_capability_mask() -> CapMask {
     <LabCaps as CapSetRuntimeMask>::MASK
 }
 

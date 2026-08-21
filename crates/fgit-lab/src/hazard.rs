@@ -456,9 +456,21 @@ mod tests {
     #[test]
     fn the_empty_script_is_the_control_condition() {
         let script = HazardScript::none();
-        assert!(script.is_empty());
-        assert!(script.hazards().is_empty());
-        assert!(script.storage().is_empty());
+        assert!(
+            script.is_empty(),
+            "the control script must inject nothing, got {:?}",
+            script.hazards()
+        );
+        assert!(
+            script.hazards().is_empty(),
+            "unexpected hazards: {:?}",
+            script.hazards()
+        );
+        assert!(
+            script.storage().is_empty(),
+            "unexpected storage directives: {:?}",
+            script.storage().directives()
+        );
         assert_eq!(script.seed(), None);
         assert_eq!(
             script.canonical_line(),

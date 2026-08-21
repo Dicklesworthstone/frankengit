@@ -235,7 +235,7 @@ impl StepCursor<'_> {
     /// Running past the end silently would let a campaign's real step count
     /// drift from the schedule it claims to have run.
     pub fn next_step(&mut self) -> Result<&StepId, LabRefusal> {
-        let step = self.schedule.order.get(self.position).ok_or({
+        let step = self.schedule.order.get(self.position).ok_or_else(|| {
             LabRefusal::ScheduleExhausted {
                 declared: self.schedule.order.len(),
             }
@@ -358,7 +358,11 @@ mod tests {
     #[test]
     fn an_empty_schedule_is_immediately_exhausted() {
         let schedule = LabSchedule::round_robin(participants(), 0).expect("valid");
-        assert!(schedule.is_empty());
+        assert!(
+            schedule.is_empty(),
+            "zero rounds must yield no steps, got {:?}",
+            schedule.order()
+        );
         let cursor = schedule.cursor();
         assert!(cursor.is_exhausted());
         assert_eq!(cursor.peek(), None);
