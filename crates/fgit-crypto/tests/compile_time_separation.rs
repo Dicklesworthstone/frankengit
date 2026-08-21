@@ -54,13 +54,13 @@ const FORBIDDEN: &[ForbiddenCase] = &[
     ForbiddenCase {
         name: "cross_format_hasher",
         reason: "a hasher for one format cannot finish into the other format's identity",
-        body: r#"
+        body: r"
             use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1, Sha256};
             fn main() {
                 let hasher = GitOid::<Sha1>::object_hasher(GitObjectKind::Blob, 0);
                 let _wide: GitOid<Sha256> = hasher.finish().unwrap();
             }
-        "#,
+        ",
     },
     ForbiddenCase {
         name: "hex_without_algorithm_context",
@@ -85,7 +85,7 @@ const FORBIDDEN: &[ForbiddenCase] = &[
     ForbiddenCase {
         name: "third_party_algorithm_marker",
         reason: "the algorithm set is sealed against downstream extension",
-        body: r#"
+        body: r"
             use fgit_crypto::{DigestAlgorithm, GitHashAlgorithm};
             #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
             struct Md5;
@@ -105,7 +105,7 @@ const FORBIDDEN: &[ForbiddenCase] = &[
                 }
             }
             fn main() {}
-        "#,
+        ",
     },
 ];
 
@@ -133,13 +133,13 @@ const PERMITTED: &[PermittedCase] = &[
     },
     PermittedCase {
         name: "same_format_hasher",
-        body: r#"
+        body: r"
             use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1};
             fn main() {
                 let hasher = GitOid::<Sha1>::object_hasher(GitObjectKind::Blob, 0);
                 let _narrow: GitOid<Sha1> = hasher.finish().unwrap();
             }
-        "#,
+        ",
     },
     PermittedCase {
         name: "hex_with_algorithm_context",

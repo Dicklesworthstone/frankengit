@@ -44,14 +44,12 @@ fn spec_bytes(spec: &str) -> Vec<u8> {
 }
 
 fn decode_hex(text: &str) -> Vec<u8> {
-    assert!(text.len() % 2 == 0, "hex input has an even length");
+    assert!(text.len().is_multiple_of(2), "hex input has an even length");
     text.as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let high = nibble(pair[0]);
-            let low = nibble(pair[1]);
-            (high << 4) | low
-        })
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
         .collect()
 }
 
