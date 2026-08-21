@@ -1,6 +1,6 @@
 # ADR-0006: Search Ships Lexical-First; the Semantic Profile Is Earned by Calibration
 
-- **Status:** proposed
+- **Status:** **accepted 2026-08-21 by GoldLotus ruling (fg061 comment 1096)**
 - **Date:** 2026-08-21
 - **Decision owners:** FrankenGit architecture (search)
 - **Scope:** plan decision D10 — local model path, embedding identities, download/offline policy, WASM and server profiles, calibration, privacy, degradation

@@ -1,6 +1,6 @@
 # ADR-0015: WEB-5 — There Is No First-Party Unsafe Exception, Including for WASM
 
-- **Status:** proposed (records a settled constitutional position and the mechanism that enforces it)
+- **Status:** **accepted 2026-08-21 by GoldLotus ruling (fg061 comment 1114)**; records a settled constitutional position and the mechanism that enforces it
 - **Date:** 2026-08-21
 - **Decision owners:** FrankenGit architecture
 - **Scope:** first-party unsafe policy across native and WebAssembly targets, and the sibling convergence prerequisite that gates every WEB adoption

@@ -1,6 +1,6 @@
 # ADR-0007: CI Isolation Is a Pluggable Substrate Behind One Containment Contract
 
-- **Status:** proposed
+- **Status:** **accepted 2026-08-21 by GoldLotus ruling (fg061 comment 1096)**
 - **Date:** 2026-08-21
 - **Decision owners:** FrankenGit architecture (CI, runners)
 - **Scope:** plan decision D11 — sandbox substrate per platform, network and secret brokering, snapshot and cleanup, determinism

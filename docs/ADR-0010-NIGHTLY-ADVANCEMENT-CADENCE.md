@@ -1,6 +1,6 @@
 # ADR-0010: The Toolchain Advances on Evidence, on a Fixed Cadence, Never on Convenience
 
-- **Status:** proposed
+- **Status:** **accepted 2026-08-21 by GoldLotus ruling (fg061 comment 1103)**
 - **Date:** 2026-08-21
 - **Decision owners:** FrankenGit architecture (toolchain, release)
 - **Scope:** plan decision D15 — dated-nightly pinning and the advancement procedure
@@ -23,7 +23,7 @@ The cadence, and who may advance the pin.
 
 ## Decision (proposed)
 
-1. **Scheduled, not reactive.** A candidate advancement is evaluated on a fixed cadence, and the pin moves only when a candidate passes. An urgent advancement to obtain a fix is permitted but takes the same evidence path, compressed rather than skipped.
+1. **Scheduled, not reactive.** A candidate advancement is evaluated on a fixed cadence, and the pin moves only when a candidate passes. An urgent advancement to obtain a fix is permitted but takes the same evidence path, compressed rather than skipped. **The initial cadence is six weeks, aligned to the upstream Rust release train**, which is the natural forcing function for the lint and feature drift this ADR exists to absorb: aligning to it means each evaluation window contains at most one stable release's worth of change, so a regression has a bounded set of candidate causes. The candidate is evaluated in a branch as clause 2 requires; the cadence sets when an evaluation STARTS, never whether the evidence path may be shortened. Six weeks is the starting value, not a measured optimum, and it is revisited if two consecutive windows either find nothing to evaluate or cannot complete the lane in time.
 2. **The candidate is evaluated in a branch, never on the default branch.** The full local verification lane runs against the candidate before the pin moves, so the default branch never carries an unevaluated toolchain.
 3. **Advancement is one commit that moves the pin and nothing else**, alongside a separate commit for any lint or API fallout. A pin bump bundled with its own fallout is unreviewable, which is how a behaviour change hides.
 4. **Determinism is the blocking check.** Golden artifacts, canonical bytes, and rendered surfaces must be byte-identical across the old and new toolchain. A codegen or formatting difference that changes a canonical byte blocks advancement outright; a difference that changes only a rendered surface requires an explicit marked golden change with a stated reason.

@@ -1,6 +1,6 @@
 # ADR-0012: WEB-2 — sqlmodel_rust on FrankenSQLite Is the Projection Substrate, and Projections Are Never Authority
 
-- **Status:** proposed (records a settled adoption; the open items are backend exclusion and admission)
+- **Status:** **accepted 2026-08-21 by GoldLotus ruling (fg061 comment 1114)**; records a settled adoption; the open items are backend exclusion and admission
 - **Date:** 2026-08-21
 - **Decision owners:** FrankenGit architecture (projections)
 - **Scope:** the derived read-model substrate

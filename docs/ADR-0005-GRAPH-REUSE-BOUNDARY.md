@@ -1,6 +1,6 @@
 # ADR-0005: The Graph Reuse Boundary Is Drawn at the Type and Runtime Universe, Not at Convenience
 
-- **Status:** proposed
+- **Status:** **accepted 2026-08-21 by GoldLotus ruling (fg061 comment 1093)**
 - **Date:** 2026-08-21
 - **Decision owners:** FrankenGit architecture (graph fabric)
 - **Scope:** plan decision D9 — which FrankenGraphDB / FrankenNetworkX surfaces are consumed directly and which mechanisms are ported

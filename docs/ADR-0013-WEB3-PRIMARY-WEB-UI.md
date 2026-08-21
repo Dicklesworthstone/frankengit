@@ -1,6 +1,6 @@
 # ADR-0013: WEB-3 — The Primary Web UI Is a Real-DOM Pure-Rust WASM App; Leptos Versus Dioxus Is the Open Choice
 
-- **Status:** proposed — this is the one WEB decision with a genuinely open selection
+- **Status:** **accepted 2026-08-21 by GoldLotus ruling (fg061 comment 1114)**; this is the one WEB decision with a genuinely open selection
 - **Date:** 2026-08-21
 - **Decision owners:** FrankenGit architecture (web UI)
 - **Scope:** the primary browser surface: framework, SSR and hydration, CSS, and toolchain

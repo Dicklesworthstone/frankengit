@@ -1,6 +1,6 @@
 # ADR-0014: WEB-4 — FrankenTUI Owns the Terminal Surface and an Optional Web Skin, Never the Primary UI
 
-- **Status:** proposed (records a settled scope boundary)
+- **Status:** **accepted 2026-08-21 by GoldLotus ruling (fg061 comment 1114)**; records a settled scope boundary
 - **Date:** 2026-08-21
 - **Decision owners:** FrankenGit architecture (TUI)
 - **Scope:** the terminal operator and agent surface, and the optional terminal-style web skin

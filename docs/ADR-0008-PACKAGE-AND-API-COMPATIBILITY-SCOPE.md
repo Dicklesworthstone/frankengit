@@ -1,6 +1,6 @@
 # ADR-0008: Compatibility Scope Is a Measured Registry, Never a Blanket Claim
 
-- **Status:** proposed
+- **Status:** **accepted 2026-08-21 by GoldLotus ruling (fg061 comment 1096)**
 - **Date:** 2026-08-21
 - **Decision owners:** FrankenGit architecture (compatibility, packages, API)
 - **Scope:** plan decision D12 — Git LFS, OCI, and GitHub REST/GraphQL/Actions subsets

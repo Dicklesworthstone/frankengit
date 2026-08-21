@@ -1,6 +1,6 @@
 # ADR-0004: Segment, Block, and Compaction Profiles Are Measured, Not Chosen Up Front
 
-- **Status:** proposed
+- **Status:** **accepted 2026-08-21 by GoldLotus ruling (fg061 comment 1093)**
 - **Date:** 2026-08-21
 - **Decision owners:** FrankenGit architecture (object fabric, search, graph)
 - **Scope:** plan decision D5 — source block, microsegment, pack, checkpoint, and graph/search tier sizing, plus the compaction trigger

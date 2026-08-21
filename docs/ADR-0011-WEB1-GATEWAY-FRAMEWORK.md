@@ -1,6 +1,6 @@
 # ADR-0011: WEB-1 — fastapi_rust Is the Gateway and API Framework
 
-- **Status:** proposed (records a settled adoption; the open item is its admission prerequisite)
+- **Status:** **accepted 2026-08-21 by GoldLotus ruling (fg061 comment 1114)**; records a settled adoption; the open item is its admission prerequisite
 - **Date:** 2026-08-21
 - **Decision owners:** FrankenGit architecture (gateway, API)
 - **Scope:** the HTTP gateway and typed API framework

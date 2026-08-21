@@ -1,6 +1,6 @@
 # ADR-0009: Federation Is Admission-Controlled Import, Not Shared Authority
 
-- **Status:** proposed
+- **Status:** **accepted 2026-08-21 by GoldLotus ruling (fg061 comment 1103)**
 - **Date:** 2026-08-21
 - **Decision owners:** FrankenGit architecture (federation)
 - **Scope:** plan decision D13 — identity and key history, event classes, coordination rules, spam and moderation, equivocation, local admission

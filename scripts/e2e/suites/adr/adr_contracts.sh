@@ -150,21 +150,76 @@ else
 fi
 
 fge_step decision-status
-# A planning bead may not mark its own decisions accepted; acceptance is the
-# owner's ruling, one by one.
-adr_selfaccepted=""
+# A planning bead may not grant its own decisions. That invariant has not
+# changed; what changed is that the rulings now EXIST, so the check can no
+# longer be "every swept ADR still says proposed".
+#
+# The earlier form was a string check and would have had to be deleted to let a
+# ruled acceptance through -- which is how a gate quietly stops guarding at the
+# exact moment it first has something to guard against. The replacement is
+# STRONGER, not weaker: an accepted ADR must cite a ruling comment that actually
+# exists on the fg061 bead AND is not authored by the agent doing the sweep.
+# Forging acceptance now requires forging a tracker comment under another
+# author, rather than editing one word in a Markdown header.
+#
+# The set of ruling comments is derived from the tracker export, never from a
+# list maintained here, so a new ruling needs no edit to this suite and a
+# retracted one stops authorising anything the moment it leaves the export.
+adr_sweep_author="JadeFalcon"
+adr_rulings=$(LC_ALL=C grep -oE '\{"id":[0-9]+,"issue_id":"frankengit-fg061-adr-sweep-hx4o","author":"[A-Za-z0-9_-]+"' \
+  "$ADR_REPO/.beads/issues.jsonl" 2>/dev/null |
+  LC_ALL=C grep -v "\"author\":\"$adr_sweep_author\"" |
+  LC_ALL=C grep -oE '"id":[0-9]+' | LC_ALL=C grep -oE '[0-9]+' | LC_ALL=C sort -u)
+adr_ruling_count=$(printf '%s\n' "$adr_rulings" | LC_ALL=C grep -c . || true)
+fge_field independent_rulings "$adr_ruling_count"
+
+adr_badstatus=""
 for file in "${adr_files[@]}"; do
   case ${file##*/} in
     ADR-0001-* | ADR-0002-* | ADR-0003-*) continue ;;
   esac
-  LC_ALL=C grep -qE '^- \*\*Status:\*\* *proposed' "$file" ||
-    adr_selfaccepted="$adr_selfaccepted ${file##*/}"
+  if LC_ALL=C grep -qE '^- \*\*Status:\*\* *proposed' "$file"; then
+    continue
+  fi
+  # Not proposed: it must be an acceptance citing an independent ruling.
+  # `.*` not `[^\n]*`: inside a bracket expression a backslash is LITERAL, so
+  # `[^\n]` means "not a backslash and not the letter n" and stops dead at the
+  # `n` in "accepted". grep is line-oriented, so `.*` is both correct and
+  # unambiguous. The guard keeps a non-matching line a RESULT rather than a
+  # pipefail abort.
+  adr_cited=$( { LC_ALL=C grep -m1 -oE '^- \*\*Status:\*\*.*fg061 comment [0-9]+' "$file" || true; } |
+    { LC_ALL=C grep -oE '[0-9]+$' || true; } )
+  if [ -z "$adr_cited" ]; then
+    adr_badstatus="$adr_badstatus ${file##*/}(no-ruling-cited)"
+    continue
+  fi
+  if ! printf '%s\n' "$adr_rulings" | LC_ALL=C grep -qx "$adr_cited"; then
+    adr_badstatus="$adr_badstatus ${file##*/}(ruling-$adr_cited-not-an-independent-fg061-comment)"
+  fi
 done
-if [ -z "$adr_selfaccepted" ]; then
-  fge_pass fg061-adrs-not-self-accepted "every swept ADR is still proposed, not self-accepted"
+
+if [ "$adr_ruling_count" -lt 1 ]; then
+  fge_fail fg061-adrs-not-self-accepted \
+    "no independent ruling comments found on fg061; the extraction is broken and this check is vacuous"
+elif [ -z "$adr_badstatus" ]; then
+  fge_pass fg061-adrs-not-self-accepted \
+    "every swept ADR is proposed, or accepted citing one of $adr_ruling_count independent fg061 rulings"
 else
-  fge_fail fg061-adrs-not-self-accepted "ADRs claiming a status this bead may not grant:$adr_selfaccepted"
+  fge_fail fg061-adrs-not-self-accepted "ADRs claiming a status this bead may not grant:$adr_badstatus"
 fi
+
+# The check must be able to fail, or the flip just turned a guard into a
+# rubber stamp. A citation of a comment authored by the sweeping agent, and a
+# citation of a comment that does not exist, must both be rejected.
+adr_selfcite_rejected=0
+printf '%s\n' "$adr_rulings" | LC_ALL=C grep -qx "1048" || adr_selfcite_rejected=1
+fge_assert_eq fg061-selfauthored-ruling-rejected 1 "$adr_selfcite_rejected" \
+  "a comment authored by the sweeping agent is not usable as an acceptance ruling"
+
+adr_absent_rejected=0
+printf '%s\n' "$adr_rulings" | LC_ALL=C grep -qx "999999" || adr_absent_rejected=1
+fge_assert_eq fg061-absent-ruling-rejected 1 "$adr_absent_rejected" \
+  "a citation of a comment that does not exist is not usable as an acceptance ruling"
 
 fge_step binds-resolve
 # An ADR that binds a bead which does not exist is unattached prose.
