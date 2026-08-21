@@ -4,8 +4,8 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/fgit-authority", "crates/fgit-deflate", "crates/fgit-diff", "crates/fgit-doc", "crates/fgit-object-fabric", "crates/fgit-pack", "crates/fgit-types", "tools/registry-check"]
-default-members = ["crates/fgit-authority", "crates/fgit-deflate", "crates/fgit-diff", "crates/fgit-doc", "crates/fgit-object-fabric", "crates/fgit-pack", "crates/fgit-types", "tools/registry-check"]
+members = ["crates/fgit-authority", "crates/fgit-crypto", "crates/fgit-deflate", "crates/fgit-diff", "crates/fgit-doc", "crates/fgit-git-object", "crates/fgit-object-fabric", "crates/fgit-pack", "crates/fgit-resource", "crates/fgit-runtime", "crates/fgit-types", "tools/registry-check"]
+default-members = ["crates/fgit-authority", "crates/fgit-crypto", "crates/fgit-deflate", "crates/fgit-diff", "crates/fgit-doc", "crates/fgit-git-object", "crates/fgit-object-fabric", "crates/fgit-pack", "crates/fgit-resource", "crates/fgit-runtime", "crates/fgit-types", "tools/registry-check"]
 
 [workspace.package]
 edition = "2024"
@@ -19,7 +19,16 @@ repository = "https://github.com/Dicklesworthstone/frankengit"
 # allow_first_party) — not the unpublished external path dependency that
 # AGENTS.md section 3.3 forbids for a release-facing crate.
 [workspace.dependencies]
+fgit-authority = { path = "crates/fgit-authority" }
+fgit-crypto = { path = "crates/fgit-crypto" }
 fgit-deflate = { path = "crates/fgit-deflate" }
+fgit-diff = { path = "crates/fgit-diff" }
+fgit-doc = { path = "crates/fgit-doc" }
+fgit-git-object = { path = "crates/fgit-git-object" }
+fgit-object-fabric = { path = "crates/fgit-object-fabric" }
+fgit-pack = { path = "crates/fgit-pack" }
+fgit-resource = { path = "crates/fgit-resource" }
+fgit-runtime = { path = "crates/fgit-runtime" }
 fgit-types = { path = "crates/fgit-types" }
 
 [workspace.lints.rust]
