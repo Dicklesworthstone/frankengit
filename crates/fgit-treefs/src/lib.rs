@@ -39,6 +39,7 @@
 
 pub mod base;
 pub mod capability;
+pub mod export;
 pub mod intent;
 pub mod obligation;
 pub mod overlay;
@@ -49,6 +50,7 @@ pub use base::{BaseEntry, BaseError, BaseView, ObjectSource, ObjectSourceError};
 pub use capability::{
     CapabilityRefusal, ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId, WriteGrant,
 };
+pub use export::{ExportLimits, ExportPlan, ExportPlanner, ExportRefusal, ExportedObject};
 pub use intent::{
     BasisEntry, IntentError, IntentEvaluation, IntentLog, NetEffect, NoOpReason, TreeEditIntent,
     TreeNetEffect,
