@@ -399,6 +399,13 @@ pub enum IdentityDomain {
     /// identity of the body it wraps — adding or removing an attestation must
     /// change the envelope's identity and must not change the wrapped body's.
     SignedEnvelope,
+    /// One key-lifecycle receipt body.
+    ///
+    /// Rotation, revocation and cryptographic erasure each produce an
+    /// immutable record. Plan section 19.4 makes erasure a deletion state with
+    /// its own evidence, which means the record is a body with an identity
+    /// rather than a log line.
+    KeyLifecycleReceipt,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -600,6 +607,12 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/signed-envelope/v1",
         None,
     ),
+    owned_row(
+        31,
+        IdentityDomain::KeyLifecycleReceipt,
+        "frankengit/key-lifecycle-receipt/v1",
+        None,
+    ),
 ];
 
 const fn pinned_row(
@@ -714,6 +727,7 @@ impl IdentityDomain {
         Self::AdmissionReceipt,
         Self::DocumentAnchor,
         Self::SignedEnvelope,
+        Self::KeyLifecycleReceipt,
     ];
 
     /// Position of this domain in [`DOMAIN_REGISTRY`].

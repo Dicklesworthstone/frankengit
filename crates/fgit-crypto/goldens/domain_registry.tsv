@@ -30,3 +30,4 @@ id	domain_tag	algorithm	durable_object_row	derived_identity	status
 28	frankengit/admission-receipt/v1	sha256	-	-	active
 29	frankengit/doc-anchor/v1	sha256	-	-	active
 30	frankengit/signed-envelope/v1	sha256	-	-	active
+31	frankengit/key-lifecycle-receipt/v1	sha256	-	-	active

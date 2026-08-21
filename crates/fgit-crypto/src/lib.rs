@@ -103,6 +103,7 @@ mod defense;
 mod derive;
 mod hashing;
 mod keys;
+mod lifecycle;
 mod mac;
 mod native;
 mod registry;
@@ -133,6 +134,10 @@ pub use keys::{
     AuthorityAdmin, Capsule, Evidence, Identity, KEY_BYTES, KeyEpoch, KeyId, KeyPurpose,
     KeyPurposeMarker, KeyScope, MacCapable, PackageRelease, PurposeMismatch, Recovery, RootSecret,
     SecretKey, StoredKey, TenantEncryption, Webhook, derivation_info,
+};
+pub use lifecycle::{
+    KeyHistory, KeyLifecycle, KeyLifecycleError, KeyRecord, LifecycleReceipt, RECEIPT_SCHEMA,
+    RECEIPT_SCHEMA_FAMILY, Recoverability,
 };
 pub use mac::{HmacSha256, TAG_BYTES, hmac_sha256, verify_mac};
 pub use native::{
