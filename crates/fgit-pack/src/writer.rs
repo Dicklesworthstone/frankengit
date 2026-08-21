@@ -358,11 +358,10 @@ impl PackPlanner {
             ids.push(id);
         }
         ids.sort_unstable();
-        if let Some(&duplicate) = ids
-            .windows(2)
-            .find_map(|pair| (pair[0] == pair[1]).then_some(&pair[0]))
-        {
-            return Err(PackWriteError::DuplicateSelectedObject(duplicate));
+        for pair in ids.windows(2) {
+            if pair[0] == pair[1] {
+                return Err(PackWriteError::DuplicateSelectedObject(pair[0]));
+            }
         }
 
         let mut objects = Vec::new();
@@ -407,13 +406,12 @@ impl PackPlanner {
         self.finish_plan(objects, total_object_bytes, deadline)
     }
 
-    fn validate_profile_depth(&self) -> Result<(), PackWriteError> {
+    const fn validate_profile_depth(&self) -> Result<(), PackWriteError> {
         if self.profile.max_delta_depth > self.limits.max_delta_depth {
-            return Err(PackError::DeltaDepthLimit {
+            return Err(PackWriteError::Pack(PackError::DeltaDepthLimit {
                 depth: self.profile.max_delta_depth,
                 limit: self.limits.max_delta_depth,
-            }
-            .into());
+            }));
         }
         Ok(())
     }
