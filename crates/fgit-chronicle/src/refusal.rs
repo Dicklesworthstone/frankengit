@@ -131,6 +131,31 @@ pub enum ChronicleRefusal {
     },
     /// The head belongs to a different repository than the batch.
     RepositoryMismatch,
+    /// A capsule pointer was asked to move to an older or equal position.
+    ///
+    /// This is the stale-pointer refusal: an older checkpoint that still
+    /// verifies must never be re-published as the current one.
+    CapsuleNotAdvancing {
+        /// Head generation the pointer currently names.
+        current: HeadGeneration,
+        /// Head generation the proposed capsule was taken at.
+        proposed: HeadGeneration,
+    },
+    /// A capsule does not name the capsule it succeeds.
+    CapsulePredecessorMismatch,
+    /// The capsule body is not staged where the pointer would name it.
+    ///
+    /// Root-last: the pointer moves only after the data it names is
+    /// readable. Advancing first would publish a root whose body no reader
+    /// can fetch, which is indistinguishable from corruption.
+    CapsuleBodyNotStaged,
+    /// The capsule's identity could not be computed.
+    CapsuleIdentityUnavailable,
+    /// A capsule declares a backup profile this build does not define.
+    BackupProfileUnknown {
+        /// The discriminant that was read.
+        observed: u8,
+    },
 }
 
 impl fmt::Display for ChronicleRefusal {
@@ -230,6 +255,24 @@ impl fmt::Display for ChronicleRefusal {
             }
             Self::RepositoryMismatch => {
                 f.write_str("the head and the batch govern different repositories")
+            }
+            Self::CapsuleNotAdvancing { current, proposed } => write!(
+                f,
+                "capsule pointer is at head generation {} and cannot move to {}",
+                current.get(),
+                proposed.get()
+            ),
+            Self::CapsulePredecessorMismatch => {
+                f.write_str("the capsule does not name the capsule it succeeds")
+            }
+            Self::CapsuleBodyNotStaged => f.write_str(
+                "the capsule body is not staged; a pointer may not name data no reader can fetch",
+            ),
+            Self::CapsuleIdentityUnavailable => {
+                f.write_str("the capsule's identity could not be computed")
+            }
+            Self::BackupProfileUnknown { observed } => {
+                write!(f, "backup profile {observed} is not defined by this build")
             }
         }
     }

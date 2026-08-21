@@ -60,12 +60,17 @@ const _: () = {
 
 pub mod assemble;
 pub mod audit;
+pub mod capsule;
 pub mod origin;
 pub mod publish;
 pub mod refusal;
 
 pub use assemble::{PublicationPlan, VerifiedPublication};
 pub use audit::{batch_identity, verify_pair};
+pub use capsule::{
+    BackupProfile, CapsulePointer, RepositoryCapsuleBody, advance_pointer_root_last,
+    capsule_identity,
+};
 pub use origin::{PublicationBasis, ResultingRoots};
 pub use publish::{CanonicalBatchReceipt, LostCandidate, PublicationVerdict, publish};
 pub use refusal::ChronicleRefusal;
