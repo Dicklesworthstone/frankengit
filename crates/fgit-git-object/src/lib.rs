@@ -1063,6 +1063,7 @@ fn validate_strict_tag(headers: &[HeaderField], limits: &ParseLimits) -> Result<
 }
 
 fn validate_native_reference(value: &[u8], object_id_bytes: usize) -> Result<(), ObjectError> {
+    validate_tree_reference_width(object_id_bytes)?;
     let expected_hex_bytes =
         object_id_bytes
             .checked_mul(2)
@@ -1415,6 +1416,17 @@ mod tests {
                 &limits()
             ),
             Err(ObjectError::MalformedObjectReference)
+        );
+
+        let mut unsupported_width = limits();
+        unsupported_width.tree_reference_bytes = 24;
+        assert_eq!(
+            parse_commit(
+                b"tree 111111111111111111111111111111111111111111111111\nauthor A <a@x> 1 +0000\ncommitter C <c@x> 1 +0000\n\nmessage",
+                AcceptanceProfile::StrictCreate,
+                &unsupported_width
+            ),
+            Err(ObjectError::UnsupportedTreeReferenceWidth { width: 24 })
         );
     }
 
