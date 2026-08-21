@@ -352,6 +352,12 @@ fn filters_sideband_and_hash_formats_preserve_explicit_domains() {
         parse_sideband(&packets[0]).expect("parse sideband").band,
         SidebandBand::Progress
     );
+    assert_eq!(
+        parse_sideband(&Packet::Data(b"\x03remote error\n".to_vec()))
+            .expect("fatal sideband")
+            .band,
+        SidebandBand::Fatal
+    );
     let sha1 = AnyGitOid::from_hex(GitObjectFormat::Sha1, WANT).expect("sha1");
     let sha256 = AnyGitOid::from_hex(
         GitObjectFormat::Sha256,
