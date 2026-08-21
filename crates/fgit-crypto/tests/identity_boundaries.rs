@@ -6,8 +6,9 @@ use fgit_crypto::{
     DigestAlgorithm, DigestBytes, GIT_PAYLOAD_SCHEMA, GitHashError, GitObjectFormat, GitObjectKind,
     GitOid, IdentityDomain, InternalDigestAlgorithm, InternalIdentityError, InternalObjectId,
     NativeObjectIdentity, RowStatus, SchemaFamily, SchemaId, Sha1, Sha256, git_object_id,
-    git_payload_body, git_payload_commitment, internal_digest_in_domain, internal_object_id,
-    parse_git_oid, verify_internal_object_id,
+    git_payload_body, git_payload_commitment, internal_digest_in_domain,
+    internal_digest_over_parts, internal_digest_value, internal_object_id, parse_git_oid,
+    verify_internal_object_id,
 };
 
 const EMPTY_BLOB_SHA1: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
@@ -519,4 +520,76 @@ fn the_payload_commitment_does_not_replace_the_native_identity() {
         "the stronger digest is additional evidence, never the visible identity"
     );
     assert_eq!(commitment.digest().len(), 32);
+}
+
+// --- allocation-free digest entry points ------------------------------------
+
+#[test]
+fn streaming_parts_match_the_materialised_preimage() {
+    // `internal_digest_over_parts` must be bit-identical to hashing the
+    // concatenation, or a Merkle builder and a verifier would disagree.
+    let schema = schema("frankengit.microsegment");
+    let splits: &[&[&[u8]]] = &[
+        &[],
+        &[b""],
+        &[b"record bytes"],
+        &[b"record", b" bytes"],
+        &[b"r", b"e", b"cord bytes"],
+        &[b"record bytes", b""],
+        &[b"", b"record bytes"],
+    ];
+    for domain in [IdentityDomain::MerkleLeaf, IdentityDomain::MerkleNode] {
+        for parts in splits {
+            let joined: Vec<u8> = parts.iter().flat_map(|part| part.iter().copied()).collect();
+            assert_eq!(
+                internal_digest_over_parts(domain, schema, parts)
+                    .as_bytes()
+                    .to_vec(),
+                internal_digest_in_domain(domain, schema, &joined),
+                "{domain} split into {} parts",
+                parts.len()
+            );
+            assert_eq!(
+                internal_digest_value(domain, schema, &joined),
+                internal_digest_over_parts(domain, schema, parts)
+            );
+        }
+    }
+}
+
+#[test]
+fn merkle_leaves_and_nodes_are_separate_domains() {
+    // Sharing one domain between leaves and interior nodes is the classic
+    // second-preimage construction against an unseparated Merkle tree: an
+    // interior node's preimage could be presented as a leaf.
+    let schema = schema("frankengit.microsegment");
+    let record = b"record bytes";
+    let leaf = internal_digest_value(IdentityDomain::MerkleLeaf, schema, record);
+    let node = internal_digest_value(IdentityDomain::MerkleNode, schema, record);
+    assert_ne!(leaf, node);
+
+    // And a two-child node is built without concatenating the children.
+    let left = internal_digest_value(IdentityDomain::MerkleLeaf, schema, b"left");
+    let right = internal_digest_value(IdentityDomain::MerkleLeaf, schema, b"right");
+    let parent = internal_digest_over_parts(
+        IdentityDomain::MerkleNode,
+        schema,
+        &[left.as_bytes(), right.as_bytes()],
+    );
+    let swapped = internal_digest_over_parts(
+        IdentityDomain::MerkleNode,
+        schema,
+        &[right.as_bytes(), left.as_bytes()],
+    );
+    assert_ne!(parent, swapped, "child order is part of the commitment");
+}
+
+#[test]
+fn the_digest_value_shell_carries_the_registry_width() {
+    let schema = schema("frankengit.canonical-body");
+    for domain in IdentityDomain::ALL.iter().copied() {
+        let value = internal_digest_value(domain, schema, b"body");
+        assert_eq!(value.len(), domain.algorithm().digest_len());
+        assert_eq!(value.len(), 32);
+    }
 }

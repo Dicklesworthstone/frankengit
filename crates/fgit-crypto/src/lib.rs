@@ -94,8 +94,8 @@ pub mod testing;
 pub use body_identity::{
     GIT_PAYLOAD_SCHEMA, GIT_PAYLOAD_SCHEMA_FAMILY, InternalIdentityError, git_payload_body,
     git_payload_commitment, internal_algorithm_id, internal_digest, internal_digest_in_domain,
-    internal_domain_tag, internal_id_preimage, internal_object_id, lowercase_hex,
-    verify_internal_object_id,
+    internal_digest_over_parts, internal_digest_value, internal_domain_tag, internal_id_preimage,
+    internal_id_preimage_header, internal_object_id, lowercase_hex, verify_internal_object_id,
 };
 pub use corpus::{
     ALGORITHM_HEADER, DOMAIN_HEADER, REGISTRY_MARKER, export_algorithm_registry,

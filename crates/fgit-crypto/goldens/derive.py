@@ -140,6 +140,9 @@ INTERNAL_SPECS = [
     ("IV-009", "frankengit/git-payload-commitment/v1", "frankengit.git-payload-commitment", 1, 0, "hex:" + git_preimage("blob", b"").hex(), "payload commitment over the empty blob"),
     ("IV-010", "frankengit/git-payload-commitment/v1", "frankengit.git-payload-commitment", 1, 0, "hex:" + git_preimage("blob", b"hello world\n").hex(), "payload commitment over a blob"),
     ("IV-011", "frankengit/generation/v1", "frankengit.generation", 3, 7, "repeat:5a:300", "long body, non-trivial versions"),
+    ("IV-012", "frankengit/merkle-leaf/v1", "frankengit.microsegment", 1, 0, "hex:" + b"record bytes".hex(), "Merkle leaf"),
+    ("IV-013", "frankengit/merkle-node/v1", "frankengit.microsegment", 1, 0, "hex:" + b"record bytes".hex(), "Merkle node over identical bytes: must differ from IV-012"),
+    ("IV-014", "frankengit/merkle-node/v1", "frankengit.microsegment", 1, 0, "hex:" + ("11" * 32) + ("22" * 32), "Merkle node over two child digests"),
 ]
 
 

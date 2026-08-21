@@ -43,7 +43,7 @@ use fgit_types::identity::InternalObjectId;
 use fgit_types::label::{DomainTag, SchemaFamily, SchemaId};
 use fgit_types::numeric::CodecVersion;
 
-use crate::hashing::sha256_digest;
+use crate::hashing::{DigestHasher, Sha256Hasher, sha256_digest};
 use crate::native::GitObjectKind;
 use crate::registry::{DigestAlgorithm, IdentityDomain, InternalDigestAlgorithm};
 
@@ -126,6 +126,31 @@ impl fmt::Display for InternalIdentityError {
 
 impl std::error::Error for InternalIdentityError {}
 
+/// The framing that precedes the canonical body in the digest preimage.
+///
+/// Split out so that the materialised preimage and the streaming digest cannot
+/// drift apart: both consume exactly this.
+#[must_use]
+pub fn internal_id_preimage_header(
+    domain: IdentityDomain,
+    schema: SchemaId,
+    body_len: u64,
+) -> Vec<u8> {
+    let tag = domain.tag().as_bytes();
+    let family = schema.family();
+    let family_bytes = family.as_bytes();
+
+    let mut header = Vec::with_capacity(2 + tag.len() + family_bytes.len() + 4 + 8);
+    header.push(u8::try_from(tag.len()).expect("a registered domain tag fits the label bound"));
+    header.extend_from_slice(tag);
+    header.push(u8::try_from(family_bytes.len()).expect("a schema family fits the label bound"));
+    header.extend_from_slice(family_bytes);
+    header.extend_from_slice(&schema.major().to_be_bytes());
+    header.extend_from_slice(&schema.minor().to_be_bytes());
+    header.extend_from_slice(&body_len.to_be_bytes());
+    header
+}
+
 /// Build the exact digest preimage for one internal body identity.
 ///
 /// Exported so FG-002c's independent verifier can reproduce the construction
@@ -136,23 +161,62 @@ pub fn internal_id_preimage(
     schema: SchemaId,
     canonical_body: &[u8],
 ) -> Vec<u8> {
-    let tag = domain.tag().as_bytes();
-    let family = schema.family();
-    let family_bytes = family.as_bytes();
     let body_len = u64::try_from(canonical_body.len())
         .expect("a slice length always fits in u64 on supported targets");
-
-    let mut preimage =
-        Vec::with_capacity(2 + tag.len() + family_bytes.len() + 4 + 8 + canonical_body.len());
-    preimage.push(u8::try_from(tag.len()).expect("a registered domain tag fits the label bound"));
-    preimage.extend_from_slice(tag);
-    preimage.push(u8::try_from(family_bytes.len()).expect("a schema family fits the label bound"));
-    preimage.extend_from_slice(family_bytes);
-    preimage.extend_from_slice(&schema.major().to_be_bytes());
-    preimage.extend_from_slice(&schema.minor().to_be_bytes());
-    preimage.extend_from_slice(&body_len.to_be_bytes());
+    let mut preimage = internal_id_preimage_header(domain, schema, body_len);
+    preimage.reserve(canonical_body.len());
     preimage.extend_from_slice(canonical_body);
     preimage
+}
+
+/// Digest a body supplied as ordered parts, without materialising the
+/// preimage or the concatenated body.
+///
+/// This is the entry point for a Merkle builder: an interior node's digest is
+/// `internal_digest_over_parts(IdentityDomain::MerkleNode, schema, &[left, right])`,
+/// which allocates nothing per node and keeps leaves and nodes in separate
+/// domains. The result is bit-identical to hashing the concatenation through
+/// [`internal_object_id`], which `streaming_parts_match_the_materialised_preimage`
+/// asserts.
+#[must_use]
+pub fn internal_digest_over_parts(
+    domain: IdentityDomain,
+    schema: SchemaId,
+    body_parts: &[&[u8]],
+) -> DigestBytes {
+    let mut body_len: u64 = 0;
+    for part in body_parts {
+        let part_len = u64::try_from(part.len())
+            .expect("a slice length always fits in u64 on supported targets");
+        body_len = body_len
+            .checked_add(part_len)
+            .expect("a canonical body is shorter than the addressable range");
+    }
+    match domain.algorithm() {
+        InternalDigestAlgorithm::Sha256 => {
+            let mut hasher = Sha256Hasher::new();
+            DigestHasher::update(
+                &mut hasher,
+                &internal_id_preimage_header(domain, schema, body_len),
+            );
+            for part in body_parts {
+                DigestHasher::update(&mut hasher, part);
+            }
+            DigestBytes::try_new(&DigestHasher::finish(hasher))
+                .expect("an internal digest is within the shell bound")
+        }
+    }
+}
+
+/// Digest one contiguous body, returning the bounded shell rather than an
+/// allocation.
+#[must_use]
+pub fn internal_digest_value(
+    domain: IdentityDomain,
+    schema: SchemaId,
+    canonical_body: &[u8],
+) -> DigestBytes {
+    internal_digest_over_parts(domain, schema, &[canonical_body])
 }
 
 /// Digest a preimage under one internal construction.
@@ -175,13 +239,11 @@ pub fn internal_object_id(
     codec_version: CodecVersion,
     canonical_body: &[u8],
 ) -> InternalObjectId {
-    let preimage = internal_id_preimage(domain, schema, canonical_body);
-    let digest = internal_digest(domain.algorithm(), &preimage);
     InternalObjectId::new(
         domain.algorithm().id(),
         domain.domain_tag(),
         codec_version,
-        DigestBytes::try_new(&digest).expect("an internal digest is within the shell bound"),
+        internal_digest_value(domain, schema, canonical_body),
     )
 }
 

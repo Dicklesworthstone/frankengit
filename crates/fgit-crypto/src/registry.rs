@@ -347,6 +347,15 @@ pub enum IdentityDomain {
     AtpTransferManifest,
     /// One continuous-integration artifact body.
     CiArtifact,
+    /// One leaf of a segment or microsegment Merkle structure.
+    ///
+    /// Leaves and interior nodes are separate domains on purpose: a Merkle
+    /// tree whose leaf and node hashing share a domain lets an interior node's
+    /// preimage be presented as a leaf, which is the classic second-preimage
+    /// construction against unseparated Merkle trees.
+    MerkleLeaf,
+    /// One interior node of a segment or microsegment Merkle structure.
+    MerkleNode,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -518,6 +527,18 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/ci-artifact/v1",
         Some("DUR-007"),
     ),
+    owned_row(
+        26,
+        IdentityDomain::MerkleLeaf,
+        "frankengit/merkle-leaf/v1",
+        None,
+    ),
+    owned_row(
+        27,
+        IdentityDomain::MerkleNode,
+        "frankengit/merkle-node/v1",
+        None,
+    ),
 ];
 
 const fn pinned_row(
@@ -577,6 +598,28 @@ pub const ALGORITHM_REGISTRY: &[AlgorithmRow] = &[
     },
 ];
 
+// A variant without a row would make `IdentityDomain::row` index past the end
+// of the registry and panic at runtime. These assertions turn that into a
+// compile error instead, and pin the discriminant-is-the-row-index invariant
+// that `row` depends on.
+const _: () = assert!(DOMAIN_REGISTRY.len() == IdentityDomain::ALL.len());
+const _: () = {
+    let mut index = 0;
+    while index < DOMAIN_REGISTRY.len() {
+        assert!(DOMAIN_REGISTRY[index].domain.index() == index);
+        assert!(DOMAIN_REGISTRY[index].registry_id as usize == index + 1);
+        index += 1;
+    }
+};
+const _: () = assert!(ALGORITHM_REGISTRY.len() == DigestAlgorithm::ALL.len());
+const _: () = {
+    let mut index = 0;
+    while index < ALGORITHM_REGISTRY.len() {
+        assert!(ALGORITHM_REGISTRY[index].code_point as usize == index + 1);
+        index += 1;
+    }
+};
+
 impl IdentityDomain {
     /// Every identity domain, in registry order.
     pub const ALL: &'static [Self] = &[
@@ -605,6 +648,8 @@ impl IdentityDomain {
         Self::ReleaseAsset,
         Self::AtpTransferManifest,
         Self::CiArtifact,
+        Self::MerkleLeaf,
+        Self::MerkleNode,
     ];
 
     /// Position of this domain in [`DOMAIN_REGISTRY`].
