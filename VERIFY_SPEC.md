@@ -567,11 +567,19 @@ release
 
 `full` and `release` remain explicitly dormant/spec-only until their real implementation surfaces exist; they must not report fake green coverage.
 
-### 24.2 DSR target attempts
+### 24.2 Exact test-suite manifest
+
+When `full` and `release` activate, a checked-in versioned manifest names every required acceptance/surface ID and script for the selected profile. Runtime discovery is compared with that independent expected set. A green receipt requires exact equality of required and passed IDs and records expected, discovered, selected, started, passed, failed, skipped, unsupported, filtered, ignored, timed-out, and malformed-log sets.
+
+The same manifest maps every required acceptance ID to exactly one active owning Bead. The release-gate owner must reach that complete owner set through blocking dependencies. A dependency rewrite is invalid if it drops or silently substitutes a required campaign owner, even when the script-discovery sets still happen to match.
+
+A minimum script count, filesystem glob, or manifest regenerated from discovery cannot establish completeness. Zero-run, missing, duplicate, unregistered, unsupported, skipped, filtered, ignored, timed-out, early-exit-without-terminal-assertion, malformed-log, stale-revision, and wrong-profile cases are non-pass for required rows. Structural defects report `FAIL` before a clean partial run may report `INCOMPLETE`; partial modes never report `PASS`. First-attempt failures remain in the receipt.
+
+### 24.3 DSR target attempts
 
 A completed target is reusable only when source/tree/lock/constellation/nightly/target/CPU/features/profile/lane/environment/input identities match. Partial target success is resumable but no authoritative release manifest is created.
 
-### 24.3 Exact release contract
+### 24.4 Exact release contract
 
 Before root publication:
 
