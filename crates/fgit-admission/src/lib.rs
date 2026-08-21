@@ -1389,10 +1389,13 @@ mod tests {
         // After installing the plan, this admission path performs two seal
         // puts; two exact-outcome probes; a head read plus authentication for
         // the publication basis; a second receipt authentication for the
-        // projection; then stages the batch and head. The CAS is operation 11.
-        // Keeping that transcript explicit makes a changed authority call
-        // graph fail this planted-race test instead of silently skipping it.
-        const PUBLISH_CAS_OPERATION: OpIndex = OpIndex::from_raw(11);
+        // projection; then stages the batch and head. The atomic publisher
+        // now also reads the authenticated decision stream to mint its
+        // duplicate-absence witness before it reaches the CAS, so the CAS is
+        // operation 12. Keeping that transcript explicit makes a changed
+        // authority call graph fail this planted-race test instead of silently
+        // skipping it.
+        const PUBLISH_CAS_OPERATION: OpIndex = OpIndex::from_raw(12);
         let context = context();
         let store = store_with_genesis(&context);
         let projection = FixtureProjection::default();
