@@ -13,7 +13,7 @@ fn fixture_history() -> History<AuthorityOp, AuthorityResponse> {
             ClientId(1),
             LogicalTime(1),
             OperationId(7),
-            AuthorityOp::ReadHead { key: key.clone() },
+            AuthorityOp::ReadHead { key },
         ),
         HistoryEvent::response(
             ClientId(1),
@@ -31,8 +31,10 @@ fn decode_hex(text: &str) -> Vec<u8> {
         .filter(|byte| !byte.is_ascii_whitespace())
         .collect::<Vec<_>>();
     assert_eq!(digits.len() % 2, 0, "fixture contains complete hex pairs");
-    digits
-        .chunks_exact(2)
+    let (pairs, remainder) = digits.as_chunks::<2>();
+    assert!(remainder.is_empty(), "fixture contains complete hex pairs");
+    pairs
+        .iter()
         .map(|pair| {
             let high = hex_nibble(pair[0]);
             let low = hex_nibble(pair[1]);

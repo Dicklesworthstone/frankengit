@@ -203,7 +203,7 @@ fn generated_history_from_the_sequential_spec_passes() {
     let report = checker().check(&AuthoritySequentialSpec, &generated_good_history());
 
     assert!(matches!(report.verdict, CheckVerdict::Linearizable { .. }));
-    assert!(report.pending_operations.is_empty());
+    assert_eq!(report.pending_operations, Vec::new());
 }
 
 #[test]

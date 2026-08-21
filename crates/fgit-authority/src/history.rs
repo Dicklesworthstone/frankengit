@@ -763,7 +763,7 @@ fn read_receipt(input: &mut Decoder<'_>) -> Result<HeadReadReceipt, CodecRefusal
     ))
 }
 
-fn put_outcome_tag(outcome: PutOutcome) -> u8 {
+const fn put_outcome_tag(outcome: PutOutcome) -> u8 {
     match outcome {
         PutOutcome::Created => 0,
         PutOutcome::IdenticalRetry => 1,
@@ -914,7 +914,7 @@ fn write_tag_only(out: &mut Encoder, tag: u8) {
     out.write_scalar(tag);
 }
 
-fn ambiguity_reason_tag(reason: AmbiguityReason) -> u8 {
+const fn ambiguity_reason_tag(reason: AmbiguityReason) -> u8 {
     match reason {
         AmbiguityReason::NoResponse => 0,
         AmbiguityReason::Timeout => 1,
@@ -940,7 +940,7 @@ fn unknown_variant(field: &'static str, observed: u8, offset: u64) -> CodecRefus
     }
 }
 
-fn history_validation_refusal(error: HistoryError, offset: u64) -> CodecRefusal {
+const fn history_validation_refusal(error: HistoryError, offset: u64) -> CodecRefusal {
     let observed = match error {
         HistoryError::NonMonotonicClientTime { .. } => 0,
         HistoryError::DuplicateInvocation { .. } => 1,
@@ -955,7 +955,7 @@ fn history_validation_refusal(error: HistoryError, offset: u64) -> CodecRefusal 
     }
 }
 
-fn key_validation_refusal(field: &'static str, error: KeyError, offset: u64) -> CodecRefusal {
+const fn key_validation_refusal(field: &'static str, error: KeyError, offset: u64) -> CodecRefusal {
     let observed = match error {
         KeyError::Empty => 0,
         KeyError::TooLong { .. } => 1,

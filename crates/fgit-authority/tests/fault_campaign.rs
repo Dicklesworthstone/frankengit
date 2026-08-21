@@ -615,7 +615,7 @@ fn overlapping_multi_client_cas_race_has_exactly_one_winner() {
         new_body: b"left".to_vec(),
     };
     let right = AuthorityOp::CompareExchangeHead {
-        key: key.clone(),
+        key,
         expected: predecessor.token(),
         new_generation: generation(2),
         new_body: b"right".to_vec(),
@@ -789,7 +789,7 @@ fn seeded_double_success_bug_is_caught_by_the_same_checker() {
         new_body: seed.to_be_bytes().to_vec(),
     };
     let right = AuthorityOp::CompareExchangeHead {
-        key: key.clone(),
+        key,
         expected: predecessor.token(),
         new_generation: generation(2),
         new_body: seed.rotate_left(7).to_be_bytes().to_vec(),
@@ -871,8 +871,7 @@ fn lost_acknowledgement_resolution_exposes_the_seeded_double_success_bug() {
         AuthorityResponse::Ambiguous(AmbiguityReason::NoResponse),
     );
 
-    let resolution =
-        read_receipt(&recorder.execute(&store, 3, AuthorityOp::ReadHead { key: key.clone() }));
+    let resolution = read_receipt(&recorder.execute(&store, 3, AuthorityOp::ReadHead { key }));
     assert_eq!(resolution.body(), b"left-after-lost-ack");
 
     let right_response = store.execute(&right);
@@ -936,7 +935,7 @@ fn immutable_fault_schedule_remains_linearizable_after_reordered_retries() {
         },
     );
     assert_eq!(put, AuthorityResponse::PutIfAbsent(PutOutcome::Created));
-    let retry = recorder.execute(&store, 1, AuthorityOp::ReadImmutable { key: key.clone() });
+    let retry = recorder.execute(&store, 1, AuthorityOp::ReadImmutable { key });
     assert_eq!(
         retry,
         AuthorityResponse::ReadImmutable(ImmutableRead::Present(b"sealed-body".to_vec()))
