@@ -227,3 +227,45 @@ fn structural_paths_are_stable_and_address_the_right_node() {
         .expect("a second list item");
     assert_eq!(document.path_of(second_item), vec![2, 1]);
 }
+
+#[test]
+fn blocks_after_the_first_are_parsed_at_their_own_position() {
+    // Every block builder returns an absolute line index; a builder that
+    // returned a relative one would mis-slice or drop everything after the
+    // first block.
+    let document = parse("para one\n\n# Heading\n\npara two\n\n---\n\n> quoted\n")
+        .expect("document parses")
+        .into_document();
+    let kinds = document
+        .roots()
+        .iter()
+        .filter_map(|id| document.node(*id).map(|node| node.kind().tag()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            "paragraph",
+            "heading",
+            "paragraph",
+            "thematic_break",
+            "block_quote"
+        ]
+    );
+    assert_eq!(document.node_text(document.roots()[1]), Some("# Heading"));
+    assert_eq!(document.node_text(document.roots()[2]), Some("para two"));
+    assert_eq!(document.node_text(document.roots()[3]), Some("---"));
+    assert_eq!(document.node_text(document.roots()[4]), Some("> quoted"));
+}
+
+#[test]
+fn consecutive_headings_each_get_their_own_node() {
+    let document = parse("# One\n## Two\n### Three\n")
+        .expect("document parses")
+        .into_document();
+    let texts = document
+        .roots()
+        .iter()
+        .filter_map(|id| document.node_text(*id))
+        .collect::<Vec<_>>();
+    assert_eq!(texts, vec!["# One", "## Two", "### Three"]);
+}

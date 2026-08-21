@@ -58,7 +58,7 @@ fn parse_one_block(
         return Ok(cursor.saturating_add(1));
     }
     if let Some(heading) = atx_heading(rest) {
-        return atx_heading_block(ctx, line, content_start, heading, parent, depth);
+        return atx_heading_block(ctx, lines, cursor, content_start, heading, parent, depth);
     }
     if let Some(fence) = fence_open(rest) {
         return fenced_code(
@@ -419,12 +419,16 @@ fn fenced_code(
 
 fn atx_heading_block(
     ctx: &mut Ctx<'_>,
-    line: LineSlice,
+    lines: &[LineSlice],
+    cursor: usize,
     content_start: usize,
     heading: AtxHeading,
     parent: Option<NodeId>,
     depth: u32,
 ) -> Result<usize, Refusal> {
+    let Some(line) = lines.get(cursor).copied() else {
+        return Ok(cursor.saturating_add(1));
+    };
     let span = ctx.span(content_start, line.end);
     let node = ctx.add(
         NodeKind::Heading(Heading {
@@ -442,7 +446,7 @@ fn atx_heading_block(
     if content.start < content.end {
         inline::parse_inlines(ctx, node, &[content], depth + 1)?;
     }
-    Ok(1)
+    Ok(cursor.saturating_add(1))
 }
 
 fn block_quote(
