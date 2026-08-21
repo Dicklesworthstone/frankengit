@@ -268,6 +268,7 @@ declare -a RA_V_UNSUPPORTED=() RA_V_ERRORS=() RA_V_DUPS=()
 RA_V_STATUS=''
 RA_V_EXIT=''
 RA_V_CONTAINMENT=''
+RA_V_CLEANUP=''
 RA_V_ZERO=''
 RA_V_FIRST=''
 RA_V_WALL=''
@@ -288,6 +289,7 @@ ra_validate_log() {
   RA_V_STATUS=''
   RA_V_EXIT=''
   RA_V_CONTAINMENT=''
+  RA_V_CLEANUP=''
   RA_V_ZERO=''
   RA_V_FIRST=''
   RA_V_WALL=''
@@ -410,6 +412,7 @@ ra_validate_log() {
   RA_V_STATUS=$(fge_json_unquote "${T[status]}")
   RA_V_EXIT=${T[exit_code]}
   RA_V_CONTAINMENT=$(fge_json_unquote "${T[containment]}")
+  RA_V_CLEANUP=$(fge_json_unquote "${T[cleanup_state]}")
   RA_V_ZERO=${T[zero_assertions]}
   RA_V_FIRST=$(fge_json_unquote "${T[first_attempt_status]}")
   RA_V_WALL=${T[wall_ms]}
@@ -522,6 +525,7 @@ declare -a S_DISCOVERED=() S_SELECTED=() S_STARTED=() S_PASSED=() S_FAILED=()
 declare -a S_SKIPPED=() S_UNSUPPORTED=() S_TIMEDOUT=() S_MALFORMED=()
 declare -a S_MISSINGTERM=() S_ZEROASSERT=() S_DUPID=() S_CONTAINMENT=()
 declare -a S_NOTRUN=() S_FLAKY=() S_EXITMISMATCH=() S_TRUNCATED=()
+declare -a S_CLEANUPFAILED=()
 declare -a ALL_IDS=() CROSS_DUP=()
 declare -A ID_OWNER=()
 
@@ -586,7 +590,22 @@ for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
 
     disposition=''
     detail=''
-    if ! ra_validate_log "$rundir/e2e.ndjson"; then
+    a_ids=()
+    a_passed=()
+    a_failed=()
+    a_skipped=()
+    a_unsupported=()
+    a_errors=()
+    a_dups=()
+    # A timeout outranks every log-derived disposition. The log of a killed
+    # script is legitimately stunted, and `timeout` reports 124 while the
+    # terminal record the script managed to write says 143: reading that
+    # disagreement as an exit mismatch would misname the actual defect.
+    if [ "$timed_out" = true ]; then
+      ra_validate_log "$rundir/e2e.ndjson" || true
+      disposition=timeout
+      detail="exceeded the ${RA_TIMEOUT}s wall budget"
+    elif ! ra_validate_log "$rundir/e2e.ndjson"; then
       disposition=$RA_V_DISPOSITION
       detail=$RA_V_DETAIL
     else
@@ -605,9 +624,6 @@ for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
       if [ "$exit_code" != "$RA_V_EXIT" ]; then
         disposition=exit_mismatch
         detail="process exited $exit_code, terminal record claims $RA_V_EXIT"
-      elif [ "$timed_out" = true ]; then
-        disposition=timeout
-        detail="exceeded the ${RA_TIMEOUT}s wall budget"
       elif [ "$RA_V_ZERO" = true ]; then
         disposition=zero_assertions
         detail='the script discovered no assertions'
@@ -617,6 +633,9 @@ for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
       elif [ "$RA_V_CONTAINMENT" != ok ]; then
         disposition=containment
         detail='orphaned processes or unresolved obligations'
+      elif [ "$RA_V_CLEANUP" = failed ]; then
+        disposition=cleanup_failed
+        detail='a registered cleanup action failed'
       elif [ "${#a_errors[@]}" -gt 0 ]; then
         disposition=failed
         detail="assertion errors: ${a_errors[*]}"
@@ -663,6 +682,7 @@ for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
     zero_assertions) S_ZEROASSERT+=("$sid") ;;
     duplicate_ids) S_DUPID+=("$sid") ;;
     containment) S_CONTAINMENT+=("$sid") ;;
+    cleanup_failed) S_CLEANUPFAILED+=("$sid") ;;
     exit_mismatch) S_EXITMISMATCH+=("$sid") ;;
     flaky) : ;;
     *) S_FAILED+=("$sid") ;;
@@ -757,6 +777,7 @@ suite_status=pass
 [ "${#S_DUPID[@]}" -gt 0 ] && suite_status=fail
 [ "${#S_CONTAINMENT[@]}" -gt 0 ] && suite_status=fail
 [ "${#S_EXITMISMATCH[@]}" -gt 0 ] && suite_status=fail
+[ "${#S_CLEANUPFAILED[@]}" -gt 0 ] && suite_status=fail
 [ "${#S_NOTRUN[@]}" -gt 0 ] && suite_status=fail
 [ "${#S_FLAKY[@]}" -gt 0 ] && suite_status=fail
 [ "${#CROSS_DUP[@]}" -gt 0 ] && suite_status=fail
@@ -779,7 +800,8 @@ for pair in \
   "malformed_log:S_MALFORMED" "truncated_log:S_TRUNCATED" \
   "missing_terminal:S_MISSINGTERM" "zero_assertion:S_ZEROASSERT" \
   "duplicate_id:S_DUPID" "containment_failed:S_CONTAINMENT" \
-  "exit_mismatch:S_EXITMISMATCH" "not_run:S_NOTRUN" "flaky:S_FLAKY"; do
+  "exit_mismatch:S_EXITMISMATCH" "cleanup_failed:S_CLEANUPFAILED" \
+  "not_run:S_NOTRUN" "flaky:S_FLAKY"; do
   name=${pair%%:*}
   var=${pair#*:}
   declare -n arr=$var
