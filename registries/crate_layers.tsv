@@ -6,6 +6,7 @@ crate	layer	allowed_dependency_layers	owner	status
 fgit-admission	L4	L0,L1,L2,L3,L4	receive-pack-admission	active
 fgit-authority	L2	L0,L1,L2	authority	active
 fgit-authority-fsqlite	L2	L0,L1,L2	authority	active
+fgit-benchmark	L2	L0,L1,L2	performance-verification	active
 fgit-chronicle	L2	L0,L1,L2	decision-log	active
 fgit-cli	L4	L0,L1,L2,L3,L4	cli	active
 # Amendment: codec's canonical framing computes digests; identity hashes are

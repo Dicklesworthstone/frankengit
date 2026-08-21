@@ -660,6 +660,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-claim"
+version = "0.0.1"
+
+[[package]]
 name = "fgit-cli"
 version = "0.0.1"
 dependencies = [
