@@ -40,6 +40,26 @@ readonly PIN_ID='git-2.54.0'
 # lane instead of shrinking it.
 readonly CORPORA=(single_blob one_commit history wide)
 
+# Reads one top-level field from a corpus's manifest record. fge_json_top fills
+# the FGE_JSON array rather than printing, so this wraps it into a value.
+manifest_field() {
+  local corpus="$1" field="$2" line=''
+  line="$(grep "\"corpus\":\"${corpus}\"" "${MANIFEST_PATH}" | head -1)"
+  [[ -n "${line}" ]] || { printf ''; return 0; }
+  fge_json_top "${line}" || { printf ''; return 0; }
+  printf '%s' "${FGE_JSON[${field}]:-}"
+}
+
+# The first root of a corpus, unquoted. Roots are a JSON array, so this pulls
+# the first hex id out of the raw array text rather than re-parsing.
+manifest_root() {
+  local corpus="$1" raw=''
+  raw="$(manifest_field "${corpus}" roots)"
+  printf '%s' "${raw}" | grep -oE '[0-9a-f]{40}' | head -1
+}
+
+MANIFEST_PATH=''
+
 main() {
   local artifacts='' producer_exit=0 manifest='' corpus='' run_directory=''
   local pack_path='' index_exit=0 accepted=0 attempted=0
@@ -47,6 +67,7 @@ main() {
   fge_phase setup
   artifacts="$(fge_artifact_path pack-writer-corpus)"
   mkdir -p "${artifacts}"
+  MANIFEST_PATH="${artifacts}/manifest.ndjson"
 
   # The producer is captured rather than run through fge_run_ok: fge_run_ok
   # calls fge_die on failure, which would exit before a single assertion below
@@ -125,6 +146,62 @@ main() {
     fge_phase action
   done
 
+  # CONSUMPTION, not merely indexing. index-pack proves a pack is structurally
+  # valid and can be indexed; it does not prove the objects inside are usable.
+  # The bead says packs must be "consumed by pinned Git clients", which is the
+  # stronger word, so for every corpus rooted at a commit the pack is placed
+  # into a real object store and the client is asked to WALK it: rev-list
+  # --objects from the root must enumerate exactly the object set we packed.
+  # A pack that indexes but cannot be traversed would pass every assertion
+  # above and be useless to a real clone.
+  fge_phase action
+  local root='' root_is_commit='' listed=0 expected=0 walk_exit=0
+  for corpus in "${CORPORA[@]}"; do
+    [[ -f "${artifacts}/${corpus}.pack" ]] || continue
+    root_is_commit="$(manifest_field "${corpus}" root_is_commit)"
+    [[ "${root_is_commit}" == 'true' ]] || continue
+    root="$(manifest_root "${corpus}")"
+    [[ -n "${root}" ]] || continue
+
+    run_directory="$("${ORACLE}" create-run "${PIN_ID}" "walk-${corpus}")"
+    mkdir -p "${run_directory}/work/repo"
+    "${ORACLE}" run "${PIN_ID}" "${run_directory}" . -- init --quiet --bare repo
+    mkdir -p "${run_directory}/work/repo/objects/pack"
+    cp "${artifacts}/${corpus}.pack" \
+      "${run_directory}/work/repo/objects/pack/pack-${corpus}.pack"
+
+    # The client builds its own index over our pack, in its own object store.
+    walk_exit=0
+    fge_capture "index-store-${corpus}" \
+      "${ORACLE}" run "${PIN_ID}" "${run_directory}" repo -- \
+      index-pack --strict "objects/pack/pack-${corpus}.pack" || walk_exit=$?
+
+    fge_phase assert
+    fge_assert_exit "FG-017B-E2E-050-${corpus}" 0 "${walk_exit}" \
+      "the ${corpus} pack indexes inside a real object store"
+    fge_phase action
+
+    walk_exit=0
+    fge_capture "walk-${corpus}" \
+      "${ORACLE}" capture "${PIN_ID}" "${run_directory}" repo "walk-${corpus}" -- \
+      rev-list --objects "${root}" || walk_exit=$?
+
+    # oracle.sh writes captured streams as stdout.bin / stderr.bin.
+    listed=0
+    if [[ -f "${run_directory}/transcripts/walk-${corpus}/stdout.bin" ]]; then
+      listed=$(grep -c '[0-9a-f]\{40\}' \
+        "${run_directory}/transcripts/walk-${corpus}/stdout.bin" 2>/dev/null || printf '0')
+    fi
+    expected="$(manifest_field "${corpus}" objects)"
+
+    fge_phase assert
+    fge_assert_exit "FG-017B-E2E-051-${corpus}" 0 "${walk_exit}" \
+      "the pinned client walks the ${corpus} object graph from its root commit"
+    fge_assert_eq "FG-017B-E2E-052-${corpus}" "${expected}" "${listed}" \
+      "rev-list enumerates exactly the ${corpus} object set we packed"
+    fge_phase action
+  done
+
   # NEGATIVE CONTROL. Everything above asserts that the pinned client accepts
   # our packs. That is worth nothing unless the same client would REJECT a pack
   # it should reject: a wrong pin, a sandbox that silently no-ops, or an
@@ -187,5 +264,6 @@ fge_context non_claim 'this lane says nothing about pack SIZE or SPEED relative 
 fge_context non_claim_reader 'our own reader round-trip lives in cargo test -p fgit-pack --test writer_roundtrip and is evidence of FrankenGit agreeing with FrankenGit; only this lane involves a foreign consumer'
 fge_context client_command 'git index-pack --strict <corpus>.pack, executed by scripts/e2e/oracle/oracle.sh inside the Bubblewrap sandbox; every invocation is captured with its exact argv, digest and exit code in this run receipt rather than described in prose'
 fge_context inherits_nothing 'this lane demonstrates client acceptance from its own captured commands; it does not inherit or restate the audit1 observation recorded in fg017a close reason'
+fge_context consumption 'for every corpus rooted at a commit, the pack is placed into a real object store, indexed there by the client, and traversed with rev-list --objects from the root; enumerating exactly the packed object set is what distinguishes a USABLE pack from a merely indexable one'
 fge_context discrimination 'a corrupted pack is offered on the same path as a negative control; if the pinned client accepted it, every acceptance assertion here would be meaningless and the lane fails'
 main

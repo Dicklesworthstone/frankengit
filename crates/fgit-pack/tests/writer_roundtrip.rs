@@ -587,7 +587,28 @@ fn emit_packs_for_the_pinned_oracle_lane() {
             manifest.push_str(&hex_oid(*id));
             manifest.push('"');
         }
-        manifest.push_str("]}\n");
+        manifest.push_str("],\"roots\":[");
+        for (index, id) in corpus.roots.iter().enumerate() {
+            if index > 0 {
+                manifest.push(',');
+            }
+            manifest.push('"');
+            manifest.push_str(&hex_oid(*id));
+            manifest.push('"');
+        }
+        // A commit root lets the oracle lane walk the object graph with
+        // rev-list. index-pack proves a pack is INDEXABLE; traversing from a
+        // commit proves the objects inside it are USABLE, which is the stronger
+        // reading of the bead's "consumed by pinned Git clients".
+        manifest.push_str("],\"root_is_commit\":");
+        let root_is_commit = corpus.roots.iter().all(|root| {
+            corpus
+                .objects
+                .iter()
+                .any(|object| object.id == *root && object.object_type == ObjectType::Commit)
+        });
+        manifest.push_str(if root_is_commit { "true" } else { "false" });
+        manifest.push_str("}\n");
 
         println!(
             "corpus={} objects={} pack_bytes={}",
