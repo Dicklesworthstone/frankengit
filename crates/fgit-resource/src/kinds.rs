@@ -74,6 +74,14 @@ pub enum AdmissionAbortReason {
     QuotaWithdrawn,
     /// Bytes, identity, digest, length, or structure failed to verify.
     VerificationFailed,
+    /// The placement write, its flush, or its publication link failed after
+    /// the reservation was taken.
+    ///
+    /// This is a storage failure, not a verification failure: the candidate
+    /// was never shown to be wrong, it was never durably placed. Reporting it
+    /// as [`AdmissionAbortReason::VerificationFailed`] would fabricate a
+    /// verdict about the bytes that nothing established.
+    PlacementWriteFailed,
     /// The owning region was cancelled.
     Cancelled,
     /// An identical object was admitted by another attempt.
@@ -880,6 +888,10 @@ impl RepairPublished {
 pub enum RepairAbortReason {
     /// The decoder could not reconstruct the target.
     DecodeFailed,
+    /// The repaired placement write or its flush failed.
+    ///
+    /// The candidate may have verified completely; nothing was published.
+    PlacementWriteFailed,
     /// The candidate failed an original commitment.
     CommitmentMismatch,
     /// The authority head moved during repair.

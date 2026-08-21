@@ -31,7 +31,8 @@ use fgit_resource::kinds::{
 };
 use fgit_resource::settlement::DownstreamIdempotency;
 use fgit_resource::twophase::{
-    ExternallyObserved, InternalEffect, ObligationClass, ObligationKind, TrivialAck,
+    ExternallyObserved, InternalEffect, ObligationClass, ObligationKind, TerminalEvidence,
+    TrivialAck,
 };
 use fgit_types::{
     AuthorityVersionToken, CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes,
@@ -936,4 +937,81 @@ fn an_opaque_handle_refuses_what_it_cannot_carry_verbatim() {
         40,
         "display is lowercase hexadecimal"
     );
+}
+
+#[test]
+fn a_storage_failure_after_reservation_settles_without_fabricating_a_verdict() {
+    let capacity = minimal_budget::<ObjectAdmissionPermit>();
+    let ledger = ObligationLedger::root(
+        RegionId::new(120),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
+    let grant = ledger.grant(capacity).expect("capacity is grantable");
+    let reservation = ObjectAdmission {
+        class: ObjectClass::GitObject,
+        declared_len: 1,
+        staging: envelope(121),
+    };
+    let obligation = ledger
+        .reserve::<ObjectAdmissionPermit>(reservation, grant)
+        .expect("required grades present");
+
+    // The placement write fails after the reservation is taken. Nothing about
+    // the bytes was disproved, so the abort must not claim verification failed.
+    let settled = obligation.abort_unused(AdmissionAbandoned {
+        reason: AdmissionAbortReason::PlacementWriteFailed,
+    });
+    assert_eq!(settled.state(), ObligationState::Aborted);
+    match settled.evidence() {
+        TerminalEvidence::Aborted(receipt) => {
+            assert_eq!(receipt.reason, AdmissionAbortReason::PlacementWriteFailed);
+            assert_ne!(
+                receipt.reason,
+                AdmissionAbortReason::VerificationFailed,
+                "a storage failure must not be recorded as a verdict about the bytes"
+            );
+        }
+        other => panic!("an aborted admission carries abort evidence: {other:?}"),
+    }
+
+    let snapshot = ledger.snapshot();
+    assert!(snapshot.is_conserved());
+    assert_eq!(
+        snapshot.available(),
+        capacity,
+        "an admission that never placed anything returns its whole reservation"
+    );
+    let outcome = ledger.close();
+    assert!(
+        outcome.is_quiescent(),
+        "a truthfully aborted admission still reaches quiescence: {outcome:?}"
+    );
+
+    // Near-identical permitted case: the same reservation whose write succeeds.
+    let twin = ObligationLedger::root(
+        RegionId::new(121),
+        LeakDisposition::RecordAndContinue,
+        capacity,
+    );
+    let grant = twin.grant(capacity).expect("capacity is grantable");
+    let obligation = twin
+        .reserve::<ObjectAdmissionPermit>(reservation, grant)
+        .expect("required grades present");
+    let settled = obligation
+        .commit_internal(
+            AdmittedObject::verified(
+                &reservation,
+                oid(122),
+                digest(123),
+                1,
+                StructureVerdict::Verified,
+            )
+            .expect("verified evidence"),
+            &capacity,
+        )
+        .expect("a placement that landed commits");
+    assert_eq!(settled.state(), ObligationState::Acknowledged);
+    let outcome = twin.close();
+    assert!(outcome.is_quiescent(), "{outcome:?}");
 }
