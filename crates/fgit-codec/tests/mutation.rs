@@ -12,8 +12,11 @@
 // should have been suppressed would not be.
 //
 // Mutants are generated exhaustively where that is cheap (every bit of every
-// byte) and systematically otherwise. Nothing here is random, so a failure
-// names an exact byte and bit.
+// byte, every byte substituted with four values) and systematically otherwise.
+// The coordinated multi-bit pass is sampled rather than exhaustive — the space
+// is far too large — but it is seeded from a fixed constant and the seed and
+// the exact bits touched are printed on failure, so a hit replays exactly.
+// Nothing here draws on wall time or a system generator.
 
 mod support {
     pub use fgit_codec::harness::*;
@@ -166,7 +169,163 @@ where
         }
     }
 
+    // 6. Byte substitution, which a bit flip cannot express: replacing a byte
+    //    outright reaches values several bits away in one step.
+    for index in 0..canonical.len() {
+        for replacement in [0x00_u8, 0xff, 0x80, 0x01] {
+            if canonical[index] == replacement {
+                continue;
+            }
+            let mut substituted = canonical.to_vec();
+            substituted[index] = replacement;
+            record(
+                &substituted,
+                &format!("byte {index} replaced with {replacement:#04x}"),
+            );
+        }
+    }
+
+    // 7. Coordinated multi-bit mutations. Single-bit flips are exhaustive but
+    //    cannot express a defect that needs two edits at once, so this samples
+    //    combinations deterministically. The seed is fixed and printed on
+    //    failure, so a hit replays exactly.
+    let mut rng = MutationRng::new(MULTI_BIT_SEED ^ seed_of(name));
+    for round in 0..MULTI_BIT_ROUNDS {
+        for width in 2..=4_usize {
+            let mut multi = canonical.to_vec();
+            let mut touched = Vec::with_capacity(width);
+            for _ in 0..width {
+                let index = rng.below(canonical.len());
+                let bit = u8::try_from(rng.below(8)).unwrap_or(0);
+                multi[index] ^= 1 << bit;
+                touched.push((index, bit));
+            }
+            record(
+                &multi,
+                &format!(
+                    "multi-bit round {round} width {width} seed {:#x} touched {touched:?}",
+                    MULTI_BIT_SEED ^ seed_of(name)
+                ),
+            );
+        }
+    }
+
+    // 8. Length-prefix compensation: the classic canonicalization attack.
+    //    Shrink one length prefix and grow the following one by the same
+    //    amount, so the frame's total length is unchanged and only the
+    //    internal split moves. A single bit flip cannot express this, and a
+    //    decoder that did not re-verify full consumption would accept it as a
+    //    second encoding of the same bytes.
+    if let Ok((_, payload)) = fgit_codec::split_frame(canonical, limits) {
+        let payload_at = canonical.len() - payload.len();
+        for position in candidate_length_prefixes(payload) {
+            for delta in [1_i64, -1] {
+                if let Some(shifted) = shift_length_prefix(payload, position, delta) {
+                    let mut framed = canonical.to_vec();
+                    framed[payload_at..].copy_from_slice(&shifted);
+                    record(
+                        &framed,
+                        &format!("length prefix at payload offset {position} shifted by {delta}"),
+                    );
+                }
+            }
+        }
+    }
+
     tally
+}
+
+/// Seed for the coordinated multi-bit pass. Fixed, so the corpus is the same
+/// on every machine and every run.
+const MULTI_BIT_SEED: u64 = 0x0c0d_ec00_3b17_5eed;
+
+/// How many rounds of each width to draw.
+const MULTI_BIT_ROUNDS: usize = 64;
+
+/// Derives a per-vector seed offset from the vector's name, so two vectors do
+/// not draw the same index sequence.
+fn seed_of(name: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in name.as_bytes() {
+        hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// `SplitMix64`, so the coordinated pass replays from its seed alone.
+struct MutationRng(u64);
+
+impl MutationRng {
+    const fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        if bound == 0 {
+            return 0;
+        }
+        let draw = usize::try_from(self.next_u64() >> 16).unwrap_or(0);
+        draw % bound
+    }
+}
+
+/// Offsets in a payload where a big-endian `u32` reads as a length that would
+/// fit in the bytes that follow.
+///
+/// A heuristic, deliberately: it does not need to find every real prefix, only
+/// enough plausible ones to drive the compensation mutation.
+fn candidate_length_prefixes(payload: &[u8]) -> Vec<usize> {
+    let mut found = Vec::new();
+    for position in 0..payload.len().saturating_sub(4) {
+        let declared = u32::from_be_bytes([
+            payload[position],
+            payload[position + 1],
+            payload[position + 2],
+            payload[position + 3],
+        ]);
+        let Ok(length) = usize::try_from(declared) else {
+            continue;
+        };
+        if length > 0 && position + 4 + length <= payload.len() {
+            found.push(position);
+        }
+        if found.len() >= 32 {
+            break;
+        }
+    }
+    found
+}
+
+/// Moves `delta` bytes across a length prefix, keeping the payload's total
+/// length unchanged so only the internal split differs.
+fn shift_length_prefix(payload: &[u8], position: usize, delta: i64) -> Option<Vec<u8>> {
+    let declared = u32::from_be_bytes([
+        payload[position],
+        payload[position + 1],
+        payload[position + 2],
+        payload[position + 3],
+    ]);
+    let current = i64::from(declared);
+    let next = current.checked_add(delta)?;
+    if next < 0 {
+        return None;
+    }
+    let next = u32::try_from(next).ok()?;
+    let length = usize::try_from(next).ok()?;
+    if position + 4 + length > payload.len() {
+        return None;
+    }
+    let mut out = payload.to_vec();
+    out[position..position + 4].copy_from_slice(&next.to_be_bytes());
+    Some(out)
 }
 
 fn canonical_bytes(cases: &[GoldenCase], name: &str) -> Vec<u8> {
