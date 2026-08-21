@@ -14,6 +14,7 @@ use fgit_chronicle::{
 };
 use fgit_codec::CryptoBodyIdentity;
 use fgit_codec::DecodeLimits;
+use fgit_codec::attest::{DetachedSignature, SignatureSchemeId, SignedEnvelopeBody};
 use fgit_codec::schema::RepositoryAuthorityHeadBody;
 use fgit_codec::wire::{decode_body, encode_body};
 use fgit_crypto::IdentityDomain;
@@ -443,4 +444,119 @@ fn a_capsule_mirrors_the_head_it_was_taken_at() {
     assert_eq!(capsule.segment_manifest_root, digest(0x21));
     assert_eq!(capsule.head_id, head_id(0x50));
     assert_eq!(capsule.backup_profile, BackupProfile::FullClosureWithRepair);
+}
+
+// ---------------------------------------------------------------------------
+// Signing: attestations must not move identity
+// ---------------------------------------------------------------------------
+
+#[test]
+fn signing_a_capsule_does_not_change_which_capsule_it_is() {
+    // Section 23: the capsule identity hashes the UNSIGNED body; signatures,
+    // placements and repair-symbol locations attest to a capsule without
+    // participating in its identity.
+    //
+    // My module doc asserts this holds because fgit-codec's envelope computes
+    // identity from the carried body's own bytes. That was prose, and prose
+    // that nothing enforces is exactly what the fg009a audit caught me on, so
+    // here it is as a test.
+    let capsule = capsule_at(4, None);
+    let unsigned_id = identity_of(&capsule);
+
+    let mut envelope = SignedEnvelopeBody::seal(&capsule).expect("a capsule seals");
+    let sealed_bytes = envelope.body_frame().to_vec();
+
+    assert_eq!(
+        envelope
+            .carried_body_id(&CryptoBodyIdentity, DecodeLimits::default())
+            .expect("the envelope yields the carried identity"),
+        *unsigned_id.as_internal_object_id(),
+        "an envelope with no signatures carries the same identity as the body"
+    );
+
+    // Attach a signature that commits over that identity.
+    envelope
+        .attach(
+            DetachedSignature {
+                scheme: SignatureSchemeId::try_new(1).expect("scheme one is valid"),
+                key_id: b"test-key".to_vec(),
+                body_id: *unsigned_id.as_internal_object_id(),
+                signature: vec![0xAB; 64],
+            },
+            DecodeLimits::default(),
+        )
+        .expect("a signature over the carried body attaches");
+
+    assert_eq!(
+        envelope.signatures().len(),
+        1,
+        "the signature is attached to the envelope"
+    );
+    assert_eq!(
+        envelope.body_frame(),
+        sealed_bytes.as_slice(),
+        "attaching a signature leaves the carried body's bytes untouched"
+    );
+    assert_eq!(
+        envelope
+            .carried_body_id(&CryptoBodyIdentity, DecodeLimits::default())
+            .expect("the envelope still yields the carried identity"),
+        *unsigned_id.as_internal_object_id(),
+        "and therefore does not change which capsule a pointer names"
+    );
+
+    // The pointer built before signing still names the signed capsule.
+    let pointer = CapsulePointer::genesis(unsigned_id, &capsule).expect("a first capsule points");
+    assert_eq!(
+        pointer.capsule_id(),
+        identity_of(&capsule),
+        "a pointer taken before signing still names the capsule afterwards"
+    );
+}
+
+#[test]
+fn a_signature_over_another_domain_cannot_be_grafted_on() {
+    // The envelope refuses a signature whose committed identity belongs to a
+    // different domain, so an attestation over some other schema's body cannot
+    // be presented as attesting to this capsule.
+    let capsule = capsule_at(4, None);
+    let mut envelope = SignedEnvelopeBody::seal(&capsule).expect("a capsule seals");
+
+    // Planted negative: a signature committing over an authority-head identity.
+    let foreign = head_id(0x77);
+    assert!(
+        envelope
+            .attach(
+                DetachedSignature {
+                    scheme: SignatureSchemeId::try_new(1).expect("scheme one is valid"),
+                    key_id: b"test-key".to_vec(),
+                    body_id: *foreign.as_internal_object_id(),
+                    signature: vec![0xCD; 64],
+                },
+                DecodeLimits::default(),
+            )
+            .is_err(),
+        "a signature from another domain must not attach to a capsule envelope"
+    );
+    assert_eq!(
+        envelope.signatures().len(),
+        0,
+        "and nothing is attached when it is refused"
+    );
+
+    // Near-identical permitted case: the same signature over THIS capsule.
+    let own = identity_of(&capsule);
+    assert!(
+        envelope
+            .attach(
+                DetachedSignature {
+                    scheme: SignatureSchemeId::try_new(1).expect("scheme one is valid"),
+                    key_id: b"test-key".to_vec(),
+                    body_id: *own.as_internal_object_id(),
+                    signature: vec![0xCD; 64],
+                },
+                DecodeLimits::default(),
+            )
+            .is_ok()
+    );
 }
