@@ -7,7 +7,9 @@ use fgit_resource::kinds::{LaneSlot, PreparedTxnSlot};
 use fgit_resource::{
     Grade, LeakDisposition, ObligationLedger, RegionId, ReservedObligation, ResourceVector,
 };
-use fgit_txn::combiner::{BatchBounds, BatchBoundsRefusal, CombinationParts, FlatCombiner};
+use fgit_txn::combiner::{
+    BatchBounds, BatchBoundsRefusal, BypassReason, CombinationParts, FlatCombiner,
+};
 use fgit_txn::lanes::{
     ConflictWitness, LaneCapacity, LaneId, PreparedCapsule, PriorityClass, WitnessDomain,
     WritableLane,
@@ -223,6 +225,41 @@ fn direct_bypass_matches_the_same_capsule_on_the_combined_path() {
     assert!(direct_ledger.leaks().is_empty());
     assert!(bypass_ledger.close().is_quiescent());
     assert!(direct_ledger.close().is_quiescent());
+}
+
+#[test]
+fn byte_and_logical_age_cuts_are_explicit_bypasses() {
+    let ledger = ledger(1_250);
+    let byte_limited = combine(
+        &ledger,
+        LaneId::new(25),
+        vec![capsule(11, 1, 11), capsule(12, 2, 12)],
+        BatchBounds::try_new(8, 8, 10).expect("valid byte-bound batch"),
+    );
+    assert_eq!(
+        byte_limited.batch().map(|batch| batch.capsules().len()),
+        Some(1)
+    );
+    assert_eq!(byte_limited.bypasses().len(), 1);
+    assert_eq!(byte_limited.bypasses()[0].reason(), BypassReason::ByteLimit);
+
+    let age_limited = combine(
+        &ledger,
+        LaneId::new(26),
+        vec![capsule(13, 1, 13)],
+        BatchBounds::try_new(8, 4_096, 4).expect("valid age-bound batch"),
+    );
+    assert!(age_limited.batch().is_none());
+    assert_eq!(age_limited.bypasses().len(), 1);
+    assert_eq!(
+        age_limited.bypasses()[0].reason(),
+        BypassReason::ReadyAgeLimit
+    );
+
+    let _cancelled = byte_limited.cancel();
+    let _cancelled = age_limited.cancel();
+    assert!(ledger.leaks().is_empty());
+    assert!(ledger.close().is_quiescent());
 }
 
 #[test]
