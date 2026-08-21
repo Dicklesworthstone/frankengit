@@ -635,7 +635,6 @@ dependencies = [
  "fgit-codec",
  "fgit-types",
  "fsqlite",
- "fsqlite-types",
 ]
 
 [[package]]
@@ -726,7 +725,6 @@ dependencies = [
 name = "fgit-object-fabric"
 version = "0.1.0"
 dependencies = [
- "asupersync",
  "fgit-codec",
  "fgit-crypto",
  "fgit-resource",
