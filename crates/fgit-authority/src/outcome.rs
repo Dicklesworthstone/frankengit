@@ -322,6 +322,51 @@ fn body_key_for_id(
 ///
 /// This is the recovery path: it consults no accelerator and would give the
 /// same answer on a node whose index was wiped.
+/// Decide which batch the replay walk reads next, and enforce the bound.
+///
+/// Shared core (t7ip condition 1). The walk's *reads* differ between the
+/// synchronous and asynchronous drivers; this decision does not, so both call
+/// it and the bound cannot be enforced in one driver and forgotten in the
+/// other — which is the failure mode where an async replay walks forever on a
+/// cyclic or adversarial chain.
+///
+/// Advances `walked` as a side effect so the caller cannot forget to count.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::ReplayBoundExceeded`] once the walk would exceed
+/// [`MAX_REPLAY_BATCHES`].
+pub const fn next_batch_to_replay(
+    head: &RepositoryAuthorityHeadBody,
+    walked: &mut usize,
+) -> Result<Option<RepositoryDecisionBatchId>, OutcomeFailure> {
+    let Some(batch_id) = head.decision_tail_id else {
+        return Ok(None);
+    };
+    *walked = walked.saturating_add(1);
+    if *walked > MAX_REPLAY_BATCHES {
+        return Err(OutcomeFailure::ReplayBoundExceeded {
+            limit: MAX_REPLAY_BATCHES,
+        });
+    }
+    Ok(Some(batch_id))
+}
+
+/// Find one transaction's terminal outcome within a decision batch.
+///
+/// Shared core (t7ip condition 1): the search is identical for both drivers.
+#[must_use]
+pub fn scan_batch_for(batch: &RepositoryDecisionBatchBody, tx_id: TxId) -> Option<TerminalOutcome> {
+    batch
+        .decisions
+        .iter()
+        .find(|decision| decision.tx_id == tx_id)
+        .map(|decision| TerminalOutcome {
+            decision_sequence: decision.decision_sequence,
+            outcome: decision.outcome,
+        })
+}
+
 pub fn replay_outcome<S>(
     store: &S,
     head_key: &HeadKey,
@@ -336,23 +381,12 @@ where
     let mut head: RepositoryAuthorityHeadBody = decode_body(receipt.body(), DecodeLimits::DEFAULT)?;
     let mut walked = 0_usize;
     loop {
-        let Some(batch_id) = head.decision_tail_id else {
+        let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? else {
             return Ok(OutcomeLookup::Undecided);
         };
-        walked = walked.saturating_add(1);
-        if walked > MAX_REPLAY_BATCHES {
-            return Err(OutcomeFailure::ReplayBoundExceeded {
-                limit: MAX_REPLAY_BATCHES,
-            });
-        }
         let batch = read_batch_body(store, batch_id)?;
-        for decision in &batch.decisions {
-            if decision.tx_id == tx_id {
-                return Ok(OutcomeLookup::Decided(TerminalOutcome {
-                    decision_sequence: decision.decision_sequence,
-                    outcome: decision.outcome,
-                }));
-            }
+        if let Some(found) = scan_batch_for(&batch, tx_id) {
+            return Ok(OutcomeLookup::Decided(found));
         }
         let predecessor = batch.predecessor_head_id;
         let Some(previous) = read_predecessor(store, predecessor)? else {
