@@ -324,9 +324,13 @@ fn a_base_read_failure_is_a_typed_refusal_not_a_silent_omission() {
     file(&mut overlay, b"src/lib.rs", b"changed\n");
 
     let refused = plan_with(ExportLimits::default(), &source, root, &overlay);
+    // Names the variant, not merely `is_err`. A refusal test that only asserts
+    // "some error" passes just as happily on the WRONG refusal, which is how a
+    // budget bug could masquerade as a read failure.
     assert!(
-        refused.is_err(),
-        "an unreadable base subtree must refuse, never export a tree without it; got {refused:?}"
+        matches!(refused, Err(ExportRefusal::Base(_))),
+        "an unreadable base subtree must refuse as a Base error, never export a tree \
+         without it; got {refused:?}"
     );
 
     // The permitted twin: the identical export against an intact store.

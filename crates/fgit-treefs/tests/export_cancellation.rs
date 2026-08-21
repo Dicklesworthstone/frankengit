@@ -25,7 +25,7 @@ use fgit_treefs::base::{BaseView, ObjectSource, ObjectSourceError};
 use fgit_treefs::capability::{ReadGrant, TreeCapability, WorkspaceId};
 use fgit_treefs::export::{ExportLimits, ExportPlanner, ExportRefusal};
 use fgit_treefs::journal::{CancellationState, ExportJournal, ExportPhase};
-use fgit_treefs::obligation::WorkspaceLeaseReservation;
+use fgit_treefs::obligation::{WorkspaceAbortReason, WorkspaceLeaseReservation};
 use fgit_treefs::overlay::{ContentRef, EntryClass, FileMode, Overlay, OverlayEntry};
 use fgit_treefs::path::{PathPolicy, TreePath};
 use fgit_types::identity::RepositoryCommitId;
@@ -268,6 +268,14 @@ fn cancellation_drains_the_lease_to_quiescence_and_leaves_no_artifact() {
         .expect("a drained journal can finalize");
     assert_eq!(journal.cancellation(), CancellationState::Finalized);
     assert_eq!(abort.workspace_id, WorkspaceId::from_bytes([1; 16]));
+    // The abort names WHY. A lease abort that does not say whether it was a
+    // deliberate discard, a budget overrun or a refused rollback is not
+    // actionable by whoever has to reconcile the reservation.
+    assert_eq!(
+        abort.reason,
+        WorkspaceAbortReason::Discarded,
+        "a caller-driven cancellation aborts the lease as a deliberate discard"
+    );
     assert!(
         !journal.left_consumable_artifact(),
         "a finalized cancellation leaves nothing a consumer could mistake for a result"
