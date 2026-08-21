@@ -125,8 +125,11 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
     let mut after = basis.clone();
     let mut dispositions = Vec::new();
     let mut last_writer: BTreeMap<RefName, usize> = BTreeMap::new();
-    let mut created_here: BTreeSet<RefName> = BTreeSet::new();
     let mut touched: Vec<Option<RefName>> = Vec::new();
+    /// Whether each intent actually altered the after-image when it ran. This,
+    /// not "was the ref created in this transaction", is what separates an
+    /// identity no-op from an inverse cancellation.
+    let mut changed: Vec<bool> = Vec::new();
     let mut aborted = false;
 
     'outer: for statement in &request.statements {
@@ -135,6 +138,7 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
                 // Only ref intents are modelled; see the module non-claims.
                 dispositions.push(OracleDisposition::StatementError);
                 touched.push(None);
+                changed.push(false);
                 continue;
             };
             let name = ref_intent.target().clone();
@@ -147,14 +151,17 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
                             AbsorptionReason::PreconditionMismatchNoOp,
                         ));
                         touched.push(None);
+                        changed.push(false);
                     }
                     MismatchPolicy::StatementError => {
                         dispositions.push(OracleDisposition::StatementError);
                         touched.push(None);
+                        changed.push(false);
                     }
                     MismatchPolicy::TxnAbort => {
                         dispositions.push(OracleDisposition::TransactionAborted);
                         touched.push(None);
+                        changed.push(false);
                         aborted = true;
                         break 'outer;
                     }
@@ -163,17 +170,16 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
             }
 
             let index = dispositions.len();
+            let before = after.get(&name).cloned();
             match ref_intent {
                 RefIntent::Update { new, .. } => {
-                    if !after.contains_key(&name) {
-                        created_here.insert(name.clone());
-                    }
                     after.insert(name.clone(), new.clone());
                 }
                 RefIntent::Delete { .. } => {
                     after.remove(&name);
                 }
             }
+            changed.push(before != after.get(&name).cloned());
             last_writer.insert(name.clone(), index);
             // Placeholder; classified after the fold, when survival is known.
             dispositions.push(OracleDisposition::StatementError);
@@ -182,15 +188,30 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
     }
 
     if aborted {
-        // An aborted transaction publishes nothing, and every intent that ran
-        // before the abort is reported as aborted rather than as having had an
-        // effect: the whole statement stream is undone.
+        // An aborted transaction publishes nothing, and EVERY source intent is
+        // reported as aborted -- including the ones after the abort point that
+        // never ran.
+        //
+        // The count matters, and this oracle got it wrong first time round. It
+        // used to stop classifying at the abort, producing fewer dispositions
+        // than there were intents. NPC §13 says "every source intent maps to"
+        // one of the arms; an intent that never ran still has a fate, and
+        // "the transaction aborted before reaching it" is that fate. Dropping
+        // it silently breaks totality -- the first property the specification
+        // states.
+        //
+        // The equivalence comparison caught this on its first execution, which
+        // is the whole argument for writing an oracle independently: my
+        // misreading and my implementation of it agreed with each other
+        // perfectly, and only a second derivation disagreed.
+        let total: usize = request
+            .statements
+            .iter()
+            .map(|statement| statement.intents.len())
+            .sum();
         return OracleReport {
             refs: BTreeMap::new(),
-            dispositions: dispositions
-                .into_iter()
-                .map(|_| OracleDisposition::TransactionAborted)
-                .collect(),
+            dispositions: vec![OracleDisposition::TransactionAborted; total],
             aborted,
         };
     }
@@ -217,15 +238,41 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
         let Some(name) = slot else {
             continue;
         };
-        let survives = refs.contains_key(name) && last_writer.get(name) == Some(&index);
-        dispositions[index] = if survives {
+        // Precedence matters here, and the first version had it wrong.
+        //
+        // The question "did a later intent touch this target" must be asked
+        // *after* "does this target carry any surviving effect at all", not
+        // before. A create that a later delete undid is not an overwrite: the
+        // target ends with no effect, and GIT_TREE_FS §7 names that case
+        // specifically as an "explicit inverse-cancellation no-op". Asking
+        // about succession first swallows it, because a later intent did touch
+        // the target — it deleted it.
+        //
+        // Overwriting is the case where an effect DOES survive and a later
+        // intent is the one that produced it.
+        // Third correction, and the one that finally names the vocabulary
+        // properly. The three no-op reasons answer three different questions:
+        //
+        //   IdentityEffect  -- this intent changed nothing WHEN IT RAN.
+        //   InverseCancelled -- it did change something, and nothing survives
+        //                       at the target because a later intent undid it.
+        //   Overwritten     -- it did change something, an effect DOES survive,
+        //                       and a later intent is the one that produced it.
+        //
+        // Earlier versions discriminated on "was this ref created during the
+        // transaction", which conflates X->Y->X (a genuine inverse
+        // cancellation) with writing the value already present (an identity).
+        // Whether the ref happens to have existed in the basis is irrelevant to
+        // either question.
+        let target_has_effect = refs.contains_key(name);
+        dispositions[index] = if target_has_effect && last_writer.get(name) == Some(&index) {
             OracleDisposition::Surviving(name.clone())
-        } else if last_writer.get(name).is_some_and(|last| *last > index) {
-            OracleDisposition::Absorbed(AbsorptionReason::OverwrittenBySucceedingIntent)
-        } else if created_here.contains(name) {
-            OracleDisposition::Absorbed(AbsorptionReason::InverseCancelled)
-        } else {
+        } else if !changed[index] {
             OracleDisposition::Absorbed(AbsorptionReason::IdentityEffect)
+        } else if target_has_effect {
+            OracleDisposition::Absorbed(AbsorptionReason::OverwrittenBySucceedingIntent)
+        } else {
+            OracleDisposition::Absorbed(AbsorptionReason::InverseCancelled)
         };
     }
 
@@ -418,6 +465,36 @@ fn the_oracle_and_the_evaluator_agree_on_every_generated_program() {
         agreements, PROGRAMS,
         "every generated program must have been compared"
     );
+}
+
+#[test]
+fn the_oracle_maps_every_source_intent() {
+    // Totality, checked against the oracle alone. This test existed in the
+    // tree-carrier version, was dropped in the domain rewrite, and its absence
+    // is exactly why an abort-path totality bug survived to be found by the
+    // equivalence comparison instead of here. Restored.
+    for i in 0..PROGRAMS {
+        let seed = CORPUS_SEED.wrapping_add(i as u64);
+        let mut rng = Rng::new(seed);
+        let mut mint = IdentityMint::new(seed);
+        let basis = generate_basis(&mut rng);
+        let request = generate_request(&mut rng, &mut mint, &basis, "totality");
+
+        let total: usize = request
+            .statements
+            .iter()
+            .map(|statement| statement.intents.len())
+            .sum();
+        let mine = oracle_fold(&basis, &request);
+
+        assert_eq!(
+            mine.dispositions.len(),
+            total,
+            "seed {seed:#x}: {total} source intents produced {} dispositions; an intent that \
+             never ran still has a fate",
+            mine.dispositions.len()
+        );
+    }
 }
 
 #[test]
