@@ -27,7 +27,7 @@
 //! restore that advances a new authority generation, never a quiet reuse of a
 //! capsule that still verifies.
 
-use fgit_authority::{AuthorityStore, ImmutableRead, body_key};
+use fgit_authority::{AsyncAuthorityStore, AuthorityStore, ImmutableRead, body_key};
 use fgit_codec::attest::{BodyIdentity, body_id};
 use fgit_codec::error::CodecRefusal;
 use fgit_codec::reader::Decoder;
@@ -419,6 +419,50 @@ where
     // does not move. Distinguishing them would invite treating an
     // unreachable store as evidence of presence.
     if !matches!(store.read_immutable(&key), Ok(ImmutableRead::Present(_))) {
+        return Err(ChronicleRefusal::CapsuleBodyNotStaged);
+    }
+    pointer.advance(capsule_id, capsule)
+}
+
+/// [`advance_pointer_root_last`] over an [`AsyncAuthorityStore`].
+///
+/// The production counterpart of the synchronous function above. Per the
+/// t7ip ruling the sync trait is the deterministic-verification surface and
+/// the async trait is the production surface: both permanent, neither
+/// deprecated.
+///
+/// This is a transport change and nothing else. The two bodies make the same
+/// decisions in the same order - same identity derivation, same staged-body
+/// precondition, same refusal, same `pointer.advance`. Only the `read_immutable` call
+/// differs, because reading the staged body is the only thing this function
+/// asks the store for. An edit that makes one of these do something the other
+/// does not is the semantic fork condition 1 of that ruling forbids, and
+/// `advance_pointer_async_matches_sync_exactly` pins it.
+///
+/// The context is threaded per call and never held, so a cancellation or a
+/// budget arriving mid-operation reaches the store instead of being lost to a
+/// context captured once at construction.
+pub async fn advance_pointer_root_last_async<S, I>(
+    store: &S,
+    cx: &S::Context,
+    identity: &I,
+    pointer: &CapsulePointer,
+    capsule: &RepositoryCapsuleBody,
+) -> Result<CapsulePointer, ChronicleRefusal>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized,
+{
+    let capsule_id = capsule_identity(identity, capsule)?;
+    let key = body_key(IdentityDomain::RepositoryCapsule, capsule)
+        .map_err(|_| ChronicleRefusal::CapsuleIdentityUnavailable)?;
+    // Identical to the sync path: a body that is absent and a store that
+    // cannot answer are the same fact, because neither has proved the data is
+    // fetchable.
+    if !matches!(
+        store.read_immutable(cx, &key).await,
+        Ok(ImmutableRead::Present(_))
+    ) {
         return Err(ChronicleRefusal::CapsuleBodyNotStaged);
     }
     pointer.advance(capsule_id, capsule)

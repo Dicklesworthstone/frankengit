@@ -73,7 +73,7 @@ pub use assemble::{PublicationPlan, VerifiedPublication};
 pub use audit::{batch_identity, verify_pair};
 pub use capsule::{
     BackupProfile, CapsulePointer, RepositoryCapsuleBody, advance_pointer_root_last,
-    capsule_identity,
+    advance_pointer_root_last_async, capsule_identity,
 };
 pub use origin::{PublicationBasis, ResultingRoots};
 pub use publish::{CanonicalBatchReceipt, LostCandidate, PublicationVerdict, publish};

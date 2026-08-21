@@ -6,11 +6,13 @@
 //! case that proceeds.
 
 use fgit_authority::{
-    AuthorityStore, ImmutableRead, MemoryAuthorityStore, StoreInstanceId, body_key,
+    AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityStore,
+    AuthorityVersionToken, CasOutcome, HeadInit, HeadKey, HeadRead, HeadReadReceipt, ImmutableKey,
+    ImmutableRead, MemoryAuthorityStore, PutOutcome, StoreInstanceId, body_key,
 };
 use fgit_chronicle::{
     BackupProfile, CapsulePointer, ChronicleRefusal, RepositoryCapsuleBody,
-    advance_pointer_root_last, capsule_identity,
+    advance_pointer_root_last, advance_pointer_root_last_async, capsule_identity,
 };
 use fgit_codec::CryptoBodyIdentity;
 use fgit_codec::DecodeLimits;
@@ -570,4 +572,165 @@ fn a_signature_over_another_domain_cannot_be_grafted_on() {
             )
             .is_ok()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Sync/async equivalence for the capsule pointer (t7ip condition 1)
+// ---------------------------------------------------------------------------
+
+/// An async view over the in-memory reference store, for equivalence only.
+///
+/// Not a blocking adapter: every operation is already resolved when its future
+/// is created, so nothing blocks and no cancellation is silently dropped. It
+/// exists so both surfaces can be driven over the SAME store state in one
+/// test, which is the only way to show they AGREE rather than merely that each
+/// works alone. Test-only per the t7ip ruling's condition 4; production async
+/// use goes through the fsqlite implementation.
+struct AsyncView(MemoryAuthorityStore);
+
+impl AsyncAuthorityStore for AsyncView {
+    type Context = ();
+
+    fn instance_id(&self) -> StoreInstanceId {
+        self.0.instance_id()
+    }
+
+    fn limits(&self) -> AuthorityLimits {
+        self.0.limits()
+    }
+
+    fn put_if_absent(
+        &self,
+        _cx: &(),
+        key: &ImmutableKey,
+        body: &[u8],
+    ) -> impl Future<Output = Result<PutOutcome, AuthorityFailure>> {
+        let outcome = self.0.put_if_absent(key, body);
+        async move { outcome }
+    }
+
+    fn read_immutable(
+        &self,
+        _cx: &(),
+        key: &ImmutableKey,
+    ) -> impl Future<Output = Result<ImmutableRead, AuthorityFailure>> {
+        let outcome = self.0.read_immutable(key);
+        async move { outcome }
+    }
+
+    fn initialize_head(
+        &self,
+        _cx: &(),
+        key: &HeadKey,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> impl Future<Output = Result<HeadInit, AuthorityFailure>> {
+        let outcome = self.0.initialize_head(key, generation, body);
+        async move { outcome }
+    }
+
+    fn read_head(
+        &self,
+        _cx: &(),
+        key: &HeadKey,
+    ) -> impl Future<Output = Result<HeadRead, AuthorityFailure>> {
+        let outcome = self.0.read_head(key);
+        async move { outcome }
+    }
+
+    fn compare_exchange_head(
+        &self,
+        _cx: &(),
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> {
+        let outcome = self
+            .0
+            .compare_exchange_head(key, expected, new_generation, new_body);
+        async move { outcome }
+    }
+
+    fn authenticate_head_receipt(
+        &self,
+        _cx: &(),
+        receipt: &HeadReadReceipt,
+    ) -> impl Future<Output = Result<AuthenticatedHead, AuthorityFailure>> {
+        let outcome = self.0.authenticate_head_receipt(receipt);
+        async move { outcome }
+    }
+}
+
+/// Minimal driver for futures that are ready on first poll.
+///
+/// Deliberately NOT a general executor: a pending poll panics rather than
+/// spinning, so this cannot quietly become the blocking bridge condition 4
+/// forbids. It serves the in-memory view above and nothing else.
+fn poll_ready<F: Future>(future: F) -> F::Output {
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+    struct NoopWake;
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+    let waker = Waker::from(Arc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+    let mut future = Box::pin(future);
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(value) => value,
+        Poll::Pending => {
+            panic!("the in-memory async view must never suspend")
+        }
+    }
+}
+
+/// Both surfaces must agree over the SAME store, in both directions.
+///
+/// The staged case must advance identically and the unstaged case must refuse
+/// identically. Asserting only the success half would let an async path that
+/// never refuses pass, which is precisely the vacuity this pins against: a
+/// pointer published ahead of its body names a root no reader can fetch.
+#[test]
+fn advance_pointer_async_matches_sync_exactly() {
+    let identity = CryptoBodyIdentity;
+    let first = capsule_at(3, None);
+    let first_id = identity_of(&first);
+    let pointer = CapsulePointer::genesis(first_id, &first).expect("a first capsule points");
+    let next = capsule_at(4, Some(first_id));
+
+    // Unstaged: neither surface may advance.
+    let empty = MemoryAuthorityStore::new(StoreInstanceId::from_raw(9));
+    let sync_refusal = advance_pointer_root_last(&empty, &identity, &pointer, &next);
+    let async_refusal = poll_ready(advance_pointer_root_last_async(
+        &AsyncView(empty),
+        &(),
+        &identity,
+        &pointer,
+        &next,
+    ));
+    assert_eq!(
+        sync_refusal, async_refusal,
+        "an unstaged body must refuse identically on both surfaces"
+    );
+    assert_eq!(
+        sync_refusal,
+        Err(ChronicleRefusal::CapsuleBodyNotStaged),
+        "and it must be the staged-body refusal, not some other failure"
+    );
+
+    // Staged: both surfaces advance to the same pointer.
+    let sync_ok = advance_pointer_root_last(&store_with(&next), &identity, &pointer, &next);
+    let async_ok = poll_ready(advance_pointer_root_last_async(
+        &AsyncView(store_with(&next)),
+        &(),
+        &identity,
+        &pointer,
+        &next,
+    ));
+    assert_eq!(
+        sync_ok, async_ok,
+        "a staged body must advance to the same pointer on both surfaces"
+    );
+    assert!(sync_ok.is_ok(), "the staged case must actually advance");
 }
