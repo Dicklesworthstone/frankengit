@@ -120,7 +120,10 @@ impl Display for CapabilityRefusal {
             Self::Expired {
                 expires_at,
                 observed,
-            } => write!(formatter, "capability expired at {expires_at}, now {observed}"),
+            } => write!(
+                formatter,
+                "capability expired at {expires_at}, now {observed}"
+            ),
             Self::Revoked => write!(formatter, "capability revoked"),
             Self::SymlinkRefused { path } => write!(formatter, "symlink refused: {path}"),
             Self::FetchBudgetExceeded {

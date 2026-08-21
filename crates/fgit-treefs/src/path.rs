@@ -118,7 +118,10 @@ impl Display for PathRefusal {
                 write!(formatter, "parent-escape component at index {component}")
             }
             Self::CurrentDirectory { component } => {
-                write!(formatter, "current-directory component at index {component}")
+                write!(
+                    formatter,
+                    "current-directory component at index {component}"
+                )
             }
             Self::EmptyComponent { component } => {
                 write!(formatter, "empty component at index {component}")
