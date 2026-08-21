@@ -2,10 +2,10 @@
 
 use fgit_wire::GitObjectFormat;
 use fgit_wire::{
-    encode_packets, encode_sideband_64k, parse_filter, parse_sideband, sideband_pack_from_source,
-    AckMode, AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, ObjectFilter,
-    PackPayloadSource, Packet, PktLineDecoder, SidebandBand, UploadPackRepository,
-    UploadPackVersion, V1Advertisement, V2UploadPack, WireError, WireEvent, WireLimits,
+    encode_packets, encode_sideband_64k, parse_filter, parse_sideband, sideband_pack_chunk,
+    AckMode, AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, ObjectFilter, Packet,
+    PktLineDecoder, SidebandBand, UploadPackRepository, UploadPackVersion, V1Advertisement,
+    V2UploadPack, WireError, WireEvent, WireLimits,
 };
 
 const WANT: &str = "1111111111111111111111111111111111111111";
@@ -15,16 +15,6 @@ const HAVE: &str = "2222222222222222222222222222222222222222";
 struct Repository {
     refs: Vec<AdvertisedRef>,
     common: AnyGitOid,
-}
-
-struct ChunkSource {
-    chunks: Vec<Vec<u8>>,
-}
-
-impl PackPayloadSource for ChunkSource {
-    fn next_chunk(&mut self, _maximum_chunk_bytes: usize) -> Result<Option<Vec<u8>>, WireError> {
-        Ok(self.chunks.pop())
-    }
 }
 
 impl Repository {
@@ -66,9 +56,24 @@ fn decode_fixture(bytes: &[u8]) -> Vec<Packet> {
 }
 
 fn fixture_bytes(bytes: &[u8]) -> &[u8] {
-    bytes
-        .strip_suffix(b"\n")
-        .expect("checked-in fixture final LF")
+    if bytes.ends_with(b"0000\n") {
+        &bytes[..bytes.len() - 1]
+    } else {
+        bytes
+    }
+}
+
+fn v2_fetch_capabilities() -> Capabilities {
+    Capabilities::parse_v2_advertisement(
+        &[
+            Packet::Data(b"version 2\n".to_vec()),
+            Packet::Data(b"agent\n".to_vec()),
+            Packet::Data(b"fetch=shallow filter\n".to_vec()),
+            Packet::Flush,
+        ],
+        &WireLimits::default(),
+    )
+    .expect("v2 fixture capabilities")
 }
 
 #[test]
@@ -81,6 +86,20 @@ fn pkt_line_transcript_round_trips_across_fragment_boundaries() {
     assert_eq!(
         encode_packets(&packets, &WireLimits::default()).expect("encode"),
         fixture
+    );
+}
+
+#[test]
+fn pkt_line_control_markers_preserve_flush_delimiter_and_response_end() {
+    let bytes = b"000000010002";
+    let packets = decode_fixture(bytes);
+    assert_eq!(
+        packets,
+        vec![Packet::Flush, Packet::Delimiter, Packet::ResponseEnd]
+    );
+    assert_eq!(
+        encode_packets(&packets, &WireLimits::default()).expect("controls encode"),
+        bytes
     );
 }
 
@@ -102,6 +121,25 @@ fn v1_advertisement_fixture_parses_and_reemits_exactly() {
         )
         .expect("wire encode"),
         fixture
+    );
+}
+
+#[test]
+fn v1_version_prelude_is_preserved_with_the_ref_advertisement() {
+    let packets = vec![
+        Packet::Data(b"version 1\n".to_vec()),
+        Packet::Data(format!("{WANT} refs/heads/main\n").into_bytes()),
+        Packet::Flush,
+    ];
+    let advertisement =
+        V1Advertisement::parse(&packets, GitObjectFormat::Sha1, &WireLimits::default())
+            .expect("v1 prelude");
+    assert!(advertisement.version_one_prelude);
+    assert_eq!(
+        advertisement
+            .encode(&WireLimits::default())
+            .expect("re-emit v1"),
+        packets
     );
 }
 
@@ -141,10 +179,37 @@ fn v1_fetch_transcript_emits_multi_ack_detailed_and_pack_request() {
 }
 
 #[test]
+fn multi_ack_mode_emits_continue_for_each_common_have() {
+    let repository = Repository::sha1();
+    let caps = Capabilities::parse_v1(b"multi_ack", &WireLimits::default()).expect("caps");
+    let mut machine =
+        LegacyUploadPack::new(UploadPackVersion::V0, caps, WireLimits::default()).expect("machine");
+    machine
+        .push_packet(
+            &Packet::Data(format!("want {WANT} multi_ack\n").into_bytes()),
+            &repository,
+        )
+        .expect("want");
+    machine
+        .push_packet(&Packet::Flush, &repository)
+        .expect("want flush");
+    let transition = machine
+        .push_packet(
+            &Packet::Data(format!("have {HAVE}\n").into_bytes()),
+            &repository,
+        )
+        .expect("common have");
+    assert!(matches!(
+        transition.output.as_slice(),
+        [Packet::Data(line)] if line == b"ACK 2222222222222222222222222222222222222222 continue\n"
+    ));
+}
+
+#[test]
 fn v2_ls_refs_transcript_filters_advertisement() {
     let repository = Repository::sha1();
-    let mut machine =
-        V2UploadPack::new(Capabilities::default(), WireLimits::default()).expect("v2 machine");
+    let caps = Capabilities::parse_v1(b"ls-refs", &WireLimits::default()).expect("ls-refs cap");
+    let mut machine = V2UploadPack::new(caps, WireLimits::default()).expect("v2 machine");
     let transition = machine
         .push_bytes(
             fixture_bytes(include_bytes!("fixtures/v2-ls-refs.pkt")),
@@ -163,7 +228,7 @@ fn v2_ls_refs_transcript_filters_advertisement() {
 #[test]
 fn v2_fetch_transcript_requests_sideband_pack_after_done() {
     let repository = Repository::sha1();
-    let caps = Capabilities::parse_v1(b"agent", &WireLimits::default()).expect("agent cap");
+    let caps = v2_fetch_capabilities();
     let mut machine = V2UploadPack::new(caps, WireLimits::default()).expect("v2 machine");
     let transition = machine
         .push_bytes(
@@ -206,6 +271,8 @@ fn malformed_packet_hex_and_oversize_packets_have_typed_refusals() {
             limit: 65_520
         })
     );
+    let mut decoder = PktLineDecoder::new(WireLimits::default()).expect("limits");
+    assert_eq!(decoder.push(b"0003"), Err(WireError::ReservedPacketLength));
 }
 
 #[test]
@@ -236,6 +303,30 @@ fn unadvertised_want_negative_depth_and_unknown_capability_are_refused() {
         machine.push_packet(&bad_cap, &repository),
         Err(WireError::UnknownCapability { .. })
     ));
+}
+
+#[test]
+fn v2_capability_phase_refuses_a_capability_not_in_its_advertisement() {
+    let repository = Repository::sha1();
+    let caps = Capabilities::parse_v1(b"ls-refs", &WireLimits::default()).expect("ls-refs cap");
+    let mut machine = V2UploadPack::new(caps, WireLimits::default()).expect("v2 machine");
+    machine
+        .push_packet(&Packet::Data(b"command=ls-refs\n".to_vec()), &repository)
+        .expect("command");
+    assert!(matches!(
+        machine.push_packet(&Packet::Data(b"unadvertised=value\n".to_vec()), &repository),
+        Err(WireError::UnknownCapability { .. })
+    ));
+}
+
+#[test]
+fn advertisement_ref_names_reuse_the_canonical_git_ref_validator() {
+    let oid = AnyGitOid::from_hex(GitObjectFormat::Sha1, WANT).expect("fixture oid");
+    assert!(AdvertisedRef::new(oid, b"refs/heads/main", &WireLimits::default()).is_ok());
+    assert_eq!(
+        AdvertisedRef::new(oid, b"refs/heads/../escape", &WireLimits::default()),
+        Err(WireError::InvalidRefName)
+    );
 }
 
 #[test]
@@ -271,22 +362,16 @@ fn filters_sideband_and_hash_formats_preserve_explicit_domains() {
 }
 
 #[test]
-fn deferred_pack_source_is_bounded_before_sideband_emission() {
-    let mut source = ChunkSource {
-        chunks: vec![b"PACK".to_vec()],
-    };
-    let packets =
-        sideband_pack_from_source(&mut source, &WireLimits::default()).expect("small source");
+fn deferred_pack_chunks_are_bounded_before_sideband_emission() {
+    let packets = sideband_pack_chunk(b"PACK", &WireLimits::default()).expect("small chunk");
     assert_eq!(
         parse_sideband(&packets[0]).expect("sideband packet").band,
         SidebandBand::PackData
     );
 
-    let mut source = ChunkSource {
-        chunks: vec![vec![0_u8; fgit_wire::MAX_SIDEBAND_DATA_BYTES + 1]],
-    };
+    let oversized = vec![0_u8; fgit_wire::MAX_SIDEBAND_DATA_BYTES + 1];
     assert!(matches!(
-        sideband_pack_from_source(&mut source, &WireLimits::default()),
+        sideband_pack_chunk(&oversized, &WireLimits::default()),
         Err(WireError::PackChunkTooLarge { .. })
     ));
 }
@@ -294,7 +379,7 @@ fn deferred_pack_source_is_bounded_before_sideband_emission() {
 #[test]
 fn repeated_transcript_transitions_are_deterministic() {
     let repository = Repository::sha1();
-    let caps = Capabilities::parse_v1(b"agent", &WireLimits::default()).expect("caps");
+    let caps = v2_fetch_capabilities();
     let mut first = V2UploadPack::new(caps.clone(), WireLimits::default()).expect("first");
     let mut second = V2UploadPack::new(caps, WireLimits::default()).expect("second");
     let transcript = fixture_bytes(include_bytes!("fixtures/v2-fetch.pkt"));

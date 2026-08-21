@@ -7,12 +7,33 @@
 //! An adapter supplies [`UploadPackRepository`] and later satisfies
 //! [`PackPayloadSource`]; this keeps all protocol transitions deterministic and
 //! testable over bytes alone.
+//!
+//! # Compatibility boundary
+//!
+//! Matched here: Git pkt-line framing (including flush, delimiter, and
+//! response-end), bounded v0/v1 advertisements and fetch negotiation,
+//! `multi_ack` / `multi_ack_detailed`, v2 `ls-refs` and `fetch` command
+//! sections, native SHA-1/SHA-256 object-ID widths, shallow/deepen and the
+//! documented object-filter forms, and side-band-64k packet multiplexing.
+//! V0/v1 wants are required to have appeared in the advertised refs; v2 wants
+//! are instead checked against the repository's canonical permitted closure,
+//! matching the protocol-v2 distinction.
+//!
+//! Explicitly unsupported, and refused rather than delegated, are receive-pack
+//! and push, unknown v2 commands/capabilities, unbounded negotiation sets,
+//! malformed `deepen` and filter grammar, object-info/bundle-uri/server-option
+//! commands, and transport/service-discovery framing.  A runtime adapter owns
+//! socket cancellation, while a pack implementation owns pack bytes and the
+//! eventual thin-pack or delta construction; neither can change these parsed
+//! request commitments.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 pub use fgit_crypto::{AnyGitOid, GitObjectFormat};
 pub use fgit_git_object::ObjectType;
+
+use fgit_types::RefName;
 
 /// The largest pkt-line frame permitted by Git's common protocol.
 pub const MAX_PKT_LINE_BYTES: usize = 65_520;
@@ -30,6 +51,8 @@ pub struct WireLimits {
     pub max_pending_bytes: usize,
     /// Maximum packets yielded by a single decoder call.
     pub max_packets_per_push: usize,
+    /// Maximum serialized bytes in one generated advertisement or response.
+    pub max_outbound_bytes: usize,
     /// Maximum capability entries in one advertisement or request.
     pub max_capabilities: usize,
     /// Maximum bytes in one capability token.
@@ -42,6 +65,8 @@ pub struct WireLimits {
     pub max_shallows: usize,
     /// Maximum ref-prefix arguments in a v2 `ls-refs` request.
     pub max_ref_prefixes: usize,
+    /// Maximum refs accepted from or emitted by one advertisement.
+    pub max_advertised_refs: usize,
     /// Maximum parts in a `combine:` object filter.
     pub max_filter_parts: usize,
     /// Maximum byte length of an opaque ref name or ref prefix.
@@ -54,12 +79,14 @@ impl Default for WireLimits {
             max_packet_bytes: MAX_PKT_LINE_BYTES,
             max_pending_bytes: MAX_PKT_LINE_BYTES * 2,
             max_packets_per_push: 4_096,
+            max_outbound_bytes: 64 * 1024 * 1024,
             max_capabilities: 256,
             max_capability_bytes: 4_096,
             max_wants: 16_384,
             max_haves: 65_536,
             max_shallows: 8_192,
             max_ref_prefixes: 1_024,
+            max_advertised_refs: 1_000_000,
             max_filter_parts: 32,
             max_ref_name_bytes: 4_096,
         }
@@ -80,11 +107,13 @@ impl WireLimits {
         }
         if self.max_packets_per_push == 0
             || self.max_capabilities == 0
+            || self.max_outbound_bytes == 0
             || self.max_capability_bytes == 0
             || self.max_wants == 0
             || self.max_haves == 0
             || self.max_shallows == 0
             || self.max_ref_prefixes == 0
+            || self.max_advertised_refs == 0
             || self.max_filter_parts == 0
             || self.max_ref_name_bytes == 0
         {
@@ -124,6 +153,8 @@ pub enum WireError {
     PendingBytesExceeded { limit: usize },
     /// A single call would return too many decoded packets.
     PacketCountExceeded { limit: usize },
+    /// A generated response would exceed its configured byte budget.
+    OutboundBytesExceeded { limit: usize },
     /// Input ended with a partial pkt-line frame.
     TruncatedPacket { pending: usize },
     /// A bounded allocation failed.
@@ -186,6 +217,8 @@ pub enum WireError {
     RefNameTooLarge { limit: usize },
     /// A ref name contains a NUL or line terminator and cannot appear on wire.
     InvalidRefName,
+    /// A ref advertisement exceeded its configured count limit.
+    TooManyAdvertisedRefs { limit: usize },
     /// Advertisement refs must be deterministic and duplicate-free.
     UnsortedOrDuplicateAdvertisement,
     /// A sideband frame did not contain its one-byte band designator.
@@ -223,6 +256,9 @@ impl Display for WireError {
             }
             Self::PacketCountExceeded { limit } => {
                 write!(formatter, "pkt-line count exceeds {limit}-packet limit")
+            }
+            Self::OutboundBytesExceeded { limit } => {
+                write!(formatter, "wire response exceeds {limit}-byte limit")
             }
             Self::TruncatedPacket { pending } => {
                 write!(
@@ -293,6 +329,9 @@ impl Display for WireError {
             }
             Self::RefNameTooLarge { limit } => write!(formatter, "ref name exceeds {limit} bytes"),
             Self::InvalidRefName => formatter.write_str("invalid ref name bytes"),
+            Self::TooManyAdvertisedRefs { limit } => {
+                write!(formatter, "too many advertised refs; limit {limit}")
+            }
             Self::UnsortedOrDuplicateAdvertisement => {
                 formatter.write_str("advertisement refs are unsorted or duplicate")
             }
@@ -471,12 +510,38 @@ pub fn encode_packets(packets: &[Packet], limits: &WireLimits) -> Result<Vec<u8>
     let mut output = Vec::new();
     for packet in packets {
         let encoded = encode_packet(packet, limits)?;
+        if encoded.len() > limits.max_outbound_bytes.saturating_sub(output.len()) {
+            return Err(WireError::OutboundBytesExceeded {
+                limit: limits.max_outbound_bytes,
+            });
+        }
         output
             .try_reserve(encoded.len())
             .map_err(|_| WireError::AllocationFailure)?;
         output.extend_from_slice(&encoded);
     }
     Ok(output)
+}
+
+fn add_output_packet(
+    output: &mut Vec<Packet>,
+    packet: Packet,
+    encoded_bytes: usize,
+    used_bytes: &mut usize,
+    limits: &WireLimits,
+) -> Result<(), WireError> {
+    let available = limits.max_outbound_bytes.saturating_sub(*used_bytes);
+    if encoded_bytes > available {
+        return Err(WireError::OutboundBytesExceeded {
+            limit: limits.max_outbound_bytes,
+        });
+    }
+    output
+        .try_reserve(1)
+        .map_err(|_| WireError::AllocationFailure)?;
+    output.push(packet);
+    *used_bytes += encoded_bytes;
+    Ok(())
 }
 
 fn format_packet_length(length: usize) -> [u8; 4] {
@@ -501,6 +566,19 @@ pub struct Capability {
 impl Capability {
     /// Parses an ASCII `name` or `name=value` capability without accepting controls.
     pub fn parse(token: &[u8], limits: &WireLimits) -> Result<Self, WireError> {
+        Self::parse_with_spaces(token, limits, false)
+    }
+
+    /// Parses a v2 capability, whose value may contain printable spaces.
+    pub fn parse_v2(token: &[u8], limits: &WireLimits) -> Result<Self, WireError> {
+        Self::parse_with_spaces(token, limits, true)
+    }
+
+    fn parse_with_spaces(
+        token: &[u8],
+        limits: &WireLimits,
+        allow_value_spaces: bool,
+    ) -> Result<Self, WireError> {
         if token.is_empty() {
             return Err(WireError::EmptyCapability);
         }
@@ -509,15 +587,6 @@ impl Capability {
                 limit: limits.max_capability_bytes,
             });
         }
-        for (offset, byte) in token.iter().copied().enumerate() {
-            if !(0x21..=0x7e).contains(&byte) {
-                return Err(WireError::InvalidToken {
-                    field: "capability",
-                    offset,
-                    byte,
-                });
-            }
-        }
         let split = token.iter().position(|byte| *byte == b'=');
         let (name, value) = match split {
             Some(index) => (&token[..index], Some(&token[index + 1..])),
@@ -525,6 +594,31 @@ impl Capability {
         };
         if name.is_empty() {
             return Err(WireError::EmptyCapability);
+        }
+        for (offset, byte) in name.iter().copied().enumerate() {
+            if !(0x21..=0x7e).contains(&byte) || byte == b'=' {
+                return Err(WireError::InvalidToken {
+                    field: "capability",
+                    offset,
+                    byte,
+                });
+            }
+        }
+        if let Some(value) = value {
+            for (offset, byte) in value.iter().copied().enumerate() {
+                let permitted = if allow_value_spaces {
+                    (0x20..=0x7e).contains(&byte)
+                } else {
+                    (0x21..=0x7e).contains(&byte)
+                };
+                if !permitted {
+                    return Err(WireError::InvalidToken {
+                        field: "capability value",
+                        offset,
+                        byte,
+                    });
+                }
+            }
         }
         Ok(Self {
             name: name.to_vec(),
@@ -586,13 +680,19 @@ impl Capabilities {
         }
         let mut capabilities = Self::default();
         let mut saw_flush = false;
-        for packet in &packets[1..] {
+        for (index, packet) in packets[1..].iter().enumerate() {
             match packet {
                 Packet::Data(line) => {
                     let token = line_without_lf(line)?;
-                    capabilities.insert(Capability::parse(token, limits)?, limits)?;
+                    capabilities.insert(Capability::parse_v2(token, limits)?, limits)?;
                 }
                 Packet::Flush => {
+                    if index + 2 != packets.len() {
+                        return Err(WireError::IllegalTransition {
+                            state: "v2 advertisement after flush",
+                            packet: packet_name(&packets[index + 2]),
+                        });
+                    }
                     saw_flush = true;
                     break;
                 }
@@ -625,10 +725,17 @@ impl Capabilities {
     /// Encodes a v2 advertisement beginning with `version 2` and ending flush.
     pub fn encode_v2_advertisement(&self, limits: &WireLimits) -> Result<Vec<Packet>, WireError> {
         let mut output = Vec::new();
+        let mut used_bytes = 0_usize;
         output
             .try_reserve(self.entries.len().saturating_add(2))
             .map_err(|_| WireError::AllocationFailure)?;
-        output.push(Packet::Data(b"version 2\n".to_vec()));
+        add_output_packet(
+            &mut output,
+            Packet::Data(b"version 2\n".to_vec()),
+            b"version 2\n".len() + 4,
+            &mut used_bytes,
+            limits,
+        )?;
         for capability in &self.entries {
             let mut line = capability.encoded()?;
             line.try_reserve(1)
@@ -640,9 +747,16 @@ impl Capabilities {
                     limit: limits.max_packet_bytes,
                 });
             }
-            output.push(Packet::Data(line));
+            let encoded_bytes = line.len() + 4;
+            add_output_packet(
+                &mut output,
+                Packet::Data(line),
+                encoded_bytes,
+                &mut used_bytes,
+                limits,
+            )?;
         }
-        output.push(Packet::Flush);
+        add_output_packet(&mut output, Packet::Flush, 4, &mut used_bytes, limits)?;
         Ok(output)
     }
 
@@ -946,6 +1060,17 @@ impl AsciiLowercaseOrDigit for u8 {
 }
 
 fn parse_ref_name(text: &[u8], limits: &WireLimits) -> Result<Vec<u8>, WireError> {
+    if text.len() > limits.max_ref_name_bytes {
+        return Err(WireError::RefNameTooLarge {
+            limit: limits.max_ref_name_bytes,
+        });
+    }
+    RefName::try_new_one_level(text)
+        .map(|name| name.as_bytes().to_vec())
+        .map_err(|_| WireError::InvalidRefName)
+}
+
+fn parse_ref_prefix(text: &[u8], limits: &WireLimits) -> Result<Vec<u8>, WireError> {
     if text.is_empty() || text.len() > limits.max_ref_name_bytes {
         return Err(WireError::RefNameTooLarge {
             limit: limits.max_ref_name_bytes,
@@ -1016,6 +1141,14 @@ pub trait UploadPackRepository {
     fn contains_want(&self, oid: AnyGitOid) -> bool;
     /// Whether a client `have` is already common with the advertised closure.
     fn is_common(&self, oid: AnyGitOid) -> bool;
+    /// Canonical symbolic-ref target, if the supplied ref is symbolic.
+    fn symref_target(&self, _name: &[u8]) -> Option<&[u8]> {
+        None
+    }
+    /// Canonical peeled target for an annotated-tag ref, if one exists.
+    fn peeled(&self, _oid: AnyGitOid) -> Option<AnyGitOid> {
+        None
+    }
 }
 
 /// Minimal deferred request passed from wire parsing to a future pack writer.
@@ -1035,6 +1168,16 @@ pub struct PackRequest {
     pub filter: Option<ObjectFilter>,
     /// Whether the pack must be multiplexed through sideband-64k.
     pub sideband_64k: bool,
+    /// Whether the generated pack may omit bases the client claimed to have.
+    pub thin_pack: bool,
+    /// Whether annotated tags reachable from wants should be included.
+    pub include_tag: bool,
+    /// Whether pack deltas may use offset notation.
+    pub ofs_delta: bool,
+    /// Whether progress packets should be omitted.
+    pub no_progress: bool,
+    /// Whether all protocol-v2 response sections use sideband framing.
+    pub sideband_all: bool,
 }
 
 /// A protocol observation or required external action from a transition.
@@ -1050,6 +1193,8 @@ pub enum WireEvent {
         symrefs: bool,
         /// Whether the client requested peeled tag attributes.
         peel: bool,
+        /// Whether the client requested unborn-head attributes.
+        unborn: bool,
     },
     /// A common object was observed during negotiation.
     Common(AnyGitOid),
@@ -1095,11 +1240,12 @@ pub trait PackPayloadSource {
     fn next_chunk(&mut self, maximum_chunk_bytes: usize) -> Result<Option<Vec<u8>>, WireError>;
 }
 
-/// Pulls a deferred pack source through sideband-64k without performing I/O.
-pub fn sideband_pack_from_source(
-    source: &mut impl PackPayloadSource,
-    limits: &WireLimits,
-) -> Result<Vec<Packet>, WireError> {
+/// Frames one bounded pack chunk through sideband-64k without performing I/O.
+///
+/// The adapter calls [`PackPayloadSource::next_chunk`] and this function in a
+/// loop, writing each returned packet group before requesting another chunk.
+/// That order prevents the wire layer from collecting an entire pack in memory.
+pub fn sideband_pack_chunk(chunk: &[u8], limits: &WireLimits) -> Result<Vec<Packet>, WireError> {
     let maximum_chunk_bytes =
         limits
             .max_packet_bytes
@@ -1107,26 +1253,20 @@ pub fn sideband_pack_from_source(
             .ok_or(WireError::InvalidLimit {
                 field: "max_packet_bytes for pack source",
             })?;
-    let mut output = Vec::new();
-    while let Some(chunk) = source.next_chunk(maximum_chunk_bytes)? {
-        if chunk.len() > maximum_chunk_bytes {
-            return Err(WireError::PackChunkTooLarge {
-                observed: chunk.len(),
-                limit: maximum_chunk_bytes,
-            });
-        }
-        let framed = encode_sideband_64k(SidebandBand::PackData, &chunk, limits)?;
-        output
-            .try_reserve(framed.len())
-            .map_err(|_| WireError::AllocationFailure)?;
-        output.extend(framed);
+    if chunk.len() > maximum_chunk_bytes {
+        return Err(WireError::PackChunkTooLarge {
+            observed: chunk.len(),
+            limit: maximum_chunk_bytes,
+        });
     }
-    Ok(output)
+    encode_sideband_64k(SidebandBand::PackData, chunk, limits)
 }
 
 /// Encodes a deterministic v0/v1 ref advertisement and parses its inverse.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct V1Advertisement {
+    /// Whether the server emitted the protocol-v1 `version 1` prelude.
+    pub version_one_prelude: bool,
     /// Advertised refs in Git's required wire order.
     pub refs: Vec<AdvertisedRef>,
     /// Server capability list, attached to the first ref after NUL.
@@ -1142,15 +1282,34 @@ impl V1Advertisement {
         limits: &WireLimits,
     ) -> Result<Self, WireError> {
         validate_advertised_refs(&refs, object_format, limits)?;
-        Ok(Self { refs, capabilities })
+        Ok(Self {
+            version_one_prelude: false,
+            refs,
+            capabilities,
+        })
     }
 
     /// Emits the v0/v1 ref records and their terminating flush.
     pub fn encode(&self, limits: &WireLimits) -> Result<Vec<Packet>, WireError> {
         let mut output = Vec::new();
+        let mut used_bytes = 0_usize;
         output
-            .try_reserve(self.refs.len().saturating_add(1))
+            .try_reserve(
+                self.refs
+                    .len()
+                    .saturating_add(1)
+                    .saturating_add(usize::from(self.version_one_prelude)),
+            )
             .map_err(|_| WireError::AllocationFailure)?;
+        if self.version_one_prelude {
+            add_output_packet(
+                &mut output,
+                Packet::Data(b"version 1\n".to_vec()),
+                b"version 1\n".len() + 4,
+                &mut used_bytes,
+                limits,
+            )?;
+        }
         for (index, reference) in self.refs.iter().enumerate() {
             let mut line = oid_hex(reference.oid).into_bytes();
             line.try_reserve(reference.name.len().saturating_add(2))
@@ -1173,9 +1332,16 @@ impl V1Advertisement {
                     limit: limits.max_packet_bytes,
                 });
             }
-            output.push(Packet::Data(line));
+            let encoded_bytes = line.len() + 4;
+            add_output_packet(
+                &mut output,
+                Packet::Data(line),
+                encoded_bytes,
+                &mut used_bytes,
+                limits,
+            )?;
         }
-        output.push(Packet::Flush);
+        add_output_packet(&mut output, Packet::Flush, 4, &mut used_bytes, limits)?;
         Ok(output)
     }
 
@@ -1188,9 +1354,17 @@ impl V1Advertisement {
         let mut refs = Vec::new();
         let mut capabilities = Capabilities::default();
         let mut saw_flush = false;
-        for packet in packets {
+        let mut version_one_prelude = false;
+        for (index, packet) in packets.iter().enumerate() {
             match packet {
                 Packet::Data(line) => {
+                    if refs.is_empty() && line.as_slice() == b"version 1\n" {
+                        if version_one_prelude {
+                            return Err(WireError::InvalidVersionAdvertisement);
+                        }
+                        version_one_prelude = true;
+                        continue;
+                    }
                     let line = line_without_lf(line)?;
                     let (reference, trailing_capabilities) =
                         parse_v1_ref_line(line, object_format, limits)?;
@@ -1207,6 +1381,12 @@ impl V1Advertisement {
                     refs.push(reference);
                 }
                 Packet::Flush => {
+                    if index + 1 != packets.len() {
+                        return Err(WireError::IllegalTransition {
+                            state: "v0/v1 advertisement after flush",
+                            packet: packet_name(&packets[index + 1]),
+                        });
+                    }
                     saw_flush = true;
                     break;
                 }
@@ -1224,7 +1404,9 @@ impl V1Advertisement {
                 packet: "end of input",
             });
         }
-        Self::new(refs, capabilities, object_format, limits)
+        let mut advertisement = Self::new(refs, capabilities, object_format, limits)?;
+        advertisement.version_one_prelude = version_one_prelude;
+        Ok(advertisement)
     }
 }
 
@@ -1257,6 +1439,11 @@ fn validate_advertised_refs(
     object_format: GitObjectFormat,
     limits: &WireLimits,
 ) -> Result<(), WireError> {
+    if refs.len() > limits.max_advertised_refs {
+        return Err(WireError::TooManyAdvertisedRefs {
+            limit: limits.max_advertised_refs,
+        });
+    }
     let mut previous: Option<&[u8]> = None;
     for reference in refs {
         if reference.oid.algorithm() != object_format {
@@ -1305,6 +1492,10 @@ pub struct LegacyUploadPack {
     filter: Option<ObjectFilter>,
     ack_mode: AckMode,
     sideband_64k: bool,
+    thin_pack: bool,
+    include_tag: bool,
+    ofs_delta: bool,
+    no_progress: bool,
     last_common: Option<AnyGitOid>,
     saw_want_capabilities: bool,
 }
@@ -1336,6 +1527,10 @@ impl LegacyUploadPack {
             filter: None,
             ack_mode: AckMode::None,
             sideband_64k: false,
+            thin_pack: false,
+            include_tag: false,
+            ofs_delta: false,
+            no_progress: false,
             last_common: None,
             saw_want_capabilities: false,
         })
@@ -1353,6 +1548,11 @@ impl LegacyUploadPack {
             transition.append(self.push_packet(&packet, repository)?)?;
         }
         Ok(transition)
+    }
+
+    /// Refuses a transport that ended inside a pkt-line frame.
+    pub fn finish(&self) -> Result<(), WireError> {
+        self.decoder.finish()
     }
 
     /// Feeds one already-decoded packet.
@@ -1405,6 +1605,7 @@ impl LegacyUploadPack {
             return self.accept_want(rest, repository);
         }
         if let Some(rest) = line.strip_prefix(b"shallow ") {
+            self.require_capability(b"shallow")?;
             let oid = parse_object_id(rest, repository.object_format())?;
             push_unique_oid("shallow", oid, &mut self.shallows, self.limits.max_shallows)?;
             return Ok(Transition::empty());
@@ -1521,6 +1722,10 @@ impl LegacyUploadPack {
                 }
                 b"multi_ack_detailed" => self.ack_mode = AckMode::MultiAckDetailed,
                 b"side-band-64k" => self.sideband_64k = true,
+                b"thin-pack" => self.thin_pack = true,
+                b"include-tag" => self.include_tag = true,
+                b"ofs-delta" => self.ofs_delta = true,
+                b"no-progress" => self.no_progress = true,
                 _ => {}
             }
         }
@@ -1541,7 +1746,7 @@ impl LegacyUploadPack {
         let output = match self.ack_mode {
             AckMode::None => Vec::new(),
             AckMode::MultiAck => vec![line_packet(
-                format!("ACK {oid_hex}\n", oid_hex = oid_hex(oid)).into_bytes(),
+                format!("ACK {oid_hex} continue\n", oid_hex = oid_hex(oid)).into_bytes(),
             )],
             AckMode::MultiAckDetailed => vec![line_packet(
                 format!("ACK {oid_hex} common\n", oid_hex = oid_hex(oid)).into_bytes(),
@@ -1580,6 +1785,11 @@ impl LegacyUploadPack {
             deepen: self.deepen,
             filter: self.filter.clone(),
             sideband_64k: self.sideband_64k,
+            thin_pack: self.thin_pack,
+            include_tag: self.include_tag,
+            ofs_delta: self.ofs_delta,
+            no_progress: self.no_progress,
+            sideband_all: false,
         }
     }
 }
@@ -1635,6 +1845,10 @@ pub struct V2UploadPack {
     deepen: Option<u32>,
     filter: Option<ObjectFilter>,
     sideband_all: bool,
+    thin_pack: bool,
+    include_tag: bool,
+    ofs_delta: bool,
+    no_progress: bool,
     done: bool,
     ref_prefixes: Vec<Vec<u8>>,
     symrefs: bool,
@@ -1658,6 +1872,10 @@ impl V2UploadPack {
             deepen: None,
             filter: None,
             sideband_all: false,
+            thin_pack: false,
+            include_tag: false,
+            ofs_delta: false,
+            no_progress: false,
             done: false,
             ref_prefixes: Vec::new(),
             symrefs: false,
@@ -1678,6 +1896,11 @@ impl V2UploadPack {
             transition.append(self.push_packet(&packet, repository)?)?;
         }
         Ok(transition)
+    }
+
+    /// Refuses a transport that ended inside a pkt-line frame.
+    pub fn finish(&self) -> Result<(), WireError> {
+        self.decoder.finish()
     }
 
     /// Feeds one decoded v2 request packet.
@@ -1719,6 +1942,15 @@ impl V2UploadPack {
                 });
             }
         };
+        let capability: &[u8] = match command {
+            V2Command::LsRefs => b"ls-refs",
+            V2Command::Fetch => b"fetch",
+        };
+        if !self.server_capabilities.contains(capability) {
+            return Err(WireError::UnsupportedCommand {
+                command: command_name(command).to_vec(),
+            });
+        }
         self.state = V2State::AwaitCapabilities(command);
         Ok(Transition::empty())
     }
@@ -1731,7 +1963,7 @@ impl V2UploadPack {
         match packet {
             Packet::Data(line) => {
                 let token = line_without_lf(line)?;
-                let capability = Capability::parse(token, &self.limits)?;
+                let capability = Capability::parse_v2(token, &self.limits)?;
                 if !self.server_capabilities.contains(&capability.name) {
                     return Err(WireError::UnknownCapability {
                         capability: capability.name,
@@ -1787,7 +2019,7 @@ impl V2UploadPack {
                         line: line.to_vec(),
                     });
                 };
-                let prefix = parse_ref_name(prefix, &self.limits)?;
+                let prefix = parse_ref_prefix(prefix, &self.limits)?;
                 if self.ref_prefixes.contains(&prefix) {
                     return Err(WireError::MalformedRequestLine {
                         line: line.to_vec(),
@@ -1830,11 +2062,13 @@ impl V2UploadPack {
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"shallow ") {
+            self.require_fetch_feature(b"shallow")?;
             let oid = parse_object_id(rest, repository.object_format())?;
             push_unique_oid("shallow", oid, &mut self.shallows, self.limits.max_shallows)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"deepen ") {
+            self.require_fetch_feature(b"shallow")?;
             if self.deepen.is_some() {
                 return Err(WireError::MalformedRequestLine {
                     line: line.to_vec(),
@@ -1844,6 +2078,7 @@ impl V2UploadPack {
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"filter ") {
+            self.require_fetch_feature(b"filter")?;
             if self.filter.is_some() {
                 return Err(WireError::MalformedRequestLine {
                     line: line.to_vec(),
@@ -1857,8 +2092,20 @@ impl V2UploadPack {
             return Ok(Transition::empty());
         }
         if line == b"sideband-all" {
+            if !self.server_capabilities.contains(b"sideband-all") {
+                return Err(WireError::UnknownCapability {
+                    capability: b"sideband-all".to_vec(),
+                });
+            }
             self.sideband_all = true;
             return Ok(Transition::empty());
+        }
+        match line {
+            b"thin-pack" => self.thin_pack = true,
+            b"include-tag" => self.include_tag = true,
+            b"ofs-delta" => self.ofs_delta = true,
+            b"no-progress" => self.no_progress = true,
+            _ => {}
         }
         if matches!(
             line,
@@ -1893,6 +2140,7 @@ impl V2UploadPack {
             &self.limits,
         )?;
         let mut output = Vec::new();
+        let mut used_bytes = 0_usize;
         for reference in repository.advertised_refs() {
             if !self.ref_prefixes.is_empty()
                 && !self
@@ -1907,16 +2155,47 @@ impl V2UploadPack {
                 .map_err(|_| WireError::AllocationFailure)?;
             line.push(b' ');
             line.extend_from_slice(&reference.name);
+            if self.symrefs {
+                if let Some(target) = repository.symref_target(&reference.name) {
+                    parse_ref_name(target, &self.limits)?;
+                    line.try_reserve(target.len().saturating_add(16))
+                        .map_err(|_| WireError::AllocationFailure)?;
+                    line.extend_from_slice(b" symref-target:");
+                    line.extend_from_slice(target);
+                }
+            }
+            if self.peel {
+                if let Some(peeled) = repository.peeled(reference.oid) {
+                    if peeled.algorithm() != repository.object_format() {
+                        return Err(WireError::ObjectFormatMismatch {
+                            expected: repository.object_format(),
+                            observed: peeled.algorithm(),
+                        });
+                    }
+                    let peeled = oid_hex(peeled);
+                    line.try_reserve(peeled.len().saturating_add(8))
+                        .map_err(|_| WireError::AllocationFailure)?;
+                    line.extend_from_slice(b" peeled:");
+                    line.extend_from_slice(peeled.as_bytes());
+                }
+            }
             line.push(b'\n');
-            output
-                .try_reserve(1)
-                .map_err(|_| WireError::AllocationFailure)?;
-            output.push(Packet::Data(line));
+            if line.len() + 4 > self.limits.max_packet_bytes {
+                return Err(WireError::PacketTooLarge {
+                    declared: line.len() + 4,
+                    limit: self.limits.max_packet_bytes,
+                });
+            }
+            let encoded_bytes = line.len() + 4;
+            add_output_packet(
+                &mut output,
+                Packet::Data(line),
+                encoded_bytes,
+                &mut used_bytes,
+                &self.limits,
+            )?;
         }
-        output
-            .try_reserve(1)
-            .map_err(|_| WireError::AllocationFailure)?;
-        output.push(Packet::Flush);
+        add_output_packet(&mut output, Packet::Flush, 4, &mut used_bytes, &self.limits)?;
         self.state = V2State::Complete;
         Ok(Transition {
             output,
@@ -1924,8 +2203,27 @@ impl V2UploadPack {
                 prefixes: self.ref_prefixes.clone(),
                 symrefs: self.symrefs,
                 peel: self.peel,
+                unborn: self.unborn,
             }],
         })
+    }
+
+    fn require_fetch_feature(&self, feature: &[u8]) -> Result<(), WireError> {
+        let supported = self.server_capabilities.entries().iter().any(|capability| {
+            capability.name == b"fetch"
+                && capability.value.as_ref().is_some_and(|value| {
+                    value
+                        .split(|byte| *byte == b' ')
+                        .any(|item| item == feature)
+                })
+        });
+        if supported {
+            Ok(())
+        } else {
+            Err(WireError::UnknownCapability {
+                capability: feature.to_vec(),
+            })
+        }
     }
 
     fn finish_fetch(
@@ -1970,8 +2268,20 @@ impl V2UploadPack {
                 shallows: self.shallows.clone(),
                 deepen: self.deepen,
                 filter: self.filter.clone(),
-                sideband_64k: self.sideband_all,
+                sideband_64k: true,
+                thin_pack: self.thin_pack,
+                include_tag: self.include_tag,
+                ofs_delta: self.ofs_delta,
+                no_progress: self.no_progress,
+                sideband_all: self.sideband_all,
             })],
         })
+    }
+}
+
+const fn command_name(command: V2Command) -> &'static [u8] {
+    match command {
+        V2Command::LsRefs => b"ls-refs",
+        V2Command::Fetch => b"fetch",
     }
 }

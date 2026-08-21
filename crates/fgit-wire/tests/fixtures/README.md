@@ -7,9 +7,10 @@ are deliberately small: the `111...` identity is an advertised want and the
 parser/state-machine evidence, not a differential claim against an upstream
 Git executable (FG-018c owns that evidence).
 
-The source files retain the customary final text-file LF after the final
-`0000` marker.  Tests strip that container-only LF before presenting bytes to
-the pkt-line decoder; it is not part of the protocol transcript.
+Fixtures that end in a `0000` control marker retain the customary final
+text-file LF after that marker. Tests strip only that container-only LF before
+presenting bytes to the pkt-line decoder. `v1-fetch-request.pkt` instead ends
+at the LF belonging to its final `done` data packet, which is protocol data.
 
 - `v1-advertisement.pkt` is a v0/v1 ref advertisement followed by a flush.
 - `v1-fetch-request.pkt` has a `want` with `multi_ack_detailed` and
