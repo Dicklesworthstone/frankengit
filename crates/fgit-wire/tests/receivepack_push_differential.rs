@@ -1,0 +1,569 @@
+#![forbid(unsafe_code)]
+//! FG-019c: report-status on a real push, differentially against pinned Git.
+//!
+//! The bridge half of
+//! `scripts/e2e/suites/wire/receivepack_push_differential.sh`. Two `#[ignore]`d
+//! phases: one writes the push payloads the suite pipes into the sandboxed
+//! oracle, the other compares what Git answered against what our encoder
+//! produces for the same verdict.
+//!
+//! ## Why the payload is built here and not in the suite
+//!
+//! A receive-pack command line is `<old> SP <new> SP <ref> NUL <caps>`, and
+//! **bash `$(…)` silently drops NUL bytes**. Building the payload in shell sent
+//! Git a ref literally named `refs/heads/doomedreport-status`, and Git answered
+//! with no report-status at all. A lane wired up that way would have compared
+//! two empty sections and reported a match. So the bytes are emitted from Rust,
+//! where a NUL survives.
+//!
+//! ## What is compared, and the boundary that is not crossed
+//!
+//! `report_status` turns a verdict into wire bytes; it does not decide the
+//! verdict. Deciding requires the authority stack and the head-bound projection
+//! that does not exist yet. So this compares **framing for a verdict Git
+//! already reached**: given that Git said this command succeeded, do we frame
+//! "succeeded" the way Git frames it?
+//!
+//! That is a real obligation — `unpack ok`, `ok <ref>`, `ng <ref> <reason>`,
+//! their pkt-line lengths and the terminating flush are what every real client
+//! parses — and it is deliberately weaker than "we agree with Git about whether
+//! the push should succeed". **This file must never be cited for the second
+//! claim.** The verdicts come from Git precisely so that no fixture of mine
+//! stages the outcome; an earlier corpus on this bead did exactly that and was
+//! withdrawn.
+//!
+//! ## The two cases, and why deletes
+//!
+//! Deletes are the documented path that carries no pack, so the corpus needs no
+//! object closure to be a genuine end-to-end push. Both outcomes are exercised:
+//!
+//! * an **accepted** delete, where the expected-old matches — Git answers `ok`;
+//! * a **refused** delete, where the expected-old is a real object that is not
+//!   the ref's current value — Git answers
+//!   `ng <ref> incorrect old value provided`.
+//!
+//! The refusal case was chosen after measuring rather than assuming. Deleting
+//! with an *unresolvable* old oid does **not** produce `ng`: Git 2.54.0 reports
+//! `warning: allowing deletion of corrupt ref` and answers `ok`. Those are two
+//! different behaviours and only the second is an expected-old check, so the
+//! corpus uses a resolvable-but-wrong oid to reach the check it means to reach.
+//!
+//! ## Non-claims
+//!
+//! * **Framing, not decisions.** See above.
+//! * Delete-path only. A push carrying a pack is not exercised here; Git needs
+//!   one even when the new object is already present, and building that corpus
+//!   is a separate slice.
+//! * Agreement with Git 2.54.0 is agreement with one pinned version.
+//! * The oracle is sandboxed and pinned; no production path reaches it
+//!   (AGENTS.md §3.1).
+
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use fgit_wire::receive::{
+    ReceiveCommandStatus, ReceiveContext, ReceiveEvent, ReceiveLimits, ReceivePack, ReceiveRequest,
+    SignedPushProfile, UnpackStatus, report_status,
+};
+use fgit_wire::{Capabilities, GitObjectFormat, Packet, WireLimits, encode_packets};
+
+const CORPUS_ENV: &str = "FGIT_PUSH_DIFF_CORPUS_DIR";
+const OUTPUT_ENV: &str = "FGIT_PUSH_DIFF_OUTPUT_DIR";
+
+const ZERO: &str = "0000000000000000000000000000000000000000";
+/// What an ordinary client sends alongside a delete.
+const CAPS: &str = "report-status delete-refs";
+
+/// The same push with `delete-refs` omitted.
+///
+/// Git 2.54.0 accepts this; our machine refuses it as
+/// `DeleteRefsNotNegotiated`. That divergence is measured rather than designed
+/// around — see the `delete_without_negotiated_capability` cell.
+const CAPS_WITHOUT_DELETE_REFS: &str = "report-status";
+
+/// The two cases, named the way the suite names their files.
+const ACCEPTED_REF: &str = "refs/heads/accepted";
+const REFUSED_REF: &str = "refs/heads/refused";
+
+// ---------------------------------------------------------------------------
+// Phase 1: emit the payloads
+// ---------------------------------------------------------------------------
+
+/// One pkt-line carrying a receive command, NUL and all.
+fn command_packet(old: &str, new: &str, ref_name: &str, caps: &str) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(old.as_bytes());
+    payload.push(b' ');
+    payload.extend_from_slice(new.as_bytes());
+    payload.push(b' ');
+    payload.extend_from_slice(ref_name.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(caps.as_bytes());
+
+    let mut packet = format!("{:04x}", payload.len() + 4).into_bytes();
+    packet.extend_from_slice(&payload);
+    packet
+}
+
+/// A complete delete-only push: one command, then flush, and no pack.
+fn delete_push_with(old: &str, ref_name: &str, caps: &str) -> Vec<u8> {
+    let mut payload = command_packet(old, ZERO, ref_name, caps);
+    payload.extend_from_slice(b"0000");
+    payload
+}
+
+fn delete_push(old: &str, ref_name: &str) -> Vec<u8> {
+    delete_push_with(old, ref_name, CAPS)
+}
+
+/// Reads `<ref>\t<oid>` lines the suite wrote after building the repository.
+fn oracle_oids(corpus: &Path) -> Vec<(String, String)> {
+    let raw = fs::read_to_string(corpus.join("oids.tsv"))
+        .unwrap_or_else(|error| panic!("the suite must supply oids.tsv: {error}"));
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (name, oid) = line
+                .split_once('\t')
+                .unwrap_or_else(|| panic!("oids.tsv line is not <ref>\\t<oid>: {line:?}"));
+            (name.to_owned(), oid.trim().to_owned())
+        })
+        .collect()
+}
+
+fn oid_for(oids: &[(String, String)], name: &str) -> String {
+    oids.iter()
+        .find(|(candidate, _)| candidate == name)
+        .map(|(_, oid)| oid.clone())
+        .unwrap_or_else(|| panic!("the suite did not report an oid for {name}"))
+}
+
+/// Writes the two push payloads for the suite to pipe into the oracle.
+#[test]
+#[ignore = "phase 1 of receivepack_push_differential.sh"]
+fn emit_push_payloads_for_the_oracle() {
+    let corpus = corpus_dir();
+    let oids = oracle_oids(&corpus);
+
+    // Accepted: the expected-old is the ref's actual value.
+    let accepted = delete_push(&oid_for(&oids, ACCEPTED_REF), ACCEPTED_REF);
+    // Refused: the expected-old is a real, resolvable object that is NOT this
+    // ref's value. A non-existent oid would take Git's corrupt-ref path
+    // instead and answer `ok`, which would not exercise the check at all.
+    let refused = delete_push(&oid_for(&oids, "other-commit"), REFUSED_REF);
+
+    assert!(
+        accepted.contains(&0),
+        "the accepted payload lost its NUL, so Git would read a fused ref name"
+    );
+    assert!(
+        refused.contains(&0),
+        "the refused payload lost its NUL, so Git would read a fused ref name"
+    );
+
+    // A third payload, identical to the accepted one except that the client
+    // does not negotiate `delete-refs`. Git accepts it; we do not. The suite
+    // pipes it so the divergence is measured on both sides rather than
+    // asserted from one.
+    let unnegotiated = delete_push_with(
+        &oid_for(&oids, "unnegotiated-commit"),
+        "refs/heads/unnegotiated",
+        CAPS_WITHOUT_DELETE_REFS,
+    );
+
+    fs::write(corpus.join("push-accepted.pkt"), &accepted).expect("write accepted payload");
+    fs::write(corpus.join("push-refused.pkt"), &refused).expect("write refused payload");
+    fs::write(corpus.join("push-unnegotiated.pkt"), &unnegotiated)
+        .expect("write unnegotiated payload");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: compare
+// ---------------------------------------------------------------------------
+
+/// Splits a pkt-line stream into payloads, stopping at the first flush.
+///
+/// Returns the payloads consumed and the offset just past the flush, so the
+/// caller can step over Git's advertisement to reach the report-status that
+/// follows it.
+fn read_until_flush(bytes: &[u8], mut cursor: usize) -> (Vec<Vec<u8>>, usize) {
+    let mut payloads = Vec::new();
+    while cursor + 4 <= bytes.len() {
+        let header = match std::str::from_utf8(&bytes[cursor..cursor + 4]) {
+            Ok(header) => header,
+            Err(_) => break,
+        };
+        let declared = match usize::from_str_radix(header, 16) {
+            Ok(declared) => declared,
+            Err(_) => break,
+        };
+        if declared == 0 {
+            return (payloads, cursor + 4);
+        }
+        if declared < 4 || cursor + declared > bytes.len() {
+            break;
+        }
+        payloads.push(bytes[cursor + 4..cursor + declared].to_vec());
+        cursor += declared;
+    }
+    (payloads, cursor)
+}
+
+/// Git's report-status section: everything after the advertisement's flush.
+fn report_section(response: &[u8]) -> Vec<Vec<u8>> {
+    let (_advertisement, after) = read_until_flush(response, 0);
+    let (report, _end) = read_until_flush(response, after);
+    report
+}
+
+/// Parses one receive command through the real wire machine, or reports why
+/// the machine refused it.
+fn try_request_from(payload: &[u8]) -> Result<ReceiveRequest, String> {
+    let context = ReceiveContext::new(
+        GitObjectFormat::Sha1,
+        Capabilities::parse_v1(b"report-status delete-refs", &WireLimits::default())
+            .expect("server capabilities"),
+        ReceiveLimits::default(),
+        SignedPushProfile::Refuse,
+    )
+    .expect("receive context");
+    let mut machine = ReceivePack::new(context).expect("machine");
+
+    let (packets, _after) = read_until_flush(payload, 0);
+    for packet in packets {
+        machine
+            .push_packet(Packet::Data(packet))
+            .map_err(|error| format!("{error:?}"))?;
+    }
+    let transition = machine
+        .push_packet(Packet::Flush)
+        .map_err(|error| format!("{error:?}"))?;
+    match transition.events.first() {
+        Some(ReceiveEvent::RequestReady(request)) => Ok((**request).clone()),
+        other => Err(format!("no request ready: {other:?}")),
+    }
+}
+
+/// Parses one receive command through the real wire machine.
+///
+/// The request is built by `ReceivePack` from the very bytes Git was sent, so
+/// the ref names our encoder emits are the ones Git parsed, not ones this test
+/// retyped.
+fn request_from(payload: &[u8]) -> ReceiveRequest {
+    let context = ReceiveContext::new(
+        GitObjectFormat::Sha1,
+        Capabilities::parse_v1(b"report-status delete-refs", &WireLimits::default())
+            .expect("server capabilities"),
+        ReceiveLimits::default(),
+        SignedPushProfile::Refuse,
+    )
+    .expect("receive context");
+    let mut machine = ReceivePack::new(context).expect("machine");
+
+    let (packets, _after) = read_until_flush(payload, 0);
+    for packet in packets {
+        machine
+            .push_packet(Packet::Data(packet))
+            .expect("the payload Git accepted must parse here too");
+    }
+    let transition = machine.push_packet(Packet::Flush).expect("command flush");
+    let Some(ReceiveEvent::RequestReady(request)) = transition.events.first() else {
+        panic!("the command flush must expose a parsed request");
+    };
+    (**request).clone()
+}
+
+/// Our report-status bytes for a verdict Git already reached.
+fn ours(payload: &[u8], status: ReceiveCommandStatus) -> Vec<Vec<u8>> {
+    let request = request_from(payload);
+    let packets = report_status(
+        &request,
+        UnpackStatus::Ok,
+        &[status],
+        &ReceiveLimits::default(),
+    )
+    .expect("report-status encodes");
+    let bytes = encode_packets(&packets, &WireLimits::default()).expect("report-status packets");
+    let (lines, _end) = read_until_flush(&bytes, 0);
+    lines
+}
+
+enum Verdict {
+    Match,
+    AcceptedDivergence(&'static str),
+    Defect(String),
+}
+
+impl Verdict {
+    fn render(&self) -> String {
+        match self {
+            Self::Match => "match".to_owned(),
+            Self::AcceptedDivergence(rationale) => {
+                format!("accepted-divergence-with-rationale:{rationale}")
+            }
+            Self::Defect(detail) => format!("defect:{detail}"),
+        }
+    }
+}
+
+fn show(line: &[u8]) -> String {
+    String::from_utf8_lossy(line).trim_end().to_owned()
+}
+
+fn compare_lines(oracle: &[u8], ours: &[u8], what: &str) -> Verdict {
+    if oracle == ours {
+        Verdict::Match
+    } else {
+        Verdict::Defect(format!(
+            "{what}: oracle {:?} vs ours {:?}",
+            show(oracle),
+            show(ours)
+        ))
+    }
+}
+
+fn corpus_dir() -> PathBuf {
+    PathBuf::from(
+        env::var(CORPUS_ENV).unwrap_or_else(|_| panic!("{CORPUS_ENV} must name the oracle corpus")),
+    )
+}
+
+/// Compares Git's report-status with ours, for the verdicts Git reached.
+#[test]
+#[ignore = "phase 2 of receivepack_push_differential.sh"]
+fn our_report_status_frames_what_git_frames() {
+    let corpus = corpus_dir();
+    let output = PathBuf::from(
+        env::var(OUTPUT_ENV)
+            .unwrap_or_else(|_| panic!("{OUTPUT_ENV} must name an output directory")),
+    );
+    fs::create_dir_all(&output).expect("output directory");
+
+    let mut cells: Vec<(&str, Verdict)> = Vec::new();
+
+    let accepted_payload = fs::read(corpus.join("push-accepted.pkt")).expect("accepted payload");
+    let refused_payload = fs::read(corpus.join("push-refused.pkt")).expect("refused payload");
+    let accepted_response =
+        fs::read(corpus.join("oracle-accepted.bin")).expect("oracle accepted response");
+    let refused_response =
+        fs::read(corpus.join("oracle-refused.bin")).expect("oracle refused response");
+
+    let oracle_accepted = report_section(&accepted_response);
+    let oracle_refused = report_section(&refused_response);
+
+    // The load-bearing precondition: Git must actually have answered. A silent
+    // empty section is how the shell-built-payload bug hid itself.
+    cells.push((
+        "oracle_answered_both_pushes",
+        if oracle_accepted.len() == 2 && oracle_refused.len() == 2 {
+            Verdict::Match
+        } else {
+            Verdict::Defect(format!(
+                "expected two report lines per push, got {} and {}",
+                oracle_accepted.len(),
+                oracle_refused.len()
+            ))
+        },
+    ));
+    // And Git must have reached *different* verdicts, or the corpus is testing
+    // one path twice.
+    cells.push((
+        "oracle_reached_both_verdicts",
+        if oracle_accepted.get(1).map(|line| line.starts_with(b"ok ")) == Some(true)
+            && oracle_refused.get(1).map(|line| line.starts_with(b"ng ")) == Some(true)
+        {
+            Verdict::Match
+        } else {
+            Verdict::Defect(format!(
+                "expected one ok and one ng, got {:?} and {:?}",
+                oracle_accepted.get(1).map(|line| show(line)),
+                oracle_refused.get(1).map(|line| show(line))
+            ))
+        },
+    ));
+
+    if matches!(cells[0].1, Verdict::Defect(_)) || matches!(cells[1].1, Verdict::Defect(_)) {
+        write_verdict(&output, &cells);
+        panic!("the oracle transcripts are unusable; see verdict.tsv");
+    }
+
+    let ours_accepted = ours(&accepted_payload, ReceiveCommandStatus::Ok);
+    let ours_refused = ours(
+        &refused_payload,
+        ReceiveCommandStatus::Rejected {
+            // The verdict is Git's; only the wording is ours, and the wording
+            // is classified below rather than compared.
+            message: b"stale info".to_vec(),
+        },
+    );
+    fs::write(
+        &output.join("fgit-accepted.txt"),
+        oracle_accepted
+            .iter()
+            .chain(ours_accepted.iter())
+            .map(|line| show(line) + "\n")
+            .collect::<String>(),
+    )
+    .ok();
+
+    cells.push((
+        "unpack_line",
+        compare_lines(&oracle_accepted[0], &ours_accepted[0], "unpack line"),
+    ));
+    cells.push((
+        "accepted_command_line",
+        compare_lines(
+            &oracle_accepted[1],
+            &ours_accepted[1],
+            "accepted command line",
+        ),
+    ));
+
+    // The refusal: the `ng <ref> ` prefix is protocol and must match; the
+    // reason text after it is each server's own and is classified.
+    let oracle_ng = &oracle_refused[1];
+    let ours_ng = &ours_refused[1];
+    let prefix = format!("ng {REFUSED_REF} ").into_bytes();
+    cells.push((
+        "refused_command_prefix",
+        if oracle_ng.starts_with(&prefix) && ours_ng.starts_with(&prefix) {
+            Verdict::Match
+        } else {
+            Verdict::Defect(format!(
+                "ng prefix: oracle {:?} vs ours {:?}",
+                show(oracle_ng),
+                show(ours_ng)
+            ))
+        },
+    ));
+    cells.push((
+        "refusal_reason_text",
+        if oracle_ng == ours_ng {
+            Verdict::Defect(
+                "our refusal text is byte-identical to Git's, which would mean copying its wording rather than reporting our own"
+                    .to_owned(),
+            )
+        } else {
+            Verdict::AcceptedDivergence(
+                "reason-text-is-server-specific;Git-says-incorrect-old-value-provided-and-fgit-says-stale-info",
+            )
+        },
+    ));
+    cells.push((
+        "unpack_line_on_refusal",
+        compare_lines(
+            &oracle_refused[0],
+            &ours_refused[0],
+            "unpack line on a refused push",
+        ),
+    ));
+
+    // ---- the measured divergence ----------------------------------------
+    // Both sides observed: Git answers this push, our machine refuses to parse
+    // it. Recorded as a divergence rather than accommodated, because widening
+    // our parser to match would be a protocol decision its owner should make,
+    // and narrowing the corpus to avoid the case would hide it.
+    let unnegotiated_payload =
+        fs::read(corpus.join("push-unnegotiated.pkt")).expect("unnegotiated payload");
+    let unnegotiated_response =
+        fs::read(corpus.join("oracle-unnegotiated.bin")).expect("oracle unnegotiated response");
+    let oracle_unnegotiated = report_section(&unnegotiated_response);
+    let ours_unnegotiated = try_request_from(&unnegotiated_payload);
+
+    cells.push((
+        "delete_without_negotiated_capability",
+        match (oracle_unnegotiated.len(), &ours_unnegotiated) {
+            (2, Err(reason)) if reason.contains("DeleteRefsNotNegotiated") => {
+                Verdict::AcceptedDivergence(
+                    "fgit-is-STRICTER-than-Git-here;Git-2.54.0-accepts-a-delete-whose-client-omitted-delete-refs-while-fgit-refuses-DeleteRefsNotNegotiated;recorded-for-the-wire-owner-not-silently-widened",
+                )
+            }
+            (2, Ok(_)) => Verdict::Defect(
+                "our machine now accepts a delete without a negotiated delete-refs; the recorded divergence is stale and this cell must be re-decided"
+                    .to_owned(),
+            ),
+            (count, _) => Verdict::Defect(format!(
+                "the oracle did not answer the unnegotiated push: {count} report lines"
+            )),
+        },
+    ));
+
+    write_verdict(&output, &cells);
+
+    let defects: Vec<&str> = cells
+        .iter()
+        .filter(|(_, verdict)| matches!(verdict, Verdict::Defect(_)))
+        .map(|(name, _)| *name)
+        .collect();
+    assert!(
+        defects.is_empty(),
+        "report-status diverges from pinned Git in: {defects:?}"
+    );
+    assert!(
+        cells.len() >= 8,
+        "only {} cells were classified",
+        cells.len()
+    );
+}
+
+fn write_verdict(output: &Path, cells: &[(&str, Verdict)]) {
+    let mut rendered = String::new();
+    for (name, verdict) in cells {
+        rendered.push_str(name);
+        rendered.push('=');
+        rendered.push_str(&verdict.render());
+        rendered.push('\n');
+    }
+    fs::write(output.join("verdict.tsv"), rendered).expect("write verdict");
+}
+
+// ---------------------------------------------------------------------------
+// Guards that need no oracle
+// ---------------------------------------------------------------------------
+
+/// The payload builder emits a NUL, and the wire machine reads the ref name we
+/// meant rather than one fused with the capability list.
+///
+/// This is the bug that made the first shell-built corpus useless, caught here
+/// so it cannot come back silently. It needs no oracle and therefore runs on
+/// every ordinary `cargo test`.
+#[test]
+fn a_built_push_payload_keeps_its_capability_nul() {
+    let payload = delete_push(
+        "9a424f83631ce6caa64d60bf266d58bc8a4ed8a5",
+        "refs/heads/doomed",
+    );
+    assert!(payload.contains(&0), "the payload must carry a NUL");
+
+    let request = request_from(&payload);
+    assert_eq!(
+        request.commands.len(),
+        1,
+        "one command line must parse to one command"
+    );
+    assert_eq!(
+        request.commands[0].ref_name, b"refs/heads/doomed",
+        "the ref name must not absorb the capability section"
+    );
+    assert!(
+        request.has_capability(b"report-status"),
+        "the capabilities after the NUL must be read as capabilities"
+    );
+}
+
+/// The comparator reports a defect when the two sides disagree.
+///
+/// Every comparison cell above is expected to report `match`, which is exactly
+/// the outcome that needs evidence the comparator can say something else.
+#[test]
+fn the_comparator_reports_a_defect_on_disagreement() {
+    assert!(matches!(
+        compare_lines(b"ok refs/heads/a\n", b"ok refs/heads/b\n", "probe"),
+        Verdict::Defect(_)
+    ));
+    assert!(matches!(
+        compare_lines(b"ok refs/heads/a\n", b"ok refs/heads/a\n", "probe"),
+        Verdict::Match
+    ));
+}
