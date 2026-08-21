@@ -71,21 +71,21 @@ fge_step campaign-shape "campaign: $cr_tests functions, $cr_armed armed fault si
 fge_phase action
 
 fge_run chronicle-crash-matrix \
-  cargo test --locked -p fgit-chronicle --test crash_matrix_publication
+  cargo test --locked -p fgit-chronicle --test crash_matrix_publication || true
 cr_matrix_exit=$FGE_LAST_EXIT
 
 # The pre-existing chronicle suites must keep passing alongside the new one: a
 # campaign that breaks the crate's own evidence is not verification.
 fge_run chronicle-publication-invariants \
-  cargo test --locked -p fgit-chronicle --test publication_invariants
+  cargo test --locked -p fgit-chronicle --test publication_invariants || true
 cr_invariants_exit=$FGE_LAST_EXIT
 
 fge_run chronicle-publication-race \
-  cargo test --locked -p fgit-chronicle --test publication_race
+  cargo test --locked -p fgit-chronicle --test publication_race || true
 cr_race_exit=$FGE_LAST_EXIT
 
 fge_run chronicle-recovery-rules \
-  cargo test --locked -p fgit-chronicle --test recovery_rules
+  cargo test --locked -p fgit-chronicle --test recovery_rules || true
 cr_recovery_exit=$FGE_LAST_EXIT
 
 fge_phase assert

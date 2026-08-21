@@ -45,19 +45,19 @@ fge_phase action
 
 fge_run txn-lanes-equivalence \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
-    cargo test --locked -p fgit-txn --test lanes_equivalence
+    cargo test --locked -p fgit-txn --test lanes_equivalence || true
 le_equivalence_exit=$FGE_LAST_EXIT
 
 fge_run txn-lanes-economics \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
-    cargo test --locked -p fgit-txn --test lanes_economics
+    cargo test --locked -p fgit-txn --test lanes_economics || true
 le_economics_exit=$FGE_LAST_EXIT
 
 # fg014a's determinism suite is the foundation this campaign extends. If it
 # regresses, the extension is resting on a broken anchor.
 fge_run txn-combiner-determinism \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
-    cargo test --locked -p fgit-txn --test combiner_determinism
+    cargo test --locked -p fgit-txn --test combiner_determinism || true
 le_determinism_exit=$FGE_LAST_EXIT
 
 fge_phase assert

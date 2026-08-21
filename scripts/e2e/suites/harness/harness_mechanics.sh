@@ -29,7 +29,7 @@ printf 'hello\n' >"$odd/file one.txt"
 # ---------------------------------------------------------------------------
 fge_phase action
 
-fge_run true-command true
+fge_run true-command true || true
 rc_true=$FGE_LAST_EXIT
 
 fge_run false-command false || true

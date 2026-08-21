@@ -107,14 +107,14 @@ fge_phase action
 # silently falling back, so this lane cannot report a campaign it did not run.
 fge_run normal-form-corpus \
   env RCH_CARGO_WRAPPER_BYPASS=1 FG008B_CORPUS=campaign \
-  cargo test --locked -p fgit-txn --test normal_form_corpus
+  cargo test --locked -p fgit-txn --test normal_form_corpus || true
 nf_corpus_exit=$FGE_LAST_EXIT
 
 # The crate's existing evidence must keep passing alongside the new corpus: a
 # campaign that breaks the crate it verifies is not verification.
 fge_run txn-combiner-determinism \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
-  cargo test --locked -p fgit-txn --test combiner_determinism
+  cargo test --locked -p fgit-txn --test combiner_determinism || true
 nf_combiner_exit=$FGE_LAST_EXIT
 
 fge_phase assert

@@ -95,28 +95,28 @@ fge_phase action
 
 # ---------------------------------------------------------------- the codec
 fge_run codec-goldens \
-  cargo test --locked -p fgit-codec --test goldens
+  cargo test --locked -p fgit-codec --test goldens || true
 ca_goldens_exit=$FGE_LAST_EXIT
 
 fge_run codec-mutation \
-  cargo test --locked -p fgit-codec --test mutation
+  cargo test --locked -p fgit-codec --test mutation || true
 ca_mutation_exit=$FGE_LAST_EXIT
 
 fge_run codec-roundtrip \
-  cargo test --locked -p fgit-codec --test roundtrip
+  cargo test --locked -p fgit-codec --test roundtrip || true
 ca_roundtrip_exit=$FGE_LAST_EXIT
 
 fge_run codec-refusals \
-  cargo test --locked -p fgit-codec --test refusals
+  cargo test --locked -p fgit-codec --test refusals || true
 ca_refusals_exit=$FGE_LAST_EXIT
 
 fge_run codec-bridge \
-  cargo test --locked -p fgit-codec --test bridge
+  cargo test --locked -p fgit-codec --test bridge || true
 ca_bridge_exit=$FGE_LAST_EXIT
 
 # ------------------------------------------------------- independent verifier
 fge_run verifier-corpus \
-  cargo test --locked -p fgit-codec-verify
+  cargo test --locked -p fgit-codec-verify || true
 ca_verifier_exit=$FGE_LAST_EXIT
 
 # The verifier must not have grown a dependency on the crate it checks. That is

@@ -95,31 +95,31 @@ fge_phase action
 export FG005B_FS_STRICT=1
 
 fge_run sqlite-crash-equivalence \
-  cargo test --locked -p fgit-authority-fsqlite --test crash_equivalence
+  cargo test --locked -p fgit-authority-fsqlite --test crash_equivalence || true
 sq_campaign_exit=$FGE_LAST_EXIT
 
 # The profile's own evidence must keep passing alongside the new campaign: a
 # campaign that breaks the crate it verifies is not verification.
 fge_run sqlite-engine-conformance \
-  cargo test --locked -p fgit-authority-fsqlite --test engine_conformance
+  cargo test --locked -p fgit-authority-fsqlite --test engine_conformance || true
 sq_conformance_exit=$FGE_LAST_EXIT
 
 fge_run sqlite-lifecycle \
-  cargo test --locked -p fgit-authority-fsqlite --test lifecycle
+  cargo test --locked -p fgit-authority-fsqlite --test lifecycle || true
 sq_lifecycle_exit=$FGE_LAST_EXIT
 
 # The retry law derived from the specification rather than from the code. This
 # is the independent counterpart to the crate's own retry_law.rs, which is
 # implementer evidence and cannot catch a misreading of the clause.
 fge_run sqlite-retry-law-independent \
-  cargo test --locked -p fgit-authority-fsqlite --test retry_law_independent
+  cargo test --locked -p fgit-authority-fsqlite --test retry_law_independent || true
 sq_retry_exit=$FGE_LAST_EXIT
 
 # The concurrency envelope derived from §3.5 rather than from the constant the
 # crate's own tests assert against. An off-by-one in
 # MAX_ADMITTED_AUTOCOMMIT_WRITERS is invisible to a test that reads it.
 fge_run sqlite-envelope-law-independent \
-  cargo test --locked -p fgit-authority-fsqlite --test envelope_law_independent
+  cargo test --locked -p fgit-authority-fsqlite --test envelope_law_independent || true
 sq_envelope_exit=$FGE_LAST_EXIT
 
 fge_phase assert

@@ -49,7 +49,7 @@ fge_assert_file FG-067-E2E-002 "$BH_REPO/crates/fgit-benchmark/src/main.rs" \
 
 fge_phase action
 fge_run benchmark-harness-self-test \
-  env RCH_CARGO_WRAPPER_BYPASS=1 cargo run -p fgit-benchmark -- self-test --out "$artifact_dir"
+  env RCH_CARGO_WRAPPER_BYPASS=1 cargo run -p fgit-benchmark -- self-test --out "$artifact_dir" || true
 
 fge_phase assert
 fge_assert_exit FG-067-E2E-003 0 "$FGE_LAST_EXIT" \

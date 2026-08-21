@@ -41,7 +41,7 @@ main() {
     'the divergence is bound to the pinned Git oracle observation'
   fge_capture write-epoch-zero-body bash -c \
     'printf "%s\\n" "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904" "author Epoch Zero <epoch@example.com> 0 +0000" "committer Epoch Zero <epoch@example.com> 0 +0000" "" "message" > "$1"' \
-    _ "${epoch_body}"
+    _ "${epoch_body}" || true
   fge_assert_exit 'FG-015C-E2E-004' 0 "${FGE_LAST_EXIT}" \
     'the exact epoch-zero commit fixture is retained for the oracle probe'
   fge_assert_file 'FG-015C-E2E-005' "${epoch_body}" \

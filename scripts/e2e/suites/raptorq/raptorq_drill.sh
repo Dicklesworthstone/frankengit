@@ -39,14 +39,14 @@ fge_phase action
 
 fge_run raptorq-adversarial \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
-    cargo test --locked -p fgit-raptorq --test raptorq_adversarial
+    cargo test --locked -p fgit-raptorq --test raptorq_adversarial || true
 rq_adversarial_exit=$FGE_LAST_EXIT
 
 # fg024a's own inline tests reach private state this campaign cannot. They are
 # the implementer's half of the coverage and must stay green beside it.
 fge_run raptorq-implementer-tests \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
-    cargo test --locked -p fgit-raptorq --lib
+    cargo test --locked -p fgit-raptorq --lib || true
 rq_lib_exit=$FGE_LAST_EXIT
 
 fge_phase assert

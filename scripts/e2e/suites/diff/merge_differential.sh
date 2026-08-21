@@ -398,11 +398,11 @@ main() {
     return 0
   fi
   fge_capture configure-oracle-user "${ORACLE}" run "${PIN_ID}" "${run_directory}" repo -- \
-    config user.name 'FrankenGit Differential Oracle'
+    config user.name 'FrankenGit Differential Oracle' || true
   fge_assert_exit FG-044C-ORACLE-005 0 "${FGE_LAST_EXIT}" \
     'the generated history has deterministic oracle identity metadata'
   fge_capture configure-oracle-email "${ORACLE}" run "${PIN_ID}" "${run_directory}" repo -- \
-    config user.email 'diff-oracle@invalid.example'
+    config user.email 'diff-oracle@invalid.example' || true
   fge_assert_exit FG-044C-ORACLE-006 0 "${FGE_LAST_EXIT}" \
     'the generated history has deterministic oracle email metadata'
 

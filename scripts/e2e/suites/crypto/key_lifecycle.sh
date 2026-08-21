@@ -60,27 +60,27 @@ fge_phase action
 
 fge_run crypto-keyed-vectors \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
-    cargo test --locked -p fgit-crypto --test keyed_vectors
+    cargo test --locked -p fgit-crypto --test keyed_vectors || true
 kl_vectors_exit=$FGE_LAST_EXIT
 
 fge_run crypto-key-purposes \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
-    cargo test --locked -p fgit-crypto --test key_purposes
+    cargo test --locked -p fgit-crypto --test key_purposes || true
 kl_purposes_exit=$FGE_LAST_EXIT
 
 fge_run crypto-key-lifecycle \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
-    cargo test --locked -p fgit-crypto --test key_lifecycle
+    cargo test --locked -p fgit-crypto --test key_lifecycle || true
 kl_lifecycle_exit=$FGE_LAST_EXIT
 
 fge_run crypto-signing \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
-    cargo test --locked -p fgit-crypto --test signing
+    cargo test --locked -p fgit-crypto --test signing || true
 kl_signing_exit=$FGE_LAST_EXIT
 
 fge_run crypto-sealing \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
-    cargo test --locked -p fgit-crypto --test sealing
+    cargo test --locked -p fgit-crypto --test sealing || true
 kl_sealing_exit=$FGE_LAST_EXIT
 
 # The compile-time half of the purpose separation lives in compile_fail
@@ -88,7 +88,7 @@ kl_sealing_exit=$FGE_LAST_EXIT
 # "cross-purpose use is unrepresentable" untested by this suite.
 fge_run crypto-doctests \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
-    cargo test --locked -p fgit-crypto --doc
+    cargo test --locked -p fgit-crypto --doc || true
 kl_doctests_exit=$FGE_LAST_EXIT
 
 fge_phase assert
