@@ -47,6 +47,7 @@ fgit-codec = { path = "crates/fgit-codec" }
 fgit-crypto = { path = "crates/fgit-crypto" }
 fgit-deflate = { path = "crates/fgit-deflate" }
 fgit-diff = { path = "crates/fgit-diff" }
+fgit-evidence = { path = "crates/fgit-evidence" }
 fgit-doc = { path = "crates/fgit-doc" }
 fgit-git-object = { path = "crates/fgit-git-object" }
 fgit-lab = { path = "crates/fgit-lab" }

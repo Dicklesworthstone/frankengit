@@ -19,6 +19,9 @@ fgit-codec-verify	L0	none	canonical-codec	active
 fgit-crypto	L1	L0,L1	crypto	active
 fgit-deflate	L1	L0,L1	pack	active
 fgit-diff	L2	L0,L1,L2	git-core	active
+# GoldLotus FG-055 ruling (bead comment 1364): evidence records are
+# crypto-identified (L1) and codec-framed (L2) bodies, so this crate is L2.
+fgit-evidence	L2	L0,L1,L2	claims-evidence	active
 fgit-doc	L3	L0,L1,L2	document-intelligence	active
 fgit-git-object	L1	L0,L1	git-core	active
 fgit-lab	L2	L0,L1,L2	concurrency	active
