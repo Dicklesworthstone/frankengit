@@ -823,3 +823,128 @@ fn base_carried_and_staged_bodies_are_distinguishable() {
         OverlayRoot::of(&staged_overlay)
     );
 }
+
+// ---------------------------------------------------------------------------
+// claims that had no test behind them
+// ---------------------------------------------------------------------------
+
+/// Folding drops bodies no surviving entry names.
+///
+/// This backs the sparseness claim directly: without it an overlay grows with
+/// edit *history* rather than edit *result*, so a file rewritten ten times
+/// would retain ten bodies forever. The property was asserted in the module
+/// docs and by `evaluate` calling `collect_content`, but nothing tested it.
+#[test]
+fn superseded_bodies_are_dropped_not_retained() {
+    let base = wide_base(10);
+    let mut log = IntentLog::new();
+    for index in 0..10_u32 {
+        log.push(write(b"a.txt", format!("revision {index}").as_bytes()));
+    }
+
+    let (overlay, _) = log.evaluate(&base);
+
+    assert_eq!(overlay.stats().entry_count, 1, "one surviving path");
+    assert_eq!(
+        overlay.stats().body_count,
+        1,
+        "ten writes to one path retain exactly one body, not ten"
+    );
+    let surviving = match overlay.lookup(&path(b"a.txt")) {
+        OverlayLookup::Present(entry) => overlay.body(entry).unwrap().to_vec(),
+        other => panic!("expected an entry, got {other:?}"),
+    };
+    assert_eq!(surviving, b"revision 9", "and it is the final one");
+}
+
+/// Deleting a path also releases the body it used to name.
+#[test]
+fn a_deleted_paths_body_is_released() {
+    let base = wide_base(10);
+    let mut log = IntentLog::new();
+    log.push(write(b"src/f1", b"a body large enough to notice"));
+    log.push(TreeEditIntent::Delete {
+        path: path(b"src/f1"),
+    });
+
+    let (overlay, _) = log.evaluate(&base);
+    assert_eq!(
+        overlay.stats().body_count,
+        0,
+        "the whiteout names no body, so nothing is retained"
+    );
+    assert_eq!(overlay.stats().body_bytes, 0);
+}
+
+/// `collect_content` is idempotent and never drops a live body.
+#[test]
+fn collect_content_keeps_referenced_bodies() {
+    let mut overlay = Overlay::new();
+    let live = overlay.intern(b"referenced".to_vec());
+    let orphan = overlay.intern(b"unreferenced".to_vec());
+    overlay.put(
+        path(b"keep.txt"),
+        OverlayEntry::File {
+            content: ContentRef::Overlay(live),
+            mode: FileMode::Regular,
+            class: EntryClass::Content,
+        },
+    );
+    assert_eq!(overlay.stats().body_count, 2, "both bodies are interned");
+
+    overlay.collect_content();
+    assert_eq!(overlay.stats().body_count, 1, "the orphan is dropped");
+    assert_eq!(overlay.content().get(live), Some(&b"referenced"[..]));
+    assert!(overlay.content().get(orphan).is_none());
+
+    overlay.collect_content();
+    assert_eq!(
+        overlay.stats().body_count,
+        1,
+        "collecting again changes nothing"
+    );
+}
+
+/// `FileMode` parses only the two modes TreeFS will create, and refuses the
+/// rest rather than coercing them.
+#[test]
+fn file_mode_parses_only_what_treefs_creates() {
+    assert_eq!(
+        FileMode::from_octal_bytes(b"100644"),
+        Some(FileMode::Regular)
+    );
+    assert_eq!(
+        FileMode::from_octal_bytes(b"100755"),
+        Some(FileMode::Executable)
+    );
+    assert_eq!(FileMode::Regular.as_octal_bytes(), b"100644");
+    assert_eq!(FileMode::Executable.as_octal_bytes(), b"100755");
+
+    // Refused: real Git modes TreeFS does not create as file entries, and
+    // non-canonical spellings. Coercing any of these would silently change an
+    // entry's kind.
+    for refused in [
+        &b"120000"[..], // symlink
+        b"160000",      // gitlink
+        b"40000",       // tree
+        b"040000",      // tree, zero-padded
+        b"100664",      // group-writable, not canonical Git
+        b"644",         // short form
+        b"",
+    ] {
+        assert_eq!(
+            FileMode::from_octal_bytes(refused),
+            None,
+            "expected {:?} to be refused",
+            String::from_utf8_lossy(refused)
+        );
+    }
+
+    // Round trip holds for both accepted modes.
+    for mode in [FileMode::Regular, FileMode::Executable] {
+        assert_eq!(
+            FileMode::from_octal_bytes(mode.as_octal_bytes()),
+            Some(mode)
+        );
+    }
+}

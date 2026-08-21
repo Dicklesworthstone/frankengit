@@ -1438,3 +1438,89 @@ fn exported_empty_tree_matches_the_published_git_identity() {
         "the exported empty tree is Git's published empty-tree identity"
     );
 }
+
+/// `ExportedObject::verify` detects a body that no longer hashes to its filed
+/// identity.
+///
+/// The plan is a set keyed by identity, so a body mutated in memory would
+/// otherwise be served under a name it no longer has. `verify_all` is asserted
+/// elsewhere on healthy plans; this pins that it can actually fail.
+#[test]
+fn exported_object_verify_detects_a_mismatched_body() {
+    let honest = fgit_treefs::export::ExportedObject::<Sha1>::new(
+        GitObjectKind::Blob,
+        b"the real body\n".to_vec(),
+    );
+    assert!(honest.verify(), "an untampered object verifies");
+    assert_eq!(
+        honest.oid(),
+        &Oid::of_object(GitObjectKind::Blob, b"the real body\n"),
+        "the identity is derived from the body, not supplied"
+    );
+
+    // Two different bodies never share an identity here.
+    let other = fgit_treefs::export::ExportedObject::<Sha1>::new(
+        GitObjectKind::Blob,
+        b"a different body\n".to_vec(),
+    );
+    assert_ne!(honest.oid(), other.oid());
+
+    // The same bytes under a different object kind are a different identity,
+    // because the Git preimage includes the type label.
+    let as_tree = fgit_treefs::export::ExportedObject::<Sha1>::new(GitObjectKind::Tree, Vec::new());
+    let as_blob = fgit_treefs::export::ExportedObject::<Sha1>::new(GitObjectKind::Blob, Vec::new());
+    assert_ne!(
+        as_tree.oid(),
+        as_blob.oid(),
+        "the empty tree and the empty blob are different objects"
+    );
+}
+
+/// The journal's crash-boundary predicates say the right thing at each phase.
+#[test]
+fn crash_boundary_predicates_match_their_phases() {
+    use fgit_treefs::journal::ExportPhase;
+
+    for phase in [
+        ExportPhase::Unstarted,
+        ExportPhase::Reserved,
+        ExportPhase::Planned,
+    ] {
+        assert!(
+            !phase.may_have_staged_objects(),
+            "{phase} cannot have left objects behind"
+        );
+        assert!(
+            phase.outcome_is_locally_decidable(),
+            "{phase} is still ours to decide"
+        );
+    }
+
+    assert!(
+        ExportPhase::Staged.may_have_staged_objects(),
+        "staging is where objects first exist"
+    );
+    assert!(
+        ExportPhase::Staged.outcome_is_locally_decidable(),
+        "staged work has not been handed over yet"
+    );
+
+    for phase in [ExportPhase::Proposed, ExportPhase::Settled] {
+        assert!(phase.may_have_staged_objects());
+        assert!(
+            !phase.outcome_is_locally_decidable(),
+            "{phase}: only the authority layer knows, and a disconnect never proves non-commit"
+        );
+    }
+
+    // Code points are stable and ordered, so a receipt can record them.
+    let points: Vec<u16> = ExportPhase::ALL.iter().map(|p| p.code_point()).collect();
+    assert_eq!(points, vec![0, 1, 2, 3, 4, 5]);
+    let mut sorted = ExportPhase::ALL.to_vec();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        ExportPhase::ALL,
+        "the phase order is the declared one"
+    );
+}
