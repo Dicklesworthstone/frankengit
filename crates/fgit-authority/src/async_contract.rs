@@ -51,6 +51,50 @@ use crate::vocabulary::{
 };
 use fgit_types::HeadGeneration;
 
+/// Proof that an authenticated stream walk found no existing terminal decision,
+/// bound to the head token the walk was performed against.
+///
+/// # Why this type exists
+///
+/// [`AsyncAuthorityStore::publish_head_with_outcomes`] is sound only when the
+/// caller's duplicate check was performed against the same head token the CAS
+/// conditions on. That is a rule, and *"the caller is supposed to have
+/// checked"* is exactly the kind of rule this project refuses to rely on — the
+/// §5.2 defect that produced this whole design existed because a check read
+/// something the CAS token did not cover.
+///
+/// So the obligation is structural instead. A caller cannot invoke the atomic
+/// publish without a witness, and a witness cannot be built except by the walk
+/// that mints it. Forgetting the check becomes a compile error rather than a
+/// race nobody sees until it costs a duplicate terminal decision.
+///
+/// The field is private and there is no public constructor: only this crate's
+/// duplicate-detection walk can produce one, and the primitive checks that
+/// [`Self::bound_to`] equals the `expected` token it was handed. A witness
+/// minted against one head cannot be replayed against another.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct DuplicateAbsenceWitness {
+    bound_to: AuthorityVersionToken,
+}
+
+impl DuplicateAbsenceWitness {
+    /// Mint a witness for a walk performed against `bound_to`.
+    ///
+    /// Deliberately `pub(crate)`: minting belongs to the duplicate-detection
+    /// walk, not to callers. A public constructor would make the witness a
+    /// token anyone can forge, which is the documented obligation again wearing
+    /// a type.
+    pub(crate) const fn minted_against(bound_to: AuthorityVersionToken) -> Self {
+        Self { bound_to }
+    }
+
+    /// The head token this walk was performed against.
+    #[must_use]
+    pub const fn bound_to(&self) -> AuthorityVersionToken {
+        self.bound_to
+    }
+}
+
 /// The production authority contract.
 ///
 /// Every method mirrors its [`AuthorityStore`] counterpart exactly, including
@@ -193,6 +237,12 @@ pub trait AsyncAuthorityStore: Sync {
     /// calling this silently reintroduces the window**, because the token it
     /// passes would no longer be the one its check was performed against.
     ///
+    /// That is why `witness` exists. An implementation MUST refuse when
+    /// `witness.bound_to() != expected`: the witness makes the binding
+    /// checkable rather than assumed, so the ordering above is enforced by the
+    /// type system and one equality check instead of by a caller remembering
+    /// this paragraph.
+    ///
     /// The defect was never that detection lived upstream — it was that
     /// detection read a derived index the CAS token does not cover. Requirement
     /// 2 of the ruling is about *what is read*, not about *where the reading
@@ -211,6 +261,7 @@ pub trait AsyncAuthorityStore: Sync {
         new_generation: HeadGeneration,
         new_body: &[u8],
         outcomes: &[(ImmutableKey, Vec<u8>)],
+        witness: &DuplicateAbsenceWitness,
     ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send;
 
     /// Confirm that this store issued `receipt` exactly as presented.

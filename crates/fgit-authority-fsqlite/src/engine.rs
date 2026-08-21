@@ -44,8 +44,8 @@
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityRefusal,
-    AuthorityVersionToken, CasOutcome, HeadGeneration, HeadInit, HeadKey, HeadRead,
-    HeadReadReceipt, ImmutableKey, ImmutableRead, PutOutcome, StoreInstanceId,
+    AuthorityVersionToken, CasOutcome, DuplicateAbsenceWitness, HeadGeneration, HeadInit, HeadKey,
+    HeadRead, HeadReadReceipt, ImmutableKey, ImmutableRead, PutOutcome, StoreInstanceId,
 };
 use fsqlite::{AsyncConnection, FrankenError, Row, SqliteValue};
 use fsqlite_types::cx::{Cx, cap};
@@ -805,11 +805,20 @@ impl FsqliteAuthorityStore {
         new_generation: HeadGeneration,
         new_body: &[u8],
         outcomes: &[(ImmutableKey, Vec<u8>)],
+        witness: &DuplicateAbsenceWitness,
     ) -> Result<CasOutcome, EngineError>
     where
         Caps: cap::SubsetOf<cap::All>,
         cap::None: cap::SubsetOf<Caps>,
     {
+        // The witness must be bound to the token this CAS conditions on. One
+        // minted against a different head proves nothing about this one, and
+        // accepting it would restore exactly the window the witness exists to
+        // close: a duplicate check performed against state the CAS does not
+        // cover. Refused before anything is written.
+        if witness.bound_to() != expected {
+            return Err(EngineError::Contract(AuthorityRefusal::TokenKeyMismatch));
+        }
         self.admit_body(new_body)?;
         for (_, bytes) in outcomes {
             self.admit_body(bytes)?;
@@ -1081,6 +1090,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         new_generation: HeadGeneration,
         new_body: &[u8],
         outcomes: &[(ImmutableKey, Vec<u8>)],
+        witness: &DuplicateAbsenceWitness,
     ) -> Result<CasOutcome, AuthorityFailure> {
         Self::publish_head_with_outcomes(
             self,
@@ -1090,6 +1100,7 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
             new_generation,
             new_body,
             outcomes,
+            witness,
         )
         .await
         .map_err(EngineError::into_failure)

@@ -82,7 +82,7 @@ pub use crate::admission::{
     ADMISSION_KEY_PREFIX, AdmissionInstant, AdmissionOutcome, AdmissionReceiptBody, admission_key,
     read_admission, record_admission,
 };
-pub use crate::async_contract::AsyncAuthorityStore;
+pub use crate::async_contract::{AsyncAuthorityStore, DuplicateAbsenceWitness};
 pub use crate::contract::{
     AuthorityLimits, AuthorityStore, CasResolution, FaultableAuthorityStore, PutResolution,
     ambiguity_of, refusal_of, resolve_ambiguous_cas, resolve_ambiguous_put,
