@@ -392,12 +392,12 @@ impl ImmutableObjectFabric for ReferenceMemoryFabric {
 }
 
 impl RuntimeImmutableObjectFabric for ReferenceMemoryFabric {
-    fn open_verified_stream(
-        &self,
-        cx: &Cx,
+    fn open_verified_stream<'a>(
+        &'a self,
+        cx: &'a Cx,
         identity: GitOid,
         budget: VerifiedStreamBudget,
-    ) -> std::future::Ready<Outcome<VerifiedObjectStream, StoreRefusal>> {
+    ) -> impl std::future::Future<Output = Outcome<VerifiedObjectStream, StoreRefusal>> + 'a {
         if let Some(outcome) = checkpoint_outcome(cx) {
             return std::future::ready(outcome);
         }
