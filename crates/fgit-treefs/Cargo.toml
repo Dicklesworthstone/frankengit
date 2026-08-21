@@ -1,0 +1,16 @@
+[package]
+name = "fgit-treefs"
+version = "0.1.0"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+fgit-crypto.workspace = true
+fgit-git-object.workspace = true
+fgit-resource.workspace = true
+fgit-types.workspace = true
+
+[lints]
+workspace = true
