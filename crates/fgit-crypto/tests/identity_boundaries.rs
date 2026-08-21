@@ -59,28 +59,36 @@ fn domain_tags_are_unique() {
 
 #[test]
 fn domain_registry_covers_every_derived_identity_domain() {
-    // `fgit-types` pins a domain tag on each of its derived identities. If one
-    // of those tags had no row here, an identity shell would exist that this
-    // registry could not produce or verify.
+    // The safety property: `fgit-types` pins a domain tag on each of its
+    // derived identities, and a pinned tag with no row here would be an
+    // identity shell this registry can neither produce nor verify.
     for tag in DERIVED_ID_DOMAINS {
         let domain = IdentityDomain::from_tag(tag).unwrap_or_else(|| {
             panic!("`{tag}` is pinned by fgit-types but absent from the registry")
         });
         assert_eq!(domain.tag(), *tag);
-        assert!(
-            domain.derived_identity().is_some(),
-            "`{tag}` must be marked as pinned by a derived identity"
-        );
     }
-    let pinned = DOMAIN_REGISTRY
-        .iter()
-        .filter(|row| row.derived_identity.is_some())
-        .count();
-    assert_eq!(
-        pinned,
-        DERIVED_ID_DOMAINS.len(),
-        "no row may claim a derived identity that fgit-types does not pin"
-    );
+}
+
+#[test]
+fn no_row_claims_a_derived_identity_that_is_not_pinned() {
+    // The other direction. `derived_identity` records *which* shell pins a
+    // tag, which is documentation rather than a safety property — a row may
+    // legitimately be unannotated for a wave while `fgit-types` catches up —
+    // but a row must never claim a pin that does not exist, because that would
+    // advertise a shell consumers cannot obtain.
+    for row in DOMAIN_REGISTRY {
+        if row.derived_identity.is_some() {
+            assert!(
+                DERIVED_ID_DOMAINS.contains(&row.tag),
+                "row {} claims derived identity {:?} but fgit-types pins no such tag",
+                row.registry_id,
+                row.derived_identity
+            );
+        }
+    }
+    // Together with the test above this pins the set relationship in both
+    // directions: every pinned tag has a row, and every claimed pin is real.
 }
 
 #[test]

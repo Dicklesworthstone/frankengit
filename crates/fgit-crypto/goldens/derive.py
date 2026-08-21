@@ -143,6 +143,8 @@ INTERNAL_SPECS = [
     ("IV-012", "frankengit/merkle-leaf/v1", "frankengit.microsegment", 1, 0, "hex:" + b"record bytes".hex(), "Merkle leaf"),
     ("IV-013", "frankengit/merkle-node/v1", "frankengit.microsegment", 1, 0, "hex:" + b"record bytes".hex(), "Merkle node over identical bytes: must differ from IV-012"),
     ("IV-014", "frankengit/merkle-node/v1", "frankengit.microsegment", 1, 0, "hex:" + ("11" * 32) + ("22" * 32), "Merkle node over two child digests"),
+    ("IV-015", "frankengit/admission-receipt/v1", "frankengit.admission-receipt", 1, 0, "hex:" + b"receipt over a seal id".hex(), "NPC 5.2 admission receipt"),
+    ("IV-016", "frankengit/doc-anchor/v1", "frankengit.doc-anchor", 1, 0, "hex:" + b"anchor preimage".hex(), "plan 28.4 document anchor"),
 ]
 
 

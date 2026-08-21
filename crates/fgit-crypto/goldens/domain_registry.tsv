@@ -27,3 +27,5 @@ id	domain_tag	algorithm	durable_object_row	derived_identity	status
 25	frankengit/ci-artifact/v1	sha256	DUR-007	-	active
 26	frankengit/merkle-leaf/v1	sha256	-	-	active
 27	frankengit/merkle-node/v1	sha256	-	-	active
+28	frankengit/admission-receipt/v1	sha256	-	-	active
+29	frankengit/doc-anchor/v1	sha256	-	-	active
