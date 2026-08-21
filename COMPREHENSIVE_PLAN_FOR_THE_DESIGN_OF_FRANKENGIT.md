@@ -1594,6 +1594,8 @@ Valid bytes may be staged in the immutable object fabric; they become retention 
 
 The registry records present/partial/missing/unsupported behavior, oracle versions, fixtures, accepted deviations, iteration/tie-break/error semantics, and resource refusal. “Works with Git” is not one boolean. Release claims are generated from the executable matrix.
 
+Implementation ownership is explicit in the backlog: FG-097 owns the required-v1 annotated/lightweight tag lifecycle; FG-084 and FG-085 own notes and submodules; FG-095 owns the declared local GitHub-Actions-compatible workflow subset; and FG-098 keeps the post-v1 reflog, LFS-lock, push-certificate, namespace, typed-hook, and broader workflow-compatibility cohort visible without making those rows v1 blockers. FG-090 derives compatibility status from their executable verdicts rather than from issue closure or prose.
+
 ### 18.6 Migration and export
 
 Import/export operates through the pure-Rust engine and verifies round trips against declared upstream Git versions. A migration can preserve Git objects/refs while translating forge state through typed adapters. Unknown or unsupported product semantics are surfaced as reports, not silently dropped.
@@ -2283,6 +2285,8 @@ CI is hostile compute with typed inputs, outputs, capabilities, and obligations.
 
 A workflow is a versioned DAG of jobs/steps, input/output schemas, capabilities, secrets, caches, budgets, cancellation, and evidence requirements. FrankenGit may parse a useful GitHub Actions-compatible YAML subset, but canonical execution lowers it to the native typed graph. Unsupported/ambiguous expressions fail with a registry-scoped diagnostic.
 
+FG-095 owns this as a real execution slice, not merely runner isolation: bounded hostile-input parsing, deterministic lowering, run/job/step identities, Asupersync-owned coordination, runner/effect obligations, check publication, and live crash/cancellation evidence ship together. Broader hosted-workflow compatibility remains a separately selected FG-098 profile and cannot weaken the native graph.
+
 ### 29.2 Local execution and DSR
 
 Repository-owned commands define verification. `.github/workflows` call those commands and are designed for local `act`/DSR execution. Linux lanes may run in local containers/native hosts; macOS and Windows run on registered native machines over authenticated SSH. Hosted Actions may optionally execute an identical lane but is never required for merge, evidence, or release.
@@ -2370,6 +2374,8 @@ Large immutable assets are eligible for registered RaptorQ/replication/tiering p
 
 Every parser/registry receives conformance, resource, tenant, signature/provenance, deletion, and namespace-race tests. Package parsing remains outside repository-head publication code.
 
+FG-060 owns the phase-one immutable artifact/log/release substrate. FG-100 keeps phases two through four as one bounded, subsequent-scope cohort with per-format support cells, so the roadmap retains every adapter without manufacturing one tracker item per registry row.
+
 ### 30.7 Provenance graph
 
 ```text
@@ -2452,6 +2458,8 @@ Example tool groups:
 - publication.
 
 Tool schemas encode capability and refusal types.
+
+FG-096 owns the generated tool registry, server/session lifecycle, public-API/effect-broker adapters, and cross-principal/injection/cancellation campaign. Repository or generated text remains untrusted data: it cannot add tools, widen a capability, request ambient secrets, approve itself, or suppress evidence gates.
 
 ### 31.5 Webhooks
 
@@ -3525,6 +3533,8 @@ Work items carry:
 - negative-evidence links;
 - local lane/DSR target requirements.
 
+Blocking dependencies distinguish delivery readiness from final evidence closure. An implementation item depends on the smallest stable implementation frontier whose API or artifact it consumes; it does not depend on an umbrella epic merely because that epic also owns an independent fault, security, differential, or E2E campaign. The umbrella still closes only after all of its children, and the exact release-suite gate still reaches every required campaign. Every graph rewrite is accepted only if the active graph remains acyclic and the release gate's exact reachable campaign set is unchanged. A non-blocking relationship may document context, but it must never be used to manufacture a larger ready queue when no enforceable close/release gate preserves the omitted prerequisite.
+
 No task may create an empty crate, placeholder “storage” map, foreign-Git fallback, or workflow-only implementation. The public seed backlog is maintained in [`docs/INITIAL_ISSUE_BACKLOG.md`](docs/INITIAL_ISSUE_BACKLOG.md).
 
 ---
@@ -3725,6 +3735,10 @@ Resolve genuine open-source core/client/protocol and hosted-commercial different
 ### D15. Nightly advancement cadence
 
 Pin a dated current nightly for reproducibility; automate candidate advancement locally; require compile/conformance/benchmark/negative-evidence review before updating the pin.
+
+### D16. Tenant and organization economic authority boundary
+
+Before hosted billing implementation, define the canonical tenant/organization authority domain already assumed by §§30.3, 36, and Phase 9. It must not compete with `RepositoryAuthorityHead` for repository truth, use a local FrankenSQLite/projection row or payment provider as authority, or imply cross-domain atomicity. The decision must bind canonical identities/bytes, exact predecessor replacement and anti-rollback, usage-receipt ingestion, pricing/policy epochs, reserve/settle/refund and external-effect obligations, repository-to-organization failure semantics, recovery/export/migration, and the self-hosted no-billing profile. FG-104 owns the decision and its first executable slice in one item; resolving the ADR alone earns no capability claim.
 
 ---
 

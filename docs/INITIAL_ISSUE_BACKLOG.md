@@ -819,10 +819,31 @@ Four further slices came from mining the remaining docs the earlier waves treate
 - **FG-089** deterministic worker-budget calculator shared across render/index/graph/pack/repair/CI batches (franken_markdown inheritance; determinism-across-worker-count is a correctness property);
 - **FG-090** compatibility-ledger generator: generate the Git/API compatibility status and release claims FROM executable differential results (FrankenNetworkX differential-ledger pattern / plan §18.5), so the matrix stops being hand-maintained prose.
 
+## Additional owners found by the full plan/code/dependency audit
+
+These are not a new sequential gate. Each retains its native gate/priority in Beads. Subsequent-scope cohorts stay off the v1 release join unless a selected profile explicitly promotes them.
+
+- **FG-091** exact E2E-suite manifest and `full`/`release` activation; exact required-set equality replaces the false-green minimum-count idea;
+- **FG-092** pure-Rust bounded DEFLATE/inflate decision D4 slice;
+- **FG-093** sqlmodel-frankensqlite projection substrate, with separate owned dependency admission and authority-negative/rebuild semantics;
+- **FG-094** adopted FrankenTUI operator surface, kept distinct from the primary DOM web UI and from the headless agent interface;
+- **FG-095** required-v1 native workflow graph, GitHub-Actions-subset lowering, orchestration, runner/effect obligations, and cross-component execution evidence;
+- **FG-096** capability-narrow MCP surface over public APIs and the effect broker—never generic admin execution;
+- **FG-097** required-v1 annotated/lightweight tag lifecycle, policy, signatures, transport, and compatibility evidence in one code-plus-tests bead;
+- **FG-098** bounded post-v1 Git compatibility cohort: reflog views, LFS locks, signed push certificates, namespaces, typed hooks, and broader workflow compatibility;
+- **FG-099** subsequent native/GitHub-compatible GraphQL subset with authorization-before-resolution and pre-work query costing;
+- **FG-100** subsequent package-registry phases: OCI, Cargo/npm/PyPI/Go, then Maven/NuGet/Helm, held as one phased code-plus-tests cohort;
+- **FG-101** enterprise SSO/SCIM, audit, legal hold/deletion evidence, residency, and network controls;
+- **FG-102** managed elastic runner fleet over the native workflow/runner/billing contracts;
+- **FG-103** stacked-change graph, review/evidence freshness, and policy-defined canonical landing;
+- **FG-104** deterministic usage/billing ledger, including open decision D16 on tenant/organization economic authority.
+
 ## Backlog governance
 
 - Issue IDs are stable and never silently reused.
-- Splitting an issue preserves a parent and dependency update.
+- Splitting an issue preserves a parent and dependency update. Code and its unit tests stay in one executable item; a test-only leaf is reserved for a genuinely cross-component integration/fault/security campaign, not closure-count inflation.
+- An implementation item blocks only on the smallest stable implementation frontier it actually consumes, not on an umbrella epic that also waits for independent fault/security/E2E evidence. Epics remain roll-up completion milestones; required campaigns remain blocking inputs to the exact release gate. Any dependency rewire must stay acyclic and preserve the release gate's exact reachable campaign set.
+- Do not convert a real completion prerequisite into a non-blocking `related` edge merely to inflate `br ready` or a swarm-width metric. Parallelism claims use the full active `br` graph; `bv` remains diagnostic when it omits issue classes or includes tombstones.
 - Closing an issue records claim level, artifact IDs, replay command, and explicit non-claims.
 - Failed hypotheses enter [`docs/NEGATIVE_EVIDENCE_LEDGER.md`](NEGATIVE_EVIDENCE_LEDGER.md) and `registries/negative_evidence.tsv`.
 - A later optimization cannot bypass the reference model, authority contract, pure-Rust boundary, or evidence gate merely because it benchmarks well.
