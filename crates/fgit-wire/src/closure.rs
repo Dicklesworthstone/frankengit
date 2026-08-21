@@ -60,8 +60,26 @@ pub struct CommitNode {
 pub struct ClosureTreeEntry {
     /// Referenced native Git object identity.
     pub oid: AnyGitOid,
-    /// Referenced object's Git type, including `Commit` for a gitlink.
+    /// Referenced object's Git type.
+    ///
+    /// A tree entry typed as [`ObjectType::Commit`] is a Git gitlink.  Its OID
+    /// remains exact data in the containing tree, but it is not an object in
+    /// this repository's closure and must never cause a cross-repository read,
+    /// credential delegation, or recursive history walk.
     pub object_type: ObjectType,
+}
+
+impl ClosureTreeEntry {
+    /// Whether this tree entry is a Git gitlink rather than a local object edge.
+    ///
+    /// Git's tree grammar reserves a commit-typed tree entry for mode `160000`.
+    /// The closure graph receives the already-classified entry type, so this
+    /// check preserves the gitlink OID in its tree while refusing to traverse
+    /// the foreign repository it names.
+    #[must_use]
+    pub const fn is_gitlink(&self) -> bool {
+        matches!(self.object_type, ObjectType::Commit)
+    }
 }
 
 /// Object facts needed to compute a filtered pack closure.
@@ -710,6 +728,16 @@ fn collect_object_frontier(
                     .checked_add(1)
                     .ok_or(ClosureError::InconsistentGraph { oid })?;
                 for entry in entries.iter().rev() {
+                    // A commit-typed tree entry is mode 160000: a gitlink. Its
+                    // OID is preserved in the tree object already admitted to
+                    // this pack, but it names another repository's commit. Do
+                    // not look it up through the parent repository, advertise
+                    // it as a promised omission, or recursively traverse it.
+                    // Any later submodule operation needs an explicit,
+                    // separately-authorized repository request.
+                    if entry.is_gitlink() {
+                        continue;
+                    }
                     ensure_format(repository, entry.oid)?;
                     push_frontier(&mut frontier, (entry.oid, Some(oid), next_depth), limits)?;
                 }
