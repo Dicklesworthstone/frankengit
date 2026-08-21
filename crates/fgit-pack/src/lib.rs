@@ -153,6 +153,10 @@ pub enum PackError {
         actual: usize,
         limit: usize,
     },
+    TotalExpandedLimit {
+        actual: usize,
+        limit: usize,
+    },
     ObjectIdLength {
         expected: usize,
         actual: usize,

@@ -340,7 +340,7 @@ impl IdxV2 {
             .map_err(|_| PackError::AllocationFailed { requested: total })?;
         output.extend_from_slice(&IDX_SIGNATURE);
         output.extend_from_slice(&IDX_V2.to_be_bytes());
-        let fanout = self.fanout()?;
+        let fanout = self.fanout(deadline)?;
         for value in fanout {
             output.extend_from_slice(&value.to_be_bytes());
         }
@@ -372,10 +372,11 @@ impl IdxV2 {
         Ok(output)
     }
 
-    fn fanout(&self) -> Result<[u32; 256], PackError> {
+    fn fanout(&self, deadline: &mut impl Deadline) -> Result<[u32; 256], PackError> {
         let mut fanout = [0_u32; 256];
         let mut previous: Option<&ObjectId> = None;
         for entry in &self.entries {
+            checkpoint(deadline)?;
             if previous.is_some_and(|prior| prior.as_bytes() >= entry.oid.as_bytes()) {
                 return Err(PackError::InvalidIndexOrdering);
             }

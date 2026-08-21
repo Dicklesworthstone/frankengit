@@ -70,43 +70,31 @@ impl<'objects, 'lookup, L> ScalarResolver<'objects, 'lookup, L>
 where
     L: ExternalBaseLookup,
 {
-    /// Validates the resolver graph before it is used to surface any object.
+    /// Validates bounded input shape before it is used to surface any object.
+    /// Ambiguous base identities and fanout are checked on the selected chain,
+    /// where their scan work is charged to `max_delta_work`.
     pub fn new(
         objects: &'objects [PackObject],
         external_bases: &'lookup L,
         limits: &'objects PackLimits,
+        deadline: &mut impl Deadline,
     ) -> Result<Self, PackError> {
+        let actual_count =
+            u32::try_from(objects.len()).map_err(|_| PackError::EntryCountLimit {
+                actual: u32::MAX,
+                limit: limits.max_entries,
+            })?;
+        if actual_count > limits.max_entries {
+            return Err(PackError::EntryCountLimit {
+                actual: actual_count,
+                limit: limits.max_entries,
+            });
+        }
         for object in objects {
+            checkpoint(deadline)?;
             match object {
                 PackObject::Base { data, .. } => limits.object_size(data.len())?,
                 PackObject::Delta(delta) => limits.input(delta.program.len())?,
-            }
-        }
-        for (index, object) in objects.iter().enumerate() {
-            for previous in &objects[..index] {
-                if object.offset() == previous.offset() {
-                    return Err(PackError::DuplicateObjectOffset(object.offset()));
-                }
-                if let (Some(left), Some(right)) = (object.id(), previous.id()) {
-                    if left == right {
-                        return Err(PackError::DuplicateObjectId);
-                    }
-                }
-            }
-        }
-        for object in objects {
-            let PackObject::Delta(delta) = object else {
-                continue;
-            };
-            let fanout = objects
-                .iter()
-                .filter(|candidate| has_same_delta_base(candidate, &delta.base))
-                .count();
-            if fanout > limits.max_delta_fanout {
-                return Err(PackError::DeltaFanoutLimit {
-                    fanout,
-                    limit: limits.max_delta_fanout,
-                });
             }
         }
         Ok(Self {
@@ -122,10 +110,10 @@ where
         offset: u64,
         deadline: &mut impl Deadline,
     ) -> Result<Vec<u8>, PackError> {
-        let object = self
-            .find_by_offset(offset)
-            .ok_or(PackError::MissingDeltaBase)?;
         let mut accounting = Accounting::default();
+        let object = self
+            .find_by_offset(offset, &mut accounting, deadline)?
+            .ok_or(PackError::MissingDeltaBase)?;
         let mut stack = Vec::new();
         self.resolve_object(object, 0, &mut stack, &mut accounting, deadline)
     }
@@ -137,8 +125,10 @@ where
         id: &ObjectId,
         deadline: &mut impl Deadline,
     ) -> Result<Vec<u8>, PackError> {
-        let object = self.find_by_id(id).ok_or(PackError::MissingDeltaBase)?;
         let mut accounting = Accounting::default();
+        let object = self
+            .find_by_id(id, &mut accounting, deadline)?
+            .ok_or(PackError::MissingDeltaBase)?;
         let mut stack = Vec::new();
         self.resolve_object(object, 0, &mut stack, &mut accounting, deadline)
     }
@@ -162,6 +152,7 @@ where
                 copy_bytes(data, deadline)
             }
             PackObject::Delta(delta) => {
+                self.validate_fanout(&delta.base, accounting, deadline)?;
                 let next_depth = depth.checked_add(1).ok_or(PackError::IntegerOverflow {
                     context: "delta depth",
                 })?;
@@ -207,12 +198,12 @@ where
         match base {
             DeltaBase::Ofs(offset) => {
                 let object = self
-                    .find_by_offset(*offset)
+                    .find_by_offset(*offset, accounting, deadline)?
                     .ok_or(PackError::MissingDeltaBase)?;
                 self.resolve_object(object, depth, stack, accounting, deadline)
             }
             DeltaBase::Ref(id) => {
-                if let Some(object) = self.find_by_id(id) {
+                if let Some(object) = self.find_by_id(id, accounting, deadline)? {
                     self.resolve_object(object, depth, stack, accounting, deadline)
                 } else {
                     checkpoint(deadline)?;
@@ -228,14 +219,69 @@ where
         }
     }
 
-    fn find_by_offset(&self, offset: u64) -> Option<&PackObject> {
-        self.objects.iter().find(|object| object.offset() == offset)
+    fn find_by_offset(
+        &self,
+        offset: u64,
+        accounting: &mut Accounting,
+        deadline: &mut impl Deadline,
+    ) -> Result<Option<&PackObject>, PackError> {
+        let mut found = None;
+        for object in self.objects {
+            checkpoint(deadline)?;
+            accounting.add_work(1, self.limits)?;
+            if object.offset() == offset {
+                if found.is_some() {
+                    return Err(PackError::DuplicateObjectOffset(offset));
+                }
+                found = Some(object);
+            }
+        }
+        Ok(found)
     }
 
-    fn find_by_id(&self, id: &ObjectId) -> Option<&PackObject> {
-        self.objects
-            .iter()
-            .find(|object| object.id().is_some_and(|candidate| candidate == id))
+    fn find_by_id(
+        &self,
+        id: &ObjectId,
+        accounting: &mut Accounting,
+        deadline: &mut impl Deadline,
+    ) -> Result<Option<&PackObject>, PackError> {
+        let mut found = None;
+        for object in self.objects {
+            checkpoint(deadline)?;
+            accounting.add_work(1, self.limits)?;
+            if object.id().is_some_and(|candidate| candidate == id) {
+                if found.is_some() {
+                    return Err(PackError::DuplicateObjectId);
+                }
+                found = Some(object);
+            }
+        }
+        Ok(found)
+    }
+
+    fn validate_fanout(
+        &self,
+        base: &DeltaBase,
+        accounting: &mut Accounting,
+        deadline: &mut impl Deadline,
+    ) -> Result<(), PackError> {
+        let mut fanout = 0_usize;
+        for candidate in self.objects {
+            checkpoint(deadline)?;
+            accounting.add_work(1, self.limits)?;
+            if has_same_delta_base(candidate, base) {
+                fanout = fanout.checked_add(1).ok_or(PackError::IntegerOverflow {
+                    context: "delta fanout",
+                })?;
+                if fanout > self.limits.max_delta_fanout {
+                    return Err(PackError::DeltaFanoutLimit {
+                        fanout,
+                        limit: self.limits.max_delta_fanout,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -253,7 +299,7 @@ struct Accounting {
 }
 
 impl Accounting {
-    fn add_expanded(&mut self, bytes: usize, limits: &PackLimits) -> Result<(), PackError> {
+    fn ensure_expanded(&self, bytes: usize, limits: &PackLimits) -> Result<(), PackError> {
         let attempted = self
             .expanded
             .checked_add(bytes)
@@ -261,11 +307,22 @@ impl Accounting {
                 context: "delta expanded bytes",
             })?;
         if attempted > limits.max_total_expanded_bytes {
-            return Err(PackError::ObjectSizeLimit {
+            return Err(PackError::TotalExpandedLimit {
                 actual: attempted,
                 limit: limits.max_total_expanded_bytes,
             });
         }
+        Ok(())
+    }
+
+    fn add_expanded(&mut self, bytes: usize, limits: &PackLimits) -> Result<(), PackError> {
+        self.ensure_expanded(bytes, limits)?;
+        let attempted = self
+            .expanded
+            .checked_add(bytes)
+            .ok_or(PackError::IntegerOverflow {
+                context: "delta expanded bytes",
+            })?;
         self.expanded = attempted;
         Ok(())
     }
@@ -297,7 +354,10 @@ pub fn apply_delta(
     deadline: &mut impl Deadline,
 ) -> Result<Vec<u8>, PackError> {
     let mut accounting = Accounting::default();
-    apply_delta_with_accounting(base, delta, limits, &mut accounting, deadline)
+    accounting.add_expanded(base.len(), limits)?;
+    let result = apply_delta_with_accounting(base, delta, limits, &mut accounting, deadline)?;
+    accounting.add_expanded(result.len(), limits)?;
+    Ok(result)
 }
 
 fn apply_delta_with_accounting(
@@ -325,6 +385,7 @@ fn apply_delta_with_accounting(
         });
     }
     limits.checked_ratio(declared_result, delta.len())?;
+    accounting.ensure_expanded(declared_result, limits)?;
     checkpoint(deadline)?;
     let mut result = Vec::new();
     result
@@ -617,7 +678,8 @@ mod tests {
             bytes: b"xyz".to_vec(),
         };
         let limits = unlimited();
-        let resolver = ScalarResolver::new(&objects, &bases, &limits).expect("valid graph");
+        let resolver =
+            ScalarResolver::new(&objects, &bases, &limits, &mut always).expect("valid graph");
         assert_eq!(
             resolver.resolve_offset(24, &mut always),
             Ok(b"abc".to_vec())
@@ -651,7 +713,8 @@ mod tests {
         ];
         let mut shallow = unlimited();
         shallow.max_delta_depth = 1;
-        let resolver = ScalarResolver::new(&objects, &(), &shallow).expect("valid graph");
+        let resolver =
+            ScalarResolver::new(&objects, &(), &shallow, &mut always).expect("valid graph");
         assert!(matches!(
             resolver.resolve_offset(3, &mut always),
             Err(PackError::DeltaDepthLimit { .. })
@@ -662,6 +725,51 @@ mod tests {
         assert!(matches!(
             apply_delta(b"abc", &[3, 3, 0x91, 0, 3], &tiny_work, &mut always),
             Err(PackError::DeltaWorkLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn size_ratio_and_fanout_bombs_refuse() {
+        let delta = [10, 10, 0x91, 0, 10];
+        let mut size_limited = unlimited();
+        size_limited.max_object_bytes = 9;
+        assert!(matches!(
+            apply_delta(&[1; 10], &delta, &size_limited, &mut always),
+            Err(PackError::ObjectSizeLimit { .. } | PackError::DeltaResultSizeLimit { .. })
+        ));
+        let mut ratio_limited = unlimited();
+        ratio_limited.max_expansion_ratio = 1;
+        assert!(matches!(
+            apply_delta(&[1; 10], &delta, &ratio_limited, &mut always),
+            Err(PackError::ExpansionRatioLimit { .. })
+        ));
+
+        let fanout_objects = [
+            PackObject::Base {
+                offset: 1,
+                id: None,
+                data: b"a".to_vec(),
+            },
+            PackObject::Delta(DeltaObject {
+                offset: 2,
+                id: None,
+                base: DeltaBase::Ofs(1),
+                program: vec![1, 1, 0x91, 0, 1],
+            }),
+            PackObject::Delta(DeltaObject {
+                offset: 3,
+                id: None,
+                base: DeltaBase::Ofs(1),
+                program: vec![1, 1, 0x91, 0, 1],
+            }),
+        ];
+        let mut fanout_limited = unlimited();
+        fanout_limited.max_delta_fanout = 1;
+        let resolver = ScalarResolver::new(&fanout_objects, &(), &fanout_limited, &mut always)
+            .expect("input shape is valid");
+        assert!(matches!(
+            resolver.resolve_offset(2, &mut always),
+            Err(PackError::DeltaFanoutLimit { .. })
         ));
     }
 
