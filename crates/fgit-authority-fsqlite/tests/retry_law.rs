@@ -11,11 +11,11 @@ use fgit_authority_fsqlite::{
     classify_is_retryable, retry_whole_transaction,
 };
 
-fn plan() -> BackoffPlan {
+const fn plan() -> BackoffPlan {
     BackoffPlan::new(4, 64, 0x5EED_1234)
 }
 
-fn generous() -> RetryBudget {
+const fn generous() -> RetryBudget {
     RetryBudget::new(10_000, MAX_TRANSIENT_ATTEMPTS)
 }
 
@@ -155,7 +155,10 @@ fn exhaustion_reports_everything_needed_to_act_on_it() {
         "the run must replay from the seed"
     );
     assert!(exhausted.elapsed_ticks > 0);
-    assert!(!exhausted.remediation.is_empty());
+    assert!(
+        !exhausted.remediation.is_empty(),
+        "an exhaustion refusal without remediation tells an operator nothing"
+    );
     assert!(
         exhausted.to_string().contains("busy"),
         "the refusal names the last class: {exhausted}"

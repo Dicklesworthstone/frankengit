@@ -6,7 +6,7 @@ use fgit_authority_fsqlite::{
     token_instance,
 };
 
-fn instance(raw: u64) -> StoreInstanceId {
+const fn instance(raw: u64) -> StoreInstanceId {
     StoreInstanceId::from_raw(raw)
 }
 

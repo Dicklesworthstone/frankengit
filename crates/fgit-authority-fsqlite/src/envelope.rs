@@ -3,7 +3,7 @@
 //! §3.5 of the integration profile publishes an explicit support matrix and
 //! then says the thing that matters: *"The reviewed upstream contract does not
 //! yet support a blanket claim for ten or more concurrent implicit-autocommit
-//! writers. FrankenGit therefore caps/admission-controls its writer topology to
+//! writers. `FrankenGit` therefore caps/admission-controls its writer topology to
 //! a proven envelope or waits for the upstream four-scenario gate; it does not
 //! extrapolate from smaller tests."*
 //!

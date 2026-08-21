@@ -265,6 +265,6 @@ fn all_six_phases_are_classified_and_none_is_silently_effect_free() {
     );
 }
 
-fn classify(phase: CancellationPhase) -> CancellationOutcome {
+const fn classify(phase: CancellationPhase) -> CancellationOutcome {
     fgit_authority_fsqlite::classify_cancellation(phase)
 }

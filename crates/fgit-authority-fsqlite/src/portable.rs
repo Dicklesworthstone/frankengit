@@ -274,7 +274,7 @@ impl ExportBundle {
     }
 }
 
-fn check_bound(
+const fn check_bound(
     collection: &'static str,
     observed: usize,
     limit: usize,

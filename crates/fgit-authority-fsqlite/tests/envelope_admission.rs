@@ -7,7 +7,7 @@ use fgit_authority_fsqlite::{
     ConcurrencyEnvelope, EnvelopeRefusal, MAX_ADMITTED_AUTOCOMMIT_WRITERS, WriterTopology,
 };
 
-fn autocommit(writers: u32) -> WriterTopology {
+const fn autocommit(writers: u32) -> WriterTopology {
     WriterTopology {
         connections: writers,
         writers,
