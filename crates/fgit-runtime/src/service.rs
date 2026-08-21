@@ -168,6 +168,26 @@ impl ChildStart for LedgerService {
         let (task_id, _handle) = state.create_task(scope.region_id(), self.budget, async move {
             ledger.record_start();
             for _ in 0..steps {
+                // The cancellation checkpoint. Without one, this service could
+                // only be stopped by dropping its future, which the profile is
+                // explicit is not a complete cancellation protocol
+                // (AGENTS.md 3.2: request -> drain -> finalize). A service that
+                // never checks runs to completion during the drain phase and
+                // makes a node's shutdown take as long as its longest unit of
+                // work, however urgent the shutdown.
+                //
+                // `Cx::current()` is the task's own context, installed by the
+                // runtime while the task is being polled; the context handed to
+                // `start` belongs to the supervisor, not to this task.
+                if let Some(task_cx) = Cx::current()
+                    && task_cx.checkpoint().is_err()
+                {
+                    // Cancelled mid-flight: return without recording a
+                    // completion, so the ledger distinguishes this from a
+                    // service that finished its work.
+                    return;
+                }
+
                 // A real await point: the scheduler may run a sibling here,
                 // which is what makes the start order observable rather than
                 // an artifact of everything completing synchronously.

@@ -81,7 +81,11 @@ fn ledgers(spec: &NodeSpec) -> BTreeMap<String, Arc<ServiceLedger>> {
 }
 
 /// Build the app spec, wiring each service to its own ledger.
-fn app_spec(spec: &NodeSpec, ledgers: &BTreeMap<String, Arc<ServiceLedger>>) -> AppSpec {
+fn app_spec(
+    spec: &NodeSpec,
+    ledgers: &BTreeMap<String, Arc<ServiceLedger>>,
+    steps: u64,
+) -> AppSpec {
     let now = Time::from_secs(0);
     spec.to_app_spec(now, |service| {
         let ledger = Arc::clone(
@@ -96,7 +100,7 @@ fn app_spec(spec: &NodeSpec, ledgers: &BTreeMap<String, Arc<ServiceLedger>>) -> 
         let requested = spec.policy().budget_at(now, service.budget_class());
         let budget = derive_child(root, requested)
             .expect("a class budget never widens the node root it is derived from");
-        LedgerService::new(ledger, STEPS, budget).into_child_start()
+        LedgerService::new(ledger, steps, budget).into_child_start()
     })
     .expect("the demonstration topology is valid")
 }
@@ -126,9 +130,22 @@ struct StartedNode {
 /// point: if the supervisor accepts a context this crate minted through the
 /// production factory, the capability story holds.
 fn start_node() -> StartedNode {
+    start_node_with(STEPS, RunMode::ToQuiescence)
+}
+
+/// How far to drive the node after its children are scheduled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunMode {
+    /// Run until nothing can make progress: every service completes.
+    ToQuiescence,
+    /// Take a bounded number of scheduler steps, leaving services mid-flight.
+    Steps(u32),
+}
+
+fn start_node_with(steps: u64, mode: RunMode) -> StartedNode {
     let spec = node();
     let ledgers = ledgers(&spec);
-    let app_spec = app_spec(&spec, &ledgers);
+    let app_spec = app_spec(&spec, &ledgers, steps);
 
     let node_runtime = RuntimeProfile::deterministic()
         .build()
@@ -164,7 +181,16 @@ fn start_node() -> StartedNode {
             scheduler.schedule(task, 0);
         }
     }
-    runtime.run_until_quiescent();
+    match mode {
+        RunMode::ToQuiescence => {
+            runtime.run_until_quiescent();
+        }
+        RunMode::Steps(count) => {
+            for _ in 0..count {
+                runtime.step_for_test();
+            }
+        }
+    }
 
     StartedNode {
         _node: node_runtime,
@@ -296,33 +322,98 @@ fn stopping_the_node_closes_its_region() {
     assert_eq!(stopped.name, "fgit-node");
     assert_eq!(stopped.root_region, app_region);
 
-    // `stop` records the intent; it does not by itself carry the region
-    // through the protocol. Cancellation is request -> drain -> finalize, so
-    // the shutdown has to be driven to completion rather than assumed from
-    // the return value — which is exactly the distinction this crate's
-    // `ShutdownDriver` exists to enforce.
+    // Note what is *not* asserted here: that the app is still running. Every
+    // service in this fixture has already completed, so there is nothing left
+    // to drain and `stop` settles the region synchronously — measured, not
+    // assumed. The interesting case, where services are still live when stop
+    // arrives, is `cancelling_a_live_service_stops_it_before_it_completes`.
     drive_shutdown(&mut started.runtime, app_region);
+
+    // Now it really is stopped. `is_stopped` is the runtime's own answer and
+    // covers both terminal shapes: a region still present and `Closed`, and a
+    // region already reaped (a settled region may be removed outright, which
+    // is what happens here).
+    assert!(
+        started.app.is_stopped(&started.runtime.state),
+        "a driven shutdown must leave the app stopped"
+    );
+
+    // Terminal and quiescent are different claims: nothing is still running,
+    // and no obligation was left outstanding.
+    assert!(
+        started.app.is_quiescent(&started.runtime.state),
+        "a stopped app must hold no live tasks or pending obligations"
+    );
 
     let region_state = started
         .runtime
         .state
         .region(app_region)
-        .map(asupersync::record::region::RegionRecord::state)
-        .expect("the app region still exists after stop");
-    assert_ne!(
-        region_state,
-        RegionState::Open,
-        "a driven shutdown must move the app region out of the open state"
+        .map(asupersync::record::region::RegionRecord::state);
+    assert!(
+        matches!(region_state, None | Some(RegionState::Closed)),
+        "the app region must be closed or reaped, got {region_state:?}"
+    );
+}
+
+#[test]
+fn cancelling_a_live_service_stops_it_before_it_completes() {
+    // The case that actually exercises request -> drain -> finalize: services
+    // still mid-flight when the stop arrives. `stopping_the_node_closes_its_region`
+    // stops an already-quiescent tree, where there is nothing to cancel and
+    // `stop` settles synchronously; here the shutdown has to interrupt work.
+    //
+    // This is what the ledger's separate counters are for. A service that was
+    // cancelled mid-flight has started, has advanced some steps, and has NOT
+    // completed. A single "progress" number could not tell that apart from a
+    // service that never ran.
+    const LONG: u64 = 10_000;
+    let mut started = start_node_with(LONG, RunMode::Steps(8));
+    let app_region = started.app.root_region();
+
+    let live: Vec<&String> = started
+        .ledgers
+        .iter()
+        .filter(|(_, ledger)| ledger.started() == 1 && ledger.completed() == 0)
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        !live.is_empty(),
+        "the bounded run must leave at least one service mid-flight, ledgers: {:?}",
+        started
+            .ledgers
+            .iter()
+            .map(|(name, ledger)| (
+                name.clone(),
+                ledger.started(),
+                ledger.steps(),
+                ledger.completed()
+            ))
+            .collect::<Vec<_>>()
     );
 
-    // Stop records a cancel intent rather than dropping the tree silently.
+    started
+        .app
+        .stop(&mut started.runtime.state)
+        .expect("a started app stops");
+    drive_shutdown(&mut started.runtime, app_region);
+
     assert!(
-        started
-            .runtime
-            .state
-            .region(app_region)
-            .and_then(|region| region.cancel_reason().map(|_| ()))
-            .is_some(),
-        "stop must record why the region was cancelled"
+        started.app.is_stopped(&started.runtime.state),
+        "a driven shutdown must leave the app stopped even with live services"
     );
+
+    // No service reached its final statement: shutdown cancelled the work
+    // rather than waiting for 100_000 steps of it to finish.
+    for (name, ledger) in &started.ledgers {
+        assert_eq!(
+            ledger.completed(),
+            0,
+            "service `{name}` must not have completed its {LONG} steps during a shutdown"
+        );
+        assert!(
+            ledger.steps() < LONG,
+            "service `{name}` must have been interrupted, not run to the end"
+        );
+    }
 }

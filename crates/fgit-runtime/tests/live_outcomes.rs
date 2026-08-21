@@ -115,7 +115,11 @@ fn a_cancelled_task_yields_a_runtime_produced_cancelled_outcome() {
     // members to completion by construction. So this drives the same primitive
     // `resolve_batch` uses — a bounded `JoinSet` in a child scope — and asks
     // the runtime to cancel it. The `CancelReason` is the runtime's.
-    let node = RuntimeProfile::deterministic().build().expect("builds");
+    // Several workers, because this test needs the members to be *running*
+    // before they are cancelled. The single-worker deterministic profile
+    // admits them but need not have dispatched them yet, and cancelling a
+    // member that has not begun proves less than cancelling one that has.
+    let node = RuntimeProfile::production(4).build().expect("builds");
     let cx = node.request_cx(BudgetClass::Request);
 
     let started = Arc::new(AtomicUsize::new(0));
@@ -149,7 +153,14 @@ fn a_cancelled_task_yields_a_runtime_produced_cancelled_outcome() {
 
             // Every member must be live before cancellation is meaningful:
             // cancelling a member that never started proves nothing.
-            for _ in 0..16 {
+            //
+            // The bound is generous rather than tight because "has the worker
+            // dispatched this task yet" is a scheduling question, not a
+            // correctness one — a handful of yields is a race, and losing it
+            // would fail the test for the wrong reason. It stays bounded so a
+            // member that genuinely never starts fails loudly instead of
+            // hanging the suite.
+            for _ in 0..100_000 {
                 if started.load(Ordering::SeqCst) == 3 {
                     break;
                 }
