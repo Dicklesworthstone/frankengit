@@ -66,6 +66,7 @@ pub mod origin;
 pub mod publish;
 pub mod recovery;
 pub mod refusal;
+pub mod verify;
 
 pub use archive::{BackupExportBundleBody, RestoreReportBody};
 pub use assemble::{PublicationPlan, VerifiedPublication};
@@ -78,3 +79,4 @@ pub use origin::{PublicationBasis, ResultingRoots};
 pub use publish::{CanonicalBatchReceipt, LostCandidate, PublicationVerdict, publish};
 pub use recovery::{AuditedRestore, CapsuleVerification, HaltReason, RecoveryPlan, plan_recovery};
 pub use refusal::ChronicleRefusal;
+pub use verify::{CapsuleDefect, MAX_REPORTED_DEFECTS, RestoreClassification, RestoreOutcome};
