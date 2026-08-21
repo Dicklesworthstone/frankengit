@@ -124,11 +124,13 @@ The plan is intentionally factored. The deepest contracts live in:
 - [`docs/GIT_TREE_FS.md`](docs/GIT_TREE_FS.md)
 - [`docs/GRAPH_INTELLIGENCE_ARCHITECTURE.md`](docs/GRAPH_INTELLIGENCE_ARCHITECTURE.md)
 - [`docs/CALM_AND_OBLIGATIONS.md`](docs/CALM_AND_OBLIGATIONS.md)
+- [`docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md`](docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md)
 - [`docs/FRANKEN_SUITE_DEEP_DIVE_SYNTHESIS.md`](docs/FRANKEN_SUITE_DEEP_DIVE_SYNTHESIS.md)
 - [`docs/FRANKENSUITE_DEEP_AUDIT_2026-08-19.md`](docs/FRANKENSUITE_DEEP_AUDIT_2026-08-19.md)
 - [`docs/FRESH_EYES_AUDIT_2026-08-19.md`](docs/FRESH_EYES_AUDIT_2026-08-19.md)
 - [`docs/LOCAL_VERIFICATION_AND_RELEASE_PIPELINE.md`](docs/LOCAL_VERIFICATION_AND_RELEASE_PIPELINE.md)
 - [`docs/NEGATIVE_EVIDENCE_LEDGER.md`](docs/NEGATIVE_EVIDENCE_LEDGER.md)
+- [`docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md`](docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md)
 
 The comprehensive plan states how those mechanisms compose into one product.
 
@@ -482,6 +484,8 @@ FrankenGit imports:
 
 FrankenGit does **not** merely “run on Asupersync.” Repository sessions, push validation, CAS attempts, outbox delivery, repair, workspaces, runners, and context assembly are modeled as Asupersync protocols with owned obligations.
 
+The production profile is exact: the node is one compiled `AppSpec`-owned lifecycle tree; production request contexts come from the owning `Runtime`/`RuntimeHandle` with an explicit finite budget; effectful APIs take `&Cx` first and narrow capabilities; child budgets can only tighten parent deadline/poll/cost/priority limits; and the four `Outcome` states remain distinct until a protocol policy edge. Requests use scopes, dynamic bounded work uses `JoinSet`, and stateful protocols use actors/`GenServer` according to ownership shape. Cancellation is request → drain → finalize, including real parked-worker/native teardown tests in addition to deterministic Lab tests. Obligation-leak response is an explicit profile input: verification/release fails fast, while any production recovery mode must emit durable containment evidence and escalate; silent leaks are forbidden. The detailed contract is [`docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md`](docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md).
+
 ### 6.2 FrankenSQLite: per-core lanes, semantic MVCC, and value-of-information
 
 FrankenSQLite contributes:
@@ -497,6 +501,8 @@ FrankenSQLite contributes:
 - exact invariant catalogs tied to evidence hooks.
 
 In FrankenGit, these mechanisms prepare and combine repository decisions. FrankenSQLite also implements the embedded `AuthorityStore` profile and local MVCC projections. It is never a second distributed source of truth beside the decision log.
+
+The caller profile uses the asynchronous FrankenSQLite surface with the runtime-owned `&Cx`, `default-features = false`, and only the exact native features each role proves necessary. A raw `Connection` remains on one owning local worker; an `AsyncConnection` owns one bounded dedicated worker/channel and is explicitly closed and joined during shutdown. Transactions await `commit` or `rollback`; drop cleanup is not completion evidence. Retry restarts the whole transaction from a fresh snapshot, is bounded by the inherited budget, and is limited to the registered transient error family; `SnapshotTooOld` requires a fresh-snapshot decision. The current engine's commit guard and tested writer envelope are stated honestly: parallel preparation/readers are useful, but FrankenGit claims neither lock-free commit nor unbounded multiwriter behavior. Authority writers and projection writers are admission-capped to the proven envelope until the upstream concurrency matrix passes at the larger profile.
 
 ### 6.3 FrankenFS: staged/visible/durable state, repair serialization, and negative results
 
@@ -3389,7 +3395,7 @@ L3 siblings do not import one another to shortcut ownership; L4 orchestrates thr
 - `sqlmodel_rust` (the `sqlmodel-frankensqlite` backend and its core/query/schema/macros/session/pool crates ONLY): the type-safe substrate for DERIVED PROJECTION read-models over FrankenSQLite — projections only, never canonical authority (the head-CAS decision stream remains the sole source of truth). Its `sqlmodel-sqlite` (C `libsqlite3-sys`), `sqlmodel-postgres`, and `sqlmodel-mysql` backends are EXCLUDED by the closed dependency universe and must never enter the graph;
 - `frankentui` (ftui) kernel crates on the `asupersync-executor` feature: the widget kernel for the terminal TUI, and (via ftui's WASM backend) an OPTIONAL parallel terminal-style web surface — NOT the primary web UI, which is a conventional GitHub-like Rust/WASM app. The demo/showcase crates and their transitive Tokio are excluded.
 
-Dependencies are pinned to one compatible constellation. The web/UI siblings introduce a version pin to reconcile: fastapi_rust and the ftui kernel target asupersync ~0.3.9 while sqlmodel_rust targets ~0.4.4; the constellation resolves these to one asupersync revision. If a sibling’s required surface is not stable/consumable, FrankenGit ports the mechanism behind its own contract rather than taking an unpublished path dependency.
+Dependencies are pinned to one compatible constellation. The adopted web/UI/data siblings currently require owned upstream convergence before they can enter FrankenGit: the reviewed fastapi_rust and ftui revisions target Asupersync 0.3.x, the reviewed sqlmodel_rust revision pins Asupersync 0.4.4 and carries unpublished absolute FrankenSQLite patches, while the reviewed FrankenSQLite revision accepts Asupersync 0.4.x. Cargo resolving two runtime versions is a failure, not reconciliation. The sibling projects must be updated to one selected Asupersync 0.4.x contract, sqlmodel's path patches must be removed in favor of an admitted published FrankenSQLite release, and exact feature/source/audit evidence must pass before integration. Failure blocks the dependent FrankenGit beads pending those sibling updates; it does not reopen the settled adoption decision or authorize a substitute framework.
 
 ### 43.4 External dependency policy
 
@@ -3709,8 +3715,8 @@ Resolved by adoption (recorded here and in the implementation beads):
 
 - **fastapi_rust** is the gateway/API framework — pure-Rust, Asupersync-native, OpenAPI generation feeding the schema registry. Alternative considered: a fully owned minimal HTTP surface; rejected because fastapi_rust already provides typed routing + OpenAPI on the sole runtime.
 - **sqlmodel_rust** (`sqlmodel-frankensqlite` backend only) is the projection read-model substrate — projections only, backend-feature-gated, with the C/Postgres/MySQL backends excluded.
-- **The primary web UI is DOM-oriented pure-Rust/WASM (Leptos or Dioxus, SSR + Tailwind), not React and not a canvas UI.** It renders the real DOM (text selection, a11y, SSR/SEO all work), with franken_markdown rendering and the verified-read verifier as native Rust in the same WebAssembly build (no-drift rendering + trustless reads). Honest cost: smaller component ecosystem / contributor pool than React (more first-party component work); WebAssembly's perf edge is concentrated on heavy forge screens. No-loss guarantee: the generated TypeScript client + a React reference remain a permanently supported alternative. The frankentui (ftui) kernel powers the terminal TUI and an optional parallel terminal-style web surface. The bounded wasm-bindgen client-only unsafe exception (WEB-4) covers the WASM UI framework and ftui's backend.
-- **Constitutional exception (bounded):** the wasm-bindgen browser boundary of the client-only WASM adapter carries generated unsafe; this is an explicit, client-target-only exception to `#![forbid(unsafe_code)]` for the L4 web adapter, never the server.
+- **The primary web UI is DOM-oriented pure-Rust/WASM (Leptos or Dioxus, SSR + Tailwind), not React and not a canvas UI.** It renders the real DOM (text selection, a11y, SSR/SEO all work), with franken_markdown rendering and the verified-read verifier as native Rust in the same WebAssembly build (no-drift rendering + trustless reads). Honest cost: smaller component ecosystem / contributor pool than React (more first-party component work); WebAssembly's perf edge is concentrated on heavy forge screens. No-loss guarantee: the generated TypeScript client + a React reference remain a permanently supported alternative. The frankentui (ftui) kernel powers the terminal TUI and an optional parallel terminal-style web surface.
+- **No unsafe exception:** every first-party native or WASM crate still declares `#![forbid(unsafe_code)]`. Any unsafe emitted or linked by wasm-bindgen/framework dependencies is treated as transitive/generated dependency surface and must be pinned, expanded where practicable, audited, and ledgered. If the exact feature closure cannot compile without a first-party lint relaxation or unsafe shim, integration blocks until the owned sibling/boundary is corrected.
 
 ### D14. License model
 
@@ -3873,4 +3879,3 @@ The v3 architecture earns its ambition by shrinking truth rather than enlarging 
 None of this is implemented merely because it is well specified. The plan is valuable only insofar as it makes future code falsifiable and prevents agents or humans from substituting convenient approximations for the final abstractions. The next contribution is not another architectural adjective. It is the smallest complete executable slice that preserves these laws.
 
 ---
-

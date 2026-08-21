@@ -181,6 +181,7 @@ fn check_required_files(root: &Path, report: &mut Report) {
         "docs/NEGATIVE_EVIDENCE_LEDGER.md",
         "docs/NORMATIVE_PROTOCOL_CONTRACTS.md",
         "docs/OBJECT_STORE_DECISION_LOG.md",
+        "docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md",
         "docs/RAPTORQ_PERMEATION_MAP.md",
         "docs/RESEARCH_PROVENANCE.md",
         "registries/README.md",
