@@ -1675,7 +1675,7 @@ fn generated_ffi_policy(name: &str) -> &'static str {
     }
 }
 
-/// Renders the four currently resolved FrankenSuite rows from `Cargo`'s lock and
+/// Renders the four currently resolved `FrankenSuite` rows from `Cargo`'s lock and
 /// metadata rather than accepting human-invented evidence digests. The public
 /// contract fingerprint is a canonical source-level inventory of public-item
 /// candidates; it is deliberately not a claim that this lexical pass is a
@@ -1988,9 +1988,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
     padded.extend_from_slice(&bit_length.to_be_bytes());
 
     let mut state = SHA256_INITIAL;
-    for chunk in padded.chunks_exact(64) {
+    let (blocks, trailing_bytes) = padded.as_chunks::<64>();
+    debug_assert!(trailing_bytes.is_empty());
+    for chunk in blocks {
         let mut words = [0_u32; 64];
-        for (index, bytes) in chunk.chunks_exact(4).take(16).enumerate() {
+        let (initial_words, trailing_bytes) = chunk.as_chunks::<4>();
+        debug_assert!(trailing_bytes.is_empty());
+        for (index, bytes) in initial_words.iter().enumerate() {
             words[index] = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         }
         for index in 16..words.len() {
@@ -2005,35 +2009,44 @@ fn sha256_hex(bytes: &[u8]) -> String {
                 .wrapping_add(words[index - 7])
                 .wrapping_add(sigma1);
         }
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
+        let [
+            mut hash_a,
+            mut hash_b,
+            mut hash_c,
+            mut hash_d,
+            mut hash_e,
+            mut hash_f,
+            mut hash_g,
+            mut hash_h,
+        ] = state;
         for (index, constant) in SHA256_ROUND_CONSTANTS.iter().enumerate() {
-            let sigma1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let choose = (e & f) ^ ((!e) & g);
-            let temp1 = h
+            let sigma1 = hash_e.rotate_right(6) ^ hash_e.rotate_right(11) ^ hash_e.rotate_right(25);
+            let choose = (hash_e & hash_f) ^ ((!hash_e) & hash_g);
+            let temp1 = hash_h
                 .wrapping_add(sigma1)
                 .wrapping_add(choose)
                 .wrapping_add(*constant)
                 .wrapping_add(words[index]);
-            let sigma0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let majority = (a & b) ^ (a & c) ^ (b & c);
+            let sigma0 = hash_a.rotate_right(2) ^ hash_a.rotate_right(13) ^ hash_a.rotate_right(22);
+            let majority = (hash_a & hash_b) ^ (hash_a & hash_c) ^ (hash_b & hash_c);
             let temp2 = sigma0.wrapping_add(majority);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
+            hash_h = hash_g;
+            hash_g = hash_f;
+            hash_f = hash_e;
+            hash_e = hash_d.wrapping_add(temp1);
+            hash_d = hash_c;
+            hash_c = hash_b;
+            hash_b = hash_a;
+            hash_a = temp1.wrapping_add(temp2);
         }
-        state[0] = state[0].wrapping_add(a);
-        state[1] = state[1].wrapping_add(b);
-        state[2] = state[2].wrapping_add(c);
-        state[3] = state[3].wrapping_add(d);
-        state[4] = state[4].wrapping_add(e);
-        state[5] = state[5].wrapping_add(f);
-        state[6] = state[6].wrapping_add(g);
-        state[7] = state[7].wrapping_add(h);
+        state[0] = state[0].wrapping_add(hash_a);
+        state[1] = state[1].wrapping_add(hash_b);
+        state[2] = state[2].wrapping_add(hash_c);
+        state[3] = state[3].wrapping_add(hash_d);
+        state[4] = state[4].wrapping_add(hash_e);
+        state[5] = state[5].wrapping_add(hash_f);
+        state[6] = state[6].wrapping_add(hash_g);
+        state[7] = state[7].wrapping_add(hash_h);
     }
     let mut output = String::with_capacity(64);
     for word in state {
@@ -3518,24 +3531,43 @@ mod tests {
 
     #[test]
     fn planted_source_version_and_checksum_drift_are_diagnosed() {
-        for (from, to, expected) in [
-            (
-                "registry+https://github.com/rust-lang/crates.io-index",
-                "registry+https://example.invalid/index",
-                "constellation source drift",
-            ),
-            ("\t0.4.9\t", "\t0.4.8\t", "constellation version drift"),
-            (
-                "\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tnone",
-                "\tdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\tnone",
-                "constellation checksum drift",
-            ),
-        ] {
-            let workspace = fixture_workspace("admitted");
-            replace_fixture_file(&workspace, "constellation.lock", from, to);
-            let metadata = matching_metadata();
-            assert_error(&report_for_fixture(&workspace, Some(&metadata)), expected);
-        }
+        let workspace = fixture_workspace("admitted");
+        replace_fixture_file(
+            &workspace,
+            "constellation.lock",
+            "registry+https://github.com/rust-lang/crates.io-index",
+            "registry+https://example.invalid/index",
+        );
+        let metadata = matching_metadata();
+        assert_error(
+            &report_for_fixture(&workspace, Some(&metadata)),
+            "constellation source drift",
+        );
+
+        let workspace = fixture_workspace("admitted");
+        replace_fixture_file(&workspace, "constellation.lock", "\t0.4.9\t", "\t0.4.8\t");
+        let metadata = matching_metadata();
+        assert_error(
+            &report_for_fixture(&workspace, Some(&metadata)),
+            "constellation version drift",
+        );
+
+        let workspace = fixture_workspace("admitted");
+        let expected_checksum = "a".repeat(64);
+        let replacement_checksum = "d".repeat(64);
+        let expected_field = format!("\t{expected_checksum}\tnone");
+        let replacement_field = format!("\t{replacement_checksum}\tnone");
+        replace_fixture_file(
+            &workspace,
+            "constellation.lock",
+            &expected_field,
+            &replacement_field,
+        );
+        let metadata = matching_metadata();
+        assert_error(
+            &report_for_fixture(&workspace, Some(&metadata)),
+            "constellation checksum drift",
+        );
     }
 
     #[test]
