@@ -120,6 +120,35 @@ opaque_id!(
 
 /// The identity of one immutable internal body.
 ///
+/// The fields are private, so an identity cannot be assembled without going
+/// through a constructor that supplies a domain separation tag:
+///
+/// ```compile_fail
+/// use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
+/// use fgit_types::identity::InternalObjectId;
+/// use fgit_types::CANONICAL_CODEC_VERSION;
+/// let _ = InternalObjectId {
+///     algorithm: DigestAlgorithmId::try_new(1).unwrap(),
+///     codec_version: CANONICAL_CODEC_VERSION,
+///     digest: DigestBytes::try_new(&[0_u8; 32]).unwrap(),
+/// };
+/// ```
+///
+/// The permitted counterpart names all four components:
+///
+/// ```
+/// use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
+/// use fgit_types::identity::{InternalObjectId, TxId};
+/// use fgit_types::CANONICAL_CODEC_VERSION;
+/// let id = InternalObjectId::new(
+///     DigestAlgorithmId::try_new(1).unwrap(),
+///     TxId::DOMAIN_TAG,
+///     CANONICAL_CODEC_VERSION,
+///     DigestBytes::try_new(&[0_u8; 32]).unwrap(),
+/// );
+/// assert_eq!(id.domain(), TxId::DOMAIN_TAG);
+/// ```
+///
 /// The value carries four components: the digest algorithm code point, the
 /// domain separation tag of the schema, the canonical codec version the body
 /// was encoded with, and the digest bytes. Carrying the codec version inside

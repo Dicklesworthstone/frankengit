@@ -79,6 +79,16 @@ pub enum TypeRefusal {
         /// Algorithm actually supplied.
         observed: GitHashAlgorithm,
     },
+    /// A reference name's bytes were individually acceptable but its
+    /// structure was not, for example a component ending in `.lock` or a
+    /// `..` sequence.
+    RefNameStructureInvalid {
+        /// Stable machine-readable reason, for example
+        /// `"component_ends_with_dot_lock"`.
+        reason: &'static str,
+        /// Zero-based offset where the violation was detected.
+        offset: u32,
+    },
     /// A digest body length disagreed with the length the algorithm slot
     /// declares.
     DigestLengthMismatch {
@@ -102,6 +112,7 @@ impl TypeRefusal {
             Self::CodePointUnknown { .. } => "code_point_unknown",
             Self::DomainMismatch { .. } => "domain_mismatch",
             Self::HashDomainMismatch { .. } => "hash_domain_mismatch",
+            Self::RefNameStructureInvalid { .. } => "ref_name_structure_invalid",
             Self::DigestLengthMismatch { .. } => "digest_length_mismatch",
         }
     }
@@ -121,6 +132,7 @@ impl TypeRefusal {
             Self::ByteNotPermitted { .. }
             | Self::CodePointUnknown { .. }
             | Self::DomainMismatch { .. } => RefusalCode::SchemaUnsupported,
+            Self::RefNameStructureInvalid { .. } => RefusalCode::RefNameInvalid,
             Self::HashDomainMismatch { .. } => RefusalCode::HashAlgorithmDomainMismatch,
             Self::DigestLengthMismatch { .. } => RefusalCode::NativeObjectIdMismatch,
         }
@@ -168,6 +180,9 @@ impl fmt::Display for TypeRefusal {
                 expected.as_str(),
                 observed.as_str()
             ),
+            Self::RefNameStructureInvalid { reason, offset } => {
+                write!(formatter, "RefName: {reason} at offset {offset}")
+            }
             Self::DigestLengthMismatch {
                 algorithm,
                 expected,

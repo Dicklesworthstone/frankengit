@@ -54,6 +54,45 @@ impl ScalarWidth {
 ///
 /// The trait is sealed: the members are exactly `u8`, `u16`, `u32`, `u64`,
 /// `i8`, `i16`, `i32`, and `i64`.
+///
+/// A fixed-width integer is accepted:
+///
+/// ```
+/// use fgit_types::numeric::CanonicalScalar;
+/// fn encode<T: CanonicalScalar>(value: T) -> u64 { value.to_canonical_bits() }
+/// assert_eq!(encode(7_u32), 7);
+/// assert_eq!(encode(-1_i32), 1);
+/// ```
+///
+/// A platform-width integer is not, so a body whose width depends on the host
+/// cannot be written:
+///
+/// ```compile_fail
+/// use fgit_types::numeric::CanonicalScalar;
+/// fn encode<T: CanonicalScalar>(value: T) -> u64 { value.to_canonical_bits() }
+/// let _ = encode(7_usize);
+/// ```
+///
+/// Neither is a floating-point value, so canonical bytes never depend on
+/// rounding mode or a payload:
+///
+/// ```compile_fail
+/// use fgit_types::numeric::CanonicalScalar;
+/// fn encode<T: CanonicalScalar>(value: T) -> u64 { value.to_canonical_bits() }
+/// let _ = encode(1.5_f64);
+/// ```
+///
+/// The set cannot be widened downstream, because the supertrait is private:
+///
+/// ```compile_fail
+/// struct Local(u8);
+/// impl fgit_types::numeric::CanonicalScalar for Local {
+///     const WIDTH: fgit_types::numeric::ScalarWidth = fgit_types::numeric::ScalarWidth::W1;
+///     const SIGNED: bool = false;
+///     fn to_canonical_bits(self) -> u64 { u64::from(self.0) }
+///     fn from_canonical_bits(_bits: u64) -> Result<Self, fgit_types::TypeRefusal> { Ok(Local(0)) }
+/// }
+/// ```
 pub trait CanonicalScalar: sealed::Sealed + Copy + Eq + Ord + fmt::Debug {
     /// Fixed encoded width.
     const WIDTH: ScalarWidth;

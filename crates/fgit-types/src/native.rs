@@ -214,6 +214,33 @@ impl fmt::Display for GitOidSha256 {
 
 /// A native Git object identity whose algorithm is carried at runtime.
 ///
+/// The domain separation is enforced by the compiler, not by a runtime check.
+/// Comparing the two domains does not build:
+///
+/// ```compile_fail
+/// use fgit_types::native::{GitOidSha1, GitOidSha256};
+/// let narrow = GitOidSha1::from_bytes([0_u8; 20]);
+/// let wide = GitOidSha256::from_bytes([0_u8; 32]);
+/// let _ = narrow == wide;
+/// ```
+///
+/// Nor does passing one where the other is required:
+///
+/// ```compile_fail
+/// use fgit_types::native::{GitOidSha1, GitOidSha256};
+/// fn takes_sha256(_oid: GitOidSha256) {}
+/// takes_sha256(GitOidSha1::from_bytes([0_u8; 20]));
+/// ```
+///
+/// The permitted counterpart, comparing within one domain, does build:
+///
+/// ```
+/// use fgit_types::native::GitOidSha1;
+/// let left = GitOidSha1::from_bytes([0_u8; 20]);
+/// let right = GitOidSha1::ZERO;
+/// assert_eq!(left, right);
+/// ```
+///
 /// Every interface that can cross repository context uses this form so the
 /// algorithm is explicit. Two values in different domains are never equal,
 /// even when their digest bytes overlap.
