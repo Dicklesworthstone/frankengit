@@ -1382,3 +1382,59 @@ fn promote_closure(state: &mut RepositoryState, tx_id: TxId, closure: &BTreeSet<
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::effect::NetEffects;
+    use crate::harness::label;
+    use crate::intent::{ForgeEntityId, ForgeEventKind, ForgeStreamId, ForgeStreamPosition};
+    use crate::state::{InvariantBreach, RepositoryRoots};
+
+    use super::apply_effects;
+
+    fn closed_event() -> ForgeEventKind {
+        ForgeEventKind::PullRequestClosed {
+            pull_request: ForgeEntityId::new(label("pswr-pr")),
+        }
+    }
+
+    #[test]
+    fn forge_stream_exhaustion_refuses_before_reusing_a_position() {
+        let stream = ForgeStreamId::new(label("pswr-stream"));
+        let effects = NetEffects {
+            forge: BTreeMap::from([(stream, vec![closed_event()])]),
+            ..NetEffects::default()
+        };
+
+        let mut permitted = RepositoryRoots::default();
+        permitted
+            .forge_positions
+            .insert(stream, ForgeStreamPosition::new(u64::MAX - 1));
+        apply_effects(&mut permitted, &effects)
+            .expect("the final distinct forge position remains usable");
+        assert_eq!(
+            permitted.forge_positions.get(&stream),
+            Some(&ForgeStreamPosition::new(u64::MAX))
+        );
+
+        let mut exhausted = RepositoryRoots::default();
+        exhausted
+            .forge_positions
+            .insert(stream, ForgeStreamPosition::new(u64::MAX));
+        let before = exhausted.clone();
+        let breach = apply_effects(&mut exhausted, &effects)
+            .expect_err("an exhausted forge stream must not share its final position");
+        assert!(matches!(
+            breach.as_ref(),
+            InvariantBreach::SequenceExhausted {
+                kind: "forge stream"
+            }
+        ));
+        assert_eq!(
+            exhausted, before,
+            "a refused forge append must not change the authenticated roots"
+        );
+    }
+}
