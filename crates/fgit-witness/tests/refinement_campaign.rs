@@ -12,8 +12,10 @@ use std::{
 };
 
 use fgit_statistics::{BetaPrior, IncrementalPosterior};
+use fgit_types::{AsciiSlug, Digest, DigestAlgorithmId, DigestBytes};
 use fgit_witness::{
-    Action, Attempt, Cost, EscalationTrigger, Footprint, Inputs, PriorityClass, Scope,
+    Action, Attempt, Cost, EscalationTrigger, Footprint, Inputs, PriorityClass, RetryController,
+    RetryEvidenceIdentity, Scope,
     retry::{self, STARVATION_AGE_TICKS, STARVATION_ATTEMPTS},
     voi,
 };
@@ -177,6 +179,18 @@ fn pessimal_posterior() -> IncrementalPosterior {
     posterior
 }
 
+fn retry_controller() -> RetryController {
+    let identity = RetryEvidenceIdentity::new(
+        AsciiSlug::from_static("witness-refinement-campaign"),
+        AsciiSlug::from_static("named-schedule-row"),
+        Digest::new(
+            DigestAlgorithmId::try_new(0x025B).expect("campaign algorithm slot"),
+            DigestBytes::try_new(&[0x25; 32]).expect("campaign fingerprint bytes"),
+        ),
+    );
+    RetryController::new(identity).expect("the pinned retry profile must be valid")
+}
+
 fn write_receipt(lines: &[String]) {
     let Ok(dir) = env::var("FGIT_WITNESS_CAMPAIGN_ARTIFACT_DIR") else {
         return;
@@ -200,8 +214,9 @@ fn deterministic_refinement_safety_fairness_and_starvation_campaign() {
     let mut true_conflict_removals = 0_usize;
     let mut refinement_wins = 0_usize;
     let mut refinement_losses = 0_usize;
+    let mut bounded_retry_controller = retry_controller();
 
-    for case in &cases {
+    for (retry_sequence, case) in (1_u64..).zip(&cases) {
         let exact_conflict = case.left.overlaps(&case.right);
         assert_eq!(
             exact_conflict, case.expected_conflict,
@@ -242,13 +257,15 @@ fn deterministic_refinement_safety_fairness_and_starvation_campaign() {
             priority: PriorityClass::Background,
             posterior: corpus_posterior,
         };
-        let bounded_action = retry::decide(bounded_retry);
+        let bounded_decision = bounded_retry_controller
+            .decide(retry_sequence, bounded_retry)
+            .expect("bounded campaign sequence cannot exhaust a policy epoch");
         assert!(
-            matches!(bounded_action, Action::BackoffFor { .. }),
+            matches!(bounded_decision.action, Action::BackoffFor { .. }),
             "{}: the named non-starved schedule must remain below escalation",
             case.label
         );
-        receipt_lines.push(retry::receipt(bounded_retry, bounded_action));
+        receipt_lines.push(retry::receipt(bounded_retry, &bounded_decision));
 
         let admitted = !case.left.overlaps(&case.right);
         if admitted {
@@ -345,6 +362,7 @@ fn deterministic_refinement_safety_fairness_and_starvation_campaign() {
     let mut turns = Vec::new();
     let mut retry_receipts = Vec::new();
     let posterior = pessimal_posterior();
+    let mut starvation_controller = retry_controller();
     let mut turn = 0_u32;
     for attempt_number in 0..STARVATION_ATTEMPTS {
         let contender = if attempt_number % 2 == 0 {
@@ -364,12 +382,14 @@ fn deterministic_refinement_safety_fairness_and_starvation_campaign() {
             priority: PriorityClass::Background,
             posterior,
         };
-        let action = retry::decide(attempt);
+        let decision = starvation_controller
+            .decide(u64::from(attempt_number) + 1, attempt)
+            .expect("declared starvation schedule cannot exhaust an epoch");
         assert!(
-            !matches!(action, Action::EscalateToSerialized { .. }),
+            !matches!(decision.action, Action::EscalateToSerialized { .. }),
             "old transaction must not escalate before the declared attempt bound"
         );
-        retry_receipts.push(retry::receipt(attempt, action));
+        retry_receipts.push(retry::receipt(attempt, &decision));
         turn += 1;
         turns.push(ConcreteTurn {
             turn,
@@ -383,15 +403,17 @@ fn deterministic_refinement_safety_fairness_and_starvation_campaign() {
         priority: PriorityClass::Background,
         posterior,
     };
-    let escalated_action = retry::decide(escalated_attempt);
+    let escalated_decision = starvation_controller
+        .decide(u64::from(STARVATION_ATTEMPTS) + 1, escalated_attempt)
+        .expect("declared starvation schedule cannot exhaust an epoch");
     assert_eq!(
-        escalated_action,
+        escalated_decision.action,
         Action::EscalateToSerialized {
             trigger: EscalationTrigger::AttemptCount,
         },
         "the old transaction must escalate at the hard attempt bound regardless of posterior"
     );
-    let escalation_receipt = retry::receipt(escalated_attempt, escalated_action);
+    let escalation_receipt = retry::receipt(escalated_attempt, &escalated_decision);
     assert!(
         escalation_receipt.contains("\"action\":\"escalate_to_serialized\"")
             && escalation_receipt.contains("\"trigger\":\"attempt_count\""),
@@ -447,43 +469,51 @@ fn deterministic_refinement_safety_fairness_and_starvation_campaign() {
             priority,
             posterior,
         };
-        let action = retry::decide(aged_attempt);
+        let mut age_controller = retry_controller();
+        let decision = age_controller
+            .decide(1, aged_attempt)
+            .expect("first age observation cannot exhaust an epoch");
         assert_eq!(
-            action,
+            decision.action,
             Action::EscalateToSerialized {
                 trigger: EscalationTrigger::Age,
             },
             "{priority:?}: age escalation cannot be vetoed by priority or posterior"
         );
-        retry_receipts.push(retry::receipt(aged_attempt, action));
+        retry_receipts.push(retry::receipt(aged_attempt, &decision));
     }
 
-    // Regime reset discards a hostile history before the next decision. The
-    // exact counts and deterministic fallback action are part of the receipt.
-    let mut stale_posterior = pessimal_posterior();
-    assert_ne!(
-        stale_posterior.counts(),
-        (0, 0),
-        "drill needs non-uniform history"
+    // Regime reset discards the controller's hostile evidence window before the
+    // next decision and publishes a fresh policy epoch.  Resetting just the
+    // posterior would leave a latched shared fallback behind.
+    assert!(
+        matches!(
+            starvation_controller.selection(),
+            fgit_statistics::PolicySelection::Fallback(_)
+        ),
+        "the hostile starvation history must select the shared fallback"
     );
-    stale_posterior.reset_for_regime();
-    assert_eq!(
-        stale_posterior.counts(),
-        (0, 0),
-        "a regime reset must discard stale contention observations"
-    );
+    let reset_epoch = starvation_controller
+        .reset_window()
+        .expect("the bounded campaign cannot exhaust a policy epoch");
     let reset_attempt = Attempt {
         attempts: 1,
         age_ticks: 1,
         priority: PriorityClass::Interactive,
-        posterior: stale_posterior,
+        posterior: IncrementalPosterior::new(BetaPrior::uniform()),
     };
-    let reset_action = retry::decide(reset_attempt);
+    let reset_decision = starvation_controller
+        .decide(1, reset_attempt)
+        .expect("fresh retry window cannot exhaust a policy epoch");
     assert!(
-        matches!(reset_action, Action::BackoffFor { .. }),
-        "the uniform post-reset posterior must follow the deterministic bounded fallback"
+        matches!(reset_decision.action, Action::BackoffFor { .. }),
+        "the uniform post-reset posterior must use the bounded candidate"
     );
-    retry_receipts.push(retry::receipt(reset_attempt, reset_action));
+    assert_eq!(
+        reset_decision.epoch, reset_epoch,
+        "the first decision in a reset window must carry the reset epoch"
+    );
+    retry_receipts.push(retry::receipt(reset_attempt, &reset_decision));
 
     receipt_lines.extend(retry_receipts);
     receipt_lines.insert(

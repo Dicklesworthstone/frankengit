@@ -65,7 +65,10 @@ pub use ladder::{
     Climb, ClimbFailure, ConflictCertificate, Observations, Reused, Revalidation, Rung, climb,
     exact_revalidation,
 };
-pub use retry::{Action, Attempt, EscalationTrigger, PriorityClass};
+pub use retry::{
+    Action, Attempt, EscalationTrigger, PriorityClass, RetryController, RetryDecision,
+    RetryEvidenceIdentity, RetryEvidenceRefusal, RetryRefusal,
+};
 pub use sketch::{
     DisjointnessProof, OverlapEstimate, OverlapSketch, ProvesAbsence, prove_disjoint,
 };
