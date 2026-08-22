@@ -53,6 +53,27 @@
 //!      this file                    20 passed  3 failed   caught it
 //! ```
 //!
+//! Two further mutations **tighten** rather than remove, which is the only
+//! kind a permitted twin can catch. These were run in a workspace-detached
+//! copy of the crate under the scratchpad, not in the shared checkout, because
+//! by then this bead was awaiting batch verification and a transient red `src`
+//! would have been attributed to it:
+//!
+//! ```text
+//! C: the frame-length guard tightened, refusing a frame of exactly MAX_FRAME
+//!      22 passed  1 failed   killed by the boundary twin, and only by it
+//!
+//! D: the declared-length bound tightened, refusing a declared length of
+//!    exactly MAX_FRAME
+//!      23 passed  0 failed   SURVIVED
+//! ```
+//!
+//! D surviving was the finding, not a footnote: the over-the-bound probe pins
+//! the refusing side and says nothing about the inclusive edge, so
+//! `a_declared_length_of_exactly_the_bound_is_not_over_the_bound` was written
+//! in response and now kills it. A guard whose tightening nothing notices is a
+//! guard whose boundary is untested, however many tests exercise its input.
+//!
 //! Under A the crate still refuses every input it refused before, so no
 //! `is_err()` assertion anywhere notices that the guard which exists to stop a
 //! corrupt length *before* the slice is gone. That includes
@@ -268,6 +289,35 @@ fn a_declared_length_within_the_bound_but_past_the_end_reports_what_remains() {
     assert_eq!(
         detail,
         format!("declared 1000 bytes at 12 but only {remaining} remain")
+    );
+}
+
+/// **The inclusive boundary of the declared-length bound.** The bound reads a
+/// strict comparison, so a declared length of *exactly* `MAX_FRAME` is not over
+/// it: such input falls through to the declared-versus-remaining guard instead.
+///
+/// Added after a **tightening** mutation survived. Changing that bound to a
+/// non-strict comparison made it refuse a declared length of exactly
+/// `MAX_FRAME`, and all 23 tests here stayed green — the refusal-side probe
+/// above pins the over-the-bound case and says nothing about the boundary
+/// itself. A guard whose tightening nothing notices is a guard whose inclusive
+/// edge is untested.
+#[test]
+fn a_declared_length_of_exactly_the_bound_is_not_over_the_bound() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(MAGIC);
+    bytes.extend_from_slice(&1_u16.to_be_bytes());
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
+    let exactly = u32::try_from(MAX_FRAME).expect("the bound fits in u32");
+    bytes.extend_from_slice(&exactly.to_be_bytes());
+    bytes.extend_from_slice(b"txn");
+
+    let remaining = bytes.len() - 12;
+    assert_eq!(
+        frame_refusal(&bytes, "declared length of exactly the bound"),
+        format!("declared {MAX_FRAME} bytes at 12 but only {remaining} remain"),
+        "exactly the bound is not OVER the bound, so the slice check owns this \
+         refusal, not the bound check"
     );
 }
 
