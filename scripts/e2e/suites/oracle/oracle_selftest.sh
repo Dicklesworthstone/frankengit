@@ -8,10 +8,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-# shellcheck source=../lib.sh
-. "${SCRIPT_DIR}/../lib.sh"
+# shellcheck source=../../lib.sh
+. "${SCRIPT_DIR}/../../lib.sh"
 
-ORACLE="${SCRIPT_DIR}/oracle.sh"
+ORACLE="${SCRIPT_DIR}/../../oracle/oracle.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/fgit-oracle-selftest.XXXXXXXX")"
 
 fge_init oracle-selftest

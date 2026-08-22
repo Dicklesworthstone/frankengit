@@ -32,7 +32,7 @@ of `byte_equal`, `semantically_equal_declared`, or `divergent`. Suites source
 `../lib.sh` for their own step-level NDJSON evidence; the oracle itself never
 mutates the shared E2E harness.
 
-`selftest.sh` exercises planted refusals for an unknown pin, missing source
-input, wrong binary version, caller configuration leakage, and sandbox path
-escape. Its fake Git/Bubblewrap fixtures prove harness mechanics only, not
-Git conformance.
+`../suites/oracle/oracle_selftest.sh` is a discovered E2E suite that exercises
+planted refusals for an unknown pin, missing source input, wrong binary version,
+caller configuration leakage, and sandbox path escape. Its fake Git/Bubblewrap
+fixtures prove harness mechanics only, not Git conformance.
