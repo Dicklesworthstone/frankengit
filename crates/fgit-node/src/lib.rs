@@ -309,6 +309,9 @@ impl MaterializedAdmission {
 pub enum AdmissionMaterializationRefusal {
     /// The repository head has not been initialized.
     HeadAbsent,
+    /// The materializer catch-up scope was cancelled before it could install
+    /// a verified cache record.
+    Cancelled,
     /// The authority operation refused or became ambiguous.
     Authority(AuthorityFailure),
     /// The authenticated receipt could not be decoded as its typed head.
@@ -342,6 +345,9 @@ impl Display for AdmissionMaterializationRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::HeadAbsent => formatter.write_str("canonical admission head is absent"),
+            Self::Cancelled => {
+                formatter.write_str("canonical admission materialization was cancelled")
+            }
             Self::Authority(error) => Display::fmt(error, formatter),
             Self::HeadBody(error) => Display::fmt(error, formatter),
             Self::RepositoryMismatch { expected, observed } => write!(
@@ -377,6 +383,7 @@ impl Error for AdmissionMaterializationRefusal {
             Self::HeadIdentityDomain(error) => Some(error),
             Self::Key(error) => Some(error),
             Self::HeadAbsent
+            | Self::Cancelled
             | Self::RepositoryMismatch { .. }
             | Self::CanonicalRoot(_)
             | Self::ImmutableAbsent(_)
@@ -444,16 +451,19 @@ impl DurableAdmissionMaterializer {
     /// The one mutable field in this type is only a bounded decoded cache.
     /// It is replaced after the immutable frame and every binding have been
     /// validated, and is never consulted as an authority source.
-    pub async fn materialize_current_in<Authority>(
+    pub async fn materialize_current_in<Authority, IsCancelled>(
         &self,
         authority: &Authority,
         cx: &Authority::Context,
         head_key: &HeadKey,
         repository_id: RepositoryId,
+        is_cancelled: &IsCancelled,
     ) -> Result<MaterializedAdmission, AdmissionMaterializationRefusal>
     where
         Authority: AsyncAuthorityStore + ?Sized,
+        IsCancelled: Fn() -> bool,
     {
+        ensure_materializer_catch_up_live(is_cancelled)?;
         let HeadRead::Present(receipt) = authority
             .read_head(cx, head_key)
             .await
@@ -461,10 +471,12 @@ impl DurableAdmissionMaterializer {
         else {
             return Err(AdmissionMaterializationRefusal::HeadAbsent);
         };
+        ensure_materializer_catch_up_live(is_cancelled)?;
         let authenticated = authority
             .authenticate_head_receipt(cx, &receipt)
             .await
             .map_err(AdmissionMaterializationRefusal::Authority)?;
+        ensure_materializer_catch_up_live(is_cancelled)?;
         let body = authenticated
             .body()
             .map_err(AdmissionMaterializationRefusal::HeadBody)?;
@@ -493,6 +505,7 @@ impl DurableAdmissionMaterializer {
                 body.ref_root,
             ));
         };
+        ensure_materializer_catch_up_live(is_cancelled)?;
         let ref_state = decode_body::<CanonicalRefState>(&frame, fgit_codec::DecodeLimits::DEFAULT)
             .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
         if canonical_ref_state_root(&ref_state)
@@ -521,6 +534,9 @@ impl DurableAdmissionMaterializer {
             policy_epoch: body.policy_epoch,
             configuration_root: body.configuration_root,
         };
+        // No await follows this final catch-up checkpoint. A cancelled scope
+        // therefore cannot install a readable partial materialization.
+        ensure_materializer_catch_up_live(is_cancelled)?;
         *self
             .materialized
             .write()
@@ -644,6 +660,16 @@ where
     {
         PutOutcome::Created | PutOutcome::IdenticalRetry => Ok(()),
         PutOutcome::Conflict => Err(AdmissionMaterializationRefusal::ImmutableConflict),
+    }
+}
+
+fn ensure_materializer_catch_up_live(
+    is_cancelled: &impl Fn() -> bool,
+) -> Result<(), AdmissionMaterializationRefusal> {
+    if is_cancelled() {
+        Err(AdmissionMaterializationRefusal::Cancelled)
+    } else {
+        Ok(())
     }
 }
 
@@ -1747,12 +1773,18 @@ impl OneNode {
         &self,
         request: &NodeRequestContext,
     ) -> Result<MaterializedAdmission, AdmissionMaterializationRefusal> {
+        // The child is the materializer-catch-up ownership scope. Parent
+        // request cancellation propagates to it; its checkpoints fence cache
+        // installation without making the cache an authority source.
+        let catch_up = request.authority().create_child();
+        let is_cancelled = || catch_up.checkpoint().is_err();
         self.admission_materializer
             .materialize_current_in(
                 &self.authority,
-                request.authority(),
+                &catch_up,
                 &self.head_key,
                 self.repository_id,
+                &is_cancelled,
             )
             .await
     }
@@ -2172,13 +2204,13 @@ mod tests {
     use std::io::{Cursor, Read};
     use std::net::{Shutdown, TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration;
 
     use fgit_admission::{
         AdmissionProjection, AdmissionSnapshot, CanonicalAdmissionStore, CanonicalRefState,
-        PermittedObjectClosure,
+        PermittedObjectClosure, canonical_ref_state_root,
     };
     use fgit_authority::{AsyncAuthorityStore, HeadInit, HeadRead, ImmutableRead, OutcomeLookup};
     use fgit_chronicle::PublicationBasis;
@@ -2756,6 +2788,49 @@ mod tests {
             )
             .expect("first-clone view comes from durable admission materialization");
         assert!(upload_pack.advertised_refs().is_empty());
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn cancelled_materializer_catch_up_never_installs_a_cache_record() {
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf());
+        let (node, _) = OneNode::init(config).expect("node initializes canonical refs");
+        let request = node.request_context();
+        let polls = AtomicUsize::new(0);
+
+        let result = node
+            .runtime()
+            .block_on(node.admission_materializer.materialize_current_in(
+                &node.authority,
+                request.authority(),
+                &node.head_key,
+                node.repository_id(),
+                &|| polls.fetch_add(1, Ordering::AcqRel) >= 3,
+            ));
+        assert!(
+            matches!(result, Err(AdmissionMaterializationRefusal::Cancelled)),
+            "the cancellation is observed after durable reads and before cache installation"
+        );
+        let cancelled_request = node.request_context();
+        cancelled_request.authority().cancel();
+        assert!(
+            matches!(
+                node.runtime()
+                    .block_on(node.materialize_admission_in(&cancelled_request)),
+                Err(AdmissionMaterializationRefusal::Cancelled)
+            ),
+            "the production child catch-up context inherits request cancellation"
+        );
+        assert_eq!(
+            CanonicalAdmissionStore::resolve_ref_state(
+                &node.admission_materializer,
+                canonical_ref_state_root(&CanonicalRefState::default())
+                    .expect("empty canonical ref root computes"),
+            ),
+            Err(RefusalCode::EvidenceMissing),
+            "a cancelled catch-up scope leaves no readable partial cache record"
+        );
         node.shutdown().expect("node closes cleanly");
     }
 
