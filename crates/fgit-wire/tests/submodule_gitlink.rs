@@ -120,7 +120,11 @@ fn assert_gitlink_boundary(root: AnyGitOid, gitlink: AnyGitOid) {
         !closure.objects.iter().any(|object| object.oid == gitlink),
         "the gitlink OID belongs only to the tree payload, never the parent pack closure"
     );
-    assert!(closure.promisor.omissions.is_empty());
+    assert_eq!(
+        closure.promisor.omissions.len(),
+        0,
+        "a full parent closure has no promised omissions"
+    );
     assert_eq!(
         *graph.reads.borrow(),
         vec![oid(TIP), root],
@@ -194,7 +198,9 @@ fn decode_hex(input: &str) -> Vec<u8> {
     );
     input
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let text = std::str::from_utf8(pair).expect("hex is ASCII");
             u8::from_str_radix(text, 16).expect("hex digit pair")
