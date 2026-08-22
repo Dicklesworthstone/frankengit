@@ -77,6 +77,28 @@ impl FallbackTrigger {
     }
 }
 
+// `ALL` must name every trigger exactly once, but it cannot force the
+// hand-written ordinal returned by `index()` to be distinct or in range. This
+// guard relates those independent declarations before `PolicyGate` can use an
+// ordinal as an array index.
+//
+// Deletion condition: remove this only if the ordinal becomes one
+// mechanically-derived declaration rather than a hand-written match arm.
+const _: () = {
+    let mut seen = [false; FallbackTrigger::COUNT];
+    let mut position = 0;
+    while position < FallbackTrigger::ALL.len() {
+        let ordinal = FallbackTrigger::ALL[position].index();
+        assert!(
+            ordinal < FallbackTrigger::COUNT,
+            "a fallback trigger ordinal is outside the gate slot range"
+        );
+        assert!(!seen[ordinal], "two fallback triggers share an ordinal");
+        seen[ordinal] = true;
+        position += 1;
+    }
+};
+
 /// What a controller may use for one decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PolicySelection {
