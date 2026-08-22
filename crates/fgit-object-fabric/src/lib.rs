@@ -2041,4 +2041,208 @@ mod tests {
             _ => panic!("golden contains non-hex input"),
         }
     }
+
+    // -----------------------------------------------------------------
+    // frankengit-syca: three ObjectEnvelope refusals whose siblings on the
+    // same function are already covered.
+    //
+    // `decoder_refuses_unknown_versions_and_trailing_envelope_bytes` above
+    // exercises `UnknownVersion` and `TrailingBytes` on `ObjectEnvelope::decode`.
+    // These three sit on the same path and were never reached.
+    //
+    // BYTE OFFSETS ARE LOCATED, NEVER HARD-CODED. The envelope puts the kind
+    // byte after two variable-length fields, so a literal offset would drift
+    // silently the day the fixture changes and the probe would corrupt
+    // something else while still refusing. Each offset below is derived and
+    // then asserted before it is used.
+    // -----------------------------------------------------------------
+
+    /// The offset of the object-kind byte, found by diffing two encodings that
+    /// differ in nothing else.
+    ///
+    /// Asserts exactly one byte differs, so if the layout ever changes such
+    /// that `object_kind` is not a single byte, this fails loudly instead of
+    /// silently mutating a neighbour.
+    fn object_kind_offset() -> usize {
+        let payload = payload(b'a');
+        let commitment = CryptoDigest
+            .payload_commitment(ObjectKind::Blob, &payload)
+            .expect("registered payload commitment must succeed");
+        let build = |kind: ObjectKind| {
+            ObjectEnvelope::new(
+                vec![b'n'],
+                oid(b'a'),
+                kind,
+                u64::try_from(payload.len()).expect("fixture length fits u64"),
+                commitment,
+                vec![b'c'],
+                [4; COMMITMENT_BYTES],
+                None,
+                &limits(),
+            )
+            .expect("fixture envelope must be valid")
+            .encode()
+            .expect("fixture envelope must encode")
+        };
+        let blob = build(ObjectKind::Blob);
+        let tag = build(ObjectKind::Tag);
+        assert_eq!(blob.len(), tag.len(), "only the kind byte may differ");
+        let differing: Vec<usize> = (0..blob.len()).filter(|i| blob[*i] != tag[*i]).collect();
+        assert_eq!(
+            differing.len(),
+            1,
+            "exactly one byte must distinguish two kinds; got {differing:?}",
+        );
+        differing[0]
+    }
+
+    /// Object-kind codes outside the wire set are refused, at both boundaries.
+    ///
+    /// `from_wire` accepts 1..=5. Code 0 is below the set and 6 is immediately
+    /// above it, so probing both is what separates an enumeration from a range
+    /// check — a guard written as `value <= 5` would admit 0, and one written
+    /// as `value >= 1` would admit 6.
+    ///
+    /// Earlier fields are untouched, so magic, version, namespace and identity
+    /// all parse and the walk genuinely reaches the kind byte.
+    #[test]
+    fn object_kind_codes_outside_the_wire_set_are_refused_at_both_boundaries() {
+        let offset = object_kind_offset();
+        let good = envelope(b'a')
+            .encode()
+            .expect("fixture envelope must encode");
+
+        for code in [0_u8, 6] {
+            let mut bad = good.clone();
+            bad[offset] = code;
+            assert_eq!(
+                ObjectEnvelope::decode(&bad, &limits()),
+                Err(FabricError::UnknownObjectKind(code)),
+                "wire kind {code} must be refused, naming itself",
+            );
+        }
+    }
+
+    /// Every valid wire kind decodes through the same path.
+    ///
+    /// The permitted twin for the boundary probe above: without it, both
+    /// refusals are equally satisfied by a `from_wire` that refuses
+    /// everything.
+    #[test]
+    fn every_valid_object_kind_code_decodes() {
+        let offset = object_kind_offset();
+        let good = envelope(b'a')
+            .encode()
+            .expect("fixture envelope must encode");
+
+        for code in 1_u8..=5 {
+            let mut bytes = good.clone();
+            bytes[offset] = code;
+            let decoded = ObjectEnvelope::decode(&bytes, &limits());
+            assert!(
+                !matches!(decoded, Err(FabricError::UnknownObjectKind(_))),
+                "wire kind {code} is valid and must not be refused as unknown; \
+                 got {decoded:?}",
+            );
+        }
+    }
+
+    /// A manifest-reference discriminant outside {0, 1} is refused.
+    ///
+    /// The fixture carries `manifest_reference: None`, and `decode` reads that
+    /// discriminant last before its end-of-input check — so for a `None`
+    /// envelope it is the final byte. That is asserted rather than assumed
+    /// before the byte is touched.
+    ///
+    /// Both twins are exercised: discriminant 0 decodes as-is, and 1 decodes
+    /// once a commitment follows it. So the refusal is attributable to the
+    /// third value and not to that position being read at all.
+    #[test]
+    fn a_manifest_reference_discriminant_outside_zero_and_one_is_refused() {
+        let good = envelope(b'a')
+            .encode()
+            .expect("fixture envelope must encode");
+        let discriminant = good.len() - 1;
+        assert_eq!(
+            good[discriminant], 0,
+            "a None manifest reference must encode as a trailing zero \
+             discriminant; the layout changed",
+        );
+
+        let mut bad = good.clone();
+        bad[discriminant] = 2;
+        assert_eq!(
+            ObjectEnvelope::decode(&bad, &limits()),
+            Err(FabricError::InvalidEnvelope),
+        );
+
+        // Twin one: discriminant 0, untouched.
+        ObjectEnvelope::decode(&good, &limits()).expect("a None reference decodes");
+
+        // Twin two: discriminant 1 with a commitment after it, built through
+        // the constructor so the encoding is canonical rather than hand-spliced.
+        let payload = payload(b'a');
+        let with_reference = ObjectEnvelope::new(
+            vec![b'n'],
+            oid(b'a'),
+            ObjectKind::Blob,
+            u64::try_from(payload.len()).expect("fixture length fits u64"),
+            CryptoDigest
+                .payload_commitment(ObjectKind::Blob, &payload)
+                .expect("registered payload commitment must succeed"),
+            vec![b'c'],
+            [4; COMMITMENT_BYTES],
+            Some([9; COMMITMENT_BYTES]),
+            &limits(),
+        )
+        .expect("a Some reference is valid");
+        let bytes = with_reference
+            .encode()
+            .expect("fixture envelope must encode");
+        assert_eq!(
+            ObjectEnvelope::decode(&bytes, &limits()),
+            Ok(with_reference),
+            "a Some reference decodes through the same discriminant position",
+        );
+    }
+
+    /// An envelope larger than the caller's declared bound is refused.
+    ///
+    /// Unreachable with the fixture limits — `max_envelope_bytes` is 256 and a
+    /// maximal envelope under `max_namespace_bytes = 16` /
+    /// `max_object_identity_bytes = 32` encodes to well under that. So the
+    /// probe tightens the bound instead of inflating the envelope, which is
+    /// legitimate because limits are a caller-supplied parameter, and is the
+    /// honest way to reach a guard whose default headroom is generous.
+    ///
+    /// The comparison is `>`, so the twin sits on the exact encoded length.
+    #[test]
+    fn an_envelope_past_the_callers_declared_bound_is_refused() {
+        let encoded_len = envelope(b'a')
+            .encode()
+            .expect("fixture envelope must encode")
+            .len();
+
+        let build = |max_envelope_bytes: usize| {
+            let payload = payload(b'a');
+            let mut tightened = limits();
+            tightened.max_envelope_bytes = max_envelope_bytes;
+            ObjectEnvelope::new(
+                vec![b'n'],
+                oid(b'a'),
+                ObjectKind::Blob,
+                u64::try_from(payload.len()).expect("fixture length fits u64"),
+                CryptoDigest
+                    .payload_commitment(ObjectKind::Blob, &payload)
+                    .expect("registered payload commitment must succeed"),
+                vec![b'c'],
+                [4; COMMITMENT_BYTES],
+                None,
+                &tightened,
+            )
+        };
+
+        assert_eq!(build(encoded_len - 1), Err(FabricError::EnvelopeTooLarge));
+        build(encoded_len).expect("an envelope of exactly the bound is admissible");
+    }
 }
