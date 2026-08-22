@@ -34,4 +34,9 @@ fge_assert_ndjson       FG-000A-NEG-NDJ   "$work/bad.ndjson"        'ndjson malf
 fge_assert_ndjson       FG-000A-NEG-NDJM  "$work/absent.ndjson"     'ndjson missing negative'
 fge_assert_ndjson       FG-000A-NEG-NDJE  "$work/empty.ndjson"      'ndjson empty negative'
 fge_assert_cmd          FG-000A-NEG-CMD   'cmd negative' false
+# No command at all: "$@" expands to nothing and the bare redirect succeeds,
+# so this used to record PASS (frankengit-xypf).
+fge_assert_cmd          FG-000A-NEG-CMDE  'cmd empty-predicate negative'
+# An explicitly EMPTY third argument must not silently become FGE_LAST_EXIT.
+fge_assert_exit         FG-000A-NEG-EXITE 0 ''                       'exit empty-actual negative'
 fge_fail                FG-000A-NEG-FAIL  'explicit failure'

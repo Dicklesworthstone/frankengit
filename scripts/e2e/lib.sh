@@ -2184,8 +2184,14 @@ fge_assert_ne() {
   return 0
 }
 
+# `${3:-...}` substitutes on EMPTY as well as unset, so a caller writing
+# `fge_assert_exit ID 0 "$rc"` with `$rc` accidentally empty silently checked
+# FGE_LAST_EXIT instead of the variable they named -- a §3.1 silent fallback,
+# and it can pass where the intended check would fail. `${3-...}` keeps the
+# two-argument convenience (UNSET still means "the last captured exit") while an
+# explicitly empty third argument now stays empty and fails the comparison.
 fge_assert_exit() {
-  local id=${1-} exp=${2-0} act=${3:-$FGE_LAST_EXIT} desc=${4:-exit code}
+  local id=${1-} exp=${2-0} act=${3-$FGE_LAST_EXIT} desc=${4:-exit code}
   fge_assert_eq "$id" "$exp" "$act" "$desc"
   return 0
 }
@@ -2326,9 +2332,17 @@ fge_assert_ndjson() {
   return 0
 }
 
+# WITH NO COMMAND, `"$@"` expands to nothing and the line becomes a bare
+# redirect, which succeeds -- so `fge_assert_cmd ID 'desc'` recorded PASS
+# unconditionally. Same empty-operand class as an empty needle, pattern or path:
+# the predicate is the operand, and an absent one is always a caller bug.
 fge_assert_cmd() {
   local id=${1-} desc=${2-predicate} rc=0
   shift 2 || true
+  if [ "$#" -eq 0 ]; then
+    fge__record_assertion "$id" fail 'a command to run' 'no command given' "$desc"
+    return 0
+  fi
   "$@" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then
     fge__record_assertion "$id" pass 'exit 0' 'exit 0' "$desc"
