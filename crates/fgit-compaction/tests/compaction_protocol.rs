@@ -10,8 +10,9 @@ use fgit_codec::{CryptoBodyIdentity, DecodeLimits, decode_body, encode_body};
 use fgit_compaction::{
     CompactionAlgorithm, CompactionExecution, CompactionOutputs, CompactionProfile,
     CompactionPublicationRefusal, CompactionRecord, DecisionRange, DurabilityReceipt,
-    DurabilityRefusal, LogicalEquivalenceProof, OutputDisposition, OutputStageReceipt, SourceEntry,
-    SourceOutputTotalityMap, StagedCompaction, TotalityEntry,
+    DurabilityRefusal, DurableCompaction, LogicalEquivalenceProof, OutputDisposition,
+    OutputStageReceipt, RetentionRefusal, SourceEntry, SourceOutputTotalityMap, StagedCompaction,
+    TotalityEntry,
 };
 use fgit_object_fabric::fabric::{
     AuthenticatedRetentionRegistry, PublicationState, RetentionRootProposal, StoreRefusal,
@@ -762,4 +763,224 @@ fn an_ambiguous_authority_failure_is_indeterminate_and_never_an_unpublished_refu
             panic!("an ambiguous authority failure cannot report a visible generation: {other:?}")
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// frankengit-pkea: the four refusal paths of `authorize_source_deletion`.
+//
+// That function is documented "Consults the *authenticated* retention basis
+// before allowing a source placement deletion", and it returns a
+// `SourceDeletionPermit` — the capability that lets a caller delete data. Its
+// success path was tested; none of the four guards in front of it was.
+//
+// ORDERING, which every probe below has to respect:
+//   :380 totality  ->  :383 head  ->  :387 `revalidate_root`  ->  :390 permits
+// Each case keeps every earlier guard satisfied and says which, or it would
+// prove an earlier refusal instead of its own.
+// ---------------------------------------------------------------------------
+
+/// An object that is deliberately NOT in the totality map.
+///
+/// `object()` is the one totality entry the fixture records, so any other
+/// identity is absent by construction. Asserted different, because a fixture
+/// change that made these equal would silently turn the totality probe into a
+/// second happy path.
+const fn absent_object() -> GitOid {
+    GitOid::Sha1(GitOidSha1::from_bytes([0x74; GitOidSha1::LEN]))
+}
+
+/// The durable generation the existing happy-path test reaches, extracted so
+/// the refusal probes share one setup rather than duplicating the chain.
+///
+/// Reproduces stage -> publish -> visible -> `confirm_durability` with all
+/// outputs durable, which is the only state in which retention is consulted at
+/// all.
+fn durable_generation(
+    slot: &'static [u8],
+    instance: u64,
+) -> (DurableCompaction, Digest, RepositoryAuthorityHeadId) {
+    let input = basis();
+    let staged = stage(&input);
+    let publication = publication(input.clone(), &staged);
+    let head_key = HeadKey::new(slot.to_vec()).expect("bounded head key");
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(instance));
+    initialize_repository(&store, &head_key, input.body()).expect("genesis initializes");
+
+    let visible = match staged.publish(
+        &store,
+        &head_key,
+        current_token(&store, &head_key),
+        &publication,
+        tenant(),
+    ) {
+        CompactionExecution::Visible(visible) => visible,
+        other => panic!("the staged generation must publish: {other:?}"),
+    };
+    let retention_root = match store.read_head(&head_key).expect("head read after publish") {
+        HeadRead::Present(receipt) => {
+            decode_body::<RepositoryAuthorityHeadBody>(receipt.body(), DecodeLimits::DEFAULT)
+                .expect("published head is a canonical body")
+                .retention_root
+        }
+        HeadRead::Absent => panic!("a successful CAS cannot remove a head"),
+    };
+    let successor = visible.successor_head();
+    let durable = visible
+        .confirm_durability(DurabilityReceipt::new(
+            visible.generation(),
+            CompactionProfile::ConservativeInterimV1,
+            vec![PublicationState::new(true, true, true); 3],
+            digest(0x82),
+        ))
+        .expect("all-durable outputs unlock retention evaluation");
+    (durable, retention_root, successor)
+}
+
+fn proposal_for(head: RepositoryAuthorityHeadId, retention_root: Digest) -> RetentionRootProposal {
+    RetentionRootProposal::new(
+        head,
+        retention_root,
+        vec![derived!(SegmentManifestId, 0x51)],
+    )
+    .expect("one manifest is canonical")
+}
+
+/// Deleting an object the generation never accounted for is refused first.
+///
+/// This is the outermost guard, so nothing earlier can pre-empt it. The
+/// registry is fully permissive — matching head, `permits: true` — which is
+/// what makes the refusal attributable to the totality check rather than to
+/// anything the registry did.
+#[test]
+fn deleting_a_source_outside_the_totality_map_is_refused() {
+    let (durable, retention_root, successor) = durable_generation(b"fg079/pkea-totality", 0x91);
+    assert_ne!(
+        absent_object(),
+        object(),
+        "the probe object must differ from the one totality entry",
+    );
+
+    let refusal = durable.authorize_source_deletion(
+        &RetentionRegistry {
+            head: successor,
+            permits: true,
+        },
+        &proposal_for(successor, retention_root),
+        absent_object(),
+    );
+    assert_eq!(refusal, Err(RetentionRefusal::SourceNotInTotality));
+}
+
+/// A proposal naming a head other than the compacted successor is refused.
+///
+/// Earlier guard satisfied: the object IS in the totality map, so
+/// `SourceNotInTotality` cannot fire first. The registry again permits
+/// everything, so only the proposal's head is wrong.
+#[test]
+fn a_retention_proposal_for_another_head_is_refused() {
+    let (durable, retention_root, successor) = durable_generation(b"fg079/pkea-head", 0x92);
+    let foreign = derived!(RepositoryAuthorityHeadId, 0x66);
+    assert_ne!(
+        foreign, successor,
+        "the foreign head must differ or the refusal below is vacuous",
+    );
+
+    let refusal = durable.authorize_source_deletion(
+        &RetentionRegistry {
+            head: successor,
+            permits: true,
+        },
+        &proposal_for(foreign, retention_root),
+        object(),
+    );
+    assert_eq!(refusal, Err(RetentionRefusal::AuthorityHeadMismatch));
+}
+
+/// A stale retention basis is refused by the registry, not by this crate.
+///
+/// Earlier guards satisfied: the object is in the totality map and the
+/// PROPOSAL names the compacted successor — that second part is essential,
+/// because a proposal for another head would trip `AuthorityHeadMismatch`
+/// before the registry is consulted at all. The REGISTRY is the thing that
+/// disagrees, so `revalidate_root` refuses.
+///
+/// The inner `StoreRefusal` is asserted, not just the outer variant, and that
+/// is forced rather than stylistic: `Registry(..)` wraps BOTH registry calls
+/// (protocol.rs:387 and :390), so the outer variant cannot say which refused.
+#[test]
+fn a_retention_basis_the_registry_no_longer_recognises_is_refused() {
+    let (durable, retention_root, successor) = durable_generation(b"fg079/pkea-basis", 0x93);
+
+    let refusal = durable.authorize_source_deletion(
+        &RetentionRegistry {
+            head: derived!(RepositoryAuthorityHeadId, 0x67),
+            permits: true,
+        },
+        &proposal_for(successor, retention_root),
+        object(),
+    );
+    assert_eq!(
+        refusal,
+        Err(RetentionRefusal::Registry(
+            StoreRefusal::RetentionRevalidationFailed
+        )),
+        "a stale basis must be distinguishable from a retained object, and only \
+         the inner refusal carries that distinction",
+    );
+}
+
+/// An object the registry retains is refused even with a current basis.
+///
+/// Earlier guards satisfied: object in totality, proposal head matches the
+/// successor, and the registry's head matches so `revalidate_root` succeeds.
+/// The only remaining difference is `permits: false`.
+///
+/// Together with the test above, this is the pair that shows `Registry(..)`
+/// covers two genuinely different operator situations — a stale basis versus a
+/// retained object — which the outer variant alone cannot report.
+#[test]
+fn an_object_the_registry_retains_is_refused_even_on_a_current_basis() {
+    let (durable, retention_root, successor) = durable_generation(b"fg079/pkea-retained", 0x94);
+
+    let refusal = durable.authorize_source_deletion(
+        &RetentionRegistry {
+            head: successor,
+            permits: false,
+        },
+        &proposal_for(successor, retention_root),
+        object(),
+    );
+    assert_eq!(
+        refusal,
+        Err(RetentionRefusal::Registry(StoreRefusal::DeletionRetained)),
+    );
+}
+
+/// The permit carries the generation it was authorized against.
+///
+/// The existing happy-path test asserts the permit's source; this pins the
+/// other half. A permit naming a different generation would authorize a
+/// deletion against a compaction that did not account for the object, which is
+/// the whole property the totality guard exists to establish.
+#[test]
+fn a_granted_permit_names_the_generation_that_authorized_it() {
+    let (durable, retention_root, successor) = durable_generation(b"fg079/pkea-permit", 0x95);
+
+    let permit = durable
+        .authorize_source_deletion(
+            &RetentionRegistry {
+                head: successor,
+                permits: true,
+            },
+            &proposal_for(successor, retention_root),
+            object(),
+        )
+        .expect("an authenticated retention basis permits deletion");
+
+    assert_eq!(permit.source(), object());
+    assert_eq!(
+        permit.generation(),
+        durable.generation(),
+        "a permit must name the compaction generation that authorized it",
+    );
 }
