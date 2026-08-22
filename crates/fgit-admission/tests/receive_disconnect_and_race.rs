@@ -91,10 +91,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use fgit_admission::{
-    AdmissionContext, AdmissionLimits, AdmissionProjection, AdmissionSnapshot,
-    CommitMaterialization, QuarantineValidator, RefusalMaterialization, ValidatedClosure,
-    ValidatedReceive, admit_validated_receive, validate_receive,
+    AdmissionContext, AdmissionEvidence, AdmissionLimits, AdmissionProjection, AdmissionSnapshot,
+    CanonicalAdmissionProjection, CanonicalAdmissionStore, CanonicalRefState, CommitEvidence,
+    CommitMaterialization, PermittedObjectClosure, QuarantineValidator, RefusalMaterialization,
+    ValidatedClosure, ValidatedReceive, admit_validated_receive, canonical_ref_state_root,
+    validate_receive,
 };
 use fgit_authority::{
     AuthenticatedHead, DuplicateDelivery, FaultDirective, FaultKind, FaultPosition,
@@ -1156,5 +1161,227 @@ fn the_authority_mechanics_do_not_depend_on_which_adapter_drove_them() {
         shapes.len(),
         1,
         "the publication routes disagreed about the session shape: {shapes:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Head-bound production projection: the ref-contention probe this file owed
+// ---------------------------------------------------------------------------
+
+/// Staging store behind [`CanonicalAdmissionProjection`].
+///
+/// Deliberately a plain map: the projection under test is production code, and
+/// what this supplies is the commitment storage it resolves roots against. It is
+/// duplicated from `pinned_snapshot_toctou.rs` rather than shared because each
+/// `tests/*.rs` compiles to its own binary and `fgit-admission` publishes no
+/// test-support module. Forty lines of map is cheaper than asking the crate
+/// owner to widen a public surface for one consumer.
+#[derive(Default)]
+struct CommitmentStore {
+    refs: RefCell<BTreeMap<Digest, CanonicalRefState>>,
+    closures: RefCell<BTreeMap<Digest, PermittedObjectClosure>>,
+}
+
+#[derive(Clone, Default)]
+struct StagingStore(Rc<CommitmentStore>);
+
+impl CanonicalAdmissionStore for StagingStore {
+    fn resolve_ref_state(&self, root: Digest) -> Result<CanonicalRefState, RefusalCode> {
+        self.0
+            .refs
+            .borrow()
+            .get(&root)
+            .cloned()
+            .ok_or(RefusalCode::EvidenceMissing)
+    }
+
+    fn stage_ref_state(&self, root: Digest, state: CanonicalRefState) -> Result<(), RefusalCode> {
+        self.0.refs.borrow_mut().insert(root, state);
+        Ok(())
+    }
+
+    fn resolve_permitted_object_closure(
+        &self,
+        root: Digest,
+    ) -> Result<PermittedObjectClosure, RefusalCode> {
+        self.0
+            .closures
+            .borrow()
+            .get(&root)
+            .cloned()
+            .ok_or(RefusalCode::EvidenceMissing)
+    }
+
+    fn stage_permitted_object_closure(
+        &self,
+        root: Digest,
+        closure: PermittedObjectClosure,
+    ) -> Result<(), RefusalCode> {
+        self.0.closures.borrow_mut().insert(root, closure);
+        Ok(())
+    }
+}
+
+struct StubEvidence;
+
+impl AdmissionEvidence for StubEvidence {
+    fn commit_evidence(
+        &self,
+        _basis: &PublicationBasis,
+        _request: &TransactionRequest,
+        _fold: &fgit_txn::TransactionFoldReport,
+    ) -> Result<CommitEvidence, RefusalCode> {
+        Ok(CommitEvidence {
+            principal_snapshot_id: principal_snapshot(),
+            forge_event_batch_root: digest(8),
+            outcome_index_root: digest(4),
+            policy_decision_root: digest(9),
+            invariant_evidence_root: digest(10),
+            outbox_effect_root: digest(11),
+            retention_delta_root: digest(12),
+            batch_evidence_root: digest(6),
+        })
+    }
+
+    fn refusal_evidence(
+        &self,
+        basis: &PublicationBasis,
+        _tx_id: TxId,
+        _code: RefusalCode,
+    ) -> Result<RefusalMaterialization, RefusalCode> {
+        Ok(RefusalMaterialization {
+            policy_epoch: basis.body().policy_epoch,
+            detail: "fg019c head-bound one-winner probe".to_owned(),
+            evidence_root: digest(13),
+        })
+    }
+}
+
+/// An authority store whose genesis head names a ref root the projection can
+/// actually resolve, plus the production projection rooted in that store.
+///
+/// The genesis `ref_root` is `canonical_ref_state_root` of the staged state, not
+/// an arbitrary digest. That is the whole difference from [`store_with_genesis`]:
+/// a head whose root resolves to nothing would make every snapshot refuse
+/// `EvidenceMissing`, and the probe would pass for the wrong reason.
+fn head_bound_setup(
+    context: &AdmissionContext,
+) -> (
+    MemoryAuthorityStore,
+    CanonicalAdmissionProjection<StagingStore, StubEvidence>,
+) {
+    let mut refs = BTreeMap::new();
+    refs.insert(
+        RefName::try_new(MAIN_REF).expect("fixture ref name"),
+        oid("1111111111111111111111111111111111111111"),
+    );
+    let state = CanonicalRefState::new(refs);
+    let ref_root =
+        canonical_ref_state_root(&state).expect("genesis ref state has a canonical root");
+
+    let staging = StagingStore::default();
+    staging
+        .stage_ref_state(ref_root, state)
+        .expect("genesis ref state stages");
+
+    let body = RepositoryAuthorityHeadBody {
+        ref_root,
+        ..genesis(context)
+    };
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(23));
+    initialize_repository(&store, &context.head_key, &body).expect("genesis head initializes");
+
+    (
+        store,
+        CanonicalAdmissionProjection::new(staging, StubEvidence),
+    )
+}
+
+/// Two sessions delete the same ref against a head-bound projection, and the
+/// authenticated stream holds **at most one** commit.
+///
+/// This is the claim
+/// [`two_sessions_seal_distinct_transactions_each_answered_from_its_own_decision`]
+/// was narrowed to remove. That narrowing was correct: the adapter ignored the
+/// head it was handed, so the second session saw a different ref table only
+/// because the fixture passed it one, and exactly-one-winner was *staged*.
+///
+/// `CanonicalAdmissionProjection` (`frankengit-o0pq`) removes that objection. Its
+/// `snapshot` resolves ref state from `authenticated.body().ref_root` and refuses
+/// `AuthorityReceiptStale` when the authenticated body disagrees with the basis,
+/// so the second session is evaluated against whatever head the first one
+/// actually published — by the projection, not by this test.
+///
+/// # What is asserted, and what is not
+///
+/// Asserted: **at most one** of the two sessions holds a committed terminal
+/// decision in the authenticated stream. Both sessions delete `MAIN_REF` from a
+/// genesis state that contains exactly that ref, so two commits would mean the
+/// ref was deleted twice from one lineage.
+///
+/// Not asserted: that exactly one *succeeds*. Both refusing is a permitted
+/// outcome — the second session may lose its CAS and exhaust its replan budget,
+/// and §5.2 says a client disconnect never proves non-commit. Demanding a
+/// success would fail the run for a legal schedule.
+///
+/// Not asserted either: *which* refusal the loser carries. Ref policy belongs to
+/// the projection's owner; this file asserts arithmetic on decisions, not policy.
+#[test]
+fn two_sessions_deleting_one_ref_never_both_commit() {
+    let first_context = context(b"fg019c-headbound-a");
+    let second_context = context(b"fg019c-headbound-b");
+    let validated = delete_main();
+    let (store, projection) = head_bound_setup(&first_context);
+
+    let first = admit_validated_receive(
+        &store,
+        &first_context,
+        &validated,
+        AdmissionLimits::default(),
+        &projection,
+    );
+    let second = admit_validated_receive(
+        &store,
+        &second_context,
+        &validated,
+        AdmissionLimits::default(),
+        &projection,
+    );
+
+    // Non-vacuity: if neither session reached admission at all the count below
+    // would be trivially zero, which is not evidence of one-winner semantics.
+    let reached = usize::from(first.is_ok()) + usize::from(second.is_ok());
+    assert!(
+        reached > 0,
+        "neither session reached a terminal decision, so this probe observed no \
+         admission at all: first={first:?} second={second:?}"
+    );
+
+    let mut committed = 0_usize;
+    for (label, result, session_context) in [
+        ("first", &first, &first_context),
+        ("second", &second, &second_context),
+    ] {
+        let Ok(result) = result else { continue };
+        let tx_id = result.session.tx_ids[0];
+        let resolved = resolve_outcome(
+            &store,
+            &session_context.head_key,
+            session_context.tenant_id,
+            session_context.repository_id,
+            tx_id,
+        )
+        .unwrap_or_else(|error| panic!("{label}: {tx_id:?} must resolve, got {error}"));
+        if let OutcomeLookup::Decided(terminal) = resolved
+            && matches!(terminal.outcome, DecisionOutcome::Committed { .. })
+        {
+            committed += 1;
+        }
+    }
+
+    assert!(
+        committed <= 1,
+        "{committed} sessions committed a delete of the same ref from one lineage; \
+         exactly-one-winner over ref state does not hold"
     );
 }
