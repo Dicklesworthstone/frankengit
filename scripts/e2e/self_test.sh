@@ -190,6 +190,13 @@ assert_fixture_fails FG-000A-ST-CMDFAIL selftests-fixtures-neg_command_failure '
 expect_case FG-000A-ST-MISMATCH assert-mismatch    1 failed           neg_assert_mismatch.sh
 assert_fixture_fails FG-000A-ST-MISMATCH selftests-fixtures-neg_assert_mismatch 'a mismatched assertion'
 
+# fge_tempdir must refuse a NAME that escapes the artifact work directory
+# (frankengit-e4gj). The fixture takes a PERMITTED name first, so a guard that
+# rejected everything would die there with a different message instead of
+# looking like a correct refusal.
+expect_case FG-000A-ST-TMPDIR   tempdir-traversal  1 failed           neg_tempdir_traversal.sh
+assert_fixture_fails FG-000A-ST-TMPDIR selftests-fixtures-neg_tempdir_traversal 'a traversal tempdir NAME'
+
 expect_case FG-000A-ST-ZERO     zero-assertions    1 zero_assertions  neg_zero_assertions.sh
 assert_fixture_fails FG-000A-ST-ZERO selftests-fixtures-neg_zero_assertions 'a run that proved nothing'
 fge_assert_eq FG-000A-ST-ZERO-LIBFLAG true "$FIX_ZERO" \

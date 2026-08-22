@@ -225,3 +225,38 @@ fge_assert_ndjson FG-000A-MECH-044 "$FGE_LOG"           'the harness log validat
 fge_assert_cmd  FG-000A-MECH-045 'the log has grown past the first record' test "$log_lines" -gt 5
 
 fge_pass FG-000A-MECH-046 'fge_pass records an explicit pass'
+
+# ---------------------------------------------------------------------------
+# fge_tempdir NAME validation (frankengit-e4gj)
+# ---------------------------------------------------------------------------
+# Every directory fge_tempdir returns is recorded in FGE_TEMPDIRS and later
+# deleted recursively by cleanup, so NAME decides what that cleanup can reach.
+#
+# Each refusal runs in a SUBSHELL because fge_die exits: the subshell dies, this
+# suite continues, and the exit status is the observable.
+#
+# THE FOUR REFUSALS REACH DIFFERENT ARMS, and one probe cannot see all of them.
+# "../escape" is caught by the charset arm because of the slash, so it says
+# nothing about the rest. "..", "." and "a..b" contain only legal characters
+# and fall through to the later arms, and the first two name real directories:
+# ".." is the artifact directory and "." is the work directory itself, so each
+# would hand a different tree to the recursive cleanup.
+tmp_rc_slash=0;  ( fge_tempdir '../escape' >/dev/null ) 2>/dev/null || tmp_rc_slash=$?
+tmp_rc_dotdot=0; ( fge_tempdir '..'        >/dev/null ) 2>/dev/null || tmp_rc_dotdot=$?
+tmp_rc_dot=0;    ( fge_tempdir '.'         >/dev/null ) 2>/dev/null || tmp_rc_dot=$?
+tmp_rc_embed=0;  ( fge_tempdir 'a..b'      >/dev/null ) 2>/dev/null || tmp_rc_embed=$?
+
+fge_assert_ne FG-000A-MECH-047 0 "$tmp_rc_slash"  'fge_tempdir refuses a NAME containing a path separator'
+fge_assert_ne FG-000A-MECH-048 0 "$tmp_rc_dotdot" 'fge_tempdir refuses "..", which names the artifact directory'
+fge_assert_ne FG-000A-MECH-049 0 "$tmp_rc_dot"    'fge_tempdir refuses ".", which names the work directory itself'
+fge_assert_ne FG-000A-MECH-050 0 "$tmp_rc_embed"  'fge_tempdir refuses an embedded ".." whose characters are all legal'
+
+# PERMITTED TWINS at the boundary the suites actually use. The license suite
+# passes "bad-README.md", so a guard rejecting uppercase or "." would turn a
+# passing suite red. These two are what make the four refusals above evidence
+# of a CORRECT guard rather than of an over-strict one.
+tmp_ok_dot=$(fge_tempdir bad-README.md)
+tmp_ok_slug=$(fge_tempdir mech-tempdir-slug)
+fge_assert_dir FG-000A-MECH-051 "$tmp_ok_dot"  'fge_tempdir still accepts uppercase and a dot, as the license suite passes'
+fge_assert_dir FG-000A-MECH-052 "$tmp_ok_slug" 'fge_tempdir still accepts an ordinary slug'
+

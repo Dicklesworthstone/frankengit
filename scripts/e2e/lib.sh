@@ -1849,8 +1849,32 @@ fge_artifact() {
   return 0
 }
 
+# NAME becomes a path component under the artifact work directory, and every
+# directory handed out here is recorded in FGE_TEMPDIRS and later deleted
+# recursively and forcibly by the cleanup at the end of a green run (see the
+# FGE_TEMPDIRS loop further down this file). An unvalidated NAME therefore
+# turns a caller mistake into a deletion OUTSIDE the artifact tree:
+# "fge_tempdir ../../x" resolves out of FGE_ARTIFACT_DIR and is still recorded
+# for that cleanup. Validate before the path is ever built.
+#
+# The charset is deliberately wider than a slug: the license suite passes
+# "bad-README.md", so uppercase and "." must both stay legal. ".." is rejected
+# ANYWHERE rather than only as a whole component, and an all-dots name is
+# rejected separately because "." alone names the work directory itself and
+# contains no ".." to catch.
 fge_tempdir() {
   local name=${1:-work} d n=0
+  case $name in
+    *[!A-Za-z0-9._-]*)
+      fge_die "fge_tempdir: NAME must match [A-Za-z0-9._-]+, refusing: $name"
+      ;;
+    *..*)
+      fge_die "fge_tempdir: NAME must not contain '..', refusing: $name"
+      ;;
+  esac
+  if [ -z "${name//./}" ]; then
+    fge_die "fge_tempdir: NAME must not be all dots, refusing: $name"
+  fi
   d="$FGE_ARTIFACT_DIR/work/$name"
   while [ -e "$d" ]; do
     n=$((n + 1))
