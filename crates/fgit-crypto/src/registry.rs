@@ -107,6 +107,25 @@ pub enum DigestAlgorithm {
 pub const CORPUS_RESERVED_CODE_POINTS: core::ops::RangeInclusive<u16> = 0xfff0..=0xffff;
 
 // A registered construction must never land in the corpus-reserved range.
+//
+// This block cannot fail to fire: it is evaluated on every build, so a
+// violating row makes the crate not compile and "the crate built" is itself the
+// presence case. It therefore has no `compile_fail` twin, unlike the guards in
+// `keys.rs`, `body_identity.rs` and `native.rs` -- a doctest cannot add a row to
+// a const registry, so any in-tree version would assert against a COPY of this
+// block and drift from it.
+//
+// Its boundary was characterised out-of-tree by YellowOak (cc_2) on 2026-08-22,
+// by compiling this block verbatim against synthetic registries: `0xfff1`
+// refused, `0xfff0` refused, `0xffef` compiles, and the real `{1, 2}` compiles.
+// The two boundary cases are the ones that matter, because `< 0xfff0` here and
+// the inclusive `0xfff0..=` above must agree at exactly one value; they do, so
+// the range's own first slot cannot be allocated to a construction.
+//
+// The runtime twin over the REAL registry is
+// `tests/identity_boundaries.rs::registered_code_points_stay_out_of_the_corpus_reserved_range`,
+// which iterates `ALGORITHM_REGISTRY` against `CORPUS_RESERVED_CODE_POINTS`
+// itself rather than a literal, so it also catches the range being moved.
 const _: () = {
     let mut index = 0;
     while index < ALGORITHM_REGISTRY.len() {
