@@ -50,12 +50,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use fgit_admission::{
-    AdmissionContext, AdmissionEvidence, AdmissionLimits, CanonicalAdmissionProjection,
-    CanonicalAdmissionStore, CanonicalRefState, CommitEvidence, PermittedObjectClosure,
-    QuarantineValidator, RefusalMaterialization, SourceImportOrigin, SourceImportReceipt,
-    SourceRefUpdate, ValidatedClosure, ValidatedReceive, ValidatedSourceImport,
-    admit_validated_receive, admit_validated_source_import, canonical_ref_state_root,
-    permitted_object_closure_root, validate_receive, validate_source_import,
+    AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits,
+    CanonicalAdmissionProjection, CanonicalAdmissionStore, CanonicalRefState, CommitEvidence,
+    PermittedObjectClosure, QuarantineValidator, RefusalMaterialization, SourceImportOrigin,
+    SourceImportReceipt, SourceRefUpdate, ValidatedClosure, ValidatedReceive,
+    ValidatedSourceImport, admit_validated_receive, admit_validated_source_import,
+    canonical_ref_state_root, permitted_object_closure_root, validate_receive,
+    validate_source_import,
 };
 use fgit_authority::{
     AuthorityStore, HeadKey, HeadRead, IdempotencyKey, MemoryAuthorityStore, OutcomeLookup,
@@ -638,8 +639,187 @@ fn a_source_import_whose_receipt_contradicts_its_updates_is_refused() {
         AdmissionLimits::default(),
         &projection,
     );
+    let error = refused.expect_err("a receipt that contradicts its own updates must be refused");
     assert!(
-        refused.is_err(),
-        "a receipt that contradicts its own updates was admitted: {refused:?}"
+        matches!(
+            error,
+            AdmissionError::MaterializationMismatch("source-import delete-only receipt")
+        ),
+        "the refusal must name WHICH receipt claim disagreed, got {error:?}. This assertion was \
+         originally an is_err() check, which could not tell this apart from HeadAbsent, \
+         InvalidLimit, or any other error the path might start returning — and the store here is \
+         headless precisely so a reordering that reached the authority would produce a different \
+         one. AdmissionError is not PartialEq, which is why the weak form was reached for; \
+         matches! names the variant and its static label without needing it"
     );
+}
+
+// ---------------------------------------------------------------------------
+// AdmissionLimits — three refusal axes in one condition (frankengit-dw7i)
+// ---------------------------------------------------------------------------
+//
+// `AdmissionLimits::validate` is the first thing `plan_session` calls, before
+// any store contact. Every probe below therefore runs against a **headless**
+// store: if the limit check were ever reordered after the authority read, these
+// would fail with `HeadAbsent` instead, which is a louder and more useful
+// failure than a silent reordering.
+
+/// Limits that are valid apart from the one field under test.
+const fn limits(max_commands: usize, max_cas_replans: usize) -> AdmissionLimits {
+    AdmissionLimits {
+        max_commands,
+        max_cas_replans,
+    }
+}
+
+/// A store that was never initialized, so any authority contact fails loudly.
+fn headless() -> MemoryAuthorityStore {
+    MemoryAuthorityStore::new(StoreInstanceId::from_raw(71))
+}
+
+#[test]
+fn a_zero_command_limit_is_refused() {
+    let context = context(b"dw7i-zero-commands");
+    let (_, projection) = setup(&context, &[(MAIN_REF, oid(MAIN_OID))]);
+    let refusal = admit_validated_source_import(
+        &headless(),
+        &context,
+        &import_deleting_main(),
+        limits(0, 16),
+        &projection,
+    )
+    .expect_err("a session permitted to carry no commands must be refused");
+    assert!(
+        matches!(refusal, AdmissionError::InvalidLimit),
+        "a zero command limit must refuse as an invalid limit, before any authority contact, \
+         got {refusal:?}"
+    );
+}
+
+#[test]
+fn a_command_limit_above_the_intent_slice_is_refused() {
+    let context = context(b"dw7i-over-64");
+    let (_, projection) = setup(&context, &[(MAIN_REF, oid(MAIN_OID))]);
+    let refusal = admit_validated_source_import(
+        &headless(),
+        &context,
+        &import_deleting_main(),
+        limits(65, 16),
+        &projection,
+    )
+    .expect_err("a command limit past the 64-intent slice must be refused");
+    assert!(
+        matches!(refusal, AdmissionError::InvalidLimit),
+        "a command limit past the intent slice must refuse as an invalid limit, got {refusal:?}"
+    );
+}
+
+#[test]
+fn a_zero_replan_budget_is_refused() {
+    let context = context(b"dw7i-zero-replans");
+    let (_, projection) = setup(&context, &[(MAIN_REF, oid(MAIN_OID))]);
+    let refusal = admit_validated_source_import(
+        &headless(),
+        &context,
+        &import_deleting_main(),
+        limits(64, 0),
+        &projection,
+    )
+    .expect_err("a session with no replan budget cannot survive a lost CAS and must be refused");
+    assert!(
+        matches!(refusal, AdmissionError::InvalidLimit),
+        "the replan budget is the third axis of one condition and must refuse on its own, \
+         got {refusal:?}"
+    );
+}
+
+/// **The permitted twin at the exact boundary.** A 64-command limit is
+/// admissible — it is the largest session the intent slice can express.
+///
+/// Stated honestly: this boundary is **already** exercised incidentally, because
+/// `AdmissionLimits::default()` *is* `max_commands: 64`, so essentially every
+/// other test in the crate would fail if the guard were tightened to `>= 64`.
+/// What this test adds is **diagnosis, not detection** — a failure here names
+/// the boundary, where the incidental failures name unrelated properties. The
+/// same distinction applies as on `frankengit-33ib`, where the byte-budget
+/// boundary turned out to be protected by a shared fixture sitting on it.
+#[test]
+fn a_command_limit_at_exactly_the_intent_slice_is_admitted() {
+    let context = context(b"dw7i-exactly-64");
+    let (store, projection) = setup(&context, &[(MAIN_REF, oid(MAIN_OID))]);
+    admit_validated_source_import(
+        &store,
+        &context,
+        &import_deleting_main(),
+        limits(64, 16),
+        &projection,
+    )
+    .expect("a limit of exactly the intent-slice width must be expressible");
+}
+
+/// The other end of both ranges, so the boundary case above is not passing
+/// merely because the validator accepts any non-zero pair it is handed.
+#[test]
+fn the_smallest_workable_limits_are_admitted() {
+    let context = context(b"dw7i-smallest");
+    let (store, projection) = setup(&context, &[(MAIN_REF, oid(MAIN_OID))]);
+    admit_validated_source_import(
+        &store,
+        &context,
+        &import_deleting_main(),
+        limits(1, 1),
+        &projection,
+    )
+    .expect("one command with one replan attempt must be expressible");
+}
+
+// ---------------------------------------------------------------------------
+// HeadAbsent — the authority has no head at all
+// ---------------------------------------------------------------------------
+
+/// An admission against a repository that was never initialized is refused as
+/// `HeadAbsent`.
+///
+/// This is the *second* stage of the ordering the limit probes above rely on:
+/// with valid limits and a well-formed input, the session gets past planning,
+/// seals, finds no decision, and then fails reading the basis. Together the two
+/// sets pin that limits are checked before the authority and the basis read
+/// after it.
+#[test]
+fn an_admission_against_an_uninitialized_repository_is_refused() {
+    let context = context(b"dw7i-head-absent");
+    let (_, projection) = setup(&context, &[(MAIN_REF, oid(MAIN_OID))]);
+    let refusal = admit_validated_source_import(
+        &headless(),
+        &context,
+        &import_deleting_main(),
+        AdmissionLimits::default(),
+        &projection,
+    )
+    .expect_err("a repository with no authority head cannot admit anything");
+    assert!(
+        matches!(refusal, AdmissionError::HeadAbsent),
+        "an uninitialized repository must refuse as HeadAbsent rather than by any later failure, \
+         got {refusal:?}"
+    );
+}
+
+/// The permitted twin: the identical import against an initialized repository
+/// reaches a decision.
+///
+/// Without it, the refusal above is attributable to the import rather than to
+/// the missing head.
+#[test]
+fn the_same_import_against_an_initialized_repository_is_admitted() {
+    let context = context(b"dw7i-head-present");
+    let (store, projection) = setup(&context, &[(MAIN_REF, oid(MAIN_OID))]);
+    let result = admit_validated_source_import(
+        &store,
+        &context,
+        &import_deleting_main(),
+        AdmissionLimits::default(),
+        &projection,
+    )
+    .expect("the same import against an initialized repository reaches a decision");
+    committed_terminal(&store, &context, result.session.tx_ids[0]);
 }
