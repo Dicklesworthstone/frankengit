@@ -147,7 +147,7 @@ enum Recovered {
 /// Classifies a recovered journal into the trichotomy.
 ///
 /// The ordering matters and is not arbitrary. A journal whose outcome is not
-/// locally decidable is REFUSED even if it staged objects, because "TreeFS
+/// locally decidable is REFUSED even if it staged objects, because "`TreeFS`
 /// cannot tell whether the transaction layer accepted this" is precisely the
 /// incomplete case §14 wants surfaced; reporting it as visible would be a guess,
 /// and reporting it as absent would lose staged objects a later GC must know
@@ -171,7 +171,15 @@ fn classify(journal: &ExportJournal) -> Recovered {
         return Recovered::Absent;
     }
     match journal.local_outcome() {
-        Err(JournalRefusal::OutcomeNotLocallyDecidable { .. }) => Recovered::RefusedAsIncomplete,
+        // EVERY refusal is incomplete, not just OutcomeNotLocallyDecidable.
+        // That variant is the one §14 is really about -- staged objects whose
+        // fate only the authority layer knows -- and it was written as its own
+        // arm to say so. The arms are merged because they returned the same
+        // value, and a duplicate arm carrying no behaviour is a comment
+        // pretending to be code. The distinction it documented is stated here
+        // instead, and the classification is unchanged: any refusal at all
+        // means TreeFS cannot call this export complete, so guessing either
+        // Absent or Visible would be the failure mode.
         Err(_) => Recovered::RefusedAsIncomplete,
         Ok(_) => {
             if journal.staged_objects() == 0 {
@@ -265,11 +273,11 @@ fn path(bytes: &[u8]) -> TreePath {
     TreePath::parse_default(bytes).expect("fixture path parses")
 }
 
-fn workspace() -> WorkspaceId {
+const fn workspace() -> WorkspaceId {
     WorkspaceId::from_bytes([1; 16])
 }
 
-fn repository() -> RepositoryId {
+const fn repository() -> RepositoryId {
     RepositoryId::from_bytes([7; 16])
 }
 
