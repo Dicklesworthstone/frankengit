@@ -2304,3 +2304,138 @@ fn the_two_collector_surfaces_agree_that_an_absent_head_is_an_empty_index() {
         "both surfaces mint the same zero-token empty set",
     );
 }
+
+// ---------------------------------------------------------------------------
+// frankengit-w95j: the replay bound.
+//
+// `MAX_REPLAY_BATCHES` is the declared denial-of-service bound on backwards
+// decision-chain replay -- "an unbounded backwards walk over an adversarial or
+// corrupt chain is a denial-of-service surface" (outcome.rs). Until these
+// tests it was exercised by nothing in the workspace: the only occurrence
+// outside `src/` was a prose doc comment.
+//
+// It is also the premise the whole cumulative-index design rests on. The claim
+// made repeatedly for `collect_cumulative_outcomes` is that past the bound the
+// walk REFUSES rather than truncating, because a short leaf set does not
+// produce a short root -- it produces a wrong root indistinguishable from a
+// right one, committed to a canonical body field. That argument requires the
+// refusal to fire, and to fire in the right place.
+//
+// The bound looked expensive to test (a 65,537-batch chain). It is not:
+// `next_batch_to_replay` takes `walked: &mut usize`, so the counter can be
+// seeded at the boundary directly.
+// ---------------------------------------------------------------------------
+
+/// A head that HAS a decision tail, so the walk reaches the bound check.
+///
+/// Load-bearing: the tail check precedes the bound check, so a tail-less head
+/// would return `Ok(None)` and these tests would pass while proving nothing.
+/// That ordering is itself pinned below.
+fn head_with_a_tail() -> RepositoryAuthorityHeadBody {
+    let genesis = genesis_head();
+    let first = batch(&genesis, 1, vec![committed(tx(0xA1), 1, 0x51)]);
+    successor_head(&genesis, batch_id_of(&first), 1)
+}
+
+/// Acceptance (1): the bound refuses, and names the bound it enforced.
+///
+/// The `limit` assertion is not decoration. A refusal that fires at the right
+/// time but reports some other number would satisfy a variant-only check while
+/// telling an operator the wrong thing about why their replay stopped.
+#[test]
+fn the_replay_bound_refuses_once_the_walk_passes_max_replay_batches() {
+    let head = head_with_a_tail();
+    let mut walked = fgit_authority::MAX_REPLAY_BATCHES;
+
+    let failure = fgit_authority::next_batch_to_replay(&head, &mut walked)
+        .expect_err("the walk must refuse rather than return a partial answer");
+
+    let OutcomeFailure::ReplayBoundExceeded { limit } = failure else {
+        panic!("expected ReplayBoundExceeded, got {failure:?}");
+    };
+    assert_eq!(
+        limit,
+        fgit_authority::MAX_REPLAY_BATCHES,
+        "the refusal must report the bound it actually enforced",
+    );
+}
+
+/// Acceptance (2): the permitted twin, at the exact boundary the comparison
+/// flips on.
+///
+/// The check is `*walked > MAX_REPLAY_BATCHES` AFTER an increment, so entering
+/// at `MAX - 1` becomes exactly `MAX` and is the LAST permitted batch. This is
+/// the case a `>` -> `>=` slip breaks, and it is what makes the refusal above
+/// evidence of a bound rather than evidence of a refusal: without it the bound
+/// could be off by one in the conservative direction and nothing would notice.
+#[test]
+fn the_last_batch_inside_the_replay_bound_is_permitted() {
+    let head = head_with_a_tail();
+    let expected_tail = head.decision_tail_id.expect("the fixture head has a tail");
+    let mut walked = fgit_authority::MAX_REPLAY_BATCHES - 1;
+
+    let next = fgit_authority::next_batch_to_replay(&head, &mut walked)
+        .expect("the batch at exactly the bound is inside it");
+
+    assert_eq!(
+        next,
+        Some(expected_tail),
+        "the permitted case must return the tail, not merely avoid refusing",
+    );
+    assert_eq!(
+        walked,
+        fgit_authority::MAX_REPLAY_BATCHES,
+        "the walk admits exactly MAX_REPLAY_BATCHES batches",
+    );
+}
+
+/// Acceptance (3): a chain that ends naturally is not a bound violation.
+///
+/// The tail check runs BEFORE the increment and before the bound check, so a
+/// head with no `decision_tail_id` terminates the walk cleanly even with the
+/// counter already past the bound. Swapping those two blocks would turn every
+/// exhausted chain into a `ReplayBoundExceeded`, reporting a denial-of-service
+/// refusal for an ordinary genesis walk. Nothing else pins that order.
+#[test]
+fn a_chain_that_ends_is_not_reported_as_exceeding_the_bound() {
+    let genesis = genesis_head();
+    assert!(
+        genesis.decision_tail_id.is_none(),
+        "the fixture must have no tail or this test proves nothing",
+    );
+    let mut walked = fgit_authority::MAX_REPLAY_BATCHES + 1_000;
+
+    let next = fgit_authority::next_batch_to_replay(&genesis, &mut walked)
+        .expect("an exhausted chain terminates; it does not exceed the bound");
+
+    assert_eq!(next, None, "the walk is over");
+    assert_eq!(
+        walked,
+        fgit_authority::MAX_REPLAY_BATCHES + 1_000,
+        "a terminating walk must not consume budget it never spent",
+    );
+}
+
+/// Acceptance (4): the counter saturates rather than wrapping.
+///
+/// `saturating_add` is load-bearing. With `wrapping_add`, a counter at
+/// `usize::MAX` would roll to 0 and the walk would happily continue -- the
+/// bound defeated by the one input most likely to arrive from a corrupt or
+/// adversarial chain, which is the case the bound exists for.
+#[test]
+fn a_saturated_walk_counter_still_refuses_rather_than_wrapping_past_the_bound() {
+    let head = head_with_a_tail();
+    let mut walked = usize::MAX;
+
+    let failure = fgit_authority::next_batch_to_replay(&head, &mut walked)
+        .expect_err("a saturated counter is far past the bound");
+    assert!(
+        matches!(failure, OutcomeFailure::ReplayBoundExceeded { .. }),
+        "expected ReplayBoundExceeded, got {failure:?}",
+    );
+    assert_eq!(
+        walked,
+        usize::MAX,
+        "the counter saturates; wrapping to 0 here would defeat the bound entirely",
+    );
+}
