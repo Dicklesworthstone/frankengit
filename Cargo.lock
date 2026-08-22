@@ -626,6 +626,8 @@ dependencies = [
  "fgit-git-object",
  "fgit-object-fabric",
  "fgit-pack",
+ "fgit-resource",
+ "fgit-statistics",
  "fgit-types",
 ]
 
@@ -775,8 +777,11 @@ dependencies = [
  "fgit-crypto",
  "fgit-git-object",
  "fgit-object-fabric",
+ "fgit-pack",
+ "fgit-reference",
  "fgit-resource",
  "fgit-runtime",
+ "fgit-txn",
  "fgit-types",
  "fgit-wire",
  "fsqlite-types",
