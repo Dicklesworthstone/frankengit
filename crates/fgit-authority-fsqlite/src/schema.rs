@@ -159,6 +159,11 @@ pub const fn operation_statements() -> &'static [SchemaStatement] {
             parameters: 6,
         },
         SchemaStatement {
+            name: "head.count",
+            sql: "SELECT COUNT(*) FROM fgit_head_slot",
+            parameters: 0,
+        },
+        SchemaStatement {
             name: "issuance.read",
             sql: "SELECT head_key, generation, body_bytes FROM fgit_version_issuance \
                   WHERE token = ?",

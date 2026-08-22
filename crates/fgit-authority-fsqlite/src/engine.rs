@@ -412,6 +412,37 @@ impl FsqliteAuthorityStore {
         Ok(next_issuance_after(committed_maximum)?)
     }
 
+    /// Occupancy of one bounded table, read from committed rows.
+    ///
+    /// A declared ceiling has to be measured against what the database holds,
+    /// not against process memory: a reopened store must enforce the same
+    /// ceiling it enforced before the kill, and a counter in memory would
+    /// forget. Same reasoning as `issuance.max_sequence`.
+    ///
+    /// COST, stated rather than hidden: `COUNT(*)` is a scan, and this runs on
+    /// the write paths that can occupy a slot. It is correct and it is not
+    /// optimised. The optimisation, if it is ever wanted, is a transactionally
+    /// maintained counter row -- which is a schema change with its own
+    /// generation bump and its own crash-equivalence argument, not something to
+    /// smuggle in beside a correctness fix. No performance claim is made here.
+    async fn occupancy<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        statement: &'static str,
+    ) -> Result<usize, EngineError>
+    where
+        Caps: cap::SubsetOf<cap::All>,
+        cap::None: cap::SubsetOf<Caps>,
+    {
+        let rows = self.query(cx, statement, &[]).await?;
+        let row = rows.first().ok_or(EngineError::RowMissing { statement })?;
+        let counted = read_unsigned(row, 0)?;
+        // Saturating rather than wrapping, and toward "full" rather than
+        // "empty": a count that cannot be represented is not a reason to admit
+        // one more row. Unreachable on any target whose usize is 64 bits.
+        Ok(usize::try_from(counted).unwrap_or(usize::MAX))
+    }
+
     /// Record one minted token in the append-only ledger.
     async fn record_issuance<Caps>(
         &self,
@@ -509,6 +540,25 @@ impl FsqliteAuthorityStore {
         Caps: cap::SubsetOf<cap::All>,
         cap::None: cap::SubsetOf<Caps>,
     {
+        // `immutable_slots` applies to a body that actually occupies a new
+        // slot. A retry of one already present occupies nothing, and the
+        // reference admits it at capacity (reference.rs: the check sits in the
+        // `None` arm, after the identical-retry and conflict arms), so the
+        // existence read is taken only once the ceiling is reached.
+        let limit = self.limits.immutable_slots;
+        let occupancy = self.occupancy(cx, "body.count").await?;
+        if occupancy >= limit
+            && self
+                .query(cx, "body.read", &[blob(key.as_bytes())])
+                .await?
+                .is_empty()
+        {
+            return Err(EngineError::Contract(AuthorityRefusal::CapacityExhausted {
+                occupancy,
+                limit,
+            }));
+        }
+
         let changed = self
             .execute(
                 cx,
@@ -615,6 +665,32 @@ impl FsqliteAuthorityStore {
         Caps: cap::SubsetOf<cap::All>,
         cap::None: cap::SubsetOf<Caps>,
     {
+        // `head_slots` and `version_tokens` both apply to a head that is
+        // actually created. An identical retry or a conflict on an existing
+        // slot creates nothing and mints nothing, and the reference admits both
+        // at capacity, so the ceilings are consulted only once the slot is
+        // known absent. Checked before minting, and in the reference's order:
+        // head slots, then version tokens.
+        if self.head_row(cx, key).await?.is_none() {
+            let head_limit = self.limits.head_slots;
+            let heads = self.occupancy(cx, "head.count").await?;
+            if heads >= head_limit {
+                return Err(EngineError::Contract(AuthorityRefusal::CapacityExhausted {
+                    occupancy: heads,
+                    limit: head_limit,
+                }));
+            }
+
+            let token_limit = self.limits.version_tokens;
+            let issued = self.occupancy(cx, "issuance.count").await?;
+            if issued >= token_limit {
+                return Err(EngineError::Contract(AuthorityRefusal::CapacityExhausted {
+                    occupancy: issued,
+                    limit: token_limit,
+                }));
+            }
+        }
+
         let sequence = self.next_sequence(cx).await?;
         let token = mint_token(self.instance, sequence);
 
@@ -718,6 +794,25 @@ impl FsqliteAuthorityStore {
         Caps: cap::SubsetOf<cap::All>,
         cap::None: cap::SubsetOf<Caps>,
     {
+        // A published exchange mints a token, so `version_tokens` applies to
+        // it -- but a losing candidate mints nothing and must not be refused
+        // for capacity. The reference reaches its capacity check only after the
+        // predecessor token matches and the generation is strictly increasing,
+        // so those same two conditions gate it here; anything else falls
+        // through to the ordinary CAS disambiguation below.
+        let token_limit = self.limits.version_tokens;
+        let issued = self.occupancy(cx, "issuance.count").await?;
+        if issued >= token_limit {
+            if let Some((current, current_generation, _)) = self.head_row(cx, key).await? {
+                if current == expected && new_generation > current_generation {
+                    return Err(EngineError::Contract(AuthorityRefusal::CapacityExhausted {
+                        occupancy: issued,
+                        limit: token_limit,
+                    }));
+                }
+            }
+        }
+
         let sequence = self.next_sequence(cx).await?;
         let token = mint_token(self.instance, sequence);
         let generation = unsigned(new_generation.get())?;

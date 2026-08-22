@@ -49,6 +49,7 @@ fn the_operation_set_is_closed_and_complete() {
         "head.read",
         "head.create_if_absent",
         "head.compare_exchange",
+        "head.count",
         "issuance.read",
         "issuance.max_sequence",
         "issuance.record",

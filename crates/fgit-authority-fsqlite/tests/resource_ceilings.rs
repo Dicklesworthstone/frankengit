@@ -50,8 +50,9 @@
 //! worked for `frankengit-w1ik`. Filed as `frankengit-nv0a`.
 
 use fgit_authority::{
-    AuthorityLimits, AuthorityRefusal, AuthorityStore, HeadGeneration, HeadKey, ImmutableKey,
-    MemoryAuthorityStore, MemoryStoreConfig, StoreInstanceId,
+    AuthorityLimits, AuthorityRefusal, AuthorityStore, AuthorityVersionToken, CasOutcome,
+    HeadGeneration, HeadInit, HeadKey, ImmutableKey, MemoryAuthorityStore, MemoryStoreConfig,
+    PutOutcome, StoreInstanceId,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
 use fgit_runtime::boot::{NodeRuntime, RuntimeProfile};
@@ -103,11 +104,51 @@ impl<'a> Engine<'a> {
     }
 
     fn put(&self, key: &ImmutableKey, body: &[u8]) -> Result<(), AuthorityRefusal> {
+        self.put_outcome(key, body).map(|_| ())
+    }
+
+    /// As `put`, keeping the outcome: `Created` and `IdenticalRetry` are the
+    /// difference between occupying a slot and occupying nothing, which is
+    /// exactly what the capacity exemption turns on.
+    fn put_outcome(&self, key: &ImmutableKey, body: &[u8]) -> Result<PutOutcome, AuthorityRefusal> {
         match self
             .node
             .block_on(self.store.put_if_absent(&self.cx, key, body))
         {
-            Ok(_) => Ok(()),
+            Ok(outcome) => Ok(outcome),
+            Err(EngineError::Contract(refusal)) => Err(refusal),
+            Err(other) => panic!("unexpected engine failure: {other:?}"),
+        }
+    }
+
+    fn init_outcome(
+        &self,
+        key: &HeadKey,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> Result<HeadInit, AuthorityRefusal> {
+        match self
+            .node
+            .block_on(self.store.initialize_head(&self.cx, key, generation, body))
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(EngineError::Contract(refusal)) => Err(refusal),
+            Err(other) => panic!("unexpected engine failure: {other:?}"),
+        }
+    }
+
+    fn exchange(
+        &self,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> Result<CasOutcome, AuthorityRefusal> {
+        match self.node.block_on(
+            self.store
+                .compare_exchange_head(&self.cx, key, expected, generation, body),
+        ) {
+            Ok(outcome) => Ok(outcome),
             Err(EngineError::Contract(refusal)) => Err(refusal),
             Err(other) => panic!("unexpected engine failure: {other:?}"),
         }
@@ -172,7 +213,6 @@ fn the_reference_refuses_one_body_past_its_declared_ceiling() {
 }
 
 #[test]
-#[ignore = "red: frankengit-nv0a -- the store enforces 1 of its 4 declared ceilings. Un-ignore with the fix."]
 fn the_engine_enforces_every_ceiling_it_declares() {
     // THIS IS RED AND IT IS A REAL DIVERGENCE, not a flaky or aspirational test.
     //
@@ -201,7 +241,6 @@ fn the_engine_enforces_every_ceiling_it_declares() {
 }
 
 #[test]
-#[ignore = "red: frankengit-nv0a -- head_slots is declared and unenforced. Un-ignore with the fix."]
 fn the_engine_enforces_the_head_slot_ceiling_it_declares() {
     // A second ceiling, because one divergence could be an oversight in a
     // single code path and three is a missing concept. `head_slots` is 1 here,
@@ -226,5 +265,182 @@ fn the_engine_enforces_the_head_slot_ceiling_it_declares() {
     assert!(
         matches!(refusal, AuthorityRefusal::CapacityExhausted { .. }),
         "got {refusal:?}"
+    );
+}
+
+// ------------------------------------------------- gaps the reproduction cannot see
+//
+// Everything above is YellowOak's reproduction, un-ignored by the fix and
+// otherwise untouched. What follows is the crate owner's addition, closing two
+// gaps a wrong fix would sail straight through.
+//
+// 1. THE EXEMPTION. A guard that simply refused every write once the table was
+//    full would pass all three tests above: the fill loops still succeed, and
+//    the one-too-many write is still refused. It would also be wrong. A retry
+//    of a body already stored occupies no NEW slot, and the reference admits it
+//    at capacity -- `reference.rs` puts the capacity check inside the `None`
+//    arm, after the identical-retry and conflict arms. Nothing above holds the
+//    fix to that, so a refuse-everything guard would read as a fix.
+//
+// 2. VERSION TOKENS. The bead names three unenforced ceilings and the
+//    reproduction covers two. `version_tokens` had no test anywhere, which is
+//    how it came to be one of the three.
+
+/// Fill both backends to the immutable ceiling and confirm both are actually
+/// full, so a later admission means "exempt" rather than "not yet full".
+fn filled_to_capacity(engine: &Engine<'_>, reference: &MemoryAuthorityStore) {
+    let limits = cramped();
+    for slot in 0..limits.immutable_slots {
+        let key = body_key(&format!("fill-{slot}"));
+        engine
+            .put(&key, b"payload")
+            .expect("a body inside the declared ceiling must be accepted by the engine");
+        reference
+            .put_if_absent(&key, b"payload")
+            .expect("a body inside the declared ceiling must be accepted by the reference");
+    }
+
+    let past = body_key("one-too-many");
+    engine
+        .put(&past, b"payload")
+        .expect_err("the engine must be at capacity, or the exemption below proves nothing");
+    reference
+        .put_if_absent(&past, b"payload")
+        .expect_err("the reference must be at capacity, or there is nothing to be differential to");
+}
+
+fn reference_at(limits: AuthorityLimits) -> MemoryAuthorityStore {
+    MemoryAuthorityStore::with_config(MemoryStoreConfig {
+        instance: StoreInstanceId::from_raw(1),
+        limits,
+        ..MemoryStoreConfig::default()
+    })
+}
+
+#[test]
+fn a_body_already_stored_is_still_admitted_at_capacity_by_both_backends() {
+    let node = node();
+    let engine = Engine::open(&node, cramped());
+    let reference = reference_at(cramped());
+    filled_to_capacity(&engine, &reference);
+
+    // Occupies nothing new, so the ceiling does not apply to it.
+    let existing = body_key("fill-0");
+
+    assert_eq!(
+        engine
+            .put_outcome(&existing, b"payload")
+            .expect("a body already stored occupies no new slot and must be admitted at capacity"),
+        PutOutcome::IdenticalRetry,
+        "the engine must admit the retry as idempotent rather than refusing it for capacity"
+    );
+
+    let reference_outcome = reference
+        .put_if_absent(&existing, b"payload")
+        .expect("the reference admits the same retry at capacity");
+    assert_eq!(
+        reference_outcome,
+        PutOutcome::IdenticalRetry,
+        "the two backends must agree on the exempt case as well as the refused one"
+    );
+}
+
+#[test]
+fn a_head_already_present_is_still_admitted_at_capacity() {
+    // `head_slots` is 1, so one head fills the table.
+    let node = node();
+    let engine = Engine::open(&node, cramped());
+    let main = HeadKey::new(b"refs/heads/main".to_vec()).expect("admissible");
+    let generation = HeadGeneration::try_new(1).expect("a small generation is admissible");
+
+    let HeadInit::Created(_) = engine
+        .init_outcome(&main, generation, b"first")
+        .expect("the first head is inside the declared ceiling")
+    else {
+        panic!("the first head must be created outright");
+    };
+
+    engine
+        .init_outcome(
+            &HeadKey::new(b"refs/heads/other".to_vec()).expect("admissible"),
+            generation,
+            b"other",
+        )
+        .expect_err("a second distinct head is past the ceiling, so the table is full");
+
+    // Same key, same generation, same body: an idempotent retry that creates no
+    // slot and mints no token. Refusing it for capacity would diverge.
+    let retry = engine
+        .init_outcome(&main, generation, b"first")
+        .expect("an identical retry of an existing head must be admitted at capacity");
+    assert!(
+        matches!(retry, HeadInit::IdenticalRetry(_)),
+        "the retry must be reported as idempotent rather than refused; got {retry:?}"
+    );
+}
+
+#[test]
+fn the_engine_enforces_the_version_token_ceiling_it_declares() {
+    // The third of the three unenforced ceilings, and the one nothing tested.
+    // `version_tokens` is 2: creating the head mints the first token, one
+    // exchange mints the second, and the next mint is past the ceiling.
+    let node = node();
+    let engine = Engine::open(&node, cramped());
+    let reference = reference_at(cramped());
+    let main = HeadKey::new(b"refs/heads/main".to_vec()).expect("admissible");
+
+    let first = HeadGeneration::try_new(1).expect("admissible");
+    let second = HeadGeneration::try_new(2).expect("admissible");
+    let third = HeadGeneration::try_new(3).expect("admissible");
+
+    // --- engine: two mints are inside the ceiling, the third is not.
+    let HeadInit::Created(created) = engine
+        .init_outcome(&main, first, b"one")
+        .expect("the head creation mints the first token, inside the ceiling")
+    else {
+        panic!("the head must be created outright");
+    };
+
+    let CasOutcome::Committed(exchanged) = engine
+        .exchange(&main, created.token(), second, b"two")
+        .expect("the first exchange mints the second token, inside the ceiling")
+    else {
+        panic!("the exchange must commit; the predecessor token is the one just issued");
+    };
+
+    let refusal = engine
+        .exchange(&main, exchanged.token(), third, b"three")
+        .expect_err(
+            "a third token is past the declared version_tokens ceiling; §3.1 requires a typed \
+             refusal rather than minting past a published limit",
+        );
+    assert!(
+        matches!(refusal, AuthorityRefusal::CapacityExhausted { .. }),
+        "got {refusal:?}"
+    );
+
+    // --- reference: the same script, so this is a divergence test and not just
+    // an assertion about one backend.
+    let HeadInit::Created(ref_created) = reference
+        .initialize_head(&main, first, b"one")
+        .expect("the reference creates the head")
+    else {
+        panic!("the reference must create the head outright");
+    };
+    let CasOutcome::Committed(ref_exchanged) = reference
+        .compare_exchange_head(&main, ref_created.token(), second, b"two")
+        .expect("the reference commits the first exchange")
+    else {
+        panic!("the reference exchange must commit");
+    };
+    let reference_failure = reference
+        .compare_exchange_head(&main, ref_exchanged.token(), third, b"three")
+        .expect_err("the reference refuses the third mint too");
+    assert!(
+        matches!(
+            reference_failure,
+            fgit_authority::AuthorityFailure::Refused(AuthorityRefusal::CapacityExhausted { .. })
+        ),
+        "the two backends must refuse the same ceiling the same way; got {reference_failure:?}"
     );
 }
