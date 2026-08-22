@@ -1,6 +1,7 @@
 use fgit_authority::history::{ClientId, History, HistoryEvent, LogicalTime, OperationId};
 use fgit_authority::lincheck::{
-    CheckLimits, CheckReport, CheckVerdict, LinearizabilityChecker, SequentialSpec,
+    CheckLimits, CheckLimitsError, CheckReport, CheckVerdict, HARD_MAX_COMPLETED_OPERATIONS,
+    LinearizabilityChecker, SequentialSpec,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -637,4 +638,246 @@ fn overlapping_compare_exchange_attempts_pass_when_exactly_one_wins() {
             },
         }
     );
+}
+
+// ---------------------------------------------------------------------------
+// frankengit-9vsd: the checker's own input validation.
+//
+// `History::validate` is what stops the linearizability checker analysing a
+// malformed history and returning a verdict anyway. That matters beyond tidy
+// coverage: `scripts/e2e/suites/authority/faults.sh` asserts FG-004C-E2E-003
+// ("verdict":"linearizable") and FG-004C-E2E-004 ("verdict":"not_linearizable")
+// on this checker's output, so a validator that does not fire produces a false
+// green inside the machinery built to detect false greens.
+//
+// Four of its five refusals had zero assertions anywhere in the workspace.
+//
+// THE ORDER IS LOAD-BEARING. The per-client clock check runs for EVERY event
+// before the kind match, and inside a Response the sequence is
+// no-invocation -> client-mismatch -> duplicate-response. So each case below is
+// built so that every EARLIER check passes -- monotonic clocks, and an
+// invocation present where one is required -- which is what makes the case
+// prove its own refusal rather than an earlier one. Each test says which
+// earlier checks it had to satisfy.
+// ---------------------------------------------------------------------------
+
+/// One operation identity invoked twice.
+///
+/// Earlier checks satisfied: both events advance client 1's clock strictly
+/// (10, 20), so `NonMonotonicClientTime` cannot fire first.
+#[test]
+fn history_refuses_one_operation_identity_invoked_twice() {
+    let malformed = History::new(vec![
+        invocation(1, 10, 7, AuthorityOperation::ReadHead),
+        invocation(1, 20, 7, AuthorityOperation::ReadHead),
+    ]);
+
+    let Err(fgit_authority::history::HistoryError::DuplicateInvocation {
+        operation_id,
+        first_event_index,
+        duplicate_event_index,
+    }) = malformed
+    else {
+        panic!("expected DuplicateInvocation, got {malformed:?}");
+    };
+    assert_eq!(operation_id, OperationId(7));
+    assert_eq!(
+        (first_event_index, duplicate_event_index),
+        (0, 1),
+        "the refusal must locate both invocations, since that is what an \
+         operator reads to find the malformed records",
+    );
+}
+
+/// A response naming an operation that was never invoked.
+///
+/// Earlier checks satisfied: a single event cannot violate the per-client
+/// clock, so this reaches the Response arm directly.
+#[test]
+fn history_refuses_a_response_with_no_invocation() {
+    let malformed = History::new(vec![response(
+        1,
+        10,
+        7,
+        AuthorityResponse::ReadHead {
+            value: Some(0),
+            version: 1,
+        },
+    )]);
+
+    let Err(fgit_authority::history::HistoryError::ResponseWithoutInvocation {
+        operation_id,
+        response_event_index,
+    }) = malformed
+    else {
+        panic!("expected ResponseWithoutInvocation, got {malformed:?}");
+    };
+    assert_eq!(operation_id, OperationId(7));
+    assert_eq!(response_event_index, 0);
+}
+
+/// A response returned to a different client than the one that invoked.
+///
+/// Earlier checks satisfied: two DIFFERENT clients each with a strictly
+/// advancing clock, so `NonMonotonicClientTime` cannot fire; and the invocation
+/// exists, so `ResponseWithoutInvocation` cannot fire. This case is only
+/// reachable because both earlier checks pass, which is the ordering the bead
+/// asked to be pinned.
+#[test]
+fn history_refuses_a_response_delivered_to_the_wrong_client() {
+    let malformed = History::new(vec![
+        invocation(1, 10, 7, AuthorityOperation::ReadHead),
+        response(
+            2,
+            10,
+            7,
+            AuthorityResponse::ReadHead {
+                value: Some(0),
+                version: 1,
+            },
+        ),
+    ]);
+
+    let Err(fgit_authority::history::HistoryError::ResponseClientMismatch {
+        operation_id,
+        invocation_client,
+        response_client,
+        response_event_index,
+    }) = malformed
+    else {
+        panic!("expected ResponseClientMismatch, got {malformed:?}");
+    };
+    assert_eq!(operation_id, OperationId(7));
+    assert_eq!(
+        (invocation_client, response_client),
+        (ClientId(1), ClientId(2)),
+        "a transposed pair would report the mismatch backwards and survive a \
+         variant-only check",
+    );
+    assert_eq!(response_event_index, 1);
+}
+
+/// Two responses for one operation.
+///
+/// Earlier checks satisfied: client 1's clock advances strictly (10, 20, 30);
+/// the invocation exists; and both responses come from the invoking client, so
+/// neither `ResponseWithoutInvocation` nor `ResponseClientMismatch` can fire
+/// first. This is the deepest case in the ordering.
+#[test]
+fn history_refuses_two_responses_for_one_operation() {
+    let reply = AuthorityResponse::ReadHead {
+        value: Some(0),
+        version: 1,
+    };
+    let malformed = History::new(vec![
+        invocation(1, 10, 7, AuthorityOperation::ReadHead),
+        response(1, 20, 7, reply.clone()),
+        response(1, 30, 7, reply),
+    ]);
+
+    let Err(fgit_authority::history::HistoryError::DuplicateResponse {
+        operation_id,
+        first_response_event_index,
+        duplicate_event_index,
+    }) = malformed
+    else {
+        panic!("expected DuplicateResponse, got {malformed:?}");
+    };
+    assert_eq!(operation_id, OperationId(7));
+    assert_eq!((first_response_event_index, duplicate_event_index), (1, 2));
+}
+
+/// The permitted twin for all five refusals.
+///
+/// Two clients, interleaved, each with a strictly advancing clock and exactly
+/// one response per invocation. Without this the four refusals above are
+/// equally satisfied by a `validate` that rejects every history, which would
+/// prove nothing about malformedness.
+#[test]
+fn a_well_formed_interleaved_history_is_accepted() {
+    let reply = AuthorityResponse::ReadHead {
+        value: Some(0),
+        version: 1,
+    };
+    let accepted = History::new(vec![
+        invocation(1, 10, 1, AuthorityOperation::ReadHead),
+        invocation(2, 10, 2, AuthorityOperation::ReadHead),
+        response(1, 20, 1, reply.clone()),
+        response(2, 20, 2, reply),
+    ])
+    .expect("a well-formed interleaved history is admissible");
+
+    assert_eq!(accepted.events().len(), 4);
+    assert_eq!(
+        accepted.completed_operation_count(),
+        2,
+        "both operations completed, so the acceptance is not vacuous on an \
+         empty or pending history",
+    );
+}
+
+/// The checker's own limits refuse degenerate configurations.
+///
+/// `HARD_MAX_COMPLETED_OPERATIONS` is a REPRESENTATION bound -- "the mask
+/// representation has a fixed finite maximum" -- so exceeding it is a
+/// correctness ceiling rather than a policy choice, and the permitted twin at
+/// exactly the limit is what stops an off-by-one either rejecting a legal
+/// history or overflowing the mask.
+#[test]
+fn check_limits_refuse_degenerate_bounds_and_permit_the_exact_hard_limit() {
+    assert!(
+        matches!(
+            CheckLimits {
+                max_completed_operations: 0,
+                max_search_nodes: 1,
+            }
+            .validate(),
+            Err(CheckLimitsError::ZeroCompletedOperationBound)
+        ),
+        "a zero operation cap could never inspect an operation",
+    );
+
+    assert!(
+        matches!(
+            CheckLimits {
+                max_completed_operations: 1,
+                max_search_nodes: 0,
+            }
+            .validate(),
+            Err(CheckLimitsError::ZeroSearchNodeBudget)
+        ),
+        "a zero-node search cannot inspect even an empty history",
+    );
+
+    let over = CheckLimits {
+        max_completed_operations: HARD_MAX_COMPLETED_OPERATIONS + 1,
+        max_search_nodes: 1,
+    }
+    .validate();
+    assert!(
+        matches!(
+            over,
+            Err(CheckLimitsError::CompletedOperationBoundExceedsHardLimit {
+                requested,
+                hard_limit,
+            }) if requested == HARD_MAX_COMPLETED_OPERATIONS + 1
+                && hard_limit == HARD_MAX_COMPLETED_OPERATIONS
+        ),
+        "the refusal must report both the request and the ceiling; got {over:?}",
+    );
+
+    // The permitted twins, on the exact boundary and at the smallest legal
+    // values. The comparison is `>`, so exactly the hard limit is admissible.
+    CheckLimits {
+        max_completed_operations: HARD_MAX_COMPLETED_OPERATIONS,
+        max_search_nodes: 1,
+    }
+    .validate()
+    .expect("exactly HARD_MAX_COMPLETED_OPERATIONS is inside the bound");
+    CheckLimits {
+        max_completed_operations: 1,
+        max_search_nodes: 1,
+    }
+    .validate()
+    .expect("the smallest legal configuration is admissible");
 }
