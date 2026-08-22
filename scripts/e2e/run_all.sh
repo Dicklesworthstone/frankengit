@@ -795,6 +795,16 @@ done
 FGE__J=''
 fge__jstr suite_dir "$RA_SUITE_DIR"
 FGE__J+=','
+# suite_profile, NOT profile: env.profile already carries the CARGO profile
+# ("debug"). A receipt that answered "profile" with "debug" while a --profile
+# harness run was in progress would look like it named its suite profile and
+# would not -- and a reader grepping for it would draw exactly the wrong
+# conclusion. The empty string means no profile was selected and no set check
+# ran, which is a different claim from a profile that passed.
+fge__jstr suite_profile "$RA_PROFILE"
+FGE__J+=','
+fge__jstr manifest_path "$RA_MANIFEST"
+FGE__J+=','
 fge__jstr out_dir "$RA_OUT"
 FGE__J+=','
 fge__jnum timeout_seconds "$RA_TIMEOUT"
