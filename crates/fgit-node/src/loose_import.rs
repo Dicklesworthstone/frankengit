@@ -1119,4 +1119,148 @@ mod tests {
         ));
         node.shutdown().expect("node drains");
     }
+
+    #[test]
+    fn loose_import_refuses_a_source_without_a_git_objects_directory() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("not-a-git-directory");
+        fs::create_dir_all(&source).expect("source directory creates");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::GitDirectoryMissing(path)) if *path == source
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_a_file_where_the_packed_object_directory_belongs() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        let pack_directory = source.join("objects/pack");
+        fs::create_dir_all(source.join("objects")).expect("object directory creates");
+        fs::write(&pack_directory, b"not a directory").expect("wrong-kind fixture writes");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::PathKind { expected, path })
+                if expected == "packed-object directory" && *path == pack_directory
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_a_loose_ref_path_outside_the_canonical_vocabulary() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        let ref_path = source.join("refs/heads/bad..name");
+        fs::create_dir_all(ref_path.parent().expect("ref parent exists"))
+            .expect("ref directory creates");
+        fs::create_dir_all(source.join("objects")).expect("object directory creates");
+        fs::write(&ref_path, "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0\n")
+            .expect("invalid-name ref writes");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::RefName { path, .. }) if *path == ref_path
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_a_direct_ref_with_noncanonical_object_hex() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        let ref_path = source.join("refs/heads/main");
+        fs::create_dir_all(ref_path.parent().expect("ref parent exists"))
+            .expect("ref directory creates");
+        fs::create_dir_all(source.join("objects")).expect("object directory creates");
+        fs::write(&ref_path, "NOT-AN-OBJECT\n").expect("invalid-identity ref writes");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::ObjectIdentity { path, .. }) if *path == ref_path
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_a_direct_ref_with_ambiguous_contents() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        let ref_path = source.join("refs/heads/main");
+        fs::create_dir_all(ref_path.parent().expect("ref parent exists"))
+            .expect("ref directory creates");
+        fs::create_dir_all(source.join("objects")).expect("object directory creates");
+        fs::write(&ref_path, "one identity plus another\n").expect("ambiguous ref fixture writes");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::RefContents(path)) if *path == ref_path
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_malformed_packed_refs() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        let packed_refs = source.join("packed-refs");
+        fs::create_dir_all(source.join("objects")).expect("object directory creates");
+        fs::write(&packed_refs, "not a packed ref\n").expect("malformed packed refs write");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::PackedRefContents(path)) if *path == packed_refs
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_a_reachable_file_that_is_not_a_zlib_loose_object() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        let oid = "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0";
+        let ref_path = source.join("refs/heads/main");
+        let object_path = source.join("objects/b6/fc4c620b67d95f953a5c1c1230aaab5db5a1b0");
+        fs::create_dir_all(ref_path.parent().expect("ref parent exists"))
+            .expect("ref directory creates");
+        fs::create_dir_all(object_path.parent().expect("object parent exists"))
+            .expect("object directory creates");
+        fs::write(&ref_path, format!("{oid}\n")).expect("fixture ref writes");
+        fs::write(&object_path, b"not a zlib stream").expect("invalid loose object writes");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::LooseObject(_))
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_ref_directories_deeper_than_the_profile_limit() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        let mut nested = source.join("refs");
+        for index in 0..=super::MAX_IMPORT_REF_DEPTH {
+            nested.push(format!("level-{index}"));
+        }
+        fs::create_dir_all(&nested).expect("deep ref directory creates");
+        fs::create_dir_all(source.join("objects")).expect("object directory creates");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::RefDepthExceeded { limit })
+                if limit == super::MAX_IMPORT_REF_DEPTH
+        ));
+        node.shutdown().expect("node drains");
+    }
 }
