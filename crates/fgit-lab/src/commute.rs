@@ -29,7 +29,7 @@
 //! Everything else commutes: different keys never conflict, two reads never
 //! conflict, and one participant's cancel is independent of another's work.
 
-use crate::plan::StepId;
+use crate::{canonical::escape_delimited_field, plan::StepId};
 
 /// A protocol event the explorer can reorder.
 ///
@@ -120,10 +120,12 @@ impl ProtocolEvent {
     #[must_use]
     pub fn canonical(&self) -> String {
         match self {
-            Self::Cancel { participant } => format!("cancel:{participant}"),
+            Self::Cancel { participant } => {
+                format!("cancel:{}", escape_delimited_field(participant.as_str()))
+            }
             other => other.key().map_or_else(
                 || other.code().to_owned(),
-                |key| format!("{}:{key}", other.code()),
+                |key| format!("{}:{}", other.code(), escape_delimited_field(key)),
             ),
         }
     }
@@ -148,7 +150,11 @@ impl OwnedEvent {
     /// A canonical rendering.
     #[must_use]
     pub fn canonical(&self) -> String {
-        format!("{}@{}", self.event.canonical(), self.actor)
+        format!(
+            "{}@{}",
+            self.event.canonical(),
+            escape_delimited_field(self.actor.as_str())
+        )
     }
 }
 
@@ -411,5 +417,17 @@ mod tests {
         assert_eq!(sorted.len(), rendered.len());
         assert_eq!(cas("a", "main").canonical(), "cas:main@a");
         assert_eq!(cancel("a", "b").canonical(), "cancel:b@a");
+    }
+
+    #[test]
+    fn canonical_event_descriptions_escape_caller_controlled_delimiters() {
+        assert_eq!(
+            cas("worker|two", "main|detail=other,next@actor:\n").canonical(),
+            "cas:main%7Cdetail%3Dother%2Cnext%40actor%3A%0A@worker%7Ctwo"
+        );
+        assert_eq!(
+            cancel("supervisor", "worker,one").canonical(),
+            "cancel:worker%2Cone@supervisor"
+        );
     }
 }

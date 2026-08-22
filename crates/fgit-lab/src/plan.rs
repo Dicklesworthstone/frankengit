@@ -11,6 +11,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::canonical::escape_delimited_field;
 use crate::refuse::LabRefusal;
 use crate::rng::SeededEntropy;
 
@@ -176,7 +177,7 @@ impl LabSchedule {
     pub fn canonical_line(&self) -> String {
         let names = |list: &[StepId]| {
             list.iter()
-                .map(StepId::as_str)
+                .map(|step| escape_delimited_field(step.as_str()))
                 .collect::<Vec<_>>()
                 .join(",")
         };
@@ -393,6 +394,23 @@ mod tests {
         // A seeded schedule records its seed, which is its reproduction key.
         let seeded = LabSchedule::seeded(participants(), 4, 77).expect("valid");
         assert!(seeded.canonical_line().contains("|seed=77|"));
+    }
+
+    #[test]
+    fn the_canonical_line_escapes_participant_names_without_changing_order() {
+        let writer = StepId::new("writer|one");
+        let reader = StepId::new("reader,two=three");
+        let schedule = LabSchedule::explicit(
+            vec![writer.clone(), reader.clone()],
+            vec![reader.clone(), writer.clone()],
+        )
+        .expect("declared names are accepted even when their canonical form needs escaping");
+
+        assert_eq!(
+            schedule.canonical_line(),
+            "fgit-lab-schedule-v1|seed=none|participants=writer%7Cone,reader%2Ctwo%3Dthree|steps=2|order=reader%2Ctwo%3Dthree,writer%7Cone"
+        );
+        assert_eq!(schedule.order(), &[reader, writer]);
     }
 
     #[test]

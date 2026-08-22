@@ -51,6 +51,8 @@
 //! while leaving declared points untouched. A stress count is never accepted
 //! as a coverage claim.
 
+mod canonical;
+
 pub mod clockvec;
 pub mod commute;
 pub mod crashpack;

@@ -46,6 +46,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::canonical::escape_delimited_field;
 use crate::clockvec::VectorClock;
 use crate::commute::{ConflictRelation, OwnedEvent, ProtocolEvent};
 use crate::plan::{LabSchedule, StepId};
@@ -278,8 +279,8 @@ impl Counterexample {
             .collect();
         format!(
             "fgit-lab-counterexample-v1|property={}|detail={}|steps={}",
-            self.property,
-            self.detail,
+            escape_delimited_field(&self.property),
+            escape_delimited_field(&self.detail),
             steps.join(",")
         )
     }
@@ -900,6 +901,25 @@ mod tests {
         // And it is quotable, which is what makes it reproducible elsewhere.
         assert!(schedule.canonical_line().contains("fgit-lab-schedule-v1"));
         assert!(counterexample.canonical().contains("no_lost_update"));
+    }
+
+    #[test]
+    fn counterexample_canonical_escapes_free_text_and_event_components() {
+        let program =
+            Program::new(vec![(who("worker|two"), vec![cas("main,one")])]).expect("valid program");
+        let outcome =
+            Dpor::new().explore(&program, GENEROUS, "property|next", |_: &[OwnedEvent]| {
+                Err("detail=value,then\nnext".to_owned())
+            });
+
+        assert!(matches!(outcome, ExplorationOutcome::Violation { .. }));
+        let counterexample = outcome
+            .counterexample()
+            .expect("the first explored schedule violates the property");
+        assert_eq!(
+            counterexample.canonical(),
+            "fgit-lab-counterexample-v1|property=property%7Cnext|detail=detail%3Dvalue%2Cthen%0Anext|steps=cas:main%2Cone@worker%7Ctwo"
+        );
     }
 
     #[test]
