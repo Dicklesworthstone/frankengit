@@ -1796,3 +1796,200 @@ fn refusal_entry(tx_byte: u8, sequence: u64, refusal: u8) -> (TxId, TerminalOutc
         },
     )
 }
+
+// ---------------------------------------------------------------------------
+// frankengit-boet: the authority-owned cumulative outcome-index derivation.
+//
+// The ruling these exercise: `resulting_outcome_index_root` is the repository's
+// CUMULATIVE authenticated outcome index after a batch, not a per-batch root,
+// because NPC 10 step 4 consults the index DURING transaction handling to ask
+// "does this TxId already have a decision" -- a question only a
+// repository-wide index answers.
+// ---------------------------------------------------------------------------
+
+fn commit_entry(tx_byte: u8, sequence: u64, commit: u8) -> (TxId, TerminalOutcome) {
+    (
+        tx(tx_byte),
+        TerminalOutcome {
+            decision_sequence: DecisionSequence::try_new(sequence).expect("positive"),
+            outcome: DecisionOutcome::Committed {
+                repository_commit_id: commit_id(commit),
+            },
+        },
+    )
+}
+
+/// Acceptance (1): the fold IS the recompute over the cumulative leaf set.
+///
+/// The two negatives are the load-bearing half. Equality with the recompute
+/// alone is also satisfied by a fold that ignores one of its arguments, so each
+/// argument is shown to matter: the result differs from the carried set's own
+/// root (the batch was absorbed) and from the batch's own root (the result is
+/// cumulative, not per-batch -- the ruling's actual claim).
+#[test]
+fn the_fold_is_a_recompute_over_the_cumulative_leaf_set_and_neither_input_alone() {
+    let carried = [commit_entry(0xa1, 1, 0xc1), refusal_entry(0xa2, 2, 0xf2)];
+    let stamped = [commit_entry(0xa3, 3, 0xc3)];
+
+    let folded = fgit_authority::fold_outcome_index(&carried, &stamped).expect("a computable root");
+
+    let cumulative: Vec<_> = carried.iter().chain(&stamped).copied().collect();
+    assert_eq!(
+        folded,
+        fgit_authority::outcome_index_root(&cumulative).expect("a computable root"),
+        "the fold must equal the recompute over the union of carried and stamped entries",
+    );
+
+    assert_ne!(
+        folded,
+        fgit_authority::outcome_index_root(&carried).expect("a computable root"),
+        "a fold that ignored the batch would leave the carried root unchanged",
+    );
+    assert_ne!(
+        folded,
+        fgit_authority::outcome_index_root(&stamped).expect("a computable root"),
+        "a fold that ignored the carried history would publish a per-batch root, \
+         which is the reading the boet ruling rejects",
+    );
+}
+
+/// Acceptance (2), the `frankengit-d6nl` regression stated as a property.
+///
+/// Refusals are terminal outcomes: they consume decision sequence and must be
+/// found by NPC 10.4 duplicate detection, so a refusal-only batch has entries
+/// to fold. `ResultingRoots::carried_forward` publishes the predecessor root
+/// unchanged for exactly this case. The first assertion is that behaviour being
+/// wrong; the second is what should be published instead.
+#[test]
+fn a_refusal_only_batch_advances_the_root_so_carrying_it_forward_is_wrong() {
+    let carried = [commit_entry(0xb1, 1, 0xc1)];
+    let refusals_only = [refusal_entry(0xb2, 2, 0xf2), refusal_entry(0xb3, 3, 0xf3)];
+
+    let folded =
+        fgit_authority::fold_outcome_index(&carried, &refusals_only).expect("a computable root");
+    let carried_forward = fgit_authority::outcome_index_root(&carried).expect("a computable root");
+
+    assert_ne!(
+        folded, carried_forward,
+        "carrying the predecessor root forward over a refusal-only batch loses \
+         both refusal outcomes from the index that NPC 10.4 queries",
+    );
+
+    let cumulative: Vec<_> = carried.iter().chain(&refusals_only).copied().collect();
+    assert_eq!(
+        folded,
+        fgit_authority::outcome_index_root(&cumulative).expect("a computable root"),
+        "the recompute over commit + both refusals is what the batch should publish",
+    );
+}
+
+/// Acceptance (3), the half the derivation owns: a transaction decided in a
+/// PRIOR batch is visible to the fold, not just one decided in this batch.
+///
+/// This is NPC 5.2 -- one sealed transaction has at most one terminal decision
+/// -- enforced at the structure that has to hold it. The permitted twin is a
+/// different `TxId` in the same position, so the refusal is attributable to the
+/// repeat rather than to the batch mixing a refusal into a commit history.
+#[test]
+fn the_fold_refuses_a_transaction_the_carried_index_already_decided() {
+    let already_decided = commit_entry(0xd1, 1, 0xc1);
+    let carried = [already_decided, commit_entry(0xd2, 2, 0xc2)];
+
+    // Same TxId as the carried entry, offered again with a different decision.
+    let redecided = [refusal_entry(0xd1, 3, 0xf3)];
+    let failure = fgit_authority::fold_outcome_index(&carried, &redecided)
+        .expect_err("a transaction decided twice must not produce a root");
+
+    let OutcomeFailure::DuplicateTerminalDecision { duplicate } = failure else {
+        panic!("expected DuplicateTerminalDecision, got {failure:?}");
+    };
+    assert_eq!(
+        duplicate.tx_id,
+        tx(0xd1),
+        "the refusal must name the transaction that was decided twice",
+    );
+    assert_eq!(
+        duplicate.existing, already_decided.1,
+        "`existing` must be the decision already carried in the index",
+    );
+    assert_eq!(
+        duplicate.offered, redecided[0].1,
+        "`offered` must be the decision the batch tried to add",
+    );
+
+    // The permitted twin: an undecided TxId in the same slot folds cleanly.
+    let fresh = [refusal_entry(0xd9, 3, 0xf3)];
+    fgit_authority::fold_outcome_index(&carried, &fresh)
+        .expect("a transaction with no prior decision folds");
+}
+
+/// A repeat WITHIN one batch is the same violation and is refused identically.
+///
+/// Checked separately because a duplicate scan that only compared the batch
+/// against the carried set would pass the test above and miss this.
+#[test]
+fn the_fold_refuses_a_transaction_repeated_inside_one_batch() {
+    let carried = [commit_entry(0xe1, 1, 0xc1)];
+    let repeated_in_batch = [refusal_entry(0xe2, 2, 0xf2), commit_entry(0xe2, 3, 0xc3)];
+
+    let failure = fgit_authority::fold_outcome_index(&carried, &repeated_in_batch)
+        .expect_err("one transaction cannot hold two decisions in one batch either");
+    let OutcomeFailure::DuplicateTerminalDecision { duplicate } = failure else {
+        panic!("expected DuplicateTerminalDecision, got {failure:?}");
+    };
+    assert_eq!(duplicate.tx_id, tx(0xe2));
+}
+
+/// Why the duplicate is REFUSED rather than de-duplicated.
+///
+/// The presence case for the design decision above. `outcome_index_root`
+/// commits to a multiset: a repeated leaf is sorted next to its twin and both
+/// are hashed, so the repeat is not inert. Dropping it silently would hide an
+/// NPC 5.2 violation behind a well-formed root, and keeping it would publish a
+/// root committing to a history where one transaction was decided twice.
+/// Without this test, "refuse rather than de-duplicate" would read as mere
+/// caution instead of the only correct option.
+#[test]
+fn a_repeated_leaf_changes_the_root_so_de_duplicating_would_not_be_inert() {
+    let single = [commit_entry(0xf1, 1, 0xc1)];
+    let repeated = [commit_entry(0xf1, 1, 0xc1), commit_entry(0xf1, 1, 0xc1)];
+
+    assert_ne!(
+        fgit_authority::outcome_index_root(&single).expect("a computable root"),
+        fgit_authority::outcome_index_root(&repeated).expect("a computable root"),
+        "identical leaves are not collapsed by the construction, so a duplicate \
+         entry is a different commitment rather than a harmless repeat",
+    );
+}
+
+/// Acceptance (5): the fold observes the STAMPED RCR identity.
+///
+/// The ordering requirement is that the fold runs after the RCRs are stamped,
+/// because the terminal outcome of a commit names the RCR it produced. Mutating
+/// only that identity must move the root; if it did not, a fold running BEFORE
+/// stamping would produce the same answer and the ordering would be
+/// unobservable. The paired equality is the control: two folds over the same
+/// stamped identity agree, so the difference is attributable to the mutation
+/// and not to an unstable root.
+#[test]
+fn the_fold_observes_the_stamped_rcr_identity_so_running_it_pre_stamp_is_detectable() {
+    let carried = [refusal_entry(0x91, 1, 0xf1)];
+
+    let stamped = [commit_entry(0x92, 2, 0xc2)];
+    let restamped = [commit_entry(0x92, 2, 0xc9)];
+
+    let with_stamp = fgit_authority::fold_outcome_index(&carried, &stamped).expect("a root");
+    let with_other_stamp =
+        fgit_authority::fold_outcome_index(&carried, &restamped).expect("a root");
+
+    assert_ne!(
+        with_stamp, with_other_stamp,
+        "the RCR identity is the only difference between these batches, so a fold \
+         that did not observe it would publish one root for both",
+    );
+    assert_eq!(
+        with_stamp,
+        fgit_authority::fold_outcome_index(&carried, &stamped).expect("a root"),
+        "the same stamped identity must fold to the same root",
+    );
+}

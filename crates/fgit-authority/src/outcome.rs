@@ -42,6 +42,7 @@ use fgit_types::identity::{
 };
 use fgit_types::numeric::DecisionSequence;
 use fgit_types::vocabulary::{DecisionOutcome, RefusalCode};
+use std::collections::BTreeMap;
 
 use crate::async_contract::{AsyncAuthorityStore, DuplicateAbsenceWitness};
 use crate::contract::AuthorityStore;
@@ -150,6 +151,27 @@ pub enum OutcomeFailure {
         body: HeadGeneration,
     },
     /// Sealing, storage, identity, or codec failed underneath.
+    /// One sealed transaction acquired a second terminal decision.
+    ///
+    /// §5.2 is the invariant: *one sealed transaction has at most one terminal
+    /// decision*. The index is the structure that has to hold it, because §10.4
+    /// duplicate detection consults the index to answer "does this `TxId`
+    /// already have a decision".
+    ///
+    /// This fails closed rather than de-duplicating, and the reason is not
+    /// merely conservatism. [`outcome_index_root`] commits to a **multiset** of
+    /// leaves: a repeated entry is sorted alongside its twin and both are
+    /// hashed, so folding one transaction in twice produces a root that no
+    /// single-decision leaf set can produce. Silently collapsing the repeat
+    /// would hide a §5.2 violation behind a root that still looks well-formed,
+    /// and keeping it would publish a root committing to a history in which one
+    /// transaction was decided twice. Neither is publishable.
+    ///
+    /// Boxed to keep [`OutcomeFailure`] inside `MAX_ERROR_BYTES`.
+    DuplicateTerminalDecision {
+        /// The transaction named twice, and the two decisions offered for it.
+        duplicate: Box<DuplicateDecision>,
+    },
     Seal(Box<SealFailure>),
     /// A canonical body could not be encoded or decoded.
     Codec(CodecRefusal),
@@ -162,6 +184,21 @@ pub struct IdentityDisagreement {
     pub requested: InternalObjectId,
     /// The identity the decoded body re-derives.
     pub found: InternalObjectId,
+}
+
+/// One transaction carrying two terminal decisions, as
+/// [`OutcomeFailure::DuplicateTerminalDecision`] reports it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DuplicateDecision {
+    /// The transaction named twice.
+    pub tx_id: TxId,
+    /// The decision encountered first.
+    ///
+    /// From the carried index when the collision crosses the two inputs, and
+    /// from the earlier position when it lies within one of them.
+    pub existing: TerminalOutcome,
+    /// The decision offered for the same transaction.
+    pub offered: TerminalOutcome,
 }
 
 impl core::fmt::Display for OutcomeFailure {
@@ -187,6 +224,14 @@ impl core::fmt::Display for OutcomeFailure {
                 "the head receipt declares generation {} but its body carries {}",
                 receipt.get(),
                 body.get()
+            ),
+            Self::DuplicateTerminalDecision { duplicate } => write!(
+                f,
+                "transaction {} carries two terminal decisions (sequences {} and {}); \
+                 one sealed transaction has at most one",
+                duplicate.tx_id,
+                duplicate.existing.decision_sequence.get(),
+                duplicate.offered.decision_sequence.get()
             ),
             Self::Seal(failure) => write!(f, "{failure}"),
             Self::Codec(refusal) => write!(f, "canonical encoding refused: {refusal}"),
@@ -832,6 +877,81 @@ pub fn outcome_index_root(entries: &[(TxId, TerminalOutcome)]) -> Result<Digest,
         IdentityDomain::MerkleNode.algorithm().id(),
         root,
     ))
+}
+
+/// Derive the repository's cumulative outcome index after a batch.
+///
+/// This is the authority-owned derivation the `frankengit-boet` ruling names:
+/// `resulting_outcome_index_root` is the repository's **cumulative**
+/// authenticated outcome index after this batch, not a per-batch root. §10
+/// step 4 queries the authenticated outcome index *during* transaction
+/// handling for duplicate detection, and only a repository-wide index can
+/// answer "does this `TxId` already have a decision".
+///
+/// # Why this takes the carried leaf set rather than the predecessor root
+///
+/// The obvious signature is `(predecessor_root, stamped)`, and it is not
+/// implementable. [`outcome_index_root`] sorts leaves by digest before
+/// pairing, so a new leaf's position -- and therefore every interior node
+/// above it -- depends on comparison against the individual existing leaves.
+/// `root(A)` is a single digest and does not carry them. No function of the
+/// predecessor root and the new leaves yields the root of their union under
+/// this commitment. An append-only construction would admit one; sorting buys
+/// canonical-set semantics and pays incrementality for it.
+///
+/// So the carried entries are a parameter, following the same discipline
+/// [`reconcile_outcome`] uses for its two reads: requiring them makes a
+/// derivation that *cannot* see the history **unrepresentable** rather than
+/// merely discouraged. Carrying a predecessor root forward unchanged -- the
+/// `frankengit-d6nl` defect -- is not something a caller of this function can
+/// express by omission.
+///
+/// # Refusals are entries
+///
+/// Both commits and refusals are terminal outcomes: they consume decision
+/// sequence and must be found by §10.4 duplicate detection. A refusal-only
+/// batch therefore *advances* the root. There is deliberately no early return
+/// for an empty `stamped`: such a shortcut would return the predecessor's root
+/// unchanged, which is the carry-forward defect arriving by another route.
+///
+/// # What this does not do
+///
+/// It does not gate publication, and it does not say where `carried` comes
+/// from. Retention -- whether the authority materializes the cumulative leaf
+/// set, or the commitment changes, or capsules gain an `outcome_index_root`
+/// field to bound the walk -- is a canonical-body question under §5.2/§10 and
+/// is escalated, not decided here. Today the only route to historic outcomes
+/// is the decision-chain walk, bounded at [`MAX_REPLAY_BATCHES`], so a caller
+/// past that bound cannot supply `carried` at all. That is a refusal at the
+/// caller's layer, deliberately not papered over here with a partial set that
+/// would silently produce a wrong root.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::DuplicateTerminalDecision`] if any `TxId` appears more
+/// than once across `carried` and `stamped`, including twice within either
+/// one; [`OutcomeFailure::Codec`] if an outcome does not encode.
+pub fn fold_outcome_index(
+    carried: &[(TxId, TerminalOutcome)],
+    stamped: &[(TxId, TerminalOutcome)],
+) -> Result<Digest, OutcomeFailure> {
+    let mut seen: BTreeMap<TxId, TerminalOutcome> = BTreeMap::new();
+    let mut folded = Vec::with_capacity(carried.len() + stamped.len());
+
+    for (tx_id, outcome) in carried.iter().chain(stamped) {
+        if let Some(existing) = seen.insert(*tx_id, *outcome) {
+            return Err(OutcomeFailure::DuplicateTerminalDecision {
+                duplicate: Box::new(DuplicateDecision {
+                    tx_id: *tx_id,
+                    existing,
+                    offered: *outcome,
+                }),
+            });
+        }
+        folded.push((*tx_id, *outcome));
+    }
+
+    outcome_index_root(&folded)
 }
 
 /// Create a repository's genesis head, staging its body by identity.
