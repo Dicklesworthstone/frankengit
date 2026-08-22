@@ -1427,6 +1427,18 @@ impl ObligationLedger {
         grant: BudgetGrant,
     ) -> Result<ReservedObligation<K>, ReserveError> {
         let amount = grant.amount();
+        // Defensive, and measured to be unreachable: `state.closed` has exactly
+        // one writer -- `ObligationLedger::close`, which takes `self` by value --
+        // and `ObligationLedger` is not `Clone`. So the only value that can call
+        // `reserve` is consumed by the act of closing, and no reachable ledger
+        // can observe `closed == true`. A child region does not inherit it
+        // either: `child` builds `LedgerState::fresh`, so closing a parent
+        // leaves the child's flag false.
+        //
+        // This arm therefore has no presence case and cannot honestly be given
+        // one. It becomes reachable the moment `close` stops consuming, or
+        // `ObligationLedger` gains `Clone`, or a child shares its parent's
+        // state -- any of which should bring a test with it.
         if self.handle.with_state(|state| state.closed) {
             let _released = grant.release();
             return Err(ReserveError::RegionClosed(self.handle.region()));
