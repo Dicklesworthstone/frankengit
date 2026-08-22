@@ -558,7 +558,14 @@ impl RegimelessWindow {
         }
     }
 
-    const fn reset(self) -> Self {
+    /// Deliberately an associated function rather than a method: a regimeless
+    /// reset discards its receiver ENTIRELY, keeping no record that a reset
+    /// ever happened. That is the whole defect being modelled -- with nothing
+    /// carried forward, a later merge cannot tell "reset to zero" apart from
+    /// "has not counted anything yet", so the pre-reset value wins. The
+    /// signature ignoring `self` is the bug made visible in the type, which is
+    /// why this is not written to take one.
+    const fn reset() -> Self {
         Self { observed: 0 }
     }
 
@@ -658,7 +665,7 @@ fn the_regime_is_what_makes_a_reset_survive_a_merge() {
     // Load-bearing: with the regime removed, the identical sequence resurrects
     // the pre-reset value. The reset is silently undone.
     let naive_stale = RegimelessWindow { observed: 500 };
-    let naive_after_reset = naive_stale.reset().observe(3);
+    let naive_after_reset = RegimelessWindow::reset().observe(3);
     assert_eq!(
         naive_after_reset.merge(naive_stale).observed,
         500,
@@ -798,7 +805,11 @@ struct Projection {
 impl Projection {
     /// Publication guarded by the exact predecessor, per section 5.5's
     /// requirement that a root-last protocol never silently roll back.
-    fn activate(&mut self, expected_predecessor: u64, next: u64) -> Result<u64, ActivationRefusal> {
+    const fn activate(
+        &mut self,
+        expected_predecessor: u64,
+        next: u64,
+    ) -> Result<u64, ActivationRefusal> {
         if expected_predecessor != self.active {
             return Err(ActivationRefusal::NotExactPredecessor);
         }
@@ -817,7 +828,7 @@ impl Projection {
     }
 }
 
-fn anti_rollback_projection_holds() -> bool {
+const fn anti_rollback_projection_holds() -> bool {
     let mut projection = Projection { active: 4 };
     let advanced = projection.activate(4, 5).is_ok();
     let stale_refused = projection.activate(4, 5).is_err();

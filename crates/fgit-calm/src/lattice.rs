@@ -90,18 +90,32 @@ impl Observation {
     /// whole point, and it is why this is not a max over an ordering.
     #[must_use]
     pub const fn join(self, other: Self) -> Self {
+        // Written as "the highest state present wins", with one exception, so
+        // the lattice order is explicit rather than encoded in arm sequence.
+        //
+        // The previous form relied on arm ORDER to place `Unknown` below
+        // `Reserved`, and a clippy-directed pattern merge silently destroyed
+        // that: `(Unknown | Reserved, value)` matches `(Reserved, Unknown)` by
+        // its first alternative and binds `value = Unknown`, so
+        // `join(Unknown, Reserved)` and `join(Reserved, Unknown)` disagreed and
+        // the join stopped commuting. `the_join_is_a_semilattice` caught it.
+        // This form cannot regress that way, because no arm depends on which
+        // side an operand arrived on.
         match (self, other) {
-            // Conflict absorbs everything, from either side.
-            (Self::Conflict, _) | (_, Self::Conflict) => Self::Conflict,
-            // Unknown is the identity.
-            (Self::Unknown, value) | (value, Self::Unknown) => value,
-            // Reserved is below both terminals.
-            (Self::Reserved, value) | (value, Self::Reserved) => value,
-            // Agreeing terminals stay themselves.
-            (Self::Committed, Self::Committed) => Self::Committed,
-            (Self::Refused, Self::Refused) => Self::Refused,
-            // Contradictory terminals are retained, never resolved.
-            (Self::Committed, Self::Refused) | (Self::Refused, Self::Committed) => Self::Conflict,
+            // The exception, and the only rule that invents a state neither
+            // operand carried: two DIFFERENT terminals contradict, and the
+            // contradiction is retained rather than resolved. `Conflict` then
+            // absorbs whatever it meets, which is what makes it sticky.
+            (Self::Conflict, _)
+            | (_, Self::Conflict)
+            | (Self::Committed, Self::Refused)
+            | (Self::Refused, Self::Committed) => Self::Conflict,
+            // Otherwise the join is the higher of the two states. Terminals
+            // dominate `Reserved`, which dominates `Unknown`.
+            (Self::Committed, _) | (_, Self::Committed) => Self::Committed,
+            (Self::Refused, _) | (_, Self::Refused) => Self::Refused,
+            (Self::Reserved, _) | (_, Self::Reserved) => Self::Reserved,
+            (Self::Unknown, Self::Unknown) => Self::Unknown,
         }
     }
 
