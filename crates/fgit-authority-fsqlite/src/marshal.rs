@@ -112,9 +112,18 @@ pub fn unsigned(value: u64) -> Result<SqliteValue, MarshalError> {
         .map_err(|_| MarshalError::IntegerOutOfRange { observed: value })
 }
 
-/// Read a `BLOB` column.
-pub fn read_blob(row: &Row, column: usize) -> Result<&[u8], MarshalError> {
-    match row.get(column) {
+/// Decode a `BLOB` cell at a named row column.
+///
+/// `fsqlite::Row` deliberately has no public constructor: rows only arise from
+/// an executed query. This value-level boundary keeps that engine invariant
+/// while making malformed storage facts directly testable by callers. The row
+/// adapters below are one-line delegations, so production unmarshalling and
+/// public refusal probes use the same classifier.
+pub fn decode_blob_column(
+    value: Option<&SqliteValue>,
+    column: usize,
+) -> Result<&[u8], MarshalError> {
+    match value {
         None => Err(MarshalError::ColumnMissing { column }),
         Some(SqliteValue::Blob(bytes)) => Ok(bytes),
         Some(_) => Err(MarshalError::ColumnTypeUnexpected {
@@ -124,13 +133,16 @@ pub fn read_blob(row: &Row, column: usize) -> Result<&[u8], MarshalError> {
     }
 }
 
-/// Read an unsigned counter from an `INTEGER` column.
-pub fn read_unsigned(row: &Row, column: usize) -> Result<u64, MarshalError> {
-    match row.get(column) {
+/// Decode an unsigned counter from an `INTEGER` cell at a named row column.
+pub fn decode_unsigned_column(
+    value: Option<&SqliteValue>,
+    column: usize,
+) -> Result<u64, MarshalError> {
+    match value {
         None => Err(MarshalError::ColumnMissing { column }),
-        Some(&SqliteValue::Integer(signed)) => {
-            u64::try_from(signed).map_err(|_| MarshalError::IntegerNegative {
-                observed: signed,
+        Some(SqliteValue::Integer(signed)) => {
+            u64::try_from(*signed).map_err(|_| MarshalError::IntegerNegative {
+                observed: *signed,
                 column,
             })
         }
@@ -148,15 +160,18 @@ pub fn read_unsigned(row: &Row, column: usize) -> Result<u64, MarshalError> {
 /// store has never minted a token. Collapsing it to zero would make an empty
 /// ledger indistinguishable from one whose first sequence is zero — which is
 /// why zero is reserved in the first place.
-pub fn read_optional_unsigned(row: &Row, column: usize) -> Result<Option<u64>, MarshalError> {
-    match row.get(column) {
+pub fn decode_optional_unsigned_column(
+    value: Option<&SqliteValue>,
+    column: usize,
+) -> Result<Option<u64>, MarshalError> {
+    match value {
         None => Err(MarshalError::ColumnMissing { column }),
         Some(SqliteValue::Null) => Ok(None),
-        Some(&SqliteValue::Integer(signed)) => {
-            u64::try_from(signed)
+        Some(SqliteValue::Integer(signed)) => {
+            u64::try_from(*signed)
                 .map(Some)
                 .map_err(|_| MarshalError::IntegerNegative {
-                    observed: signed,
+                    observed: *signed,
                     column,
                 })
         }
@@ -165,4 +180,19 @@ pub fn read_optional_unsigned(row: &Row, column: usize) -> Result<Option<u64>, M
             expected: "INTEGER or NULL",
         }),
     }
+}
+
+/// Read a `BLOB` column from an engine row.
+pub fn read_blob(row: &Row, column: usize) -> Result<&[u8], MarshalError> {
+    decode_blob_column(row.get(column), column)
+}
+
+/// Read an unsigned counter from an engine `INTEGER` column.
+pub fn read_unsigned(row: &Row, column: usize) -> Result<u64, MarshalError> {
+    decode_unsigned_column(row.get(column), column)
+}
+
+/// Read a nullable `INTEGER` column from an engine row.
+pub fn read_optional_unsigned(row: &Row, column: usize) -> Result<Option<u64>, MarshalError> {
+    decode_optional_unsigned_column(row.get(column), column)
 }

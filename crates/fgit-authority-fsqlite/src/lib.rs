@@ -168,7 +168,8 @@ pub use crate::lifecycle::{
     observable_cancellation_phase,
 };
 pub use crate::marshal::{
-    MarshalError, blob, read_blob, read_optional_unsigned, read_unsigned, unsigned,
+    MarshalError, blob, decode_blob_column, decode_optional_unsigned_column,
+    decode_unsigned_column, read_blob, read_optional_unsigned, read_unsigned, unsigned,
 };
 pub use crate::portable::{
     BundleRefusal, ExportBundle, ExportedBody, ExportedHead, ExportedIssuance, MAX_EXPORT_BODIES,
