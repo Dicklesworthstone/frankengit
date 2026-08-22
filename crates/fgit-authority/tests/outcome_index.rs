@@ -1672,3 +1672,127 @@ fn the_async_reidentification_actually_fires_too() {
         "the refusal must name the body that was actually found"
     );
 }
+
+// ---------------------------------------------------------------------------
+// frankengit-boet: properties the cumulative outcome index must have, and the
+// one it cannot have.
+//
+// The index is CUMULATIVE (GoldLotus's triangulated ruling): a batch's
+// `resulting_outcome_index_root` is the repository's index AFTER that batch,
+// not a root over that batch alone. NPC §10 step 4 consults it for duplicate
+// detection, which only a repository-wide index can answer.
+//
+// These two tests pin what that requires of the root function itself. They are
+// independent of where the fold eventually lives and of which retention design
+// is chosen, because they are properties of `outcome_index_root`.
+// ---------------------------------------------------------------------------
+
+/// A refusal outcome must move the root, so a batch that carries its
+/// predecessor's root forward unchanged is DETECTABLY wrong.
+///
+/// This is the `d6nl` defect expressed as a property. Refusals are terminal
+/// outcomes: they consume decision sequence and must be findable by NPC §10.4
+/// duplicate detection, so they belong in the index exactly as commits do.
+/// `fgit-chronicle`'s `carried_forward` currently propagates the predecessor
+/// root verbatim for a refusal-only batch, which this property says cannot be
+/// right — whatever the eventual fold looks like.
+#[test]
+fn a_refusal_outcome_moves_the_index_root_so_carrying_it_forward_is_detectable() {
+    let before = [entry(0xA1, 1, 0x51)];
+    let after = [entry(0xA1, 1, 0x51), refusal_entry(0xB2, 2, 0x62)];
+
+    let root_before = fgit_authority::outcome_index_root(&before).expect("a computable root");
+    let root_after = fgit_authority::outcome_index_root(&after).expect("a computable root");
+
+    assert_ne!(
+        root_before, root_after,
+        "a refusal must advance the cumulative index; if these were equal, \
+         carrying the predecessor root forward would be indistinguishable from \
+         folding the refusal in, and the d6nl defect would be untestable"
+    );
+
+    // The paired permitted case. Without it the assertion above is satisfied by
+    // a root function that changes on any call, which would prove nothing about
+    // refusals specifically.
+    assert_eq!(
+        fgit_authority::outcome_index_root(&after).expect("a computable root"),
+        root_after,
+        "the root must still be a deterministic function of the entry set"
+    );
+}
+
+/// The root cannot be folded incrementally from its predecessor, and the
+/// obvious attempt is refuted here so nobody has to rediscover it.
+///
+/// `outcome_index_root` sorts leaves by digest before pairing them, so a new
+/// leaf's position — and therefore every interior node above it — depends on
+/// comparison against the individual existing leaves. The predecessor root is
+/// one digest and does not contain them, so no `f(predecessor_root, new)` can
+/// reproduce the cumulative root. An append-only construction would admit such
+/// a fold; a sorted-set commitment does not, and that is the trade this design
+/// made.
+///
+/// The consequence, recorded on `frankengit-boet`: the fold needs the whole
+/// cumulative leaf set, and the only route to historic outcomes — the decision
+/// chain walk — is bounded by `MAX_REPLAY_BATCHES`. Whoever lifts that chooses
+/// between retaining a materialised leaf set and changing the commitment; both
+/// are normative decisions, not implementation details.
+#[test]
+fn treating_the_predecessor_root_as_a_leaf_does_not_reproduce_the_cumulative_root() {
+    let historic = [entry(0xA1, 1, 0x51), entry(0xB2, 2, 0x52)];
+    let fresh = entry(0xC3, 3, 0x53);
+
+    let predecessor = fgit_authority::outcome_index_root(&historic).expect("a computable root");
+
+    let cumulative = fgit_authority::outcome_index_root(&[historic[0], historic[1], fresh])
+        .expect("a computable root");
+
+    // The naive fold: stand the predecessor root in for everything behind it
+    // and combine it with the new entry. This is the shape someone reaches for
+    // when the leaves are no longer to hand.
+    let folded = fgit_authority::outcome_index_root(&[
+        (
+            // The predecessor root, standing in for the leaves behind it.
+            TxId::from_digest(
+                IdentityDomain::RefTransaction.algorithm().id(),
+                CANONICAL_CODEC_VERSION,
+                *predecessor.bytes(),
+            ),
+            historic[1].1,
+        ),
+        fresh,
+    ])
+    .expect("a computable root");
+
+    assert_ne!(
+        cumulative, folded,
+        "standing the predecessor root in for its leaves must not reproduce the \
+         cumulative root; if it did, the index would admit a shortcut that skips \
+         the history it is supposed to commit to"
+    );
+
+    // Paired case: the cumulative root IS reproducible from the full leaf set,
+    // in any order. So the failure above is specifically the missing leaves,
+    // not an unstable root function.
+    assert_eq!(
+        cumulative,
+        fgit_authority::outcome_index_root(&[fresh, historic[1], historic[0],])
+            .expect("a computable root"),
+        "the cumulative root must be recoverable from the whole leaf set"
+    );
+}
+
+/// A refusal-shaped entry, so the refusal property above is not silently
+/// testing two commits.
+fn refusal_entry(tx_byte: u8, sequence: u64, refusal: u8) -> (TxId, TerminalOutcome) {
+    (
+        tx(tx_byte),
+        TerminalOutcome {
+            decision_sequence: DecisionSequence::try_new(sequence).expect("positive"),
+            outcome: DecisionOutcome::Refused {
+                refusal_record_id: refusal_id(refusal),
+                code: RefusalCode::QuotaExceeded,
+            },
+        },
+    )
+}
