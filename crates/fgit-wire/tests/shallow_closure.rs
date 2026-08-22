@@ -286,6 +286,29 @@ fn an_unequal_path_relaxes_a_premature_depth_boundary() {
         !first.shallow_update.shallow.contains(&oid(BASE)),
         "BASE sits at depth 3 on its shorter path and is not a boundary"
     );
+
+    // With no `deepen` cut, re-visiting BASE through its shorter path cannot
+    // change a boundary decision. The unique graph has five parent edges;
+    // re-expanding BASE would charge its one parent a second time and reject
+    // this otherwise-admissible closure at the exact resource ceiling.
+    let unbounded = compute_pack_closure(
+        &graph,
+        &request(vec![oid(TOP)]),
+        &ClosureLimits {
+            max_commits: 5,
+            max_objects: 16,
+            max_edges: 5,
+        },
+    )
+    .expect("a deepen-less repeat arrival does not re-charge BASE's parent edge");
+    assert!(
+        unbounded.shallow_update.shallow.is_empty(),
+        "without a depth or time cut, the duplicate path creates no shallow boundary"
+    );
+    assert!(
+        object_ids(&unbounded).contains(&oid(THIRD)),
+        "the unique closure still includes history below the repeated commit"
+    );
 }
 
 #[test]

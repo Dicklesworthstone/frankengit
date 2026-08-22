@@ -669,6 +669,41 @@ fn v1_advertisement_accepts_the_empty_repository_capabilities_record() {
     assert_eq!(advertisement.refs[0].name, b"capabilities^{}");
 }
 
+/// The opaque-byte ceiling covers the name as it arrived on the wire, not only
+/// the strict base name after a peeled-record suffix is stripped. Otherwise a
+/// base at the ceiling gains three unchecked bytes from `^{}`.
+#[test]
+fn v1_advertisement_counts_the_peel_suffix_against_the_ref_name_limit() {
+    let accepted_base = b"refs/heads/x";
+    let mut limits = WireLimits::default();
+    limits.max_ref_name_bytes = accepted_base.len() + b"^{}".len();
+
+    let mut accepted_line = format!("{TAG} ").into_bytes();
+    accepted_line.extend_from_slice(accepted_base);
+    accepted_line.extend_from_slice(b"^{}\n");
+    let accepted = V1Advertisement::parse(
+        &[Packet::Data(accepted_line), Packet::Flush],
+        GitObjectFormat::Sha1,
+        &limits,
+    )
+    .expect("an advertised name exactly at the suffix-inclusive limit is admitted");
+    assert_eq!(accepted.refs[0].name, b"refs/heads/x^{}");
+
+    let overflow_base = b"refs/heads/xxxx";
+    assert_eq!(overflow_base.len(), limits.max_ref_name_bytes);
+    let mut overflow_line = format!("{TAG} ").into_bytes();
+    overflow_line.extend_from_slice(overflow_base);
+    overflow_line.extend_from_slice(b"^{}\n");
+    assert!(matches!(
+        V1Advertisement::parse(
+            &[Packet::Data(overflow_line), Packet::Flush],
+            GitObjectFormat::Sha1,
+            &limits,
+        ),
+        Err(WireError::RefNameTooLarge { limit }) if limit == limits.max_ref_name_bytes
+    ));
+}
+
 #[test]
 fn v1_advertisement_still_refuses_an_invalid_name_under_the_peel_suffix() {
     // The suffix widens nothing else: the base name must still satisfy the
