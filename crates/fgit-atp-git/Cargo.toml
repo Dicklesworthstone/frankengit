@@ -9,5 +9,13 @@ fgit-crypto.workspace = true
 fgit-object-fabric.workspace = true
 fgit-types.workspace = true
 
+# Test-only, for the FG-022b end-state differential: the bead requires object
+# equality between the ATP-Git path and the ORDINARY PACK PATH, which cannot be
+# demonstrated from inside one of them. Both are workspace members, so this
+# introduces no external dependency and no production-graph change.
+[dev-dependencies]
+fgit-pack.workspace = true
+fgit-git-object.workspace = true
+
 [lints]
 workspace = true
