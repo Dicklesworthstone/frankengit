@@ -3604,7 +3604,7 @@ mod tests {
             .local_addr()
             .expect("listener address is available");
         let repository = FixtureRepository::single_main_ref();
-        let server = thread::spawn(move || {
+        let fixture_pack_worker = thread::spawn(move || {
             serve_git_daemon_tcp_once(
                 &listener,
                 &repository,
@@ -3644,7 +3644,7 @@ mod tests {
         client
             .read_to_end(&mut response)
             .expect("server response reaches write-half EOF");
-        let outcome = server
+        let outcome = fixture_pack_worker
             .join()
             .expect("server thread joins")
             .expect("server accepts the complete V0 request");
@@ -3665,7 +3665,7 @@ mod tests {
         let address = listener
             .local_addr()
             .expect("listener reports its bound loopback address");
-        let server = thread::spawn(move || {
+        let empty_repository_worker = thread::spawn(move || {
             let served = node.serve_git_daemon_once_with_limits(&listener, WireLimits::default());
             let shutdown = node.shutdown();
             (served, shutdown)
@@ -3691,15 +3691,21 @@ mod tests {
             .read_to_end(&mut response)
             .expect("empty repository advertisement reaches EOF");
 
-        let (served, shutdown) = server.join().expect("node server thread joins");
+        let (session_result, shutdown) = empty_repository_worker
+            .join()
+            .expect("node server thread joins");
         shutdown.expect("node drains and shuts down after the one session");
-        let served = served.expect("empty canonical admission state serves");
+        let empty_repository_session =
+            session_result.expect("empty canonical admission state serves");
         assert!(matches!(
-            served,
+            empty_repository_session,
             GitDaemonSessionOutcome::EmptyRepository(_)
         ));
         assert_eq!(
-            served.request().repository_path().as_bytes(),
+            empty_repository_session
+                .request()
+                .repository_path()
+                .as_bytes(),
             repository_path
         );
         assert_eq!(
@@ -3737,10 +3743,10 @@ mod tests {
             .read_to_end(&mut response)
             .expect("rejected session reaches EOF");
 
-        let (served, shutdown) = server.join().expect("node server thread joins");
+        let (path_rejection, shutdown) = server.join().expect("node server thread joins");
         shutdown.expect("node drains and shuts down after rejecting the session");
         assert!(matches!(
-            served,
+            path_rejection,
             Err(NodeGitDaemonServeRefusal::RepositoryPathMismatch)
         ));
         assert!(response.is_empty(), "no repository state is advertised");
