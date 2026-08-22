@@ -234,3 +234,73 @@ fn a_settled_obligation_journals_its_transition_and_replays_to_it() {
 // Non-production fixture identity: this reserved tag deliberately has no registered digest width.
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
 const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
+
+#[test]
+fn a_journal_reserving_the_same_obligation_twice_is_refused_and_two_distinct_ones_are_not() {
+    // ReplayError::DuplicateReservation had no test. It guards the one thing a
+    // replayed journal cannot recover from on its own: an obligation opened
+    // twice. The second opening would silently reset the first's accumulated
+    // state, so a verifier reading durable evidence would reconstruct a
+    // lifecycle that never happened -- and every later event would replay
+    // against the wrong starting point.
+    //
+    // An opening record is `event: None`; that is what distinguishes it from a
+    // transition, and it is the branch the guard sits in.
+    let ledger = ledger();
+    let grant = ledger.grant(unit()).expect("a grant");
+    let reserved = ledger
+        .reserve::<PreparedTxnSlot>(lane_slot(), grant)
+        .expect("a reservation");
+    let opening = *ledger.journal().first().expect("one record");
+
+    // The same obligation opened a second time, at a later ordinal so the
+    // monotonicity check passes and this reaches the duplicate check rather
+    // than NonMonotonicOrdinal.
+    let reopened = LedgerRecord::new(
+        opening.region(),
+        opening.ordinal() + 1,
+        opening.obligation(),
+        opening.class(),
+        None,
+        ObligationState::Reserved,
+        RecordAmounts {
+            reserved: ResourceVector::ZERO,
+            charged: ResourceVector::ZERO,
+        },
+    );
+    match replay_journal(&[opening, reopened]).expect_err("a second opening refuses") {
+        ReplayError::DuplicateReservation(id) => {
+            assert_eq!(
+                id,
+                opening.obligation(),
+                "the refusal must name the obligation that was opened twice"
+            );
+        }
+        other => panic!("expected a duplicate reservation, got {other:?}"),
+    }
+
+    // The near-identical permitted case: the same shape with a DIFFERENT
+    // obligation replays cleanly. Without this the test above is satisfied by a
+    // guard that refuses every second opening record regardless of whose it is,
+    // which would make a two-obligation journal unreplayable.
+    let second_grant = ledger.grant(unit()).expect("a second grant");
+    let other = ledger
+        .reserve::<PreparedTxnSlot>(lane_slot(), second_grant)
+        .expect("a second reservation");
+    let other_opening = *ledger
+        .journal()
+        .iter()
+        .find(|record| record.obligation() != opening.obligation())
+        .expect("the second reservation opened its own record");
+
+    let states = replay_journal(&[opening, other_opening])
+        .expect("two distinct obligations opening once each is a valid trace");
+    assert_eq!(
+        states.len(),
+        2,
+        "both obligations must appear in the replay"
+    );
+
+    drop(reserved);
+    drop(other);
+}
