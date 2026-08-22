@@ -553,6 +553,10 @@ Publication is root-last:
 
 Recovery MUST NOT silently fall back to an older valid capsule when the newest acknowledged root is structurally present but fails authentication/closure. Older-state recovery is an explicit audited restore that advances a new authority generation.
 
+A capsule is evidence of what was bound at publication, and nothing more. It does **not** prove that its contents are readable **now**: verifying a capsule establishes that the body is intact and its identity holds, not that the codec, key material, storage backend, or toolchain required to restore from it are still available at the moment of reading. A capsule that passes every digest check can still be unrestorable, and only an executed restore drill says otherwise. Nor does a capsule prove that any **recovery point or recovery time objective was met**: possession of a body attests to a bound position in the decision log, never to the interval between that position and the failure, nor to the duration of the recovery that follows. RPO and RTO are measured properties of a drill, and a capsule is an input to that measurement rather than a substitute for it. A signature over a capsule carries the same limit as every other signature in this document — it is evidence of authorship, never of trustworthiness (§ADR-0003) — so a signed capsule is not thereby a trusted one.
+
+These are the three ways possession of a capsule is over-read, and they are stated here because the recovery chain built on this section consumes the capsule vocabulary and inherits the temptation.
+
 ## 24. RaptorQ and repair
 
 RaptorQ is an erasure-recovery mechanism for registered immutable byte objects. It is not a hash, signature, authorization system, ordering protocol, consensus algorithm, freshness oracle, or substitute for the authority head.
