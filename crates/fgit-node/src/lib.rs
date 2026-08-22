@@ -4098,9 +4098,12 @@ mod tests {
         client
             .read_to_end(&mut response)
             .expect("server completes authority-selected pack response");
-        let (served, shutdown) = server.join().expect("node server thread joins");
+        let (pack_session_result, shutdown) = server.join().expect("node server thread joins");
         shutdown.expect("node drains after authority-selected pack session");
-        assert!(matches!(served, Ok(GitDaemonSessionOutcome::Pack(_))));
+        assert!(matches!(
+            pack_session_result,
+            Ok(GitDaemonSessionOutcome::Pack(_))
+        ));
         assert!(
             response
                 .windows(b"PACK".len())
