@@ -284,3 +284,49 @@ fn the_same_stream_produces_the_same_wealth_every_time() {
     }
     assert!(expected > 0, "the fixture must leave the process alive");
 }
+
+#[test]
+fn the_largest_admissible_null_rate_and_alarm_level_are_accepted() {
+    // `degenerate_null_rates_and_alarm_levels_are_refused` covers the REFUSED
+    // side of both unit-interval guards thoroughly -- zero, the exact boundary
+    // at 1_000_000, and above it. What it does not cover is the permitted side
+    // AT the boundary: its only accepting case is `config()` at 500_000 ppm,
+    // which sits comfortably interior.
+    //
+    // That leaves one direction unpinned. The guards read
+    //
+    //     if null  == 0 || null  >= PARTS_PER_MILLION
+    //     if alpha == 0 || alpha >= PARTS_PER_MILLION
+    //
+    // and an over-tight variant -- `>= PARTS_PER_MILLION - 1`, or a `>` turned
+    // into `>=` one value early -- would refuse 999_999 while still passing
+    // every existing assertion, because nothing asks whether the largest
+    // admissible value is admitted. A refusal-only boundary test pins the wall
+    // but not where it stands.
+    let largest = 1_000_000_u32 - 1;
+
+    let mut null_at_edge = config();
+    null_at_edge.null_rate_parts_per_million = largest;
+    assert!(
+        EProcess::new(null_at_edge).is_ok(),
+        "p0 = {largest} ppm is strictly inside (0, 1) and must be admitted; the interval is \
+         open at 1_000_000, not at 999_999"
+    );
+
+    let mut alpha_at_edge = config();
+    alpha_at_edge.alarm_alpha_parts_per_million = largest;
+    assert!(
+        EProcess::new(alpha_at_edge).is_ok(),
+        "alpha = {largest} ppm is strictly inside (0, 1) and must be admitted"
+    );
+
+    // And the smallest admissible value on the other end, for the same reason:
+    // the guards refuse zero, so one is the floor and must be accepted.
+    let mut null_at_floor = config();
+    null_at_floor.null_rate_parts_per_million = 1;
+    assert!(
+        EProcess::new(null_at_floor).is_ok(),
+        "p0 = 1 ppm is the smallest admissible rate; refusing it would make the interval \
+         half-open at the wrong end"
+    );
+}
