@@ -34,8 +34,8 @@ use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
     AuthorityVersionToken, HeadInit, HeadKey, HeadRead, ImmutableKey, ImmutableRead, KeyError,
     OutcomeLookup, PublicationOutcome, PutOutcome, StoreInstanceId, initialize_repository_async,
-    publish_decisions_async, read_authority_head_body_async, read_decision_batch_body_async,
-    resolve_outcome_async,
+    outcome_index_root, publish_decisions_async, read_authority_head_body_async,
+    read_decision_batch_body_async, resolve_outcome_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
 use fgit_chronicle::{PublicationBasis, verify_pair};
@@ -2889,7 +2889,18 @@ impl OneNode {
                 }),
             };
         }
-        let genesis = genesis_head(repository_id, ref_root);
+        let genesis = match genesis_head(repository_id, ref_root) {
+            Ok(genesis) => genesis,
+            Err(initialization) => {
+                return match node.shutdown() {
+                    Ok(()) => Err(initialization),
+                    Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
+                        initialization: Box::new(initialization),
+                        cleanup: Box::new(cleanup),
+                    }),
+                };
+            }
+        };
         let initialization = match initialize_embedded_repository(
             &node.runtime,
             &node.authority,
@@ -3692,8 +3703,11 @@ fn default_git_daemon_repository_path(repository_id: RepositoryId) -> GitDaemonR
     GitDaemonRepositoryPath(text.into_bytes())
 }
 
-fn genesis_head(repository_id: RepositoryId, ref_root: Digest) -> RepositoryAuthorityHeadBody {
-    RepositoryAuthorityHeadBody {
+fn genesis_head(
+    repository_id: RepositoryId,
+    ref_root: Digest,
+) -> Result<RepositoryAuthorityHeadBody, NodeRefusal> {
+    Ok(RepositoryAuthorityHeadBody {
         repository_id,
         generation: HeadGeneration::FIRST,
         predecessor_head_id: None,
@@ -3703,14 +3717,14 @@ fn genesis_head(repository_id: RepositoryId, ref_root: Digest) -> RepositoryAuth
         latest_repository_sequence: None,
         ref_root,
         forge_position_root: genesis_root(repository_id, b"forge-position"),
-        outcome_index_root: genesis_root(repository_id, b"outcome-index"),
+        outcome_index_root: outcome_index_root(&[]).map_err(NodeRefusal::from)?,
         retention_root: genesis_root(repository_id, b"retention"),
         outbox_root: genesis_root(repository_id, b"outbox"),
         configuration_root: genesis_root(repository_id, b"configuration"),
         policy_epoch: PolicyEpoch::FIRST,
         format_registry_epoch: RegistryEpoch::FIRST,
         last_checkpoint_id: None,
-    }
+    })
 }
 
 fn genesis_root(repository_id: RepositoryId, label: &[u8]) -> Digest {
@@ -3842,6 +3856,22 @@ mod tests {
             TenantId::from_bytes([0x11; 16]),
             RepositoryId::from_bytes([0x22; 16]),
         )
+    }
+
+    #[test]
+    fn genesis_head_commits_to_the_canonical_empty_outcome_index() {
+        let repository_id = RepositoryId::from_bytes([0x22; 16]);
+        let ref_root = genesis_root(repository_id, b"fixed-genesis-refs");
+
+        let head = genesis_head(repository_id, ref_root)
+            .expect("the canonical empty outcome index derives without input entries");
+
+        assert_eq!(
+            head.outcome_index_root,
+            fgit_authority::outcome_index_root(&[])
+                .expect("the authority empty-outcome derivation is defined"),
+            "the live genesis head uses the authority-owned empty index commitment"
+        );
     }
 
     fn distinct_tx_id() -> TxId {
@@ -4915,7 +4945,8 @@ mod tests {
                     ),
             )
             .expect("a staged closure alone remains non-authoritative");
-        let genesis = genesis_head(node.repository_id(), ref_root);
+        let genesis = genesis_head(node.repository_id(), ref_root)
+            .expect("schema-valid test genesis derives the empty outcome root");
         initialize_embedded_repository(
             node.runtime(),
             &node.authority,
@@ -5047,7 +5078,8 @@ mod tests {
         let config = test_config(scratch.path().to_path_buf());
         let node = OneNode::open_components(config).expect("components open");
         let missing_root = genesis_root(node.repository_id(), b"unstaged-canonical-refs");
-        let head = genesis_head(node.repository_id(), missing_root);
+        let head = genesis_head(node.repository_id(), missing_root)
+            .expect("schema-valid test genesis derives the empty outcome root");
         let initialization_cx = node.authority_context();
         let initialized = initialize_embedded_repository(
             node.runtime(),
