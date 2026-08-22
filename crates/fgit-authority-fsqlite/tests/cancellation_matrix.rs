@@ -82,7 +82,7 @@
 //!   is caught by the *caller await*, not inside the engine, so cancelling a
 //!   dispatched operation simply IS abandoning its reply. The with-cancel
 //!   variant is the sweep below; the without-cancel variant is
-//!   `fault_conformance.rs`'''s `LoseResponse`, which passes. Their conjunction
+//!   `fault_conformance.rs`'s `LoseResponse`, which passes. Their conjunction
 //!   produces no observable the store can tell apart from either one.
 //!
 //!   **This list used to include `commit-ambiguous`, and that was wrong.** It
@@ -93,9 +93,13 @@
 //!   different lane cell. The verdict on this paragraph was right and the
 //!   reason inside it was wrong; it was caught only because the clause had been
 //!   labelled an unverified assertion rather than left to look measured.
-//! - **Not that cancellation is distinguishable from failure.** See
-//!   `cancellation_is_not_separately_typed_at_the_public_surface`, which pins
-//!   the current behaviour and names the gap rather than blessing it.
+//!
+//! Cancellation **is** now distinguishable from a non-retryable engine failure,
+//! and no longer asserts non-commit. That was `frankengit-w1ik`, found by this
+//! file and fixed in the store by its owner. This bullet used to say the
+//! opposite and pointed at a test that has since been renamed; it survived a
+//! revert that restored it, which is how a non-claim outlives the thing it
+//! described. See `cancellation_is_separately_typed_and_never_asserts_non_commit`.
 //!
 //! # A trap for the next author of a cancellation test
 //!
@@ -792,3 +796,88 @@ fn no_cancellation_position_makes_a_claim_the_database_contradicts() {
 // probe shows a cancel is caught by the caller's await, which IS abandoning the
 // reply, so the conjunction produces no observable the store can distinguish
 // from either half alone. Not written, and not claimed.
+
+// ------------------------------------- the phase model, against the real store
+
+#[test]
+fn the_published_phase_model_is_stricter_than_the_store_it_describes() {
+    // `classify_cancellation` is a **published** function -- re-exported from
+    // `lib.rs` -- that tells a caller what a cancellation at a given phase
+    // licenses them to conclude. It says `BeforeDispatch` and `Queued` are
+    // `NoEffect`: provably effect-free, so the caller may conclude non-commit
+    // and re-drive without reading first.
+    //
+    // The store does not answer that way, and cannot. Measured in
+    // `cancellation_error_probe.rs`: a pre-dispatch and an after-dispatch
+    // cancel both return `FrankenError::Interrupt`, because the cancel is
+    // caught by the caller's await rather than inside the engine. Having no way
+    // to tell the phases apart, the store answers `Ambiguous(Cancelled)` for
+    // every cancellation -- including the pre-dispatch one the model calls
+    // provable.
+    //
+    // # Which side is wrong, and why this is not filed as a defect
+    //
+    // Neither, exactly. The model is right *about the phase*: nothing has left
+    // the process at `BeforeDispatch`, so non-commit really is provable there.
+    // The store is right *about what it can observe*, and it errs safe --
+    // declining to claim non-commit costs the caller one exact-key read, while
+    // claiming it wrongly is the §5.2 violation that was `frankengit-w1ik`.
+    //
+    // What is wrong is that **nothing connected them until now**.
+    // `classify_cancellation` has exactly one caller in the repository: the
+    // test that tests it. No production path constructs a `CancellationPhase`,
+    // so the model has never been held against the behaviour it describes, and
+    // `lifecycle.rs`'s
+    // `cancellation_before_the_effect_proves_non_commit_and_at_the_commit_does_not`
+    // passes while the adapter proves no such thing.
+    //
+    // That is the class SnowyFortress named while generalising
+    // `frankengit-nv0a`: a type advertising a guarantee no driven test holds
+    // the implementation to. This test is the driven counterpart. It asserts
+    // both sides so it fails if either moves -- if the store learns to
+    // distinguish the phases, or if the model is relaxed to match the store.
+    let f = Fixture::new();
+
+    // The model's claim, read from the published function.
+    assert_eq!(
+        fgit_authority_fsqlite::classify_cancellation(
+            fgit_authority_fsqlite::CancellationPhase::BeforeDispatch
+        ),
+        fgit_authority_fsqlite::CancellationOutcome::NoEffect,
+        "the published model is expected to call a pre-dispatch cancellation provably effect-free"
+    );
+
+    // What the store actually answers for that same phase. `f.cancelled` is
+    // cancelled before the call, so the preflight refuses before dispatch --
+    // the model's `BeforeDispatch` case exactly.
+    let Err(error) = f.node.block_on(f.store.put_if_absent(
+        &f.cancelled,
+        &body_key("phase-model"),
+        b"x",
+    )) else {
+        panic!("a context cancelled before dispatch must refuse");
+    };
+
+    assert!(
+        matches!(
+            error.into_failure(),
+            AuthorityFailure::Ambiguous(AmbiguityReason::Cancelled)
+        ),
+        "the store answers Ambiguous for the phase its own published model calls NoEffect. If \
+         this assertion fails the divergence has been resolved -- delete this test and say which \
+         way it went"
+    );
+
+    // And the effect really is absent, which is what makes the model's claim
+    // true-about-the-phase even though the store will not assert it. Without
+    // this the test would read as though the model were simply wrong.
+    let after = f
+        .node
+        .block_on(f.store.read_immutable(&f.spare, &body_key("phase-model")))
+        .expect("a never-cancelled context still reads the store");
+    assert!(
+        matches!(after, ImmutableRead::Absent),
+        "nothing was written, so the model is right about the phase and the store is merely \
+         unable to see it; found {after:?}"
+    );
+}
