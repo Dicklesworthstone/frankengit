@@ -26,7 +26,9 @@ fn decode_hex(value: &str, field: &str, line_number: usize) -> Vec<u8> {
 
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .enumerate()
         .map(|(offset, pair)| {
             let text = std::str::from_utf8(pair)
