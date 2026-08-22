@@ -220,6 +220,56 @@ would make the boundary cases exact and would cost exactly that property, so it 
 above. Widening the representable region past `2^-96` needs a mantissa-plus-exponent representation
 or arbitrary-precision rationals, and neither is introduced here.
 
+### NEG-026 — a float-literal ban is not enforceable in first-party source (FG-f5i1 follow-on)
+
+**Hypothesis.** The no-floating-point rule can be enforced over first-party
+production source as a float-*literal* ban, catching floats that enter without
+their type ever being named.
+
+**Why it looked right.** `frankengit-f5i1` shipped a type-and-arithmetic check
+and deferred the literal half on the grounds that section references (`33.4`,
+`16.1`, `5.2`) are lexically identical to float literals in a codebase that
+cites clauses constantly. That reason turned out to be weaker than assumed:
+stripping comments **and string literals**, and excluding tuple-index chains
+(`x.0.1` reads as `0.1`), the scan produced **zero false positives across the
+whole production tree**.
+
+**What killed it.** The same scan found two real sites:
+
+```
+crates/fgit-raptorq/src/lib.rs:680   repair_overhead: 1.0,
+crates/fgit-raptorq/src/lib.rs:692   repair_overhead: 1.0,
+```
+
+`EncodingConfig` and `DecodingConfig` are **asupersync's** types, and
+`repair_overhead` is float-typed in the admitted runtime's own API. First-party
+code cannot express that configuration without writing a float. A hard-error
+literal ban would therefore red the constitution lane workspace-wide on a
+construct with no compliant alternative, escapable only through an `#[allow]`
+that §16.3 forbids or an upstream API change nobody here controls. That is an
+obligation nobody can discharge — the same reason NEG-024 declines registry
+coverage.
+
+**What this does not say.** The risk at these two sites is low: `1.0` is exactly
+representable, both are compile-time `const` configuration values, and neither
+is accumulation. Nothing here makes canonical bytes depend on rounding mode,
+NaN payload, signed zero, or host width, which is what §3.1 and NPC §33.1
+protect. The type-and-arithmetic check shipped in `frankengit-f5i1` remains
+correct and is not weakened by this row.
+
+**A claim this supersedes.** The sentence "this workspace has zero floating
+point in production source" circulated between two agents and is false. Both
+measurements used type-*name* greps (`f64`/`f32`), and the type name never
+appears at either site because it is inferred from the struct field. The
+accurate statement is: **no first-party float types and no float arithmetic;
+two exact float constants at an admitted runtime's API boundary.** Recorded here
+because the failure was methodological — a second agent verifying with the same
+method as the first inherits the blind spot rather than removing it.
+
+**Revisit condition.** Asupersync exposes an integer or fixed-point
+configuration surface for `repair_overhead`, at which point the literal ban
+becomes dischargeable and should be reconsidered.
+
 ## 5. Integration with agents
 
 Context Packets for architecture/performance work include relevant negative-evidence rows. An agent proposing a known-rejected dependency or mechanism must cite and rebut the row. The system does not block creative reconsideration; it prevents amnesia.
