@@ -573,6 +573,7 @@ fn calm_coordination_classes(root: &Path, report: &mut Report) -> BTreeSet<Strin
 
 fn check_registries(root: &Path, report: &mut Report) {
     let schemas = registry_schemas();
+    check_status_vocabulary_pin(root, report);
     let calm_classes = calm_coordination_classes(root, report);
     let registry_dir = root.join("registries");
     for (file_name, expected_header) in schemas {
@@ -717,11 +718,85 @@ fn check_registries(root: &Path, report: &mut Report) {
     claims::check(root, report);
 }
 
+/// The one in-code source of the registry status vocabulary.
+///
+/// `docs/NEGATIVE_EVIDENCE_LEDGER.md` §6.2 publishes the same list in a
+/// machine-read block, and [`check_status_vocabulary_pin`] asserts the two are
+/// equal in both directions. Adding a value here without adding it there (or
+/// the reverse) is a verification failure, which is the drift this pin exists
+/// to make impossible.
+const KNOWN_STATUSES: &[&str] = &[
+    "active",
+    "specified",
+    "implemented",
+    "verified",
+    "experimental",
+    "rejected",
+];
+
 fn is_known_status(value: &str) -> bool {
-    matches!(
-        value,
-        "active" | "specified" | "implemented" | "verified" | "experimental" | "rejected"
-    )
+    KNOWN_STATUSES.contains(&value)
+}
+
+/// Parses the status vocabulary the ledger publishes for machine reading.
+///
+/// Returns `None` when the block is absent or unparseable, so the caller can
+/// distinguish "the document disagrees" from "the document lost its block" --
+/// collapsing those would let a deleted block read as an empty set and pass by
+/// vacuity.
+fn ledger_status_vocabulary(text: &str) -> Option<BTreeSet<String>> {
+    const BEGIN: &str = "<!-- registry-status-vocabulary:begin -->";
+    const END: &str = "<!-- registry-status-vocabulary:end -->";
+    let start = text.find(BEGIN)? + BEGIN.len();
+    let end = text[start..].find(END)? + start;
+    let mut values = BTreeSet::new();
+    for line in text[start..end].lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("- ") else {
+            continue;
+        };
+        let value = rest.trim().trim_matches('`');
+        if !value.is_empty() {
+            values.insert(value.to_owned());
+        }
+    }
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+/// The pin: the ledger's published vocabulary and the checker's own set must be
+/// the same set, in both directions.
+fn check_status_vocabulary_pin(root: &Path, report: &mut Report) {
+    let path = root.join("docs/NEGATIVE_EVIDENCE_LEDGER.md");
+    let display = relative(root, &path);
+    let text = match fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(error) => {
+            report.error(format!("cannot read {display}: {error}"));
+            return;
+        }
+    };
+    let Some(documented) = ledger_status_vocabulary(&text) else {
+        report.error(format!(
+            "{display} §6.2 must publish the registry status vocabulary between \
+             the `registry-status-vocabulary` markers; the block is missing or empty"
+        ));
+        return;
+    };
+    let enforced: BTreeSet<String> = KNOWN_STATUSES.iter().map(|s| (*s).to_owned()).collect();
+    for value in documented.difference(&enforced) {
+        report.error(format!(
+            "{display} §6.2 documents status `{value}`, which `is_known_status` does not admit"
+        ));
+    }
+    for value in enforced.difference(&documented) {
+        report.error(format!(
+            "`is_known_status` admits status `{value}`, which {display} §6.2 does not document"
+        ));
+    }
 }
 
 fn check_markdown(root: &Path, report: &mut Report) {
@@ -5538,6 +5613,89 @@ mod tests {
             floats.is_empty(),
             "first-party production source must carry no floating point: {floats:?}"
         );
+    }
+
+    /// Builds a ledger fragment carrying the machine-read vocabulary block.
+    fn vocabulary_block(values: &[&str]) -> String {
+        let mut out = String::from("<!-- registry-status-vocabulary:begin -->\n");
+        for value in values {
+            out.push_str("- `");
+            out.push_str(value);
+            out.push_str("`\n");
+        }
+        out.push_str("<!-- registry-status-vocabulary:end -->\n");
+        out
+    }
+
+    #[test]
+    fn the_documented_vocabulary_parses_to_exactly_the_listed_values() {
+        let parsed = ledger_status_vocabulary(&vocabulary_block(&["active", "rejected"]))
+            .expect("a well-formed block parses");
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed.contains("active") && parsed.contains("rejected"));
+    }
+
+    #[test]
+    fn a_missing_or_empty_block_is_refused_rather_than_read_as_an_empty_set() {
+        // The vacuity guard. If a deleted block parsed as an empty set, the
+        // difference comparison would find no disagreement and the pin would
+        // pass while enforcing nothing.
+        assert!(ledger_status_vocabulary("no markers here at all").is_none());
+        assert!(ledger_status_vocabulary(&vocabulary_block(&[])).is_none());
+    }
+
+    #[test]
+    fn the_pin_detects_drift_in_both_directions() {
+        // Presence case: the comparison must actually fire. Direction one --
+        // the document naming a value the checker does not admit.
+        let doc_only =
+            ledger_status_vocabulary(&vocabulary_block(&["active", "superseded"])).expect("parses");
+        let enforced: BTreeSet<String> = KNOWN_STATUSES.iter().map(|s| (*s).to_owned()).collect();
+        assert!(
+            doc_only.difference(&enforced).any(|v| v == "superseded"),
+            "a documented value the checker rejects must be detected"
+        );
+
+        // Direction two -- the checker admitting a value the document omits.
+        let short = ledger_status_vocabulary(&vocabulary_block(&["active"])).expect("parses");
+        assert!(
+            enforced.difference(&short).count() > 0,
+            "an enforced value the document omits must be detected"
+        );
+    }
+
+    #[test]
+    fn the_shipped_ledger_and_the_checker_agree_and_the_set_is_non_empty() {
+        // The live assertion, plus non-vacuity: a vocabulary that had shrunk to
+        // nothing would satisfy set equality trivially.
+        let root = calm_repo_root();
+        let mut report = Report::new();
+        check_status_vocabulary_pin(&root, &mut report);
+        assert!(
+            report.errors.is_empty(),
+            "ledger §6.2 and is_known_status must agree: {:?}",
+            report.errors
+        );
+        assert_eq!(
+            KNOWN_STATUSES.len(),
+            6,
+            "the vocabulary is six values; changing it requires changing the ledger in the same commit"
+        );
+    }
+
+    #[test]
+    fn is_known_status_still_admits_exactly_the_documented_set() {
+        // The refactor from `matches!` to a slice must not have changed
+        // behaviour: every listed value passes, and a near-miss does not.
+        for value in KNOWN_STATUSES {
+            assert!(is_known_status(value), "{value} must be admitted");
+        }
+        for planted in ["superseded", "Active", "act", "", "retired"] {
+            assert!(
+                !is_known_status(planted),
+                "`{planted}` must not be admitted"
+            );
+        }
     }
 
     fn calm_repo_root() -> PathBuf {

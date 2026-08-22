@@ -277,3 +277,53 @@ Context Packets for architecture/performance work include relevant negative-evid
 ## 6. Retention
 
 Negative evidence is append-only. A row may be superseded by a later result, but it is not deleted or rewritten. Supersession links preserve both artifacts and explain why the conclusion changed.
+
+### 6.1 Supersession is recorded as a link, not as a status
+
+A superseded row **keeps its existing status**. Supersession is recorded in the
+row's ledger entry as a link naming three things:
+
+1. the **superseding commit SHA**;
+2. the **bead ID** that discharged the clause;
+3. the **reason** — specifically, *which* revisit condition was met.
+
+There is deliberately no `superseded` status value. The status column's
+vocabulary is shared across every registry that has one (§6.2), and a value
+meaningful to exactly one of them would be dead weight in the rest. The stronger
+reason is semantic: a status flip reads as *the warning is retired*, and that is
+usually false. A row typically names several revisit routes, and discharging one
+of them does not make the caution stop applying.
+
+**Worked example — NEG-025, superseded at `091032e`.** Its entry carries
+*"Superseded 2026-08-22 by `529b8a7` (`frankengit-s76z`), on the third route"*,
+and its status remains `active`. That is correct rather than an oversight: the
+row warns against evaluating the Beta recurrence upward from `T(0)` in fixed
+point, and that walk still silently returns `0 ppm`. Someone will still reach
+for it. One of three named revisit routes was taken; the warning is untouched.
+
+A reader who needs to know whether a caution still binds reads the entry, not
+the status column.
+
+### 6.2 Status vocabulary
+
+The status column of every registry admits exactly these values, and no others:
+
+<!-- registry-status-vocabulary:begin -->
+- `active`
+- `specified`
+- `implemented`
+- `verified`
+- `experimental`
+- `rejected`
+<!-- registry-status-vocabulary:end -->
+
+This block is **machine-read**. `tools/registry-check` parses it and asserts it
+equals the checker's own `is_known_status` set exactly, in both directions, so
+the document and the code cannot drift apart. Changing one without the other is
+a verification failure rather than a silent divergence.
+
+That pin exists because the drift already happened: §6 promised supersession
+while the checker had no way to express it, and nothing compared the two. The
+vocabulary lived in exactly one place — the code — with prose beside it that
+nobody checked against it. Recorded on bead
+`frankengit-negative-evidence-supersession-status-8373`.
