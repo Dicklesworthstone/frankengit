@@ -131,6 +131,17 @@ fge_run sqlite-checkpoint-under-load \
   cargo test --locked -p fgit-authority-fsqlite --test checkpoint_under_load || true
 sq_checkpoint_exit=$FGE_LAST_EXIT
 
+# The cancellation cells that ARE drivable. The reason this cell carried as
+# unsupported ("no drain/finalize surface a test can drive") was derived by
+# scanning fgit-authority-fsqlite/src, which indeed never polls cancellation.
+# The poll is one layer down: fsqlite's preflight_async_call runs on all
+# thirteen async entry points and refuses a cancelled context before dispatch.
+# Fifth reason on this bead to fall to a measurement after being derived from
+# reading a single layer.
+fge_run sqlite-cancellation-matrix \
+  cargo test --locked -p fgit-authority-fsqlite --test cancellation_matrix || true
+sq_cancellation_exit=$FGE_LAST_EXIT
+
 fge_phase assert
 
 fge_assert_exit FG-005B-E2E-010 0 "$sq_campaign_exit" \
@@ -145,6 +156,8 @@ fge_assert_exit FG-005C-E2E-001 0 "$sq_checkpoint_exit" \
   'the checkpoint-under-load kill/restart boundary is exercised, not documented away'
 fge_assert_exit FG-005B-E2E-019 0 "$sq_envelope_exit" \
   'the spec-derived concurrency envelope agrees with the implementation'
+fge_assert_exit FG-005B-E2E-022 0 "$sq_cancellation_exit" \
+  'cancellation before dispatch refuses AND leaves no effect, and is never retried'
 
 fge_assert_eq FG-005B-E2E-013 '' "$sq_missing" \
   'every mechanism the campaign depends on is still present in it'
@@ -166,7 +179,7 @@ fi
 #
 # FG-005b's acceptance says the report publishes the support matrix and that
 # any unproved cell is "unsupported/non-pass and is admission-capped in
-# production". These three cells are unproved, so they are recorded as TYPED
+# production". These two cells are unproved, so they are recorded as TYPED
 # UNSUPPORTED assertions rather than as a prose note.
 #
 # That makes this lane's terminal status non-pass, and it should: the harness
@@ -176,15 +189,17 @@ fi
 # assertion it ran, and misleading about the profile as a whole. A support
 # matrix with holes in it must not look like a support matrix without them.
 #
-# Each of these converts to a pass the moment the named API exists. None is a
-# defect in the implementation; all three are absent capability in the surface
-# available to a verifier.
+# Each of these converts to a pass the moment the named API exists. Neither is
+# a defect in the implementation; both are absent capability in the surface
+# available to a verifier. A third cell used to sit here and no longer does:
+# cancellation was assumed undrivable and turned out to be drivable, which is
+# why these reasons are re-checked at every pass rather than inherited.
 
 fge_unsupported FG-005B-E2E-020 \
   'AF-01..AF-08 injected faults: run_fault_conformance is bound S: FaultableAuthorityStore and MemoryAuthorityStore is the only impl in the workspace, so ambiguity, duplication and lost-request-vs-lost-response are unprovable for this backend by anyone'
 
 fge_unsupported FG-005B-E2E-021 \
-  'cancellation mid-operation: AsyncAuthorityStore now exists so a future CAN be held in flight, but AGENTS.md 3.2 says dropping a future is not a complete cancellation protocol (request -> drain -> finalize), and no drain/finalize surface is exposed that a test can drive; the phase semantics are modelled in fgit-authority-fsqlite/tests/lifecycle.rs but nothing drives a real cancel against a real in-flight operation'
+  'cancellation of an ALREADY-EXECUTING statement, and the commit-ambiguous and reply-lost cancellation cells. Cancellation before dispatch and between retry attempts are now exercised by FG-005B-E2E-022; what remains needs a second thread racing a running query against the VDBE page-lock poll, and the commit-ambiguous cells need the same fault injection FG-005B-E2E-020 lacks. Narrowed rather than deleted: the drivable subset landing does not prove the rest'
 
 # The structural PRECONDITION for that cell, which IS checkable today.
 #
