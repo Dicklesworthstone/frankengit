@@ -619,6 +619,7 @@ impl DurableAdmissionMaterializer {
             .body()
             .map_err(|_| RefusalCode::AuthorityReceiptInvalid)?;
         if authenticated_body != *basis.body() {
+            self.discard_materialized_cache()?;
             return Err(RefusalCode::AuthorityReceiptStale);
         }
         let cache_binding = CacheBinding::new(
@@ -648,21 +649,36 @@ impl DurableAdmissionMaterializer {
             *guard = None;
             return Err(RefusalCode::AuthorityReceiptStale);
         }
-        let materialized = guard.as_ref().ok_or(RefusalCode::EvidenceMissing)?;
+        let refs = guard
+            .as_ref()
+            .ok_or(RefusalCode::EvidenceMissing)?
+            .ref_state
+            .refs()
+            .clone();
+        drop(guard);
         Ok(AdmissionSnapshot {
-            refs: materialized.ref_state.refs().clone(),
+            refs,
             forge_positions: BTreeMap::new(),
             retention: BTreeSet::new(),
             outbox: BTreeMap::new(),
         })
     }
+
+    fn discard_materialized_cache(&self) -> Result<(), RefusalCode> {
+        let mut guard = self
+            .materialized
+            .write()
+            .map_err(|_| RefusalCode::InternalInvariantBreach)?;
+        *guard = None;
+        Ok(())
+    }
 }
 
 impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
     fn resolve_ref_state(&self, root: Digest) -> Result<CanonicalRefState, RefusalCode> {
-        let guard = self
+        let mut guard = self
             .materialized
-            .read()
+            .write()
             .map_err(|_| RefusalCode::InternalInvariantBreach)?;
         let Some(materialized) = guard.as_ref() else {
             return Err(RefusalCode::EvidenceMissing);
@@ -673,12 +689,16 @@ impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
             materialized.basis.generation(),
             self.cache_scope,
         );
-        if materialized.basis.body().ref_root != root
-            || CachePermit::require_matching(Some(&materialized.cache_permit), binding).is_err()
-        {
+        if CachePermit::require_matching(Some(&materialized.cache_permit), binding).is_err() {
+            *guard = None;
+            return Err(RefusalCode::EvidenceMissing);
+        }
+        if materialized.basis.body().ref_root != root {
             return Err(RefusalCode::AuthorityReceiptStale);
         }
-        Ok(materialized.ref_state.clone())
+        let ref_state = materialized.ref_state.clone();
+        drop(guard);
+        Ok(ref_state)
     }
 
     fn stage_ref_state(&self, _root: Digest, _state: CanonicalRefState) -> Result<(), RefusalCode> {
@@ -1934,7 +1954,7 @@ impl OneNode {
         limits: &WireLimits,
     ) -> Result<AdmissionUploadPackRepository, NodeAdmissionViewRefusal>
     where
-        Projection: AdmissionProjection + ?Sized,
+        Projection: AdmissionProjection + Sync + ?Sized,
     {
         let authenticated = self
             .authenticate_authority_head_in(request)
@@ -2953,8 +2973,14 @@ mod tests {
         let config = test_config(scratch.path().to_path_buf());
         let (node, _) = OneNode::init(config).expect("node initializes canonical refs");
         let request = node.request_context();
+        let limits = WireLimits::default();
 
         require_send(node.materialize_admission_in(&request));
+        require_send(node.admission_upload_pack_repository_in(
+            &request,
+            node.admission_projection(),
+            &limits,
+        ));
         node.shutdown().expect("node closes cleanly");
     }
 
