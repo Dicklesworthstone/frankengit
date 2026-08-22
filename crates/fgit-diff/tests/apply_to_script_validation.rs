@@ -107,3 +107,107 @@ fn the_fixture_script_is_not_a_single_whole_file_replacement() {
         result.edits,
     );
 }
+
+// ---------------------------------------------------------------------------
+// frankengit-diff-contiguity-disjunct-tv02: the OTHER half of the `:193` guard.
+//
+// `:193` is a disjunction, and the tests above reach only one side of it:
+//
+//     old_span.byte_start != cursor  ||  old_span.byte_end > old.len()
+//     \___ contiguity ____________/      \___ bounds ________________/
+//
+// Every probe above varies the INPUT against a script `diff` produced, so its
+// spans are always contiguous by construction and only the bounds half can
+// fire. Reaching contiguity needs the opposite: a fixed input and a script
+// whose spans are hand-built to disagree with it.
+//
+// This is not a redundant second check. With contiguity removed, a gapped
+// script does not panic and does not refuse — it returns Ok with bytes silently
+// missing, which is the §4 shape "a decoder result accepted without original
+// commitments". The tail guard at `:205` cannot cover for it, and the fixtures
+// below are chosen so that it demonstrably does not: in both, the cursor
+// finishes at exactly `old.len()`, so `cursor != old.len()` is false and the
+// only thing that can refuse is the disjunct under test.
+//
+// Measured by ChartreuseHorizon (cc_4) in a detached probe crate: deleting the
+// contiguity disjunct is killed by NOTHING — all 42 tests in the crate stay
+// green. The axis was disclosed as unmeasured in 5q0i's filing; the run is
+// theirs.
+
+use fgit_diff::{DiffResult, Edit, Span};
+
+/// A six-byte input, small enough that each span below can be read at a glance.
+const SPANNED: &[u8] = b"abcdef";
+
+/// An `Equal` edit over `SPANNED`, with byte and unit offsets aligned.
+const fn equal(byte_start: usize, byte_end: usize) -> Edit {
+    let span = Span {
+        byte_start,
+        byte_end,
+        unit_start: byte_start,
+        unit_end: byte_end,
+    };
+    Edit::Equal {
+        old: span,
+        new: span,
+    }
+}
+
+/// A hand-built script: real profile/granularity/algorithm, chosen edits.
+///
+/// The non-edit fields come from a genuine `diff` result rather than being
+/// guessed, so these scripts differ from a real one in exactly one respect —
+/// the spans.
+fn with_edits(edits: Vec<Edit>) -> DiffResult {
+    DiffResult { edits, ..script() }
+}
+
+/// The permitted twin for both refusals below, over the same input and the same
+/// hand-built shape.
+///
+/// Without it, a guard that refused every hand-built script — or one made
+/// over-strict — would satisfy the two refusals and still be wrong.
+#[test]
+fn a_hand_built_contiguous_script_still_applies() {
+    let applied = with_edits(vec![equal(0, 2), equal(2, 6)])
+        .apply_to(SPANNED)
+        .expect("spans that tile the input exactly must apply");
+
+    assert_eq!(
+        applied, SPANNED,
+        "two contiguous Equal spans reproduce the input unchanged",
+    );
+}
+
+/// A script that SKIPS a region of the input is refused.
+///
+/// `old[2..4]` is covered by no edit. Every span is still within bounds, so the
+/// bounds disjunct cannot fire, and the cursor still ends at `old.len()`, so the
+/// tail guard cannot fire either — contiguity is the only thing standing here.
+///
+/// Without it the result is `Ok(b"abef")`: the skipped bytes are simply gone
+/// from an output the caller has no reason to distrust.
+#[test]
+fn a_script_that_leaves_a_gap_in_the_input_is_refused() {
+    assert_eq!(
+        with_edits(vec![equal(0, 2), equal(4, 6)]).apply_to(SPANNED),
+        Err(fgit_diff::DiffError::MalformedScript),
+        "an unaccounted region must refuse, not silently vanish from the output",
+    );
+}
+
+/// A script whose edits OVERLAP is refused, for the same reason and with the
+/// same two escape routes closed.
+///
+/// The second span restarts before the first ended. In bounds, and the cursor
+/// again finishes at `old.len()`. Without contiguity the result is
+/// `Ok(b"abbcdef")` — one byte emitted twice, and an output longer than the
+/// input it claims to reconstruct.
+#[test]
+fn a_script_whose_edits_overlap_is_refused() {
+    assert_eq!(
+        with_edits(vec![equal(0, 2), equal(1, 6)]).apply_to(SPANNED),
+        Err(fgit_diff::DiffError::MalformedScript),
+        "a re-read region must refuse, not duplicate bytes into the output",
+    );
+}
