@@ -93,8 +93,8 @@
 //! next to it, or it cannot tell "refused correctly" from "broken".
 
 use fgit_authority::{
-    AuthorityLimits, HeadGeneration, HeadInit, HeadKey, ImmutableKey, ImmutableRead, PutOutcome,
-    StoreInstanceId,
+    AmbiguityReason, AuthorityFailure, AuthorityLimits, HeadGeneration, HeadInit, HeadKey,
+    ImmutableKey, ImmutableRead, PutOutcome, StoreInstanceId,
 };
 use fgit_authority_fsqlite::{
     BackoffPlan, EngineError, FsqliteAuthorityStore, RetryBudget, RetryOutcome, TransientClass,
@@ -413,40 +413,49 @@ fn cancellation_between_attempts_stops_the_loop_within_one_backoff() {
     }
 }
 
-// ------------------------------------------------------------ the gap, recorded
+// -------------------------------------------------------- the gap, now closed
 
 #[test]
-fn cancellation_is_not_separately_typed_at_the_public_surface() {
-    // A characterization test, and deliberately not an approving one.
+fn cancellation_is_separately_typed_and_never_asserts_non_commit() {
+    // This was a characterization test pinning a defect, and it said of its own
+    // assertion: "if this assertion fails because a distinct cancellation class
+    // was added, that is an improvement -- update this test". It failed for
+    // exactly that reason. `frankengit-w1ik`.
     //
-    // `classify_franken_error` defaults every unnamed engine error to
-    // `Permanent`, which is the right default and the reason cancellation is
-    // never retried. The cost is that `FrankenError::Interrupt` arrives at the
-    // caller as `EngineError::Engine(Permanent)` -- the same value a corrupt
-    // page produces.
+    // What it used to pin: `FrankenError::Interrupt` fell through
+    // `classify_franken_error`'s default to `Permanent` and reached the caller
+    // as `Refused(Unavailable)` -- the same value a corrupt page produces. Two
+    // separate faults. A caller that cancelled its own work may re-drive and
+    // one holding a corrupt database must not, and they could not tell which
+    // they held; and `Refused` asserts in this vocabulary that nothing was
+    // applied, which §5.2 forbids for cancellation.
     //
-    // For the retry law that is correct. For §3.2's request -> drain -> finalize
-    // it is not sufficient: a caller that cancelled its own work and a caller
-    // whose database is corrupt must not behave identically, because the first
-    // may re-drive the operation and the second must not. Nothing here can fix
-    // that from a test crate -- the vocabulary belongs to the store -- so this
-    // pins the present behaviour and states the limitation where the next
-    // reader will meet it.
+    // Both halves are asserted below, because the second is the constitutional
+    // one and would still be broken if only the class had been split.
     let f = Fixture::new();
 
     let Err(error) = f.node.block_on(
         f.store
             .put_if_absent(&f.cancelled, &body_key("shape"), b"x"),
     ) else {
-        panic!("a cancelled context must refuse");
+        panic!("a cancelled context must not report success");
     };
 
     assert_eq!(
         error.transient_class(),
-        TransientClass::Permanent,
-        "cancellation currently collapses into the permanent class; if this assertion fails \
-         because a distinct cancellation class was added, that is an improvement -- update this \
-         test and delete the limitation note above it"
+        TransientClass::Cancelled,
+        "cancellation must carry its own class; collapsing it into Permanent is what made it \
+         indistinguishable from a corrupt page"
+    );
+
+    assert!(
+        matches!(
+            error.into_failure(),
+            AuthorityFailure::Ambiguous(AmbiguityReason::Cancelled)
+        ),
+        "a cancelled operation must reach the caller as AMBIGUOUS, never as a refusal: §5.2 says \
+         client cancellation never proves non-commit, and a late cancel really can land after the \
+         commit -- see no_cancellation_position_leaves_a_mixture"
     );
 }
 
