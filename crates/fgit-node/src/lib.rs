@@ -17,10 +17,10 @@ use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 use std::io::{self, Read, Write};
 use std::mem::size_of;
-use std::net::{Shutdown, TcpListener};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionResult,
@@ -1837,6 +1837,127 @@ pub struct GitDaemonRequest {
     repository_path: GitDaemonRepositoryPath,
 }
 
+/// A finite wall-clock budget for one accepted git-daemon session.
+///
+/// The value is an absolute session budget, not a per-read idle interval: a
+/// peer that drips one byte before each socket timeout still reaches the same
+/// deadline.  It is part of the node configuration so a deployment chooses
+/// its compatibility/resource profile explicitly rather than inheriting an
+/// unbounded socket default.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GitDaemonSessionTimeout(Duration);
+
+impl GitDaemonSessionTimeout {
+    /// Conservative bounded profile for the embedded one-session daemon.
+    pub const DEFAULT: Self = Self(Duration::from_secs(30));
+
+    /// Constructs a non-zero session budget.
+    pub const fn try_new(timeout: Duration) -> Result<Self, GitDaemonSessionTimeoutRefusal> {
+        if timeout.is_zero() {
+            return Err(GitDaemonSessionTimeoutRefusal::Zero);
+        }
+        Ok(Self(timeout))
+    }
+
+    /// Returns the configured session budget.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+}
+
+/// Why a git-daemon session budget could not be configured.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitDaemonSessionTimeoutRefusal {
+    /// A zero duration cannot bound an I/O operation.
+    Zero,
+}
+
+impl Display for GitDaemonSessionTimeoutRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Zero => formatter.write_str("git-daemon session timeout must be non-zero"),
+        }
+    }
+}
+
+impl Error for GitDaemonSessionTimeoutRefusal {}
+
+/// Absolute elapsed-time accounting for one accepted git-daemon connection.
+///
+/// The deadline is shared by the read and write halves. Each socket operation
+/// installs only the remaining duration, so a peer cannot turn an idle timeout
+/// into an unbounded session by periodically sending a single byte.
+#[derive(Clone, Copy, Debug)]
+struct GitDaemonSessionDeadline {
+    started: Instant,
+    timeout: GitDaemonSessionTimeout,
+}
+
+impl GitDaemonSessionDeadline {
+    fn new(timeout: GitDaemonSessionTimeout) -> Self {
+        Self {
+            started: Instant::now(),
+            timeout,
+        }
+    }
+
+    fn remaining(self) -> io::Result<Duration> {
+        let remaining = self
+            .timeout
+            .duration()
+            .saturating_sub(self.started.elapsed());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "git-daemon session deadline elapsed",
+            ));
+        }
+        Ok(remaining)
+    }
+}
+
+/// A socket half whose every operation observes a shared absolute deadline.
+struct DeadlineTcpStream<'stream> {
+    stream: &'stream mut TcpStream,
+    deadline: GitDaemonSessionDeadline,
+}
+
+impl<'stream> DeadlineTcpStream<'stream> {
+    const fn new(stream: &'stream mut TcpStream, deadline: GitDaemonSessionDeadline) -> Self {
+        Self { stream, deadline }
+    }
+
+    fn prepare_read(&self) -> io::Result<()> {
+        self.stream
+            .set_read_timeout(Some(self.deadline.remaining()?))
+    }
+
+    fn prepare_write(&self) -> io::Result<()> {
+        self.stream
+            .set_write_timeout(Some(self.deadline.remaining()?))
+    }
+}
+
+impl Read for DeadlineTcpStream<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.prepare_read()?;
+        self.stream.read(buffer)
+    }
+}
+
+impl Write for DeadlineTcpStream<'_> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.prepare_write()?;
+        self.stream.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.prepare_write()?;
+        self.stream.flush()
+    }
+}
+
 impl GitDaemonRequest {
     /// Returns the canonical authority lookup key requested by the client.
     #[must_use]
@@ -1854,6 +1975,11 @@ pub enum GitDaemonTransportRefusal {
         operation: &'static str,
         /// The source I/O failure.
         source: io::Error,
+    },
+    /// The configured absolute session budget elapsed during one I/O step.
+    SessionDeadlineExceeded {
+        /// The read or write operation that exceeded the budget.
+        operation: &'static str,
     },
     /// The service-request pkt-line had malformed length syntax.
     InvalidGreetingLength,
@@ -1890,6 +2016,12 @@ impl Display for GitDaemonTransportRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io { operation, source } => write!(formatter, "git-daemon {operation}: {source}"),
+            Self::SessionDeadlineExceeded { operation } => {
+                write!(
+                    formatter,
+                    "git-daemon session deadline exceeded while {operation}"
+                )
+            }
             Self::InvalidGreetingLength => {
                 formatter.write_str("git-daemon greeting has a non-hex pkt-line length")
             }
@@ -1943,6 +2075,7 @@ impl Error for GitDaemonTransportRefusal {
             Self::Wire(error) => Some(error),
             Self::InvalidGreetingLength
             | Self::GreetingControlPacket
+            | Self::SessionDeadlineExceeded { .. }
             | Self::GreetingPacketTooSmall { .. }
             | Self::GreetingPacketTooLarge { .. }
             | Self::InvalidGreetingPacketSequence { .. }
@@ -1956,6 +2089,20 @@ impl Error for GitDaemonTransportRefusal {
     }
 }
 
+fn classify_session_deadline(error: GitDaemonTransportRefusal) -> GitDaemonTransportRefusal {
+    match error {
+        GitDaemonTransportRefusal::Io { operation, source }
+            if matches!(
+                source.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ) =>
+        {
+            GitDaemonTransportRefusal::SessionDeadlineExceeded { operation }
+        }
+        other => other,
+    }
+}
+
 /// A transport or canonical-pack-construction failure from one served session.
 #[derive(Debug)]
 pub enum GitDaemonServeError<PackError> {
@@ -1963,6 +2110,17 @@ pub enum GitDaemonServeError<PackError> {
     Transport(GitDaemonTransportRefusal),
     /// The authority-backed canonical pack builder declined the selected request.
     Pack(PackError),
+}
+
+fn classify_session_serve_error<PackError>(
+    error: GitDaemonServeError<PackError>,
+) -> GitDaemonServeError<PackError> {
+    match error {
+        GitDaemonServeError::Transport(error) => {
+            GitDaemonServeError::Transport(classify_session_deadline(error))
+        }
+        GitDaemonServeError::Pack(error) => GitDaemonServeError::Pack(error),
+    }
 }
 
 impl<PackError: Display> Display for GitDaemonServeError<PackError> {
@@ -2318,6 +2476,7 @@ pub fn serve_git_daemon_tcp_once<BuildPack, Payload, PackError>(
     repository: &impl UploadPackRepository,
     capabilities: Capabilities,
     limits: WireLimits,
+    session_timeout: GitDaemonSessionTimeout,
     build_pack: BuildPack,
 ) -> Result<GitDaemonSessionOutcome, GitDaemonServeError<PackError>>
 where
@@ -2330,26 +2489,32 @@ where
             source,
         })
     })?;
-    let mut writer = stream.try_clone().map_err(|source| {
+    let mut response_stream = stream.try_clone().map_err(|source| {
         GitDaemonServeError::Transport(GitDaemonTransportRefusal::Io {
             operation: "duplicate git-daemon connection for response writes",
             source,
         })
     })?;
+    let deadline = GitDaemonSessionDeadline::new(session_timeout);
+    let mut reader = DeadlineTcpStream::new(&mut stream, deadline);
+    let mut writer = DeadlineTcpStream::new(&mut response_stream, deadline);
     let receipt = serve_git_daemon_upload_pack(
-        &mut stream,
+        &mut reader,
         &mut writer,
         repository,
         capabilities,
         limits,
         build_pack,
-    )?;
-    writer.shutdown(Shutdown::Write).map_err(|source| {
-        GitDaemonServeError::Transport(GitDaemonTransportRefusal::Io {
-            operation: "send git-daemon response EOF",
-            source,
-        })
-    })?;
+    )
+    .map_err(classify_session_serve_error)?;
+    response_stream
+        .shutdown(Shutdown::Write)
+        .map_err(|source| {
+            GitDaemonServeError::Transport(GitDaemonTransportRefusal::Io {
+                operation: "send git-daemon response EOF",
+                source,
+            })
+        })?;
     Ok(receipt)
 }
 
@@ -2536,6 +2701,7 @@ pub struct NodeConfig {
     object_format: GitHashAlgorithm,
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
+    git_daemon_session_timeout: GitDaemonSessionTimeout,
 }
 
 impl NodeConfig {
@@ -2552,6 +2718,7 @@ impl NodeConfig {
             object_format: GitHashAlgorithm::Sha1,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             segment_limits: SegmentLimits::default(),
+            git_daemon_session_timeout: GitDaemonSessionTimeout::DEFAULT,
         }
     }
 
@@ -2580,6 +2747,16 @@ impl NodeConfig {
     #[must_use]
     pub const fn with_max_object_bytes(mut self, max_object_bytes: u64) -> Self {
         self.max_object_bytes = max_object_bytes;
+        self
+    }
+
+    /// Selects the absolute resource budget for one accepted git-daemon session.
+    #[must_use]
+    pub const fn with_git_daemon_session_timeout(
+        mut self,
+        session_timeout: GitDaemonSessionTimeout,
+    ) -> Self {
+        self.git_daemon_session_timeout = session_timeout;
         self
     }
 }
@@ -2660,6 +2837,7 @@ pub struct OneNode {
     object_format: GitHashAlgorithm,
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
+    git_daemon_session_timeout: GitDaemonSessionTimeout,
     runtime: NodeRuntime,
 }
 
@@ -2805,6 +2983,7 @@ impl OneNode {
             object_format: config.object_format,
             max_object_bytes: config.max_object_bytes,
             segment_limits: config.segment_limits,
+            git_daemon_session_timeout: config.git_daemon_session_timeout,
         })
     }
 
@@ -3136,7 +3315,16 @@ impl OneNode {
                 source,
             })
         })?;
-        let greeting = read_git_daemon_request(&mut stream, &limits)
+        let mut response_stream = stream.try_clone().map_err(|source| {
+            NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::Io {
+                operation: "duplicate git-daemon connection for response writes",
+                source,
+            })
+        })?;
+        let deadline = GitDaemonSessionDeadline::new(self.git_daemon_session_timeout);
+        let mut reader = DeadlineTcpStream::new(&mut stream, deadline);
+        let greeting = read_git_daemon_request(&mut reader, &limits)
+            .map_err(classify_session_deadline)
             .map_err(NodeGitDaemonServeRefusal::from)?;
         if greeting.repository_path() != &self.git_daemon_repository_path {
             return Err(NodeGitDaemonServeRefusal::RepositoryPathMismatch);
@@ -3155,14 +3343,9 @@ impl OneNode {
             &limits,
         )
         .map_err(|error| NodeGitDaemonServeRefusal::from(NodeAdmissionViewRefusal::from(error)))?;
-        let mut writer = stream.try_clone().map_err(|source| {
-            NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::Io {
-                operation: "duplicate git-daemon connection for response writes",
-                source,
-            })
-        })?;
+        let mut writer = DeadlineTcpStream::new(&mut response_stream, deadline);
         let served = serve_git_daemon_upload_pack_after_greeting(
-            &mut stream,
+            &mut reader,
             &mut writer,
             greeting,
             &repository,
@@ -3174,13 +3357,16 @@ impl OneNode {
                 self.materialize_selected_pack(&materialized, &mut is_live)
             },
         )
+        .map_err(classify_session_serve_error)
         .map_err(node_git_daemon_serve_error)?;
-        writer.shutdown(Shutdown::Write).map_err(|source| {
-            NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::Io {
-                operation: "send git-daemon response EOF",
-                source,
-            })
-        })?;
+        response_stream
+            .shutdown(Shutdown::Write)
+            .map_err(|source| {
+                NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::Io {
+                    operation: "send git-daemon response EOF",
+                    source,
+                })
+            })?;
         Ok(served)
     }
 
@@ -3616,11 +3802,11 @@ mod tests {
     use super::{
         ADMISSION_CLOSURE_KEY_PREFIX, AdmissionMaterializationRefusal, AdmissionUploadPackRefusal,
         AdmissionUploadPackRepository, ClosureSelectionSource, DurableAsyncAdmissionProjection,
-        GitDaemonServeError, GitDaemonSessionOutcome, GitDaemonTransportRefusal, NodeConfig,
-        NodeGitDaemonServeRefusal, NodeInitialization, NodeRefusal, OneNode,
-        admission_immutable_key, authority_head_id, genesis_head, genesis_root,
-        initialize_embedded_repository, parse_git_daemon_request, serve_git_daemon_tcp_once,
-        serve_git_daemon_upload_pack,
+        GitDaemonServeError, GitDaemonSessionOutcome, GitDaemonSessionTimeout,
+        GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal, NodeInitialization,
+        NodeRefusal, OneNode, admission_immutable_key, authority_head_id, genesis_head,
+        genesis_root, initialize_embedded_repository, parse_git_daemon_request,
+        serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
     };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -4036,6 +4222,7 @@ mod tests {
                 &repository,
                 Capabilities::default(),
                 WireLimits::default(),
+                GitDaemonSessionTimeout::DEFAULT,
                 |_request, _pack_request| -> Result<FixturePack, Infallible> {
                     Ok(FixturePack {
                         bytes: Some(b"PACK\0tcp".to_vec()),
