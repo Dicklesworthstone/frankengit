@@ -131,14 +131,14 @@ fn fixture_outcomes() -> (CumulativeOutcomes, fgit_authority::AuthorityVersionTo
 
 fn seal_result(
     plan: PublicationPlan,
-    roots: ResultingRoots,
+    roots: &ResultingRoots,
 ) -> Result<VerifiedPublication, ChronicleRefusal> {
     let (outcomes, expected) = fixture_outcomes();
-    plan.seal(&CryptoBodyIdentity, roots, &outcomes, expected)
+    plan.seal(&CryptoBodyIdentity, *roots, &outcomes, expected)
 }
 
 fn seal(plan: PublicationPlan, roots: &ResultingRoots) -> VerifiedPublication {
-    seal_result(plan, *roots).expect("a plan built through the builder is well formed")
+    seal_result(plan, roots).expect("a plan built through the builder is well formed")
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +257,7 @@ fn an_empty_plan_refuses_to_seal() {
     let plan = PublicationPlan::open(basis()).expect("genesis basis opens");
     assert!(plan.is_empty(), "a freshly opened plan has decided nothing");
     assert_eq!(
-        seal_result(plan, refusal_only_roots()),
+        seal_result(plan, &refusal_only_roots()),
         Err(ChronicleRefusal::EmptyBatch),
         "a batch that decides nothing consumes no sequence and publishes nothing"
     );
@@ -292,7 +292,7 @@ fn a_second_batch_continues_the_first_without_a_gap() {
     );
     let mut plan = PublicationPlan::open(next_basis).expect("successor basis opens");
     plan.commit(record(0x86));
-    let second = seal_result(plan, committed_roots()).expect("the successor batch is well formed");
+    let second = seal_result(plan, &committed_roots()).expect("the successor batch is well formed");
     let second_record = second
         .batch()
         .committed_rcrs
@@ -655,7 +655,7 @@ fn one_transaction_cannot_be_decided_twice_by_the_builder() {
     duplicate.tx_id = reused;
     plan.commit(duplicate);
     assert_eq!(
-        seal_result(plan, committed_roots()),
+        seal_result(plan, &committed_roots()),
         Err(ChronicleRefusal::DuplicateTransaction { index: 1 }),
         "the second decision for one transaction is refused, naming its index"
     );
@@ -673,7 +673,7 @@ fn one_transaction_cannot_be_decided_twice_by_the_builder() {
         derived!(RefusalRecordId, 0xE5),
     );
     assert!(matches!(
-        seal_result(plan, refusal_only_roots()),
+        seal_result(plan, &refusal_only_roots()),
         Err(ChronicleRefusal::DuplicateTransaction { .. })
     ));
 

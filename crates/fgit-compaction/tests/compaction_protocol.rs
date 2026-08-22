@@ -196,7 +196,7 @@ fn seal_fixture(
     roots: &ResultingRoots,
 ) -> fgit_chronicle::VerifiedPublication {
     let (outcomes, expected) = fixture_outcomes();
-    plan.seal(&CryptoBodyIdentity, roots.clone(), &outcomes, expected)
+    plan.seal(&CryptoBodyIdentity, *roots, &outcomes, expected)
         .expect("ordinary compaction decision is well formed")
 }
 

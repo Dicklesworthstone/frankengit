@@ -140,7 +140,7 @@ fn seal_against(
     let outcomes =
         collect_cumulative_outcomes(store, &head_key()).expect("outcomes collect from the basis");
     let expected = current_token(store);
-    plan.seal(&CryptoBodyIdentity, roots.clone(), &outcomes, expected)
+    plan.seal(&CryptoBodyIdentity, *roots, &outcomes, expected)
         .expect("the plan is well formed")
 }
 
