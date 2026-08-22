@@ -25,7 +25,6 @@ use crate::refusal::ChronicleRefusal;
 pub struct PublicationPlan {
     basis: PublicationBasis,
     decisions: Vec<PlannedDecision>,
-    records: Vec<RepositoryCommitRecord>,
     next_decision: DecisionSequence,
     next_repository: RepositorySequence,
     decided: BTreeSet<TxId>,
@@ -40,7 +39,6 @@ impl PublicationPlan {
         Ok(Self {
             basis,
             decisions: Vec::new(),
-            records: Vec::new(),
             next_decision,
             next_repository,
             decided: BTreeSet::new(),
@@ -105,9 +103,8 @@ impl PublicationPlan {
         self.decisions.push(PlannedDecision {
             tx_id: record.tx_id,
             decision_sequence: sequence,
-            outcome: PlannedOutcome::Committed,
+            outcome: PlannedOutcome::Committed(record),
         });
-        self.records.push(record);
         self
     }
 
@@ -144,10 +141,9 @@ impl PublicationPlan {
             .map(|decision| decision.decision_sequence)
             .ok_or(ChronicleRefusal::EmptyBatch)?;
         let mut parent_rcr = previous.latest_committed_rcr_id;
-        let mut records = self.records.into_iter();
-        let mut committed_rcrs = Vec::with_capacity(records.len());
+        let mut committed_rcrs = Vec::with_capacity(self.decisions.len());
         let mut decisions = Vec::with_capacity(self.decisions.len());
-        for (index, planned) in self.decisions.into_iter().enumerate() {
+        for planned in self.decisions {
             let outcome = match planned.outcome {
                 PlannedOutcome::Refused {
                     code,
@@ -156,10 +152,7 @@ impl PublicationPlan {
                     code,
                     refusal_record_id,
                 },
-                PlannedOutcome::Committed => {
-                    let mut record = records
-                        .next()
-                        .ok_or(ChronicleRefusal::CommitRecordNotBound { index })?;
+                PlannedOutcome::Committed(mut record) => {
                     record.parent_rcr_id = parent_rcr;
                     let repository_commit_id = repository_commit_identity(identity, &record)?;
                     parent_rcr = Some(repository_commit_id);
@@ -173,12 +166,6 @@ impl PublicationPlan {
                 tx_id: planned.tx_id,
                 decision_sequence: planned.decision_sequence,
                 outcome,
-            });
-        }
-        if records.next().is_some() {
-            return Err(ChronicleRefusal::CommitRecordCountMismatch {
-                committed_decisions: committed_rcrs.len(),
-                records: committed_rcrs.len().saturating_add(1),
             });
         }
         let latest_repository_sequence = committed_rcrs
@@ -293,7 +280,7 @@ enum PlannedOutcome {
         code: RefusalCode,
         refusal_record_id: RefusalRecordId,
     },
-    Committed,
+    Committed(RepositoryCommitRecord),
 }
 
 /// A batch and head pair that passed every chronicle invariant.
