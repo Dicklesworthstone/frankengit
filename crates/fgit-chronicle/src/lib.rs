@@ -76,7 +76,9 @@ pub use capsule::{
     advance_pointer_root_last_async, capsule_identity,
 };
 pub use origin::{PublicationBasis, ResultingRoots};
-pub use publish::{CanonicalBatchReceipt, LostCandidate, PublicationVerdict, publish};
+pub use publish::{
+    CanonicalBatchReceipt, LostCandidate, PublicationVerdict, publish, publish_async,
+};
 pub use recovery::{AuditedRestore, CapsuleVerification, HaltReason, RecoveryPlan, plan_recovery};
 pub use refusal::ChronicleRefusal;
 pub use verify::{CapsuleDefect, MAX_REPORTED_DEFECTS, RestoreClassification, RestoreOutcome};

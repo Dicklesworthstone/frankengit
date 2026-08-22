@@ -21,8 +21,9 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use fgit_authority::{
-    AuthenticatedHead, AuthorityFailure, AuthorityStore, HeadKey, HeadRead, IdempotencyKey,
-    OutcomeFailure, OutcomeLookup, SealAttempt, SealFailure, initialize_repository, seal_request,
+    AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityStore, HeadKey, HeadRead,
+    IdempotencyKey, OutcomeFailure, OutcomeLookup, SealAttempt, SealFailure, initialize_repository,
+    seal_request,
 };
 use fgit_chronicle::{
     PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots, publish,
@@ -999,45 +1000,298 @@ where
     S: AuthorityStore + ?Sized,
     Projection: AdmissionProjection + ?Sized,
 {
-    limits.validate()?;
-    validate_admission_input(context, validated, limits)?;
-    let atomic = validated.request.has_capability(b"atomic");
-    let lowered_requests = lower_session(context, &validated.request, atomic)?;
-    let tx_ids = lowered_requests
-        .iter()
-        .map(|request| derive_tx_id(context, request))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let mut commands = Vec::with_capacity(validated.request.commands.len());
-    if atomic {
-        let terminal = admit_one(
+    let plan = plan_session(context, validated, limits)?;
+    let terminals = if plan.atomic {
+        SessionTerminals::Atomic(admit_one(
             store,
             context,
             validated,
-            &lowered_requests[0],
+            &plan.lowered[0],
             projection,
             limits,
-        )?;
-        commands.resize(
-            validated.request.commands.len(),
-            CommandOutcome {
-                tx_id: tx_ids[0],
-                terminal,
-            },
-        );
+        )?)
     } else {
-        for (request, tx_id) in lowered_requests.iter().zip(&tx_ids) {
-            let terminal = admit_one(store, context, validated, request, projection, limits)?;
-            commands.push(CommandOutcome {
-                tx_id: *tx_id,
-                terminal,
-            });
+        let mut outcomes = Vec::with_capacity(plan.lowered.len());
+        for request in &plan.lowered {
+            outcomes.push(admit_one(
+                store, context, validated, request, projection, limits,
+            )?);
+        }
+        SessionTerminals::PerCommand(outcomes)
+    };
+    Ok(assemble_result(plan, terminals))
+}
+
+// --- the shared decision core ---------------------------------------------
+//
+// Everything in this section is synchronous and touches no `AuthorityStore`.
+// It is what the blocking and asynchronous admission surfaces have in common:
+// the order the checks run in, which refusal code each branch selects, what
+// becomes canonical, and what a losing candidate may conclude. The two
+// surfaces differ only in how they wait for the store.
+//
+// This split is load-bearing rather than stylistic. AGENTS.md §10 requires a
+// normative rule to live in one authoritative location, and §5.2's terminality
+// and replan rules are exactly such rules. A mechanical `async fn` + `.await`
+// sweep over the publication path would have produced a second copy of each,
+// free to drift.
+
+/// The plan for a single admission attempt, decided before any publication.
+///
+/// A refusal and a commit are the only two outcomes an attempt can plan, and
+/// the choice between them is made once, here, for both surfaces.
+#[derive(Debug)]
+enum PlannedPublication {
+    /// Publish a terminal refusal carrying this code.
+    Refuse(RefusalCode),
+    /// Publish the commit this materialization describes.
+    ///
+    /// Boxed because a materialization carries an RCR and its successor roots
+    /// while the refusing arm carries one code; inlining it would make every
+    /// refusal pay for the width of a commit.
+    Commit(Box<CommitMaterialization>),
+}
+
+/// Derive the publication basis from an authenticated head.
+///
+/// The basis identity is derived from the head body itself, so a basis can
+/// never name a head that was not authenticated. Shared so that both surfaces
+/// bind the same identity to the same bytes.
+fn basis_from_authenticated(
+    authenticated: &AuthenticatedHead,
+) -> Result<PublicationBasis, AdmissionError> {
+    let body = authenticated.body().map_err(|failure| match failure {
+        fgit_authority::HeadBodyRefusal::Codec(refusal) => AdmissionError::HeadCodec(refusal),
+        fgit_authority::HeadBodyRefusal::GenerationMismatch { .. } => {
+            AdmissionError::MaterializationMismatch("head receipt generation")
+        }
+    })?;
+    let id = body_id(&CryptoBodyIdentity, &body)
+        .map_err(AdmissionError::HeadIdentity)
+        .and_then(|id| {
+            fgit_types::RepositoryAuthorityHeadId::from_internal_object_id(id)
+                .map_err(|refusal| AdmissionError::HeadIdentity(refusal.into()))
+        })?;
+    Ok(PublicationBasis::new(id, body))
+}
+
+/// Decide, against one authenticated basis, whether this attempt commits or
+/// refuses — and with which code.
+///
+/// This is the whole of the per-attempt decision: open the projection at
+/// exactly this head, model the request, fold it, and materialize. Each of the
+/// three routes to a refusal selects its code here, so neither surface can
+/// select a different one:
+///
+/// - the projection cannot open at this basis (a stale or invalid receipt);
+/// - the fold aborts;
+/// - the fold commits but the projection cannot materialize it.
+///
+/// Returning [`PlannedPublication`] rather than publishing is what keeps the
+/// store out of this function. It also collapses what were three separate
+/// refusal call sites in the blocking loop into one.
+fn plan_publication<Projection>(
+    projection: &Projection,
+    context: &AdmissionContext,
+    basis: &PublicationBasis,
+    authenticated: &AuthenticatedHead,
+    lowered: &LoweredRequest,
+    closure: &ValidatedClosure,
+    tx_id: TxId,
+) -> Result<PlannedPublication, AdmissionError>
+where
+    Projection: AdmissionProjection + ?Sized,
+{
+    let snapshot = match projection.snapshot(basis, authenticated) {
+        Ok(snapshot) => snapshot,
+        Err(code) => return Ok(PlannedPublication::Refuse(code)),
+    };
+    let model_request = model_request(context, &lowered.semantic, tx_id, closure)?;
+    let fold = IntentEvaluator::new().evaluate(snapshot.as_fold_basis(), &model_request);
+    match &fold.outcome {
+        FoldOutcome::Aborted { code, .. } => Ok(PlannedPublication::Refuse(*code)),
+        FoldOutcome::Folded(_) => {
+            match projection.materialize_commit(basis, &model_request, &fold, closure) {
+                Ok(materialization) => Ok(PlannedPublication::Commit(Box::new(materialization))),
+                Err(code) => Ok(PlannedPublication::Refuse(code)),
+            }
         }
     }
-    Ok(AdmissionResult {
+}
+
+/// Validate a commit materialization and seal it into a publication.
+///
+/// The validation is the part that must not drift: it is what stops a
+/// projection from materializing an RCR for a different repository, a
+/// different transaction, or a different request than the one that was sealed.
+fn prepare_commit_publication(
+    context: &AdmissionContext,
+    basis: &PublicationBasis,
+    tx_id: TxId,
+    semantic: &fgit_authority::SemanticRequest,
+    closure: &ValidatedClosure,
+    materialization: CommitMaterialization,
+) -> Result<fgit_chronicle::VerifiedPublication, AdmissionError> {
+    validate_commit_materialization(context, tx_id, semantic, closure, &materialization)?;
+    let mut plan = PublicationPlan::open(basis.clone())?;
+    plan.commit(materialization.record);
+    Ok(plan.seal(&CryptoBodyIdentity, materialization.roots)?)
+}
+
+/// Build the refusal record this attempt will publish.
+///
+/// The projection supplies the policy evidence, and the two ways it can fail
+/// are distinguished here: a projection that echoes the code back has failed
+/// to materialize, while one that answers with a different code has replaced
+/// the policy decision. Neither is allowed to silently become the published
+/// refusal.
+fn prepare_refusal_record<Projection>(
+    projection: &Projection,
+    basis: &PublicationBasis,
+    seal_id: TransactionSealId,
+    tx_id: TxId,
+    code: RefusalCode,
+) -> Result<RefusalRecordBody, AdmissionError>
+where
+    Projection: AdmissionProjection + ?Sized,
+{
+    let materialization =
+        projection
+            .materialize_refusal(basis, tx_id, code)
+            .map_err(|fallback| {
+                if fallback == code {
+                    AdmissionError::MaterializationMismatch("refusal materialization")
+                } else {
+                    AdmissionError::MaterializationMismatch("refusal policy replacement")
+                }
+            })?;
+    let sequence = basis.open_decision_sequence()?;
+    Ok(RefusalRecordBody {
+        tx_id,
+        seal_id,
+        decision_sequence: sequence,
+        code,
+        policy_epoch: materialization.policy_epoch,
+        detail: materialization.detail,
+        evidence_root: materialization.evidence_root,
+    })
+}
+
+/// The immutable key and canonical bytes of a refusal record.
+fn refusal_body_bytes(
+    refusal: &RefusalRecordBody,
+) -> Result<(fgit_authority::ImmutableKey, Vec<u8>), AdmissionError> {
+    let key = fgit_authority::body_key(IdentityDomain::RefusalRecord, refusal)?;
+    let bytes = encode_body(refusal).map_err(AdmissionError::HeadCodec)?;
+    Ok((key, bytes))
+}
+
+/// Seal a staged refusal record into the publication that carries it.
+///
+/// The successor roots are carried forward from the basis: a refusal publishes
+/// a decision, never new repository content.
+fn seal_refusal_publication(
+    basis: &PublicationBasis,
+    refusal: &RefusalRecordBody,
+) -> Result<fgit_chronicle::VerifiedPublication, AdmissionError> {
+    let refusal_id = refusal_record_id(refusal)?;
+    let mut plan = PublicationPlan::open(basis.clone())?;
+    plan.refuse(refusal.tx_id, refusal.code, refusal_id);
+    let roots = ResultingRoots::carried_forward(basis, refusal.evidence_root);
+    Ok(plan.seal(&CryptoBodyIdentity, roots)?)
+}
+
+/// The `TxId` whose terminal decision this publication settles.
+fn publication_tx_id(
+    publication: &fgit_chronicle::VerifiedPublication,
+) -> Result<TxId, AdmissionError> {
+    publication
+        .batch()
+        .decisions
+        .first()
+        .map(|decision| decision.tx_id)
+        .ok_or(AdmissionError::PublishedOutcomeMissing)
+}
+
+/// One receive session, lowered and sealed, ready to be admitted.
+struct SessionPlan {
+    atomic: bool,
+    lowered: Vec<LoweredRequest>,
+    tx_ids: Vec<TxId>,
+    command_count: usize,
+}
+
+/// Validate and lower a receive session into the requests that will be
+/// admitted, deriving each transaction identity.
+///
+/// Every input check happens here, before any store contact, so both surfaces
+/// refuse a malformed session identically and without having touched the
+/// authority.
+fn plan_session(
+    context: &AdmissionContext,
+    validated: &ValidatedReceive,
+    limits: AdmissionLimits,
+) -> Result<SessionPlan, AdmissionError> {
+    limits.validate()?;
+    validate_admission_input(context, validated, limits)?;
+    let atomic = validated.request.has_capability(b"atomic");
+    let lowered = lower_session(context, &validated.request, atomic)?;
+    let tx_ids = lowered
+        .iter()
+        .map(|request| derive_tx_id(context, request))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SessionPlan {
+        atomic,
+        lowered,
+        tx_ids,
+        command_count: validated.request.commands.len(),
+    })
+}
+
+/// The terminal outcomes a session produced.
+///
+/// The two shapes are distinct types rather than a `Vec` plus a length rule,
+/// so an atomic session cannot be assembled from per-command outcomes or the
+/// reverse — the invalid pairing is unrepresentable instead of checked.
+enum SessionTerminals {
+    /// One decision governs every command in the session.
+    Atomic(fgit_authority::TerminalOutcome),
+    /// One decision per lowered command, in wire order.
+    PerCommand(Vec<fgit_authority::TerminalOutcome>),
+}
+
+/// Attach terminal decisions to the session's commands in wire order.
+fn assemble_result(plan: SessionPlan, terminals: SessionTerminals) -> AdmissionResult {
+    let SessionPlan {
+        atomic,
+        tx_ids,
+        command_count,
+        ..
+    } = plan;
+    let mut commands = Vec::with_capacity(command_count);
+    match terminals {
+        SessionTerminals::Atomic(terminal) => {
+            commands.resize(
+                command_count,
+                CommandOutcome {
+                    tx_id: tx_ids[0],
+                    terminal,
+                },
+            );
+        }
+        SessionTerminals::PerCommand(outcomes) => {
+            for (terminal, tx_id) in outcomes.into_iter().zip(&tx_ids) {
+                commands.push(CommandOutcome {
+                    tx_id: *tx_id,
+                    terminal,
+                });
+            }
+        }
+    }
+    AdmissionResult {
         session: SessionMapping { atomic, tx_ids },
         commands,
-    })
+    }
 }
 
 fn validate_admission_input(
@@ -1205,9 +1459,16 @@ where
         }
         let (basis, receipt, authenticated) = read_basis(store, &context.head_key)?;
         let closure = &validated.closure;
-        let snapshot = match projection.snapshot(&basis, &authenticated) {
-            Ok(snapshot) => snapshot,
-            Err(code) => match publish_refusal(
+        let terminal = match plan_publication(
+            projection,
+            context,
+            &basis,
+            &authenticated,
+            lowered,
+            closure,
+            tx_id,
+        )? {
+            PlannedPublication::Refuse(code) => publish_refusal(
                 store,
                 context,
                 &basis,
@@ -1216,48 +1477,17 @@ where
                 tx_id,
                 code,
                 projection,
-            )? {
-                Some(terminal) => return Ok(terminal),
-                None => continue,
-            },
-        };
-        let model_request = model_request(context, &lowered.semantic, tx_id, closure)?;
-        let fold = IntentEvaluator::new().evaluate(snapshot.as_fold_basis(), &model_request);
-        let terminal = match &fold.outcome {
-            FoldOutcome::Aborted { code, .. } => publish_refusal(
+            )?,
+            PlannedPublication::Commit(materialization) => publish_commit(
                 store,
                 context,
                 &basis,
                 receipt.token(),
-                admission.seal_id(),
                 tx_id,
-                *code,
-                projection,
+                &lowered.semantic,
+                closure,
+                *materialization,
             )?,
-            FoldOutcome::Folded(_) => {
-                match projection.materialize_commit(&basis, &model_request, &fold, closure) {
-                    Ok(materialization) => publish_commit(
-                        store,
-                        context,
-                        &basis,
-                        receipt.token(),
-                        tx_id,
-                        &lowered.semantic,
-                        closure,
-                        materialization,
-                    )?,
-                    Err(code) => publish_refusal(
-                        store,
-                        context,
-                        &basis,
-                        receipt.token(),
-                        admission.seal_id(),
-                        tx_id,
-                        code,
-                        projection,
-                    )?,
-                }
-            }
         };
         if let Some(terminal) = terminal {
             return Ok(terminal);
@@ -1287,19 +1517,8 @@ where
         HeadRead::Absent => return Err(AdmissionError::HeadAbsent),
     };
     let authenticated = store.authenticate_head_receipt(&receipt)?;
-    let body = authenticated.body().map_err(|failure| match failure {
-        fgit_authority::HeadBodyRefusal::Codec(refusal) => AdmissionError::HeadCodec(refusal),
-        fgit_authority::HeadBodyRefusal::GenerationMismatch { .. } => {
-            AdmissionError::MaterializationMismatch("head receipt generation")
-        }
-    })?;
-    let id = body_id(&CryptoBodyIdentity, &body)
-        .map_err(AdmissionError::HeadIdentity)
-        .and_then(|id| {
-            fgit_types::RepositoryAuthorityHeadId::from_internal_object_id(id)
-                .map_err(|refusal| AdmissionError::HeadIdentity(refusal.into()))
-        })?;
-    Ok((PublicationBasis::new(id, body), receipt, authenticated))
+    let basis = basis_from_authenticated(&authenticated)?;
+    Ok((basis, receipt, authenticated))
 }
 
 fn model_request(
@@ -1367,10 +1586,8 @@ fn publish_commit<S>(
 where
     S: AuthorityStore + ?Sized,
 {
-    validate_commit_materialization(context, tx_id, semantic, closure, &materialization)?;
-    let mut plan = PublicationPlan::open(basis.clone())?;
-    plan.commit(materialization.record);
-    let publication = plan.seal(&CryptoBodyIdentity, materialization.roots)?;
+    let publication =
+        prepare_commit_publication(context, basis, tx_id, semantic, closure, materialization)?;
     outcome_after_publish(store, context, expected, &publication)
 }
 
@@ -1433,35 +1650,11 @@ where
     S: AuthorityStore + ?Sized,
     Projection: AdmissionProjection + ?Sized,
 {
-    let materialization =
-        projection
-            .materialize_refusal(basis, tx_id, code)
-            .map_err(|fallback| {
-                if fallback == code {
-                    AdmissionError::MaterializationMismatch("refusal materialization")
-                } else {
-                    AdmissionError::MaterializationMismatch("refusal policy replacement")
-                }
-            })?;
-    let sequence = basis.open_decision_sequence()?;
-    let refusal = RefusalRecordBody {
-        tx_id,
-        seal_id,
-        decision_sequence: sequence,
-        code,
-        policy_epoch: materialization.policy_epoch,
-        detail: materialization.detail,
-        evidence_root: materialization.evidence_root,
-    };
-    let refusal_id = refusal_record_id(&refusal)?;
-    let key = fgit_authority::body_key(IdentityDomain::RefusalRecord, &refusal)?;
-    let bytes = encode_body(&refusal).map_err(AdmissionError::HeadCodec)?;
+    let refusal = prepare_refusal_record(projection, basis, seal_id, tx_id, code)?;
+    let (key, bytes) = refusal_body_bytes(&refusal)?;
     store.put_if_absent(&key, &bytes)?;
 
-    let mut plan = PublicationPlan::open(basis.clone())?;
-    plan.refuse(tx_id, code, refusal_id);
-    let roots = ResultingRoots::carried_forward(basis, materialization.evidence_root);
-    let publication = plan.seal(&CryptoBodyIdentity, roots)?;
+    let publication = seal_refusal_publication(basis, &refusal)?;
     outcome_after_publish(store, context, expected, &publication)
 }
 
@@ -1497,12 +1690,7 @@ fn outcome_after_publish<S>(
 where
     S: AuthorityStore + ?Sized,
 {
-    let tx_id = publication
-        .batch()
-        .decisions
-        .first()
-        .map(|decision| decision.tx_id)
-        .ok_or(AdmissionError::PublishedOutcomeMissing)?;
+    let tx_id = publication_tx_id(publication)?;
     match publish(
         store,
         &context.head_key,
@@ -1554,6 +1742,320 @@ const fn refusal_message(code: RefusalCode) -> &'static [u8] {
 // Non-production fixture identity: this reserved tag deliberately has no registered digest width.
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
 const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
+
+// --- the asynchronous admission surface -----------------------------------
+//
+// The sibling of the blocking surface above, for a backend that implements
+// [`AsyncAuthorityStore`] only — `fgit-authority-fsqlite` is the one that
+// motivated it, reached through `fgit-node`.
+//
+// These are siblings rather than layers, in the sense `fgit-authority`'s own
+// async contract uses: they delegate every decision to the same core, so
+// neither can conclude something the other would not about the same store
+// answers. What differs is only how they wait. In particular the CAS replan
+// loop below selects refusal codes, orders its checks, and interprets an
+// ambiguous publication through `plan_publication`, `prepare_*` and
+// `outcome_after_publish_async`'s shared deciders — not through a second copy
+// of §5.2.
+//
+// The projection stays synchronous on purpose. `fgit-node` materializes
+// canonical ref state from the authority ahead of admission and the projection
+// reads only that materialized record, so nothing here needs to block on I/O
+// inside a projection call.
+
+/// Lower, seal, evaluate, and publish a validated receive session,
+/// asynchronously.
+///
+/// The asynchronous sibling of [`admit_validated_receive`]. It plans the
+/// session with the same [`plan_session`] and assembles its result with the
+/// same [`assemble_result`], so a session that the blocking surface refuses
+/// before touching the store is refused here identically and just as early.
+pub async fn admit_validated_receive_async<S, Projection>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    validated: &ValidatedReceive,
+    limits: AdmissionLimits,
+    projection: &Projection,
+) -> Result<AdmissionResult, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    Projection: AdmissionProjection + ?Sized,
+{
+    let plan = plan_session(context, validated, limits)?;
+    let terminals = if plan.atomic {
+        SessionTerminals::Atomic(
+            admit_one_async(
+                store,
+                cx,
+                context,
+                validated,
+                &plan.lowered[0],
+                projection,
+                limits,
+            )
+            .await?,
+        )
+    } else {
+        let mut outcomes = Vec::with_capacity(plan.lowered.len());
+        for request in &plan.lowered {
+            outcomes.push(
+                admit_one_async(store, cx, context, validated, request, projection, limits).await?,
+            );
+        }
+        SessionTerminals::PerCommand(outcomes)
+    };
+    Ok(assemble_result(plan, terminals))
+}
+
+/// Admit one sealed transaction against a fresh basis, asynchronously.
+///
+/// The asynchronous sibling of [`admit_one`], and structurally the same loop:
+/// a pre-loop terminal check makes an idempotent retry cheap, and each replan
+/// re-reads the basis rather than reusing a stale one. §5.2's rule that a CAS
+/// loser reuses and revalidates *without changing the sealed request* is
+/// preserved by sealing once, before the loop, exactly as the blocking sibling
+/// does.
+async fn admit_one_async<S, Projection>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    validated: &ValidatedReceive,
+    lowered: &LoweredRequest,
+    projection: &Projection,
+    limits: AdmissionLimits,
+) -> Result<fgit_authority::TerminalOutcome, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    Projection: AdmissionProjection + ?Sized,
+{
+    let attempt = seal_attempt(context, lowered);
+    let admission = fgit_authority::seal_request_async(store, cx, &attempt).await?;
+    let tx_id = admission.tx_id();
+    if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+        store,
+        cx,
+        &context.head_key,
+        context.tenant_id,
+        context.repository_id,
+        tx_id,
+    )
+    .await?
+    {
+        return Ok(terminal);
+    }
+
+    for _ in 0..limits.max_cas_replans {
+        if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+            store,
+            cx,
+            &context.head_key,
+            context.tenant_id,
+            context.repository_id,
+            tx_id,
+        )
+        .await?
+        {
+            return Ok(terminal);
+        }
+        let (basis, receipt, authenticated) =
+            read_basis_async(store, cx, &context.head_key).await?;
+        let closure = &validated.closure;
+        let terminal = match plan_publication(
+            projection,
+            context,
+            &basis,
+            &authenticated,
+            lowered,
+            closure,
+            tx_id,
+        )? {
+            PlannedPublication::Refuse(code) => {
+                publish_refusal_async(
+                    store,
+                    cx,
+                    context,
+                    &basis,
+                    receipt.token(),
+                    admission.seal_id(),
+                    tx_id,
+                    code,
+                    projection,
+                )
+                .await?
+            }
+            PlannedPublication::Commit(materialization) => {
+                publish_commit_async(
+                    store,
+                    cx,
+                    context,
+                    &basis,
+                    receipt.token(),
+                    tx_id,
+                    &lowered.semantic,
+                    closure,
+                    *materialization,
+                )
+                .await?
+            }
+        };
+        if let Some(terminal) = terminal {
+            return Ok(terminal);
+        }
+    }
+    Err(AdmissionError::CasReplanLimitExceeded {
+        limit: limits.max_cas_replans,
+    })
+}
+
+/// Read and authenticate the current head, asynchronously.
+///
+/// The asynchronous sibling of [`read_basis`]. The basis is derived by the
+/// shared [`basis_from_authenticated`], so both surfaces bind the same identity
+/// to the same authenticated bytes.
+async fn read_basis_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+) -> Result<
+    (
+        PublicationBasis,
+        fgit_authority::HeadReadReceipt,
+        AuthenticatedHead,
+    ),
+    AdmissionError,
+>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let receipt = match store.read_head(cx, head_key).await? {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => return Err(AdmissionError::HeadAbsent),
+    };
+    let authenticated = store.authenticate_head_receipt(cx, &receipt).await?;
+    let basis = basis_from_authenticated(&authenticated)?;
+    Ok((basis, receipt, authenticated))
+}
+
+/// Publish a committed fold through the exact-head CAS, asynchronously.
+///
+/// The asynchronous sibling of [`publish_commit`]. The materialization is
+/// validated and sealed by the shared [`prepare_commit_publication`], so a
+/// materialization the blocking surface rejects is rejected here for the same
+/// reason.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the blocking sibling's parameters exactly, plus the \
+              runtime context; diverging the two signatures would make the \
+              pair harder to compare than the extra parameter costs"
+)]
+async fn publish_commit_async<S>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    basis: &PublicationBasis,
+    expected: fgit_authority::AuthorityVersionToken,
+    tx_id: TxId,
+    semantic: &fgit_authority::SemanticRequest,
+    closure: &ValidatedClosure,
+    materialization: CommitMaterialization,
+) -> Result<Option<fgit_authority::TerminalOutcome>, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let publication =
+        prepare_commit_publication(context, basis, tx_id, semantic, closure, materialization)?;
+    outcome_after_publish_async(store, cx, context, expected, &publication).await
+}
+
+/// Stage a refusal record and publish its terminal decision, asynchronously.
+///
+/// The asynchronous sibling of [`publish_refusal`], with the same ordering: the
+/// refusal record is staged before the head moves, so a reader that observes
+/// the decision can always resolve the record it names.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the blocking sibling's parameters exactly, plus the \
+              runtime context; diverging the two signatures would make the \
+              pair harder to compare than the extra parameter costs"
+)]
+async fn publish_refusal_async<S, Projection>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    basis: &PublicationBasis,
+    expected: fgit_authority::AuthorityVersionToken,
+    seal_id: TransactionSealId,
+    tx_id: TxId,
+    code: RefusalCode,
+    projection: &Projection,
+) -> Result<Option<fgit_authority::TerminalOutcome>, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    Projection: AdmissionProjection + ?Sized,
+{
+    let refusal = prepare_refusal_record(projection, basis, seal_id, tx_id, code)?;
+    let (key, bytes) = refusal_body_bytes(&refusal)?;
+    store.put_if_absent(cx, &key, &bytes).await?;
+
+    let publication = seal_refusal_publication(basis, &refusal)?;
+    outcome_after_publish_async(store, cx, context, expected, &publication).await
+}
+
+/// Interpret the result of a publication attempt, asynchronously.
+///
+/// The asynchronous sibling of [`outcome_after_publish`], and it makes the same
+/// three-way reading of a conditional replacement:
+///
+/// - a win **or** a lost race resolves the transaction authoritatively, because
+///   a loser may still have been decided by the candidate that beat it;
+/// - a transaction that was already terminal before anything was attempted
+///   yields that standing decision, never a fresh one.
+///
+/// `Ok(None)` means the transaction is still undecided and the caller may
+/// replan. It never means "not committed": §5.2 forbids concluding
+/// non-commitment from an ambiguous response.
+async fn outcome_after_publish_async<S>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    expected: fgit_authority::AuthorityVersionToken,
+    publication: &fgit_chronicle::VerifiedPublication,
+) -> Result<Option<fgit_authority::TerminalOutcome>, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let tx_id = publication_tx_id(publication)?;
+    match fgit_chronicle::publish_async(
+        store,
+        cx,
+        &context.head_key,
+        expected,
+        publication,
+        context.tenant_id,
+    )
+    .await?
+    {
+        PublicationVerdict::Published(_) | PublicationVerdict::Lost(_) => {
+            match fgit_authority::resolve_outcome_async(
+                store,
+                cx,
+                &context.head_key,
+                context.tenant_id,
+                context.repository_id,
+                tx_id,
+            )
+            .await?
+            {
+                OutcomeLookup::Decided(terminal) => Ok(Some(terminal)),
+                OutcomeLookup::Undecided => Ok(None),
+            }
+        }
+        PublicationVerdict::AlreadyDecided { decided } => {
+            Ok(Some(already_decided_terminal(tx_id, decided)?))
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

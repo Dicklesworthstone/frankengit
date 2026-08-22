@@ -6,8 +6,9 @@
 //! usable, or has the repository already decided the transactions it carries?
 
 use fgit_authority::{
-    AuthorityStore, AuthorityVersionToken, HeadKey, HeadReadReceipt, OutcomeFailure, OutcomeLookup,
-    PublicationOutcome, TerminalOutcome, publish_decisions, resolve_outcome,
+    AsyncAuthorityStore, AuthorityStore, AuthorityVersionToken, HeadKey, HeadReadReceipt,
+    OutcomeFailure, OutcomeLookup, PublicationOutcome, PublishedBatch, TerminalOutcome,
+    publish_decisions, publish_decisions_async, resolve_outcome, resolve_outcome_async,
 };
 use fgit_types::{RepositoryDecisionBatchId, TenantId, TxId};
 
@@ -133,13 +134,7 @@ where
         tenant_id,
     )?;
     match outcome {
-        PublicationOutcome::Published(published) => Ok(PublicationVerdict::Published(Box::new(
-            CanonicalBatchReceipt {
-                head: published.head,
-                batch: published.batch_id,
-                indexed: published.indexed,
-            },
-        ))),
+        PublicationOutcome::Published(published) => Ok(published_verdict(*published)),
         PublicationOutcome::PredecessorMismatch => Ok(PublicationVerdict::Lost(classify_loss(
             store,
             head_key,
@@ -187,9 +182,115 @@ where
             decided.push((decision.tx_id, outcome));
         }
     }
+    Ok(classify_decided(decided))
+}
+
+/// The verdict a landed conditional replacement yields.
+///
+/// Shared by [`publish`] and [`publish_async`]. The receipt a caller sees after
+/// a win is constructed in exactly one place, so the two surfaces cannot drift
+/// about what a win reports.
+fn published_verdict(published: PublishedBatch) -> PublicationVerdict {
+    PublicationVerdict::Published(Box::new(CanonicalBatchReceipt {
+        head: published.head,
+        batch: published.batch_id,
+        indexed: published.indexed,
+    }))
+}
+
+/// Decide what a losing candidate may conclude, from the decisions that already
+/// stand.
+///
+/// This is the §5.2 replan rule itself: a candidate may replan if and only if
+/// **no** transaction it carries is already terminal. Shared by
+/// [`classify_loss`] and [`classify_loss_async`] so the rule is written once;
+/// the two callers differ only in how they wait for each lookup, never in what
+/// they conclude from the same answers.
+fn classify_decided(decided: Vec<(TxId, TerminalOutcome)>) -> LostCandidate {
     if decided.is_empty() {
-        Ok(LostCandidate::Replannable)
+        LostCandidate::Replannable
     } else {
-        Ok(LostCandidate::Superseded { decided })
+        LostCandidate::Superseded { decided }
     }
+}
+
+/// Stage, replace, and index a verified publication, asynchronously.
+///
+/// The asynchronous sibling of [`publish`]. It delegates the protocol to
+/// [`publish_decisions_async`] exactly as [`publish`] delegates to
+/// `publish_decisions`, and it reaches its verdict through the same two shared
+/// deciders — [`published_verdict`] and [`classify_decided`]. Neither sibling
+/// can conclude something the other would not about the same store answers.
+///
+/// The `AlreadyDecided` arm is deliberately NOT routed through
+/// [`classify_loss_async`], for the same reason the synchronous arm avoids
+/// `classify_loss`: the head did not move, so this is not a lost race and the
+/// batch's positions are still valid.
+pub async fn publish_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    expected: AuthorityVersionToken,
+    publication: &VerifiedPublication,
+    tenant_id: TenantId,
+) -> Result<PublicationVerdict, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let outcome = publish_decisions_async(
+        store,
+        cx,
+        head_key,
+        expected,
+        publication.batch(),
+        publication.head(),
+        tenant_id,
+    )
+    .await?;
+    match outcome {
+        PublicationOutcome::Published(published) => Ok(published_verdict(*published)),
+        PublicationOutcome::PredecessorMismatch => Ok(PublicationVerdict::Lost(
+            classify_loss_async(store, cx, head_key, publication, tenant_id).await?,
+        )),
+        PublicationOutcome::AlreadyDecided { decided } => {
+            Ok(PublicationVerdict::AlreadyDecided { decided })
+        }
+    }
+}
+
+/// Ask the authority whether any transaction in the candidate is decided,
+/// asynchronously.
+///
+/// The asynchronous sibling of [`classify_loss`], resolving through
+/// [`resolve_outcome_async`] — which replays the authenticated decision stream
+/// **and** consults the accelerator — rather than through the accelerator
+/// alone. The classification itself is [`classify_decided`], shared with the
+/// synchronous sibling.
+async fn classify_loss_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    publication: &VerifiedPublication,
+    tenant_id: TenantId,
+) -> Result<LostCandidate, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let repository_id = publication.batch().repository_id;
+    let mut decided = Vec::new();
+    for decision in &publication.batch().decisions {
+        if let OutcomeLookup::Decided(outcome) = resolve_outcome_async(
+            store,
+            cx,
+            head_key,
+            tenant_id,
+            repository_id,
+            decision.tx_id,
+        )
+        .await?
+        {
+            decided.push((decision.tx_id, outcome));
+        }
+    }
+    Ok(classify_decided(decided))
 }
