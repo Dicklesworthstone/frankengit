@@ -1168,3 +1168,211 @@ fn a_receipt_matching_the_stage_confirms_durability() {
         "the receipt's durability evidence must survive into the capability",
     );
 }
+
+// ---------------------------------------------------------------------------
+// frankengit-6c3r: the FOURTH verdict arm.
+//
+// `StagedCompaction::publish` matches four arms of `PublicationVerdict` and
+// maps each to a different execution outcome:
+//
+//   Published       -> Visible
+//   Lost            -> Unpublished(AuthorityRaceLost)
+//   AlreadyDecided  -> Unpublished(AlreadyDecided)
+//   Err(failure)    -> Indeterminate
+//
+// Three were pinned above — the section header two blocks up says "the three
+// outcomes", and that undercount is the gap. The fourth is §5.2's arm: one
+// sealed transaction has at most one terminal decision, and a batch whose
+// transaction is already terminal must not be re-decided.
+//
+// Note which `AlreadyDecided` this is. Three distinct types carry the name:
+// `fgit-authority`'s `PublicationOutcome::AlreadyDecided` (tested in that
+// crate), `fgit-chronicle`'s `PublicationVerdict::AlreadyDecided`, and this
+// crate's `CompactionPublicationRefusal::AlreadyDecided`. A grep for the bare
+// word finds the tested one and reports a false green.
+// ---------------------------------------------------------------------------
+
+/// **§5.2.** A transaction that already reached a terminal decision is refused
+/// as `AlreadyDecided`, and that is NOT a lost race.
+///
+/// Driven through the real authority path rather than a store double: the
+/// first publication lands, and the second is built on the **successor** head
+/// so it passes every `validate_publication` guard, against the **current**
+/// token so its CAS predecessor is correct. The only thing wrong with it is
+/// that `commit_record` pins one `tx_id`, so both batches carry the same
+/// transaction — and that transaction is already terminal.
+///
+/// A double returning the verdict would prove the match arm compiles. This
+/// proves the protocol reaches it.
+///
+/// The distinction from `AuthorityRaceLost` is the point, and both arms land on
+/// `Unpublished` with the staged output intact, so a probe that only checked
+/// `Unpublished` could not tell them apart. They mean opposite things to an
+/// operator: a lost race says retry against the new head; an already-terminal
+/// transaction says do **not** retry, the decision exists. Chronicle's own
+/// comment says this arm is deliberately not routed through `classify_loss`,
+/// because the head did not move.
+#[test]
+fn a_transaction_that_is_already_terminal_reports_already_decided_not_a_lost_race() {
+    let input = basis();
+    let head_key = HeadKey::new(b"6c3r/already-decided".to_vec()).expect("bounded head key");
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7d));
+    initialize_repository(&store, &head_key, input.body()).expect("genesis initializes");
+
+    let first_staged = stage(&input);
+    let first = publication(input.clone(), &first_staged);
+    match first_staged.publish(
+        &store,
+        &head_key,
+        current_token(&store, &head_key),
+        &first,
+        tenant(),
+    ) {
+        CompactionExecution::Visible(_) => {}
+        other => panic!("the first publication must land: {other:?}"),
+    }
+
+    // Re-publish the IDENTICAL batch: same basis, same record, so the same
+    // compaction-generation link and therefore the same committed RCR. A
+    // duplicate that produced *different* canonical content would not be
+    // idempotent -- it would be one transaction with two different terminal
+    // outcomes, which is the conflict §5.2 exists to prevent, and a different
+    // failure entirely.
+    let second_staged = stage(&input);
+    let second = publication(input, &second_staged);
+    match second_staged.publish(
+        &store,
+        &head_key,
+        current_token(&store, &head_key),
+        &second,
+        tenant(),
+    ) {
+        CompactionExecution::Unpublished(unpublished) => {
+            assert_eq!(
+                unpublished.reason(),
+                &CompactionPublicationRefusal::AlreadyDecided,
+                "an already-terminal transaction must not be re-decided"
+            );
+            assert_ne!(
+                unpublished.reason(),
+                &CompactionPublicationRefusal::AuthorityRaceLost,
+                "the head did not move, so this is not a lost race; reporting one \
+                 would tell the caller to discard positions that are still valid"
+            );
+        }
+        CompactionExecution::Indeterminate(_) => panic!(
+            "an already-terminal transaction is a DEFINITE non-move, not an unknown: \
+             the head did not move and nothing was attempted"
+        ),
+        other @ CompactionExecution::Visible(_) => {
+            panic!("re-deciding a terminal transaction cannot publish a generation: {other:?}")
+        }
+    }
+}
+
+/// The staged output survives an already-decided refusal, exactly as it does a
+/// lost race.
+///
+/// Asserted separately because it is what makes the reason worth reporting: the
+/// caller still holds everything it staged, and the reason is the only thing
+/// telling it whether replanning is appropriate.
+#[test]
+fn an_already_decided_refusal_keeps_the_staged_output() {
+    let input = basis();
+    let head_key = HeadKey::new(b"6c3r/already-decided-staged".to_vec()).expect("bounded head key");
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7e));
+    initialize_repository(&store, &head_key, input.body()).expect("genesis initializes");
+
+    let first_staged = stage(&input);
+    let first = publication(input.clone(), &first_staged);
+    match first_staged.publish(
+        &store,
+        &head_key,
+        current_token(&store, &head_key),
+        &first,
+        tenant(),
+    ) {
+        CompactionExecution::Visible(_) => {}
+        other => panic!("the first publication must land: {other:?}"),
+    }
+
+    let second_staged = stage(&input);
+    let handed_in = second_staged.generation();
+    let second = publication(input, &second_staged);
+    match second_staged.publish(
+        &store,
+        &head_key,
+        current_token(&store, &head_key),
+        &second,
+        tenant(),
+    ) {
+        CompactionExecution::Unpublished(unpublished) => {
+            assert_eq!(
+                unpublished.reason(),
+                &CompactionPublicationRefusal::AlreadyDecided
+            );
+            let recovered = unpublished.into_staged();
+            assert_eq!(
+                recovered.generation(),
+                handed_in,
+                "into_staged must hand back exactly the compaction that was attempted, \
+                 so a caller can re-plan it against a fresh authenticated basis"
+            );
+        }
+        other => panic!("expected an already-decided refusal: {other:?}"),
+    }
+}
+
+/// **Why `Codec` is not reachable through `stage`.**
+///
+/// `stage` calls `record.validate()` and maps failure to `Record`. The very
+/// next statement calls `record.generation_id()`, which calls `self.validate()`
+/// **again** and maps failure to `Codec`. The earlier guard subsumes the later
+/// one's validation half, so no invalid record can reach the `Codec` arm this
+/// way — what remains behind `Codec` is the crypto identity computation for a
+/// record that already validated.
+///
+/// This is recorded as a test rather than a comment because it is the ordering
+/// that makes it true: move the two statements and the same input reports the
+/// other variant. Measured, not argued — the bead's mutation matrix records
+/// that deleting the `Codec` arm changes no test result here.
+#[test]
+fn an_invalid_record_reports_record_because_that_guard_precedes_the_codec_one() {
+    let input = basis();
+    let mut invalid = record(&input);
+    // A totality entry naming a pack root the outputs never list. The map's own
+    // shape check passes; the cross-reference check inside `validate` is what
+    // refuses.
+    invalid.totality = SourceOutputTotalityMap::new(vec![
+        TotalityEntry {
+            source: SourceEntry::Object(object()),
+            disposition: OutputDisposition::Stored {
+                pack_root: digest(0x7f),
+                segment_manifest: derived!(SegmentManifestId, 0x51),
+            },
+        },
+        TotalityEntry {
+            source: SourceEntry::Decision(DecisionSequence::FIRST),
+            disposition: OutputDisposition::DocumentedDrop {
+                evidence_root: digest(0x42),
+            },
+        },
+    ])
+    .expect("the map's shape is well formed; only the cross-reference is wrong");
+
+    let refusal = StagedCompaction::stage(
+        invalid,
+        OutputStageReceipt::new(vec![PublicationState::new(true, false, false); 3])
+            .expect("all physical outputs are staged"),
+    )
+    .expect_err("a record whose totality names an unknown output cannot stage");
+
+    assert!(
+        matches!(refusal, CompactionPublicationRefusal::Record(_)),
+        "the validate() guard owns this refusal, got {refusal:?}"
+    );
+    assert!(
+        !matches!(refusal, CompactionPublicationRefusal::Codec(_)),
+        "reaching Codec would mean the identity computation ran on an unvalidated record"
+    );
+}
