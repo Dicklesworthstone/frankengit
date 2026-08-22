@@ -242,7 +242,16 @@ fn list_marker(text: &str, indent_columns: usize, content_start: usize) -> Optio
         start,
         character,
         content_columns: indent_columns + marker_len + width,
-        content_start: content_start + marker_len + if content_is_empty { 0 } else { offset },
+        // More than four columns after a marker designate an indented code
+        // block. Consume only its required separator column so the nested
+        // parser can still observe the remaining indentation.
+        content_start: content_start
+            + marker_len
+            + if content_is_empty || spaces <= 4 {
+                offset
+            } else {
+                1
+            },
         content_is_empty,
     })
 }
@@ -456,7 +465,9 @@ fn block_quote(
 ) -> Result<usize, Refusal> {
     let mut inner = Vec::new();
     let mut end = cursor;
-    let mut in_fence = false;
+    // A boolean loses the opener's character and length, so it can mistake a
+    // shorter or mismatched fence for a close while deciding lazy continuations.
+    let mut open_fence = None;
     let mut previous_is_text = false;
     while let Some(line) = lines.get(end).copied() {
         let (indent_columns, content_start) = measure_indent(ctx.source, line.start);
@@ -472,10 +483,22 @@ fn block_quote(
                 term_end: line.term_end,
             };
             let stripped_text = ctx.line_text(stripped);
-            let (_, stripped_content) = measure_indent(ctx.source, stripped.start);
+            let (stripped_indent, stripped_content) = measure_indent(ctx.source, stripped.start);
             let stripped_rest = ctx.source.get(stripped_content..stripped.end).unwrap_or("");
-            if fence_open(stripped_rest).is_some() {
-                in_fence = !in_fence;
+            if stripped_indent < 4 {
+                match open_fence {
+                    Some((character, length))
+                        if is_fence_close(stripped_rest, character, length) =>
+                    {
+                        open_fence = None;
+                    }
+                    None => {
+                        if let Some(fence) = fence_open(stripped_rest) {
+                            open_fence = Some((fence.character, fence.length));
+                        }
+                    }
+                    Some(_) => {}
+                }
             }
             previous_is_text = !stripped_text.trim().is_empty();
             inner.push(stripped);
@@ -486,7 +509,7 @@ fn block_quote(
             break;
         }
         let is_lazy = previous_is_text
-            && !in_fence
+            && open_fence.is_none()
             && !ctx.is_blank(line)
             && !starts_new_block(ctx, line)
             && !rest.starts_with('>');

@@ -325,6 +325,37 @@ fn nested_containers_render_with_stable_prefixes() {
 }
 
 #[test]
+fn quoted_indented_fence_does_not_disable_lazy_continuation() {
+    assert_eq!(
+        html_of("> paragraph\n>     ```\nlazy\n"),
+        "<blockquote>\n<p>paragraph\n```\nlazy</p>\n</blockquote>\n"
+    );
+}
+
+#[test]
+fn quoted_fence_closes_only_with_matching_fence() {
+    assert_eq!(
+        html_of("> ````\n> code\n> ```\noutside\n"),
+        concat!(
+            "<blockquote>\n<pre><code>code\n```\n</code></pre>\n",
+            "</blockquote>\n<p>outside</p>\n"
+        )
+    );
+}
+
+#[test]
+fn list_marker_preserves_padding_after_five_columns() {
+    assert_eq!(html_of("-    text\n"), "<ul>\n<li>text</li>\n</ul>\n");
+    assert_eq!(
+        html_of("-     code\n"),
+        concat!(
+            "<ul>\n<li>\n<pre><code>code\n</code></pre>\n",
+            "</li>\n</ul>\n"
+        )
+    );
+}
+
+#[test]
 fn the_compact_profile_keeps_one_node_on_one_line_under_hostile_text() {
     let document = parse("a\\\\b and a\ttab\n")
         .expect("document parses")
