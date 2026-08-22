@@ -88,9 +88,30 @@ pub enum ProposalRefusal {
     ExistenceIsNotCommit,
     /// The proposal names a tree the plan does not contain.
     TreeNotInPlan,
-    /// A ref intent carried no precondition.
+    /// A ref intent carried an EMPTY REF NAME.
+    ///
+    /// The name says "precondition" and the sole construction site (`seal`)
+    /// fires on `intent.name.is_empty()`, which is a different condition
+    /// (frankengit-duo3). The doc and `Display` here describe what it actually
+    /// checks; the variant name is left alone because renaming a public variant
+    /// is an API change and the call is a design one, not a defect fix.
+    ///
+    /// THERE IS NO MISSING PRECONDITION CHECK TO ADD, which is worth stating
+    /// because that is the alarming reading. `ExpectedRef` has exactly two
+    /// variants, `Absent` and `Exactly`, with no unconditional case, so an
+    /// intent cannot be built without stating a precondition and there is
+    /// nothing for `seal` to verify at runtime. Note that the neighbouring
+    /// `ExpectedRefState` (`fgit-reference` refs.rs:57) DOES carry an `Any` =
+    /// "no precondition asserted" variant, so a reader crossing between the two
+    /// crates may expect this to guard that case. It does not, and need not.
     MissingPrecondition {
         /// The ref name bytes.
+        ///
+        /// Always EMPTY by construction: this variant is raised only where
+        /// `name.is_empty()` already holds, so the field can never carry
+        /// information. `Display` therefore does not interpolate it. Retained
+        /// rather than removed because dropping it is the same public API
+        /// change as the rename.
         name: Vec<u8>,
     },
     /// Two intents target the same ref, so the proposal is not target-disjoint.
@@ -116,11 +137,9 @@ impl Display for ProposalRefusal {
             Self::TreeNotInPlan => {
                 write!(formatter, "the proposed tree is not present in the plan")
             }
-            Self::MissingPrecondition { name } => write!(
-                formatter,
-                "ref {} carries no precondition",
-                String::from_utf8_lossy(name)
-            ),
+            Self::MissingPrecondition { .. } => {
+                write!(formatter, "a ref intent carries an empty ref name")
+            }
             Self::DuplicateRefTarget { name } => write!(
                 formatter,
                 "ref {} is targeted twice; a proposal must be target-disjoint",
@@ -150,9 +169,16 @@ impl<A: GitHashAlgorithm> ProposedTransaction<A> {
     /// Seals a proposal over an export plan.
     ///
     /// Validates that the proposed tree is actually in the plan, that every ref
-    /// intent carries a precondition, and that no two intents target one ref.
+    /// intent carries a non-empty name, and that no two intents target one ref.
     /// A proposal that fails any of those is not built at all rather than built
     /// and flagged.
+    ///
+    /// This previously said "carries a precondition", which no line of this
+    /// function checks (frankengit-duo3). The precondition invariant is real
+    /// but is enforced by `ExpectedRef` having no unconditional variant, so it
+    /// holds before `seal` is entered and cannot fail here. Naming a
+    /// type-enforced invariant as a runtime validation invites someone to trust
+    /// a check that does not exist, and to add one that cannot fire.
     pub fn seal(
         workspace_id: WorkspaceId,
         plan: &ExportPlan<A>,

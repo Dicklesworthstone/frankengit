@@ -743,6 +743,28 @@ fn sealing_refuses_malformed_proposals() {
         Err(ProposalRefusal::DuplicateRefTarget { .. })
     ));
 
+    // An EMPTY REF NAME. Reachable through `seal` and covered by nothing until
+    // frankengit-duo3: the refusal was declared, documented as "carried no
+    // precondition", and never asserted, so neither the guard nor its message
+    // was exercised. The name is the condition -- `ExpectedRef` has no
+    // unconditional variant, so a missing precondition is not constructible.
+    let unnamed = vec![ProposedRefIntent {
+        name: Vec::new(),
+        expected: ExpectedRef::Absent,
+        new: *plan.root_tree(),
+    }];
+    let refused = ProposedTransaction::seal(workspace, &plan, receipt(), unnamed)
+        .expect_err("an empty ref name is refused");
+    assert!(matches!(
+        refused,
+        ProposalRefusal::MissingPrecondition { .. }
+    ));
+    // The rendered message must describe the condition that fired. Before
+    // duo3 this read "ref  carries no precondition" -- a blank where the name
+    // belongs, naming a cause that cannot occur.
+    let rendered = refused.to_string();
+    assert_eq!(rendered, "a ref intent carries an empty ref name");
+
     let wrong_tree = PositionReceipt {
         proposed_tree_oid: Oid::of_object(GitObjectKind::Blob, b"not in the plan"),
         ..receipt()

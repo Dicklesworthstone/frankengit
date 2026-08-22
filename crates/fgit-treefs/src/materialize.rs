@@ -61,8 +61,25 @@ pub enum MaterializeRefusal {
     Object(String),
     /// An object's identity is too short to split into a loose-object path.
     ///
-    /// Git splits the hex identity after two characters; an identity shorter
-    /// than that has no valid placement and is refused rather than padded.
+    /// Git splits the hex identity after two characters, so a placement needs
+    /// at least THREE: two for the directory and one or more for the filename.
+    /// The guard is `< 3`, not `< 2` -- a two-character identity would render
+    /// `objects/ab/`, a directory with an empty filename rather than an object
+    /// path. Refused rather than padded.
+    ///
+    /// UNREACHABLE BY CONSTRUCTION, caller-independent (frankengit-duo3).
+    /// `hex` comes from `hex_of(oid.digest_bytes())`, two characters per byte.
+    /// Every `DigestBytes` is built by `DigestBytes::try_new`
+    /// (`fgit-types` hash.rs:74), which is the type's ONLY constructor -- no
+    /// `Default`, no unchecked variant, no public fields -- and it refuses
+    /// anything below `MIN_DIGEST_LEN` = 16 bytes (hash.rs:23, :75). The
+    /// shortest reachable identity is therefore 32 hex characters against a
+    /// guard needing fewer than 3: a margin of 29. No caller can narrow that,
+    /// because the bound lives in the type rather than in a convention.
+    ///
+    /// Kept as a fail-closed guard. It starts earning its keep the day a
+    /// digest type admits a body under two bytes, which is exactly when a
+    /// silent `&hex[..2]` panic would otherwise appear.
     IdentityTooShort {
         /// Hex length observed.
         observed: usize,

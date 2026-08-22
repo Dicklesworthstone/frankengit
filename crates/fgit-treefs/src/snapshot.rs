@@ -80,6 +80,25 @@ pub enum EpochRefusal {
         visible: WorkspaceEpoch,
     },
     /// An epoch would move backwards.
+    ///
+    /// UNREACHABLE BY CONSTRUCTION, caller-independent (frankengit-duo3), and
+    /// constructed at zero sites -- unlike its two siblings, which are raised
+    /// at five. This is NOT a check that was forgotten: `EpochSet` offers no
+    /// backwards transition to guard. `stage` advances with
+    /// `WorkspaceEpoch::next`; `publish` assigns `visible := staged` under an
+    /// invariant that already guarantees `staged >= visible`; `sync` assigns
+    /// `durable := visible` likewise. `EpochSet` is `Copy` and every method
+    /// takes `self` by value, so "this epoch moved backwards" is not
+    /// expressible on a value, and `try_new` builds a fresh set without
+    /// comparing against any predecessor.
+    ///
+    /// KEPT DELIBERATELY, and the distinction is the point. AGENTS.md 5.5 says
+    /// never silently roll back. Today that assurance comes from the ABSENCE of
+    /// a backwards operation, not from this refusal -- a reader who sees the
+    /// variant and concludes the guard is wired would be right about the
+    /// outcome and wrong about the mechanism. The two stop being equivalent the
+    /// moment an absolute setter (`with_visible(epoch)` or similar) is added,
+    /// which is when this variant becomes load-bearing and must be raised.
     NonMonotone {
         /// The epoch it holds now.
         current: WorkspaceEpoch,
