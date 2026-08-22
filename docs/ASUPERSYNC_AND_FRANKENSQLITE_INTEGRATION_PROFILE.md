@@ -18,6 +18,43 @@ The following local source snapshots were inspected to plan the first dependency
 | sqlmodel_rust | `23da90cdfe057162d436417bbc4af7ec206ed48e` | Asupersync `=0.4.4`; local absolute `[patch]` entries for an older FrankenSQLite checkout | adopted projection substrate; its owned upstream must remove unpublished paths and align with the selected FrankenSQLite/runtime constellation before integration |
 | FrankenTUI | `a136062fa3e4f325a45414d00f35e39a0de27870` | optional Asupersync executor requires `0.3.9` | adopted TUI; its owned upstream must advance to the selected one-runtime constellation before FrankenGit integration |
 
+### 1.1 The pin of record is the crates.io checksum, not the git revision
+
+The "Reviewed revision" column above is a **non-binding human reference**. It
+names the tree a human read; it does not name what the build consumes, and
+nothing verifies the two are the same artifact.
+
+The **binding pin for FrankenSQLite is the crates.io content checksum recorded
+in `Cargo.lock`**:
+
+| Crate | Version | Binding pin (crates.io checksum) |
+|---|---|---|
+| `fsqlite` | `0.3.7` | `sha256:0b7b5b479b155c0c6f32a4e725d33b5b7fc89303a821566ddb0711238883847c` |
+
+Why the checksum and not the revision, stated so this is not re-litigated: the
+checksum is content-addressed and exact, cargo enforces it on every build, and a
+mismatch fails closed. The git revision is neither enforced nor verifiable from
+here — upstream publishes no revision-to-release linkage, so
+`f99d639b019c1400e55135c8ee4ba988f2587df9` cannot be shown to be the tree that
+produced `0.3.7`. Treating an unverifiable reference as a pin would be recording
+provenance the project cannot check, which §10 forbids.
+
+Consequences, so the distinction is operational rather than decorative:
+
+- an audit that cites the revision alone has **not** identified the admitted
+  artifact; it must cite the checksum;
+- a checksum change is a dependency change and requires re-admission through
+  `registries/dependency_policy.tsv`, whatever the revision says;
+- a revision change with an unchanged checksum changes nothing that binds;
+- `registries/dependency_policy.tsv` already keys its fsqlite rows (DEP-176
+  onward) on the version rather than a revision, so no registry row asserts a
+  revision pin and none needed amending for this ruling.
+
+This paragraph is retired only if upstream publishes a verifiable
+revision-to-release linkage, at which point the revision may be recorded
+alongside the checksum — still not instead of it. Ruled by GoldLotus on bead
+`frankengit-z4ly`, following FG-005 bullet 7.
+
 Cargo can install multiple semver-incompatible 0.x versions, but FrankenGit may not: two Asupersync versions are two runtime/type universes even if Cargo resolves both. “The resolver found a build” is therefore not an admission result. The adopted stack cannot enter FrankenGit until repository-owned probes compile every exact feature closure against one selected Asupersync and the dependency checker verifies the resulting lockfile. Failure leaves the integration beads blocked pending sibling updates; it does not reopen the architecture decision.
 
 The snapshots above can drift. An implementation bead must re-audit the live source and record the exact selected revisions, public-contract fingerprints, features, licenses, build scripts, proc macros, transitive unsafe, native code, and removal/port path. No release-facing FrankenGit crate may commit an absolute or unpublished sibling path.
