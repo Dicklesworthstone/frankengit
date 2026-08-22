@@ -491,3 +491,82 @@ fn genesis_head_body() -> fgit_codec::RepositoryAuthorityHeadBody {
         last_checkpoint_id: None,
     }
 }
+
+// ---------------------------------------------------------------------------
+// frankengit-nhpp: cancellation outranks the refusal that would otherwise fire
+//
+// materialize_current_in opens with a catch-up checkpoint BEFORE it reads the
+// head:
+//
+//     ensure_materializer_catch_up_live(is_cancelled)?;      <- notch 0
+//     let HeadRead::Present(receipt) = authority.read_head(..) else {
+//         return Err(AdmissionMaterializationRefusal::HeadAbsent);
+//     };
+//
+// `is_cancelled` is caller-supplied, so which of the two a caller sees is a
+// precedence question, and §3.2 answers it: cancellation is a protocol, not an
+// error code, and a cancelled request must not be told its head is absent —
+// absent invites initialization.
+//
+// The deeper notches of that dial (the cache scope, and `CacheContainment`)
+// need `OneNode`'s PRIVATE fields — `authority`, `admission_materializer`,
+// `head_key`, `runtime` are all private with no public accessor — so they are
+// an in-crate experiment, not a gap reachable from here. Recorded on the bead.
+// ---------------------------------------------------------------------------
+
+/// An `is_cancelled` that reports cancellation from the very first poll.
+fn cancelled_immediately() -> impl Fn() -> bool + Sync {
+    || true
+}
+
+/// **§3.2 outranks §5.1 here.** A caller cancelled before the head is read is
+/// told `Cancelled`, not `HeadAbsent` — against the very same empty slot that
+/// `an_uninitialized_head_slot_is_head_absent` shows refuses as absent.
+///
+/// Asserted as a difference rather than in isolation: the two tests drive an
+/// identical store and head key and differ only in the cancellation closure, so
+/// the outcome is attributable to that one switch.
+#[test]
+fn cancellation_outranks_the_absent_head_it_would_otherwise_report() {
+    let store = StagingStore::real();
+    let refusal = poll_ready(materializer().materialize_current_in(
+        &store,
+        &(),
+        &head_key(),
+        repository(),
+        &cancelled_immediately(),
+    ))
+    .expect_err("a cancelled materialization must refuse");
+
+    assert!(
+        matches!(refusal, AdmissionMaterializationRefusal::Cancelled),
+        "expected Cancelled, got {refusal:?}"
+    );
+    assert!(
+        !matches!(refusal, AdmissionMaterializationRefusal::HeadAbsent),
+        "a cancelled caller must never be told the head is absent: absent invites \
+         initialization, and this caller asked to stop rather than to discover an empty slot"
+    );
+}
+
+/// The permitted twin for the switch above: the same call with a closure that
+/// never fires reaches the head read and reports `HeadAbsent`.
+///
+/// Without this the probe above could be the materializer refusing everything
+/// once a closure is supplied at all.
+#[test]
+fn a_closure_that_never_cancels_leaves_the_underlying_refusal_intact() {
+    let store = StagingStore::real();
+    let refusal = poll_ready(materializer().materialize_current_in(
+        &store,
+        &(),
+        &head_key(),
+        repository(),
+        &never_cancelled(),
+    ))
+    .expect_err("an empty slot still refuses");
+    assert!(
+        matches!(refusal, AdmissionMaterializationRefusal::HeadAbsent),
+        "with no cancellation the head read owns the refusal, got {refusal:?}"
+    );
+}
