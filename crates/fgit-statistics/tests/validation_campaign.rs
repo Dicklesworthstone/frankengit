@@ -603,13 +603,30 @@ fn validate_expected_loss() -> Record {
     }
 
     // The identity that catches a sign or ordering error no single value can:
-    // a posterior compared against itself must be exactly one half.
+    // a posterior compared against itself is exactly one half.
+    //
+    // Asserted as a one-ppm band rather than an equality, and that is not slack.
+    // Every division in the evaluation floors, so the computed sum is strictly
+    // below the exact value; the exact value here is 1/2, which sits *on* a ppm
+    // boundary, so any downward error at all crosses it and the module reports
+    // 499_999. A boundary is the one place an arithmetic error of ~4e-27 changes
+    // the reported integer -- and self-comparison is a boundary by construction,
+    // so the identity best suited to catching a sign or ordering error is
+    // exactly the one that cannot be asserted exactly.
+    //
+    // The band is closed ABOVE at 500_000 deliberately. Flooring makes the error
+    // one-directional, which is the property worth keeping: an under-stated
+    // P(theta_b > theta_a) under-states a candidate's advantage over its pinned
+    // fallback, so it can delay a policy switch but never provoke one. An
+    // overestimate would invert that, so this fails on 500_001 rather than
+    // tolerating it.
     for alpha in [2_u32, 4, 17] {
-        assert_eq!(
-            probability_b_exceeds_a_ppm(prior(alpha, alpha), prior(alpha, alpha))
-                .expect("evaluable"),
-            500_000,
-            "an arm compared against itself must be exactly even"
+        let got = probability_b_exceeds_a_ppm(prior(alpha, alpha), prior(alpha, alpha))
+            .expect("evaluable");
+        assert!(
+            (499_999..=500_000).contains(&got),
+            "an arm compared against itself must be one half to within the module's stated 1 ppm, \
+             and never above it; got {got}"
         );
     }
 

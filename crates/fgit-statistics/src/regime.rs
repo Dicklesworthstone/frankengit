@@ -11,7 +11,7 @@
 //! **That was wrong**, and the correction is worth carrying because the reason it
 //! was wrong is instructive: `crates/fgit-raptorq/src/lib.rs` passes
 //! `repair_overhead: 1.0` to `asupersync`'s `EncodingConfig` and `DecodingConfig`,
-//! whose field is float-typed in the admitted runtime's own API. Both JadeFalcon
+//! whose field is float-typed in the admitted runtime's own API. Both `JadeFalcon`
 //! and I had measured the claim by grepping for the type *names*, and the name
 //! never appears there — it is inferred from the struct field. A float can enter
 //! production source without anyone writing its type.
