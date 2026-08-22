@@ -109,7 +109,6 @@ impl PeerCapabilities {
     }
 
     /// Declared ATP-Git profiles in canonical order.
-    #[must_use]
     pub fn profiles(&self) -> impl Iterator<Item = AtpGitProfile> + '_ {
         self.profiles.iter().copied()
     }
@@ -159,10 +158,10 @@ impl AuthenticatedPeerCapabilities {
 /// Bound applied before ATP-Git accepts an untrusted inventory or payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransferLimits {
-    max_objects: u32,
-    max_payload_bytes: u64,
-    max_total_reconstruction_bytes: u64,
-    max_probabilistic_summary_bytes: usize,
+    objects: u32,
+    payload_bytes: u64,
+    reconstruction_bytes: u64,
+    probabilistic_summary_bytes: usize,
 }
 
 impl TransferLimits {
@@ -181,35 +180,35 @@ impl TransferLimits {
             return Err(AtpRefusal::InvalidLimits);
         }
         Ok(Self {
-            max_objects,
-            max_payload_bytes,
-            max_total_reconstruction_bytes,
-            max_probabilistic_summary_bytes,
+            objects: max_objects,
+            payload_bytes: max_payload_bytes,
+            reconstruction_bytes: max_total_reconstruction_bytes,
+            probabilistic_summary_bytes: max_probabilistic_summary_bytes,
         })
     }
 
     /// Maximum objects in one manifest closure.
     #[must_use]
     pub const fn max_objects(&self) -> u32 {
-        self.max_objects
+        self.objects
     }
 
     /// Maximum bytes in one transferred payload.
     #[must_use]
     pub const fn max_payload_bytes(&self) -> u64 {
-        self.max_payload_bytes
+        self.payload_bytes
     }
 
     /// Maximum cumulative bytes copied into verified reconstruction objects.
     #[must_use]
     pub const fn max_total_reconstruction_bytes(&self) -> u64 {
-        self.max_total_reconstruction_bytes
+        self.reconstruction_bytes
     }
 
     /// Maximum wire bytes in a probabilistic inventory summary.
     #[must_use]
     pub const fn max_probabilistic_summary_bytes(&self) -> usize {
-        self.max_probabilistic_summary_bytes
+        self.probabilistic_summary_bytes
     }
 }
 
@@ -307,9 +306,7 @@ impl TransferManifest {
         objects: Vec<TransferObjectEntry>,
         limits: TransferLimits,
     ) -> Result<Self, AtpRefusal> {
-        if u32::try_from(objects.len()).map_err(|_| AtpRefusal::TooManyObjects)?
-            > limits.max_objects
-        {
+        if u32::try_from(objects.len()).map_err(|_| AtpRefusal::TooManyObjects)? > limits.objects {
             return Err(AtpRefusal::TooManyObjects);
         }
         ensure_strictly_sorted(
@@ -327,19 +324,19 @@ impl TransferManifest {
                     expected: object_format,
                 });
             }
-            if entry.logical_size > limits.max_payload_bytes {
+            if entry.logical_size > limits.payload_bytes {
                 return Err(AtpRefusal::PayloadTooLarge {
                     offered: entry.logical_size,
-                    maximum: limits.max_payload_bytes,
+                    maximum: limits.payload_bytes,
                 });
             }
             total_logical_bytes = total_logical_bytes
                 .checked_add(entry.logical_size)
                 .ok_or(AtpRefusal::LengthOverflow)?;
-            if total_logical_bytes > limits.max_total_reconstruction_bytes {
+            if total_logical_bytes > limits.reconstruction_bytes {
                 return Err(AtpRefusal::ReconstructionBudgetExceeded {
                     offered: total_logical_bytes,
-                    maximum: limits.max_total_reconstruction_bytes,
+                    maximum: limits.reconstruction_bytes,
                 });
             }
             if let Some(previous) = prior {
@@ -350,12 +347,11 @@ impl TransferManifest {
                 }
             }
             prior = Some(entry.identity);
-            if let Some(previous_size) =
-                payload_sizes.insert(entry.payload_identity, entry.logical_size)
+            if payload_sizes
+                .insert(entry.payload_identity, entry.logical_size)
+                .is_some_and(|previous_size| previous_size != entry.logical_size)
             {
-                if previous_size != entry.logical_size {
-                    return Err(AtpRefusal::PayloadIdentitySizeMismatch);
-                }
+                return Err(AtpRefusal::PayloadIdentitySizeMismatch);
             }
         }
         for root in &requested_roots {
@@ -752,18 +748,21 @@ impl PlanSelector {
             select_delta(manifest.objects(), have)
         };
         let payloads = group_payloads(&selected);
-        let plan_kind = if let Some(reason) = fallback {
-            TransferPlanKind::FullClosureFallback(reason)
-        } else if selected.is_empty() && !requires_exact_closure_repair {
-            TransferPlanKind::AlreadyInSync
-        } else if payloads
-            .iter()
-            .any(|payload| payload.object_identities.len() > 1)
-        {
-            TransferPlanKind::UniqueContentDelta
-        } else {
-            TransferPlanKind::ObjectDelta
-        };
+        let plan_kind = fallback.map_or_else(
+            || {
+                if selected.is_empty() && !requires_exact_closure_repair {
+                    TransferPlanKind::AlreadyInSync
+                } else if payloads
+                    .iter()
+                    .any(|payload| payload.object_identities.len() > 1)
+                {
+                    TransferPlanKind::UniqueContentDelta
+                } else {
+                    TransferPlanKind::ObjectDelta
+                }
+            },
+            TransferPlanKind::FullClosureFallback,
+        );
         TransferPlan {
             payloads,
             receipt: PlanReceipt {
@@ -1391,7 +1390,7 @@ fn ensure_inventory_count(count: usize, limits: TransferLimits) -> Result<(), At
 }
 
 fn checked_summary_byte_count(bit_count: u32, limits: TransferLimits) -> Result<usize, AtpRefusal> {
-    if bit_count == 0 || bit_count % 8 != 0 {
+    if bit_count == 0 || !bit_count.is_multiple_of(8) {
         return Err(AtpRefusal::InvalidProbabilisticSummary);
     }
     let byte_count = usize::try_from(bit_count / 8).map_err(|_| AtpRefusal::LengthOverflow)?;
@@ -1406,7 +1405,7 @@ fn checked_summary_byte_count(bit_count: u32, limits: TransferLimits) -> Result<
 
 fn bloom_bits(identity: GitOid, bit_count: u32) -> [u32; 3] {
     let mut first = 14_695_981_039_346_656_037_u64;
-    let mut second = 10_995_116_282_11_u64;
+    let mut second = 1_099_511_628_211_u64;
     for byte in identity
         .algorithm()
         .code_point()
@@ -1422,9 +1421,10 @@ fn bloom_bits(identity: GitOid, bit_count: u32) -> [u32; 3] {
             .wrapping_add(1);
     }
     [
-        (first % u64::from(bit_count)) as u32,
-        (second % u64::from(bit_count)) as u32,
-        ((first ^ second.rotate_left(29)) % u64::from(bit_count)) as u32,
+        u32::try_from(first % u64::from(bit_count)).expect("modulo bit position fits u32"),
+        u32::try_from(second % u64::from(bit_count)).expect("modulo bit position fits u32"),
+        u32::try_from((first ^ second.rotate_left(29)) % u64::from(bit_count))
+            .expect("modulo bit position fits u32"),
     ]
 }
 
@@ -1440,7 +1440,7 @@ fn payload_commitment(object_kind: ObjectKind, payload: &[u8]) -> Result<Commitm
         .map_err(AtpRefusal::Fabric)
 }
 
-fn crypto_kind(object_kind: ObjectKind) -> Result<fgit_crypto::GitObjectKind, AtpRefusal> {
+const fn crypto_kind(object_kind: ObjectKind) -> Result<fgit_crypto::GitObjectKind, AtpRefusal> {
     match object_kind {
         ObjectKind::Commit => Ok(fgit_crypto::GitObjectKind::Commit),
         ObjectKind::Tree => Ok(fgit_crypto::GitObjectKind::Tree),
@@ -1591,7 +1591,7 @@ mod tests {
                     .collect(),
             )
         );
-        assert!(first_plan.payloads().is_empty());
+        assert_eq!(first_plan.payloads(), []);
     }
 
     #[test]
@@ -1627,7 +1627,7 @@ mod tests {
                 closure: vec![object.identity()],
             }))
         );
-        assert!(quarantine.0.is_empty());
+        assert_eq!(quarantine.0.len(), 0);
     }
 
     #[test]
@@ -1659,7 +1659,7 @@ mod tests {
                 identity: requested.identity(),
             })
         );
-        assert!(quarantine.0.is_empty());
+        assert_eq!(quarantine.0.len(), 0);
     }
 
     #[test]
@@ -1702,7 +1702,7 @@ mod tests {
     fn probabilistic_false_positive_requests_exact_repair_without_staging_partial_closure() {
         let first = entry(ObjectKind::Blob, b"first");
         let second = entry(ObjectKind::Blob, b"second");
-        let manifest = manifest(vec![first.clone(), second.clone()]);
+        let manifest = manifest(vec![first.clone(), second]);
         let mut filter = BloomHaveSummary::empty(64, limits()).expect("valid filter");
         filter
             .insert(first.identity())
@@ -1737,7 +1737,7 @@ mod tests {
                 missing: vec![first.identity()],
             })
         );
-        assert!(quarantine.0.is_empty());
+        assert_eq!(quarantine.0.len(), 0);
 
         let complete = pipeline
             .reconstruct(
@@ -1772,7 +1772,7 @@ mod tests {
     fn equal_content_across_logical_kinds_uses_one_payload_with_independent_object_verification() {
         let blob = entry(ObjectKind::Blob, b"same");
         let commit = entry(ObjectKind::Commit, b"same");
-        let mut entries = vec![blob.clone(), commit.clone()];
+        let mut entries = vec![blob, commit];
         entries.sort_by_key(TransferObjectEntry::identity);
         let manifest = manifest(entries);
         let plan = PlanSelector::new(limits()).select(
@@ -1835,7 +1835,7 @@ mod tests {
             ),
             Err(AtpRefusal::UnrequestedPayload)
         );
-        assert!(quarantine.0.is_empty());
+        assert_eq!(quarantine.0.len(), 0);
     }
 
     #[test]
