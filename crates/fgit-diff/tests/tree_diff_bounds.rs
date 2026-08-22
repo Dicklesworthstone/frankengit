@@ -94,7 +94,7 @@ fn a_similarity_threshold_of_exactly_one_hundred_is_accepted() {
     let diff = diff_trees::<u8, _, _>(Vec::new(), Vec::new(), renames(100, 1))
         .expect("100 percent is the one threshold exact-object rename detection implements");
 
-    assert!(diff.changes.is_empty(), "two empty trees differ in nothing",);
+    assert!(diff.changes.is_empty(), "two empty trees differ in nothing");
 }
 
 /// A rename scan that would exceed its candidate budget is refused.
