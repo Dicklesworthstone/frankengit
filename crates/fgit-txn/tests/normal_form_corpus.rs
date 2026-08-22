@@ -720,6 +720,138 @@ fn programs() -> usize {
     }
 }
 
+/// The disagreement between the two folders, if there is one.
+///
+/// Extracted so the SAME comparison decides both the assertion and the
+/// shrinker's predicate. Two copies would let the shrinker minimise against a
+/// subtly different question from the one that actually failed, and report a
+/// "minimal" program that does not exhibit the reported fault.
+fn disagreement(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) -> Option<String> {
+    // Constructed here rather than threaded in: `IntentEvaluator` is
+    // zero-sized, so passing it by reference costs a pointer to nothing and
+    // clippy is right to object.
+    let evaluator = IntentEvaluator::new();
+    let forge_positions = forge_basis();
+    let retention = BTreeSet::new();
+    let outbox = BTreeMap::new();
+    let report = evaluator.evaluate(
+        FoldBasis {
+            refs: basis,
+            forge_positions: &forge_positions,
+            retention: &retention,
+            outbox: &outbox,
+        },
+        request,
+    );
+    let oracle = oracle_fold(basis, request);
+
+    match &report.outcome {
+        FoldOutcome::Folded(effects) => {
+            if oracle.aborted {
+                return Some("the evaluator folded, the oracle aborted".to_owned());
+            }
+            if effects.refs != oracle.refs {
+                return Some("surviving ref effects disagree".to_owned());
+            }
+        }
+        FoldOutcome::Aborted { .. } => {
+            if !oracle.aborted {
+                return Some("the evaluator aborted, the oracle folded".to_owned());
+            }
+        }
+    }
+
+    let theirs: Vec<OracleDisposition> = report
+        .mappings
+        .iter()
+        .map(|m| translate(&m.disposition))
+        .collect();
+    if theirs.len() != oracle.dispositions.len() {
+        return Some(format!(
+            "totality disagrees — {} mappings vs {} dispositions",
+            theirs.len(),
+            oracle.dispositions.len()
+        ));
+    }
+    if theirs != oracle.dispositions {
+        return Some("intent dispositions disagree (absorption reasons included)".to_owned());
+    }
+    None
+}
+
+/// How many intents a program carries, across all statements.
+fn intent_count(request: &TransactionRequest) -> usize {
+    request
+        .statements
+        .iter()
+        .map(|statement| statement.intents.len())
+        .sum()
+}
+
+/// Reduce a program that satisfies `still_fails` to a locally minimal one.
+///
+/// The acceptance asks that a failure "auto-shrinks to a minimal program".
+/// Greedy delta debugging: drop whole statements while the failure survives,
+/// then drop individual intents, and repeat until a pass changes nothing.
+/// Locally minimal rather than globally minimal -- no single further deletion
+/// preserves the failure, which is the property a reader needs and is reachable
+/// without searching subsets.
+///
+/// Deletion only. Nothing is mutated or reordered, so every candidate is a
+/// sub-program of the original and a minimal result cannot exhibit a fault the
+/// original did not.
+///
+/// CAVEAT, because the result is a diagnostic and not a replayable request:
+/// `canonical_request_digest` and `tx_id` are carried over unchanged and no
+/// longer describe the shrunken statements. That is sound here only because the
+/// fold path reads neither -- verified by grep against `effect.rs` and
+/// `fgit-txn/src/lib.rs`. A caller wanting to REPLAY a shrunken program must
+/// rebuild it through `RequestBuilder` so those fields are recomputed.
+fn shrink_to_minimal<F>(request: &TransactionRequest, still_fails: &F) -> TransactionRequest
+where
+    F: Fn(&TransactionRequest) -> bool,
+{
+    let mut best = request.clone();
+    loop {
+        let mut improved = false;
+
+        // Whole statements first: one deletion can remove many intents, so the
+        // cheap large reductions happen before the expensive small ones.
+        let mut index = best.statements.len();
+        while index > 0 {
+            index -= 1;
+            let mut candidate = best.clone();
+            candidate.statements.remove(index);
+            if still_fails(&candidate) {
+                best = candidate;
+                improved = true;
+            }
+        }
+
+        // Then individual intents, including emptying a statement entirely --
+        // an empty statement is still a statement and its mismatch policy may
+        // be part of the fault.
+        let mut statement = best.statements.len();
+        while statement > 0 {
+            statement -= 1;
+            let mut intent = best.statements[statement].intents.len();
+            while intent > 0 {
+                intent -= 1;
+                let mut candidate = best.clone();
+                candidate.statements[statement].intents.remove(intent);
+                if still_fails(&candidate) {
+                    best = candidate;
+                    improved = true;
+                }
+            }
+        }
+
+        if !improved {
+            return best;
+        }
+    }
+}
+
 /// Translate the evaluator's disposition into the oracle's vocabulary.
 ///
 /// The absorption reason is carried through rather than collapsed. Comparing on
@@ -750,7 +882,6 @@ fn translate(disposition: &IntentDisposition) -> OracleDisposition {
 
 #[test]
 fn the_oracle_and_the_evaluator_agree_on_every_generated_program() {
-    let evaluator = IntentEvaluator::new();
     let mut agreements = 0_usize;
 
     for i in 0..programs() {
@@ -760,54 +891,25 @@ fn the_oracle_and_the_evaluator_agree_on_every_generated_program() {
         let basis = generate_basis(&mut rng);
         let request = generate_request(&mut rng, &mut identity_mint, &basis, "corpus");
 
-        let forge_positions = forge_basis();
-        let retention = BTreeSet::new();
-        let outbox = BTreeMap::new();
-        let fold_basis = FoldBasis {
-            refs: &basis,
-            forge_positions: &forge_positions,
-            retention: &retention,
-            outbox: &outbox,
-        };
-
-        let report = evaluator.evaluate(fold_basis, &request);
-        let oracle = oracle_fold(&basis, &request);
-
-        match &report.outcome {
-            FoldOutcome::Folded(effects) => {
-                assert!(
-                    !oracle.aborted,
-                    "seed {seed:#x}: the evaluator folded, the oracle aborted"
-                );
-                assert_eq!(
-                    effects.refs, oracle.refs,
-                    "seed {seed:#x}: surviving ref effects disagree"
-                );
-            }
-            FoldOutcome::Aborted { .. } => {
-                assert!(
-                    oracle.aborted,
-                    "seed {seed:#x}: the evaluator aborted, the oracle folded"
-                );
-            }
+        // The acceptance asks that a failure auto-shrinks. A 10^5 campaign
+        // that reports "seed 0x… disagrees" hands the reader a program of up to
+        // a dozen intents to bisect by hand; the shrinker does it in the same
+        // run, against the identical predicate that failed.
+        if let Some(why) = disagreement(&basis, &request) {
+            let minimal = shrink_to_minimal(&request, &|candidate| {
+                disagreement(&basis, candidate).is_some()
+            });
+            panic!(
+                "seed {seed:#x}: {why}\n\
+                 shrunk from {} statements / {} intents to {} statements / {} intents, and no \
+                 single further deletion preserves the disagreement:\n{:#?}",
+                request.statements.len(),
+                intent_count(&request),
+                minimal.statements.len(),
+                intent_count(&minimal),
+                minimal.statements
+            );
         }
-
-        let theirs: Vec<OracleDisposition> = report
-            .mappings
-            .iter()
-            .map(|m| translate(&m.disposition))
-            .collect();
-        assert_eq!(
-            theirs.len(),
-            oracle.dispositions.len(),
-            "seed {seed:#x}: totality disagrees — {} mappings vs {} dispositions",
-            theirs.len(),
-            oracle.dispositions.len()
-        );
-        assert_eq!(
-            theirs, oracle.dispositions,
-            "seed {seed:#x}: intent dispositions disagree (absorption reasons included)"
-        );
         agreements += 1;
     }
 
@@ -1210,5 +1312,86 @@ fn the_intent_refusal_taxonomy_is_exhaustively_reached() {
         "the corpus should reach exactly the four intent refusal codes; \
          reaching more means the model grew and this claim needs updating, reaching none \
          means the statement-error path went untested. Reached: {reached:?}"
+    );
+}
+
+#[test]
+fn the_shrinker_reduces_a_planted_failure_to_its_minimum() {
+    // The shrinker runs only on failure, and there are no failures -- so
+    // without this test it would execute for the first time on the day it is
+    // needed most, which is the day nobody wants to debug it. A safety net
+    // nothing has ever pulled on is not a safety net.
+    //
+    // Planted rather than real, because manufacturing a genuine oracle/evaluator
+    // disagreement would mean deliberately breaking one of them. The predicate
+    // here has a KNOWN minimum instead: "this program still contains at least
+    // one intent" is satisfied by exactly one intent and by nothing smaller, so
+    // the expected result is checkable rather than eyeballed.
+    let mut rng = Rng::new(CORPUS_SEED);
+    let mut mint = IdentityMint::new(CORPUS_SEED);
+    let basis = generate_basis(&mut rng);
+
+    // Find a program with enough structure to exercise BOTH loops: more than
+    // one statement, and more than one intent.
+    let mut request = generate_request(&mut rng, &mut mint, &basis, "shrink");
+    for _ in 0..64 {
+        if request.statements.len() > 1 && intent_count(&request) > 2 {
+            break;
+        }
+        request = generate_request(&mut rng, &mut mint, &basis, "shrink");
+    }
+    assert!(
+        request.statements.len() > 1 && intent_count(&request) > 2,
+        "the planted program must be big enough that shrinking it means something; got {} \
+         statements / {} intents",
+        request.statements.len(),
+        intent_count(&request)
+    );
+
+    let before_statements = request.statements.len();
+    let before_intents = intent_count(&request);
+    let minimal = shrink_to_minimal(&request, &|candidate| {
+        candidate
+            .statements
+            .iter()
+            .any(|statement| !statement.intents.is_empty())
+    });
+
+    // It reduced.
+    assert!(
+        intent_count(&minimal) < before_intents,
+        "the shrinker returned a program no smaller than the original ({before_intents} \
+         intents); a shrinker that cannot shrink reports the failure it was given"
+    );
+
+    // It reduced to the KNOWN minimum, and not past it. Stopping short would
+    // leave a reader bisecting by hand; going past would mean it returned a
+    // program that does not exhibit the fault at all, which is worse than not
+    // shrinking.
+    assert_eq!(
+        intent_count(&minimal),
+        1,
+        "the predicate holds for exactly one intent, so a locally minimal program has exactly \
+         one; got {} intents across {} statements (from {before_statements} / {before_intents})",
+        intent_count(&minimal),
+        minimal.statements.len()
+    );
+    assert_eq!(
+        minimal.statements.len(),
+        1,
+        "an empty statement can always be deleted while the predicate holds, so none should \
+         survive; got {} statements",
+        minimal.statements.len()
+    );
+
+    // The invariant that makes the result trustworthy: the returned program
+    // still satisfies the predicate it was minimised against.
+    assert!(
+        minimal
+            .statements
+            .iter()
+            .any(|statement| !statement.intents.is_empty()),
+        "the shrinker returned a program that no longer satisfies the predicate; a minimal \
+         program that does not reproduce is a false lead, not a smaller lead"
     );
 }
