@@ -780,7 +780,7 @@ mod tests {
         RepositoryAuthorityHeadId::from_digest(
             DigestAlgorithmId::try_new(1).expect("valid digest algorithm"),
             CANONICAL_CODEC_VERSION,
-            DigestBytes::try_new(&[value; 32]).expect("valid digest bytes"),
+            DigestBytes::try_new(&[value; 20]).expect("valid digest bytes"),
         )
     }
 

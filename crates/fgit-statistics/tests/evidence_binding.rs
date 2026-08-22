@@ -25,7 +25,7 @@ fn slug(text: &str) -> AsciiSlug {
 fn fingerprint(seed: u8) -> Digest {
     Digest::new(
         DigestAlgorithmId::try_new(1).expect("nonzero code point"),
-        DigestBytes::try_new(&[seed; 32]).expect("32 bytes is in range"),
+        DigestBytes::try_new(&[seed; 20]).expect("20-byte SHA-1 digest fits its registered width"),
     )
 }
 

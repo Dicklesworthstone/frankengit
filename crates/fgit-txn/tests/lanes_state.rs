@@ -19,7 +19,7 @@ fn tx_id(tag: u8) -> TxId {
     TxId::from_digest(
         DigestAlgorithmId::try_new(1).expect("one is a valid digest algorithm"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 32]).expect("a 32-byte digest is valid"),
+        DigestBytes::try_new(&[tag; 20]).expect("a 20-byte SHA-1 digest is valid"),
     )
 }
 
@@ -27,7 +27,7 @@ fn capsule_id(tag: u8) -> PreparedTxnCapsuleId {
     PreparedTxnCapsuleId::from_digest(
         DigestAlgorithmId::try_new(1).expect("one is a valid digest algorithm"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 32]).expect("a 32-byte digest is valid"),
+        DigestBytes::try_new(&[tag; 20]).expect("a 20-byte SHA-1 digest is valid"),
     )
 }
 

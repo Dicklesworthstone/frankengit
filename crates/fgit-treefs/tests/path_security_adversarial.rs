@@ -42,7 +42,7 @@ fn rcr_id() -> RepositoryCommitId {
     RepositoryCommitId::from_digest(
         DigestAlgorithmId::try_new(1).expect("algorithm 1 is registered"),
         CodecVersion::new(1, 0),
-        DigestBytes::try_new(&[0x19; 32]).expect("fixture digest width is legal"),
+        DigestBytes::try_new(&[0x19; 20]).expect("fixture digest width is legal"),
     )
 }
 

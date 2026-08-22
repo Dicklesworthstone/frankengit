@@ -116,7 +116,7 @@ fn oid(hex: &str) -> GitOid {
 fn digest() -> Digest {
     Digest::new(
         fgit_types::hash::DigestAlgorithmId::try_new(1).expect("algorithm slot"),
-        fgit_types::hash::DigestBytes::try_new(&[7_u8; 32]).expect("digest body"),
+        fgit_types::hash::DigestBytes::try_new(&[7_u8; 20]).expect("digest body"),
     )
 }
 

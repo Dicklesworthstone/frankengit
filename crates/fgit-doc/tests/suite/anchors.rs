@@ -407,7 +407,7 @@ fn a_digest_over_the_preimage_becomes_a_domain_pinned_identity() {
     // A stand-in digest: this crate does not compute one, and the test must not
     // pretend otherwise. What is under test is the domain stamping, not the hash.
     let algorithm = fgit_types::hash::DigestAlgorithmId::try_new(1).expect("an algorithm slot");
-    let digest = fgit_types::hash::DigestBytes::try_new(&[0x11_u8; 32]).expect("digest bytes");
+    let digest = fgit_types::hash::DigestBytes::try_new(&[0x11_u8; 20]).expect("digest bytes");
     let codec = fgit_types::numeric::CodecVersion::new(1, 0);
     let identity = fgit_doc::document_anchor_id(algorithm, codec, digest);
     let internal = identity.as_internal_object_id();

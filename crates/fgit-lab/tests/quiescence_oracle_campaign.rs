@@ -46,7 +46,7 @@ use fgit_types::{
 fn digest(tag: u8) -> Digest {
     Digest::new(
         DigestAlgorithmId::try_new(1).expect("code point one is a valid algorithm slot"),
-        DigestBytes::try_new(&[tag; 32]).expect("thirty-two bytes is a valid digest body"),
+        DigestBytes::try_new(&[tag; 20]).expect("20-byte SHA-1 digest body is valid"),
     )
 }
 
@@ -54,7 +54,7 @@ fn envelope(tag: u8) -> ObjectEnvelopeId {
     ObjectEnvelopeId::from_digest(
         DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
     )
 }
 
@@ -62,7 +62,7 @@ fn head(tag: u8) -> RepositoryAuthorityHeadId {
     RepositoryAuthorityHeadId::from_digest(
         DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
     )
 }
 
@@ -70,7 +70,7 @@ fn batch(tag: u8) -> RepositoryDecisionBatchId {
     RepositoryDecisionBatchId::from_digest(
         DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
     )
 }
 
@@ -78,7 +78,7 @@ fn rcr(tag: u8) -> RepositoryCommitId {
     RepositoryCommitId::from_digest(
         DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
     )
 }
 
@@ -86,7 +86,7 @@ fn txid(tag: u8) -> TxId {
     TxId::from_digest(
         DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
     )
 }
 
@@ -94,7 +94,7 @@ fn principal_snapshot(tag: u8) -> PrincipalSnapshotId {
     PrincipalSnapshotId::from_digest(
         DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
     )
 }
 
@@ -102,7 +102,7 @@ fn generation(tag: u8) -> GenerationId {
     GenerationId::from_digest(
         DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
     )
 }
 
@@ -110,7 +110,7 @@ fn evidence_record(tag: u8) -> EvidenceRecordId {
     EvidenceRecordId::from_digest(
         DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
     )
 }
 
@@ -118,7 +118,7 @@ fn segment(tag: u8) -> SegmentManifestId {
     SegmentManifestId::from_digest(
         DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 32]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
     )
 }
 

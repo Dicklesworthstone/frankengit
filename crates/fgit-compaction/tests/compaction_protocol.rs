@@ -27,7 +27,7 @@ macro_rules! derived {
         <$ty>::from_digest(
             DigestAlgorithmId::try_new(1).expect("algorithm code point one is present"),
             CANONICAL_CODEC_VERSION,
-            DigestBytes::try_new(&[$tag; 32]).expect("fixture digest width is valid"),
+            DigestBytes::try_new(&[$tag; 20]).expect("fixture digest width is valid"),
         )
     };
 }
@@ -35,7 +35,7 @@ macro_rules! derived {
 fn digest(tag: u8) -> Digest {
     Digest::new(
         DigestAlgorithmId::try_new(1).expect("algorithm code point one is present"),
-        DigestBytes::try_new(&[tag; 32]).expect("fixture digest width is valid"),
+        DigestBytes::try_new(&[tag; 20]).expect("fixture digest width is valid"),
     )
 }
 

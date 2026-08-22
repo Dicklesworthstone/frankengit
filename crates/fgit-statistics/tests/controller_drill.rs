@@ -384,7 +384,7 @@ fn the_controller_produces_a_bindable_evidence_body() {
         assumptions: RetryBackoffController::assumptions().expect("fixed labels are valid"),
         fingerprint: Digest::new(
             DigestAlgorithmId::try_new(1).expect("nonzero"),
-            DigestBytes::try_new(&[7; 32]).expect("32 bytes"),
+            DigestBytes::try_new(&[7; 20]).expect("20-byte SHA-1 digest"),
         ),
     };
 

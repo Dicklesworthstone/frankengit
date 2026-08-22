@@ -287,7 +287,7 @@ fn base_view(root: Oid) -> BaseView<Sha1> {
         RepositoryCommitId::from_digest(
             DigestAlgorithmId::try_new(1).expect("algorithm 1 is registered"),
             CodecVersion::new(1, 0),
-            DigestBytes::try_new(&[9_u8; 32]).expect("fixture digest is a legal width"),
+            DigestBytes::try_new(&[9_u8; 20]).expect("fixture digest is a legal width"),
         ),
         root,
         root,

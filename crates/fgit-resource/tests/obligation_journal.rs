@@ -36,7 +36,7 @@ fn lane_slot() -> LaneSlot {
         transaction: TxId::from_digest(
             DigestAlgorithmId::try_new(1).expect("a valid algorithm slot"),
             CANONICAL_CODEC_VERSION,
-            DigestBytes::try_new(&[7; 32]).expect("a valid digest body"),
+            DigestBytes::try_new(&[7; 20]).expect("a valid digest body"),
         ),
     }
 }
@@ -45,7 +45,7 @@ fn batch_id() -> RepositoryDecisionBatchId {
     RepositoryDecisionBatchId::from_digest(
         DigestAlgorithmId::try_new(1).expect("a valid algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[9; 32]).expect("a valid digest body"),
+        DigestBytes::try_new(&[9; 20]).expect("a valid digest body"),
     )
 }
 

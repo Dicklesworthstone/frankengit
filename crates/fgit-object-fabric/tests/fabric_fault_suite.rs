@@ -458,11 +458,11 @@ fn proposal_fixture() -> RetentionRootProposal {
         RepositoryAuthorityHeadId::from_digest(
             DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
             CANONICAL_CODEC_VERSION,
-            DigestBytes::try_new(&[7; 32]).expect("fixture digest must fit"),
+            DigestBytes::try_new(&[7; 20]).expect("fixture digest must fit"),
         ),
         Digest::new(
             DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
-            DigestBytes::try_new(&[9; 32]).expect("fixture digest must fit"),
+            DigestBytes::try_new(&[9; 20]).expect("fixture digest must fit"),
         ),
         Vec::new(),
     )
@@ -698,11 +698,11 @@ fn a_retention_root_the_registry_refuses_does_not_publish() {
         RepositoryAuthorityHeadId::from_digest(
             DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
             CANONICAL_CODEC_VERSION,
-            DigestBytes::try_new(&[7; 32]).expect("fixture digest must fit"),
+            DigestBytes::try_new(&[7; 20]).expect("fixture digest must fit"),
         ),
         Digest::new(
             DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
-            DigestBytes::try_new(&[9; 32]).expect("fixture digest must fit"),
+            DigestBytes::try_new(&[9; 20]).expect("fixture digest must fit"),
         ),
         Vec::new(),
     )

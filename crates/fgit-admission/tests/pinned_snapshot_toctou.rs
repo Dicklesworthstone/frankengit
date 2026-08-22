@@ -101,7 +101,7 @@ type RefMap = BTreeMap<RefName, GitOid>;
 fn digest(seed: u8) -> Digest {
     Digest::new(
         DigestAlgorithmId::try_new(1).expect("non-zero algorithm id"),
-        DigestBytes::try_new(&[seed; 32]).expect("32-byte test digest"),
+        DigestBytes::try_new(&[seed; 20]).expect("20-byte SHA-1 test digest"),
     )
 }
 
@@ -109,7 +109,7 @@ fn principal_snapshot() -> PrincipalSnapshotId {
     PrincipalSnapshotId::from_digest(
         DigestAlgorithmId::try_new(1).expect("non-zero algorithm id"),
         fgit_types::CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[15; 32]).expect("32-byte test digest"),
+        DigestBytes::try_new(&[15; 20]).expect("20-byte SHA-1 test digest"),
     )
 }
 

@@ -20,7 +20,7 @@ fn head(tag: u8) -> RepositoryAuthorityHeadId {
     RepositoryAuthorityHeadId::from_digest(
         DigestAlgorithmId::try_new(1).expect("one is a registered digest algorithm"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 32]).expect("thirty-two bytes form a digest body"),
+        DigestBytes::try_new(&[tag; 20]).expect("20-byte SHA-1 digest body is valid"),
     )
 }
 

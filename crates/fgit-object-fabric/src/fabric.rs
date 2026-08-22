@@ -1371,7 +1371,7 @@ mod tests {
     fn digest(value: u8) -> Digest {
         Digest::new(
             DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
-            DigestBytes::try_new(&[value; 32]).expect("fixture digest must fit"),
+            DigestBytes::try_new(&[value; 20]).expect("fixture digest must fit"),
         )
     }
 
@@ -1542,7 +1542,7 @@ mod tests {
             RepositoryAuthorityHeadId::from_digest(
                 DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
                 CANONICAL_CODEC_VERSION,
-                DigestBytes::try_new(&[3; 32]).expect("fixture digest must fit"),
+                DigestBytes::try_new(&[3; 20]).expect("fixture digest must fit"),
             ),
             digest(4),
             vec![manifest.identity().expect("fixture manifest must identify")],

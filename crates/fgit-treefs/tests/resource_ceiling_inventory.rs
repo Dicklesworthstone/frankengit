@@ -63,7 +63,7 @@ fn fixture() -> (MemorySource, BaseView<Sha1>, TreeCapability, Overlay) {
         RepositoryCommitId::from_digest(
             DigestAlgorithmId::try_new(1).expect("registered fixture algorithm"),
             CodecVersion::new(1, 0),
-            DigestBytes::try_new(&[0x77; 32]).expect("fixture digest width"),
+            DigestBytes::try_new(&[0x77; 20]).expect("fixture digest width"),
         ),
         root,
         root,

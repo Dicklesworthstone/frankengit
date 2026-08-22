@@ -22,7 +22,7 @@ use fgit_types::{
 fn digest(tag: u8) -> Digest {
     Digest::new(
         DigestAlgorithmId::try_new(1).expect("code point one is valid"),
-        DigestBytes::try_new(&[tag; 32]).expect("thirty-two bytes is a valid digest"),
+        DigestBytes::try_new(&[tag; 20]).expect("20-byte SHA-1 digest is valid"),
     )
 }
 
@@ -31,7 +31,7 @@ macro_rules! derived {
         <$ty>::from_digest(
             DigestAlgorithmId::try_new(1).expect("code point one is valid"),
             CANONICAL_CODEC_VERSION,
-            DigestBytes::try_new(&[$tag; 32]).expect("thirty-two bytes is a valid digest"),
+            DigestBytes::try_new(&[$tag; 20]).expect("20-byte SHA-1 digest is valid"),
         )
     };
 }

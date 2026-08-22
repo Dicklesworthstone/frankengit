@@ -33,7 +33,7 @@ fn head(value: u8) -> RepositoryAuthorityHeadId {
     RepositoryAuthorityHeadId::from_digest(
         DigestAlgorithmId::try_new(1).expect("test digest algorithm is valid"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[value; 32]).expect("test digest has valid width"),
+        DigestBytes::try_new(&[value; 20]).expect("test digest has valid width"),
     )
 }
 

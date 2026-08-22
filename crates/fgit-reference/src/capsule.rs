@@ -288,7 +288,8 @@ mod tests {
     fn digest(byte: u8) -> Digest {
         Digest::new(
             DigestAlgorithmId::try_new(1).expect("a non-reserved algorithm slot"),
-            DigestBytes::try_new(&[byte; 32]).expect("a 32-byte body is inside the window"),
+            DigestBytes::try_new(&[byte; 20])
+                .expect("a 20-byte SHA-1 digest body is inside the window"),
         )
     }
 

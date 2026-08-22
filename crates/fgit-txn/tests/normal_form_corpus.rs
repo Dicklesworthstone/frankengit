@@ -549,7 +549,7 @@ fn delivery_key(index: usize) -> OutboxDeliveryKey {
 fn digest_of(tag: u8) -> Digest {
     let algorithm = DigestAlgorithmId::try_new(1).expect("a non-zero algorithm slot is admissible");
     let bytes =
-        DigestBytes::try_new(&[tag; 32]).expect("32 bytes is inside the accepted digest window");
+        DigestBytes::try_new(&[tag; 20]).expect("20-byte SHA-1 digest fits its registered width");
     Digest::new(algorithm, bytes)
 }
 
