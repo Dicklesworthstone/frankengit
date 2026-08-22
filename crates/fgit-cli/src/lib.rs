@@ -12,7 +12,7 @@ use fgit_node::{
     DoctorReport, GitDaemonSessionOutcome, NodeConfig, NodeGitDaemonServeRefusal,
     NodeInitialization, OneNode,
 };
-use fgit_types::{RepositoryId, TenantId};
+use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, TenantId};
 
 /// Typed refusal from the minimal `fg` command parser.
 #[derive(Debug)]
@@ -23,6 +23,8 @@ pub enum CliRefusal {
     Tenant(fgit_types::TypeRefusal),
     /// The supplied repository identity was not canonical lowercase hex.
     Repository(fgit_types::TypeRefusal),
+    /// The supplied doctor sample was not a native SHA-1 object identity.
+    Object(fgit_types::TypeRefusal),
     /// Node initialization refused before a usable service existed.
     Node(fgit_node::NodeRefusal),
     /// The requested listener address could not become a bounded local socket.
@@ -51,9 +53,11 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init|doctor <storage-root> <tenant-id-hex> <repository-id-hex>; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address>",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex>; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address>",
             ),
-            Self::Tenant(error) | Self::Repository(error) => Display::fmt(error, formatter),
+            Self::Tenant(error) | Self::Repository(error) | Self::Object(error) => {
+                Display::fmt(error, formatter)
+            }
             Self::Node(error) => Display::fmt(error, formatter),
             Self::Listener(error) => write!(formatter, "cannot bind fg serve listener: {error}"),
             Self::Serve(error) => Display::fmt(error, formatter),
@@ -75,7 +79,7 @@ impl Display for CliRefusal {
 impl Error for CliRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Tenant(error) | Self::Repository(error) => Some(error),
+            Self::Tenant(error) | Self::Repository(error) | Self::Object(error) => Some(error),
             Self::Node(error) => Some(error),
             Self::Listener(error) => Some(error),
             Self::Serve(error) => Some(error),
@@ -117,19 +121,12 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             Ok(CliOutcome::Initialized(initialization))
         }
         [command, storage_root, tenant, repository] if command == "doctor" => {
-            let node = OneNode::open_existing(node_config(storage_root, tenant, repository)?)
-                .map_err(CliRefusal::Node)?;
-            let inspection = node.runtime().block_on(node.doctor(None));
-            let cleanup = node.shutdown();
-            match (inspection, cleanup) {
-                (Ok(report), Ok(())) => Ok(CliOutcome::Doctor(report)),
-                (Err(inspection), Ok(())) => Err(CliRefusal::Node(inspection)),
-                (Ok(_), Err(cleanup)) => Err(CliRefusal::Node(cleanup)),
-                (Err(inspection), Err(cleanup)) => Err(CliRefusal::DoctorCleanup {
-                    inspection: Box::new(inspection),
-                    cleanup: Box::new(cleanup),
-                }),
-            }
+            run_doctor(storage_root, tenant, repository, None)
+        }
+        [command, storage_root, tenant, repository, sample] if command == "doctor" => {
+            let sample =
+                GitOid::from_hex(GitHashAlgorithm::Sha1, sample).map_err(CliRefusal::Object)?;
+            run_doctor(storage_root, tenant, repository, Some(sample))
         }
         [command, storage_root, tenant, repository, listen_address] if command == "serve" => {
             let listener = TcpListener::bind(listen_address).map_err(CliRefusal::Listener)?;
@@ -152,6 +149,27 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             }
         }
         _ => Err(CliRefusal::Usage),
+    }
+}
+
+fn run_doctor(
+    storage_root: &str,
+    tenant: &str,
+    repository: &str,
+    sampled_object: Option<GitOid>,
+) -> Result<CliOutcome, CliRefusal> {
+    let node = OneNode::open_existing(node_config(storage_root, tenant, repository)?)
+        .map_err(CliRefusal::Node)?;
+    let inspection = node.runtime().block_on(node.doctor(sampled_object));
+    let cleanup = node.shutdown();
+    match (inspection, cleanup) {
+        (Ok(report), Ok(())) => Ok(CliOutcome::Doctor(report)),
+        (Err(inspection), Ok(())) => Err(CliRefusal::Node(inspection)),
+        (Ok(_), Err(cleanup)) => Err(CliRefusal::Node(cleanup)),
+        (Err(inspection), Err(cleanup)) => Err(CliRefusal::DoctorCleanup {
+            inspection: Box::new(inspection),
+            cleanup: Box::new(cleanup),
+        }),
     }
 }
 
@@ -217,5 +235,17 @@ mod tests {
         assert!(matches!(run(&init), Ok(CliOutcome::Initialized(_))));
         let doctor = vec!["doctor".to_owned(), storage_root, tenant, repository];
         assert!(matches!(run(&doctor), Ok(CliOutcome::Doctor(_))));
+    }
+
+    #[test]
+    fn doctor_refuses_a_noncanonical_sample_object_before_opening_the_node() {
+        let command = vec![
+            "doctor".to_owned(),
+            "/unused".to_owned(),
+            "11111111111111111111111111111111".to_owned(),
+            "22222222222222222222222222222222".to_owned(),
+            "not-an-object".to_owned(),
+        ];
+        assert!(matches!(run(&command), Err(CliRefusal::Object(_))));
     }
 }
