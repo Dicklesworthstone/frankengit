@@ -104,6 +104,7 @@ pub mod controller;
 pub mod e_process;
 pub mod elimination;
 pub mod evidence;
+pub mod expected_loss;
 pub mod fallback;
 pub mod lyapunov;
 pub mod off_policy;
