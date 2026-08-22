@@ -1151,3 +1151,69 @@ fn each_exhausted_counter_refuses_under_its_own_name_and_stops_one_short() {
         "a head one generation short of the ceiling can still be succeeded"
     );
 }
+
+/// A [`BodyIdentity`] that refuses everything, so the identity-unavailable arms
+/// become reachable.
+///
+/// These arms map an identity failure into a chronicle refusal, and the failure
+/// they map cannot be produced with the real `CryptoBodyIdentity` for a
+/// well-formed body -- the domains are registered and the bodies encode. The
+/// trait is public and generic, though, so the failure path belongs to the
+/// caller's identity rather than to the body, and this reaches it honestly
+/// rather than by contriving an unencodable body.
+struct RefusingIdentity;
+
+impl fgit_codec::BodyIdentity for RefusingIdentity {
+    fn identify(
+        &self,
+        _domain: fgit_types::DomainTag,
+        _schema: fgit_types::SchemaId,
+        _codec_version: fgit_types::numeric::CodecVersion,
+        _canonical_body: &[u8],
+    ) -> Result<fgit_types::identity::InternalObjectId, fgit_codec::CodecRefusal> {
+        Err(fgit_codec::CodecRefusal::MagicUnrecognized { observed: *b"NOPE" })
+    }
+}
+
+#[test]
+fn an_unavailable_identity_is_reported_against_the_body_that_needed_it() {
+    // `batch_identity` and `repository_commit_identity` sit four lines apart in
+    // audit.rs and differ only in which refusal their `map_err` closure names:
+    //
+    //   audit.rs:77   body_id(identity, batch)  -> BatchIdentityUnavailable
+    //   audit.rs:95   body_id(identity, record) -> CommitRecordIdentityUnavailable
+    //
+    // Neither had a test, and swapping the two closures would compile, keep
+    // both functions refusing, and tell an operator that the batch's identity
+    // was unavailable when it was the record's. That is the same copy-paste
+    // shape as the three SequenceExhausted labels, and it is why both arms are
+    // asserted here rather than one standing in for the other.
+    let (_, batch, _) = well_formed_pair();
+    let record = batch
+        .committed_rcrs
+        .first()
+        .expect("the pair carries one committed record");
+
+    assert_eq!(
+        batch_identity(&RefusingIdentity, &batch),
+        Err(ChronicleRefusal::BatchIdentityUnavailable),
+        "a batch whose identity cannot be produced must be named as the batch"
+    );
+    assert_eq!(
+        repository_commit_identity(&RefusingIdentity, record),
+        Err(ChronicleRefusal::CommitRecordIdentityUnavailable),
+        "a record whose identity cannot be produced must be named as the record"
+    );
+
+    // The permitted twins, which are what make the two assertions above about
+    // the LABEL rather than about refusing in general: the same batch and the
+    // same record identify cleanly under the real identity.
+    assert!(
+        batch_identity(&CryptoBodyIdentity, &batch).is_ok(),
+        "the fixture batch identifies under the real identity"
+    );
+    assert!(
+        repository_commit_identity(&CryptoBodyIdentity, record).is_ok(),
+        "the fixture record identifies under the real identity"
+    );
+}
