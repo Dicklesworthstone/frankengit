@@ -32,6 +32,7 @@ use fgit_statistics::beta_bernoulli::{BetaAssumptionFailure, BetaPrior, Outcomes
 use fgit_statistics::conformal::{ConformalAssumptionFailure, ConformalConfig, SplitConformal};
 use fgit_statistics::e_process::{EProcess, EProcessAssumptionFailure, EProcessConfig};
 use fgit_statistics::elimination::{EliminationAssumptionFailure, SuccessiveElimination};
+use fgit_statistics::expected_loss::{MAX_TERMS, probability_b_exceeds_a_ppm};
 use fgit_statistics::lyapunov::{LyapunovAssumptionFailure, LyapunovConfig, LyapunovGovernor};
 use fgit_statistics::off_policy::{
     LoggedSample, OffPolicyConfig, OffPolicyEvaluator, OpeAssumptionFailure,
@@ -572,6 +573,68 @@ fn validate_lyapunov() -> Record {
     }
 }
 
+fn validate_expected_loss() -> Record {
+    // Landed under frankengit-s76z (529b8a7) after NEG-025 disproved the naive
+    // T(0)-upward walk. Validated here independently: the known answers below
+    // were computed from the closed form in exact rational arithmetic, not read
+    // back from that module or copied from its own tests.
+    let prior = |alpha: u32, beta: u32| {
+        BetaPrior::try_new(alpha, beta)
+            .expect("proper prior")
+            .update(Outcomes {
+                successes: 0,
+                trials: 0,
+            })
+            .expect("no observations")
+    };
+
+    // Known answers. The module's stated error bound is ~2^-96 relative over at
+    // most a few hundred steps, so ppm-exact agreement is the right assertion;
+    // a tolerance would hide precisely the regression worth catching.
+    for (a1, b1, a2, b2, want) in [
+        (3_u32, 4_u32, 5_u32, 2_u32, 878_787_u32),
+        (11, 3, 8, 6, 100_778),
+    ] {
+        let got = probability_b_exceeds_a_ppm(prior(a1, b1), prior(a2, b2)).expect("evaluable");
+        assert_eq!(
+            got, want,
+            "P(Beta({a2},{b2}) > Beta({a1},{b1})) disagreed with exact rational evaluation"
+        );
+    }
+
+    // The identity that catches a sign or ordering error no single value can:
+    // a posterior compared against itself must be exactly one half.
+    for alpha in [2_u32, 4, 17] {
+        assert_eq!(
+            probability_b_exceeds_a_ppm(prior(alpha, alpha), prior(alpha, alpha))
+                .expect("evaluable"),
+            500_000,
+            "an arm compared against itself must be exactly even"
+        );
+    }
+
+    // And NEG-025's own failure region is REFUSED rather than answered. This is
+    // the check that matters most: the naive walk returned 0 ppm here, which
+    // reads as "the candidate never wins" and would pin a controller to its
+    // fallback forever. A refusal is the only safe answer.
+    let refusals = u32::try_from(MAX_TERMS)
+        .ok()
+        .and_then(|max| max.checked_add(1))
+        .map_or(0, |over| {
+            probability_b_exceeds_a_ppm(prior(1, 1), prior(over, 1))
+                .err()
+                .map_or(0, |_| 1)
+        });
+    assert_eq!(refusals, 1, "an out-of-bound term count must be refused");
+
+    Record {
+        mechanism: "beta-bernoulli-expected-loss",
+        refusals_exercised: refusals,
+        known_answer_cases: 5,
+        seeded_observations: 0,
+    }
+}
+
 fn validate_fallback_gate() -> Record {
     // Every trigger, alone, selects the pinned fallback.
     let mut cases = 0;
@@ -604,6 +667,7 @@ fn the_validation_campaign_covers_every_mechanism_and_writes_its_receipt() {
         validate_off_policy(),
         validate_beta_bernoulli(),
         validate_lyapunov(),
+        validate_expected_loss(),
         validate_fallback_gate(),
     ];
 
@@ -611,8 +675,8 @@ fn the_validation_campaign_covers_every_mechanism_and_writes_its_receipt() {
     // silently stopped covering a mechanism must fail, not shrink quietly.
     assert_eq!(
         records.len(),
-        8,
-        "the campaign must cover all seven mechanisms plus the fallback gate"
+        9,
+        "the campaign must cover all eight mechanisms plus the fallback gate"
     );
     for record in &records {
         assert!(

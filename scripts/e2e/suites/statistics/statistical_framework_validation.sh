@@ -33,6 +33,7 @@ readonly EXPECTED_MECHANISMS=(
   'off-policy-evaluation'
   'beta-bernoulli-posterior'
   'lyapunov-progress-governor'
+  'beta-bernoulli-expected-loss'
   'deterministic-fallback-gate'
 )
 
