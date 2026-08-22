@@ -20,24 +20,34 @@
 //!
 //! # Why counting is not the only route
 //!
-//! The acceptance says **workers**, not threads, and a worker already has an
-//! identity: its handle. `AsyncConnection::close` (fsqlite 0.1.13,
-//! `async_api.rs:599`) is documented *"The worker task is joined before
-//! returning"* and does exactly that — it takes `self.worker` and calls
-//! `join_worker_task(handle)`, which is `handle.wait()`. That is a per-handle
-//! join, so it is per-store by construction and is indifferent to whether the
-//! underlying thread is pooled.
+//! The acceptance says **workers**, not threads, and in the revision this
+//! workspace actually builds against — **fsqlite 0.3.7**, the `Cargo.lock` pin —
+//! the worker carries explicit lifecycle state rather than being anonymous:
+//!
+//! ```text
+//! WorkerLifecycle::Running { tx, .. } | Closing { join } | Terminal(memo)
+//! ```
+//!
+//! `AsyncConnection::close` (`async_api.rs:2706`) drives that machine: it
+//! returns `memo.replay()` when already `Terminal`, otherwise acquires a join
+//! capability, calls `begin_close(Command::Close { checkpoint: true })`, and
+//! schedules the join via `ensure_join_scheduled(pool)`. So the transition is
+//! per-connection and does not depend on which thread the join runs on — which
+//! is exactly the property a process-global thread tally cannot supply.
 //!
 //! `FsqliteAuthorityStore::close` delegates to it, and this crate declares no
 //! `Drop` at all, so the explicit path is the only shutdown there is.
 //!
 //! # What this file adds
 //!
-//! The structural argument above is upstream's contract, and a test that only
-//! restated it would be checking a doc comment. What is observable *here* is the
-//! consequence: upstream also documents that after `close`, *"all subsequent
-//! operations will return an error"*. So a store that still serves a read after
-//! an awaited close would mean the close did not do what it claims.
+//! The structural argument above is upstream's, and a test that only restated it
+//! would be checking someone else's source. What is observable *here* is the
+//! consequence: once the connection leaves `Running`, `running_sender()`
+//! (`async_api.rs:2194`) returns
+//! `FrankenError::Internal("AsyncConnection has been closed")` for **both**
+//! `Closing` and `Terminal`, and every query routes through it. So a store that
+//! still serves a read after an awaited close would mean the lifecycle never
+//! left `Running`.
 //!
 //! The probe runs **the same read, with the same arguments, on both sides of the
 //! close**, so the only difference between the two calls is the close itself. A
@@ -50,12 +60,18 @@
 //!   `process_quiescence.rs`. Threads and workers are different resources and
 //!   both members of the bullet want evidence; that file measures one, this
 //!   measures the other.
-//! * It proves *this* store's worker was joined before `close` returned. It says
-//!   nothing about workers belonging to other stores, or about a pool's own
+//! * It proves *this* connection left `Running` and refuses work. It says
+//!   nothing about workers belonging to other stores, or about a join pool's own
 //!   threads outliving every store, which is legitimate and is not what
 //!   "zero DB workers" forbids.
-//! * The join itself is upstream's code. What is asserted here is the
-//!   observable behaviour that would be false if the join had not happened.
+//! * **It does not prove the join has completed.** In 0.3.7 the join is
+//!   *scheduled* (`ensure_join_scheduled`), and `Closing` and `Terminal` are
+//!   indistinguishable from the caller through `running_sender`, which returns
+//!   the same error for both. So this evidences *refusal after close*, not
+//!   *reaped*. Distinguishing them needs `WorkerLifecycle` to be observable from
+//!   outside the crate, and it is a private field.
+//! * The lifecycle machine is upstream's code. What is asserted here is the
+//!   observable behaviour that would be false if the transition had not happened.
 
 use fgit_authority::{AuthorityLimits, HeadGeneration, HeadKey, HeadRead, StoreInstanceId};
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore, TransientClass};
