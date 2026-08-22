@@ -99,7 +99,7 @@ use fgit_admission::{
     CanonicalAdmissionProjection, CanonicalAdmissionStore, CanonicalRefState, CommitEvidence,
     CommitMaterialization, PermittedObjectClosure, QuarantineValidator, RefusalMaterialization,
     ValidatedClosure, ValidatedReceive, admit_validated_receive, canonical_ref_state_root,
-    validate_receive,
+    permitted_object_closure_root, validate_receive,
 };
 use fgit_authority::{
     AuthenticatedHead, DuplicateDelivery, FaultDirective, FaultKind, FaultPosition,
@@ -363,9 +363,20 @@ impl QuarantineValidator for DeleteOnlyValidator {
         _pack: Option<&fgit_pack::QuarantinedPack>,
         _receipt: &QuarantineReceipt,
     ) -> Result<ValidatedClosure, RefusalCode> {
+        // The root must be the CANONICAL root of the closure this validator
+        // declares, not an arbitrary digest. `materialize_commit` recomputes
+        // `permitted_object_closure_root` over `objects` and refuses
+        // `ObjectClosureIncomplete` when the two disagree — so `digest(14)`
+        // beside an empty set made every production-projection admission refuse,
+        // which is the second reason the head-bound race probe was vacuous. The
+        // unbound adapters never caught it because they mint roots instead of
+        // checking them.
+        let objects = BTreeSet::new();
+        let object_closure_root =
+            permitted_object_closure_root(&PermittedObjectClosure::new(objects.clone()))?;
         Ok(ValidatedClosure {
-            object_closure_root: digest(14),
-            objects: BTreeSet::new(),
+            object_closure_root,
+            objects,
         })
     }
 }
@@ -1273,7 +1284,11 @@ fn head_bound_setup(
     let mut refs = BTreeMap::new();
     refs.insert(
         RefName::try_new(MAIN_REF).expect("fixture ref name"),
-        oid("1111111111111111111111111111111111111111"),
+        // MUST be MAIN_OID: `delete_main_request` sends it as the expected-old,
+        // and admission refuses `ExpectedOldRefMismatch` when the staged ref
+        // does not carry exactly that predecessor. Staging any other value makes
+        // every session refuse, which is what left the race probe vacuous.
+        oid(MAIN_OID),
     );
     let state = CanonicalRefState::new(refs);
     let ref_root =
