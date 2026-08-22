@@ -165,11 +165,15 @@ impl ReceiveCancellation for CancelAfter {
 /// It does **not** prove the refusal is the *earliest* possible one, nor that
 /// no other defect coexists on the path — only that the named guard is the one
 /// that answered.
+/// One refusal-provocation route: its label, the request packets to feed,
+/// and the plain fn predicate identifying the expected typed refusal.
+type RefusalRoute = (&'static str, Vec<Packet>, fn(&ReceiveError) -> bool);
+
 #[test]
 fn every_refusal_route_leaves_an_empty_quarantine() {
     // (label, the packets to feed, the refusal this route exists to provoke).
     // The predicate is a plain fn pointer so the table stays a table.
-    let routes: Vec<(&str, Vec<Packet>, fn(&ReceiveError) -> bool)> = vec![
+    let routes: Vec<RefusalRoute> = vec![
         (
             "malformed command line",
             vec![Packet::Data(b"not-a-command".to_vec())],

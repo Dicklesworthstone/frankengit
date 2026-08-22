@@ -67,10 +67,9 @@ impl RefVisibility {
                 limit: limits.max_ref_prefixes,
             });
         }
-        let (negated, pattern) = match rule.strip_prefix(b"!") {
-            Some(rest) => (true, rest),
-            None => (false, rule),
-        };
+        let (negated, pattern) = rule
+            .strip_prefix(b"!")
+            .map_or((false, rule), |rest| (true, rest));
         let pattern = crate::parse_ref_name(pattern, limits)?;
         self.rules.push(VisibilityRule { pattern, negated });
         Ok(())
@@ -90,7 +89,7 @@ impl RefVisibility {
 
     /// Whether no rule has been configured.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
 

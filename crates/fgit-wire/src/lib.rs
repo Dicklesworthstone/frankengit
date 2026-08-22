@@ -1466,6 +1466,9 @@ pub struct V1Advertisement {
     pub refs: Vec<AdvertisedRef>,
     /// Server capability list, attached to the first ref after NUL.
     pub capabilities: Capabilities,
+    /// Object format selecting the all-zero identity for the
+    /// `capabilities^{}` empty-repository pseudo-ref.
+    object_format: GitObjectFormat,
 }
 
 impl V1Advertisement {
@@ -1481,7 +1484,17 @@ impl V1Advertisement {
             version_one_prelude: false,
             refs,
             capabilities,
+            object_format,
         })
+    }
+
+    /// The all-zero identity Git uses for the empty-repository pseudo-ref.
+    const fn zero_oid(&self) -> AnyGitOid {
+        use fgit_crypto::{GitOidSha1, GitOidSha256};
+        match self.object_format {
+            GitObjectFormat::Sha1 => AnyGitOid::Sha1(GitOidSha1::ZERO),
+            GitObjectFormat::Sha256 => AnyGitOid::Sha256(GitOidSha256::ZERO),
+        }
     }
 
     /// Emits the v0/v1 ref records and their terminating flush.
@@ -1504,6 +1517,46 @@ impl V1Advertisement {
                 &mut used_bytes,
                 limits,
             )?;
+        }
+        if self.refs.is_empty() {
+            // Upstream Git's empty-repository form: a single advertisement
+            // line carrying the all-zero identity, the `capabilities^{}`
+            // pseudo-ref, and the NUL-attached capability list.
+            if !self.capabilities.entries.is_empty() {
+                let mut line = oid_hex(self.zero_oid()).into_bytes();
+                line.try_reserve(
+                    self.capabilities
+                        .entries
+                        .len()
+                        .saturating_mul(2)
+                        .saturating_add(b" capabilities^{}".len()),
+                )
+                .map_err(|_| WireError::AllocationFailure)?;
+                line.extend_from_slice(b" capabilities^{}\x00");
+                for (capability_index, capability) in self.capabilities.entries.iter().enumerate() {
+                    if capability_index != 0 {
+                        line.push(b' ');
+                    }
+                    line.extend_from_slice(&capability.encoded()?);
+                }
+                line.push(b'\n');
+                if line.len() + 4 > limits.max_packet_bytes {
+                    return Err(WireError::PacketTooLarge {
+                        declared: line.len() + 4,
+                        limit: limits.max_packet_bytes,
+                    });
+                }
+                let encoded_bytes = line.len() + 4;
+                add_output_packet(
+                    &mut output,
+                    Packet::Data(line),
+                    encoded_bytes,
+                    &mut used_bytes,
+                    limits,
+                )?;
+            }
+            add_output_packet(&mut output, Packet::Flush, 4, &mut used_bytes, limits)?;
+            return Ok(output);
         }
         for (index, reference) in self.refs.iter().enumerate() {
             let mut line = oid_hex(reference.oid).into_bytes();

@@ -43,14 +43,29 @@ fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-/// Strips every non-alphabetic character so two refusals can be compared for
-/// identical shape independent of which object id they embed (the error
-/// Displays render oids as Debug byte arrays).
-fn error_shape(error: &WireError) -> String {
-    format!("{error}")
-        .chars()
-        .filter(|character| character.is_ascii_alphabetic())
-        .collect()
+/// Renders a refusal with the embedded oid replaced by `<oid>`, so two
+/// refusals compare byte-exact apart from the object they name. This is
+/// deliberately NOT a lossy shape: any divergence in variant, wording, or
+/// punctuation between two otherwise-identical refusals fails the test.
+fn error_normalized(error: &WireError, named: AnyGitOid) -> String {
+    format!("{error}").replace(&format!("{named:?}"), "<oid>")
+}
+
+/// Proves [`error_normalized`] can actually fire: genuinely different
+/// refusal kinds must normalize differently for the same oid.
+#[test]
+fn refusal_normalization_distinguishes_genuinely_different_refusals() {
+    let advertised = WireError::WantNotAdvertised {
+        oid: oid(HIDDEN_TIP),
+    };
+    let reachable = WireError::WantNotReachable {
+        oid: oid(HIDDEN_TIP),
+    };
+    assert_ne!(
+        error_normalized(&advertised, oid(HIDDEN_TIP)),
+        error_normalized(&reachable, oid(HIDDEN_TIP)),
+        "control: the comparator discriminates distinct refusal kinds"
+    );
 }
 
 fn fixture_refs(limits: &WireLimits) -> Vec<AdvertisedRef> {
@@ -167,8 +182,10 @@ fn classification_is_exact_or_slash_bounded_with_last_match_wins() {
 #[test]
 fn rule_ingestion_is_bounded_and_name_validated() {
     let mut visibility = RefVisibility::new();
-    let mut limits = WireLimits::default();
-    limits.max_ref_prefixes = 1;
+    let limits = WireLimits {
+        max_ref_prefixes: 1,
+        ..WireLimits::default()
+    };
     visibility
         .push_rule(b"refs/one", &limits)
         .expect("first rule");
@@ -217,7 +234,7 @@ fn advertisement_carries_only_visible_refs_in_wire_order() {
     // Control: the unfiltered wire form does carry the hidden tip; the
     // filtered form must never name it.
     let unfiltered_encoded = V1Advertisement::new(
-        repository.refs.clone(),
+        repository.refs,
         capabilities,
         GitObjectFormat::Sha1,
         &limits,
@@ -242,22 +259,29 @@ fn advertisement_carries_only_visible_refs_in_wire_order() {
 }
 
 #[test]
-fn all_hidden_advertisement_emits_no_ref_lines() {
+fn all_hidden_advertisement_emits_capabilities_pseudo_ref() {
     let mut visibility = RefVisibility::new();
     let limits = WireLimits::default();
     // `refs` matches every namespace member via the slash-boundary rule.
     visibility.push_rule(b"refs", &limits).expect("hide all");
     let filtered = filter_advertised_refs(&fixture_refs(&limits), &visibility);
-    assert!(filtered.is_empty());
+    assert_eq!(filtered.len(), 0, "every ref is hidden by the `refs` rule");
     let capabilities = Capabilities::parse_v1(b"multi_ack", &limits).expect("capabilities");
     let encoded = V1Advertisement::new(filtered, capabilities, GitObjectFormat::Sha1, &limits)
         .expect("empty advertisement")
         .encode(&limits)
         .expect("encode empty");
-    assert!(
-        !encoded.iter().any(|packet| {
-            matches!(packet, Packet::Data(line) if bytes_contain(line, b"refs/"))
-        })
+
+    // Upstream Git's empty-repository v0 form, byte for byte: one line
+    // carrying the all-zero identity, the `capabilities^{}` pseudo-ref, and
+    // the NUL-attached capability list, then the terminating flush.
+    let zero = "0".repeat(40);
+    assert_eq!(
+        encoded,
+        vec![
+            Packet::Data(format!("{zero} capabilities^{{}}\x00multi_ack\n").into_bytes()),
+            Packet::Flush,
+        ]
     );
 }
 
@@ -293,11 +317,11 @@ fn v0_v1_hidden_want_is_refusal_indistinguishable_from_unknown() {
     assert!(matches!(hidden_error, WireError::WantNotAdvertised { .. }));
     assert!(matches!(unknown_error, WireError::WantNotAdvertised { .. }));
     assert_eq!(
-        error_shape(&hidden_error),
-        error_shape(&unknown_error),
-        "refusals must share one shape; a distinguishable shape is an oracle"
+        error_normalized(&hidden_error, oid(HIDDEN_TIP)),
+        error_normalized(&unknown_error, oid(UNKNOWN)),
+        "refusals must be byte-identical apart from the embedded oid; \
+         a distinguishable rendering is an oracle"
     );
-    assert!(!error_shape(&hidden_error).contains("hidden"));
 }
 
 #[test]
@@ -338,9 +362,10 @@ fn v2_hidden_want_is_refusal_indistinguishable_from_unknown() {
     assert!(matches!(hidden_error, WireError::WantNotReachable { .. }));
     assert!(matches!(unknown_error, WireError::WantNotReachable { .. }));
     assert_eq!(
-        error_shape(&hidden_error),
-        error_shape(&unknown_error),
-        "refusals must share one shape; a distinguishable shape is an oracle"
+        error_normalized(&hidden_error, oid(HIDDEN_TIP)),
+        error_normalized(&unknown_error, oid(UNKNOWN)),
+        "refusals must be byte-identical apart from the embedded oid; \
+         a distinguishable rendering is an oracle"
     );
 
     // The visible tip still validates on the same machine grammar.
