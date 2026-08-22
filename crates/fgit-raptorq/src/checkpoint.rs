@@ -1176,4 +1176,66 @@ mod tests {
             other => panic!("an oversized symbol must refuse as SymbolSizeMismatch, got {other:?}"),
         }
     }
+
+    /// `EngineObjectIdMismatch` -- the guard I wrongly recorded as already
+    /// covered in the message of 1b71402.
+    ///
+    /// `ScopeMismatch` is genuinely covered (tests/raptorq_adversarial.rs:268,
+    /// 308). This one was not covered by anything: before this test its only
+    /// occurrences in the workspace were two construction sites, the enum
+    /// declaration, a Display arm, and two comments I wrote myself. A sweep that
+    /// matched the bare variant name rather than `RaptorRefusal::<Variant>` also
+    /// missed it, because other crates carry same-named variants of different
+    /// enums.
+    ///
+    /// The forgery carries a FOREIGN engine object id under the victim's scope,
+    /// so the scope-equality guard passes and this one fires next.
+    #[test]
+    fn a_symbol_carrying_a_foreign_engine_object_id_is_refused_for_that_reason() {
+        let security = security();
+        let victim = borrowed_scope(&security);
+        let stranger = protect_checkpoint(
+            CheckpointClass::ForgeEvent,
+            &canonical(0x44, 601),
+            &security,
+        )
+        .expect("a second canonical body must protect");
+        let scope = victim.scope();
+        let size = usize::from(CheckpointRaptorProfile::SYMBOL_BYTES);
+        assert_ne!(
+            scope.engine_object_id(),
+            stranger.scope().engine_object_id(),
+            "the two bodies must differ in engine object id or this probe is vacuous"
+        );
+
+        let data = vec![0x5a_u8; size];
+        let symbol = Symbol::from_slice(
+            SymbolId::new(stranger.scope().engine_object_id(), 0, 0),
+            &data,
+            SymbolKind::Source,
+        );
+        let foreign = ScopedCheckpointSymbol {
+            scope: scope.clone(),
+            tag: security.sign_symbol_tag(&symbol),
+            symbol,
+        };
+
+        let refusal = reconstruct_checkpoint(scope, &[foreign], &security, None);
+        assert!(
+            matches!(refusal, Err(RaptorRefusal::EngineObjectIdMismatch)),
+            "a foreign engine object id must refuse as EngineObjectIdMismatch, got {refusal:?}"
+        );
+
+        // Permitted twin: the victim's own engine object id clears this guard.
+        let twin = reconstruct_checkpoint(
+            scope,
+            &[forged(scope, 0, 0, size, SymbolKind::Source, &security)],
+            &security,
+            None,
+        );
+        assert!(
+            !matches!(twin, Err(RaptorRefusal::EngineObjectIdMismatch)),
+            "the scope's own engine object id must clear the guard"
+        );
+    }
 }

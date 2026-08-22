@@ -1294,4 +1294,62 @@ mod tests {
             other => panic!("an oversized symbol must refuse as SymbolSizeMismatch, got {other:?}"),
         }
     }
+
+    /// The microsegment twin of the `EngineObjectIdMismatch` probe. Same reason
+    /// as every other paired probe in this crate: both profiles use
+    /// SYMBOL_BYTES = 128, so no refusal payload separates the two chains and
+    /// only the entry point does.
+    #[test]
+    fn a_microsegment_symbol_with_a_foreign_engine_object_id_is_refused() {
+        let security = security();
+        let victim =
+            protect_microsegment(&canonical_segment(), &SegmentLimits::default(), &security)
+                .expect("canonical microsegment is profile-admitted");
+        let scope = victim.scope();
+        let size = usize::from(MicrosegmentRaptorProfile::SYMBOL_BYTES);
+
+        // A fixed object id that is not this scope's. The assertion below is
+        // what makes it safe to pick one literally: if it ever collided with
+        // the real id the probe would pass while testing nothing, so the
+        // collision fails the test loudly instead.
+        let foreign_id = ObjectId::new(0xdead_beef_dead_beef, 0xfeed_face_feed_face);
+        assert_ne!(
+            foreign_id,
+            scope.engine_object_id(),
+            "the chosen id must differ from the scope's or this probe is vacuous"
+        );
+
+        let data = vec![0x5a_u8; size];
+        let symbol = Symbol::from_slice(SymbolId::new(foreign_id, 0, 0), &data, SymbolKind::Source);
+        let foreign = ScopedSymbol {
+            scope: scope.clone(),
+            tag: security.sign_symbol_tag(&symbol),
+            symbol,
+        };
+
+        let refusal =
+            reconstruct_microsegment(scope, &[foreign], &SegmentLimits::default(), &security);
+        assert!(
+            matches!(refusal, Err(RaptorRefusal::EngineObjectIdMismatch)),
+            "a foreign engine object id must refuse as EngineObjectIdMismatch, got {refusal:?}"
+        );
+
+        let twin = reconstruct_microsegment(
+            scope,
+            &[forged_scoped(
+                scope,
+                0,
+                0,
+                size,
+                SymbolKind::Source,
+                &security,
+            )],
+            &SegmentLimits::default(),
+            &security,
+        );
+        assert!(
+            !matches!(twin, Err(RaptorRefusal::EngineObjectIdMismatch)),
+            "the scope's own engine object id must clear the guard"
+        );
+    }
 }
