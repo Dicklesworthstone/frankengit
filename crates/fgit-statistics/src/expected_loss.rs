@@ -57,14 +57,51 @@
 //!
 //! **The worst case is not in that sample, and saying so is the point.** A
 //! randomly drawn parameter set essentially never lands on an exact ppm
-//! boundary, and the boundary is where the flooring shows. Any posterior
-//! compared against itself is exactly `1/2` by symmetry — a boundary by
-//! construction — and there this returns `499999 ppm`. Measured across
-//! `Beta(n,n)` for `n` in `1..=200` and a spread of asymmetric self-pairs, the
-//! shortfall is **exactly 1 ppm and never more** (`Beta(1,1)` is exact).
+//! boundary, and the boundary is where the flooring shows.
 //!
-//! So the stated bound is **1 ppm, one-directional**, attained at exact ppm
-//! boundaries and `0 ppm` away from them.
+//! Two kinds of boundary case exist and they now behave differently:
+//!
+//! * **a posterior against itself** is exactly `1/2`, and the answer is
+//!   **exactly `500000 ppm`** — see the normalisation below. Measured across
+//!   `Beta(n,n)` for `n` in `1..=200` plus a spread of asymmetric self-pairs:
+//!   no exceptions;
+//! * **two DIFFERENT posteriors each symmetric about one half** are also
+//!   exactly `1/2`, but their tails are not bit-identical, so flooring can
+//!   still cost one ppm. `Beta(2,2)` against `Beta(3,3)` returns `499999`.
+//!
+//! So the stated bound is **1 ppm, one-directional**, attained only at exact
+//! ppm boundaries between distinct posteriors, and `0 ppm` everywhere else.
+//!
+//! # Why a self-comparison is exact, and why it is not a special case
+//!
+//! `P(theta_b > theta_a) + P(theta_a > theta_b) = 1` exactly: the posteriors
+//! are continuous, so `P(theta_a == theta_b) = 0` and there is no tie mass to
+//! apportion. Both tails are therefore evaluated and the answer is normalised
+//! by **their actual total** rather than by [`ONE`].
+//!
+//! That cancels the flooring drift, because both sums lose it by the same
+//! mechanism and it appears in numerator and denominator alike. When the two
+//! posteriors are equal the two sums are computed from identical inputs, so
+//! they are bit-identical and the quotient is exactly one half — **by
+//! construction, with no tie-breaking, no rounding mode, and no branch in the
+//! code testing for equality**. A special case would have been the wrong fix:
+//! it would report the right number for the one input anybody checks while
+//! leaving every neighbouring input as wrong as before.
+//!
+//! When the complementary tail underflows the scale, `P(theta_a > theta_b)` is
+//! below `2^-96`, the two tails total `ONE` far beyond ppm resolution, and
+//! `ONE` is used. Refusing instead would have cost **48 of the 500** sampled
+//! sets this evaluation answers correctly — measured, which is why it is not
+//! done.
+//!
+//! [`compare_ppm`] returns both tails together for callers that need the
+//! three-term invariant to hold exactly:
+//! `P(B>A) + P(A>B) + P(A==B) + residual == 1_000_000`. Both tails are
+//! computed independently rather than one being derived as the complement of
+//! the other, so the identity is a real cross-check: a sign or ordering error
+//! moves one tail and not the other. The one ppm that flooring both tails can
+//! drop is reported as an explicit residual rather than absorbed into a tail,
+//! because absorbing it would push that tail above its own exact value.
 //!
 //! # Why that bound is structural rather than lucky
 //!
@@ -95,7 +132,8 @@
 //! Reference points, exact versus computed:
 //!
 //! ```text
-//! Beta(2,2)     vs Beta(3,3)      500000.0000    499999   (symmetry control)
+//! Beta(17,17)   vs Beta(17,17)    500000.0000    500000   (self: exact)
+//! Beta(2,2)     vs Beta(3,3)      500000.0000    499999   (distinct halves)
 //! Beta(30,10)   vs Beta(10,30)         1.7982         1
 //! Beta(20,10)   vs Beta(10,20)      4037.5866      4037
 //! Beta(3,4)     vs Beta(5,2)      878787.8788    878787
@@ -205,14 +243,23 @@ pub const MAX_TERMS: u64 = 1 << 16;
 ///     Ok(4_037),
 /// );
 ///
-/// // THE ONE THAT SURPRISES CALLERS. An arm against itself is exactly one
-/// // half, so the true answer is 500000 ppm -- and this returns 499999. Every
-/// // division floors, and an exact ppm boundary is the one place that shows.
-/// // Assert a range here, never equality against the ideal value.
-/// let even = probability_b_exceeds_a_ppm(posterior(17, 17), posterior(17, 17))
+/// // An arm against itself is exactly one half, and this is exact -- both
+/// // tails are computed from identical inputs, so they are bit-identical and
+/// // normalising one by their total gives exactly half with no rounding
+/// // choice involved.
+/// assert_eq!(
+///     probability_b_exceeds_a_ppm(posterior(17, 17), posterior(17, 17)),
+///     Ok(500_000),
+/// );
+///
+/// // THE ONE THAT STILL SURPRISES CALLERS. Two DIFFERENT posteriors, each
+/// // symmetric about one half, are also exactly 500000 ppm -- but their tails
+/// // are not bit-identical, so flooring can still cost one ppm at that
+/// // boundary. Assert a range here, never equality against the ideal value.
+/// let across = probability_b_exceeds_a_ppm(posterior(2, 2), posterior(3, 3))
 ///     .expect("representable");
-/// assert_eq!(even, 499_999);
-/// assert!((499_999..=500_000).contains(&even));
+/// assert_eq!(across, 499_999);
+/// assert!((499_999..=500_000).contains(&across));
 /// ```
 ///
 /// # Errors
@@ -241,13 +288,170 @@ pub fn probability_b_exceeds_a_ppm(a: Posterior, b: Posterior) -> Result<u32, Ex
     let (alpha_a, beta_a) = (a.alpha(), a.beta());
     let (alpha_b, beta_b) = (b.alpha(), b.beta());
 
-    if alpha_b > MAX_TERMS {
-        return Err(ExpectedLossRefusal::TooManyTerms {
-            offered: alpha_b,
-            maximum: MAX_TERMS,
-        });
+    // Both directions are walked, so both term counts need the bound. The
+    // reverse tail walks alpha_a terms; checking only alpha_b would leave one
+    // direction unbounded, and "bounded evaluation" is the claim this makes.
+    for offered in [alpha_b, alpha_a] {
+        if offered > MAX_TERMS {
+            return Err(ExpectedLossRefusal::TooManyTerms {
+                offered,
+                maximum: MAX_TERMS,
+            });
+        }
     }
 
+    let forward = tail_sum(alpha_a, beta_a, alpha_b, beta_b)?;
+
+    // Normalise by the two tails' ACTUAL total rather than by ONE.
+    //
+    // `P(theta_b > theta_a) + P(theta_a > theta_b) = 1` exactly -- the
+    // posteriors are continuous, so there is no tie mass to apportion. Both
+    // sums floor every division, so both sit a hair low by the SAME
+    // mechanism; dividing one by their total cancels that drift because it
+    // appears in numerator and denominator alike.
+    //
+    // That is what makes a self-comparison exact rather than nearly exact, and
+    // exact BY CONSTRUCTION rather than by a rounding choice: equal posteriors
+    // make the two sums bit-identical, so the quotient is exactly one half
+    // with no tie-breaking, no rounding mode, and no special case in the code.
+    //
+    // When the complementary tail underflows, `P(theta_a > theta_b)` is below
+    // `2^-96` and the two tails total `ONE` to far beyond ppm resolution, so
+    // `ONE` is the right scale and nothing is lost. Refusing there instead
+    // would discard 48 of the 500 sampled parameter sets that this evaluation
+    // answers correctly -- measured, not assumed.
+    let scale = tail_sum(alpha_b, beta_b, alpha_a, beta_a)
+        .map_or(ONE, |reverse| forward.saturating_add(reverse));
+
+    // `scale` is at least `forward`, which is at least 1: `peak_term` returns
+    // `None` rather than zero, so an underflowed peak has already refused
+    // above. And `forward <= ~2^96` keeps the product under `2^116`.
+    let ppm = forward.saturating_mul(PARTS_PER_MILLION) / scale;
+    Ok(u32::try_from(ppm.min(PARTS_PER_MILLION)).unwrap_or(u32::MAX))
+}
+
+/// Both tails of a comparison, summing to exactly one million ppm.
+///
+/// Each tail is computed independently by the same peak-outward evaluation and
+/// floored against the same scale, so this is a genuine cross-check rather
+/// than one number and its arithmetic complement: a sign or ordering error
+/// moves one tail without moving the other, and
+/// [`Self::sums_to_one_million`] stops holding.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TailComparison {
+    // The unit lives on the accessors, where a caller reads it. Repeating
+    // `_ppm` on every field says nothing extra and trips `struct_field_names`.
+    b_exceeds_a: u32,
+    a_exceeds_b: u32,
+    rounding_residual: u32,
+}
+
+impl TailComparison {
+    /// `P(theta_b > theta_a)` in ppm, at or below the exact value.
+    #[must_use]
+    pub const fn b_exceeds_a_ppm(&self) -> u32 {
+        self.b_exceeds_a
+    }
+
+    /// `P(theta_a > theta_b)` in ppm, at or below the exact value.
+    #[must_use]
+    pub const fn a_exceeds_b_ppm(&self) -> u32 {
+        self.a_exceeds_b
+    }
+
+    /// `P(theta_a == theta_b)` in ppm, which is exactly zero.
+    ///
+    /// Both posteriors are continuous, so the event that two independent
+    /// draws are equal has probability zero — there is no diagonal mass to
+    /// apportion between the tails. This is a method rather than an omitted
+    /// term so that the three-term invariant can be written out in full and
+    /// checked, instead of being silently a two-term one.
+    #[must_use]
+    pub const fn tie_ppm(&self) -> u32 {
+        0
+    }
+
+    /// Parts per million lost to flooring both tails.
+    ///
+    /// Zero or one. Both tails floor, and the exact values sum to exactly one
+    /// million, so at most one ppm goes unassigned. It is reported rather than
+    /// absorbed into a tail, because absorbing it would push that tail above
+    /// its own exact value and break the one-directional guarantee.
+    #[must_use]
+    pub const fn rounding_residual_ppm(&self) -> u32 {
+        self.rounding_residual
+    }
+
+    /// The three-term invariant, exactly.
+    ///
+    /// `P(B>A) + P(A>B) + P(A==B) + residual == 1_000_000`.
+    #[must_use]
+    pub const fn sums_to_one_million(&self) -> bool {
+        self.b_exceeds_a + self.a_exceeds_b + self.tie_ppm() + self.rounding_residual == 1_000_000
+    }
+}
+
+/// Both tails of `a` against `b`, normalised together.
+///
+/// Stricter than [`probability_b_exceeds_a_ppm`], deliberately: that function
+/// falls back to a fixed scale when the complementary tail underflows, because
+/// it only has to report one number. This one must report both, so it refuses
+/// unless both are representable.
+///
+/// # Errors
+///
+/// Returns [`ExpectedLossRefusal`] when either tail's peak is unrepresentable
+/// at this scale, or when either term count exceeds [`MAX_TERMS`].
+pub fn compare_ppm(a: Posterior, b: Posterior) -> Result<TailComparison, ExpectedLossRefusal> {
+    let (alpha_a, beta_a) = (a.alpha(), a.beta());
+    let (alpha_b, beta_b) = (b.alpha(), b.beta());
+
+    for offered in [alpha_b, alpha_a] {
+        if offered > MAX_TERMS {
+            return Err(ExpectedLossRefusal::TooManyTerms {
+                offered,
+                maximum: MAX_TERMS,
+            });
+        }
+    }
+
+    let forward = tail_sum(alpha_a, beta_a, alpha_b, beta_b)?;
+    let reverse = tail_sum(alpha_b, beta_b, alpha_a, beta_a)?;
+    let scale = forward.saturating_add(reverse);
+
+    let b_exceeds_a = floor_ppm(forward, scale);
+    let a_exceeds_b = floor_ppm(reverse, scale);
+    let assigned = b_exceeds_a.saturating_add(a_exceeds_b);
+
+    Ok(TailComparison {
+        b_exceeds_a,
+        a_exceeds_b,
+        rounding_residual: u32::try_from(PARTS_PER_MILLION)
+            .unwrap_or(u32::MAX)
+            .saturating_sub(assigned),
+    })
+}
+
+/// `part / scale` in ppm, floored, saturating at one million.
+fn floor_ppm(part: u128, scale: u128) -> u32 {
+    if scale == 0 {
+        return 0;
+    }
+    let ppm = part.saturating_mul(PARTS_PER_MILLION) / scale;
+    u32::try_from(ppm.min(PARTS_PER_MILLION)).unwrap_or(u32::MAX)
+}
+
+/// The fixed-point sum for `P(theta_b > theta_a)`, before normalisation.
+///
+/// Evaluated peak-outward: `T(0)` is never represented. The returned value is
+/// on the [`ONE`] scale and is always at or below the true tail, because every
+/// division floors.
+fn tail_sum(
+    alpha_a: u64,
+    beta_a: u64,
+    alpha_b: u64,
+    beta_b: u64,
+) -> Result<u128, ExpectedLossRefusal> {
     let peak = peak_index(alpha_a, beta_a, alpha_b, beta_b);
     let peak_value = peak_term(alpha_a, beta_a, beta_b, peak).ok_or_else(|| {
         ExpectedLossRefusal::PeakTermUnrepresentable {
@@ -279,8 +483,7 @@ pub fn probability_b_exceeds_a_ppm(a: Posterior, b: Posterior) -> Result<u32, Ex
         total = total.saturating_add(value);
     }
 
-    let ppm = total.saturating_mul(PARTS_PER_MILLION) / ONE;
-    Ok(u32::try_from(ppm.min(PARTS_PER_MILLION)).unwrap_or(u32::MAX))
+    Ok(total)
 }
 
 /// `T(i+1)/T(i)`, as an exact integer ratio.

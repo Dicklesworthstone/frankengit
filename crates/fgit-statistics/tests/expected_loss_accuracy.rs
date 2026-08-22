@@ -22,7 +22,9 @@
 //! stated `1 ppm` bound is attained rather than merely bounded.
 
 use fgit_statistics::beta_bernoulli::{BetaPrior, Outcomes, Posterior};
-use fgit_statistics::expected_loss::{ExpectedLossRefusal, probability_b_exceeds_a_ppm};
+use fgit_statistics::expected_loss::{
+    ExpectedLossRefusal, compare_ppm, probability_b_exceeds_a_ppm,
+};
 
 /// Build a posterior with exactly the parameters `(alpha, beta)`.
 ///
@@ -98,69 +100,166 @@ fn the_symmetry_control_is_exact_without_reference_to_any_oracle() {
     for (alpha, beta) in [(2_u32, 2_u32), (5, 5), (37, 37)] {
         let got = probability_b_exceeds_a_ppm(posterior(alpha, beta), posterior(alpha, beta))
             .expect("identical symmetric posteriors are representable");
-        assert!(
-            (500_000 - MAX_UNDERSTATEMENT_PPM..=500_000).contains(&got),
-            "Beta({alpha},{beta}) against itself must be one half to within the stated bound, \
-             and never above it; got {got} ppm"
+        assert_eq!(
+            got, 500_000,
+            "Beta({alpha},{beta}) against itself must be EXACTLY one half. Both tails are \
+             computed from identical inputs, so they are bit-identical and normalising one by \
+             their total is exactly half -- there is no rounding choice left for this to get \
+             wrong, so a band here would hide a real defect rather than tolerate a known limit"
         );
     }
 }
 
 #[test]
 fn the_flooring_error_is_attained_only_at_a_boundary_and_never_exceeds_the_bound() {
-    // WHERE THE 1 PPM ACTUALLY LIVES.
+    // WHERE THE 1 PPM ACTUALLY LIVES, after the normalisation fix.
     //
-    // The 500-set sweep in expected_loss_error_evidence.rs measures 0 ppm
-    // error, which would justify claiming a tighter bound than the module
-    // states. It does not, because that sample cannot reach the worst case: a
-    // randomly drawn parameter set essentially never lands on an exact ppm
-    // boundary, and the accumulated flooring error is ~4e-27, so a boundary is
-    // the only place it can change the reported integer.
+    // It is no longer the self-comparison. Normalising each tail by the two
+    // tails' total made identical posteriors exact, because their tails are
+    // bit-identical. The bound did not disappear with it: two DIFFERENT
+    // posteriors that are each symmetric about one half are also exactly
+    // 1/2, their tails are NOT bit-identical, and there the flooring still
+    // shows.
     //
-    // Any posterior compared against itself is exactly 1/2 -- a boundary by
-    // construction, needing no oracle. This walks 200 of them plus a spread of
-    // asymmetric self-pairs and asserts BOTH halves of the claim: never above
-    // the exact value, and never more than the stated bound below it.
+    // Beta(2,2) vs Beta(3,3) is that case and returns 499999.
     //
-    // Stating a bound of 1 while measuring 0 would be understating the module;
-    // measuring 0 and claiming 0 would be overstating it. This is the test that
-    // decides which number is honest.
+    // The 500-set random sweep measures 0 ppm error and cannot reach any of
+    // this: a random draw essentially never lands on an exact ppm boundary,
+    // and with accumulated error near 4e-27 a boundary is the only place the
+    // reported integer can move. So this test is the reason the module claims
+    // 1 ppm rather than 0.
     let mut attained = false;
 
+    // Every posterior against itself: exact, no exceptions.
     for alpha in 1_u32..=200 {
         let got = probability_b_exceeds_a_ppm(posterior(alpha, alpha), posterior(alpha, alpha))
             .expect("a posterior against itself is representable");
+        assert_eq!(
+            got, 500_000,
+            "Beta({alpha},{alpha}) against itself must be exactly one half; got {got} ppm"
+        );
+    }
+    for (alpha, beta) in [(2_u32, 3_u32), (7, 11), (50, 3), (3, 50), (120, 240)] {
+        let got = probability_b_exceeds_a_ppm(posterior(alpha, beta), posterior(alpha, beta))
+            .expect("a posterior against itself is representable");
+        assert_eq!(
+            got, 500_000,
+            "Beta({alpha},{beta}) against itself must be exactly one half; got {got} ppm"
+        );
+    }
+
+    // Distinct posteriors that are each symmetric about one half: still
+    // exactly 1/2, and this is where the bound is spent.
+    for (left, right) in [
+        ((2_u32, 2_u32), (3_u32, 3_u32)),
+        ((2, 2), (7, 7)),
+        ((2, 2), (40, 40)),
+        ((3, 3), (40, 40)),
+        ((5, 5), (3, 3)),
+        ((11, 11), (7, 7)),
+    ] {
+        let got =
+            probability_b_exceeds_a_ppm(posterior(left.0, left.1), posterior(right.0, right.1))
+                .expect("symmetric posteriors are representable");
         assert!(
             got <= 500_000,
-            "Beta({alpha},{alpha}) against itself is exactly one half; {got} ppm is ABOVE it, and \
-             the error must never take that direction"
+            "Beta{left:?} vs Beta{right:?} is exactly one half; {got} ppm is ABOVE it, and the \
+             error must never take that direction"
         );
         assert!(
             500_000 - got <= MAX_UNDERSTATEMENT_PPM,
-            "Beta({alpha},{alpha}) against itself returned {got} ppm, short of one half by more \
-             than the {MAX_UNDERSTATEMENT_PPM} ppm bound"
+            "Beta{left:?} vs Beta{right:?} returned {got} ppm, short of one half by more than \
+             the {MAX_UNDERSTATEMENT_PPM} ppm bound"
         );
         if got != 500_000 {
             attained = true;
         }
     }
 
-    for (alpha, beta) in [(2_u32, 3_u32), (7, 11), (50, 3), (3, 50), (120, 240)] {
-        let got = probability_b_exceeds_a_ppm(posterior(alpha, beta), posterior(alpha, beta))
-            .expect("a posterior against itself is representable");
-        assert!(
-            (500_000 - MAX_UNDERSTATEMENT_PPM..=500_000).contains(&got),
-            "Beta({alpha},{beta}) against itself must be one half to within the bound; got {got}"
-        );
-    }
-
     // The presence half: the bound is a measurement, not a cushion. If nothing
-    // in this family ever fell short, the module would be claiming a looser
-    // bound than it needs and this test would be asserting nothing.
+    // reached it, the module would be claiming a looser bound than it needs
+    // and this test would be asserting nothing.
     assert!(
         attained,
-        "no self-comparison fell short of 500000 ppm, so the stated {MAX_UNDERSTATEMENT_PPM} ppm \
+        "no boundary case fell short of 500000 ppm, so the stated {MAX_UNDERSTATEMENT_PPM} ppm \
          bound is no longer attained anywhere and the module is understating its own accuracy"
+    );
+}
+
+#[test]
+fn both_tails_sum_to_exactly_one_million() {
+    // The three-term invariant, and the reason it is worth having.
+    //
+    // P(B>A) + P(A>B) + P(A==B) == 1_000_000 ppm exactly. The tie term is
+    // exactly zero because both posteriors are continuous -- there is no
+    // diagonal mass to apportion -- and the ppm that flooring both tails drops
+    // is reported as an explicit residual rather than absorbed into a tail,
+    // since absorbing it would push that tail above its own exact value.
+    //
+    // NOT TAUTOLOGICAL, and that is the design point: both tails are computed
+    // independently by the same evaluation rather than one being derived as
+    // 1_000_000 minus the other. A sign or ordering error moves one tail
+    // without moving the other and the sum stops holding. Deriving the
+    // complement would make this pass against an evaluation wired backwards.
+    for (alpha_a, beta_a, alpha_b, beta_b) in [
+        (3_u32, 4_u32, 5_u32, 2_u32),
+        (10, 90, 20, 80),
+        (20, 10, 10, 20),
+        (101, 101, 151, 51),
+        (2, 2, 3, 3),
+        (7, 3, 9, 5),
+    ] {
+        let pair = compare_ppm(posterior(alpha_a, beta_a), posterior(alpha_b, beta_b))
+            .expect("both tails are representable here");
+
+        assert!(
+            pair.sums_to_one_million(),
+            "Beta({alpha_a},{beta_a}) vs Beta({alpha_b},{beta_b}): {} + {} + {} + {} != 1000000",
+            pair.b_exceeds_a_ppm(),
+            pair.a_exceeds_b_ppm(),
+            pair.tie_ppm(),
+            pair.rounding_residual_ppm()
+        );
+        assert_eq!(pair.tie_ppm(), 0, "continuous posteriors have no tie mass");
+        assert!(
+            pair.rounding_residual_ppm() <= 1,
+            "at most one ppm can go unassigned when two floors split an exact one million; got {}",
+            pair.rounding_residual_ppm()
+        );
+        assert_eq!(
+            pair.b_exceeds_a_ppm(),
+            probability_b_exceeds_a_ppm(posterior(alpha_a, beta_a), posterior(alpha_b, beta_b))
+                .expect("representable"),
+            "the paired tail must agree with the single-tail entry point, or the two surfaces \
+             have drifted apart"
+        );
+    }
+}
+
+#[test]
+fn a_self_comparison_splits_exactly_evenly_with_no_residual() {
+    // The presence case for the residual: it is 0 exactly when the split is
+    // clean, and 1 otherwise. If it were always 1, the field would be a
+    // constant rather than a measurement.
+    for alpha in [1_u32, 2, 5, 17, 60, 199] {
+        let pair = compare_ppm(posterior(alpha, alpha), posterior(alpha, alpha))
+            .expect("a posterior against itself is representable");
+        assert_eq!(pair.b_exceeds_a_ppm(), 500_000);
+        assert_eq!(pair.a_exceeds_b_ppm(), 500_000);
+        assert_eq!(
+            pair.rounding_residual_ppm(),
+            0,
+            "an even split assigns every ppm; a residual here means the halves are not equal"
+        );
+        assert!(pair.sums_to_one_million());
+    }
+
+    // And the contrasting case, so the assertion above is not vacuous.
+    let uneven = compare_ppm(posterior(3, 4), posterior(5, 2)).expect("representable");
+    assert_eq!(
+        uneven.rounding_residual_ppm(),
+        1,
+        "two floors of non-integer tails must leave exactly one ppm unassigned"
     );
 }
 
