@@ -199,6 +199,20 @@ pub enum CodecRefusal {
         /// The unregistered tag.
         domain: Box<str>,
     },
+    /// A digest carries an algorithm code point the digest registry never
+    /// allocated, so no construction, and therefore no output width and no
+    /// collision-resistance property, can be attached to it.
+    ///
+    /// A refusal rather than a fallback for the same reason
+    /// [`Self::IdentityDomainUnregistered`] is one: accepting the frame would
+    /// admit a digest nothing can verify, under a name that means nothing.
+    /// Code points inside `fgit-crypto`'s corpus-reserved range are exempt --
+    /// they are *deliberately* unresolvable and declare no width, which is what
+    /// lets the fixture corpus round-trip through the production reader.
+    DigestAlgorithmUnregistered {
+        /// The unallocated code point, as it appeared on the wire.
+        code_point: u16,
+    },
     /// A decoded component was rejected by its own type.
     Type(TypeRefusal),
 }
@@ -274,6 +288,7 @@ impl CodecRefusal {
             Self::VariantUnknown { .. } => "variant_unknown",
             Self::ValueUnrepresentable { .. } => "value_unrepresentable",
             Self::IdentityDomainUnregistered { .. } => "identity_domain_unregistered",
+            Self::DigestAlgorithmUnregistered { .. } => "digest_algorithm_unregistered",
             Self::Type(_) => "type_refusal",
         }
     }
@@ -292,7 +307,8 @@ impl CodecRefusal {
             | Self::SchemaMajorUnsupported { .. }
             | Self::SchemaFamilyUnexpected { .. }
             | Self::DomainUnexpected { .. }
-            | Self::IdentityDomainUnregistered { .. } => RefusalCode::SchemaUnsupported,
+            | Self::IdentityDomainUnregistered { .. }
+            | Self::DigestAlgorithmUnregistered { .. } => RefusalCode::SchemaUnsupported,
             Self::InputTruncated { .. }
             | Self::TrailingBytes { .. }
             | Self::BooleanByteInvalid { .. }
@@ -438,6 +454,10 @@ impl fmt::Display for CodecRefusal {
             Self::IdentityDomainUnregistered { domain } => write!(
                 formatter,
                 "domain {domain} is not registered in the identity registry"
+            ),
+            Self::DigestAlgorithmUnregistered { code_point } => write!(
+                formatter,
+                "digest algorithm code point {code_point} is not registered"
             ),
             Self::Type(refusal) => write!(formatter, "{refusal}"),
         }

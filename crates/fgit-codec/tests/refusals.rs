@@ -14,7 +14,7 @@ use fgit_codec::{
     peek_frame_domain,
 };
 use fgit_crypto::{CORPUS_RESERVED_CODE_POINTS, DigestAlgorithm};
-use fgit_types::hash::{Digest, DigestBytes};
+use fgit_types::hash::{Digest, DigestAlgorithmId, DigestBytes};
 use fgit_types::identity::{InternalObjectId, TxId};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, DomainTag, RefusalCode, SchemaFamily, SchemaId, TypeRefusal,
@@ -620,4 +620,93 @@ fn the_corpus_slots_sit_inside_the_range_crypto_reserves() {
     // everything, which is the shape a vacuous guard takes.
     assert!(!CORPUS_RESERVED_CODE_POINTS.contains(&DigestAlgorithm::Sha1.code_point()));
     assert!(!CORPUS_RESERVED_CODE_POINTS.contains(&DigestAlgorithm::Sha256.code_point()));
+}
+
+// ------------------------------------- unregistered algorithm code points
+//
+// `DigestAlgorithmId::try_new` refuses only code point 0, correctly: `fgit-types`
+// is L0 and cannot see the registry. So until this check, the decoder accepted a
+// digest under any non-zero u16, including points the registry never allocated.
+// ADR-0002 already settled the doctrine for the *domain* vocabulary -- "an
+// unregistered domain is now a typed refusal" -- and `fgit-types` already
+// refuses an unknown *Git* hash algorithm. The internal digest vocabulary was
+// the one that missed it.
+
+#[test]
+fn a_digest_under_an_unregistered_algorithm_code_point_is_refused() {
+    // 3 names no construction and sits outside the corpus-reserved range, so
+    // nothing can attach a width or a collision-resistance property to it.
+    let unregistered = DigestAlgorithmId::try_new(3).expect("nonzero");
+    let frame = seal_with_digest(Digest::new(unregistered, body_of(0x77, 32)));
+    let refusal = decode_body::<TransactionSealBody>(&frame, DecodeLimits::DEFAULT)
+        .expect_err("an unallocated code point must not decode");
+    assert_eq!(
+        refusal,
+        CodecRefusal::DigestAlgorithmUnregistered { code_point: 3 }
+    );
+
+    // Permitted twin 1: a REGISTERED point at its own width still decodes.
+    let registered = seal_with_digest(Digest::new(DigestAlgorithm::Sha256.id(), body_of(0x77, 32)));
+    assert!(decode_body::<TransactionSealBody>(&registered, DecodeLimits::DEFAULT).is_ok());
+
+    // Permitted twin 2: a corpus-reserved point is DELIBERATELY unresolvable
+    // and must stay accepted, or the golden corpus stops decoding.
+    let reserved = seal_with_digest(Digest::new(support::algorithm(), body_of(0x77, 32)));
+    assert!(decode_body::<TransactionSealBody>(&reserved, DecodeLimits::DEFAULT).is_ok());
+}
+
+#[test]
+fn the_unregistered_refusal_stops_exactly_at_the_reserved_boundary() {
+    // Arms 2 and 3 meet at one value. `CORPUS_RESERVED_CODE_POINTS` starts
+    // INCLUSIVELY at 0xfff0, so 0xfff0 is accepted and 0xffef is refused. A
+    // refusal-only test cannot tell a correct boundary from an off-by-one, and
+    // an off-by-one here would refuse the range's own first slot -- the slot
+    // every migrated fixture in the workspace is entitled to use.
+    let below = DigestAlgorithmId::try_new(0xffef).expect("nonzero");
+    let refusal = decode_body::<TransactionSealBody>(
+        &seal_with_digest(Digest::new(below, body_of(0x77, 32))),
+        DecodeLimits::DEFAULT,
+    )
+    .expect_err("0xffef is one below the reserved range");
+    assert_eq!(
+        refusal,
+        CodecRefusal::DigestAlgorithmUnregistered { code_point: 0xffef }
+    );
+
+    let first_reserved = DigestAlgorithmId::try_new(0xfff0).expect("nonzero");
+    assert!(
+        decode_body::<TransactionSealBody>(
+            &seal_with_digest(Digest::new(first_reserved, body_of(0x77, 32))),
+            DecodeLimits::DEFAULT,
+        )
+        .is_ok(),
+        "0xfff0 is the first reserved point and must be accepted"
+    );
+}
+
+#[test]
+fn the_unregistered_refusal_guards_the_internal_object_id_door_too() {
+    // Same second door as the width check: a different function reads an
+    // algorithm and a digest body, so a guard on `read_digest` alone would
+    // close this under one name and leave it open under another.
+    let unregistered = DigestAlgorithmId::try_new(3).expect("nonzero");
+    let mut body = support::transaction_seal();
+    body.tx_id = TxId::from_internal_object_id(InternalObjectId::new(
+        unregistered,
+        TxId::DOMAIN_TAG,
+        CANONICAL_CODEC_VERSION,
+        body_of(0x77, 32),
+    ))
+    .expect("own domain");
+    let frame = encode_body(&body).expect("a malformed identity still encodes");
+
+    let refusal = decode_body::<TransactionSealBody>(&frame, DecodeLimits::DEFAULT)
+        .expect_err("an unallocated code point must not decode as an identity");
+    assert_eq!(
+        refusal,
+        CodecRefusal::DigestAlgorithmUnregistered { code_point: 3 }
+    );
+
+    // Permitted twin: the corpus identity through the same door, unchanged.
+    assert!(decode_body::<TransactionSealBody>(&seal_bytes(), DecodeLimits::DEFAULT).is_ok());
 }

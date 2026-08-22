@@ -12,7 +12,7 @@
 //! one-byte-string-per-value rule would hold only for bodies this process
 //! happened to write itself.
 
-use fgit_crypto::DigestAlgorithm;
+use fgit_crypto::{CORPUS_RESERVED_CODE_POINTS, DigestAlgorithm};
 use fgit_types::hash::{Digest, DigestAlgorithmId, DigestBytes};
 use fgit_types::identity::InternalObjectId;
 use fgit_types::numeric::{CanonicalScalar, CodecVersion};
@@ -448,24 +448,35 @@ impl<'a> Decoder<'a> {
 /// looking it up. `fgit-codec` is L2 and already depends on `fgit-crypto`, so
 /// the lookup is available here at no architectural cost.
 ///
-/// # Non-claim
+/// # The three regions of the code-point space
 ///
-/// A code point that resolves to no construction is accepted with no width
-/// enforced. That covers two distinct regions the registry keeps apart --
-/// `CORPUS_RESERVED_CODE_POINTS` (`0xfff0..=0xffff`, which
-/// `fgit-crypto` asserts at compile time no registered construction occupies,
-/// and which the golden corpus needs in order to round-trip through this
-/// reader) and code points that are simply unregistered. This function does
-/// not distinguish them and does not enforce registry MEMBERSHIP; that is a
-/// separate invariant with a separate refusal, and it is not claimed here.
-/// What is closed is the case where a resolvable construction is named and the
-/// body does not match its declared width.
+/// 1. **Resolves to a construction.** The body must be exactly that
+///    construction's output width, or the frame is refused.
+/// 2. **Inside `CORPUS_RESERVED_CODE_POINTS`** (`0xfff0..=0xffff`, a range
+///    `fgit-crypto` asserts at compile time no registered construction
+///    occupies). Deliberately unresolvable, so it declares no width and there
+///    is nothing to match. This is what lets the golden corpus round-trip
+///    through the production reader rather than being refused by it.
+/// 3. **Anything else unresolvable** is a code point the registry never
+///    allocated, and is refused. Accepting it would admit a digest nothing can
+///    verify under a name that means nothing -- the same reasoning ADR-0002
+///    records for unregistered *domain* tags, applied to the vocabulary that
+///    did not receive it.
+///
+/// Arms 2 and 3 meet at exactly `0xfff0`: the reserved range starts
+/// inclusively, so that value is accepted and `0xffef` is refused.
 fn checked_digest(
     algorithm: DigestAlgorithmId,
     bytes: DigestBytes,
 ) -> Result<Digest, CodecRefusal> {
     let Some(construction) = DigestAlgorithm::from_id(algorithm) else {
-        return Ok(Digest::new(algorithm, bytes));
+        return if CORPUS_RESERVED_CODE_POINTS.contains(&algorithm.code_point()) {
+            Ok(Digest::new(algorithm, bytes))
+        } else {
+            Err(CodecRefusal::DigestAlgorithmUnregistered {
+                code_point: algorithm.code_point(),
+            })
+        };
     };
     Digest::new_checked(algorithm, bytes, construction.digest_len()).map_err(CodecRefusal::from)
 }
