@@ -54,13 +54,16 @@
 //! # Status
 //!
 //! The first vertical slice is the regime detector in [`regime`], with its
-//! assumptions executable rather than documented. The evidence body and the
+//! assumptions executable rather than documented, and the fail-closed selection
+//! rule in [`fallback`]. The evidence body and the
 //! remaining mechanisms of the section 33 library — conformal bounds,
 //! e-processes, bandit arm selection, off-policy evaluation with support and
 //! effective-sample-size gates, Beta-Bernoulli expected loss, and Lyapunov
 //! governors — are **not** implemented here yet, and this crate does not claim
 //! them.
 
+pub mod fallback;
 pub mod regime;
 
+pub use fallback::{FallbackTrigger, PolicyGate, PolicySelection};
 pub use regime::{AssumptionFailure, Cusum, CusumConfig, Scaled, Shift};
