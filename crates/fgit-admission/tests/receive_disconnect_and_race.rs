@@ -75,11 +75,16 @@
 //!   permitted — is answered.
 //! * **Backend applicability: every result here is against
 //!   [`MemoryAuthorityStore`], the reference backend, and says nothing about
-//!   `FsqliteAuthorityStore`, which is the production one.** The fault engine
-//!   this corpus drives exists only on the reference store, so "no disconnect
-//!   leaves a stuck intermediate" is a statement about the reference
-//!   implementation of the authority contract. The production backend has its
-//!   own crash suite and its own applicability limits.
+//!   `FsqliteAuthorityStore`, which is the production one.** No *exported*
+//!   faultable production backend exists: `FaultableAuthorityStore` has one
+//!   implementor in `src` (`MemoryAuthorityStore`). A per-crate test-local
+//!   wrapper is the established workaround — `fgit-authority-fsqlite`'s own
+//!   `fault_conformance.rs` implements the trait for a `FaultingStore` defined
+//!   inside that test file — but a `tests/` item in another crate is not a
+//!   surface this corpus can import. So "no disconnect leaves a stuck
+//!   intermediate" is a statement about the reference implementation of the
+//!   authority contract. The production backend has its own crash suite and its
+//!   own applicability limits.
 //! * Hidden-ref probes remain unwritten and unwritable:
 //!   `RefusalCode::HiddenRefUnauthorized` (0x0206) is defined in `fgit-types`
 //!   and classified in `fgit-reference` but produced by nothing in the tree.
