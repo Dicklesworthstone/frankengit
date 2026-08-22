@@ -728,8 +728,20 @@ fn point_04_is_absent_because_nothing_is_ever_durable() {
 // writer, so a test resting only on that would survive its own premise
 // breaking. What actually enforces "writes nothing" is the signature --
 // `materialize` is handed a plan and parse limits and no filesystem handle, so
-// it has nothing to write through. Gaining a writer means gaining a parameter,
-// and this binding then fails to compile.
+// it has nothing to write through. A writer added as a PARAMETER changes the
+// signature, and this binding then fails to compile.
+//
+// WHAT THIS DOES NOT CATCH, measured rather than assumed. A writer that arrives
+// INSIDE an existing type is invisible here: the binding names types, so
+// `ParseLimits` gaining a path field, or `ReferenceLayout` gaining one, leaves
+// the signature identical. Measured by giving `ReferenceLayout` a `PathBuf`
+// field and initialising it -- the crate still compiles clean, exit 0, and this
+// binding says nothing. So the pin covers the function's own shape and not the
+// reachability of a filesystem through its arguments or its result.
+//
+// That bound is worth stating because the honest scope is narrower than the
+// first version of this comment claimed, and a guard trusted past its scope is
+// worse than no guard.
 //
 // That the detector is the compiler rather than an assertion is the reason to
 // state it here. It was true before this binding existed and nothing said so,
