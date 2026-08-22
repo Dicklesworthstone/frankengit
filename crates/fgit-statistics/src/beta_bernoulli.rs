@@ -59,6 +59,8 @@
 //! difference of one part per million would order the arms, and a controller
 //! would switch policies on noise — which is churn, not adaptation.
 
+use fgit_types::Probability;
+
 /// Parts per million.
 const PARTS_PER_MILLION: u64 = 1_000_000;
 
@@ -129,6 +131,19 @@ impl Posterior {
     /// One truncating division from this posterior's own two counts. Nothing
     /// downstream feeds back into it, so the truncation quantises rather than
     /// compounds.
+    /// The posterior mean as a typed probability.
+    ///
+    /// Uses the saturating constructor deliberately. `Probability`'s contract
+    /// reserves the checked `try_new` for untrusted or policy-relevant input
+    /// and permits the saturating path for a bounded calculation; this mean is
+    /// `alpha / (alpha + beta)` with `alpha < alpha + beta`, so it cannot leave
+    /// `0..=1_000_000` and there is no out-of-range case for a refusal to
+    /// report.
+    #[must_use]
+    pub fn mean(self) -> Probability {
+        Probability::saturating_from_parts_per_million(self.mean_parts_per_million())
+    }
+
     #[must_use]
     pub fn mean_parts_per_million(self) -> u32 {
         let total = self.alpha + self.beta;
@@ -308,5 +323,98 @@ impl ArmComparison {
             return Ok(ArmVerdict::FallbackPreferred { margin });
         }
         Ok(ArmVerdict::Indistinguishable { difference: margin })
+    }
+}
+
+/// A posterior updated one observation at a time.
+///
+/// [`BetaPrior::update`] is batch-shaped: it takes a whole [`Outcomes`] and
+/// yields a [`Posterior`]. A retry controller does not have a batch — it learns
+/// one commit or conflict at a time and must be able to discard its history
+/// when the regime moves. This is that shape, and it exists so a caller does
+/// not keep its own counts beside a `Posterior` and drift from it.
+///
+/// # Why the prior is kept apart from the observations
+///
+/// The counts here are **real observations only**. The prior contributes belief
+/// and is added when a [`Posterior`] is produced, never mixed into the tally.
+/// That separation is what lets [`Self::trials`] answer "how much evidence is
+/// there", which is the question [`ArmComparison`]'s minimum-evidence gate asks
+/// — a representation that folded the prior into the counts could not answer it,
+/// and would report a confident mean after zero observations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct IncrementalPosterior {
+    prior: BetaPrior,
+    successes: u32,
+    failures: u32,
+}
+
+impl IncrementalPosterior {
+    /// Starts from a proper prior with no observations.
+    #[must_use]
+    pub const fn new(prior: BetaPrior) -> Self {
+        Self {
+            prior,
+            successes: 0,
+            failures: 0,
+        }
+    }
+
+    /// Records one observed outcome.
+    ///
+    /// Saturating, so a long-lived caller cannot wrap its own history into a
+    /// smaller count and silently look less experienced than it is.
+    pub const fn observe(&mut self, success: bool) {
+        if success {
+            self.successes = self.successes.saturating_add(1);
+        } else {
+            self.failures = self.failures.saturating_add(1);
+        }
+    }
+
+    /// Discards accumulated observations, keeping the prior.
+    ///
+    /// A regime change invalidates the observations without invalidating the
+    /// belief the caller started from, so the prior survives and the evidence
+    /// does not. [`Self::trials`] returns to zero, which is the point: after a
+    /// regime change the evidence gate should refuse again until real
+    /// observations accumulate under the new regime.
+    pub const fn reset_for_regime(&mut self) {
+        self.successes = 0;
+        self.failures = 0;
+    }
+
+    /// Real observations recorded, excluding the prior's pseudo-counts.
+    #[must_use]
+    pub const fn trials(self) -> u32 {
+        self.successes.saturating_add(self.failures)
+    }
+
+    /// The observed counts, for a receipt.
+    #[must_use]
+    pub const fn counts(self) -> (u32, u32) {
+        (self.successes, self.failures)
+    }
+
+    /// The posterior implied by the prior and the observations so far.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BetaRefusal::MoreSuccessesThanTrials`] only if the internal
+    /// counts were somehow inconsistent, which [`Self::observe`] cannot produce.
+    pub const fn posterior(self) -> Result<Posterior, BetaRefusal> {
+        self.prior.update(Outcomes {
+            successes: self.successes,
+            trials: self.trials(),
+        })
+    }
+
+    /// The posterior mean as a typed probability.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Self::posterior`].
+    pub fn success_probability(self) -> Result<Probability, BetaRefusal> {
+        Ok(self.posterior()?.mean())
     }
 }

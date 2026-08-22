@@ -147,7 +147,8 @@ pub use authority::{
     ProposedTarget,
 };
 pub use beta_bernoulli::{
-    ArmComparison, ArmVerdict, BetaAssumptionFailure, BetaPrior, BetaRefusal, Outcomes, Posterior,
+    ArmComparison, ArmVerdict, BetaAssumptionFailure, BetaPrior, BetaRefusal, IncrementalPosterior,
+    Outcomes, Posterior,
 };
 pub use conformal::{
     ConformalAssumptionFailure, ConformalConfig, ConformalRefusal, SplitConformal,
