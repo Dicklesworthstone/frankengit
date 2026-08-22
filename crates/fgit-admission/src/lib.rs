@@ -1551,6 +1551,10 @@ const fn refusal_message(code: RefusalCode) -> &'static [u8] {
     }
 }
 
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
+
 #[cfg(test)]
 mod tests {
     #![forbid(unsafe_code)]
@@ -2264,7 +2268,3 @@ mod tests {
         assert!(admit_validated_receive(&store, &context, &permitted, one, &projection,).is_ok());
     }
 }
-
-// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
-const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
-const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
