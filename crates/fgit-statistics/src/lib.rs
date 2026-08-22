@@ -78,6 +78,7 @@ pub mod beta_bernoulli;
 pub mod conformal;
 pub mod controller;
 pub mod e_process;
+pub mod elimination;
 pub mod evidence;
 pub mod fallback;
 pub mod lyapunov;
@@ -97,6 +98,9 @@ pub use conformal::{
 pub use controller::{ControllerConfig, ControllerRefusal, ControllerStep, RetryBackoffController};
 pub use e_process::{
     EProcess, EProcessAssumptionFailure, EProcessConfig, EProcessRefusal, EProcessStep,
+};
+pub use elimination::{
+    EliminationAssumptionFailure, EliminationRefusal, RoundOutcome, SuccessiveElimination,
 };
 pub use evidence::{
     AssumptionSet, BindingRefusal, RegimeBinding, SequenceWindow, StatisticalEvidenceBody,
