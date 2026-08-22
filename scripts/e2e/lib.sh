@@ -2200,10 +2200,37 @@ fge_assert_contains() {
   return 0
 }
 
+# Absence assertions have two ways to be unfalsifiable, and they need different
+# answers. Reported by ChartreuseHorizon, who triaged all call sites and found
+# 24 of 25 already carry a witness that the haystack was populated.
+#
+# AN EMPTY NEEDLE IS ALWAYS A BUG, so it fails. `fge_assert_not_contains ID
+# "$out" "$expected"` with `$expected` accidentally unset previously passed
+# unconditionally -- the assertion could not fail in the direction it existed to
+# cover, and no legitimate call passes an empty needle. Its twin
+# `fge_assert_contains` already fails on this, so the two now agree.
+#
+# AN EMPTY HAYSTACK IS NOT ALWAYS A BUG, so it still passes -- but it is
+# RECORDED DIFFERENTLY. "stderr contains no FATAL" against legitimately clean
+# stderr is a real and correct assertion, and failing it would break honest
+# suites to catch dishonest ones. What was wrong is that the receipt could not
+# tell "checked populated output, needle absent" from "there was nothing to
+# check": both wrote `absent`. The actual value is now `absent (empty haystack)`
+# in the second case, so the vacuous instances are findable from receipts rather
+# than by grepping 28 call sites, and a caller who meant "the output is empty"
+# has `fge_assert_eq "$id" "" "$out"` which says exactly that.
+#
+# The asymmetry with fge_assert_contains is therefore deliberate now rather than
+# accidental: `contains` fails on empty because absence of output disproves
+# presence, while absence of output does not disprove absence.
 fge_assert_not_contains() {
   local id=${1-} hay=${2-} needle=${3-} desc=${4:-substring absent}
-  if [ -n "$needle" ] && [[ $hay == *"$needle"* ]]; then
+  if [ -z "$needle" ]; then
+    fge__record_assertion "$id" fail 'a non-empty needle' 'empty needle' "$desc"
+  elif [[ $hay == *"$needle"* ]]; then
     fge__record_assertion "$id" fail "absent: $needle" 'present' "$desc"
+  elif [ -z "$hay" ]; then
+    fge__record_assertion "$id" pass "absent: $needle" 'absent (empty haystack)' "$desc"
   else
     fge__record_assertion "$id" pass "absent: $needle" 'absent' "$desc"
   fi

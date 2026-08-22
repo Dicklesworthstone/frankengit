@@ -15,6 +15,9 @@ fge_assert_ne           FG-000A-NEG-NE    same same                 'ne negative
 fge_assert_exit         FG-000A-NEG-EXIT  0 9                       'exit negative'
 fge_assert_contains     FG-000A-NEG-CONT  haystack needle           'contains negative'
 fge_assert_not_contains FG-000A-NEG-NCONT haystack hay              'not_contains negative'
+# An empty needle is unfalsifiable: before this fired, the call passed
+# unconditionally, so an unset expected-absent variable silently proved nothing.
+fge_assert_not_contains FG-000A-NEG-NCONTE haystack ''               'not_contains empty-needle negative'
 fge_assert_match        FG-000A-NEG-MATCH abc '^z+$'                'match negative'
 fge_assert_file         FG-000A-NEG-FILE  "$work/absent.txt"        'file negative'
 fge_assert_no_file      FG-000A-NEG-NFILE "$work/present.txt"       'no_file negative'

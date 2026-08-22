@@ -272,11 +272,11 @@ fge_assert_contains FG-000A-ST-TRUNCSEQ-DETAIL "$CASE_DETAIL" 'highest seq is' \
 # every assertion helper's failing branch fires exactly once
 # ---------------------------------------------------------------------------
 run_case assert-negatives 60 1 neg_assert_negatives.sh
-expected_failed='FG-000A-NEG-EQ FG-000A-NEG-NE FG-000A-NEG-EXIT FG-000A-NEG-CONT FG-000A-NEG-NCONT FG-000A-NEG-MATCH FG-000A-NEG-FILE FG-000A-NEG-NFILE FG-000A-NEG-DIR FG-000A-NEG-DIG FG-000A-NEG-DIGM FG-000A-NEG-NDJ FG-000A-NEG-NDJM FG-000A-NEG-NDJE FG-000A-NEG-CMD FG-000A-NEG-FAIL'
+expected_failed='FG-000A-NEG-EQ FG-000A-NEG-NE FG-000A-NEG-EXIT FG-000A-NEG-CONT FG-000A-NEG-NCONT FG-000A-NEG-NCONTE FG-000A-NEG-MATCH FG-000A-NEG-FILE FG-000A-NEG-NFILE FG-000A-NEG-DIR FG-000A-NEG-DIG FG-000A-NEG-DIGM FG-000A-NEG-NDJ FG-000A-NEG-NDJM FG-000A-NEG-NDJE FG-000A-NEG-CMD FG-000A-NEG-FAIL'
 fge_assert_eq FG-000A-ST-NEGSET "$expected_failed" "${CASE_FAILED_IDS[*]}" \
   'the failing branch of every assertion helper fires exactly once, in order'
-fge_assert_eq FG-000A-ST-NEGCOUNT 16 "${#CASE_FAILED_IDS[@]}" \
-  'sixteen assertion negatives are accounted for'
+fge_assert_eq FG-000A-ST-NEGCOUNT 17 "${#CASE_FAILED_IDS[@]}" \
+  'seventeen assertion negatives are accounted for'
 
 # ---------------------------------------------------------------------------
 # a retry that passes never launders the first attempt
