@@ -148,48 +148,61 @@ fn pushing_exactly_the_record_limit_is_accepted() {
     assert_eq!(segment.record_count(), 2);
 }
 
-/// The segment byte budget, calibrated at runtime rather than guessed.
+/// The exact encoded size of a one-record segment, measured rather than
+/// guessed.
 ///
-/// The framing overhead is not something a test should hard-code, so this
-/// measures the exact encoded size of a one-record segment under roomy limits
-/// and then drives the boundary from that measurement: exactly that many bytes
-/// is accepted, one fewer is refused.
-///
-/// Both halves in one test because the accepted half is meaningless without the
-/// measurement that produced the number.
-#[test]
-fn a_segment_at_exactly_its_byte_budget_is_accepted_and_one_byte_short_is_refused() {
-    let measured = {
-        let roomy = roomy();
-        let digest = CryptoDigest;
-        let mut builder = MicrosegmentBuilder::new(&digest, roomy.clone());
-        builder
-            .push(record(1, &roomy))
-            .expect("one record fits roomy limits");
-        builder
-            .build()
-            .expect("one record builds under roomy limits")
-            .as_bytes()
-            .len()
-    };
-
-    let exact = limits(measured, 128);
+/// Framing overhead is not something a test should hard-code, so the two byte-
+/// budget tests below both drive their boundary from this measurement.
+fn measured_one_record_size() -> usize {
+    let roomy = roomy();
     let digest = CryptoDigest;
-    let mut builder = MicrosegmentBuilder::new(&digest, exact.clone());
+    let mut builder = MicrosegmentBuilder::new(&digest, roomy.clone());
     builder
-        .push(record(1, &exact))
-        .expect("a budget of exactly the encoded size must admit the record");
+        .push(record(1, &roomy))
+        .expect("one record fits roomy limits");
     builder
         .build()
-        .expect("a segment of exactly its byte budget must build");
+        .expect("one record builds under roomy limits")
+        .as_bytes()
+        .len()
+}
 
-    let short = limits(measured - 1, 128);
+/// A budget one byte under the encoded size is refused, at the push.
+///
+/// Split from its twin below rather than combined, so the mutation matrix can
+/// tell the two halves apart: a single test covering both would be killed by
+/// either mutation and could not say which guard changed.
+#[test]
+fn a_segment_one_byte_over_its_byte_budget_is_refused() {
+    let short = limits(measured_one_record_size() - 1, 128);
     let digest = CryptoDigest;
     let mut builder = MicrosegmentBuilder::new(&digest, short.clone());
+
     assert_eq!(
         builder.push(record(1, &short)),
         Err(FabricError::SegmentTooLarge),
         "one byte under the encoded size must be refused, and push is where the \
          projection is checked",
     );
+}
+
+/// The permitted twin at the exact inclusive boundary: a budget of exactly the
+/// encoded size is accepted and builds.
+///
+/// The guard is `>`. Written `>=` it would reject a segment that exactly fits
+/// the budget its caller was given, and the refusal test above still passes
+/// under that change.
+#[test]
+fn a_segment_of_exactly_its_byte_budget_is_accepted() {
+    let exact = limits(measured_one_record_size(), 128);
+    let digest = CryptoDigest;
+    let mut builder = MicrosegmentBuilder::new(&digest, exact.clone());
+
+    builder
+        .push(record(1, &exact))
+        .expect("a budget of exactly the encoded size must admit the record");
+    let segment = builder
+        .build()
+        .expect("a segment of exactly its byte budget must build");
+    assert_eq!(segment.record_count(), 1);
 }
