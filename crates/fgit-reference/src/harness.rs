@@ -48,12 +48,19 @@ use crate::transition::{
     stage, stage_objects,
 };
 
-/// The digest algorithm slot minted identities are stamped with.
+/// The corpus-reserved digest algorithm slot minted identities are stamped with.
 ///
-/// A real identity carries the algorithm that actually produced its bytes.
-/// A minted one carries this reserved-for-harnesses slot so a minted identity
-/// is distinguishable from a real one by inspection.
-pub const HARNESS_ALGORITHM_CODE_POINT: u16 = 0xff01;
+/// A real identity carries the algorithm that actually produced its bytes. A
+/// minted one uses `fgit-codec`'s corpus marker, which `fgit-crypto` reserves
+/// away from registered digest constructions. A minted identity is therefore
+/// distinguishable from a real one by inspection without this crate inventing
+/// a second harness reservation.
+pub const HARNESS_ALGORITHM_CODE_POINT: u16 = fgit_codec::harness::CORPUS_ALGORITHM_CODE_POINT;
+
+// The codec-owned source is itself tied to fgit-crypto's complete reserved
+// range. Keep a local floor assertion too, so changing this alias to a
+// production code point is a compile-time error in the reference harness.
+const _: () = assert!(HARNESS_ALGORITHM_CODE_POINT >= 0xfff0);
 
 /// The codec version minted identities are stamped with.
 pub const HARNESS_CODEC_VERSION: CodecVersion = CodecVersion::new(1, 0);
@@ -503,7 +510,7 @@ pub fn publish(
 
 #[cfg(test)]
 mod tests {
-    use super::IdentityMint;
+    use super::{HARNESS_ALGORITHM_CODE_POINT, IdentityMint};
     use std::collections::BTreeSet;
 
     #[test]
@@ -538,6 +545,21 @@ mod tests {
         for _ in 0..64 {
             assert_ne!(left.tx(), right.tx());
         }
+    }
+
+    #[test]
+    fn minted_digests_carry_the_codec_corpus_marker() {
+        let mut mint = IdentityMint::new(5);
+        assert_eq!(
+            mint.digest().algorithm().code_point(),
+            HARNESS_ALGORITHM_CODE_POINT,
+            "a harness digest must expose the reserved corpus marker"
+        );
+        assert_eq!(
+            HARNESS_ALGORITHM_CODE_POINT,
+            fgit_codec::harness::CORPUS_ALGORITHM_CODE_POINT,
+            "the reference harness must not invent a second corpus marker"
+        );
     }
 
     #[test]
