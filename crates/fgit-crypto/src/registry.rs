@@ -464,6 +464,16 @@ pub enum IdentityDomain {
     AdmissionObjectClosure,
     /// One canonical immutable admission ref delta body.
     AdmissionRefDelta,
+    /// One ATP trust-scoped transfer cache key.
+    ///
+    /// A cache key is an identity like any other: FG-075 keys entries by
+    /// content identity PLUS trust scope, and `ATP_GIT_PROFILE.md` section 9 is
+    /// explicit that content equality does not authorise cross-tenant reuse. A
+    /// key derived outside this registry could collide with, or be mistaken
+    /// for, an identity that carries different disclosure rules -- so the cache
+    /// gets its own domain rather than borrowing `AtpTransferManifest`, which
+    /// means something else.
+    AtpTrustCacheKey,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -701,6 +711,12 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/admission-ref-delta/v1",
         None,
     ),
+    owned_row(
+        37,
+        IdentityDomain::AtpTrustCacheKey,
+        "frankengit/atp-trust-cache-key/v1",
+        None,
+    ),
 ];
 
 const fn pinned_row(
@@ -925,6 +941,7 @@ impl IdentityDomain {
         Self::AdmissionRefState,
         Self::AdmissionObjectClosure,
         Self::AdmissionRefDelta,
+        Self::AtpTrustCacheKey,
     ];
 
     /// Position of this domain in [`DOMAIN_REGISTRY`].
