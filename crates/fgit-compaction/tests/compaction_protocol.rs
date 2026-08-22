@@ -12,15 +12,16 @@ use fgit_compaction::{
     CompactionPublicationRefusal, CompactionRecord, DecisionRange, DurabilityReceipt,
     DurabilityRefusal, DurableCompaction, LogicalEquivalenceProof, OutputDisposition,
     OutputStageReceipt, RetentionRefusal, SourceEntry, SourceOutputTotalityMap, StagedCompaction,
-    TotalityEntry,
+    TotalityEntry, VisibleCompaction,
 };
 use fgit_object_fabric::fabric::{
     AuthenticatedRetentionRegistry, PublicationState, RetentionRootProposal, StoreRefusal,
 };
 use fgit_types::{
-    CANONICAL_CODEC_VERSION, DecisionSequence, Digest, DigestAlgorithmId, DigestBytes, GitOid,
-    GitOidSha1, HeadGeneration, OPAQUE_ID_LEN, PolicyEpoch, PrincipalSnapshotId, RegistryEpoch,
-    RepositoryAuthorityHeadId, RepositoryId, RepositorySequence, SegmentManifestId, TenantId, TxId,
+    CANONICAL_CODEC_VERSION, DecisionSequence, Digest, DigestAlgorithmId, DigestBytes,
+    GenerationId, GitOid, GitOidSha1, HeadGeneration, OPAQUE_ID_LEN, PolicyEpoch,
+    PrincipalSnapshotId, RegistryEpoch, RepositoryAuthorityHeadId, RepositoryId,
+    RepositorySequence, SegmentManifestId, TenantId, TxId,
 };
 
 macro_rules! derived {
@@ -795,10 +796,10 @@ const fn absent_object() -> GitOid {
 /// Reproduces stage -> publish -> visible -> `confirm_durability` with all
 /// outputs durable, which is the only state in which retention is consulted at
 /// all.
-fn durable_generation(
+fn visible_generation(
     slot: &'static [u8],
     instance: u64,
-) -> (DurableCompaction, Digest, RepositoryAuthorityHeadId) {
+) -> (VisibleCompaction, Digest, RepositoryAuthorityHeadId) {
     let input = basis();
     let staged = stage(&input);
     let publication = publication(input.clone(), &staged);
@@ -825,11 +826,28 @@ fn durable_generation(
         HeadRead::Absent => panic!("a successful CAS cannot remove a head"),
     };
     let successor = visible.successor_head();
+    (visible, retention_root, successor)
+}
+
+/// The number of physical outputs `stage()` above places in the output stage.
+///
+/// `a_receipt_matching_the_stage_confirms_durability` pins this empirically, so
+/// a fixture change cannot silently turn the cardinality probe below into a
+/// second copy of some other refusal.
+const STAGED_OUTPUT_COUNT: usize = 3;
+
+/// The durable generation the existing happy-path test reaches, extracted so
+/// the refusal probes share one setup rather than duplicating the chain.
+fn durable_generation(
+    slot: &'static [u8],
+    instance: u64,
+) -> (DurableCompaction, Digest, RepositoryAuthorityHeadId) {
+    let (visible, retention_root, successor) = visible_generation(slot, instance);
     let durable = visible
         .confirm_durability(DurabilityReceipt::new(
             visible.generation(),
             CompactionProfile::ConservativeInterimV1,
-            vec![PublicationState::new(true, true, true); 3],
+            vec![PublicationState::new(true, true, true); STAGED_OUTPUT_COUNT],
             digest(0x82),
         ))
         .expect("all-durable outputs unlock retention evaluation");
@@ -982,5 +1000,157 @@ fn a_granted_permit_names_the_generation_that_authorized_it() {
         permit.generation(),
         durable.generation(),
         "a permit must name the compaction generation that authorized it",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// frankengit-wpn8: the integrity guards of `confirm_durability`.
+//
+// `DurableCompaction` is what unlocks retention evaluation -- only a compaction
+// that has passed this call can be asked to `authorize_source_deletion`
+// (frankengit-pkea). Four guards stand in front of it:
+//
+//   :296 generation -> :299 profile -> :302 cardinality -> :309 not-durable
+//
+// One was exercised, on one of its three axes. Each probe below keeps every
+// earlier guard satisfied, or it would prove an earlier refusal under its own
+// name.
+//
+// `ProfileMismatch` (:299) has NO probe here and that is deliberate:
+// `CompactionProfile` (record.rs:51) has exactly one variant, so
+// `receipt.profile != self.staged.record.profile` is unreachable from any
+// caller. Adding a variant to make it fire would be changing the code to serve
+// the test. It is recorded as unreachable, not as covered.
+// ---------------------------------------------------------------------------
+
+/// A receipt naming a different generation cannot confirm this one.
+///
+/// Every other field is valid -- right profile, right cardinality, every output
+/// fully durable -- so the refusal is attributable to the generation alone.
+///
+/// The foreign id is built directly rather than taken from a second store: the
+/// generation derives from the compaction record body, so a second store over
+/// the same fixture would mint a byte-identical id and this probe would pass
+/// while proving nothing.
+#[test]
+fn a_durability_receipt_for_another_generation_is_refused() {
+    let (visible, _, _) = visible_generation(b"fg079/wpn8-generation", 0xa1);
+    let foreign = derived!(GenerationId, 0x69);
+    assert_ne!(
+        foreign,
+        visible.generation(),
+        "the foreign generation must differ or the refusal below is vacuous",
+    );
+
+    let refusal = visible.confirm_durability(DurabilityReceipt::new(
+        foreign,
+        CompactionProfile::ConservativeInterimV1,
+        vec![PublicationState::new(true, true, true); STAGED_OUTPUT_COUNT],
+        digest(0x83),
+    ));
+    assert_eq!(refusal, Err(DurabilityRefusal::GenerationMismatch));
+}
+
+/// A receipt covering the wrong number of outputs is refused in BOTH
+/// directions.
+///
+/// Under-count and over-count are both checked, and that is the point: the
+/// guard is `!=`, and a `<` written by mistake would accept the over-count
+/// while still passing an under-count-only test. Every state is fully durable
+/// in both receipts, so the later not-durable guard cannot be what fires.
+#[test]
+fn a_durability_receipt_of_the_wrong_cardinality_is_refused() {
+    let (visible, _, _) = visible_generation(b"fg079/wpn8-cardinality", 0xa2);
+
+    for count in [STAGED_OUTPUT_COUNT - 1, STAGED_OUTPUT_COUNT + 1] {
+        let refusal = visible.confirm_durability(DurabilityReceipt::new(
+            visible.generation(),
+            CompactionProfile::ConservativeInterimV1,
+            vec![PublicationState::new(true, true, true); count],
+            digest(0x84),
+        ));
+        assert_eq!(
+            refusal,
+            Err(DurabilityRefusal::OutputReceiptCardinality),
+            "a receipt covering {count} outputs cannot confirm a \
+             {STAGED_OUTPUT_COUNT}-output stage",
+        );
+    }
+}
+
+/// An output that was never staged is not durable, however durable it claims.
+///
+/// This axis looks redundant -- surely nothing can be durable without having
+/// been staged -- and it is not, because `PublicationState::new`
+/// (fabric.rs:974) is an unvalidated three-`bool` constructor that enforces no
+/// ordering between the epochs. A non-monotone state is constructible, so the
+/// guard has to check this term, and dropping it is a change no other test in
+/// the suite would notice.
+#[test]
+fn an_output_that_was_never_staged_is_not_durable() {
+    let (visible, _, _) = visible_generation(b"fg079/wpn8-staged-axis", 0xa3);
+
+    let refusal = visible.confirm_durability(DurabilityReceipt::new(
+        visible.generation(),
+        CompactionProfile::ConservativeInterimV1,
+        vec![PublicationState::new(false, true, true); STAGED_OUTPUT_COUNT],
+        digest(0x85),
+    ));
+    assert_eq!(refusal, Err(DurabilityRefusal::OutputNotDurable));
+}
+
+/// An output that never became visible is not durable.
+///
+/// The second unexercised term of the same disjunction. AGENTS.md 5.4 requires
+/// staged, visible, and durable to stay distinct; this is the test that makes
+/// the middle epoch load-bearing rather than assumed.
+#[test]
+fn an_output_that_never_became_visible_is_not_durable() {
+    let (visible, _, _) = visible_generation(b"fg079/wpn8-visible-axis", 0xa4);
+
+    let refusal = visible.confirm_durability(DurabilityReceipt::new(
+        visible.generation(),
+        CompactionProfile::ConservativeInterimV1,
+        vec![PublicationState::new(true, false, true); STAGED_OUTPUT_COUNT],
+        digest(0x86),
+    ));
+    assert_eq!(refusal, Err(DurabilityRefusal::OutputNotDurable));
+}
+
+/// The permitted twin: a receipt matching the stage confirms durability and
+/// carries its evidence into the capability.
+///
+/// This is the half that makes the four refusals above mean something -- four
+/// tests that only ever see `Err` would pass against a `confirm_durability`
+/// that refused unconditionally. It also pins `STAGED_OUTPUT_COUNT`
+/// empirically: change the fixture's output count and this fails loudly rather
+/// than letting the cardinality probe drift into agreement.
+///
+/// The evidence root is asserted, not just `is_ok`: the durability evidence is
+/// the whole reason the receipt exists, and a call that dropped it would still
+/// return `Ok`.
+#[test]
+fn a_receipt_matching_the_stage_confirms_durability() {
+    let (visible, _, _) = visible_generation(b"fg079/wpn8-permitted", 0xa5);
+    let evidence = digest(0x87);
+
+    let durable = visible
+        .confirm_durability(DurabilityReceipt::new(
+            visible.generation(),
+            CompactionProfile::ConservativeInterimV1,
+            vec![PublicationState::new(true, true, true); STAGED_OUTPUT_COUNT],
+            evidence,
+        ))
+        .expect("a matching all-durable receipt confirms durability");
+
+    assert_eq!(
+        durable.generation(),
+        visible.generation(),
+        "confirming durability must not change which generation is durable",
+    );
+    assert_eq!(
+        durable.durability_evidence_root(),
+        evidence,
+        "the receipt's durability evidence must survive into the capability",
     );
 }
