@@ -1,7 +1,7 @@
 //! Batch rendering: derived worker budgets, and one receipt line per input.
 
 use fgit_doc::{
-    BatchInput, BatchPlan, InputOutcome, Limits, ParseProfile, RefusalKind, RenderProfile,
+    BatchInput, InputOutcome, Limits, ParseProfile, RefusalKind, RenderBatchPlan, RenderProfile,
     VarianceClass, WorkloadProfile, batch::SkipReason, render_batch, worker_count,
 };
 
@@ -96,11 +96,35 @@ fn an_unusable_workload_is_refused_and_a_usable_one_is_derived() {
     )
     .expect_err("a zero per-job estimate is refused, not guessed");
     assert_eq!(no_estimate.kind(), RefusalKind::WorkloadUnusable);
+
+    let insufficient_memory = worker_count(
+        workload(4, 63, 16, VarianceClass::Skewed),
+        RenderProfile::PlainText,
+        1,
+    )
+    .expect_err("a declared budget that cannot hold one skewed job is refused");
+    assert_eq!(
+        insufficient_memory.kind(),
+        RefusalKind::MemoryBudgetBelowOneJob
+    );
+    assert_eq!(insufficient_memory.limit(), 63);
+    assert_eq!(insufficient_memory.observed(), 64);
+
+    let overflowing_estimate = worker_count(
+        workload(4, u64::MAX, u64::MAX / 4 + 1, VarianceClass::Skewed),
+        RenderProfile::PlainText,
+        1,
+    )
+    .expect_err("four-times skew headroom refuses rather than wrapping");
+    assert_eq!(
+        overflowing_estimate.kind(),
+        RefusalKind::WorkloadEstimateOverflow
+    );
 }
 
 #[test]
 fn a_uniform_plan_uses_contiguous_blocks_and_a_skewed_plan_deals_round_robin() {
-    let uniform = BatchPlan::derive(
+    let uniform = RenderBatchPlan::derive(
         workload(4, 1_000_000, 16, VarianceClass::Uniform),
         RenderProfile::PlainText,
         8,
@@ -109,7 +133,7 @@ fn a_uniform_plan_uses_contiguous_blocks_and_a_skewed_plan_deals_round_robin() {
     assert_eq!(uniform.workers(), 4);
     assert_eq!(uniform.assignment(), &[0, 0, 1, 1, 2, 2, 3, 3]);
 
-    let skewed = BatchPlan::derive(
+    let skewed = RenderBatchPlan::derive(
         workload(4, 1_000_000, 16, VarianceClass::Skewed),
         RenderProfile::PlainText,
         8,
@@ -127,7 +151,7 @@ fn every_plan_assigns_every_input_exactly_once() {
             VarianceClass::Mixed,
             VarianceClass::Skewed,
         ] {
-            let plan = BatchPlan::derive(
+            let plan = RenderBatchPlan::derive(
                 workload(6, 1_000_000, 16, variance),
                 RenderProfile::HtmlSafe,
                 count,

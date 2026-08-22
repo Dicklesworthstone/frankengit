@@ -81,7 +81,7 @@ pub use anchors::{
 pub use ast::{Document, Node, NodeId, NodeKind};
 pub use basis::{AnchorBasis, BasisId, DiffSide};
 pub use batch::{
-    BatchInput, BatchPlan, BatchReceipt, InputOutcome, VarianceClass, WorkloadProfile,
+    BatchInput, BatchReceipt, InputOutcome, RenderBatchPlan, VarianceClass, WorkloadProfile,
     render_batch, worker_count,
 };
 pub use diagnostic::{Diagnostic, DiagnosticCode};

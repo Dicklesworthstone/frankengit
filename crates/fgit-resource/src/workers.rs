@@ -96,6 +96,12 @@ pub enum VarianceClass {
     Moderate,
     /// The estimate is a guess; allow double.
     Wide,
+    /// The estimate has a heavy upper tail; reserve four times it.
+    ///
+    /// This is deliberately distinct from [`Self::Wide`]: a caller that
+    /// declares skewed work must not silently receive the smaller two-times
+    /// headroom merely because another consumer does not need four times it.
+    Extreme,
 }
 
 impl VarianceClass {
@@ -106,6 +112,7 @@ impl VarianceClass {
             Self::Tight => 100,
             Self::Moderate => 125,
             Self::Wide => 200,
+            Self::Extreme => 400,
         }
     }
 }
@@ -116,6 +123,7 @@ impl fmt::Display for VarianceClass {
             Self::Tight => "tight",
             Self::Moderate => "moderate",
             Self::Wide => "wide",
+            Self::Extreme => "extreme",
         };
         f.write_str(name)
     }
@@ -616,6 +624,19 @@ mod tests {
                 headroom_percent: 200,
             })
         );
+    }
+
+    #[test]
+    fn extreme_variance_reserves_four_times_the_declared_estimate() {
+        let extreme = plan(WorkerBudgetInputs {
+            variance: VarianceClass::Extreme,
+            ..inputs(64, 8 * 1024, 1024)
+        })
+        .expect("four-times headroom still fits two jobs");
+
+        assert_eq!(extreme.effective_per_job_bytes(), 4 * 1024);
+        assert_eq!(extreme.workers(), 2);
+        assert!(extreme.memory_reserved_bytes() <= 8 * 1024);
     }
 
     #[test]

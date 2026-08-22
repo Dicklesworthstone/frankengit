@@ -623,7 +623,9 @@ name = "fgit-atp-git"
 version = "0.1.0"
 dependencies = [
  "fgit-crypto",
+ "fgit-git-object",
  "fgit-object-fabric",
+ "fgit-pack",
  "fgit-types",
 ]
 
@@ -728,6 +730,7 @@ version = "0.0.1"
 name = "fgit-doc"
 version = "0.0.0"
 dependencies = [
+ "fgit-resource",
  "fgit-types",
 ]
 

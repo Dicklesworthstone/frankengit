@@ -234,6 +234,7 @@ fn the_memory_bound_holds_across_the_parameter_space() {
         VarianceClass::Tight,
         VarianceClass::Moderate,
         VarianceClass::Wide,
+        VarianceClass::Extreme,
     ];
 
     let mut planned = 0_u32;
@@ -294,7 +295,7 @@ fn the_memory_bound_holds_across_the_parameter_space() {
     // either branch fails instead of passing quietly.
     assert_eq!(
         planned + refused,
-        6 * 5 * 4 * 3 * 3,
+        6 * 5 * 4 * 3 * 4,
         "the sweep did not cover the parameter space it claims to"
     );
     assert!(planned > 0, "the sweep never planned a fleet");

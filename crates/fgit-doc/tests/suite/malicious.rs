@@ -547,6 +547,29 @@ fn trip(kind: RefusalKind) -> RefusalKind {
         )
         .expect_err("tripped")
         .kind(),
+        RefusalKind::MemoryBudgetBelowOneJob => fgit_doc::worker_count(
+            fgit_doc::WorkloadProfile {
+                memory_budget_bytes: 63,
+                per_job_bytes: 16,
+                variance: fgit_doc::VarianceClass::Skewed,
+                ..fgit_doc::WorkloadProfile::SERIAL
+            },
+            RenderProfile::PlainText,
+            1,
+        )
+        .expect_err("tripped")
+        .kind(),
+        RefusalKind::WorkloadEstimateOverflow => fgit_doc::worker_count(
+            fgit_doc::WorkloadProfile {
+                per_job_bytes: u64::MAX / 4 + 1,
+                variance: fgit_doc::VarianceClass::Skewed,
+                ..fgit_doc::WorkloadProfile::SERIAL
+            },
+            RenderProfile::PlainText,
+            1,
+        )
+        .expect_err("tripped")
+        .kind(),
         RefusalKind::OutputNameInvalid => {
             fgit_doc::OutputRequest::new("../escape", RenderProfile::PlainText)
                 .expect_err("tripped")

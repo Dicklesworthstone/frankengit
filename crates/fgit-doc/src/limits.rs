@@ -153,6 +153,10 @@ pub enum RefusalKind {
     TooManyBatchInputs,
     /// A declared batch workload is not usable, for example a zero core cap.
     WorkloadUnusable,
+    /// A declared batch memory budget cannot hold one headroom-adjusted job.
+    MemoryBudgetBelowOneJob,
+    /// Applying the declared workload variance would overflow its job estimate.
+    WorkloadEstimateOverflow,
     /// An output name is empty, too long, or not safe for a host path.
     OutputNameInvalid,
     /// Two outputs of one publication requested the same name.
@@ -182,6 +186,8 @@ impl RefusalKind {
         Self::UnknownNode,
         Self::TooManyBatchInputs,
         Self::WorkloadUnusable,
+        Self::MemoryBudgetBelowOneJob,
+        Self::WorkloadEstimateOverflow,
         Self::OutputNameInvalid,
         Self::DuplicateOutputName,
         Self::TooManyOutputs,
@@ -205,6 +211,8 @@ impl RefusalKind {
             Self::UnknownNode => "unknown_node",
             Self::TooManyBatchInputs => "too_many_batch_inputs",
             Self::WorkloadUnusable => "workload_unusable",
+            Self::MemoryBudgetBelowOneJob => "memory_budget_below_one_job",
+            Self::WorkloadEstimateOverflow => "workload_estimate_overflow",
             Self::OutputNameInvalid => "output_name_invalid",
             Self::DuplicateOutputName => "duplicate_output_name",
             Self::TooManyOutputs => "too_many_outputs",

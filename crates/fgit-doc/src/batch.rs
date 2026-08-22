@@ -19,6 +19,10 @@ use crate::limits::{Refusal, RefusalKind, as_u64, offset_u32, usize_of};
 use crate::parse::parse_with;
 use crate::profile::ParseProfile;
 use crate::render::{RenderProfile, Rendered, render};
+use fgit_resource::{
+    VarianceClass as WorkerVarianceClass, WorkerBudgetInputs, WorkerBudgetRefusal, WorkerMode,
+    plan_for_batch,
+};
 
 /// How much the sizes of the declared inputs vary.
 ///
@@ -36,13 +40,13 @@ pub enum VarianceClass {
 }
 
 impl VarianceClass {
-    /// Headroom multiplier applied to the per-job memory estimate.
+    /// Maps this document-specific input taxonomy onto the shared worker policy.
     #[must_use]
-    pub const fn headroom(self) -> u64 {
+    const fn worker_budget_variance(self) -> WorkerVarianceClass {
         match self {
-            Self::Uniform => 1,
-            Self::Mixed => 2,
-            Self::Skewed => 4,
+            Self::Uniform => WorkerVarianceClass::Tight,
+            Self::Mixed => WorkerVarianceClass::Wide,
+            Self::Skewed => WorkerVarianceClass::Extreme,
         }
     }
 
@@ -93,43 +97,58 @@ const fn mode_cap(surface: RenderProfile) -> u32 {
 
 /// Derives the worker count from the declared workload.
 ///
-/// The count is `min(cpu_cap, memory_workers, mode_cap, input_count)` clamped
-/// to at least one, where `memory_workers` is the memory budget divided by the
-/// per-job estimate scaled by the variance headroom. A zero core cap or a zero
-/// per-job estimate is a refusal, not a guess.
+/// The shared [`fgit_resource::plan_for_batch`] mechanism owns CPU, memory,
+/// variance headroom, and input-count caps. This render layer applies its
+/// additional per-surface cap after that plan, which can only lower the count.
+/// A zero core cap, zero per-job estimate, insufficient memory budget, or an
+/// overflowing headroom estimate is a typed refusal, never a guess.
 pub fn worker_count(
     workload: WorkloadProfile,
     surface: RenderProfile,
     input_count: u32,
 ) -> Result<u32, Refusal> {
-    if workload.cpu_cap == 0 || workload.per_job_bytes == 0 {
-        return Err(Refusal::precondition(RefusalKind::WorkloadUnusable));
-    }
-    if input_count == 0 {
-        return Ok(1);
-    }
-    let scaled = workload
-        .per_job_bytes
-        .saturating_mul(workload.variance.headroom());
-    let memory_workers =
-        u32::try_from(workload.memory_budget_bytes / scaled.max(1)).unwrap_or(u32::MAX);
-    let workers = workload
-        .cpu_cap
-        .min(memory_workers)
-        .min(mode_cap(surface))
-        .min(input_count)
-        .max(1);
-    Ok(workers)
+    let planned = plan_for_batch(
+        WorkerBudgetInputs {
+            cpu_cap: workload.cpu_cap,
+            memory_budget_bytes: workload.memory_budget_bytes,
+            per_job_rss_bytes: workload.per_job_bytes,
+            mode: WorkerMode::Batch,
+            variance: workload.variance.worker_budget_variance(),
+        },
+        usize_of(input_count),
+    )
+    .map_err(map_worker_budget_refusal)?;
+
+    Ok(planned.workers().min(mode_cap(surface)))
 }
 
-/// A deterministic assignment of inputs to workers.
+fn map_worker_budget_refusal(refusal: WorkerBudgetRefusal) -> Refusal {
+    match refusal {
+        WorkerBudgetRefusal::ZeroCpuCap | WorkerBudgetRefusal::ZeroPerJobEstimate => {
+            Refusal::precondition(RefusalKind::WorkloadUnusable)
+        }
+        WorkerBudgetRefusal::BudgetBelowOneJob {
+            budget_bytes,
+            required_bytes,
+        } => Refusal::exceeded(
+            RefusalKind::MemoryBudgetBelowOneJob,
+            budget_bytes,
+            required_bytes,
+        ),
+        WorkerBudgetRefusal::EstimateOverflow { .. } => {
+            Refusal::precondition(RefusalKind::WorkloadEstimateOverflow)
+        }
+    }
+}
+
+/// A deterministic assignment of inputs to render workers.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BatchPlan {
+pub struct RenderBatchPlan {
     workers: u32,
     assignment: Vec<u32>,
 }
 
-impl BatchPlan {
+impl RenderBatchPlan {
     /// Derives the plan for a declared workload and input count.
     ///
     /// A uniform batch is split into contiguous blocks, which keeps each
@@ -258,14 +277,14 @@ impl InputOutcome {
 /// The complete receipt for one batch: the plan and one outcome per input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BatchReceipt {
-    plan: BatchPlan,
+    plan: RenderBatchPlan,
     outcomes: Vec<InputOutcome>,
 }
 
 impl BatchReceipt {
     /// The plan the batch was executed under.
     #[must_use]
-    pub const fn plan(&self) -> &BatchPlan {
+    pub const fn plan(&self) -> &RenderBatchPlan {
         &self.plan
     }
 
@@ -320,7 +339,7 @@ pub fn render_batch(
             as_u64(count),
         ));
     }
-    let plan = BatchPlan::derive(workload, surface, offset_u32(count))?;
+    let plan = RenderBatchPlan::derive(workload, surface, offset_u32(count))?;
     let mut outcomes: Vec<Option<InputOutcome>> = vec![None; count];
     for shard in plan.shards() {
         for index in shard {

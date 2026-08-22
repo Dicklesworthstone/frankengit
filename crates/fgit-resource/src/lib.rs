@@ -136,5 +136,5 @@ pub use twophase::{
 };
 pub use workers::{
     BatchMergeRefusal, BatchPlan, BindingConstraint, VarianceClass, WorkerBudget,
-    WorkerBudgetInputs, WorkerBudgetRefusal, WorkerMode, merge_in_job_order, plan,
+    WorkerBudgetInputs, WorkerBudgetRefusal, WorkerMode, merge_in_job_order, plan, plan_for_batch,
 };
