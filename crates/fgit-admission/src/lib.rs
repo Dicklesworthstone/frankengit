@@ -1605,7 +1605,12 @@ enum PublicationPreparation {
     Refuse(RefusalCode),
     /// The fold committed; a projection must now materialize its immutable
     /// successor bodies before the authority driver can publish it.
-    Commit(PreparedCommit),
+    ///
+    /// Boxed for the same reason [`PlannedPublication::Commit`] is: a prepared
+    /// commit carries a whole `TransactionRequest` and its fold report — 616
+    /// bytes against the refusing arm's one — so inlining it would make every
+    /// refusal pay the width of a commit.
+    Commit(Box<PreparedCommit>),
 }
 
 /// Derive the publication basis from an authenticated head.
@@ -1674,10 +1679,10 @@ fn prepare_publication_from_snapshot(
     let fold = IntentEvaluator::new().evaluate(snapshot.as_fold_basis(), &model_request);
     match &fold.outcome {
         FoldOutcome::Aborted { code, .. } => Ok(PublicationPreparation::Refuse(*code)),
-        FoldOutcome::Folded(_) => Ok(PublicationPreparation::Commit(PreparedCommit {
+        FoldOutcome::Folded(_) => Ok(PublicationPreparation::Commit(Box::new(PreparedCommit {
             request: model_request,
             fold,
-        })),
+        }))),
     }
 }
 
