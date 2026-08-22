@@ -29,9 +29,10 @@
 //! re-identification check exists to prevent, reproduced in the test suite.
 
 use fgit_authority::{
-    AuthorityStore, HeadRead, IdentityDisagreement, MemoryAuthorityStore, OutcomeFailure,
-    PublicationOutcome, PutOutcome, StoreInstanceId, body_key, canonical_body_id,
-    initialize_repository, publish_decisions, read_authority_head_body, read_decision_batch_body,
+    AuthorityStore, CasOutcome, HeadRead, IdentityDisagreement, MemoryAuthorityStore,
+    OutcomeFailure, OutcomeLookup, PublicationOutcome, PutOutcome, StoreInstanceId, body_key,
+    canonical_body_id, initialize_repository, publish_decisions, read_authority_head_body,
+    read_decision_batch_body, replay_outcome,
 };
 use fgit_authority::{HeadKey, ImmutableKey};
 use fgit_codec::wire::encode_body;
@@ -453,5 +454,120 @@ fn the_mismatch_refusal_renders_both_identities() {
     assert!(
         rendered.contains("head body"),
         "the message must name the link being resolved: {rendered}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The check is on the replay path, not only behind the new entry points
+// ---------------------------------------------------------------------------
+//
+// `read_decision_batch_body` is shared: `replay_outcome` resolves every batch
+// through it. So publishing these readers did not only add a surface, it
+// strengthened an existing one — and a strengthening asserted in a commit
+// message and nowhere else is a claim, not a property.
+//
+// These two cases execute it. They are the difference between "the branch
+// exists" and "the branch is reachable from the function that matters".
+
+/// Genesis, then a head whose decision tail names `named` while the slot for
+/// that identity holds `stored`.
+///
+/// With the same batch twice this is an ordinary published history. With two
+/// different batches it is a misfiled slot: the head commits to `named`, and
+/// the store hands back `stored` when asked for it.
+fn repository_whose_tail_slot_holds(
+    named: &RepositoryDecisionBatchBody,
+    stored: &RepositoryDecisionBatchBody,
+) -> MemoryAuthorityStore {
+    let store = store();
+    let genesis = genesis_head(0);
+    initialize_repository(&store, &head_slot(), &genesis).expect("genesis publishes");
+
+    // The tail slot, filled before the head points at it.
+    assert_eq!(
+        store
+            .put_if_absent(
+                &batch_slot_key(named),
+                &encode_body(stored).expect("a batch body encodes"),
+            )
+            .expect("the store accepts the write"),
+        PutOutcome::Created,
+        "the tail slot must be the one this fixture wrote"
+    );
+
+    let head = successor_head(&genesis, batch_id_of(named));
+    let head_bytes = encode_body(&head).expect("a head body encodes");
+    assert_eq!(
+        store
+            .put_if_absent(&head_slot_key(&head), &head_bytes)
+            .expect("the store accepts the write"),
+        PutOutcome::Created,
+        "the successor head body must be staged, or the walk cannot resolve it"
+    );
+
+    let HeadRead::Present(receipt) = store.read_head(&head_slot()).expect("a readable head") else {
+        panic!("genesis must be published");
+    };
+    let advanced = store
+        .compare_exchange_head(&head_slot(), receipt.token(), head.generation, &head_bytes)
+        .expect("the store accepts the exchange");
+    assert!(
+        matches!(advanced, CasOutcome::Committed(_)),
+        "the fixture must advance the head, or replay walks the genesis tip: {advanced:?}"
+    );
+    store
+}
+
+#[test]
+fn replay_resolves_a_correctly_filed_tail_and_answers_from_it() {
+    // The permitted case, and the control for the one below. It fixes what a
+    // sound history says about BOTH transactions: 0xA1 is in the tail and
+    // decided, 0xB2 is in no batch this head commits to and is undecided.
+    let genesis = genesis_head(0);
+    let batch_a = batch(&genesis, 0xA0, vec![committed(tx(0xA1))]);
+    let store = repository_whose_tail_slot_holds(&batch_a, &batch_a);
+
+    assert!(
+        matches!(
+            replay_outcome(&store, &head_slot(), tx(0xA1)).expect("the walk completes"),
+            OutcomeLookup::Decided(_)
+        ),
+        "the transaction the tail decides must replay as decided"
+    );
+    assert_eq!(
+        replay_outcome(&store, &head_slot(), tx(0xB2)).expect("the walk completes"),
+        OutcomeLookup::Undecided,
+        "a transaction this history never decided must replay as undecided"
+    );
+}
+
+#[test]
+fn a_misfiled_tail_makes_replay_refuse_instead_of_answering_from_the_wrong_batch() {
+    // The consequence, stated as the canonical-state violation it is.
+    //
+    // The head commits to batch A. The slot for A's identity holds batch B,
+    // which decides tx(0xB2) — a transaction the control above proves this
+    // history does NOT decide. A replay that decoded without re-identifying
+    // would walk to B, find 0xB2, and return Decided: §5.1 truth invented from
+    // bytes the authority head never committed to, reported to a caller with
+    // no way to tell.
+    let genesis = genesis_head(0);
+    let batch_a = batch(&genesis, 0xA0, vec![committed(tx(0xA1))]);
+    let batch_b = batch(&genesis, 0xB0, vec![committed(tx(0xB2))]);
+    let store = repository_whose_tail_slot_holds(&batch_a, &batch_b);
+
+    let failure = replay_outcome(&store, &head_slot(), tx(0xB2))
+        .expect_err("replay must refuse a tail whose bytes are a different batch");
+
+    assert_eq!(
+        failure,
+        OutcomeFailure::BodyIdentityMismatch {
+            link: "decision batch",
+            identities: Box::new(IdentityDisagreement {
+                requested: batch_id_of(&batch_a).into_internal_object_id(),
+                found: batch_id_of(&batch_b).into_internal_object_id(),
+            }),
+        },
+        "replay must refuse with the identity disagreement, naming both sides"
     );
 }
