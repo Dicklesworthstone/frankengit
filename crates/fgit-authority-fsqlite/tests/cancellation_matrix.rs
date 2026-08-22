@@ -55,14 +55,20 @@
 //!   of those: cancelling a statement the VDBE is actively stepping through
 //!   (the poll sites are there -- 31 of them, including the main instruction
 //!   loop every N opcodes -- but the store's statements are far too short to
-//!   reach an opcode checkpoint reliably), and the `commit-ambiguous` and
-//!   `reply-lost` cancellation cells, which need cancellation and a lost
-//!   response to arrive together.
+//!   reach an opcode checkpoint reliably), and the `reply-lost` cancellation
+//!   cell, which needs a cancel and a lost response arriving together.
+//!   `fault_conformance.rs` supplies the fault engine, so composing
+//!   `LoseResponse` with a cancel is a matter of writing it. Not written, so
+//!   not claimed.
 //!
-//!   That last pair is now *buildable* rather than blocked:
-//!   `fault_conformance.rs` supplies a fault engine over a real database, so
-//!   composing `LoseResponse` with a cancel is a matter of writing it. It is
-//!   not written, so it is not claimed.
+//!   **This list used to include `commit-ambiguous`, and that was wrong.** It
+//!   is not unwritten: the sweep below cancels at `scale - 1`, the window after
+//!   the commit has gone through, which IS that cell -- and it is the position
+//!   that exposed `frankengit-w1ik`. So commit-ambiguous is written and
+//!   *defect-blocked*, which is a different state from unbuilt and belongs to a
+//!   different lane cell. The verdict on this paragraph was right and the
+//!   reason inside it was wrong; it was caught only because the clause had been
+//!   labelled an unverified assertion rather than left to look measured.
 //! - **Not that cancellation is distinguishable from failure.** See
 //!   `cancellation_is_not_separately_typed_at_the_public_surface`, which pins
 //!   the current behaviour and names the gap rather than blessing it.
