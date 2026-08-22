@@ -49,7 +49,7 @@ use fgit_authority::{
     AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityRefusal, AuthorityStore,
     AuthorityVersionToken, CasOutcome, HeadGeneration, HeadInit, HeadKey, HeadRead,
     HeadReadReceipt, ImmutableKey, ImmutableRead, PutOutcome, StoreInstanceId,
-    run_authority_conformance,
+    run_authority_conformance, run_capacity_conformance,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
 use fgit_runtime::boot::{NodeRuntime, RuntimeProfile};
@@ -72,6 +72,18 @@ impl<'a> BlockingStore<'a> {
     /// Each call gets its own database: `:memory:` is per-connection, which is
     /// what the suite needs, since it builds a fresh store per check.
     fn open(node: &'a NodeRuntime, instance: StoreInstanceId) -> Self {
+        Self::open_with_limits(node, instance, AuthorityLimits::default())
+    }
+
+    /// As `open`, with the ceilings supplied by the caller.
+    ///
+    /// `run_capacity_conformance` needs a store cramped enough to exhaust in a
+    /// few operations; the default `immutable_slots` is 65536.
+    fn open_with_limits(
+        node: &'a NodeRuntime,
+        instance: StoreInstanceId,
+        limits: AuthorityLimits,
+    ) -> Self {
         let native = node.request_cx(BudgetClass::Request);
         let cx = FsqliteCx::new();
         // Attach explicitly rather than relying on a task-local being set:
@@ -82,10 +94,7 @@ impl<'a> BlockingStore<'a> {
 
         let store = node
             .block_on(FsqliteAuthorityStore::open(
-                &cx,
-                ":memory:",
-                instance,
-                AuthorityLimits::default(),
+                &cx, ":memory:", instance, limits,
             ))
             .expect("an in-memory store opens");
 
@@ -416,4 +425,38 @@ fn tokens_survive_reopening_because_the_ledger_is_the_counter() {
         .expect("the current token was issued");
 
     store.close().expect("closes");
+}
+
+/// How many checks `run_capacity_conformance` records: CAP-00..CAP-06.
+const CAP_CHECK_COUNT: usize = 7;
+
+#[test]
+fn the_capacity_conformance_campaign_passes_against_the_engine() {
+    // `frankengit-jyhk`. This backend is the one `frankengit-nv0a` was found in:
+    // it published four ceilings through `limits()` and enforced one, and the
+    // AC suite stayed green over it because AC-16 exercises `body_bytes`, the
+    // single ceiling both backends already enforced.
+    //
+    // Opt-in, which is weaker than mandatory -- widening the AC factory to take
+    // limits is the next-wave change that makes capacity unavoidable for every
+    // backend. Until then, this call is the coverage, and a backend that never
+    // adds one is exactly the backend that would carry the defect.
+    let node = deterministic_node();
+    let report = run_capacity_conformance(|instance, limits| {
+        BlockingStore::open_with_limits(&node, instance, limits)
+    });
+
+    // Same non-vacuity discipline as the AC guard above: `is_pass()` is happiest
+    // against a report that ran nothing.
+    assert!(
+        report.checks().len() >= CAP_CHECK_COUNT,
+        "the capacity campaign must record at least {CAP_CHECK_COUNT} checks, got {}; a shrunken \
+         campaign proves nothing about the backend",
+        report.checks().len()
+    );
+    assert!(
+        report.failures().next().is_none(),
+        "the engine must enforce every ceiling it publishes; failures: {:?}",
+        report.failed_ids()
+    );
 }

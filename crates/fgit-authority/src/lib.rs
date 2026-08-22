@@ -120,7 +120,8 @@ pub use crate::seal::{
     idempotency_binding_key, read_seal, seal_key, seal_request,
 };
 pub use crate::suite::{
-    ConformanceCheck, ConformanceReport, run_authority_conformance, run_fault_conformance,
+    CAPACITY_PROBE_LIMITS, ConformanceCheck, ConformanceReport, run_authority_conformance,
+    run_capacity_conformance, run_fault_conformance,
 };
 pub use crate::tokens::{AuthorityVersionToken, StoreInstanceId, VERSION_TOKEN_BYTES};
 pub use crate::vocabulary::{

@@ -935,6 +935,306 @@ where
     }
 }
 
+// --- capacity conformance ----------------------------------------------------
+//
+// `AuthorityLimits` declares four ceilings. `run_authority_conformance` covers
+// exactly one: `ac_16_bounded_typed_errors` puts an oversize body and expects
+// `BodyTooLarge`. That check is correct, and it is also why the other three sat
+// unenforced in a shipped backend -- **a shared suite covering one member of a
+// family reads, at a glance, as covering the family** (`frankengit-nv0a`, found
+// by YellowOak).
+//
+// Separate from `run_authority_conformance` rather than folded into it because
+// covering capacity needs a store built with *cramped* limits, and that suite's
+// factory is `Fn(StoreInstanceId) -> S` with no limits parameter. Widening it,
+// so capacity becomes a mandatory AC for every backend, is the right long-term
+// answer but breaks a frozen shared contract, so it is next-wave work.
+//
+// NON-CLAIM, and the reason the mandatory version must follow: opt-in coverage
+// is weaker than mandatory coverage. A backend that never calls this function is
+// exactly the backend that would carry the defect it detects, and "the author
+// remembered to call it" is not an enforceable property of anything.
+
+/// Limits tight enough that exhaustion is reached in a few operations.
+///
+/// Every value must stay strictly below the corresponding default or the probes
+/// stop probing; `CAP-00` checks that at run time rather than trusting it.
+pub const CAPACITY_PROBE_LIMITS: AuthorityLimits = AuthorityLimits {
+    body_bytes: 4096,
+    immutable_slots: 2,
+    head_slots: 1,
+    version_tokens: 2,
+};
+
+/// The probes are only probes while they ask for less than the default.
+///
+/// If a default ever moved down to meet one of these values, the checks that
+/// depend on it would quietly stop testing anything and stay green. That is the
+/// trap `ChartreuseHorizon` hit on `PackLimits`; it is measured here rather
+/// asserted in a comment.
+fn cap_00_the_probe_actually_tightens() -> Result<(), String> {
+    let default = AuthorityLimits::default();
+    let probe = CAPACITY_PROBE_LIMITS;
+    let mut slack: Vec<&str> = Vec::new();
+    if probe.body_bytes >= default.body_bytes {
+        slack.push("body_bytes");
+    }
+    if probe.immutable_slots >= default.immutable_slots {
+        slack.push("immutable_slots");
+    }
+    if probe.head_slots >= default.head_slots {
+        slack.push("head_slots");
+    }
+    if probe.version_tokens >= default.version_tokens {
+        slack.push("version_tokens");
+    }
+    if slack.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the probe no longer tightens {slack:?} below the default, so every check depending \
+             on those ceilings is vacuous and would stay green against a backend enforcing none \
+             of them"
+        ))
+    }
+}
+
+fn cap_01_body_ceiling<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String> {
+    let limits = store.limits();
+    let oversize = vec![0_u8; limits.body_bytes.saturating_add(1)];
+    let failure = store
+        .put_if_absent(&immutable_key("cap01/body")?, &oversize)
+        .err()
+        .ok_or_else(|| "a body past the declared body_bytes ceiling was accepted".to_owned())?;
+    expect_refusal(
+        failure,
+        &AuthorityRefusal::BodyTooLarge {
+            len: oversize.len(),
+            limit: limits.body_bytes,
+        },
+        "oversize body",
+    )
+}
+
+/// Fill the immutable table exactly to its declared ceiling.
+fn fill_immutable<S: AuthorityStore + ?Sized>(store: &S, limit: usize) -> Result<(), String> {
+    for slot in 0..limit {
+        store
+            .put_if_absent(&immutable_key(&format!("cap/fill-{slot}"))?, b"payload")
+            .map_err(|failure| {
+                format!("a body inside the declared ceiling was refused: {failure}")
+            })?;
+    }
+    Ok(())
+}
+
+fn cap_02_immutable_slot_ceiling<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String> {
+    let limits = store.limits();
+    fill_immutable(store, limits.immutable_slots)?;
+    let failure = store
+        .put_if_absent(&immutable_key("cap02/one-too-many")?, b"payload")
+        .err()
+        .ok_or_else(|| {
+            "a body past the declared immutable_slots ceiling was accepted; a store that \
+             publishes a ceiling through limits() must enforce it rather than fall back silently"
+                .to_owned()
+        })?;
+    // The exact occupancy and limit, not merely the variant. A refusal naming
+    // the configured value can only have come from the session's limits; one
+    // naming anything else proves some other check fired.
+    expect_refusal(
+        failure,
+        &AuthorityRefusal::CapacityExhausted {
+            occupancy: limits.immutable_slots,
+            limit: limits.immutable_slots,
+        },
+        "immutable slots exhausted",
+    )
+}
+
+fn cap_03_head_slot_ceiling<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String> {
+    let limits = store.limits();
+    for slot in 0..limits.head_slots {
+        initialized_head(
+            store,
+            &head_key(&format!("refs/heads/cap-{slot}"))?,
+            b"body",
+        )?;
+    }
+    let failure = store
+        .initialize_head(
+            &head_key("refs/heads/cap-one-too-many")?,
+            HeadGeneration::FIRST,
+            b"body",
+        )
+        .err()
+        .ok_or_else(|| "a head past the declared head_slots ceiling was accepted".to_owned())?;
+    expect_refusal(
+        failure,
+        &AuthorityRefusal::CapacityExhausted {
+            occupancy: limits.head_slots,
+            limit: limits.head_slots,
+        },
+        "head slots exhausted",
+    )
+}
+
+fn cap_04_version_token_ceiling<S: AuthorityStore + ?Sized>(store: &S) -> Result<(), String> {
+    let limits = store.limits();
+    let key = head_key("refs/heads/cap-tokens")?;
+    // Creating the head mints the first token; each exchange mints one more.
+    let mut receipt = initialized_head(store, &key, b"one")?;
+    let mut minted = 1_usize;
+    let mut next = 2_u64;
+    while minted < limits.version_tokens {
+        receipt = committed(store, &key, receipt.token(), generation(next)?, b"more")?;
+        minted = minted.saturating_add(1);
+        next = next.saturating_add(1);
+    }
+    let failure = store
+        .compare_exchange_head(&key, receipt.token(), generation(next)?, b"past")
+        .err()
+        .ok_or_else(|| {
+            "a token past the declared version_tokens ceiling was minted; a store that publishes \
+             a ceiling through limits() must enforce it"
+                .to_owned()
+        })?;
+    expect_refusal(
+        failure,
+        &AuthorityRefusal::CapacityExhausted {
+            occupancy: limits.version_tokens,
+            limit: limits.version_tokens,
+        },
+        "version tokens exhausted",
+    )
+}
+
+fn cap_05_stored_body_admitted_at_capacity<S: AuthorityStore + ?Sized>(
+    store: &S,
+) -> Result<(), String> {
+    // The presence half, and it is load-bearing: without it a backend that
+    // refused EVERY write once the table was full would pass CAP-02 and be
+    // called conformant. The fill would still succeed and the one-too-many
+    // would still be refused. A retry of a body already stored occupies no new
+    // slot, so the ceiling does not apply to it.
+    let limits = store.limits();
+    fill_immutable(store, limits.immutable_slots)?;
+    let outcome = store
+        .put_if_absent(&immutable_key("cap/fill-0")?, b"payload")
+        .map_err(|failure| {
+            format!(
+                "a retry of a body already stored was refused at capacity: {failure}. It occupies \
+                 no new slot, so this is over-enforcement rather than enforcement"
+            )
+        })?;
+    if outcome == PutOutcome::IdenticalRetry {
+        Ok(())
+    } else {
+        Err(format!(
+            "a retry of a stored body must be reported idempotent, not {outcome:?}"
+        ))
+    }
+}
+
+fn cap_06_present_head_admitted_at_capacity<S: AuthorityStore + ?Sized>(
+    store: &S,
+) -> Result<(), String> {
+    // The presence half for heads, same argument as CAP-05.
+    let limits = store.limits();
+    for slot in 0..limits.head_slots {
+        initialized_head(
+            store,
+            &head_key(&format!("refs/heads/cap-{slot}"))?,
+            b"body",
+        )?;
+    }
+    let outcome = store
+        .initialize_head(
+            &head_key("refs/heads/cap-0")?,
+            HeadGeneration::FIRST,
+            b"body",
+        )
+        .map_err(|failure| {
+            format!(
+                "an identical retry of an existing head was refused at capacity: {failure}. It \
+                 creates no slot and mints no token"
+            )
+        })?;
+    match outcome {
+        HeadInit::IdenticalRetry(_) => Ok(()),
+        other => Err(format!(
+            "an identical retry of an existing head must be reported idempotent, not {other:?}"
+        )),
+    }
+}
+
+/// Run the capacity conformance campaign against one backend.
+///
+/// Opt-in, and separate from [`run_authority_conformance`] because these checks
+/// need a store constructed with [`CAPACITY_PROBE_LIMITS`] rather than whatever
+/// the backend's usual factory supplies: exhausting a default ceiling
+/// (`immutable_slots` is 65536) inside a conformance run is not practical.
+///
+/// The backend supplies a factory taking the instance **and** the limits, and
+/// must honour the limits it is handed. A factory that ignores them makes every
+/// check below vacuous in exactly the way an untightened probe would, which is
+/// why `CAP-01` through `CAP-04` assert the refusal names the configured value
+/// rather than merely checking the variant.
+pub fn run_capacity_conformance<S, F>(make_store: F) -> ConformanceReport
+where
+    S: AuthorityStore,
+    F: Fn(StoreInstanceId, AuthorityLimits) -> S,
+{
+    let mut report = ConformanceReport::default();
+    let instance = StoreInstanceId::from_raw(1);
+
+    report.record(
+        "CAP-00",
+        "the probe limits are strictly tighter than the defaults",
+        cap_00_the_probe_actually_tightens(),
+    );
+
+    macro_rules! cramped {
+        ($id:expr, $requirement:expr, $check:expr) => {{
+            let store = make_store(instance, CAPACITY_PROBE_LIMITS);
+            report.record($id, $requirement, $check(&store));
+        }};
+    }
+
+    cramped!(
+        "CAP-01",
+        "a body past the declared body_bytes ceiling is refused",
+        cap_01_body_ceiling
+    );
+    cramped!(
+        "CAP-02",
+        "a body past the declared immutable_slots ceiling is refused",
+        cap_02_immutable_slot_ceiling
+    );
+    cramped!(
+        "CAP-03",
+        "a head past the declared head_slots ceiling is refused",
+        cap_03_head_slot_ceiling
+    );
+    cramped!(
+        "CAP-04",
+        "a token past the declared version_tokens ceiling is refused",
+        cap_04_version_token_ceiling
+    );
+    cramped!(
+        "CAP-05",
+        "a body already stored is still admitted at capacity",
+        cap_05_stored_body_admitted_at_capacity
+    );
+    cramped!(
+        "CAP-06",
+        "a head already present is still admitted at capacity",
+        cap_06_present_head_admitted_at_capacity
+    );
+
+    report
+}
+
 /// Run the fault-profile conformance suite.
 ///
 /// This is the half of `VERIFY_SPEC.md` §7 that needs a backend able to inject
