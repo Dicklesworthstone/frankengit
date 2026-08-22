@@ -1248,6 +1248,13 @@ pub(crate) fn parse_advertised_ref_name(
     limits: &WireLimits,
 ) -> Result<Vec<u8>, WireError> {
     const PEEL_SUFFIX: &[u8] = b"^{}";
+    // The byte cap applies to the name AS ADVERTISED, suffix included, the
+    // same way the strict grammar capped a bare name.
+    if text.len() > limits.max_ref_name_bytes {
+        return Err(WireError::RefNameTooLarge {
+            limit: limits.max_ref_name_bytes,
+        });
+    }
     let base = text.strip_suffix(PEEL_SUFFIX).unwrap_or(text);
     let mut name = parse_ref_name(base, limits)?;
     if base.len() != text.len() {

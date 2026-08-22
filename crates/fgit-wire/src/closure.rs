@@ -596,7 +596,9 @@ fn collect_commits(
         match depths.get(&oid).copied() {
             // A previous arrival already recorded this commit at an equal or
             // shorter path length; nothing about this visit can improve it.
-            Some(previous) if depth >= previous => {}
+            // Without a deepen cut there are no depth-dependent decisions at
+            // all, so no arrival can improve anything either.
+            Some(previous) if depth >= previous || shallow.deepen.is_none() => {}
             // A SHORTER PATH arrived. A commit's effective generation is its
             // minimum over all paths -- merge history makes unequal paths
             // common -- so an earlier visit's boundary decision is stale
