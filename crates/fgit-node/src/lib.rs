@@ -1707,7 +1707,7 @@ async fn stage_evidence_body_in<Authority, Body, IsCancelled>(
 ) -> Result<(), AdmissionMaterializationRefusal>
 where
     Authority: AsyncAuthorityStore + ?Sized,
-    Body: CanonicalBody,
+    Body: CanonicalBody + Sync,
     IsCancelled: Fn() -> bool + Sync,
 {
     ensure_materializer_catch_up_live(is_cancelled)?;
@@ -5586,7 +5586,7 @@ mod tests {
             Err(AdmissionMaterializationRefusal::Cancelled)
         ));
 
-        let mut cross_principal = request.clone();
+        let mut cross_principal = request;
         cross_principal.principal = PrincipalId::from_bytes([0x55; 16]);
         assert!(matches!(
             node.runtime()
