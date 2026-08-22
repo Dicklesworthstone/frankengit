@@ -151,6 +151,28 @@ pub enum OutcomeFailure {
         body: HeadGeneration,
     },
     /// Sealing, storage, identity, or codec failed underneath.
+    /// A cumulative leaf set was folded against a head it was not collected from.
+    ///
+    /// The CAS-loser case. A set is a snapshot of one head's reachable history;
+    /// folding it onto a different head publishes a cumulative root for a
+    /// history that was never extended. Every digest in that root is
+    /// individually valid and the body is well-formed, so nothing downstream
+    /// can detect it -- the same failure mode as a truncated walk, arriving
+    /// through timing instead of through a bound.
+    ///
+    /// §5.2 requires a CAS loser to revalidate against the exact per-attempt
+    /// basis. `publish_decisions` already applies this rule to the
+    /// duplicate-scan witness; this applies it to the other walk over the same
+    /// stream in the same publication.
+    ///
+    /// Both tokens are `VERSION_TOKEN_BYTES` wide, so this stays inside
+    /// `MAX_ERROR_BYTES` unboxed.
+    CumulativeIndexStale {
+        /// The head the leaf set was collected against.
+        observed: AuthorityVersionToken,
+        /// The head the caller intends to replace.
+        expected: AuthorityVersionToken,
+    },
     /// One sealed transaction acquired a second terminal decision.
     ///
     /// §5.2 is the invariant: *one sealed transaction has at most one terminal
@@ -224,6 +246,11 @@ impl core::fmt::Display for OutcomeFailure {
                 "the head receipt declares generation {} but its body carries {}",
                 receipt.get(),
                 body.get()
+            ),
+            Self::CumulativeIndexStale { .. } => f.write_str(
+                "the cumulative outcome index was collected against a different head \
+                 than the one being replaced; failing closed rather than folding a \
+                 leaf set from another history",
             ),
             Self::DuplicateTerminalDecision { duplicate } => write!(
                 f,
@@ -923,16 +950,25 @@ pub fn outcome_index_root(entries: &[(TxId, TerminalOutcome)]) -> Result<Digest,
 pub fn collect_cumulative_outcomes<S>(
     store: &S,
     head_key: &HeadKey,
-) -> Result<Vec<(TxId, TerminalOutcome)>, OutcomeFailure>
+) -> Result<CumulativeOutcomes, OutcomeFailure>
 where
     S: AuthorityStore + ?Sized,
 {
     let HeadRead::Present(receipt) = store.read_head(head_key)? else {
-        // No head: nothing has been decided, so the cumulative index is empty.
-        // This is the genesis case and it is a real answer, not an absence --
-        // `outcome_index_root(&[])` has a defined value.
-        return Ok(Vec::new());
+        // No head: nothing has been decided, so the index is empty. Bound to a
+        // ZERO token, which no minted token equals, so `fold_against` refuses
+        // it. That mirrors the absent-head witness in
+        // `scan_for_existing_decisions` and fails closed for the same reason:
+        // with no head there is nothing to conditionally replace, and genesis
+        // publishes through `initialize_repository` rather than a CAS.
+        return Ok(CumulativeOutcomes {
+            observed: AuthorityVersionToken::from_opaque_bytes(
+                [0_u8; crate::tokens::VERSION_TOKEN_BYTES],
+            ),
+            entries: Vec::new(),
+        });
     };
+    let observed = receipt.token();
     let mut head: RepositoryAuthorityHeadBody = head_body_of(&receipt)?;
     let mut walked = 0_usize;
     let mut collected: Vec<(TxId, TerminalOutcome)> = Vec::new();
@@ -954,7 +990,10 @@ where
         head = previous;
     }
 
-    Ok(collected)
+    Ok(CumulativeOutcomes {
+        observed,
+        entries: collected,
+    })
 }
 
 /// The asynchronous twin of [`collect_cumulative_outcomes`].
@@ -979,14 +1018,21 @@ pub async fn collect_cumulative_outcomes_async<S>(
     store: &S,
     cx: &S::Context,
     head_key: &HeadKey,
-) -> Result<Vec<(TxId, TerminalOutcome)>, OutcomeFailure>
+) -> Result<CumulativeOutcomes, OutcomeFailure>
 where
     S: AsyncAuthorityStore + ?Sized,
 {
     let HeadRead::Present(receipt) = store.read_head(cx, head_key).await? else {
-        // No head: the cumulative index is empty. See the sync twin.
-        return Ok(Vec::new());
+        // No head: empty, bound to the zero token so `fold_against` refuses.
+        // See the sync twin.
+        return Ok(CumulativeOutcomes {
+            observed: AuthorityVersionToken::from_opaque_bytes(
+                [0_u8; crate::tokens::VERSION_TOKEN_BYTES],
+            ),
+            entries: Vec::new(),
+        });
     };
+    let observed = receipt.token();
     let mut head: RepositoryAuthorityHeadBody = head_body_of(&receipt)?;
     let mut walked = 0_usize;
     let mut collected: Vec<(TxId, TerminalOutcome)> = Vec::new();
@@ -1009,7 +1055,137 @@ where
         head = previous;
     }
 
-    Ok(collected)
+    Ok(CumulativeOutcomes {
+        observed,
+        entries: collected,
+    })
+}
+
+/// A cumulative leaf set, inseparable from the head it was collected against.
+///
+/// # Why the binding is part of the type
+///
+/// This file already establishes the rule twice. [`DuplicateScan::Found`]
+/// carries an `observed` token because, in its own words, "the caller cannot
+/// classify this without knowing whether the head it walked is still the head
+/// it intends to replace", and [`DuplicateAbsenceWitness`] goes further -- its
+/// constructor is deliberately `pub(crate)` so that "a public constructor would
+/// make the witness a token anyone can forge, which is the documented
+/// obligation again wearing a type".
+///
+/// `DuplicateScan::Found.decided` and the cumulative leaf set are the *same
+/// element type*, produced by the *same walk primitives*, over the *same
+/// stream*, in the *same publication*. Returning one bound and the other bare
+/// would leave two adjacent walks with opposite safety postures.
+///
+/// # What the binding buys
+///
+/// The fields are private and there is no public constructor, so a set cannot
+/// be fabricated claiming a token it was never collected under. The only way to
+/// obtain one is [`collect_cumulative_outcomes`] or its async twin, and the
+/// only way to fold one is [`Self::fold_against`], which requires the caller to
+/// name the head being replaced.
+///
+/// The entries are deliberately **not** exposed as a slice. Handing them out
+/// would let a caller reach [`fold_outcome_index`] directly and skip the check,
+/// which is the documented-obligation shape this type exists to replace.
+/// [`Self::decision_for`] covers the legitimate read -- it is the §10.4
+/// "does this transaction already have a decision" query against the cumulative
+/// index.
+///
+/// # Why the token and not the head id
+///
+/// [`AuthorityVersionToken`] embeds the `StoreInstanceId` and a per-instance
+/// issuance sequence that never repeats, and the conditional replacement
+/// compares *this exact value*. Binding to the head id would identify the body
+/// while the CAS tests the slot version, so the token is not merely sufficient
+/// here -- it is the only binding that is byte-for-byte the thing publication
+/// conditions on.
+///
+/// # The binding cannot be forged
+///
+/// The fields are private, so a set claiming a token it was never collected
+/// under does not compile:
+///
+/// ```compile_fail
+/// use fgit_authority::{AuthorityVersionToken, CumulativeOutcomes};
+///
+/// let forged = CumulativeOutcomes {
+///     observed: AuthorityVersionToken::from_opaque_bytes([0; 16]),
+///     entries: Vec::new(),
+/// };
+/// ```
+///
+/// A `compile_fail` example passes when compilation fails for *any* reason,
+/// including a typo, so it proves nothing on its own. This companion is
+/// identical in its imports and in every name it touches, and it **does**
+/// compile -- so the only difference left to explain the failure above is the
+/// struct literal reaching private fields:
+///
+/// ```
+/// use fgit_authority::{AuthorityVersionToken, CumulativeOutcomes};
+///
+/// let _token = AuthorityVersionToken::from_opaque_bytes([0; 16]);
+/// fn _accepts(_set: &CumulativeOutcomes) {}
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CumulativeOutcomes {
+    observed: AuthorityVersionToken,
+    entries: Vec<(TxId, TerminalOutcome)>,
+}
+
+impl CumulativeOutcomes {
+    /// The head token this set was collected against.
+    #[must_use]
+    pub const fn observed(&self) -> AuthorityVersionToken {
+        self.observed
+    }
+
+    /// How many terminal outcomes the index holds.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the index is empty, which is the genesis case.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The decision this transaction already has, if any.
+    ///
+    /// This is the §10.4 duplicate-detection query answered against the
+    /// *cumulative* index rather than against one batch: a transaction decided
+    /// in any prior batch reachable from the collected head is found here.
+    #[must_use]
+    pub fn decision_for(&self, tx_id: TxId) -> Option<TerminalOutcome> {
+        self.entries
+            .iter()
+            .find(|(candidate, _)| *candidate == tx_id)
+            .map(|(_, outcome)| *outcome)
+    }
+
+    /// Fold a batch's stamped outcomes onto this set, for a named head.
+    ///
+    /// # Errors
+    ///
+    /// [`OutcomeFailure::CumulativeIndexStale`] if this set was collected
+    /// against a head other than `expected` -- the CAS-loser case, refused
+    /// before any digest is computed. Otherwise as [`fold_outcome_index`].
+    pub fn fold_against(
+        &self,
+        expected: AuthorityVersionToken,
+        stamped: &[(TxId, TerminalOutcome)],
+    ) -> Result<Digest, OutcomeFailure> {
+        if self.observed != expected {
+            return Err(OutcomeFailure::CumulativeIndexStale {
+                observed: self.observed,
+                expected,
+            });
+        }
+        fold_outcome_index(&self.entries, stamped)
+    }
 }
 
 /// Derive the repository's cumulative outcome index after a batch.

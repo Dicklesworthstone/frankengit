@@ -2008,33 +2008,33 @@ fn the_walk_collects_every_terminal_outcome_including_refusals() {
     let collected = fgit_authority::collect_cumulative_outcomes(&store, &head_slot())
         .expect("a walk within the replay bound");
 
-    assert_eq!(
-        collected.len(),
-        2,
-        "the batch decided two transactions; got {collected:?}",
-    );
+    assert_eq!(collected.len(), 2, "the batch decided two transactions");
 
-    let committed_entry = collected
-        .iter()
-        .find(|(tx_id, _)| *tx_id == tx(0xA1))
-        .expect("the committed transaction must be in the cumulative index");
     assert_eq!(
-        committed_entry.1.outcome,
+        collected
+            .decision_for(tx(0xA1))
+            .expect("the committed transaction must be in the cumulative index")
+            .outcome,
         DecisionOutcome::Committed {
             repository_commit_id: commit_id(0x51),
         },
     );
-
-    let refused_entry = collected
-        .iter()
-        .find(|(tx_id, _)| *tx_id == tx(0xB2))
-        .expect("the REFUSED transaction must be in the cumulative index too");
     assert_eq!(
-        refused_entry.1.outcome,
+        collected
+            .decision_for(tx(0xB2))
+            .expect("the REFUSED transaction must be in the cumulative index too")
+            .outcome,
         DecisionOutcome::Refused {
             code: RefusalCode::QuotaExceeded,
             refusal_record_id: refusal_id(0x52),
         },
+    );
+
+    // The permitted twin for the two lookups above: an undecided transaction
+    // answers None, so `decision_for` is discriminating rather than always-Some.
+    assert!(
+        collected.decision_for(tx(0xEE)).is_none(),
+        "a transaction with no decision must not be reported as decided",
     );
 }
 
@@ -2053,59 +2053,117 @@ fn a_repository_with_no_head_has_an_empty_cumulative_index() {
 
     assert!(
         collected.is_empty(),
-        "nothing has been decided, so nothing is in the index; got {collected:?}",
+        "nothing has been decided, so nothing is in the index",
     );
 }
 
-/// End to end: walk the published history, fold the next batch onto it, and get
-/// the root the cumulative leaf set commits to.
+/// The absent-head set is bound to a token no publication can match.
 ///
-/// This is the derivation `frankengit-boet` asks for, working today for any
-/// repository inside the replay bound. What it does NOT do is decide retention:
-/// past `MAX_REPLAY_BATCHES` the walk refuses and this composition is
-/// unavailable, which is exactly the part still awaiting a ruling.
+/// Genesis publishes through `initialize_repository`, not a CAS, so there is no
+/// head to condition on and the empty set must not be foldable against one.
+/// This is the same fail-closed shape as the absent-head witness in
+/// `scan_for_existing_decisions`. Without this the empty set would be a
+/// universal donor: foldable against any head, which is exactly the
+/// wrong-history root the binding exists to prevent.
 #[test]
-fn the_collected_history_folds_with_a_new_batch_into_the_cumulative_root() {
+fn the_absent_head_set_cannot_be_folded_against_any_real_head() {
+    let empty = fgit_authority::collect_cumulative_outcomes(&store(), &head_slot())
+        .expect("an absent head is not a failure");
+
     let (store, _) = published_repository();
+    let real = current_token(&store);
 
-    let carried = fgit_authority::collect_cumulative_outcomes(&store, &head_slot())
+    let failure = empty
+        .fold_against(real, &[commit_entry(0xa8, 1, 0x58)])
+        .expect_err("the genesis set must not fold against a published head");
+    assert!(
+        matches!(failure, OutcomeFailure::CumulativeIndexStale { .. }),
+        "expected CumulativeIndexStale, got {failure:?}",
+    );
+}
+
+/// Acceptance (1) and (2) of v3tc: the fold is checked against the basis.
+///
+/// POSITIVE -- a set collected at `H`, folded against `H`, produces exactly the
+/// root a recompute over the union produces.
+///
+/// FORBIDDEN -- the same set folded against a different head is a TYPED
+/// refusal naming both tokens, not a silently wrong root. The two halves run
+/// over one collected set so the only difference is the head named at the fold,
+/// which is what makes the refusal attributable to the binding.
+#[test]
+fn a_set_collected_at_one_head_refuses_to_fold_against_another() {
+    let (store, _) = published_repository();
+    let collected = fgit_authority::collect_cumulative_outcomes(&store, &head_slot())
         .expect("a walk within the replay bound");
-    let stamped = [commit_entry(0xc4, 3, 0x53)];
+    let basis = current_token(&store);
+    let stamped = [commit_entry(0xa9, 3, 0x59)];
 
-    let folded = fgit_authority::fold_outcome_index(&carried, &stamped).expect("a computable root");
+    // PERMITTED: same head.
+    let folded = collected
+        .fold_against(basis, &stamped)
+        .expect("folding against the head it was collected from is the whole point");
 
-    let mut expected_leaves = carried.clone();
-    expected_leaves.extend_from_slice(&stamped);
-    assert_eq!(
-        folded,
-        fgit_authority::outcome_index_root(&expected_leaves).expect("a computable root"),
-        "the end-to-end derivation must equal the recompute over the whole leaf set",
+    // FORBIDDEN: a different head. A second store issues its own tokens, and
+    // `AuthorityVersionToken` embeds the store instance, so this token cannot
+    // collide with the first store's.
+    let (other_store, _) = published_repository();
+    let other_basis = current_token(&other_store);
+    assert_ne!(
+        basis, other_basis,
+        "the two heads must differ or the forbidden case below is vacuous",
     );
 
-    // It advanced: the published history's own root is not the answer.
-    assert_ne!(
+    let failure = collected
+        .fold_against(other_basis, &stamped)
+        .expect_err("a CAS loser must not fold its stale set against the new basis");
+    let OutcomeFailure::CumulativeIndexStale { observed, expected } = failure else {
+        panic!("expected CumulativeIndexStale, got {failure:?}");
+    };
+    assert_eq!(observed, basis, "the refusal must name the head walked");
+    assert_eq!(
+        expected, other_basis,
+        "the refusal must name the head the caller tried to publish against",
+    );
+
+    // And the permitted half really did produce the right value, so the
+    // refusal above is the binding firing rather than the fold being broken.
+    let mut union = vec![
+        (
+            tx(0xA1),
+            TerminalOutcome {
+                decision_sequence: DecisionSequence::try_new(1).expect("positive"),
+                outcome: DecisionOutcome::Committed {
+                    repository_commit_id: commit_id(0x51),
+                },
+            },
+        ),
+        refusal_entry(0xB2, 2, 0x52),
+    ];
+    union.extend_from_slice(&stamped);
+    assert_eq!(
         folded,
-        fgit_authority::outcome_index_root(&carried).expect("a computable root"),
-        "folding a new batch must move the root off the predecessor's",
+        fgit_authority::outcome_index_root(&union).expect("a computable root"),
     );
 }
 
 /// Re-deciding a transaction the walked history already decided is refused.
 ///
-/// This is acceptance (3)'s substance reached through the real walk rather than
-/// a hand-built slice: the transaction was decided in a PRIOR batch, recovered
-/// from the authenticated stream, and the fold sees it. The permitted twin is a
-/// fresh `TxId` through the identical path.
+/// Acceptance (3) of boet reached through the real walk: the transaction was
+/// decided in a PRIOR batch, recovered from the authenticated stream, and the
+/// fold sees it. The permitted twin is a fresh `TxId` through the identical
+/// path.
 #[test]
 fn a_transaction_decided_in_a_prior_batch_is_caught_through_the_real_walk() {
     let (store, _) = published_repository();
-    let carried = fgit_authority::collect_cumulative_outcomes(&store, &head_slot())
+    let collected = fgit_authority::collect_cumulative_outcomes(&store, &head_slot())
         .expect("a walk within the replay bound");
+    let basis = current_token(&store);
 
     // `tx(0xB2)` was REFUSED in the published batch. Offering it again --
     // committed this time -- is the two-terminal-decisions violation.
-    let redecided = [commit_entry(0xB2, 3, 0x53)];
-    let failure = fgit_authority::fold_outcome_index(&carried, &redecided)
+    let failure = collected
+        .fold_against(basis, &[commit_entry(0xB2, 3, 0x53)])
         .expect_err("a transaction decided in a prior batch cannot be decided again");
     let OutcomeFailure::DuplicateTerminalDecision { duplicate } = failure else {
         panic!("expected DuplicateTerminalDecision, got {failure:?}");
@@ -2120,8 +2178,8 @@ fn a_transaction_decided_in_a_prior_batch_is_caught_through_the_real_walk() {
         "the decision recovered from the stream is the one that must be reported",
     );
 
-    let fresh = [commit_entry(0xc7, 3, 0x53)];
-    fgit_authority::fold_outcome_index(&carried, &fresh)
+    collected
+        .fold_against(basis, &[commit_entry(0xc7, 3, 0x53)])
         .expect("an undecided transaction folds through the same path");
 }
 
@@ -2133,10 +2191,10 @@ fn a_transaction_decided_in_a_prior_batch_is_caught_through_the_real_walk() {
 /// constructed stores rather than one shared store, so agreement is a property
 /// of the two implementations rather than of a single traversal.
 ///
-/// The length assertion is load-bearing. Two empty vectors compare equal, so
+/// The length assertion is load-bearing. Two empty sets compare equal, so
 /// without it this test passes if BOTH collectors are broken in the same
-/// direction -- which is the likelier failure, since they were written from the
-/// same template.
+/// direction -- the likelier failure, since they were written from one
+/// template.
 #[test]
 fn the_two_collector_surfaces_agree_over_the_same_published_history() {
     let (sync_store, _) = published_repository();
@@ -2144,6 +2202,7 @@ fn the_two_collector_surfaces_agree_over_the_same_published_history() {
         .expect("a walk within the replay bound");
 
     let (async_store, _) = published_repository();
+    let async_basis = current_token(&async_store);
     let view = AsyncView(async_store);
     let mirrored = poll_ready(fgit_authority::collect_cumulative_outcomes_async(
         &view,
@@ -2156,29 +2215,35 @@ fn the_two_collector_surfaces_agree_over_the_same_published_history() {
         baseline.len(),
         2,
         "the published batch decided two transactions; an empty result would make \
-         the equality below vacuous",
+         the comparisons below vacuous",
     );
     assert_eq!(
-        baseline, mirrored,
-        "the asynchronous walk must recover the same cumulative leaf set as the \
-         synchronous one, or production publishes a different root than the tests assert",
+        baseline.decision_for(tx(0xB2)),
+        mirrored.decision_for(tx(0xB2)),
+        "both walks must recover the same decision for the same transaction",
     );
 
-    // And the sets fold to the same root, which is the value that actually
-    // reaches a canonical body field.
+    // The tokens differ because the stores differ, so the sets are NOT equal as
+    // values -- which is correct and is why the roots are compared through each
+    // set's own basis rather than by comparing the structs.
     let stamped = [commit_entry(0xd5, 3, 0x55)];
     assert_eq!(
-        fgit_authority::fold_outcome_index(&baseline, &stamped).expect("a root"),
-        fgit_authority::fold_outcome_index(&mirrored, &stamped).expect("a root"),
+        baseline
+            .fold_against(current_token(&sync_store), &stamped)
+            .expect("a root"),
+        mirrored
+            .fold_against(async_basis, &stamped)
+            .expect("a root"),
+        "the asynchronous walk must fold to the same root as the synchronous one, \
+         or production publishes a different root than the tests assert",
     );
 }
 
-/// Both surfaces agree on the empty case too, and it is a distinct code path.
+/// Both surfaces agree that an absent head is an empty index.
 ///
-/// The absent-head early return is written separately in each twin rather than
-/// shared, so it is the kind of thing a port silently gets wrong -- returning an
-/// error where the other returns an empty set would make genesis publication
-/// fail only on the asynchronous path.
+/// The early return is written separately in each twin rather than shared, so
+/// it is the kind of thing a port silently gets wrong: an error where the other
+/// returns empty would fail genesis publication on the asynchronous path only.
 #[test]
 fn the_two_collector_surfaces_agree_that_an_absent_head_is_an_empty_index() {
     let baseline = fgit_authority::collect_cumulative_outcomes(&store(), &head_slot())
@@ -2193,7 +2258,10 @@ fn the_two_collector_surfaces_agree_that_an_absent_head_is_an_empty_index() {
 
     assert!(
         baseline.is_empty(),
-        "an unpublished repository has decided nothing; got {baseline:?}",
+        "an unpublished repository has decided nothing",
     );
-    assert_eq!(baseline, mirrored);
+    assert_eq!(
+        baseline, mirrored,
+        "both surfaces mint the same zero-token empty set",
+    );
 }
