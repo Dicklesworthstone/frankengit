@@ -840,6 +840,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use fgit_crypto::GitObjectKind;
     use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, TenantId};
 
     use super::{LooseGitImportRefusal, OneNode};
@@ -915,6 +916,40 @@ mod tests {
             .expect("ref directory creates");
         fs::write(ref_path, format!("{oid}\n")).expect("fixture ref writes");
         oid
+    }
+
+    fn write_loose_object(root: &Path, kind: GitObjectKind, body: &[u8]) -> GitOid {
+        let oid = fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, kind, body);
+        let identity = oid.to_string();
+        let (directory, file) = identity.split_at(2);
+        let path = root.join("objects").join(directory).join(file);
+        fs::create_dir_all(path.parent().expect("object parent exists"))
+            .expect("object directory creates");
+        let mut framed = format!("{} {}\0", kind.label(), body.len()).into_bytes();
+        framed.extend_from_slice(body);
+        fs::write(path, zlib_stored_member(&framed)).expect("zlib loose object writes");
+        oid
+    }
+
+    fn zlib_stored_member(bytes: &[u8]) -> Vec<u8> {
+        let length = u16::try_from(bytes.len()).expect("small test member fits one stored block");
+        let mut member = Vec::with_capacity(bytes.len() + 11);
+        member.extend_from_slice(&[0x78, 0x01, 0x01]);
+        member.extend_from_slice(&length.to_le_bytes());
+        member.extend_from_slice(&(!length).to_le_bytes());
+        member.extend_from_slice(bytes);
+        member.extend_from_slice(&adler32(bytes).to_be_bytes());
+        member
+    }
+
+    fn adler32(bytes: &[u8]) -> u32 {
+        let mut a = 1_u32;
+        let mut b = 0_u32;
+        for byte in bytes {
+            a = (a + u32::from(*byte)) % 65_521;
+            b = (b + a) % 65_521;
+        }
+        (b << 16) | a
     }
 
     #[test]
@@ -1268,6 +1303,74 @@ mod tests {
             Err(LooseGitImportRefusal::CompressedObjectBytesExceeded { limit, observed })
                 if limit == super::MAX_IMPORT_COMPRESSED_OBJECT_BYTES
                     && observed == compressed_bytes
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_a_reachable_tree_with_an_incomplete_edge() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        fs::create_dir_all(&source).expect("source directory creates");
+        let tree = decode_hex(include_str!(
+            "../../fgit-git-object/tests/corpus/malformed/tree-truncated-reference.hex"
+        ));
+        let oid = write_loose_object(&source, GitObjectKind::Tree, &tree);
+        let ref_path = source.join("refs/heads/main");
+        fs::create_dir_all(ref_path.parent().expect("ref parent exists"))
+            .expect("ref directory creates");
+        fs::write(&ref_path, format!("{oid}\n")).expect("fixture ref writes");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::ObjectStructure(_))
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_a_reachable_commit_without_a_tree_edge() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        fs::create_dir_all(&source).expect("source directory creates");
+        let oid = write_loose_object(
+            &source,
+            GitObjectKind::Commit,
+            b"author Example <example@invalid> 1 +0000\ncommitter Example <example@invalid> 1 +0000\n",
+        );
+        let ref_path = source.join("refs/heads/main");
+        fs::create_dir_all(ref_path.parent().expect("ref parent exists"))
+            .expect("ref directory creates");
+        fs::write(&ref_path, format!("{oid}\n")).expect("fixture ref writes");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::CommitTreeMissing(identity)) if identity == oid
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_a_reachable_tag_without_exactly_one_target() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        fs::create_dir_all(&source).expect("source directory creates");
+        let oid = write_loose_object(
+            &source,
+            GitObjectKind::Tag,
+            b"type commit\ntag v1.0.0\ntagger Example <example@invalid> 1 +0000\n",
+        );
+        let ref_path = source.join("refs/tags/v1.0.0");
+        fs::create_dir_all(ref_path.parent().expect("ref parent exists"))
+            .expect("ref directory creates");
+        fs::write(&ref_path, format!("{oid}\n")).expect("fixture ref writes");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::TagObjectMissing(identity)) if identity == oid
         ));
         node.shutdown().expect("node drains");
     }
