@@ -1993,3 +1993,134 @@ fn the_fold_observes_the_stamped_rcr_identity_so_running_it_pre_stamp_is_detecta
         "the same stamped identity must fold to the same root",
     );
 }
+
+/// The walk yields the cumulative leaf set, refusals included.
+///
+/// `published_repository` decides `tx(0xA1)` committed and `tx(0xB2)` refused
+/// in one batch. Both must come back: a refusal consumes decision sequence and
+/// must be found by NPC 10.4 duplicate detection, so an index that collected
+/// only commits would answer "undecided" for a transaction that was refused --
+/// and a caller acting on that would decide it a second time.
+#[test]
+fn the_walk_collects_every_terminal_outcome_including_refusals() {
+    let (store, _) = published_repository();
+
+    let collected = fgit_authority::collect_cumulative_outcomes(&store, &head_slot())
+        .expect("a walk within the replay bound");
+
+    assert_eq!(
+        collected.len(),
+        2,
+        "the batch decided two transactions; got {collected:?}",
+    );
+
+    let committed_entry = collected
+        .iter()
+        .find(|(tx_id, _)| *tx_id == tx(0xA1))
+        .expect("the committed transaction must be in the cumulative index");
+    assert_eq!(
+        committed_entry.1.outcome,
+        DecisionOutcome::Committed {
+            repository_commit_id: commit_id(0x51),
+        },
+    );
+
+    let refused_entry = collected
+        .iter()
+        .find(|(tx_id, _)| *tx_id == tx(0xB2))
+        .expect("the REFUSED transaction must be in the cumulative index too");
+    assert_eq!(
+        refused_entry.1.outcome,
+        DecisionOutcome::Refused {
+            code: RefusalCode::QuotaExceeded,
+            refusal_record_id: refusal_id(0x52),
+        },
+    );
+}
+
+/// A repository with no head has an empty cumulative index, not an error.
+///
+/// The genesis case is a real answer: `outcome_index_root(&[])` is defined, so
+/// the first batch folds against an empty set rather than against nothing. The
+/// paired positive above is what stops this test passing for the wrong reason
+/// -- an always-empty collector would satisfy this one alone.
+#[test]
+fn a_repository_with_no_head_has_an_empty_cumulative_index() {
+    let store = store();
+
+    let collected = fgit_authority::collect_cumulative_outcomes(&store, &head_slot())
+        .expect("an absent head is not a failure");
+
+    assert!(
+        collected.is_empty(),
+        "nothing has been decided, so nothing is in the index; got {collected:?}",
+    );
+}
+
+/// End to end: walk the published history, fold the next batch onto it, and get
+/// the root the cumulative leaf set commits to.
+///
+/// This is the derivation `frankengit-boet` asks for, working today for any
+/// repository inside the replay bound. What it does NOT do is decide retention:
+/// past `MAX_REPLAY_BATCHES` the walk refuses and this composition is
+/// unavailable, which is exactly the part still awaiting a ruling.
+#[test]
+fn the_collected_history_folds_with_a_new_batch_into_the_cumulative_root() {
+    let (store, _) = published_repository();
+
+    let carried = fgit_authority::collect_cumulative_outcomes(&store, &head_slot())
+        .expect("a walk within the replay bound");
+    let stamped = [commit_entry(0xc4, 3, 0x53)];
+
+    let folded = fgit_authority::fold_outcome_index(&carried, &stamped).expect("a computable root");
+
+    let mut expected_leaves = carried.clone();
+    expected_leaves.extend_from_slice(&stamped);
+    assert_eq!(
+        folded,
+        fgit_authority::outcome_index_root(&expected_leaves).expect("a computable root"),
+        "the end-to-end derivation must equal the recompute over the whole leaf set",
+    );
+
+    // It advanced: the published history's own root is not the answer.
+    assert_ne!(
+        folded,
+        fgit_authority::outcome_index_root(&carried).expect("a computable root"),
+        "folding a new batch must move the root off the predecessor's",
+    );
+}
+
+/// Re-deciding a transaction the walked history already decided is refused.
+///
+/// This is acceptance (3)'s substance reached through the real walk rather than
+/// a hand-built slice: the transaction was decided in a PRIOR batch, recovered
+/// from the authenticated stream, and the fold sees it. The permitted twin is a
+/// fresh `TxId` through the identical path.
+#[test]
+fn a_transaction_decided_in_a_prior_batch_is_caught_through_the_real_walk() {
+    let (store, _) = published_repository();
+    let carried = fgit_authority::collect_cumulative_outcomes(&store, &head_slot())
+        .expect("a walk within the replay bound");
+
+    // `tx(0xB2)` was REFUSED in the published batch. Offering it again --
+    // committed this time -- is the two-terminal-decisions violation.
+    let redecided = [commit_entry(0xB2, 3, 0x53)];
+    let failure = fgit_authority::fold_outcome_index(&carried, &redecided)
+        .expect_err("a transaction decided in a prior batch cannot be decided again");
+    let OutcomeFailure::DuplicateTerminalDecision { duplicate } = failure else {
+        panic!("expected DuplicateTerminalDecision, got {failure:?}");
+    };
+    assert_eq!(duplicate.tx_id, tx(0xB2));
+    assert_eq!(
+        duplicate.existing.outcome,
+        DecisionOutcome::Refused {
+            code: RefusalCode::QuotaExceeded,
+            refusal_record_id: refusal_id(0x52),
+        },
+        "the decision recovered from the stream is the one that must be reported",
+    );
+
+    let fresh = [commit_entry(0xc7, 3, 0x53)];
+    fgit_authority::fold_outcome_index(&carried, &fresh)
+        .expect("an undecided transaction folds through the same path");
+}

@@ -879,6 +879,84 @@ pub fn outcome_index_root(entries: &[(TxId, TerminalOutcome)]) -> Result<Digest,
     ))
 }
 
+/// Collect every terminal outcome reachable from the head, as the fold's
+/// `carried` argument.
+///
+/// This is the same authenticated walk [`scan_for_existing_decisions`] makes --
+/// `next_batch_to_replay`, `read_decision_batch_body`, `read_predecessor` --
+/// differing only in that it takes *every* decision in each batch rather than
+/// probing for named ones.
+///
+/// # Why this is not a retention decision
+///
+/// It materializes nothing. The returned set is a **projection derived from the
+/// authenticated decision stream on demand** and dropped by the caller, so §5.1
+/// is untouched and no §4 "second database whose rows compete with the
+/// authority-head decision stream" comes into existence. The open question on
+/// `frankengit-boet` is whether to *retain* the leaf set or change the
+/// commitment; this answers neither and pre-empts neither. What it does is
+/// narrow the question: within the replay bound the derivation already works,
+/// so the ruling governs only what happens beyond that bound.
+///
+/// # The bound is a refusal, never a truncation
+///
+/// Past [`MAX_REPLAY_BATCHES`] the walk returns
+/// [`OutcomeFailure::ReplayBoundExceeded`] and this function propagates it
+/// rather than returning the entries gathered so far. That distinction is the
+/// whole safety property: a *short* leaf set does not produce a short root, it
+/// produces a **wrong root that is indistinguishable from a right one**, and it
+/// would be committed to a canonical body field. §3.1's typed refusal is the
+/// only admissible answer, so there is deliberately no partial-result variant
+/// for a caller to reach for.
+///
+/// # Duplicates are reported, not resolved
+///
+/// The stream is reported faithfully, including a `TxId` that somehow carries
+/// two decisions. Enforcing §5.2 here would hide such a stream behind a clean
+/// read; [`fold_outcome_index`] refuses it instead, at the point where it would
+/// otherwise become a published root.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::ReplayBoundExceeded`] past the walk's bound, plus the
+/// body-read failures [`read_decision_batch_body`] can raise.
+pub fn collect_cumulative_outcomes<S>(
+    store: &S,
+    head_key: &HeadKey,
+) -> Result<Vec<(TxId, TerminalOutcome)>, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let HeadRead::Present(receipt) = store.read_head(head_key)? else {
+        // No head: nothing has been decided, so the cumulative index is empty.
+        // This is the genesis case and it is a real answer, not an absence --
+        // `outcome_index_root(&[])` has a defined value.
+        return Ok(Vec::new());
+    };
+    let mut head: RepositoryAuthorityHeadBody = head_body_of(&receipt)?;
+    let mut walked = 0_usize;
+    let mut collected: Vec<(TxId, TerminalOutcome)> = Vec::new();
+
+    while let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? {
+        let batch = read_decision_batch_body(store, batch_id)?;
+        for decision in &batch.decisions {
+            collected.push((
+                decision.tx_id,
+                TerminalOutcome {
+                    decision_sequence: decision.decision_sequence,
+                    outcome: decision.outcome,
+                },
+            ));
+        }
+        let Some(previous) = read_predecessor(store, batch.predecessor_head_id)? else {
+            break;
+        };
+        head = previous;
+    }
+
+    Ok(collected)
+}
+
 /// Derive the repository's cumulative outcome index after a batch.
 ///
 /// This is the authority-owned derivation the `frankengit-boet` ruling names:
