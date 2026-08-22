@@ -226,6 +226,20 @@ fn main() -> ExitCode {
         claims::check_readme(&root, &mut report);
     } else {
         check_required_files(&root, &mut report);
+        // Hoisted out of `check_registries` deliberately. The pin compares a
+        // Rust source constant against a document, so it belongs to BOTH the
+        // registry lane (which enforces the vocabulary) and the constitution
+        // lane (which is where `KNOWN_STATUSES` actually lives). Running it
+        // only under `includes_registries` left `verify.sh constitution` blind
+        // to a divergence introduced by editing Rust -- measured, not inferred:
+        // with a seventh value planted in the ledger, constitution exited 0
+        // while docs exited 1. The `||` rather than a call in each branch is
+        // what keeps `All` from reporting every divergence twice.
+        if invocation.check_set.includes_registries()
+            || invocation.check_set.includes_constitution()
+        {
+            check_status_vocabulary_pin(&root, &mut report);
+        }
         if invocation.check_set.includes_registries() {
             check_registries(&root, &mut report);
         }
@@ -573,7 +587,6 @@ fn calm_coordination_classes(root: &Path, report: &mut Report) -> BTreeSet<Strin
 
 fn check_registries(root: &Path, report: &mut Report) {
     let schemas = registry_schemas();
-    check_status_vocabulary_pin(root, report);
     let calm_classes = calm_coordination_classes(root, report);
     let registry_dir = root.join("registries");
     for (file_name, expected_header) in schemas {
@@ -5661,6 +5674,41 @@ mod tests {
         assert!(
             enforced.difference(&short).count() > 0,
             "an enforced value the document omits must be detected"
+        );
+    }
+
+    #[test]
+    fn the_pin_is_reached_by_both_the_registry_and_constitution_lanes() {
+        // The lane-coverage regression guard. The pin was originally called
+        // only from `check_registries`, so `verify.sh constitution` was blind
+        // to a divergence -- measured at the time as constitution exit 0 while
+        // docs exited 1. That matters because `KNOWN_STATUSES` is a RUST source
+        // constant: whoever adds a seventh value is editing Rust and reaches
+        // for the Rust lane, which is the one that stayed quiet.
+        //
+        // Asserting the predicates rather than the call site, because the call
+        // site is what a future refactor moves and the predicates are what
+        // decide whether it runs.
+        assert!(
+            CheckSet::Constitution.includes_constitution(),
+            "the constitution lane must reach the pin"
+        );
+        assert!(
+            CheckSet::Registries.includes_registries(),
+            "the registry lane must reach the pin"
+        );
+        assert!(
+            CheckSet::All.includes_registries() && CheckSet::All.includes_constitution(),
+            "`all` satisfies both predicates, which is why the dispatch guards \
+             them with `||` rather than calling the pin in each branch -- \
+             otherwise `all` would report every divergence twice"
+        );
+        // And the paired negative, so this is not merely asserting that
+        // everything is included: a lane genuinely outside both must stay out.
+        assert!(
+            !CheckSet::CrateGraph.includes_registries()
+                && !CheckSet::CrateGraph.includes_constitution(),
+            "a lane outside both predicates must not reach the pin"
         );
     }
 
