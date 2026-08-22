@@ -22,3 +22,6 @@ evidence/
 
 # rch project override (local builds only)
 .rch/
+
+# beads compliance audit (self-tracked)
+beads_compliance_audit/
