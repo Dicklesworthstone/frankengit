@@ -2182,6 +2182,39 @@ where
     )
 }
 
+/// Best-effort consumption of the client's want-less request after an
+/// empty-repository advertisement.
+///
+/// A real client answers the zero-identity `capabilities^{}` advertisement by
+/// sending its request and waiting; closing the read side with those bytes
+/// still queued makes the kernel answer with RST instead of a clean FIN, so a
+/// cloning client can observe a connection reset where upstream completes
+/// gracefully. The drain reads until the request flush, stream end, or any
+/// bounded refusal, and never changes the session outcome. A client that
+/// drips framing forever is the unbounded-session problem a transport
+/// deadline owns, not this drain's.
+fn drain_client_request(reader: &mut impl Read, limits: &WireLimits) {
+    let Ok(mut decoder) = PktLineDecoder::new(limits.clone()) else {
+        return;
+    };
+    let mut input = [0_u8; 16 * 1024];
+    loop {
+        let read = match reader.read(&mut input) {
+            Ok(0) | Err(_) => return,
+            Ok(read) => read,
+        };
+        match decoder.push(&input[..read]) {
+            Ok(packets) if packets.iter().any(|packet| matches!(packet, Packet::Flush)) => {
+                return;
+            }
+            Ok(_) => {}
+            // A bounded framing refusal ends the politeness drain the same
+            // way a stream end does: the outcome is already decided.
+            Err(_) => return,
+        }
+    }
+}
+
 /// Completes one upload-pack session after its git-daemon greeting was read.
 ///
 /// Keeping this half of the session beside [`serve_git_daemon_upload_pack`]
@@ -2220,6 +2253,7 @@ where
     .map_err(GitDaemonServeError::Transport)?;
 
     if repository.advertised_refs().is_empty() {
+        drain_client_request(reader, &limits);
         return Ok(GitDaemonSessionOutcome::EmptyRepository(
             GitDaemonAdvertisementReceipt { request },
         ));
@@ -4994,4 +5028,64 @@ mod tests {
             Err(NodeRefusal::AuthorityHeadAbsent)
         ));
     }
+}
+
+/// A reader that yields fixed chunks and records how many reads happened,
+/// so a drain can be pinned to the exact read it must stop on.
+struct ChunkedReader {
+    chunks: Vec<Vec<u8>>,
+    next: usize,
+    reads: usize,
+}
+
+impl ChunkedReader {
+    fn new(chunks: &[&[u8]]) -> Self {
+        Self {
+            chunks: chunks.iter().map(|chunk| chunk.to_vec()).collect(),
+            next: 0,
+            reads: 0,
+        }
+    }
+}
+
+impl std::io::Read for ChunkedReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.reads += 1;
+        let Some(chunk) = self.chunks.get(self.next) else {
+            return Ok(0);
+        };
+        self.next += 1;
+        let taken = chunk.len().min(buf.len());
+        buf[..taken].copy_from_slice(&chunk[..taken]);
+        Ok(taken)
+    }
+}
+
+#[test]
+fn drain_consumes_a_want_less_request_through_its_flush() {
+    // The request flush completes in the SECOND chunk; a correct drain
+    // stops there and never asks for a third.
+    let mut client = ChunkedReader::new(&[b"000ePACK-request\n", b"0000"]);
+    drain_client_request(&mut client, &WireLimits::default());
+    assert_eq!(
+        client.reads, 2,
+        "the drain must stop reading once the request flush arrives"
+    );
+}
+
+#[test]
+fn drain_returns_at_stream_end_without_a_flush() {
+    let mut client = ChunkedReader::new(&[b"0009half-framed"]);
+    drain_client_request(&mut client, &WireLimits::default());
+    assert_eq!(client.reads, 1, "a truncated request ends the drain at EOF");
+}
+
+#[test]
+fn drain_stops_at_a_framing_refusal_without_hanging() {
+    let mut client = ChunkedReader::new(&[b"zzzznot-a-packet-length"]);
+    drain_client_request(&mut client, &WireLimits::default());
+    assert_eq!(
+        client.reads, 1,
+        "a framing refusal ends the drain without another read"
+    );
 }
