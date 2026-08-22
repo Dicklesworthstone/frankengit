@@ -758,17 +758,14 @@ impl RuntimeImmutableObjectFabric for LocalFilesystemFabric {
             return outcome;
         }
         let fabric = self.clone();
-        let mut task = match cx.spawn_blocking(move |child_cx| {
-            if child_cx.checkpoint().is_err() {
-                return Err(StoreRefusal::RuntimeCheckpointRejected);
-            }
-            fabric.read_whole(identity)
-        }) {
+        let mut task = match cx
+            .spawn_blocking(move |child_cx| blocking_read_outcome(&child_cx, &fabric, identity))
+        {
             Ok(task) => task,
             Err(_) => return Outcome::Err(StoreRefusal::RuntimeSpawnUnavailable),
         };
         match task.join(cx).await {
-            Ok(Ok(whole)) => {
+            Ok(Outcome::Ok(whole)) => {
                 if let Some(outcome) = checkpoint_outcome(cx) {
                     return outcome;
                 }
@@ -777,13 +774,34 @@ impl RuntimeImmutableObjectFabric for LocalFilesystemFabric {
                     Err(error) => Outcome::Err(error),
                 }
             }
-            Ok(Err(error)) => Outcome::Err(error),
+            Ok(Outcome::Err(error)) => Outcome::Err(error),
+            Ok(Outcome::Cancelled(reason)) => Outcome::Cancelled(reason),
+            Ok(Outcome::Panicked(payload)) => Outcome::Panicked(payload),
             Err(JoinError::Cancelled(reason)) => Outcome::Cancelled(reason),
             Err(JoinError::Panicked(payload)) => Outcome::Panicked(payload),
             Err(JoinError::PolledAfterCompletion) => {
                 Outcome::Err(StoreRefusal::RuntimeJoinConsumed)
             }
         }
+    }
+}
+
+/// Reads one object in the blocking region without collapsing runtime state.
+///
+/// A blocking child can observe cancellation before it starts storage work. It
+/// must return that `Outcome::Cancelled` to the joiner; encoding it in a
+/// `Result` would falsely describe cancellation as a `StoreRefusal`.
+fn blocking_read_outcome<Caps>(
+    cx: &Cx<Caps>,
+    fabric: &LocalFilesystemFabric,
+    identity: GitOid,
+) -> Outcome<WholeObjectRead, StoreRefusal> {
+    if let Some(outcome) = checkpoint_outcome(cx) {
+        return outcome;
+    }
+    match fabric.read_whole(identity) {
+        Ok(whole) => Outcome::Ok(whole),
+        Err(error) => Outcome::Err(error),
     }
 }
 
@@ -1270,6 +1288,31 @@ mod tests {
         drop(cx);
         drop(seed);
         assert!(runtime.shutdown_timeout(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn blocking_read_preserves_child_cancellation_instead_of_a_store_refusal() {
+        let root = TestRoot::new();
+        let fabric = fabric(root.path());
+        let object = object(b"payload");
+        let ledger = ledger();
+        fabric
+            .put_if_absent(object.clone(), admission(&ledger, &object))
+            .expect("local placement must succeed");
+
+        let active = Cx::detached_cancel_context();
+        assert!(matches!(
+            blocking_read_outcome(&active, &fabric, object.identity()),
+            Outcome::Ok(_)
+        ));
+
+        let cancelled = Cx::detached_cancel_context();
+        cancelled.cancel_with(CancelKind::User, Some("cancel inside local blocking read"));
+        assert!(matches!(
+            blocking_read_outcome(&cancelled, &fabric, object.identity()),
+            Outcome::Cancelled(_)
+        ));
+        assert_quiescent(ledger);
     }
 
     #[test]
