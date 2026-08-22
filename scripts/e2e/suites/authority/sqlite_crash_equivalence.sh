@@ -204,8 +204,8 @@ fi
 #
 # FG-005b's acceptance says the report publishes the support matrix and that
 # any unproved cell is "unsupported/non-pass and is admission-capped in
-# production". Two cells are still unproved, so both are recorded as TYPED
-# UNSUPPORTED assertions rather than as prose notes.
+# production". One cell is still unproved, so it is recorded as a TYPED
+# UNSUPPORTED assertion rather than as a prose note.
 #
 # That makes this lane's terminal status non-pass, and it should: the harness
 # treats an unsupported assertion as non-pass precisely so a partially proved
@@ -242,10 +242,7 @@ fi
 # one is waiting on a capability and the other on a bug nobody may be fixing.
 
 fge_unsupported FG-005B-E2E-021 \
-  'cancellation of a statement the VDBE is ACTIVELY STEPPING. That is the ONE clause left, and it is measured: 31 poll sites read, including the main instruction loop every N opcodes, and the store statements are far too short to reach an opcode checkpoint reliably. Reaching it needs sustained page-lock contention, which no cell here builds. THE OTHER TWO CLAUSES THIS CELL USED TO CARRY WERE BOTH WRONG, and both were the structural assertions rather than the measured one. (1) commit-ambiguous is not unwritten: the E2E-022 sweep cancels at scale-1, the post-commit window, which IS that cell and is the position that exposed w1ik -- so it is DEFECT-BLOCKED and belongs to FG-005B-E2E-024. (2) reply-lost is not a distinct cell at this boundary: the probe measures that a cancel is caught by the CALLER AWAIT, not inside the engine, so cancelling a dispatched operation IS abandoning its reply -- the with-cancel variant is the sweep, and the without-cancel variant is FG-005B-E2E-020 LoseResponse, which passes. The conjunction adds no observable the store can distinguish. Both corrections came from labelling which clauses were measured and then checking the ones that were not; neither would have surfaced from re-reading a verdict I already agreed with'
-
-fge_unsupported FG-005B-E2E-024 \
-  'no-mixed-state under LATE cancellation is BLOCKED BY A DEFECT, not by absent capability. The test exists and is correct: cancellation_matrix::no_cancellation_position_leaves_a_mixture, currently #[ignore]. It measures the store reporting ok=false while the body IS committed -- e.g. "after 1335 of about 1525 suspensions" -- because a cancelled operation returns Refused(Unavailable), and Refused asserts non-commit, which NPC 5.2 forbids for cancellation. Filed as frankengit-w1ik (P1) by BoldIbis from a reading of into_failure; this lane measured the same defect from the outside. The fix is written and verified but deliberately NOT applied here: it belongs to the crate owner, because a campaign whose author also implements the crate cannot catch the implementer misreadings it exists to catch. Un-ignore the test and delete this cell when w1ik lands'
+  'cancellation of a statement the VDBE is ACTIVELY STEPPING. That is the ONE clause left, and it is measured: 31 poll sites read, including the main instruction loop every N opcodes, and the store statements are far too short to reach an opcode checkpoint reliably. Reaching it needs sustained page-lock contention, which no cell here builds. THE OTHER TWO CLAUSES THIS CELL USED TO CARRY WERE BOTH WRONG, and both were the structural assertions rather than the measured one. (1) commit-ambiguous is not unwritten: the E2E-022 sweep cancels at scale-1, the post-commit window, which IS that cell and is the position that exposed w1ik -- so it was DEFECT-BLOCKED rather than unbuilt, and it is now covered: the w1ik fix landed at 6e9a559 and the sweep runs green. (2) reply-lost is not a distinct cell at this boundary: the probe measures that a cancel is caught by the CALLER AWAIT, not inside the engine, so cancelling a dispatched operation IS abandoning its reply -- the with-cancel variant is the sweep, and the without-cancel variant is FG-005B-E2E-020 LoseResponse, which passes. The conjunction adds no observable the store can distinguish. Both corrections came from labelling which clauses were measured and then checking the ones that were not; neither would have surfaced from re-reading a verdict I already agreed with'
 
 # The structural PRECONDITION for that cell, which IS checkable today.
 #

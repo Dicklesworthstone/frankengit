@@ -579,15 +579,31 @@ fn suspensions_before_completion() -> usize {
     })
 }
 
+/// What the caller was told about one cancelled operation.
+///
+/// Three-valued on purpose. This was a boolean until `frankengit-w1ik` was
+/// fixed, and the boolean was itself an instance of the bug: it forced every
+/// non-success into "did not happen", which is exactly the claim §5.2 says a
+/// cancellation is not entitled to make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reported {
+    /// The store said the operation committed.
+    Committed,
+    /// The store declined to say, and the caller must resolve by reading.
+    Unknown,
+    /// The store asserted the operation did not take effect.
+    DidNotHappen,
+}
+
 /// Run one `put_if_absent`, cancelling once it has suspended `spins` times.
 ///
 /// Returns what the caller was told, and what the database actually holds
 /// afterwards read through a context no test ever cancels.
-fn cancel_after_spins(spins: usize) -> (bool, bool) {
+fn cancel_after_spins(spins: usize) -> (Reported, bool) {
     let f = Fixture::new();
     let key = body_key("sweep");
 
-    let reported_ok = f.node.block_on(async {
+    let reported = f.node.block_on(async {
         let mut in_flight = core::pin::pin!(f.store.put_if_absent(&f.live, &key, b"payload"));
         let mut done = None;
 
@@ -605,14 +621,25 @@ fn cancel_after_spins(spins: usize) -> (bool, bool) {
             }
         }
 
-        match done {
+        let outcome = match done {
             // Completed before the cancellation position was reached. Not a
-            // cancellation observation at all, and reported as such.
-            Some(value) => value.is_ok(),
+            // cancellation observation at all, and classified as such.
+            Some(value) => value,
             None => {
                 f.live.cancel();
-                in_flight.await.is_ok()
+                in_flight.await
             }
+        };
+
+        // Classified through `into_failure`, the mapping the published
+        // `AsyncAuthorityStore` impl applies, so this reads the answer a real
+        // caller receives rather than an internal one.
+        match outcome {
+            Ok(_) => Reported::Committed,
+            Err(error) => match error.into_failure() {
+                AuthorityFailure::Ambiguous(_) => Reported::Unknown,
+                AuthorityFailure::Refused(_) => Reported::DidNotHappen,
+            },
         }
     });
 
@@ -623,38 +650,43 @@ fn cancel_after_spins(spins: usize) -> (bool, bool) {
         ImmutableRead::Present(_)
     );
 
-    (reported_ok, stored)
+    (reported, stored)
 }
 
 #[test]
-#[ignore = "red: reproduces frankengit-w1ik, a filed P1 defect. Un-ignore with the fix."]
-fn no_cancellation_position_leaves_a_mixture() {
-    // THIS TEST IS RED, AND IT IS NOT FLAKY. Read this before touching it.
+fn no_cancellation_position_makes_a_claim_the_database_contradicts() {
+    // This test found `frankengit-w1ik` and was parked red until it was fixed.
     //
-    // It fails roughly half the time, and it fails for a reason: at late
-    // cancellation positions the store reports
+    // What it measured: at late cancellation positions the store reported
     //
     //     ok=false   while the database holds   stored=true
     //
-    // Measured instances: "cancelling after 1335 of about 1525 suspensions"
-    // and "after 1526 of about 1743". A cancel that lands once the commit has
-    // gone through returns `Refused(Unavailable)`, and in this vocabulary
-    // `Refused` asserts the operation did not take effect. §5.2 says client
-    // cancellation never proves non-commit. The commit stands and the caller
-    // is told it did not happen: exactly the mixture this test names.
+    // -- "after 1335 of about 1525 suspensions", and again at 1526 of about
+    // 1743. A cancel landing once the commit had gone through returned
+    // `Refused(Unavailable)`, and `Refused` asserts in this vocabulary that
+    // nothing was applied, which §5.2 forbids for cancellation. BoldIbis fixed
+    // it in the store at 6e9a559; cancellation now answers
+    // `Ambiguous(Cancelled)`.
     //
-    // It is intermittent because the defect needs the cancel to land after the
-    // commit, and how many busy-poll spins that takes depends on machine load.
-    // Run alone the target passed five times running; run beside one other
-    // test binary it failed three times in six. **A flakiness check that does
-    // not reproduce the real execution environment is not a flakiness check**
-    // -- and here it would have mislabelled a defect as noise.
+    // It failed intermittently, because the defect needs the cancel to land
+    // after the commit and how many busy-poll spins that takes depends on
+    // machine load. Run alone the target passed five times running; run beside
+    // one other test binary it failed three times in six. **A flakiness check
+    // that does not reproduce the real execution environment is not a flakiness
+    // check** -- this one would have relabelled a P1 as noise, and the "fix"
+    // would have been loosening the assertion.
     //
-    // Filed by BoldIbis as `frankengit-w1ik` (P1) from a reading of
-    // `into_failure`'s catch-all. This is the same defect measured from the
-    // outside. It is ignored rather than deleted, weakened, or inverted into a
-    // characterization of the broken behaviour: the assertion is correct as
-    // written and must start passing when w1ik is fixed. Do not relax it to
+    // # Why the assertion is three-valued now, and why that is not a weakening
+    //
+    // It compared two booleans, reported-ok against stored. **That boolean was
+    // itself an instance of the bug**: it forced every non-success into "did
+    // not happen". `Ambiguous` is a third answer and a correct one -- a store
+    // that says "I do not know, go and read" contradicts nothing.
+    //
+    // So the rule is now that a store may claim committed, claim
+    // not-committed, or decline to claim, and only a CLAIM can be contradicted.
+    // Both definite answers are checked exactly as before; the third was
+    // previously being scored as a failure it never was. Do not relax it to
     // make the suite green -- that is RH-1, and the point of this whole file
     // is that the words must not outrun the measurement.
     //
@@ -688,37 +720,56 @@ fn no_cancellation_position_leaves_a_mixture() {
         if position == 0 {
             continue;
         }
-        let (reported_ok, stored) = cancel_after_spins(position);
-        assert_eq!(
-            reported_ok, stored,
-            "cancelling after {position} of about {scale} suspensions reported ok={reported_ok} \
-             while the database holds stored={stored}; §5.2 admits old-complete or new-complete \
-             and never a mixture, and a caller that cannot trust its own answer cannot resolve \
-             anything by reading"
-        );
-        if !reported_ok {
+        let (reported, stored) = cancel_after_spins(position);
+        match reported {
+            Reported::Committed => assert!(
+                stored,
+                "cancelling after {position} of about {scale} suspensions reported COMMITTED and \
+                 the body is not in the database; a success that did not happen is the worst of \
+                 the three mixtures"
+            ),
+            Reported::DidNotHappen => assert!(
+                !stored,
+                "cancelling after {position} of about {scale} suspensions asserted the operation \
+                 DID NOT HAPPEN while the body is in the database. This is frankengit-w1ik \
+                 regressing: §5.2 says client cancellation never proves non-commit, so a \
+                 cancelled operation whose outcome the store cannot establish must be Ambiguous, \
+                 never Refused"
+            ),
+            // No claim, nothing to contradict. §5.2's remedy is then exercised
+            // rather than assumed: the caller resolves by exact-key read, which
+            // is the `stored` observation above, taken through a context that
+            // was never cancelled.
+            Reported::Unknown => {}
+        }
+        if reported != Reported::Committed {
             interrupted += 1;
         }
     }
 
     assert!(
         interrupted > 0,
-        "no position actually interrupted the operation, so the agreement above is trivial"
+        "no position actually interrupted the operation, so the checks above are trivial"
     );
 }
 
 // ---------------------------------------------------- what the sweep does not say
 //
-// The sweep above never exhibits a cancellation that arrives *after* the commit
-// and leaves it standing, because the only way to get there with this harness is
-// to let the operation finish first -- and an operation that finished was not
-// cancelled. So nothing here should be read as evidence for the converse of
-// §5.2's rule:
+// The sweep never exhibits a cancellation that arrives after the commit and is
+// then reported as a success, because the only way there with this harness is to
+// let the operation finish -- and an operation that finished was not cancelled.
+//
+// Before `frankengit-w1ik` that gap invited the wrong inference, since every
+// cancellation here ended with the body absent and a reader could have concluded
+// that cancellation implies non-commit. It no longer does: the store answers
+// `Ambiguous(Cancelled)`, so it declines to make the claim the reader would have
+// generalised from. §5.2's rule is now enforced by the store rather than merely
+// unviolated by these positions.
 //
 // > Client cancellation/disconnect never proves non-commit.
 //
-// Every cancellation this file observes happens to end with the body absent.
-// That is a fact about these positions, not a licence to infer non-commit from
-// cancellation. A caller still has to resolve by exact-key read, and the case
-// that would demonstrate why -- a lost response arriving together with a
-// cancel -- needs the fault engine in `fault_conformance.rs` and is not written.
+// What remains unexercised is a cancel and a lost response arriving together.
+// `fault_conformance.rs` has the fault engine, so it is buildable -- but the
+// probe shows a cancel is caught by the caller's await, which IS abandoning the
+// reply, so the conjunction produces no observable the store can distinguish
+// from either half alone. Not written, and not claimed.
