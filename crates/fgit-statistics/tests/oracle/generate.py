@@ -34,6 +34,18 @@ of the Beta-function form, `B(alpha_a+i, beta_a+beta_b) / ((beta_b+i)
 B(1+i, beta_b) B(alpha_a, beta_a))`, which shares no code path with the
 recurrence above. Both agree to the last digit.
 
+Each row carries BOTH exact tails:
+
+    (alpha_a, beta_a, alpha_b, beta_b, exact_b_exceeds_a, exact_a_exceeds_b)
+
+The second is the same closed form with the two posteriors exchanged, and it is
+computed here rather than derived as `1_000_000 - first`. Deriving it would make
+any test that compares both tails tautological: the derived value cannot
+disagree with the first, so it could not catch a normalisation that inflates one
+tail. It is also not equal to the complement in general, because both are
+floored — for Beta(20,10) vs Beta(10,20) the tails floor to 4037 and 995962,
+which sum to 999999, not a million.
+
 Usage:
 
     python3 crates/fgit-statistics/tests/oracle/generate.py
@@ -88,11 +100,19 @@ def main():
     stream = draws()
     for _ in range(ROWS):
         alpha_a, beta_a, alpha_b, beta_b = (next(stream) for _ in range(4))
-        exact = exact_ppm_floor(alpha_a, beta_a, alpha_b, beta_b)
-        # Digit separators on the ppm value: clippy's `unreadable_literal` is
+        # The draw order is unchanged, so the first five columns of every row
+        # are byte-identical to the previous five-column table. That is
+        # checkable with `cut -d, -f1-5` and is the reason this extends the
+        # generator rather than adding a second one.
+        b_exceeds_a = exact_ppm_floor(alpha_a, beta_a, alpha_b, beta_b)
+        a_exceeds_b = exact_ppm_floor(alpha_b, beta_b, alpha_a, beta_a)
+        # Digit separators on the ppm values: clippy's `unreadable_literal` is
         # deny-level in this workspace, so a table without them would not
         # compile.
-        print(f"    ({alpha_a}, {beta_a}, {alpha_b}, {beta_b}, {exact:_}),")
+        print(
+            f"    ({alpha_a}, {beta_a}, {alpha_b}, {beta_b}, "
+            f"{b_exceeds_a:_}, {a_exceeds_b:_}),"
+        )
 
 
 if __name__ == "__main__":
