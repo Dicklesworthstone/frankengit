@@ -121,7 +121,7 @@ fn parse_object_body_refuses_over_budget_and_accepts_the_exact_bound() {
 
     let accepted = parse_object_body(
         ObjectType::Blob,
-        &vec![b'x'; MAX],
+        &[b'x'; MAX],
         AcceptanceProfile::StrictCreate,
         &limits,
     )
@@ -134,7 +134,7 @@ fn parse_object_body_refuses_over_budget_and_accepts_the_exact_bound() {
 
     let refused = parse_object_body(
         ObjectType::Blob,
-        &vec![b'x'; MAX + 1],
+        &[b'x'; MAX + 1],
         AcceptanceProfile::StrictCreate,
         &limits,
     )
@@ -275,7 +275,7 @@ fn emit_object_body_refuses_over_budget_and_accepts_the_exact_bound() {
 fn the_streaming_decoder_refuses_an_over_budget_declared_size_before_any_body_byte() {
     let mut decoder = LooseObjectDecoder::new(limits());
     let mut input = format!("blob {}\0", MAX + 1).into_bytes();
-    input.extend_from_slice(&vec![b'x'; MAX + 1]);
+    input.extend_from_slice(&[b'x'; MAX + 1]);
 
     let refused = decoder
         .push(&input)
@@ -287,7 +287,7 @@ fn the_streaming_decoder_refuses_an_over_budget_declared_size_before_any_body_by
 fn the_streaming_decoder_accepts_a_declared_size_at_the_exact_bound() {
     let mut decoder = LooseObjectDecoder::new(limits());
     let mut input = format!("blob {MAX}\0").into_bytes();
-    input.extend_from_slice(&vec![b'x'; MAX]);
+    input.extend_from_slice(&[b'x'; MAX]);
 
     decoder
         .push(&input)
