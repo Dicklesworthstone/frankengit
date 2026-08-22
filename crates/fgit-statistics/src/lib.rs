@@ -53,25 +53,47 @@
 //!
 //! # Status
 //!
-//! Implemented: the regime detector in [`regime`], with its assumptions
-//! executable rather than documented; the fail-closed selection rule in
-//! [`fallback`]; the typed evidence body in [`evidence`], which carries all
-//! seven of `AGENTS.md` section 8's bindings as types and has canonical bytes;
-//! and section 33.4's forbidden-decision boundary in [`authority`], where the
-//! primary enforcement is that the permitted-decision enum has no variant for
-//! identity, authorization, retention, deletion or ordering.
+//! The section 33 mechanism library is implemented, each with its assumptions
+//! executable rather than documented:
 //!
-//! The evidence body has **no digest identity yet**. Computing one requires
+//! | mechanism | module |
+//! |---|---|
+//! | CUSUM regime detection | [`regime`] |
+//! | split conformal bounds | [`conformal`] |
+//! | e-process alarms | [`e_process`] |
+//! | successive elimination | [`elimination`] |
+//! | off-policy evaluation with support and ESS gates | [`off_policy`] |
+//! | Beta-Bernoulli posteriors | [`beta_bernoulli`] |
+//! | Lyapunov progress governors | [`lyapunov`] |
+//!
+//! Around them: the fail-closed selection rule in [`fallback`], the typed
+//! evidence body in [`evidence`] carrying all seven of `AGENTS.md` section 8's
+//! bindings, section 33.4's forbidden-decision boundary in [`authority`], and
+//! the demo controller in [`controller`] that runs them end to end.
+//!
+//! # Non-claims
+//!
+//! Two things are deliberately absent, and this crate does not claim either.
+//!
+//! **Beta-Bernoulli expected loss.** [`beta_bernoulli`] provides the posterior
+//! and a minimum-evidence arm comparison. The expected-loss integral needs the
+//! distribution of the difference of two Beta variables, which has no exact
+//! integer form; approximating it would mean either a floating-point path the
+//! workspace forbids, or a quadrature whose error bound is itself a claim
+//! needing evidence. Calling a mean comparison "expected loss" would be
+//! proof-class inflation, so it is named for what it is.
+//!
+//! **Confidence-width derivation.** [`elimination`] takes its half-widths as a
+//! declared schedule rather than computing `sqrt(log(2 / delta) / (2 n))`, for
+//! the same reason. It checks the properties a schedule must have to be a
+//! confidence schedule at all, and cannot check that a well-formed schedule
+//! delivers the level it claims.
+//!
+//! The evidence body also has **no digest identity yet**. Computing one requires
 //! `frankengit/statistical-evidence/v1` to be registered in `fgit-crypto`'s
 //! `DOMAIN_REGISTRY`, which is another crate's frozen surface and is routed to
 //! its owner by mail under section 16.1. The canonical bytes do not depend on
 //! that, so they are complete; the artifact commitment is what waits.
-//!
-//! The remaining mechanisms of the section 33 library — conformal bounds,
-//! e-processes, bandit arm selection, off-policy evaluation with support and
-//! effective-sample-size gates, Beta-Bernoulli expected loss, and Lyapunov
-//! governors — are **not** implemented here yet, and this crate does not claim
-//! them.
 
 pub mod authority;
 pub mod beta_bernoulli;

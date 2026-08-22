@@ -39,6 +39,19 @@ fn fresh() -> RetryBackoffController {
     RetryBackoffController::new(config()).expect("assumptions hold")
 }
 
+/// The same controller with a detector that cannot alarm on a single
+/// observation.
+///
+/// Needed because the CUSUM threshold of 20 with a slack of 5 is crossed by one
+/// deviation of 26, so any test feeding a large single value would trip the
+/// regime alarm and observe *that* rather than the condition it meant to test.
+/// Raising the threshold isolates the condition instead of weakening it.
+fn quiet_detector() -> RetryBackoffController {
+    let mut config = config();
+    config.cusum.threshold = 100_000;
+    RetryBackoffController::new(config).expect("assumptions hold")
+}
+
 // ------------------------------------------------------------- the quiet case
 
 #[test]
@@ -73,7 +86,7 @@ fn a_stream_at_target_keeps_the_candidate_and_never_republishes() {
 fn the_candidate_backoff_tracks_the_observation() {
     // Proves the candidate is a real mechanism rather than a constant that
     // happens to equal the base delay in the test above.
-    let mut controller = fresh();
+    let mut controller = quiet_detector();
     let step = controller.observe(1, TARGET + 40).expect("step");
     assert_eq!(step.selection, PolicySelection::Candidate);
     assert_eq!(
@@ -85,13 +98,23 @@ fn the_candidate_backoff_tracks_the_observation() {
 
     // And it does not go below base on an observation under target: a faster
     // stream is not a reason to retry sooner than the floor.
-    let mut below = fresh();
+    let mut below = quiet_detector();
     let step = below.observe(1, TARGET - 40).expect("step");
     assert_eq!(
         step.decision,
         AdvisoryDecision::RetryBackoff {
             micros: BASE_BACKOFF
         }
+    );
+
+    // Under the standard configuration the same +40 observation is a genuine
+    // regime alarm on its own -- deviation 40, slack 5, threshold 20 -- so the
+    // quiet detector above is isolating the backoff formula, not hiding a
+    // disagreement about what the detector should do.
+    let mut standard = fresh();
+    assert_eq!(
+        standard.observe(1, TARGET + 40).expect("step").selection,
+        PolicySelection::Fallback(FallbackTrigger::RegimeAlarm)
     );
 }
 
@@ -207,14 +230,26 @@ fn an_observation_outside_declared_support_selects_the_fallback() {
         PolicySelection::Fallback(FallbackTrigger::SupportFailure)
     );
 
-    // The permitted twin: exactly at the declared bound is inside support.
-    let mut boundary = fresh();
+    // The permitted twin: exactly at the declared bound is inside support. The
+    // quiet detector is used because a deviation of 1_000 also alarms the
+    // standard detector, and SupportFailure precedes RegimeAlarm in the fixed
+    // order -- so under the standard configuration this case could not
+    // distinguish "in support" from "reported as something else first".
+    let mut boundary = quiet_detector();
     let step = boundary.observe(1, TARGET + 1_000).expect("step");
     assert_eq!(
         step.selection,
         PolicySelection::Candidate,
         "the bound is inclusive; refusing at exactly max_deviation would be a blanket refusal one \
          off from the declared contract"
+    );
+
+    // And one past the bound is a support failure under the same quiet detector,
+    // so the refusal is attributable to the support gate alone.
+    let mut past = quiet_detector();
+    assert_eq!(
+        past.observe(1, TARGET + 1_001).expect("step").selection,
+        PolicySelection::Fallback(FallbackTrigger::SupportFailure)
     );
 }
 

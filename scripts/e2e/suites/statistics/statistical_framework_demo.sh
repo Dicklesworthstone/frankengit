@@ -34,7 +34,9 @@ main() {
   fge_context non_claim \
     'the evidence body has canonical bytes but no digest identity until its domain is registered in fgit-crypto'
   fge_context non_claim \
-    'only regime detection is implemented; conformal bounds, e-processes, bandit selection, OPE and Lyapunov governors are not'
+    'Beta-Bernoulli expected loss is NOT implemented; only the posterior and a mean comparison are'
+  fge_context non_claim \
+    'elimination takes its confidence widths as declared data and cannot check they deliver the claimed level'
 
   # Structural: every acceptance line has a file behind it. An acceptance line
   # with nothing behind it is the failure this suite exists to make loud.
@@ -50,6 +52,18 @@ main() {
     'the end-to-end demo controller is present'
   fge_assert_file 'FG-054-E2E-006' "${CRATE_TESTS}/controller_drill.rs" \
     'the fallback drill is present'
+  fge_assert_file 'FG-054-E2E-007' "${CRATE_SRC}/conformal.rs" \
+    'split conformal bounds are present'
+  fge_assert_file 'FG-054-E2E-008' "${CRATE_SRC}/off_policy.rs" \
+    'off-policy evaluation with support and ESS gates is present'
+  fge_assert_file 'FG-054-E2E-009' "${CRATE_SRC}/lyapunov.rs" \
+    'the Lyapunov progress governor is present'
+  fge_assert_file 'FG-054-E2E-020' "${CRATE_SRC}/beta_bernoulli.rs" \
+    'Beta-Bernoulli posteriors are present'
+  fge_assert_file 'FG-054-E2E-021' "${CRATE_SRC}/e_process.rs" \
+    'the e-process alarm is present'
+  fge_assert_file 'FG-054-E2E-022' "${CRATE_SRC}/elimination.rs" \
+    'successive elimination is present'
 
   fge_phase action
   fge_capture statistics-tests \
@@ -88,6 +102,27 @@ main() {
   fge_assert_contains 'FG-054-E2E-015' "${output}" \
     'the_controller_produces_a_bindable_evidence_body' \
     'the loop from observations to canonical evidence bytes actually ran'
+
+  # One named assertion per mechanism, each pointing at the test that carries
+  # that mechanism's load-bearing assumption check rather than at a happy path.
+  fge_assert_contains 'FG-054-E2E-030' "${output}" \
+    'a_calibration_set_one_short_of_feasible_is_refused_rather_than_capped' \
+    'conformal refuses the infeasible calibration set instead of capping it'
+  fge_assert_contains 'FG-054-E2E-031' "${output}" \
+    'a_concentrated_batch_is_refused_even_though_every_sample_is_in_support' \
+    'the effective-sample-size gate catches weight concentration'
+  fge_assert_contains 'FG-054-E2E-032' "${output}" \
+    'a_system_that_is_busy_but_never_drains_is_a_violation' \
+    'the Lyapunov governor catches work without progress'
+  fge_assert_contains 'FG-054-E2E-033' "${output}" \
+    'a_confident_looking_prior_with_no_trials_is_refused' \
+    'the Beta-Bernoulli evidence gate counts observations, not pseudo-counts'
+  fge_assert_contains 'FG-054-E2E-034' "${output}" \
+    'a_bet_that_could_exhaust_the_wealth_is_refused' \
+    'the e-process refuses a bet that would permanently kill the process'
+  fge_assert_contains 'FG-054-E2E-035' "${output}" \
+    'a_widening_schedule_is_refused' \
+    'successive elimination refuses a schedule that is not a confidence schedule'
 
   # The permitted twin for the assertions above: they check that named tests are
   # PRESENT, which a log containing every name and zero results would also
