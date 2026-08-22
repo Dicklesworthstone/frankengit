@@ -4,11 +4,32 @@
 //!
 //! Section 33 names "Beta-Bernoulli expected loss" in its mechanism library.
 //! **The expected-loss integral is not implemented here, and this module does
-//! not claim it.** Expected loss under either the 0-1 or the linear loss needs
-//! the distribution of the *difference* of two Beta variables, which has no
-//! exact form in integer arithmetic; approximating it would mean either a float
-//! path, which the workspace forbids, or a quadrature whose error bound is
-//! itself a claim needing evidence.
+//! not claim it.**
+//!
+//! An earlier version of this comment said it *could not* be, "because the
+//! difference of two Beta variables has no exact form in integer arithmetic".
+//! That was wrong, and the correction matters more than the original claim:
+//! for **integer** parameters — which is all this module ever has, since a
+//! proper prior plus observed counts is always integral — `P(theta_b > theta_a)`
+//! has an exact closed form, a finite sum of `a_b` rational terms whose
+//! successive ratio is
+//!
+//! ```text
+//! T(i+1)/T(i) = (a_a+i)/(a_a+i+b_a+b_b) * (1+i+b_b)/(1+i) * (b_b+i)/(b_b+i+1)
+//! ```
+//!
+//! so no factorial is ever formed. Verified against numerical integration and
+//! against exact rational evaluation of the closed form.
+//!
+//! The real obstacle is narrower and is an engineering choice rather than a
+//! mathematical one: exact evaluation needs arbitrary-precision rationals,
+//! whose denominators grow across the sum, and the closed dependency universe
+//! admits no bignum crate. Doing it in bounded fixed-point instead means
+//! rounding that compounds over up to `a_b` terms, which owes a proven error
+//! bound — and an unproven bound on a number that ranks two policies is exactly
+//! the kind of claim section 10 refuses.
+//!
+//! So it remains unimplemented, for a reason that is now stated accurately.
 //!
 //! What is provided is exact and useful on its own:
 //!

@@ -34,7 +34,7 @@ main() {
   fge_context non_claim \
     'the evidence body has canonical bytes but no digest identity until its domain is registered in fgit-crypto'
   fge_context non_claim \
-    'Beta-Bernoulli expected loss is NOT implemented; only the posterior and a mean comparison are'
+    'Beta-Bernoulli expected loss is NOT implemented; an exact integer closed form exists, but evaluating it needs arbitrary-precision rationals or a proven fixed-point error bound'
   fge_context non_claim \
     'elimination takes its confidence widths as declared data and cannot check they deliver the claimed level'
 

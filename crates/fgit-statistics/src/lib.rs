@@ -76,12 +76,14 @@
 //! Two things are deliberately absent, and this crate does not claim either.
 //!
 //! **Beta-Bernoulli expected loss.** [`beta_bernoulli`] provides the posterior
-//! and a minimum-evidence arm comparison. The expected-loss integral needs the
-//! distribution of the difference of two Beta variables, which has no exact
-//! integer form; approximating it would mean either a floating-point path the
-//! workspace forbids, or a quadrature whose error bound is itself a claim
-//! needing evidence. Calling a mean comparison "expected loss" would be
-//! proof-class inflation, so it is named for what it is.
+//! and a minimum-evidence arm comparison. The expected-loss integral is not
+//! implemented — **not** because it is impossible: for integer parameters
+//! `P(theta_b > theta_a)` has an exact closed form with a factorial-free
+//! recurrence, and that is verified. It is unimplemented because exact
+//! evaluation needs arbitrary-precision rationals that the closed dependency
+//! universe has no crate for, and bounded fixed-point evaluation owes a proven
+//! error bound this crate does not have. Calling a mean comparison "expected
+//! loss" would be proof-class inflation, so it is named for what it is.
 //!
 //! **Confidence-width derivation.** [`elimination`] takes its half-widths as a
 //! declared schedule rather than computing `sqrt(log(2 / delta) / (2 n))`, for
