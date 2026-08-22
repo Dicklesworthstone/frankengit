@@ -103,6 +103,25 @@ impl RetryBackoffController {
     /// fail, or [`ControllerRefusal::RetentionBoundZero`] for a zero retention
     /// bound.
     pub const fn new(config: ControllerConfig) -> Result<Self, ControllerRefusal> {
+        Self::new_at_epoch(config, PolicyEpoch::FIRST)
+    }
+
+    /// Builds a controller resuming from an already-published epoch.
+    ///
+    /// Epochs are stream-sequenced, so a controller restarted after a crash must
+    /// not reissue an epoch a reader has already seen. This is the entry point
+    /// for that: the caller supplies the last epoch it published, and the next
+    /// selection change advances past it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ControllerRefusal::Detector`] when the detector's assumptions
+    /// fail, or [`ControllerRefusal::RetentionBoundZero`] for a zero retention
+    /// bound.
+    pub const fn new_at_epoch(
+        config: ControllerConfig,
+        epoch: PolicyEpoch,
+    ) -> Result<Self, ControllerRefusal> {
         if config.max_retained_observations == 0 {
             return Err(ControllerRefusal::RetentionBoundZero);
         }
@@ -113,7 +132,7 @@ impl RetryBackoffController {
         Ok(Self {
             config,
             detector,
-            epoch: PolicyEpoch::FIRST,
+            epoch,
             // The controller starts on its candidate, and the first observation
             // that disqualifies it publishes a new epoch.
             selection: PolicySelection::Candidate,

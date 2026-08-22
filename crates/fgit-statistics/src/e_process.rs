@@ -100,6 +100,16 @@ pub enum EProcessRefusal {
     /// Refused rather than saturated: a saturated wealth would cross the alarm
     /// threshold for an arithmetic reason rather than an evidential one, which
     /// is a false alarm dressed as a detection.
+    ///
+    /// **Unreachable while the alarm latches, and deliberately retained.** The
+    /// smallest admitted `alpha` is one part per million, so the threshold is at
+    /// most `1e12`; the alarm stops the wealth at that point, and one further
+    /// multiplication by at most `2e6` reaches `2e18` against a `u128` ceiling of
+    /// about `3.4e38`. No test can drive this variant, and none pretends to.
+    ///
+    /// It stays because the bound is a consequence of the latch, not of the
+    /// arithmetic. Removing the guard would make a future change to the latching
+    /// behaviour silently unsafe instead of loudly refused.
     WealthOverflow,
 }
 

@@ -14,6 +14,7 @@ use fgit_statistics::controller::{ControllerConfig, ControllerRefusal, RetryBack
 use fgit_statistics::evidence::StatisticalEvidenceBody;
 use fgit_statistics::regime::CusumConfig;
 use fgit_statistics::{FallbackTrigger, PolicySelection};
+use fgit_types::PolicyEpoch;
 use fgit_types::{AsciiSlug, Digest, DigestAlgorithmId, DigestBytes};
 
 const TARGET: i64 = 100;
@@ -396,4 +397,39 @@ fn the_controller_produces_a_bindable_evidence_body() {
     );
     assert!(!body.regime.saturated);
     assert_eq!(body.assumptions.len(), 5);
+}
+
+#[test]
+fn an_exhausted_epoch_counter_is_refused_rather_than_wrapped() {
+    // A wrapped epoch would make a later policy look older than an earlier one,
+    // and epochs are the only thing ordering adaptive choices. Reachable only
+    // through `new_at_epoch`, which exists so a restarted controller does not
+    // reissue an epoch a reader has already seen.
+    let last = PolicyEpoch::try_new(u64::MAX).expect("nonzero");
+    let mut controller =
+        RetryBackoffController::new_at_epoch(config(), last).expect("assumptions hold");
+
+    // An observation that changes nothing does not need a new epoch.
+    let step = controller.observe(1, TARGET).expect("no selection change");
+    assert_eq!(step.epoch, last);
+    assert!(!step.published_epoch);
+
+    // One that forces the fallback does, and the counter has nothing left.
+    assert_eq!(
+        controller.observe(3, TARGET),
+        Err(ControllerRefusal::EpochExhausted),
+        "an evidence gap changes the selection, which needs an epoch that does not exist"
+    );
+
+    // The permitted twin: one epoch lower, the same sequence succeeds.
+    let spare = PolicyEpoch::try_new(u64::MAX - 1).expect("nonzero");
+    let mut ok = RetryBackoffController::new_at_epoch(config(), spare).expect("assumptions hold");
+    ok.observe(1, TARGET).expect("first");
+    let step = ok.observe(3, TARGET).expect("one epoch remains");
+    assert!(step.published_epoch);
+    assert_eq!(step.epoch.get(), u64::MAX);
+    assert_eq!(
+        step.selection,
+        PolicySelection::Fallback(FallbackTrigger::EvidenceGap)
+    );
 }

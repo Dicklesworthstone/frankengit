@@ -305,3 +305,40 @@ fn the_same_batch_evaluates_identically_every_time() {
     }
     assert!(first.is_ok(), "the fixture must exercise the passing path");
 }
+
+#[test]
+fn an_accumulator_that_would_overflow_is_refused_rather_than_saturated() {
+    // Reachable, and computed rather than guessed: with a support floor of one
+    // part per million every weight is 1e12, so 100_000 samples give
+    // sum w^2 = 1e29. Multiplying that by a required effective size of
+    // u32::MAX gives ~4.29e38, past the u128 ceiling of ~3.40e38.
+    //
+    // Saturating instead would silently change the comparison the ESS gate
+    // makes, turning a refusal into a pass for an arithmetic reason.
+    let config = OffPolicyConfig {
+        min_behavior_parts_per_million: 1,
+        max_behavior_parts_per_million: ONE,
+        min_effective_sample_size: u32::MAX,
+    };
+    let evaluator = OffPolicyEvaluator::new(config).expect("assumptions hold");
+    let samples: Vec<LoggedSample> = (0..100_000).map(|_| sample(1, ONE, 1)).collect();
+
+    assert_eq!(
+        evaluator.evaluate(&samples),
+        Err(OpeRefusal::AccumulatorOverflow)
+    );
+
+    // The permitted twin: the same batch under an ordinary required size does
+    // not overflow, so the refusal is about capacity and not about batch size.
+    let modest = OffPolicyConfig {
+        min_effective_sample_size: 10,
+        ..config
+    };
+    let evaluator = OffPolicyEvaluator::new(modest).expect("assumptions hold");
+    let estimate = evaluator.evaluate(&samples).expect("no overflow");
+    assert_eq!(estimate.samples, 100_000);
+    assert_eq!(
+        estimate.effective_sample_size, 100_000,
+        "uniform weights, so the effective size is the sample count"
+    );
+}

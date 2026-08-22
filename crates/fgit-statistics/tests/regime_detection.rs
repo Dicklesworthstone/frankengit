@@ -154,6 +154,30 @@ fn a_non_positive_threshold_is_refused() {
 }
 
 #[test]
+fn a_negative_deviation_bound_is_refused_and_zero_is_admitted() {
+    // `max_deviation` bounds an ABSOLUTE value, so a negative one is not a
+    // bound at all. Left unchecked it also silently disables the saturation
+    // proof below: `max_deviation - slack` goes negative, `per_observation > 0`
+    // is false, and the whole capacity argument is skipped.
+    let mut bad = cfg();
+    bad.max_deviation = -1;
+    assert_eq!(
+        Cusum::new(bad).err(),
+        Some(AssumptionFailure::MaxDeviationNegative),
+        "a negative bound on |observation - target| would also skip the saturation check entirely"
+    );
+
+    // The permitted twin, and the boundary: zero is a legitimate declaration
+    // that the stream never departs from target at all.
+    let mut zero = cfg();
+    zero.max_deviation = 0;
+    assert!(
+        Cusum::new(zero).is_ok(),
+        "the refusal must be specific to negative bounds, not a blanket refusal"
+    );
+}
+
+#[test]
 fn a_configuration_that_could_saturate_is_refused_before_it_can_lie() {
     // per_observation = max_deviation - slack = i64::MAX - 5, so even two
     // observations overflow. Saturation loses the excursion magnitude, so the
