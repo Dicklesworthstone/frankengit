@@ -297,7 +297,7 @@ pub struct CanonicalRefState {
 impl CanonicalRefState {
     /// Builds an immutable ref state from uniquely keyed validated refs.
     #[must_use]
-    pub fn new(refs: BTreeMap<RefName, fgit_types::GitOid>) -> Self {
+    pub const fn new(refs: BTreeMap<RefName, fgit_types::GitOid>) -> Self {
         Self { refs }
     }
 
@@ -372,7 +372,7 @@ pub struct PermittedObjectClosure {
 impl PermittedObjectClosure {
     /// Builds a closure from exactly the validated native object identities.
     #[must_use]
-    pub fn new(objects: BTreeSet<fgit_types::GitOid>) -> Self {
+    pub const fn new(objects: BTreeSet<fgit_types::GitOid>) -> Self {
         Self { objects }
     }
 
@@ -1905,15 +1905,15 @@ mod tests {
     #[test]
     fn cas_loser_resolves_and_retries_the_same_sealed_request() {
         // After installing the plan, this admission path performs two seal
-        // puts; two exact-outcome probes; a head read plus authentication for
-        // the publication basis; a second receipt authentication for the
-        // projection; then stages the batch and head. The atomic publisher
-        // now also reads the authenticated decision stream to mint its
-        // duplicate-absence witness before it reaches the CAS, so the CAS is
-        // operation 12. Keeping that transcript explicit makes a changed
+        // puts; two exact-outcome probes; then a head read plus one receipt
+        // authentication shared by the publication basis and projection.
+        // The atomic publisher now also reads the authenticated decision
+        // stream to mint its duplicate-absence witness before it reaches the
+        // CAS, so the CAS is operation 11. Keeping that transcript explicit
+        // makes a changed
         // authority call graph fail this planted-race test instead of silently
         // skipping it.
-        const PUBLISH_CAS_OPERATION: OpIndex = OpIndex::from_raw(12);
+        const PUBLISH_CAS_OPERATION: OpIndex = OpIndex::from_raw(11);
         let context = context();
         let store = store_with_genesis(&context);
         let projection = FixtureProjection::default();
