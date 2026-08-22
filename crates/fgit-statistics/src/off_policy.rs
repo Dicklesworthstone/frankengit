@@ -263,7 +263,13 @@ impl OffPolicyEvaluator {
         // Self-normalised: dividing by the realised weight total rather than by
         // the sample count keeps the estimate on the reward's scale even when
         // the weights do not average to one.
-        let value = sum_weighted_reward / (sum_weights as i128);
+        //
+        // `try_from` rather than `as`: the reward total is signed and the weight
+        // total is not, so an `as` cast of a weight total past `i128::MAX` would
+        // wrap to a negative divisor and flip the estimate's sign. A total that
+        // large is an accumulator failure, which this already has a refusal for.
+        let divisor = i128::try_from(sum_weights).map_err(|_| OpeRefusal::AccumulatorOverflow)?;
+        let value = sum_weighted_reward / divisor;
         let effective_sample_size = squared_total / sum_squares;
 
         Ok(OffPolicyEstimate {

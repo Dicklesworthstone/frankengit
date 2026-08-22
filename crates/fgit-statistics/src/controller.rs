@@ -209,16 +209,21 @@ impl RetryBackoffController {
     /// integer, division-free, and monotone in the observation. The fallback
     /// ignores the observation entirely, which is the whole point of a pinned
     /// deterministic policy.
-    const fn backoff_for(&self, selection: PolicySelection, value: Scaled) -> AdvisoryDecision {
+    fn backoff_for(&self, selection: PolicySelection, value: Scaled) -> AdvisoryDecision {
         let micros = match selection {
             PolicySelection::Fallback(_) => self.config.pinned_fallback_micros,
             PolicySelection::Candidate => {
                 let excess = value.saturating_sub(self.config.cusum.target);
                 let excess = if excess > 0 { excess } else { 0 };
-                // `excess` is non-negative here, so the cast cannot lose sign.
-                self.config
-                    .base_backoff_micros
-                    .saturating_add(excess as u64)
+                // Deliberately not `as u64`. `excess` is provably non-negative
+                // one line above, so the conversion cannot fail and the `0` is
+                // unreachable -- but a signed-to-unsigned `as` would silently
+                // turn a negative into an enormous delay if that proof ever
+                // stopped holding, and an enormous retry delay is indisputable
+                // from the outside. This costs `const` on a private helper the
+                // only caller of which is not `const` anyway.
+                let excess = u64::try_from(excess).unwrap_or(0);
+                self.config.base_backoff_micros.saturating_add(excess)
             }
         };
         AdvisoryDecision::RetryBackoff { micros }
