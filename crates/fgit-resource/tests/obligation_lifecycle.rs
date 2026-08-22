@@ -946,3 +946,129 @@ fn a_leak_record_names_its_subject_and_only_an_obligation_carries_a_class() {
 // Non-production fixture identity: this reserved tag deliberately has no registered digest width.
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
 const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
+
+#[test]
+fn a_late_acknowledgement_settles_an_escalated_effect_and_reaches_quiescence() {
+    // frankengit-lbt5. `ObligationState::apply` has always admitted
+    // `(Escalated, Acknowledge)`, and the assertion earlier in this file spells
+    // out the intent -- "a late acknowledgement still settles an escalated
+    // effect". Until `EscalationReceipt::resolve_acknowledged` existed, the
+    // state machine permitted that transition and NOTHING could perform it:
+    // `escalate` consumes the `UnacknowledgedEffect`, and the receipt it handed
+    // back carried only accessors. So a human who resolved an escalation could
+    // not record it, and the region reported containment failure forever.
+    //
+    // THE PAIR IS THE POINT. Asserting only the settled end state would pass
+    // against an implementation that settled at `escalate` time -- which is
+    // exactly the failure `terminal_failure_settles_where_escalation_does_not`
+    // guards. So this pins BOTH sides of the resolution boundary: outstanding
+    // while unresolved, settled and quiescent only after.
+    let ledger = ObligationLedger::root(
+        RegionId::new(43),
+        LeakDisposition::RecordAndContinue,
+        outbox_budget(),
+    );
+    let grant = ledger.grant(outbox_budget()).expect("capacity covers it");
+    let obligation = ledger
+        .reserve::<OutboxEffectPermit>(outbox_reservation(DownstreamIdempotency::Strong), grant)
+        .expect("egress is the required grade");
+    let id = obligation.id();
+    let handle = ledger.handle();
+
+    let owner = PrincipalId::from_bytes([0x5a; OPAQUE_ID_LEN]);
+    let receipt = obligation
+        .commit(EffectDispatched { attempt: 1 }, &outbox_budget())
+        .expect("dispatch fits inside the reservation")
+        .defer_acknowledgement(DeferralReason::AwaitingObservation)
+        .escalate(owner, EscalationReason::IndeterminateDelivery);
+
+    // BEFORE: holding the receipt settles nothing.
+    assert_eq!(
+        handle.state_of(id),
+        Some(ObligationState::Escalated),
+        "the effect must still be escalated while the receipt is merely held"
+    );
+    assert_eq!(
+        handle.outstanding().len(),
+        1,
+        "an unresolved escalation must keep the region owing this effect"
+    );
+
+    // AFTER: the named owner obtained the acknowledgement.
+    let settled = receipt.resolve_acknowledged(DownstreamAck {
+        receipt: opaque(0x11),
+        attempt: 1,
+    });
+    assert_eq!(
+        settled.state(),
+        ObligationState::Acknowledged,
+        "a late acknowledgement must settle the escalated effect"
+    );
+    assert_eq!(
+        handle.state_of(id),
+        Some(ObligationState::Acknowledged),
+        "the ledger must agree with the receipt, not just the returned summary"
+    );
+    assert!(
+        handle.outstanding().is_empty(),
+        "a resolved escalation is no longer outstanding"
+    );
+
+    let outcome = ledger.close();
+    assert!(
+        outcome.is_quiescent(),
+        "a region whose only escalation was resolved must close quiescent, got {outcome:?}"
+    );
+}
+
+#[test]
+fn a_terminally_failed_escalation_settles_to_a_different_state_than_acknowledgement() {
+    // The `(Escalated, FailTerminally)` row, dead for the same reason and
+    // restored by `EscalationReceipt::resolve_failed`. Paired with the test
+    // above so neither resolution can be mistaken for the other: from the same
+    // escalated starting point the two must reach DIFFERENT terminal states.
+    // A single resolution method that always acknowledged would satisfy the
+    // test above and fail here.
+    let ledger = ObligationLedger::root(
+        RegionId::new(44),
+        LeakDisposition::RecordAndContinue,
+        outbox_budget(),
+    );
+    let grant = ledger.grant(outbox_budget()).expect("capacity covers it");
+    let obligation = ledger
+        .reserve::<OutboxEffectPermit>(outbox_reservation(DownstreamIdempotency::Strong), grant)
+        .expect("egress is the required grade");
+    let id = obligation.id();
+    let handle = ledger.handle();
+
+    let owner = PrincipalId::from_bytes([0x5a; OPAQUE_ID_LEN]);
+    let receipt = obligation
+        .commit(EffectDispatched { attempt: 1 }, &outbox_budget())
+        .expect("dispatch fits inside the reservation")
+        .defer_acknowledgement(DeferralReason::AwaitingObservation)
+        .escalate(owner, EscalationReason::IndeterminateDelivery);
+
+    assert_eq!(
+        handle.outstanding().len(),
+        1,
+        "an unresolved escalation must keep the region owing this effect"
+    );
+
+    let settled = receipt.resolve_failed(TerminalFailureReason::PermanentDownstreamRejection);
+    assert_eq!(
+        settled.state(),
+        ObligationState::TerminallyFailed,
+        "a terminally failed escalation must not report itself acknowledged"
+    );
+    assert_eq!(
+        handle.state_of(id),
+        Some(ObligationState::TerminallyFailed),
+        "the ledger must record the terminal failure, not merely the summary"
+    );
+
+    let outcome = ledger.close();
+    assert!(
+        outcome.is_quiescent(),
+        "a region whose only escalation was resolved must close quiescent, got {outcome:?}"
+    );
+}

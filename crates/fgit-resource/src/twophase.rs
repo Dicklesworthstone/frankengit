@@ -290,6 +290,14 @@ pub struct EscalationReceipt<K: ObligationKind> {
     owner: PrincipalId,
     reason: EscalationReason,
     receipt: K::CommitReceipt,
+    /// Retained so a human-resolved escalation can still be recorded.
+    ///
+    /// The guard is disarmed at escalation, so this is not a leak guard and
+    /// dropping the receipt records nothing. It is the ledger connection the
+    /// two resolution methods need, and holding it settles nothing on its own:
+    /// the obligation stays `Escalated` and therefore outstanding until one of
+    /// them is actually called.
+    handle: LedgerHandle,
 }
 
 impl<K: ObligationKind> EscalationReceipt<K> {
@@ -321,6 +329,67 @@ impl<K: ObligationKind> EscalationReceipt<K> {
     #[must_use]
     pub const fn commit_receipt(&self) -> &K::CommitReceipt {
         &self.receipt
+    }
+
+    /// Records that the named owner obtained the missing acknowledgement after
+    /// all.
+    ///
+    /// # Why this exists
+    ///
+    /// `ObligationState::apply` already admits `(Escalated, Acknowledge)`, and
+    /// `obligation_lifecycle.rs` asserts it with the words "a late
+    /// acknowledgement still settles an escalated effect". Before this method
+    /// the state machine permitted that transition and nothing could perform
+    /// it: `escalate` consumes the [`UnacknowledgedEffect`] and the receipt it
+    /// returned carried only accessors. A human who resolved an escalation had
+    /// no way to record it, and because `Escalated` is `is_outstanding` the
+    /// region reported the containment failure forever. This supplies the
+    /// missing path; it does not change the policy.
+    ///
+    /// Escalation itself remains "an admission that automation stopped, never a
+    /// settlement": holding this receipt settles nothing, so the region keeps
+    /// reporting the failure for exactly as long as it stays unresolved.
+    pub fn resolve_acknowledged(self, evidence: K::AckEvidence) -> SettledObligation<K> {
+        let Self {
+            id,
+            owner: _,
+            reason: _,
+            receipt,
+            handle,
+        } = self;
+        let state = advance(&handle, id, LifecycleEvent::Acknowledge);
+        SettledObligation {
+            summary: SettlementSummary {
+                id,
+                class: K::CLASS,
+                state,
+            },
+            evidence: TerminalEvidence::Acknowledged(receipt, evidence),
+        }
+    }
+
+    /// Records that the named owner determined the effect will never be
+    /// delivered.
+    ///
+    /// The counterpart of [`Self::resolve_acknowledged`] for the
+    /// `(Escalated, FailTerminally)` row, which was dead for the same reason.
+    pub fn resolve_failed(self, reason: TerminalFailureReason) -> SettledObligation<K> {
+        let Self {
+            id,
+            owner: _,
+            reason: _,
+            receipt,
+            handle,
+        } = self;
+        let state = advance(&handle, id, LifecycleEvent::FailTerminally);
+        SettledObligation {
+            summary: SettlementSummary {
+                id,
+                class: K::CLASS,
+                state,
+            },
+            evidence: TerminalEvidence::TerminallyFailed(receipt, reason),
+        }
     }
 }
 
@@ -743,6 +812,7 @@ impl<K: ObligationKind> UnacknowledgedEffect<K> {
             owner,
             reason,
             receipt,
+            handle,
         }
     }
 
