@@ -493,6 +493,9 @@ fn validate_checkpoint_symbol(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Not imported by the parent: the production paths never construct a
+    // symbol id or kind, only read them. The forgeries below have to.
+    use asupersync::types::{SymbolId, SymbolKind};
 
     fn security() -> SecurityContext {
         SecurityContext::for_testing(24)
@@ -908,5 +911,167 @@ mod tests {
         // that refuses everything.
         reconstruct_checkpoint(target.scope(), target.symbols(), &security, verifier)
             .expect("the untampered set must still reconstruct");
+    }
+
+    /// The ordered accept chain in [`validate_checkpoint_symbol`], one guard at
+    /// a time, through the public entry point rather than by calling the guard
+    /// directly -- so each probe also witnesses that the guard is still ON the
+    /// production path, not merely that it exists.
+    ///
+    /// Each forged symbol differs from a well-formed one in exactly ONE field,
+    /// and every earlier guard is satisfied deliberately: the scope is cloned
+    /// from a real `protect_checkpoint` result and the object id comes from that
+    /// scope, so `ScopeMismatch` and `EngineObjectIdMismatch` cannot fire first
+    /// and mask the guard under test.
+    ///
+    /// # Why each refusal is paired with a near-identical permitted twin
+    ///
+    /// A guard that refused unconditionally would satisfy every "is refused"
+    /// assertion here. The twin flips only the field under test back to a legal
+    /// value and asserts the refusal is no longer THAT one -- it does not assert
+    /// success, because a synthetic symbol still cannot complete a decode. That
+    /// is the strongest claim the construction supports, and overstating it
+    /// would be the vacuous half of a permitted-twin pair.
+    fn forged(
+        scope: &CheckpointScope,
+        sbn: u8,
+        esi: u32,
+        len: usize,
+        kind: SymbolKind,
+        security: &SecurityContext,
+    ) -> ScopedCheckpointSymbol {
+        let data = vec![0x5a_u8; len];
+        let symbol = Symbol::from_slice(
+            SymbolId::new(scope.engine_object_id(), sbn, esi),
+            &data,
+            kind,
+        );
+        ScopedCheckpointSymbol {
+            scope: scope.clone(),
+            tag: security.sign_symbol_tag(&symbol),
+            symbol,
+        }
+    }
+
+    /// Builds a protected checkpoint whose scope the forgeries borrow.
+    fn borrowed_scope(security: &SecurityContext) -> ProtectedCheckpoint {
+        protect_checkpoint(CheckpointClass::ForgeEvent, &canonical(0x31, 600), security)
+            .expect("canonical input must protect")
+    }
+
+    #[test]
+    fn a_symbol_naming_a_second_source_block_is_refused_for_that_exact_reason() {
+        let security = security();
+        let protected = borrowed_scope(&security);
+        let scope = protected.scope();
+        let size = usize::from(CheckpointRaptorProfile::SYMBOL_BYTES);
+
+        // The profile declares ONE source block, so any sbn but 0 is a symbol
+        // from a segmentation this scope never described.
+        let refusal = reconstruct_checkpoint(
+            scope,
+            &[forged(scope, 1, 0, size, SymbolKind::Source, &security)],
+            &security,
+            None,
+        );
+        assert!(
+            matches!(refusal, Err(RaptorRefusal::SourceBlockMismatch)),
+            "a non-zero source block number must refuse as SourceBlockMismatch, got {refusal:?}"
+        );
+
+        // Permitted twin: identical but for sbn, which must clear this guard.
+        let twin = reconstruct_checkpoint(
+            scope,
+            &[forged(scope, 0, 0, size, SymbolKind::Source, &security)],
+            &security,
+            None,
+        );
+        assert!(
+            !matches!(twin, Err(RaptorRefusal::SourceBlockMismatch)),
+            "sbn 0 must pass the source-block guard; the guard is keyed on sbn alone"
+        );
+    }
+
+    #[test]
+    fn a_repair_symbol_occupying_a_source_slot_is_refused_as_a_kind_mismatch() {
+        let security = security();
+        let protected = borrowed_scope(&security);
+        let scope = protected.scope();
+        let size = usize::from(CheckpointRaptorProfile::SYMBOL_BYTES);
+        let source_symbols = scope
+            .source_symbols()
+            .expect("a protected scope counts its symbols");
+        assert!(
+            source_symbols > 0,
+            "the denominator must be non-zero or esi 0 would not be a source slot"
+        );
+
+        // esi 0 is inside the source range, so the id says source and the kind
+        // says repair. The guard exists to catch exactly that disagreement.
+        let refusal = reconstruct_checkpoint(
+            scope,
+            &[forged(scope, 0, 0, size, SymbolKind::Repair, &security)],
+            &security,
+            None,
+        );
+        assert!(
+            matches!(refusal, Err(RaptorRefusal::EncodingSymbolKindMismatch)),
+            "a repair-kind symbol in a source slot must refuse as EncodingSymbolKindMismatch, got {refusal:?}"
+        );
+
+        // Permitted twin: same slot, kind corrected to agree with the id.
+        let twin = reconstruct_checkpoint(
+            scope,
+            &[forged(scope, 0, 0, size, SymbolKind::Source, &security)],
+            &security,
+            None,
+        );
+        assert!(
+            !matches!(twin, Err(RaptorRefusal::EncodingSymbolKindMismatch)),
+            "an agreeing kind must clear the guard; it is keyed on the disagreement, not on the kind"
+        );
+    }
+
+    #[test]
+    fn a_short_symbol_is_refused_with_both_the_offered_and_expected_sizes_named() {
+        let security = security();
+        let protected = borrowed_scope(&security);
+        let scope = protected.scope();
+        let size = usize::from(CheckpointRaptorProfile::SYMBOL_BYTES);
+
+        // The payload field is the point: a caller must be able to tell WHICH
+        // size was wrong without re-deriving the profile constant.
+        let refusal = reconstruct_checkpoint(
+            scope,
+            &[forged(scope, 0, 0, size - 1, SymbolKind::Source, &security)],
+            &security,
+            None,
+        );
+        match refusal {
+            Err(RaptorRefusal::SymbolSizeMismatch { offered, expected }) => {
+                assert_eq!(
+                    offered,
+                    size - 1,
+                    "the refusal must name the size actually offered"
+                );
+                assert_eq!(
+                    expected, size,
+                    "the refusal must name the profile's symbol size"
+                );
+            }
+            other => panic!("a short symbol must refuse as SymbolSizeMismatch, got {other:?}"),
+        }
+
+        // Permitted twin: the exact profile size clears the guard.
+        let twin = reconstruct_checkpoint(
+            scope,
+            &[forged(scope, 0, 0, size, SymbolKind::Source, &security)],
+            &security,
+            None,
+        );
+        assert!(
+            !matches!(twin, Err(RaptorRefusal::SymbolSizeMismatch { .. })),
+            "a correctly sized symbol must clear the size guard"
+        );
     }
 }
