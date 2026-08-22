@@ -59,6 +59,7 @@ fgit-object-fabric = { path = "crates/fgit-object-fabric" }
 fgit-object-store = { path = "crates/fgit-object-store" }
 fgit-pack = { path = "crates/fgit-pack" }
 fgit-raptorq = { path = "crates/fgit-raptorq" }
+fgit-repair = { path = "crates/fgit-repair" }
 fgit-reference = { path = "crates/fgit-reference" }
 fgit-resource = { path = "crates/fgit-resource" }
 fgit-runtime = { path = "crates/fgit-runtime" }

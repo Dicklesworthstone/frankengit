@@ -832,6 +832,17 @@ name = "fgit-registry-check"
 version = "0.0.1"
 
 [[package]]
+name = "fgit-repair"
+version = "0.1.0"
+dependencies = [
+ "asupersync",
+ "fgit-object-fabric",
+ "fgit-raptorq",
+ "fgit-resource",
+ "fgit-types",
+]
+
+[[package]]
 name = "fgit-resource"
 version = "0.0.1"
 dependencies = [
