@@ -913,6 +913,7 @@ dependencies = [
 name = "fgit-witness"
 version = "0.0.1"
 dependencies = [
+ "fgit-statistics",
  "fgit-types",
 ]
 

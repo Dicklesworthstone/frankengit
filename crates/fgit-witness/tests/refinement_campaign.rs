@@ -11,8 +11,9 @@ use std::{
     path::PathBuf,
 };
 
+use fgit_statistics::{BetaPrior, IncrementalPosterior};
 use fgit_witness::{
-    Action, Attempt, Cost, EscalationTrigger, Footprint, Inputs, Posterior, PriorityClass, Scope,
+    Action, Attempt, Cost, EscalationTrigger, Footprint, Inputs, PriorityClass, Scope,
     retry::{self, STARVATION_AGE_TICKS, STARVATION_ATTEMPTS},
     voi,
 };
@@ -168,8 +169,8 @@ fn campaign_seed() -> u64 {
     })
 }
 
-fn pessimal_posterior() -> Posterior {
-    let mut posterior = Posterior::uniform();
+fn pessimal_posterior() -> IncrementalPosterior {
+    let mut posterior = IncrementalPosterior::new(BetaPrior::uniform());
     for _ in 0..64 {
         posterior.observe(false);
     }
@@ -222,7 +223,7 @@ fn deterministic_refinement_safety_fairness_and_starvation_campaign() {
         );
         receipt_lines.push(voi::receipt(case.voi_inputs, decision));
 
-        let mut corpus_posterior = Posterior::uniform();
+        let mut corpus_posterior = IncrementalPosterior::new(BetaPrior::uniform());
         for _ in 0..case.posterior_successes {
             corpus_posterior.observe(true);
         }
@@ -462,13 +463,13 @@ fn deterministic_refinement_safety_fairness_and_starvation_campaign() {
     let mut stale_posterior = pessimal_posterior();
     assert_ne!(
         stale_posterior.counts(),
-        (1, 1),
+        (0, 0),
         "drill needs non-uniform history"
     );
     stale_posterior.reset_for_regime();
     assert_eq!(
         stale_posterior.counts(),
-        (1, 1),
+        (0, 0),
         "a regime reset must discard stale contention observations"
     );
     let reset_attempt = Attempt {

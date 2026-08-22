@@ -21,7 +21,7 @@
 //! decisions differ across targets, and §26 requires an adaptive artifact to
 //! bind a reproducible numeric fingerprint.
 
-use fgit_types::Probability;
+use fgit_statistics::IncrementalPosterior;
 
 /// Attempts after which a transaction is escalated regardless of its
 /// posterior.
@@ -35,73 +35,6 @@ pub const STARVATION_AGE_TICKS: u32 = 512;
 
 /// Largest backoff the policy may ever ask for.
 pub const MAX_BACKOFF_TICKS: u32 = 64;
-
-/// A Beta-Bernoulli posterior over "this transaction's next attempt commits".
-///
-/// Held as integer pseudo-counts. Both start at one, the uniform prior, so a
-/// transaction with no history is neither optimistic nor pessimistic.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Posterior {
-    successes: u32,
-    failures: u32,
-}
-
-impl Default for Posterior {
-    fn default() -> Self {
-        Self::uniform()
-    }
-}
-
-impl Posterior {
-    /// The uniform prior: one pseudo-success, one pseudo-failure.
-    #[must_use]
-    pub const fn uniform() -> Self {
-        Self {
-            successes: 1,
-            failures: 1,
-        }
-    }
-
-    /// Records an observed outcome, saturating so a long-lived transaction
-    /// cannot wrap its own history.
-    pub const fn observe(&mut self, committed: bool) {
-        if committed {
-            self.successes = self.successes.saturating_add(1);
-        } else {
-            self.failures = self.failures.saturating_add(1);
-        }
-    }
-
-    /// Posterior mean probability of success, in parts per million.
-    #[must_use]
-    pub fn success_probability(self) -> Probability {
-        let total = u64::from(self.successes).saturating_add(u64::from(self.failures));
-        if total == 0 {
-            return Probability::saturating_from_parts_per_million(500_000);
-        }
-        let ppm = u64::from(self.successes)
-            .saturating_mul(1_000_000)
-            .checked_div(total)
-            .unwrap_or(0);
-        Probability::saturating_from_parts_per_million(u32::try_from(ppm).unwrap_or(u32::MAX))
-    }
-
-    /// Discards accumulated history on a regime change.
-    ///
-    /// §26 requires regime drift to revert to the deterministic fallback
-    /// rather than to keep extrapolating from observations the new regime
-    /// invalidates. A pinned policy epoch moving is exactly such a drift: the
-    /// contention pattern the counts described no longer exists.
-    pub const fn reset_for_regime(&mut self) {
-        *self = Self::uniform();
-    }
-
-    /// The observed counts, for the receipt.
-    #[must_use]
-    pub const fn counts(self) -> (u32, u32) {
-        (self.successes, self.failures)
-    }
-}
 
 /// How urgent a transaction is relative to its peers.
 ///
@@ -148,7 +81,7 @@ pub struct Attempt {
     /// Its priority class.
     pub priority: PriorityClass,
     /// What its history says about committing next time.
-    pub posterior: Posterior,
+    pub posterior: IncrementalPosterior,
 }
 
 /// What the policy decided to do next.
@@ -272,11 +205,12 @@ pub fn receipt(attempt: Attempt, action: Action) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, Attempt, EscalationTrigger, MAX_BACKOFF_TICKS, Posterior, PriorityClass,
-        STARVATION_AGE_TICKS, STARVATION_ATTEMPTS, decide, receipt,
+        Action, Attempt, EscalationTrigger, MAX_BACKOFF_TICKS, PriorityClass, STARVATION_AGE_TICKS,
+        STARVATION_ATTEMPTS, decide, receipt,
     };
+    use fgit_statistics::{BetaPrior, IncrementalPosterior};
 
-    fn attempt(attempts: u32, age: u32, posterior: Posterior) -> Attempt {
+    fn attempt(attempts: u32, age: u32, posterior: IncrementalPosterior) -> Attempt {
         Attempt {
             attempts,
             age_ticks: age,
@@ -285,8 +219,8 @@ mod tests {
         }
     }
 
-    fn hopeless() -> Posterior {
-        let mut p = Posterior::uniform();
+    fn hopeless() -> IncrementalPosterior {
+        let mut p = IncrementalPosterior::new(BetaPrior::uniform());
         for _ in 0..10_000 {
             p.observe(false);
         }
@@ -307,7 +241,7 @@ mod tests {
         );
         // And an optimistic one escalates identically: the escalator does not
         // consult the posterior at all.
-        let mut optimistic = Posterior::uniform();
+        let mut optimistic = IncrementalPosterior::new(BetaPrior::uniform());
         for _ in 0..10_000 {
             optimistic.observe(true);
         }
@@ -354,7 +288,7 @@ mod tests {
 
     #[test]
     fn a_confident_transaction_retries_immediately() {
-        let mut optimistic = Posterior::uniform();
+        let mut optimistic = IncrementalPosterior::new(BetaPrior::uniform());
         for _ in 0..100 {
             optimistic.observe(true);
         }
@@ -365,7 +299,7 @@ mod tests {
     fn backoff_grows_as_the_posterior_worsens_and_stays_bounded() {
         let mut previous = 0_u32;
         for failures in [1_u32, 4, 16, 64] {
-            let mut p = Posterior::uniform();
+            let mut p = IncrementalPosterior::new(BetaPrior::uniform());
             for _ in 0..failures {
                 p.observe(false);
             }
@@ -408,20 +342,22 @@ mod tests {
         let mut p = hopeless();
         assert!(p.success_probability().parts_per_million() < 100_000);
         p.reset_for_regime();
-        assert_eq!(p.counts(), (1, 1));
+        assert_eq!(p.counts(), (0, 0));
+        assert_eq!((p.posterior().alpha(), p.posterior().beta()), (1, 1));
         assert_eq!(p.success_probability().parts_per_million(), 500_000);
     }
 
     #[test]
     fn posterior_counts_saturate_rather_than_wrapping() {
-        let mut p = Posterior::uniform();
+        let mut p = IncrementalPosterior::new(BetaPrior::uniform());
         for _ in 0..3 {
             p.observe(true);
         }
         let (successes, failures) = p.counts();
-        assert_eq!((successes, failures), (4, 1));
+        assert_eq!((successes, failures), (3, 0));
+        assert_eq!((p.posterior().alpha(), p.posterior().beta()), (4, 1));
         // A wrapped count would invert the posterior; pin that it cannot.
-        let mut extreme = Posterior::uniform();
+        let mut extreme = IncrementalPosterior::new(BetaPrior::uniform());
         for _ in 0..64 {
             extreme.observe(false);
         }
