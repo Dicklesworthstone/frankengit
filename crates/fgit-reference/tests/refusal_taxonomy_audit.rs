@@ -51,6 +51,35 @@ use std::collections::{BTreeMap, BTreeSet};
 use fgit_reference::refusal::RefusalClass;
 use fgit_types::vocabulary::RefusalCode;
 
+/// The vocabulary floor both tests below are pinned against.
+///
+/// Every test in this file iterates `RefusalCode::ALL`, so its coverage is
+/// exactly `ALL.len()`. That makes a *shrinking* vocabulary the silent failure:
+/// the reachability audit still passes if a reduced set happens to touch all
+/// thirteen classes, and the range check still passes because its only assertion
+/// is inside the loop and a shorter loop simply asserts fewer times. Neither
+/// reports that it now covers less, which is coverage evaporating rather than
+/// breaking.
+///
+/// `ALL` is a `const`, so its length is known at compile time and this cannot be
+/// a runtime assertion without being a tautology — it is a build-time gate, and
+/// a vocabulary that shrinks below the measured floor fails the build.
+///
+/// This is **not** the completeness check described above and does not stand in
+/// for it: it bounds the size of `ALL` from below, and says nothing about
+/// whether `ALL` names every variant of the enum. That check is still owed to a
+/// checker or constitution-lane rule.
+///
+/// Measured at the time of writing: 61 codes in `RefusalCode::ALL`, 13 classes
+/// in `RefusalClass::ALL`. `>=` rather than `==` so adding a code is an ordinary
+/// change and only removal trips the gate.
+const _: () = assert!(
+    RefusalCode::ALL.len() >= 61,
+    "the published refusal vocabulary shrank below the 61 codes this audit was \
+     pinned against; every test here iterates ALL, so a shorter vocabulary would \
+     pass while covering less"
+);
+
 /// Every class in the taxonomy is reachable from at least one published code.
 ///
 /// A class nothing maps to is decorative: it inflates a taxonomy that other
