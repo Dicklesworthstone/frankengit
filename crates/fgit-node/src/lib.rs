@@ -11,6 +11,7 @@
 //! node lifecycle transitions. Authority operations themselves remain async:
 //! no synchronous request-path adapter is introduced around the async engine.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Read, Write};
@@ -63,7 +64,7 @@ const HEAD_KEY_PREFIX: &[u8] = b"frankengit/node/head/";
 const FABRIC_NAMESPACE_PREFIX: &[u8] = b"frankengit/node/object/";
 const ADMISSION_REF_STATE_KEY_PREFIX: &[u8] = b"frankengit/admission/ref-state/v1/";
 const ADMISSION_CLOSURE_KEY_PREFIX: &[u8] = b"frankengit/admission/object-closure/v1/";
-const ADMISSION_CACHE_SCOPE: &[u8] = b"node/admission-materialization/v1";
+const ADMISSION_CACHE_SCOPE: &[u8] = b"node/admission-cache/v1";
 const DEFAULT_MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 const AUTHORITY_DATABASE_FILE: &str = "authority.fsqlite";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -490,7 +491,7 @@ impl DurableAdmissionMaterializer {
     ) -> Result<MaterializedAdmission, AdmissionMaterializationRefusal>
     where
         Authority: AsyncAuthorityStore + ?Sized,
-        IsCancelled: Fn() -> bool,
+        IsCancelled: Fn() -> bool + Sync,
     {
         ensure_materializer_catch_up_live(is_cancelled)?;
         let HeadRead::Present(receipt) = authority
@@ -570,9 +571,9 @@ impl DurableAdmissionMaterializer {
             }
             let snapshot = AdmissionSnapshot {
                 refs: ref_state.refs().clone(),
-                forge_positions: Default::default(),
-                retention: Default::default(),
-                outbox: Default::default(),
+                forge_positions: BTreeMap::new(),
+                retention: BTreeSet::new(),
+                outbox: BTreeMap::new(),
             };
             let cache_permit = cache_grant
                 .accept(cache_binding)
@@ -594,7 +595,8 @@ impl DurableAdmissionMaterializer {
             Ok((materialized, state))
         }
         .await;
-        if !cache_ledger.close().is_quiescent() {
+        let cache_close = cache_ledger.close();
+        if !cache_close.is_quiescent() {
             return Err(AdmissionMaterializationRefusal::CacheContainment);
         }
         let (materialized, state) = cache_result?;
@@ -649,9 +651,9 @@ impl DurableAdmissionMaterializer {
         let materialized = guard.as_ref().ok_or(RefusalCode::EvidenceMissing)?;
         Ok(AdmissionSnapshot {
             refs: materialized.ref_state.refs().clone(),
-            forge_positions: Default::default(),
-            retention: Default::default(),
-            outbox: Default::default(),
+            forge_positions: BTreeMap::new(),
+            retention: BTreeSet::new(),
+            outbox: BTreeMap::new(),
         })
     }
 }
@@ -2938,6 +2940,21 @@ mod tests {
             Err(RefusalCode::EvidenceMissing),
             "a cancelled catch-up scope leaves no readable partial cache record"
         );
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn admission_materializer_request_future_is_send() {
+        fn require_send(value: impl Send) {
+            drop(value);
+        }
+
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf());
+        let (node, _) = OneNode::init(config).expect("node initializes canonical refs");
+        let request = node.request_context();
+
+        require_send(node.materialize_admission_in(&request));
         node.shutdown().expect("node closes cleanly");
     }
 
