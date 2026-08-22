@@ -85,7 +85,8 @@
 #   suite_terminal  exact discovered / selected / started / passed / failed /
 #                   skipped / unsupported / timed_out / malformed_log /
 #                   missing_terminal / zero_assertion / duplicate_id /
-#                   containment_failed / not_run ID sets, plus the union of
+#                   containment_failed / not_run ID sets, profile manifest
+#                   coverage (including uncovered areas), plus the union of
 #                   acceptance IDs and any claimed by more than one script.
 #
 # SEAM FOR FG-091: FG-091 owns the checked-in expected-suite manifest and the
@@ -311,6 +312,7 @@ declare -a S_MANIFEST_WRONGTERM=()
 declare -a S_MANIFEST_OPTIONAL=()
 declare -a S_MANIFEST_MISSING=()
 declare -a S_MANIFEST_UNREGISTERED=()
+declare -a S_MANIFEST_UNCOVERED_AREAS=()
 declare -a S_MANIFEST_NOTPASSED=()
 if [ -n "$RA_PROFILE" ]; then
   declare -a RA_MANIFEST_TERM=()
@@ -405,10 +407,16 @@ if [ -n "$RA_PROFILE" ]; then
   # must not report the other forty-odd suites as unregistered -- they are
   # outside it. What it MUST catch is a NEW suite appearing inside an area it
   # owns, because that is the release surface growing without the manifest being
-  # updated to approve it.
+  # updated to approve it. The omitted areas are nevertheless evidence: record
+  # them separately so a release-facing profile cannot look corpus-complete
+  # merely because its set equality covers only its own rows.
   for d_id in "${RA_ALL_DISCOVERED[@]+"${RA_ALL_DISCOVERED[@]}"}"; do
     d_area=${d_id%-*}
-    ra_in_set "$d_area" "${RA_PROFILE_AREAS[@]+"${RA_PROFILE_AREAS[@]}"}" || continue
+    if ! ra_in_set "$d_area" "${RA_PROFILE_AREAS[@]+"${RA_PROFILE_AREAS[@]}"}"; then
+      ra_in_set "$d_area" "${S_MANIFEST_UNCOVERED_AREAS[@]+"${S_MANIFEST_UNCOVERED_AREAS[@]}"}" ||
+        S_MANIFEST_UNCOVERED_AREAS+=("$d_area")
+      continue
+    fi
     ra_in_set "$d_id" "${S_MANIFEST_REQUIRED[@]}" || S_MANIFEST_UNREGISTERED+=("$d_id")
   done
 
@@ -1137,6 +1145,7 @@ for pair in \
   "manifest_required:S_MANIFEST_REQUIRED" "manifest_optional:S_MANIFEST_OPTIONAL" \
   "manifest_missing:S_MANIFEST_MISSING" \
   "manifest_unregistered:S_MANIFEST_UNREGISTERED" \
+  "manifest_uncovered_areas:S_MANIFEST_UNCOVERED_AREAS" \
   "manifest_required_not_passed:S_MANIFEST_NOTPASSED" \
   "manifest_wrong_terminal:S_MANIFEST_WRONGTERM"; do
   name=${pair%%:*}
@@ -1169,6 +1178,10 @@ printf 'run_all: status=%s selected=%d passed=%d failed=%d skipped=%d unsupporte
   "${#S_ZEROASSERT[@]}" "${#S_DUPID[@]}" "${#S_CONTAINMENT[@]}" \
   "${#S_EXITMISMATCH[@]}" "${#S_NOTRUN[@]}" "${#S_FLAKY[@]}" \
   "${#CROSS_DUP[@]}" >&2
+if [ -n "$RA_PROFILE" ]; then
+  printf 'run_all: profile=%s uncovered_areas=[%s]\n' \
+    "$RA_PROFILE" "${S_MANIFEST_UNCOVERED_AREAS[*]-}" >&2
+fi
 printf 'run_all: receipt: %s\n' "$RA_RECEIPT" >&2
 
 [ "$suite_status" = pass ] || exit 1

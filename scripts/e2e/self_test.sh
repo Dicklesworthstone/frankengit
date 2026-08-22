@@ -339,6 +339,57 @@ fge_assert_eq FG-000A-ST-DISCOVER-RC 0 "$disc_rc" \
   'a discovered healthy script passes through the discovery path'
 
 # ---------------------------------------------------------------------------
+# a scoped profile names every outside area in its receipt without turning a
+# legitimate area-scoped profile into an all-corpus gate
+# ---------------------------------------------------------------------------
+fge_phase action
+profile_root=$(fge_tempdir profile-coverage)
+mkdir -p "$profile_root/manifests" \
+  "$profile_root/suites/harness" "$profile_root/suites/outside"
+cp "$RUN_ALL" "$profile_root/run_all.sh"
+cp "$HERE/lib.sh" "$profile_root/lib.sh"
+cp "$FIXTURES/pos_control.sh" "$profile_root/suites/harness/declared.sh"
+cp "$FIXTURES/pos_control.sh" "$profile_root/suites/outside/undeclared.sh"
+chmod +x "$profile_root/run_all.sh" \
+  "$profile_root/suites/harness/declared.sh" \
+  "$profile_root/suites/outside/undeclared.sh"
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  suites-harness-declared frankengit-fg000a-e2e-harness-4ci g0 \
+  scripts/e2e/suites/harness/declared.sh any required mechanism pass \
+  >"$profile_root/manifests/harness.tsv"
+
+profile_rc=0
+FGE_LIB="$profile_root/lib.sh" "$profile_root/run_all.sh" --profile harness \
+  --out "$profile_root/run" --timeout 60 \
+  >"$profile_root/stdout.log" 2>"$profile_root/stderr.log" || profile_rc=$?
+profile_terminal=$(grep -m1 '"kind":"suite_terminal"' \
+  "$profile_root/run/receipt.ndjson" 2>/dev/null || printf '')
+profile_status=''
+declare -a profile_uncovered_areas=() profile_unregistered=()
+if [ -n "$profile_terminal" ] && fge_json_top "$profile_terminal"; then
+  profile_status=$(fge_json_unquote "${FGE_JSON[status]-\"\"}")
+  if fge_json_array_strings "${FGE_JSON[manifest_uncovered_areas]-[]}"; then
+    profile_uncovered_areas=("${FGE_JSON_ARRAY[@]+"${FGE_JSON_ARRAY[@]}"}")
+  fi
+  if fge_json_array_strings "${FGE_JSON[manifest_unregistered]-[]}"; then
+    profile_unregistered=("${FGE_JSON_ARRAY[@]+"${FGE_JSON_ARRAY[@]}"}")
+  fi
+fi
+
+fge_phase assert
+fge_assert_eq FG-000A-ST-PROFILE-SCOPED-RC 0 "$profile_rc" \
+  'an area-scoped profile still runs and passes its declared surface'
+fge_assert_eq FG-000A-ST-PROFILE-SCOPED-STATUS pass "$profile_status" \
+  'the controlled scoped profile retains its passing terminal status'
+fge_assert_eq FG-000A-ST-PROFILE-SCOPED-UNREGISTERED 0 "${#profile_unregistered[@]}" \
+  'a suite in an unowned area is not misreported as unregistered in the owned area'
+fge_assert_eq FG-000A-ST-PROFILE-UNCOVERED-COUNT 1 "${#profile_uncovered_areas[@]}" \
+  'the receipt counts the planted undeclared area'
+fge_assert_eq FG-000A-ST-PROFILE-UNCOVERED-NAME suites-outside \
+  "${profile_uncovered_areas[*]}" \
+  'the receipt names the planted undeclared area rather than hiding it by scope'
+
+# ---------------------------------------------------------------------------
 # evidence retention
 # ---------------------------------------------------------------------------
 fge_preserve "$CASES" 'self-test case outputs, receipts and run_all stderr'
