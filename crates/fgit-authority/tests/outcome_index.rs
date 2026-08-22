@@ -2124,3 +2124,76 @@ fn a_transaction_decided_in_a_prior_batch_is_caught_through_the_real_walk() {
     fgit_authority::fold_outcome_index(&carried, &fresh)
         .expect("an undecided transaction folds through the same path");
 }
+
+/// The two collector surfaces agree over identically-published history.
+///
+/// Equivalence is the point: `fgit-node`'s publication path is asynchronous, so
+/// if the two walks could disagree the root published in production would
+/// differ from the one every synchronous test asserts. Driven over separately
+/// constructed stores rather than one shared store, so agreement is a property
+/// of the two implementations rather than of a single traversal.
+///
+/// The length assertion is load-bearing. Two empty vectors compare equal, so
+/// without it this test passes if BOTH collectors are broken in the same
+/// direction -- which is the likelier failure, since they were written from the
+/// same template.
+#[test]
+fn the_two_collector_surfaces_agree_over_the_same_published_history() {
+    let (sync_store, _) = published_repository();
+    let baseline = fgit_authority::collect_cumulative_outcomes(&sync_store, &head_slot())
+        .expect("a walk within the replay bound");
+
+    let (async_store, _) = published_repository();
+    let view = AsyncView(async_store);
+    let mirrored = poll_ready(fgit_authority::collect_cumulative_outcomes_async(
+        &view,
+        &(),
+        &head_slot(),
+    ))
+    .expect("a walk within the replay bound");
+
+    assert_eq!(
+        baseline.len(),
+        2,
+        "the published batch decided two transactions; an empty result would make \
+         the equality below vacuous",
+    );
+    assert_eq!(
+        baseline, mirrored,
+        "the asynchronous walk must recover the same cumulative leaf set as the \
+         synchronous one, or production publishes a different root than the tests assert",
+    );
+
+    // And the sets fold to the same root, which is the value that actually
+    // reaches a canonical body field.
+    let stamped = [commit_entry(0xd5, 3, 0x55)];
+    assert_eq!(
+        fgit_authority::fold_outcome_index(&baseline, &stamped).expect("a root"),
+        fgit_authority::fold_outcome_index(&mirrored, &stamped).expect("a root"),
+    );
+}
+
+/// Both surfaces agree on the empty case too, and it is a distinct code path.
+///
+/// The absent-head early return is written separately in each twin rather than
+/// shared, so it is the kind of thing a port silently gets wrong -- returning an
+/// error where the other returns an empty set would make genesis publication
+/// fail only on the asynchronous path.
+#[test]
+fn the_two_collector_surfaces_agree_that_an_absent_head_is_an_empty_index() {
+    let baseline = fgit_authority::collect_cumulative_outcomes(&store(), &head_slot())
+        .expect("an absent head is not a failure");
+    let view = AsyncView(store());
+    let mirrored = poll_ready(fgit_authority::collect_cumulative_outcomes_async(
+        &view,
+        &(),
+        &head_slot(),
+    ))
+    .expect("an absent head is not a failure on the async surface either");
+
+    assert!(
+        baseline.is_empty(),
+        "an unpublished repository has decided nothing; got {baseline:?}",
+    );
+    assert_eq!(baseline, mirrored);
+}

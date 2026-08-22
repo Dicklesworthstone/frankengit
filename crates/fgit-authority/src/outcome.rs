@@ -957,6 +957,61 @@ where
     Ok(collected)
 }
 
+/// The asynchronous twin of [`collect_cumulative_outcomes`].
+///
+/// Same walk, same bound, same refusal. It exists because the publication path
+/// that needs the carried set is asynchronous -- `fgit-node`'s
+/// `materialize_commit_async` -- so a synchronous-only collector would be
+/// uncallable exactly where the fold is required, and the caller's remaining
+/// option would be to invent a value.
+///
+/// The two are kept deliberately identical in structure rather than one
+/// delegating to the other: an asynchronous port that quietly dropped the
+/// bound, or returned what it had gathered instead of propagating
+/// [`OutcomeFailure::ReplayBoundExceeded`], would publish a wrong root on the
+/// path that actually runs. See the sync twin for why a short leaf set is worse
+/// than no leaf set.
+///
+/// # Errors
+///
+/// As [`collect_cumulative_outcomes`].
+pub async fn collect_cumulative_outcomes_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+) -> Result<Vec<(TxId, TerminalOutcome)>, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let HeadRead::Present(receipt) = store.read_head(cx, head_key).await? else {
+        // No head: the cumulative index is empty. See the sync twin.
+        return Ok(Vec::new());
+    };
+    let mut head: RepositoryAuthorityHeadBody = head_body_of(&receipt)?;
+    let mut walked = 0_usize;
+    let mut collected: Vec<(TxId, TerminalOutcome)> = Vec::new();
+
+    while let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? {
+        let batch = read_decision_batch_body_async(store, cx, batch_id).await?;
+        for decision in &batch.decisions {
+            collected.push((
+                decision.tx_id,
+                TerminalOutcome {
+                    decision_sequence: decision.decision_sequence,
+                    outcome: decision.outcome,
+                },
+            ));
+        }
+        let Some(previous) = read_predecessor_async(store, cx, batch.predecessor_head_id).await?
+        else {
+            break;
+        };
+        head = previous;
+    }
+
+    Ok(collected)
+}
+
 /// Derive the repository's cumulative outcome index after a batch.
 ///
 /// This is the authority-owned derivation the `frankengit-boet` ruling names:
