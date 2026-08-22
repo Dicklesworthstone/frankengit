@@ -524,3 +524,151 @@ fn cancelling_an_operation_already_in_flight_leaves_no_partial_effect() {
          holds {after:?}"
     );
 }
+
+/// How many times `put_if_absent` returns `Pending` before it completes.
+///
+/// Measured rather than assumed. The first version of the sweep below guessed
+/// twelve and every position behaved identically, because re-polling a future
+/// that is waiting on the engine's worker thread does not advance it -- it
+/// spins. The count is therefore a busy-wait length, it varies between runs,
+/// and it is only useful as a *scale* for spreading cancellations across the
+/// operation's real duration.
+fn suspensions_before_completion() -> usize {
+    let f = Fixture::new();
+    let key = body_key("calibrate");
+    f.node.block_on(async {
+        let mut in_flight = core::pin::pin!(f.store.put_if_absent(&f.live, &key, b"payload"));
+        let mut spins = 0_usize;
+        loop {
+            let step = core::future::poll_fn(|task| {
+                core::task::Poll::Ready(match in_flight.as_mut().poll(task) {
+                    core::task::Poll::Ready(value) => Some(value),
+                    core::task::Poll::Pending => None,
+                })
+            })
+            .await;
+            if step.is_some() {
+                return spins;
+            }
+            spins = spins.saturating_add(1);
+            assert!(
+                spins < 5_000_000,
+                "the operation never completed under a busy poll; the harness cannot calibrate"
+            );
+        }
+    })
+}
+
+/// Run one `put_if_absent`, cancelling once it has suspended `spins` times.
+///
+/// Returns what the caller was told, and what the database actually holds
+/// afterwards read through a context no test ever cancels.
+fn cancel_after_spins(spins: usize) -> (bool, bool) {
+    let f = Fixture::new();
+    let key = body_key("sweep");
+
+    let reported_ok = f.node.block_on(async {
+        let mut in_flight = core::pin::pin!(f.store.put_if_absent(&f.live, &key, b"payload"));
+        let mut done = None;
+
+        for _ in 0..spins {
+            let step = core::future::poll_fn(|task| {
+                core::task::Poll::Ready(match in_flight.as_mut().poll(task) {
+                    core::task::Poll::Ready(value) => Some(value),
+                    core::task::Poll::Pending => None,
+                })
+            })
+            .await;
+            if let Some(value) = step {
+                done = Some(value);
+                break;
+            }
+        }
+
+        match done {
+            // Completed before the cancellation position was reached. Not a
+            // cancellation observation at all, and reported as such.
+            Some(value) => value.is_ok(),
+            None => {
+                f.live.cancel();
+                in_flight.await.is_ok()
+            }
+        }
+    });
+
+    let stored = matches!(
+        f.node
+            .block_on(f.store.read_immutable(&f.spare, &key))
+            .expect("a never-cancelled context still reads the store"),
+        ImmutableRead::Present(_)
+    );
+
+    (reported_ok, stored)
+}
+
+#[test]
+fn no_cancellation_position_leaves_a_mixture() {
+    // §5.2's no-mixed-state rule, checked at cancellation points spread across
+    // the operation's whole duration rather than at one convenient instant.
+    //
+    // The single-point test above cancels at the first suspension. This one
+    // calibrates against a measured busy-wait length and cancels at fractions
+    // of it, including immediately before completion -- the position most
+    // likely to catch a store that has committed and is about to report it.
+    // At every position the answer the caller was given must match what the
+    // database holds.
+    let scale = suspensions_before_completion();
+    assert!(
+        scale > 0,
+        "the operation completed without ever suspending, so there is no in-flight window to \
+         sweep and this test is not exercising what it claims"
+    );
+
+    let positions = [
+        1,
+        scale / 8,
+        scale / 4,
+        scale / 2,
+        scale.saturating_sub(scale / 8),
+        scale.saturating_sub(1),
+    ];
+
+    let mut interrupted = 0_usize;
+    for position in positions {
+        if position == 0 {
+            continue;
+        }
+        let (reported_ok, stored) = cancel_after_spins(position);
+        assert_eq!(
+            reported_ok, stored,
+            "cancelling after {position} of about {scale} suspensions reported ok={reported_ok} \
+             while the database holds stored={stored}; §5.2 admits old-complete or new-complete \
+             and never a mixture, and a caller that cannot trust its own answer cannot resolve \
+             anything by reading"
+        );
+        if !reported_ok {
+            interrupted += 1;
+        }
+    }
+
+    assert!(
+        interrupted > 0,
+        "no position actually interrupted the operation, so the agreement above is trivial"
+    );
+}
+
+// ---------------------------------------------------- what the sweep does not say
+//
+// The sweep above never exhibits a cancellation that arrives *after* the commit
+// and leaves it standing, because the only way to get there with this harness is
+// to let the operation finish first -- and an operation that finished was not
+// cancelled. So nothing here should be read as evidence for the converse of
+// §5.2's rule:
+//
+// > Client cancellation/disconnect never proves non-commit.
+//
+// Every cancellation this file observes happens to end with the body absent.
+// That is a fact about these positions, not a licence to infer non-commit from
+// cancellation. A caller still has to resolve by exact-key read, and the case
+// that would demonstrate why -- a lost response arriving together with a
+// cancel -- needs the fault engine in `fault_conformance.rs` and is not written.
