@@ -70,38 +70,6 @@ pub enum TransientClass {
     /// transaction and snapshot decision, and quietly looping on it would turn
     /// a stale read into an unbounded spin.
     FreshSnapshotRequired,
-    /// The caller's own context was cancelled.
-    ///
-    /// **Not retryable, and — like [`Self::OutcomeIndeterminate`] — not a
-    /// proof of non-commit.** `frankengit-w1ik`.
-    ///
-    /// This was folded into [`Self::Permanent`] and reached the caller as
-    /// `Refused(Unavailable)`, the same value a corrupt page produces. Two
-    /// things were wrong with that. A caller that cancelled its own work may
-    /// legitimately re-drive and one holding a corrupt database must not, and
-    /// they could not tell which they had. And `Refused` asserts in this
-    /// vocabulary that the store applied nothing, which §5.2 forbids for
-    /// cancellation: *client cancellation/disconnect never proves non-commit.*
-    ///
-    /// It really does not. Measured in `tests/cancellation_matrix.rs`: a cancel
-    /// landing late reported failure while the body was in the database.
-    ///
-    /// # Why every cancellation lands here, and what would let it be narrowed
-    ///
-    /// A cancel caught before dispatch genuinely proves non-commit, and in
-    /// principle deserves a refusal rather than an ambiguity. The store cannot
-    /// tell the two apart: `tests/cancellation_error_probe.rs` measures that
-    /// fsqlite returns `FrankenError::Interrupt` for *both* the pre-dispatch
-    /// and the after-dispatch case, because the cancel is observed by the
-    /// caller's await rather than inside the engine.
-    ///
-    /// So this class is deliberately coarse, and the imprecision costs a caller
-    /// one exact-key read it did not strictly need. **Reopen condition:** if
-    /// the two points ever become separable — the probe asserts the current
-    /// answer and will fail when it changes — a pre-dispatch cancel may be
-    /// narrowed back to a refusal. Do not narrow it on a reading; that
-    /// distinction has been derived wrongly here before.
-    Cancelled,
     /// Anything else. Never retried, never reclassified as busy.
     Permanent,
 }
@@ -146,7 +114,6 @@ impl TransientClass {
             Self::PageBufferCapacityExhausted => "page_buffer_capacity_exhausted",
             Self::OutcomeIndeterminate => "outcome_indeterminate",
             Self::FreshSnapshotRequired => "fresh_snapshot_required",
-            Self::Cancelled => "cancelled",
             Self::Permanent => "permanent",
         }
     }
@@ -386,13 +353,7 @@ pub const fn decide_after_failure(
     match class {
         TransientClass::FreshSnapshotRequired => RetryVerdict::FreshSnapshotRequired,
         TransientClass::OutcomeIndeterminate => RetryVerdict::OutcomeIndeterminate,
-        // Named explicitly, and the arm below is why it must be. The fallback
-        // binds `retryable`, so a class without an arm here is silently treated
-        // as retryable -- and a retried cancellation is a loop that ignores the
-        // caller's request to stop. `Permanent` keeps the retry behaviour
-        // exactly as it was before `Cancelled` existed; only the failure the
-        // caller sees changed.
-        TransientClass::Cancelled | TransientClass::Permanent => RetryVerdict::Permanent,
+        TransientClass::Permanent => RetryVerdict::Permanent,
         retryable => {
             if attempt_number >= budget.max_attempts() {
                 return RetryVerdict::Exhausted(RetryExhausted {

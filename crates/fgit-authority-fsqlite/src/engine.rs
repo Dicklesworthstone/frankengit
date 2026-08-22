@@ -187,11 +187,6 @@ impl EngineError {
             Self::Engine(TransientClass::OutcomeIndeterminate) => {
                 AuthorityFailure::Ambiguous(fgit_authority::AmbiguityReason::NoResponse)
             }
-            // §5.2: client cancellation never proves non-commit, so a cancelled
-            // operation must not come back as a refusal. `frankengit-w1ik`.
-            Self::Engine(TransientClass::Cancelled) => {
-                AuthorityFailure::Ambiguous(fgit_authority::AmbiguityReason::Cancelled)
-            }
             Self::Engine(class) if class.is_retryable() => {
                 AuthorityFailure::Refused(AuthorityRefusal::Throttled)
             }

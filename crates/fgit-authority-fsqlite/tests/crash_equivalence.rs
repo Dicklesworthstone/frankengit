@@ -3,22 +3,6 @@
 //! Written by a pane that did not implement this crate. Nothing here edits
 //! `fgit-authority-fsqlite/src`; every fixture drives the published surface.
 //!
-//! **Amendment, and it narrows that claim.** The author of this campaign later
-//! took `frankengit-w1ik` — a defect this campaign found — and wrote the fix in
-//! `src`: a `TransientClass::Cancelled` variant, its classifier arm, and its
-//! `into_failure` mapping. So "did not implement this crate" is no longer true
-//! without qualification, and the honest version is: **this campaign was
-//! written against an implementation the author had no hand in, and the author
-//! has since changed three small pieces of that implementation, all of them
-//! downstream of what this campaign measured.**
-//!
-//! Why that is worth a paragraph rather than a quiet edit: the independence is
-//! not decoration, it is the reason the campaign can catch a misreading its
-//! implementer could not. Every finding here predates the amendment, so none of
-//! them is self-verification — but a *future* reader must not assume the
-//! separation still holds by default. Recorded rather than left to be
-//! discovered, because the alternative is a claim that decays into a false one.
-//!
 //! # Why these tests use a file and the existing ones do not
 //!
 //! `engine_conformance.rs` opens `":memory:"`, which is correct for the
