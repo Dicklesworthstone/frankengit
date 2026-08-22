@@ -12,7 +12,7 @@ use fgit_types::{
     RepositoryAuthorityHeadId, RepositoryId,
 };
 
-fn repository(tag: u8) -> RepositoryId {
+const fn repository(tag: u8) -> RepositoryId {
     RepositoryId::from_bytes([tag; OPAQUE_ID_LEN])
 }
 
