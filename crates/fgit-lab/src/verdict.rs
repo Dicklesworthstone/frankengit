@@ -122,6 +122,12 @@ pub struct QuiescenceOracle {
     active_tasks: i64,
     peak_tasks: i64,
     closed: bool,
+    /// Finishes that had no matching started task.
+    ///
+    /// Unbalanced accounting would otherwise let `close` certify quiescence
+    /// while the counter sits below zero, so every underflow is recorded and
+    /// refused at close rather than clamped away.
+    accounting_faults: usize,
 }
 
 impl QuiescenceOracle {
@@ -132,6 +138,7 @@ impl QuiescenceOracle {
             active_tasks: 0,
             peak_tasks: 0,
             closed: false,
+            accounting_faults: 0,
         }
     }
 
@@ -144,8 +151,16 @@ impl QuiescenceOracle {
     }
 
     /// Record a task leaving the region, however it ended.
+    ///
+    /// A finish with no matching start is corrupt accounting, not a smaller
+    /// region: it is counted and refused at close instead of being clamped
+    /// into a false quiescence certificate.
     pub const fn task_finished(&mut self) {
-        self.active_tasks = self.active_tasks.saturating_sub(1);
+        if self.active_tasks == 0 {
+            self.accounting_faults += 1;
+        } else {
+            self.active_tasks -= 1;
+        }
     }
 
     /// Tasks still running.
@@ -170,15 +185,20 @@ impl QuiescenceOracle {
     ///
     /// # Errors
     ///
-    /// [`LabRefusal::RegionNotQuiescent`] when tasks are still running or
-    /// obligations remain outstanding. Region close reports zero unresolved
-    /// obligations or a typed containment failure — never a shrug.
+    /// [`LabRefusal::RegionNotQuiescent`] when tasks are still running,
+    /// obligations remain outstanding, settlements were duplicated, or task
+    /// accounting is unbalanced. The refusal names the FULL unresolved count
+    /// rather than a shrug-shaped zero.
     pub fn close(&mut self, obligations: &ObligationOracle) -> Result<OracleReport, LabRefusal> {
         let outstanding = obligations.outstanding();
         let leftover_tasks = usize::try_from(self.active_tasks.max(0)).unwrap_or(usize::MAX);
-        if leftover_tasks > 0 || outstanding > 0 || !obligations.is_clean() {
+        let unresolved = outstanding
+            .saturating_add(leftover_tasks)
+            .saturating_add(self.accounting_faults)
+            .saturating_add(obligations.double_settlements().len());
+        if unresolved > 0 {
             return Err(LabRefusal::RegionNotQuiescent {
-                outstanding: outstanding.saturating_add(leftover_tasks),
+                outstanding: unresolved,
             });
         }
         self.closed = true;
@@ -276,6 +296,52 @@ mod tests {
             report.settlements(),
             &[(Settlement::Aborted, 1), (Settlement::Transferred, 1)][..]
         );
+    }
+
+    #[test]
+    fn an_unbalanced_finish_is_containment_failure_not_quiescence() {
+        let mut region = QuiescenceOracle::new();
+        let obligations = ObligationOracle::new();
+
+        region.task_started();
+        region.task_finished();
+        // Corrupt: a second finish with no matching start. Clamping this to
+        // zero used to certify quiescence on broken accounting.
+        region.task_finished();
+
+        let refusal = region
+            .close(&obligations)
+            .expect_err("unbalanced task accounting is a containment failure");
+        assert_eq!(refusal, LabRefusal::RegionNotQuiescent { outstanding: 1 });
+        assert!(!region.is_closed());
+
+        // Paired permitted case: balanced accounting closes cleanly.
+        let mut region = QuiescenceOracle::new();
+        region.task_started();
+        region.task_finished();
+        assert!(region.close(&obligations).is_ok());
+    }
+
+    #[test]
+    fn a_double_settlement_refusal_names_the_duplicate_count() {
+        let mut obligations = ObligationOracle::new();
+        let mut region = QuiescenceOracle::new();
+        obligations.opened("outbox/9");
+        obligations.settled("outbox/9", Settlement::Committed);
+        // The obligation is fully settled and nothing else is open or
+        // running, so the ONLY defect is the duplicate settlement. The
+        // refusal must not report a shrug-shaped zero.
+        obligations.settled("outbox/9", Settlement::Committed);
+
+        let refusal = region
+            .close(&obligations)
+            .expect_err("a double settlement is not a clean close");
+        assert_eq!(
+            refusal,
+            LabRefusal::RegionNotQuiescent { outstanding: 1 },
+            "the count names one unclean observation, never zero"
+        );
+        assert!(!region.is_closed());
     }
 
     #[test]
