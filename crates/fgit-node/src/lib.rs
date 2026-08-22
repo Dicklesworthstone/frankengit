@@ -3100,15 +3100,18 @@ mod tests {
         PermittedObjectClosure, canonical_ref_state_root,
     };
     use fgit_authority::{AsyncAuthorityStore, HeadInit, HeadRead, ImmutableRead, OutcomeLookup};
-    use fgit_chronicle::{PublicationBasis, PublicationPlan, ResultingRoots};
+    use fgit_chronicle::{
+        ChronicleRefusal, PublicationBasis, PublicationPlan, ResultingRoots, batch_identity,
+    };
     use fgit_codec::harness::{
         advanced_head, commit_record, decision_batch, digest_of, refusal_record_id, tx_id,
     };
     use fgit_codec::{CryptoBodyIdentity, body_id, decode_body};
     use fgit_object_fabric::fabric::StoreRefusal;
     use fgit_types::{
-        CANONICAL_CODEC_VERSION, DigestBytes, GitHashAlgorithm, GitOid, InternalObjectId, RefName,
-        RefusalCode, RepositoryAuthorityHeadId, RepositoryId, TenantId, TxId,
+        CANONICAL_CODEC_VERSION, DecisionOutcome, DigestBytes, GitHashAlgorithm, GitOid,
+        InternalObjectId, RefName, RefusalCode, RepositoryAuthorityHeadId, RepositoryId, TenantId,
+        TxId,
     };
     use fgit_wire::{
         AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, PackPayloadSource, Packet,
@@ -3860,21 +3863,21 @@ mod tests {
         record.object_closure_root = closure_root;
         record.resulting_forge_position_root = first_basis.body().forge_position_root;
         record.policy_epoch = first_basis.body().policy_epoch;
-        // `PublicationPlan::commit` stamps these fields. Bind them before
-        // deriving the RCR identity too: otherwise the decision names a
-        // pre-stamp record while the batch carries a different post-stamp one.
-        record.repository_sequence = first_basis
-            .open_repository_sequence()
-            .expect("genesis leaves the first repository sequence open");
-        record.parent_rcr_id = first_basis.body().latest_committed_rcr_id;
-        let record_id = super::repository_commit_id(&record).expect("RCR re-identifies");
         let mut roots = ResultingRoots::carried_forward(&first_basis, digest_of(0x91));
         roots.ref_root = ref_root;
         let mut commit_plan = PublicationPlan::open(first_basis).expect("genesis opens a plan");
-        commit_plan.commit(record_id, record);
+        commit_plan.commit(record);
         let committed = commit_plan
             .seal(&CryptoBodyIdentity, roots)
             .expect("committed RCR produces a verified head pair");
+        let record_id = super::repository_commit_id(
+            committed
+                .batch()
+                .committed_rcrs
+                .first()
+                .expect("committed batch carries the selected RCR"),
+        )
+        .expect("the final stamped RCR re-identifies");
         node.runtime()
             .block_on(node.publish_decisions_in(
                 &request,
@@ -4058,26 +4061,41 @@ mod tests {
         let mut roots = ResultingRoots::carried_forward(&first_basis, digest_of(0xb2));
         roots.ref_root = ref_root;
         let mut plan = PublicationPlan::open(first_basis).expect("genesis opens a plan");
-        plan.commit(stale_record_id, record);
+        plan.commit(record);
         let committed = plan
             .seal(&CryptoBodyIdentity, roots)
-            .expect("the chronicle still exposes a malformed RCR identity to its reader");
+            .expect("the plan derives the committed RCR identity after stamping");
+        let mut stale_batch = committed.batch().clone();
+        stale_batch
+            .decisions
+            .first_mut()
+            .expect("the committed batch carries its decision")
+            .outcome = DecisionOutcome::Committed {
+            repository_commit_id: stale_record_id,
+        };
+        let mut stale_head = committed.head().clone();
+        stale_head.latest_committed_rcr_id = Some(stale_record_id);
+        stale_head.decision_tail_id = Some(
+            batch_identity(&CryptoBodyIdentity, &stale_batch)
+                .expect("the deliberately stale batch re-identifies"),
+        );
         node.runtime()
             .block_on(node.publish_decisions_in(
                 &request,
                 first_receipt.token(),
-                committed.batch(),
-                committed.head(),
+                &stale_batch,
+                &stale_head,
             ))
             .expect("schema-valid stale fixture publishes through authority");
 
         assert!(matches!(
             node.runtime()
                 .block_on(node.materialize_admission_in(&request)),
-            Err(AdmissionMaterializationRefusal::LatestCommitMismatch {
-                observed: Some(observed),
-                ..
-            }) if observed == stale_record_id
+            Err(
+                AdmissionMaterializationRefusal::DecisionHistoryVerification(
+                    ChronicleRefusal::CommitRecordIdentityMismatch { index: 0 }
+                )
+            )
         ));
         node.shutdown().expect("node closes cleanly");
     }
