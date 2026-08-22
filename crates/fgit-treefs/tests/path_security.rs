@@ -206,6 +206,67 @@ fn windows_profile_refuses_only_under_that_profile() {
         );
     }
 
+    // WHICH refusal fires, not merely that one does.
+    //
+    // The loop above asserts `is_err()`, which proves the Windows profile
+    // rejects these names but not that it rejects them for the stated reason. A
+    // change that made a trailing space raise HostReserved, or a reserved stem
+    // raise HostTrailingByte, would keep every assertion above green while the
+    // typed refusal -- the thing a caller actually branches on -- silently
+    // stopped discriminating. Found by sweeping for variants no test names:
+    // HostReserved and HostTrailingByte were exercised here and asserted
+    // nowhere, which is the same "right impression, wrong basis" shape as a
+    // shared suite covering one member of a family.
+    for (input, expected) in [
+        (&b"con"[..], "HostReserved"),
+        (b"CON", "HostReserved"),
+        (b"com1.txt", "HostReserved"),
+        (b"a/prn/b", "HostReserved"),
+        (b"has:colon", "HostReserved"),
+        (b"has|pipe", "HostReserved"),
+        (b"trailing.", "HostTrailingByte"),
+        (b"trailing ", "HostTrailingByte"),
+    ] {
+        let refusal =
+            TreePath::parse(input, &windows()).expect_err("the Windows profile refuses this name");
+        let actual = match refusal {
+            PathRefusal::HostReserved { .. } => "HostReserved",
+            PathRefusal::HostTrailingByte { .. } => "HostTrailingByte",
+            other => panic!(
+                "{:?} raised {other:?}, which is neither host-profile refusal",
+                String::from_utf8_lossy(input)
+            ),
+        };
+        assert_eq!(
+            actual,
+            expected,
+            "{:?} must raise {expected}",
+            String::from_utf8_lossy(input)
+        );
+    }
+
+    // The component index is reported, not defaulted. `a/prn/b` reserves at
+    // index 1, so a hard-coded 0 would pass every test above.
+    let nested =
+        TreePath::parse(b"a/prn/b", &windows()).expect_err("a nested reserved stem is refused");
+    assert!(
+        matches!(nested, PathRefusal::HostReserved { component: 1 }),
+        "the refusal must name the offending component, got {nested:?}"
+    );
+
+    // And the trailing byte itself is carried, so a caller can tell a dot from
+    // a space without re-parsing the name.
+    let dot = TreePath::parse(b"trailing.", &windows()).expect_err("trailing dot is refused");
+    assert!(
+        matches!(dot, PathRefusal::HostTrailingByte { byte: b'.', .. }),
+        "the refusal must carry the offending byte, got {dot:?}"
+    );
+    let space = TreePath::parse(b"trailing ", &windows()).expect_err("trailing space is refused");
+    assert!(
+        matches!(space, PathRefusal::HostTrailingByte { byte: b' ', .. }),
+        "the refusal must carry the offending byte, got {space:?}"
+    );
+
     // Permitted under both: near-identical but not reserved.
     for accepted in [&b"console"[..], b"com0", b"comx", b"nulls", b"prn2x"] {
         assert!(
