@@ -1080,4 +1080,65 @@ mod tests {
             "a correctly sized symbol must clear the size guard"
         );
     }
+
+    /// The SECOND axis of the kind guard, which the probe above does not reach.
+    ///
+    /// `validate_checkpoint_symbol` compares `id.is_source(k)` against
+    /// `kind().is_source()` -- a DISAGREEMENT test, so it has two directions and
+    /// a probe from one side leaves the other uncharacterised. The test above
+    /// puts a repair-kind symbol in a source slot; this one puts a source-kind
+    /// symbol in a repair slot (`esi >= k`, since `is_source` is `esi < k`).
+    ///
+    /// Both matter: an implementation that only checked "repair symbols must not
+    /// claim source slots" would pass the first probe and fail this one.
+    #[test]
+    fn a_source_kind_symbol_in_a_repair_slot_is_refused_the_same_way() {
+        let security = security();
+        let protected = borrowed_scope(&security);
+        let scope = protected.scope();
+        let size = usize::from(CheckpointRaptorProfile::SYMBOL_BYTES);
+        let source_symbols = scope
+            .source_symbols()
+            .expect("a protected scope counts its source symbols");
+        // The first repair slot. `is_source` is `esi < k`, so this is the exact
+        // boundary at which the id stops claiming to be a source symbol.
+        let repair_slot = u32::from(source_symbols);
+
+        let refusal = reconstruct_checkpoint(
+            scope,
+            &[forged(
+                scope,
+                0,
+                repair_slot,
+                size,
+                SymbolKind::Source,
+                &security,
+            )],
+            &security,
+            None,
+        );
+        assert!(
+            matches!(refusal, Err(RaptorRefusal::EncodingSymbolKindMismatch)),
+            "a source-kind symbol in a repair slot must refuse as EncodingSymbolKindMismatch, got {refusal:?}"
+        );
+
+        // Permitted twin at the exact boundary: same slot, kind corrected.
+        let twin = reconstruct_checkpoint(
+            scope,
+            &[forged(
+                scope,
+                0,
+                repair_slot,
+                size,
+                SymbolKind::Repair,
+                &security,
+            )],
+            &security,
+            None,
+        );
+        assert!(
+            !matches!(twin, Err(RaptorRefusal::EncodingSymbolKindMismatch)),
+            "a repair-kind symbol in a repair slot agrees with its id and must clear the guard"
+        );
+    }
 }
