@@ -805,7 +805,7 @@ impl DurableAdmissionMaterializer {
                     RefusalCode::InternalInvariantBreach,
                 ));
             }
-            let (closure_root, closure_source) =
+            let (closure_root, selection_source) =
                 select_authority_closure_in(authority, cx, body.clone(), &ref_state, is_cancelled)
                     .await?;
             ensure_materializer_catch_up_live(is_cancelled)?;
@@ -838,7 +838,7 @@ impl DurableAdmissionMaterializer {
             let selected_closure = AuthoritySelectedClosure {
                 root: closure_root,
                 closure,
-                source: closure_source,
+                source: selection_source,
             };
             let snapshot = AdmissionSnapshot {
                 refs: ref_state.refs().clone(),
@@ -3937,29 +3937,29 @@ mod tests {
             )
             .expect("future RCR closure stages before head publication");
 
-        let HeadRead::Present(first_receipt) = node
+        let HeadRead::Present(genesis_read) = node
             .runtime()
             .block_on(node.read_authority_head_in(&request))
             .expect("genesis head reads")
         else {
             panic!("node initialization publishes genesis");
         };
-        let first_head: fgit_codec::RepositoryAuthorityHeadBody =
-            decode_body(first_receipt.body(), fgit_codec::DecodeLimits::DEFAULT)
+        let genesis_body: fgit_codec::RepositoryAuthorityHeadBody =
+            decode_body(genesis_read.body(), fgit_codec::DecodeLimits::DEFAULT)
                 .expect("authenticated fixture head decodes");
-        let first_basis = PublicationBasis::new(
-            authority_head_id(&first_head).expect("genesis head re-identifies"),
-            first_head,
+        let genesis_basis = PublicationBasis::new(
+            authority_head_id(&genesis_body).expect("genesis head re-identifies"),
+            genesis_body,
         );
         let mut record = commit_record();
         record.repository_id = node.repository_id();
         record.resulting_ref_root = ref_root;
         record.object_closure_root = closure_root;
-        record.resulting_forge_position_root = first_basis.body().forge_position_root;
-        record.policy_epoch = first_basis.body().policy_epoch;
-        let mut roots = ResultingRoots::carried_forward(&first_basis, digest_of(0x91));
+        record.resulting_forge_position_root = genesis_basis.body().forge_position_root;
+        record.policy_epoch = genesis_basis.body().policy_epoch;
+        let mut roots = ResultingRoots::carried_forward(&genesis_basis, digest_of(0x91));
         roots.ref_root = ref_root;
-        let mut commit_plan = PublicationPlan::open(first_basis).expect("genesis opens a plan");
+        let mut commit_plan = PublicationPlan::open(genesis_basis).expect("genesis opens a plan");
         commit_plan.commit(record);
         let committed = commit_plan
             .seal(&CryptoBodyIdentity, roots)
@@ -3975,44 +3975,44 @@ mod tests {
         node.runtime()
             .block_on(node.publish_decisions_in(
                 &request,
-                first_receipt.token(),
+                genesis_read.token(),
                 committed.batch(),
                 committed.head(),
             ))
             .expect("committed RCR publishes through authority");
 
-        let HeadRead::Present(refusal_basis_receipt) = node
+        let HeadRead::Present(successor_read) = node
             .runtime()
             .block_on(node.read_authority_head_in(&request))
             .expect("committed head reads")
         else {
             panic!("committed RCR advances head");
         };
-        let refusal_basis_body: fgit_codec::RepositoryAuthorityHeadBody = decode_body(
-            refusal_basis_receipt.body(),
-            fgit_codec::DecodeLimits::DEFAULT,
-        )
-        .expect("committed fixture head decodes");
-        let refusal_basis = PublicationBasis::new(
-            authority_head_id(&refusal_basis_body).expect("committed head re-identifies"),
-            refusal_basis_body,
+        let successor_body: fgit_codec::RepositoryAuthorityHeadBody =
+            decode_body(successor_read.body(), fgit_codec::DecodeLimits::DEFAULT)
+                .expect("committed fixture head decodes");
+        let successor_basis = PublicationBasis::new(
+            authority_head_id(&successor_body).expect("committed head re-identifies"),
+            successor_body,
         );
-        let refusal_roots = ResultingRoots::carried_forward(&refusal_basis, digest_of(0x92));
-        let mut refusal_plan = PublicationPlan::open(refusal_basis).expect("committed head opens");
-        refusal_plan.refuse(
+        let refusal_result_roots =
+            ResultingRoots::carried_forward(&successor_basis, digest_of(0x92));
+        let mut refusal_publication =
+            PublicationPlan::open(successor_basis).expect("committed head opens");
+        refusal_publication.refuse(
             distinct_tx_id(),
             RefusalCode::ExpectedOldRefMismatch,
             refusal_record_id(),
         );
-        let refusal_only = refusal_plan
-            .seal(&CryptoBodyIdentity, refusal_roots)
+        let refusal_pair = refusal_publication
+            .seal(&CryptoBodyIdentity, refusal_result_roots)
             .expect("refusal-only successor preserves committed roots");
         node.runtime()
             .block_on(node.publish_decisions_in(
                 &request,
-                refusal_basis_receipt.token(),
-                refusal_only.batch(),
-                refusal_only.head(),
+                successor_read.token(),
+                refusal_pair.batch(),
+                refusal_pair.head(),
             ))
             .expect("refusal-only successor publishes through authority");
 
@@ -4129,56 +4129,56 @@ mod tests {
             ))
             .expect("future RCR ref state stages before head publication");
 
-        let HeadRead::Present(first_receipt) = node
+        let HeadRead::Present(genesis_read) = node
             .runtime()
             .block_on(node.read_authority_head_in(&request))
             .expect("genesis head reads")
         else {
             panic!("node initialization publishes genesis");
         };
-        let first_head: fgit_codec::RepositoryAuthorityHeadBody =
-            decode_body(first_receipt.body(), fgit_codec::DecodeLimits::DEFAULT)
+        let genesis_body: fgit_codec::RepositoryAuthorityHeadBody =
+            decode_body(genesis_read.body(), fgit_codec::DecodeLimits::DEFAULT)
                 .expect("authenticated fixture head decodes");
-        let first_basis = PublicationBasis::new(
-            authority_head_id(&first_head).expect("genesis head re-identifies"),
-            first_head,
+        let genesis_basis = PublicationBasis::new(
+            authority_head_id(&genesis_body).expect("genesis head re-identifies"),
+            genesis_body,
         );
         let mut record = commit_record();
         record.repository_id = node.repository_id();
         record.resulting_ref_root = ref_root;
         record.object_closure_root = digest_of(0xb1);
-        record.resulting_forge_position_root = first_basis.body().forge_position_root;
-        record.policy_epoch = first_basis.body().policy_epoch;
+        record.resulting_forge_position_root = genesis_basis.body().forge_position_root;
+        record.policy_epoch = genesis_basis.body().policy_epoch;
         let stale_record_id =
             super::repository_commit_id(&record).expect("pre-stamp RCR re-identifies");
 
-        let mut roots = ResultingRoots::carried_forward(&first_basis, digest_of(0xb2));
+        let mut roots = ResultingRoots::carried_forward(&genesis_basis, digest_of(0xb2));
         roots.ref_root = ref_root;
-        let mut plan = PublicationPlan::open(first_basis).expect("genesis opens a plan");
+        let mut plan = PublicationPlan::open(genesis_basis).expect("genesis opens a plan");
         plan.commit(record);
         let committed = plan
             .seal(&CryptoBodyIdentity, roots)
             .expect("the plan derives the committed RCR identity after stamping");
-        let mut stale_batch = committed.batch().clone();
-        stale_batch
+        let mut mismatched_batch = committed.batch().clone();
+        mismatched_batch
             .decisions
             .first_mut()
             .expect("the committed batch carries its decision")
             .outcome = DecisionOutcome::Committed {
             repository_commit_id: stale_record_id,
         };
-        let mut stale_head = committed.head().clone();
-        stale_head.latest_committed_rcr_id = Some(stale_record_id);
-        stale_head.decision_tail_id = Some(
-            batch_identity(&CryptoBodyIdentity, &stale_batch)
+        let mut mismatched_successor = committed.head().clone();
+        mismatched_successor.latest_committed_rcr_id = Some(stale_record_id);
+        mismatched_successor.decision_tail_id = Some(
+            batch_identity(&CryptoBodyIdentity, &mismatched_batch)
                 .expect("the deliberately stale batch re-identifies"),
         );
         node.runtime()
             .block_on(node.publish_decisions_in(
                 &request,
-                first_receipt.token(),
-                &stale_batch,
-                &stale_head,
+                genesis_read.token(),
+                &mismatched_batch,
+                &mismatched_successor,
             ))
             .expect("schema-valid stale fixture publishes through authority");
 
