@@ -151,6 +151,7 @@ fn batch(
         resulting_outbox_root: digest(1),
         resulting_policy_epoch: PolicyEpoch::FIRST,
         batch_evidence_root: digest(1),
+        compaction_generation_link: None,
     }
 }
 

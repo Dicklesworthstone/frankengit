@@ -130,7 +130,7 @@ fn committed_roots() -> ResultingRoots {
         retention_root: digest(0x33),
         outbox_root: digest(0x34),
         policy_epoch: PolicyEpoch::FIRST,
-        batch_evidence_root: digest(0x35),
+        compaction_generation_link: None,
     }
 }
 
@@ -144,7 +144,7 @@ fn refusal_only_roots(previous: &RepositoryAuthorityHeadBody) -> ResultingRoots 
         retention_root: previous.retention_root,
         outbox_root: previous.outbox_root,
         policy_epoch: previous.policy_epoch,
-        batch_evidence_root: digest(0x45),
+        compaction_generation_link: None,
     }
 }
 

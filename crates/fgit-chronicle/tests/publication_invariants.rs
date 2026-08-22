@@ -6,7 +6,7 @@
 
 use fgit_chronicle::{
     ChronicleRefusal, PublicationBasis, PublicationPlan, ResultingRoots, VerifiedPublication,
-    batch_identity, repository_commit_identity, verify_pair,
+    batch_evidence_root, batch_identity, repository_commit_identity, verify_pair,
 };
 use fgit_codec::CryptoBodyIdentity;
 use fgit_codec::schema::{
@@ -97,15 +97,15 @@ fn committed_roots() -> ResultingRoots {
         retention_root: digest(0x33),
         outbox_root: digest(0x34),
         policy_epoch: PolicyEpoch::FIRST,
-        batch_evidence_root: digest(0x35),
+        compaction_generation_link: None,
     }
 }
 
 fn refusal_only_roots() -> ResultingRoots {
     ResultingRoots {
         outcome_index_root: digest(0x32),
-        batch_evidence_root: digest(0x35),
-        ..ResultingRoots::carried_forward(&basis(), digest(0x35))
+        compaction_generation_link: None,
+        ..ResultingRoots::carried_forward(&basis())
     }
 }
 
@@ -1520,5 +1520,68 @@ fn a_head_that_misreports_the_latest_repository_sequence_is_refused() {
     assert_eq!(
         verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
         Ok(())
+    );
+}
+
+#[test]
+fn batch_evidence_root_commits_the_stamped_commit_evidence() {
+    let mut plan = PublicationPlan::open(basis()).expect("genesis basis opens");
+    plan.commit(record(0xD1));
+    let publication = seal(plan, &committed_roots());
+
+    let canonical = batch_evidence_root(publication.batch())
+        .expect("the sealed batch carries encodable decision evidence");
+    assert_eq!(
+        publication.batch().batch_evidence_root,
+        canonical,
+        "seal derives rather than accepts the batch evidence root"
+    );
+
+    let mut evidence_mutated = publication.batch().clone();
+    evidence_mutated
+        .committed_rcrs
+        .first_mut()
+        .expect("the committed decision has one RCR")
+        .policy_decision_root = digest(0xD2);
+    assert_ne!(
+        batch_evidence_root(&evidence_mutated)
+            .expect("changing evidence leaves a well-shaped commitment input"),
+        canonical,
+        "a per-decision evidence mutation cannot retain the original batch root"
+    );
+}
+
+#[test]
+fn received_batch_with_mutated_refusal_evidence_is_refused() {
+    let basis = basis();
+    let mut plan = PublicationPlan::open(basis.clone()).expect("genesis basis opens");
+    plan.refuse(
+        derived!(TxId, 0xD3),
+        RefusalCode::QuotaExceeded,
+        derived!(RefusalRecordId, 0xD4),
+    );
+    let publication = seal(plan, &refusal_only_roots());
+    let mut evidence_mutated = publication.batch().clone();
+    match &mut evidence_mutated
+        .decisions
+        .first_mut()
+        .expect("the batch has one refusal decision")
+        .outcome
+    {
+        DecisionOutcome::Refused {
+            refusal_record_id, ..
+        } => *refusal_record_id = derived!(RefusalRecordId, 0xD5),
+        DecisionOutcome::Committed { .. } => panic!("the plan recorded a refusal"),
+    }
+
+    assert_eq!(
+        verify_pair(
+            &CryptoBodyIdentity,
+            &basis,
+            &evidence_mutated,
+            publication.head(),
+        ),
+        Err(ChronicleRefusal::BatchEvidenceRootMismatch),
+        "a received batch cannot retain its root after its refusal evidence changes"
     );
 }

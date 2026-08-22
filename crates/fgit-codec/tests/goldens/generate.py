@@ -138,8 +138,8 @@ batch_payload = (REPO + HEAD_ID + u64(4) + u64(9)
                  + sequence([decision_committed, decision_refused])
                  + sequence([rcr_payload])
                  + dg(0x70) + dg(0x71) + dg(0x72) + dg(0x73) + dg(0x74)
-                 + u64(3) + dg(0x75))
-BATCH = frame(D_BATCH, "decision-batch", 1, 0, batch_payload)
+                 + u64(3) + dg(0x75) + opt(None))
+BATCH = frame(D_BATCH, "decision-batch", 1, 1, batch_payload)
 
 genesis_head_payload = (REPO + u64(1) + opt(None) + opt(None) + opt(None)
                         + opt(None) + opt(None)
@@ -212,6 +212,9 @@ def family_of(domain):
             D_HEAD: "authority-head", D_REFUSAL: "refusal-record",
             D_ENV: "signed-envelope"}[domain]
 
+def schema_minor_of(domain):
+    return 1 if domain == D_BATCH else 0
+
 # Equal length so every later offset is unchanged, and lowercase so the label
 # validator accepts the tag and the DOMAIN check is what actually refuses.
 SWAP = {D_SEAL: "frankengit/txn-seaz/v1", D_RCR: "frankengit/rcz/v1",
@@ -242,7 +245,9 @@ for schema, case, domain, data, payload, description in VALID:
         "schema = " + schema,
         "kind = valid",
         "frame_len = %d" % len(data),
-        "body_id = " + corpus_body_id(domain, family_of(domain), 1, 0, payload),
+        "body_id = " + corpus_body_id(
+            domain, family_of(domain), 1, schema_minor_of(domain), payload
+        ),
         "canonical_body_len = %d" % len(payload),
         "bytes = " + data.hex(),
     ])

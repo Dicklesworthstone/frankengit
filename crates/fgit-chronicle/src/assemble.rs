@@ -12,6 +12,7 @@ use fgit_types::{
 use std::collections::BTreeSet;
 
 use crate::audit::{batch_identity, repository_commit_identity, verify_pair};
+use crate::evidence::derive_batch_evidence_root;
 use crate::origin::{PublicationBasis, ResultingRoots};
 use crate::refusal::ChronicleRefusal;
 
@@ -175,6 +176,7 @@ impl PublicationPlan {
                 Some(record.repository_sequence)
             });
 
+        let batch_evidence_root = derive_batch_evidence_root(&decisions, &committed_rcrs)?;
         let batch = RepositoryDecisionBatchBody {
             repository_id: previous.repository_id,
             predecessor_head_id: self.basis.id(),
@@ -188,7 +190,8 @@ impl PublicationPlan {
             resulting_retention_root: roots.retention_root,
             resulting_outbox_root: roots.outbox_root,
             resulting_policy_epoch: roots.policy_epoch,
-            batch_evidence_root: roots.batch_evidence_root,
+            batch_evidence_root,
+            compaction_generation_link: roots.compaction_generation_link,
         };
 
         let batch_id = batch_identity(identity, &batch)?;

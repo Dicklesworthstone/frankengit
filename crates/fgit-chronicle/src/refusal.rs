@@ -82,6 +82,11 @@ pub enum ChronicleRefusal {
     },
     /// An RCR's canonical identity could not be computed.
     CommitRecordIdentityUnavailable,
+    /// Canonical decision evidence could not be encoded for commitment.
+    BatchEvidenceEncodingUnavailable,
+    /// The batch's declared evidence root is not the canonical commitment of
+    /// its ordered decisions and matching commit records.
+    BatchEvidenceRootMismatch,
     /// A commit record's parent is not the record that precedes it.
     CommitRecordParentBroken {
         /// Zero-based index of the offending record.
@@ -249,6 +254,12 @@ impl fmt::Display for ChronicleRefusal {
             ),
             Self::CommitRecordIdentityUnavailable => {
                 f.write_str("the commit record's identity could not be computed")
+            }
+            Self::BatchEvidenceEncodingUnavailable => {
+                f.write_str("the batch's decision evidence could not be canonically encoded")
+            }
+            Self::BatchEvidenceRootMismatch => {
+                f.write_str("the batch's evidence root does not match its decision evidence")
             }
             Self::CommitRecordParentBroken { index } => {
                 write!(f, "commit record {index} does not name its predecessor")

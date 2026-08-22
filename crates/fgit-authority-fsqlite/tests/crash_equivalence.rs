@@ -1351,6 +1351,7 @@ fn batch_for(predecessor: &RepositoryAuthorityHeadBody) -> RepositoryDecisionBat
         resulting_outbox_root: digest_of(0x14),
         resulting_policy_epoch: PolicyEpoch::FIRST,
         batch_evidence_root: digest_of(0x21),
+        compaction_generation_link: None,
     }
 }
 
@@ -1519,6 +1520,7 @@ fn committing_batch_for(predecessor: &RepositoryAuthorityHeadBody) -> Repository
         resulting_outbox_root: digest_of(0x14),
         resulting_policy_epoch: PolicyEpoch::FIRST,
         batch_evidence_root: digest_of(0x3b),
+        compaction_generation_link: None,
     }
 }
 

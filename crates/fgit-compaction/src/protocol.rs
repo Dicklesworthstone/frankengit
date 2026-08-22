@@ -56,7 +56,7 @@ impl OutputStageReceipt {
 pub struct StagedCompaction {
     record: CompactionRecord,
     generation: GenerationId,
-    evidence_root: Digest,
+    compaction_generation_link: Digest,
     output_stage: OutputStageReceipt,
 }
 
@@ -79,13 +79,13 @@ impl StagedCompaction {
         let generation = record
             .generation_id(&identity)
             .map_err(CompactionPublicationRefusal::Codec)?;
-        let evidence_root = record
-            .evidence_root(&identity)
+        let compaction_generation_link = record
+            .compaction_generation_link(&identity)
             .map_err(CompactionPublicationRefusal::Codec)?;
         Ok(Self {
             record,
             generation,
-            evidence_root,
+            compaction_generation_link,
             output_stage,
         })
     }
@@ -102,17 +102,17 @@ impl StagedCompaction {
         self.generation
     }
 
-    /// The authority schema's root value that carries `generation`.
+    /// The explicit batch linkage value that carries `generation`.
     #[must_use]
-    pub const fn evidence_root(&self) -> Digest {
-        self.evidence_root
+    pub const fn compaction_generation_link(&self) -> Digest {
+        self.compaction_generation_link
     }
 
     /// Validates that an ordinary committed decision batch carries this exact
     /// compaction record, and returns the authority head that batch proposes.
     ///
     /// This runs before any CAS attempt.  A record not linked into the RCR and
-    /// batch evidence cannot accidentally acquire visibility through an
+    /// batch linkage cannot accidentally acquire visibility through an
     /// unrelated decision.
     pub fn validate_publication(
         &self,
@@ -126,14 +126,14 @@ impl StagedCompaction {
         {
             return Err(CompactionPublicationRefusal::InputBasisMismatch);
         }
-        if publication.batch().batch_evidence_root != self.evidence_root {
-            return Err(CompactionPublicationRefusal::EvidenceRootMismatch);
+        if publication.batch().compaction_generation_link != Some(self.compaction_generation_link) {
+            return Err(CompactionPublicationRefusal::CompactionGenerationLinkMismatch);
         }
         if !publication
             .batch()
             .committed_rcrs
             .iter()
-            .any(|record| record.invariant_evidence_root == self.evidence_root)
+            .any(|record| record.invariant_evidence_root == self.compaction_generation_link)
         {
             return Err(CompactionPublicationRefusal::RcrEvidenceLinkMissing);
         }
@@ -273,10 +273,10 @@ impl VisibleCompaction {
         self.staged.generation
     }
 
-    /// The exact compaction-generation evidence root selected by this batch.
+    /// The exact compaction-generation link selected by this batch.
     #[must_use]
-    pub const fn evidence_root(&self) -> Digest {
-        self.staged.evidence_root
+    pub const fn compaction_generation_link(&self) -> Digest {
+        self.staged.compaction_generation_link
     }
 
     /// Receipt from the ordinary authority publication.
@@ -428,8 +428,8 @@ pub enum CompactionPublicationRefusal {
     OutputNotStaged,
     /// The ordinary publication was prepared from another authority head.
     InputBasisMismatch,
-    /// The batch evidence root does not bind this compaction generation.
-    EvidenceRootMismatch,
+    /// The explicit batch link does not bind this compaction generation.
+    CompactionGenerationLinkMismatch,
     /// No committed RCR in the batch references this compaction evidence.
     RcrEvidenceLinkMissing,
     /// Compaction must be an ordinary commit, never a refusal-only batch.
@@ -456,8 +456,9 @@ impl fmt::Display for CompactionPublicationRefusal {
             Self::InputBasisMismatch => {
                 formatter.write_str("compaction publication does not use the record input head")
             }
-            Self::EvidenceRootMismatch => formatter
-                .write_str("decision batch does not bind the compaction generation evidence"),
+            Self::CompactionGenerationLinkMismatch => {
+                formatter.write_str("decision batch does not bind the compaction generation link")
+            }
             Self::RcrEvidenceLinkMissing => {
                 formatter.write_str("no committed RCR links the compaction generation evidence")
             }

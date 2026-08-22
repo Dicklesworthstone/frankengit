@@ -963,8 +963,6 @@ pub struct CommitEvidence {
     pub outbox_effect_root: Digest,
     /// Root over retention changes created by this candidate.
     pub retention_delta_root: Digest,
-    /// Root over the decision batch evidence.
-    pub batch_evidence_root: Digest,
 }
 
 /// Policy and evidence owner used by the production projection.
@@ -1024,7 +1022,7 @@ pub fn prepare_canonical_commit(
         retention_root: basis.body().retention_root,
         outbox_root: basis.body().outbox_root,
         policy_epoch: basis.body().policy_epoch,
-        batch_evidence_root: evidence.batch_evidence_root,
+        compaction_generation_link: None,
     };
     let materialization = CommitMaterialization {
         record: RepositoryCommitRecord {
@@ -1913,7 +1911,7 @@ fn seal_refusal_publication(
     let refusal_id = refusal_record_id(refusal)?;
     let mut plan = PublicationPlan::open(basis.clone())?;
     plan.refuse(refusal.tx_id, refusal.code, refusal_id);
-    let roots = ResultingRoots::carried_forward(basis, refusal.evidence_root);
+    let roots = ResultingRoots::carried_forward(basis);
     Ok(plan.seal(&CryptoBodyIdentity, roots)?)
 }
 
@@ -2920,7 +2918,7 @@ mod tests {
                 retention_root: basis.body().retention_root,
                 outbox_root: digest(5),
                 policy_epoch: basis.body().policy_epoch,
-                batch_evidence_root: digest(6),
+                compaction_generation_link: None,
             };
             Ok(CommitMaterialization {
                 record: RepositoryCommitRecord {

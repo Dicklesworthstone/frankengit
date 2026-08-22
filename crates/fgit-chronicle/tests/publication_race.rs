@@ -104,7 +104,7 @@ fn roots() -> ResultingRoots {
         retention_root: digest(0x33),
         outbox_root: digest(0x34),
         policy_epoch: PolicyEpoch::FIRST,
-        batch_evidence_root: digest(0x35),
+        compaction_generation_link: None,
     }
 }
 
@@ -297,7 +297,7 @@ fn a_refusal_only_publication_advances_the_head_without_committing() {
             &CryptoBodyIdentity,
             ResultingRoots {
                 outcome_index_root: digest(0x32),
-                ..ResultingRoots::carried_forward(&basis, digest(0x35))
+                ..ResultingRoots::carried_forward(&basis)
             },
         )
         .expect("a refusal-only plan is well formed");

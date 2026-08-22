@@ -241,10 +241,29 @@ struct RepositoryDecisionBatchBody {
     resulting_outbox_root: Digest,
     resulting_policy_epoch: PolicyEpoch,
     batch_evidence_root: Digest,
+    compaction_generation_link: Option<Digest>,
 }
 ```
 
 A decision sequence is gap-free across all terminal decisions. Repository sequence is gap-free across committed RCRs. Batch order is deterministic and each decision is evaluated with read-your-own-prior-decisions within the batch.
+
+`batch_evidence_root` has one meaning: a Merkle commitment over this batch's
+decision evidence. Its leaves follow `decisions` in canonical decision-sequence
+order. A committed leaf carries that decision (including its final
+`RepositoryCommitId`) followed by the canonical payload of its matching RCR,
+which binds the policy, invariant, outbox, retention, and forge evidence roots.
+A refused leaf carries that decision and its `RefusalRecordId`; the immutable
+refusal record identity binds the refusal's evidence root. Leaves use the
+registered `MerkleLeaf` domain, interior nodes use the registered `MerkleNode`
+domain, both use schema family `decision-batch-evidence-merkle` version `1.0`,
+and an odd-width level duplicates its final child. One decision has its leaf as
+the root. `PublicationPlan::seal` derives and verifies this root from final
+stamped records; no admission provider or caller may mint it.
+
+`compaction_generation_link` is separately optional. It is `Some` exactly for
+a compaction publication and carries that compaction record's generation
+identity digest; ordinary decision batches carry `None`. Compaction validates
+this linkage field and never repurposes `batch_evidence_root` for it.
 
 ### 8.2 Authority head
 

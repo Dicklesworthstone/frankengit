@@ -320,7 +320,6 @@ impl AdmissionEvidence for StubEvidence {
             invariant_evidence_root: digest(10),
             outbox_effect_root: digest(11),
             retention_delta_root: digest(12),
-            batch_evidence_root: digest(6),
         })
     }
 

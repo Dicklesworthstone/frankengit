@@ -381,6 +381,7 @@ pub fn decision_batch() -> RepositoryDecisionBatchBody {
         resulting_outbox_root: digest_of(0x74),
         resulting_policy_epoch: PolicyEpoch::try_new(3).expect("nonzero"),
         batch_evidence_root: digest_of(0x75),
+        compaction_generation_link: None,
     }
 }
 

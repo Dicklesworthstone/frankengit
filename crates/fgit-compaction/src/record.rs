@@ -497,12 +497,12 @@ impl CompactionRecord {
         GenerationId::from_internal_object_id(raw).map_err(CodecRefusal::from)
     }
 
-    /// The generation identity represented as the batch evidence-root value.
+    /// The generation identity represented in a decision batch's explicit
+    /// compaction-generation linkage field.
     ///
     /// The caller still carries the typed [`GenerationId`] alongside this
-    /// digest.  The digest is only the authority schema's existing root field,
-    /// never a replacement identity type.
-    pub fn evidence_root<I>(&self, identity: &I) -> Result<Digest, CodecRefusal>
+    /// digest. The digest is a link target, never batch-evidence content.
+    pub fn compaction_generation_link<I>(&self, identity: &I) -> Result<Digest, CodecRefusal>
     where
         I: BodyIdentity + ?Sized,
     {

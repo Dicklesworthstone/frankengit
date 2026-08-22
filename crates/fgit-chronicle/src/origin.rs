@@ -108,8 +108,11 @@ pub struct ResultingRoots {
     pub outbox_root: Digest,
     /// Policy epoch after the batch.
     pub policy_epoch: PolicyEpoch,
-    /// Root over the batch's own evidence.
-    pub batch_evidence_root: Digest,
+    /// Compaction generation this publication links, when it publishes one.
+    ///
+    /// Batch evidence is derived by chronicle sealing from the final decisions
+    /// and records; evaluation cannot supply or choose it.
+    pub compaction_generation_link: Option<Digest>,
 }
 
 impl ResultingRoots {
@@ -118,7 +121,7 @@ impl ResultingRoots {
     /// A refusal-only batch starts here: it consumes decision sequence and
     /// records evidence, and it moves nothing else.
     #[must_use]
-    pub const fn carried_forward(basis: &PublicationBasis, batch_evidence_root: Digest) -> Self {
+    pub const fn carried_forward(basis: &PublicationBasis) -> Self {
         let head = basis.body();
         Self {
             ref_root: head.ref_root,
@@ -144,7 +147,7 @@ impl ResultingRoots {
             retention_root: head.retention_root,
             outbox_root: head.outbox_root,
             policy_epoch: head.policy_epoch,
-            batch_evidence_root,
+            compaction_generation_link: None,
         }
     }
 }

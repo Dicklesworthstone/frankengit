@@ -225,7 +225,7 @@ impl AdmissionProjection for UnboundAdapter {
             retention_root: basis.body().retention_root,
             outbox_root: self.digest(5),
             policy_epoch: basis.body().policy_epoch,
-            batch_evidence_root: self.digest(6),
+            compaction_generation_link: None,
         };
         Ok(CommitMaterialization {
             record: RepositoryCommitRecord {
@@ -1259,7 +1259,6 @@ impl AdmissionEvidence for StubEvidence {
             invariant_evidence_root: digest(10),
             outbox_effect_root: digest(11),
             retention_delta_root: digest(12),
-            batch_evidence_root: digest(6),
         })
     }
 

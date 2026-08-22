@@ -284,7 +284,6 @@ impl AdmissionEvidence for TestEvidence {
             invariant_evidence_root: digest(10),
             outbox_effect_root: digest(11),
             retention_delta_root: digest(12),
-            batch_evidence_root: digest(6),
         })
     }
 
@@ -410,6 +409,7 @@ impl PinnedProjection {
             resulting_outbox_root: rival.outbox_root,
             resulting_policy_epoch: rival.policy_epoch,
             batch_evidence_root: digest(21),
+            compaction_generation_link: None,
         };
 
         let landed = publish_decisions(

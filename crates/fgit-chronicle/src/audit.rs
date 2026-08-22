@@ -10,6 +10,7 @@ use fgit_types::{
 };
 use std::collections::BTreeSet;
 
+use crate::evidence::batch_evidence_root;
 use crate::origin::PublicationBasis;
 use crate::refusal::ChronicleRefusal;
 
@@ -37,10 +38,20 @@ where
     let tail = verify_decision_sequence(basis, batch)?;
     verify_unique_transactions(batch)?;
     let latest_committed_rcr_id = verify_commit_records(identity, basis, batch)?;
+    verify_batch_evidence_root(batch)?;
     verify_successor(basis, batch, head, tail, latest_committed_rcr_id)?;
     verify_tail_binding(identity, batch, head)?;
     verify_roots(batch, head)?;
     verify_refusal_only(basis, batch)
+}
+
+fn verify_batch_evidence_root(batch: &RepositoryDecisionBatchBody) -> Result<(), ChronicleRefusal> {
+    let observed = batch_evidence_root(batch)?;
+    if batch.batch_evidence_root == observed {
+        Ok(())
+    } else {
+        Err(ChronicleRefusal::BatchEvidenceRootMismatch)
+    }
 }
 
 /// Recomputes the batch identity and holds the head to it.

@@ -303,15 +303,22 @@ pub struct RepositoryDecisionBatchBody {
     pub resulting_outbox_root: Digest,
     /// Policy epoch after the batch.
     pub resulting_policy_epoch: PolicyEpoch,
-    /// Root over the batch's own evidence.
+    /// Merkle commitment over this batch's ordered decision evidence.
     pub batch_evidence_root: Digest,
+    /// Compaction generation bound by this publication, when it publishes one.
+    ///
+    /// Ordinary decision batches carry `None`. The explicit tag keeps an
+    /// absent compaction linkage distinct from a digest that happens to have
+    /// zero-like bytes, and prevents the generation identity from overloading
+    /// [`Self::batch_evidence_root`].
+    pub compaction_generation_link: Option<Digest>,
 }
 
 impl CanonicalBody for RepositoryDecisionBatchBody {
     const DOMAIN: DomainTag = DomainTag::from_static("frankengit/decision-batch/v1");
     const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("decision-batch");
     const SCHEMA_MAJOR: u16 = 1;
-    const SCHEMA_MINOR: u16 = 0;
+    const SCHEMA_MINOR: u16 = 1;
 
     fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         out.write_opaque_id(self.repository_id.as_bytes());
@@ -336,7 +343,10 @@ impl CanonicalBody for RepositoryDecisionBatchBody {
             out.write_digest(digest)?;
         }
         out.write_scalar(self.resulting_policy_epoch.get());
-        out.write_digest(&self.batch_evidence_root)
+        out.write_digest(&self.batch_evidence_root)?;
+        out.write_option(self.compaction_generation_link.as_ref(), |out, link| {
+            out.write_digest(link)
+        })
     }
 
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
@@ -370,6 +380,8 @@ impl CanonicalBody for RepositoryDecisionBatchBody {
             resulting_outbox_root,
             resulting_policy_epoch,
             batch_evidence_root: input.read_digest()?,
+            compaction_generation_link: input
+                .read_option("compaction_generation_link", Decoder::read_digest)?,
         })
     }
 }

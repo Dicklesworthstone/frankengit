@@ -130,6 +130,13 @@ fn both_terminal_outcomes_round_trip_inside_a_batch() {
 }
 
 #[test]
+fn an_explicit_compaction_generation_link_round_trips() {
+    let mut batch = support::decision_batch();
+    batch.compaction_generation_link = Some(digest_of(0xC1));
+    assert_round_trips("decision-batch/compaction-generation-link", &batch);
+}
+
+#[test]
 fn shuffling_a_canonical_set_never_changes_the_bytes() {
     // The acceptance property: logically identical input in any order must
     // produce one byte string.
