@@ -379,6 +379,49 @@ fn assert_campaign_is_substantive(name: &str, tally: &BTreeMap<String, usize>) {
 }
 
 #[test]
+fn the_detector_fires_when_two_byte_strings_share_one_value() {
+    // THE PRESENCE CASE FOR THE DETECTOR ITSELF.
+    //
+    // Every other test here asserts that no mutant trips `classify`. That is
+    // the property worth having, and on its own it is also what a permanently
+    // broken detector would produce: if `classify` could never return `Err`,
+    // all six campaigns would pass, the tally would still exceed 500, the
+    // refusal kinds would still be varied, and a genuine identity collision
+    // would be recorded as `DecodedDistinct` and counted as a success.
+    //
+    // Neither existing guard closes that. `assert_campaign_is_substantive`
+    // proves the campaign did WORK; the canonical-decodes assertion proves the
+    // FIXTURE is sound. Only this proves the campaign can FAIL.
+    //
+    // The construction is the one input the campaign deliberately skips: the
+    // canonical bytes themselves. `campaign` filters `mutant == canonical` to
+    // keep the tally honest, so this arm is never exercised there — but a
+    // direct call decodes it, re-encodes to exactly the canonical bytes, and
+    // must trip the first violation. That is the same shape as a real second
+    // encoding of one value, which is the outcome a content-addressed system
+    // cannot survive.
+    let cases = load_goldens();
+    let canonical = canonical_bytes(&cases, "txn-seal__canonical");
+    let canonical_id = body_id_of_frame(&CryptoBodyIdentity, &canonical, DecodeLimits::DEFAULT)
+        .expect("the canonical vector has an identity");
+
+    let verdict = classify::<TransactionSealBody>(&canonical, &canonical_id, &canonical);
+
+    let Err(violation) = verdict else {
+        panic!(
+            "the detector accepted a byte string that decodes to the canonical value and \
+             re-encodes to the canonical bytes. Every `no_mutant_of_*` test in this file is \
+             then vacuous: they assert an Err that cannot occur. Got {verdict:?}"
+        );
+    };
+    assert!(
+        violation.contains("two byte strings, one value"),
+        "the detector fired, but not on the identity-collision arm; the campaign's acceptance \
+         line rests on that specific check. Got: {violation}"
+    );
+}
+
+#[test]
 fn no_mutant_of_the_transaction_seal_shares_its_identity() {
     let cases = load_goldens();
     let canonical = canonical_bytes(&cases, "txn-seal__canonical");
