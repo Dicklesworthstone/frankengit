@@ -196,16 +196,19 @@ impl Cusum {
     }
 
     /// The upward accumulator, for a decision-path witness (§8).
+    #[must_use]
     pub const fn high(&self) -> Scaled {
         self.high
     }
 
     /// The downward accumulator, for a decision-path witness (§8).
+    #[must_use]
     pub const fn low(&self) -> Scaled {
         self.low
     }
 
     /// Observations fed so far.
+    #[must_use]
     pub const fn observations(&self) -> u32 {
         self.observations
     }
@@ -215,6 +218,7 @@ impl Cusum {
     /// A saturated accumulator has lost the magnitude of its excursion, so a
     /// caller must treat the statistic as a lower bound rather than a value —
     /// which is why `check_assumptions` refuses configurations that can reach it.
+    #[must_use]
     pub const fn saturated(&self) -> bool {
         self.saturated
     }
