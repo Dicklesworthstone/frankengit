@@ -19,8 +19,7 @@ use fgit_object_fabric::fabric::{
 use fgit_types::{
     CANONICAL_CODEC_VERSION, DecisionSequence, Digest, DigestAlgorithmId, DigestBytes, GitOid,
     GitOidSha1, HeadGeneration, OPAQUE_ID_LEN, PolicyEpoch, PrincipalSnapshotId, RegistryEpoch,
-    RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, RepositorySequence,
-    SegmentManifestId, TenantId, TxId,
+    RepositoryAuthorityHeadId, RepositoryId, RepositorySequence, SegmentManifestId, TenantId, TxId,
 };
 
 macro_rules! derived {
@@ -170,10 +169,7 @@ fn publication(
     staged: &StagedCompaction,
 ) -> fgit_chronicle::VerifiedPublication {
     let mut plan = PublicationPlan::open(input).expect("authenticated basis opens a plan");
-    plan.commit(
-        derived!(RepositoryCommitId, 0x70),
-        commit_record(staged.evidence_root()),
-    );
+    plan.commit(commit_record(staged.evidence_root()));
     plan.seal(&CryptoBodyIdentity, roots(staged.evidence_root()))
         .expect("ordinary compaction decision is well formed")
 }
@@ -349,10 +345,7 @@ fn publication_without_rcr_evidence_link_stays_staged_even_when_batch_evidence_m
     let input = basis();
     let staged = stage(&input);
     let mut plan = PublicationPlan::open(input.clone()).expect("basis opens a plan");
-    plan.commit(
-        derived!(RepositoryCommitId, 0x90),
-        commit_record(digest(0x91)),
-    );
+    plan.commit(commit_record(digest(0x91)));
     let publication = plan
         .seal(&CryptoBodyIdentity, roots(staged.evidence_root()))
         .expect("the generic batch itself is valid");

@@ -42,8 +42,8 @@ use fgit_reference::refs::ExpectedRefState;
 use fgit_txn::{IntentEvaluator, TransactionFoldReport};
 use fgit_types::{
     AsciiSlug, DecisionOutcome, Digest, DomainTag, PrincipalId, PrincipalSnapshotId, RefName,
-    RefusalCode, RefusalRecordId, RepositoryCommitId, RepositoryId, RepositorySequence,
-    SchemaFamily, SchemaId, TenantId, TransactionSealId, TxId,
+    RefusalCode, RefusalRecordId, RepositoryId, RepositorySequence, SchemaFamily, SchemaId,
+    TenantId, TransactionSealId, TxId,
 };
 use fgit_wire::receive::{
     QuarantineReceipt, ReceiveCommand, ReceiveCommandKind, ReceiveCommandStatus, ReceiveError,
@@ -764,6 +764,9 @@ where
         Ok(CommitMaterialization {
             record: RepositoryCommitRecord {
                 repository_id: request.repository,
+                // `PublicationPlan` owns final sequence and predecessor
+                // stamping. These values only satisfy the complete RCR shape
+                // before it is handed to that plan; they are never identified.
                 repository_sequence: RepositorySequence::FIRST,
                 parent_rcr_id: None,
                 tx_id: request.tx_id,
@@ -1365,9 +1368,8 @@ where
     S: AuthorityStore + ?Sized,
 {
     validate_commit_materialization(context, tx_id, semantic, closure, &materialization)?;
-    let commit_id = repository_commit_id(&materialization.record)?;
     let mut plan = PublicationPlan::open(basis.clone())?;
-    plan.commit(commit_id, materialization.record);
+    plan.commit(materialization.record);
     let publication = plan.seal(&CryptoBodyIdentity, materialization.roots)?;
     outcome_after_publish(store, context, expected, &publication)
 }
@@ -1415,17 +1417,6 @@ fn validate_commit_materialization(
         return Err(AdmissionError::MaterializationMismatch("policy epoch"));
     }
     Ok(())
-}
-
-fn repository_commit_id(
-    record: &RepositoryCommitRecord,
-) -> Result<RepositoryCommitId, AdmissionError> {
-    body_id(&CryptoBodyIdentity, record)
-        .map_err(AdmissionError::HeadIdentity)
-        .and_then(|id| {
-            RepositoryCommitId::from_internal_object_id(id)
-                .map_err(|refusal| AdmissionError::HeadIdentity(refusal.into()))
-        })
 }
 
 fn publish_refusal<S, Projection>(
