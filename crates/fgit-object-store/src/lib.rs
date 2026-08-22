@@ -232,14 +232,14 @@ impl fmt::Debug for CanonicalHmacSha256Signer {
 }
 
 impl CanonicalHmacSha256Signer {
-    /// Construct a signer from a caller-provided credential scope and secret.
+    /// Construct a signer from a caller-provided nonempty credential scope and secret.
     pub fn new(
         key_id: impl Into<String>,
         key: impl Into<Vec<u8>>,
     ) -> Result<Self, AdapterConfigError> {
         let key_id = key_id.into();
         let key = key.into();
-        if !is_visible_ascii(&key_id) || key_id.len() > 256 || key.is_empty() {
+        if key_id.is_empty() || !is_visible_ascii(&key_id) || key_id.len() > 256 || key.is_empty() {
             return Err(AdapterConfigError::InvalidSigningCredential);
         }
         Ok(Self { key_id, key })
@@ -462,7 +462,7 @@ pub enum AdapterConfigError {
     InvalidHeaderValue,
     /// Two case-insensitive headers would make conditional/signing semantics ambiguous.
     DuplicateHeader,
-    /// Signing key material or identifier was not admissible.
+    /// Signing key material or a nonempty identifier was not admissible.
     InvalidSigningCredential,
     /// The adapter was constructed with a receipt for another endpoint scope.
     ReceiptEndpointMismatch,

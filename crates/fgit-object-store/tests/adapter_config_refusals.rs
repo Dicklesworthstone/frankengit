@@ -424,6 +424,16 @@ fn a_key_id_with_a_non_visible_byte_is_refused() {
 }
 
 #[test]
+fn an_empty_signing_key_id_is_refused_but_a_one_byte_id_is_admitted() {
+    let refusal = CanonicalHmacSha256Signer::new("", b"secret".to_vec())
+        .expect_err("an empty key identifier cannot select an authenticated credential scope");
+    assert_eq!(refusal, AdapterConfigError::InvalidSigningCredential);
+
+    CanonicalHmacSha256Signer::new("k", b"secret".to_vec())
+        .expect("a one-byte visible key identifier remains an admissible credential scope");
+}
+
+#[test]
 fn an_empty_signing_key_is_refused() {
     let refusal = CanonicalHmacSha256Signer::new("probe-key", Vec::new())
         .expect_err("an empty secret cannot authenticate anything");
