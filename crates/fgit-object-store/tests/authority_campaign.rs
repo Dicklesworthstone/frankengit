@@ -822,7 +822,7 @@ fn the_adapter_and_the_reference_profile_agree_on_immutable_history() {
     let key = ImmutableKey::new(b"campaign/differential".to_vec()).expect("key");
     let other = ImmutableKey::new(b"campaign/absent".to_vec()).expect("key");
 
-    let script = vec![
+    let script = [
         AuthorityOp::ReadImmutable { key: key.clone() },
         AuthorityOp::PutIfAbsent {
             key: key.clone(),
