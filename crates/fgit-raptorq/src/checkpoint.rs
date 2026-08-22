@@ -603,6 +603,53 @@ mod tests {
         assert!(CheckpointClass::PolicyKey.requires_aead());
     }
 
+    /// Pinned identity goldens, checked against an INDEPENDENT derivation.
+    ///
+    /// The round-trip and corpus tests prove behaviour, not byte-stability: a
+    /// framing change applied consistently to encode and decode passes all of
+    /// them while minting different identities for the same bytes. These
+    /// constants were derived from the spec by
+    /// `crates/fgit-raptorq/goldens/checkpoint_identity.py`, which reimplements
+    /// the preimage framing over `hashlib.sha256` rather than calling this
+    /// code, so agreement here is two derivations concurring instead of one
+    /// asserting itself.
+    ///
+    /// If this test fails, the framing, a registered domain tag, or a schema
+    /// family moved. That is a wire-format change and needs a version bump,
+    /// not a re-blessed constant.
+    #[test]
+    fn checkpoint_identities_match_the_independently_derived_goldens() {
+        const GOLDEN_BODY: &[u8] = b"frankengit fg077a checkpoint golden vector";
+        const FORGE_GOLDEN: &str =
+            "d5d8b1effa326c166ef52362e9342b312e1dfb76c83f6c0f6a148ed36a653e80";
+        const POLICY_GOLDEN: &str =
+            "a616f9829ba49f34f2dee84e74fbc168f4bda6f7e7c8d9b475f118e072d27326";
+
+        fn hex(bytes: &[u8; 32]) -> String {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        }
+
+        let forge = CheckpointScope::from_canonical_bytes(CheckpointClass::ForgeEvent, GOLDEN_BODY)
+            .expect("golden body must protect");
+        let policy = CheckpointScope::from_canonical_bytes(CheckpointClass::PolicyKey, GOLDEN_BODY)
+            .expect("golden body must protect");
+
+        assert_eq!(
+            hex(forge.checkpoint_digest()),
+            FORGE_GOLDEN,
+            "DUR-012 identity drifted from the independently derived golden"
+        );
+        assert_eq!(
+            hex(policy.checkpoint_digest()),
+            POLICY_GOLDEN,
+            "DUR-014 identity drifted from the independently derived golden"
+        );
+        assert_ne!(
+            FORGE_GOLDEN, POLICY_GOLDEN,
+            "the goldens themselves must witness domain separation"
+        );
+    }
+
     #[test]
     fn policy_key_requires_an_aead_verifier() {
         let security = security();
