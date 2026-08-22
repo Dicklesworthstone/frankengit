@@ -73,23 +73,33 @@
 //!
 //! # Non-claims
 //!
-//! Two things are deliberately absent, and this crate does not claim either.
+//! Two things are deliberately bounded, and this crate claims neither past its
+//! stated limit.
 //!
-//! **Beta-Bernoulli expected loss.** [`beta_bernoulli`] provides the posterior
-//! and a minimum-evidence arm comparison. The expected-loss integral is not
-//! implemented — **not** because it is impossible: for integer parameters
-//! `P(theta_b > theta_a)` has an exact closed form with a factorial-free
-//! recurrence, and that is verified. It is unimplemented because exact
-//! evaluation needs arbitrary-precision rationals that the closed dependency
-//! universe has no crate for, and bounded fixed-point evaluation owes a proven
-//! error bound this crate does not have. Calling a mean comparison "expected
-//! loss" would be proof-class inflation, so it is named for what it is.
+//! **Beta-Bernoulli expected loss — now implemented, with a stated bound.**
+//! [`expected_loss`] evaluates `P(theta_b > theta_a)` in parts per million for
+//! integer parameters. This paragraph previously recorded the integral as
+//! absent, on the grounds that exact evaluation needs arbitrary-precision
+//! rationals the closed dependency universe has no crate for and that bounded
+//! fixed-point evaluation owed an error bound the crate did not have. The
+//! second half is what changed: the bound is now measured and asserted, not
+//! owed. See `NEG-025` for why the obvious fixed-point evaluation is silently
+//! wrong and what replaced it.
+//!
+//! What is still NOT claimed: the answer is exact. It is **at or below** the
+//! exact value, by at most `1 ppm`, and the shortfall is attained only where
+//! the exact value sits on a ppm boundary. Concentrated, far-from-even
+//! posteriors are refused outright rather than approximated, and widening that
+//! refusal region is the part that still needs arbitrary-precision rationals.
+//! The one-directional half of the bound is the load-bearing one: an
+//! under-stated probability under-states a candidate policy's advantage over
+//! its fallback, so the error can delay a policy switch but never provoke one.
 //!
 //! **Confidence-width derivation.** [`elimination`] takes its half-widths as a
-//! declared schedule rather than computing `sqrt(log(2 / delta) / (2 n))`, for
-//! the same reason. It checks the properties a schedule must have to be a
-//! confidence schedule at all, and cannot check that a well-formed schedule
-//! delivers the level it claims.
+//! declared schedule rather than computing `sqrt(log(2 / delta) / (2 n))`. This
+//! one is still absent rather than bounded: the crate checks the properties a
+//! schedule must have to be a confidence schedule at all, and cannot check that
+//! a well-formed schedule delivers the level it claims.
 //!
 //! The evidence body also has **no digest identity yet**. Computing one requires
 //! `frankengit/statistical-evidence/v1` to be registered in `fgit-crypto`'s
