@@ -220,9 +220,9 @@ impl AdmissionProjection for UnboundAdapter {
         }
         let roots = ResultingRoots {
             ref_root: self.digest(2),
-            forge_position_root: self.digest(3),
+            forge_position_root: basis.body().forge_position_root,
             retention_root: basis.body().retention_root,
-            outbox_root: self.digest(5),
+            outbox_root: basis.body().outbox_root,
             policy_epoch: basis.body().policy_epoch,
             compaction_generation_link: None,
         };

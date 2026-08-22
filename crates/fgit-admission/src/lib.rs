@@ -1796,7 +1796,7 @@ fn prepare_commit_publication(
     cumulative_outcomes: &CumulativeOutcomes,
     expected_head_token: fgit_authority::AuthorityVersionToken,
 ) -> Result<fgit_chronicle::VerifiedPublication, AdmissionError> {
-    validate_commit_materialization(context, tx_id, semantic, closure, &materialization)?;
+    validate_commit_materialization(context, basis, tx_id, semantic, closure, &materialization)?;
     let mut plan = PublicationPlan::open(basis.clone())?;
     plan.commit(materialization.record);
     Ok(plan.seal(
@@ -1809,7 +1809,8 @@ fn prepare_commit_publication(
 
 /// Build the refusal record this attempt will publish.
 ///
-/// The projection supplies the policy evidence, and the two ways it can fail
+/// Two projections can answer the same refusal code differently: the code
+/// and a materialized evidence body. The two failure shapes below
 /// are distinguished here: a projection that echoes the code back has failed
 /// to materialize, while one that answers with a different code has replaced
 /// the policy decision. Neither is allowed to silently become the published
@@ -2359,6 +2360,7 @@ where
 
 fn validate_commit_materialization(
     context: &AdmissionContext,
+    basis: &PublicationBasis,
     tx_id: TxId,
     semantic: &fgit_authority::SemanticRequest,
     closure: &ValidatedClosure,
@@ -2398,6 +2400,39 @@ fn validate_commit_materialization(
     }
     if record.policy_epoch != materialization.roots.policy_epoch {
         return Err(AdmissionError::MaterializationMismatch("policy epoch"));
+    }
+    // CONTINUATION AGAINST THE AUTHENTICATED BASIS. Lowered admission
+    // requests are ref-only: the fold refuses any forge, retention, or
+    // outbox effect before a materialization can exist, so the only correct
+    // carried-forward values are EXACTLY the authenticated basis's. A
+    // projection that fabricates a stream position, retention state, outbox
+    // state, policy epoch, or compaction link would otherwise publish those
+    // into the canonical head unchallenged — record-vs-roots agreement
+    // cannot catch it because the fabrication matches itself.
+    if materialization.roots.forge_position_root != basis.body().forge_position_root {
+        return Err(AdmissionError::MaterializationMismatch(
+            "carried forge position root",
+        ));
+    }
+    if materialization.roots.retention_root != basis.body().retention_root {
+        return Err(AdmissionError::MaterializationMismatch(
+            "carried retention root",
+        ));
+    }
+    if materialization.roots.outbox_root != basis.body().outbox_root {
+        return Err(AdmissionError::MaterializationMismatch(
+            "carried outbox root",
+        ));
+    }
+    if materialization.roots.policy_epoch != basis.body().policy_epoch {
+        return Err(AdmissionError::MaterializationMismatch(
+            "carried policy epoch",
+        ));
+    }
+    if materialization.roots.compaction_generation_link.is_some() {
+        return Err(AdmissionError::MaterializationMismatch(
+            "compaction generation link",
+        ));
     }
     Ok(())
 }
@@ -2960,9 +2995,12 @@ mod tests {
             }
             let roots = ResultingRoots {
                 ref_root: digest(2),
-                forge_position_root: digest(3),
+                // Continuation is checked against the basis now, so even the
+                // fixture must carry the real carried-forward values; only
+                // ref_root is this projection's own decision.
+                forge_position_root: basis.body().forge_position_root,
                 retention_root: basis.body().retention_root,
-                outbox_root: digest(5),
+                outbox_root: basis.body().outbox_root,
                 policy_epoch: basis.body().policy_epoch,
                 compaction_generation_link: None,
             };
