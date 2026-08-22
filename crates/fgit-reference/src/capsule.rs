@@ -261,6 +261,10 @@ impl PreparedTxnCapsule {
     }
 }
 
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -531,7 +535,3 @@ mod tests {
         assert_eq!(coarse.refined(), refined);
     }
 }
-
-// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
-const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
-const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
