@@ -1555,3 +1555,107 @@ fn a_kill_around_a_committing_publication_keeps_the_commit_record_with_the_head(
          single transaction forbids"
     );
 }
+
+// ------------------------------- reopen reads by key, and never by enumeration
+
+/// Aggregate openings a keyless `SELECT` is allowed to have.
+///
+/// An aggregate returns a number. Enumeration returns identities, and it is
+/// identities that the acceptance line is about.
+const AGGREGATE_OPENINGS: [&str; 4] = ["COUNT(", "MAX(", "MIN(", "SUM("];
+
+#[test]
+fn no_published_statement_can_enumerate_keys() {
+    // FG-005b's acceptance: "reopen uses known authenticated keys, never
+    // listing". Today that holds -- every key-returning read in the closed set
+    // is `WHERE <key> = ?`, and the only keyless selects are aggregates.
+    //
+    // But it held by *habit*, not by construction. `schema_contract.rs` pins
+    // nine properties of this statement set -- no interpolation, unique names,
+    // closed operation set, both CAS guards, no deletes or truncates, STRICT
+    // tables, ledger uniqueness, one head row, pinned generation -- and none of
+    // them is this one. A future `SELECT head_key FROM fgit_head_slot` with no
+    // `WHERE` would pass every existing test in the crate.
+    //
+    // That is the shape `frankengit-nv0a` was: a property the profile declares,
+    // that happens to be true, that nothing holds it to. The difference between
+    // "currently true" and "enforced" is the only thing standing between this
+    // acceptance line and the next person who needs a convenient scan.
+    //
+    // Why it matters beyond tidiness: an authority store that can list its own
+    // keys can be walked by anything holding the connection, and reopen stops
+    // being a lookup of names the caller already authenticated. §5.1 keeps
+    // authority in the head slot rather than in the ability to discover what
+    // exists.
+    for statement in fgit_authority_fsqlite::operation_statements() {
+        let sql = statement.sql;
+        let squeezed: String = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let upper = squeezed.to_uppercase();
+
+        if !upper.starts_with("SELECT") || upper.contains(" WHERE ") {
+            continue;
+        }
+
+        // A keyless SELECT survives only if everything it projects is an
+        // aggregate. `SELECT MAX(issued_seq)` is a number; `SELECT head_key` is
+        // a directory.
+        let projection = upper
+            .strip_prefix("SELECT ")
+            .and_then(|rest| rest.split(" FROM ").next())
+            .unwrap_or("");
+        let aggregate_only = AGGREGATE_OPENINGS
+            .iter()
+            .any(|opening| projection.trim_start().starts_with(opening));
+
+        assert!(
+            aggregate_only,
+            "statement `{}` selects `{projection}` with no WHERE clause, so it can enumerate \
+             rows rather than look one up by an authenticated key. FG-005b requires reopen to \
+             use known keys and never to list. If this projection really is a count or a bound \
+             rather than a directory, add its opening to AGGREGATE_OPENINGS and say why here.",
+            statement.name
+        );
+    }
+}
+
+#[test]
+fn the_enumeration_guard_can_actually_fire() {
+    // The presence case, and this file is the reason it exists: a guard whose
+    // rejecting branch is never exercised is a guard nobody has seen work.
+    //
+    // Twice tonight I shipped refusal assertions with no permitted case beside
+    // them -- five cancellation assertions that passed against a dead store,
+    // and a capacity reproduction that a refuse-everything guard would have
+    // satisfied. Both were caught by someone else. So the classifier above is
+    // run against a statement that must be rejected and one that must be
+    // allowed, rather than only against a set that currently passes.
+    let classify = |sql: &str| -> bool {
+        let squeezed: String = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let upper = squeezed.to_uppercase();
+        if !upper.starts_with("SELECT") || upper.contains(" WHERE ") {
+            return true;
+        }
+        let projection = upper
+            .strip_prefix("SELECT ")
+            .and_then(|rest| rest.split(" FROM ").next())
+            .unwrap_or("");
+        AGGREGATE_OPENINGS
+            .iter()
+            .any(|opening| projection.trim_start().starts_with(opening))
+    };
+
+    assert!(
+        !classify("SELECT head_key FROM fgit_head_slot"),
+        "the guard must reject a keyless projection of an identity column, or it cannot catch \
+         the thing it exists to catch"
+    );
+    assert!(
+        classify("SELECT COUNT(*) FROM fgit_head_slot"),
+        "the guard must allow a keyless aggregate, or it forbids the capacity counts the store \
+         legitimately needs"
+    );
+    assert!(
+        classify("SELECT head_key, generation FROM fgit_head_slot WHERE head_key = ?"),
+        "the guard must allow an exact-key lookup, which is the whole permitted shape"
+    );
+}
