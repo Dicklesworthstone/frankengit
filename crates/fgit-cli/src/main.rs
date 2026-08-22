@@ -25,6 +25,22 @@ fn main() -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        Ok(fgit_cli::CliOutcome::Served {
+            listen_address,
+            session,
+        }) => {
+            match session {
+                fgit_node::GitDaemonSessionOutcome::EmptyRepository(_) => {
+                    println!(
+                        "served an authenticated empty repository session on {listen_address}"
+                    );
+                }
+                fgit_node::GitDaemonSessionOutcome::Pack(_) => {
+                    println!("served an authenticated pack session on {listen_address}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("fg: {error}");
             ExitCode::from(2)

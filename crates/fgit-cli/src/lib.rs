@@ -4,9 +4,14 @@
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::io;
+use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 
-use fgit_node::{DoctorReport, NodeConfig, NodeInitialization, OneNode};
+use fgit_node::{
+    DoctorReport, GitDaemonSessionOutcome, NodeConfig, NodeGitDaemonServeRefusal,
+    NodeInitialization, OneNode,
+};
 use fgit_types::{RepositoryId, TenantId};
 
 /// Typed refusal from the minimal `fg` command parser.
@@ -14,20 +19,29 @@ use fgit_types::{RepositoryId, TenantId};
 pub enum CliRefusal {
     /// The command line did not identify a supported command.
     Usage,
-    /// Serving cannot start until the canonical projection and socket gateway
-    /// are both published as production surfaces.
-    ServeUnavailable,
     /// The supplied tenant identity was not canonical lowercase hex.
     Tenant(fgit_types::TypeRefusal),
     /// The supplied repository identity was not canonical lowercase hex.
     Repository(fgit_types::TypeRefusal),
     /// Node initialization refused before a usable service existed.
     Node(fgit_node::NodeRefusal),
+    /// The requested listener address could not become a bounded local socket.
+    Listener(io::Error),
+    /// A one-session git-daemon serve attempt refused.
+    Serve(NodeGitDaemonServeRefusal),
     /// Doctor inspection refused and the following mandatory node shutdown
     /// also failed, so neither failure is discarded.
     DoctorCleanup {
         /// The failed authenticated inspection.
         inspection: Box<fgit_node::NodeRefusal>,
+        /// The failed explicit lifecycle close.
+        cleanup: Box<fgit_node::NodeRefusal>,
+    },
+    /// Serving refused and mandatory node shutdown also failed, so neither
+    /// failure is discarded.
+    ServeCleanup {
+        /// The session refusal before cleanup.
+        serving: Box<NodeGitDaemonServeRefusal>,
         /// The failed explicit lifecycle close.
         cleanup: Box<fgit_node::NodeRefusal>,
     },
@@ -37,19 +51,22 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init|doctor <storage-root> <tenant-id-hex> <repository-id-hex>; fg serve",
-            ),
-            Self::ServeUnavailable => formatter.write_str(
-                "fg serve is unavailable: no published raw-socket gateway and canonical admission projection are available",
+                "usage: fg init|doctor <storage-root> <tenant-id-hex> <repository-id-hex>; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address>",
             ),
             Self::Tenant(error) | Self::Repository(error) => Display::fmt(error, formatter),
             Self::Node(error) => Display::fmt(error, formatter),
+            Self::Listener(error) => write!(formatter, "cannot bind fg serve listener: {error}"),
+            Self::Serve(error) => Display::fmt(error, formatter),
             Self::DoctorCleanup {
                 inspection,
                 cleanup,
             } => write!(
                 formatter,
                 "doctor inspection failed ({inspection}) and node shutdown also failed ({cleanup})"
+            ),
+            Self::ServeCleanup { serving, cleanup } => write!(
+                formatter,
+                "serve session failed ({serving}) and node shutdown also failed ({cleanup})"
             ),
         }
     }
@@ -60,8 +77,11 @@ impl Error for CliRefusal {
         match self {
             Self::Tenant(error) | Self::Repository(error) => Some(error),
             Self::Node(error) => Some(error),
+            Self::Listener(error) => Some(error),
+            Self::Serve(error) => Some(error),
             Self::DoctorCleanup { inspection, .. } => Some(inspection),
-            Self::Usage | Self::ServeUnavailable => None,
+            Self::ServeCleanup { serving, .. } => Some(serving),
+            Self::Usage => None,
         }
     }
 }
@@ -77,12 +97,18 @@ pub enum CliOutcome {
     /// scan. It opens an already initialized node, authenticates its current
     /// head receipt, and then shuts the node down cleanly.
     Doctor(DoctorReport),
+    /// `fg serve` completed one fully drained git-daemon session.
+    Served {
+        /// Socket address actually bound for this bounded session.
+        listen_address: SocketAddr,
+        /// Whether the session completed an empty advertisement or a pack.
+        session: GitDaemonSessionOutcome,
+    },
 }
 
 /// Executes a bounded command invocation without ambient configuration.
 pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
     match arguments {
-        [command] if command == "serve" => Err(CliRefusal::ServeUnavailable),
         [command, storage_root, tenant, repository] if command == "init" => {
             let (node, initialization) =
                 OneNode::init(node_config(storage_root, tenant, repository)?)
@@ -101,6 +127,26 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 (Ok(_), Err(cleanup)) => Err(CliRefusal::Node(cleanup)),
                 (Err(inspection), Err(cleanup)) => Err(CliRefusal::DoctorCleanup {
                     inspection: Box::new(inspection),
+                    cleanup: Box::new(cleanup),
+                }),
+            }
+        }
+        [command, storage_root, tenant, repository, listen_address] if command == "serve" => {
+            let listener = TcpListener::bind(listen_address).map_err(CliRefusal::Listener)?;
+            let listen_address = listener.local_addr().map_err(CliRefusal::Listener)?;
+            let node = OneNode::open_existing(node_config(storage_root, tenant, repository)?)
+                .map_err(CliRefusal::Node)?;
+            let serving = node.serve_git_daemon_once(&listener);
+            let cleanup = node.shutdown();
+            match (serving, cleanup) {
+                (Ok(session), Ok(())) => Ok(CliOutcome::Served {
+                    listen_address,
+                    session,
+                }),
+                (Err(serving), Ok(())) => Err(CliRefusal::Serve(serving)),
+                (Ok(_), Err(cleanup)) => Err(CliRefusal::Node(cleanup)),
+                (Err(serving), Err(cleanup)) => Err(CliRefusal::ServeCleanup {
+                    serving: Box::new(serving),
                     cleanup: Box::new(cleanup),
                 }),
             }
@@ -152,11 +198,8 @@ mod tests {
     }
 
     #[test]
-    fn serve_is_a_typed_refusal_until_a_real_gateway_is_published() {
-        assert!(matches!(
-            run(&["serve".to_owned()]),
-            Err(CliRefusal::ServeUnavailable)
-        ));
+    fn serve_requires_a_complete_bounded_listener_configuration() {
+        assert!(matches!(run(&["serve".to_owned()]), Err(CliRefusal::Usage)));
     }
 
     #[test]

@@ -1185,6 +1185,127 @@ impl GitDaemonSessionReceipt {
     }
 }
 
+/// Evidence that a client received the complete advertisement for an empty
+/// repository.
+///
+/// Empty repositories have no reachable objects to negotiate, so a flush after
+/// the standard zero-identity advertisement is the complete upload-pack
+/// response.  Recording this separately prevents callers from claiming a pack
+/// was emitted when no pack was required.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitDaemonAdvertisementReceipt {
+    request: GitDaemonRequest,
+}
+
+impl GitDaemonAdvertisementReceipt {
+    /// Returns the parsed git-daemon service request that selected the empty
+    /// repository advertisement.
+    #[must_use]
+    pub const fn request(&self) -> &GitDaemonRequest {
+        &self.request
+    }
+}
+
+/// The complete observable result of one legacy git-daemon session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GitDaemonSessionOutcome {
+    /// The repository was canonically empty, so advertisement plus EOF was
+    /// the complete fetch response and no pack builder was called.
+    EmptyRepository(GitDaemonAdvertisementReceipt),
+    /// Negotiation selected a request and a canonical pack payload was emitted.
+    Pack(GitDaemonSessionReceipt),
+}
+
+impl GitDaemonSessionOutcome {
+    /// Returns the request that selected this session's authenticated view.
+    #[must_use]
+    pub const fn request(&self) -> &GitDaemonRequest {
+        match self {
+            Self::EmptyRepository(receipt) => receipt.request(),
+            Self::Pack(receipt) => receipt.request(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct UnavailablePackPayload;
+
+impl PackPayloadSource for UnavailablePackPayload {
+    fn next_chunk(&mut self, _maximum_chunk_bytes: usize) -> Result<Option<Vec<u8>>, WireError> {
+        Ok(None)
+    }
+}
+
+#[derive(Debug)]
+struct UnavailablePackRefusal;
+
+impl Display for UnavailablePackRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str("no canonical pack materializer is available for this session")
+    }
+}
+
+impl Error for UnavailablePackRefusal {}
+
+/// Failure while composing one node-owned git-daemon session.
+#[derive(Debug)]
+pub enum NodeGitDaemonServeRefusal {
+    /// The daemon socket or protocol framing was refused.
+    Transport(GitDaemonTransportRefusal),
+    /// The authenticated authority-backed admission view could not be read.
+    Admission(NodeAdmissionViewRefusal),
+    /// The request selected another repository endpoint before authority work.
+    RepositoryPathMismatch,
+    /// Canonical refs exist, but their authenticated object closure has no
+    /// published closure-to-pack materializer yet.
+    PackMaterializationUnavailable {
+        /// Number of refs that were deliberately not advertised.
+        advertised_refs: usize,
+    },
+    /// A pack request reached the empty-repository fallback unexpectedly.
+    PackRequestedWithoutMaterializer,
+}
+
+impl Display for NodeGitDaemonServeRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(error) => Display::fmt(error, formatter),
+            Self::Admission(error) => Display::fmt(error, formatter),
+            Self::RepositoryPathMismatch => {
+                formatter.write_str("git-daemon request does not select this node repository")
+            }
+            Self::PackMaterializationUnavailable { advertised_refs } => write!(
+                formatter,
+                "git-daemon cannot advertise {advertised_refs} refs before an authenticated closure-to-pack materializer is available"
+            ),
+            Self::PackRequestedWithoutMaterializer => formatter.write_str(
+                "git-daemon received a pack request without a canonical pack materializer",
+            ),
+        }
+    }
+}
+
+impl Error for NodeGitDaemonServeRefusal {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Transport(error) => Some(error),
+            Self::Admission(error) => Some(error),
+            Self::RepositoryPathMismatch
+            | Self::PackMaterializationUnavailable { .. }
+            | Self::PackRequestedWithoutMaterializer => None,
+        }
+    }
+}
+
+fn node_git_daemon_serve_error(
+    error: GitDaemonServeError<UnavailablePackRefusal>,
+) -> NodeGitDaemonServeRefusal {
+    match error {
+        GitDaemonServeError::Transport(error) => NodeGitDaemonServeRefusal::Transport(error),
+        GitDaemonServeError::Pack(_) => NodeGitDaemonServeRefusal::PackRequestedWithoutMaterializer,
+    }
+}
+
 /// Parses one complete git-daemon opening pkt-line.
 ///
 /// Only legacy V0 `git-upload-pack` is accepted for the first-clone vertical
@@ -1224,17 +1345,20 @@ pub fn parse_git_daemon_request(
 ///
 /// The first-clone lane advertises exactly the supplied capabilities. Its
 /// intended caller passes an empty capability set, yielding raw `PACK` bytes
-/// after the final negotiated ACK/NAK. When a later caller explicitly enables
-/// `side-band-64k`, this adapter preserves the wire crate's bounded
-/// pull/write ordering and emits a terminal flush after the payload.
+/// after the final negotiated ACK/NAK. An authenticated empty repository is
+/// complete without negotiation or a pack, so its advertisement returns an
+/// [`GitDaemonSessionOutcome::EmptyRepository`] immediately. When a later
+/// caller explicitly enables `side-band-64k`, this adapter preserves the wire
+/// crate's bounded pull/write ordering and emits a terminal flush after the
+/// payload.
 pub fn serve_git_daemon_upload_pack<R, W, BuildPack, Payload, PackError>(
     reader: &mut R,
     writer: &mut W,
     repository: &impl UploadPackRepository,
     capabilities: Capabilities,
     limits: WireLimits,
-    mut build_pack: BuildPack,
-) -> Result<GitDaemonSessionReceipt, GitDaemonServeError<PackError>>
+    build_pack: BuildPack,
+) -> Result<GitDaemonSessionOutcome, GitDaemonServeError<PackError>>
 where
     R: Read,
     W: Write,
@@ -1243,6 +1367,38 @@ where
 {
     let request =
         read_git_daemon_request(reader, &limits).map_err(GitDaemonServeError::Transport)?;
+    serve_git_daemon_upload_pack_after_greeting(
+        reader,
+        writer,
+        request,
+        repository,
+        capabilities,
+        limits,
+        build_pack,
+    )
+}
+
+/// Completes one upload-pack session after its git-daemon greeting was read.
+///
+/// Keeping this half of the session beside [`serve_git_daemon_upload_pack`]
+/// lets a node validate the parsed opaque repository key before it refreshes
+/// authority-backed state, without duplicating any advertisement, negotiation,
+/// or pack-emission behavior from `fgit-wire`.
+fn serve_git_daemon_upload_pack_after_greeting<R, W, BuildPack, Payload, PackError>(
+    reader: &mut R,
+    writer: &mut W,
+    request: GitDaemonRequest,
+    repository: &impl UploadPackRepository,
+    capabilities: Capabilities,
+    limits: WireLimits,
+    mut build_pack: BuildPack,
+) -> Result<GitDaemonSessionOutcome, GitDaemonServeError<PackError>>
+where
+    R: Read,
+    W: Write,
+    BuildPack: FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, PackError>,
+    Payload: PackPayloadSource,
+{
     let advertisement = V1Advertisement::new(
         repository.advertised_refs().to_vec(),
         capabilities.clone(),
@@ -1258,6 +1414,12 @@ where
         &limits,
     )
     .map_err(GitDaemonServeError::Transport)?;
+
+    if repository.advertised_refs().is_empty() {
+        return Ok(GitDaemonSessionOutcome::EmptyRepository(
+            GitDaemonAdvertisementReceipt { request },
+        ));
+    }
 
     let mut machine = LegacyUploadPack::new(UploadPackVersion::V0, capabilities, limits.clone())
         .map_err(|error| GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error)))?;
@@ -1299,10 +1461,10 @@ where
                 build_pack(&request, &pack_request).map_err(GitDaemonServeError::Pack)?;
             emit_pack_payload(writer, &mut payload, &pack_request, &limits)
                 .map_err(GitDaemonServeError::Transport)?;
-            return Ok(GitDaemonSessionReceipt {
+            return Ok(GitDaemonSessionOutcome::Pack(GitDaemonSessionReceipt {
                 request,
                 pack_request,
-            });
+            }));
         }
     }
 }
@@ -1319,7 +1481,7 @@ pub fn serve_git_daemon_tcp_once<BuildPack, Payload, PackError>(
     capabilities: Capabilities,
     limits: WireLimits,
     build_pack: BuildPack,
-) -> Result<GitDaemonSessionReceipt, GitDaemonServeError<PackError>>
+) -> Result<GitDaemonSessionOutcome, GitDaemonServeError<PackError>>
 where
     BuildPack: FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, PackError>,
     Payload: PackPayloadSource,
@@ -1530,6 +1692,7 @@ pub struct NodeConfig {
     storage_root: PathBuf,
     tenant_id: TenantId,
     repository_id: RepositoryId,
+    git_daemon_repository_path: GitDaemonRepositoryPath,
     store_instance: StoreInstanceId,
     worker_threads: usize,
     object_format: GitHashAlgorithm,
@@ -1545,6 +1708,7 @@ impl NodeConfig {
             storage_root,
             tenant_id,
             repository_id,
+            git_daemon_repository_path: default_git_daemon_repository_path(repository_id),
             store_instance: StoreInstanceId::from_raw(1),
             worker_threads: 1,
             object_format: GitHashAlgorithm::Sha1,
@@ -1651,6 +1815,7 @@ pub struct OneNode {
     admission_materializer: DurableAdmissionMaterializer,
     head_key: HeadKey,
     fabric: LocalFilesystemFabric,
+    git_daemon_repository_path: GitDaemonRepositoryPath,
     tenant_id: TenantId,
     repository_id: RepositoryId,
     namespace: Vec<u8>,
@@ -1777,6 +1942,7 @@ impl OneNode {
             admission_materializer: DurableAdmissionMaterializer::new(admission_cache_scope),
             head_key,
             fabric,
+            git_daemon_repository_path: config.git_daemon_repository_path,
             tenant_id: config.tenant_id,
             repository_id: config.repository_id,
             namespace,
@@ -1802,6 +1968,16 @@ impl OneNode {
     #[must_use]
     pub const fn repository_id(&self) -> RepositoryId {
         self.repository_id
+    }
+
+    /// Returns the one canonical git-daemon lookup path this node serves.
+    ///
+    /// The path is an opaque transport lookup key, rather than a filesystem
+    /// location.  Matching it before any authority read prevents a listener
+    /// for one repository from answering under an alternate repository name.
+    #[must_use]
+    pub const fn git_daemon_repository_path(&self) -> &GitDaemonRepositoryPath {
+        &self.git_daemon_repository_path
     }
 
     /// Mints the bounded authority context for one node request.
@@ -1938,6 +2114,96 @@ impl OneNode {
             limits,
         )
         .map_err(NodeAdmissionViewRefusal::View)
+    }
+
+    /// Accepts and completes one legacy git-daemon upload-pack session.
+    ///
+    /// The accepted socket first supplies its bounded greeting and must name
+    /// this node's configured repository lookup path.  Only then does this
+    /// method drive the request-owned asynchronous materialization through the
+    /// node's owned runtime, producing the exact authenticated-head snapshot
+    /// used for the V0 advertisement.  This is not a synchronous
+    /// `CanonicalAdmissionStore` adapter: the admission cache remains a
+    /// derived view refreshed by the async authority contract.
+    ///
+    /// The currently complete pack materialization slice is the canonical
+    /// empty repository.  A non-empty ref state refuses before advertisement;
+    /// emitting refs without the authenticated closure-to-pack materializer
+    /// would promise objects this node cannot supply.
+    pub fn serve_git_daemon_once(
+        &self,
+        listener: &TcpListener,
+    ) -> Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal> {
+        self.serve_git_daemon_once_with_limits(listener, WireLimits::default())
+    }
+
+    /// Variant of [`Self::serve_git_daemon_once`] with an explicit bounded
+    /// transport profile for callers that own a narrower protocol policy.
+    pub fn serve_git_daemon_once_with_limits(
+        &self,
+        listener: &TcpListener,
+        limits: WireLimits,
+    ) -> Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal> {
+        let (mut stream, _) = listener.accept().map_err(|source| {
+            NodeGitDaemonServeRefusal::Transport(GitDaemonTransportRefusal::Io {
+                operation: "accept git-daemon connection",
+                source,
+            })
+        })?;
+        let greeting = read_git_daemon_request(&mut stream, &limits)
+            .map_err(NodeGitDaemonServeRefusal::Transport)?;
+        if greeting.repository_path() != &self.git_daemon_repository_path {
+            return Err(NodeGitDaemonServeRefusal::RepositoryPathMismatch);
+        }
+
+        let request = self.request_context();
+        let materialized = self
+            .runtime
+            .block_on(self.materialize_admission_in(&request))
+            .map_err(|error| {
+                NodeGitDaemonServeRefusal::Admission(NodeAdmissionViewRefusal::Materialization(
+                    error,
+                ))
+            })?;
+        let repository = AdmissionUploadPackRepository::from_snapshot(
+            materialized.snapshot(),
+            self.object_format,
+            &limits,
+        )
+        .map_err(|error| {
+            NodeGitDaemonServeRefusal::Admission(NodeAdmissionViewRefusal::View(error))
+        })?;
+        if !repository.advertised_refs().is_empty() {
+            return Err(NodeGitDaemonServeRefusal::PackMaterializationUnavailable {
+                advertised_refs: repository.advertised_refs().len(),
+            });
+        }
+
+        let mut writer = stream.try_clone().map_err(|source| {
+            NodeGitDaemonServeRefusal::Transport(GitDaemonTransportRefusal::Io {
+                operation: "duplicate git-daemon connection for response writes",
+                source,
+            })
+        })?;
+        let served = serve_git_daemon_upload_pack_after_greeting(
+            &mut stream,
+            &mut writer,
+            greeting,
+            &repository,
+            Capabilities::default(),
+            limits,
+            |_request, _pack_request| -> Result<UnavailablePackPayload, UnavailablePackRefusal> {
+                Err(UnavailablePackRefusal)
+            },
+        )
+        .map_err(node_git_daemon_serve_error)?;
+        writer.shutdown(Shutdown::Write).map_err(|source| {
+            NodeGitDaemonServeRefusal::Transport(GitDaemonTransportRefusal::Io {
+                operation: "send git-daemon response EOF",
+                source,
+            })
+        })?;
+        Ok(served)
     }
 
     /// Opens the current durable authority state as a bounded V0 upload-pack view.
@@ -2250,6 +2516,14 @@ fn object_namespace(repository_id: RepositoryId) -> Vec<u8> {
     namespace
 }
 
+fn default_git_daemon_repository_path(repository_id: RepositoryId) -> GitDaemonRepositoryPath {
+    let text = format!("/{repository_id}.git");
+    // A `RepositoryId` display value is canonical lowercase hexadecimal, so
+    // this fixed prefix/suffix construction satisfies the daemon path grammar
+    // without accepting a caller-provided filesystem spelling.
+    GitDaemonRepositoryPath(text.into_bytes())
+}
+
 fn genesis_head(repository_id: RepositoryId, ref_root: Digest) -> RepositoryAuthorityHeadBody {
     RepositoryAuthorityHeadBody {
         repository_id,
@@ -2349,10 +2623,11 @@ mod tests {
 
     use super::{
         ADMISSION_CLOSURE_KEY_PREFIX, AdmissionMaterializationRefusal, AdmissionUploadPackRefusal,
-        AdmissionUploadPackRepository, GitDaemonServeError, GitDaemonTransportRefusal, NodeConfig,
-        NodeInitialization, NodeRefusal, OneNode, admission_immutable_key, genesis_head,
-        genesis_root, initialize_embedded_repository, parse_git_daemon_request,
-        serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
+        AdmissionUploadPackRepository, GitDaemonServeError, GitDaemonSessionOutcome,
+        GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal, NodeInitialization,
+        NodeRefusal, OneNode, admission_immutable_key, genesis_head, genesis_root,
+        initialize_embedded_repository, parse_git_daemon_request, serve_git_daemon_tcp_once,
+        serve_git_daemon_upload_pack,
     };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -2659,7 +2934,7 @@ mod tests {
         let mut reader = FragmentedReader::new(client_bytes, 3);
         let mut writer = Cursor::new(Vec::new());
 
-        let receipt = serve_git_daemon_upload_pack(
+        let outcome = serve_git_daemon_upload_pack(
             &mut reader,
             &mut writer,
             &repository,
@@ -2674,6 +2949,9 @@ mod tests {
             },
         )
         .expect("complete V0 negotiation emits the canonical-pack payload");
+        let GitDaemonSessionOutcome::Pack(receipt) = outcome else {
+            panic!("a non-empty repository must negotiate and emit a pack");
+        };
 
         assert_eq!(receipt.request().repository_path().as_bytes(), b"/demo.git");
         assert_eq!(receipt.pack_request().wants, vec![repository.refs[0].oid]);
@@ -2765,12 +3043,106 @@ mod tests {
         client
             .read_to_end(&mut response)
             .expect("server response reaches write-half EOF");
-        let receipt = server
+        let outcome = server
             .join()
             .expect("server thread joins")
             .expect("server accepts the complete V0 request");
+        let GitDaemonSessionOutcome::Pack(receipt) = outcome else {
+            panic!("a non-empty repository must negotiate and emit a pack");
+        };
         assert_eq!(receipt.request().repository_path().as_bytes(), b"/demo.git");
         assert!(response.ends_with(b"PACK\0tcp"));
+    }
+
+    #[test]
+    fn one_node_serves_its_authenticated_empty_repository_without_a_fixture_pack() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
+            .expect("node initializes a canonical empty repository");
+        let repository_path = node.git_daemon_repository_path().as_bytes().to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
+        let address = listener
+            .local_addr()
+            .expect("listener reports its bound loopback address");
+        let server = thread::spawn(move || {
+            let served = node.serve_git_daemon_once_with_limits(&listener, WireLimits::default());
+            let shutdown = node.shutdown();
+            (served, shutdown)
+        });
+
+        let mut client = TcpStream::connect(address).expect("client connects to node listener");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("client read timeout configures");
+        let greeting_payload = [
+            b"git-upload-pack ".as_slice(),
+            repository_path.as_slice(),
+            b"\0host=loopback\0".as_slice(),
+        ]
+        .concat();
+        let greeting = daemon_greeting(&greeting_payload);
+        std::io::Write::write_all(&mut client, &greeting).expect("client greeting writes");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client closes its greeting half");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .expect("empty repository advertisement reaches EOF");
+
+        let (served, shutdown) = server.join().expect("node server thread joins");
+        shutdown.expect("node drains and shuts down after the one session");
+        let served = served.expect("empty canonical admission state serves");
+        assert!(matches!(
+            served,
+            GitDaemonSessionOutcome::EmptyRepository(_)
+        ));
+        assert_eq!(
+            served.request().repository_path().as_bytes(),
+            repository_path
+        );
+        assert_eq!(
+            response, b"0000",
+            "the empty V0 advertisement is supplied by fgit-wire and no fixture pack follows"
+        );
+    }
+
+    #[test]
+    fn one_node_refuses_a_different_daemon_path_before_authority_materialization() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
+            .expect("node initializes a canonical empty repository");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
+        let address = listener
+            .local_addr()
+            .expect("listener reports its bound loopback address");
+        let server = thread::spawn(move || {
+            let served = node.serve_git_daemon_once_with_limits(&listener, WireLimits::default());
+            let shutdown = node.shutdown();
+            (served, shutdown)
+        });
+
+        let mut client = TcpStream::connect(address).expect("client connects to node listener");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("client read timeout configures");
+        let greeting = daemon_greeting(b"git-upload-pack /other.git\0host=loopback\0");
+        std::io::Write::write_all(&mut client, &greeting).expect("client greeting writes");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client closes its greeting half");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .expect("rejected session reaches EOF");
+
+        let (served, shutdown) = server.join().expect("node server thread joins");
+        shutdown.expect("node drains and shuts down after rejecting the session");
+        assert!(matches!(
+            served,
+            Err(NodeGitDaemonServeRefusal::RepositoryPathMismatch)
+        ));
+        assert!(response.is_empty(), "no repository state is advertised");
     }
 
     #[test]
