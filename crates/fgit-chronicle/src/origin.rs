@@ -88,20 +88,20 @@ impl PublicationBasis {
     }
 }
 
-/// The state a batch's evaluation resulted in.
+/// The non-outcome state a batch's evaluation resulted in.
 ///
 /// These roots are computed by transaction evaluation, not by this crate. The
 /// chronicle's job is to refuse a pair whose batch and head disagree about
 /// them, and to refuse a batch that committed nothing yet moved the ones a
-/// refusal may never move.
+/// refusal may never move. The cumulative outcome-index root is deliberately
+/// absent: it is derived only after sealing from authority-owned carried leaves
+/// and the batch's stamped terminal outcomes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResultingRoots {
     /// Root over the resulting ref state.
     pub ref_root: Digest,
     /// Root over the resulting forge position.
     pub forge_position_root: Digest,
-    /// Root over the rebuildable outcome index.
-    pub outcome_index_root: Digest,
     /// Root over the resulting retention state.
     pub retention_root: Digest,
     /// Root over the resulting external-effect outbox.
@@ -116,34 +116,18 @@ pub struct ResultingRoots {
 }
 
 impl ResultingRoots {
-    /// The roots an unchanged repository carries forward from `basis`.
+    /// The non-outcome roots an unchanged repository carries forward from
+    /// `basis`.
     ///
     /// A refusal-only batch starts here: it consumes decision sequence and
-    /// records evidence, and it moves nothing else.
+    /// records evidence, and it moves no committed root. Its outcome index is
+    /// still derived at sealing because refusals are terminal outcomes.
     #[must_use]
     pub const fn carried_forward(basis: &PublicationBasis) -> Self {
         let head = basis.body();
         Self {
             ref_root: head.ref_root,
             forge_position_root: head.forge_position_root,
-            // KNOWN DEFECT, tracked as frankengit-d6nl. Carrying this one
-            // forward is wrong: a batch cannot be empty, refusals ARE outcome
-            // index entries (fgit-authority encode_outcome matches Refused), and
-            // the index is cumulative. So a refusal-only publication ships a
-            // head whose index root omits the very refusals it just made
-            // canonical. Demonstrated: two refusal-only batches differing in
-            // refusal code AND refusal-record identity publish byte-identical
-            // roots, both equal to the predecessor's.
-            //
-            // NOT fixed here, deliberately. The correct value needs the
-            // cumulative leaf set, and no incremental fold exists because
-            // outcome_index_root sorts leaves by digest (outcome.rs:806), so a
-            // new leaf's position depends on leaves a root does not carry. The
-            // remedy is a pending design decision -- see d6nl and boet -- and
-            // choosing one here would be this crate taking a cross-crate call
-            // that fgit-authority explicitly declines to take alone
-            // (outcome.rs:789).
-            outcome_index_root: head.outcome_index_root,
             retention_root: head.retention_root,
             outbox_root: head.outbox_root,
             policy_epoch: head.policy_epoch,

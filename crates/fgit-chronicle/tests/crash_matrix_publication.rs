@@ -32,7 +32,8 @@
 use fgit_authority::{
     AuthorityOpKind, AuthorityStore, FaultDirective, FaultKind, FaultPlan, FaultableAuthorityStore,
     HeadInit, HeadKey, HeadRead, MemoryAuthorityStore, OutcomeLookup, StoreInstanceId,
-    canonical_body_id, indexed_outcome, initialize_repository, replay_outcome, resolve_outcome,
+    canonical_body_id, collect_cumulative_outcomes, indexed_outcome, initialize_repository,
+    replay_outcome, resolve_outcome,
 };
 use fgit_chronicle::{
     LostCandidate, PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots,
@@ -126,7 +127,6 @@ fn committed_roots() -> ResultingRoots {
     ResultingRoots {
         ref_root: digest(0x30),
         forge_position_root: digest(0x31),
-        outcome_index_root: digest(0x32),
         retention_root: digest(0x33),
         outbox_root: digest(0x34),
         policy_epoch: PolicyEpoch::FIRST,
@@ -140,7 +140,6 @@ fn refusal_only_roots(previous: &RepositoryAuthorityHeadBody) -> ResultingRoots 
     ResultingRoots {
         ref_root: previous.ref_root,
         forge_position_root: previous.forge_position_root,
-        outcome_index_root: digest(0x42),
         retention_root: previous.retention_root,
         outbox_root: previous.outbox_root,
         policy_epoch: previous.policy_epoch,
@@ -174,11 +173,24 @@ fn opened(plan: FaultPlan) -> (MemoryAuthorityStore, PublicationBasis) {
     (store, PublicationBasis::new(identity_of(&head), head))
 }
 
-fn commit_candidate(basis: &PublicationBasis, tag: u8) -> VerifiedPublication {
+fn seal_against(
+    store: &MemoryAuthorityStore,
+    plan: PublicationPlan,
+    roots: ResultingRoots,
+) -> Result<VerifiedPublication, fgit_chronicle::ChronicleRefusal> {
+    let outcomes =
+        collect_cumulative_outcomes(store, &head_key()).expect("outcomes collect from the basis");
+    plan.seal(&CryptoBodyIdentity, roots, &outcomes, current_token(store))
+}
+
+fn commit_candidate(
+    store: &MemoryAuthorityStore,
+    basis: &PublicationBasis,
+    tag: u8,
+) -> VerifiedPublication {
     let mut plan = PublicationPlan::open(basis.clone()).expect("the basis opens");
     plan.commit(record(tag));
-    plan.seal(&CryptoBodyIdentity, committed_roots())
-        .expect("the plan is well formed")
+    seal_against(store, plan, committed_roots()).expect("the plan is well formed")
 }
 
 fn current_token(store: &MemoryAuthorityStore) -> fgit_authority::AuthorityVersionToken {
@@ -315,7 +327,7 @@ fn a_publication_whose_head_replacement_never_applies_publishes_nothing() {
         AuthorityOpKind::CompareExchangeHead,
         FaultKind::LoseRequest,
     );
-    let candidate = commit_candidate(&basis, 0xa1);
+    let candidate = commit_candidate(&store, &basis, 0xa1);
     let tx = candidate.batch().decisions[0].tx_id;
 
     let outcome = publish(&store, &head_key(), token, &candidate, tenant());
@@ -375,7 +387,7 @@ fn a_head_that_moved_without_answering_still_makes_its_decision_canonical() {
         AuthorityOpKind::CompareExchangeHead,
         FaultKind::LoseResponse,
     );
-    let candidate = commit_candidate(&basis, 0xb2);
+    let candidate = commit_candidate(&store, &basis, 0xb2);
     let tx = candidate.batch().decisions[0].tx_id;
 
     let answer = publish(&store, &head_key(), token, &candidate, tenant());
@@ -462,8 +474,7 @@ fn a_publication_interrupted_inside_the_accelerator_leaves_every_decision_canoni
         RefusalCode::NonFastForwardRefused,
         derived!(RefusalRecordId, 0xc2),
     );
-    let candidate = plan
-        .seal(&CryptoBodyIdentity, refusal_only_roots(&genesis()))
+    let candidate = seal_against(&store, plan, refusal_only_roots(&genesis()))
         .expect("a refusal-only plan is well formed");
 
     let _ = publish(&store, &head_key(), token, &candidate, tenant());
@@ -522,7 +533,8 @@ fn an_older_valid_head_never_silently_replaces_a_newer_one() {
     let (store, basis) = opened(FaultPlan::none());
     let stale_token = current_token(&store);
 
-    let first = commit_candidate(&basis, 0xd1);
+    let first = commit_candidate(&store, &basis, 0xd1);
+    let rollback = commit_candidate(&store, &basis, 0xd2);
     let verdict = publish(&store, &head_key(), stale_token, &first, tenant())
         .expect("the first publication runs");
     let PublicationVerdict::Published(receipt) = verdict else {
@@ -533,7 +545,6 @@ fn an_older_valid_head_never_silently_replaces_a_newer_one() {
 
     // A second candidate prepared against the ORIGINAL basis, replayed with
     // the ORIGINAL token: the rollback attempt.
-    let rollback = commit_candidate(&basis, 0xd2);
     let verdict = publish(&store, &head_key(), stale_token, &rollback, tenant())
         .expect("the attempt is answered rather than erroring");
     assert!(
@@ -557,7 +568,7 @@ fn an_older_valid_head_never_silently_replaces_a_newer_one() {
 fn a_generation_may_only_move_forward_across_a_publication() {
     let (store, basis) = opened(FaultPlan::none());
     let before = current_head(&store).generation;
-    let candidate = commit_candidate(&basis, 0xe1);
+    let candidate = commit_candidate(&store, &basis, 0xe1);
     let token = current_token(&store);
     let verdict =
         publish(&store, &head_key(), token, &candidate, tenant()).expect("publication runs");
@@ -584,7 +595,7 @@ fn an_interrupted_publication_resumes_without_deciding_twice() {
         AuthorityOpKind::CompareExchangeHead,
         FaultKind::LoseResponse,
     );
-    let candidate = commit_candidate(&basis, 0xf1);
+    let candidate = commit_candidate(&store, &basis, 0xf1);
     let tx = candidate.batch().decisions[0].tx_id;
     let _ = publish(&store, &head_key(), token, &candidate, tenant());
     assert_fault_delivered(
@@ -651,13 +662,12 @@ fn a_cas_loser_replans_the_same_sealed_transaction_against_the_new_head() {
     let mut loser_record = record(0x9b);
     loser_record.tx_id = loser_tx;
     loser_plan.commit(loser_record.clone());
-    let loser = loser_plan
-        .seal(&CryptoBodyIdentity, committed_roots())
+    let loser = seal_against(&store, loser_plan, committed_roots())
         .expect("the loser's plan is well formed");
     let original_sequence = loser.batch().decisions[0].decision_sequence;
 
     // The winner publishes first, using the same token.
-    let winner = commit_candidate(&basis, 0x8a);
+    let winner = commit_candidate(&store, &basis, 0x8a);
     let verdict =
         publish(&store, &head_key(), token, &winner, tenant()).expect("the winner publishes");
     assert!(
@@ -681,9 +691,8 @@ fn a_cas_loser_replans_the_same_sealed_transaction_against_the_new_head() {
     let new_basis = PublicationBasis::new(identity_of(&winner_head), winner_head);
     let mut replan = PublicationPlan::open(new_basis).expect("the new basis opens");
     replan.commit(loser_record);
-    let replanned = replan
-        .seal(&CryptoBodyIdentity, committed_roots())
-        .expect("the replanned plan is well formed");
+    let replanned =
+        seal_against(&store, replan, committed_roots()).expect("the replanned plan is well formed");
 
     assert_eq!(
         replanned.batch().decisions[0].tx_id,
@@ -722,8 +731,7 @@ fn a_refusal_only_batch_consumes_decision_sequence_and_moves_no_source_state() {
         RefusalCode::PublicationPolicyRefused,
         derived!(RefusalRecordId, 0x71),
     );
-    let candidate = plan
-        .seal(&CryptoBodyIdentity, refusal_only_roots(&before))
+    let candidate = seal_against(&store, plan, refusal_only_roots(&before))
         .expect("a refusal-only plan is well formed");
 
     let token = current_token(&store);
@@ -762,7 +770,7 @@ fn a_refusal_only_batch_consumes_decision_sequence_and_moves_no_source_state() {
 #[test]
 fn a_duplicate_transaction_cannot_be_assembled() {
     // Audited defect 1, assembly half. Fixed at 06b65dc; this holds it fixed.
-    let (_, basis) = opened(FaultPlan::none());
+    let (store, basis) = opened(FaultPlan::none());
     let tx = derived!(TxId, 0x55);
 
     let mut plan = PublicationPlan::open(basis).expect("the basis opens");
@@ -775,8 +783,7 @@ fn a_duplicate_transaction_cannot_be_assembled() {
     duplicate.tx_id = tx;
     plan.commit(duplicate);
 
-    let refusal = plan
-        .seal(&CryptoBodyIdentity, committed_roots())
+    let refusal = seal_against(&store, plan, committed_roots())
         .expect_err("one sealed transaction may not take two terminal decisions");
     assert!(
         format!("{refusal:?}").contains("DuplicateTransaction"),
@@ -789,7 +796,7 @@ fn a_duplicate_transaction_cannot_pass_the_audit_either() {
     // Audited defect 1, audit half. A batch that reached an auditor as DATA —
     // from replay, recovery, or a peer — must be rejected even though no
     // builder on this machine could have produced it.
-    let (_, basis) = opened(FaultPlan::none());
+    let (store, basis) = opened(FaultPlan::none());
     let tx = derived!(TxId, 0x66);
 
     let mut plan = PublicationPlan::open(basis.clone()).expect("the basis opens");
@@ -798,8 +805,7 @@ fn a_duplicate_transaction_cannot_pass_the_audit_either() {
         RefusalCode::ExpectedOldRefMismatch,
         derived!(RefusalRecordId, 0x66),
     );
-    let sound = plan
-        .seal(&CryptoBodyIdentity, refusal_only_roots(&genesis()))
+    let sound = seal_against(&store, plan, refusal_only_roots(&genesis()))
         .expect("a single refusal is well formed");
 
     // Forge the duplicate directly in the body, bypassing the builder. The

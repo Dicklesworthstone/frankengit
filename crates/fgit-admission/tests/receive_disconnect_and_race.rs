@@ -221,7 +221,6 @@ impl AdmissionProjection for UnboundAdapter {
         let roots = ResultingRoots {
             ref_root: self.digest(2),
             forge_position_root: self.digest(3),
-            outcome_index_root: self.digest(4),
             retention_root: basis.body().retention_root,
             outbox_root: self.digest(5),
             policy_epoch: basis.body().policy_epoch,
@@ -1254,7 +1253,6 @@ impl AdmissionEvidence for StubEvidence {
         Ok(CommitEvidence {
             principal_snapshot_id: principal_snapshot(),
             forge_event_batch_root: digest(8),
-            outcome_index_root: digest(4),
             policy_decision_root: digest(9),
             invariant_evidence_root: digest(10),
             outbox_effect_root: digest(11),

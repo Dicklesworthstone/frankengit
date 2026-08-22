@@ -430,7 +430,6 @@ impl AdmissionEvidence for StubEvidence {
         Ok(CommitEvidence {
             principal_snapshot_id: principal_snapshot(),
             forge_event_batch_root: digest(8),
-            outcome_index_root: digest(4),
             policy_decision_root: digest(9),
             invariant_evidence_root: digest(10),
             outbox_effect_root: digest(11),

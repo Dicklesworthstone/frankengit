@@ -1,5 +1,6 @@
 //! The builder that cannot express an ill-formed publication.
 
+use fgit_authority::{AuthorityVersionToken, CumulativeOutcomes, TerminalOutcome};
 use fgit_codec::attest::BodyIdentity;
 use fgit_codec::schema::{
     RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecision,
@@ -120,10 +121,18 @@ impl PublicationPlan {
     /// The result is verified by [`verify_pair`] before it is returned, so the
     /// builder and the total checker can never disagree about what well formed
     /// means.
+    ///
+    /// `cumulative_outcomes` must be collected from the authority against the
+    /// same receipt whose token is `expected_head_token`. This method stamps
+    /// every decision before folding those terminal outcomes into that witness;
+    /// it deliberately accepts no outcome-index digest from evaluation or a
+    /// provider.
     pub fn seal<I>(
         self,
         identity: &I,
         roots: ResultingRoots,
+        cumulative_outcomes: &CumulativeOutcomes,
+        expected_head_token: AuthorityVersionToken,
     ) -> Result<VerifiedPublication, ChronicleRefusal>
     where
         I: BodyIdentity + ?Sized,
@@ -176,6 +185,27 @@ impl PublicationPlan {
                 Some(record.repository_sequence)
             });
 
+        // Outcome-index leaves are only complete after this plan has assigned
+        // every terminal decision sequence and bound every committed record
+        // identity.  The authority witness is tied to the exact CAS token, so
+        // a collector racing a head movement refuses before any candidate body
+        // can carry a root for the wrong predecessor.
+        let stamped = decisions
+            .iter()
+            .map(|decision| {
+                (
+                    decision.tx_id,
+                    TerminalOutcome {
+                        decision_sequence: decision.decision_sequence,
+                        outcome: decision.outcome,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let outcome_index_root = cumulative_outcomes
+            .fold_against(expected_head_token, &stamped)
+            .map_err(|failure| ChronicleRefusal::OutcomeIndexDerivation(Box::new(failure)))?;
+
         let batch_evidence_root = derive_batch_evidence_root(&decisions, &committed_rcrs)?;
         let batch = RepositoryDecisionBatchBody {
             repository_id: previous.repository_id,
@@ -186,7 +216,7 @@ impl PublicationPlan {
             committed_rcrs,
             resulting_ref_root: roots.ref_root,
             resulting_forge_position_root: roots.forge_position_root,
-            resulting_outcome_index_root: roots.outcome_index_root,
+            resulting_outcome_index_root: outcome_index_root,
             resulting_retention_root: roots.retention_root,
             resulting_outbox_root: roots.outbox_root,
             resulting_policy_epoch: roots.policy_epoch,
@@ -206,7 +236,7 @@ impl PublicationPlan {
             latest_repository_sequence,
             ref_root: roots.ref_root,
             forge_position_root: roots.forge_position_root,
-            outcome_index_root: roots.outcome_index_root,
+            outcome_index_root,
             retention_root: roots.retention_root,
             outbox_root: roots.outbox_root,
             configuration_root: previous.configuration_root,
@@ -225,7 +255,7 @@ impl PublicationPlan {
 
     /// Records the first refusal seen while building; later ones do not
     /// overwrite it, because the first is the one that explains the rest.
-    const fn note(&mut self, refusal: ChronicleRefusal) {
+    fn note(&mut self, refusal: ChronicleRefusal) {
         if self.deferred.is_none() {
             self.deferred = Some(refusal);
         }

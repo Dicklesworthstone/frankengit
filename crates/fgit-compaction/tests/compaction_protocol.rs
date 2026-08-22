@@ -1,8 +1,8 @@
 //! Acceptance coverage for FG-079's decision-log and segment-compaction slice.
 
 use fgit_authority::{
-    AuthorityStore, HeadKey, HeadRead, MemoryAuthorityStore, StoreInstanceId,
-    authority_head_identity, initialize_repository,
+    AuthorityStore, CumulativeOutcomes, HeadKey, HeadRead, MemoryAuthorityStore, StoreInstanceId,
+    authority_head_identity, collect_cumulative_outcomes, initialize_repository,
 };
 use fgit_chronicle::{PublicationBasis, PublicationPlan, ResultingRoots};
 use fgit_codec::schema::{RepositoryAuthorityHeadBody, RepositoryCommitRecord};
@@ -139,7 +139,6 @@ fn roots(compaction_generation_link: Option<Digest>) -> ResultingRoots {
     ResultingRoots {
         ref_root: digest(0x10),
         forge_position_root: digest(0x11),
-        outcome_index_root: digest(0x12),
         retention_root: digest(0x13),
         outbox_root: digest(0x14),
         policy_epoch: PolicyEpoch::FIRST,
@@ -168,17 +167,39 @@ fn commit_record(compaction_generation_link: Digest) -> RepositoryCommitRecord {
     }
 }
 
+/// Compaction's direct constructor probes do not publish the manufactured
+/// bases.  Supply the production witness shape here; the chronicle regression
+/// test covers the shared-store post-stamp derivation itself.
+fn fixture_outcomes() -> (CumulativeOutcomes, fgit_authority::AuthorityVersionToken) {
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7979));
+    let head_key = HeadKey::new(b"compaction/publication-fixture".to_vec())
+        .expect("fixture head key is admissible");
+    initialize_repository(&store, &head_key, &genesis_head()).expect("fixture genesis initializes");
+    let receipt = match store.read_head(&head_key).expect("fixture head reads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("fixture genesis exists"),
+    };
+    let outcomes =
+        collect_cumulative_outcomes(&store, &head_key).expect("fixture outcomes collect");
+    (outcomes, receipt.token())
+}
+
+fn seal_fixture(
+    plan: PublicationPlan,
+    roots: ResultingRoots,
+) -> fgit_chronicle::VerifiedPublication {
+    let (outcomes, expected) = fixture_outcomes();
+    plan.seal(&CryptoBodyIdentity, roots, &outcomes, expected)
+        .expect("ordinary compaction decision is well formed")
+}
+
 fn publication(
     input: PublicationBasis,
     staged: &StagedCompaction,
 ) -> fgit_chronicle::VerifiedPublication {
     let mut plan = PublicationPlan::open(input).expect("authenticated basis opens a plan");
     plan.commit(commit_record(staged.compaction_generation_link()));
-    plan.seal(
-        &CryptoBodyIdentity,
-        roots(Some(staged.compaction_generation_link())),
-    )
-    .expect("ordinary compaction decision is well formed")
+    seal_fixture(plan, roots(Some(staged.compaction_generation_link())))
 }
 
 fn current_token(
@@ -353,12 +374,7 @@ fn publication_without_rcr_evidence_link_stays_staged_even_when_batch_link_match
     let staged = stage(&input);
     let mut plan = PublicationPlan::open(input.clone()).expect("basis opens a plan");
     plan.commit(commit_record(digest(0x91)));
-    let publication = plan
-        .seal(
-            &CryptoBodyIdentity,
-            roots(Some(staged.compaction_generation_link())),
-        )
-        .expect("the generic batch itself is valid");
+    let publication = seal_fixture(plan, roots(Some(staged.compaction_generation_link())));
     let head_key = HeadKey::new(b"fg079/no-rcr-link".to_vec()).expect("bounded head key");
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7b));
     initialize_repository(&store, &head_key, input.body()).expect("genesis initializes");
@@ -442,8 +458,7 @@ fn publication_with_link(
 ) -> fgit_chronicle::VerifiedPublication {
     let mut plan = PublicationPlan::open(input).expect("authenticated basis opens a plan");
     plan.commit(commit_record(link));
-    plan.seal(&CryptoBodyIdentity, roots(Some(link)))
-        .expect("an ordinary decision is well formed")
+    seal_fixture(plan, roots(Some(link)))
 }
 
 /// A publication carrying only a refusal, so no committed RCR exists.
@@ -454,8 +469,7 @@ fn refusal_only_publication(input: PublicationBasis) -> fgit_chronicle::Verified
         RefusalCode::IntentExpired,
         derived!(RefusalRecordId, 0x72),
     );
-    plan.seal(&CryptoBodyIdentity, roots(None))
-        .expect("a refusal-only batch is well formed")
+    seal_fixture(plan, roots(None))
 }
 
 /// A store that is a **complete** delegate except for one deliberately

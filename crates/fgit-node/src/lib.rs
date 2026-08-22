@@ -3792,7 +3792,10 @@ mod tests {
         CanonicalRefState, CommitEvidence, PermittedObjectClosure, RefusalMaterialization,
         canonical_ref_state_root,
     };
-    use fgit_authority::{AsyncAuthorityStore, HeadInit, HeadRead, ImmutableRead, OutcomeLookup};
+    use fgit_authority::{
+        AsyncAuthorityStore, HeadInit, HeadRead, ImmutableRead, OutcomeLookup,
+        collect_cumulative_outcomes_async,
+    };
     use fgit_chronicle::{
         ChronicleRefusal, PublicationBasis, PublicationPlan, ResultingRoots, batch_identity,
     };
@@ -4674,8 +4677,21 @@ mod tests {
         roots.ref_root = ref_root;
         let mut commit_plan = PublicationPlan::open(genesis_basis).expect("genesis opens a plan");
         commit_plan.commit(record);
+        let genesis_outcomes = node
+            .runtime()
+            .block_on(collect_cumulative_outcomes_async(
+                &node.authority,
+                request.authority(),
+                &node.head_key,
+            ))
+            .expect("genesis outcomes collect from the authority");
         let committed = commit_plan
-            .seal(&CryptoBodyIdentity, roots)
+            .seal(
+                &CryptoBodyIdentity,
+                roots,
+                &genesis_outcomes,
+                genesis_read.token(),
+            )
             .expect("committed RCR produces a verified head pair");
         let record_id = super::repository_commit_id(
             committed
@@ -4716,8 +4732,21 @@ mod tests {
             RefusalCode::ExpectedOldRefMismatch,
             refusal_record_id(),
         );
+        let successor_outcomes = node
+            .runtime()
+            .block_on(collect_cumulative_outcomes_async(
+                &node.authority,
+                request.authority(),
+                &node.head_key,
+            ))
+            .expect("successor outcomes collect from the authority");
         let refusal_pair = refusal_publication
-            .seal(&CryptoBodyIdentity, refusal_result_roots)
+            .seal(
+                &CryptoBodyIdentity,
+                refusal_result_roots,
+                &successor_outcomes,
+                successor_read.token(),
+            )
             .expect("refusal-only successor preserves committed roots");
         node.runtime()
             .block_on(node.publish_decisions_in(
@@ -4871,8 +4900,21 @@ mod tests {
         roots.ref_root = ref_root;
         let mut plan = PublicationPlan::open(genesis_basis).expect("genesis opens a plan");
         plan.commit(record);
+        let genesis_outcomes = node
+            .runtime()
+            .block_on(collect_cumulative_outcomes_async(
+                &node.authority,
+                request.authority(),
+                &node.head_key,
+            ))
+            .expect("genesis outcomes collect from the authority");
         let committed = plan
-            .seal(&CryptoBodyIdentity, roots)
+            .seal(
+                &CryptoBodyIdentity,
+                roots,
+                &genesis_outcomes,
+                genesis_read.token(),
+            )
             .expect("the plan derives the committed RCR identity after stamping");
         let mut mismatched_batch = committed.batch().clone();
         mismatched_batch

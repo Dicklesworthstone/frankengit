@@ -7,8 +7,8 @@
 
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, HeadRead, ImmutableKey, ImmutableRead, MemoryAuthorityStore,
-    OutcomeLookup, StoreInstanceId, body_key, canonical_body_id, indexed_outcome,
-    initialize_repository,
+    OutcomeLookup, StoreInstanceId, body_key, canonical_body_id, collect_cumulative_outcomes,
+    indexed_outcome, initialize_repository,
 };
 use fgit_chronicle::{
     LostCandidate, PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots,
@@ -100,7 +100,6 @@ fn roots() -> ResultingRoots {
     ResultingRoots {
         ref_root: digest(0x30),
         forge_position_root: digest(0x31),
-        outcome_index_root: digest(0x32),
         retention_root: digest(0x33),
         outbox_root: digest(0x34),
         policy_epoch: PolicyEpoch::FIRST,
@@ -133,11 +132,26 @@ fn opened() -> (MemoryAuthorityStore, PublicationBasis) {
     (store, PublicationBasis::new(id, head))
 }
 
-fn candidate(basis: &PublicationBasis, commit_tag: u8) -> VerifiedPublication {
+fn seal_against(
+    store: &MemoryAuthorityStore,
+    plan: PublicationPlan,
+    roots: ResultingRoots,
+) -> VerifiedPublication {
+    let outcomes =
+        collect_cumulative_outcomes(store, &head_key()).expect("outcomes collect from the basis");
+    let expected = current_token(store);
+    plan.seal(&CryptoBodyIdentity, roots, &outcomes, expected)
+        .expect("the plan is well formed")
+}
+
+fn candidate(
+    store: &MemoryAuthorityStore,
+    basis: &PublicationBasis,
+    commit_tag: u8,
+) -> VerifiedPublication {
     let mut plan = PublicationPlan::open(basis.clone()).expect("the basis opens");
     plan.commit(record(commit_tag));
-    plan.seal(&CryptoBodyIdentity, roots())
-        .expect("the plan is well formed")
+    seal_against(store, plan, roots())
 }
 
 fn current_token(store: &MemoryAuthorityStore) -> fgit_authority::AuthorityVersionToken {
@@ -157,7 +171,7 @@ fn staged(store: &MemoryAuthorityStore, key: &ImmutableKey) -> bool {
 #[test]
 fn a_winning_publication_makes_every_decision_canonical_at_once() {
     let (store, basis) = opened();
-    let publication = candidate(&basis, 0x40);
+    let publication = candidate(&store, &basis, 0x40);
     let tx = publication
         .batch()
         .decisions
@@ -212,8 +226,8 @@ fn a_winning_publication_makes_every_decision_canonical_at_once() {
 fn a_losing_publication_exposes_nothing_and_may_replan() {
     let (store, basis) = opened();
     // Two candidates prepared against the same basis: only one can publish.
-    let winner = candidate(&basis, 0x50);
-    let loser = candidate(&basis, 0x60);
+    let winner = candidate(&store, &basis, 0x50);
+    let loser = candidate(&store, &basis, 0x60);
     let loser_tx = loser.batch().decisions.first().expect("one decision").tx_id;
     let loser_batch_key =
         body_key(IdentityDomain::RepositoryDecisionBatch, loser.batch()).expect("a body key");
@@ -261,8 +275,8 @@ fn a_losing_publication_exposes_nothing_and_may_replan() {
 fn a_loser_whose_transaction_was_already_decided_is_superseded() {
     let (store, basis) = opened();
     // Both candidates carry the SAME transaction; the winner decides it.
-    let winner = candidate(&basis, 0x70);
-    let loser = candidate(&basis, 0x70);
+    let winner = candidate(&store, &basis, 0x70);
+    let loser = candidate(&store, &basis, 0x70);
     let tx = loser.batch().decisions.first().expect("one decision").tx_id;
 
     let stale = current_token(&store);
@@ -292,15 +306,7 @@ fn a_refusal_only_publication_advances_the_head_without_committing() {
         RefusalCode::QuotaExceeded,
         derived!(RefusalRecordId, 0x81),
     );
-    let publication = plan
-        .seal(
-            &CryptoBodyIdentity,
-            ResultingRoots {
-                outcome_index_root: digest(0x32),
-                ..ResultingRoots::carried_forward(&basis)
-            },
-        )
-        .expect("a refusal-only plan is well formed");
+    let publication = seal_against(&store, plan, ResultingRoots::carried_forward(&basis));
     assert!(publication.is_refusal_only());
 
     let verdict = publish(

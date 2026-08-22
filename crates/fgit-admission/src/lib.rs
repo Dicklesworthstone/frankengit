@@ -22,8 +22,9 @@ use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 
 use fgit_authority::{
-    AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityStore, HeadKey, HeadRead,
-    IdempotencyKey, OutcomeFailure, OutcomeLookup, SealAttempt, SealFailure, initialize_repository,
+    AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityStore, CumulativeOutcomes,
+    HeadKey, HeadRead, IdempotencyKey, OutcomeFailure, OutcomeLookup, SealAttempt, SealFailure,
+    collect_cumulative_outcomes, collect_cumulative_outcomes_async, initialize_repository,
     seal_request,
 };
 use fgit_chronicle::{
@@ -953,8 +954,6 @@ pub struct CommitEvidence {
     pub principal_snapshot_id: PrincipalSnapshotId,
     /// Root over forge events (empty for the receive-only slice).
     pub forge_event_batch_root: Digest,
-    /// Resulting authenticated outcome-index root.
-    pub outcome_index_root: Digest,
     /// Root over policy evaluation evidence.
     pub policy_decision_root: Digest,
     /// Root over invariant checks for the candidate.
@@ -1018,7 +1017,6 @@ pub fn prepare_canonical_commit(
     let roots = ResultingRoots {
         ref_root,
         forge_position_root: basis.body().forge_position_root,
-        outcome_index_root: evidence.outcome_index_root,
         retention_root: basis.body().retention_root,
         outbox_root: basis.body().outbox_root,
         policy_epoch: basis.body().policy_epoch,
@@ -1793,11 +1791,18 @@ fn prepare_commit_publication(
     semantic: &fgit_authority::SemanticRequest,
     closure: &ValidatedClosure,
     materialization: CommitMaterialization,
+    cumulative_outcomes: &CumulativeOutcomes,
+    expected_head_token: fgit_authority::AuthorityVersionToken,
 ) -> Result<fgit_chronicle::VerifiedPublication, AdmissionError> {
     validate_commit_materialization(context, tx_id, semantic, closure, &materialization)?;
     let mut plan = PublicationPlan::open(basis.clone())?;
     plan.commit(materialization.record);
-    Ok(plan.seal(&CryptoBodyIdentity, materialization.roots)?)
+    Ok(plan.seal(
+        &CryptoBodyIdentity,
+        materialization.roots,
+        cumulative_outcomes,
+        expected_head_token,
+    )?)
 }
 
 /// Build the refusal record this attempt will publish.
@@ -1907,12 +1912,19 @@ fn refusal_body_bytes(
 fn seal_refusal_publication(
     basis: &PublicationBasis,
     refusal: &RefusalRecordBody,
+    cumulative_outcomes: &CumulativeOutcomes,
+    expected_head_token: fgit_authority::AuthorityVersionToken,
 ) -> Result<fgit_chronicle::VerifiedPublication, AdmissionError> {
     let refusal_id = refusal_record_id(refusal)?;
     let mut plan = PublicationPlan::open(basis.clone())?;
     plan.refuse(refusal.tx_id, refusal.code, refusal_id);
     let roots = ResultingRoots::carried_forward(basis);
-    Ok(plan.seal(&CryptoBodyIdentity, roots)?)
+    Ok(plan.seal(
+        &CryptoBodyIdentity,
+        roots,
+        cumulative_outcomes,
+        expected_head_token,
+    )?)
 }
 
 /// The `TxId` whose terminal decision this publication settles.
@@ -2196,6 +2208,10 @@ where
             return Ok(terminal);
         }
         let (basis, receipt, authenticated) = read_basis(store, &context.head_key)?;
+        let cumulative_outcomes = collect_cumulative_outcomes(store, &context.head_key)?;
+        if cumulative_outcomes.observed() != receipt.token() {
+            continue;
+        }
         let terminal = match plan_publication(
             projection,
             context,
@@ -2214,6 +2230,7 @@ where
                 tx_id,
                 code,
                 projection,
+                &cumulative_outcomes,
             )?,
             PlannedPublication::Commit(materialization) => publish_commit(
                 store,
@@ -2224,6 +2241,7 @@ where
                 &lowered.semantic,
                 closure,
                 *materialization,
+                &cumulative_outcomes,
             )?,
         };
         if let Some(terminal) = terminal {
@@ -2319,12 +2337,21 @@ fn publish_commit<S>(
     semantic: &fgit_authority::SemanticRequest,
     closure: &ValidatedClosure,
     materialization: CommitMaterialization,
+    cumulative_outcomes: &CumulativeOutcomes,
 ) -> Result<Option<fgit_authority::TerminalOutcome>, AdmissionError>
 where
     S: AuthorityStore + ?Sized,
 {
-    let publication =
-        prepare_commit_publication(context, basis, tx_id, semantic, closure, materialization)?;
+    let publication = prepare_commit_publication(
+        context,
+        basis,
+        tx_id,
+        semantic,
+        closure,
+        materialization,
+        cumulative_outcomes,
+        expected,
+    )?;
     outcome_after_publish(store, context, expected, &publication)
 }
 
@@ -2382,6 +2409,7 @@ fn publish_refusal<S, Projection>(
     tx_id: TxId,
     code: RefusalCode,
     projection: &Projection,
+    cumulative_outcomes: &CumulativeOutcomes,
 ) -> Result<Option<fgit_authority::TerminalOutcome>, AdmissionError>
 where
     S: AuthorityStore + ?Sized,
@@ -2391,7 +2419,7 @@ where
     let (key, bytes) = refusal_body_bytes(&refusal)?;
     store.put_if_absent(&key, &bytes)?;
 
-    let publication = seal_refusal_publication(basis, &refusal)?;
+    let publication = seal_refusal_publication(basis, &refusal, cumulative_outcomes, expected)?;
     outcome_after_publish(store, context, expected, &publication)
 }
 
@@ -2632,6 +2660,11 @@ where
         }
         let (basis, receipt, authenticated) =
             read_basis_async(store, cx, &context.head_key).await?;
+        let cumulative_outcomes =
+            collect_cumulative_outcomes_async(store, cx, &context.head_key).await?;
+        if cumulative_outcomes.observed() != receipt.token() {
+            continue;
+        }
         let preparation = prepare_publication_async(
             projection,
             store,
@@ -2671,6 +2704,7 @@ where
                     tx_id,
                     code,
                     projection,
+                    &cumulative_outcomes,
                 )
                 .await?
             }
@@ -2685,6 +2719,7 @@ where
                     &lowered.semantic,
                     closure,
                     *materialization,
+                    &cumulative_outcomes,
                 )
                 .await?
             }
@@ -2749,12 +2784,21 @@ async fn publish_commit_async<S>(
     semantic: &fgit_authority::SemanticRequest,
     closure: &ValidatedClosure,
     materialization: CommitMaterialization,
+    cumulative_outcomes: &CumulativeOutcomes,
 ) -> Result<Option<fgit_authority::TerminalOutcome>, AdmissionError>
 where
     S: AsyncAuthorityStore + ?Sized,
 {
-    let publication =
-        prepare_commit_publication(context, basis, tx_id, semantic, closure, materialization)?;
+    let publication = prepare_commit_publication(
+        context,
+        basis,
+        tx_id,
+        semantic,
+        closure,
+        materialization,
+        cumulative_outcomes,
+        expected,
+    )?;
     outcome_after_publish_async(store, cx, context, expected, &publication).await
 }
 
@@ -2779,6 +2823,7 @@ async fn publish_refusal_async<S, Projection>(
     tx_id: TxId,
     code: RefusalCode,
     projection: &Projection,
+    cumulative_outcomes: &CumulativeOutcomes,
 ) -> Result<Option<fgit_authority::TerminalOutcome>, AdmissionError>
 where
     S: AsyncAuthorityStore + ?Sized,
@@ -2789,7 +2834,7 @@ where
     let (key, bytes) = refusal_body_bytes(&refusal)?;
     store.put_if_absent(cx, &key, &bytes).await?;
 
-    let publication = seal_refusal_publication(basis, &refusal)?;
+    let publication = seal_refusal_publication(basis, &refusal, cumulative_outcomes, expected)?;
     outcome_after_publish_async(store, cx, context, expected, &publication).await
 }
 
@@ -2914,7 +2959,6 @@ mod tests {
             let roots = ResultingRoots {
                 ref_root: digest(2),
                 forge_position_root: digest(3),
-                outcome_index_root: digest(4),
                 retention_root: basis.body().retention_root,
                 outbox_root: digest(5),
                 policy_epoch: basis.body().policy_epoch,

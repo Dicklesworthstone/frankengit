@@ -4,6 +4,10 @@
 //! Every forbidden case is paired with the near-identical permitted case that
 //! proceeds, so the tests show the boundary rather than only the wall.
 
+use fgit_authority::{
+    AuthorityStore, CumulativeOutcomes, HeadKey, HeadRead, MemoryAuthorityStore, StoreInstanceId,
+    collect_cumulative_outcomes, initialize_repository,
+};
 use fgit_chronicle::{
     ChronicleRefusal, PublicationBasis, PublicationPlan, ResultingRoots, VerifiedPublication,
     batch_evidence_root, batch_identity, repository_commit_identity, verify_pair,
@@ -93,7 +97,6 @@ fn committed_roots() -> ResultingRoots {
     ResultingRoots {
         ref_root: digest(0x30),
         forge_position_root: digest(0x31),
-        outcome_index_root: digest(0x32),
         retention_root: digest(0x33),
         outbox_root: digest(0x34),
         policy_epoch: PolicyEpoch::FIRST,
@@ -103,15 +106,39 @@ fn committed_roots() -> ResultingRoots {
 
 fn refusal_only_roots() -> ResultingRoots {
     ResultingRoots {
-        outcome_index_root: digest(0x32),
         compaction_generation_link: None,
         ..ResultingRoots::carried_forward(&basis())
     }
 }
 
+/// Direct constructor tests do not publish their manufactured bases.  This
+/// real authority read supplies the same unforgeable cumulative-witness shape
+/// production sealing requires, while the dedicated post-stamp test covers a
+/// witness and basis from one shared store.
+fn fixture_outcomes() -> (CumulativeOutcomes, fgit_authority::AuthorityVersionToken) {
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x5151));
+    let head_key = HeadKey::new(b"chronicle/invariants/outcomes".to_vec())
+        .expect("fixture head key is admissible");
+    initialize_repository(&store, &head_key, &genesis_head()).expect("fixture genesis initializes");
+    let receipt = match store.read_head(&head_key).expect("fixture head reads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("fixture genesis exists"),
+    };
+    let outcomes =
+        collect_cumulative_outcomes(&store, &head_key).expect("fixture outcomes collect");
+    (outcomes, receipt.token())
+}
+
+fn seal_result(
+    plan: PublicationPlan,
+    roots: ResultingRoots,
+) -> Result<VerifiedPublication, ChronicleRefusal> {
+    let (outcomes, expected) = fixture_outcomes();
+    plan.seal(&CryptoBodyIdentity, roots, &outcomes, expected)
+}
+
 fn seal(plan: PublicationPlan, roots: &ResultingRoots) -> VerifiedPublication {
-    plan.seal(&CryptoBodyIdentity, *roots)
-        .expect("a plan built through the builder is well formed")
+    seal_result(plan, *roots).expect("a plan built through the builder is well formed")
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +257,7 @@ fn an_empty_plan_refuses_to_seal() {
     let plan = PublicationPlan::open(basis()).expect("genesis basis opens");
     assert!(plan.is_empty(), "a freshly opened plan has decided nothing");
     assert_eq!(
-        plan.seal(&CryptoBodyIdentity, refusal_only_roots()),
+        seal_result(plan, refusal_only_roots()),
         Err(ChronicleRefusal::EmptyBatch),
         "a batch that decides nothing consumes no sequence and publishes nothing"
     );
@@ -265,9 +292,7 @@ fn a_second_batch_continues_the_first_without_a_gap() {
     );
     let mut plan = PublicationPlan::open(next_basis).expect("successor basis opens");
     plan.commit(record(0x86));
-    let second = plan
-        .seal(&CryptoBodyIdentity, committed_roots())
-        .expect("the successor batch is well formed");
+    let second = seal_result(plan, committed_roots()).expect("the successor batch is well formed");
     let second_record = second
         .batch()
         .committed_rcrs
@@ -630,7 +655,7 @@ fn one_transaction_cannot_be_decided_twice_by_the_builder() {
     duplicate.tx_id = reused;
     plan.commit(duplicate);
     assert_eq!(
-        plan.seal(&CryptoBodyIdentity, committed_roots()),
+        seal_result(plan, committed_roots()),
         Err(ChronicleRefusal::DuplicateTransaction { index: 1 }),
         "the second decision for one transaction is refused, naming its index"
     );
@@ -648,7 +673,7 @@ fn one_transaction_cannot_be_decided_twice_by_the_builder() {
         derived!(RefusalRecordId, 0xE5),
     );
     assert!(matches!(
-        plan.seal(&CryptoBodyIdentity, refusal_only_roots()),
+        seal_result(plan, refusal_only_roots()),
         Err(ChronicleRefusal::DuplicateTransaction { .. })
     ));
 

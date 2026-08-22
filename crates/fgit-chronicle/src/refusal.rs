@@ -8,10 +8,15 @@ use fgit_types::{DecisionSequence, HeadGeneration, RepositorySequence};
 /// Every variant names the exact position that disagrees, because a caller
 /// that cannot see which sequence broke has to re-derive the whole batch to
 /// find out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChronicleRefusal {
     /// A batch with no decisions consumes no sequence and publishes nothing.
     EmptyBatch,
+    /// The authority-owned cumulative outcome fold refused the stamped batch.
+    ///
+    /// The caller must re-read and replan when its witness is stale; it must
+    /// not copy the predecessor root or accept a provider-minted replacement.
+    OutcomeIndexDerivation(Box<fgit_authority::OutcomeFailure>),
     /// One sealed transaction was decided twice in the same batch.
     ///
     /// A sealed transaction has at most one terminal decision, ever. Two in
@@ -200,8 +205,11 @@ pub enum ChronicleRefusal {
 
 impl fmt::Display for ChronicleRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
+        match self {
             Self::EmptyBatch => f.write_str("a decision batch must carry at least one decision"),
+            Self::OutcomeIndexDerivation(failure) => {
+                write!(f, "post-stamp outcome-index derivation refused: {failure}")
+            }
             Self::DuplicateTransaction { index } => write!(
                 f,
                 "decision {index} decides a transaction this batch already decided"
