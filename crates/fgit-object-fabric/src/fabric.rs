@@ -1160,6 +1160,10 @@ pub(crate) fn checkpoint_outcome<T, Caps>(cx: &Cx<Caps>) -> Option<Outcome<T, St
     if cx.checkpoint().is_ok() {
         return None;
     }
+    // Budget-driven cancellation always carries a reason, but Asupersync's
+    // public `set_cancel_requested(true)` can deliberately model a reasonless
+    // request. Keep that fail-closed refusal distinct from attributed runtime
+    // cancellation and pin both branches below (frankengit-emk8).
     cx.cancel_reason().map_or_else(
         || Some(Outcome::Err(StoreRefusal::RuntimeCheckpointRejected)),
         |reason| Some(Outcome::Cancelled(reason)),
@@ -1336,6 +1340,7 @@ const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync::CancelKind;
     use fgit_types::{DigestAlgorithmId, DigestBytes, GitOidSha1};
 
     use crate::{MicrosegmentBuilder, SegmentLimits, SegmentRecordInput, verify_merkle_proof};
@@ -1370,6 +1375,22 @@ mod tests {
 
     fn oid(value: u8) -> GitOid {
         GitOid::Sha1(GitOidSha1::from_bytes([value; GitOidSha1::LEN]))
+    }
+
+    #[test]
+    fn checkpoint_outcome_separates_reasonless_refusal_from_attributed_cancellation() {
+        let reasonless = Cx::detached_cancel_context();
+        reasonless.set_cancel_requested(true);
+        let reasonless_outcome: Option<Outcome<(), StoreRefusal>> = checkpoint_outcome(&reasonless);
+        assert!(matches!(
+            reasonless_outcome,
+            Some(Outcome::Err(StoreRefusal::RuntimeCheckpointRejected))
+        ));
+
+        let attributed = Cx::detached_cancel_context();
+        attributed.cancel_with(CancelKind::User, Some("attributed checkpoint cancellation"));
+        let attributed_outcome: Option<Outcome<(), StoreRefusal>> = checkpoint_outcome(&attributed);
+        assert!(matches!(attributed_outcome, Some(Outcome::Cancelled(_))));
     }
 
     fn manifest_entry(value: u8) -> ManifestEntry {
