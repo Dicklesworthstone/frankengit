@@ -1321,7 +1321,7 @@ mod tests {
 
     /// The microsegment twin of the `EngineObjectIdMismatch` probe. Same reason
     /// as every other paired probe in this crate: both profiles use
-    /// SYMBOL_BYTES = 128, so no refusal payload separates the two chains and
+    /// `SYMBOL_BYTES` = 128, so no refusal payload separates the two chains and
     /// only the entry point does.
     #[test]
     fn a_microsegment_symbol_with_a_foreign_engine_object_id_is_refused() {

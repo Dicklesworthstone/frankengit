@@ -1180,10 +1180,11 @@ mod tests {
     /// `EngineObjectIdMismatch` -- the guard I wrongly recorded as already
     /// covered in the message of 1b71402.
     ///
-    /// `ScopeMismatch` is genuinely covered (tests/raptorq_adversarial.rs:268,
-    /// 308). This one was not covered by anything: before this test its only
-    /// occurrences in the workspace were two construction sites, the enum
-    /// declaration, a Display arm, and two comments I wrote myself. A sweep that
+    /// `ScopeMismatch` is genuinely covered (`tests/raptorq_adversarial.rs`
+    /// lines 268 and 308). This one was not covered by anything: before this
+    /// test its only occurrences in the workspace were two construction sites,
+    /// the enum declaration, a `Display` arm, and two comments I wrote myself.
+    /// A sweep that
     /// matched the bare variant name rather than `RaptorRefusal::<Variant>` also
     /// missed it, because other crates carry same-named variants of different
     /// enums.
