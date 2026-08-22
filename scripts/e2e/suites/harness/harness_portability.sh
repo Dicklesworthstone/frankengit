@@ -650,3 +650,68 @@ fge_assert_eq FG-000A-PORT-039 yes "$orphan_detector_spares_declared" \
   'the orphan detector spares a root-level suite that declares why in its header'
 fge_assert_cmd FG-000A-PORT-040 'the orphan scan covered a real candidate set' \
   test "$orphan_candidates" -ge 15
+
+# ---------------------------------------------------------------------------
+# FG-091 profile gate: the manifest refusals must be able to FIRE
+#
+# The gate refuses four manifest defects. Each was verified by hand when
+# written, and a hand verification preserves nothing -- the next person to touch
+# the loader cannot tell which branches were ever exercised. These plant each
+# defect into a TEMPORARY PROFILE beside the real manifests and require the
+# specific refusal.
+#
+# WHY A TEMPORARY PROFILE RATHER THAN A COPIED TREE. The first version of this
+# probe copied run_all.sh and suites/harness into a scratch directory. Every
+# refusal passed and the CONTROL failed: script ids are derived repo-relative,
+# so a copied tree produces ids that match no manifest entry, and the good
+# manifest reported all three required suites as simultaneously missing and
+# unregistered. Four refusals passing in an environment where everything is
+# refused is exactly the vacuity the control exists to catch, and it caught it.
+#
+# `--list` throughout, so the nested runner stops after discovery and set
+# checking. This suite already runs under run_all; a nested full run would
+# execute the corpus inside the corpus.
+#
+# DELETION CONDITION: these go when the profile gate does. Not a process
+# artifact -- each fails the run if its refusal stops working, which is the
+# §16.3 boundary test for product.
+# ---------------------------------------------------------------------------
+fge_phase action
+probe_profile="zz-gate-probe-$$"
+probe_manifest_path="$E2E_ROOT/manifests/$probe_profile.tsv"
+# Registered before the file exists: a probe that dies mid-way must not leave a
+# stale manifest behind for the next run to trip over.
+fge_cleanup_register rm -f -- "$probe_manifest_path"
+good_manifest=$(cat "$E2E_ROOT/manifests/harness.tsv")
+
+probe_manifest() {
+  local body=$1 status=0
+  printf '%s\n' "$body" | cat >"$probe_manifest_path"
+  "$E2E_ROOT/run_all.sh" --profile "$probe_profile" --list >/dev/null 2>&1 || status=$?
+  printf '%s' "$status"
+}
+
+first_required=$(printf '%s\n' "$good_manifest" | grep '^suites-harness-harness_json' | head -1)
+
+probe_control=$(probe_manifest "$good_manifest")
+probe_duplicate=$(probe_manifest "$good_manifest
+$first_required")
+probe_classification=$(probe_manifest "$(printf '%s\n' "$good_manifest" |
+  sed 's/	required	mechanism/	mandatory	mechanism/')")
+probe_incomplete=$(probe_manifest "$good_manifest
+suites-harness-truncated	bead	g0")
+probe_rename=$(probe_manifest "$(printf '%s\n' "$good_manifest" |
+  sed 's/^suites-harness-harness_json	/suites-harness-harness_json_v2	/')")
+rm -f -- "$probe_manifest_path"
+
+fge_phase assert
+fge_assert_eq FG-000A-PORT-041 0 "$probe_control" \
+  'the unmodified manifest passes, so the refusals below are not refusing everything'
+fge_assert_eq FG-000A-PORT-042 2 "$probe_duplicate" \
+  'a duplicate manifest entry is refused before the run, not silently counted twice'
+fge_assert_eq FG-000A-PORT-043 2 "$probe_classification" \
+  'a mistyped classification is refused rather than dropping the row out of the required set'
+fge_assert_eq FG-000A-PORT-044 2 "$probe_incomplete" \
+  'an incomplete manifest row is refused rather than read with empty columns'
+fge_assert_eq FG-000A-PORT-045 1 "$probe_rename" \
+  'a renamed suite fails the set check: a rename is a release-surface change needing approval'
