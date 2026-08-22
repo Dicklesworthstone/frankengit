@@ -749,7 +749,7 @@ const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
 mod tests {
     use std::cell::Cell;
 
-    use fgit_object_fabric::fabric::ManifestLimits;
+    use fgit_object_fabric::fabric::{ManifestLimits, SegmentManifest as FabricManifest};
     use fgit_object_fabric::{
         DigestAlgorithm, MicrosegmentBuilder, ObjectEnvelope, ObjectKind, SegmentRecordInput,
     };
@@ -1481,6 +1481,94 @@ mod tests {
         assert!(
             led.close().is_quiescent(),
             "the budget must be released on the scope-mismatch path, not leaked"
+        );
+    }
+
+    /// `ManifestRealityMismatch`: a manifest that agrees with the scope on
+    /// namespace and digest but describes DIFFERENT records.
+    ///
+    /// This is the arm the scope guard cannot catch. `SegmentManifest::new` is
+    /// public and takes namespace, digest and entries independently, so a
+    /// manifest can be assembled that clears
+    /// `plan.manifest.namespace()/segment_digest()` against the expected scope
+    /// and still disagrees with the decoded segment's actual reality. The
+    /// entries are borrowed from a second genuinely built manifest rather than
+    /// hand-rolled, so `validate_manifest_parts` sees canonical input and the
+    /// probe fails at reality verification rather than at construction.
+    ///
+    /// Unlike the two `Candidate*` arms this bead leaves open, this one sits
+    /// after a decode that is already known to succeed -- the existing
+    /// stale/current repair test drives the same symbols to a published
+    /// placement -- so it rests on an exercised path, not on a prediction about
+    /// the decoder.
+    #[test]
+    fn a_manifest_agreeing_on_digest_but_not_on_records_is_refused_as_a_reality_mismatch() {
+        let security = security();
+        let bytes = canonical_segment();
+        let other = segment_with(b"records that the victim segment does not contain", 9);
+        let protected = protect_microsegment(&bytes, &SegmentLimits::default(), &security)
+            .expect("canonical microsegment is profile-admitted");
+
+        let truthful = manifest(&bytes);
+        let divergent = manifest(&other);
+        assert_ne!(
+            truthful.entries(),
+            divergent.entries(),
+            "the two segments must describe different records or this probe is vacuous"
+        );
+
+        // Victim namespace and digest, stranger entries: clears the scope guard,
+        // fails reality.
+        let forged = FabricManifest::new(
+            truthful.namespace().to_vec(),
+            truthful.segment_digest(),
+            divergent.entries().to_vec(),
+            Vec::new(),
+            &ManifestLimits::default(),
+        )
+        .expect("a manifest with canonical parts must build");
+        assert_eq!(
+            forged.segment_digest(),
+            protected.scope().segment_digest(),
+            "the forgery must clear the scope guard, or it would refuse earlier for another reason"
+        );
+
+        let plan = RepairPlan {
+            expected: protected.scope(),
+            manifest: &forged,
+            authority_basis: head(7),
+        };
+        let led = ledger(13);
+        let authority = TestAuthority {
+            revalidation: AuthorityRevalidation::StillCurrent,
+            published: Cell::new(false),
+        };
+        let budget = led
+            .grant(ResourceVector::from_grades(&[
+                (Grade::Bytes, 4096),
+                (Grade::CpuMicros, 100),
+            ]))
+            .expect("test repair budget is available");
+
+        assert_eq!(
+            repair_microsegment(
+                plan,
+                &lossy_symbols(&protected),
+                &SegmentLimits::default(),
+                &security,
+                &led,
+                budget,
+                &authority,
+            ),
+            Err(RaptorRefusal::ManifestRealityMismatch)
+        );
+        assert!(
+            !authority.published.get(),
+            "a manifest that misdescribes the segment must never reach publication"
+        );
+        assert!(
+            led.close().is_quiescent(),
+            "this arm settles the reservation via settle_abort; it must not leak it"
         );
     }
 }
