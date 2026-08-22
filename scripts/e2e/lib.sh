@@ -2237,9 +2237,17 @@ fge_assert_not_contains() {
   return 0
 }
 
+# An EMPTY PATTERN matches everything, including the empty string, so a caller
+# whose `$re` is accidentally unset gets an assertion that cannot fail in the
+# direction it exists to cover. That is the empty-NEEDLE case, and the rule for
+# it is already settled above: an empty operand is always a caller bug, so it
+# fails. No legitimate call passes an empty pattern -- a caller who means "any
+# output" has fge_assert_ne "$id" "" "$out", which says so.
 fge_assert_match() {
   local id=${1-} s=${2-} re=${3-} desc=${4:-regex match}
-  if [[ $s =~ $re ]]; then
+  if [ -z "$re" ]; then
+    fge__record_assertion "$id" fail 'a non-empty pattern' 'empty pattern' "$desc"
+  elif [[ $s =~ $re ]]; then
     fge__record_assertion "$id" pass "match: $re" 'matched' "$desc"
   else
     fge__record_assertion "$id" fail "match: $re" "$s" "$desc"
@@ -2257,9 +2265,15 @@ fge_assert_file() {
   return 0
 }
 
+# `[ -e "" ]` is FALSE, so an empty path previously recorded PASS: it reported a
+# file absent when no file was ever named. Same empty-operand class as an empty
+# needle or an empty pattern, and the same answer -- fail, because absence at an
+# unnamed path is not a fact about the tree.
 fge_assert_no_file() {
   local id=${1-} p=${2-} desc=${3:-file absent}
-  if [ -e "$p" ]; then
+  if [ -z "$p" ]; then
+    fge__record_assertion "$id" fail 'a non-empty path' 'empty path' "$desc"
+  elif [ -e "$p" ]; then
     fge__record_assertion "$id" fail "absent: $p" 'present' "$desc"
   else
     fge__record_assertion "$id" pass "absent: $p" 'absent' "$desc"

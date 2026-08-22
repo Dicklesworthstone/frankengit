@@ -19,8 +19,14 @@ fge_assert_not_contains FG-000A-NEG-NCONT haystack hay              'not_contain
 # unconditionally, so an unset expected-absent variable silently proved nothing.
 fge_assert_not_contains FG-000A-NEG-NCONTE haystack ''               'not_contains empty-needle negative'
 fge_assert_match        FG-000A-NEG-MATCH abc '^z+$'                'match negative'
+# An empty pattern matches everything, so this is the empty-OPERAND negative for
+# match, the twin of NCONTE above (frankengit-xypf).
+fge_assert_match        FG-000A-NEG-MATCHE abc ''                     'match empty-pattern negative'
 fge_assert_file         FG-000A-NEG-FILE  "$work/absent.txt"        'file negative'
 fge_assert_no_file      FG-000A-NEG-NFILE "$work/present.txt"       'no_file negative'
+# [ -e "" ] is false, so an empty path used to record PASS -- absence at a path
+# that was never named (frankengit-xypf).
+fge_assert_no_file      FG-000A-NEG-NFILEE ''                        'no_file empty-path negative'
 fge_assert_dir          FG-000A-NEG-DIR   "$work/absent-dir"        'dir negative'
 fge_assert_digest       FG-000A-NEG-DIG   deadbeef "$work/present.txt" 'digest negative'
 fge_assert_digest       FG-000A-NEG-DIGM  deadbeef "$work/absent.txt"  'digest missing-file negative'
