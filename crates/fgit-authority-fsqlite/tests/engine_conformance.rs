@@ -19,13 +19,19 @@
 //! this runs one of them:
 //!
 //! * `run_authority_conformance` -- AC-01..AC-20. Run here, and passing.
-//! * `run_fault_conformance` -- AF-01..AF-08. **Not run, and not runnable
-//!   against this binding**: it is bound `S: FaultableAuthorityStore`, and
-//!   `FsqliteAuthorityStore` has no fault injection to implement it with.
+//! * `run_fault_conformance` -- AF-01..AF-08. It is driven separately by
+//!   `fault_conformance.rs`, whose `FaultableAuthorityStore` wrapper delegates
+//!   effects and resolution reads to a real `FsqliteAuthorityStore`. This file
+//!   does not rerun those injected-fault cells.
 //!
-//! So deterministic fault behaviour -- ambiguity, duplication, lost request
-//! versus lost response -- is unproven for this backend, and a green run here
-//! must not be read as covering it.
+//! [`fg004_history_checker_accepts_a_recorded_fsqlite_authority_history`] is
+//! separate from both suites: it records a bounded real-engine history in the
+//! public `AuthorityOp` vocabulary and passes it through the FG-004
+//! linearizability checker. Its logical-client sequence is not a claim about
+//! kernel scheduling, injected faults, or cancellation during an operation.
+//!
+//! A green run of this file must not itself be read as coverage for deterministic
+//! ambiguity, duplication, lost-request, or lost-response fault cells.
 //!
 //! The claim is also **not** "the binding is conformant under cancellation". That needs
 //! a harness that can actually interleave a cancel with an in-flight operation,
@@ -42,13 +48,18 @@
 //! covers the awaited path directly, so the discipline is tested even though
 //! the suite cannot follow it.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use asupersync::cx::Cx as NativeCx;
+use fgit_authority::history::{ClientId, History, HistoryEvent, LogicalTime, OperationId};
+use fgit_authority::lincheck::{
+    AuthorityHistory, CheckLimits, CheckVerdict, LinearizabilityChecker, SequentialSpec,
+};
 use fgit_authority::{
-    AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityRefusal, AuthorityStore,
-    AuthorityVersionToken, CasOutcome, HeadGeneration, HeadInit, HeadKey, HeadRead,
-    HeadReadReceipt, ImmutableKey, ImmutableRead, PutOutcome, StoreInstanceId,
+    AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityOp, AuthorityRefusal,
+    AuthorityResponse, AuthorityStore, AuthorityVersionToken, CasOutcome, HeadGeneration, HeadInit,
+    HeadKey, HeadRead, HeadReadReceipt, ImmutableKey, ImmutableRead, PutOutcome, StoreInstanceId,
     run_authority_conformance, run_capacity_conformance,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
@@ -200,6 +211,361 @@ fn head_key() -> HeadKey {
 
 fn generation(value: u64) -> HeadGeneration {
     HeadGeneration::try_new(value).expect("a small generation is admissible")
+}
+
+/// A test-local sequential oracle for the exact public authority vocabulary.
+///
+/// `check_authority` normalizes each backend's opaque token equality class to
+/// the `fgithist || issuance` representatives minted below. Keeping this
+/// oracle in the external binding test makes it independent of both the
+/// FrankenSQLite implementation and the test bridge; it is not a second
+/// production authority implementation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HistoryOracleState {
+    immutable: BTreeMap<ImmutableKey, Vec<u8>>,
+    heads: BTreeMap<HeadKey, HeadReadReceipt>,
+    issued: BTreeMap<AuthorityVersionToken, IssuedVersion>,
+    next_issuance: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IssuedVersion {
+    key: HeadKey,
+    generation: HeadGeneration,
+    body: Vec<u8>,
+}
+
+impl HistoryOracleState {
+    fn mint_receipt(
+        &mut self,
+        key: HeadKey,
+        generation: HeadGeneration,
+        body: Vec<u8>,
+    ) -> HeadReadReceipt {
+        let mut token_bytes = [0_u8; 16];
+        token_bytes[..8].copy_from_slice(b"fgithist");
+        token_bytes[8..].copy_from_slice(&self.next_issuance.to_be_bytes());
+        self.next_issuance = self.next_issuance.saturating_add(1);
+        let token = AuthorityVersionToken::from_opaque_bytes(token_bytes);
+        self.issued.insert(
+            token,
+            IssuedVersion {
+                key: key.clone(),
+                generation,
+                body: body.clone(),
+            },
+        );
+        HeadReadReceipt::new(key, token, generation, body)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HistoryOracle {
+    instance: StoreInstanceId,
+}
+
+impl HistoryOracle {
+    const fn new(instance: StoreInstanceId) -> Self {
+        Self { instance }
+    }
+}
+
+impl SequentialSpec for HistoryOracle {
+    type State = HistoryOracleState;
+    type Operation = AuthorityOp;
+    type Response = AuthorityResponse;
+
+    fn initial_state(&self) -> Self::State {
+        HistoryOracleState {
+            immutable: BTreeMap::new(),
+            heads: BTreeMap::new(),
+            issued: BTreeMap::new(),
+            next_issuance: 0,
+        }
+    }
+
+    fn apply(
+        &self,
+        state: &Self::State,
+        operation: &Self::Operation,
+    ) -> (Self::State, Self::Response) {
+        let mut next = state.clone();
+        let response = match operation {
+            AuthorityOp::PutIfAbsent { key, body } => match next.immutable.get(key) {
+                Some(existing) if existing == body => {
+                    AuthorityResponse::PutIfAbsent(PutOutcome::IdenticalRetry)
+                }
+                Some(_) => AuthorityResponse::PutIfAbsent(PutOutcome::Conflict),
+                None => {
+                    next.immutable.insert(key.clone(), body.clone());
+                    AuthorityResponse::PutIfAbsent(PutOutcome::Created)
+                }
+            },
+            AuthorityOp::ReadImmutable { key } => {
+                AuthorityResponse::ReadImmutable(next.immutable.get(key).map_or_else(
+                    || ImmutableRead::Absent,
+                    |body| ImmutableRead::Present(body.clone()),
+                ))
+            }
+            AuthorityOp::InitializeHead {
+                key,
+                generation,
+                body,
+            } => match next.heads.get(key) {
+                Some(existing)
+                    if existing.generation() == *generation && existing.body() == body =>
+                {
+                    AuthorityResponse::InitializeHead(HeadInit::IdenticalRetry(existing.clone()))
+                }
+                Some(_) => AuthorityResponse::InitializeHead(HeadInit::Conflict),
+                None => {
+                    let receipt = next.mint_receipt(key.clone(), *generation, body.clone());
+                    next.heads.insert(key.clone(), receipt.clone());
+                    AuthorityResponse::InitializeHead(HeadInit::Created(receipt))
+                }
+            },
+            AuthorityOp::ReadHead { key } => {
+                AuthorityResponse::ReadHead(next.heads.get(key).map_or_else(
+                    || HeadRead::Absent,
+                    |receipt| HeadRead::Present(receipt.clone()),
+                ))
+            }
+            AuthorityOp::CompareExchangeHead {
+                key,
+                expected,
+                new_generation,
+                new_body,
+            } => match next.issued.get(expected) {
+                None => AuthorityResponse::Refused(AuthorityRefusal::UnknownVersionToken),
+                Some(issued) if issued.key != *key => {
+                    AuthorityResponse::Refused(AuthorityRefusal::TokenKeyMismatch)
+                }
+                Some(_) => match next.heads.get(key).cloned() {
+                    None => AuthorityResponse::Refused(AuthorityRefusal::HeadAbsent),
+                    Some(current) if current.token() != *expected => {
+                        AuthorityResponse::CompareExchangeHead(CasOutcome::PredecessorMismatch)
+                    }
+                    Some(current) if *new_generation <= current.generation() => {
+                        AuthorityResponse::Refused(AuthorityRefusal::NonMonotoneGeneration {
+                            current: current.generation(),
+                            proposed: *new_generation,
+                        })
+                    }
+                    Some(_) => {
+                        let receipt =
+                            next.mint_receipt(key.clone(), *new_generation, new_body.clone());
+                        next.heads.insert(key.clone(), receipt.clone());
+                        AuthorityResponse::CompareExchangeHead(CasOutcome::Committed(receipt))
+                    }
+                },
+            },
+            AuthorityOp::AuthenticateHeadReceipt { receipt } => {
+                match next.issued.get(&receipt.token()) {
+                    None => AuthorityResponse::Refused(AuthorityRefusal::UnknownVersionToken),
+                    Some(issued) if issued.key != *receipt.key() => {
+                        AuthorityResponse::Refused(AuthorityRefusal::TokenKeyMismatch)
+                    }
+                    Some(issued) if issued.generation != receipt.generation() => {
+                        AuthorityResponse::Refused(AuthorityRefusal::TokenGenerationMismatch)
+                    }
+                    Some(issued) if issued.body.as_slice() != receipt.body() => {
+                        AuthorityResponse::Refused(AuthorityRefusal::TokenBodyMismatch)
+                    }
+                    Some(_) => AuthorityResponse::AuthenticateHeadReceipt(AuthenticatedHead::new(
+                        receipt.clone(),
+                        self.instance,
+                    )),
+                }
+            }
+        };
+        (next, response)
+    }
+}
+
+/// Records the actual binding calls in the FG-004 checker history shape.
+#[derive(Debug, Default)]
+struct HistoryRecorder {
+    events: Vec<HistoryEvent<AuthorityOp, AuthorityResponse>>,
+    next_operation_id: u64,
+    next_time_by_client: BTreeMap<u64, u64>,
+}
+
+impl HistoryRecorder {
+    fn next_time(&mut self, client: u64) -> LogicalTime {
+        let time = self.next_time_by_client.entry(client).or_insert(0);
+        *time = time.saturating_add(1);
+        LogicalTime(*time)
+    }
+
+    fn execute(
+        &mut self,
+        store: &impl AuthorityStore,
+        client: u64,
+        operation: AuthorityOp,
+    ) -> AuthorityResponse {
+        self.next_operation_id = self.next_operation_id.saturating_add(1);
+        let operation_id = OperationId(self.next_operation_id);
+        let invoked_at = self.next_time(client);
+        self.events.push(HistoryEvent::invocation(
+            ClientId(client),
+            invoked_at,
+            operation_id,
+            operation.clone(),
+        ));
+        let response = store.execute(&operation);
+        let returned_at = self.next_time(client);
+        self.events.push(HistoryEvent::response(
+            ClientId(client),
+            returned_at,
+            operation_id,
+            response.clone(),
+        ));
+        response
+    }
+
+    fn into_history(self) -> AuthorityHistory {
+        History::new(self.events).expect("the real-backend recorder emits a valid lifecycle")
+    }
+}
+
+fn present_receipt(response: AuthorityResponse) -> HeadReadReceipt {
+    match response {
+        AuthorityResponse::ReadHead(HeadRead::Present(receipt))
+        | AuthorityResponse::InitializeHead(HeadInit::Created(receipt)) => receipt,
+        unexpected => panic!("expected a present head receipt, got {unexpected:?}"),
+    }
+}
+
+/// The real backend history stays intentionally beneath the checker bound.
+const HISTORY_OPERATION_COUNT: usize = 10;
+
+#[test]
+fn fg004_history_checker_accepts_a_recorded_fsqlite_authority_history() {
+    // This is a logical two-client CAS race, not a claim about kernel thread
+    // scheduling: each real operation is recorded before and after it crosses
+    // the async binding, then checked against the independent sequential oracle.
+    let node = deterministic_node();
+    let instance = StoreInstanceId::from_raw(0xF005_0004);
+    let store = BlockingStore::open(&node, instance);
+    let mut recorder = HistoryRecorder::default();
+    let immutable = ImmutableKey::new(b"history/seal".to_vec()).expect("short key is admissible");
+    let head = HeadKey::new(b"history/authority-head".to_vec()).expect("short key is admissible");
+
+    assert!(matches!(
+        recorder.execute(
+            &store,
+            0,
+            AuthorityOp::PutIfAbsent {
+                key: immutable.clone(),
+                body: b"immutable-body".to_vec(),
+            },
+        ),
+        AuthorityResponse::PutIfAbsent(PutOutcome::Created)
+    ));
+    assert!(matches!(
+        recorder.execute(
+            &store,
+            1,
+            AuthorityOp::ReadImmutable {
+                key: immutable.clone(),
+            },
+        ),
+        AuthorityResponse::ReadImmutable(ImmutableRead::Present(body)) if body == b"immutable-body"
+    ));
+
+    let initial = present_receipt(recorder.execute(
+        &store,
+        0,
+        AuthorityOp::InitializeHead {
+            key: head.clone(),
+            generation: HeadGeneration::FIRST,
+            body: b"head-1".to_vec(),
+        },
+    ));
+    let contender_one =
+        present_receipt(recorder.execute(&store, 1, AuthorityOp::ReadHead { key: head.clone() }));
+    let contender_two =
+        present_receipt(recorder.execute(&store, 2, AuthorityOp::ReadHead { key: head.clone() }));
+    assert_eq!(initial, contender_one);
+    assert_eq!(initial, contender_two);
+
+    let winner = recorder.execute(
+        &store,
+        1,
+        AuthorityOp::CompareExchangeHead {
+            key: head.clone(),
+            expected: contender_one.token(),
+            new_generation: generation(2),
+            new_body: b"head-2".to_vec(),
+        },
+    );
+    assert!(matches!(
+        winner,
+        AuthorityResponse::CompareExchangeHead(CasOutcome::Committed(_))
+    ));
+    let loser = recorder.execute(
+        &store,
+        2,
+        AuthorityOp::CompareExchangeHead {
+            key: head.clone(),
+            expected: contender_two.token(),
+            new_generation: generation(2),
+            new_body: b"head-2-loser".to_vec(),
+        },
+    );
+    assert_eq!(
+        loser,
+        AuthorityResponse::CompareExchangeHead(CasOutcome::PredecessorMismatch),
+        "the second logical client must lose the exact-predecessor race"
+    );
+
+    let final_receipt =
+        present_receipt(recorder.execute(&store, 3, AuthorityOp::ReadHead { key: head.clone() }));
+    assert_eq!(final_receipt.body(), b"head-2");
+    assert!(matches!(
+        recorder.execute(
+            &store,
+            3,
+            AuthorityOp::AuthenticateHeadReceipt {
+                receipt: final_receipt,
+            },
+        ),
+        AuthorityResponse::AuthenticateHeadReceipt(_)
+    ));
+    assert!(matches!(
+        recorder.execute(
+            &store,
+            4,
+            AuthorityOp::PutIfAbsent {
+                key: immutable,
+                body: b"immutable-body".to_vec(),
+            },
+        ),
+        AuthorityResponse::PutIfAbsent(PutOutcome::IdenticalRetry)
+    ));
+
+    let history = recorder.into_history();
+    assert_eq!(history.operations().len(), HISTORY_OPERATION_COUNT);
+    store
+        .close()
+        .expect("the recorded store closes through the awaited path");
+    assert!(
+        node.join_root(Duration::from_secs(5)),
+        "the runtime did not reach quiescence after the recorded history"
+    );
+
+    let checker = LinearizabilityChecker::new(CheckLimits {
+        max_completed_operations: HISTORY_OPERATION_COUNT,
+        max_search_nodes: 100_000,
+    })
+    .expect("the history-checker limits are valid");
+    let report = checker.check_authority(&HistoryOracle::new(instance), &history);
+    assert!(
+        matches!(report.verdict, CheckVerdict::Linearizable { .. }),
+        "the real FrankenSQLite authority history must pass the FG-004 checker: {report:?}"
+    );
+    assert_eq!(report.completed_operations, HISTORY_OPERATION_COUNT);
+    assert!(report.pending_operations.is_empty());
 }
 
 #[test]
