@@ -341,6 +341,19 @@ if [ -n "$RA_PROFILE" ]; then
         exit 2
         ;;
     esac
+    # THE DECLARED PATH MUST DERIVE TO THE DECLARED ID. Both columns describe
+    # the same suite, so they can disagree -- and a row whose path points at one
+    # suite while its id names another would require the id (satisfied by
+    # whatever is discovered under that name) while documenting a different file
+    # entirely. Recomputing the id from the path is the only thing that keeps
+    # the two columns honest, and it is exactly the renamed-alias case the bead
+    # names: after a rename, one column gets updated and the other does not.
+    m_derived=$(ra_script_id "$RA_REPO_ROOT/$m_path")
+    if [ "$m_derived" != "$m_id" ]; then
+      printf 'run_all: manifest %s line %d: path %s derives id %s, row declares %s\n' \
+        "$RA_MANIFEST" "$ra_manifest_line" "$m_path" "$m_derived" "$m_id" >&2
+      exit 2
+    fi
     if ra_in_set "$m_id" "${RA_MANIFEST_SEEN[@]+"${RA_MANIFEST_SEEN[@]}"}"; then
       printf 'run_all: manifest %s line %d: duplicate entry %s\n' \
         "$RA_MANIFEST" "$ra_manifest_line" "$m_id" >&2

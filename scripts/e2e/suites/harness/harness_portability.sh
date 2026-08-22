@@ -700,8 +700,20 @@ probe_classification=$(probe_manifest "$(printf '%s\n' "$good_manifest" |
   sed 's/	required	mechanism/	mandatory	mechanism/')")
 probe_incomplete=$(probe_manifest "$good_manifest
 suites-harness-truncated	bead	g0")
+# A CONSISTENT manifest naming a suite that is not on disk. Both columns are
+# renamed together, so the row is internally coherent and the failure is
+# genuinely about the release surface rather than about a malformed row -- which
+# is what PORT-046 covers separately. Renaming only the id column, as this probe
+# first did, is caught earlier by the path/id agreement check and would have
+# made this assertion silently test that instead.
 probe_rename=$(probe_manifest "$(printf '%s\n' "$good_manifest" |
-  sed 's/^suites-harness-harness_json	/suites-harness-harness_json_v2	/')")
+  sed 's/^suites-harness-harness_json	/suites-harness-harness_json_v2	/' |
+  sed 's|/harness/harness_json.sh|/harness/harness_json_v2.sh|')")
+# A row whose path column points at a different suite than its id column. Both
+# describe the same thing, so they can drift apart -- and after a rename it is
+# normal for one to be updated and the other missed.
+probe_path_mismatch=$(probe_manifest "$(printf '%s\n' "$good_manifest" |
+  sed 's|g0	scripts/e2e/suites/harness/harness_json.sh|g0	scripts/e2e/suites/harness/harness_mechanics.sh|')")
 rm -f -- "$probe_manifest_path"
 
 fge_phase assert
@@ -715,3 +727,5 @@ fge_assert_eq FG-000A-PORT-044 2 "$probe_incomplete" \
   'an incomplete manifest row is refused rather than read with empty columns'
 fge_assert_eq FG-000A-PORT-045 1 "$probe_rename" \
   'a renamed suite fails the set check: a rename is a release-surface change needing approval'
+fge_assert_eq FG-000A-PORT-046 2 "$probe_path_mismatch" \
+  'a row whose declared path derives a different id than the row declares is refused'
