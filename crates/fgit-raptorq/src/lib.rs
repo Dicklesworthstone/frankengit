@@ -710,6 +710,10 @@ pub(crate) fn symbol_pool() -> SymbolPool {
     )
 }
 
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -972,7 +976,3 @@ mod tests {
         assert!(current_ledger.close().is_quiescent());
     }
 }
-
-// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
-const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
-const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
