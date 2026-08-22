@@ -973,4 +973,52 @@ mod tests {
         ));
         node.shutdown().expect("node drains");
     }
+
+    #[test]
+    fn loose_import_uses_packed_refs_without_treating_them_as_an_object_source() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        fs::create_dir_all(&source).expect("source directory creates");
+        let oid = write_loose_blob_repository(&source);
+        fs::remove_file(source.join("refs/heads/main")).expect("direct ref is removed");
+        fs::write(
+            source.join("packed-refs"),
+            format!("# pack-refs with: peeled fully-peeled\n{oid} refs/heads/main\n"),
+        )
+        .expect("packed ref writes");
+        let node = node(scratch.0.join("node"));
+
+        let staged = node
+            .stage_loose_git_import(&source)
+            .expect("a packed ref still names the same verified loose closure");
+        assert_eq!(staged.object_count(), 1);
+        assert_eq!(
+            staged
+                .refs()
+                .refs()
+                .get(&fgit_types::RefName::try_new(b"refs/heads/main").expect("fixed ref parses")),
+            Some(&oid)
+        );
+        assert!(node.read_git_object(oid).is_ok());
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_an_alternate_even_when_its_direct_closure_is_valid() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        fs::create_dir_all(&source).expect("source directory creates");
+        let _ = write_loose_blob_repository(&source);
+        let alternates = source.join("objects/info/alternates");
+        fs::create_dir_all(alternates.parent().expect("alternates parent exists"))
+            .expect("alternates parent creates");
+        fs::write(&alternates, "/outside/object-source\n").expect("alternate writes");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::ObjectAlternatesUnsupported(path)) if *path == alternates
+        ));
+        node.shutdown().expect("node drains");
+    }
 }
