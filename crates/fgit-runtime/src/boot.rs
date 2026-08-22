@@ -13,10 +13,9 @@
 //! [`RuntimeHandle::try_request_cx_with_budget`]; no test-only or detached
 //! constructor appears anywhere in this crate's production sources.
 
-use std::time::Duration;
-
 use asupersync::Budget;
 use std::sync::Arc;
+use std::time::Duration;
 
 use asupersync::cx::Cx;
 use asupersync::cx::cap::{self, CapSetRuntimeMask, SubsetOf};
@@ -26,6 +25,7 @@ use asupersync::runtime::config::{
 };
 use asupersync::runtime::{Runtime, RuntimeHandle};
 use asupersync::types::id::Time;
+use fgit_resource::{WorkerBudgetInputs, WorkerBudgetRefusal, plan};
 
 use crate::grant::CapabilityProfile;
 use crate::meter::{BudgetClass, BudgetPolicy, ClassLimits};
@@ -101,6 +101,57 @@ pub struct RuntimeProfile {
     budgets: BudgetPolicy,
 }
 
+/// Why a declared worker-budget input could not configure a runtime profile.
+///
+/// The calculator and the runtime profile each own a distinct refusal domain:
+/// the former decides whether the declared CPU and memory inputs admit a
+/// worker count, and the latter decides whether that count is legal for this
+/// profile class. Keeping both variants preserves the actionable refusal
+/// instead of collapsing a scheduler-class violation into a resource guess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeclaredWorkerBudgetRefusal {
+    /// The shared calculator found that no worker fleet fits the declaration.
+    WorkerBudget(WorkerBudgetRefusal),
+    /// The computed count violates this runtime profile's own invariants.
+    Profile(RuntimeRefusal),
+}
+
+impl From<WorkerBudgetRefusal> for DeclaredWorkerBudgetRefusal {
+    fn from(refusal: WorkerBudgetRefusal) -> Self {
+        Self::WorkerBudget(refusal)
+    }
+}
+
+impl From<RuntimeRefusal> for DeclaredWorkerBudgetRefusal {
+    fn from(refusal: RuntimeRefusal) -> Self {
+        Self::Profile(refusal)
+    }
+}
+
+impl std::fmt::Display for DeclaredWorkerBudgetRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WorkerBudget(refusal) => write!(
+                formatter,
+                "declared worker budget cannot configure the runtime: {refusal}"
+            ),
+            Self::Profile(refusal) => write!(
+                formatter,
+                "worker budget produced a runtime profile the class refuses: {refusal}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DeclaredWorkerBudgetRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::WorkerBudget(refusal) => Some(refusal),
+            Self::Profile(refusal) => Some(refusal),
+        }
+    }
+}
+
 impl RuntimeProfile {
     /// A serving-node profile with explicit worker count.
     ///
@@ -171,6 +222,36 @@ impl RuntimeProfile {
         self.host_derived_parallelism = true;
         self.worker_threads = workers.max(1);
         self
+    }
+
+    /// Derive the actual scheduler worker count from explicit resource inputs.
+    ///
+    /// This is deliberately a declaration, not a host probe: callers supply
+    /// the CPU cap, memory budget, per-job estimate, mode, and variance that
+    /// govern this runtime. The resulting count sets [`RuntimeConfig`]'s
+    /// `worker_threads` field through [`Self::to_config`]. It is therefore a
+    /// real scheduler input, not an advisory report.
+    ///
+    /// The profile remains pinned rather than host-derived because it records
+    /// the caller's declaration and its resulting count; it does not inspect
+    /// ambient host state. The completed profile is validated before return,
+    /// so a deterministic class cannot receive an inadmissible multi-worker
+    /// configuration and fail only later during startup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeclaredWorkerBudgetRefusal::WorkerBudget`] when no fleet
+    /// fits the declared inputs, or [`DeclaredWorkerBudgetRefusal::Profile`]
+    /// when the resulting count violates this profile class.
+    pub fn with_declared_worker_budget(
+        self,
+        inputs: WorkerBudgetInputs,
+    ) -> Result<Self, DeclaredWorkerBudgetRefusal> {
+        let budget = plan(inputs)?;
+        let workers = usize::try_from(budget.workers()).unwrap_or(usize::MAX);
+        let profile = self.with_worker_threads(workers);
+        profile.validate()?;
+        Ok(profile)
     }
 
     /// Set the obligation-leak policy.
@@ -702,6 +783,125 @@ mod tests {
             derived.canonical_descriptor(),
             "host-derived parallelism must change replay identity"
         );
+    }
+
+    #[test]
+    fn declared_worker_budget_drives_the_actual_scheduler_thread_count() {
+        let declarations = [
+            (
+                WorkerBudgetInputs {
+                    cpu_cap: 6,
+                    memory_budget_bytes: 1 << 20,
+                    per_job_rss_bytes: 128,
+                    mode: fgit_resource::WorkerMode::Batch,
+                    variance: fgit_resource::VarianceClass::Tight,
+                },
+                6_usize,
+                "cpu cap",
+            ),
+            (
+                WorkerBudgetInputs {
+                    cpu_cap: 64,
+                    memory_budget_bytes: 5 * 128,
+                    per_job_rss_bytes: 128,
+                    mode: fgit_resource::WorkerMode::Batch,
+                    variance: fgit_resource::VarianceClass::Tight,
+                },
+                5,
+                "memory budget",
+            ),
+            (
+                WorkerBudgetInputs {
+                    cpu_cap: 12,
+                    memory_budget_bytes: 1 << 20,
+                    per_job_rss_bytes: 128,
+                    mode: fgit_resource::WorkerMode::Background,
+                    variance: fgit_resource::VarianceClass::Tight,
+                },
+                3,
+                "mode",
+            ),
+            (
+                WorkerBudgetInputs {
+                    cpu_cap: 64,
+                    memory_budget_bytes: 4 * 256,
+                    per_job_rss_bytes: 256,
+                    mode: fgit_resource::WorkerMode::Batch,
+                    variance: fgit_resource::VarianceClass::Wide,
+                },
+                2,
+                "variance",
+            ),
+        ];
+
+        for (inputs, expected_workers, binding) in declarations {
+            let profile = RuntimeProfile::production(1)
+                .with_declared_worker_budget(inputs)
+                .expect("declared budget is admissible");
+            let identity = profile.identity();
+            assert_eq!(identity.worker_threads, expected_workers, "{binding} binds");
+            assert!(
+                !identity.host_derived_parallelism,
+                "a declared budget is not an ambient host probe"
+            );
+            assert_eq!(
+                profile.to_config().worker_threads,
+                expected_workers,
+                "the planner result must configure Asupersync, not merely be reported"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_worker_budget_refuses_unfit_memory_and_pinned_multi_worker_profiles() {
+        let below_one_job = WorkerBudgetInputs {
+            cpu_cap: 4,
+            memory_budget_bytes: 63,
+            per_job_rss_bytes: 16,
+            mode: fgit_resource::WorkerMode::Batch,
+            variance: fgit_resource::VarianceClass::Extreme,
+        };
+        let refusal = RuntimeProfile::production(1)
+            .with_declared_worker_budget(below_one_job)
+            .expect_err("the profile must not silently oversubscribe memory");
+        assert_eq!(
+            refusal,
+            DeclaredWorkerBudgetRefusal::WorkerBudget(WorkerBudgetRefusal::BudgetBelowOneJob {
+                budget_bytes: 63,
+                required_bytes: 64,
+            })
+        );
+
+        RuntimeProfile::production(1)
+            .with_declared_worker_budget(WorkerBudgetInputs {
+                memory_budget_bytes: 64,
+                ..below_one_job
+            })
+            .expect("the adjacent budget that holds one job is admitted");
+
+        let multi_worker = WorkerBudgetInputs {
+            cpu_cap: 2,
+            memory_budget_bytes: 1 << 20,
+            per_job_rss_bytes: 128,
+            mode: fgit_resource::WorkerMode::Batch,
+            variance: fgit_resource::VarianceClass::Tight,
+        };
+        let refusal = RuntimeProfile::deterministic()
+            .with_declared_worker_budget(multi_worker)
+            .expect_err("a pinned scheduler cannot receive a multi-worker plan");
+        assert_eq!(
+            refusal,
+            DeclaredWorkerBudgetRefusal::Profile(RuntimeRefusal::LeakPolicyInsufficient {
+                policy: "unpinned_deterministic_profile",
+            })
+        );
+
+        RuntimeProfile::deterministic()
+            .with_declared_worker_budget(WorkerBudgetInputs {
+                cpu_cap: 1,
+                ..multi_worker
+            })
+            .expect("the adjacent one-worker plan remains pinned and admissible");
     }
 
     #[test]

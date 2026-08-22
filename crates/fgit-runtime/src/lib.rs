@@ -52,7 +52,9 @@ pub mod service;
 pub mod topology;
 
 pub use adapter::{CommitAmbiguity, OutcomeClass, ServiceOutcome};
-pub use boot::{NodeRuntime, ProfileClass, ProfileIdentity, RuntimeProfile};
+pub use boot::{
+    DeclaredWorkerBudgetRefusal, NodeRuntime, ProfileClass, ProfileIdentity, RuntimeProfile,
+};
 pub use grant::{AuthorityCapability, AuthoritySet, CapabilityProfile, Ownership};
 pub use meter::{BudgetClass, BudgetPolicy, ClassLimits, derive_child};
 pub use obligations::{LeakControls, LeakPolicy, RecoverySinks};

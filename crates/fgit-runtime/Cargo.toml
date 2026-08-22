@@ -9,6 +9,7 @@ description = "FrankenGit Asupersync runtime profile: node topology, production 
 
 [dependencies]
 asupersync = { version = "0.4.9", default-features = false }
+fgit-resource.workspace = true
 
 [lints]
 workspace = true

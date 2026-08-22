@@ -857,6 +857,7 @@ name = "fgit-runtime"
 version = "0.0.1"
 dependencies = [
  "asupersync",
+ "fgit-resource",
 ]
 
 [[package]]
