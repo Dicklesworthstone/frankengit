@@ -11,8 +11,8 @@
 use core::panic::AssertUnwindSafe;
 use fgit_resource::algebra::{Grade, ResourceVector};
 use fgit_resource::custody::{
-    LeakClass, LeakDisposition, LedgerHandle, LifecycleError, LifecycleEvent, ObligationLedger,
-    ObligationState, RegionCloseOutcome,
+    LeakClass, LeakDisposition, LeakSubject, LedgerHandle, LifecycleError, LifecycleEvent,
+    ObligationLedger, ObligationState, RegionCloseOutcome,
 };
 use fgit_resource::ids::{IdempotencyKey, OpaqueHandle, RegionId};
 use fgit_resource::kinds::{
@@ -787,5 +787,155 @@ fn terminal_failure_settles_where_escalation_does_not() {
     assert!(
         outcome.is_quiescent(),
         "a settled region closes quiescent, got {outcome:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ledger accessors: the two halves of an entry, and what a leak names
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reserved_and_charged_are_the_opposite_halves_of_one_entry() {
+    // `reserved_for` and `charged_to` read two fields of the SAME ledger entry
+    // -- `entry.reserved` and `entry.charged` -- and return the same type. A
+    // swap between them compiles, keeps the accounting identity true, and
+    // reports held budget as already spent (or spent budget as still held).
+    // Nothing else in this crate calls `charged_to` at all.
+    //
+    // What makes the swap visible is that the two are non-zero at OPPOSITE
+    // stages: `settle` writes `charged = spent.mask(Consumable)` and
+    // simultaneously zeroes `reserved`. A test that checked a single stage, or
+    // one where the two happened to be equal, would pass with them swapped.
+    let ledger = ObligationLedger::root(
+        RegionId::new(91),
+        LeakDisposition::RecordAndContinue,
+        outbox_budget(),
+    );
+    let grant = ledger.grant(outbox_budget()).expect("capacity covers it");
+    let obligation = ledger
+        .reserve::<OutboxEffectPermit>(outbox_reservation(DownstreamIdempotency::Strong), grant)
+        .expect("egress is the required grade");
+    let id = obligation.id();
+    let handle = ledger.handle();
+
+    // Stage one: everything is reserved, nothing is charged.
+    assert_eq!(
+        handle.reserved_for(id),
+        Some(outbox_budget()),
+        "a fresh reservation holds the whole grant"
+    );
+    assert_eq!(
+        handle.charged_to(id),
+        Some(ResourceVector::ZERO),
+        "nothing is charged before settlement"
+    );
+
+    // Settle for strictly LESS than was reserved, so the charged amount is
+    // distinguishable from the reserved one rather than coinciding with it.
+    let actually_spent = ResourceVector::single(Grade::EgressBytes, 200);
+    let committed = obligation
+        .commit(EffectDispatched { attempt: 1 }, &actually_spent)
+        .expect("200 fits inside the reserved 512");
+
+    // Stage two: the halves have exchanged roles.
+    assert_eq!(
+        handle.charged_to(id),
+        Some(actually_spent),
+        "settlement charges exactly what was spent, not what was reserved"
+    );
+    assert_eq!(
+        handle.reserved_for(id),
+        Some(ResourceVector::ZERO),
+        "settlement releases the reservation; the unspent 312 is not still held"
+    );
+
+    // The unspent remainder is back in the pool rather than lost, which is the
+    // reason the two fields must not be conflated.
+    assert!(ledger.snapshot().is_conserved());
+
+    // Absence case: an id the region never knew reports nothing from either
+    // accessor, rather than a zero vector that would read as "known and empty".
+    let stranger = committed
+        .acknowledge(DownstreamAck {
+            receipt: opaque(0x22),
+            attempt: 1,
+        })
+        .state();
+    assert_eq!(stranger, ObligationState::Acknowledged);
+    let outcome = ledger.close();
+    assert!(outcome.is_quiescent(), "{outcome:?}");
+}
+
+#[test]
+fn a_leak_record_names_its_subject_and_only_an_obligation_carries_a_class() {
+    // `LeakRecord::subject` and `LeakRecord::obligation_class` are read by no
+    // test in this crate and by no other code in `src`. `obligation_class` is
+    // documented as `Some` only "when the subject was an obligation", which is
+    // a correlation between two fields that nothing checks -- a record that
+    // returned `Some` for a dropped grant, or `None` for a dropped obligation,
+    // would look perfectly well-formed to every existing assertion, which read
+    // only `reclaimed()` and the leak count.
+    //
+    // So both branches are exercised against the same ledger shape.
+
+    // Branch one: a dropped GRANT is not an obligation and carries no class.
+    let grant_ledger = ObligationLedger::root(
+        RegionId::new(92),
+        LeakDisposition::RecordAndContinue,
+        outbox_budget(),
+    );
+    {
+        let _dropped = grant_ledger
+            .grant(outbox_budget())
+            .expect("capacity covers it");
+    }
+    let grant_leaks = grant_ledger.leaks();
+    assert_eq!(grant_leaks.len(), 1, "the dropped grant is recorded once");
+    let grant_leak = grant_leaks.first().expect("checked length");
+    assert!(
+        matches!(grant_leak.subject(), LeakSubject::Grant(_)),
+        "a dropped grant must be recorded as a Grant subject, got {:?}",
+        grant_leak.subject()
+    );
+    assert_eq!(
+        grant_leak.obligation_class(),
+        None,
+        "a grant is not an obligation, so it carries no obligation class"
+    );
+
+    // Branch two: a dropped OBLIGATION names itself and its class. Without
+    // this half, an `obligation_class` that returned `None` unconditionally
+    // would satisfy branch one.
+    let obligation_ledger = ObligationLedger::root(
+        RegionId::new(93),
+        LeakDisposition::RecordAndContinue,
+        outbox_budget(),
+    );
+    let grant = obligation_ledger
+        .grant(outbox_budget())
+        .expect("capacity covers it");
+    let dropped_id = {
+        let obligation = obligation_ledger
+            .reserve::<OutboxEffectPermit>(outbox_reservation(DownstreamIdempotency::Strong), grant)
+            .expect("egress is the required grade");
+        obligation.id()
+        // Dropped unsettled on purpose: this is the planted negative.
+    };
+    let obligation_leaks = obligation_ledger.leaks();
+    assert_eq!(
+        obligation_leaks.len(),
+        1,
+        "the dropped obligation is recorded once"
+    );
+    let obligation_leak = obligation_leaks.first().expect("checked length");
+    assert_eq!(
+        obligation_leak.subject(),
+        LeakSubject::Obligation(dropped_id),
+        "the leak must name the obligation that was dropped, not merely that one was"
+    );
+    assert_eq!(
+        obligation_leak.obligation_class(),
+        Some(ObligationClass::OutboxEffectPermit),
+        "a dropped obligation carries the class needed to route the failure"
     );
 }
