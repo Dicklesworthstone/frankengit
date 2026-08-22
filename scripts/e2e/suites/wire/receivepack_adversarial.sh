@@ -42,7 +42,7 @@ readonly TEST_NAME='receivepack_adversarial'
 # quietly shrinking it.
 readonly WIRE_PROBES=9
 readonly ADMISSION_PROBES=4
-readonly RACE_PROBES=9
+readonly RACE_PROBES=10
 readonly PROPAGATION_PROBES=3
 
 main() {

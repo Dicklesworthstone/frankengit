@@ -102,12 +102,14 @@ use fgit_admission::{
     permitted_object_closure_root, validate_receive,
 };
 use fgit_authority::{
-    AuthenticatedHead, DuplicateDelivery, FaultDirective, FaultKind, FaultPosition,
-    FaultableAuthorityStore, HeadKey, IdempotencyKey, MemoryAuthorityStore, OpIndex,
+    AuthenticatedHead, AuthorityStore, DuplicateDelivery, FaultDirective, FaultKind, FaultPosition,
+    FaultableAuthorityStore, HeadKey, HeadRead, IdempotencyKey, MemoryAuthorityStore, OpIndex,
     OutcomeFailure, OutcomeLookup, StoreInstanceId, TerminalOutcome, initialize_repository,
     reconcile_outcome, resolve_outcome,
 };
 use fgit_chronicle::{PublicationBasis, ResultingRoots};
+use fgit_codec::attest::body_id;
+use fgit_codec::bridge::CryptoBodyIdentity;
 use fgit_codec::{RepositoryAuthorityHeadBody, RepositoryCommitRecord};
 use fgit_reference::effect::FoldOutcome;
 use fgit_reference::intent::{
@@ -1450,4 +1452,91 @@ fn two_sessions_deleting_one_ref_never_both_commit() {
         "{committed} sessions committed a delete of the same ref from one lineage; \
          exactly-one-winner over ref state does not hold"
     );
+}
+
+/// The head-binding property itself: a basis that disagrees with the
+/// authenticated head is refused, and one that agrees is not.
+///
+/// # Why this exists, and what it replaces
+///
+/// [`two_sessions_deleting_one_ref_never_both_commit`] was believed to rest on
+/// head-binding and does not. Mutation testing settled it: making
+/// `CanonicalAdmissionProjection::snapshot` ignore its `AuthenticatedHead` —
+/// dropping the staleness check *and* resolving from `basis.body().ref_root` —
+/// left every test in this file passing. The reason is that the race fixture
+/// never makes the basis and the head **diverge**, so the two roots are equal,
+/// resolving from either is identical, and the check cannot fire. Exactly-one-
+/// winner there is real but comes from the authority head CAS, not from the
+/// projection being head-bound.
+///
+/// `AuthorityReceiptStale` was asserted nowhere in this suite before this test —
+/// it appeared once, in a doc comment claiming the behaviour.
+///
+/// # The pair
+///
+/// Both halves use the same store-issued `AuthenticatedHead`, so the only
+/// variable is the basis:
+///
+/// * **permitted** — a basis whose body equals the authenticated head's resolves;
+/// * **forbidden** — a basis naming a different `ref_root` is refused
+///   `AuthorityReceiptStale`.
+///
+/// The head id is derived with `body_id` exactly as `admit_validated_receive`
+/// derives it, so these bases are the same shape admission builds rather than a
+/// test-invented pairing.
+#[test]
+fn a_basis_that_disagrees_with_the_authenticated_head_is_refused_as_stale() {
+    let context = context(b"fg019c-stale-basis");
+    let (store, projection) = head_bound_setup(&context);
+
+    let HeadRead::Present(receipt) = store
+        .read_head(&context.head_key)
+        .expect("the genesis head reads back")
+    else {
+        panic!("head_bound_setup initializes a head, so it must be present");
+    };
+    let authenticated = store
+        .authenticate_head_receipt(&receipt)
+        .expect("a store authenticates a receipt it issued itself");
+    let head_body = authenticated
+        .body()
+        .expect("the authenticated receipt carries a decodable head body");
+
+    // PERMITTED. Agreement resolves, so the refusal below is discrimination
+    // rather than a projection that refuses every basis it is handed.
+    projection
+        .snapshot(&basis_for(&head_body), &authenticated)
+        .expect("a basis equal to the authenticated head must resolve");
+
+    // FORBIDDEN. Same head, a basis naming a different ref root. This is the
+    // divergence the race fixture never produces.
+    let divergent = RepositoryAuthorityHeadBody {
+        ref_root: canonical_ref_state_root(&CanonicalRefState::new(BTreeMap::new()))
+            .expect("the empty ref state has a canonical root"),
+        ..head_body
+    };
+    assert_ne!(
+        divergent.ref_root, head_body.ref_root,
+        "the divergent basis must actually differ, or this asserts nothing"
+    );
+
+    let refusal = projection
+        .snapshot(&basis_for(&divergent), &authenticated)
+        .expect_err("a basis disagreeing with the authenticated head must be refused");
+    assert_eq!(
+        refusal,
+        RefusalCode::AuthorityReceiptStale,
+        "a stale basis was refused {refusal:?} rather than AuthorityReceiptStale, so the \
+         projection is not rejecting it for the head-binding reason this test exists to pin"
+    );
+}
+
+/// A publication basis for `body`, with its id derived the way admission derives
+/// it (`body_id` over the head body), not invented here.
+fn basis_for(body: &RepositoryAuthorityHeadBody) -> PublicationBasis {
+    let internal =
+        body_id(&CryptoBodyIdentity, body).expect("a head body has a canonical identity");
+    let id = fgit_types::RepositoryAuthorityHeadId::from_internal_object_id(internal)
+        .expect("the head identity is a valid head id");
+    PublicationBasis::new(id, body.clone())
 }
