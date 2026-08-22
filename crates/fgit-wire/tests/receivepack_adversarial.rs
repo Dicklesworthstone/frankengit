@@ -153,13 +153,27 @@ impl ReceiveCancellation for CancelAfter {
 /// buffers real bytes first and asserts that it did. What *this* test carries
 /// on its own is that four structurally different malformed inputs each reach a
 /// typed refusal rather than being absorbed.
+///
+/// **Each route is bound to the refusal it is meant to exercise.** An earlier
+/// version asserted only `is_err()`, which cannot tell "this route refused for
+/// its own reason" from "this route refused for some unrelated reason that
+/// happens to fire first". That distinction is the whole value of a route
+/// table: four labels asserting one generic failure are one probe wearing four
+/// names. Binding the variant also pins the routes apart from each other, since
+/// each names a different one.
+///
+/// It does **not** prove the refusal is the *earliest* possible one, nor that
+/// no other defect coexists on the path — only that the named guard is the one
+/// that answered.
 #[test]
 fn every_refusal_route_leaves_an_empty_quarantine() {
-    // (label, the packets to feed) — each ends in a typed refusal.
-    let routes: Vec<(&str, Vec<Packet>)> = vec![
+    // (label, the packets to feed, the refusal this route exists to provoke).
+    // The predicate is a plain fn pointer so the table stays a table.
+    let routes: Vec<(&str, Vec<Packet>, fn(&ReceiveError) -> bool)> = vec![
         (
             "malformed command line",
             vec![Packet::Data(b"not-a-command".to_vec())],
+            |error| matches!(error, ReceiveError::MalformedCommand { .. }),
         ),
         (
             "both object ids zero",
@@ -169,6 +183,7 @@ fn every_refusal_route_leaves_an_empty_quarantine() {
                 "refs/heads/main",
                 Some("report-status"),
             )],
+            |error| matches!(error, ReceiveError::BothObjectIdsZero),
         ),
         (
             "duplicate ref command",
@@ -176,6 +191,7 @@ fn every_refusal_route_leaves_an_empty_quarantine() {
                 command(ZERO, NEW, "refs/heads/main", Some("report-status")),
                 command(NEW, OTHER, "refs/heads/main", None),
             ],
+            |error| matches!(error, ReceiveError::DuplicateRefCommand { .. }),
         ),
         (
             "capabilities after the first command",
@@ -183,24 +199,35 @@ fn every_refusal_route_leaves_an_empty_quarantine() {
                 command(ZERO, NEW, "refs/heads/main", Some("report-status")),
                 command(ZERO, OTHER, "refs/heads/other", Some("report-status")),
             ],
+            |error| matches!(error, ReceiveError::CapabilitiesNotFirstCommand),
         ),
     ];
 
-    for (label, packets) in routes {
+    for (label, packets, expected) in routes {
         let mut machine = ReceivePack::new(context()).expect("machine");
-        let mut refused = false;
+        let mut refusal: Option<ReceiveError> = None;
         for packet in packets {
-            if machine.push_packet(packet).is_err() {
-                refused = true;
+            if let Err(error) = machine.push_packet(packet) {
+                refusal = Some(error);
                 break;
             }
         }
-        if !refused {
+        if refusal.is_none() {
             // Some routes only refuse at the flush that parses the request.
-            refused = machine.push_packet(Packet::Flush).is_err();
+            if let Err(error) = machine.push_packet(Packet::Flush) {
+                refusal = Some(error);
+            }
         }
 
-        assert!(refused, "{label}: expected a typed refusal and got none");
+        let Some(error) = refusal else {
+            panic!("{label}: expected a typed refusal and got none");
+        };
+        assert!(
+            expected(&error),
+            "{label}: refused with {error:?}, which is not the guard this route \
+             exists to exercise — the route may be reaching a different failure \
+             first, which would make its label wrong"
+        );
         assert_eq!(
             machine.quarantine_len(),
             0,
