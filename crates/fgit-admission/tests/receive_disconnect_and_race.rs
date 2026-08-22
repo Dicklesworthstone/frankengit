@@ -98,8 +98,9 @@ use fgit_admission::{
 };
 use fgit_authority::{
     AuthenticatedHead, DuplicateDelivery, FaultDirective, FaultKind, FaultPosition,
-    FaultableAuthorityStore, HeadKey, IdempotencyKey, MemoryAuthorityStore, OpIndex, OutcomeLookup,
-    StoreInstanceId, TerminalOutcome, initialize_repository, reconcile_outcome, resolve_outcome,
+    FaultableAuthorityStore, HeadKey, IdempotencyKey, MemoryAuthorityStore, OpIndex,
+    OutcomeFailure, OutcomeLookup, StoreInstanceId, TerminalOutcome, initialize_repository,
+    reconcile_outcome, resolve_outcome,
 };
 use fgit_chronicle::{PublicationBasis, ResultingRoots};
 use fgit_codec::{RepositoryAuthorityHeadBody, RepositoryCommitRecord};
@@ -748,10 +749,37 @@ fn a_transaction_that_cannot_be_resolved_is_classified_stuck() {
         },
     });
 
+    // `is_err()` alone would not say *why* it failed. `OutcomeFailure` has
+    // several variants, so a future validation step that rejected these inputs
+    // for an unrelated reason — a malformed refusal record, say — would keep
+    // this test green while it silently stopped testing conflict detection at
+    // all. Today `AcceleratorConflict` is the only reachable `Err` arm for two
+    // `Decided` inputs, but that is a property of the current implementation,
+    // not of this assertion, which is exactly the gap worth closing.
     let conflict = reconcile_outcome(indexed, replayed);
-    assert!(
-        conflict.is_err(),
-        "an accelerator that disagrees with the stream must fail closed, not pick a side"
+    let Err(OutcomeFailure::AcceleratorConflict {
+        indexed: reported_indexed,
+        replayed: reported_replayed,
+    }) = conflict
+    else {
+        panic!(
+            "an accelerator that disagrees with the stream must fail closed as \
+             AcceleratorConflict, not pick a side; got {conflict:?}"
+        );
+    };
+
+    // And the failure must name the disagreement it actually saw, rather than
+    // reporting some other pair — which is what makes it actionable to a
+    // repair path instead of a bare "something was inconsistent".
+    assert_eq!(
+        OutcomeLookup::Decided(*reported_indexed),
+        indexed,
+        "the conflict names an indexed outcome that is not the one supplied"
+    );
+    assert_eq!(
+        OutcomeLookup::Decided(*reported_replayed),
+        replayed,
+        "the conflict names a replayed outcome that is not the one supplied"
     );
     // The permitted twin: agreement resolves, so the arm above is a genuine
     // discrimination rather than a resolver that refuses everything.
