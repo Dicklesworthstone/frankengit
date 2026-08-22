@@ -324,8 +324,8 @@ impl CanonicalRefState {
 }
 
 impl CanonicalBody for CanonicalRefState {
-    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/admission-ref-state/v1");
-    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("admission-ref-state");
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/ref-state/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("ref-state");
     const SCHEMA_MAJOR: u16 = 1;
     const SCHEMA_MINOR: u16 = 0;
 

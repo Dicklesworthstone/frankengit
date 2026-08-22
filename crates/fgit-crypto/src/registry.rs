@@ -654,7 +654,7 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
     owned_row(
         34,
         IdentityDomain::AdmissionRefState,
-        "frankengit/admission-ref-state/v1",
+        "frankengit/ref-state/v1",
         None,
     ),
     owned_row(
