@@ -445,7 +445,12 @@ Crates appear only with a real final-abstraction slice. The prospective strict D
 - derived systems: search, typed graphs, document lineage, agents, CI protocol, packages, projections;
 - products/adapters: gateway, API, CLI, node, runner, operations, browser/WASM.
 
-The repository currently contains only the constitutional bootstrap checker rather than dozens of empty placeholder crates.
+The repository currently contains 33 first-party `fgit-*` crates, each admitted with a real
+final-abstraction slice and its tests (foundation codec/authority/txn/evidence layers, Git
+object/pack/wire/fabric primitives, TreeFS, repair, statistics, lab, node, CLI), plus the
+constitutional registry checker. No empty placeholder crates exist; derived systems (search,
+graphs, forge projections) and product surfaces (API/web/TUI) remain unbuilt by design until
+their owning slices open.
 
 See the full map in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md#43-prospective-implementation-architecture).
 
