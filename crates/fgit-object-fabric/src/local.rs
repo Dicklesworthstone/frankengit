@@ -775,9 +775,10 @@ impl RuntimeImmutableObjectFabric for LocalFilesystemFabric {
                 }
             }
             Ok(Outcome::Err(error)) => Outcome::Err(error),
-            Ok(Outcome::Cancelled(reason)) => Outcome::Cancelled(reason),
+            Ok(Outcome::Cancelled(reason)) | Err(JoinError::Cancelled(reason)) => {
+                Outcome::Cancelled(reason)
+            }
             Ok(Outcome::Panicked(payload)) => Outcome::Panicked(payload),
-            Err(JoinError::Cancelled(reason)) => Outcome::Cancelled(reason),
             Err(JoinError::Panicked(payload)) => Outcome::Panicked(payload),
             Err(JoinError::PolledAfterCompletion) => {
                 Outcome::Err(StoreRefusal::RuntimeJoinConsumed)
