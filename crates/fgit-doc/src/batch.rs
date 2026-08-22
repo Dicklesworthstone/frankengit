@@ -122,7 +122,7 @@ pub fn worker_count(
     Ok(planned.workers().min(mode_cap(surface)))
 }
 
-fn map_worker_budget_refusal(refusal: WorkerBudgetRefusal) -> Refusal {
+const fn map_worker_budget_refusal(refusal: WorkerBudgetRefusal) -> Refusal {
     match refusal {
         WorkerBudgetRefusal::ZeroCpuCap | WorkerBudgetRefusal::ZeroPerJobEstimate => {
             Refusal::precondition(RefusalKind::WorkloadUnusable)
