@@ -746,3 +746,48 @@ fn advance_pointer_async_matches_sync_exactly() {
 // Non-production fixture identity: this reserved tag deliberately has no registered digest width.
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
 const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
+
+/// A [`fgit_codec::BodyIdentity`] that refuses everything.
+///
+/// `CapsuleIdentityUnavailable` maps an identity failure that the real
+/// `CryptoBodyIdentity` cannot produce for a well-formed capsule -- the domain
+/// is registered and the body encodes. But `capsule_identity` is generic over
+/// the identity, so the failure belongs to the caller's implementation, and a
+/// stub reaches the arm honestly rather than by contriving an unencodable body.
+struct RefusingIdentity;
+
+impl fgit_codec::BodyIdentity for RefusingIdentity {
+    fn identify(
+        &self,
+        _domain: fgit_types::DomainTag,
+        _schema: fgit_types::SchemaId,
+        _codec_version: fgit_types::numeric::CodecVersion,
+        _canonical_body: &[u8],
+    ) -> Result<fgit_types::identity::InternalObjectId, fgit_codec::CodecRefusal> {
+        Err(fgit_codec::CodecRefusal::MagicUnrecognized { observed: *b"NOPE" })
+    }
+}
+
+#[test]
+fn a_capsule_whose_identity_cannot_be_produced_is_refused_and_the_real_identity_is_not() {
+    // Closes the remainder recorded in b24c829. The sibling arms in audit.rs
+    // got their presence cases there; this is the third member of the same
+    // family, and it lives here because the capsule fixtures do.
+    //
+    // The pairing is what makes this about the refusal rather than about the
+    // stub: the SAME capsule identifies cleanly under CryptoBodyIdentity, so
+    // the refusal is attributable to the identity that could not produce one
+    // and not to a malformed fixture.
+    let capsule = capsule_at(1, None);
+
+    assert_eq!(
+        capsule_identity(&RefusingIdentity, &capsule),
+        Err(ChronicleRefusal::CapsuleIdentityUnavailable),
+        "a capsule whose identity cannot be produced must refuse rather than invent one"
+    );
+    assert!(
+        capsule_identity(&CryptoBodyIdentity, &capsule).is_ok(),
+        "the same capsule identifies under the real identity, so the refusal is about the \
+         identity rather than about the body"
+    );
+}
