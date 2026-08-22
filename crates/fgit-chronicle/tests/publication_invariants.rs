@@ -1385,3 +1385,140 @@ fn a_refusal_only_batch_may_advance_the_outcome_index_root_alone() {
         "a refusal-only batch may advance the outcome index: refusals are entries in it"
     );
 }
+
+// ---------------------------------------------------------------------------
+// verify_roots is an array of six pairs, and a wrong entry is invisible until
+// every axis is probed under its own name
+// ---------------------------------------------------------------------------
+
+/// `verify_roots` compares six fields and returns the first disagreement under
+/// a `&'static str` label. Two defects live in that shape and neither is caught
+/// by testing one axis: a missing entry silently permits a root to disagree,
+/// and a mislabelled entry -- the retention comparison reported as
+/// `"outbox_root"`, say -- sends a reader to the wrong field. Walking every
+/// axis and asserting the exact label closes both.
+///
+/// Each axis is restored before the next is planted, so exactly one pair
+/// disagrees at a time and the guard cannot pass by short-circuiting on an
+/// earlier failure.
+#[test]
+fn every_axis_of_the_resulting_root_agreement_is_checked_under_its_own_name() {
+    let (basis, batch, mut head) = well_formed_pair();
+
+    // Axis one: the source root.
+    head.ref_root = digest(0xF0);
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::ResultingRootMismatch { field: "ref_root" }),
+        "the head must publish the ref state the batch resulted in"
+    );
+    head.ref_root = batch.resulting_ref_root;
+
+    // Axis two: the forge position.
+    head.forge_position_root = digest(0xF1);
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::ResultingRootMismatch {
+            field: "forge_position_root"
+        }),
+        "the head must publish the forge position the batch resulted in"
+    );
+    head.forge_position_root = batch.resulting_forge_position_root;
+
+    // Axis three: the outcome index. This is the axis a derived cumulative
+    // root would have to satisfy, so it is the one that must be exercised
+    // rather than assumed.
+    head.outcome_index_root = digest(0xF2);
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::ResultingRootMismatch {
+            field: "outcome_index_root"
+        }),
+        "the head must publish the outcome index the batch resulted in"
+    );
+    head.outcome_index_root = batch.resulting_outcome_index_root;
+
+    // Axis four: retention.
+    head.retention_root = digest(0xF3);
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::ResultingRootMismatch {
+            field: "retention_root"
+        }),
+        "the head must publish the retention state the batch resulted in"
+    );
+    head.retention_root = batch.resulting_retention_root;
+
+    // Axis five: the outbox.
+    head.outbox_root = digest(0xF4);
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::ResultingRootMismatch {
+            field: "outbox_root"
+        }),
+        "the head must publish the outbox state the batch resulted in"
+    );
+    head.outbox_root = batch.resulting_outbox_root;
+
+    // Axis six: the policy epoch, which is a counter rather than a root and so
+    // is the entry most easily left out of a root-shaped array.
+    head.policy_epoch = PolicyEpoch::try_new(2).expect("two is a valid epoch");
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::ResultingRootMismatch {
+            field: "policy_epoch"
+        }),
+        "the head must publish the policy epoch the batch resulted in"
+    );
+    head.policy_epoch = batch.resulting_policy_epoch;
+
+    // Permitted twin: with every axis restored the same pair verifies, so each
+    // refusal above was caused by the planted field and not by the walk.
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
+}
+
+/// `verify_successor` reports a misreported committed-order position through
+/// the same `ResultingRootMismatch` vocabulary as the root array, under the
+/// label `"latest_repository_sequence"`. It is the only non-root field routed
+/// that way, which is exactly why nothing reached it: a reader scanning for
+/// root names does not look for a sequence there.
+#[test]
+fn a_head_that_misreports_the_latest_repository_sequence_is_refused() {
+    let (basis, batch, mut head) = well_formed_pair();
+    let committed = batch
+        .committed_rcrs
+        .last()
+        .expect("well_formed_pair commits one record")
+        .repository_sequence;
+
+    // Planted negative: the head claims a position the batch did not reach.
+    head.latest_repository_sequence =
+        Some(RepositorySequence::try_new(2).expect("two is a valid position"));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::ResultingRootMismatch {
+            field: "latest_repository_sequence"
+        }),
+        "the head must publish the committed position the batch actually reached"
+    );
+
+    // Second axis of the same clause: absence is a mismatch too, not a wildcard.
+    head.latest_repository_sequence = None;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::ResultingRootMismatch {
+            field: "latest_repository_sequence"
+        }),
+        "a head that reports no committed position at all is refused, not excused"
+    );
+
+    // Near-identical permitted case: the position the batch did reach.
+    head.latest_repository_sequence = Some(committed);
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
+}
