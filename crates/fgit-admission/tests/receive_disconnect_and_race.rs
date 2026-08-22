@@ -1297,6 +1297,57 @@ fn head_bound_setup(
     )
 }
 
+/// The permitted twin: one session alone deleting the same ref **does** commit.
+///
+/// Without this, [`two_sessions_deleting_one_ref_never_both_commit`] is vacuous
+/// in a way its own non-vacuity guard does not catch. That guard asserts a
+/// session *reached a terminal decision*, and a refusal reaches one — so a
+/// harness where nothing can ever commit yields `committed == 0`, which is
+/// `<= 1`, and the probe passes while demonstrating nothing about one-winner
+/// semantics.
+///
+/// The distinction is between a test that *agrees* with a property and one that
+/// would *notice* the property breaking. The race probe agrees with one-winner
+/// semantics; on its own it cannot discriminate them from a broken fixture. This twin supplies the missing half, so a
+/// zero-commit race outcome is attributable to the race rather than to a setup
+/// that could never commit anything.
+#[test]
+fn one_session_alone_deleting_that_ref_does_commit() {
+    let context = context(b"fg019c-headbound-solo");
+    let validated = delete_main();
+    let (store, projection) = head_bound_setup(&context);
+
+    let result = admit_validated_receive(
+        &store,
+        &context,
+        &validated,
+        AdmissionLimits::default(),
+        &projection,
+    )
+    .expect("an uncontended delete against a resolvable genesis basis reaches a decision");
+
+    let tx_id = result.session.tx_ids[0];
+    let resolved = resolve_outcome(
+        &store,
+        &context.head_key,
+        context.tenant_id,
+        context.repository_id,
+        tx_id,
+    )
+    .unwrap_or_else(|error| panic!("{tx_id:?} must resolve, got {error}"));
+
+    let OutcomeLookup::Decided(terminal) = resolved else {
+        panic!("an uncontended delete left {tx_id:?} undecided: {resolved:?}");
+    };
+    assert!(
+        matches!(terminal.outcome, DecisionOutcome::Committed { .. }),
+        "an uncontended delete of a ref present in the genesis state did not commit \
+         ({:?}), so this harness cannot commit at all and the two-session probe's \
+         zero-commit outcome would prove nothing",
+        terminal.outcome
+    );
+}
+
 /// Two sessions delete the same ref against a head-bound projection, and the
 /// authenticated stream holds **at most one** commit.
 ///
