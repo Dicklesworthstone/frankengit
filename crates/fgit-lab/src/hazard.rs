@@ -296,6 +296,20 @@ impl ScheduledHazard {
     }
 }
 
+/// Orders hazards by where they fire, then by their canonical fault identity.
+///
+/// The second component is necessary because several independent faults may
+/// fire at one operation index. A stable sort by index alone would retain the
+/// caller's construction order and make equivalent scripts compare unequal.
+fn sort_hazards(hazards: &mut [ScheduledHazard]) {
+    hazards.sort_by(|left, right| {
+        left.at()
+            .raw()
+            .cmp(&right.at().raw())
+            .then_with(|| left.canonical().cmp(&right.canonical()))
+    });
+}
+
 /// A run's complete fault configuration.
 ///
 /// Storage faults are delegated to `fgit-authority`'s [`FaultPlan`]; packet and
@@ -329,7 +343,7 @@ impl HazardScript {
     /// regardless of construction order.
     #[must_use]
     pub fn explicit(storage: FaultPlan, mut hazards: Vec<ScheduledHazard>) -> Self {
-        hazards.sort_by_key(|hazard| hazard.at().raw());
+        sort_hazards(&mut hazards);
         Self {
             storage,
             hazards,
@@ -387,7 +401,7 @@ impl HazardScript {
             };
             hazards.push(hazard);
         }
-        hazards.sort_by_key(|hazard| hazard.at().raw());
+        sort_hazards(&mut hazards);
         Self {
             storage,
             hazards,
@@ -540,6 +554,74 @@ mod tests {
             ],
         );
         assert_eq!(script.canonical_line(), reordered.canonical_line());
+    }
+
+    #[test]
+    fn same_index_hazards_have_a_construction_order_independent_canonical_order() {
+        let at = OpIndex::from_raw(6);
+        let first = HazardScript::explicit(
+            FaultPlan::none(),
+            vec![
+                ScheduledHazard::Packet {
+                    at,
+                    fault: PacketFault::Truncate { after_bytes: 3 },
+                },
+                ScheduledHazard::ObjectStore {
+                    at,
+                    fault: ObjectStoreFault::StaleGeneration { behind: 2 },
+                },
+                ScheduledHazard::Execution {
+                    at,
+                    fault: ExecutionFault::Cancelled {
+                        phase: CancelPhase::Finalize,
+                    },
+                },
+                ScheduledHazard::Packet {
+                    at,
+                    fault: PacketFault::Drop,
+                },
+            ],
+        );
+        let reordered = HazardScript::explicit(
+            FaultPlan::none(),
+            vec![
+                ScheduledHazard::Packet {
+                    at,
+                    fault: PacketFault::Drop,
+                },
+                ScheduledHazard::Execution {
+                    at,
+                    fault: ExecutionFault::Cancelled {
+                        phase: CancelPhase::Finalize,
+                    },
+                },
+                ScheduledHazard::ObjectStore {
+                    at,
+                    fault: ObjectStoreFault::StaleGeneration { behind: 2 },
+                },
+                ScheduledHazard::Packet {
+                    at,
+                    fault: PacketFault::Truncate { after_bytes: 3 },
+                },
+            ],
+        );
+
+        assert_eq!(first, reordered);
+        assert_eq!(first.canonical_line(), reordered.canonical_line());
+        assert_eq!(
+            first
+                .hazards()
+                .iter()
+                .copied()
+                .map(ScheduledHazard::canonical)
+                .collect::<Vec<_>>(),
+            vec![
+                "exec.cancelled:finalize@6",
+                "object.stale_generation:2@6",
+                "packet.drop@6",
+                "packet.truncate:3@6",
+            ]
+        );
     }
 
     #[test]
