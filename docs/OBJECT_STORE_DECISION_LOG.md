@@ -182,8 +182,16 @@ struct RepositoryDecisionBatchBody {
     resulting_outbox_root: Digest,
     resulting_policy_epoch: PolicyEpoch,
     batch_evidence_root: Digest,
+    compaction_generation_link: Option<Digest>,
 }
 ```
+
+This is a copy of the authoritative schema in
+[`NORMATIVE_PROTOCOL_CONTRACTS.md`](NORMATIVE_PROTOCOL_CONTRACTS.md) §8.1;
+that document wins on any divergence. In particular, `batch_evidence_root` is
+the canonical commitment over this batch's decision evidence, while
+`compaction_generation_link` is the separate optional link for a compaction
+publication.
 
 All ordering inside a batch is canonical. The combiner applies decisions sequentially to a scratch reference state and emits a normal form. A batch cannot contain two outcomes for one `TxId`, duplicate an RCR sequence, or skip the predecessor head.
 
