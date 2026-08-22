@@ -765,3 +765,137 @@ fn a_committed_decision_bound_to_another_transaction_is_refused_and_the_matching
 // Non-production fixture identity: this reserved tag deliberately has no registered digest width.
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
 const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
+
+// ---------------------------------------------------------------------------
+// Refusals on the batch-as-data path that had no presence case
+// ---------------------------------------------------------------------------
+//
+// These four ChronicleRefusal variants are constructed only in audit.rs, on the
+// path that validates a pair arriving as DATA rather than one we sealed. Each
+// had zero test occurrences. An unexercised refusal on the untrusted-input path
+// is a section 5.2 terminal non-pass, and these are the checks standing between
+// a forged pair and acceptance.
+//
+// Every case mutates exactly one field of a well-formed pair and restores it, so
+// the refusal is shown to be specific to that field rather than to anything the
+// mutation disturbed in passing.
+
+#[test]
+fn each_half_of_the_repository_binding_is_checked_independently() {
+    // The guard is a DISJUNCTION -- batch != head OR batch != basis -- and a
+    // single mutation of batch.repository_id trips both at once, so it cannot
+    // tell either clause from the other. Mutation testing proved that: disabling
+    // the first clause left this passing, because the second still fired.
+    //
+    // So each clause gets a case that only IT can catch.
+    let other = RepositoryId::from_bytes([9; OPAQUE_ID_LEN]);
+
+    // Clause one alone: batch still agrees with the basis, but not with the head.
+    let (basis, batch, mut head) = well_formed_pair();
+    head.repository_id = other;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::RepositoryMismatch),
+        "a batch and the head it publishes must name the same repository"
+    );
+
+    // Clause two alone: batch and head agree with each other, and neither with
+    // the basis. The first clause is false here, so only the second can catch it.
+    let (basis, mut batch, mut head) = well_formed_pair();
+    batch.repository_id = other;
+    head.repository_id = other;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::RepositoryMismatch),
+        "a self-consistent pair may not publish into a repository its basis does not name: \
+         agreement between batch and head is not authority"
+    );
+
+    // The permitted twin: untouched, the same pair verifies.
+    let (basis, batch, head) = well_formed_pair();
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(()),
+        "both refusals above are about the repository binding, not the fixture"
+    );
+}
+
+#[test]
+fn a_batch_built_on_the_wrong_predecessor_generation_is_refused_and_its_twin_is_not() {
+    let (basis, mut batch, head) = well_formed_pair();
+    let wrong = HeadGeneration::try_new(2).expect("two is a valid generation");
+    batch.predecessor_head_generation = wrong;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::PredecessorGenerationMismatch {
+            expected: HeadGeneration::FIRST,
+            observed: wrong,
+        }),
+        "the generation a batch claims to extend must be the generation its basis was read at, \
+         or a batch built on a stale head could publish over a newer one"
+    );
+
+    batch.predecessor_head_generation = HeadGeneration::FIRST;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(()),
+        "the refusal is specific to the generation, not to the predecessor binding as a whole"
+    );
+}
+
+#[test]
+fn a_batch_that_does_not_open_at_the_next_decision_position_is_refused_and_its_twin_is_not() {
+    let (basis, mut batch, head) = well_formed_pair();
+    let gap = DecisionSequence::try_new(2).expect("two is a valid position");
+    batch.first_decision_sequence = gap;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::DecisionSequenceNotContinuing {
+            expected: DecisionSequence::FIRST,
+            observed: gap,
+        }),
+        "a batch that opens past the next free position would leave a hole in the decision \
+         order that no later batch can fill"
+    );
+
+    batch.first_decision_sequence = DecisionSequence::FIRST;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_committed_record_naming_the_wrong_predecessor_is_refused_and_its_twin_is_not() {
+    // The parent check sits BEFORE the identity check in the same loop, so this
+    // reaches CommitRecordParentBroken rather than CommitRecordIdentityMismatch
+    // even though changing the parent also changes the record's identity. That
+    // ordering is the point: a broken chain is reported as a broken chain.
+    let (basis, mut batch, head) = well_formed_pair();
+    let original = batch
+        .committed_rcrs
+        .first()
+        .expect("the pair carries one committed record")
+        .parent_rcr_id;
+    batch
+        .committed_rcrs
+        .first_mut()
+        .expect("the pair carries one committed record")
+        .parent_rcr_id = Some(derived!(RepositoryCommitId, 0x77));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::CommitRecordParentBroken { index: 0 }),
+        "the first record of a genesis batch has no predecessor; naming one forges a chain link"
+    );
+
+    batch
+        .committed_rcrs
+        .first_mut()
+        .expect("the pair carries one committed record")
+        .parent_rcr_id = original;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(()),
+        "restoring the predecessor leaves the pair verifiable"
+    );
+}
