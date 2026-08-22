@@ -49,7 +49,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_reference::effect::{
-    AbsorptionReason, EffectTarget, FoldBasis, FoldOutcome, IntentDisposition, RefEffect,
+    AbsorptionReason, EffectTarget, FoldBasis, FoldOutcome, IntentDisposition, NetEffects,
+    RefEffect,
 };
 use fgit_reference::harness::{IdentityMint, RequestBuilder, label};
 use fgit_reference::intent::{
@@ -57,7 +58,7 @@ use fgit_reference::intent::{
     Intent, OutboxDeliveryKey, OutboxIntent, RefIntent, TransactionRequest,
 };
 use fgit_reference::refs::ExpectedRefState;
-use fgit_txn::IntentEvaluator;
+use fgit_txn::{IntentEvaluator, Workspace, apply_net_effects};
 use fgit_types::label::{SchemaFamily, SchemaId};
 use fgit_types::native::{GitOid, GitOidSha1};
 use fgit_types::refs::RefName;
@@ -116,6 +117,15 @@ struct OracleReport {
     refs: BTreeMap<RefName, RefEffect>,
     dispositions: Vec<OracleDisposition>,
     aborted: bool,
+    /// The end state the ordered evaluation actually produced.
+    ///
+    /// Distinct from `refs`, which is the DIFF against the basis. The round-trip
+    /// property needs the state itself: a diff round-trips against its own
+    /// basis by construction, so comparing diffs would prove nothing about
+    /// whether the fold preserved semantics.
+    final_refs: BTreeMap<RefName, GitOid>,
+    final_forge: BTreeMap<ForgeStreamId, Vec<ForgeEventKind>>,
+    final_outbox: BTreeMap<OutboxDeliveryKey, Digest>,
 }
 
 /// Evaluate in source order with read-your-own-writes, then fold.
@@ -149,6 +159,9 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
     let mut outbox_scratch: BTreeMap<OutboxDeliveryKey, Digest> = BTreeMap::new();
     // Forge positions, seeded from the same fixture the evaluator is given.
     let mut forge_scratch: BTreeMap<ForgeStreamId, ForgeStreamPosition> = forge_basis();
+    // Positions decide admission; EVENTS are what the normal form carries, so
+    // the round-trip needs both tracked independently.
+    let mut forge_events: BTreeMap<ForgeStreamId, Vec<ForgeEventKind>> = BTreeMap::new();
     let mut aborted = false;
 
     'outer: for statement in &request.statements {
@@ -261,6 +274,10 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
                             },
                             None => {
                                 forge_scratch.insert(forge.stream, current.successor());
+                                forge_events
+                                    .entry(forge.stream)
+                                    .or_default()
+                                    .push(forge.event.clone());
                                 dispositions.push(OracleDisposition::Surviving(
                                     EffectTarget::ForgeStream(forge.stream),
                                 ));
@@ -376,6 +393,14 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
             refs: BTreeMap::new(),
             dispositions: vec![OracleDisposition::TransactionAborted; total],
             aborted,
+            // An aborted transaction publishes nothing, so the end state is the
+            // basis untouched -- NOT the partially mutated scratch the
+            // evaluation had reached when it aborted. Returning the scratch here
+            // would make the round-trip assert that an abort publishes its
+            // partial work.
+            final_refs: basis.clone(),
+            final_forge: BTreeMap::new(),
+            final_outbox: BTreeMap::new(),
         };
     }
 
@@ -478,6 +503,9 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
         refs,
         dispositions,
         aborted,
+        final_refs: after,
+        final_forge: forge_events,
+        final_outbox: outbox_scratch,
     }
 }
 
@@ -1393,5 +1421,101 @@ fn the_shrinker_reduces_a_planted_failure_to_its_minimum() {
             .any(|statement| !statement.intents.is_empty()),
         "the shrinker returned a program that no longer satisfies the predicate; a minimal \
          program that does not reproduce is a false lead, not a smaller lead"
+    );
+}
+
+#[test]
+fn the_normal_form_applied_to_the_basis_reproduces_the_evaluated_workspace() {
+    // FG-008 epic acceptance, line 2: "apply(normal_form, basis) ==
+    // evaluator-final-workspace for the whole reference corpus".
+    //
+    // This is a DIFFERENT property from the equivalence campaign above, and the
+    // difference is the reason it is worth having. That campaign compares the
+    // two folders' outputs — `effects.refs` against the oracle's diff, and the
+    // dispositions. This one closes the loop: it takes the normal form the
+    // evaluator produced, applies it to the basis, and requires the result to
+    // equal the state that ORDERED evaluation with read-your-own-writes
+    // reached. Folding is target-disjoint and unordered; evaluation is ordered.
+    // They agree only if the fold preserved semantics.
+    //
+    // It also covers three effect classes nothing else here checks. The
+    // equivalence campaign asserts `effects.refs` and stops, so a fold that
+    // mangled forge events or outbox bindings passes it today. This compares
+    // refs, forge and outbox together.
+    let evaluator = IntentEvaluator::new();
+    let mut non_trivial = 0_usize;
+    let mut aborted = 0_usize;
+
+    for i in 0..programs() {
+        let seed = CORPUS_SEED.wrapping_add(i as u64);
+        let mut rng = Rng::new(seed);
+        let mut identity_mint = IdentityMint::new(seed);
+        let basis = generate_basis(&mut rng);
+        let request = generate_request(&mut rng, &mut identity_mint, &basis, "roundtrip");
+
+        let forge_positions = forge_basis();
+        let retention = BTreeSet::new();
+        let outbox = BTreeMap::new();
+        let report = evaluator.evaluate(
+            FoldBasis {
+                refs: &basis,
+                forge_positions: &forge_positions,
+                retention: &retention,
+                outbox: &outbox,
+            },
+            &request,
+        );
+        let oracle = oracle_fold(&basis, &request);
+
+        // The basis carries no prior forge events, retention roots or outbox
+        // bindings: `forge_basis()` seeds POSITIONS, which gate admission, and
+        // the normal form carries the events this transaction appends.
+        let basis_workspace = Workspace {
+            refs: basis.clone(),
+            ..Workspace::default()
+        };
+
+        let applied = match &report.outcome {
+            FoldOutcome::Folded(effects) => {
+                if !effects.is_empty() {
+                    non_trivial += 1;
+                }
+                apply_net_effects(&basis_workspace, effects)
+            }
+            // An aborted transaction publishes nothing, so applying its (empty)
+            // normal form must leave the basis exactly as it was.
+            FoldOutcome::Aborted { .. } => {
+                aborted += 1;
+                apply_net_effects(&basis_workspace, &NetEffects::default())
+            }
+        };
+
+        let expected = Workspace {
+            refs: oracle.final_refs.clone(),
+            forge: oracle.final_forge.clone(),
+            retention: BTreeSet::new(),
+            outbox: oracle.final_outbox.clone(),
+        };
+
+        assert_eq!(
+            applied, expected,
+            "seed {seed:#x}: applying the normal form to the basis did not reproduce the state \
+             ordered evaluation reached. The fold lost or invented information: an unordered, \
+             target-disjoint effect set must be interchangeable with replaying the intents in \
+             source order, and here it is not"
+        );
+    }
+
+    // Non-vacuity. A corpus whose programs all folded to nothing would satisfy
+    // every assertion above by comparing two copies of the basis.
+    assert!(
+        non_trivial > 0,
+        "no generated program produced a non-empty normal form, so the round-trip compared the \
+         basis against itself every time and proved nothing"
+    );
+    assert!(
+        aborted > 0,
+        "no generated program aborted, so the publishes-nothing half of the property is untested; \
+         the generator emits MismatchPolicy::TxnAbort and should reach it"
     );
 }

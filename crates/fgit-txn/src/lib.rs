@@ -35,7 +35,7 @@
 pub mod combiner;
 pub mod lanes;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_codec::{CodecRefusal, Encoder};
 use fgit_reference::effect::{
@@ -47,11 +47,102 @@ use fgit_reference::intent::{
     TransactionRequest,
 };
 use fgit_reference::state::RepositoryState;
+use fgit_types::Digest;
+use fgit_types::native::GitOid;
+use fgit_types::refs::RefName;
 use fgit_types::vocabulary::RefusalCode;
 
 pub use fgit_reference::effect::{
     FoldOutcome as TransactionFoldOutcome, FoldReport as TransactionFoldReport,
 };
+
+/// The observable state a transaction reads and leaves behind.
+///
+/// FG-008's second acceptance line is
+/// `apply(normal_form, basis) == evaluator-final-workspace`, and that sentence
+/// needs a workspace to be a value before it can be an assertion. This is that
+/// value: every target class [`NetEffects`] can carry, and nothing else.
+///
+/// It exists because the normal form is **target-disjoint and unordered** while
+/// evaluation is **ordered with read-your-own-writes**. Those two produce the
+/// same end state only if folding preserved semantics, and that is a property
+/// worth executing rather than assuming.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Workspace {
+    /// Ref values.
+    pub refs: BTreeMap<RefName, GitOid>,
+    /// Events appended per forge stream, in append order.
+    pub forge: BTreeMap<ForgeStreamId, Vec<ForgeEventKind>>,
+    /// Retention roots currently held.
+    pub retention: BTreeSet<RetentionRoot>,
+    /// Outbox deliveries owed, by delivery key.
+    pub outbox: BTreeMap<OutboxDeliveryKey, Digest>,
+}
+
+/// Apply a net-effect normal form to a basis.
+///
+/// The inverse direction of the fold: given the target-disjoint effects the
+/// evaluator produced, reconstruct the state they describe.
+///
+/// # Order independence
+///
+/// Each effect is applied to a distinct target, so no effect can observe
+/// another's result and the outcome cannot depend on iteration order. That is
+/// the whole point of the normal form and the reason plan §16.3 forbids
+/// hash-map iteration order from being publication semantics. Iteration here is
+/// over `BTreeMap`/`BTreeSet` anyway, so the traversal is deterministic even
+/// though the result does not depend on it.
+///
+/// # What this does NOT do
+///
+/// It does not re-evaluate. Preconditions were checked during evaluation
+/// against the pinned basis, and re-checking them here would be a second,
+/// drifting copy of semantics that already exist. Applying a normal form built
+/// against a *different* basis is therefore a caller error and produces a state
+/// nobody promised — the fold and the apply must share one pinned basis.
+#[must_use]
+pub fn apply_net_effects(basis: &Workspace, effects: &NetEffects) -> Workspace {
+    let mut after = basis.clone();
+
+    for (name, effect) in &effects.refs {
+        match effect {
+            RefEffect::Set(oid) => {
+                after.refs.insert(name.clone(), *oid);
+            }
+            RefEffect::Delete => {
+                after.refs.remove(name);
+            }
+        }
+    }
+
+    // Forge events append rather than replace: a stream is a log, and the
+    // normal form carries the events this transaction adds, not the whole
+    // history.
+    for (stream, events) in &effects.forge {
+        after
+            .forge
+            .entry(*stream)
+            .or_default()
+            .extend(events.iter().cloned());
+    }
+
+    for (root, effect) in &effects.retention {
+        match effect {
+            RetentionEffect::Add => {
+                after.retention.insert(*root);
+            }
+            RetentionEffect::Remove => {
+                after.retention.remove(root);
+            }
+        }
+    }
+
+    for (key, parameters) in &effects.outbox {
+        after.outbox.insert(*key, *parameters);
+    }
+
+    after
+}
 
 /// Wire revision of [`canonical_fold_bytes`]'s normal-form payload.
 pub const NORMAL_FORM_FORMAT_VERSION: u16 = 1;
