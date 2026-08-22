@@ -718,6 +718,24 @@ fn a_basis_mismatch_outranks_a_compaction_generation_link_mismatch() {
 
 /// **§5.1.** A stale expected token loses the race; nothing it staged becomes
 /// canonical, and the staged output survives for a replan.
+///
+/// **Comment corrected (`frankengit-q77o`).** This test originally asserted
+/// "a moved head is a lost race, not an already-decided duplicate". That is
+/// **false for this very fixture**, and I wrote it. Driving the same scenario
+/// through `fgit_chronicle::publish` directly returns
+/// `Lost(Superseded { decided: [(tx, Committed(..))] })` — the transaction IS
+/// already decided, and chronicle says so while naming the committed RCR.
+///
+/// `StagedCompaction::publish` matches `Lost(_)` with a wildcard, so both
+/// `LostCandidate` arms become `AuthorityRaceLost` even though their own docs
+/// carry opposite instructions: `Replannable` may be replanned, `Superseded`
+/// must not be retried. What this test pins is therefore what the compaction
+/// layer *reports*, which is not the same as what the authority layer
+/// *classified*.
+///
+/// The assertion is left as-is deliberately: whether that mapping should change
+/// is a refusal-vocabulary decision recorded on `frankengit-q77o` and not
+/// settled here. Only the misleading claim is removed.
 #[test]
 fn a_stale_expected_token_reports_a_lost_race() {
     let input = basis();
@@ -741,7 +759,8 @@ fn a_stale_expected_token_reports_a_lost_race() {
             assert_eq!(
                 unpublished.reason(),
                 &CompactionPublicationRefusal::AuthorityRaceLost,
-                "a moved head is a lost race, not an already-decided duplicate"
+                "the compaction layer reports a lost race here -- but see the note \
+                 above: chronicle classified this same candidate as Superseded"
             );
         }
         other => panic!("a stale predecessor cannot publish: {other:?}"),
