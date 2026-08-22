@@ -67,6 +67,45 @@ impl RequestRejectionCode {
         Self::HashAlgorithmUnsupported,
     ];
 
+    /// Compile-time completeness guard for [`RequestRejectionCode::ALL`].
+    ///
+    /// `ALL` is written by hand, and the tests that assert a property of
+    /// *every* rejection code iterate it. So a variant missing from the array is not a
+    /// failing test — it is a silently smaller corpus under a test whose name
+    /// says "every". That is not hypothetical: `frankengit-0eu0` found exactly
+    /// this shape in this crate, where a test named
+    /// `every_construction_refusal_maps_to_a_live_refusal_code` sampled seven
+    /// of eight variants.
+    ///
+    /// This match is exhaustive with no wildcard, so a new variant fails to
+    /// compile **here**, beside the array that has to be updated. The
+    /// exhaustive `match self` blocks elsewhere in this file already force a
+    /// new variant to be *handled*; what they do not do is send anyone to
+    /// `ALL`. That gap is the whole reason this guard sits at the array rather
+    /// than with them.
+    ///
+    /// It cannot force the variant to be *added* to `ALL` — only to be
+    /// considered. That is the honest limit, and it is strictly more than the
+    /// array had before.
+    ///
+    /// DELETION CONDITION: goes if `ALL` ever becomes derived rather than
+    /// maintained, at which point the array cannot drift and this is dead
+    /// weight.
+    const fn _every_request_rejection_code_is_listed(value: Self) {
+        match value {
+            Self::AuthenticationFailed
+            | Self::MalformedFraming
+            | Self::UnsupportedCapability
+            | Self::RequestSizeExceeded
+            | Self::TenantSuspended
+            | Self::IngressThrottled
+            | Self::IdempotencyKeyReuse
+            | Self::SchemaUnsupported
+            | Self::RepositoryUnknown
+            | Self::HashAlgorithmUnsupported => (),
+        }
+    }
+
     /// Stable wire code point.
     #[must_use]
     pub const fn code_point(self) -> u16 {
@@ -347,6 +386,96 @@ impl RefusalCode {
         Self::CanonicalBoundExceeded,
     ];
 
+    /// Compile-time completeness guard for [`RefusalCode::ALL`].
+    ///
+    /// `ALL` is written by hand, and the tests that assert a property of
+    /// *every* refusal code iterate it. So a variant missing from the array is not a
+    /// failing test — it is a silently smaller corpus under a test whose name
+    /// says "every". That is not hypothetical: `frankengit-0eu0` found exactly
+    /// this shape in this crate, where a test named
+    /// `every_construction_refusal_maps_to_a_live_refusal_code` sampled seven
+    /// of eight variants.
+    ///
+    /// This match is exhaustive with no wildcard, so a new variant fails to
+    /// compile **here**, beside the array that has to be updated. The
+    /// exhaustive `match self` blocks elsewhere in this file already force a
+    /// new variant to be *handled*; what they do not do is send anyone to
+    /// `ALL`. That gap is the whole reason this guard sits at the array rather
+    /// than with them.
+    ///
+    /// It cannot force the variant to be *added* to `ALL` — only to be
+    /// considered. That is the honest limit, and it is strictly more than the
+    /// array had before.
+    ///
+    /// DELETION CONDITION: goes if `ALL` ever becomes derived rather than
+    /// maintained, at which point the array cannot drift and this is dead
+    /// weight.
+    const fn _every_refusal_code_is_listed(value: Self) {
+        match value {
+            Self::IntentExpired
+            | Self::IntentBytesConflict
+            | Self::SponsorUnauthorized
+            | Self::AgentIdentityRevoked
+            | Self::AuthorityReceiptInvalid
+            | Self::AuthorityReceiptStale
+            | Self::CapabilityMissing
+            | Self::CapabilityExpired
+            | Self::CapabilityAudienceMismatch
+            | Self::CapabilityScopeViolation
+            | Self::DelegationAmplifiesAuthority
+            | Self::ContextGenerationMixed
+            | Self::ContextCoverageUnsupported
+            | Self::WorkspaceBaseUnavailable
+            | Self::WorkspacePolicyViolation
+            | Self::PathOutsideScope
+            | Self::NetworkDestinationDenied
+            | Self::SecretPurposeDenied
+            | Self::BudgetInsufficient
+            | Self::EvidenceMissing
+            | Self::EvidenceInvalid
+            | Self::EvidenceStale
+            | Self::IndependentVerificationRequired
+            | Self::TargetRefMoved
+            | Self::WitnessRefinementInsufficient
+            | Self::PublicationPolicyRefused
+            | Self::CancellationInProgress
+            | Self::ObligationsOutstanding
+            | Self::ExternalEffectIndeterminate
+            | Self::SchemaUnsupported
+            | Self::ExpectedOldRefMismatch
+            | Self::NonFastForwardRefused
+            | Self::ForceNotPermitted
+            | Self::ProtectedRefTransitionDenied
+            | Self::RefNameInvalid
+            | Self::HiddenRefUnauthorized
+            | Self::AtomicTransactionAborted
+            | Self::ObjectClosureIncomplete
+            | Self::PackFramingInvalid
+            | Self::DecompressionBudgetExceeded
+            | Self::DeltaBudgetExceeded
+            | Self::ThinPackBaseMissing
+            | Self::ObjectHeaderInvalid
+            | Self::TreeEntryOrderingInvalid
+            | Self::CommitOrTagHeaderInvalid
+            | Self::NativeObjectIdMismatch
+            | Self::HashAlgorithmDomainMismatch
+            | Self::SignedPushCertificateRefused
+            | Self::QuotaExceeded
+            | Self::ResourceBudgetExceeded
+            | Self::RetentionHoldViolation
+            | Self::PolicyEpochSuperseded
+            | Self::BasisCapsuleNotReusable
+            | Self::ForgeTransitionInvalid
+            | Self::RepositoryIncarnationMismatch
+            | Self::EffectIdempotencyKeyReuse
+            | Self::ConflictingSemanticEffects
+            | Self::DurabilityProfileUnavailable
+            | Self::InternalInvariantBreach
+            | Self::CanonicalFramingInvalid
+            | Self::CanonicalBoundExceeded => (),
+        }
+    }
+
     /// Stable wire code point.
     #[must_use]
     pub const fn code_point(self) -> u16 {
@@ -568,6 +697,36 @@ impl MismatchPolicy {
     /// Every member, in stable code-point order.
     pub const ALL: &'static [Self] = &[Self::NoOp, Self::StatementError, Self::TxnAbort];
 
+    /// Compile-time completeness guard for [`MismatchPolicy::ALL`].
+    ///
+    /// `ALL` is written by hand, and the tests that assert a property of
+    /// *every* mismatch policy iterate it. So a variant missing from the array is not a
+    /// failing test — it is a silently smaller corpus under a test whose name
+    /// says "every". That is not hypothetical: `frankengit-0eu0` found exactly
+    /// this shape in this crate, where a test named
+    /// `every_construction_refusal_maps_to_a_live_refusal_code` sampled seven
+    /// of eight variants.
+    ///
+    /// This match is exhaustive with no wildcard, so a new variant fails to
+    /// compile **here**, beside the array that has to be updated. The
+    /// exhaustive `match self` blocks elsewhere in this file already force a
+    /// new variant to be *handled*; what they do not do is send anyone to
+    /// `ALL`. That gap is the whole reason this guard sits at the array rather
+    /// than with them.
+    ///
+    /// It cannot force the variant to be *added* to `ALL` — only to be
+    /// considered. That is the honest limit, and it is strictly more than the
+    /// array had before.
+    ///
+    /// DELETION CONDITION: goes if `ALL` ever becomes derived rather than
+    /// maintained, at which point the array cannot drift and this is dead
+    /// weight.
+    const fn _every_mismatch_policy_is_listed(value: Self) {
+        match value {
+            Self::NoOp | Self::StatementError | Self::TxnAbort => (),
+        }
+    }
+
     /// Stable wire code point.
     #[must_use]
     pub const fn code_point(self) -> u16 {
@@ -609,6 +768,36 @@ pub enum PublicationEpoch {
 impl PublicationEpoch {
     /// Every member, in stable code-point order.
     pub const ALL: &'static [Self] = &[Self::Staged, Self::Visible, Self::Durable];
+
+    /// Compile-time completeness guard for [`PublicationEpoch::ALL`].
+    ///
+    /// `ALL` is written by hand, and the tests that assert a property of
+    /// *every* publication epoch iterate it. So a variant missing from the array is not a
+    /// failing test — it is a silently smaller corpus under a test whose name
+    /// says "every". That is not hypothetical: `frankengit-0eu0` found exactly
+    /// this shape in this crate, where a test named
+    /// `every_construction_refusal_maps_to_a_live_refusal_code` sampled seven
+    /// of eight variants.
+    ///
+    /// This match is exhaustive with no wildcard, so a new variant fails to
+    /// compile **here**, beside the array that has to be updated. The
+    /// exhaustive `match self` blocks elsewhere in this file already force a
+    /// new variant to be *handled*; what they do not do is send anyone to
+    /// `ALL`. That gap is the whole reason this guard sits at the array rather
+    /// than with them.
+    ///
+    /// It cannot force the variant to be *added* to `ALL` — only to be
+    /// considered. That is the honest limit, and it is strictly more than the
+    /// array had before.
+    ///
+    /// DELETION CONDITION: goes if `ALL` ever becomes derived rather than
+    /// maintained, at which point the array cannot drift and this is dead
+    /// weight.
+    const fn _every_publication_epoch_is_listed(value: Self) {
+        match value {
+            Self::Staged | Self::Visible | Self::Durable => (),
+        }
+    }
 
     /// Stable wire code point.
     #[must_use]
