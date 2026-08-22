@@ -135,7 +135,7 @@ fn stage(input: &PublicationBasis) -> StagedCompaction {
     .expect("well-formed staged compaction")
 }
 
-fn roots(evidence: Digest) -> ResultingRoots {
+fn roots(compaction_generation_link: Option<Digest>) -> ResultingRoots {
     ResultingRoots {
         ref_root: digest(0x10),
         forge_position_root: digest(0x11),
@@ -143,11 +143,11 @@ fn roots(evidence: Digest) -> ResultingRoots {
         retention_root: digest(0x13),
         outbox_root: digest(0x14),
         policy_epoch: PolicyEpoch::FIRST,
-        batch_evidence_root: evidence,
+        compaction_generation_link,
     }
 }
 
-fn commit_record(evidence: Digest) -> RepositoryCommitRecord {
+fn commit_record(compaction_generation_link: Digest) -> RepositoryCommitRecord {
     RepositoryCommitRecord {
         repository_id: repository(),
         repository_sequence: RepositorySequence::FIRST,
@@ -162,7 +162,7 @@ fn commit_record(evidence: Digest) -> RepositoryCommitRecord {
         resulting_forge_position_root: digest(0x11),
         policy_epoch: PolicyEpoch::FIRST,
         policy_decision_root: digest(0x67),
-        invariant_evidence_root: evidence,
+        invariant_evidence_root: compaction_generation_link,
         outbox_effect_root: digest(0x68),
         retention_delta_root: digest(0x69),
     }
@@ -173,9 +173,12 @@ fn publication(
     staged: &StagedCompaction,
 ) -> fgit_chronicle::VerifiedPublication {
     let mut plan = PublicationPlan::open(input).expect("authenticated basis opens a plan");
-    plan.commit(commit_record(staged.evidence_root()));
-    plan.seal(&CryptoBodyIdentity, roots(staged.evidence_root()))
-        .expect("ordinary compaction decision is well formed")
+    plan.commit(commit_record(staged.compaction_generation_link()));
+    plan.seal(
+        &CryptoBodyIdentity,
+        roots(Some(staged.compaction_generation_link())),
+    )
+    .expect("ordinary compaction decision is well formed")
 }
 
 fn current_token(
@@ -301,9 +304,9 @@ fn ordinary_decision_makes_complete_generation_visible_then_durable_retention_co
     );
     assert_eq!(current.retention_root, input.body().retention_root);
     assert_eq!(
-        publication.batch().batch_evidence_root,
-        visible.evidence_root(),
-        "the ordinary batch carries the compaction generation as evidence"
+        publication.batch().compaction_generation_link,
+        Some(visible.compaction_generation_link()),
+        "the ordinary batch carries the compaction generation in its dedicated link"
     );
 
     let not_durable = visible.confirm_durability(DurabilityReceipt::new(
@@ -345,13 +348,16 @@ fn ordinary_decision_makes_complete_generation_visible_then_durable_retention_co
 }
 
 #[test]
-fn publication_without_rcr_evidence_link_stays_staged_even_when_batch_evidence_matches() {
+fn publication_without_rcr_evidence_link_stays_staged_even_when_batch_link_matches() {
     let input = basis();
     let staged = stage(&input);
     let mut plan = PublicationPlan::open(input.clone()).expect("basis opens a plan");
     plan.commit(commit_record(digest(0x91)));
     let publication = plan
-        .seal(&CryptoBodyIdentity, roots(staged.evidence_root()))
+        .seal(
+            &CryptoBodyIdentity,
+            roots(Some(staged.compaction_generation_link())),
+        )
         .expect("the generic batch itself is valid");
     let head_key = HeadKey::new(b"fg079/no-rcr-link".to_vec()).expect("bounded head key");
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7b));
@@ -428,15 +434,15 @@ fn basis_with(identity: RepositoryAuthorityHeadId, generation: HeadGeneration) -
     PublicationBasis::new(identity, head)
 }
 
-/// A publication built on `input` that commits, carrying `evidence` as both the
-/// batch evidence root and the linked RCR's invariant evidence root.
-fn publication_with_evidence(
+/// A publication built on `input` that commits, carrying `link` in both the
+/// explicit batch linkage field and the linked RCR's invariant evidence root.
+fn publication_with_link(
     input: PublicationBasis,
-    evidence: Digest,
+    link: Digest,
 ) -> fgit_chronicle::VerifiedPublication {
     let mut plan = PublicationPlan::open(input).expect("authenticated basis opens a plan");
-    plan.commit(commit_record(evidence));
-    plan.seal(&CryptoBodyIdentity, roots(evidence))
+    plan.commit(commit_record(link));
+    plan.seal(&CryptoBodyIdentity, roots(Some(link)))
         .expect("an ordinary decision is well formed")
 }
 
@@ -448,7 +454,7 @@ fn refusal_only_publication(input: PublicationBasis) -> fgit_chronicle::Verified
         RefusalCode::IntentExpired,
         derived!(RefusalRecordId, 0x72),
     );
-    plan.seal(&CryptoBodyIdentity, roots(digest(0x73)))
+    plan.seal(&CryptoBodyIdentity, roots(None))
         .expect("a refusal-only batch is well formed")
 }
 
@@ -583,6 +589,11 @@ fn a_matching_publication_validates_and_returns_a_successor_head() {
     staged
         .validate_publication(&publication)
         .expect("a publication carrying this record must validate");
+    assert_eq!(
+        publication.batch().compaction_generation_link,
+        Some(staged.compaction_generation_link()),
+        "the permitted compaction publication uses the explicit linkage field"
+    );
 }
 
 /// **§5.2.** A batch with no committed RCR cannot carry a compaction
@@ -610,7 +621,7 @@ fn a_publication_on_another_head_is_refused() {
         derived!(RepositoryAuthorityHeadId, 0x7e),
         input.generation(),
     );
-    let publication = publication_with_evidence(foreign, staged.evidence_root());
+    let publication = publication_with_link(foreign, staged.compaction_generation_link());
     let refusal = staged
         .validate_publication(&publication)
         .expect_err("a compaction record binds the head it was computed against");
@@ -630,23 +641,26 @@ fn a_publication_at_another_head_generation_is_refused() {
     let staged = stage(&input);
     let later = HeadGeneration::try_new(2).expect("a second generation");
     let shifted = basis_with(input.id(), later);
-    let publication = publication_with_evidence(shifted, staged.evidence_root());
+    let publication = publication_with_link(shifted, staged.compaction_generation_link());
     let refusal = staged
         .validate_publication(&publication)
         .expect_err("a compaction record binds the generation it was computed against");
     assert_eq!(refusal, CompactionPublicationRefusal::InputBasisMismatch);
 }
 
-/// The batch must carry exactly this compaction's evidence root.
+/// The batch must carry exactly this compaction's generation link.
 #[test]
-fn a_publication_with_another_evidence_root_is_refused() {
+fn a_publication_with_another_compaction_generation_link_is_refused() {
     let input = basis();
     let staged = stage(&input);
-    let publication = publication_with_evidence(input, digest(0x7d));
+    let publication = publication_with_link(input, digest(0x7d));
     let refusal = staged
         .validate_publication(&publication)
-        .expect_err("an unrelated batch evidence root cannot carry this generation");
-    assert_eq!(refusal, CompactionPublicationRefusal::EvidenceRootMismatch);
+        .expect_err("an unrelated batch linkage cannot carry this generation");
+    assert_eq!(
+        refusal,
+        CompactionPublicationRefusal::CompactionGenerationLinkMismatch
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -676,25 +690,25 @@ fn a_refusal_only_publication_outranks_a_basis_mismatch() {
     );
 }
 
-/// Stage 2 outranks stage 3: a basis mismatch is reported before an evidence
+/// Stage 2 outranks stage 3: a basis mismatch is reported before a linkage
 /// mismatch — the opposite end of the chain from the probe above, so the two
 /// together pin the order rather than one adjacency of it.
 #[test]
-fn a_basis_mismatch_outranks_an_evidence_root_mismatch() {
+fn a_basis_mismatch_outranks_a_compaction_generation_link_mismatch() {
     let input = basis();
     let staged = stage(&input);
     let foreign = basis_with(
         derived!(RepositoryAuthorityHeadId, 0x7e),
         input.generation(),
     );
-    let publication = publication_with_evidence(foreign, digest(0x7d));
+    let publication = publication_with_link(foreign, digest(0x7d));
     let refusal = staged
         .validate_publication(&publication)
         .expect_err("a publication wrong in two ways must still refuse");
     assert_eq!(
         refusal,
         CompactionPublicationRefusal::InputBasisMismatch,
-        "the basis comparison runs before the evidence-root comparison"
+        "the basis comparison runs before the compaction-link comparison"
     );
 }
 
