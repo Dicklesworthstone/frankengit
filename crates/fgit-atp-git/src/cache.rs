@@ -276,7 +276,7 @@ impl CacheReaders {
         }
     }
 
-    fn owner(&self) -> Option<PrincipalId> {
+    const fn owner(&self) -> Option<PrincipalId> {
         match self {
             Self::AnyAuthenticated => None,
             Self::Explicit { owner, .. } => Some(*owner),
@@ -434,7 +434,7 @@ pub struct CachePieceCandidate {
 impl CachePieceCandidate {
     /// Records an untrusted content claim and its candidate bytes.
     #[must_use]
-    pub fn new(claimed_content_identity: Commitment, bytes: Vec<u8>) -> Self {
+    pub const fn new(claimed_content_identity: Commitment, bytes: Vec<u8>) -> Self {
         Self {
             claimed_content_identity,
             bytes,
@@ -486,7 +486,7 @@ impl TransferCacheLimits {
         })
     }
 
-    fn capacity_for(self, partition: CachePartition) -> usize {
+    const fn capacity_for(self, partition: CachePartition) -> usize {
         match partition {
             CachePartition::Shareable(ShareableCacheScope::PublicGlobal) => self.public_entries,
             CachePartition::Shareable(ShareableCacheScope::TenantShared { .. }) => {
@@ -944,13 +944,12 @@ impl TrustScopedTransferCache {
         audit: CacheAuditRequirement,
     ) -> CacheLookup {
         let key = CacheEntryKey::derive(partition, key_domain, content_identity);
-        match self.entries.get(&key) {
-            Some(entry) => CacheLookup::Hit {
+        self.entries
+            .get(&key)
+            .map_or(CacheLookup::Miss, |entry| CacheLookup::Hit {
                 payload: entry.payload.clone(),
                 audit,
-            },
-            None => CacheLookup::Miss,
-        }
+            })
     }
 
     fn quarantine_status(
