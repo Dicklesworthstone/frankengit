@@ -61,10 +61,11 @@ use std::rc::Rc;
 
 use fgit_admission::{
     AdmissionContext, AdmissionEvidence, AdmissionLimits, AdmissionProjection, AdmissionSnapshot,
-    CanonicalAdmissionProjection, CanonicalAdmissionStore, CanonicalRefState, CommitEvidence,
-    CommitMaterialization, PermittedObjectClosure, QuarantineValidator, RefusalMaterialization,
-    ValidatedClosure, ValidatedReceive, admit_validated_receive, canonical_ref_state_root,
-    initialize_canonical_repository, permitted_object_closure_root, validate_receive,
+    AdmissionSnapshotProjection, CanonicalAdmissionProjection, CanonicalAdmissionStore,
+    CanonicalRefState, CommitEvidence, CommitMaterialization, PermittedObjectClosure,
+    QuarantineValidator, RefusalMaterialization, ValidatedClosure, ValidatedReceive,
+    admit_validated_receive, canonical_ref_state_root, initialize_canonical_repository,
+    permitted_object_closure_root, validate_receive,
 };
 use fgit_authority::{
     AuthenticatedHead, AuthorityStore, HeadKey, HeadRead, IdempotencyKey, MemoryAuthorityStore,
@@ -435,7 +436,7 @@ impl PinnedProjection {
     }
 }
 
-impl AdmissionProjection for PinnedProjection {
+impl AdmissionSnapshotProjection for PinnedProjection {
     fn snapshot(
         &self,
         basis: &PublicationBasis,
@@ -455,7 +456,9 @@ impl AdmissionProjection for PinnedProjection {
 
         Ok(snapshot)
     }
+}
 
+impl AdmissionProjection for PinnedProjection {
     fn materialize_commit(
         &self,
         basis: &PublicationBasis,

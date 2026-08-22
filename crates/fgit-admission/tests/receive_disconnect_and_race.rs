@@ -96,10 +96,11 @@ use std::rc::Rc;
 
 use fgit_admission::{
     AdmissionContext, AdmissionEvidence, AdmissionLimits, AdmissionProjection, AdmissionSnapshot,
-    CanonicalAdmissionProjection, CanonicalAdmissionStore, CanonicalRefState, CommitEvidence,
-    CommitMaterialization, PermittedObjectClosure, QuarantineValidator, RefusalMaterialization,
-    ValidatedClosure, ValidatedReceive, admit_validated_receive, canonical_ref_state_root,
-    permitted_object_closure_root, validate_receive,
+    AdmissionSnapshotProjection, CanonicalAdmissionProjection, CanonicalAdmissionStore,
+    CanonicalRefState, CommitEvidence, CommitMaterialization, PermittedObjectClosure,
+    QuarantineValidator, RefusalMaterialization, ValidatedClosure, ValidatedReceive,
+    admit_validated_receive, canonical_ref_state_root, permitted_object_closure_root,
+    validate_receive,
 };
 use fgit_authority::{
     AuthenticatedHead, AuthorityStore, DuplicateDelivery, FaultDirective, FaultKind, FaultPosition,
@@ -188,7 +189,7 @@ impl UnboundAdapter {
     }
 }
 
-impl AdmissionProjection for UnboundAdapter {
+impl AdmissionSnapshotProjection for UnboundAdapter {
     fn snapshot(
         &self,
         _basis: &PublicationBasis,
@@ -201,7 +202,9 @@ impl AdmissionProjection for UnboundAdapter {
             outbox: self.outbox.clone(),
         })
     }
+}
 
+impl AdmissionProjection for UnboundAdapter {
     fn materialize_commit(
         &self,
         basis: &PublicationBasis,

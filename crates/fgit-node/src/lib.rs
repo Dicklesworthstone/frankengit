@@ -22,9 +22,8 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use fgit_admission::{
-    AdmissionProjection, AdmissionSnapshot, CanonicalAdmissionStore, CanonicalRefState,
-    CommitMaterialization, PermittedObjectClosure, RefusalMaterialization, ValidatedClosure,
-    canonical_ref_state_root, permitted_object_closure_root,
+    AdmissionSnapshot, AdmissionSnapshotProjection, CanonicalAdmissionStore, CanonicalRefState,
+    PermittedObjectClosure, canonical_ref_state_root, permitted_object_closure_root,
 };
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
@@ -85,7 +84,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// This view carries no mutable ref map and does not infer object reachability
 /// from the local object fabric.  Its advertised refs come exclusively from a
-/// caller-supplied [`AdmissionProjection`] evaluated against an authenticated
+/// caller-supplied [`AdmissionSnapshotProjection`] evaluated against an authenticated
 /// authority basis.  The first-clone git-daemon transport is legacy V0, whose
 /// wants must name an advertised ref; therefore this view deliberately refuses
 /// every non-advertised want until the decision-history closure reader is wired
@@ -147,7 +146,7 @@ impl AdmissionUploadPackRepository {
         limits: &WireLimits,
     ) -> Result<Self, AdmissionUploadPackRefusal>
     where
-        Projection: AdmissionProjection + ?Sized,
+        Projection: AdmissionSnapshotProjection + ?Sized,
     {
         let snapshot = projection
             .snapshot(basis, authenticated)
@@ -371,7 +370,7 @@ impl AuthoritySelectedClosure {
 ///
 /// The receipt is intentionally retained with the snapshot.  A user that
 /// needs the generic admission interface can pass the same receipt and basis
-/// to [`AdmissionProjection::snapshot`]; mixing an otherwise-valid snapshot
+/// to [`AdmissionSnapshotProjection::snapshot`]; mixing an otherwise-valid snapshot
 /// with another head is a typed refusal.
 #[derive(Clone, Debug)]
 pub struct MaterializedAdmission {
@@ -1034,32 +1033,13 @@ impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
     }
 }
 
-impl AdmissionProjection for DurableAdmissionMaterializer {
+impl AdmissionSnapshotProjection for DurableAdmissionMaterializer {
     fn snapshot(
         &self,
         basis: &PublicationBasis,
         authenticated: &AuthenticatedHead,
     ) -> Result<AdmissionSnapshot, RefusalCode> {
         self.snapshot_for(basis, authenticated)
-    }
-
-    fn materialize_commit(
-        &self,
-        _basis: &PublicationBasis,
-        _request: &fgit_reference::intent::TransactionRequest,
-        _fold: &fgit_txn::TransactionFoldReport,
-        _closure: &ValidatedClosure,
-    ) -> Result<CommitMaterialization, RefusalCode> {
-        Err(RefusalCode::DurabilityProfileUnavailable)
-    }
-
-    fn materialize_refusal(
-        &self,
-        _basis: &PublicationBasis,
-        _tx_id: fgit_types::TxId,
-        _code: RefusalCode,
-    ) -> Result<RefusalMaterialization, RefusalCode> {
-        Err(RefusalCode::DurabilityProfileUnavailable)
     }
 }
 
@@ -2819,7 +2799,7 @@ impl OneNode {
         limits: &WireLimits,
     ) -> Result<AdmissionUploadPackRepository, NodeAdmissionViewRefusal>
     where
-        Projection: AdmissionProjection + Sync + ?Sized,
+        Projection: AdmissionSnapshotProjection + Sync + ?Sized,
     {
         let authenticated = self
             .authenticate_authority_head_in(request)
@@ -3205,7 +3185,7 @@ mod tests {
     use std::time::Duration;
 
     use fgit_admission::{
-        AdmissionProjection, AdmissionSnapshot, CanonicalAdmissionStore, CanonicalRefState,
+        AdmissionSnapshot, AdmissionSnapshotProjection, CanonicalAdmissionStore, CanonicalRefState,
         PermittedObjectClosure, canonical_ref_state_root,
     };
     use fgit_authority::{AsyncAuthorityStore, HeadInit, HeadRead, ImmutableRead, OutcomeLookup};
@@ -3823,7 +3803,7 @@ mod tests {
             "the synchronous trait cannot claim durable staging"
         );
 
-        let projection_snapshot = AdmissionProjection::snapshot(
+        let projection_snapshot = AdmissionSnapshotProjection::snapshot(
             &node.admission_materializer,
             materialized.basis(),
             materialized.authenticated(),
@@ -3889,7 +3869,7 @@ mod tests {
             .expect("fixed alternate test body identifies");
         let other_basis = PublicationBasis::new(other_id, other_body);
         assert_eq!(
-            AdmissionProjection::snapshot(
+            AdmissionSnapshotProjection::snapshot(
                 &node.admission_materializer,
                 &other_basis,
                 materialized.authenticated(),

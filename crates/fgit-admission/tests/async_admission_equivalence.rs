@@ -58,10 +58,11 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use fgit_admission::{
-    AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionResult,
+    AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionProjection,
+    AdmissionResult, AdmissionSnapshotProjection, AsyncAdmissionProjection,
     CanonicalAdmissionProjection, CanonicalAdmissionStore, CanonicalRefState, CommitEvidence,
-    PermittedObjectClosure, QuarantineValidator, RefusalMaterialization, ValidatedClosure,
-    ValidatedReceive, admit_validated_receive, admit_validated_receive_async,
+    CommitMaterialization, PermittedObjectClosure, QuarantineValidator, RefusalMaterialization,
+    ValidatedClosure, ValidatedReceive, admit_validated_receive, admit_validated_receive_async,
     canonical_ref_state_root, permitted_object_closure_root, validate_receive,
 };
 use fgit_authority::{
@@ -451,6 +452,51 @@ impl AdmissionEvidence for StubEvidence {
     }
 }
 
+/// Projection fixture with no synchronous materialization capability.
+///
+/// Its async capability delegates to the otherwise identical canonical
+/// projection.  The type deliberately cannot satisfy [`AdmissionProjection`],
+/// so the blocking entrypoint rejects this projection at compile time rather
+/// than publishing a terminal refusal for a caller's entrypoint mistake.
+struct AsyncMaterializingProjection {
+    inner: CanonicalAdmissionProjection<StagingStore, StubEvidence>,
+}
+
+impl AdmissionSnapshotProjection for AsyncMaterializingProjection {
+    fn snapshot(
+        &self,
+        basis: &PublicationBasis,
+        authenticated: &AuthenticatedHead,
+    ) -> Result<fgit_admission::AdmissionSnapshot, RefusalCode> {
+        self.inner.snapshot(basis, authenticated)
+    }
+}
+
+impl AsyncAdmissionProjection<AsyncView> for AsyncMaterializingProjection {
+    fn materialize_commit_async<'a>(
+        &'a self,
+        _authority: &'a AsyncView,
+        _cx: &'a <AsyncView as AsyncAuthorityStore>::Context,
+        basis: &'a PublicationBasis,
+        request: &'a TransactionRequest,
+        fold: &'a fgit_txn::TransactionFoldReport,
+        closure: &'a ValidatedClosure,
+    ) -> impl Future<Output = Result<CommitMaterialization, RefusalCode>> + Send + 'a {
+        std::future::ready(self.inner.materialize_commit(basis, request, fold, closure))
+    }
+
+    fn materialize_refusal_async<'a>(
+        &'a self,
+        _authority: &'a AsyncView,
+        _cx: &'a <AsyncView as AsyncAuthorityStore>::Context,
+        basis: &'a PublicationBasis,
+        tx_id: TxId,
+        code: RefusalCode,
+    ) -> impl Future<Output = Result<RefusalMaterialization, RefusalCode>> + Send + 'a {
+        std::future::ready(self.inner.materialize_refusal(basis, tx_id, code))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The corpus
 // ---------------------------------------------------------------------------
@@ -590,6 +636,40 @@ fn the_two_surfaces_agree_on_every_case() {
              answered {blocking}, the asynchronous one {asynchronous}. They delegate \
              every decision to one core, so a disagreement means the core is not \
              actually shared"
+        );
+    }
+}
+
+/// The async driver accepts an asynchronous-only materialization boundary for
+/// both the committing and refusing branches.
+///
+/// The wrapper has no synchronous materialization implementation at all, so
+/// the blocking entrypoint cannot publish a permanent typed refusal if a
+/// caller selects it accidentally.  Its async methods delegate to the
+/// canonical projection, exercising the commit and fold-refusal branches.
+#[test]
+fn async_driver_uses_the_async_materialization_boundary() {
+    for basis in [Basis::NamedPredecessor, Basis::OtherPredecessor] {
+        let session = format!("600m-async-materialization-{basis:?}");
+        let expected = blocking_answer(session.as_bytes(), basis);
+        let context = context(session.as_bytes());
+        let validated = delete_main();
+        let (store, inner) = setup(&context, basis);
+        let projection = AsyncMaterializingProjection { inner };
+        let view = AsyncView(store);
+
+        let observed = label(&poll_ready(admit_validated_receive_async(
+            &view,
+            &(),
+            &context,
+            &validated,
+            AdmissionLimits::default(),
+            &projection,
+        )));
+        assert_eq!(
+            observed, expected,
+            "the async driver used the synchronous materialization method for {basis:?}: \
+             expected {expected}, observed {observed}"
         );
     }
 }
