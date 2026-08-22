@@ -32,24 +32,27 @@ use fgit_types::{
 
 fn digest(tag: u8) -> Digest {
     Digest::new(
-        DigestAlgorithmId::try_new(1).expect("code point one is a valid algorithm slot"),
-        DigestBytes::try_new(&[tag; 20]).expect("20-byte SHA-1 digest body is valid"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 fn envelope(tag: u8) -> ObjectEnvelopeId {
     ObjectEnvelopeId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 fn rcr(tag: u8) -> RepositoryCommitId {
     RepositoryCommitId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
@@ -939,3 +942,7 @@ fn a_leak_record_names_its_subject_and_only_an_obligation_carries_a_class() {
         "a dropped obligation carries the class needed to route the failure"
     );
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

@@ -18,9 +18,10 @@ const fn repository(tag: u8) -> RepositoryId {
 
 fn head(tag: u8) -> RepositoryAuthorityHeadId {
     RepositoryAuthorityHeadId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("one is a registered digest algorithm"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("20-byte SHA-1 digest body is valid"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
@@ -182,3 +183,7 @@ fn cancelled_materialization_discards_its_grant_without_recording_a_budget_leak(
         "discarding a cache hint is not an outstanding authority effect or budget leak"
     );
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

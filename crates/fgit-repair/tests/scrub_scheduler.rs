@@ -31,9 +31,10 @@ fn security() -> SecurityContext {
 
 fn head(value: u8) -> RepositoryAuthorityHeadId {
     RepositoryAuthorityHeadId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("test digest algorithm is valid"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[value; 20]).expect("test digest has valid width"),
+        DigestBytes::try_new(&[value; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
@@ -497,3 +498,7 @@ fn drill_cadence_flags_an_overdue_class_and_a_fresh_drill_proceeds() {
         "one sequence beyond cadence must raise the typed alarm"
     );
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

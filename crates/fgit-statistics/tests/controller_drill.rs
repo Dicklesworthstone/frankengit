@@ -383,8 +383,9 @@ fn the_controller_produces_a_bindable_evidence_body() {
         policy: controller.selection(),
         assumptions: RetryBackoffController::assumptions().expect("fixed labels are valid"),
         fingerprint: Digest::new(
-            DigestAlgorithmId::try_new(1).expect("nonzero"),
-            DigestBytes::try_new(&[7; 20]).expect("20-byte SHA-1 digest"),
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("nonzero corpus fixture algorithm slot"),
+            DigestBytes::try_new(&[7; 32]).expect("32-byte corpus fixture body"),
         ),
     };
 
@@ -436,3 +437,7 @@ fn an_exhausted_epoch_counter_is_refused_rather_than_wrapped() {
         PolicySelection::Fallback(FallbackTrigger::EvidenceGap)
     );
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

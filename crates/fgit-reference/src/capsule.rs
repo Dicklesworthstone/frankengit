@@ -287,9 +287,10 @@ mod tests {
 
     fn digest(byte: u8) -> Digest {
         Digest::new(
-            DigestAlgorithmId::try_new(1).expect("a non-reserved algorithm slot"),
-            DigestBytes::try_new(&[byte; 20])
-                .expect("a 20-byte SHA-1 digest body is inside the window"),
+            DigestAlgorithmId::try_new(super::FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("a nonzero corpus fixture algorithm slot"),
+            DigestBytes::try_new(&[byte; 32])
+                .expect("a 32-byte corpus fixture digest body is inside the window"),
         )
     }
 
@@ -530,3 +531,7 @@ mod tests {
         assert_eq!(coarse.refined(), refined);
     }
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

@@ -1370,8 +1370,9 @@ mod tests {
 
     fn digest(value: u8) -> Digest {
         Digest::new(
-            DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
-            DigestBytes::try_new(&[value; 20]).expect("fixture digest must fit"),
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("nonzero corpus fixture algorithm slot"),
+            DigestBytes::try_new(&[value; 32]).expect("32-byte corpus fixture body"),
         )
     }
 
@@ -1540,9 +1541,10 @@ mod tests {
         let manifest = manifest();
         let proposal = RetentionRootProposal::new(
             RepositoryAuthorityHeadId::from_digest(
-                DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
+                DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                    .expect("nonzero corpus fixture algorithm slot"),
                 CANONICAL_CODEC_VERSION,
-                DigestBytes::try_new(&[3; 20]).expect("fixture digest must fit"),
+                DigestBytes::try_new(&[3; 32]).expect("32-byte corpus fixture body"),
             ),
             digest(4),
             vec![manifest.identity().expect("fixture manifest must identify")],
@@ -1567,3 +1569,7 @@ mod tests {
         );
     }
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

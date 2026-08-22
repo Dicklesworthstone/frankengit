@@ -456,13 +456,15 @@ fn manifest_fixture() -> SegmentManifest {
 fn proposal_fixture() -> RetentionRootProposal {
     RetentionRootProposal::new(
         RepositoryAuthorityHeadId::from_digest(
-            DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("nonzero corpus fixture algorithm slot"),
             CANONICAL_CODEC_VERSION,
-            DigestBytes::try_new(&[7; 20]).expect("fixture digest must fit"),
+            DigestBytes::try_new(&[7; 32]).expect("32-byte corpus fixture body"),
         ),
         Digest::new(
-            DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
-            DigestBytes::try_new(&[9; 20]).expect("fixture digest must fit"),
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("nonzero corpus fixture algorithm slot"),
+            DigestBytes::try_new(&[9; 32]).expect("32-byte corpus fixture body"),
         ),
         Vec::new(),
     )
@@ -696,13 +698,15 @@ fn a_retention_root_the_registry_refuses_does_not_publish() {
     let store = fabric(None);
     let proposal = RetentionRootProposal::new(
         RepositoryAuthorityHeadId::from_digest(
-            DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("nonzero corpus fixture algorithm slot"),
             CANONICAL_CODEC_VERSION,
-            DigestBytes::try_new(&[7; 20]).expect("fixture digest must fit"),
+            DigestBytes::try_new(&[7; 32]).expect("32-byte corpus fixture body"),
         ),
         Digest::new(
-            DigestAlgorithmId::try_new(1).expect("fixture algorithm must be valid"),
-            DigestBytes::try_new(&[9; 20]).expect("fixture digest must fit"),
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("nonzero corpus fixture algorithm slot"),
+            DigestBytes::try_new(&[9; 32]).expect("32-byte corpus fixture body"),
         ),
         Vec::new(),
     )
@@ -916,3 +920,7 @@ fn cancellation_surfaces_as_cancelled_and_never_collapses_into_a_refusal() {
     close_quiescent(ledger);
     assert!(runtime.shutdown_timeout(std::time::Duration::from_secs(5)));
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

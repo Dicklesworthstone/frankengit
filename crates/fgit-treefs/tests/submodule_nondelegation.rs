@@ -54,9 +54,10 @@ const fn foreign_repository_id() -> RepositoryId {
 
 fn rcr_id() -> RepositoryCommitId {
     RepositoryCommitId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("algorithm 1 is registered"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CodecVersion::new(1, 0),
-        DigestBytes::try_new(&[9_u8; 20]).expect("fixture digest is a legal width"),
+        DigestBytes::try_new(&[9_u8; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
@@ -254,3 +255,7 @@ fn seeded_parent_credential_delegation_is_detected_by_read_audit() {
         "the corpus catches the seeded parent-credential delegation as a foreign-object read"
     );
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

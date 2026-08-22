@@ -92,9 +92,10 @@ fn view_for(repository: RepositoryId, root: Oid) -> BaseView<Sha1> {
     BaseView::new(
         repository,
         RepositoryCommitId::from_digest(
-            DigestAlgorithmId::try_new(1).expect("algorithm 1 is registered"),
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("nonzero corpus fixture algorithm slot"),
             CodecVersion::new(1, 0),
-            DigestBytes::try_new(&[9_u8; 20]).expect("fixture digest is a legal width"),
+            DigestBytes::try_new(&[9_u8; 32]).expect("32-byte corpus fixture body"),
         ),
         root,
         root,
@@ -245,3 +246,7 @@ fn a_readable_path_outside_write_scope_is_refused_as_a_write() {
         "outside read scope entirely must refuse as a READ, not a write; got {neither:?}"
     );
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

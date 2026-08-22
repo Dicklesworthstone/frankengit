@@ -40,9 +40,10 @@ const fn repository_id() -> RepositoryId {
 
 fn rcr_id() -> RepositoryCommitId {
     RepositoryCommitId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("algorithm 1 is registered"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CodecVersion::new(1, 0),
-        DigestBytes::try_new(&[0x19; 20]).expect("fixture digest width is legal"),
+        DigestBytes::try_new(&[0x19; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
@@ -382,3 +383,7 @@ fn seeded_secret_detector_catches_overlay_effect_and_export_leaks() {
         "the detector does not report a sentinel where none was planted"
     );
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

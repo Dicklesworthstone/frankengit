@@ -778,9 +778,10 @@ mod tests {
 
     fn head(value: u8) -> RepositoryAuthorityHeadId {
         RepositoryAuthorityHeadId::from_digest(
-            DigestAlgorithmId::try_new(1).expect("valid digest algorithm"),
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("nonzero corpus fixture algorithm slot"),
             CANONICAL_CODEC_VERSION,
-            DigestBytes::try_new(&[value; 20]).expect("valid digest bytes"),
+            DigestBytes::try_new(&[value; 32]).expect("32-byte corpus fixture body"),
         )
     }
 
@@ -971,3 +972,7 @@ mod tests {
         assert!(current_ledger.close().is_quiescent());
     }
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

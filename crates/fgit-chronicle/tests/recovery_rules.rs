@@ -20,16 +20,18 @@ use fgit_types::{
 
 fn digest(tag: u8) -> Digest {
     Digest::new(
-        DigestAlgorithmId::try_new(1).expect("code point one is valid"),
-        DigestBytes::try_new(&[tag; 20]).expect("20-byte SHA-1 digest is valid"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 fn head_id(tag: u8) -> RepositoryAuthorityHeadId {
     RepositoryAuthorityHeadId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("code point one is valid"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("20-byte SHA-1 digest is valid"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
@@ -305,3 +307,7 @@ fn a_restore_cannot_override_a_recovery_that_was_fine() {
         .is_ok()
     );
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

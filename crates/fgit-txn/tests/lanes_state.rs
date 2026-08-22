@@ -17,17 +17,19 @@ use fgit_types::identity::{PreparedTxnCapsuleId, TxId};
 
 fn tx_id(tag: u8) -> TxId {
     TxId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("one is a valid digest algorithm"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("a 20-byte SHA-1 digest is valid"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 fn capsule_id(tag: u8) -> PreparedTxnCapsuleId {
     PreparedTxnCapsuleId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("one is a valid digest algorithm"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("a 20-byte SHA-1 digest is valid"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
@@ -166,3 +168,7 @@ fn sealing_refuses_mismatched_slots_but_matching_slots_proceed() {
     assert_eq!(ledger.leaks(), Vec::new());
     assert!(ledger.close().is_quiescent());
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

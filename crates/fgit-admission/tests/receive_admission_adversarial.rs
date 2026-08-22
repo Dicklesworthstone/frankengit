@@ -115,8 +115,9 @@ fn oid(hex: &str) -> GitOid {
 
 fn digest() -> Digest {
     Digest::new(
-        fgit_types::hash::DigestAlgorithmId::try_new(1).expect("algorithm slot"),
-        fgit_types::hash::DigestBytes::try_new(&[7_u8; 20]).expect("digest body"),
+        fgit_types::hash::DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
+        fgit_types::hash::DigestBytes::try_new(&[7_u8; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
@@ -304,3 +305,7 @@ fn the_structural_receipt_is_relayed_intact_and_not_recomputed() {
         "admission altered the structural receipt it was handed"
     );
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

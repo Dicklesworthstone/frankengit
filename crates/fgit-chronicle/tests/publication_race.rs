@@ -25,17 +25,19 @@ use fgit_types::{
 
 fn digest(tag: u8) -> Digest {
     Digest::new(
-        DigestAlgorithmId::try_new(1).expect("code point one is valid"),
-        DigestBytes::try_new(&[tag; 20]).expect("20-byte SHA-1 digest is valid"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 macro_rules! derived {
     ($ty:ty, $tag:expr) => {
         <$ty>::from_digest(
-            DigestAlgorithmId::try_new(1).expect("code point one is valid"),
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("nonzero corpus fixture algorithm slot"),
             CANONICAL_CODEC_VERSION,
-            DigestBytes::try_new(&[$tag; 20]).expect("20-byte SHA-1 digest is valid"),
+            DigestBytes::try_new(&[$tag; 32]).expect("32-byte corpus fixture body"),
         )
     };
 }
@@ -322,3 +324,7 @@ fn a_refusal_only_publication_advances_the_head_without_committing() {
     );
     assert_eq!(head.ref_root, genesis().ref_root, "source root untouched");
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

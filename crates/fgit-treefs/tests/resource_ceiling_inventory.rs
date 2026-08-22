@@ -61,9 +61,10 @@ fn fixture() -> (MemorySource, BaseView<Sha1>, TreeCapability, Overlay) {
     let base = BaseView::new(
         repository,
         RepositoryCommitId::from_digest(
-            DigestAlgorithmId::try_new(1).expect("registered fixture algorithm"),
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("nonzero corpus fixture algorithm slot"),
             CodecVersion::new(1, 0),
-            DigestBytes::try_new(&[0x77; 20]).expect("fixture digest width"),
+            DigestBytes::try_new(&[0x77; 32]).expect("32-byte corpus fixture body"),
         ),
         root,
         root,
@@ -120,3 +121,7 @@ fn object_budget_refuses_one_below_the_exact_constructed_count_and_accepts_at_it
         "the identical export must name the measured object count and the one-below ceiling"
     );
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

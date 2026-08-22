@@ -100,16 +100,18 @@ type RefMap = BTreeMap<RefName, GitOid>;
 
 fn digest(seed: u8) -> Digest {
     Digest::new(
-        DigestAlgorithmId::try_new(1).expect("non-zero algorithm id"),
-        DigestBytes::try_new(&[seed; 20]).expect("20-byte SHA-1 test digest"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
+        DigestBytes::try_new(&[seed; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 fn principal_snapshot() -> PrincipalSnapshotId {
     PrincipalSnapshotId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("non-zero algorithm id"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         fgit_types::CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[15; 20]).expect("20-byte SHA-1 test digest"),
+        DigestBytes::try_new(&[15; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
@@ -872,3 +874,21 @@ fn production_successor_ref_root_round_trips_and_missing_root_refuses() {
         "the RCR-validated closure commitment must resolve from the same immutable store"
     );
 }
+
+#[test]
+fn fixture_algorithm_slot_is_reserved_and_unregistered() {
+    let fixture_algorithm = DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+        .expect("corpus fixture code point is nonzero");
+    assert!(
+        fgit_crypto::CORPUS_RESERVED_CODE_POINTS.contains(&FIXTURE_ALGORITHM_CODE_POINT),
+        "fixture algorithm slot {FIXTURE_ALGORITHM_CODE_POINT:#06x} escaped the corpus-reserved range"
+    );
+    assert!(
+        fgit_crypto::DigestAlgorithm::from_id(fixture_algorithm).is_none(),
+        "fixture algorithm slot must never resolve to a registered construction"
+    );
+}
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

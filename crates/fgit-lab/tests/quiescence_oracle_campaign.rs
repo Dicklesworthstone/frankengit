@@ -45,80 +45,90 @@ use fgit_types::{
 
 fn digest(tag: u8) -> Digest {
     Digest::new(
-        DigestAlgorithmId::try_new(1).expect("code point one is a valid algorithm slot"),
-        DigestBytes::try_new(&[tag; 20]).expect("20-byte SHA-1 digest body is valid"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 fn envelope(tag: u8) -> ObjectEnvelopeId {
     ObjectEnvelopeId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 fn head(tag: u8) -> RepositoryAuthorityHeadId {
     RepositoryAuthorityHeadId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 fn batch(tag: u8) -> RepositoryDecisionBatchId {
     RepositoryDecisionBatchId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 fn rcr(tag: u8) -> RepositoryCommitId {
     RepositoryCommitId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 fn txid(tag: u8) -> TxId {
     TxId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 fn principal_snapshot(tag: u8) -> PrincipalSnapshotId {
     PrincipalSnapshotId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 fn generation(tag: u8) -> GenerationId {
     GenerationId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 fn evidence_record(tag: u8) -> EvidenceRecordId {
     EvidenceRecordId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
 fn segment(tag: u8) -> SegmentManifestId {
     SegmentManifestId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("valid algorithm slot"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[tag; 20]).expect("valid digest body"),
+        DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
@@ -1151,3 +1161,7 @@ fn e2e_receipt_is_written_only_after_the_complete_campaign_passes() {
     journal_replay_preserves_accounting_and_refuses_a_tampered_transition();
     write_campaign_receipt_if_requested();
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

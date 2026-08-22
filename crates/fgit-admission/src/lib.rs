@@ -1684,16 +1684,18 @@ mod tests {
 
     fn digest(seed: u8) -> Digest {
         Digest::new(
-            DigestAlgorithmId::try_new(1).expect("non-zero algorithm id"),
-            DigestBytes::try_new(&[seed; 20]).expect("20-byte SHA-1 test digest"),
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("nonzero corpus fixture algorithm slot"),
+            DigestBytes::try_new(&[seed; 32]).expect("32-byte corpus fixture body"),
         )
     }
 
     fn principal_snapshot() -> PrincipalSnapshotId {
         PrincipalSnapshotId::from_digest(
-            DigestAlgorithmId::try_new(1).expect("non-zero algorithm id"),
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("nonzero corpus fixture algorithm slot"),
             fgit_types::CANONICAL_CODEC_VERSION,
-            DigestBytes::try_new(&[15; 20]).expect("20-byte SHA-1 test digest"),
+            DigestBytes::try_new(&[15; 32]).expect("32-byte corpus fixture body"),
         )
     }
 
@@ -2262,3 +2264,7 @@ mod tests {
         assert!(admit_validated_receive(&store, &context, &permitted, one, &projection,).is_ok());
     }
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

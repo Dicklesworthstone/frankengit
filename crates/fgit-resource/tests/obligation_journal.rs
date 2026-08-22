@@ -34,18 +34,20 @@ fn lane_slot() -> LaneSlot {
     LaneSlot {
         lane: 3,
         transaction: TxId::from_digest(
-            DigestAlgorithmId::try_new(1).expect("a valid algorithm slot"),
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("nonzero corpus fixture algorithm slot"),
             CANONICAL_CODEC_VERSION,
-            DigestBytes::try_new(&[7; 20]).expect("a valid digest body"),
+            DigestBytes::try_new(&[7; 32]).expect("32-byte corpus fixture body"),
         ),
     }
 }
 
 fn batch_id() -> RepositoryDecisionBatchId {
     RepositoryDecisionBatchId::from_digest(
-        DigestAlgorithmId::try_new(1).expect("a valid algorithm slot"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
         CANONICAL_CODEC_VERSION,
-        DigestBytes::try_new(&[9; 20]).expect("a valid digest body"),
+        DigestBytes::try_new(&[9; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
@@ -228,3 +230,7 @@ fn a_settled_obligation_journals_its_transition_and_replays_to_it() {
         "the replay must agree with the ledger's own state for that obligation"
     );
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

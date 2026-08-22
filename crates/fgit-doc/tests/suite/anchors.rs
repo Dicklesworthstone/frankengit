@@ -406,8 +406,10 @@ fn a_digest_over_the_preimage_becomes_a_domain_pinned_identity() {
 
     // A stand-in digest: this crate does not compute one, and the test must not
     // pretend otherwise. What is under test is the domain stamping, not the hash.
-    let algorithm = fgit_types::hash::DigestAlgorithmId::try_new(1).expect("an algorithm slot");
-    let digest = fgit_types::hash::DigestBytes::try_new(&[0x11_u8; 20]).expect("digest bytes");
+    let algorithm = fgit_types::hash::DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+        .expect("nonzero corpus fixture algorithm slot");
+    let digest = fgit_types::hash::DigestBytes::try_new(&[0x11_u8; 32])
+        .expect("32-byte corpus fixture body");
     let codec = fgit_types::numeric::CodecVersion::new(1, 0);
     let identity = fgit_doc::document_anchor_id(algorithm, codec, digest);
     let internal = identity.as_internal_object_id();
@@ -584,3 +586,7 @@ fn basis_tags_are_stable_and_distinguish_every_presentation() {
     assert_eq!(DiffSide::Old.tag(), "old");
     assert_eq!(DiffSide::New.tag(), "new");
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

@@ -24,8 +24,9 @@ fn slug(text: &str) -> AsciiSlug {
 
 fn fingerprint(seed: u8) -> Digest {
     Digest::new(
-        DigestAlgorithmId::try_new(1).expect("nonzero code point"),
-        DigestBytes::try_new(&[seed; 20]).expect("20-byte SHA-1 digest fits its registered width"),
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("nonzero corpus fixture algorithm slot"),
+        DigestBytes::try_new(&[seed; 32]).expect("32-byte corpus fixture body"),
     )
 }
 
@@ -381,3 +382,7 @@ fn the_body_declares_its_own_domain_and_schema() {
     assert_eq!(StatisticalEvidenceBody::SCHEMA_MAJOR, 1);
     assert_eq!(StatisticalEvidenceBody::SCHEMA_MINOR, 0);
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);

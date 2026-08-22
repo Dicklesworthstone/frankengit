@@ -547,9 +547,9 @@ fn delivery_key(index: usize) -> OutboxDeliveryKey {
 /// byte-identical parameters, or `DuplicateIdenticalDelivery` is unreachable
 /// and the corpus silently tests only the reuse arm.
 fn digest_of(tag: u8) -> Digest {
-    let algorithm = DigestAlgorithmId::try_new(1).expect("a non-zero algorithm slot is admissible");
-    let bytes =
-        DigestBytes::try_new(&[tag; 20]).expect("20-byte SHA-1 digest fits its registered width");
+    let algorithm = DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+        .expect("nonzero corpus fixture algorithm slot");
+    let bytes = DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body");
     Digest::new(algorithm, bytes)
 }
 
@@ -1519,3 +1519,7 @@ fn the_normal_form_applied_to_the_basis_reproduces_the_evaluated_workspace() {
          the generator emits MismatchPolicy::TxnAbort and should reach it"
     );
 }
+
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
