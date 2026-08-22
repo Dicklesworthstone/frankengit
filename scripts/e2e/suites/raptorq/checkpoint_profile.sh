@@ -24,6 +24,8 @@ CP_REPO=$(cd "$CP_DIR/../../../.." && pwd)
 . "$CP_REPO/scripts/e2e/lib.sh"
 
 CP_SRC="$CP_REPO/crates/fgit-raptorq/src/checkpoint.rs"
+CP_VECTORS="$CP_REPO/crates/fgit-raptorq/goldens/checkpoint_vectors.tsv"
+CP_ORACLE="$CP_REPO/crates/fgit-raptorq/goldens/checkpoint_identity.py"
 
 fge_init fg077a-checkpoint-profile
 fge_context bead frankengit-fg077a-raptorq-microsegment-checkpoint-ko1i
@@ -36,6 +38,10 @@ fge_phase setup
 
 fge_assert_file FG-077A-E2E-001 "$CP_SRC" \
   'the checkpoint_segment_v1 profile is checked in'
+fge_assert_file FG-077A-E2E-002 "$CP_VECTORS" \
+  'independently derived checkpoint identity vectors are checked in'
+fge_assert_file FG-077A-E2E-003 "$CP_ORACLE" \
+  'the independent hashlib checkpoint-identity derivation is checked in'
 
 fge_phase action
 
