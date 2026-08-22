@@ -66,9 +66,9 @@ use fgit_admission::{
 };
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityStore,
-    AuthorityVersionToken, CasOutcome, HeadInit, HeadKey, HeadRead, HeadReadReceipt,
-    IdempotencyKey, ImmutableKey, ImmutableRead, MemoryAuthorityStore, OutcomeLookup, PutOutcome,
-    StoreInstanceId, initialize_repository, resolve_outcome,
+    AuthorityVersionToken, CasOutcome, DuplicateAbsenceWitness, HeadInit, HeadKey, HeadRead,
+    HeadReadReceipt, IdempotencyKey, ImmutableKey, ImmutableRead, MemoryAuthorityStore,
+    OutcomeLookup, PutOutcome, StoreInstanceId, initialize_repository, resolve_outcome,
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_codec::RepositoryAuthorityHeadBody;
@@ -168,6 +168,39 @@ impl AsyncAuthorityStore for AsyncView {
         let resolved = self
             .0
             .compare_exchange_head(key, expected, new_generation, new_body);
+        async move { resolved }
+    }
+
+    /// Forwarded, and load-bearing.
+    ///
+    /// This is the trait's **only** defaulted method: a backend that has not
+    /// implemented atomic publication inherits a typed
+    /// `OperationUnsupported` refusal rather than a compile error, so that a
+    /// store which cannot publish says so honestly instead of silently
+    /// providing a non-atomic imitation.
+    ///
+    /// A test view must therefore forward it explicitly. Leaving it on the
+    /// default made this fixture refuse every commit while the blocking
+    /// surface committed — which read as the two surfaces disagreeing about
+    /// the shared core when in fact the fixture never reached it.
+    fn publish_head_with_outcomes(
+        &self,
+        _cx: &Self::Context,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+        outcomes: &[(ImmutableKey, Vec<u8>)],
+        witness: &DuplicateAbsenceWitness,
+    ) -> impl Future<Output = Result<CasOutcome, AuthorityFailure>> + Send {
+        let resolved = self.0.publish_head_with_outcomes(
+            key,
+            expected,
+            new_generation,
+            new_body,
+            outcomes,
+            witness,
+        );
         async move { resolved }
     }
 
