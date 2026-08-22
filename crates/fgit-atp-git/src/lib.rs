@@ -1200,6 +1200,116 @@ pub enum AtpRefusal {
         /// Object identity whose local bytes were unsuitable.
         identity: GitOid,
     },
+    /// ATP execution limits were zero or internally contradictory.
+    InvalidExecutionLimits,
+    /// Too many path candidates arrived before the actor could retain them.
+    TooManyPathCandidates {
+        /// Number of candidates supplied by the caller.
+        offered: usize,
+        /// Maximum candidate count the actor admitted.
+        maximum: usize,
+    },
+    /// More than one candidate used one stable path identity.
+    DuplicatePathCandidate {
+        /// Repeated stable path identity.
+        path: PathId,
+    },
+    /// No candidate passed capability, privacy, and budget admission.
+    NoEligiblePath,
+    /// A probe observation named a path that the race did not start.
+    ObservationForUnstartedPath {
+        /// Path identity named by the observation.
+        path: PathId,
+    },
+    /// A swarm tracker received too many pieces before allocating tracker state.
+    TooManyPieces {
+        /// Piece count supplied by the caller.
+        offered: usize,
+        /// Maximum piece count the tracker admitted.
+        maximum: usize,
+    },
+    /// A swarm tracker received too many authenticated peers before retaining availability.
+    TooManySwarmPeers {
+        /// Peer count supplied by the caller.
+        offered: usize,
+        /// Maximum peer count the tracker admitted.
+        maximum: usize,
+    },
+    /// A peer availability declaration repeated a peer identity.
+    DuplicateSwarmPeer {
+        /// Peer that appeared more than once.
+        peer: PeerIdentity,
+    },
+    /// A peer named a piece outside the tracker's immutable piece set.
+    UnknownSwarmPiece {
+        /// Unknown piece identity.
+        piece: PieceId,
+    },
+    /// A peer availability list was not in canonical strict piece order.
+    NonCanonicalPeerAvailability,
+    /// Immutable tracker pieces were not in canonical strict order.
+    NonCanonicalPieceOrder,
+    /// Immutable tracker pieces contained the same stable identity twice.
+    DuplicatePiece {
+        /// Repeated piece identity.
+        piece: PieceId,
+    },
+    /// A peer was recorded out of order for the current deterministic regime.
+    NonMonotonicRegimeEpoch {
+        /// Earlier observed epoch.
+        previous: u64,
+        /// Newly supplied epoch.
+        observed: u64,
+    },
+    /// An assignment would exceed the actor's in-flight piece budget.
+    InFlightPieceLimitReached {
+        /// Configured hard maximum.
+        maximum: usize,
+    },
+    /// A peer reported a result for a piece it was not assigned.
+    UnassignedPieceResult {
+        /// Piece whose result was not owned by this peer.
+        piece: PieceId,
+        /// Peer that attempted to report the result.
+        peer: PeerIdentity,
+    },
+    /// An actor effect exceeded the bounded canonical-parameter payload.
+    EffectParametersTooLarge {
+        /// Offered canonical parameter bytes.
+        offered: usize,
+        /// Maximum bytes admitted before copying.
+        maximum: usize,
+    },
+    /// The actor has reached its bounded external-effect count before reserving another one.
+    TooManyTransferEffects {
+        /// Configured hard maximum.
+        maximum: usize,
+    },
+    /// An effect key was reused with another semantic intent.
+    DuplicateEffectKey {
+        /// Reused idempotency key.
+        key: TransferEffectKey,
+    },
+    /// An effect transition named no currently reserved actor obligation.
+    EffectNotReserved {
+        /// Effect key that did not name a reserved effect.
+        key: TransferEffectKey,
+    },
+    /// Cancellation reached an effect that has committed but not been acknowledged.
+    CommittedEffectRequiresOutcome {
+        /// Committed effect whose outcome remains externally observable.
+        key: TransferEffectKey,
+    },
+    /// The actor was asked to close before its effect ledger reached quiescence.
+    ActorNotQuiescent {
+        /// Number of effects that still need a terminal outcome.
+        outstanding: usize,
+    },
+    /// An actor operation was invalid for the current transfer phase.
+    InvalidActorPhase {
+        /// Current actor phase.
+        phase: TransferActorPhase,
+    },
     /// Object-fabric envelope construction refused the candidate object.
     Fabric(FabricError),
     /// Object-fabric verification refused the candidate object.
@@ -1301,6 +1411,89 @@ impl fmt::Display for AtpRefusal {
                 write!(
                     formatter,
                     "ATP-Git local verified object disagrees for {identity}"
+                )
+            }
+            Self::InvalidExecutionLimits => {
+                formatter.write_str("ATP-Git execution limits are invalid")
+            }
+            Self::TooManyPathCandidates { offered, maximum } => write!(
+                formatter,
+                "ATP-Git path candidates {offered} exceed bound {maximum}"
+            ),
+            Self::DuplicatePathCandidate { path } => {
+                write!(formatter, "ATP-Git path candidate {path:?} is duplicated")
+            }
+            Self::NoEligiblePath => {
+                formatter.write_str("ATP-Git has no capability-authorized eligible path")
+            }
+            Self::ObservationForUnstartedPath { path } => write!(
+                formatter,
+                "ATP-Git observed unstarted path {path:?} during a race"
+            ),
+            Self::TooManyPieces { offered, maximum } => write!(
+                formatter,
+                "ATP-Git swarm pieces {offered} exceed bound {maximum}"
+            ),
+            Self::TooManySwarmPeers { offered, maximum } => write!(
+                formatter,
+                "ATP-Git swarm peers {offered} exceed bound {maximum}"
+            ),
+            Self::DuplicateSwarmPeer { peer } => write!(
+                formatter,
+                "ATP-Git swarm peer {:?} was declared twice",
+                peer.as_bytes()
+            ),
+            Self::UnknownSwarmPiece { piece } => {
+                write!(formatter, "ATP-Git swarm piece {piece:?} is unknown")
+            }
+            Self::NonCanonicalPeerAvailability => {
+                formatter.write_str("ATP-Git peer availability is not canonically ordered")
+            }
+            Self::NonCanonicalPieceOrder => {
+                formatter.write_str("ATP-Git piece identities are not canonically ordered")
+            }
+            Self::DuplicatePiece { piece } => {
+                write!(formatter, "ATP-Git piece {piece:?} is duplicated")
+            }
+            Self::NonMonotonicRegimeEpoch { previous, observed } => write!(
+                formatter,
+                "ATP-Git regime epoch {observed} precedes prior epoch {previous}"
+            ),
+            Self::InFlightPieceLimitReached { maximum } => write!(
+                formatter,
+                "ATP-Git in-flight piece limit {maximum} has been reached"
+            ),
+            Self::UnassignedPieceResult { piece, peer } => write!(
+                formatter,
+                "ATP-Git peer {:?} reported unassigned piece {piece:?}",
+                peer.as_bytes()
+            ),
+            Self::EffectParametersTooLarge { offered, maximum } => write!(
+                formatter,
+                "ATP-Git effect parameters {offered} exceed bound {maximum}"
+            ),
+            Self::TooManyTransferEffects { maximum } => write!(
+                formatter,
+                "ATP-Git transfer effect limit {maximum} has been reached"
+            ),
+            Self::DuplicateEffectKey { key } => {
+                write!(formatter, "ATP-Git transfer effect {key:?} is duplicated")
+            }
+            Self::EffectNotReserved { key } => {
+                write!(formatter, "ATP-Git transfer effect {key:?} is not reserved")
+            }
+            Self::CommittedEffectRequiresOutcome { key } => write!(
+                formatter,
+                "ATP-Git committed transfer effect {key:?} needs an outcome before close"
+            ),
+            Self::ActorNotQuiescent { outstanding } => write!(
+                formatter,
+                "ATP-Git transfer actor has {outstanding} unsettled effects"
+            ),
+            Self::InvalidActorPhase { phase } => {
+                write!(
+                    formatter,
+                    "ATP-Git actor phase {phase:?} rejects this operation"
                 )
             }
             Self::Fabric(error) => fmt::Display::fmt(error, formatter),
@@ -1462,6 +1655,1316 @@ fn verify_existing(entry: &TransferObjectEntry, object: &VerifiedObject) -> Resu
         });
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// FG-023a: path racing, swarm scheduling, and transfer-actor ownership
+// ---------------------------------------------------------------------------
+
+/// Stable identity of one candidate transfer path inside a manifest-scoped race.
+///
+/// This is not a socket descriptor or a host name.  Those are adapter details
+/// and may be recycled; a receipt needs one deterministic identity that stays
+/// meaningful during replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PathId(u32);
+
+impl PathId {
+    /// Creates a stable caller-assigned path identity.
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Returns the canonical numeric path identity.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// Stable identity of one manifest piece inside a swarm transfer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PieceId(u32);
+
+impl PieceId {
+    /// Creates a stable manifest piece identity.
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Returns the canonical numeric piece identity.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// Native or fallback transport represented by a typed path candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PathTransport {
+    /// Same-process immutable object access.
+    LocalObjectStore,
+    /// Same-host local socket or descriptor-passing adapter.
+    LocalSocket,
+    /// A direct LAN native-transport path.
+    LanQuic,
+    /// A direct wide-area native-transport path.
+    DirectQuic,
+    /// A policy-authorized relay or MASQUE-compatible path.
+    Relay,
+    /// A store-and-forward mailbox path.
+    Mailbox,
+    /// A verified multi-source peer path.
+    SwarmPeer,
+    /// Ordinary Git pack fallback; this does not turn ATP-Git into Git v2.
+    GitPackFallback,
+}
+
+/// Why a candidate cannot be armed, before any throughput optimisation runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PathAdmission {
+    /// Capability, trust, privacy, and budget policy admitted the candidate.
+    Permitted,
+    /// Authentication strength was insufficient for the transfer scope.
+    AuthenticationInsufficient,
+    /// The path violates the transfer's privacy or residency scope.
+    PrivacyScopeDenied,
+    /// The transport trust domain cannot serve this manifest.
+    TrustScopeDenied,
+    /// Egress or monetary reservation was unavailable before the path started.
+    BudgetDenied,
+}
+
+impl PathAdmission {
+    /// Whether the actor may arm this path at all.
+    #[must_use]
+    pub const fn is_permitted(self) -> bool {
+        matches!(self, Self::Permitted)
+    }
+}
+
+/// Measured, caller-supplied path attributes used only after policy admission.
+///
+/// The fields are integer estimates rather than wall-clock reads or floating
+/// point scores.  Their order is part of the receipt and thus replayable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathAttributes {
+    /// Lower ranks are preferred by declared policy before cost optimisation.
+    pub policy_rank: u16,
+    /// Estimated round-trip latency in microseconds.
+    pub estimated_rtt_micros: u64,
+    /// Estimated goodput in bytes per second; higher is preferred.
+    pub estimated_goodput_bytes_per_second: u64,
+    /// Estimated egress or relay cost in micro-units; lower is preferred.
+    pub estimated_cost_microunits: u64,
+    /// Regime epoch that produced these estimates.
+    pub regime_epoch: u64,
+}
+
+/// One immutable, policy-classified path candidate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathCandidate {
+    id: PathId,
+    peer: PeerIdentity,
+    transport: PathTransport,
+    admission: PathAdmission,
+    attributes: PathAttributes,
+}
+
+impl PathCandidate {
+    /// Builds one path candidate after the caller has performed policy admission.
+    #[must_use]
+    pub const fn new(
+        id: PathId,
+        peer: PeerIdentity,
+        transport: PathTransport,
+        admission: PathAdmission,
+        attributes: PathAttributes,
+    ) -> Self {
+        Self {
+            id,
+            peer,
+            transport,
+            admission,
+            attributes,
+        }
+    }
+
+    /// Stable manifest-scoped path identity.
+    #[must_use]
+    pub const fn id(&self) -> PathId {
+        self.id
+    }
+
+    /// Authenticated peer or endpoint identity for this path.
+    #[must_use]
+    pub const fn peer(&self) -> PeerIdentity {
+        self.peer
+    }
+
+    /// Transport family selected by the adapter.
+    #[must_use]
+    pub const fn transport(&self) -> PathTransport {
+        self.transport
+    }
+
+    /// Pre-optimisation capability and policy verdict.
+    #[must_use]
+    pub const fn admission(&self) -> PathAdmission {
+        self.admission
+    }
+
+    /// Measured attributes tied to one regime epoch.
+    #[must_use]
+    pub const fn attributes(&self) -> PathAttributes {
+        self.attributes
+    }
+}
+
+/// One deterministic probe observation from a path that was actually armed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathProbeObservation {
+    /// Candidate that emitted the observation.
+    pub path: PathId,
+    /// Logical arrival turn from the adapter's recorded trace.
+    pub arrival_turn: u64,
+    /// Whether the probe passed the path's usable gate.
+    pub usable: bool,
+}
+
+/// Bounded racing policy for one transfer actor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathRaceLimits {
+    max_candidates: usize,
+    initial_width: usize,
+}
+
+impl PathRaceLimits {
+    /// Creates bounds checked before the selector sorts or copies candidates.
+    pub const fn new(max_candidates: usize, initial_width: usize) -> Result<Self, AtpRefusal> {
+        if max_candidates == 0 || initial_width == 0 || initial_width > max_candidates {
+            return Err(AtpRefusal::InvalidExecutionLimits);
+        }
+        Ok(Self {
+            max_candidates,
+            initial_width,
+        })
+    }
+
+    /// Maximum path candidates this actor may retain.
+    #[must_use]
+    pub const fn max_candidates(&self) -> usize {
+        self.max_candidates
+    }
+
+    /// Number of admitted candidates the actor may arm initially.
+    #[must_use]
+    pub const fn initial_width(&self) -> usize {
+        self.initial_width
+    }
+}
+
+/// Immutable receipt for a bounded race and its loser drain set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathRaceReceipt {
+    started: Vec<PathId>,
+    policy_rejected: Vec<PathId>,
+    winner: Option<PathId>,
+    drained_losers: Vec<PathId>,
+}
+
+impl PathRaceReceipt {
+    /// Paths armed in declared deterministic order.
+    #[must_use]
+    pub fn started(&self) -> &[PathId] {
+        &self.started
+    }
+
+    /// Candidates rejected before optimisation because policy did not admit them.
+    #[must_use]
+    pub fn policy_rejected(&self) -> &[PathId] {
+        &self.policy_rejected
+    }
+
+    /// First usable path, with the declared arrival/path tie-break applied.
+    #[must_use]
+    pub const fn winner(&self) -> Option<PathId> {
+        self.winner
+    }
+
+    /// Started paths the caller must protocol-cancel and drain before return.
+    #[must_use]
+    pub fn drained_losers(&self) -> &[PathId] {
+        &self.drained_losers
+    }
+}
+
+/// Deterministic bounded path-race selector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathRacer {
+    limits: PathRaceLimits,
+}
+
+impl PathRacer {
+    /// Creates a race selector with explicit candidate and fan-out bounds.
+    #[must_use]
+    pub const fn new(limits: PathRaceLimits) -> Self {
+        Self { limits }
+    }
+
+    /// Selects the first usable started path and records every loser to drain.
+    ///
+    /// Admission is filtered before sorting.  Among admitted candidates the
+    /// policy order is `(policy_rank, RTT, reverse goodput, cost, path_id)`.
+    /// An observation wins by `(arrival_turn, path_id)`, so same-turn races
+    /// replay identically without consulting a clock or scheduler order.
+    pub fn race(
+        &self,
+        mut candidates: Vec<PathCandidate>,
+        observations: &[PathProbeObservation],
+    ) -> Result<PathRaceReceipt, AtpRefusal> {
+        if candidates.len() > self.limits.max_candidates {
+            return Err(AtpRefusal::TooManyPathCandidates {
+                offered: candidates.len(),
+                maximum: self.limits.max_candidates,
+            });
+        }
+        let mut identities = BTreeSet::new();
+        for candidate in &candidates {
+            if !identities.insert(candidate.id) {
+                return Err(AtpRefusal::DuplicatePathCandidate { path: candidate.id });
+            }
+        }
+        candidates.sort_by(path_candidate_order);
+
+        let policy_rejected = candidates
+            .iter()
+            .filter(|candidate| !candidate.admission.is_permitted())
+            .map(PathCandidate::id)
+            .collect::<Vec<_>>();
+        let started = candidates
+            .iter()
+            .filter(|candidate| candidate.admission.is_permitted())
+            .take(self.limits.initial_width)
+            .map(PathCandidate::id)
+            .collect::<Vec<_>>();
+        if started.is_empty() {
+            return Err(AtpRefusal::NoEligiblePath);
+        }
+        for observation in observations {
+            if !started.contains(&observation.path) {
+                return Err(AtpRefusal::ObservationForUnstartedPath {
+                    path: observation.path,
+                });
+            }
+        }
+        let winner = observations
+            .iter()
+            .filter(|observation| observation.usable)
+            .min_by_key(|observation| (observation.arrival_turn, observation.path))
+            .map(|observation| observation.path);
+        let drained_losers = started
+            .iter()
+            .copied()
+            .filter(|path| Some(*path) != winner)
+            .collect();
+        Ok(PathRaceReceipt {
+            started,
+            policy_rejected,
+            winner,
+            drained_losers,
+        })
+    }
+}
+
+fn path_candidate_order(left: &PathCandidate, right: &PathCandidate) -> std::cmp::Ordering {
+    left.attributes
+        .policy_rank
+        .cmp(&right.attributes.policy_rank)
+        .then_with(|| {
+            left.attributes
+                .estimated_rtt_micros
+                .cmp(&right.attributes.estimated_rtt_micros)
+        })
+        .then_with(|| {
+            right
+                .attributes
+                .estimated_goodput_bytes_per_second
+                .cmp(&left.attributes.estimated_goodput_bytes_per_second)
+        })
+        .then_with(|| {
+            left.attributes
+                .estimated_cost_microunits
+                .cmp(&right.attributes.estimated_cost_microunits)
+        })
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+/// Per-peer deterministic penalty regime for swarm scheduling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerPenaltyPolicy {
+    /// Penalty at or above which a peer is excluded from new assignments.
+    pub exclusion_threshold: u32,
+    /// Penalty points removed at every monotonic regime epoch.
+    pub decay_per_regime_epoch: u32,
+}
+
+impl PeerPenaltyPolicy {
+    /// Validates a non-zero exclusion ceiling before a ledger accepts evidence.
+    pub const fn new(
+        exclusion_threshold: u32,
+        decay_per_regime_epoch: u32,
+    ) -> Result<Self, AtpRefusal> {
+        if exclusion_threshold == 0 {
+            return Err(AtpRefusal::InvalidExecutionLimits);
+        }
+        Ok(Self {
+            exclusion_threshold,
+            decay_per_regime_epoch,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PeerPenaltyState {
+    penalty: u32,
+    epoch: u64,
+}
+
+/// Replayable per-peer invalid-piece evidence and deterministic decay/reset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerPenaltyLedger {
+    policy: PeerPenaltyPolicy,
+    states: BTreeMap<PeerIdentity, PeerPenaltyState>,
+}
+
+impl PeerPenaltyLedger {
+    /// Creates an empty ledger under one declared deterministic regime.
+    #[must_use]
+    pub const fn new(policy: PeerPenaltyPolicy) -> Self {
+        Self {
+            policy,
+            states: BTreeMap::new(),
+        }
+    }
+
+    /// Returns the decayed penalty at `epoch` without mutating the evidence ledger.
+    pub fn penalty_at(&self, peer: PeerIdentity, epoch: u64) -> Result<u32, AtpRefusal> {
+        let Some(state) = self.states.get(&peer) else {
+            return Ok(0);
+        };
+        if epoch < state.epoch {
+            return Err(AtpRefusal::NonMonotonicRegimeEpoch {
+                previous: state.epoch,
+                observed: epoch,
+            });
+        }
+        let elapsed = epoch - state.epoch;
+        let decay = u32::try_from(elapsed)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(self.policy.decay_per_regime_epoch);
+        Ok(state.penalty.saturating_sub(decay))
+    }
+
+    /// Records an invalid piece and applies decay before the new penalty point.
+    pub fn record_bad_piece(&mut self, peer: PeerIdentity, epoch: u64) -> Result<u32, AtpRefusal> {
+        let penalty = self
+            .penalty_at(peer, epoch)?
+            .saturating_add(1)
+            .min(self.policy.exclusion_threshold);
+        self.states
+            .insert(peer, PeerPenaltyState { penalty, epoch });
+        Ok(penalty)
+    }
+
+    /// Records a verified piece, resetting the peer's accumulated bad-piece evidence.
+    pub fn record_verified_piece(
+        &mut self,
+        peer: PeerIdentity,
+        epoch: u64,
+    ) -> Result<(), AtpRefusal> {
+        let _prior = self.penalty_at(peer, epoch)?;
+        self.states
+            .insert(peer, PeerPenaltyState { penalty: 0, epoch });
+        Ok(())
+    }
+
+    /// Whether the peer may receive a new request in this regime epoch.
+    pub fn is_eligible(&self, peer: PeerIdentity, epoch: u64) -> Result<bool, AtpRefusal> {
+        Ok(self.penalty_at(peer, epoch)? < self.policy.exclusion_threshold)
+    }
+}
+
+/// Bounds applied before a swarm tracker retains pieces, peers, or assignments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SwarmLimits {
+    max_pieces: usize,
+    max_peers: usize,
+    max_in_flight_assignments: usize,
+    endgame_remaining_pieces: usize,
+    max_assignments_per_piece: usize,
+    penalty_policy: PeerPenaltyPolicy,
+}
+
+impl SwarmLimits {
+    /// Creates an explicit bounded swarm profile.
+    pub const fn new(
+        max_pieces: usize,
+        max_peers: usize,
+        max_in_flight_assignments: usize,
+        endgame_remaining_pieces: usize,
+        max_assignments_per_piece: usize,
+        penalty_policy: PeerPenaltyPolicy,
+    ) -> Result<Self, AtpRefusal> {
+        if max_pieces == 0
+            || max_peers == 0
+            || max_in_flight_assignments == 0
+            || max_assignments_per_piece == 0
+        {
+            return Err(AtpRefusal::InvalidExecutionLimits);
+        }
+        Ok(Self {
+            max_pieces,
+            max_peers,
+            max_in_flight_assignments,
+            endgame_remaining_pieces,
+            max_assignments_per_piece,
+            penalty_policy,
+        })
+    }
+}
+
+/// One peer's canonical piece availability declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerAvailability {
+    peer: PeerIdentity,
+    pieces: Vec<PieceId>,
+}
+
+impl PeerAvailability {
+    /// Builds an availability declaration.  The tracker validates all bounds and order.
+    #[must_use]
+    pub fn new(peer: PeerIdentity, pieces: Vec<PieceId>) -> Self {
+        Self { peer, pieces }
+    }
+
+    /// Authenticated peer whose availability this declaration describes.
+    #[must_use]
+    pub const fn peer(&self) -> PeerIdentity {
+        self.peer
+    }
+
+    /// Declared available pieces in canonical strict identity order.
+    #[must_use]
+    pub fn pieces(&self) -> &[PieceId] {
+        &self.pieces
+    }
+}
+
+/// Observed state of one immutable swarm piece.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PieceStatus {
+    /// No request is currently outstanding.
+    Missing,
+    /// One or more peers own outstanding requests for the piece.
+    Requested,
+    /// A peer supplied invalid bytes; the piece may be requested again.
+    Rejected,
+    /// Bytes verified against the manifest commitment.
+    Verified,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SwarmPieceRecord {
+    status: PieceStatus,
+    assignments: BTreeSet<PeerIdentity>,
+}
+
+/// Deterministic request assignment emitted by [`SwarmPieceTracker::next_assignment`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SwarmAssignment {
+    /// Piece to request from the selected peer.
+    pub piece: PieceId,
+    /// Peer selected by rarity, penalty, then identity tie-breaks.
+    pub peer: PeerIdentity,
+    /// Whether this is an endgame duplicate rather than a first request.
+    pub duplicate: bool,
+}
+
+/// Bounded rarest-first swarm scheduler with deterministic endgame duplication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SwarmPieceTracker {
+    limits: SwarmLimits,
+    pieces: BTreeMap<PieceId, SwarmPieceRecord>,
+    availability: BTreeMap<PeerIdentity, BTreeSet<PieceId>>,
+    penalties: PeerPenaltyLedger,
+    in_flight_assignments: usize,
+}
+
+impl SwarmPieceTracker {
+    /// Creates a tracker after validating every untrusted count and identity list.
+    pub fn new(
+        limits: SwarmLimits,
+        pieces: Vec<PieceId>,
+        peers: Vec<PeerAvailability>,
+    ) -> Result<Self, AtpRefusal> {
+        if pieces.len() > limits.max_pieces {
+            return Err(AtpRefusal::TooManyPieces {
+                offered: pieces.len(),
+                maximum: limits.max_pieces,
+            });
+        }
+        if peers.len() > limits.max_peers {
+            return Err(AtpRefusal::TooManySwarmPeers {
+                offered: peers.len(),
+                maximum: limits.max_peers,
+            });
+        }
+        for pair in pieces.windows(2) {
+            match pair[0].cmp(&pair[1]) {
+                std::cmp::Ordering::Less => {}
+                std::cmp::Ordering::Equal => {
+                    return Err(AtpRefusal::DuplicatePiece { piece: pair[0] });
+                }
+                std::cmp::Ordering::Greater => return Err(AtpRefusal::NonCanonicalPieceOrder),
+            }
+        }
+        let mut records = BTreeMap::new();
+        for piece in pieces {
+            records.insert(
+                piece,
+                SwarmPieceRecord {
+                    status: PieceStatus::Missing,
+                    assignments: BTreeSet::new(),
+                },
+            );
+        }
+        let mut availability = BTreeMap::new();
+        for peer in peers {
+            let PeerAvailability { peer, pieces } = peer;
+            if availability.contains_key(&peer) {
+                return Err(AtpRefusal::DuplicateSwarmPeer { peer });
+            }
+            if pieces.len() > limits.max_pieces {
+                return Err(AtpRefusal::TooManyPieces {
+                    offered: pieces.len(),
+                    maximum: limits.max_pieces,
+                });
+            }
+            for pair in pieces.windows(2) {
+                if pair[0] >= pair[1] {
+                    return Err(AtpRefusal::NonCanonicalPeerAvailability);
+                }
+            }
+            let mut known = BTreeSet::new();
+            for piece in pieces {
+                if !records.contains_key(&piece) {
+                    return Err(AtpRefusal::UnknownSwarmPiece { piece });
+                }
+                known.insert(piece);
+            }
+            availability.insert(peer, known);
+        }
+        Ok(Self {
+            limits,
+            pieces: records,
+            availability,
+            penalties: PeerPenaltyLedger::new(limits.penalty_policy),
+            in_flight_assignments: 0,
+        })
+    }
+
+    /// Returns the current state of one known piece.
+    #[must_use]
+    pub fn status(&self, piece: PieceId) -> Option<PieceStatus> {
+        self.pieces.get(&piece).map(|record| record.status)
+    }
+
+    /// Number of outstanding assignments retained by the actor.
+    #[must_use]
+    pub const fn in_flight_assignments(&self) -> usize {
+        self.in_flight_assignments
+    }
+
+    /// Selects one request using rarity, peer penalty, then stable identities.
+    pub fn next_assignment(&mut self, epoch: u64) -> Result<Option<SwarmAssignment>, AtpRefusal> {
+        if self.in_flight_assignments >= self.limits.max_in_flight_assignments {
+            return Err(AtpRefusal::InFlightPieceLimitReached {
+                maximum: self.limits.max_in_flight_assignments,
+            });
+        }
+        let remaining = self
+            .pieces
+            .values()
+            .filter(|record| record.status != PieceStatus::Verified)
+            .count();
+        let endgame = remaining <= self.limits.endgame_remaining_pieces;
+        let mut selected: Option<(usize, PieceId, u32, PeerIdentity, bool)> = None;
+
+        for (piece, record) in &self.pieces {
+            let duplicate = !record.assignments.is_empty();
+            let eligible_piece = match record.status {
+                PieceStatus::Missing | PieceStatus::Rejected => true,
+                PieceStatus::Requested => {
+                    endgame && record.assignments.len() < self.limits.max_assignments_per_piece
+                }
+                PieceStatus::Verified => false,
+            };
+            if !eligible_piece {
+                continue;
+            }
+            let peers = self.eligible_peers(*piece, &record.assignments, epoch)?;
+            let Some((penalty, peer)) = peers.first().copied() else {
+                continue;
+            };
+            let mut rarity = 0;
+            for (candidate, pieces) in &self.availability {
+                if pieces.contains(piece) && self.penalties.is_eligible(*candidate, epoch)? {
+                    rarity += 1;
+                }
+            }
+            let candidate = (rarity, *piece, penalty, peer, duplicate);
+            if selected.as_ref().is_none_or(|current| {
+                (candidate.0, candidate.1, candidate.2, candidate.3)
+                    < (current.0, current.1, current.2, current.3)
+            }) {
+                selected = Some(candidate);
+            }
+        }
+        let Some((_, piece, _, peer, duplicate)) = selected else {
+            return Ok(None);
+        };
+        let record = self
+            .pieces
+            .get_mut(&piece)
+            .ok_or(AtpRefusal::UnknownSwarmPiece { piece })?;
+        record.assignments.insert(peer);
+        record.status = PieceStatus::Requested;
+        self.in_flight_assignments = self.in_flight_assignments.saturating_add(1);
+        Ok(Some(SwarmAssignment {
+            piece,
+            peer,
+            duplicate,
+        }))
+    }
+
+    /// Records a manifest-verified or rejected result from an assigned peer.
+    pub fn record_piece_result(
+        &mut self,
+        piece: PieceId,
+        peer: PeerIdentity,
+        verified: bool,
+        epoch: u64,
+    ) -> Result<(), AtpRefusal> {
+        let record = self
+            .pieces
+            .get_mut(&piece)
+            .ok_or(AtpRefusal::UnknownSwarmPiece { piece })?;
+        if !record.assignments.contains(&peer) {
+            return Err(AtpRefusal::UnassignedPieceResult { piece, peer });
+        }
+        if verified {
+            let removed = record.assignments.len();
+            record.assignments.clear();
+            record.status = PieceStatus::Verified;
+            self.in_flight_assignments = self.in_flight_assignments.saturating_sub(removed);
+            self.penalties.record_verified_piece(peer, epoch)?;
+        } else {
+            let _removed = record.assignments.remove(&peer);
+            self.in_flight_assignments = self.in_flight_assignments.saturating_sub(1);
+            record.status = if record.assignments.is_empty() {
+                PieceStatus::Rejected
+            } else {
+                PieceStatus::Requested
+            };
+            let _penalty = self.penalties.record_bad_piece(peer, epoch)?;
+        }
+        Ok(())
+    }
+
+    /// Returns a peer's deterministic decayed penalty for receipt construction.
+    pub fn penalty_at(&self, peer: PeerIdentity, epoch: u64) -> Result<u32, AtpRefusal> {
+        self.penalties.penalty_at(peer, epoch)
+    }
+
+    fn eligible_peers(
+        &self,
+        piece: PieceId,
+        assigned: &BTreeSet<PeerIdentity>,
+        epoch: u64,
+    ) -> Result<Vec<(u32, PeerIdentity)>, AtpRefusal> {
+        let mut peers = Vec::new();
+        for (peer, pieces) in &self.availability {
+            if assigned.contains(peer) || !pieces.contains(&piece) {
+                continue;
+            }
+            let penalty = self.penalties.penalty_at(*peer, epoch)?;
+            if penalty < self.limits.penalty_policy.exclusion_threshold {
+                peers.push((penalty, *peer));
+            }
+        }
+        peers.sort_unstable();
+        Ok(peers)
+    }
+}
+
+/// Stable idempotency key for one actor-owned transfer effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TransferEffectKey([u8; 32]);
+
+impl TransferEffectKey {
+    /// Builds a key from the effect broker's canonical idempotency material.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the opaque canonical key bytes for an adapter receipt.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Stable input root binding every actor effect to its manifest/basis inputs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TransferInputRoot([u8; 32]);
+
+impl TransferInputRoot {
+    /// Builds an input-root wrapper from a caller-verified manifest/basis digest.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+/// The external side-effect class one transfer actor must account for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TransferEffectKind {
+    /// Opening or probing one path with a reserved network/credential budget.
+    PathAttempt,
+    /// Asking a peer or adapter for one immutable piece.
+    PieceRequest,
+    /// Spending bounded decode work for a verified source or repair symbol.
+    DecodeBudget,
+    /// Persisting a verified cache entry in its declared trust scope.
+    CacheWrite,
+    /// Charging egress only after the adapter's exact byte receipt.
+    EgressCharge,
+    /// Making a relay credential reachable to a named path adapter.
+    RelayCredential,
+    /// Recording the exact final closure-verification result.
+    ManifestCompletion,
+}
+
+/// Capability target carried by one externally observable transfer effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TransferCapability {
+    /// A policy-admitted path.
+    Path(PathId),
+    /// An authenticated peer.
+    Peer(PeerIdentity),
+    /// The immutable transfer manifest's repository scope.
+    Repository(RepositoryId),
+}
+
+/// Immutable reserve request given to a runtime-owned transfer effect broker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferEffectIntent {
+    key: TransferEffectKey,
+    kind: TransferEffectKind,
+    capability: TransferCapability,
+    input_root: TransferInputRoot,
+    reserved_bytes: u64,
+    canonical_parameters: Vec<u8>,
+}
+
+impl TransferEffectIntent {
+    /// Builds one exact effect request before it is handed to the broker.
+    #[must_use]
+    pub fn new(
+        key: TransferEffectKey,
+        kind: TransferEffectKind,
+        capability: TransferCapability,
+        input_root: TransferInputRoot,
+        reserved_bytes: u64,
+        canonical_parameters: Vec<u8>,
+    ) -> Self {
+        Self {
+            key,
+            kind,
+            capability,
+            input_root,
+            reserved_bytes,
+            canonical_parameters,
+        }
+    }
+
+    /// Stable idempotency key for this one effect.
+    #[must_use]
+    pub const fn key(&self) -> TransferEffectKey {
+        self.key
+    }
+
+    /// Typed external side-effect class.
+    #[must_use]
+    pub const fn kind(&self) -> TransferEffectKind {
+        self.kind
+    }
+
+    /// Capability target passed to the broker.
+    #[must_use]
+    pub const fn capability(&self) -> TransferCapability {
+        self.capability
+    }
+
+    /// Exact input commitment/basis that this effect consumes.
+    #[must_use]
+    pub const fn input_root(&self) -> TransferInputRoot {
+        self.input_root
+    }
+
+    /// Bytes reserved before the adapter starts external work.
+    #[must_use]
+    pub const fn reserved_bytes(&self) -> u64 {
+        self.reserved_bytes
+    }
+
+    /// Canonical adapter parameters, bounded by actor limits before copy/retain.
+    #[must_use]
+    pub fn canonical_parameters(&self) -> &[u8] {
+        &self.canonical_parameters
+    }
+}
+
+/// Exact adapter receipt root recorded when an effect commits or is observed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TransferEffectReceipt([u8; 32]);
+
+impl TransferEffectReceipt {
+    /// Wraps a broker-produced canonical receipt root.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+/// Why a reserved transfer effect was explicitly aborted before commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TransferAbortReason {
+    /// The transfer actor received a cancellation request.
+    Cancelled,
+    /// Another path won the bounded race and this loser was drained.
+    RaceLoser,
+    /// A bounded request was superseded by a verified duplicate.
+    Superseded,
+    /// The adapter refused before committing an external effect.
+    AdapterRefused,
+}
+
+/// Runtime-facing boundary that binds ATP actor events to real obligations.
+///
+/// This crate is SANS-I/O: it owns the exact transfer lifecycle and refuses
+/// to fake sockets, credentials, or a runtime region.  A runtime adapter
+/// implements this broker using the established obligation core, preserving
+/// reserve/commit/abort/acknowledge ownership for every external effect.
+pub trait TransferEffectBroker {
+    /// Reserves all capability and resource obligations for one effect.
+    fn reserve(&mut self, intent: &TransferEffectIntent) -> Result<(), AtpRefusal>;
+    /// Commits the externally attempted effect and retains its exact receipt.
+    fn commit(
+        &mut self,
+        key: TransferEffectKey,
+        receipt: TransferEffectReceipt,
+    ) -> Result<(), AtpRefusal>;
+    /// Aborts a reservation that never committed an external effect.
+    fn abort(
+        &mut self,
+        key: TransferEffectKey,
+        reason: TransferAbortReason,
+    ) -> Result<(), AtpRefusal>;
+    /// Records external acknowledgement/outcome for one committed effect.
+    fn acknowledge(
+        &mut self,
+        key: TransferEffectKey,
+        receipt: TransferEffectReceipt,
+    ) -> Result<(), AtpRefusal>;
+}
+
+/// Transfer actor lifecycle.  Cancellation always follows request, drain, finalize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TransferActorPhase {
+    /// Manifest and policy are present; no path is armed yet.
+    Prepared,
+    /// Bounded path probes are active.
+    Racing,
+    /// Piece scheduler and verified sources are active.
+    Swarming,
+    /// A cancellation request has been accepted but reservations still need draining.
+    CancelRequested,
+    /// The actor is draining reservations and waiting for cancellation cleanup.
+    Draining,
+    /// Closure verification or cancellation cleanup is in progress.
+    Finalizing,
+    /// Every actor-owned effect settled and the logical region closed.
+    Closed,
+}
+
+/// Origin of a deterministic cancellation injection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TransferCancellationSource {
+    /// A deterministic laboratory campaign injected the cancellation.
+    LabInjected,
+    /// A caller or runtime request initiated cancellation.
+    RuntimeRequested,
+}
+
+/// Explicit cancellation receipt proving the request/drain/finalize order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferCancellationReceipt {
+    source: TransferCancellationSource,
+    phases: [TransferActorPhase; 3],
+    aborted: Vec<TransferEffectKey>,
+}
+
+impl TransferCancellationReceipt {
+    /// Cancellation origin recorded in the actor receipt.
+    #[must_use]
+    pub const fn source(&self) -> TransferCancellationSource {
+        self.source
+    }
+
+    /// Ordered cancellation lifecycle: request, drain, then finalization.
+    #[must_use]
+    pub const fn phases(&self) -> &[TransferActorPhase; 3] {
+        &self.phases
+    }
+
+    /// Reserved effects drained and aborted before actor finalization.
+    #[must_use]
+    pub fn aborted(&self) -> &[TransferEffectKey] {
+        &self.aborted
+    }
+}
+
+/// Actor-side effect state.  Committed is intentionally non-terminal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TransferEffectState {
+    /// The broker owns a reservation, but no external effect committed.
+    Reserved,
+    /// External work may have occurred; an acknowledgement is still required.
+    Committed(TransferEffectReceipt),
+    /// External observation has been recorded.
+    Acknowledged(TransferEffectReceipt),
+    /// Reservation aborted before any external commit.
+    Aborted(TransferAbortReason),
+}
+
+impl TransferEffectState {
+    fn is_terminal(&self) -> bool {
+        matches!(self, Self::Acknowledged(_) | Self::Aborted(_))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActorEffect {
+    intent: TransferEffectIntent,
+    state: TransferEffectState,
+}
+
+/// Bounds retained by one transfer actor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransferActorLimits {
+    max_effects: usize,
+    max_canonical_parameter_bytes: usize,
+}
+
+impl TransferActorLimits {
+    /// Creates explicit effect-count and parameter-byte limits.
+    pub const fn new(
+        max_effects: usize,
+        max_canonical_parameter_bytes: usize,
+    ) -> Result<Self, AtpRefusal> {
+        if max_effects == 0 || max_canonical_parameter_bytes == 0 {
+            return Err(AtpRefusal::InvalidExecutionLimits);
+        }
+        Ok(Self {
+            max_effects,
+            max_canonical_parameter_bytes,
+        })
+    }
+}
+
+/// Logical region owner for one ATP-Git transfer's paths, pieces, and effects.
+///
+/// The actor deliberately has no I/O handle.  It is driven by adapters through
+/// [`TransferEffectBroker`], which means production code cannot replace an
+/// obligation with an untracked convenience call.  Its close receipt is a
+/// logical-lifecycle result; native socket/task reaping remains the runtime
+/// adapter's responsibility and is not claimed here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferActor {
+    limits: TransferActorLimits,
+    phase: TransferActorPhase,
+    effects: BTreeMap<TransferEffectKey, ActorEffect>,
+}
+
+impl TransferActor {
+    /// Creates a prepared actor with no unowned external effect.
+    #[must_use]
+    pub const fn new(limits: TransferActorLimits) -> Self {
+        Self {
+            limits,
+            phase: TransferActorPhase::Prepared,
+            effects: BTreeMap::new(),
+        }
+    }
+
+    /// Current transfer lifecycle phase.
+    #[must_use]
+    pub const fn phase(&self) -> TransferActorPhase {
+        self.phase
+    }
+
+    /// Enters the bounded path-racing phase.
+    pub fn begin_race(&mut self) -> Result<(), AtpRefusal> {
+        self.transition(TransferActorPhase::Prepared, TransferActorPhase::Racing)
+    }
+
+    /// Enters piece scheduling after the caller has drained race losers.
+    pub fn begin_swarm(&mut self) -> Result<(), AtpRefusal> {
+        self.transition(TransferActorPhase::Racing, TransferActorPhase::Swarming)
+    }
+
+    /// Enters final closure verification on the normal, non-cancel path.
+    pub fn begin_finalization(&mut self) -> Result<(), AtpRefusal> {
+        match self.phase {
+            TransferActorPhase::Prepared
+            | TransferActorPhase::Racing
+            | TransferActorPhase::Swarming => {
+                self.phase = TransferActorPhase::Finalizing;
+                Ok(())
+            }
+            phase => Err(AtpRefusal::InvalidActorPhase { phase }),
+        }
+    }
+
+    /// Reserves a broker-owned effect before an adapter starts work.
+    pub fn reserve_effect<B: TransferEffectBroker>(
+        &mut self,
+        broker: &mut B,
+        intent: TransferEffectIntent,
+    ) -> Result<(), AtpRefusal> {
+        self.ensure_effect_phase()?;
+        if intent.canonical_parameters.len() > self.limits.max_canonical_parameter_bytes {
+            return Err(AtpRefusal::EffectParametersTooLarge {
+                offered: intent.canonical_parameters.len(),
+                maximum: self.limits.max_canonical_parameter_bytes,
+            });
+        }
+        if self.effects.len() >= self.limits.max_effects {
+            return Err(AtpRefusal::TooManyTransferEffects {
+                maximum: self.limits.max_effects,
+            });
+        }
+        if self.effects.contains_key(&intent.key) {
+            return Err(AtpRefusal::DuplicateEffectKey { key: intent.key });
+        }
+        broker.reserve(&intent)?;
+        self.effects.insert(
+            intent.key,
+            ActorEffect {
+                intent,
+                state: TransferEffectState::Reserved,
+            },
+        );
+        Ok(())
+    }
+
+    /// Records a broker commit; close remains forbidden until acknowledgement.
+    pub fn commit_effect<B: TransferEffectBroker>(
+        &mut self,
+        broker: &mut B,
+        key: TransferEffectKey,
+        receipt: TransferEffectReceipt,
+    ) -> Result<(), AtpRefusal> {
+        self.ensure_effect_phase()?;
+        if !matches!(
+            self.effects.get(&key).map(|effect| &effect.state),
+            Some(TransferEffectState::Reserved)
+        ) {
+            return Err(AtpRefusal::EffectNotReserved { key });
+        }
+        broker.commit(key, receipt)?;
+        let effect = self
+            .effects
+            .get_mut(&key)
+            .ok_or(AtpRefusal::EffectNotReserved { key })?;
+        effect.state = TransferEffectState::Committed(receipt);
+        Ok(())
+    }
+
+    /// Records the external acknowledgement required after an effect commits.
+    pub fn acknowledge_effect<B: TransferEffectBroker>(
+        &mut self,
+        broker: &mut B,
+        key: TransferEffectKey,
+        receipt: TransferEffectReceipt,
+    ) -> Result<(), AtpRefusal> {
+        if !matches!(
+            self.effects.get(&key).map(|effect| &effect.state),
+            Some(TransferEffectState::Committed(_))
+        ) {
+            return Err(AtpRefusal::EffectNotReserved { key });
+        }
+        broker.acknowledge(key, receipt)?;
+        let effect = self
+            .effects
+            .get_mut(&key)
+            .ok_or(AtpRefusal::EffectNotReserved { key })?;
+        effect.state = TransferEffectState::Acknowledged(receipt);
+        Ok(())
+    }
+
+    /// Aborts a still-reserved effect before it can commit externally.
+    pub fn abort_effect<B: TransferEffectBroker>(
+        &mut self,
+        broker: &mut B,
+        key: TransferEffectKey,
+        reason: TransferAbortReason,
+    ) -> Result<(), AtpRefusal> {
+        if !matches!(
+            self.effects.get(&key).map(|effect| &effect.state),
+            Some(TransferEffectState::Reserved)
+        ) {
+            return Err(AtpRefusal::EffectNotReserved { key });
+        }
+        broker.abort(key, reason)?;
+        let effect = self
+            .effects
+            .get_mut(&key)
+            .ok_or(AtpRefusal::EffectNotReserved { key })?;
+        effect.state = TransferEffectState::Aborted(reason);
+        Ok(())
+    }
+
+    /// Requests cancellation, drains all uncommitted effects, then finalizes.
+    ///
+    /// A committed effect is never aborted or reported as non-committed.  The
+    /// method returns a typed outcome requirement naming that effect; callers
+    /// must acknowledge it before [`Self::close`] can certify quiescence.
+    pub fn cancel<B: TransferEffectBroker>(
+        &mut self,
+        broker: &mut B,
+        source: TransferCancellationSource,
+    ) -> Result<TransferCancellationReceipt, AtpRefusal> {
+        match self.phase {
+            TransferActorPhase::Prepared
+            | TransferActorPhase::Racing
+            | TransferActorPhase::Swarming
+            | TransferActorPhase::Finalizing => {}
+            phase => return Err(AtpRefusal::InvalidActorPhase { phase }),
+        }
+        // request
+        self.phase = TransferActorPhase::CancelRequested;
+        // drain: collect first so broker calls cannot invalidate map iteration.
+        self.phase = TransferActorPhase::Draining;
+        let reserved = self
+            .effects
+            .iter()
+            .filter_map(|(key, effect)| {
+                (effect.state == TransferEffectState::Reserved).then_some(*key)
+            })
+            .collect::<Vec<_>>();
+        for key in &reserved {
+            self.abort_effect(broker, *key, TransferAbortReason::Cancelled)?;
+        }
+        // finalize: any committed effect remains explicitly owed.
+        self.phase = TransferActorPhase::Finalizing;
+        if let Some(key) = self.effects.iter().find_map(|(key, effect)| {
+            matches!(effect.state, TransferEffectState::Committed(_)).then_some(*key)
+        }) {
+            return Err(AtpRefusal::CommittedEffectRequiresOutcome { key });
+        }
+        Ok(TransferCancellationReceipt {
+            source,
+            phases: [
+                TransferActorPhase::CancelRequested,
+                TransferActorPhase::Draining,
+                TransferActorPhase::Finalizing,
+            ],
+            aborted: reserved,
+        })
+    }
+
+    /// Closes the actor only after every reserved/committed effect settled.
+    pub fn close(&mut self) -> Result<TransferActorReceipt, AtpRefusal> {
+        if self.phase != TransferActorPhase::Finalizing {
+            return Err(AtpRefusal::InvalidActorPhase { phase: self.phase });
+        }
+        let outstanding = self
+            .effects
+            .values()
+            .filter(|effect| !effect.state.is_terminal())
+            .count();
+        if outstanding != 0 {
+            return Err(AtpRefusal::ActorNotQuiescent { outstanding });
+        }
+        self.phase = TransferActorPhase::Closed;
+        Ok(TransferActorReceipt {
+            settled_effects: self.effects.len(),
+        })
+    }
+
+    /// Returns one effect's lifecycle state for deterministic receipt inspection.
+    #[must_use]
+    pub fn effect_state(&self, key: TransferEffectKey) -> Option<&TransferEffectState> {
+        self.effects.get(&key).map(|effect| &effect.state)
+    }
+
+    /// Returns the canonical effect intent retained for receipt construction.
+    #[must_use]
+    pub fn effect_intent(&self, key: TransferEffectKey) -> Option<&TransferEffectIntent> {
+        self.effects.get(&key).map(|effect| &effect.intent)
+    }
+
+    fn ensure_effect_phase(&self) -> Result<(), AtpRefusal> {
+        match self.phase {
+            TransferActorPhase::Prepared
+            | TransferActorPhase::Racing
+            | TransferActorPhase::Swarming
+            | TransferActorPhase::Finalizing => Ok(()),
+            phase => Err(AtpRefusal::InvalidActorPhase { phase }),
+        }
+    }
+
+    fn transition(
+        &mut self,
+        expected: TransferActorPhase,
+        next: TransferActorPhase,
+    ) -> Result<(), AtpRefusal> {
+        if self.phase != expected {
+            return Err(AtpRefusal::InvalidActorPhase { phase: self.phase });
+        }
+        self.phase = next;
+        Ok(())
+    }
+}
+
+/// Logical quiescence receipt from one actor close.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransferActorReceipt {
+    settled_effects: usize,
+}
+
+impl TransferActorReceipt {
+    /// Number of effects that reached acknowledged or aborted terminal states.
+    #[must_use]
+    pub const fn settled_effects(&self) -> usize {
+        self.settled_effects
+    }
 }
 
 #[cfg(test)]
