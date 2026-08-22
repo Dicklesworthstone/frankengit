@@ -21,7 +21,7 @@
 //! decisions differ across targets, and §26 requires an adaptive artifact to
 //! bind a reproducible numeric fingerprint.
 
-use crate::sketch::Probability;
+use fgit_types::Probability;
 
 /// Attempts after which a transaction is escalated regardless of its
 /// posterior.
@@ -77,13 +77,13 @@ impl Posterior {
     pub fn success_probability(self) -> Probability {
         let total = u64::from(self.successes).saturating_add(u64::from(self.failures));
         if total == 0 {
-            return Probability::from_parts_per_million(500_000);
+            return Probability::saturating_from_parts_per_million(500_000);
         }
         let ppm = u64::from(self.successes)
             .saturating_mul(1_000_000)
             .checked_div(total)
             .unwrap_or(0);
-        Probability::from_parts_per_million(u32::try_from(ppm).unwrap_or(u32::MAX))
+        Probability::saturating_from_parts_per_million(u32::try_from(ppm).unwrap_or(u32::MAX))
     }
 
     /// Discards accumulated history on a regime change.

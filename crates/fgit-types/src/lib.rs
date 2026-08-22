@@ -7,6 +7,7 @@ pub mod identity;
 pub mod label;
 pub mod native;
 pub mod numeric;
+pub mod probability;
 pub mod refs;
 pub mod vocabulary;
 
@@ -26,6 +27,7 @@ pub use numeric::{
     ByteCount, CanonicalScalar, CodecVersion, DecisionSequence, HeadGeneration, PolicyEpoch,
     RegistryEpoch, RepositorySequence, ScalarWidth,
 };
+pub use probability::{PARTS_PER_MILLION, Probability};
 pub use refs::{MAX_REF_NAME_LEN, RefName};
 pub use vocabulary::{
     DecisionOutcome, MismatchPolicy, PublicationEpoch, RefusalCode, RequestRejectionCode,

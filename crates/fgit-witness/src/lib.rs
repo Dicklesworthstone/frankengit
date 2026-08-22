@@ -59,6 +59,7 @@ pub mod retry;
 pub mod sketch;
 pub mod voi;
 
+pub use fgit_types::Probability;
 pub use footprint::{Footprint, Scope};
 pub use ladder::{
     Climb, ClimbFailure, ConflictCertificate, Observations, Reused, Revalidation, Rung, climb,
@@ -66,6 +67,6 @@ pub use ladder::{
 };
 pub use retry::{Action, Attempt, EscalationTrigger, Posterior, PriorityClass};
 pub use sketch::{
-    DisjointnessProof, OverlapEstimate, OverlapSketch, Probability, ProvesAbsence, prove_disjoint,
+    DisjointnessProof, OverlapEstimate, OverlapSketch, ProvesAbsence, prove_disjoint,
 };
 pub use voi::{Cost, Decision, Inputs, RetainReason};

@@ -912,6 +912,9 @@ dependencies = [
 [[package]]
 name = "fgit-witness"
 version = "0.0.1"
+dependencies = [
+ "fgit-types",
+]
 
 [[package]]
 name = "fiat-crypto"

@@ -34,46 +34,7 @@
 //! reproducible.
 
 use crate::footprint::{Footprint, Scope};
-
-/// A probability in fixed-point parts per million.
-///
-/// Integer-valued so a receipt reproduces exactly on every target.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Probability(u32);
-
-impl Probability {
-    /// Certainly not.
-    pub const ZERO: Self = Self(0);
-    /// Certainly so.
-    pub const ONE: Self = Self(1_000_000);
-
-    /// Builds a probability, clamping into `0..=1_000_000` parts per million.
-    ///
-    /// Clamping rather than refusing: every caller here derives the value from
-    /// bounded counters, so an out-of-range input is an arithmetic slip rather
-    /// than untrusted data, and saturating keeps the type total.
-    #[must_use]
-    pub const fn from_parts_per_million(parts: u32) -> Self {
-        Self(if parts > 1_000_000 { 1_000_000 } else { parts })
-    }
-
-    /// The value in parts per million.
-    #[must_use]
-    pub const fn parts_per_million(self) -> u32 {
-        self.0
-    }
-
-    /// True when the probability is exactly zero.
-    ///
-    /// Note what this is *not*: a proof that the footprints are disjoint. A
-    /// zero estimate means the sketch found no evidence of overlap, which is
-    /// an absence of evidence. [`prove_disjoint`] is the only thing in this
-    /// crate that decides disjointness, and it does not accept a sketch.
-    #[must_use]
-    pub const fn is_zero(self) -> bool {
-        self.0 == 0
-    }
-}
+use fgit_types::Probability;
 
 /// Width of a sketch, in buckets.
 ///
@@ -198,8 +159,9 @@ impl OverlapEstimate {
             .saturating_mul(1_000_000)
             .checked_div(u64::from(smaller))
             .unwrap_or(0);
-        let upper =
-            Probability::from_parts_per_million(u32::try_from(upper_ppm).unwrap_or(u32::MAX));
+        let upper = Probability::saturating_from_parts_per_million(
+            u32::try_from(upper_ppm).unwrap_or(u32::MAX),
+        );
         // No lower bound above zero is defensible from a lossy sketch: every
         // shared bucket could be a collision.
         (Probability::ZERO, upper)
@@ -326,8 +288,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{OverlapSketch, Probability, prove_disjoint};
+    use super::{OverlapSketch, prove_disjoint};
     use crate::footprint::{Footprint, Scope};
+    use fgit_types::Probability;
 
     fn exact(text: &str) -> Scope {
         Scope::ExactRef(text.as_bytes().to_vec())
@@ -430,12 +393,15 @@ mod tests {
     }
 
     #[test]
-    fn probability_clamps_rather_than_wrapping() {
+    fn bounded_counter_probability_uses_the_explicit_saturating_constructor() {
         assert_eq!(
-            Probability::from_parts_per_million(2_000_000),
+            Probability::saturating_from_parts_per_million(2_000_000),
             Probability::ONE
         );
-        assert_eq!(Probability::from_parts_per_million(0), Probability::ZERO);
+        assert_eq!(
+            Probability::saturating_from_parts_per_million(0),
+            Probability::ZERO
+        );
         assert!(Probability::ZERO.is_zero());
         assert!(!Probability::ONE.is_zero());
     }
