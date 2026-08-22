@@ -837,7 +837,7 @@ fn io_refusal(operation: &'static str, path: PathBuf, source: io::Error) -> Loos
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, TenantId};
