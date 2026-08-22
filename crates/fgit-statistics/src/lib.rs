@@ -78,6 +78,7 @@ pub mod conformal;
 pub mod controller;
 pub mod evidence;
 pub mod fallback;
+pub mod lyapunov;
 pub mod off_policy;
 pub mod regime;
 
@@ -93,6 +94,9 @@ pub use evidence::{
     AssumptionSet, BindingRefusal, RegimeBinding, SequenceWindow, StatisticalEvidenceBody,
 };
 pub use fallback::{FallbackTrigger, PolicyGate, PolicySelection};
+pub use lyapunov::{
+    LyapunovAssumptionFailure, LyapunovConfig, LyapunovGovernor, LyapunovRefusal, ProgressVerdict,
+};
 pub use off_policy::{
     LoggedSample, OffPolicyConfig, OffPolicyEstimate, OffPolicyEvaluator, OpeAssumptionFailure,
     OpeRefusal,
