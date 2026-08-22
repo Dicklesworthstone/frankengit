@@ -570,3 +570,128 @@ fn a_closure_that_never_cancels_leaves_the_underlying_refusal_intact() {
         "with no cancellation the head read owns the refusal, got {refusal:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// frankengit-dp70: the two NodeRefusal cleanup variants report the CAUSE
+//
+// Both are §3.2 containment-failure reports — an operation failed AND the
+// mandatory teardown failed, so both failures are carried rather than one being
+// discarded:
+//
+//     AuthorityInitializationCleanup { initialization: Box<Self>, cleanup: Box<Self> }
+//     ExistingOpenCleanup            { opening: Box<Self>,        cleanup: Box<Self> }
+//
+// Driving either end to end needs an operation failure and a cleanup failure at
+// the same moment, which this crate has no fault injection for. What is pinned
+// here is what they REPORT — `source()` and `Display`, both pure functions over
+// a constructed value — so these are covered BY CONSTRUCTION, and no test below
+// implies it drove a paired failure.
+//
+// The claim: `source()` returns the ORIGINAL failure, not the cleanup. The
+// cleanup failure is the second thing that went wrong, and a caller walking the
+// error chain should reach the cause, not the consequence.
+// ---------------------------------------------------------------------------
+
+use std::error::Error as _;
+
+use fgit_node::NodeRefusal;
+
+/// Two distinguishable inner refusals, so a probe can tell which one came back
+/// rather than merely that something did.
+const CAUSE: NodeRefusal = NodeRefusal::AuthorityHeadAbsent;
+const CONSEQUENCE: NodeRefusal = NodeRefusal::EmptyStorageRoot;
+
+/// **The cause, not the consequence.** Both variants expose the failure that
+/// happened *first*.
+#[test]
+fn both_cleanup_variants_report_the_original_failure_as_their_source() {
+    let initialization = NodeRefusal::AuthorityInitializationCleanup {
+        initialization: Box::new(CAUSE),
+        cleanup: Box::new(CONSEQUENCE),
+    };
+    assert_eq!(
+        initialization
+            .source()
+            .expect("AuthorityInitializationCleanup has a source")
+            .to_string(),
+        CAUSE.to_string(),
+        "the initialization failure is the cause; the cleanup failure is what followed it"
+    );
+
+    let opening = NodeRefusal::ExistingOpenCleanup {
+        opening: Box::new(CAUSE),
+        cleanup: Box::new(CONSEQUENCE),
+    };
+    assert_eq!(
+        opening
+            .source()
+            .expect("ExistingOpenCleanup has a source")
+            .to_string(),
+        CAUSE.to_string(),
+        "the opening failure is the cause"
+    );
+}
+
+/// **Asserted as a difference, which is what makes it a claim.**
+///
+/// The same two inner refusals, swapped, must produce different `source()`
+/// answers. A probe that only checked `source().is_some()` would pass against a
+/// variant that returned the cleanup — which is precisely the refactor this
+/// test exists to catch.
+#[test]
+fn swapping_the_two_inner_failures_changes_which_one_source_reports() {
+    let normal = NodeRefusal::AuthorityInitializationCleanup {
+        initialization: Box::new(CAUSE),
+        cleanup: Box::new(CONSEQUENCE),
+    };
+    let swapped = NodeRefusal::AuthorityInitializationCleanup {
+        initialization: Box::new(CONSEQUENCE),
+        cleanup: Box::new(CAUSE),
+    };
+
+    let from_normal = normal.source().expect("has a source").to_string();
+    let from_swapped = swapped.source().expect("has a source").to_string();
+
+    assert_ne!(
+        from_normal, from_swapped,
+        "source() must track the initialization slot, not return a fixed member"
+    );
+    assert_eq!(from_normal, CAUSE.to_string());
+    assert_eq!(from_swapped, CONSEQUENCE.to_string());
+}
+
+/// Each message names **both** failures, so neither is discarded.
+///
+/// Asserted by the property the docs claim — each inner refusal's own rendering
+/// appears — rather than by exact string, which would be brittle and close to
+/// tautological.
+#[test]
+fn each_cleanup_message_names_both_failures() {
+    let initialization = NodeRefusal::AuthorityInitializationCleanup {
+        initialization: Box::new(CAUSE),
+        cleanup: Box::new(CONSEQUENCE),
+    }
+    .to_string();
+    assert!(
+        initialization.contains(&CAUSE.to_string())
+            && initialization.contains(&CONSEQUENCE.to_string()),
+        "AuthorityInitializationCleanup must render both failures, got {initialization:?}"
+    );
+
+    let opening = NodeRefusal::ExistingOpenCleanup {
+        opening: Box::new(CAUSE),
+        cleanup: Box::new(CONSEQUENCE),
+    }
+    .to_string();
+    assert!(
+        opening.contains(&CAUSE.to_string()) && opening.contains(&CONSEQUENCE.to_string()),
+        "ExistingOpenCleanup must render both failures, got {opening:?}"
+    );
+
+    // The two are distinguishable from each other, not just from their parts:
+    // one names initialization, the other a non-initializing open.
+    assert_ne!(
+        initialization, opening,
+        "the two containment reports must not render identically"
+    );
+}
