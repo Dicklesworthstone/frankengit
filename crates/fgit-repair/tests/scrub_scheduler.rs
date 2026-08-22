@@ -345,6 +345,29 @@ fn foreground_floor_refuses_before_the_scrub_source_is_read() {
 }
 
 #[test]
+fn no_reason_checkpoint_rejection_is_a_typed_refusal_before_source_work() {
+    let basis = head(9);
+    let batch = canonical_batch(basis, 42, 0, vec![target(4, basis)]);
+    let source = ScriptedSource::new(batch, vec![ScrubObservation::Verified]);
+    let health = RecordingHealthLedger::default();
+    let obligations = ledger(3);
+    let worker = ScrubWorker::new(profile(1, 1), SegmentLimits::default());
+    let cx = Cx::detached_cancel_context();
+    cx.set_cancel_requested(true);
+
+    assert!(matches!(
+        worker.walk(&cx, &source, &obligations, &health, &security(), None),
+        Outcome::Err(ScrubRefusal::RuntimeCheckpointRejected)
+    ));
+    assert_eq!(
+        source.loaded.get(),
+        0,
+        "reason-less checkpoint refusal must precede source work"
+    );
+    assert!(obligations.close().is_quiescent());
+}
+
+#[test]
 fn cancellation_between_targets_releases_worker_budget() {
     let basis = head(9);
     let batch = canonical_batch(basis, 42, 0, vec![target(4, basis), target(5, basis)]);

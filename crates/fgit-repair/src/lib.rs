@@ -1048,6 +1048,10 @@ fn checkpoint<T, Caps>(cx: &Cx<Caps>) -> Option<Outcome<T, ScrubRefusal>> {
     if cx.checkpoint().is_ok() {
         return None;
     }
+    // A failed checkpoint without a reason is reachable through the upstream
+    // test-only `set_cancel_requested(true)` hook. FrankenGit has no call
+    // sites for that hook, so ordinary production cancellation reaches the
+    // `Cancelled` branch; retain this typed refusal if that discipline changes.
     cx.cancel_reason().map_or_else(
         || Some(Outcome::Err(ScrubRefusal::RuntimeCheckpointRejected)),
         |reason| Some(Outcome::Cancelled(reason)),
