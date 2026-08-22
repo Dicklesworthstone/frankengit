@@ -55,8 +55,11 @@
 //!
 //! Implemented: the regime detector in [`regime`], with its assumptions
 //! executable rather than documented; the fail-closed selection rule in
-//! [`fallback`]; and the typed evidence body in [`evidence`], which carries all
-//! seven of `AGENTS.md` section 8's bindings as types and has canonical bytes.
+//! [`fallback`]; the typed evidence body in [`evidence`], which carries all
+//! seven of `AGENTS.md` section 8's bindings as types and has canonical bytes;
+//! and section 33.4's forbidden-decision boundary in [`authority`], where the
+//! primary enforcement is that the permitted-decision enum has no variant for
+//! identity, authorization, retention, deletion or ordering.
 //!
 //! The evidence body has **no digest identity yet**. Computing one requires
 //! `frankengit/statistical-evidence/v1` to be registered in `fgit-crypto`'s
@@ -70,10 +73,15 @@
 //! governors — are **not** implemented here yet, and this crate does not claim
 //! them.
 
+pub mod authority;
 pub mod evidence;
 pub mod fallback;
 pub mod regime;
 
+pub use authority::{
+    AdmissibleShape, AdvisoryDecision, DecisionRefusal, EffectClass, ForbiddenTarget,
+    ProposedTarget,
+};
 pub use evidence::{
     AssumptionSet, BindingRefusal, RegimeBinding, SequenceWindow, StatisticalEvidenceBody,
 };
