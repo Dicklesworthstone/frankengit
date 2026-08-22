@@ -41,6 +41,8 @@ use fgit_types::RefName;
 pub mod closure;
 /// Bounded SANS-I/O receive-pack parsing and structural pack quarantine.
 pub mod receive;
+/// Hidden-ref authorization policy and visibility-filtered repository views.
+pub mod visibility;
 
 /// The largest pkt-line frame permitted by Git's common protocol.
 pub const MAX_PKT_LINE_BYTES: usize = 65_520;
@@ -1224,7 +1226,7 @@ impl AsciiLowercaseOrDigit for u8 {
     }
 }
 
-fn parse_ref_name(text: &[u8], limits: &WireLimits) -> Result<Vec<u8>, WireError> {
+pub(crate) fn parse_ref_name(text: &[u8], limits: &WireLimits) -> Result<Vec<u8>, WireError> {
     if text.len() > limits.max_ref_name_bytes {
         return Err(WireError::RefNameTooLarge {
             limit: limits.max_ref_name_bytes,
