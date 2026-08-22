@@ -440,6 +440,12 @@ pub fn reconstruct_checkpoint(
     let candidate = decoder
         .into_data()
         .map_err(|_| RaptorRefusal::DecodeFailed)?;
+    // DEFENSIVE, NOT INPUT-REACHABLE, and deliberately kept. The decoder was
+    // handed `expected.source_len()` in its `ObjectParams` above, and this
+    // compares its output against that same value, so no caller-supplied
+    // symbol set can make it fire -- only an engine that violates its own
+    // parameter contract. It is not covered by a fixture for that reason
+    // (frankengit-zrxa); manufacturing one would mean faking a decoder.
     if u64::try_from(candidate.len()).ok() != Some(expected.source_len()) {
         return Err(RaptorRefusal::CandidateLengthMismatch);
     }

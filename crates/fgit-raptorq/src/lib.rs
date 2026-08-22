@@ -458,6 +458,10 @@ pub fn reconstruct_microsegment(
     let bytes = decoder
         .into_data()
         .map_err(|_| RaptorRefusal::DecodeFailed)?;
+    // DEFENSIVE, NOT INPUT-REACHABLE -- same argument as the checkpoint chain.
+    // `ObjectParams` above carries `expected.source_len()`, which is exactly
+    // what this compares against, so only an engine breaking its own contract
+    // reaches this arm. Uncovered on purpose (frankengit-zrxa).
     if u64::try_from(bytes.len()).ok() != Some(expected.source_len()) {
         return Err(RaptorRefusal::CandidateLengthMismatch);
     }
