@@ -658,6 +658,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-calm"
+version = "0.0.0"
+
+[[package]]
 name = "fgit-chronicle"
 version = "0.0.1"
 dependencies = [

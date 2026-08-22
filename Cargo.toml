@@ -42,6 +42,7 @@ fgit-atp-git = { path = "crates/fgit-atp-git" }
 fgit-authority = { path = "crates/fgit-authority" }
 fgit-authority-fsqlite = { path = "crates/fgit-authority-fsqlite" }
 fgit-benchmark = { path = "crates/fgit-benchmark" }
+fgit-calm = { path = "crates/fgit-calm" }
 fgit-chronicle = { path = "crates/fgit-chronicle" }
 fgit-claim = { path = "crates/fgit-claim" }
 fgit-compaction = { path = "crates/fgit-compaction" }

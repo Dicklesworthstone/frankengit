@@ -8,6 +8,7 @@ fgit-atp-git	L3	L0,L1,L2,L3	transport	active
 fgit-authority	L2	L0,L1,L2	authority	active
 fgit-authority-fsqlite	L2	L0,L1,L2	authority	active
 fgit-benchmark	L2	L0,L1,L2	performance-verification	active
+fgit-calm	L0	none	calm-vocabulary	active
 fgit-chronicle	L2	L0,L1,L2	decision-log	active
 # The closed claim lattice is a foundational pure value/type gate; it owns no
 # cryptographic construction or evidence storage and has no first-party edges.
