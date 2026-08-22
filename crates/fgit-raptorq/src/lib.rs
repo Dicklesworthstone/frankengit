@@ -1352,4 +1352,66 @@ mod tests {
             "the scope's own engine object id must clear the guard"
         );
     }
+
+    /// `RetentionExpired`, the sibling of the `AuthorityHeadMoved` case that the
+    /// stale-repair test already covers.
+    ///
+    /// I previously recorded this variant as "tested in fgit-resource" and
+    /// routed the repair-path gaps to another crate on the grounds that building
+    /// a harness here would duplicate one. Both were wrong. The fgit-resource
+    /// hits were `AuthorityRevalidation::RetentionExpired` -- a different type
+    /// that merely shares the name -- and the harness is right here:
+    /// `TestAuthority` already exposes `revalidation` as a plain field, so this
+    /// arm is one value away from the arm beside it.
+    ///
+    /// The two arms settle the reservation with DIFFERENT abort reasons
+    /// (`AuthorityMoved` vs `RetentionExpired`), so covering one says nothing
+    /// about the other; the ledger-quiescence assertion below is what witnesses
+    /// that this arm settles its obligation at all rather than leaking it.
+    #[test]
+    fn an_expired_retention_refuses_the_repair_and_leaves_no_obligation_open() {
+        let bytes = canonical_segment();
+        let security = security();
+        let protected = protect_microsegment(&bytes, &SegmentLimits::default(), &security)
+            .expect("canonical microsegment is profile-admitted");
+        let manifest = manifest(&bytes);
+        let plan = RepairPlan {
+            expected: protected.scope(),
+            manifest: &manifest,
+            authority_basis: head(5),
+        };
+
+        let expired_ledger = ledger(11);
+        let expired_authority = TestAuthority {
+            revalidation: AuthorityRevalidation::RetentionExpired,
+            published: Cell::new(false),
+        };
+        let expired_budget = expired_ledger
+            .grant(ResourceVector::from_grades(&[
+                (Grade::Bytes, 4096),
+                (Grade::CpuMicros, 100),
+            ]))
+            .expect("test repair budget is available");
+
+        assert_eq!(
+            repair_microsegment(
+                plan,
+                &lossy_symbols(&protected),
+                &SegmentLimits::default(),
+                &security,
+                &expired_ledger,
+                expired_budget,
+                &expired_authority,
+            ),
+            Err(RaptorRefusal::RetentionExpired)
+        );
+        assert!(
+            !expired_authority.published.get(),
+            "an expired retention must not publish; the refusal is the whole point"
+        );
+        assert!(
+            expired_ledger.close().is_quiescent(),
+            "the reservation must be settled on the retention-expired path, not leaked"
+        );
+    }
 }
