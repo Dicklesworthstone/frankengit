@@ -1484,6 +1484,21 @@ fn two_sessions_deleting_one_ref_never_both_commit() {
 /// The head id is derived with `body_id` exactly as `admit_validated_receive`
 /// derives it, so these bases are the same shape admission builds rather than a
 /// test-invented pairing.
+///
+/// # What this pins, and what it does not
+///
+/// Measured by mutation rather than argued: deleting the staleness check at
+/// `fgit-admission/src/lib.rs:712` fails this test and only this test, and so
+/// does the weaker mutation that removes *only* that check while leaving ref
+/// resolution reading from `authenticated_body.ref_root`. So it pins
+/// `AuthorityReceiptStale` specifically, not merely "the head was ignored".
+///
+/// **It exercises exactly one field.** The check compares the *whole* body
+/// (`authenticated_body != *basis.body()`); this varies `ref_root` alone. One
+/// field is enough to kill the mutation, and widening it for its own sake would
+/// add cost without evidence. But a future narrowing of that comparison from
+/// whole-body to `ref_root`-only would be **invisible here** — this test would
+/// still pass. Stated so the next reader does not inherit the stronger reading.
 #[test]
 fn a_basis_that_disagrees_with_the_authenticated_head_is_refused_as_stale() {
     let context = context(b"fg019c-stale-basis");
