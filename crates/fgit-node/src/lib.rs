@@ -1816,7 +1816,9 @@ where
 
     loop {
         ensure_materializer_catch_up_live(is_cancelled)?;
-        let Some(batch_id) = successor.decision_tail_id else {
+        let Some(batch_id) = fgit_authority::next_batch_to_replay(&successor, &mut walked)
+            .map_err(|error| AdmissionMaterializationRefusal::DecisionHistory(Box::new(error)))?
+        else {
             if successor.predecessor_head_id.is_some() {
                 return Err(AdmissionMaterializationRefusal::DecisionHistoryUnbound);
             }
@@ -1828,15 +1830,6 @@ where
                 .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
             return Ok((root, ClosureSelectionSource::EmptyGenesis));
         };
-
-        walked = walked.saturating_add(1);
-        if walked > fgit_authority::MAX_REPLAY_BATCHES {
-            return Err(AdmissionMaterializationRefusal::DecisionHistory(Box::new(
-                fgit_authority::OutcomeFailure::ReplayBoundExceeded {
-                    limit: fgit_authority::MAX_REPLAY_BATCHES,
-                },
-            )));
-        }
         let predecessor_id = successor
             .predecessor_head_id
             .ok_or(AdmissionMaterializationRefusal::DecisionHistoryUnbound)?;
