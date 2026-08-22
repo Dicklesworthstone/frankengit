@@ -304,8 +304,38 @@ if [ -n "$RA_PROFILE" ]; then
     printf 'run_all: profile %s has no manifest at %s\n' "$RA_PROFILE" "$RA_MANIFEST" >&2
     exit 2
   fi
-  while IFS=$'\t' read -r m_id _m_bead _m_gate _m_path _m_targets m_class _m_proof _m_term; do
+  # THE MANIFEST IS VALIDATED BEFORE IT IS TRUSTED. "Stale manifest" is a
+  # non-pass condition in its own right, and a manifest that is malformed can
+  # weaken the gate silently: a row with a mistyped classification simply drops
+  # out of the required set, so a suite stops being required without anyone
+  # deciding that. Each defect below is refused by name.
+  ra_manifest_line=0
+  declare -a RA_MANIFEST_SEEN=()
+  while IFS=$'\t' read -r m_id m_bead m_gate m_path m_targets m_class m_proof m_term; do
+    ra_manifest_line=$((ra_manifest_line + 1))
     case $m_id in ''|'#'*) continue ;; esac
+    if [ -z "$m_bead" ] || [ -z "$m_gate" ] || [ -z "$m_path" ] || [ -z "$m_targets" ] ||
+      [ -z "$m_class" ] || [ -z "$m_proof" ] || [ -z "$m_term" ]; then
+      printf 'run_all: manifest %s line %d: incomplete row for %s\n' \
+        "$RA_MANIFEST" "$ra_manifest_line" "$m_id" >&2
+      exit 2
+    fi
+    case $m_class in
+      required | optional) ;;
+      *)
+        # A mistyped classification would silently drop the row from the
+        # required set. Refused rather than ignored.
+        printf 'run_all: manifest %s line %d: %s has classification %s, expected required|optional\n' \
+          "$RA_MANIFEST" "$ra_manifest_line" "$m_id" "$m_class" >&2
+        exit 2
+        ;;
+    esac
+    if ra_in_set "$m_id" "${RA_MANIFEST_SEEN[@]+"${RA_MANIFEST_SEEN[@]}"}"; then
+      printf 'run_all: manifest %s line %d: duplicate entry %s\n' \
+        "$RA_MANIFEST" "$ra_manifest_line" "$m_id" >&2
+      exit 2
+    fi
+    RA_MANIFEST_SEEN+=("$m_id")
     [ "$m_class" = required ] || continue
     S_MANIFEST_REQUIRED+=("$m_id")
   done <"$RA_MANIFEST"
@@ -344,6 +374,17 @@ if [ -n "$RA_PROFILE" ]; then
   done
 
   if [ "${#S_MANIFEST_MISSING[@]}" -gt 0 ] || [ "${#S_MANIFEST_UNREGISTERED[@]}" -gt 0 ]; then
+    # A RENAME LOOKS LIKE TWO UNRELATED FAILURES unless it is named. One missing
+    # and one unregistered in the same area is far more likely a renamed suite
+    # than simultaneous deletion and creation, and saying so turns a puzzle into
+    # a one-line manifest edit. Reported as a hint, never as an excuse: the run
+    # still fails, because a rename IS a change to the release surface and the
+    # manifest is where it gets approved.
+    if [ "${#S_MANIFEST_MISSING[@]}" -eq 1 ] && [ "${#S_MANIFEST_UNREGISTERED[@]}" -eq 1 ] &&
+      [ "${S_MANIFEST_MISSING[0]%-*}" = "${S_MANIFEST_UNREGISTERED[0]%-*}" ]; then
+      printf 'run_all: profile %s: %s appears renamed to %s -- update the manifest to approve it\n' \
+        "$RA_PROFILE" "${S_MANIFEST_MISSING[0]}" "${S_MANIFEST_UNREGISTERED[0]}" >&2
+    fi
     printf 'run_all: profile %s set mismatch -- missing:[%s] unregistered:[%s]\n' \
       "$RA_PROFILE" "${S_MANIFEST_MISSING[*]-}" "${S_MANIFEST_UNREGISTERED[*]-}" >&2
     exit 1
