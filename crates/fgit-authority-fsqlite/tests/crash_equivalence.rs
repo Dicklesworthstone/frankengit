@@ -1706,7 +1706,10 @@ fn a_projection_rebuild_never_observes_authority_going_backwards() {
             .expect("a conditional replacement inside the admitted envelope");
         let receipt = match outcome {
             CasOutcome::Committed(receipt) => receipt,
-            other => panic!("the writer must win uncontended, got {other:?}"),
+            CasOutcome::PredecessorMismatch => panic!(
+                "the writer must win uncontended: it holds the only live token and the projection \
+                 only reads, so a predecessor mismatch means the reader moved the head"
+            ),
         };
         token = receipt.token();
 
