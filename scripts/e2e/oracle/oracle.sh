@@ -204,6 +204,15 @@ oracle_assert_archive_paths_are_safe() {
     local -a components=()
 
     oracle_require_command tar
+    # List through a checked temp file rather than a process substitution:
+    # `done < <(tar ...)` discards tar's exit status, so an unreadable or
+    # truncated archive passed path-safety vacuously with zero members.
+    local listing=""
+    listing="$(mktemp "${TMPDIR:-/tmp}/oracle-archive-listing.XXXXXXXX")"
+    if ! tar -tJf "${archive_path}" > "${listing}"; then
+        rm -f -- "${listing}"
+        oracle_die "REFUSED" "pinned archive cannot be listed: ${archive_path}"
+    fi
     while IFS= read -r member; do
         [[ -n "${member}" ]] || continue
         [[ "${member}" != /* ]] || oracle_die "REFUSED" "pinned archive contains an absolute path"
@@ -211,7 +220,8 @@ oracle_assert_archive_paths_are_safe() {
         for component in "${components[@]}"; do
             [[ "${component}" != ".." ]] || oracle_die "REFUSED" "pinned archive contains a parent-directory path"
         done
-    done < <(tar -tJf "${archive_path}")
+    done < "${listing}"
+    rm -f -- "${listing}"
 }
 
 oracle_require_bwrap() {
@@ -497,7 +507,7 @@ oracle_reject_escape_options() {
     local argument=""
     for argument in "$@"; do
         case "${argument}" in
-            -C|--git-dir|--work-tree|--template|--exec-path|--config-env|--config|--super-prefix|-c|--paginate|--no-pager|--)
+            -C|-p|-P|--git-dir|--work-tree|--template|--exec-path|--config-env|--config|--super-prefix|-c|--paginate|--no-pager|--)
                 oracle_die "ESCAPE" "Git option is not permitted in the sandbox runner: ${argument}"
                 ;;
             -C*|--git-dir=*|--work-tree=*|--template=*|--exec-path=*|--config-env=*|--config=*|--super-prefix=*|file://*|ssh://*|git://*|http://*|https://*|/*)
@@ -628,6 +638,7 @@ oracle_compare() {
     local right_stderr=""
     local identical="false"
     local divergence_json=""
+    local observed_digest=""
 
     [[ -f "${left}/receipt.tsv" && -f "${right}/receipt.tsv" ]] || oracle_die "REFUSED" "both comparison operands must be completed transcripts"
     left_exit="$(oracle_receipt_value "${left}/receipt.tsv" exit_code)"
@@ -638,6 +649,27 @@ oracle_compare() {
     right_stderr="$(oracle_receipt_value "${right}/receipt.tsv" stderr_sha256)"
     [[ "${left_exit}" =~ ^[0-9]+$ && "${right_exit}" =~ ^[0-9]+$ ]] || oracle_die "REFUSED" "comparison transcript exit code is malformed"
     [[ "${left_stdout}" =~ ^[0-9a-f]{64}$ && "${right_stdout}" =~ ^[0-9a-f]{64}$ && "${left_stderr}" =~ ^[0-9a-f]{64}$ && "${right_stderr}" =~ ^[0-9a-f]{64}$ ]] || oracle_die "REFUSED" "comparison transcript digest is malformed"
+    # THE VERDICT IS COMPUTED OVER BYTES, NOT OVER CLAIMS ABOUT BYTES. A
+    # digest stored beside mutable payloads is an unverified claim: each
+    # side's transcripts are re-hashed and must match their own receipt
+    # before classification, so a truncated, edited, or substituted payload
+    # refuses instead of comparing stale metadata.
+    for operand in "${left}" "${right}"; do
+        [[ -f "${operand}/stdout.bin" && -f "${operand}/stderr.bin" ]] ||
+            oracle_die "REFUSED" "comparison transcript payload is missing: ${operand}"
+    done
+    observed_digest="$(oracle_sha256 "${left}/stdout.bin")"
+    [[ "${observed_digest}" == "${left_stdout}" ]] ||
+        oracle_die "REFUSED" "left stdout bytes no longer match their receipt digest"
+    observed_digest="$(oracle_sha256 "${left}/stderr.bin")"
+    [[ "${observed_digest}" == "${left_stderr}" ]] ||
+        oracle_die "REFUSED" "left stderr bytes no longer match their receipt digest"
+    observed_digest="$(oracle_sha256 "${right}/stdout.bin")"
+    [[ "${observed_digest}" == "${right_stdout}" ]] ||
+        oracle_die "REFUSED" "right stdout bytes no longer match their receipt digest"
+    observed_digest="$(oracle_sha256 "${right}/stderr.bin")"
+    [[ "${observed_digest}" == "${right_stderr}" ]] ||
+        oracle_die "REFUSED" "right stderr bytes no longer match their receipt digest"
     if [[ "${left_exit}" == "${right_exit}" && "${left_stdout}" == "${right_stdout}" && "${left_stderr}" == "${right_stderr}" ]]; then
         identical="true"
     fi

@@ -538,7 +538,15 @@ fn read_packed_refs(
                 source: Box::new(error),
             }
         })?;
-        if refs.insert(name, identity).is_some() || refs.len() > MAX_IMPORT_REFS {
+        // A repeated name is a contents-law violation (one ref, one
+        // identity), not a size problem: it gets the malformed-contents
+        // refusal, and only a genuinely over-limit set names the limit.
+        if refs.insert(name, identity).is_some() {
+            return Err(LooseGitImportRefusal::PackedRefContents(Box::new(
+                packed.clone(),
+            )));
+        }
+        if refs.len() > MAX_IMPORT_REFS {
             return Err(LooseGitImportRefusal::RefLimitExceeded {
                 limit: MAX_IMPORT_REFS,
             });
@@ -1265,6 +1273,27 @@ mod tests {
         fs::write(&packed_refs, "not a packed ref\n").expect("malformed packed refs write");
         let node = node(scratch.0.join("node"));
 
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::PackedRefContents(path)) if *path == packed_refs
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_a_duplicate_packed_ref_name_as_contents_not_size() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        let packed_refs = source.join("packed-refs");
+        fs::create_dir_all(source.join("objects")).expect("object directory creates");
+        let oid = "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0";
+        let duplicate = format!("{oid} refs/heads/duplicated\n{oid} refs/heads/duplicated\n");
+        fs::write(&packed_refs, duplicate).expect("duplicate packed refs write");
+        let node = node(scratch.0.join("node"));
+
+        // One name carried twice is a contents-law violation even though the
+        // set is far below any limit: it must not be misreported as
+        // RefLimitExceeded.
         assert!(matches!(
             node.stage_loose_git_import(&source),
             Err(LooseGitImportRefusal::PackedRefContents(path)) if *path == packed_refs
