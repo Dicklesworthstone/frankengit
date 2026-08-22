@@ -344,11 +344,13 @@ fge_assert_eq FG-000A-ST-DISCOVER-RC 0 "$disc_rc" \
 # ---------------------------------------------------------------------------
 fge_phase action
 profile_manifest="$HERE/manifests/profile-coverage-probe.tsv"
+profile_declared_dir="$HERE/suites/profile_coverage_declared"
+profile_declared_script="$profile_declared_dir/declared.sh"
 profile_probe_dir="$HERE/suites/profile_coverage_probe"
 profile_probe_script="$profile_probe_dir/undeclared.sh"
 profile_root=$(fge_tempdir profile-coverage)
 profile_probe_ready=false
-if [ -e "$profile_manifest" ] || [ -e "$profile_probe_dir" ]; then
+if [ -e "$profile_manifest" ] || [ -e "$profile_declared_dir" ] || [ -e "$profile_probe_dir" ]; then
   fge_fail FG-000A-ST-PROFILE-PRECONDITION \
     'profile-coverage probe paths already exist; refusing to overwrite them'
 else
@@ -358,12 +360,15 @@ else
   fge_cleanup_register rm -f -- "$profile_manifest"
   fge_cleanup_register rmdir -- "$profile_probe_dir"
   fge_cleanup_register rm -f -- "$profile_probe_script"
-  mkdir -p "$profile_probe_dir"
+  fge_cleanup_register rmdir -- "$profile_declared_dir"
+  fge_cleanup_register rm -f -- "$profile_declared_script"
+  mkdir -p "$profile_declared_dir" "$profile_probe_dir"
+  cp "$FIXTURES/pos_control.sh" "$profile_declared_script"
   cp "$FIXTURES/pos_control.sh" "$profile_probe_script"
-  chmod +x "$profile_probe_script"
+  chmod +x "$profile_declared_script" "$profile_probe_script"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    suites-harness-harness_json frankengit-fg000a-e2e-harness-4ci g0 \
-    scripts/e2e/suites/harness/harness_json.sh any required mechanism pass \
+    suites-profile_coverage_declared-declared frankengit-fg000a-e2e-harness-4ci g0 \
+    scripts/e2e/suites/profile_coverage_declared/declared.sh any required mechanism pass \
     >"$profile_manifest"
   profile_probe_ready=true
 fi
