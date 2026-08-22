@@ -23,7 +23,7 @@ use fgit_types::native::{GitOid, GitOidSha1};
 
 const MAX_NAMESPACE: usize = 4;
 
-fn limits(max_segment_bytes: usize, max_records: u32) -> SegmentLimits {
+const fn limits(max_segment_bytes: usize, max_records: u32) -> SegmentLimits {
     SegmentLimits {
         max_segment_bytes,
         max_records,
@@ -35,11 +35,11 @@ fn limits(max_segment_bytes: usize, max_records: u32) -> SegmentLimits {
 }
 
 /// Limits generous enough that nothing under test can be what refuses.
-fn roomy() -> SegmentLimits {
+const fn roomy() -> SegmentLimits {
     limits(64 * 1024, 128)
 }
 
-fn oid(identity: u8) -> GitOid {
+const fn oid(identity: u8) -> GitOid {
     GitOid::Sha1(GitOidSha1::from_bytes([identity; GitOidSha1::LEN]))
 }
 
