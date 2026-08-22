@@ -214,7 +214,7 @@ fi
 # was derived by reading a single layer of a stack.
 
 fge_unsupported FG-005B-E2E-021 \
-  'cancellation of an ALREADY-EXECUTING statement, and the commit-ambiguous and reply-lost cancellation cells. Cancellation before dispatch and between retry attempts are now exercised by FG-005B-E2E-022; what remains needs a second thread racing a running query against the VDBE page-lock poll, and the commit-ambiguous cells need the same fault injection FG-005B-E2E-020 lacks. Narrowed rather than deleted: the drivable subset landing does not prove the rest'
+  'cancellation of a statement the VDBE is ACTIVELY STEPPING, plus the commit-ambiguous and reply-lost cancellation cells. FG-005B-E2E-022 now covers cancellation before dispatch, between retry attempts, and after dispatch before completion. What remains: the store statements are too short to reach a VDBE opcode checkpoint reliably, and commit-ambiguous needs a lost response and a cancel arriving together -- buildable now that FG-005B-E2E-020 supplies a fault engine, but not written, so not claimed. Narrowed twice rather than deleted'
 
 # The structural PRECONDITION for that cell, which IS checkable today.
 #

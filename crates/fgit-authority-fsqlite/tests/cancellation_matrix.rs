@@ -50,14 +50,19 @@
 //! # What this file does NOT prove
 //!
 //! - **Not the full request -> drain -> finalize protocol.** These cells cover
-//!   cancellation *before dispatch* and *between retry attempts*. Cancelling a
-//!   statement already executing inside the VDBE needs a second thread racing a
-//!   running query; the poll site exists (page-lock waits) but nothing here
-//!   drives it. `commit-ambiguous` and `reply-lost` cancellation remain
-//!   unproved for this backend -- but that gap is narrower than it was when
-//!   this file was written. `fault_conformance.rs` now supplies the fault
-//!   engine over a real database, so what is missing is a cancel *interleaved*
-//!   with an in-flight operation, not the ability to inject at all.
+//!   cancellation *before dispatch*, *between retry attempts*, and *after
+//!   dispatch and before completion*. What is still open is narrower than any
+//!   of those: cancelling a statement the VDBE is actively stepping through
+//!   (the poll sites are there -- 31 of them, including the main instruction
+//!   loop every N opcodes -- but the store's statements are far too short to
+//!   reach an opcode checkpoint reliably), and the `commit-ambiguous` and
+//!   `reply-lost` cancellation cells, which need cancellation and a lost
+//!   response to arrive together.
+//!
+//!   That last pair is now *buildable* rather than blocked:
+//!   `fault_conformance.rs` supplies a fault engine over a real database, so
+//!   composing `LoseResponse` with a cancel is a matter of writing it. It is
+//!   not written, so it is not claimed.
 //! - **Not that cancellation is distinguishable from failure.** See
 //!   `cancellation_is_not_separately_typed_at_the_public_surface`, which pins
 //!   the current behaviour and names the gap rather than blessing it.
@@ -132,6 +137,13 @@ struct Fixture {
     store: FsqliteAuthorityStore,
     live: FsqliteCx,
     cancelled: FsqliteCx,
+    /// A third root, never cancelled by any test.
+    ///
+    /// `live` is cancelled by the in-flight test, so a test that cancels it
+    /// cannot then use it to observe the database. Reading back through a
+    /// context that was never cancelled is what makes the observation about
+    /// stored state rather than about the preflight refusing again.
+    spare: FsqliteCx,
 }
 
 impl Fixture {
@@ -147,6 +159,7 @@ impl Fixture {
         // assertions "passed" against a store where *everything* refused.
         let live_native = node.request_cx(BudgetClass::Request);
         let cancelled_native = node.request_cx(BudgetClass::Request);
+        let spare_native = node.request_cx(BudgetClass::Request);
 
         let live = FsqliteCx::new();
         live.set_native_cx(live_native);
@@ -166,11 +179,15 @@ impl Fixture {
         cancelled.set_native_cx(cancelled_native);
         cancelled.cancel();
 
+        let spare = FsqliteCx::new();
+        spare.set_native_cx(spare_native);
+
         Self {
             node,
             store,
             live,
             cancelled,
+            spare,
         }
     }
 }
@@ -419,5 +436,91 @@ fn cancellation_is_not_separately_typed_at_the_public_surface() {
         "cancellation currently collapses into the permanent class; if this assertion fails \
          because a distinct cancellation class was added, that is an improvement -- update this \
          test and delete the limitation note above it"
+    );
+}
+
+// ------------------------------------------------- cancellation while in flight
+
+#[test]
+fn cancelling_an_operation_already_in_flight_leaves_no_partial_effect() {
+    // The "executing" cell, driven without threads, sleeps, or a race.
+    //
+    // What "in flight" means here, stated exactly, because the neighbouring
+    // cell is close enough to be confused with it. `preflight_async_call` is
+    // synchronous and runs at the top of every async entry point, so a future
+    // that has returned `Pending` is **past the preflight**: the request was
+    // admitted and handed to the engine's async worker. The before-dispatch
+    // test above cancels a call that never gets that far. This one cancels a
+    // request the engine already has.
+    //
+    // What this does NOT establish is which statement the engine had reached --
+    // whether `BEGIN` had executed at that instant is not observable from here,
+    // so the test does not claim it. Cancelled after dispatch and before
+    // completion is the claim, and it is the cell.
+    //
+    // The future is therefore driven by hand: poll it until it first returns
+    // Pending, cancel the context at that suspension point, then resume it.
+    // Every subsequent statement meets `preflight_async_call`, which refuses.
+    // This is deterministic in a way a spawn-and-sleep never is: there is no
+    // window to lose, because the cancel happens at a suspension the test
+    // observed rather than at a moment it hoped for.
+    //
+    // What must be true afterwards is the §5.2 property this whole bead is
+    // about: **old-complete or new-complete, never mixed.** An operation
+    // interrupted after the engine accepted it must leave the slot exactly as
+    // it found it, or a caller that cancelled its own work is left holding a
+    // half-published body.
+    let f = Fixture::new();
+    let key = body_key("mid-flight");
+
+    let suspended = f.node.block_on(async {
+        let mut in_flight = core::pin::pin!(f.store.put_if_absent(&f.live, &key, b"payload"));
+
+        // Poll once. `Ready` means the operation never suspended and this cell
+        // cannot be exercised this way; `Pending` means it is in flight.
+        let finished_immediately = core::future::poll_fn(|task| {
+            core::task::Poll::Ready(match in_flight.as_mut().poll(task) {
+                core::task::Poll::Ready(done) => Some(done),
+                core::task::Poll::Pending => None,
+            })
+        })
+        .await;
+
+        match finished_immediately {
+            Some(done) => Err(done),
+            None => {
+                // Cancelled at an observed suspension point, mid-transaction.
+                f.live.cancel();
+                Ok(in_flight.await)
+            }
+        }
+    });
+
+    let outcome = match suspended {
+        Ok(outcome) => outcome,
+        Err(done) => panic!(
+            "the operation completed without ever suspending, so nothing was in flight to \
+             cancel and this cell was NOT exercised; it returned {done:?}. Do not weaken this \
+             into a before-dispatch test -- that cell is already covered above."
+        ),
+    };
+
+    assert!(
+        outcome.is_err(),
+        "an operation cancelled mid-transaction must not report success; got {outcome:?}"
+    );
+
+    // The property that matters. Read through a context that was never
+    // cancelled, so the answer comes from the database rather than from the
+    // preflight refusing again.
+    let after = f
+        .node
+        .block_on(f.store.read_immutable(&f.spare, &key))
+        .expect("a never-cancelled context still reads the store");
+    assert!(
+        matches!(after, ImmutableRead::Absent),
+        "an operation cancelled after the engine accepted it must leave the slot exactly as it \
+         found it; §5.2 admits old-complete or new-complete and never a mixture, but the slot \
+         holds {after:?}"
     );
 }
