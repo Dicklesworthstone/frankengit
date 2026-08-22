@@ -383,3 +383,383 @@ fn publication_without_rcr_evidence_link_stays_staged_even_when_batch_evidence_m
 // Non-production fixture identity: this reserved tag deliberately has no registered digest width.
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
 const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
+
+// ---------------------------------------------------------------------------
+// frankengit-oq73: the publication-refusal chain
+//
+// Appended to this file rather than opened as a second binary so these probes
+// reuse the fixtures above. Duplicating `basis`, `record`, `stage`, `roots`,
+// `commit_record` and `publication` into another integration test would be a
+// drift hazard: two copies of an intricate fixture drift silently, and the
+// copy that drifts is the one that stops testing what it claims to.
+//
+// Safe by inspection: scripts/e2e/suites/compaction/compaction_protocol.sh
+// asserts `fge_assert_exit 0` plus three `fge_assert_contains` checks on
+// specific TEST NAMES. There is no probe-COUNT assertion, so adding tests
+// cannot break it — unlike the wire suites, where a count is asserted.
+//
+// `CompactionPublicationRefusal` had 10 constructed variants and exactly two
+// named by any test. These are the constitution's publication rules stated as
+// types: §5.1 (only exact-predecessor CAS publishes), §5.2 (one sealed
+// transaction has at most one terminal decision), §5.4 (staged / visible /
+// durable are distinct epochs).
+// ---------------------------------------------------------------------------
+
+use fgit_authority::{
+    AmbiguityReason, AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityVersionToken,
+    CasOutcome, DuplicateAbsenceWitness, HeadInit, HeadReadReceipt, ImmutableKey, ImmutableRead,
+    PutOutcome,
+};
+use fgit_types::{RefusalCode, RefusalRecordId};
+
+/// A basis whose identity and body are supplied independently.
+///
+/// The two `InputBasisMismatch` axes cannot be varied together: the head
+/// identity is *derived from* the body, so changing the generation would change
+/// the identity too and the `||` would short-circuit on the identity arm. Since
+/// `PublicationBasis::new` takes the identity and the body separately, a probe
+/// can hold one fixed while moving the other — which is the only way to reach
+/// the generation arm at all.
+fn basis_with(identity: RepositoryAuthorityHeadId, generation: HeadGeneration) -> PublicationBasis {
+    let mut head = genesis_head();
+    head.generation = generation;
+    PublicationBasis::new(identity, head)
+}
+
+/// A publication built on `input` that commits, carrying `evidence` as both the
+/// batch evidence root and the linked RCR's invariant evidence root.
+fn publication_with_evidence(
+    input: PublicationBasis,
+    evidence: Digest,
+) -> fgit_chronicle::VerifiedPublication {
+    let mut plan = PublicationPlan::open(input).expect("authenticated basis opens a plan");
+    plan.commit(commit_record(evidence));
+    plan.seal(&CryptoBodyIdentity, roots(evidence))
+        .expect("an ordinary decision is well formed")
+}
+
+/// A publication carrying only a refusal, so no committed RCR exists.
+fn refusal_only_publication(input: PublicationBasis) -> fgit_chronicle::VerifiedPublication {
+    let mut plan = PublicationPlan::open(input).expect("authenticated basis opens a plan");
+    plan.refuse(
+        derived!(TxId, 0x71),
+        RefusalCode::IntentExpired,
+        derived!(RefusalRecordId, 0x72),
+    );
+    plan.seal(&CryptoBodyIdentity, roots(digest(0x73)))
+        .expect("a refusal-only batch is well formed")
+}
+
+/// A store that is a **complete** delegate except for one deliberately
+/// ambiguous operation.
+///
+/// Completeness matters here. `AuthorityStore::publish_head_with_outcomes` has
+/// a default body that refuses with `OperationUnsupported`, so a double that
+/// simply *omitted* it would fail for a reason the test did not choose and
+/// would look like evidence while proving nothing. Every method is forwarded;
+/// only the publish path is armed, and it returns `Ambiguous(Cancelled)` —
+/// whose own documentation says cancellation after transmission never proves
+/// non-commit.
+struct AmbiguousPublishStore(MemoryAuthorityStore);
+
+impl AuthorityStore for AmbiguousPublishStore {
+    fn instance_id(&self) -> StoreInstanceId {
+        self.0.instance_id()
+    }
+
+    fn limits(&self) -> AuthorityLimits {
+        self.0.limits()
+    }
+
+    fn put_if_absent(
+        &self,
+        key: &ImmutableKey,
+        body: &[u8],
+    ) -> Result<PutOutcome, AuthorityFailure> {
+        self.0.put_if_absent(key, body)
+    }
+
+    fn read_immutable(&self, key: &ImmutableKey) -> Result<ImmutableRead, AuthorityFailure> {
+        self.0.read_immutable(key)
+    }
+
+    fn initialize_head(
+        &self,
+        key: &HeadKey,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> Result<HeadInit, AuthorityFailure> {
+        self.0.initialize_head(key, generation, body)
+    }
+
+    fn read_head(&self, key: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
+        self.0.read_head(key)
+    }
+
+    fn compare_exchange_head(
+        &self,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        self.0
+            .compare_exchange_head(key, expected, new_generation, new_body)
+    }
+
+    fn authenticate_head_receipt(
+        &self,
+        receipt: &HeadReadReceipt,
+    ) -> Result<AuthenticatedHead, AuthorityFailure> {
+        self.0.authenticate_head_receipt(receipt)
+    }
+
+    fn publish_head_with_outcomes(
+        &self,
+        _key: &HeadKey,
+        _expected: AuthorityVersionToken,
+        _new_generation: HeadGeneration,
+        _new_body: &[u8],
+        _outcomes: &[(ImmutableKey, Vec<u8>)],
+        _witness: &DuplicateAbsenceWitness,
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        Err(AuthorityFailure::Ambiguous(AmbiguityReason::Cancelled))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OutputStageReceipt — §5.4, staged is not inferred from existence
+// ---------------------------------------------------------------------------
+
+/// An output the caller has not recorded as staged cannot receipt.
+///
+/// The constructor deliberately does not infer staging from object existence,
+/// which is §5.4's separation of epochs: object existence is not visibility and
+/// is not durability.
+#[test]
+fn an_output_that_is_not_recorded_as_staged_cannot_receipt() {
+    let refusal = OutputStageReceipt::new(vec![
+        PublicationState::new(true, false, false),
+        PublicationState::new(false, false, false),
+    ])
+    .expect_err("an unstaged output cannot be receipted as staged");
+    assert_eq!(refusal, CompactionPublicationRefusal::OutputNotStaged);
+}
+
+/// The permitted twin, and the ordering pair for the cardinality arm.
+///
+/// A one-element all-staged receipt is admitted; an EMPTY receipt reports
+/// cardinality rather than staging, since that check runs first.
+#[test]
+fn a_staged_receipt_is_admitted_and_an_empty_one_reports_cardinality() {
+    OutputStageReceipt::new(vec![PublicationState::new(true, false, false)])
+        .expect("a fully staged receipt must be admitted");
+
+    let refusal =
+        OutputStageReceipt::new(Vec::new()).expect_err("no outputs at all is a cardinality fault");
+    assert_eq!(
+        refusal,
+        CompactionPublicationRefusal::OutputReceiptCardinality,
+        "the cardinality check runs before the staging scan"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// validate_publication — the five-stage chain
+// ---------------------------------------------------------------------------
+
+/// The permitted terminus: a matching publication validates and yields the
+/// successor head identity.
+///
+/// Every refusal below is measured against this; without it they could be
+/// `validate_publication` rejecting any input at all.
+#[test]
+fn a_matching_publication_validates_and_returns_a_successor_head() {
+    let input = basis();
+    let staged = stage(&input);
+    let publication = publication(input, &staged);
+    staged
+        .validate_publication(&publication)
+        .expect("a publication carrying this record must validate");
+}
+
+/// **§5.2.** A batch with no committed RCR cannot carry a compaction
+/// generation into visibility.
+#[test]
+fn a_refusal_only_publication_cannot_publish_a_generation() {
+    let input = basis();
+    let staged = stage(&input);
+    let publication = refusal_only_publication(input);
+    let refusal = staged
+        .validate_publication(&publication)
+        .expect_err("a refusal-only batch commits nothing to carry the generation");
+    assert_eq!(
+        refusal,
+        CompactionPublicationRefusal::RefusalOnlyPublication
+    );
+}
+
+/// Axis 1 of `InputBasisMismatch`: the publication is built on another head.
+#[test]
+fn a_publication_on_another_head_is_refused() {
+    let input = basis();
+    let staged = stage(&input);
+    let foreign = basis_with(
+        derived!(RepositoryAuthorityHeadId, 0x7e),
+        input.generation(),
+    );
+    let publication = publication_with_evidence(foreign, staged.evidence_root());
+    let refusal = staged
+        .validate_publication(&publication)
+        .expect_err("a compaction record binds the head it was computed against");
+    assert_eq!(refusal, CompactionPublicationRefusal::InputBasisMismatch);
+}
+
+/// Axis 2 of `InputBasisMismatch`: the same head identity at another
+/// generation.
+///
+/// One arm covers two conditions joined by `||`, so a probe hitting only the
+/// identity leaves the generation unexercised — and the generation is the arm
+/// that stops a record computed against one generation being replayed onto a
+/// later one.
+#[test]
+fn a_publication_at_another_head_generation_is_refused() {
+    let input = basis();
+    let staged = stage(&input);
+    let later = HeadGeneration::try_new(2).expect("a second generation");
+    let shifted = basis_with(input.id(), later);
+    let publication = publication_with_evidence(shifted, staged.evidence_root());
+    let refusal = staged
+        .validate_publication(&publication)
+        .expect_err("a compaction record binds the generation it was computed against");
+    assert_eq!(refusal, CompactionPublicationRefusal::InputBasisMismatch);
+}
+
+/// The batch must carry exactly this compaction's evidence root.
+#[test]
+fn a_publication_with_another_evidence_root_is_refused() {
+    let input = basis();
+    let staged = stage(&input);
+    let publication = publication_with_evidence(input, digest(0x7d));
+    let refusal = staged
+        .validate_publication(&publication)
+        .expect_err("an unrelated batch evidence root cannot carry this generation");
+    assert_eq!(refusal, CompactionPublicationRefusal::EvidenceRootMismatch);
+}
+
+// ---------------------------------------------------------------------------
+// Ordering — publications that are wrong twice
+// ---------------------------------------------------------------------------
+
+/// Stage 1 outranks stage 2: refusal-only is reported before a basis mismatch.
+///
+/// Single-fault probes are structurally blind to a stage swap — each violates
+/// one rule and still reaches its own stage wherever that stage sits.
+#[test]
+fn a_refusal_only_publication_outranks_a_basis_mismatch() {
+    let input = basis();
+    let staged = stage(&input);
+    let foreign = basis_with(
+        derived!(RepositoryAuthorityHeadId, 0x7e),
+        input.generation(),
+    );
+    let publication = refusal_only_publication(foreign);
+    let refusal = staged
+        .validate_publication(&publication)
+        .expect_err("a publication wrong in two ways must still refuse");
+    assert_eq!(
+        refusal,
+        CompactionPublicationRefusal::RefusalOnlyPublication,
+        "the refusal-only check runs before the basis comparison"
+    );
+}
+
+/// Stage 2 outranks stage 3: a basis mismatch is reported before an evidence
+/// mismatch — the opposite end of the chain from the probe above, so the two
+/// together pin the order rather than one adjacency of it.
+#[test]
+fn a_basis_mismatch_outranks_an_evidence_root_mismatch() {
+    let input = basis();
+    let staged = stage(&input);
+    let foreign = basis_with(
+        derived!(RepositoryAuthorityHeadId, 0x7e),
+        input.generation(),
+    );
+    let publication = publication_with_evidence(foreign, digest(0x7d));
+    let refusal = staged
+        .validate_publication(&publication)
+        .expect_err("a publication wrong in two ways must still refuse");
+    assert_eq!(
+        refusal,
+        CompactionPublicationRefusal::InputBasisMismatch,
+        "the basis comparison runs before the evidence-root comparison"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// publish — the three outcomes, told apart from each other
+// ---------------------------------------------------------------------------
+
+/// **§5.1.** A stale expected token loses the race; nothing it staged becomes
+/// canonical, and the staged output survives for a replan.
+#[test]
+fn a_stale_expected_token_reports_a_lost_race() {
+    let input = basis();
+    let head_key = HeadKey::new(b"oq73/race-head".to_vec()).expect("bounded head key");
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7b));
+    initialize_repository(&store, &head_key, input.body()).expect("genesis initializes");
+    let stale = current_token(&store, &head_key);
+
+    // Move the head first, so `stale` no longer names the current version.
+    let winner_staged = stage(&input);
+    let winner = publication(input.clone(), &winner_staged);
+    match winner_staged.publish(&store, &head_key, stale, &winner, tenant()) {
+        CompactionExecution::Visible(_) => {}
+        other => panic!("the first publication must land: {other:?}"),
+    }
+
+    let loser_staged = stage(&input);
+    let loser = publication(input, &loser_staged);
+    match loser_staged.publish(&store, &head_key, stale, &loser, tenant()) {
+        CompactionExecution::Unpublished(unpublished) => {
+            assert_eq!(
+                unpublished.reason(),
+                &CompactionPublicationRefusal::AuthorityRaceLost,
+                "a moved head is a lost race, not an already-decided duplicate"
+            );
+        }
+        other => panic!("a stale predecessor cannot publish: {other:?}"),
+    }
+}
+
+/// **§5.2, and the arm that must NOT be a refusal.**
+///
+/// An ambiguous authority failure means the CAS may or may not have occurred.
+/// Reporting it as `Unpublished` would assert non-commit, which is exactly what
+/// `AmbiguityReason::Cancelled` documents as unprovable. The outcome must be
+/// `Indeterminate`.
+///
+/// This is the distinction between "we know it did not commit" and "we do not
+/// know", and getting it backwards is the failure the type exists to prevent.
+#[test]
+fn an_ambiguous_authority_failure_is_indeterminate_and_never_an_unpublished_refusal() {
+    let input = basis();
+    let head_key = HeadKey::new(b"oq73/ambiguous-head".to_vec()).expect("bounded head key");
+    let inner = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7c));
+    initialize_repository(&inner, &head_key, input.body()).expect("genesis initializes");
+    let token = current_token(&inner, &head_key);
+    let store = AmbiguousPublishStore(inner);
+
+    let staged = stage(&input);
+    let publication = publication(input, &staged);
+    match staged.publish(&store, &head_key, token, &publication, tenant()) {
+        CompactionExecution::Indeterminate(_) => {}
+        CompactionExecution::Unpublished(unpublished) => panic!(
+            "an ambiguous failure must not manufacture a non-commit conclusion, got {:?}",
+            unpublished.reason()
+        ),
+        other @ CompactionExecution::Visible(_) => {
+            panic!("an ambiguous authority failure cannot report a visible generation: {other:?}")
+        }
+    }
+}
