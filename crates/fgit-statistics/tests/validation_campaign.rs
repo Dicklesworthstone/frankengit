@@ -608,28 +608,32 @@ fn validate_expected_loss() -> Record {
     // The identity that catches a sign or ordering error no single value can:
     // a posterior compared against itself is exactly one half.
     //
-    // Asserted as a one-ppm band rather than an equality, and that is not slack.
-    // Every division in the evaluation floors, so the computed sum is strictly
-    // below the exact value; the exact value here is 1/2, which sits *on* a ppm
-    // boundary, so any downward error at all crosses it and the module reports
-    // 499_999. A boundary is the one place an arithmetic error of ~4e-27 changes
-    // the reported integer -- and self-comparison is a boundary by construction,
-    // so the identity best suited to catching a sign or ordering error is
-    // exactly the one that cannot be asserted exactly.
+    // Asserted EXACTLY, and it was a one-ppm band until 2c595d9. That band was
+    // right against the previous contract and is wrong against this one, so it
+    // is tightened rather than left as harmless slack: a band where the module
+    // now guarantees exactness would not catch a regression back to 499_999,
+    // which is precisely the defect it was written to detect.
     //
-    // The band is closed ABOVE at 500_000 deliberately. Flooring makes the error
-    // one-directional, which is the property worth keeping: an under-stated
-    // P(theta_b > theta_a) under-states a candidate's advantage over its pinned
-    // fallback, so it can delay a policy switch but never provoke one. An
-    // overestimate would invert that, so this fails on 500_001 rather than
-    // tolerating it.
+    // Exact by construction, verified by reading the normalisation rather than
+    // by trusting the claim: `scale` is `forward + reverse`, and with identical
+    // posteriors both tails are computed from identical inputs and are
+    // therefore bit-identical, so the quotient is `forward * 1e6 / (2 * forward)`.
+    // No equality branch and no rounding mode is involved -- which matters,
+    // because a special case keyed on `a == b` would return the right number for
+    // the one input anyone checks and leave every neighbour as wrong as before.
+    //
+    // The module still claims 1 ppm rather than 0, and correctly: two DIFFERENT
+    // posteriors each symmetric about one half are also exactly one half, but
+    // their tails are not bit-identical, so flooring still costs a ppm there.
+    // That case is asserted in the module's own error-evidence test, where the
+    // bound's presence case belongs; duplicating it here would couple this
+    // campaign to an implementation detail it does not own.
     for alpha in [2_u32, 4, 17] {
-        let got = probability_b_exceeds_a_ppm(prior(alpha, alpha), prior(alpha, alpha))
-            .expect("evaluable");
-        assert!(
-            (499_999..=500_000).contains(&got),
-            "an arm compared against itself must be one half to within the module's stated 1 ppm, \
-             and never above it; got {got}"
+        assert_eq!(
+            probability_b_exceeds_a_ppm(prior(alpha, alpha), prior(alpha, alpha))
+                .expect("evaluable"),
+            500_000,
+            "an arm compared against itself must be exactly even"
         );
     }
 
