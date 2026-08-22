@@ -386,3 +386,129 @@ fn the_body_declares_its_own_domain_and_schema() {
 // Non-production fixture identity: this reserved tag deliberately has no registered digest width.
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
 const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
+
+// ------------------------------------------------- fail-closed on the wire
+
+/// The constructor guard and the decode guard are different code.
+///
+/// [`an_inverted_window_is_refused_and_a_single_position_window_is_not`] proves
+/// `SequenceWindow::try_new` refuses an inverted window, which is the guard that
+/// runs when *this build* assembles evidence. It says nothing about the guard
+/// that runs when a window arrives as bytes: `read_payload` maps the same
+/// rejection onto `CodecRefusal::ValueUnrepresentable` with its own field label
+/// and its own operands, and that mapping had no test.
+///
+/// The distinction is the whole point of section 9. Bytes off the wire are
+/// untrusted input; the constructor is only reached if the decoder chooses to
+/// call it and reports what happened faithfully. A decoder that swapped the
+/// ends to "repair" the window, or that reported the failure under a different
+/// field, would leave every constructor test still passing.
+#[test]
+fn an_inverted_window_arriving_as_bytes_is_refused_under_its_own_field() {
+    let evidence = body();
+    let bytes = encode_body(&evidence).expect("encodes");
+
+    // Scalars are fixed-width big-endian, so each window bound is eight bytes.
+    let first = 1_000_u64.to_be_bytes();
+    let last = 2_048_u64.to_be_bytes();
+    let first_offset = find(&bytes, &first).expect("window_first is on the wire");
+    let last_offset = find(&bytes, &last).expect("window_last is on the wire");
+    assert_eq!(
+        last_offset,
+        first_offset + 8,
+        "the two bounds are adjacent scalars; if this moves, the patch below \
+         is editing the wrong field and the test must be re-derived"
+    );
+
+    // Swap the ends on the wire. The bytes were signed over as written, so a
+    // decoder must refuse rather than quietly reorder them.
+    let mut inverted = bytes.clone();
+    inverted[first_offset..first_offset + 8].copy_from_slice(&last);
+    inverted[last_offset..last_offset + 8].copy_from_slice(&first);
+
+    match decode_body::<StatisticalEvidenceBody>(&inverted, DecodeLimits::DEFAULT) {
+        Err(CodecRefusal::ValueUnrepresentable {
+            field,
+            observed,
+            limit,
+        }) => {
+            assert_eq!(field, "window", "the refusal must name the window");
+            assert_eq!(observed, 2_048, "observed carries the decoded first bound");
+            assert_eq!(limit, 1_000, "limit carries the decoded last bound");
+        }
+        other => panic!("an inverted window must be refused, got {other:?}"),
+    }
+
+    // Near-identical permitted case: the untouched frame, which differs from
+    // the refused one only in the order of those sixteen bytes.
+    let decoded: StatisticalEvidenceBody =
+        decode_body(&bytes, DecodeLimits::DEFAULT).expect("the unswapped frame decodes");
+    assert_eq!(decoded.window.first(), 1_000);
+    assert_eq!(decoded.window.last(), 2_048);
+}
+
+/// The empty-set decode guard, reached the only way it can be.
+///
+/// `read_canonical_set` already refuses duplicates and disorder, so the sole
+/// reachable failure of `AssumptionSet::try_new` inside `read_payload` is a set
+/// the wire declares empty. Reaching it needs a frame that genuinely declares
+/// zero assumptions and carries no leftover entry bytes, so the count is
+/// rewritten and the entry it counted is spliced out together.
+///
+/// [`an_empty_assumption_set_is_refused_and_a_single_assumption_is_not`] covers
+/// the constructor. This covers the decoder, which reports the same condition
+/// under a different type with different operands.
+#[test]
+fn an_assumption_set_declared_empty_on_the_wire_is_refused() {
+    // Two frames differing only in the assumption count, with equal-length
+    // labels so one entry is the same size in both.
+    let mut one = body();
+    one.assumptions = assumptions(&["assume-a"]);
+    let bytes = encode_body(&one).expect("encodes");
+
+    let mut two = body();
+    two.assumptions = assumptions(&["assume-a", "assume-b"]);
+    let other = encode_body(&two).expect("encodes");
+
+    // The count is a u32, so four big-endian bytes: 1 and 2 differ in the last
+    // of them.
+    let divergence = bytes
+        .iter()
+        .zip(other.iter())
+        .position(|(left, right)| left != right)
+        .expect("the two frames differ at the assumption count");
+    let count_offset = divergence - 3;
+    assert_eq!(
+        &bytes[count_offset..count_offset + 4],
+        &1_u32.to_be_bytes(),
+        "the located field must be the count that says one"
+    );
+    let entry_len = other.len() - bytes.len();
+    assert!(entry_len > 0, "the second entry must occupy bytes");
+
+    // Declare zero assumptions and remove the entry that count covered, so the
+    // frame is well formed and simply empty rather than truncated.
+    let mut empty = Vec::with_capacity(bytes.len() - entry_len);
+    empty.extend_from_slice(&bytes[..count_offset]);
+    empty.extend_from_slice(&0_u32.to_be_bytes());
+    empty.extend_from_slice(&bytes[count_offset + 4 + entry_len..]);
+
+    match decode_body::<StatisticalEvidenceBody>(&empty, DecodeLimits::DEFAULT) {
+        Err(CodecRefusal::CountBoundExceeded {
+            field,
+            observed,
+            limit,
+        }) => {
+            assert_eq!(field, "assumptions", "the refusal must name the set");
+            assert_eq!(observed, 0, "the wire declared none");
+            assert_eq!(limit, 1, "one assumption is the smallest admissible set");
+        }
+        other => panic!("an empty assumption set must be refused, got {other:?}"),
+    }
+
+    // Near-identical permitted case: the same frame with the count it was
+    // written with, which is the smallest admissible set.
+    let decoded: StatisticalEvidenceBody =
+        decode_body(&bytes, DecodeLimits::DEFAULT).expect("one assumption decodes");
+    assert_eq!(decoded.assumptions.len(), 1);
+}
