@@ -1245,6 +1245,34 @@ mod tests {
     }
 
     #[test]
+    fn loose_import_refuses_a_compressed_object_before_reading_it_over_the_bound() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        let oid = "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0";
+        let ref_path = source.join("refs/heads/main");
+        let object_path = source.join("objects/b6/fc4c620b67d95f953a5c1c1230aaab5db5a1b0");
+        fs::create_dir_all(ref_path.parent().expect("ref parent exists"))
+            .expect("ref directory creates");
+        fs::create_dir_all(object_path.parent().expect("object parent exists"))
+            .expect("object directory creates");
+        fs::write(&ref_path, format!("{oid}\n")).expect("fixture ref writes");
+        let compressed_bytes = super::MAX_IMPORT_COMPRESSED_OBJECT_BYTES + 1;
+        fs::File::create(&object_path)
+            .expect("oversized loose object creates")
+            .set_len(compressed_bytes)
+            .expect("oversized loose object is sparse");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::CompressedObjectBytesExceeded { limit, observed })
+                if limit == super::MAX_IMPORT_COMPRESSED_OBJECT_BYTES
+                    && observed == compressed_bytes
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
     fn loose_import_refuses_ref_directories_deeper_than_the_profile_limit() {
         let scratch = ScratchDirectory::new();
         let source = scratch.0.join("source.git");
