@@ -33,11 +33,41 @@ in `Cargo.lock`**:
 
 Why the checksum and not the revision, stated so this is not re-litigated: the
 checksum is content-addressed and exact, cargo enforces it on every build, and a
-mismatch fails closed. The git revision is neither enforced nor verifiable from
-here — upstream publishes no revision-to-release linkage, so
-`f99d639b019c1400e55135c8ee4ba988f2587df9` cannot be shown to be the tree that
-produced `0.3.7`. Treating an unverifiable reference as a pin would be recording
-provenance the project cannot check, which §10 forbids.
+mismatch fails closed. **The revision is published but not enforceable, and the
+distinction is the whole reason it cannot be the pin.**
+
+`cargo package` writes `.cargo_vcs_info.json` into every published crate, and
+fsqlite's is present:
+
+```json
+{ "git": { "sha1": "9b1d3ed7b3cbb03675a8eeeb136099cecdf6ed0a" },
+  "path_in_vcs": "crates/fsqlite" }
+```
+
+So a revision-to-release linkage does exist. It is nevertheless **a publisher
+claim, not a cryptographic binding**: cargo writes that field from whatever
+checkout the publisher ran it in, so anyone able to publish mislabelled bytes is
+equally able to write a mislabelled revision beside them. Nothing a consumer can
+compute checks it. The checksum, by contrast, *is* the bytes. Treating a
+publisher assertion as a pin would record provenance the project cannot verify,
+which §10 forbids.
+
+Two measured facts a later reader should not have to rediscover, both checked
+against the artifacts in the local registry rather than inferred:
+
+- **Asupersync agrees.** `asupersync-0.4.9`'s recorded revision is
+  `9eb0600e6ef4d17633dff3dc43ad99c64e72adbe`, which is exactly the reviewed
+  revision in §1's table. That agreement is what makes the comparison
+  meaningful; without a case that can return a match, a mismatch elsewhere would
+  be indistinguishable from a broken method.
+- **FrankenSQLite does not.** The table reviews
+  `f99d639b019c1400e55135c8ee4ba988f2587df9`; the artifact records
+  `9b1d3ed7b3cbb03675a8eeeb136099cecdf6ed0a`. The two are divergent rather than
+  sequential and differ over `crates/fsqlite` by one file and one hunk —
+  workspace dependencies gaining explicit versions so the crate is publishable —
+  with `default-features = false` preserved on both sides. So the reviewed tree
+  is close to, but is not, the built tree. That costs nothing here precisely
+  because the checksum and not the revision is what binds.
 
 Consequences, so the distinction is operational rather than decorative:
 
@@ -50,10 +80,16 @@ Consequences, so the distinction is operational rather than decorative:
   onward) on the version rather than a revision, so no registry row asserts a
   revision pin and none needed amending for this ruling.
 
-This paragraph is retired only if upstream publishes a verifiable
-revision-to-release linkage, at which point the revision may be recorded
-alongside the checksum — still not instead of it. Ruled by GoldLotus on bead
-`frankengit-z4ly`, following FG-005 bullet 7.
+**Retirement condition, tightened deliberately.** This paragraph is retired only
+if a revision-to-release linkage becomes **verifiable by a consumer** — that is,
+checkable from the artifact without trusting the publisher's own assertion about
+it. Publication alone does not satisfy it and never did; the original wording
+said "publishes a verifiable linkage" and could be read as met the moment
+someone noticed `.cargo_vcs_info.json` exists, which is exactly the misreading
+this sentence now forecloses. Even then the revision may be recorded *alongside*
+the checksum, never instead of it. Ruled by GoldLotus on bead
+`frankengit-z4ly`, following FG-005 bullet 7; the false premise in the original
+reason was found by ChartreuseHorizon and corrected on `frankengit-aofy`.
 
 Cargo can install multiple semver-incompatible 0.x versions, but FrankenGit may not: two Asupersync versions are two runtime/type universes even if Cargo resolves both. “The resolver found a build” is therefore not an admission result. The adopted stack cannot enter FrankenGit until repository-owned probes compile every exact feature closure against one selected Asupersync and the dependency checker verifies the resulting lockfile. Failure leaves the integration beads blocked pending sibling updates; it does not reopen the architecture decision.
 
