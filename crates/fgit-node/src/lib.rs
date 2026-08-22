@@ -431,9 +431,9 @@ impl PackPayloadSource for AuthoritySelectedPackPayload {
 #[derive(Debug)]
 pub enum NodePackMaterializationRefusal {
     /// The exact-head admission materialization was unavailable or invalid.
-    Admission(AdmissionMaterializationRefusal),
+    Admission(Box<AdmissionMaterializationRefusal>),
     /// The bounded deterministic pack planner or writer refused the closure.
-    Pack(PackWriteError),
+    Pack(Box<PackWriteError>),
 }
 
 impl Display for NodePackMaterializationRefusal {
@@ -448,9 +448,21 @@ impl Display for NodePackMaterializationRefusal {
 impl Error for NodePackMaterializationRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Admission(error) => Some(error),
-            Self::Pack(error) => Some(error),
+            Self::Admission(error) => Some(error.as_ref()),
+            Self::Pack(error) => Some(error.as_ref()),
         }
+    }
+}
+
+impl From<AdmissionMaterializationRefusal> for NodePackMaterializationRefusal {
+    fn from(value: AdmissionMaterializationRefusal) -> Self {
+        Self::Admission(Box::new(value))
+    }
+}
+
+impl From<PackWriteError> for NodePackMaterializationRefusal {
+    fn from(value: PackWriteError) -> Self {
+        Self::Pack(Box::new(value))
     }
 }
 
@@ -468,7 +480,7 @@ pub enum AdmissionMaterializationRefusal {
     /// The authenticated receipt could not be decoded as its typed head.
     HeadBody(fgit_authority::HeadBodyRefusal),
     /// Reading an authority-addressed head or decision body refused.
-    DecisionHistory(fgit_authority::OutcomeFailure),
+    DecisionHistory(Box<fgit_authority::OutcomeFailure>),
     /// A decoded head and batch did not satisfy the chronicle successor rules.
     DecisionHistoryVerification(fgit_chronicle::ChronicleRefusal),
     /// The authenticated head belongs to a different repository.
@@ -579,7 +591,7 @@ impl Error for AdmissionMaterializationRefusal {
         match self {
             Self::Authority(error) => Some(error),
             Self::HeadBody(error) => Some(error),
-            Self::DecisionHistory(error) => Some(error),
+            Self::DecisionHistory(error) => Some(error.as_ref()),
             Self::DecisionHistoryVerification(error) => Some(error),
             Self::HeadIdentity(error)
             | Self::CommitIdentity(error)
@@ -1087,11 +1099,11 @@ where
 
         walked = walked.saturating_add(1);
         if walked > fgit_authority::MAX_REPLAY_BATCHES {
-            return Err(AdmissionMaterializationRefusal::DecisionHistory(
+            return Err(AdmissionMaterializationRefusal::DecisionHistory(Box::new(
                 fgit_authority::OutcomeFailure::ReplayBoundExceeded {
                     limit: fgit_authority::MAX_REPLAY_BATCHES,
                 },
-            ));
+            )));
         }
         let predecessor_id = successor
             .predecessor_head_id
@@ -1099,11 +1111,11 @@ where
         ensure_materializer_catch_up_live(is_cancelled)?;
         let predecessor = read_authority_head_body_async(authority, cx, predecessor_id)
             .await
-            .map_err(AdmissionMaterializationRefusal::DecisionHistory)?;
+            .map_err(|error| AdmissionMaterializationRefusal::DecisionHistory(Box::new(error)))?;
         ensure_materializer_catch_up_live(is_cancelled)?;
         let batch = read_decision_batch_body_async(authority, cx, batch_id)
             .await
-            .map_err(AdmissionMaterializationRefusal::DecisionHistory)?;
+            .map_err(|error| AdmissionMaterializationRefusal::DecisionHistory(Box::new(error)))?;
         let basis = PublicationBasis::new(predecessor_id, predecessor.clone());
         verify_pair(&CryptoBodyIdentity, &basis, &batch, &successor)
             .map_err(AdmissionMaterializationRefusal::DecisionHistoryVerification)?;
@@ -2515,7 +2527,7 @@ impl OneNode {
         let materialized = self
             .materialize_admission_in(request)
             .await
-            .map_err(NodePackMaterializationRefusal::Admission)?;
+            .map_err(NodePackMaterializationRefusal::from)?;
         let pack_context = request.authority().create_child();
         let mut is_live = || pack_context.checkpoint().is_ok();
         self.materialize_selected_pack(&materialized, &mut is_live)
@@ -2541,7 +2553,7 @@ impl OneNode {
             maximum_object_bytes: limits.max_object_bytes.min(configured_limit),
         };
         let ids = selected_pack_ids(materialized.selected_closure().closure(), &limits)
-            .map_err(NodePackMaterializationRefusal::Pack)?;
+            .map_err(NodePackMaterializationRefusal::from)?;
         let planner = PackPlanner::new(
             self.object_format,
             PackWriteProfile::STORED_V1,
@@ -2549,10 +2561,10 @@ impl OneNode {
         );
         let plan = planner
             .plan_selected(&source, &ids, is_live)
-            .map_err(NodePackMaterializationRefusal::Pack)?;
+            .map_err(NodePackMaterializationRefusal::from)?;
         let (bytes, receipt) = PackWriter::new(limits)
             .write(&plan, is_live)
-            .map_err(NodePackMaterializationRefusal::Pack)?;
+            .map_err(NodePackMaterializationRefusal::from)?;
         Ok(AuthoritySelectedPackPayload {
             basis: materialized.basis().clone(),
             closure: materialized.selected_closure().clone(),
@@ -3848,6 +3860,13 @@ mod tests {
         record.object_closure_root = closure_root;
         record.resulting_forge_position_root = first_basis.body().forge_position_root;
         record.policy_epoch = first_basis.body().policy_epoch;
+        // `PublicationPlan::commit` stamps these fields. Bind them before
+        // deriving the RCR identity too: otherwise the decision names a
+        // pre-stamp record while the batch carries a different post-stamp one.
+        record.repository_sequence = first_basis
+            .open_repository_sequence()
+            .expect("genesis leaves the first repository sequence open");
+        record.parent_rcr_id = first_basis.body().latest_committed_rcr_id;
         let record_id = super::repository_commit_id(&record).expect("RCR re-identifies");
         let mut roots = ResultingRoots::carried_forward(&first_basis, digest_of(0x91));
         roots.ref_root = ref_root;
@@ -4111,6 +4130,7 @@ mod tests {
             node.admission_projection(),
             &limits,
         ));
+        require_send(node.authority_selected_pack_payload_in(&request));
         node.shutdown().expect("node closes cleanly");
     }
 
