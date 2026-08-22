@@ -85,7 +85,8 @@ pub use crate::admission::{
 pub use crate::async_contract::{AsyncAuthorityStore, DuplicateAbsenceWitness};
 pub use crate::contract::{
     AuthorityLimits, AuthorityStore, CasResolution, FaultableAuthorityStore, PutResolution,
-    ambiguity_of, refusal_of, resolve_ambiguous_cas, resolve_ambiguous_put,
+    ambiguity_of, refusal_of, resolve_ambiguous_cas, resolve_ambiguous_cas_async,
+    resolve_ambiguous_put, resolve_ambiguous_put_async,
 };
 pub use crate::identity::{
     IdempotencyKey, IdentityRefusal, MAX_IDEMPOTENCY_KEY_BYTES, TxIdPreimage, canonical_body_id,

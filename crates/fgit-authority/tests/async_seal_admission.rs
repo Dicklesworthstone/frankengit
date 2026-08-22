@@ -1,4 +1,10 @@
-//! The async seal/admission surface, driven beside the sync one over identical state.
+//! The async-surface equivalence suite: seal, admission, and ambiguity resolution.
+//!
+//! One `AsyncView` fixture serves all three. A second or third copy of a
+//! delegating view would be free to drift from the first, which is the defect
+//! class these tests exist to prevent -- so the file's scope is "the async
+//! surface" rather than any one module of it, despite the name it was created
+//! under.
 //!
 //! `FsqliteAuthorityStore` implements [`AsyncAuthorityStore`] only, so a node
 //! that must seal a request and record its admission before publishing its
@@ -25,11 +31,13 @@ use std::future::Future;
 use fgit_authority::{
     AdmissionInstant, AdmissionReceiptBody, AsyncAuthorityStore, AuthenticatedHead,
     AuthorityFailure, AuthorityLimits, AuthorityStore, AuthorityVersionToken, CasOutcome,
-    DuplicateAbsenceWitness, ExpectedOld, HeadInit, HeadKey, HeadRead, HeadReadReceipt,
-    IdempotencyKey, ImmutableKey, ImmutableRead, MemoryAuthorityStore, ProposedNew, PutOutcome,
-    RefCommand, RequestRejection, SealAdmission, SealAttempt, SealFailure, SemanticRequest,
-    StoreInstanceId, admission_key, read_admission, read_admission_async, read_seal_async,
-    record_admission, record_admission_async, seal_request, seal_request_async,
+    CasResolution, DuplicateAbsenceWitness, ExpectedOld, HeadInit, HeadKey, HeadRead,
+    HeadReadReceipt, IdempotencyKey, ImmutableKey, ImmutableRead, MemoryAuthorityStore,
+    ProposedNew, PutOutcome, PutResolution, RefCommand, RequestRejection, SealAdmission,
+    SealAttempt, SealFailure, SemanticRequest, StoreInstanceId, admission_key, read_admission,
+    read_admission_async, read_seal_async, record_admission, record_admission_async,
+    resolve_ambiguous_cas, resolve_ambiguous_cas_async, resolve_ambiguous_put,
+    resolve_ambiguous_put_async, seal_request, seal_request_async,
 };
 use fgit_codec::wire::encode_body;
 use fgit_types::identity::{PrincipalId, RepositoryId, TenantId, TransactionSealId};
@@ -444,5 +452,271 @@ fn an_absent_admission_reads_as_none_on_both_surfaces() {
     assert_eq!(
         sync_read, async_read,
         "the surfaces must agree that an unadmitted seal reads as None"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ambiguity resolution (frankengit-08gg)
+// ---------------------------------------------------------------------------
+//
+// §5.2: "Client cancellation/disconnect never proves non-commit." A node over a
+// durable backend meets `AuthorityFailure::Ambiguous` on any timeout, and the
+// resolution protocol existed only over `AuthorityStore` — so the one place the
+// rule is most needed had no published way to apply it.
+//
+// The corpus below reaches four distinct CAS answers and three put answers, so
+// agreement between the surfaces is not satisfied by a pair that returns one
+// constant.
+
+fn head_slot() -> HeadKey {
+    HeadKey::new(b"fg/head/v1/ambiguity".to_vec()).expect("an admissible head key")
+}
+
+fn immutable_slot() -> ImmutableKey {
+    ImmutableKey::new(b"fg/body/v1/ambiguity".to_vec()).expect("an admissible immutable key")
+}
+
+/// A store with a head at `generation` carrying `body`.
+fn store_with_head(generation: u64, body: &[u8]) -> MemoryAuthorityStore {
+    let backing = store();
+    backing
+        .initialize_head(
+            &head_slot(),
+            HeadGeneration::try_new(generation).expect("a positive generation"),
+            body,
+        )
+        .expect("the head initializes");
+    backing
+}
+
+/// A stable label for a CAS resolution, so the surfaces compare by shape.
+const fn cas_label(r: &CasResolution) -> &'static str {
+    match r {
+        CasResolution::Applied(_) => "applied",
+        CasResolution::NotApplied(_) => "not-applied",
+        CasResolution::Superseded(_) => "superseded",
+        CasResolution::HeadAbsent => "head-absent",
+    }
+}
+
+const fn put_label(r: &PutResolution) -> &'static str {
+    match r {
+        PutResolution::PresentIdentical => "present-identical",
+        PutResolution::PresentConflicting(_) => "present-conflicting",
+        PutResolution::Absent => "absent",
+    }
+}
+
+/// One ambiguous-put case: a label, the slot's seed (if any), the proposal, and
+/// the resolution it must reach.
+type PutCase = (
+    &'static str,
+    Option<&'static [u8]>,
+    &'static [u8],
+    &'static str,
+);
+
+/// One ambiguous-CAS case: a label, the head to seed (if any), and the proposal.
+type CasCase = (
+    &'static str,
+    Option<(u64, &'static [u8])>,
+    u64,
+    &'static [u8],
+);
+
+/// The four CAS cases: absent head, exact match, head behind, head ahead.
+fn cas_corpus() -> Vec<CasCase> {
+    vec![
+        ("no head at all", None, 4, b"proposed"),
+        ("exact match", Some((4, b"proposed")), 4, b"proposed"),
+        (
+            "head behind the proposal",
+            Some((3, b"older")),
+            4,
+            b"proposed",
+        ),
+        (
+            "head past the proposal",
+            Some((7, b"newer")),
+            4,
+            b"proposed",
+        ),
+    ]
+}
+
+#[test]
+fn the_cas_corpus_reaches_every_resolution() {
+    // Non-vacuity: without four distinct answers, agreement below is satisfied
+    // by two surfaces that always say the same thing.
+    let labels: Vec<&str> = cas_corpus()
+        .into_iter()
+        .map(|(_, seeded, generation, body)| {
+            let backing = seeded.map_or_else(store, |(g, b)| store_with_head(g, b));
+            let resolved = resolve_ambiguous_cas(
+                &backing,
+                &head_slot(),
+                HeadGeneration::try_new(generation).expect("positive"),
+                body,
+            )
+            .expect("the resolution completes");
+            cas_label(&resolved)
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["head-absent", "applied", "not-applied", "superseded"],
+        "the corpus must reach all four CAS resolutions, or agreement on it proves nothing"
+    );
+}
+
+#[test]
+fn both_surfaces_resolve_an_ambiguous_cas_identically() {
+    for (case, seeded, generation, body) in cas_corpus() {
+        let sync_backing = seeded.map_or_else(store, |(g, b)| store_with_head(g, b));
+        let sync = resolve_ambiguous_cas(
+            &sync_backing,
+            &head_slot(),
+            HeadGeneration::try_new(generation).expect("positive"),
+            body,
+        )
+        .expect("the sync resolution completes");
+
+        let view = AsyncView(seeded.map_or_else(store, |(g, b)| store_with_head(g, b)));
+        let asynchronous = poll_ready(resolve_ambiguous_cas_async(
+            &view,
+            &(),
+            &head_slot(),
+            HeadGeneration::try_new(generation).expect("positive"),
+            body,
+        ))
+        .expect("the async resolution completes");
+
+        assert_eq!(
+            cas_label(&sync),
+            cas_label(&asynchronous),
+            "{case}: the surfaces disagree about whether an ambiguous CAS applied. §5.2 admits one \
+             resolution protocol, not one per runtime"
+        );
+    }
+}
+
+#[test]
+fn a_head_past_the_proposal_is_superseded_and_not_guessed_on_either_surface() {
+    // The case that matters most, called out separately because it is the one a
+    // reimplementation gets wrong: storage CANNOT say whether the attempt
+    // linearized and was then superseded, or never linearized. Reporting
+    // NotApplied here would assert non-commit — exactly what §5.2 forbids.
+    let seeded = || store_with_head(7, b"newer");
+    let proposed = HeadGeneration::try_new(4).expect("positive");
+
+    let sync = resolve_ambiguous_cas(&seeded(), &head_slot(), proposed, b"proposed")
+        .expect("sync resolution");
+    let view = AsyncView(seeded());
+    let asynchronous = poll_ready(resolve_ambiguous_cas_async(
+        &view,
+        &(),
+        &head_slot(),
+        proposed,
+        b"proposed",
+    ))
+    .expect("async resolution");
+
+    assert!(
+        matches!(sync, CasResolution::Superseded(_)),
+        "a head past the proposal must be Superseded, never NotApplied: storage cannot prove \
+         non-commit and §5.2 sends this to the outcome index"
+    );
+    assert_eq!(
+        cas_label(&sync),
+        cas_label(&asynchronous),
+        "and the production surface must not guess where the verification surface refuses to"
+    );
+}
+
+#[test]
+fn both_surfaces_resolve_an_ambiguous_put_identically() {
+    let cases: Vec<PutCase> = vec![
+        ("empty slot", None, b"proposed", "absent"),
+        (
+            "same bytes",
+            Some(b"proposed"),
+            b"proposed",
+            "present-identical",
+        ),
+        (
+            "other bytes",
+            Some(b"somebody else"),
+            b"proposed",
+            "present-conflicting",
+        ),
+    ];
+    let mut seen = Vec::new();
+    for (case, seeded, proposed, expected) in cases {
+        let build = || {
+            let backing = store();
+            if let Some(bytes) = seeded {
+                backing
+                    .put_if_absent(&immutable_slot(), bytes)
+                    .expect("the seed write lands");
+            }
+            backing
+        };
+        let sync =
+            resolve_ambiguous_put(&build(), &immutable_slot(), proposed).expect("sync resolution");
+        let view = AsyncView(build());
+        let asynchronous = poll_ready(resolve_ambiguous_put_async(
+            &view,
+            &(),
+            &immutable_slot(),
+            proposed,
+        ))
+        .expect("async resolution");
+
+        assert_eq!(
+            put_label(&sync),
+            expected,
+            "{case}: unexpected sync resolution"
+        );
+        assert_eq!(
+            put_label(&sync),
+            put_label(&asynchronous),
+            "{case}: the surfaces disagree about whether an ambiguous put applied"
+        );
+        seen.push(put_label(&sync));
+    }
+    assert_eq!(
+        seen,
+        vec!["absent", "present-identical", "present-conflicting"],
+        "the put corpus must reach all three resolutions, or the agreement above is vacuous"
+    );
+}
+
+#[test]
+fn a_conflicting_put_hands_back_the_bytes_that_are_actually_there() {
+    // Shape agreement is not enough: PresentConflicting carries the observed
+    // body, and a caller diagnosing an ambiguous write needs the real bytes
+    // rather than an empty vector that happens to match on shape.
+    let build = || {
+        let backing = store();
+        backing
+            .put_if_absent(&immutable_slot(), b"somebody else")
+            .expect("the seed write lands");
+        backing
+    };
+    let view = AsyncView(build());
+    let asynchronous = poll_ready(resolve_ambiguous_put_async(
+        &view,
+        &(),
+        &immutable_slot(),
+        b"proposed",
+    ))
+    .expect("async resolution");
+
+    let PutResolution::PresentConflicting(found) = asynchronous else {
+        panic!("a different body must resolve as PresentConflicting; got {asynchronous:?}");
+    };
+    assert_eq!(
+        found, b"somebody else",
+        "the resolution must carry the bytes the slot actually holds"
     );
 }

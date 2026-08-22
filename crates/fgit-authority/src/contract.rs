@@ -340,18 +340,37 @@ pub fn resolve_ambiguous_cas<S>(
 where
     S: AuthorityStore + ?Sized,
 {
-    match store.read_head(key)? {
-        HeadRead::Absent => Ok(CasResolution::HeadAbsent),
-        HeadRead::Present(receipt) => {
-            let current = receipt.generation();
-            if current == proposed_generation && receipt.body() == proposed_body {
-                Ok(CasResolution::Applied(receipt))
-            } else if current < proposed_generation {
-                Ok(CasResolution::NotApplied(receipt))
-            } else {
-                Ok(CasResolution::Superseded(receipt))
-            }
-        }
+    Ok(classify_cas_resolution(
+        store.read_head(key)?,
+        proposed_generation,
+        proposed_body,
+    ))
+}
+
+/// What an observed head means for a proposal whose outcome was ambiguous.
+///
+/// The shared decision core. §5.2 says client cancellation never proves
+/// non-commit, so this is the rule that decides whether it committed — and a
+/// second copy of it, one per runtime, is the way a node ends up concluding
+/// "not applied" about a transaction that did apply.
+///
+/// It never guesses: a head past the proposal reports
+/// [`CasResolution::Superseded`] and leaves the decision to the outcome index.
+fn classify_cas_resolution(
+    read: HeadRead,
+    proposed_generation: HeadGeneration,
+    proposed_body: &[u8],
+) -> CasResolution {
+    let HeadRead::Present(receipt) = read else {
+        return CasResolution::HeadAbsent;
+    };
+    let current = receipt.generation();
+    if current == proposed_generation && receipt.body() == proposed_body {
+        CasResolution::Applied(receipt)
+    } else if current < proposed_generation {
+        CasResolution::NotApplied(receipt)
+    } else {
+        CasResolution::Superseded(receipt)
     }
 }
 
@@ -364,16 +383,85 @@ pub fn resolve_ambiguous_put<S>(
 where
     S: AuthorityStore + ?Sized,
 {
-    match store.read_immutable(key)? {
-        ImmutableRead::Absent => Ok(PutResolution::Absent),
-        ImmutableRead::Present(body) => {
-            if body == proposed_body {
-                Ok(PutResolution::PresentIdentical)
-            } else {
-                Ok(PutResolution::PresentConflicting(body))
-            }
-        }
+    Ok(classify_put_resolution(
+        store.read_immutable(key)?,
+        proposed_body,
+    ))
+}
+
+/// What an observed slot means for a put whose outcome was ambiguous.
+///
+/// The shared decision core, for the same reason as
+/// [`classify_cas_resolution`]: an ambiguous write is resolved by reading, and
+/// the reading must mean the same thing on both surfaces.
+fn classify_put_resolution(read: ImmutableRead, proposed_body: &[u8]) -> PutResolution {
+    let ImmutableRead::Present(body) = read else {
+        return PutResolution::Absent;
+    };
+    if body == proposed_body {
+        PutResolution::PresentIdentical
+    } else {
+        PutResolution::PresentConflicting(body)
     }
+}
+
+// --- the production surface -------------------------------------------------
+//
+// §5.2: "Client cancellation/disconnect never proves non-commit." A node over a
+// durable backend meets `AuthorityFailure::Ambiguous` on any timeout, and until
+// now the resolution protocol existed only over `AuthorityStore`.
+// `FsqliteAuthorityStore` implements `AsyncAuthorityStore` only, so the one
+// place the rule is most needed — a real network or database timeout in
+// production — had no published way to apply it.
+//
+// Both surfaces call the same classifier above. Only the read differs.
+
+/// Resolve an ambiguous conditional replacement by exact-key read, asynchronously.
+///
+/// The asynchronous twin of [`resolve_ambiguous_cas`]. Same classification, same
+/// refusal to guess: a head past the proposal is [`CasResolution::Superseded`]
+/// and the decision belongs to the outcome index.
+///
+/// # Errors
+///
+/// Whatever the store's head read refuses.
+pub async fn resolve_ambiguous_cas_async<S>(
+    store: &S,
+    cx: &S::Context,
+    key: &HeadKey,
+    proposed_generation: HeadGeneration,
+    proposed_body: &[u8],
+) -> Result<CasResolution, AuthorityFailure>
+where
+    S: crate::async_contract::AsyncAuthorityStore + ?Sized,
+{
+    Ok(classify_cas_resolution(
+        store.read_head(cx, key).await?,
+        proposed_generation,
+        proposed_body,
+    ))
+}
+
+/// Resolve an ambiguous put-if-absent by exact-key read, asynchronously.
+///
+/// The asynchronous twin of [`resolve_ambiguous_put`].
+///
+/// # Errors
+///
+/// Whatever the store's immutable read refuses.
+pub async fn resolve_ambiguous_put_async<S>(
+    store: &S,
+    cx: &S::Context,
+    key: &ImmutableKey,
+    proposed_body: &[u8],
+) -> Result<PutResolution, AuthorityFailure>
+where
+    S: crate::async_contract::AsyncAuthorityStore + ?Sized,
+{
+    Ok(classify_put_resolution(
+        store.read_immutable(cx, key).await?,
+        proposed_body,
+    ))
 }
 
 /// Convenience re-statement used by the conformance suite and by callers that
