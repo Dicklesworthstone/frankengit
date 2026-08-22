@@ -1207,12 +1207,20 @@ fn validate_capability_value(
                 });
             }
         }
-        _ if capability.value.is_some() => {
-            return Err(ReceiveError::CapabilityValueForbidden {
-                capability: capability.name.clone(),
-            });
+        ReceiveCapability::ReportStatus
+        | ReceiveCapability::ReportStatusV2
+        | ReceiveCapability::SideBand64k
+        | ReceiveCapability::Quiet
+        | ReceiveCapability::Atomic
+        | ReceiveCapability::OfsDelta
+        | ReceiveCapability::PushOptions
+        | ReceiveCapability::DeleteRefs => {
+            if capability.value.is_some() {
+                return Err(ReceiveError::CapabilityValueForbidden {
+                    capability: capability.name.clone(),
+                });
+            }
         }
-        _ => {}
     }
     Ok(())
 }

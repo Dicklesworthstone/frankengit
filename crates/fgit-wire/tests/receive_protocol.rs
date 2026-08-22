@@ -581,6 +581,92 @@ fn planted_protocol_negatives_refuse_before_admission_or_unbounded_storage() {
 }
 
 #[test]
+fn unknown_client_capability_refuses_and_supported_twin_proceeds() {
+    let mut refused = ReceivePack::new(context(b"report-status")).expect("machine");
+    assert_eq!(
+        refused.push_packet(command(
+            OLD,
+            NEW,
+            "refs/heads/main",
+            Some("made-up-extension"),
+        )),
+        Err(ReceiveError::UnsupportedCapability {
+            capability: b"made-up-extension".to_vec(),
+        })
+    );
+    assert_eq!(refused.phase(), ReceivePhase::Refused);
+
+    let mut permitted = ReceivePack::new(context(b"report-status")).expect("machine");
+    permitted
+        .push_packet(command(OLD, NEW, "refs/heads/main", Some("report-status")))
+        .expect("advertised supported capability");
+    let request = ready_request(&mut permitted);
+    assert!(request.has_capability(b"report-status"));
+}
+
+#[test]
+fn unadvertised_client_capability_refuses_and_advertised_twin_proceeds() {
+    let mut refused = ReceivePack::new(context(b"report-status")).expect("machine");
+    assert_eq!(
+        refused.push_packet(command(OLD, NEW, "refs/heads/main", Some("atomic"))),
+        Err(ReceiveError::CapabilityNotAdvertised {
+            capability: b"atomic".to_vec(),
+        })
+    );
+    assert_eq!(refused.phase(), ReceivePhase::Refused);
+
+    let mut permitted = ReceivePack::new(context(b"report-status atomic")).expect("machine");
+    permitted
+        .push_packet(command(OLD, NEW, "refs/heads/main", Some("atomic")))
+        .expect("advertised capability");
+    let request = ready_request(&mut permitted);
+    assert!(request.has_capability(b"atomic"));
+}
+
+#[test]
+fn agent_client_capability_requires_a_value_and_valued_twin_proceeds() {
+    let mut refused = ReceivePack::new(context(b"agent=server")).expect("machine");
+    assert_eq!(
+        refused.push_packet(command(OLD, NEW, "refs/heads/main", Some("agent"))),
+        Err(ReceiveError::CapabilityValueRequired {
+            capability: b"agent".to_vec(),
+        })
+    );
+    assert_eq!(refused.phase(), ReceivePhase::Refused);
+
+    let mut permitted = ReceivePack::new(context(b"agent=server")).expect("machine");
+    permitted
+        .push_packet(command(OLD, NEW, "refs/heads/main", Some("agent=client")))
+        .expect("valued agent capability");
+    let request = ready_request(&mut permitted);
+    assert!(request.has_capability(b"agent"));
+}
+
+#[test]
+fn valueless_client_capability_refuses_a_value_and_plain_twin_proceeds() {
+    let mut refused = ReceivePack::new(context(b"report-status")).expect("machine");
+    assert_eq!(
+        refused.push_packet(command(
+            OLD,
+            NEW,
+            "refs/heads/main",
+            Some("report-status=unexpected"),
+        )),
+        Err(ReceiveError::CapabilityValueForbidden {
+            capability: b"report-status".to_vec(),
+        })
+    );
+    assert_eq!(refused.phase(), ReceivePhase::Refused);
+
+    let mut permitted = ReceivePack::new(context(b"report-status")).expect("machine");
+    permitted
+        .push_packet(command(OLD, NEW, "refs/heads/main", Some("report-status")))
+        .expect("valueless report-status capability");
+    let request = ready_request(&mut permitted);
+    assert!(request.has_capability(b"report-status"));
+}
+
+#[test]
 fn empty_repository_advertisement_has_capability_pseudo_ref_and_is_reproducible() {
     let context = context(b"report-status delete-refs");
     let first = advertise_receive_pack(Vec::new(), &context).expect("first advertisement");
