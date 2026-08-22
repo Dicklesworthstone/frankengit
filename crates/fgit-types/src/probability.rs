@@ -80,6 +80,19 @@ mod tests {
     }
 
     #[test]
+    fn checked_constructor_admits_the_whole_range_including_certainty() {
+        assert_eq!(Probability::try_new(0), Ok(Probability::ZERO));
+        assert_eq!(
+            Probability::try_new(500_000).map(Probability::parts_per_million),
+            Ok(500_000)
+        );
+        assert_eq!(
+            Probability::try_new(PARTS_PER_MILLION),
+            Ok(Probability::ONE)
+        );
+    }
+
+    #[test]
     fn explicit_saturating_constructor_preserves_the_bounded_counter_path() {
         assert_eq!(
             Probability::saturating_from_parts_per_million(PARTS_PER_MILLION + 1),
