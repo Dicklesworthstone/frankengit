@@ -53,7 +53,8 @@ use fgit_reference::effect::{
 };
 use fgit_reference::harness::{IdentityMint, RequestBuilder, label};
 use fgit_reference::intent::{
-    IdempotencyKey, Intent, OutboxDeliveryKey, OutboxIntent, RefIntent, TransactionRequest,
+    ForgeEntityId, ForgeEventKind, ForgeIntent, ForgeStreamId, ForgeStreamPosition, IdempotencyKey,
+    Intent, OutboxDeliveryKey, OutboxIntent, RefIntent, TransactionRequest,
 };
 use fgit_reference::refs::ExpectedRefState;
 use fgit_txn::IntentEvaluator;
@@ -146,6 +147,8 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
     // caller ever seeds one, this must take it as a parameter or the two
     // sides start from different states and every disagreement is spurious.
     let mut outbox_scratch: BTreeMap<OutboxDeliveryKey, Digest> = BTreeMap::new();
+    // Forge positions, seeded from the same fixture the evaluator is given.
+    let mut forge_scratch: BTreeMap<ForgeStreamId, ForgeStreamPosition> = forge_basis();
     let mut aborted = false;
 
     'outer: for statement in &request.statements {
@@ -214,9 +217,63 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
                         identity_at_evaluation.push(true);
                         continue;
                     }
-                    // Stage 2 adds forge intents. Until then, loudly: a
-                    // placeholder disposition is precisely what made the
-                    // previous version of this arm wrong-in-waiting.
+                    Intent::Forge(forge) => {
+                        // Derived from the rule: a forge intent advances one
+                        // stream by one position, and may do so only from the
+                        // position the caller expected. Two refusals, in this
+                        // order, because a stale expectation is a different
+                        // fault from a stream that cannot advance at all.
+                        let current = forge_scratch
+                            .get(&forge.stream)
+                            .copied()
+                            .unwrap_or(ForgeStreamPosition::GENESIS);
+                        let refusal = if current != forge.expected_position {
+                            Some(RefusalCode::ForgeTransitionInvalid)
+                        } else if current.is_exhausted() {
+                            // NOT a general budget refusal despite the name --
+                            // forge-stream exhaustion specifically. An earlier
+                            // reading of this file guessed otherwise and would
+                            // have sent whoever extended it hunting for a
+                            // declared budget that does not exist.
+                            Some(RefusalCode::ResourceBudgetExceeded)
+                        } else {
+                            None
+                        };
+                        match refusal {
+                            // Same uniform policy routing as the outbox and ref
+                            // mismatches; effect.rs:296.
+                            Some(code) => match statement.mismatch_policy {
+                                MismatchPolicy::NoOp => {
+                                    dispositions.push(OracleDisposition::Absorbed(
+                                        AbsorptionReason::PreconditionMismatchNoOp,
+                                    ));
+                                }
+                                MismatchPolicy::StatementError => {
+                                    dispositions.push(OracleDisposition::StatementError(code));
+                                }
+                                MismatchPolicy::TxnAbort => {
+                                    dispositions.push(OracleDisposition::TransactionAborted);
+                                    touched.push(None);
+                                    identity_at_evaluation.push(true);
+                                    aborted = true;
+                                    break 'outer;
+                                }
+                            },
+                            None => {
+                                forge_scratch.insert(forge.stream, current.successor());
+                                dispositions.push(OracleDisposition::Surviving(
+                                    EffectTarget::ForgeStream(forge.stream),
+                                ));
+                            }
+                        }
+                        touched.push(None);
+                        identity_at_evaluation.push(true);
+                        continue;
+                    }
+                    // Retention roots remain unmodelled; the generator does not
+                    // emit them. Loudly, because a placeholder disposition is
+                    // precisely what made the original version of this arm
+                    // wrong-in-waiting.
                     other => panic!(
                         "the generator emitted {other:?}, which this oracle does not model. \
                          Extend the oracle in the same commit that extends the generator, or \
@@ -468,6 +525,49 @@ fn digest_of(tag: u8) -> Digest {
     Digest::new(algorithm, bytes)
 }
 
+/// The two forge streams the corpus drives.
+fn forge_stream(index: usize) -> ForgeStreamId {
+    ForgeStreamId::new(label(if index == 0 {
+        "forge-fresh"
+    } else {
+        "forge-exhausted"
+    }))
+}
+
+/// The forge basis, and it is a FIXTURE rather than generated data.
+///
+/// One stream is left absent so it reads as `GENESIS` and can advance
+/// normally. The other is seeded at `u64::MAX` **deliberately**, because
+/// `ResourceBudgetExceeded` fires only on a stream that `is_exhausted()` and
+/// scratch positions advance through a saturating `successor()` -- so
+/// exhaustion is 2^64 steps away and no generator will ever reach it by
+/// advancing. `FoldBasis::forge_positions` is caller-supplied and
+/// `ForgeStreamPosition::new` is public, which is the only reason that arm is
+/// reachable at all.
+///
+/// Stated at this length because the next reader would otherwise assume the
+/// generator produces exhaustion on its own, and quietly delete the seed.
+///
+/// Both the oracle and the evaluator must start from this same map or every
+/// forge disagreement is spurious.
+fn forge_basis() -> BTreeMap<ForgeStreamId, ForgeStreamPosition> {
+    let mut positions = BTreeMap::new();
+    positions.insert(forge_stream(1), ForgeStreamPosition::new(u64::MAX));
+    positions
+}
+
+/// A forge event with no cross-intent obligations.
+///
+/// `PullRequestOpened` on purpose: `PullRequestMerged` may only appear
+/// alongside a ref effect that moves its target, and a generator emitting it
+/// freely would be producing programs the specification does not admit.
+fn forge_event() -> ForgeEventKind {
+    ForgeEventKind::PullRequestOpened {
+        pull_request: ForgeEntityId::new(label("pr-1")),
+        target: ref_name("refs/heads/forge-target"),
+    }
+}
+
 fn generate_basis(rng: &mut Rng) -> BTreeMap<RefName, GitOid> {
     let mut basis = BTreeMap::new();
     for name in ref_alphabet() {
@@ -517,26 +617,60 @@ fn generate_request(
                     .map_or(ExpectedRefState::Absent, |o| ExpectedRefState::Exact(*o)),
                 _ => ExpectedRefState::Exact(oid(200)),
             };
-            // One intent in four is an outbox delivery, drawn from the tiny
-            // key/parameter alphabets above so that identical redelivery and
-            // key reuse both occur naturally rather than being hand-built.
-            if rng.below(4) == 0 {
-                intents.push(Intent::Outbox(OutboxIntent {
-                    delivery_key: delivery_key(rng.below(2)),
-                    parameters: digest_of(u8::try_from(rng.below(2)).expect("small")),
-                }));
-                continue;
-            }
-            intents.push(Intent::Ref(if rng.below(4) == 0 {
-                RefIntent::Delete { name, expected }
-            } else {
-                RefIntent::Update {
-                    name,
-                    expected,
-                    new: oid(u8::try_from(rng.below(3)).expect("small") + 1),
-                    force: rng.below(2) == 0,
+            // ONE draw selects the intent kind, and it must stay one draw.
+            //
+            // Stage 2 first added forge as a SECOND independent `rng.below(4)`
+            // beside the outbox one. Every property still passed and the
+            // equivalence campaign stayed green -- but the extra draw shifted
+            // the sequence and outbox collisions fell below the default bound's
+            // reach, so `EffectIdempotencyKeyReuse` silently stopped being
+            // reached. The taxonomy test caught it; nothing else would have.
+            //
+            // Independent per-kind draws make each kind's frequency depend on
+            // every other kind's, so adding a kind quietly reduces the coverage
+            // of the ones already there. A single selector keeps the weights
+            // explicit and local.
+            match rng.below(8) {
+                // Forge. The expected position is drawn from three values so
+                // all three outcomes occur naturally: matching a fresh stream
+                // advances it, matching the seeded exhausted stream hits the
+                // exhaustion arm, and anything else is a stale expectation.
+                0 | 1 => {
+                    let expected = match rng.below(3) {
+                        0 => ForgeStreamPosition::GENESIS,
+                        1 => ForgeStreamPosition::new(u64::MAX),
+                        // Neither stream's real position, so a guaranteed stale
+                        // expectation whichever stream it lands on.
+                        _ => ForgeStreamPosition::new(7),
+                    };
+                    intents.push(Intent::Forge(ForgeIntent {
+                        stream: forge_stream(rng.below(2)),
+                        expected_position: expected,
+                        event: forge_event(),
+                    }));
                 }
-            }));
+                // Outbox, from the tiny key/parameter alphabets above so that
+                // identical redelivery and key reuse both occur by collision
+                // rather than by hand-built programs.
+                2 | 3 => {
+                    intents.push(Intent::Outbox(OutboxIntent {
+                        delivery_key: delivery_key(rng.below(2)),
+                        parameters: digest_of(u8::try_from(rng.below(2)).expect("small")),
+                    }));
+                }
+                _ => {
+                    intents.push(Intent::Ref(if rng.below(4) == 0 {
+                        RefIntent::Delete { name, expected }
+                    } else {
+                        RefIntent::Update {
+                            name,
+                            expected,
+                            new: oid(u8::try_from(rng.below(3)).expect("small") + 1),
+                            force: rng.below(2) == 0,
+                        }
+                    }));
+                }
+            }
         }
         builder = builder.statement(policy, intents);
     }
@@ -593,9 +727,10 @@ fn programs() -> usize {
 /// specification asks for went untested.
 fn translate(disposition: &IntentDisposition) -> OracleDisposition {
     match disposition {
-        IntentDisposition::Surviving(target @ (EffectTarget::Ref(_) | EffectTarget::Outbox(_))) => {
-            OracleDisposition::Surviving(target.clone())
-        }
+        IntentDisposition::Surviving(
+            target
+            @ (EffectTarget::Ref(_) | EffectTarget::Outbox(_) | EffectTarget::ForgeStream(_)),
+        ) => OracleDisposition::Surviving(target.clone()),
         // A surviving effect at a target this model does not carry. The
         // original version mapped it silently onto StatementError, which would
         // have made an escaped model look like an ordinary refusal and agree
@@ -625,7 +760,7 @@ fn the_oracle_and_the_evaluator_agree_on_every_generated_program() {
         let basis = generate_basis(&mut rng);
         let request = generate_request(&mut rng, &mut identity_mint, &basis, "corpus");
 
-        let forge_positions = BTreeMap::new();
+        let forge_positions = forge_basis();
         let retention = BTreeSet::new();
         let outbox = BTreeMap::new();
         let fold_basis = FoldBasis {
@@ -830,7 +965,9 @@ fn identical_intents_receive_identical_dispositions() {
         .build(&mut mint);
 
         let basis = BTreeMap::new();
-        let forge = BTreeMap::new();
+        // Same fixture the oracle seeds, so these stay consistent if a forge
+        // intent is ever added to this hand-built request.
+        let forge = forge_basis();
         let retention = BTreeSet::new();
         let outbox = BTreeMap::new();
         let report = evaluator.evaluate(
@@ -952,7 +1089,8 @@ fn the_provenance_ambiguity_is_pinned_and_reproducible() {
     // disagreement has grown past provenance into semantics and is no longer
     // the question described above.
     let evaluator = IntentEvaluator::new();
-    let forge = BTreeMap::new();
+    // Same fixture the oracle seeds; see above.
+    let forge = forge_basis();
     let retention = BTreeSet::new();
     let outbox = BTreeMap::new();
     let report = evaluator.evaluate(
@@ -988,7 +1126,7 @@ const INTENT_REFUSAL_TAXONOMY: [RefusalCode; 4] = [
 ];
 
 #[test]
-fn the_intent_refusal_taxonomy_is_bounded_and_its_gaps_are_named() {
+fn the_intent_refusal_taxonomy_is_exhaustively_reached() {
     // The acceptance asks for a refusal corpus exhaustive over the taxonomy
     // relevant to intents. This states exactly how far that is met, because a
     // corpus reaching one of four codes while claiming exhaustiveness is worse
@@ -1016,17 +1154,22 @@ fn the_intent_refusal_taxonomy_is_bounded_and_its_gaps_are_named() {
     //                              with identical parameters is the separate
     //                              Absorbed(DuplicateIdenticalDelivery) arm.
     //
-    // STAGE 1 LANDED: the carrier now emits outbox intents, so
-    // EffectIdempotencyKeyReuse is reached, and DuplicateIdenticalDelivery
-    // with it. The two remaining gaps are both forge-only, and are stage 2.
+    // STAGE 2 LANDED: the carrier now emits forge transitions as well as
+    // outbox deliveries, and all four intent-relevant codes are reached. The
+    // acceptance line -- "exhaustive over the refusal taxonomy relevant to
+    // intents" -- is met by REACHING the taxonomy, not by narrowing it.
     //
-    // ResourceBudgetExceeded is reachable but needs a FIXTURE rather than
-    // just a forge intent: scratch positions advance by a saturating
-    // successor(), so exhaustion is 2^64 steps away and unreachable by
-    // advancing. `FoldBasis::forge_positions` is caller-supplied and
-    // `ForgeStreamPosition::new` is public, so stage 2 seeds one stream at
-    // u64::MAX deliberately and labels it as a fixture rather than letting
-    // it look like an ordinary generated basis.
+    // Worth keeping: the tempting way to "meet" this line was to shrink
+    // INTENT_REFUSAL_TAXONOMY to the one code a refs-only corpus reached.
+    // That is editing the gate to fit the result, and this constant is
+    // deliberately declared above the test so the two cannot be adjusted
+    // together without it being obvious in a diff.
+    //
+    // ResourceBudgetExceeded is reached only because `forge_basis()` seeds a
+    // stream at u64::MAX. Scratch positions advance through a saturating
+    // successor(), so no generator reaches exhaustion by advancing -- it is
+    // 2^64 steps away. Delete that seed and this test fails, which is the
+    // intended relationship between the two.
     let mut reached: BTreeSet<RefusalCode> = BTreeSet::new();
     for i in 0..programs() {
         let seed = CORPUS_SEED.wrapping_add(i as u64);
@@ -1047,34 +1190,24 @@ fn the_intent_refusal_taxonomy_is_bounded_and_its_gaps_are_named() {
          refs-only model can reach, and without it the statement-error arm is untested"
     );
 
-    assert!(
-        reached.contains(&RefusalCode::EffectIdempotencyKeyReuse),
-        "the corpus must reuse an outbox delivery key with DIFFERENT canonical parameters; \
-         stage 1 exists to reach exactly this code. Reached: {reached:?}"
-    );
-
-    const STAGE_ONE_REACHED: [RefusalCode; 2] = [
-        RefusalCode::ExpectedOldRefMismatch,
-        RefusalCode::EffectIdempotencyKeyReuse,
-    ];
-    let unreachable: Vec<RefusalCode> = INTENT_REFUSAL_TAXONOMY
-        .into_iter()
-        .filter(|code| !STAGE_ONE_REACHED.contains(code))
-        .collect();
-    for code in unreachable {
+    // Every code, named individually rather than by a set comparison, so a
+    // failure says WHICH code stopped being reached instead of reporting a
+    // set difference the reader has to decode.
+    for code in INTENT_REFUSAL_TAXONOMY {
         assert!(
-            !reached.contains(&code),
-            "{code:?} is now reachable. That is good news, but this test still records it \
-             as a gap, and both remaining codes are forge-only stage-2 work. Move it into \
-             STAGE_ONE_REACHED in the same commit that lands its coverage rather than \
-             leaving a stale assertion"
+            reached.contains(&code),
+            "{code:?} is in the intent-relevant taxonomy and the corpus no longer reaches \
+             it. Something narrowed the generator: check the intent-kind selector weights, \
+             the two-wide outbox key/parameter alphabets (collisions are what reach the \
+             outbox arms), and `forge_basis()`'s seeded exhausted stream. Reached: \
+             {reached:?}"
         );
     }
 
     assert_eq!(
         reached.len(),
-        STAGE_ONE_REACHED.len(),
-        "the stage-1 corpus should reach exactly the stage-1 codes of the four; \
+        INTENT_REFUSAL_TAXONOMY.len(),
+        "the corpus should reach exactly the four intent refusal codes; \
          reaching more means the model grew and this claim needs updating, reaching none \
          means the statement-error path went untested. Reached: {reached:?}"
     );
