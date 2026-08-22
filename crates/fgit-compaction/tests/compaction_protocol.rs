@@ -186,10 +186,10 @@ fn fixture_outcomes() -> (CumulativeOutcomes, fgit_authority::AuthorityVersionTo
 
 fn seal_fixture(
     plan: PublicationPlan,
-    roots: ResultingRoots,
+    roots: &ResultingRoots,
 ) -> fgit_chronicle::VerifiedPublication {
     let (outcomes, expected) = fixture_outcomes();
-    plan.seal(&CryptoBodyIdentity, roots, &outcomes, expected)
+    plan.seal(&CryptoBodyIdentity, roots.clone(), &outcomes, expected)
         .expect("ordinary compaction decision is well formed")
 }
 
@@ -199,7 +199,7 @@ fn publication(
 ) -> fgit_chronicle::VerifiedPublication {
     let mut plan = PublicationPlan::open(input).expect("authenticated basis opens a plan");
     plan.commit(commit_record(staged.compaction_generation_link()));
-    seal_fixture(plan, roots(Some(staged.compaction_generation_link())))
+    seal_fixture(plan, &roots(Some(staged.compaction_generation_link())))
 }
 
 fn current_token(
@@ -374,7 +374,7 @@ fn publication_without_rcr_evidence_link_stays_staged_even_when_batch_link_match
     let staged = stage(&input);
     let mut plan = PublicationPlan::open(input.clone()).expect("basis opens a plan");
     plan.commit(commit_record(digest(0x91)));
-    let publication = seal_fixture(plan, roots(Some(staged.compaction_generation_link())));
+    let publication = seal_fixture(plan, &roots(Some(staged.compaction_generation_link())));
     let head_key = HeadKey::new(b"fg079/no-rcr-link".to_vec()).expect("bounded head key");
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7b));
     initialize_repository(&store, &head_key, input.body()).expect("genesis initializes");
@@ -458,7 +458,7 @@ fn publication_with_link(
 ) -> fgit_chronicle::VerifiedPublication {
     let mut plan = PublicationPlan::open(input).expect("authenticated basis opens a plan");
     plan.commit(commit_record(link));
-    seal_fixture(plan, roots(Some(link)))
+    seal_fixture(plan, &roots(Some(link)))
 }
 
 /// A publication carrying only a refusal, so no committed RCR exists.
@@ -469,7 +469,7 @@ fn refusal_only_publication(input: PublicationBasis) -> fgit_chronicle::Verified
         RefusalCode::IntentExpired,
         derived!(RefusalRecordId, 0x72),
     );
-    seal_fixture(plan, roots(None))
+    seal_fixture(plan, &roots(None))
 }
 
 /// A store that is a **complete** delegate except for one deliberately

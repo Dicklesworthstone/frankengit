@@ -3246,11 +3246,12 @@ mod tests {
         // authentication shared by the publication basis and projection.
         // The atomic publisher now also reads the authenticated decision
         // stream to mint its duplicate-absence witness before it reaches the
-        // CAS, so the CAS is operation 11. Keeping that transcript explicit
+        // CAS. The post-stamp outcome fold then reads the exact carried stream,
+        // so the CAS is operation 12. Keeping that transcript explicit
         // makes a changed
         // authority call graph fail this planted-race test instead of silently
         // skipping it.
-        const PUBLISH_CAS_OPERATION: OpIndex = OpIndex::from_raw(11);
+        const PUBLISH_CAS_OPERATION: OpIndex = OpIndex::from_raw(12);
         let context = context();
         let store = store_with_genesis(&context);
         let projection = FixtureProjection::default();

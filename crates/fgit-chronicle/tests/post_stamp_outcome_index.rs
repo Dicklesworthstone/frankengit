@@ -10,9 +10,8 @@ use fgit_codec::{
     CryptoBodyIdentity, DecodeLimits, RepositoryAuthorityHeadBody, decode_body, encode_body,
 };
 use fgit_types::{
-    CANONICAL_CODEC_VERSION, DecisionOutcome, Digest, DigestAlgorithmId, DigestBytes,
-    HeadGeneration, OPAQUE_ID_LEN, PolicyEpoch, RefusalCode, RefusalRecordId, RegistryEpoch,
-    RepositoryId, TenantId, TxId,
+    CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, HeadGeneration, OPAQUE_ID_LEN,
+    PolicyEpoch, RefusalCode, RefusalRecordId, RegistryEpoch, RepositoryId, TenantId, TxId,
 };
 
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
@@ -70,7 +69,7 @@ fn genesis() -> RepositoryAuthorityHeadBody {
     }
 }
 
-fn roots(basis: &PublicationBasis) -> ResultingRoots {
+const fn roots(basis: &PublicationBasis) -> ResultingRoots {
     ResultingRoots::carried_forward(basis)
 }
 
@@ -197,7 +196,7 @@ fn authority_fold_uses_stamped_terminal_outcomes_and_survives_head_decode() {
     );
 }
 
-fn terminal_outcome(decision: &fgit_codec::RepositoryDecision) -> (TxId, TerminalOutcome) {
+const fn terminal_outcome(decision: &fgit_codec::RepositoryDecision) -> (TxId, TerminalOutcome) {
     (
         decision.tx_id,
         TerminalOutcome {

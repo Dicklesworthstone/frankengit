@@ -135,12 +135,12 @@ fn opened() -> (MemoryAuthorityStore, PublicationBasis) {
 fn seal_against(
     store: &MemoryAuthorityStore,
     plan: PublicationPlan,
-    roots: ResultingRoots,
+    roots: &ResultingRoots,
 ) -> VerifiedPublication {
     let outcomes =
         collect_cumulative_outcomes(store, &head_key()).expect("outcomes collect from the basis");
     let expected = current_token(store);
-    plan.seal(&CryptoBodyIdentity, roots, &outcomes, expected)
+    plan.seal(&CryptoBodyIdentity, roots.clone(), &outcomes, expected)
         .expect("the plan is well formed")
 }
 
@@ -151,7 +151,7 @@ fn candidate(
 ) -> VerifiedPublication {
     let mut plan = PublicationPlan::open(basis.clone()).expect("the basis opens");
     plan.commit(record(commit_tag));
-    seal_against(store, plan, roots())
+    seal_against(store, plan, &roots())
 }
 
 fn current_token(store: &MemoryAuthorityStore) -> fgit_authority::AuthorityVersionToken {
@@ -306,7 +306,7 @@ fn a_refusal_only_publication_advances_the_head_without_committing() {
         RefusalCode::QuotaExceeded,
         derived!(RefusalRecordId, 0x81),
     );
-    let publication = seal_against(&store, plan, ResultingRoots::carried_forward(&basis));
+    let publication = seal_against(&store, plan, &ResultingRoots::carried_forward(&basis));
     assert!(publication.is_refusal_only());
 
     let verdict = publish(

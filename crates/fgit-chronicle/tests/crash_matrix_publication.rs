@@ -136,7 +136,7 @@ fn committed_roots() -> ResultingRoots {
 
 /// Roots for a refusal-only batch: the source and forge roots are the ones the
 /// basis already published, because a refusal moves neither.
-fn refusal_only_roots(previous: &RepositoryAuthorityHeadBody) -> ResultingRoots {
+const fn refusal_only_roots(previous: &RepositoryAuthorityHeadBody) -> ResultingRoots {
     ResultingRoots {
         ref_root: previous.ref_root,
         forge_position_root: previous.forge_position_root,
@@ -176,11 +176,16 @@ fn opened(plan: FaultPlan) -> (MemoryAuthorityStore, PublicationBasis) {
 fn seal_against(
     store: &MemoryAuthorityStore,
     plan: PublicationPlan,
-    roots: ResultingRoots,
+    roots: &ResultingRoots,
 ) -> Result<VerifiedPublication, fgit_chronicle::ChronicleRefusal> {
     let outcomes =
         collect_cumulative_outcomes(store, &head_key()).expect("outcomes collect from the basis");
-    plan.seal(&CryptoBodyIdentity, roots, &outcomes, current_token(store))
+    plan.seal(
+        &CryptoBodyIdentity,
+        roots.clone(),
+        &outcomes,
+        current_token(store),
+    )
 }
 
 fn commit_candidate(
@@ -190,7 +195,7 @@ fn commit_candidate(
 ) -> VerifiedPublication {
     let mut plan = PublicationPlan::open(basis.clone()).expect("the basis opens");
     plan.commit(record(tag));
-    seal_against(store, plan, committed_roots()).expect("the plan is well formed")
+    seal_against(store, plan, &committed_roots()).expect("the plan is well formed")
 }
 
 fn current_token(store: &MemoryAuthorityStore) -> fgit_authority::AuthorityVersionToken {
@@ -474,7 +479,7 @@ fn a_publication_interrupted_inside_the_accelerator_leaves_every_decision_canoni
         RefusalCode::NonFastForwardRefused,
         derived!(RefusalRecordId, 0xc2),
     );
-    let candidate = seal_against(&store, plan, refusal_only_roots(&genesis()))
+    let candidate = seal_against(&store, plan, &refusal_only_roots(&genesis()))
         .expect("a refusal-only plan is well formed");
 
     let _ = publish(&store, &head_key(), token, &candidate, tenant());
@@ -662,7 +667,7 @@ fn a_cas_loser_replans_the_same_sealed_transaction_against_the_new_head() {
     let mut loser_record = record(0x9b);
     loser_record.tx_id = loser_tx;
     loser_plan.commit(loser_record.clone());
-    let loser = seal_against(&store, loser_plan, committed_roots())
+    let loser = seal_against(&store, loser_plan, &committed_roots())
         .expect("the loser's plan is well formed");
     let original_sequence = loser.batch().decisions[0].decision_sequence;
 
@@ -691,8 +696,8 @@ fn a_cas_loser_replans_the_same_sealed_transaction_against_the_new_head() {
     let new_basis = PublicationBasis::new(identity_of(&winner_head), winner_head);
     let mut replan = PublicationPlan::open(new_basis).expect("the new basis opens");
     replan.commit(loser_record);
-    let replanned =
-        seal_against(&store, replan, committed_roots()).expect("the replanned plan is well formed");
+    let replanned = seal_against(&store, replan, &committed_roots())
+        .expect("the replanned plan is well formed");
 
     assert_eq!(
         replanned.batch().decisions[0].tx_id,
@@ -731,7 +736,7 @@ fn a_refusal_only_batch_consumes_decision_sequence_and_moves_no_source_state() {
         RefusalCode::PublicationPolicyRefused,
         derived!(RefusalRecordId, 0x71),
     );
-    let candidate = seal_against(&store, plan, refusal_only_roots(&before))
+    let candidate = seal_against(&store, plan, &refusal_only_roots(&before))
         .expect("a refusal-only plan is well formed");
 
     let token = current_token(&store);
@@ -783,7 +788,7 @@ fn a_duplicate_transaction_cannot_be_assembled() {
     duplicate.tx_id = tx;
     plan.commit(duplicate);
 
-    let refusal = seal_against(&store, plan, committed_roots())
+    let refusal = seal_against(&store, plan, &committed_roots())
         .expect_err("one sealed transaction may not take two terminal decisions");
     assert!(
         format!("{refusal:?}").contains("DuplicateTransaction"),
@@ -805,7 +810,7 @@ fn a_duplicate_transaction_cannot_pass_the_audit_either() {
         RefusalCode::ExpectedOldRefMismatch,
         derived!(RefusalRecordId, 0x66),
     );
-    let sound = seal_against(&store, plan, refusal_only_roots(&genesis()))
+    let sound = seal_against(&store, plan, &refusal_only_roots(&genesis()))
         .expect("a single refusal is well formed");
 
     // Forge the duplicate directly in the body, bypassing the builder. The
