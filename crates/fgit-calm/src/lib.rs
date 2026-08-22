@@ -35,5 +35,5 @@
 pub mod class;
 pub mod lattice;
 
-pub use class::CoordinationClass;
+pub use class::{ConformanceDirection, CoordinationClass};
 pub use lattice::Observation;
