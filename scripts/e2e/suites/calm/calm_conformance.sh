@@ -99,8 +99,13 @@ fge_step first-party-type-matches-the-document
 # The crate's tags must be exactly the declared set -- no more, no fewer. A type
 # that admitted an eighth class would let code accept a row the document calls a
 # defect; one that omitted a class would refuse a legitimate row.
-calm_typed=$(LC_ALL=C grep -oE '=> "[a-z_]+"' "$CALM_SRC" |
-  LC_ALL=C sed -E 's/=> "([a-z_]+)"/\1/' | LC_ALL=C sort -u)
+# Scoped to CoordinationClass::tag() specifically. The file also declares
+# ConformanceDirection::tag(), whose arms have the identical shape, so an
+# unscoped grep reads direction tags as class tags -- which is exactly what it
+# did the first time this ran, and this check is what caught it.
+calm_typed=$(LC_ALL=C sed -n '/^impl CoordinationClass {/,/^}/p' "$CALM_SRC" |
+  LC_ALL=C sed -n '/pub const fn tag(self)/,/^    }/p' |
+  LC_ALL=C grep -oE '=> "[a-z_]+"' | LC_ALL=C sed -E 's/=> "([a-z_]+)"/\1/' | LC_ALL=C sort -u)
 calm_typed_count=$(printf '%s\n' "$calm_typed" | LC_ALL=C grep -c . || true)
 fge_field typed_classes "$calm_typed_count"
 
@@ -129,34 +134,82 @@ fi
 
 # -----------------------------------------------------------------------------
 fge_phase assert
-fge_step every-row-is-covered-by-its-class
+fge_step every-class-has-a-conformance-direction
 # -----------------------------------------------------------------------------
 # Acceptance: every row is exercised by a test matching its class. The crate
-# owns the semantics; this lane checks the pairing is total, so a row in a class
-# with no conformance coverage is visible from outside the crate.
+# dispatches each row through its class's declared ConformanceDirection, so the
+# question this lane can answer from outside is whether that mapping is TOTAL in
+# both directions -- every class assigned a direction, every direction actually
+# dispatched by the suite.
+#
+# This check exists because of a real defect, not a hypothetical one: the first
+# version of the suite dispatched with an if/else chain that tested convergence
+# first and coordination second, and `local_deterministic` -- which is
+# coordination-free AND non-convergent -- matched neither arm. CALM-012 was
+# exercised by nothing while the suite reported green.
 calm_suite="$CALM_REPO/crates/fgit-calm/tests/conformance.rs"
 fge_assert_file fg070-conformance-suite-present "$calm_suite" \
   "the conformance suite the registry rows are exercised by exists"
 
-calm_uncovered=""
-while IFS= read -r used; do
-  [ -n "$used" ] || continue
-  # Coordination-free classes are covered by the convergence direction;
-  # coordinated ones by the removed-coordination direction. Both must be
-  # named in the suite, or a class is classified but never exercised.
-  LC_ALL=C grep -q "converges_under_reorder_duplicate_drop" "$calm_suite" &&
-    LC_ALL=C grep -q "removing_coordination_breaks_it" "$calm_suite" ||
-    calm_uncovered="$calm_uncovered $used"
+# The declared directions, read from the enum in the crate.
+calm_directions=$(LC_ALL=C sed -n '/^pub enum ConformanceDirection {/,/^}/p' "$CALM_SRC" |
+  LC_ALL=C grep -oE '^    [A-Z][A-Za-z]*,' | LC_ALL=C tr -d ' ,' | LC_ALL=C sort -u)
+calm_direction_count=$(printf '%s\n' "$calm_directions" | LC_ALL=C grep -c . || true)
+fge_field declared_directions "$calm_direction_count"
+
+# Non-vacuity: an empty parse would make every membership test below pass.
+if [ "$calm_direction_count" -lt 2 ]; then
+  fge_fail fg070-directions-parsed \
+    "parsed $calm_direction_count conformance directions; the checks below would be vacuous"
+else
+  fge_pass fg070-directions-parsed \
+    "parsed $calm_direction_count declared conformance directions from the crate"
+fi
+
+# Every declared direction must be dispatched by the suite. A direction with no
+# arm is a check nothing runs.
+calm_undispatched=""
+while IFS= read -r direction; do
+  [ -n "$direction" ] || continue
+  LC_ALL=C grep -q "ConformanceDirection::$direction =>" "$calm_suite" ||
+    calm_undispatched="$calm_undispatched $direction"
 done <<EOF
-$calm_used
+$calm_directions
 EOF
 
-if [ -n "$calm_uncovered" ]; then
-  fge_fail fg070-classes-have-conformance-directions \
-    "classes present in the registry with no conformance direction:$calm_uncovered"
+if [ -n "$calm_undispatched" ]; then
+  fge_fail fg070-directions-are-dispatched \
+    "declared directions the conformance suite never dispatches:$calm_undispatched"
 else
-  fge_pass fg070-classes-have-conformance-directions \
-    "both conformance directions are present for the classes the registry uses"
+  fge_pass fg070-directions-are-dispatched \
+    "all $calm_direction_count declared directions are dispatched by the suite"
+fi
+
+# ...and every class must be assigned one, so no class can fall through.
+calm_classless=""
+while IFS= read -r tag; do
+  [ -n "$tag" ] || continue
+  # The variant whose tag() arm names this registry spelling.
+  variant=$(LC_ALL=C grep -B0 -E "=> \"$tag\"," "$CALM_SRC" |
+    LC_ALL=C grep -oE 'Self::[A-Z][A-Za-z]*' | LC_ALL=C head -n1 | LC_ALL=C sed 's/Self:://')
+  if [ -z "$variant" ]; then
+    calm_classless="$calm_classless $tag(no-variant)"
+    continue
+  fi
+  # It must appear on the left of an arm inside conformance_direction().
+  LC_ALL=C sed -n '/pub const fn conformance_direction/,/^    }/p' "$CALM_SRC" |
+    LC_ALL=C grep -q "Self::$variant" ||
+    calm_classless="$calm_classless $tag"
+done <<EOF
+$calm_declared
+EOF
+
+if [ -n "$calm_classless" ]; then
+  fge_fail fg070-classes-have-a-direction \
+    "declared classes with no conformance direction:$calm_classless"
+else
+  fge_pass fg070-classes-have-a-direction \
+    "all $calm_declared_count declared classes are assigned a conformance direction"
 fi
 
 # -----------------------------------------------------------------------------

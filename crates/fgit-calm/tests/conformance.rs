@@ -26,11 +26,12 @@
 //! NOT prove any particular operation is implemented in accordance with its
 //! class. When an operation lands, its own crate owes the conformance run.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use fgit_calm::class::CoordinationClass;
+use fgit_calm::class::{ConformanceDirection, CoordinationClass};
 use fgit_calm::lattice::Observation;
 
 // ---------------------------------------------------------------- the registry
@@ -125,41 +126,95 @@ fn apply_terminal_assignment(attempts: &[Observation], coordinated: bool) -> Obs
 // ------------------------------------------------------------------- coverage
 
 #[test]
-fn every_registry_row_has_a_conformance_test_for_its_class() {
+fn every_registry_row_is_exercised_by_a_check_matching_its_class() {
     // Acceptance: "every calm_operations.tsv row is exercised by a test
-    // matching its class". Coverage is asserted over the classes actually
-    // present, so a new row in an untested class fails here rather than
-    // passing unnoticed.
+    // matching its class".
+    //
+    // Dispatch is an exhaustive match on the class's declared direction, not an
+    // `if`/`else if` chain. That is not a style preference: the chain this
+    // replaces tested `converges` first and `!is_coordination_free` second, so
+    // `local_deterministic` -- which is coordination-free AND non-convergent --
+    // matched neither arm. CALM-012 was exercised by nothing while this suite
+    // reported green, which is precisely the decorative-check failure the lane
+    // exists to catch one layer down. A match makes that unrepresentable: a new
+    // class, or a direction with no check, fails to compile.
     let rows = registry_rows();
-    let mut by_class: BTreeMap<&'static str, Vec<&Row>> = BTreeMap::new();
+    let mut exercised: BTreeMap<&'static str, usize> = BTreeMap::new();
+
     for row in &rows {
-        by_class.entry(row.class.tag()).or_default().push(row);
+        let direction = row.class.conformance_direction();
+        let holds = match direction {
+            ConformanceDirection::ConvergesUnderReorderDuplicateDrop => {
+                converges_under_reorder_duplicate_drop()
+            }
+            ConformanceDirection::BoundedMergeWithReset => bounded_merge_with_reset_holds(),
+            ConformanceDirection::PinnedInputDeterminism => pinned_input_determinism_holds(),
+            ConformanceDirection::AntiRollbackProjection => anti_rollback_projection_holds(),
+            ConformanceDirection::CoordinationIsLoadBearing => removing_coordination_breaks_it(),
+            ConformanceDirection::IdempotentExternalEffect => idempotent_external_effect_holds(),
+        };
+        assert!(
+            holds,
+            "{} ({}) claims class {}, whose {} check does not hold",
+            row.id, row.operation, row.class, direction
+        );
+        *exercised.entry(direction.tag()).or_default() += 1;
     }
 
-    for (tag, rows) in &by_class {
-        let class = CoordinationClass::parse(tag).expect("grouped by a parsed class");
-        // Each row is exercised by the direction its class claims.
-        for row in rows {
-            if class.converges_under_reorder_duplicate_drop() {
-                assert!(
-                    converges_under_reorder_duplicate_drop(),
-                    "{} ({}) claims {tag}, which must converge",
-                    row.id,
-                    row.operation
-                );
-            } else if !class.is_coordination_free() {
-                assert!(
-                    removing_coordination_breaks_it(),
-                    "{} ({}) claims {tag}, whose coordination must be load-bearing",
-                    row.id,
-                    row.operation
-                );
+    assert!(
+        !exercised.is_empty(),
+        "no rows were exercised; this assertion would be vacuous"
+    );
+    // Every row landed in exactly one direction, so the histogram must account
+    // for all of them. A row silently skipped would show up here as a deficit.
+    let counted: usize = exercised.values().sum();
+    assert_eq!(
+        counted,
+        rows.len(),
+        "every row must be counted by exactly one direction"
+    );
+}
+
+#[test]
+fn every_class_in_the_vocabulary_has_a_conformance_check_that_holds() {
+    // Coverage of the VOCABULARY rather than of today's registry contents.
+    // The test above would stop exercising a direction if the last row in that
+    // class were deleted; this one keeps all seven classes checked regardless,
+    // so removing a row cannot quietly retire a check.
+    for class in CoordinationClass::ALL {
+        let direction = class.conformance_direction();
+        let holds = match direction {
+            ConformanceDirection::ConvergesUnderReorderDuplicateDrop => {
+                converges_under_reorder_duplicate_drop()
             }
-        }
+            ConformanceDirection::BoundedMergeWithReset => bounded_merge_with_reset_holds(),
+            ConformanceDirection::PinnedInputDeterminism => pinned_input_determinism_holds(),
+            ConformanceDirection::AntiRollbackProjection => anti_rollback_projection_holds(),
+            ConformanceDirection::CoordinationIsLoadBearing => removing_coordination_breaks_it(),
+            ConformanceDirection::IdempotentExternalEffect => idempotent_external_effect_holds(),
+        };
+        assert!(
+            holds,
+            "{class} maps to {direction}, whose check does not hold"
+        );
+    }
+
+    // The mapping must be onto: a direction no class claims is a check nothing
+    // depends on, and a direction claimed by every class would mean the
+    // classification carries no information.
+    let claimed: BTreeSet<&'static str> = CoordinationClass::ALL
+        .iter()
+        .map(|class| class.conformance_direction().tag())
+        .collect();
+    for direction in ConformanceDirection::ALL {
+        assert!(
+            claimed.contains(direction.tag()),
+            "{direction} is claimed by no class"
+        );
     }
     assert!(
-        !by_class.is_empty(),
-        "no classes were exercised; this assertion would be vacuous"
+        claimed.len() > 1,
+        "a single direction for every class would make the classification informationless"
     );
 }
 
@@ -413,4 +468,510 @@ fn agreeing_terminals_do_not_manufacture_a_conflict() {
         Observation::Refused
     );
     assert_eq!(Observation::observe_all(&[]), Observation::Unknown);
+}
+
+// ------------------------------------------------- bounded-merge direction
+//
+// `commutative_but_bounded` (CALM-011 merge_bounded_telemetry, CALM-014
+// merge_peer_availability_map) claims a DECLARED merge algebra with declared
+// bounds, declared overflow behaviour, and reset/regime semantics. Plain union
+// convergence is too weak for it: the interesting failure is a reset that a
+// merge with a pre-reset replica silently undoes.
+
+/// The declared bound of the modelled window.
+const TELEMETRY_BOUND: u64 = 1_000;
+
+/// A bounded, retractable, resettable counter.
+///
+/// Retraction is kept mergeable by counting retractions in their own grow-only
+/// field rather than subtracting in place; reset advances a regime rather than
+/// truncating, so a merge can tell "reset" apart from "stale".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BoundedWindow {
+    regime: u32,
+    observed: u64,
+    retracted: u64,
+}
+
+impl BoundedWindow {
+    const fn new() -> Self {
+        Self {
+            regime: 0,
+            observed: 0,
+            retracted: 0,
+        }
+    }
+
+    /// Declared overflow behaviour: saturate at the bound, never wrap.
+    fn observe(self, count: u64) -> Self {
+        Self {
+            observed: self.observed.saturating_add(count).min(TELEMETRY_BOUND),
+            ..self
+        }
+    }
+
+    fn retract(self, count: u64) -> Self {
+        Self {
+            retracted: self.retracted.saturating_add(count).min(TELEMETRY_BOUND),
+            ..self
+        }
+    }
+
+    /// Declared reset semantics: a new regime, not a truncation.
+    const fn reset(self) -> Self {
+        Self {
+            regime: self.regime + 1,
+            observed: 0,
+            retracted: 0,
+        }
+    }
+
+    fn merge(self, other: Self) -> Self {
+        match self.regime.cmp(&other.regime) {
+            Ordering::Greater => self,
+            Ordering::Less => other,
+            Ordering::Equal => Self {
+                regime: self.regime,
+                observed: self.observed.max(other.observed).min(TELEMETRY_BOUND),
+                retracted: self.retracted.max(other.retracted),
+            },
+        }
+    }
+
+    const fn effective(self) -> u64 {
+        self.observed.saturating_sub(self.retracted)
+    }
+}
+
+/// The same counter with reset modelled as an in-place truncation -- i.e. with
+/// the regime removed. Present only so the regime can be shown to be
+/// load-bearing rather than decorative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RegimelessWindow {
+    observed: u64,
+}
+
+impl RegimelessWindow {
+    fn observe(self, count: u64) -> Self {
+        Self {
+            observed: self.observed.saturating_add(count).min(TELEMETRY_BOUND),
+        }
+    }
+
+    const fn reset(self) -> Self {
+        Self { observed: 0 }
+    }
+
+    fn merge(self, other: Self) -> Self {
+        Self {
+            observed: self.observed.max(other.observed),
+        }
+    }
+}
+
+fn bounded_merge_with_reset_holds() -> bool {
+    let left = BoundedWindow::new().observe(7).retract(2);
+    let right = BoundedWindow::new().observe(11);
+    // Commutative, and a reset survives a merge with a pre-reset replica.
+    let commutes = left.merge(right) == right.merge(left);
+    let stale = BoundedWindow::new().observe(500);
+    let after_reset = stale.reset().observe(3);
+    let reset_survives = after_reset.merge(stale) == after_reset;
+    // Saturating, not wrapping.
+    let saturates = BoundedWindow::new()
+        .observe(TELEMETRY_BOUND)
+        .observe(TELEMETRY_BOUND)
+        .observed
+        == TELEMETRY_BOUND;
+    commutes && reset_survives && saturates
+}
+
+#[test]
+fn a_bounded_window_merges_commutatively_and_respects_its_declared_bound() {
+    let a = BoundedWindow::new().observe(7).retract(2);
+    let b = BoundedWindow::new().observe(11).retract(1);
+    let c = BoundedWindow::new().observe(4);
+
+    assert_eq!(a.merge(b), b.merge(a), "the declared merge must commute");
+    assert_eq!(
+        a.merge(b).merge(c),
+        a.merge(b.merge(c)),
+        "the declared merge must associate"
+    );
+    assert_eq!(a.merge(a), a, "the declared merge must be idempotent");
+
+    // Retraction stays mergeable: the effective value falls, and it does so
+    // identically in both merge orders.
+    // Both fields join independently: observed takes max(7, 11) and retracted
+    // takes max(2, 1). A retraction is grow-only, so the LARGER retraction
+    // survives the merge -- a peer that has not yet seen it cannot undo it by
+    // reporting a smaller one.
+    assert_eq!(
+        a.merge(b).effective(),
+        9,
+        "max(7,11) observed minus max(2,1) retracted"
+    );
+    assert_eq!(a.merge(b).effective(), b.merge(a).effective());
+
+    // Declared overflow behaviour: saturate at the bound.
+    let saturated = BoundedWindow::new()
+        .observe(TELEMETRY_BOUND - 1)
+        .observe(50);
+    assert_eq!(
+        saturated.observed, TELEMETRY_BOUND,
+        "observation past the bound must saturate, not wrap"
+    );
+    assert_eq!(
+        saturated.merge(saturated.observe(9_000)).observed,
+        TELEMETRY_BOUND,
+        "merging saturated windows stays at the bound"
+    );
+
+    // The paired permitted case: below the bound nothing is clamped, so the
+    // saturation assertions above are not satisfied by a constant.
+    let under = BoundedWindow::new().observe(12).observe(30);
+    assert_eq!(
+        under.observed, 42,
+        "values under the bound must be carried exactly"
+    );
+}
+
+#[test]
+fn the_regime_is_what_makes_a_reset_survive_a_merge() {
+    // A replica accumulates, resets, then accumulates a little; a peer still
+    // holds the pre-reset value and gossips it back.
+    let stale = BoundedWindow::new().observe(500);
+    let after_reset = stale.reset().observe(3);
+
+    assert_eq!(
+        after_reset.merge(stale),
+        after_reset,
+        "a merge with a pre-reset replica must not resurrect the old regime"
+    );
+    assert_eq!(
+        stale.merge(after_reset),
+        after_reset,
+        "and it must not depend on which side the reset arrives from"
+    );
+    assert_eq!(after_reset.merge(stale).effective(), 3);
+
+    // Load-bearing: with the regime removed, the identical sequence resurrects
+    // the pre-reset value. The reset is silently undone.
+    let naive_stale = RegimelessWindow { observed: 500 };
+    let naive_after_reset = naive_stale.reset().observe(3);
+    assert_eq!(
+        naive_after_reset.merge(naive_stale).observed,
+        500,
+        "without a regime the merge undoes the reset -- this is the defect the \
+         declared reset semantics exist to prevent"
+    );
+    assert_ne!(
+        naive_after_reset.merge(naive_stale).observed,
+        after_reset.effective(),
+        "the two models must actually disagree, or the regime proves nothing"
+    );
+}
+
+// --------------------------------------------- pinned-input determinism
+//
+// `local_deterministic` (CALM-012 rank_context_candidates) is the class that
+// fell through the old dispatch. It is coordination-free AND non-convergent,
+// which is not a contradiction: it needs no boundary because it never publishes
+// shared truth, but it is a function of its pinned inputs, so losing one
+// changes the answer.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Candidate {
+    id: &'static str,
+    score: u32,
+}
+
+/// Ranking under a closed tie-break: score descending, then id ascending.
+///
+/// No RNG, no arrival order, no map iteration order -- section 8's requirement
+/// that observable order be deterministic with a closed tie-break policy.
+fn rank(candidates: &[Candidate]) -> Vec<&'static str> {
+    let mut sorted = candidates.to_vec();
+    sorted.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.id.cmp(right.id))
+    });
+    sorted.into_iter().map(|candidate| candidate.id).collect()
+}
+
+fn pinned_input_determinism_holds() -> bool {
+    let pinned = [
+        Candidate {
+            id: "beta",
+            score: 5,
+        },
+        Candidate {
+            id: "alpha",
+            score: 5,
+        },
+        Candidate {
+            id: "gamma",
+            score: 9,
+        },
+    ];
+    let shuffled = [pinned[2], pinned[0], pinned[1]];
+    let order_independent = rank(&pinned) == rank(&shuffled);
+    let tie_break_is_closed = rank(&pinned) == vec!["gamma", "alpha", "beta"];
+    // Non-convergent under drop, which is the half that distinguishes this
+    // class from a monotone merge.
+    let drop_is_observable = rank(&pinned) != rank(&pinned[..2]);
+    order_independent && tie_break_is_closed && drop_is_observable
+}
+
+#[test]
+fn a_local_deterministic_operation_is_order_independent_but_not_drop_tolerant() {
+    let pinned = [
+        Candidate {
+            id: "beta",
+            score: 5,
+        },
+        Candidate {
+            id: "alpha",
+            score: 5,
+        },
+        Candidate {
+            id: "gamma",
+            score: 9,
+        },
+    ];
+
+    // Determinism over the SET of pinned inputs: presentation order cannot
+    // change the ranking, and the tie between `alpha` and `beta` is settled by
+    // the closed rule rather than by which arrived first.
+    assert_eq!(rank(&pinned), vec!["gamma", "alpha", "beta"]);
+    assert_eq!(
+        rank(&pinned),
+        rank(&[pinned[2], pinned[0], pinned[1]]),
+        "a pinned-input computation must not depend on arrival order"
+    );
+    assert_eq!(
+        rank(&[pinned[1], pinned[0]]),
+        rank(&[pinned[0], pinned[1]]),
+        "the tie-break must be closed, not arrival-ordered"
+    );
+
+    // The absence half. `local_deterministic` is coordination-free, and a
+    // reader who stopped there would assume it is also drop-tolerant. It is
+    // not, and the class exposes both facts separately.
+    assert!(
+        CoordinationClass::LocalDeterministic.is_coordination_free(),
+        "the class needs no coordination boundary"
+    );
+    assert!(
+        !CoordinationClass::LocalDeterministic.converges_under_reorder_duplicate_drop(),
+        "...and yet is not drop-tolerant; conflating the two is the mislabel \
+         this direction exists to catch"
+    );
+    assert_ne!(
+        rank(&pinned),
+        rank(&pinned[..2]),
+        "dropping a pinned input must change the answer, or the claim above is \
+         unfounded"
+    );
+}
+
+// ------------------------------------------- anti-rollback projection
+//
+// `ordered_projection` (CALM-009 activate_generation) publishes through a
+// subordinate monotone authority whose only job is refusing to go backwards.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivationRefusal {
+    /// The caller's expected predecessor is not the active generation.
+    NotExactPredecessor,
+    /// The requested generation does not advance the projection.
+    NotAnAdvance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Projection {
+    active: u64,
+}
+
+impl Projection {
+    /// Publication guarded by the exact predecessor, per section 5.5's
+    /// requirement that a root-last protocol never silently roll back.
+    fn activate(&mut self, expected_predecessor: u64, next: u64) -> Result<u64, ActivationRefusal> {
+        if expected_predecessor != self.active {
+            return Err(ActivationRefusal::NotExactPredecessor);
+        }
+        if next <= self.active {
+            return Err(ActivationRefusal::NotAnAdvance);
+        }
+        self.active = next;
+        Ok(next)
+    }
+
+    /// The same publication with the anti-rollback guard removed. Present only
+    /// to demonstrate that the guard changes the outcome.
+    const fn activate_unguarded(&mut self, next: u64) -> u64 {
+        self.active = next;
+        next
+    }
+}
+
+fn anti_rollback_projection_holds() -> bool {
+    let mut projection = Projection { active: 4 };
+    let advanced = projection.activate(4, 5).is_ok();
+    let stale_refused = projection.activate(4, 5).is_err();
+    let held = projection.active == 5;
+
+    let mut unguarded = Projection { active: 5 };
+    unguarded.activate_unguarded(4);
+    let rollback_is_possible_without_the_guard = unguarded.active == 4;
+
+    advanced && stale_refused && held && rollback_is_possible_without_the_guard
+}
+
+#[test]
+fn an_ordered_projection_advances_but_never_rolls_back() {
+    let mut projection = Projection { active: 4 };
+
+    // The permitted case: the exact predecessor advances the projection.
+    assert_eq!(projection.activate(4, 5), Ok(5));
+    assert_eq!(projection.active, 5);
+
+    // Replay of an already-applied activation is refused rather than reapplied,
+    // so duplicate delivery cannot roll the projection back to generation 5's
+    // predecessor state.
+    assert_eq!(
+        projection.activate(4, 5),
+        Err(ActivationRefusal::NotExactPredecessor)
+    );
+    assert_eq!(
+        projection.active, 5,
+        "a refused activation must leave the projection untouched"
+    );
+
+    // A late-arriving older generation is refused on both counts it could be
+    // wrong: wrong predecessor, and not an advance.
+    assert_eq!(
+        projection.activate(3, 4),
+        Err(ActivationRefusal::NotExactPredecessor)
+    );
+    assert_eq!(
+        projection.activate(5, 5),
+        Err(ActivationRefusal::NotAnAdvance)
+    );
+    assert_eq!(projection.active, 5);
+
+    // ...and the projection still advances afterwards, so the refusals above
+    // are not a wedged state.
+    assert_eq!(projection.activate(5, 6), Ok(6));
+
+    // Load-bearing: with the guard removed the identical late activation rolls
+    // the projection backwards, which is the silent rollback section 5.5
+    // forbids.
+    let mut unguarded = Projection { active: 6 };
+    unguarded.activate_unguarded(4);
+    assert_eq!(
+        unguarded.active, 4,
+        "without the exact-predecessor guard, a stale activation rolls back"
+    );
+    assert_ne!(
+        unguarded.active, projection.active,
+        "the guarded and unguarded paths must actually differ"
+    );
+}
+
+// ------------------------------------------ exclusive external effect
+//
+// `exclusive_external_effect` (CALM-010 deliver_webhook) owns one externally
+// observable side effect under a stable idempotency key. Retries are expected;
+// duplicate effects are not.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Delivery {
+    Performed,
+    AlreadyPerformed,
+}
+
+#[derive(Debug, Default)]
+struct Outbox {
+    performed: BTreeSet<String>,
+    external_effects: u64,
+}
+
+impl Outbox {
+    /// One external effect per idempotency key, however many times delivery is
+    /// attempted.
+    fn deliver(&mut self, idempotency_key: &str) -> Delivery {
+        if self.performed.contains(idempotency_key) {
+            return Delivery::AlreadyPerformed;
+        }
+        self.performed.insert(idempotency_key.to_owned());
+        self.external_effects += 1;
+        Delivery::Performed
+    }
+
+    /// Delivery with the idempotency key ignored. Present only to show the key
+    /// is what makes the effect exclusive.
+    const fn deliver_without_key(&mut self) {
+        self.external_effects += 1;
+    }
+}
+
+fn idempotent_external_effect_holds() -> bool {
+    let mut outbox = Outbox::default();
+    let first = outbox.deliver("wh-1") == Delivery::Performed;
+    let retried = outbox.deliver("wh-1") == Delivery::AlreadyPerformed;
+    let once = outbox.external_effects == 1;
+    let distinct = {
+        outbox.deliver("wh-2");
+        outbox.external_effects == 2
+    };
+    first && retried && once && distinct
+}
+
+#[test]
+fn one_external_effect_per_idempotency_key_however_many_retries() {
+    let mut outbox = Outbox::default();
+
+    assert_eq!(outbox.deliver("wh-1"), Delivery::Performed);
+    for _ in 0..5 {
+        assert_eq!(
+            outbox.deliver("wh-1"),
+            Delivery::AlreadyPerformed,
+            "a retry under the same key must not perform a second effect"
+        );
+    }
+    assert_eq!(
+        outbox.external_effects, 1,
+        "five retries must leave exactly one external effect"
+    );
+
+    // The paired permitted case: distinct keys DO produce distinct effects, so
+    // "never deliver anything" would not satisfy the assertions above.
+    assert_eq!(outbox.deliver("wh-2"), Delivery::Performed);
+    assert_eq!(outbox.external_effects, 2);
+
+    // Interleaving retries of two keys in either order yields the same count:
+    // the effect is a function of the SET of keys, not of arrival order.
+    let mut interleaved = Outbox::default();
+    for key in ["wh-1", "wh-2", "wh-1", "wh-2", "wh-1"] {
+        interleaved.deliver(key);
+    }
+    assert_eq!(interleaved.external_effects, 2);
+
+    // Load-bearing: with the key ignored, the same six attempts become six
+    // externally observable effects.
+    let mut keyless = Outbox::default();
+    for _ in 0..6 {
+        keyless.deliver_without_key();
+    }
+    assert_eq!(
+        keyless.external_effects, 6,
+        "without the idempotency key every retry is a fresh external effect"
+    );
+    assert_ne!(
+        keyless.external_effects, outbox.external_effects,
+        "the keyed and keyless paths must actually differ"
+    );
 }
