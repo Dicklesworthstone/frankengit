@@ -38,6 +38,7 @@ fgit-registry-check	L0	none	constitution	active
 fgit-repair	L2	L0,L1,L2	repair	active
 fgit-resource	L0	L0	resource	active
 fgit-runtime	L2	L0,L1,L2	concurrency	active
+fgit-statistics	L2	L0,L1,L2	statistics	active
 fgit-treefs	L2	L0,L1,L2	treefs	active
 fgit-txn	L2	L0,L1,L2	transactions	active
 fgit-types	L0	none	types	active

@@ -857,6 +857,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-statistics"
+version = "0.0.1"
+
+[[package]]
 name = "fgit-treefs"
 version = "0.1.0"
 dependencies = [

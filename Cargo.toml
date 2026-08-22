@@ -63,6 +63,7 @@ fgit-repair = { path = "crates/fgit-repair" }
 fgit-reference = { path = "crates/fgit-reference" }
 fgit-resource = { path = "crates/fgit-resource" }
 fgit-runtime = { path = "crates/fgit-runtime" }
+fgit-statistics = { path = "crates/fgit-statistics" }
 fgit-txn = { path = "crates/fgit-txn" }
 fgit-types = { path = "crates/fgit-types" }
 fgit-wire = { path = "crates/fgit-wire" }
