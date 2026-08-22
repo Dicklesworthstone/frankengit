@@ -128,6 +128,9 @@ pub enum InflateRefusal {
     IncompleteHuffmanSet,
     OversubscribedHuffmanSet,
     InvalidCodeLength,
+    /// A dynamic block declared more literal/length or distance codes than
+    /// the RFC 1951 alphabets contain.
+    TooManyDeclaredCodes,
     InvalidLengthOrDistanceCode,
     DistanceTooFar {
         distance: usize,
@@ -170,6 +173,9 @@ impl fmt::Display for InflateRefusal {
                 formatter.write_str("oversubscribed DEFLATE Huffman code set")
             }
             Self::InvalidCodeLength => formatter.write_str("invalid DEFLATE dynamic code length"),
+            Self::TooManyDeclaredCodes => {
+                formatter.write_str("dynamic block declares too many length or distance symbols")
+            }
             Self::InvalidLengthOrDistanceCode => {
                 formatter.write_str("invalid DEFLATE length or distance code")
             }
@@ -1170,6 +1176,15 @@ impl Inflater {
             self.reader.restore(checkpoint);
             return Ok(None);
         };
+        // RFC 1951 caps the declared code counts at the alphabets that exist
+        // (286 literal/length codes, 30 distance codes). The five-bit fields
+        // can encode two wider values each; reference decoders refuse those
+        // outright ("too many length or distance symbols") instead of giving
+        // Huffman codes to symbols that cannot occur, so this decoder does
+        // the same before any table is built.
+        if hlit > 29 || hdist > 29 {
+            return Err(InflateRefusal::TooManyDeclaredCodes);
+        }
         let literal_count = usize::from(hlit) + 257;
         let distance_count = usize::from(hdist) + 1;
         let code_length_count = usize::from(hclen) + 4;
@@ -2395,6 +2410,52 @@ mod tests {
         member.extend(deflate);
         member.extend(adler32(plain).to_be_bytes());
         member
+    }
+
+    #[test]
+    fn a_dynamic_block_declaring_more_codes_than_the_alphabet_is_refused() {
+        // The refusal must fire at the header itself, before any code-length
+        // bit is interpreted, exactly where reference decoders refuse.
+        let build = |hlit: u16, hdist: u16| {
+            let mut packer = BitPacker::default();
+            packer.push_bits(1, 1); // bfinal
+            packer.push_bits(0b10, 2); // dynamic block
+            packer.push_bits(hlit, 5);
+            packer.push_bits(hdist, 5);
+            packer.push_bits(0, 4); // HCLEN; never consumed past the refusal
+            packer.finish()
+        };
+        for (hlit, hdist) in [(30_u16, 0_u16), (31, 0), (0, 30), (0, 31)] {
+            let member = zlib_member(build(hlit, hdist), &[]);
+            assert!(
+                matches!(
+                    inflate_zlib(&member, limits()),
+                    Err(InflateRefusal::TooManyDeclaredCodes)
+                ),
+                "HLIT {hlit} / HDIST {hdist} must be refused as over-wide"
+            );
+        }
+    }
+
+    #[test]
+    fn a_maximal_dynamic_header_is_not_refused_for_its_declared_counts() {
+        // 286 literal/length and 30 distance codes are the RFC maxima; a
+        // header declaring them must pass the count gate and fail later on
+        // its (here, empty) code-length alphabet instead.
+        let mut packer = BitPacker::default();
+        packer.push_bits(1, 1); // bfinal
+        packer.push_bits(0b10, 2); // dynamic block
+        packer.push_bits(29, 5); // HLIT: 286 literal/length codes
+        packer.push_bits(29, 5); // HDIST: 30 distance codes
+        packer.push_bits(0, 4); // HCLEN: four code-length codes
+        for _ in 0..4 {
+            packer.push_bits(0, 3); // every length zero: an incomplete set
+        }
+        let member = zlib_member(packer.finish(), &[]);
+        assert!(matches!(
+            inflate_zlib(&member, limits()),
+            Err(InflateRefusal::IncompleteHuffmanSet)
+        ));
     }
 
     #[derive(Default)]
