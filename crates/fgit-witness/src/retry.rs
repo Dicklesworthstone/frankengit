@@ -163,14 +163,20 @@ pub fn decide(attempt: Attempt) -> Action {
 /// One NDJSON line recording a retry decision and the inputs behind it.
 #[must_use]
 pub fn receipt(attempt: Attempt, action: Action) -> String {
-    let (successes, failures) = attempt.posterior.counts();
+    // A receipt names the belief that informed this decision, including the
+    // declared prior. `IncrementalPosterior::counts` is deliberately the
+    // distinct real-observation evidence count, so use the canonical
+    // posterior here rather than silently changing this receipt's meaning.
+    let posterior = attempt.posterior.posterior();
+    let successes = posterior.alpha();
+    let failures = posterior.beta();
     let mut out = String::with_capacity(256);
     out.push_str("{\"record\":\"retry_decision\"");
     for (key, value) in [
         ("attempts", u64::from(attempt.attempts)),
         ("age_ticks", u64::from(attempt.age_ticks)),
-        ("posterior_successes", u64::from(successes)),
-        ("posterior_failures", u64::from(failures)),
+        ("posterior_successes", successes),
+        ("posterior_failures", failures),
         (
             "success_probability_ppm",
             u64::from(attempt.posterior.success_probability().parts_per_million()),
@@ -232,7 +238,12 @@ mod tests {
         // The central guarantee of plan section 16.5: statistical estimates
         // cannot deny liveness indefinitely. A maximally pessimistic posterior
         // must still escalate once the hard threshold is crossed.
-        let action = decide(attempt(STARVATION_ATTEMPTS, 0, hopeless()));
+        let hopeless = hopeless();
+        assert!(
+            hopeless.success_probability().parts_per_million() < 100_000,
+            "the pessimistic control must remain near the reachable lower extreme"
+        );
+        let action = decide(attempt(STARVATION_ATTEMPTS, 0, hopeless));
         assert_eq!(
             action,
             Action::EscalateToSerialized {
@@ -245,6 +256,10 @@ mod tests {
         for _ in 0..10_000 {
             optimistic.observe(true);
         }
+        assert!(
+            optimistic.success_probability().parts_per_million() > 900_000,
+            "the optimistic control must remain near the reachable upper extreme"
+        );
         assert_eq!(
             decide(attempt(STARVATION_ATTEMPTS, 0, optimistic)),
             Action::EscalateToSerialized {
