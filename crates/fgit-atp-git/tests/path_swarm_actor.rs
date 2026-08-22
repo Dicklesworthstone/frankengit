@@ -15,7 +15,7 @@ use fgit_atp_git::{
     TransferEffectReceipt, TransferInputRoot,
 };
 
-fn peer(value: u8) -> PeerIdentity {
+const fn peer(value: u8) -> PeerIdentity {
     PeerIdentity::from_bytes([value; 32])
 }
 
@@ -261,7 +261,7 @@ fn enter_phase(actor: &mut TransferActor, phase: TransferActorPhase) {
             actor.begin_swarm().expect("racing to swarming");
         }
         TransferActorPhase::Finalizing => {
-            actor.begin_finalization().expect("prepared to finalizing")
+            actor.begin_finalization().expect("prepared to finalizing");
         }
         TransferActorPhase::CancelRequested
         | TransferActorPhase::Draining
@@ -377,5 +377,5 @@ fn actor_refuses_oversized_effect_parameters_before_broker_reservation() {
             maximum: 3,
         })
     );
-    assert!(broker.events.is_empty());
+    assert_eq!(broker.events, []);
 }

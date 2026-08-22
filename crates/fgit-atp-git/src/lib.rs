@@ -2146,7 +2146,7 @@ pub struct PeerAvailability {
 impl PeerAvailability {
     /// Builds an availability declaration.  The tracker validates all bounds and order.
     #[must_use]
-    pub fn new(peer: PeerIdentity, pieces: Vec<PieceId>) -> Self {
+    pub const fn new(peer: PeerIdentity, pieces: Vec<PieceId>) -> Self {
         Self { peer, pieces }
     }
 
@@ -2484,7 +2484,7 @@ pub struct TransferEffectIntent {
 impl TransferEffectIntent {
     /// Builds one exact effect request before it is handed to the broker.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         key: TransferEffectKey,
         kind: TransferEffectKind,
         capability: TransferCapability,
@@ -2663,7 +2663,7 @@ pub enum TransferEffectState {
 }
 
 impl TransferEffectState {
-    fn is_terminal(&self) -> bool {
+    const fn is_terminal(&self) -> bool {
         matches!(self, Self::Acknowledged(_) | Self::Aborted(_))
     }
 }
@@ -2739,7 +2739,7 @@ impl TransferActor {
     }
 
     /// Enters final closure verification on the normal, non-cancel path.
-    pub fn begin_finalization(&mut self) -> Result<(), AtpRefusal> {
+    pub const fn begin_finalization(&mut self) -> Result<(), AtpRefusal> {
         match self.phase {
             TransferActorPhase::Prepared
             | TransferActorPhase::Racing
@@ -2930,7 +2930,7 @@ impl TransferActor {
         self.effects.get(&key).map(|effect| &effect.intent)
     }
 
-    fn ensure_effect_phase(&self) -> Result<(), AtpRefusal> {
+    const fn ensure_effect_phase(&self) -> Result<(), AtpRefusal> {
         match self.phase {
             TransferActorPhase::Prepared
             | TransferActorPhase::Racing
