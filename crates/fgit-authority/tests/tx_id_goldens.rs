@@ -469,3 +469,254 @@ fn a_mixed_object_format_request_is_refused_and_a_matching_one_proceeds() {
     )
     .expect("a matching object format must proceed");
 }
+
+// ---------------------------------------------------------------------------
+// frankengit-2u7e: SealedRequest admission checks.
+//
+// `SemanticRequest::build` is the NPC 5.2 boundary -- the sealed request is the
+// body whose identity must be stable, so these checks are what stop one seal
+// body owning two logical shapes. Two of its four name-constructible refusals
+// were tested (RefCommandDuplicated, ObjectFormatMismatch, both above); the
+// other two had zero assertions anywhere in the workspace.
+//
+// `check_bound` is `observed > limit`, so EXACTLY the limit is permitted at
+// every site. Each permitted twin below sits on that exact value, which is the
+// case a `>`/`>=` slip flips.
+// ---------------------------------------------------------------------------
+
+/// A slug built at runtime, since the file's existing `slug` takes `&'static str`
+/// and these tests generate names in a loop.
+fn runtime_slug(text: &str) -> AsciiSlug {
+    AsciiSlug::try_new("test", text.as_bytes()).expect("an admissible slug")
+}
+
+fn entry(namespace: &str, key: &str) -> ScopedEntry {
+    ScopedEntry::new(runtime_slug(namespace), runtime_slug(key), Vec::new())
+        .expect("an admissible entry")
+}
+
+fn distinct_commands(count: usize) -> Vec<RefCommand> {
+    (0..count)
+        .map(|index| command(&format!("refs/heads/b{index}"), 1, 2))
+        .collect()
+}
+
+/// Entries distinct in BOTH namespace and key.
+///
+/// Varying only one half would make the bound tests below depend on the
+/// duplicate guard's other clause: with a shared namespace, dropping the key
+/// clause makes every entry collide and the bound tests fail for a reason that
+/// has nothing to do with bounds. Mutation `mc` demonstrated exactly that
+/// coupling before this was fixed.
+fn distinct_entries(count: usize) -> Vec<ScopedEntry> {
+    (0..count)
+        .map(|index| entry(&format!("ns{index}"), &format!("k{index}")))
+        .collect()
+}
+
+fn build_with(
+    ref_commands: Vec<RefCommand>,
+    push_options: Vec<PushOption>,
+    scoped_entries: Vec<ScopedEntry>,
+) -> Result<SemanticRequest, RequestRefusal> {
+    SemanticRequest::build(
+        schema(),
+        GitHashAlgorithm::Sha1,
+        true,
+        ref_commands,
+        push_options,
+        scoped_entries,
+    )
+}
+
+/// Acceptance (1): each collection bound reports its OWN field, count and limit.
+///
+/// The three `check_bound` calls sit on consecutive lines, each hand-passing a
+/// `(field, length, limit)` triple. That adjacency is the defect class: passing
+/// `push_options.len()` against `MAX_SCOPED_ENTRIES`, or labelling a refusal
+/// with a neighbour's field string, refuses and permits at the wrong sizes
+/// while looking entirely correct. Asserting only the variant would not see it,
+/// so all three payload fields are pinned.
+#[test]
+fn each_collection_bound_refuses_naming_its_own_field_count_and_limit() {
+    let over_commands = build_with(
+        distinct_commands(fgit_authority::MAX_REF_COMMANDS + 1),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect_err("one command past the bound must refuse");
+    assert!(
+        matches!(
+            over_commands,
+            RequestRefusal::BoundExceeded {
+                field: "ref_commands",
+                observed,
+                limit,
+            } if observed == fgit_authority::MAX_REF_COMMANDS + 1
+                && limit == fgit_authority::MAX_REF_COMMANDS
+        ),
+        "ref_commands must name itself and its own limit; got {over_commands:?}",
+    );
+
+    let over_options = build_with(
+        Vec::new(),
+        vec![
+            PushOption::new(Vec::new()).expect("an empty option is admissible");
+            fgit_authority::MAX_PUSH_OPTIONS + 1
+        ],
+        Vec::new(),
+    )
+    .expect_err("one push option past the bound must refuse");
+    assert!(
+        matches!(
+            over_options,
+            RequestRefusal::BoundExceeded {
+                field: "push_options",
+                observed,
+                limit,
+            } if observed == fgit_authority::MAX_PUSH_OPTIONS + 1
+                && limit == fgit_authority::MAX_PUSH_OPTIONS
+        ),
+        "push_options must name itself and its own limit; got {over_options:?}",
+    );
+
+    let over_entries = build_with(
+        Vec::new(),
+        Vec::new(),
+        distinct_entries(fgit_authority::MAX_SCOPED_ENTRIES + 1),
+    )
+    .expect_err("one scoped entry past the bound must refuse");
+    assert!(
+        matches!(
+            over_entries,
+            RequestRefusal::BoundExceeded {
+                field: "scoped_entries",
+                observed,
+                limit,
+            } if observed == fgit_authority::MAX_SCOPED_ENTRIES + 1
+                && limit == fgit_authority::MAX_SCOPED_ENTRIES
+        ),
+        "scoped_entries must name itself and its own limit; got {over_entries:?}",
+    );
+}
+
+/// Acceptance (2): the permitted twins, at exactly the limit.
+///
+/// `check_bound` is `observed > limit`, so a collection of exactly the limit is
+/// admissible. Without these the bounds could each be off by one in the
+/// conservative direction and every refusal test above would still pass.
+#[test]
+fn each_collection_bound_permits_exactly_its_limit() {
+    build_with(
+        distinct_commands(fgit_authority::MAX_REF_COMMANDS),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("exactly MAX_REF_COMMANDS is inside the bound");
+
+    build_with(
+        Vec::new(),
+        vec![
+            PushOption::new(Vec::new()).expect("an empty option is admissible");
+            fgit_authority::MAX_PUSH_OPTIONS
+        ],
+        Vec::new(),
+    )
+    .expect("exactly MAX_PUSH_OPTIONS is inside the bound");
+
+    build_with(
+        Vec::new(),
+        Vec::new(),
+        distinct_entries(fgit_authority::MAX_SCOPED_ENTRIES),
+    )
+    .expect("exactly MAX_SCOPED_ENTRIES is inside the bound");
+}
+
+/// The two byte-length bounds, refusal and permitted twin together.
+///
+/// These live on the value constructors rather than on `build`, so they are a
+/// separate surface with their own field strings.
+#[test]
+fn the_value_byte_bounds_refuse_one_over_and_permit_exactly_the_limit() {
+    PushOption::new(vec![b'x'; fgit_authority::MAX_PUSH_OPTION_BYTES])
+        .expect("exactly MAX_PUSH_OPTION_BYTES is inside the bound");
+    let option = PushOption::new(vec![b'x'; fgit_authority::MAX_PUSH_OPTION_BYTES + 1])
+        .expect_err("one byte past the bound must refuse");
+    assert!(
+        matches!(
+            option,
+            RequestRefusal::BoundExceeded {
+                field: "push_option",
+                observed,
+                limit,
+            } if observed == fgit_authority::MAX_PUSH_OPTION_BYTES + 1
+                && limit == fgit_authority::MAX_PUSH_OPTION_BYTES
+        ),
+        "the push-option byte bound must name itself; got {option:?}",
+    );
+
+    ScopedEntry::new(
+        runtime_slug("ns"),
+        runtime_slug("k"),
+        vec![b'x'; fgit_authority::MAX_SCOPED_VALUE_BYTES],
+    )
+    .expect("exactly MAX_SCOPED_VALUE_BYTES is inside the bound");
+    let value = ScopedEntry::new(
+        runtime_slug("ns"),
+        runtime_slug("k"),
+        vec![b'x'; fgit_authority::MAX_SCOPED_VALUE_BYTES + 1],
+    )
+    .expect_err("one byte past the bound must refuse");
+    assert!(
+        matches!(
+            value,
+            RequestRefusal::BoundExceeded {
+                field: "scoped_entry_value",
+                observed,
+                limit,
+            } if observed == fgit_authority::MAX_SCOPED_VALUE_BYTES + 1
+                && limit == fgit_authority::MAX_SCOPED_VALUE_BYTES
+        ),
+        "the scoped-entry value bound must name itself; got {value:?}",
+    );
+}
+
+/// Acceptance (3): the duplicate guard is TWO clauses, so it needs two twins.
+///
+/// `if left.namespace == right.namespace && left.key == right.key`. A refusal
+/// case paired with a wholly-unrelated permitted case cannot distinguish this
+/// from a one-clause guard: drop `&& key` and entries sharing a namespace would
+/// wrongly refuse; drop the namespace clause and entries sharing a key across
+/// namespaces would. Each twin isolates one clause by varying only that half.
+///
+/// The scan is `windows(2)` over entries sorted by `(namespace, key)`, so the
+/// permitted pairs are also the ones a broken sort would mis-adjacent.
+#[test]
+fn scoped_entries_are_duplicates_only_when_both_namespace_and_key_match() {
+    let duplicated = build_with(
+        Vec::new(),
+        Vec::new(),
+        vec![entry("ns", "k"), entry("ns", "k")],
+    )
+    .expect_err("two entries sharing a namespace AND a key are duplicates");
+    assert!(
+        matches!(duplicated, RequestRefusal::ScopedEntryDuplicated { .. }),
+        "expected ScopedEntryDuplicated, got {duplicated:?}",
+    );
+
+    // Twin isolating the key clause: same namespace, different key.
+    build_with(
+        Vec::new(),
+        Vec::new(),
+        vec![entry("ns", "one"), entry("ns", "two")],
+    )
+    .expect("a shared namespace alone is not a duplicate");
+
+    // Twin isolating the namespace clause: different namespace, same key.
+    build_with(
+        Vec::new(),
+        Vec::new(),
+        vec![entry("alpha", "k"), entry("beta", "k")],
+    )
+    .expect("a shared key alone is not a duplicate");
+}
