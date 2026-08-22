@@ -55,11 +55,16 @@
 //!   of those: cancelling a statement the VDBE is actively stepping through
 //!   (the poll sites are there -- 31 of them, including the main instruction
 //!   loop every N opcodes -- but the store's statements are far too short to
-//!   reach an opcode checkpoint reliably), and the `reply-lost` cancellation
-//!   cell, which needs a cancel and a lost response arriving together.
-//!   `fault_conformance.rs` supplies the fault engine, so composing
-//!   `LoseResponse` with a cancel is a matter of writing it. Not written, so
-//!   not claimed.
+//!   reach an opcode checkpoint reliably; reaching it needs sustained page-lock
+//!   contention, which nothing here builds). That is now the ONLY open clause.
+//!
+//!   **This list used to include `reply-lost`, and that was wrong too.** At
+//!   this boundary it is not a distinct cell: the probe measures that a cancel
+//!   is caught by the *caller await*, not inside the engine, so cancelling a
+//!   dispatched operation simply IS abandoning its reply. The with-cancel
+//!   variant is the sweep below; the without-cancel variant is
+//!   `fault_conformance.rs`'''s `LoseResponse`, which passes. Their conjunction
+//!   produces no observable the store can tell apart from either one.
 //!
 //!   **This list used to include `commit-ambiguous`, and that was wrong.** It
 //!   is not unwritten: the sweep below cancels at `scale - 1`, the window after
