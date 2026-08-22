@@ -165,6 +165,7 @@ pub use crate::interpret::{
 pub use crate::lifecycle::{
     CANCELLATION_PHASES, CancellationOutcome, CancellationPhase, LifecycleError, TransactionEvent,
     TransactionState, WorkerEvent, WorkerState, classify_cancellation,
+    observable_cancellation_phase,
 };
 pub use crate::marshal::{
     MarshalError, blob, read_blob, read_optional_unsigned, read_unsigned, unsigned,

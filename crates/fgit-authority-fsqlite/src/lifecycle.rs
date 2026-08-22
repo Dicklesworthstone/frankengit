@@ -282,12 +282,62 @@ pub enum CancellationOutcome {
     ContainmentRisk,
 }
 
+/// The phase this adapter can establish for a cancellation it actually saw.
+///
+/// **Always `None`, and that is the entire point of this function.**
+///
+/// `frankengit-0kqi`. [`classify_cancellation`] is a correct model of the
+/// protocol and a caller could reasonably wire it to decide whether to
+/// re-drive. It would be wrong to, and nothing in this crate said so: the
+/// adapter cannot tell you which phase a cancellation landed in, so the only
+/// phase a caller can pass is one it invented.
+///
+/// Measured in `tests/cancellation_error_probe.rs`: fsqlite returns
+/// `FrankenError::Interrupt` for **both** the pre-dispatch and the
+/// after-dispatch case, because the cancel is observed by the caller's await
+/// rather than inside the engine. Having no way to separate them, the store
+/// answers [`AuthorityFailure::Ambiguous`](fgit_authority::AuthorityFailure)
+/// with [`AmbiguityReason::Cancelled`](fgit_authority::AmbiguityReason) for
+/// every cancellation -- including the pre-dispatch one this model calls
+/// provably effect-free.
+///
+/// So the divergence is not a defect on either side. The model is right about
+/// the phase; the store is right about what it can observe and errs safe. What
+/// was missing is any statement connecting them, which is why
+/// `tests/lifecycle.rs` could assert
+/// `cancellation_before_the_effect_proves_non_commit` and pass while the
+/// adapter proved no such thing. A model checked only against itself is a
+/// mirror, not a guard.
+///
+/// **Reopen condition:** if the engine ever surfaces the phase -- an interrupt
+/// distinguishable at the boundary, or an fsqlite API reporting where the
+/// cancel landed -- this returns `Some` and [`classify_cancellation`] becomes
+/// consultable. Until then, treat a `NoEffect` from that function as a
+/// statement about the protocol and never as a licence to conclude non-commit
+/// from this store.
+///
+/// The canonical *live* cancellation model for the project is
+/// `fgit_reference::CancellationPhase`, phased by the head compare-and-swap
+/// rather than by engine dispatch, and consulted by real code. Its companion
+/// report deliberately has no "not committed" field so the forbidden claim is
+/// unrepresentable. Prefer it for anything that decides.
+#[must_use]
+pub const fn observable_cancellation_phase() -> Option<CancellationPhase> {
+    None
+}
+
 /// Classify a cancellation by the phase it caught.
 ///
 /// The load-bearing entry is [`CancellationPhase::CommitInFlight`]: a
 /// cancellation there must never be reported as a refusal, because the commit
 /// may have applied. That is the storage-layer form of the rule that a client
 /// cancellation never proves non-commit.
+///
+/// **This is a model of the protocol, not a decision procedure for this
+/// adapter.** See [`observable_cancellation_phase`], which is `None`: the
+/// store cannot establish which phase a cancellation landed in, so it cannot
+/// supply the input this function needs, and a `NoEffect` answer here licenses
+/// nothing about a cancellation this store reported. `frankengit-0kqi`.
 #[must_use]
 pub const fn classify_cancellation(phase: CancellationPhase) -> CancellationOutcome {
     match phase {

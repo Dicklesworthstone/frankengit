@@ -209,7 +209,13 @@ fn a_begun_transaction_accepts_every_finalizer_exactly_once() {
 }
 
 #[test]
-fn cancellation_before_the_effect_proves_non_commit_and_at_the_commit_does_not() {
+fn the_model_calls_pre_dispatch_effect_free_and_a_cancelled_commit_ambiguous() {
+    // Renamed under `frankengit-0kqi`. This asserts a property of the MODEL,
+    // and the old name -- "cancellation before the effect proves non commit" --
+    // read as a property of the adapter. It is not one: the store cannot tell
+    // which phase a cancellation landed in, so it answers Ambiguous(Cancelled)
+    // for every phase including this one. The assertions below were always
+    // correct; the name was the part that outran them.
     assert_eq!(
         classify(CancellationPhase::BeforeDispatch),
         CancellationOutcome::NoEffect
@@ -267,4 +273,39 @@ fn all_six_phases_are_classified_and_none_is_silently_effect_free() {
 
 const fn classify(phase: CancellationPhase) -> CancellationOutcome {
     fgit_authority_fsqlite::classify_cancellation(phase)
+}
+
+#[test]
+fn the_adapter_cannot_source_a_phase_so_the_model_licenses_nothing_about_it() {
+    // `frankengit-0kqi`, the structural half.
+    //
+    // Every other test in this file drives the model against itself, which is
+    // the shape YellowOak named: a model checked only against itself is a
+    // mirror, not a guard. What was missing was any statement in the crate
+    // connecting the model to the adapter it describes -- so a caller could
+    // reasonably wire `classify_cancellation` and conclude non-commit from a
+    // `NoEffect`, which at this boundary §5.2 forbids.
+    //
+    // The connection is now a fact in the API rather than a comment: the
+    // adapter cannot produce a `CancellationPhase` at all, so the only phase a
+    // caller can pass is one it invented, and an invented phase licenses
+    // nothing about what this store did.
+    assert_eq!(
+        fgit_authority_fsqlite::observable_cancellation_phase(),
+        None,
+        "if this now returns Some, the engine has learned to distinguish \
+         cancellation phases -- which is the reopen condition on the docs for \
+         both this function and classify_cancellation. Wire the model, then \
+         delete this test and say which phase became observable"
+    );
+
+    // The presence half: the model itself must still be intact and answering,
+    // or the assertion above would be satisfied by a model that had been
+    // gutted rather than by one that is correctly unwired.
+    assert_eq!(
+        classify(CancellationPhase::CommitInFlight),
+        CancellationOutcome::Ambiguous,
+        "the model must still classify, or this test proves only that something \
+         was deleted"
+    );
 }
