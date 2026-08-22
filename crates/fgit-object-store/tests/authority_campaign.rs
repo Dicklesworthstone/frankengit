@@ -36,8 +36,8 @@ use std::sync::{Arc, Mutex};
 
 use asupersync::runtime::{Runtime, RuntimeBuilder};
 use fgit_authority::{
-    AmbiguityReason, AsyncAuthorityStore, AuthorityLimits, ImmutableKey, ImmutableRead,
-    StoreInstanceId,
+    AmbiguityReason, AsyncAuthorityStore, AuthorityLimits, CasOutcome, HeadGeneration, HeadInit,
+    HeadKey, HeadRead, ImmutableKey, ImmutableRead, StoreInstanceId,
 };
 use fgit_object_store::{
     CanonicalHmacSha256Signer, ObjectStoreAuthority, ObjectStoreEndpoint, ObjectStoreMethod,
@@ -597,4 +597,127 @@ fn a_duplicated_delivery_still_lands_exactly_one_effect() {
          refused by the store's own condition, which is what makes at-least-once delivery safe \
          for a conditional write and unsafe for an unconditional one"
     );
+}
+
+// ---------------------------------------------------------------------------
+// stale-proxy read
+// ---------------------------------------------------------------------------
+
+/// A stale proxy serving a superseded head is DETECTABLE, not silently absorbed.
+///
+/// This is the fault with the worst failure mode in the list: a dropped or
+/// rejected request announces itself, but a stale read looks exactly like a
+/// successful read of older truth. Nothing in a single response says "this is
+/// behind". What must hold is that the adapter reports what it actually
+/// observed — token and generation — rather than normalising the answer, so a
+/// caller that just committed generation 2 can tell it is being served
+/// generation 1.
+///
+/// Written by observing first: the assertion pins what the adapter genuinely
+/// does, rather than what I assumed it should.
+#[test]
+fn a_stale_proxy_read_is_visible_in_the_receipt() {
+    let (runtime, cx, adapter, provider) = admit(7);
+    let head = HeadKey::new(b"repo/head".to_vec()).expect("head key");
+
+    let init = block(
+        &runtime,
+        adapter.initialize_head(&cx, &head, HeadGeneration::FIRST, b"head-v1"),
+    )
+    .expect("head initialises");
+    let first = match init {
+        HeadInit::Created(receipt) | HeadInit::IdenticalRetry(receipt) => receipt,
+        HeadInit::Conflict => panic!("a fresh head slot must not conflict"),
+    };
+
+    let second_generation = HeadGeneration::try_new(2).expect("generation 2");
+    let committed = block(
+        &runtime,
+        adapter.compare_exchange_head(&cx, &head, first.token(), second_generation, b"head-v2"),
+    )
+    .expect("the exchange completes");
+    let CasOutcome::Committed(committed_receipt) = committed else {
+        panic!("the CAS against the current token must commit; got {committed:?}");
+    };
+
+    // Now the proxy serves the superseded version.
+    provider.0.arm([Fault::StaleProxyRead]);
+    let stale = block(&runtime, adapter.read_head(&cx, &head)).expect("the stale read returns");
+    let HeadRead::Present(receipt) = stale else {
+        panic!("a head that exists must not read as absent under a stale proxy");
+    };
+
+    assert_eq!(
+        receipt.generation(),
+        HeadGeneration::FIRST,
+        "the stale read must surface the generation it actually observed; normalising it to the \
+         latest would make a lagging proxy indistinguishable from a current one"
+    );
+    assert_eq!(
+        receipt.body(),
+        b"head-v1",
+        "the observed bytes and the observed generation must agree — a receipt pairing new bytes \
+         with an old generation, or the reverse, would let a caller mis-order history"
+    );
+    // Sanity, against the POST-CAS token rather than the pre-CAS one. My first
+    // version compared with `first.token()` and failed: a stale read serves
+    // exactly version 1, so of course it carries version 1's token. The
+    // meaningful statement is that it is NOT the committed token — that is what
+    // makes the read stale rather than current.
+    assert_ne!(
+        receipt.token(),
+        committed_receipt.token(),
+        "the staleness must be real: a stale read carries the superseded token, never the \
+         committed one. If these were equal the fault would not have fired and every assertion \
+         above would be describing an ordinary current read."
+    );
+    assert_eq!(
+        receipt.token(),
+        first.token(),
+        "and it carries precisely the superseded version's token, so a caller can identify WHICH \
+         version it was served rather than only that something was wrong"
+    );
+}
+
+/// The permitted twin: with no stale fault, the same read observes the commit.
+///
+/// Without this, the test above is satisfied by an adapter whose reads always
+/// lag — the failure mode it exists to detect.
+#[test]
+fn without_the_stale_fault_the_same_read_observes_the_commit() {
+    let (runtime, cx, adapter, _provider) = admit(8);
+    let head = HeadKey::new(b"repo/head".to_vec()).expect("head key");
+
+    let init = block(
+        &runtime,
+        adapter.initialize_head(&cx, &head, HeadGeneration::FIRST, b"head-v1"),
+    )
+    .expect("head initialises");
+    let first = match init {
+        HeadInit::Created(receipt) | HeadInit::IdenticalRetry(receipt) => receipt,
+        HeadInit::Conflict => panic!("a fresh head slot must not conflict"),
+    };
+    block(
+        &runtime,
+        adapter.compare_exchange_head(
+            &cx,
+            &head,
+            first.token(),
+            HeadGeneration::try_new(2).expect("generation 2"),
+            b"head-v2",
+        ),
+    )
+    .expect("the exchange completes");
+
+    let HeadRead::Present(receipt) =
+        block(&runtime, adapter.read_head(&cx, &head)).expect("the read returns")
+    else {
+        panic!("a committed head must read as present");
+    };
+    assert_eq!(
+        receipt.generation(),
+        HeadGeneration::try_new(2).expect("generation 2"),
+        "a clean read observes the committed generation"
+    );
+    assert_eq!(receipt.body(), b"head-v2");
 }
