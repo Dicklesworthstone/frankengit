@@ -460,36 +460,57 @@ fn an_inverted_window_arriving_as_bytes_is_refused_under_its_own_field() {
 /// under a different type with different operands.
 #[test]
 fn an_assumption_set_declared_empty_on_the_wire_is_refused() {
-    // Two frames differing only in the assumption count, with equal-length
-    // labels so one entry is the same size in both.
+    // Three frames differing only in the assumption count, with equal-length
+    // labels so one entry is the same size in every frame.
     let mut one = body();
     one.assumptions = assumptions(&["assume-a"]);
-    let bytes = encode_body(&one).expect("encodes");
-
     let mut two = body();
     two.assumptions = assumptions(&["assume-a", "assume-b"]);
-    let other = encode_body(&two).expect("encodes");
+    let mut three = body();
+    three.assumptions = assumptions(&["assume-a", "assume-b", "assume-c"]);
+    let frames = [&one, &two, &three].map(|frame| encode_body(frame).expect("encodes"));
 
-    // The count is a u32, so four big-endian bytes: 1 and 2 differ in the last
-    // of them.
-    let divergence = bytes
-        .iter()
-        .zip(other.iter())
-        .position(|(left, right)| left != right)
-        .expect("the two frames differ at the assumption count");
-    let count_offset = divergence - 3;
-    assert_eq!(
-        &bytes[count_offset..count_offset + 4],
-        &1_u32.to_be_bytes(),
-        "the located field must be the count that says one"
-    );
-    let entry_len = other.len() - bytes.len();
+    // LOCATE THE COUNT STRUCTURALLY, NOT BY FIRST DIVERGENCE. The frame
+    // prefixes its payload with its own u32 length, which also moves when an
+    // entry is added, so the earliest differing byte belongs to that header
+    // field, not to the count. The count is instead the unique offset whose
+    // big-endian u32 reads 1, 2, 3 across the three frames -- the wire
+    // declares exactly one count, and nothing else tracks set cardinality.
+    let count_offset = (0..frames[0].len() - 4)
+        .find(|&offset| {
+            frames.iter().enumerate().all(|(index, frame)| {
+                frame[offset..offset + 4]
+                    == u32::try_from(index + 1)
+                        .expect("three counts fit")
+                        .to_be_bytes()
+            })
+        })
+        .expect("the declared assumption count appears once on the wire");
+    let entry_len = frames[1].len() - frames[0].len();
     assert!(entry_len > 0, "the second entry must occupy bytes");
 
-    // Declare zero assumptions and remove the entry that count covered, so the
-    // frame is well formed and simply empty rather than truncated.
+    // Declare zero assumptions and remove the entry that count covered, then
+    // re-point the frame's own payload-length prefix at the shorter payload,
+    // so the frame is well formed and simply empty rather than truncated.
+    // That prefix is the unique header window whose big-endian u32 equals
+    // exactly the bytes that follow it.
+    let bytes = &frames[0];
+    let length_offset = (0..count_offset - 4)
+        .find(|&offset| {
+            u32::from_be_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ]) == u32::try_from(bytes.len() - (offset + 4)).expect("frame lengths fit u32")
+        })
+        .expect("the frame declares its payload length exactly once");
+    let shortened = u32::try_from(bytes.len() - entry_len - (length_offset + 4))
+        .expect("the spliced payload still fits u32");
     let mut empty = Vec::with_capacity(bytes.len() - entry_len);
-    empty.extend_from_slice(&bytes[..count_offset]);
+    empty.extend_from_slice(&bytes[..length_offset]);
+    empty.extend_from_slice(&shortened.to_be_bytes());
+    empty.extend_from_slice(&bytes[length_offset + 4..count_offset]);
     empty.extend_from_slice(&0_u32.to_be_bytes());
     empty.extend_from_slice(&bytes[count_offset + 4 + entry_len..]);
 
@@ -509,6 +530,6 @@ fn an_assumption_set_declared_empty_on_the_wire_is_refused() {
     // Near-identical permitted case: the same frame with the count it was
     // written with, which is the smallest admissible set.
     let decoded: StatisticalEvidenceBody =
-        decode_body(&bytes, DecodeLimits::DEFAULT).expect("one assumption decodes");
+        decode_body(bytes, DecodeLimits::DEFAULT).expect("one assumption decodes");
     assert_eq!(decoded.assumptions.len(), 1);
 }

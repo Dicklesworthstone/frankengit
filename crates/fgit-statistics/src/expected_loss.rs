@@ -224,7 +224,6 @@ pub enum ExpectedLossRefusal {
 /// The largest `alpha_b` this evaluation will walk.
 pub const MAX_TERMS: u64 = 1 << 16;
 
- /// The largest combined factor count [`peak_term`](fn@peak_term) materializes.
 /// The largest combined factor count [`peak_term`](fn@peak_term) materializes.
 ///
 /// The four numerator runs and two denominator runs of the balanced product
@@ -287,7 +286,8 @@ pub const MAX_PEAK_FACTORS: u64 = 1 << 18;
 /// # Errors
 ///
 /// Returns [`ExpectedLossRefusal`] when the peak term is unrepresentable at
-/// this scale, or when the term count exceeds [`MAX_TERMS`].
+/// this scale, when the term count exceeds [`MAX_TERMS`], or when the peak
+/// term's factor runs exceed [`MAX_PEAK_FACTORS`].
 ///
 /// A refusal is not a small probability. `Beta(90,10)` against `Beta(10,90)`
 /// refuses rather than returning `Ok(0)`, because its peak term underflows the
@@ -423,7 +423,8 @@ impl TailComparison {
 /// # Errors
 ///
 /// Returns [`ExpectedLossRefusal`] when either tail's peak is unrepresentable
-/// at this scale, or when either term count exceeds [`MAX_TERMS`].
+/// at this scale, when either term count exceeds [`MAX_TERMS`], or when a
+/// peak term's factor runs exceed [`MAX_PEAK_FACTORS`].
 pub fn compare_ppm(a: Posterior, b: Posterior) -> Result<TailComparison, ExpectedLossRefusal> {
     let (alpha_a, beta_a) = (a.alpha(), a.beta());
     let (alpha_b, beta_b) = (b.alpha(), b.beta());
@@ -472,20 +473,17 @@ fn tail_sum(
     alpha_a: u64,
     beta_a: u64,
     alpha_b: u64,
+    beta_b: u64,
+) -> Result<u128, ExpectedLossRefusal> {
     let peak = peak_index(alpha_a, beta_a, alpha_b, beta_b);
 
     // BOUND BEFORE ALLOCATION. `peak_term` materializes one integer per
     // element of six input-derived runs, and those runs are linear in the
     // beta parameters that [`MAX_TERMS`] never sees: an admitted posterior
     // can carry billions of observed failures. Counting the runs first keeps
-    // the whole evaluation bounded and refuses with its own typed refusal
-    // instead of aborting inside an allocation.
-    let factors = peak_factor_count(alpha_a, beta_a, beta_b, peak).ok_or(
-        ExpectedLossRefusal::TooManyPeakFactors {
-            offered: u64::MAX,
-            maximum: MAX_PEAK_FACTORS,
-        },
-    )?;
+    // the whole evaluation bounded; saturation only ever over-counts, which
+    // is the safe direction for a bound.
+    let factors = peak_factor_count(alpha_a, beta_a, beta_b, peak);
     if factors > MAX_PEAK_FACTORS {
         return Err(ExpectedLossRefusal::TooManyPeakFactors {
             offered: factors,
@@ -493,10 +491,11 @@ fn tail_sum(
         });
     }
 
-     let peak_value = peak_term(alpha_a, beta_a, beta_b, peak).ok_or_else(|| {
-         ExpectedLossRefusal::PeakTermUnrepresentable {
-             peak: u32::try_from(peak).unwrap_or(u32::MAX),
-
+    let peak_value = peak_term(alpha_a, beta_a, beta_b, peak).ok_or_else(|| {
+        ExpectedLossRefusal::PeakTermUnrepresentable {
+            peak: u32::try_from(peak).unwrap_or(u32::MAX),
+        }
+    })?;
     let mut total = peak_value;
 
     // Downward from the peak: divide by the ratio that produced each step.
@@ -522,6 +521,36 @@ fn tail_sum(
     }
 
     Ok(total)
+}
+
+/// Combined length of the six integer runs [`peak_term`](fn@peak_term)
+/// materializes for one peak term, saturating instead of overflowing.
+///
+/// Mirrors `peak_term`'s four numerator runs (`alpha_a..alpha_a + peak`,
+/// `beta_a..beta_a + beta_b`, `1..alpha_a + beta_a`, `beta_b..beta_b + peak`)
+/// and two denominator runs (`1..=peak`,
+/// `1..alpha_a + peak + beta_a + beta_b`) run for run, so a change to one
+/// must change the other. Every admitted posterior makes the true total far
+/// below `u64::MAX`; saturation only ever over-counts, which keeps the
+/// [`MAX_PEAK_FACTORS`] bound sound.
+const fn peak_factor_count(alpha_a: u64, beta_a: u64, beta_b: u64, peak: u64) -> u64 {
+    // Inclusive-start, exclusive-end run length; saturation only ever
+    // over-counts, which is the safe direction for a bound.
+    const fn run(start: u64, end: u64) -> u64 {
+        end.saturating_sub(start)
+    }
+    let numerators = peak
+        .saturating_add(beta_b)
+        .saturating_add(run(1, alpha_a.saturating_add(beta_a)))
+        .saturating_add(peak);
+    let denominators = peak.saturating_add(run(
+        1,
+        alpha_a
+            .saturating_add(peak)
+            .saturating_add(beta_a)
+            .saturating_add(beta_b),
+    ));
+    numerators.saturating_add(denominators)
 }
 
 /// `T(i+1)/T(i)`, as an exact integer ratio.
