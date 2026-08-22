@@ -6241,6 +6241,125 @@ mod tests {
         fs::write(path, text).expect("write lock");
     }
 
+    fn lock_package(name: &str) -> LockPackage {
+        LockPackage {
+            name: name.to_owned(),
+            version: "0.0.0".to_owned(),
+            source: None,
+            checksum: None,
+            dependencies: Vec::new(),
+        }
+    }
+
+    fn workspace_dependency(package: &str, features: &[&str]) -> WorkspaceDependency {
+        WorkspaceDependency {
+            package: package.to_owned(),
+            manifest: "crates/fgit-fixture/Cargo.toml".to_owned(),
+            version: None,
+            default_features: "not_applicable".to_owned(),
+            declared_features: features
+                .iter()
+                .map(|feature| (*feature).to_owned())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn forbidden_constellation_classifiers_keep_explicit_permitted_boundaries() {
+        assert!(is_forbidden_telemetry_exporter("opentelemetry-otlp"));
+        assert!(is_forbidden_telemetry_exporter("tracing-opentelemetry"));
+        assert!(!is_forbidden_telemetry_exporter("tracing"));
+        assert!(!is_forbidden_telemetry_exporter("tracing-core"));
+        assert!(!is_forbidden_telemetry_exporter("tracing-subscriber"));
+        assert!(!is_forbidden_telemetry_exporter("log"));
+
+        assert!(is_forbidden_native_media("wgpu"));
+        assert!(is_forbidden_native_media("freetype-sys"));
+        assert!(!is_forbidden_native_media("png"));
+        assert!(!is_forbidden_native_media("image"));
+
+        assert!(is_forbidden_native_transport("hyper"));
+        assert!(is_forbidden_native_transport("actix"));
+        assert!(!is_forbidden_native_transport("miniz_oxide"));
+
+        assert!(is_forbidden_fastapi_surface(
+            "fastapi-demo",
+            &BTreeSet::new()
+        ));
+        assert!(is_forbidden_fastapi_surface(
+            "fastapi-core",
+            &BTreeSet::from(["tokio".to_owned()])
+        ));
+        assert!(!is_forbidden_fastapi_surface(
+            "fastapi-core",
+            &BTreeSet::from(["json".to_owned()])
+        ));
+        assert!(!is_forbidden_fastapi_surface(
+            "fgit-api",
+            &BTreeSet::from(["tokio".to_owned()])
+        ));
+    }
+
+    #[test]
+    fn forbidden_constellation_preflight_checks_the_lock_package_loop() {
+        let packages = vec![
+            lock_package("fastapi-demo"),
+            lock_package("hyper"),
+            lock_package("opentelemetry-otlp"),
+            lock_package("wgpu"),
+        ];
+        let mut report = Report::new();
+
+        check_forbidden_constellation_surfaces(&packages, &[], &mut report);
+
+        assert_error(
+            &report,
+            "forbidden fastapi demo/example package `fastapi-demo`",
+        );
+        assert_error(
+            &report,
+            "forbidden native transport `hyper` resolved in Cargo.lock",
+        );
+        assert_error(
+            &report,
+            "forbidden telemetry exporter `opentelemetry-otlp` resolved in Cargo.lock",
+        );
+        assert_error(
+            &report,
+            "forbidden native media/GPU dependency `wgpu` resolved in Cargo.lock",
+        );
+    }
+
+    #[test]
+    fn forbidden_constellation_preflight_checks_the_workspace_feature_loop() {
+        let dependencies = vec![
+            workspace_dependency("fastapi-core", &["tokio"]),
+            workspace_dependency("hyper", &[]),
+            workspace_dependency("opentelemetry-sdk", &[]),
+            workspace_dependency("glow", &[]),
+        ];
+        let mut report = Report::new();
+
+        check_forbidden_constellation_surfaces(&[], &dependencies, &mut report);
+
+        assert_error(
+            &report,
+            "forbidden fastapi feature closure for `fastapi-core` in crates/fgit-fixture/Cargo.toml",
+        );
+        assert_error(
+            &report,
+            "forbidden native transport dependency `hyper` declared in crates/fgit-fixture/Cargo.toml",
+        );
+        assert_error(
+            &report,
+            "forbidden telemetry exporter dependency `opentelemetry-sdk` declared in crates/fgit-fixture/Cargo.toml",
+        );
+        assert_error(
+            &report,
+            "forbidden native media/GPU dependency `glow` declared in crates/fgit-fixture/Cargo.toml",
+        );
+    }
+
     #[test]
     fn planted_gateway_transport_surfaces_are_refused() {
         let workspace = fixture_workspace("admitted");
