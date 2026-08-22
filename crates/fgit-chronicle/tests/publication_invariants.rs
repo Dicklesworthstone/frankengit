@@ -433,6 +433,8 @@ fn a_decision_sequence_gap_is_refused_and_the_contiguous_twin_is_not() {
     if let Some(last) = batch.decisions.last_mut() {
         last.decision_sequence = DecisionSequence::try_new(2).expect("two is a valid position");
     }
+    batch.batch_evidence_root =
+        batch_evidence_root(&batch).expect("the contiguous decision evidence has a canonical root");
     let mut head = head;
     head.latest_decision_sequence =
         Some(DecisionSequence::try_new(2).expect("two is a valid position"));
@@ -700,6 +702,8 @@ fn a_duplicate_transaction_is_refused_in_a_pair_that_arrives_as_data() {
     if let Some(last) = batch.decisions.last_mut() {
         last.tx_id = derived!(TxId, 0xEC);
     }
+    batch.batch_evidence_root = batch_evidence_root(&batch)
+        .expect("the distinct-transaction evidence has a canonical root");
     head.decision_tail_id =
         Some(batch_identity(&CryptoBodyIdentity, &batch).expect("the batch has an identity"));
     assert_eq!(
