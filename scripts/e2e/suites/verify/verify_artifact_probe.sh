@@ -3,11 +3,11 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-# shellcheck source=lib.sh
-. "${SCRIPT_DIR}/lib.sh"
+E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+# shellcheck source=../../lib.sh
+. "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
-REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
+REPOSITORY_ROOT="$(cd "${E2E_ROOT}/../.." && pwd -P)"
 VERIFY="${REPOSITORY_ROOT}/scripts/verify.sh"
 readonly DOCS_TIMEOUT_SECONDS="${VERIFY_ARTIFACT_PROBE_DOCS_TIMEOUT_SECONDS:-15}"
 
@@ -46,6 +46,34 @@ if ! [[ "${DOCS_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 fge_init verify-artifact-probe
+
+# ---------------------------------------------------------------------------
+# DEFAULT-OFF GATE (frankengit-osqi, GoldLotus disposition option (c)).
+#
+# This suite drives scripts/verify.sh, which is the orchestrator's lane and not
+# a thing an agent may invoke -- AGENTS.md §16.2 puts cargo test / clippy /
+# build / verify.sh outside every agent's ceiling. Before this bead the file
+# solved that by living outside suites/ and therefore never running at all,
+# which is worse: its 30 assertion ids read as coverage for FG-001 while
+# nothing executed them (that is the defect osqi records).
+#
+# So it is discovered like every other suite, and REFUSES BY DEFAULT rather
+# than falling back to silence. §3.1: unsupported behaviour returns a typed
+# refusal, it never falls back secretly. One typed unsupported cell says
+# exactly why, and the corpus terminal for this suite is honestly non-pass.
+#
+# Set FGIT_PROBE_ALLOW_VERIFY=1 to run the real 37-assertion body. That switch
+# belongs to whoever owns the verify.sh lane.
+#
+# DELETION CONDITION: goes if verify.sh ever becomes an agent-invocable lane,
+# at which point the gate is pure obstruction and the body should run always.
+# ---------------------------------------------------------------------------
+if [ -z "${FGIT_PROBE_ALLOW_VERIFY:-}" ]; then
+  fge_phase action
+  fge_unsupported FG-001-PROBE-000 \
+    'verify.sh is the orchestrator lane and is outside every agent build ceiling (AGENTS.md 16.2), so this suite refuses by default rather than invoking it; set FGIT_PROBE_ALLOW_VERIFY=1 to run the 37 replay-artifact assertions'
+  exit 0
+fi
 fge_phase setup
 artifact_root="$(fge_tempdir verify-replay)"
 normal_root="${artifact_root}/normal"

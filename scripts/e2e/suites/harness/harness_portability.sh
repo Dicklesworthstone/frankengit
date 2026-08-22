@@ -640,8 +640,8 @@ fge_assert_match FG-000A-PORT-023 "$FGE_TIME_RES" '^(us|ns|s)$' \
 # empty string. It is written as an exact match precisely so that resolving the
 # bead cannot leave a stale allowance behind: the assertion fails until it is
 # updated.
-fge_assert_eq FG-000A-PORT-036 'verify_artifact_probe ' "$root_orphans" \
-  'the only unrun root-level suite is the one frankengit-osqi tracks'
+fge_assert_eq FG-000A-PORT-036 '' "$root_orphans" \
+  'no root-level suite is left undiscovered: osqi moved the last one under suites/verify/ with a default-off gate'
 fge_assert_eq FG-000A-PORT-037 yes "$orphan_detector_fires" \
   'the orphan detector fires on a planted root-level suite with no invoker'
 fge_assert_eq FG-000A-PORT-038 yes "$orphan_detector_spares_driven" \
