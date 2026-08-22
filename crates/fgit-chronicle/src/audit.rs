@@ -1,9 +1,12 @@
 //! Total verification of a batch and head pair that arrives as data.
 
 use fgit_codec::attest::{BodyIdentity, body_id};
-use fgit_codec::schema::{RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody};
+use fgit_codec::schema::{
+    RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecisionBatchBody,
+};
 use fgit_types::{
-    DecisionOutcome, DecisionSequence, RepositoryDecisionBatchId, RepositorySequence, TxId,
+    DecisionOutcome, DecisionSequence, RepositoryCommitId, RepositoryDecisionBatchId,
+    RepositorySequence, TxId,
 };
 use std::collections::BTreeSet;
 
@@ -33,8 +36,8 @@ where
     verify_identity(basis, batch, head)?;
     let tail = verify_decision_sequence(basis, batch)?;
     verify_unique_transactions(batch)?;
-    verify_commit_records(basis, batch)?;
-    verify_successor(basis, batch, head, tail)?;
+    let latest_committed_rcr_id = verify_commit_records(identity, basis, batch)?;
+    verify_successor(basis, batch, head, tail, latest_committed_rcr_id)?;
     verify_tail_binding(identity, batch, head)?;
     verify_roots(batch, head)?;
     verify_refusal_only(basis, batch)
@@ -74,6 +77,24 @@ where
         body_id(identity, batch).map_err(|_| ChronicleRefusal::BatchIdentityUnavailable)?;
     RepositoryDecisionBatchId::from_internal_object_id(object)
         .map_err(|_| ChronicleRefusal::BatchIdentityUnavailable)
+}
+
+/// The identity of a repository commit record, computed from its final bytes.
+///
+/// An RCR's sequence and predecessor are part of its canonical body, so they
+/// must be stamped before deriving this value. Readers use this to verify both
+/// the corresponding committed decision and the successor head.
+pub fn repository_commit_identity<I>(
+    identity: &I,
+    record: &RepositoryCommitRecord,
+) -> Result<RepositoryCommitId, ChronicleRefusal>
+where
+    I: BodyIdentity + ?Sized,
+{
+    let object =
+        body_id(identity, record).map_err(|_| ChronicleRefusal::CommitRecordIdentityUnavailable)?;
+    RepositoryCommitId::from_internal_object_id(object)
+        .map_err(|_| ChronicleRefusal::CommitRecordIdentityUnavailable)
 }
 
 fn verify_identity(
@@ -150,10 +171,14 @@ fn verify_unique_transactions(batch: &RepositoryDecisionBatchBody) -> Result<(),
     Ok(())
 }
 
-fn verify_commit_records(
+fn verify_commit_records<I>(
+    identity: &I,
     basis: &PublicationBasis,
     batch: &RepositoryDecisionBatchBody,
-) -> Result<(), ChronicleRefusal> {
+) -> Result<Option<RepositoryCommitId>, ChronicleRefusal>
+where
+    I: BodyIdentity + ?Sized,
+{
     let committed: Vec<(usize, &fgit_codec::schema::RepositoryDecision)> = batch
         .decisions
         .iter()
@@ -167,7 +192,7 @@ fn verify_commit_records(
         });
     }
     if batch.committed_rcrs.is_empty() {
-        return Ok(());
+        return Ok(basis.body().latest_committed_rcr_id);
     }
     let open = basis.open_repository_sequence()?;
     let mut expected = open;
@@ -195,10 +220,13 @@ fn verify_commit_records(
         if decision.1.tx_id != record.tx_id {
             return Err(ChronicleRefusal::CommitRecordNotBound { index: decision.0 });
         }
-        parent = Some(
-            commit_id_of(&decision.1.outcome)
-                .ok_or(ChronicleRefusal::CommitRecordNotBound { index: decision.0 })?,
-        );
+        let observed = commit_id_of(&decision.1.outcome)
+            .ok_or(ChronicleRefusal::CommitRecordNotBound { index: decision.0 })?;
+        let record_id = repository_commit_identity(identity, record)?;
+        if observed != record_id {
+            return Err(ChronicleRefusal::CommitRecordIdentityMismatch { index });
+        }
+        parent = Some(record_id);
         if index + 1 < batch.committed_rcrs.len() {
             expected = expected
                 .next()
@@ -207,7 +235,7 @@ fn verify_commit_records(
                 })?;
         }
     }
-    Ok(())
+    Ok(parent)
 }
 
 const fn commit_id_of(outcome: &DecisionOutcome) -> Option<fgit_types::RepositoryCommitId> {
@@ -224,6 +252,7 @@ fn verify_successor(
     batch: &RepositoryDecisionBatchBody,
     head: &RepositoryAuthorityHeadBody,
     tail: DecisionSequence,
+    latest_committed_rcr_id: Option<RepositoryCommitId>,
 ) -> Result<(), ChronicleRefusal> {
     if head.generation <= basis.generation() {
         return Err(ChronicleRefusal::GenerationNotAdvancing {
@@ -252,6 +281,9 @@ fn verify_successor(
         return Err(ChronicleRefusal::ResultingRootMismatch {
             field: "latest_repository_sequence",
         });
+    }
+    if head.latest_committed_rcr_id != latest_committed_rcr_id {
+        return Err(ChronicleRefusal::LatestCommittedRecordMismatch);
     }
     Ok(())
 }

@@ -44,8 +44,7 @@ use fgit_crypto::IdentityDomain;
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, HeadGeneration, OPAQUE_ID_LEN,
     PolicyEpoch, PrincipalSnapshotId, RefusalCode, RefusalRecordId, RegistryEpoch,
-    RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, RepositorySequence, TenantId,
-    TxId,
+    RepositoryAuthorityHeadId, RepositoryId, RepositorySequence, TenantId, TxId,
 };
 
 // ---------------------------------------------------------------- fixtures
@@ -175,7 +174,7 @@ fn opened(plan: FaultPlan) -> (MemoryAuthorityStore, PublicationBasis) {
 
 fn commit_candidate(basis: &PublicationBasis, tag: u8) -> VerifiedPublication {
     let mut plan = PublicationPlan::open(basis.clone()).expect("the basis opens");
-    plan.commit(derived!(RepositoryCommitId, tag), record(tag));
+    plan.commit(record(tag));
     plan.seal(&CryptoBodyIdentity, committed_roots())
         .expect("the plan is well formed")
 }
@@ -649,7 +648,7 @@ fn a_cas_loser_replans_the_same_sealed_transaction_against_the_new_head() {
     let mut loser_plan = PublicationPlan::open(basis.clone()).expect("the basis opens");
     let mut loser_record = record(0x9b);
     loser_record.tx_id = loser_tx;
-    loser_plan.commit(derived!(RepositoryCommitId, 0x9b), loser_record.clone());
+    loser_plan.commit(loser_record.clone());
     let loser = loser_plan
         .seal(&CryptoBodyIdentity, committed_roots())
         .expect("the loser's plan is well formed");
@@ -679,7 +678,7 @@ fn a_cas_loser_replans_the_same_sealed_transaction_against_the_new_head() {
     // Replan the SAME seal against the winner's head.
     let new_basis = PublicationBasis::new(identity_of(&winner_head), winner_head);
     let mut replan = PublicationPlan::open(new_basis).expect("the new basis opens");
-    replan.commit(derived!(RepositoryCommitId, 0x9b), loser_record);
+    replan.commit(loser_record);
     let replanned = replan
         .seal(&CryptoBodyIdentity, committed_roots())
         .expect("the replanned plan is well formed");
@@ -772,7 +771,7 @@ fn a_duplicate_transaction_cannot_be_assembled() {
     );
     let mut duplicate = record(0x55);
     duplicate.tx_id = tx;
-    plan.commit(derived!(RepositoryCommitId, 0x55), duplicate);
+    plan.commit(duplicate);
 
     let refusal = plan
         .seal(&CryptoBodyIdentity, committed_roots())

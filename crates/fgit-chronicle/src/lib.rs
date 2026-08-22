@@ -70,7 +70,7 @@ pub mod verify;
 
 pub use archive::{BackupExportBundleBody, RestoreReportBody};
 pub use assemble::{PublicationPlan, VerifiedPublication};
-pub use audit::{batch_identity, verify_pair};
+pub use audit::{batch_identity, repository_commit_identity, verify_pair};
 pub use capsule::{
     BackupProfile, CapsulePointer, RepositoryCapsuleBody, advance_pointer_root_last,
     advance_pointer_root_last_async, capsule_identity,

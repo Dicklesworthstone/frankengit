@@ -20,8 +20,7 @@ use fgit_crypto::IdentityDomain;
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, HeadGeneration, OPAQUE_ID_LEN,
     PolicyEpoch, PrincipalSnapshotId, RefusalCode, RefusalRecordId, RegistryEpoch,
-    RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, RepositorySequence, TenantId,
-    TxId,
+    RepositoryAuthorityHeadId, RepositoryId, RepositorySequence, TenantId, TxId,
 };
 
 fn digest(tag: u8) -> Digest {
@@ -134,7 +133,7 @@ fn opened() -> (MemoryAuthorityStore, PublicationBasis) {
 
 fn candidate(basis: &PublicationBasis, commit_tag: u8) -> VerifiedPublication {
     let mut plan = PublicationPlan::open(basis.clone()).expect("the basis opens");
-    plan.commit(derived!(RepositoryCommitId, commit_tag), record(commit_tag));
+    plan.commit(record(commit_tag));
     plan.seal(&CryptoBodyIdentity, roots())
         .expect("the plan is well formed")
 }

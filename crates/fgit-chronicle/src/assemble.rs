@@ -6,13 +6,12 @@ use fgit_codec::schema::{
     RepositoryDecisionBatchBody,
 };
 use fgit_types::{
-    DecisionOutcome, DecisionSequence, RefusalCode, RefusalRecordId, RepositoryCommitId,
-    RepositorySequence, TxId,
+    DecisionOutcome, DecisionSequence, RefusalCode, RefusalRecordId, RepositorySequence, TxId,
 };
 
 use std::collections::BTreeSet;
 
-use crate::audit::{batch_identity, verify_pair};
+use crate::audit::{batch_identity, repository_commit_identity, verify_pair};
 use crate::origin::{PublicationBasis, ResultingRoots};
 use crate::refusal::ChronicleRefusal;
 
@@ -25,11 +24,10 @@ use crate::refusal::ChronicleRefusal;
 #[derive(Clone, Debug)]
 pub struct PublicationPlan {
     basis: PublicationBasis,
-    decisions: Vec<RepositoryDecision>,
+    decisions: Vec<PlannedDecision>,
     records: Vec<RepositoryCommitRecord>,
     next_decision: DecisionSequence,
     next_repository: RepositorySequence,
-    parent_rcr: Option<RepositoryCommitId>,
     decided: BTreeSet<TxId>,
     deferred: Option<ChronicleRefusal>,
 }
@@ -39,14 +37,12 @@ impl PublicationPlan {
     pub fn open(basis: PublicationBasis) -> Result<Self, ChronicleRefusal> {
         let next_decision = basis.open_decision_sequence()?;
         let next_repository = basis.open_repository_sequence()?;
-        let parent_rcr = basis.body().latest_committed_rcr_id;
         Ok(Self {
             basis,
             decisions: Vec::new(),
             records: Vec::new(),
             next_decision,
             next_repository,
-            parent_rcr,
             decided: BTreeSet::new(),
             deferred: None,
         })
@@ -82,10 +78,10 @@ impl PublicationPlan {
     ) -> &mut Self {
         self.claim(tx_id);
         let sequence = self.take_decision_sequence();
-        self.decisions.push(RepositoryDecision {
+        self.decisions.push(PlannedDecision {
             tx_id,
             decision_sequence: sequence,
-            outcome: DecisionOutcome::Refused {
+            outcome: PlannedOutcome::Refused {
                 code,
                 refusal_record_id,
             },
@@ -95,26 +91,21 @@ impl PublicationPlan {
 
     /// Records a commit and the record that carries it.
     ///
-    /// The plan stamps the record's repository sequence and parent, so the
-    /// committed chain is contiguous and correctly linked by construction.
+    /// The plan stamps the record's repository sequence and parent, then
+    /// derives its identity from those final bytes while sealing. The caller
+    /// therefore cannot associate a pre-stamp identity with the post-stamp
+    /// record that the batch actually carries.
+    ///
     /// `record` is otherwise taken as given: this crate does not compute roots.
-    pub fn commit(
-        &mut self,
-        repository_commit_id: RepositoryCommitId,
-        mut record: RepositoryCommitRecord,
-    ) -> &mut Self {
+    pub fn commit(&mut self, mut record: RepositoryCommitRecord) -> &mut Self {
         self.claim(record.tx_id);
         let sequence = self.take_decision_sequence();
         let repository_sequence = self.take_repository_sequence();
         record.repository_sequence = repository_sequence;
-        record.parent_rcr_id = self.parent_rcr;
-        self.parent_rcr = Some(repository_commit_id);
-        self.decisions.push(RepositoryDecision {
+        self.decisions.push(PlannedDecision {
             tx_id: record.tx_id,
             decision_sequence: sequence,
-            outcome: DecisionOutcome::Committed {
-                repository_commit_id,
-            },
+            outcome: PlannedOutcome::Committed,
         });
         self.records.push(record);
         self
@@ -152,21 +143,57 @@ impl PublicationPlan {
             .last()
             .map(|decision| decision.decision_sequence)
             .ok_or(ChronicleRefusal::EmptyBatch)?;
-        let latest_repository_sequence = self
-            .records
+        let mut parent_rcr = previous.latest_committed_rcr_id;
+        let mut records = self.records.into_iter();
+        let mut committed_rcrs = Vec::with_capacity(records.len());
+        let mut decisions = Vec::with_capacity(self.decisions.len());
+        for (index, planned) in self.decisions.into_iter().enumerate() {
+            let outcome = match planned.outcome {
+                PlannedOutcome::Refused {
+                    code,
+                    refusal_record_id,
+                } => DecisionOutcome::Refused {
+                    code,
+                    refusal_record_id,
+                },
+                PlannedOutcome::Committed => {
+                    let mut record = records
+                        .next()
+                        .ok_or(ChronicleRefusal::CommitRecordNotBound { index })?;
+                    record.parent_rcr_id = parent_rcr;
+                    let repository_commit_id = repository_commit_identity(identity, &record)?;
+                    parent_rcr = Some(repository_commit_id);
+                    committed_rcrs.push(record);
+                    DecisionOutcome::Committed {
+                        repository_commit_id,
+                    }
+                }
+            };
+            decisions.push(RepositoryDecision {
+                tx_id: planned.tx_id,
+                decision_sequence: planned.decision_sequence,
+                outcome,
+            });
+        }
+        if records.next().is_some() {
+            return Err(ChronicleRefusal::CommitRecordCountMismatch {
+                committed_decisions: committed_rcrs.len(),
+                records: committed_rcrs.len().saturating_add(1),
+            });
+        }
+        let latest_repository_sequence = committed_rcrs
             .last()
             .map_or(previous.latest_repository_sequence, |record| {
                 Some(record.repository_sequence)
             });
-        let latest_committed_rcr_id = self.parent_rcr;
 
         let batch = RepositoryDecisionBatchBody {
             repository_id: previous.repository_id,
             predecessor_head_id: self.basis.id(),
             predecessor_head_generation: self.basis.generation(),
             first_decision_sequence,
-            decisions: self.decisions,
-            committed_rcrs: self.records,
+            decisions,
+            committed_rcrs,
             resulting_ref_root: roots.ref_root,
             resulting_forge_position_root: roots.forge_position_root,
             resulting_outcome_index_root: roots.outcome_index_root,
@@ -184,7 +211,7 @@ impl PublicationPlan {
             predecessor_head_id: Some(self.basis.id()),
             decision_tail_id: Some(batch_id),
             latest_decision_sequence: Some(tail),
-            latest_committed_rcr_id,
+            latest_committed_rcr_id: parent_rcr,
             latest_repository_sequence,
             ref_root: roots.ref_root,
             forge_position_root: roots.forge_position_root,
@@ -249,6 +276,24 @@ impl PublicationPlan {
         }
         current
     }
+}
+
+/// A terminal decision before an RCR has final bytes and therefore an identity.
+#[derive(Clone, Debug)]
+struct PlannedDecision {
+    tx_id: TxId,
+    decision_sequence: DecisionSequence,
+    outcome: PlannedOutcome,
+}
+
+/// The outcome shape known while the plan is still mutable.
+#[derive(Clone, Debug)]
+enum PlannedOutcome {
+    Refused {
+        code: RefusalCode,
+        refusal_record_id: RefusalRecordId,
+    },
+    Committed,
 }
 
 /// A batch and head pair that passed every chronicle invariant.

@@ -6,7 +6,7 @@
 
 use fgit_chronicle::{
     ChronicleRefusal, PublicationBasis, PublicationPlan, ResultingRoots, VerifiedPublication,
-    batch_identity, verify_pair,
+    batch_identity, repository_commit_identity, verify_pair,
 };
 use fgit_codec::CryptoBodyIdentity;
 use fgit_codec::schema::{
@@ -124,7 +124,7 @@ fn the_builder_assigns_contiguous_decision_sequence_from_the_basis() {
         RefusalCode::NonFastForwardRefused,
         derived!(RefusalRecordId, 0x51),
     );
-    plan.commit(derived!(RepositoryCommitId, 0x52), record(0x53));
+    plan.commit(record(0x53));
     plan.refuse(
         derived!(TxId, 0x54),
         RefusalCode::QuotaExceeded,
@@ -163,7 +163,7 @@ fn the_builder_assigns_contiguous_decision_sequence_from_the_basis() {
 #[test]
 fn the_successor_head_binds_the_batch_and_the_predecessor() {
     let mut plan = PublicationPlan::open(basis()).expect("genesis basis opens");
-    plan.commit(derived!(RepositoryCommitId, 0x60), record(0x61));
+    plan.commit(record(0x61));
     let published = seal(plan, &committed_roots());
     let head = published.head();
 
@@ -237,23 +237,42 @@ fn an_empty_plan_refuses_to_seal() {
 #[test]
 fn a_second_batch_continues_the_first_without_a_gap() {
     let mut plan = PublicationPlan::open(basis()).expect("genesis basis opens");
-    plan.commit(derived!(RepositoryCommitId, 0x80), record(0x81));
+    plan.commit(record(0x81));
     plan.refuse(
         derived!(TxId, 0x82),
         RefusalCode::QuotaExceeded,
         derived!(RefusalRecordId, 0x83),
     );
     let first = seal(plan, &committed_roots());
+    let first_record = first
+        .batch()
+        .committed_rcrs
+        .first()
+        .expect("the first batch carries its commit record");
+    let first_rcr_id = repository_commit_identity(&CryptoBodyIdentity, first_record)
+        .expect("the first record re-identifies from its final bytes");
+    assert_eq!(
+        first.head().latest_committed_rcr_id,
+        Some(first_rcr_id),
+        "the first head names the record its batch actually carries"
+    );
 
     let next_basis = PublicationBasis::new(
         derived!(RepositoryAuthorityHeadId, 0x84),
         first.head().clone(),
     );
     let mut plan = PublicationPlan::open(next_basis).expect("successor basis opens");
-    plan.commit(derived!(RepositoryCommitId, 0x85), record(0x86));
+    plan.commit(record(0x86));
     let second = plan
         .seal(&CryptoBodyIdentity, committed_roots())
         .expect("the successor batch is well formed");
+    let second_record = second
+        .batch()
+        .committed_rcrs
+        .first()
+        .expect("the second batch carries its commit record");
+    let second_rcr_id = repository_commit_identity(&CryptoBodyIdentity, second_record)
+        .expect("the second record re-identifies from its final bytes");
 
     assert_eq!(
         second.batch().first_decision_sequence.get(),
@@ -261,25 +280,53 @@ fn a_second_batch_continues_the_first_without_a_gap() {
         "the second batch starts exactly where the first ended"
     );
     assert_eq!(
-        second
-            .batch()
-            .committed_rcrs
-            .first()
-            .expect("one record")
-            .repository_sequence
-            .get(),
+        second_record.repository_sequence.get(),
         2,
         "repository sequence continues across batches, counting commits only"
     );
     assert_eq!(
-        second
-            .batch()
-            .committed_rcrs
-            .first()
-            .expect("one record")
-            .parent_rcr_id,
-        Some(derived!(RepositoryCommitId, 0x80)),
+        second_record.parent_rcr_id,
+        Some(first_rcr_id),
         "the commit chain links to the previous batch's last record"
+    );
+    assert_eq!(
+        second.head().latest_committed_rcr_id,
+        Some(second_rcr_id),
+        "the second head names the RCR re-derived from its own batch, not a pre-stamp caller label"
+    );
+    assert!(matches!(
+        second.batch().decisions.first().map(|decision| decision.outcome),
+        Some(DecisionOutcome::Committed { repository_commit_id }) if repository_commit_id == second_rcr_id
+    ));
+}
+
+#[test]
+fn an_rcr_identity_binds_the_stamped_sequence_and_predecessor() {
+    let first = record(0x87);
+    let first_id = repository_commit_identity(&CryptoBodyIdentity, &first)
+        .expect("the first stamped record identifies");
+
+    // Near-identical permitted case: an unchanged final record retains its
+    // identity, so the check is about the two stamped fields rather than an
+    // incidental field in the fixture.
+    assert_eq!(
+        repository_commit_identity(&CryptoBodyIdentity, &first)
+            .expect("the unchanged record identifies"),
+        first_id
+    );
+
+    let mut successor = first.clone();
+    successor.repository_sequence = first
+        .repository_sequence
+        .next()
+        .expect("the first repository sequence has a successor");
+    successor.parent_rcr_id = Some(first_id);
+    let successor_id = repository_commit_identity(&CryptoBodyIdentity, &successor)
+        .expect("the successor stamped record identifies");
+
+    assert_ne!(
+        successor_id, first_id,
+        "records that differ only in plan-stamped sequence and predecessor must not collide"
     );
 }
 
@@ -293,7 +340,7 @@ fn well_formed_pair() -> (
     RepositoryAuthorityHeadBody,
 ) {
     let mut plan = PublicationPlan::open(basis()).expect("genesis basis opens");
-    plan.commit(derived!(RepositoryCommitId, 0x90), record(0x91));
+    plan.commit(record(0x91));
     let published = seal(plan, &committed_roots());
     (basis(), published.batch().clone(), published.head().clone())
 }
@@ -304,6 +351,45 @@ fn a_well_formed_pair_verifies() {
     assert_eq!(
         verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
         Ok(())
+    );
+}
+
+#[test]
+fn a_committed_decision_with_a_stale_rcr_identity_is_refused_and_the_reidentified_twin_is_not() {
+    let (basis, mut batch, head) = well_formed_pair();
+    let expected = repository_commit_identity(
+        &CryptoBodyIdentity,
+        batch
+            .committed_rcrs
+            .first()
+            .expect("the pair carries one committed record"),
+    )
+    .expect("the committed record re-identifies");
+    batch
+        .decisions
+        .first_mut()
+        .expect("the pair carries the corresponding decision")
+        .outcome = DecisionOutcome::Committed {
+        repository_commit_id: derived!(RepositoryCommitId, 0x9a),
+    };
+
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::CommitRecordIdentityMismatch { index: 0 }),
+        "a decision may not name an RCR identity that its record's bytes cannot reproduce"
+    );
+
+    batch
+        .decisions
+        .first_mut()
+        .expect("the pair carries the corresponding decision")
+        .outcome = DecisionOutcome::Committed {
+        repository_commit_id: expected,
+    };
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(()),
+        "the exact same pair proceeds when the decision names its carried record"
     );
 }
 
@@ -501,7 +587,7 @@ fn a_head_naming_another_batch_is_refused_and_the_bound_twin_is_not() {
     // Near-identical permitted case: the identity recomputed from the batch.
     let rebuilt = {
         let mut plan = PublicationPlan::open(basis.clone()).expect("the basis opens");
-        plan.commit(derived!(RepositoryCommitId, 0x90), record(0x91));
+        plan.commit(record(0x91));
         seal(plan, &committed_roots())
     };
     assert_eq!(
@@ -531,7 +617,7 @@ fn one_transaction_cannot_be_decided_twice_by_the_builder() {
     );
     let mut duplicate = record(0xE2);
     duplicate.tx_id = reused;
-    plan.commit(derived!(RepositoryCommitId, 0xE3), duplicate);
+    plan.commit(duplicate);
     assert_eq!(
         plan.seal(&CryptoBodyIdentity, committed_roots()),
         Err(ChronicleRefusal::DuplicateTransaction { index: 1 }),
@@ -564,7 +650,7 @@ fn one_transaction_cannot_be_decided_twice_by_the_builder() {
     );
     let mut distinct = record(0xE8);
     distinct.tx_id = derived!(TxId, 0xE9);
-    plan.commit(derived!(RepositoryCommitId, 0xEA), distinct);
+    plan.commit(distinct);
     let published = seal(plan, &committed_roots());
     assert_eq!(published.batch().decisions.len(), 2);
 }

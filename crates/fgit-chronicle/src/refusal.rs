@@ -75,6 +75,13 @@ pub enum ChronicleRefusal {
         /// Zero-based index of the committed decision.
         index: usize,
     },
+    /// A committed decision does not name the canonical bytes of its record.
+    CommitRecordIdentityMismatch {
+        /// Zero-based index of the mismatched record within the batch.
+        index: usize,
+    },
+    /// An RCR's canonical identity could not be computed.
+    CommitRecordIdentityUnavailable,
     /// A commit record's parent is not the record that precedes it.
     CommitRecordParentBroken {
         /// Zero-based index of the offending record.
@@ -120,6 +127,8 @@ pub enum ChronicleRefusal {
         /// The position the head claims.
         observed: Option<DecisionSequence>,
     },
+    /// The successor head does not name the final committed RCR in its batch.
+    LatestCommittedRecordMismatch,
     /// A batch that committed nothing advanced committed state anyway.
     ///
     /// A refusal consumes decision sequence but never advances repository
@@ -234,6 +243,13 @@ impl fmt::Display for ChronicleRefusal {
             Self::CommitRecordNotBound { index } => {
                 write!(f, "committed decision {index} does not name its record")
             }
+            Self::CommitRecordIdentityMismatch { index } => write!(
+                f,
+                "committed decision {index} does not name its record's canonical identity"
+            ),
+            Self::CommitRecordIdentityUnavailable => {
+                f.write_str("the commit record's identity could not be computed")
+            }
             Self::CommitRecordParentBroken { index } => {
                 write!(f, "commit record {index} does not name its predecessor")
             }
@@ -273,6 +289,9 @@ impl fmt::Display for ChronicleRefusal {
                 observed.map(DecisionSequence::get),
                 expected.get()
             ),
+            Self::LatestCommittedRecordMismatch => {
+                f.write_str("successor head does not name the final committed RCR")
+            }
             Self::RefusalOnlyBatchAdvancedCommittedState { field } => write!(
                 f,
                 "a batch that committed nothing advanced {field}; refusals consume decision sequence only"
