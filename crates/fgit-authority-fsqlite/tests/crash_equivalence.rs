@@ -1104,6 +1104,33 @@ fn the_crash_matrix_holds_on_every_distinct_filesystem() {
 //
 // Linux only: /proc/self/fd is the mechanism.
 
+/// Serialises every test that samples a PROCESS-GLOBAL resource counter.
+///
+/// `/proc/self/fd` and `/proc/self/task` describe the whole process, and the
+/// harness runs tests concurrently in one binary. Two such tests overlapping
+/// measure each other: a bulk-open test added later made
+/// `an_abandoned_store_releases_its_descriptors_too` fail, not because
+/// descriptors leaked but because eight other stores were open during its
+/// sample.
+///
+/// The descriptor tests carried that hazard latently from the day they were
+/// written and passed only because nothing had yet opened enough handles
+/// beside them. A guard that survives on the absence of neighbours is not a
+/// guard, so the probes now take a lock rather than hoping.
+#[cfg(target_os = "linux")]
+static RESOURCE_PROBE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take the process-global probe lock, ignoring poisoning.
+///
+/// A panicking probe test has already failed; poisoning the rest so they abort
+/// with a different error would hide which one broke.
+#[cfg(target_os = "linux")]
+fn resource_probe_guard() -> std::sync::MutexGuard<'static, ()> {
+    RESOURCE_PROBE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(target_os = "linux")]
 fn open_descriptors() -> usize {
     std::fs::read_dir("/proc/self/fd")
@@ -1114,6 +1141,7 @@ fn open_descriptors() -> usize {
 #[cfg(target_os = "linux")]
 #[test]
 fn repeated_open_and_close_cycles_do_not_leak_descriptors() {
+    let _probe = resource_probe_guard();
     const CYCLES: usize = 8;
     let node = node();
 
@@ -1167,6 +1195,7 @@ fn repeated_open_and_close_cycles_do_not_leak_descriptors() {
 #[cfg(target_os = "linux")]
 #[test]
 fn an_abandoned_store_releases_its_descriptors_too() {
+    let _probe = resource_probe_guard();
     // The killed path, not the closed one. A crash-and-reopen loop is exactly
     // what this crate's recovery story asks a node to do repeatedly, so if
     // only the AWAITED close released descriptors, recovery itself would be
