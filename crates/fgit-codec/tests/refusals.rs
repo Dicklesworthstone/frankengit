@@ -125,6 +125,118 @@ fn a_frame_over_the_size_bound_is_refused_before_it_is_parsed() {
 }
 
 #[test]
+fn a_frame_at_its_exact_limit_decodes_and_one_byte_over_is_refused() {
+    let bytes = seal_bytes();
+    let frame_bytes = u64::try_from(bytes.len()).expect("fixture frame length fits in u64");
+    assert!(
+        frame_bytes > 0,
+        "an empty fixture cannot exercise the frame bound"
+    );
+    let exact = DecodeLimits {
+        frame_bytes,
+        ..DecodeLimits::DEFAULT
+    };
+    assert!(
+        decode_body::<TransactionSealBody>(&bytes, exact).is_ok(),
+        "a complete canonical frame exactly at frame_bytes must decode"
+    );
+
+    let one_byte_over = DecodeLimits {
+        frame_bytes: frame_bytes - 1,
+        ..exact
+    };
+    assert_eq!(
+        decode_body::<TransactionSealBody>(&bytes, one_byte_over),
+        Err(CodecRefusal::LengthBoundExceeded {
+            field: "frame",
+            observed: frame_bytes,
+            limit: frame_bytes - 1,
+        }),
+        "lowering the wall by one byte must reject the same frame"
+    );
+}
+
+#[test]
+fn a_byte_string_at_its_exact_limit_decodes_and_one_byte_over_is_refused() {
+    let exact_len = usize::try_from(DecodeLimits::MINIMAL.byte_string_bytes)
+        .expect("minimal byte-string bound fits in usize");
+    let exact_bytes = vec![0x5a; exact_len];
+    let mut encoder = Encoder::new();
+    encoder
+        .write_bytes("boundary", &exact_bytes)
+        .expect("the canonical encoder accepts the exact fixture");
+    let exact_frame = encoder.into_bytes();
+    let mut decoder = Decoder::new(&exact_frame, DecodeLimits::MINIMAL);
+    assert_eq!(
+        decoder
+            .read_bytes("boundary")
+            .expect("a byte string exactly at byte_string_bytes must decode"),
+        exact_bytes
+    );
+    decoder.finish().expect("the exact frame is fully consumed");
+
+    let one_byte_over = vec![0x5a; exact_len + 1];
+    let mut encoder = Encoder::new();
+    encoder
+        .write_bytes("boundary", &one_byte_over)
+        .expect("the encoder admits the adversarial wire fixture");
+    let hostile = encoder.into_bytes();
+    let mut decoder = Decoder::new(&hostile, DecodeLimits::MINIMAL);
+    assert_eq!(
+        decoder.read_bytes("boundary"),
+        Err(CodecRefusal::LengthBoundExceeded {
+            field: "boundary",
+            observed: u64::try_from(exact_len + 1).expect("fixture length fits in u64"),
+            limit: DecodeLimits::MINIMAL.byte_string_bytes,
+        }),
+        "one byte past byte_string_bytes must keep its typed refusal"
+    );
+}
+
+#[test]
+fn an_element_count_at_its_exact_limit_decodes_and_one_over_is_refused() {
+    let exact_count = usize::try_from(DecodeLimits::MINIMAL.elements)
+        .expect("minimal element bound fits in usize");
+    let exact_values = vec![7_u8; exact_count];
+    let mut encoder = Encoder::new();
+    encoder
+        .write_sequence("boundary", &exact_values, |out, value| {
+            out.write_scalar(*value);
+            Ok(())
+        })
+        .expect("the canonical encoder accepts the exact fixture");
+    let exact_frame = encoder.into_bytes();
+    let mut decoder = Decoder::new(&exact_frame, DecodeLimits::MINIMAL);
+    assert_eq!(
+        decoder
+            .read_sequence("boundary", |input| input.read_scalar::<u8>("element"))
+            .expect("a collection exactly at elements must decode"),
+        exact_values
+    );
+    decoder.finish().expect("the exact frame is fully consumed");
+
+    let one_over_values = vec![7_u8; exact_count + 1];
+    let mut encoder = Encoder::new();
+    encoder
+        .write_sequence("boundary", &one_over_values, |out, value| {
+            out.write_scalar(*value);
+            Ok(())
+        })
+        .expect("the encoder admits the adversarial wire fixture");
+    let hostile = encoder.into_bytes();
+    let mut decoder = Decoder::new(&hostile, DecodeLimits::MINIMAL);
+    assert_eq!(
+        decoder.read_sequence("boundary", |input| input.read_scalar::<u8>("element")),
+        Err(CodecRefusal::CountBoundExceeded {
+            field: "boundary",
+            observed: u64::try_from(exact_count + 1).expect("fixture count fits in u64"),
+            limit: DecodeLimits::MINIMAL.elements,
+        }),
+        "one element past elements must keep its typed refusal"
+    );
+}
+
+#[test]
 fn a_declared_length_larger_than_the_input_is_refused_without_allocating() {
     let mut encoder = Encoder::new();
     encoder.write_scalar(0xffff_fff0_u32); // claims four gigabytes
