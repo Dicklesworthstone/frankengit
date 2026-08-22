@@ -736,3 +736,68 @@ fge_assert_eq FG-000A-PORT-046 2 "$probe_path_mismatch" \
   'a row whose declared path derives a different id than the row declares is refused'
 fge_assert_eq FG-000A-PORT-047 0 "$probe_optional" \
   'an optional manifest row is accepted rather than refused, so the optional branch is exercised'
+
+# ---------------------------------------------------------------------------
+# FG-091: every manifest row's owning bead must RESOLVE
+#
+# A row names an owning bead so a reader can find who is accountable for the
+# suite. A typo, a tombstoned id, or a bead that was never filed leaves that
+# column pointing at nothing, and nothing today notices -- the set check only
+# looks at suite ids.
+#
+# WHY "RESOLVES" AND NOT "IS OPEN". The bead's wording is "exactly one ACTIVE
+# owning Bead", and I nearly read that as open. It cannot mean that: every
+# suite's originating bead eventually closes, so requiring an open owner would
+# fail for every mature suite in the corpus, including all three here -- fg000a
+# is CLOSED and is the correct owner of the harness suites. Measured: br show
+# exits 0 for a closed bead, 0 for a blocked one, and 3 for an id that does not
+# exist. Existence is the property that discriminates a real owner from a
+# detached one; status does not.
+#
+# WHY THIS LIVES IN THE SUITE AND NOT IN run_all. The runner must not depend on
+# the tracker: an e2e corpus that fails when br is missing or slow reports a
+# defect in something it does not test. Here the dependency is optional and
+# visible -- if br is absent the cell is a typed unsupported, so the check
+# degrades into a named non-claim rather than into a false green or a broken
+# run. That is the same shape as the oracle-unavailable arm in export_crash.
+#
+# DELETION CONDITION: goes when the manifest does.
+# ---------------------------------------------------------------------------
+fge_phase action
+owner_probe_state=available
+command -v br >/dev/null 2>&1 || owner_probe_state=unavailable
+
+owner_unresolved=''
+owner_checked=0
+if [ "$owner_probe_state" = available ]; then
+  while IFS=$'\t' read -r o_id o_bead _rest; do
+    case $o_id in '' | '#'*) continue ;; esac
+    owner_checked=$((owner_checked + 1))
+    RUST_LOG=error br show "$o_bead" >/dev/null 2>&1 || owner_unresolved="$owner_unresolved$o_bead "
+  done <"$E2E_ROOT/manifests/harness.tsv"
+fi
+
+# The probe must be able to fail, or "no unresolved owners" is a statement about
+# a loop that never ran.
+owner_detector_fires=no
+if [ "$owner_probe_state" = available ]; then
+  RUST_LOG=error br show frankengit-owner-that-cannot-exist >/dev/null 2>&1 ||
+    owner_detector_fires=yes
+fi
+
+fge_phase assert
+if [ "$owner_probe_state" = available ]; then
+  fge_assert_eq FG-000A-PORT-048 '' "$owner_unresolved" \
+    'every manifest row names an owning bead that resolves in the tracker'
+  fge_assert_cmd FG-000A-PORT-049 'the owner check covered every manifest row' \
+    test "$owner_checked" -ge 3
+  fge_assert_eq FG-000A-PORT-050 yes "$owner_detector_fires" \
+    'the owner check rejects a bead id that does not exist, so a clean result is not vacuous'
+else
+  fge_unsupported FG-000A-PORT-048 \
+    'the beads tracker (br) is not on PATH, so manifest owning-bead resolution was not verified; the runner deliberately does not depend on the tracker, so this degrades to a named non-claim rather than failing the corpus'
+  fge_unsupported FG-000A-PORT-049 \
+    'owner-check coverage not measured: br unavailable'
+  fge_unsupported FG-000A-PORT-050 \
+    'owner-check falsifiability not demonstrated: br unavailable'
+fi
