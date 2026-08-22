@@ -1809,4 +1809,122 @@ mod tests {
         )
         .expect("exactly max_placements is admissible");
     }
+
+    // -----------------------------------------------------------------
+    // frankengit-2p75: the manifest DECODE path's refusals.
+    //
+    // `s0vo` covered `validate_manifest_parts`, which runs on the way IN. These
+    // three run on the way back OUT, turning untrusted bytes into a manifest,
+    // and one of them is a named constitutional hazard rather than ordinary
+    // validation: `decode_verified` is documented "decodes bytes only if they
+    // reproduce the caller-supplied typed identity", and §4 forbids "a decoder
+    // result accepted without original commitments" by name.
+    // `ManifestIdentityMismatch` is the entire difference between `decode` and
+    // `decode_verified`, and nothing exercised it.
+    //
+    // Layout, so the byte offsets below are not magic numbers: `encode` writes
+    // a four-byte `FGMF` magic, then a `u16` version, then the body.
+    // -----------------------------------------------------------------
+
+    /// A manifest declaring an unknown format version is refused, naming it.
+    ///
+    /// Earlier check satisfied: the magic is left intact, so `InvalidMagic`
+    /// cannot fire first — which is why this corrupts only bytes 4..6.
+    ///
+    /// The version is asserted, not just the variant: a guard that refused the
+    /// right bytes while reporting the wrong version would survive a
+    /// variant-only check.
+    #[test]
+    fn a_manifest_declaring_an_unknown_version_is_refused_and_names_it() {
+        let good = manifest().encode().expect("the fixture manifest encodes");
+
+        let mut bad = good.clone();
+        bad[4..6].copy_from_slice(&99_u16.to_be_bytes());
+        assert_eq!(
+            SegmentManifest::decode(&bad, &manifest_limits()),
+            Err(StoreRefusal::UnknownVersion(99)),
+        );
+
+        // The permitted twin is the SAME bytes uncorrupted, so the refusal is
+        // attributable to the two mutated bytes and not to the fixture.
+        SegmentManifest::decode(&good, &manifest_limits()).expect("the unmutated encoding decodes");
+    }
+
+    /// Bytes after a complete manifest body are refused rather than ignored.
+    ///
+    /// Earlier checks satisfied: the appended byte follows a VALID encoding, so
+    /// magic, version and the whole body parse first and the cursor reaches its
+    /// end-of-input check. Appending to anything less would refuse earlier, for
+    /// a different reason.
+    ///
+    /// Silently ignoring a trailing byte would mean two distinct byte strings
+    /// decode to one manifest, which is the canonical-form property the whole
+    /// encoding exists to hold.
+    #[test]
+    fn trailing_bytes_after_a_complete_manifest_are_refused() {
+        let good = manifest().encode().expect("the fixture manifest encodes");
+
+        let mut padded = good.clone();
+        padded.push(0);
+        assert_eq!(
+            SegmentManifest::decode(&padded, &manifest_limits()),
+            Err(StoreRefusal::TrailingBytes),
+        );
+
+        SegmentManifest::decode(&good, &manifest_limits())
+            .expect("the same bytes without the pad decode");
+    }
+
+    /// §4: a decoder result is not accepted without its original commitment.
+    ///
+    /// The bytes here are a perfectly valid manifest — they decode cleanly on
+    /// their own. What differs is only the identity the caller claims for them,
+    /// so the refusal is attributable to the identity check and not to any
+    /// decode failure. That is the arrangement acceptance 4 asks for: a
+    /// corrupted encoding would have proved the wrong thing.
+    ///
+    /// Both twins are asserted: the same bytes with their OWN identity are
+    /// accepted, so the refusal is not a `decode_verified` that rejects
+    /// everything.
+    #[test]
+    fn decode_verified_refuses_bytes_that_do_not_reproduce_the_claimed_identity() {
+        let mine = manifest();
+        let bytes = mine.encode().expect("the fixture manifest encodes");
+        let own_identity = mine.identity().expect("the fixture has an identity");
+
+        // A different, equally valid manifest — one extra entry.
+        let other = SegmentManifest::new(
+            vec![b'n'],
+            [9; 32],
+            vec![
+                manifest_entry(b'a'),
+                manifest_entry(b'b'),
+                manifest_entry(b'c'),
+            ],
+            vec![placement()],
+            &manifest_limits(),
+        )
+        .expect("a second canonical manifest");
+        let foreign_identity = other.identity().expect("the second has an identity");
+        assert_ne!(
+            own_identity, foreign_identity,
+            "the two identities must differ or the refusal below is vacuous",
+        );
+
+        // The bytes decode fine on their own — proving the refusal that follows
+        // is about the identity and not about the encoding.
+        SegmentManifest::decode(&bytes, &manifest_limits())
+            .expect("these bytes are a valid manifest");
+
+        assert_eq!(
+            SegmentManifest::decode_verified(&bytes, foreign_identity, &manifest_limits()),
+            Err(StoreRefusal::ManifestIdentityMismatch),
+        );
+
+        assert_eq!(
+            SegmentManifest::decode_verified(&bytes, own_identity, &manifest_limits()),
+            Ok(mine),
+            "the same bytes under their own identity are accepted",
+        );
+    }
 }
