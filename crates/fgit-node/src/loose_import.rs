@@ -1024,4 +1024,99 @@ mod tests {
         ));
         node.shutdown().expect("node drains");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn loose_import_refuses_a_worktree_git_directory_symlink() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("worktree");
+        let dot_git = source.join(".git");
+        fs::create_dir_all(&source).expect("worktree directory creates");
+        std::os::unix::fs::symlink(scratch.0.join("outside"), &dot_git)
+            .expect("fixture symbolic link creates");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::SymbolicLink(path)) if *path == dot_git
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_a_worktree_git_directory_file() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("worktree");
+        let dot_git = source.join(".git");
+        fs::create_dir_all(&source).expect("worktree directory creates");
+        fs::write(&dot_git, "gitdir: /outside\n").expect("indirection fixture writes");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::GitDirectoryFileUnsupported(path)) if *path == dot_git
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_packed_objects_instead_of_ignoring_them() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        let pack_directory = source.join("objects/pack");
+        fs::create_dir_all(&pack_directory).expect("packed-object directory creates");
+        fs::write(pack_directory.join("fixture.pack"), b"not a loose object")
+            .expect("packed-object fixture writes");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::PackedObjectsUnsupported(path)) if *path == pack_directory
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_a_symbolic_ref_instead_of_resolving_it() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        let ref_path = source.join("refs/heads/main");
+        fs::create_dir_all(ref_path.parent().expect("ref parent exists"))
+            .expect("ref directory creates");
+        fs::create_dir_all(source.join("objects")).expect("object directory creates");
+        fs::write(&ref_path, "ref: refs/heads/other\n").expect("symbolic ref fixture writes");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::SymbolicRefUnsupported(path)) if *path == ref_path
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_a_loose_body_that_does_not_match_its_path_identity() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        fs::create_dir_all(&source).expect("source directory creates");
+        let observed = write_loose_blob_repository(&source);
+        let expected = "a6fc4c620b67d95f953a5c1c1230aaab5db5a1b0";
+        let original_path = source.join("objects/b6/fc4c620b67d95f953a5c1c1230aaab5db5a1b0");
+        let mismatched_path = source.join("objects/a6/fc4c620b67d95f953a5c1c1230aaab5db5a1b0");
+        fs::create_dir_all(mismatched_path.parent().expect("mismatched parent exists"))
+            .expect("mismatched object directory creates");
+        fs::rename(&original_path, &mismatched_path).expect("fixture object moves");
+        fs::write(source.join("refs/heads/main"), format!("{expected}\n"))
+            .expect("mismatched ref writes");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::ObjectIdentityMismatch {
+                expected: refused_expected,
+                observed: refused_observed,
+            }) if refused_expected.to_string() == expected && refused_observed == observed
+        ));
+        node.shutdown().expect("node drains");
+    }
 }
