@@ -3874,9 +3874,51 @@ fn is_forbidden_ftui_surface(name: &str, features: &BTreeSet<String>) -> bool {
     (name.starts_with("ftui") || name.starts_with("frankentui"))
         && (name.contains("demo")
             || name.contains("showcase")
-            || features
-                .iter()
-                .any(|feature| matches!(feature.as_str(), "demo" | "showcase")))
+            || name.contains("extras")
+            || features.iter().any(|feature| {
+                matches!(
+                    feature.as_str(),
+                    "demo" | "showcase" | "extras" | "telemetry"
+                )
+            }))
+}
+
+/// Telemetry exporters that open their own egress path out of a truth process.
+///
+/// FG-094a excludes "blocking telemetry exporters" from the FrankenTUI kernel
+/// closure. The rule is deliberately narrow: it names the OpenTelemetry export
+/// family only. `tracing`, `tracing-core` and `log` are pure-Rust facades
+/// already resolved in this workspace and are NOT exporters, so banning them
+/// would break the shared checkout to punish the wrong thing.
+/// `tracing-subscriber` is likewise not an exporter; the `telemetry` feature
+/// that pulls it is refused by [`is_forbidden_ftui_surface`] instead, which
+/// catches the whole set at the manifest rather than one crate at the lock.
+fn is_forbidden_telemetry_exporter(name: &str) -> bool {
+    name.starts_with("opentelemetry") || name == "tracing-opentelemetry"
+}
+
+/// GPU, windowing, and native font shims that a terminal kernel must not drag in.
+///
+/// Every entry links a C or system library, so each is already an `AGENTS.md`
+/// section 3.1 violation; this rule is what makes that sentence enforceable for
+/// the FG-094a closure. Pure-Rust image codecs are deliberately absent: whether
+/// `png` or `image` belongs in the universe is a policy question for an ADR,
+/// not a refusal to smuggle in behind a TUI admission bead.
+fn is_forbidden_native_media(name: &str) -> bool {
+    matches!(
+        name,
+        "wgpu"
+            | "wgpu-core"
+            | "wgpu-hal"
+            | "glutin"
+            | "glow"
+            | "skia-safe"
+            | "cairo-sys-rs"
+            | "freetype-sys"
+            | "fontconfig-sys"
+            | "servo-fontconfig"
+            | "servo-fontconfig-sys"
+    )
 }
 
 /// Alternate HTTP runtimes, reactors, and native TLS/compression backends that
@@ -4416,6 +4458,18 @@ fn check_forbidden_constellation_surfaces(
                 package.name
             ));
         }
+        if is_forbidden_telemetry_exporter(&package.name) {
+            report.error(format!(
+                "forbidden telemetry exporter `{}` resolved in Cargo.lock; a truth process does not own its own egress path",
+                package.name
+            ));
+        }
+        if is_forbidden_native_media(&package.name) {
+            report.error(format!(
+                "forbidden native media/GPU dependency `{}` resolved in Cargo.lock",
+                package.name
+            ));
+        }
     }
     for dependency in dependencies {
         if is_forbidden_sqlmodel_backend(&dependency.package, &dependency.declared_features) {
@@ -4439,6 +4493,18 @@ fn check_forbidden_constellation_surfaces(
         if is_forbidden_native_transport(&dependency.package) {
             report.error(format!(
                 "forbidden native transport dependency `{}` declared in {}",
+                dependency.package, dependency.manifest
+            ));
+        }
+        if is_forbidden_telemetry_exporter(&dependency.package) {
+            report.error(format!(
+                "forbidden telemetry exporter dependency `{}` declared in {}",
+                dependency.package, dependency.manifest
+            ));
+        }
+        if is_forbidden_native_media(&dependency.package) {
+            report.error(format!(
+                "forbidden native media/GPU dependency `{}` declared in {}",
                 dependency.package, dependency.manifest
             ));
         }
@@ -5685,6 +5751,76 @@ mod tests {
     /// upstream fact, and is expected to keep failing to admit until the
     /// upstream owner drops the dependency -- at which point the planted lock
     /// below stops resembling reality and this test should be revisited.
+    #[test]
+    fn planted_ftui_extras_telemetry_and_gpu_surfaces_are_refused() {
+        let workspace = fixture_workspace("admitted");
+        lock_with_extra_packages(
+            &workspace,
+            &[
+                ("ftui-extras", "0.5.0"),
+                ("opentelemetry-otlp", "0.27.0"),
+                ("tracing-opentelemetry", "0.28.0"),
+                ("wgpu", "22.1.0"),
+                ("freetype-sys", "0.20.1"),
+            ],
+        );
+        let metadata = matching_metadata();
+        let report = report_for_fixture(&workspace, Some(&metadata));
+        assert_error(
+            &report,
+            "forbidden ftui demo/showcase package `ftui-extras`",
+        );
+        for exporter in ["opentelemetry-otlp", "tracing-opentelemetry"] {
+            assert_error(
+                &report,
+                &format!("forbidden telemetry exporter `{exporter}` resolved in Cargo.lock"),
+            );
+        }
+        for media in ["wgpu", "freetype-sys"] {
+            assert_error(
+                &report,
+                &format!("forbidden native media/GPU dependency `{media}` resolved in Cargo.lock"),
+            );
+        }
+    }
+
+    /// The permitted twin. `tracing`, `tracing-core` and `log` are pure-Rust
+    /// facades already resolved in this workspace: a telemetry rule that matched
+    /// on the substring "tracing" rather than on the exporter family would break
+    /// every pane, and this is the case that would have caught it.
+    #[test]
+    fn the_tracing_facade_is_not_a_telemetry_exporter() {
+        let workspace = fixture_workspace("admitted");
+        lock_with_extra_packages(
+            &workspace,
+            &[
+                ("tracing", "0.1.41"),
+                ("tracing-core", "0.1.33"),
+                ("log", "0.4.22"),
+                ("tracing-subscriber", "0.3.19"),
+            ],
+        );
+        let metadata = matching_metadata();
+        let report = report_for_fixture(&workspace, Some(&metadata));
+        for facade in ["tracing", "tracing-core", "log", "tracing-subscriber"] {
+            assert_no_error(&report, &format!("forbidden telemetry exporter `{facade}`"));
+        }
+    }
+
+    /// A plain ftui kernel crate carries no forbidden surface; only the
+    /// demo/showcase/extras names and the extras/telemetry features do.
+    #[test]
+    fn the_ftui_kernel_names_are_not_themselves_forbidden() {
+        assert!(!is_forbidden_ftui_surface("ftui-core", &BTreeSet::new()));
+        assert!(!is_forbidden_ftui_surface("ftui-runtime", &BTreeSet::new()));
+        assert!(!is_forbidden_ftui_surface("ftui-render", &BTreeSet::new()));
+        assert!(is_forbidden_ftui_surface("ftui-extras", &BTreeSet::new()));
+        let telemetry = BTreeSet::from(["telemetry".to_owned()]);
+        assert!(is_forbidden_ftui_surface("ftui-runtime", &telemetry));
+        let extras = BTreeSet::from(["extras".to_owned()]);
+        assert!(is_forbidden_ftui_surface("ftui", &extras));
+    }
+
     #[test]
     fn published_fastapi_zero_four_x_is_refused_for_its_bundled_executor() {
         let workspace = fixture_workspace("admitted");
