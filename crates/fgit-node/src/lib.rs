@@ -30,11 +30,14 @@ use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
     AuthorityVersionToken, HeadInit, HeadKey, HeadRead, ImmutableKey, ImmutableRead, KeyError,
     OutcomeLookup, PublicationOutcome, PutOutcome, StoreInstanceId, initialize_repository_async,
-    publish_decisions_async, resolve_outcome_async,
+    publish_decisions_async, read_authority_head_body_async, read_decision_batch_body_async,
+    resolve_outcome_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
-use fgit_chronicle::PublicationBasis;
-use fgit_codec::schema::{RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody};
+use fgit_chronicle::{PublicationBasis, verify_pair};
+use fgit_codec::schema::{
+    RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecisionBatchBody,
+};
 use fgit_codec::{CodecRefusal, CryptoBodyIdentity, body_id, decode_body, encode_body};
 use fgit_crypto::{GitObjectKind, IdentityDomain, git_object_id, git_payload_commitment};
 use fgit_git_object::ObjectType;
@@ -43,6 +46,10 @@ use fgit_object_fabric::fabric::{
 };
 use fgit_object_fabric::local::{LocalFilesystemConfig, LocalFilesystemFabric};
 use fgit_object_fabric::{ObjectEnvelope, ObjectKind, SegmentLimits};
+use fgit_pack::{
+    CanonicalObjectSource, CanonicalPackObject, PackError, PackLimits, PackPlanner, PackWriteError,
+    PackWriteProfile, PackWriteReceipt, PackWriter,
+};
 use fgit_resource::{
     CacheBinding, CacheGrant, CacheGrantRefusal, CachePermit, CacheScope, Grade, LeakDisposition,
     ObligationLedger, OpaqueHandle, RegionCloseOutcome, RegionId, ResourceError, ResourceVector,
@@ -50,7 +57,8 @@ use fgit_resource::{
 use fgit_runtime::{BudgetClass, NodeRuntime, RuntimeProfile, RuntimeRefusal};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, GitHashAlgorithm, GitOid, HeadGeneration, PolicyEpoch,
-    RefusalCode, RegistryEpoch, RepositoryAuthorityHeadId, RepositoryId, TenantId,
+    RefusalCode, RegistryEpoch, RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId,
+    TenantId,
 };
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, PackPayloadSource, PackRequest,
@@ -269,8 +277,53 @@ struct MaterializedAdmissionState {
     basis: PublicationBasis,
     cache_permit: CachePermit,
     ref_state: CanonicalRefState,
+    selected_closure: AuthoritySelectedClosure,
     policy_epoch: PolicyEpoch,
     configuration_root: Digest,
+}
+
+/// The canonical record through which an authority head selected a closure.
+///
+/// The empty genesis state has no RCR by protocol design.  Its empty closure
+/// is therefore selected only when the authenticated genesis ref state is
+/// empty; imports with objects must first publish an RCR.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClosureSelectionSource {
+    /// The empty closure paired with the empty genesis ref state.
+    EmptyGenesis,
+    /// The latest committed RCR found by replaying the authenticated head chain.
+    RepositoryCommit(RepositoryCommitId),
+}
+
+/// A permitted object set selected from authenticated authority history.
+///
+/// This is not a local reachability cache: `root` is re-derived from `closure`,
+/// and `source` names the genesis rule or exact RCR that selected it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthoritySelectedClosure {
+    root: Digest,
+    closure: PermittedObjectClosure,
+    source: ClosureSelectionSource,
+}
+
+impl AuthoritySelectedClosure {
+    /// The RCR commitment root reproduced by the decoded closure bytes.
+    #[must_use]
+    pub const fn root(&self) -> Digest {
+        self.root
+    }
+
+    /// The immutable native Git object identities permitted by that root.
+    #[must_use]
+    pub const fn closure(&self) -> &PermittedObjectClosure {
+        &self.closure
+    }
+
+    /// The exact authority-history source that selected the closure.
+    #[must_use]
+    pub const fn source(&self) -> ClosureSelectionSource {
+        self.source
+    }
 }
 
 /// One immutable admission snapshot paired with the authority receipt that
@@ -285,6 +338,7 @@ pub struct MaterializedAdmission {
     authenticated: AuthenticatedHead,
     basis: PublicationBasis,
     snapshot: AdmissionSnapshot,
+    selected_closure: AuthoritySelectedClosure,
 }
 
 impl MaterializedAdmission {
@@ -305,6 +359,99 @@ impl MaterializedAdmission {
     pub const fn snapshot(&self) -> &AdmissionSnapshot {
         &self.snapshot
     }
+
+    /// The exact authority-selected object closure available to a pack writer.
+    #[must_use]
+    pub const fn selected_closure(&self) -> &AuthoritySelectedClosure {
+        &self.selected_closure
+    }
+}
+
+/// A bounded Git pack derived from one authority-selected object closure.
+///
+/// The payload is consumable only after the `fgit-pack` writer finished its
+/// temporary artifact and checksum.  Its evidence retains both the exact
+/// authority head basis and the RCR/genesis source that selected the objects.
+#[derive(Debug)]
+pub struct AuthoritySelectedPackPayload {
+    basis: PublicationBasis,
+    closure: AuthoritySelectedClosure,
+    receipt: PackWriteReceipt,
+    bytes: Vec<u8>,
+    offset: usize,
+}
+
+impl AuthoritySelectedPackPayload {
+    /// The authenticated authority basis that selected the payload closure.
+    #[must_use]
+    pub const fn basis(&self) -> &PublicationBasis {
+        &self.basis
+    }
+
+    /// The closure root and RCR/genesis source that authorized every entry.
+    #[must_use]
+    pub const fn closure(&self) -> &AuthoritySelectedClosure {
+        &self.closure
+    }
+
+    /// The completed deterministic pack-writer receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> &PackWriteReceipt {
+        &self.receipt
+    }
+}
+
+impl PackPayloadSource for AuthoritySelectedPackPayload {
+    fn next_chunk(&mut self, maximum_chunk_bytes: usize) -> Result<Option<Vec<u8>>, WireError> {
+        if maximum_chunk_bytes == 0 {
+            return Err(WireError::InvalidLimit {
+                field: "pack payload chunk bytes",
+            });
+        }
+        if self.offset == self.bytes.len() {
+            return Ok(None);
+        }
+        let remaining = self.bytes.len().saturating_sub(self.offset);
+        let length = remaining.min(maximum_chunk_bytes);
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(WireError::AllocationFailure)?;
+        let mut chunk = Vec::new();
+        chunk
+            .try_reserve_exact(length)
+            .map_err(|_| WireError::AllocationFailure)?;
+        chunk.extend_from_slice(&self.bytes[self.offset..end]);
+        self.offset = end;
+        Ok(Some(chunk))
+    }
+}
+
+/// Refusal while turning an authority-selected closure into a Git pack.
+#[derive(Debug)]
+pub enum NodePackMaterializationRefusal {
+    /// The exact-head admission materialization was unavailable or invalid.
+    Admission(AdmissionMaterializationRefusal),
+    /// The bounded deterministic pack planner or writer refused the closure.
+    Pack(PackWriteError),
+}
+
+impl Display for NodePackMaterializationRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Admission(error) => Display::fmt(error, formatter),
+            Self::Pack(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for NodePackMaterializationRefusal {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Admission(error) => Some(error),
+            Self::Pack(error) => Some(error),
+        }
+    }
 }
 
 /// Failure while staging or refreshing canonical admission state through the
@@ -320,6 +467,10 @@ pub enum AdmissionMaterializationRefusal {
     Authority(AuthorityFailure),
     /// The authenticated receipt could not be decoded as its typed head.
     HeadBody(fgit_authority::HeadBodyRefusal),
+    /// Reading an authority-addressed head or decision body refused.
+    DecisionHistory(fgit_authority::OutcomeFailure),
+    /// A decoded head and batch did not satisfy the chronicle successor rules.
+    DecisionHistoryVerification(fgit_chronicle::ChronicleRefusal),
     /// The authenticated head belongs to a different repository.
     RepositoryMismatch {
         /// Repository selected by the caller/node configuration.
@@ -331,6 +482,23 @@ pub enum AdmissionMaterializationRefusal {
     HeadIdentity(CodecRefusal),
     /// The head identity carried a different domain than an authority head.
     HeadIdentityDomain(fgit_types::TypeRefusal),
+    /// Re-identifying a committed RCR failed.
+    CommitIdentity(CodecRefusal),
+    /// The re-identified RCR carried a different derived-identity domain.
+    CommitIdentityDomain(fgit_types::TypeRefusal),
+    /// A head named a decision batch but omitted the predecessor needed to verify it.
+    DecisionHistoryUnbound,
+    /// A re-identified RCR did not agree with the successor head's latest record.
+    LatestCommitMismatch {
+        /// RCR identity recomputed from the selected record.
+        expected: RepositoryCommitId,
+        /// RCR identity carried by the selected authority head.
+        observed: Option<RepositoryCommitId>,
+    },
+    /// The selected RCR did not describe the successor head's repository state.
+    SelectedCommitStateMismatch { field: &'static str },
+    /// A no-decision genesis head named a non-empty ref state without an RCR closure.
+    NonEmptyGenesisWithoutClosure,
     /// A canonical admission frame could not be encoded or decoded.
     CanonicalFrame(CodecRefusal),
     /// A canonical frame did not reproduce the root named by authority.
@@ -360,14 +528,31 @@ impl Display for AdmissionMaterializationRefusal {
             }
             Self::Authority(error) => Display::fmt(error, formatter),
             Self::HeadBody(error) => Display::fmt(error, formatter),
+            Self::DecisionHistory(error) => Display::fmt(error, formatter),
+            Self::DecisionHistoryVerification(error) => Display::fmt(error, formatter),
             Self::RepositoryMismatch { expected, observed } => write!(
                 formatter,
                 "authenticated admission head repository {observed:?} differs from {expected:?}"
             ),
-            Self::HeadIdentity(error) | Self::CanonicalFrame(error) => {
+            Self::HeadIdentity(error)
+            | Self::CommitIdentity(error)
+            | Self::CanonicalFrame(error) => Display::fmt(error, formatter),
+            Self::HeadIdentityDomain(error) | Self::CommitIdentityDomain(error) => {
                 Display::fmt(error, formatter)
             }
-            Self::HeadIdentityDomain(error) => Display::fmt(error, formatter),
+            Self::DecisionHistoryUnbound => formatter
+                .write_str("authority decision history omitted a required predecessor head"),
+            Self::LatestCommitMismatch { expected, observed } => write!(
+                formatter,
+                "authority head latest RCR {observed:?} differs from selected record {expected:?}"
+            ),
+            Self::SelectedCommitStateMismatch { field } => write!(
+                formatter,
+                "selected RCR does not bind successor authority {field}"
+            ),
+            Self::NonEmptyGenesisWithoutClosure => {
+                formatter.write_str("non-empty genesis has no authority-selected RCR closure")
+            }
             Self::CanonicalRoot(code) => write!(
                 formatter,
                 "canonical admission body did not reproduce its authority root: {code:?}"
@@ -394,14 +579,22 @@ impl Error for AdmissionMaterializationRefusal {
         match self {
             Self::Authority(error) => Some(error),
             Self::HeadBody(error) => Some(error),
-            Self::HeadIdentity(error) | Self::CanonicalFrame(error) => Some(error),
-            Self::HeadIdentityDomain(error) => Some(error),
+            Self::DecisionHistory(error) => Some(error),
+            Self::DecisionHistoryVerification(error) => Some(error),
+            Self::HeadIdentity(error)
+            | Self::CommitIdentity(error)
+            | Self::CanonicalFrame(error) => Some(error),
+            Self::HeadIdentityDomain(error) | Self::CommitIdentityDomain(error) => Some(error),
             Self::Key(error) => Some(error),
             Self::Resource(error) => Some(error),
             Self::CacheGrant(error) => Some(error),
             Self::HeadAbsent
             | Self::Cancelled
             | Self::RepositoryMismatch { .. }
+            | Self::DecisionHistoryUnbound
+            | Self::LatestCommitMismatch { .. }
+            | Self::SelectedCommitStateMismatch { .. }
+            | Self::NonEmptyGenesisWithoutClosure
             | Self::CanonicalRoot(_)
             | Self::ImmutableAbsent(_)
             | Self::ImmutableConflict
@@ -452,9 +645,9 @@ impl DurableAdmissionMaterializer {
     /// Stages one immutable validated object-closure frame through authority.
     ///
     /// This deliberately does not make the closure current: only the selected
-    /// RCR can do that, and a head does not carry a closure root.  Until the
-    /// chronicle reader is composed, synchronous closure resolution remains a
-    /// typed absence rather than an invented association.
+    /// RCR (or the empty-genesis rule) can do that.  The current resolver
+    /// reads that association back from authenticated authority history rather
+    /// than treating this staged frame as a node-local catalog entry.
     pub async fn stage_permitted_object_closure_in<Authority>(
         &self,
         authority: &Authority,
@@ -516,12 +709,7 @@ impl DurableAdmissionMaterializer {
                 observed: body.repository_id,
             });
         }
-        let head_id = body_id(&CryptoBodyIdentity, &body)
-            .map_err(AdmissionMaterializationRefusal::HeadIdentity)
-            .and_then(|identity| {
-                RepositoryAuthorityHeadId::from_internal_object_id(identity)
-                    .map_err(AdmissionMaterializationRefusal::HeadIdentityDomain)
-            })?;
+        let head_id = authority_head_id(&body)?;
         let basis = PublicationBasis::new(head_id, body.clone());
         let cache_binding =
             CacheBinding::new(repository_id, head_id, body.generation, self.cache_scope);
@@ -569,6 +757,41 @@ impl DurableAdmissionMaterializer {
                     RefusalCode::InternalInvariantBreach,
                 ));
             }
+            let (closure_root, closure_source) =
+                select_authority_closure_in(authority, cx, body.clone(), &ref_state, is_cancelled)
+                    .await?;
+            ensure_materializer_catch_up_live(is_cancelled)?;
+            let closure_key =
+                admission_immutable_key(ADMISSION_CLOSURE_KEY_PREFIX, repository_id, closure_root)
+                    .map_err(AdmissionMaterializationRefusal::Key)?;
+            let ImmutableRead::Present(closure_frame) = authority
+                .read_immutable(cx, &closure_key)
+                .await
+                .map_err(AdmissionMaterializationRefusal::Authority)?
+            else {
+                return Err(AdmissionMaterializationRefusal::ImmutableAbsent(
+                    closure_root,
+                ));
+            };
+            ensure_materializer_catch_up_live(is_cancelled)?;
+            let closure = decode_body::<PermittedObjectClosure>(
+                &closure_frame,
+                fgit_codec::DecodeLimits::DEFAULT,
+            )
+            .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
+            if permitted_object_closure_root(&closure)
+                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
+                != closure_root
+            {
+                return Err(AdmissionMaterializationRefusal::CanonicalRoot(
+                    RefusalCode::InternalInvariantBreach,
+                ));
+            }
+            let selected_closure = AuthoritySelectedClosure {
+                root: closure_root,
+                closure,
+                source: closure_source,
+            };
             let snapshot = AdmissionSnapshot {
                 refs: ref_state.refs().clone(),
                 forge_positions: BTreeMap::new(),
@@ -583,12 +806,14 @@ impl DurableAdmissionMaterializer {
                 authenticated: authenticated.clone(),
                 basis: basis.clone(),
                 snapshot,
+                selected_closure: selected_closure.clone(),
             };
             let state = MaterializedAdmissionState {
                 authenticated,
                 basis,
                 cache_permit,
                 ref_state,
+                selected_closure,
                 policy_epoch: body.policy_epoch,
                 configuration_root: body.configuration_root,
             };
@@ -641,6 +866,8 @@ impl DurableAdmissionMaterializer {
             || materialized.policy_epoch != authenticated_body.policy_epoch
             || materialized.configuration_root != authenticated_body.configuration_root
             || canonical_ref_state_root(&materialized.ref_state)? != authenticated_body.ref_root
+            || permitted_object_closure_root(&materialized.selected_closure.closure)?
+                != materialized.selected_closure.root
             || CachePermit::require_matching(Some(&materialized.cache_permit), cache_binding)
                 .is_err();
         if mismatched {
@@ -708,9 +935,31 @@ impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
 
     fn resolve_permitted_object_closure(
         &self,
-        _root: Digest,
+        root: Digest,
     ) -> Result<PermittedObjectClosure, RefusalCode> {
-        Err(RefusalCode::EvidenceMissing)
+        let mut guard = self
+            .materialized
+            .write()
+            .map_err(|_| RefusalCode::InternalInvariantBreach)?;
+        let Some(materialized) = guard.as_ref() else {
+            return Err(RefusalCode::EvidenceMissing);
+        };
+        let binding = CacheBinding::new(
+            materialized.basis.body().repository_id,
+            materialized.basis.id(),
+            materialized.basis.generation(),
+            self.cache_scope,
+        );
+        if CachePermit::require_matching(Some(&materialized.cache_permit), binding).is_err() {
+            *guard = None;
+            return Err(RefusalCode::EvidenceMissing);
+        }
+        if materialized.selected_closure.root != root {
+            return Err(RefusalCode::AuthorityReceiptStale);
+        }
+        let closure = materialized.selected_closure.closure.clone();
+        drop(guard);
+        Ok(closure)
     }
 
     fn stage_permitted_object_closure(
@@ -778,6 +1027,193 @@ fn ensure_materializer_catch_up_live(
     } else {
         Ok(())
     }
+}
+
+fn authority_head_id(
+    body: &RepositoryAuthorityHeadBody,
+) -> Result<RepositoryAuthorityHeadId, AdmissionMaterializationRefusal> {
+    body_id(&CryptoBodyIdentity, body)
+        .map_err(AdmissionMaterializationRefusal::HeadIdentity)
+        .and_then(|identity| {
+            RepositoryAuthorityHeadId::from_internal_object_id(identity)
+                .map_err(AdmissionMaterializationRefusal::HeadIdentityDomain)
+        })
+}
+
+fn repository_commit_id(
+    record: &RepositoryCommitRecord,
+) -> Result<RepositoryCommitId, AdmissionMaterializationRefusal> {
+    body_id(&CryptoBodyIdentity, record)
+        .map_err(AdmissionMaterializationRefusal::CommitIdentity)
+        .and_then(|identity| {
+            RepositoryCommitId::from_internal_object_id(identity)
+                .map_err(AdmissionMaterializationRefusal::CommitIdentityDomain)
+        })
+}
+
+/// Selects the last committed closure from one authenticated head chain.
+///
+/// A refusal-only batch advances the head but does not change the object
+/// closure, so this deliberately walks predecessors until it finds an RCR.
+/// Every hop re-identifies the predecessor, verifies the batch/successor pair,
+/// and is bounded by the authority replay ceiling before another immutable read.
+async fn select_authority_closure_in<Authority>(
+    authority: &Authority,
+    cx: &Authority::Context,
+    current_head: RepositoryAuthorityHeadBody,
+    current_refs: &CanonicalRefState,
+    is_cancelled: &impl Fn() -> bool,
+) -> Result<(Digest, ClosureSelectionSource), AdmissionMaterializationRefusal>
+where
+    Authority: AsyncAuthorityStore + ?Sized,
+{
+    let mut successor = current_head;
+    let mut walked = 0_usize;
+
+    loop {
+        ensure_materializer_catch_up_live(is_cancelled)?;
+        let Some(batch_id) = successor.decision_tail_id else {
+            if successor.predecessor_head_id.is_some() {
+                return Err(AdmissionMaterializationRefusal::DecisionHistoryUnbound);
+            }
+            if !current_refs.refs().is_empty() {
+                return Err(AdmissionMaterializationRefusal::NonEmptyGenesisWithoutClosure);
+            }
+            let closure = PermittedObjectClosure::default();
+            let root = permitted_object_closure_root(&closure)
+                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
+            return Ok((root, ClosureSelectionSource::EmptyGenesis));
+        };
+
+        walked = walked.saturating_add(1);
+        if walked > fgit_authority::MAX_REPLAY_BATCHES {
+            return Err(AdmissionMaterializationRefusal::DecisionHistory(
+                fgit_authority::OutcomeFailure::ReplayBoundExceeded {
+                    limit: fgit_authority::MAX_REPLAY_BATCHES,
+                },
+            ));
+        }
+        let predecessor_id = successor
+            .predecessor_head_id
+            .ok_or(AdmissionMaterializationRefusal::DecisionHistoryUnbound)?;
+        ensure_materializer_catch_up_live(is_cancelled)?;
+        let predecessor = read_authority_head_body_async(authority, cx, predecessor_id)
+            .await
+            .map_err(AdmissionMaterializationRefusal::DecisionHistory)?;
+        ensure_materializer_catch_up_live(is_cancelled)?;
+        let batch = read_decision_batch_body_async(authority, cx, batch_id)
+            .await
+            .map_err(AdmissionMaterializationRefusal::DecisionHistory)?;
+        let basis = PublicationBasis::new(predecessor_id, predecessor.clone());
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &successor)
+            .map_err(AdmissionMaterializationRefusal::DecisionHistoryVerification)?;
+
+        if let Some(record) = batch.committed_rcrs.last() {
+            let record_id = repository_commit_id(record)?;
+            if successor.latest_committed_rcr_id != Some(record_id) {
+                return Err(AdmissionMaterializationRefusal::LatestCommitMismatch {
+                    expected: record_id,
+                    observed: successor.latest_committed_rcr_id,
+                });
+            }
+            if record.repository_id != successor.repository_id {
+                return Err(
+                    AdmissionMaterializationRefusal::SelectedCommitStateMismatch {
+                        field: "repository_id",
+                    },
+                );
+            }
+            if record.resulting_ref_root != successor.ref_root {
+                return Err(
+                    AdmissionMaterializationRefusal::SelectedCommitStateMismatch {
+                        field: "ref_root",
+                    },
+                );
+            }
+            if record.policy_epoch != successor.policy_epoch {
+                return Err(
+                    AdmissionMaterializationRefusal::SelectedCommitStateMismatch {
+                        field: "policy_epoch",
+                    },
+                );
+            }
+            return Ok((
+                record.object_closure_root,
+                ClosureSelectionSource::RepositoryCommit(record_id),
+            ));
+        }
+
+        successor = predecessor;
+    }
+}
+
+struct VerifiedFabricPackSource<'a> {
+    fabric: &'a LocalFilesystemFabric,
+    maximum_object_bytes: usize,
+}
+
+impl CanonicalObjectSource for VerifiedFabricPackSource<'_> {
+    fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
+        let verified = self
+            .fabric
+            .read_whole(*id)
+            .map_err(|_| PackWriteError::MissingCanonicalObject(*id))?;
+        let object_type = match verified.object.envelope().object_kind() {
+            ObjectKind::Commit => ObjectType::Commit,
+            ObjectKind::Tree => ObjectType::Tree,
+            ObjectKind::Blob => ObjectType::Blob,
+            ObjectKind::Tag => ObjectType::Tag,
+            ObjectKind::Internal => return Err(PackError::InvalidEntryType(5).into()),
+        };
+        let payload = verified.object.payload();
+        if payload.len() > self.maximum_object_bytes {
+            return Err(PackError::ObjectSizeLimit {
+                actual: payload.len(),
+                limit: self.maximum_object_bytes,
+            }
+            .into());
+        }
+        let mut body = Vec::new();
+        body.try_reserve_exact(payload.len())
+            .map_err(|_| PackError::AllocationFailed {
+                requested: payload.len(),
+            })?;
+        body.extend_from_slice(payload);
+        Ok(CanonicalPackObject::new(
+            *id,
+            object_type,
+            body,
+            Vec::new(),
+            0,
+            0,
+        ))
+    }
+}
+
+fn selected_pack_ids(
+    closure: &PermittedObjectClosure,
+    limits: &PackLimits,
+) -> Result<Vec<GitOid>, PackWriteError> {
+    let count = u32::try_from(closure.objects().len()).map_err(|_| {
+        PackWriteError::Pack(PackError::EntryCountLimit {
+            actual: u32::MAX,
+            limit: limits.max_entries,
+        })
+    })?;
+    if count > limits.max_entries {
+        return Err(PackError::EntryCountLimit {
+            actual: count,
+            limit: limits.max_entries,
+        }
+        .into());
+    }
+    let mut ids = Vec::new();
+    ids.try_reserve_exact(closure.objects().len())
+        .map_err(|_| PackError::AllocationFailed {
+            requested: closure.objects().len(),
+        })?;
+    ids.extend(closure.objects().iter().copied());
+    Ok(ids)
 }
 
 fn admission_immutable_key(
@@ -1227,26 +1663,6 @@ impl GitDaemonSessionOutcome {
     }
 }
 
-#[derive(Debug)]
-struct UnavailablePackPayload;
-
-impl PackPayloadSource for UnavailablePackPayload {
-    fn next_chunk(&mut self, _maximum_chunk_bytes: usize) -> Result<Option<Vec<u8>>, WireError> {
-        Ok(None)
-    }
-}
-
-#[derive(Debug)]
-struct UnavailablePackRefusal;
-
-impl Display for UnavailablePackRefusal {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str("no canonical pack materializer is available for this session")
-    }
-}
-
-impl Error for UnavailablePackRefusal {}
-
 /// Failure while composing one node-owned git-daemon session.
 #[derive(Debug)]
 pub enum NodeGitDaemonServeRefusal {
@@ -1254,16 +1670,10 @@ pub enum NodeGitDaemonServeRefusal {
     Transport(GitDaemonTransportRefusal),
     /// The authenticated authority-backed admission view could not be read.
     Admission(NodeAdmissionViewRefusal),
+    /// The authority-selected closure could not become a bounded pack payload.
+    Pack(NodePackMaterializationRefusal),
     /// The request selected another repository endpoint before authority work.
     RepositoryPathMismatch,
-    /// Canonical refs exist, but their authenticated object closure has no
-    /// published closure-to-pack materializer yet.
-    PackMaterializationUnavailable {
-        /// Number of refs that were deliberately not advertised.
-        advertised_refs: usize,
-    },
-    /// A pack request reached the empty-repository fallback unexpectedly.
-    PackRequestedWithoutMaterializer,
 }
 
 impl Display for NodeGitDaemonServeRefusal {
@@ -1271,16 +1681,10 @@ impl Display for NodeGitDaemonServeRefusal {
         match self {
             Self::Transport(error) => Display::fmt(error, formatter),
             Self::Admission(error) => Display::fmt(error, formatter),
+            Self::Pack(error) => Display::fmt(error, formatter),
             Self::RepositoryPathMismatch => {
                 formatter.write_str("git-daemon request does not select this node repository")
             }
-            Self::PackMaterializationUnavailable { advertised_refs } => write!(
-                formatter,
-                "git-daemon cannot advertise {advertised_refs} refs before an authenticated closure-to-pack materializer is available"
-            ),
-            Self::PackRequestedWithoutMaterializer => formatter.write_str(
-                "git-daemon received a pack request without a canonical pack materializer",
-            ),
         }
     }
 }
@@ -1290,19 +1694,18 @@ impl Error for NodeGitDaemonServeRefusal {
         match self {
             Self::Transport(error) => Some(error),
             Self::Admission(error) => Some(error),
-            Self::RepositoryPathMismatch
-            | Self::PackMaterializationUnavailable { .. }
-            | Self::PackRequestedWithoutMaterializer => None,
+            Self::Pack(error) => Some(error),
+            Self::RepositoryPathMismatch => None,
         }
     }
 }
 
 fn node_git_daemon_serve_error(
-    error: GitDaemonServeError<UnavailablePackRefusal>,
+    error: GitDaemonServeError<NodePackMaterializationRefusal>,
 ) -> NodeGitDaemonServeRefusal {
     match error {
         GitDaemonServeError::Transport(error) => NodeGitDaemonServeRefusal::Transport(error),
-        GitDaemonServeError::Pack(_) => NodeGitDaemonServeRefusal::PackRequestedWithoutMaterializer,
+        GitDaemonServeError::Pack(error) => NodeGitDaemonServeRefusal::Pack(error),
     }
 }
 
@@ -1855,6 +2258,24 @@ impl OneNode {
                 };
             }
         };
+        if let Err(staging) = node.runtime.block_on(
+            node.admission_materializer
+                .stage_permitted_object_closure_in(
+                    &node.authority,
+                    &initialization_cx,
+                    repository_id,
+                    PermittedObjectClosure::default(),
+                ),
+        ) {
+            let initialization = NodeRefusal::AdmissionMaterialization(staging);
+            return match node.shutdown() {
+                Ok(()) => Err(initialization),
+                Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
+                    initialization: Box::new(initialization),
+                    cleanup: Box::new(cleanup),
+                }),
+            };
+        }
         let genesis = genesis_head(repository_id, ref_root);
         let initialization = match initialize_embedded_repository(
             &node.runtime,
@@ -2081,6 +2502,66 @@ impl OneNode {
         self.materialize_admission_in(&request).await
     }
 
+    /// Materializes a bounded Git pack from exactly one authority-selected closure.
+    ///
+    /// The closure is read through the authenticated head/RCR chain before any
+    /// fabric read.  The fabric provides only verified native object bodies;
+    /// `fgit-pack` applies the deterministic selected-set planner and writes a
+    /// temporary artifact before this payload becomes consumable.
+    pub async fn authority_selected_pack_payload_in(
+        &self,
+        request: &NodeRequestContext,
+    ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
+        let materialized = self
+            .materialize_admission_in(request)
+            .await
+            .map_err(NodePackMaterializationRefusal::Admission)?;
+        let pack_context = request.authority().create_child();
+        let mut is_live = || pack_context.checkpoint().is_ok();
+        self.materialize_selected_pack(&materialized, &mut is_live)
+    }
+
+    /// Materializes an authority-selected pack with a fresh request context.
+    pub async fn authority_selected_pack_payload(
+        &self,
+    ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
+        let request = self.request_context();
+        self.authority_selected_pack_payload_in(&request).await
+    }
+
+    fn materialize_selected_pack(
+        &self,
+        materialized: &MaterializedAdmission,
+        is_live: &mut impl FnMut() -> bool,
+    ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
+        let limits = PackLimits::default();
+        let configured_limit = usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX);
+        let source = VerifiedFabricPackSource {
+            fabric: &self.fabric,
+            maximum_object_bytes: limits.max_object_bytes.min(configured_limit),
+        };
+        let ids = selected_pack_ids(materialized.selected_closure().closure(), &limits)
+            .map_err(NodePackMaterializationRefusal::Pack)?;
+        let planner = PackPlanner::new(
+            self.object_format,
+            PackWriteProfile::STORED_V1,
+            limits.clone(),
+        );
+        let plan = planner
+            .plan_selected(&source, &ids, is_live)
+            .map_err(NodePackMaterializationRefusal::Pack)?;
+        let (bytes, receipt) = PackWriter::new(limits)
+            .write(&plan, is_live)
+            .map_err(NodePackMaterializationRefusal::Pack)?;
+        Ok(AuthoritySelectedPackPayload {
+            basis: materialized.basis().clone(),
+            closure: materialized.selected_closure().clone(),
+            receipt,
+            bytes,
+            offset: 0,
+        })
+    }
+
     /// Returns the read-only canonical admission projection backed by this
     /// node's last successful async materialization.
     ///
@@ -2126,10 +2607,10 @@ impl OneNode {
     /// `CanonicalAdmissionStore` adapter: the admission cache remains a
     /// derived view refreshed by the async authority contract.
     ///
-    /// The currently complete pack materialization slice is the canonical
-    /// empty repository.  A non-empty ref state refuses before advertisement;
-    /// emitting refs without the authenticated closure-to-pack materializer
-    /// would promise objects this node cannot supply.
+    /// Empty state still completes at advertisement.  A non-empty state
+    /// advertises only after its immutable refs and permitted object closure
+    /// were selected by the same authenticated authority head; the wire crate
+    /// remains the sole owner of negotiation and bounded payload framing.
     pub fn serve_git_daemon_once(
         &self,
         listener: &TcpListener,
@@ -2173,12 +2654,6 @@ impl OneNode {
         .map_err(|error| {
             NodeGitDaemonServeRefusal::Admission(NodeAdmissionViewRefusal::View(error))
         })?;
-        if !repository.advertised_refs().is_empty() {
-            return Err(NodeGitDaemonServeRefusal::PackMaterializationUnavailable {
-                advertised_refs: repository.advertised_refs().len(),
-            });
-        }
-
         let mut writer = stream.try_clone().map_err(|source| {
             NodeGitDaemonServeRefusal::Transport(GitDaemonTransportRefusal::Io {
                 operation: "duplicate git-daemon connection for response writes",
@@ -2192,8 +2667,10 @@ impl OneNode {
             &repository,
             Capabilities::default(),
             limits,
-            |_request, _pack_request| -> Result<UnavailablePackPayload, UnavailablePackRefusal> {
-                Err(UnavailablePackRefusal)
+            |_request, _pack_request| {
+                let pack_context = request.authority().create_child();
+                let mut is_live = || pack_context.checkpoint().is_ok();
+                self.materialize_selected_pack(&materialized, &mut is_live)
             },
         )
         .map_err(node_git_daemon_serve_error)?;
@@ -2212,8 +2689,10 @@ impl OneNode {
     /// async authority contract, derives the exact [`PublicationBasis`] from
     /// that receipt, then delegates ref resolution to the supplied admission
     /// projection.  The resulting view is safe only for the legacy V0
-    /// first-clone transport: non-advertised closure wants are deliberately
-    /// refused until the decision-history closure reader is composed.
+    /// first-clone transport: this generic projection view does not itself
+    /// carry a closure, so non-advertised wants remain refused.  The durable
+    /// authority-selected pack path supplies closure evidence for the node's
+    /// served transport.
     pub async fn admission_upload_pack_repository_in<Projection>(
         &self,
         request: &NodeRequestContext,
@@ -2594,7 +3073,7 @@ fn admission_cache_resources() -> ResourceVector {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::convert::Infallible;
     use std::fs;
     use std::io::{Cursor, Read};
@@ -2609,13 +3088,15 @@ mod tests {
         PermittedObjectClosure, canonical_ref_state_root,
     };
     use fgit_authority::{AsyncAuthorityStore, HeadInit, HeadRead, ImmutableRead, OutcomeLookup};
-    use fgit_chronicle::PublicationBasis;
-    use fgit_codec::harness::{advanced_head, decision_batch, tx_id};
+    use fgit_chronicle::{PublicationBasis, PublicationPlan, ResultingRoots};
+    use fgit_codec::harness::{
+        advanced_head, commit_record, decision_batch, digest_of, refusal_record_id, tx_id,
+    };
     use fgit_codec::{CryptoBodyIdentity, body_id, decode_body};
     use fgit_object_fabric::fabric::StoreRefusal;
     use fgit_types::{
-        GitHashAlgorithm, GitOid, RefName, RefusalCode, RepositoryAuthorityHeadId, RepositoryId,
-        TenantId,
+        CANONICAL_CODEC_VERSION, DigestBytes, GitHashAlgorithm, GitOid, InternalObjectId, RefName,
+        RefusalCode, RepositoryAuthorityHeadId, RepositoryId, TenantId, TxId,
     };
     use fgit_wire::{
         AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, PackPayloadSource, Packet,
@@ -2624,11 +3105,11 @@ mod tests {
 
     use super::{
         ADMISSION_CLOSURE_KEY_PREFIX, AdmissionMaterializationRefusal, AdmissionUploadPackRefusal,
-        AdmissionUploadPackRepository, GitDaemonServeError, GitDaemonSessionOutcome,
-        GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal, NodeInitialization,
-        NodeRefusal, OneNode, admission_immutable_key, genesis_head, genesis_root,
-        initialize_embedded_repository, parse_git_daemon_request, serve_git_daemon_tcp_once,
-        serve_git_daemon_upload_pack,
+        AdmissionUploadPackRepository, ClosureSelectionSource, GitDaemonServeError,
+        GitDaemonSessionOutcome, GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal,
+        NodeInitialization, NodeRefusal, OneNode, admission_immutable_key, authority_head_id,
+        genesis_head, genesis_root, initialize_embedded_repository, parse_git_daemon_request,
+        serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
     };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -2664,6 +3145,16 @@ mod tests {
             TenantId::from_bytes([0x11; 16]),
             RepositoryId::from_bytes([0x22; 16]),
         )
+    }
+
+    fn distinct_tx_id() -> TxId {
+        TxId::from_internal_object_id(InternalObjectId::new(
+            fgit_codec::harness::algorithm(),
+            TxId::DOMAIN_TAG,
+            CANONICAL_CODEC_VERSION,
+            DigestBytes::try_new(&[0x9a; 32]).expect("fixed test digest has canonical length"),
+        ))
+        .expect("fixed transaction identity uses its own domain")
     }
 
     #[derive(Clone, Debug)]
@@ -3252,9 +3743,10 @@ mod tests {
             CanonicalAdmissionStore::resolve_permitted_object_closure(
                 &node.admission_materializer,
                 closure_root,
-            ),
-            Err(RefusalCode::EvidenceMissing),
-            "a staged closure is not current without an authenticated RCR"
+            )
+            .expect("the empty genesis rule selects only its canonical empty closure"),
+            closure,
+            "a matching staged root resolves only because the authenticated head is empty genesis"
         );
 
         let mut other_body = materialized.basis().body().clone();
@@ -3291,6 +3783,270 @@ mod tests {
             )
             .expect("first-clone view comes from durable admission materialization");
         assert_eq!(upload_pack.advertised_refs(), []);
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn refusal_tail_replays_to_the_committed_rcr_closure_and_materializes_a_pack() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
+            .expect("node initializes empty canonical state");
+        let request = node.request_context();
+        let stored = node
+            .put_git_object(
+                fgit_git_object::ObjectType::Blob,
+                b"authority selected blob".to_vec(),
+            )
+            .expect("fixture blob enters verified fabric");
+
+        let mut refs = BTreeMap::new();
+        refs.insert(
+            RefName::try_new(b"refs/heads/main").expect("fixed ref name is valid"),
+            stored.identity(),
+        );
+        let ref_state = CanonicalRefState::new(refs);
+        let ref_root = node
+            .runtime()
+            .block_on(node.admission_materializer.stage_ref_state_in(
+                &node.authority,
+                request.authority(),
+                node.repository_id(),
+                ref_state,
+            ))
+            .expect("future RCR ref state stages before head publication");
+        let closure = PermittedObjectClosure::new(BTreeSet::from([stored.identity()]));
+        let closure_root = node
+            .runtime()
+            .block_on(
+                node.admission_materializer
+                    .stage_permitted_object_closure_in(
+                        &node.authority,
+                        request.authority(),
+                        node.repository_id(),
+                        closure.clone(),
+                    ),
+            )
+            .expect("future RCR closure stages before head publication");
+
+        let HeadRead::Present(first_receipt) = node
+            .runtime()
+            .block_on(node.read_authority_head_in(&request))
+            .expect("genesis head reads")
+        else {
+            panic!("node initialization publishes genesis");
+        };
+        let first_head: fgit_codec::RepositoryAuthorityHeadBody =
+            decode_body(first_receipt.body(), fgit_codec::DecodeLimits::DEFAULT)
+                .expect("authenticated fixture head decodes");
+        let first_basis = PublicationBasis::new(
+            authority_head_id(&first_head).expect("genesis head re-identifies"),
+            first_head,
+        );
+        let mut record = commit_record();
+        record.repository_id = node.repository_id();
+        record.resulting_ref_root = ref_root;
+        record.object_closure_root = closure_root;
+        record.resulting_forge_position_root = first_basis.body().forge_position_root;
+        record.policy_epoch = first_basis.body().policy_epoch;
+        let record_id = super::repository_commit_id(&record).expect("RCR re-identifies");
+        let mut roots = ResultingRoots::carried_forward(&first_basis, digest_of(0x91));
+        roots.ref_root = ref_root;
+        let mut commit_plan = PublicationPlan::open(first_basis).expect("genesis opens a plan");
+        commit_plan.commit(record_id, record);
+        let committed = commit_plan
+            .seal(&CryptoBodyIdentity, roots)
+            .expect("committed RCR produces a verified head pair");
+        node.runtime()
+            .block_on(node.publish_decisions_in(
+                &request,
+                first_receipt.token(),
+                committed.batch(),
+                committed.head(),
+            ))
+            .expect("committed RCR publishes through authority");
+
+        let HeadRead::Present(refusal_basis_receipt) = node
+            .runtime()
+            .block_on(node.read_authority_head_in(&request))
+            .expect("committed head reads")
+        else {
+            panic!("committed RCR advances head");
+        };
+        let refusal_basis_body: fgit_codec::RepositoryAuthorityHeadBody = decode_body(
+            refusal_basis_receipt.body(),
+            fgit_codec::DecodeLimits::DEFAULT,
+        )
+        .expect("committed fixture head decodes");
+        let refusal_basis = PublicationBasis::new(
+            authority_head_id(&refusal_basis_body).expect("committed head re-identifies"),
+            refusal_basis_body,
+        );
+        let refusal_roots = ResultingRoots::carried_forward(&refusal_basis, digest_of(0x92));
+        let mut refusal_plan = PublicationPlan::open(refusal_basis).expect("committed head opens");
+        refusal_plan.refuse(
+            distinct_tx_id(),
+            RefusalCode::ExpectedOldRefMismatch,
+            refusal_record_id(),
+        );
+        let refusal_only = refusal_plan
+            .seal(&CryptoBodyIdentity, refusal_roots)
+            .expect("refusal-only successor preserves committed roots");
+        node.runtime()
+            .block_on(node.publish_decisions_in(
+                &request,
+                refusal_basis_receipt.token(),
+                refusal_only.batch(),
+                refusal_only.head(),
+            ))
+            .expect("refusal-only successor publishes through authority");
+
+        let materialized = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .expect("reader verifies tail then walks to the committed RCR");
+        assert_eq!(materialized.selected_closure().root(), closure_root);
+        assert_eq!(materialized.selected_closure().closure(), &closure);
+        assert_eq!(
+            materialized.selected_closure().source(),
+            ClosureSelectionSource::RepositoryCommit(record_id),
+            "the derived view names the exact RCR rather than a local catalog"
+        );
+        assert_eq!(
+            CanonicalAdmissionStore::resolve_permitted_object_closure(
+                &node.admission_materializer,
+                closure_root,
+            )
+            .expect("only the exact authority-selected closure resolves"),
+            closure
+        );
+
+        let mut payload = node
+            .runtime()
+            .block_on(node.authority_selected_pack_payload_in(&request))
+            .expect("selected verified object becomes a bounded deterministic pack");
+        assert_eq!(payload.basis(), materialized.basis());
+        assert_eq!(
+            payload.closure().source(),
+            ClosureSelectionSource::RepositoryCommit(record_id)
+        );
+        let first_chunk = payload
+            .next_chunk(4)
+            .expect("payload honors bounded chunk requests")
+            .expect("non-empty closure emits a pack header");
+        assert_eq!(first_chunk, b"PACK");
+
+        let repository_path = node.git_daemon_repository_path().as_bytes().to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
+        let address = listener
+            .local_addr()
+            .expect("loopback listener reports its address");
+        let server = thread::spawn(move || {
+            let served = node.serve_git_daemon_once_with_limits(&listener, WireLimits::default());
+            let shutdown = node.shutdown();
+            (served, shutdown)
+        });
+        let mut client = TcpStream::connect(address).expect("client connects to node listener");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("client read timeout configures");
+        let greeting_payload = [
+            b"git-upload-pack ".as_slice(),
+            repository_path.as_slice(),
+            b"\0host=loopback\0".as_slice(),
+        ]
+        .concat();
+        let mut client_request = daemon_greeting(&greeting_payload);
+        client_request.extend(
+            encode_packets(
+                &[
+                    Packet::Data(format!("want {}\n", stored.identity()).into_bytes()),
+                    Packet::Flush,
+                    Packet::Data(b"done\n".to_vec()),
+                ],
+                &WireLimits::default(),
+            )
+            .expect("authority-selected want negotiation encodes"),
+        );
+        std::io::Write::write_all(&mut client, &client_request)
+            .expect("client sends greeting and negotiation");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client closes request half after done");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .expect("server completes authority-selected pack response");
+        let (served, shutdown) = server.join().expect("node server thread joins");
+        shutdown.expect("node drains after authority-selected pack session");
+        assert!(matches!(served, Ok(GitDaemonSessionOutcome::Pack(_))));
+        assert!(
+            response
+                .windows(b"PACK".len())
+                .any(|window| window == b"PACK"),
+            "non-empty refs are advertised only with an emitted authority-selected pack"
+        );
+    }
+
+    #[test]
+    fn nonempty_genesis_refuses_even_when_a_closure_frame_is_staged() {
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf());
+        let node = OneNode::open_components(config).expect("node components open before genesis");
+        let request = node.request_context();
+        let oid = GitOid::from_hex(
+            GitHashAlgorithm::Sha1,
+            "1111111111111111111111111111111111111111",
+        )
+        .expect("fixed object identity parses");
+        let mut refs = BTreeMap::new();
+        refs.insert(
+            RefName::try_new(b"refs/heads/imported").expect("fixed ref name is valid"),
+            oid,
+        );
+        let ref_root = node
+            .runtime()
+            .block_on(node.admission_materializer.stage_ref_state_in(
+                &node.authority,
+                request.authority(),
+                node.repository_id(),
+                CanonicalRefState::new(refs),
+            ))
+            .expect("non-empty frame stages before genesis publication");
+        node.runtime()
+            .block_on(
+                node.admission_materializer
+                    .stage_permitted_object_closure_in(
+                        &node.authority,
+                        request.authority(),
+                        node.repository_id(),
+                        PermittedObjectClosure::new(BTreeSet::from([oid])),
+                    ),
+            )
+            .expect("a staged closure alone remains non-authoritative");
+        let genesis = genesis_head(node.repository_id(), ref_root);
+        initialize_embedded_repository(
+            node.runtime(),
+            &node.authority,
+            request.authority(),
+            &node.head_key,
+            &genesis,
+        )
+        .expect("test publishes a schema-valid but closure-unbound genesis head");
+
+        assert!(matches!(
+            node.runtime()
+                .block_on(node.materialize_admission_in(&request)),
+            Err(AdmissionMaterializationRefusal::NonEmptyGenesisWithoutClosure)
+        ));
+        assert_eq!(
+            CanonicalAdmissionStore::resolve_permitted_object_closure(
+                &node.admission_materializer,
+                canonical_ref_state_root(&CanonicalRefState::default())
+                    .expect("empty ref root computes"),
+            ),
+            Err(RefusalCode::EvidenceMissing),
+            "the unbound staged closure never becomes a local fallback"
+        );
         node.shutdown().expect("node closes cleanly");
     }
 
