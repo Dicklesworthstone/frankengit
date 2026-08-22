@@ -133,6 +133,7 @@ fn batch(
         resulting_outbox_root: digest(1),
         resulting_policy_epoch: PolicyEpoch::FIRST,
         batch_evidence_root: digest(1),
+        compaction_generation_link: None,
     }
 }
 
@@ -2446,7 +2447,7 @@ fn a_saturated_walk_counter_still_refuses_rather_than_wrapping_past_the_bound() 
 /// surviving decision by list order -- discretion §5.2 withholds from every
 /// layer, including this one.
 #[test]
-fn a_batch_listing_one_transaction_twice_is_refused_before_staging() {
+fn an_agreeing_duplicate_decision_is_refused_without_staging_a_successor() {
     let store = store();
     let genesis = genesis_head();
     initialize_repository(&store, &head_slot(), &genesis).expect("genesis");
@@ -2454,9 +2455,13 @@ fn a_batch_listing_one_transaction_twice_is_refused_before_staging() {
     let duplicate = batch(
         &genesis,
         1,
-        vec![committed(tx(0xA1), 1, 0x51), refused(tx(0xA1), 2, 0x52)],
+        vec![committed(tx(0xA1), 1, 0x51), committed(tx(0xA1), 2, 0x51)],
     );
     let head = successor_head(&genesis, batch_id_of(&duplicate), 2);
+    let batch_key = body_key(IdentityDomain::RepositoryDecisionBatch, &duplicate)
+        .expect("a batch has a body key");
+    let successor_head_key = body_key(IdentityDomain::RepositoryAuthorityHead, &head)
+        .expect("a successor head has a body key");
     let HeadRead::Present(receipt) = store.read_head(&head_slot()).expect("a readable head") else {
         panic!("genesis must be published");
     };
@@ -2482,6 +2487,28 @@ fn a_batch_listing_one_transaction_twice_is_refused_before_staging() {
         ),
         "got {failure:?}"
     );
+    let HeadRead::Present(after) = store.read_head(&head_slot()).expect("a readable head") else {
+        panic!("a rejected batch must not remove the predecessor head");
+    };
+    assert_eq!(
+        after.token(),
+        receipt.token(),
+        "the rejection must leave the authority head at its predecessor",
+    );
+    assert!(
+        matches!(
+            store.read_immutable(&batch_key),
+            Ok(fgit_authority::ImmutableRead::Absent)
+        ),
+        "a malformed batch must not leave its decision body staged",
+    );
+    assert!(
+        matches!(
+            store.read_immutable(&successor_head_key),
+            Ok(fgit_authority::ImmutableRead::Absent)
+        ),
+        "a malformed batch must not leave its successor head staged",
+    );
 }
 
 /// The publication primitive is reachable by callers other than
@@ -2492,16 +2519,27 @@ fn a_batch_listing_one_transaction_twice_is_refused_before_staging() {
 /// backend to the same semantics so the two cannot diverge on malformed
 /// input. Driven through a delegating wrapper because the absence witness is
 /// minted inside the duplicate walk; the wrapper forwards that real witness
-/// untouched and only corrupts the entry slice.
-struct ConflictingOutcomeInjector(MemoryAuthorityStore);
+/// untouched and only changes the entry slice after that witness exists.
+#[derive(Clone, Copy)]
+enum DuplicateInjection {
+    /// Repeat the canonical entry without changing a byte.
+    Identical,
+    /// Repeat the entry after changing its final byte.
+    Conflicting,
+}
 
-impl AuthorityStore for ConflictingOutcomeInjector {
+struct OutcomeInjector {
+    store: MemoryAuthorityStore,
+    injection: DuplicateInjection,
+}
+
+impl AuthorityStore for OutcomeInjector {
     fn instance_id(&self) -> StoreInstanceId {
-        self.0.instance_id()
+        self.store.instance_id()
     }
 
     fn limits(&self) -> AuthorityLimits {
-        self.0.limits()
+        self.store.limits()
     }
 
     fn put_if_absent(
@@ -2509,11 +2547,11 @@ impl AuthorityStore for ConflictingOutcomeInjector {
         key: &ImmutableKey,
         body: &[u8],
     ) -> Result<PutOutcome, AuthorityFailure> {
-        self.0.put_if_absent(key, body)
+        self.store.put_if_absent(key, body)
     }
 
     fn read_immutable(&self, key: &ImmutableKey) -> Result<ImmutableRead, AuthorityFailure> {
-        self.0.read_immutable(key)
+        self.store.read_immutable(key)
     }
 
     fn initialize_head(
@@ -2522,11 +2560,11 @@ impl AuthorityStore for ConflictingOutcomeInjector {
         generation: HeadGeneration,
         body: &[u8],
     ) -> Result<HeadInit, AuthorityFailure> {
-        self.0.initialize_head(key, generation, body)
+        self.store.initialize_head(key, generation, body)
     }
 
     fn read_head(&self, key: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
-        self.0.read_head(key)
+        self.store.read_head(key)
     }
 
     fn compare_exchange_head(
@@ -2536,7 +2574,7 @@ impl AuthorityStore for ConflictingOutcomeInjector {
         new_generation: HeadGeneration,
         new_body: &[u8],
     ) -> Result<CasOutcome, AuthorityFailure> {
-        self.0
+        self.store
             .compare_exchange_head(key, expected, new_generation, new_body)
     }
 
@@ -2549,19 +2587,25 @@ impl AuthorityStore for ConflictingOutcomeInjector {
         outcomes: &[(ImmutableKey, Vec<u8>)],
         witness: &DuplicateAbsenceWitness,
     ) -> Result<CasOutcome, AuthorityFailure> {
-        let mut corrupted = outcomes.to_vec();
-        if let Some((first_key, first_bytes)) = corrupted.first().cloned() {
-            let mut flipped = first_bytes;
-            let last = flipped.len() - 1;
-            flipped[last] ^= 0xff;
-            corrupted.push((first_key, flipped));
+        let mut injected = outcomes.to_vec();
+        if let Some((first_key, first_bytes)) = injected.first().cloned() {
+            let duplicate = match self.injection {
+                DuplicateInjection::Identical => first_bytes,
+                DuplicateInjection::Conflicting => {
+                    let mut flipped = first_bytes;
+                    let last = flipped.len() - 1;
+                    flipped[last] ^= 0xff;
+                    flipped
+                }
+            };
+            injected.push((first_key, duplicate));
         }
-        self.0.publish_head_with_outcomes(
+        self.store.publish_head_with_outcomes(
             key,
             expected,
             new_generation,
             new_body,
-            &corrupted,
+            &injected,
             witness,
         )
     }
@@ -2570,13 +2614,16 @@ impl AuthorityStore for ConflictingOutcomeInjector {
         &self,
         receipt: &HeadReadReceipt,
     ) -> Result<AuthenticatedHead, AuthorityFailure> {
-        self.0.authenticate_head_receipt(receipt)
+        self.store.authenticate_head_receipt(receipt)
     }
 }
 
 #[test]
 fn the_reference_backend_refuses_conflicting_duplicate_keys_in_one_call() {
-    let injector = ConflictingOutcomeInjector(store());
+    let injector = OutcomeInjector {
+        store: store(),
+        injection: DuplicateInjection::Conflicting,
+    };
     let genesis = genesis_head();
     initialize_repository(&injector, &head_slot(), &genesis).expect("genesis");
 
@@ -2605,5 +2652,51 @@ fn the_reference_backend_refuses_conflicting_duplicate_keys_in_one_call() {
                     )))
         ) || matches!(&failure, OutcomeFailure::AcceleratorConflict { .. }),
         "the primitive refusal must surface as the accelerator-conflict shape, got {failure:?}"
+    );
+}
+
+/// The permitted twin of the conflicting injection above.  Repeating exactly
+/// the same key and canonical bytes is an idempotent retry, not a second
+/// terminal decision.  This reaches the backend primitive through the same
+/// real duplicate-absence witness, so accepting it proves duplicate handling
+/// did not regress into a blanket refusal.
+#[test]
+fn the_reference_backend_deduplicates_identical_keys_in_one_call() {
+    let injector = OutcomeInjector {
+        store: store(),
+        injection: DuplicateInjection::Identical,
+    };
+    let genesis = genesis_head();
+    initialize_repository(&injector, &head_slot(), &genesis).expect("genesis");
+
+    let first = batch(&genesis, 1, vec![committed(tx(0xA1), 1, 0x51)]);
+    let head = successor_head(&genesis, batch_id_of(&first), 1);
+    let HeadRead::Present(receipt) = injector.read_head(&head_slot()).expect("a readable head")
+    else {
+        panic!("genesis must be published");
+    };
+    let publication = publish_decisions(
+        &injector,
+        &head_slot(),
+        receipt.token(),
+        &first,
+        &head,
+        tenant(),
+    )
+    .expect("an identical duplicate is an idempotent primitive retry");
+    assert!(
+        matches!(publication, PublicationOutcome::Published(ref batch) if batch.indexed == 1),
+        "the duplicate must collapse to one canonical accelerator entry, got {publication:?}",
+    );
+    assert_eq!(
+        indexed_outcome(&injector, tenant(), repository(), tx(0xA1))
+            .expect("the single canonical entry is readable"),
+        OutcomeLookup::Decided(TerminalOutcome {
+            decision_sequence: DecisionSequence::FIRST,
+            outcome: DecisionOutcome::Committed {
+                repository_commit_id: commit_id(0x51),
+            },
+        }),
+        "the primitive must retain the original decision rather than a duplicate",
     );
 }
