@@ -1001,3 +1001,65 @@ fn a_batch_not_opening_at_the_next_repository_position_is_refused_and_its_twin_i
         "the refusal is specific to the position, not to the record"
     );
 }
+
+#[test]
+fn a_second_committed_record_that_skips_a_repository_position_is_refused_and_its_twin_is_not() {
+    // The repository-sequence guard has TWO arms in the same loop, and only the
+    // first was covered:
+    //
+    //   index == 0 && sequence != open   -> RepositorySequenceNotContinuing
+    //   sequence != expected             -> RepositorySequenceNotContiguous
+    //
+    // The first arm only ever sees the opening record, so a batch with one
+    // committed record -- which is what every other case here builds -- cannot
+    // reach the second arm at all. Removing the contiguity check entirely would
+    // leave every existing test green.
+    //
+    // So this builds a TWO-record batch and skips the second position. The
+    // contiguity check sits before both the parent check and the identity
+    // check, so a wrong sequence is reported as a wrong sequence rather than as
+    // the identity mismatch it also causes.
+    let mut plan = PublicationPlan::open(basis()).expect("genesis basis opens");
+    plan.commit(record(0x71));
+    plan.commit(record(0x72));
+    let published = seal(plan, &committed_roots());
+    let basis = basis();
+    let mut batch = published.batch().clone();
+    let head = published.head().clone();
+    assert_eq!(
+        batch.committed_rcrs.len(),
+        2,
+        "the fixture must publish two records or the second arm is unreachable"
+    );
+
+    let skipped = RepositorySequence::try_new(3).expect("three is a valid repository position");
+    batch
+        .committed_rcrs
+        .get_mut(1)
+        .expect("the batch carries a second record")
+        .repository_sequence = skipped;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::RepositorySequenceNotContiguous {
+            index: 1,
+            expected: RepositorySequence::try_new(2).expect("two follows one"),
+            observed: skipped,
+        }),
+        "the second committed record must occupy the position immediately after the first; a \
+         skipped position leaves a hole in the committed-only order that no later batch can fill"
+    );
+
+    // The permitted twin: restoring the position leaves the same two-record
+    // pair verifiable, so the refusal is about contiguity rather than about
+    // second records being rejected generally.
+    batch
+        .committed_rcrs
+        .get_mut(1)
+        .expect("the batch carries a second record")
+        .repository_sequence = RepositorySequence::try_new(2).expect("two follows one");
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(()),
+        "a contiguous two-record batch verifies"
+    );
+}
