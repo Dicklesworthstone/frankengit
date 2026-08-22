@@ -52,13 +52,16 @@ use fgit_reference::effect::{
     AbsorptionReason, EffectTarget, FoldBasis, FoldOutcome, IntentDisposition, RefEffect,
 };
 use fgit_reference::harness::{IdentityMint, RequestBuilder, label};
-use fgit_reference::intent::{IdempotencyKey, Intent, RefIntent, TransactionRequest};
+use fgit_reference::intent::{
+    IdempotencyKey, Intent, OutboxDeliveryKey, OutboxIntent, RefIntent, TransactionRequest,
+};
 use fgit_reference::refs::ExpectedRefState;
 use fgit_txn::IntentEvaluator;
 use fgit_types::label::{SchemaFamily, SchemaId};
 use fgit_types::native::{GitOid, GitOidSha1};
 use fgit_types::refs::RefName;
 use fgit_types::vocabulary::{MismatchPolicy, RefusalCode};
+use fgit_types::{Digest, DigestAlgorithmId, DigestBytes};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -92,7 +95,7 @@ fn ref_alphabet() -> Vec<RefName> {
 /// The oracle's view of one intent's fate, at the evaluator's own resolution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum OracleDisposition {
-    Surviving(RefName),
+    Surviving(EffectTarget),
     Absorbed(AbsorptionReason),
     /// The refusal code is carried, not discarded.
     ///
@@ -138,18 +141,88 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
     // requested after-state already equalled the scratch state. Per the
     // normative ruling this takes precedence over last-writer provenance.
     let mut identity_at_evaluation: Vec<bool> = Vec::new();
+    // Outbox deliveries bound so far, read-your-own-writes like `after`.
+    // Seeded empty because every call site passes an empty outbox basis; if a
+    // caller ever seeds one, this must take it as a parameter or the two
+    // sides start from different states and every disagreement is spurious.
+    let mut outbox_scratch: BTreeMap<OutboxDeliveryKey, Digest> = BTreeMap::new();
     let mut aborted = false;
 
     'outer: for statement in &request.statements {
         for intent in &statement.intents {
             let Intent::Ref(ref_intent) = intent else {
-                // Only ref intents are modelled; see the module non-claims.
-                dispositions.push(OracleDisposition::StatementError(
-                    RefusalCode::ExpectedOldRefMismatch,
-                ));
-                touched.push(None);
-                identity_at_evaluation.push(true);
-                continue;
+                // This arm used to score EVERY non-ref intent as
+                // `StatementError(ExpectedOldRefMismatch)`. That was dead code
+                // while the generator emitted refs only, and it would have
+                // become silently wrong the moment it wasn't: a valid outbox
+                // delivery would have been reported as a precondition mismatch,
+                // the evaluator would have disagreed, and the obvious "fix"
+                // would have been to copy the evaluator here -- destroying the
+                // independence this oracle exists to provide.
+                match intent {
+                    Intent::Outbox(outbox) => {
+                        // Derived from the rule, not from the folder: an outbox
+                        // delivery is owed once per key. The same key with the
+                        // same canonical parameters owes nothing new; with
+                        // different parameters it is a reuse of an effect key
+                        // that already means something else.
+                        //
+                        // Note an outbox target, unlike a ref, can never be
+                        // overwritten inside one transaction -- a second intent
+                        // at a bound key is either absorbed or refused, never a
+                        // later writer. So these dispositions are final here and
+                        // need none of the survival machinery below.
+                        let bound = outbox_scratch.get(&outbox.delivery_key).copied();
+                        match bound {
+                            Some(parameters) if parameters == outbox.parameters => {
+                                dispositions.push(OracleDisposition::Absorbed(
+                                    AbsorptionReason::DuplicateIdenticalDelivery,
+                                ));
+                            }
+                            // A mismatch, and the statement policy governs it
+                            // exactly as it governs a ref precondition
+                            // mismatch. Verified at `effect.rs:296`, which
+                            // routes every `Applied::Mismatch` through the
+                            // policy uniformly rather than per intent kind.
+                            Some(_) => match statement.mismatch_policy {
+                                MismatchPolicy::NoOp => {
+                                    dispositions.push(OracleDisposition::Absorbed(
+                                        AbsorptionReason::PreconditionMismatchNoOp,
+                                    ));
+                                }
+                                MismatchPolicy::StatementError => {
+                                    dispositions.push(OracleDisposition::StatementError(
+                                        RefusalCode::EffectIdempotencyKeyReuse,
+                                    ));
+                                }
+                                MismatchPolicy::TxnAbort => {
+                                    dispositions.push(OracleDisposition::TransactionAborted);
+                                    touched.push(None);
+                                    identity_at_evaluation.push(true);
+                                    aborted = true;
+                                    break 'outer;
+                                }
+                            },
+                            None => {
+                                outbox_scratch.insert(outbox.delivery_key, outbox.parameters);
+                                dispositions.push(OracleDisposition::Surviving(
+                                    EffectTarget::Outbox(outbox.delivery_key),
+                                ));
+                            }
+                        }
+                        touched.push(None);
+                        identity_at_evaluation.push(true);
+                        continue;
+                    }
+                    // Stage 2 adds forge intents. Until then, loudly: a
+                    // placeholder disposition is precisely what made the
+                    // previous version of this arm wrong-in-waiting.
+                    other => panic!(
+                        "the generator emitted {other:?}, which this oracle does not model. \
+                         Extend the oracle in the same commit that extends the generator, or \
+                         the comparison stops testing what it claims"
+                    ),
+                }
             };
             let name = ref_intent.target().clone();
             let satisfied = ref_intent.expected().is_satisfied_by(after.get(&name));
@@ -323,7 +396,7 @@ fn oracle_fold(basis: &BTreeMap<RefName, GitOid>, request: &TransactionRequest) 
             OracleDisposition::Absorbed(AbsorptionReason::IdentityEffect)
         } else if target_has_effect {
             if last_writer.get(name) == Some(&index) {
-                OracleDisposition::Surviving(name.clone())
+                OracleDisposition::Surviving(EffectTarget::Ref(name.clone()))
             } else {
                 OracleDisposition::Absorbed(AbsorptionReason::OverwrittenBySucceedingIntent)
             }
@@ -371,6 +444,28 @@ impl Rng {
     fn below(&mut self, bound: usize) -> usize {
         usize::try_from(self.next_u64() % bound as u64).expect("small bound")
     }
+}
+
+/// A delivery key from a deliberately tiny alphabet.
+///
+/// Two keys, so a generated statement collides with itself often enough that
+/// both outbox arms -- identical redelivery and key reuse -- are reached
+/// without hand-built programs. Widening this alphabet makes the corpus cover
+/// LESS, which is the opposite of the usual intuition.
+fn delivery_key(index: usize) -> OutboxDeliveryKey {
+    OutboxDeliveryKey::new(label(if index == 0 { "outbox-a" } else { "outbox-b" }))
+}
+
+/// A canonical-parameters digest that is a pure function of `tag`.
+///
+/// Determinism is the point: two intents carrying the same tag must produce
+/// byte-identical parameters, or `DuplicateIdenticalDelivery` is unreachable
+/// and the corpus silently tests only the reuse arm.
+fn digest_of(tag: u8) -> Digest {
+    let algorithm = DigestAlgorithmId::try_new(1).expect("a non-zero algorithm slot is admissible");
+    let bytes =
+        DigestBytes::try_new(&[tag; 32]).expect("32 bytes is inside the accepted digest window");
+    Digest::new(algorithm, bytes)
 }
 
 fn generate_basis(rng: &mut Rng) -> BTreeMap<RefName, GitOid> {
@@ -422,6 +517,16 @@ fn generate_request(
                     .map_or(ExpectedRefState::Absent, |o| ExpectedRefState::Exact(*o)),
                 _ => ExpectedRefState::Exact(oid(200)),
             };
+            // One intent in four is an outbox delivery, drawn from the tiny
+            // key/parameter alphabets above so that identical redelivery and
+            // key reuse both occur naturally rather than being hand-built.
+            if rng.below(4) == 0 {
+                intents.push(Intent::Outbox(OutboxIntent {
+                    delivery_key: delivery_key(rng.below(2)),
+                    parameters: digest_of(u8::try_from(rng.below(2)).expect("small")),
+                }));
+                continue;
+            }
             intents.push(Intent::Ref(if rng.below(4) == 0 {
                 RefIntent::Delete { name, expected }
             } else {
@@ -488,14 +593,15 @@ fn programs() -> usize {
 /// specification asks for went untested.
 fn translate(disposition: &IntentDisposition) -> OracleDisposition {
     match disposition {
-        IntentDisposition::Surviving(EffectTarget::Ref(name)) => {
-            OracleDisposition::Surviving(name.clone())
+        IntentDisposition::Surviving(target @ (EffectTarget::Ref(_) | EffectTarget::Outbox(_))) => {
+            OracleDisposition::Surviving(target.clone())
         }
-        // A surviving effect at a non-ref target means the corpus produced
-        // something outside this refs-only model. The previous version mapped
-        // it silently onto StatementError, which would have made an escaped
-        // model look like an ordinary refusal and agree with an oracle that
-        // never generated it. Loud is correct here.
+        // A surviving effect at a target this model does not carry. The
+        // original version mapped it silently onto StatementError, which would
+        // have made an escaped model look like an ordinary refusal and agree
+        // with an oracle that never generated it. Loud is correct here. Refs
+        // and outbox deliveries are modelled; forge streams and retention roots
+        // are stage 2.
         IntentDisposition::Surviving(other) => panic!(
             "the corpus produced a surviving effect at a non-ref target ({other:?}); this \
              model generates ref intents only, so either the generator or the evaluator has \
@@ -646,10 +752,12 @@ fn the_corpus_reaches_the_dispositions_it_claims_to_test() {
 }
 
 #[test]
-fn the_unmodelled_arms_are_named_rather_than_quietly_absent() {
-    // `DuplicateIdenticalDelivery` needs outbox delivery keys, which this
-    // ref-only model does not carry. An oracle silently producing four of five
-    // absorption reasons would look complete; this makes the gap a statement.
+fn every_absorption_reason_including_duplicate_delivery_is_reached() {
+    // Was `the_unmodelled_arms_are_named_rather_than_quietly_absent`, asserting
+    // that `DuplicateIdenticalDelivery` was NOT reachable. The carrier now
+    // emits outbox intents, so the gap is closed and the assertion is inverted
+    // in the same commit that closes it -- removing it a commit early is how a
+    // coverage claim quietly widens.
     let mut seen: BTreeSet<AbsorptionReason> = BTreeSet::new();
     for i in 0..programs() {
         let case_seed = CORPUS_SEED.wrapping_add(i as u64);
@@ -665,9 +773,10 @@ fn the_unmodelled_arms_are_named_rather_than_quietly_absent() {
     }
 
     assert!(
-        !seen.contains(&AbsorptionReason::DuplicateIdenticalDelivery),
-        "DuplicateIdenticalDelivery is now reachable; extend the comparison to outbox \
-         intents and remove this assertion rather than leaving it asserting a stale gap"
+        seen.contains(&AbsorptionReason::DuplicateIdenticalDelivery),
+        "the corpus must redeliver an outbox key with identical canonical parameters; without \
+         it the permitted twin of EffectIdempotencyKeyReuse is untested, and a folder that \
+         refused every redelivery would pass the refusal half alone. Reached: {seen:?}"
     );
 }
 
@@ -907,10 +1016,17 @@ fn the_intent_refusal_taxonomy_is_bounded_and_its_gaps_are_named() {
     //                              with identical parameters is the separate
     //                              Absorbed(DuplicateIdenticalDelivery) arm.
     //
-    // All three gaps are the same gap: this model carries ref intents only.
-    // Closing them means extending the carrier, not adding assertions — and
-    // adding forge plus outbox intents would close all three codes AND the
-    // DuplicateIdenticalDelivery absorption reason in one extension.
+    // STAGE 1 LANDED: the carrier now emits outbox intents, so
+    // EffectIdempotencyKeyReuse is reached, and DuplicateIdenticalDelivery
+    // with it. The two remaining gaps are both forge-only, and are stage 2.
+    //
+    // ResourceBudgetExceeded is reachable but needs a FIXTURE rather than
+    // just a forge intent: scratch positions advance by a saturating
+    // successor(), so exhaustion is 2^64 steps away and unreachable by
+    // advancing. `FoldBasis::forge_positions` is caller-supplied and
+    // `ForgeStreamPosition::new` is public, so stage 2 seeds one stream at
+    // u64::MAX deliberately and labels it as a fixture rather than letting
+    // it look like an ordinary generated basis.
     let mut reached: BTreeSet<RefusalCode> = BTreeSet::new();
     for i in 0..programs() {
         let seed = CORPUS_SEED.wrapping_add(i as u64);
@@ -931,23 +1047,34 @@ fn the_intent_refusal_taxonomy_is_bounded_and_its_gaps_are_named() {
          refs-only model can reach, and without it the statement-error arm is untested"
     );
 
+    assert!(
+        reached.contains(&RefusalCode::EffectIdempotencyKeyReuse),
+        "the corpus must reuse an outbox delivery key with DIFFERENT canonical parameters; \
+         stage 1 exists to reach exactly this code. Reached: {reached:?}"
+    );
+
+    const STAGE_ONE_REACHED: [RefusalCode; 2] = [
+        RefusalCode::ExpectedOldRefMismatch,
+        RefusalCode::EffectIdempotencyKeyReuse,
+    ];
     let unreachable: Vec<RefusalCode> = INTENT_REFUSAL_TAXONOMY
         .into_iter()
-        .filter(|code| *code != RefusalCode::ExpectedOldRefMismatch)
+        .filter(|code| !STAGE_ONE_REACHED.contains(code))
         .collect();
     for code in unreachable {
         assert!(
             !reached.contains(&code),
-            "{code:?} is now reachable from the refs-only corpus. That is good news, but this \
-             test records it as unreachable — extend the taxonomy coverage claim and remove it \
-             from the gap list rather than leaving a stale assertion"
+            "{code:?} is now reachable. That is good news, but this test still records it \
+             as a gap, and both remaining codes are forge-only stage-2 work. Move it into \
+             STAGE_ONE_REACHED in the same commit that lands its coverage rather than \
+             leaving a stale assertion"
         );
     }
 
     assert_eq!(
         reached.len(),
-        1,
-        "the refs-only corpus should reach exactly one of the four intent refusal codes; \
+        STAGE_ONE_REACHED.len(),
+        "the stage-1 corpus should reach exactly the stage-1 codes of the four; \
          reaching more means the model grew and this claim needs updating, reaching none \
          means the statement-error path went untested. Reached: {reached:?}"
     );
