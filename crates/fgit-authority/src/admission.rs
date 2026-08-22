@@ -31,6 +31,7 @@ use fgit_types::identity::{AdmissionReceiptId, PrincipalId, TransactionSealId};
 use fgit_types::label::{AsciiSlug, DomainTag, SchemaFamily};
 use fgit_types::numeric::PolicyEpoch;
 
+use crate::async_contract::AsyncAuthorityStore;
 use crate::contract::AuthorityStore;
 use crate::identity::canonical_body_id;
 use crate::keys::ImmutableKey;
@@ -176,17 +177,54 @@ where
 {
     let key = admission_key(receipt.seal_id)?;
     let bytes = encode_body(receipt)?;
-    match store.put_if_absent(&key, &bytes)? {
-        PutOutcome::Created => Ok(AdmissionOutcome::Admitted(receipt.clone())),
-        PutOutcome::IdenticalRetry => Ok(AdmissionOutcome::AlreadyAdmitted(receipt.clone())),
-        PutOutcome::Conflict => {
-            let existing = read_admission(store, receipt.seal_id)?.ok_or(
-                SealFailure::SlotContentUnexpected {
-                    slot: "admission-receipt",
-                },
-            )?;
-            Ok(AdmissionOutcome::AlreadyAdmitted(existing))
-        }
+    match classify_admission(store.put_if_absent(&key, &bytes)?, receipt) {
+        Some(settled) => Ok(settled),
+        None => Ok(AdmissionOutcome::AlreadyAdmitted(
+            read_admission(store, receipt.seal_id)?.ok_or(SealFailure::SlotContentUnexpected {
+                slot: "admission-receipt",
+            })?,
+        )),
+    }
+}
+
+/// What a receipt write means, when the store's answer settles it alone.
+///
+/// Shared decision core. `None` means the slot already holds a *different*
+/// receipt for this seal and must be read back, which is the only step where
+/// the two surfaces differ.
+///
+/// The `Conflict` arm is deliberately not an error: a second admission attempt
+/// for an already-admitted seal is the idempotent case §5.2 requires, and the
+/// caller is owed the receipt that won rather than a refusal.
+fn classify_admission(
+    outcome: PutOutcome,
+    receipt: &AdmissionReceiptBody,
+) -> Option<AdmissionOutcome> {
+    match outcome {
+        PutOutcome::Created => Some(AdmissionOutcome::Admitted(receipt.clone())),
+        PutOutcome::IdenticalRetry => Some(AdmissionOutcome::AlreadyAdmitted(receipt.clone())),
+        PutOutcome::Conflict => None,
+    }
+}
+
+/// Interpret the bytes an admission slot holds, requiring them to name `seal_id`.
+///
+/// The other half of the shared core: both surfaces must apply the same
+/// cross-check, or one of them returns a receipt belonging to another seal.
+fn interpret_admission_slot(
+    read: ImmutableRead,
+    seal_id: TransactionSealId,
+) -> Result<Option<AdmissionReceiptBody>, SealFailure> {
+    let ImmutableRead::Present(bytes) = read else {
+        return Ok(None);
+    };
+    let receipt: AdmissionReceiptBody = decode_body(&bytes, DecodeLimits::DEFAULT)?;
+    if receipt.seal_id == seal_id {
+        Ok(Some(receipt))
+    } else {
+        Err(SealFailure::SlotContentUnexpected {
+            slot: "admission-receipt",
+        })
     }
 }
 
@@ -199,17 +237,66 @@ where
     S: AuthorityStore + ?Sized,
 {
     let key = admission_key(seal_id)?;
-    match store.read_immutable(&key)? {
-        ImmutableRead::Absent => Ok(None),
-        ImmutableRead::Present(bytes) => {
-            let receipt: AdmissionReceiptBody = decode_body(&bytes, DecodeLimits::DEFAULT)?;
-            if receipt.seal_id == seal_id {
-                Ok(Some(receipt))
-            } else {
-                Err(SealFailure::SlotContentUnexpected {
+    interpret_admission_slot(store.read_immutable(&key)?, seal_id)
+}
+
+// --- the production surface -------------------------------------------------
+//
+// Asynchronous siblings of `record_admission` and `read_admission`, sharing the
+// pure core above. A node publishing its first RCR must record how the
+// transaction was admitted before the head moves, and `FsqliteAuthorityStore`
+// implements `AsyncAuthorityStore` only — so without these the rule would be
+// copied into the node and the two copies would be free to disagree.
+
+/// Record how a sealed transaction was admitted, asynchronously.
+///
+/// The asynchronous twin of [`record_admission`], including the idempotent
+/// reading of a conflict: a second attempt for an already-admitted seal returns
+/// the receipt that won rather than refusing.
+///
+/// # Errors
+///
+/// [`SealFailure::SlotContentUnexpected`] when a conflicting slot reads back
+/// empty, or holds a receipt naming a different seal.
+pub async fn record_admission_async<S>(
+    store: &S,
+    cx: &S::Context,
+    receipt: &AdmissionReceiptBody,
+) -> Result<AdmissionOutcome, SealFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = admission_key(receipt.seal_id)?;
+    let bytes = encode_body(receipt)?;
+    match classify_admission(store.put_if_absent(cx, &key, &bytes).await?, receipt) {
+        Some(settled) => Ok(settled),
+        None => Ok(AdmissionOutcome::AlreadyAdmitted(
+            read_admission_async(store, cx, receipt.seal_id)
+                .await?
+                .ok_or(SealFailure::SlotContentUnexpected {
                     slot: "admission-receipt",
-                })
-            }
-        }
+                })?,
+        )),
     }
+}
+
+/// Read the admission record for one seal identity, asynchronously.
+///
+/// The asynchronous twin of [`read_admission`], including its cross-check that
+/// the decoded receipt names the seal whose slot was read.
+///
+/// # Errors
+///
+/// [`SealFailure::SlotContentUnexpected`] when the slot holds a receipt for a
+/// different seal.
+pub async fn read_admission_async<S>(
+    store: &S,
+    cx: &S::Context,
+    seal_id: TransactionSealId,
+) -> Result<Option<AdmissionReceiptBody>, SealFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = admission_key(seal_id)?;
+    interpret_admission_slot(store.read_immutable(cx, &key).await?, seal_id)
 }

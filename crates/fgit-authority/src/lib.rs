@@ -80,7 +80,7 @@ mod vocabulary;
 
 pub use crate::admission::{
     ADMISSION_KEY_PREFIX, AdmissionInstant, AdmissionOutcome, AdmissionReceiptBody, admission_key,
-    read_admission, record_admission,
+    read_admission, read_admission_async, record_admission, record_admission_async,
 };
 pub use crate::async_contract::{AsyncAuthorityStore, DuplicateAbsenceWitness};
 pub use crate::contract::{
@@ -118,8 +118,9 @@ pub use crate::schedule::{
 };
 pub use crate::seal::{
     BODY_KEY_PREFIX, IDEMPOTENCY_BINDING_KEY_PREFIX, KeyBinding, RequestRejection, SEAL_KEY_PREFIX,
-    SealAdmission, SealAttempt, SealFailure, admit_seal, bind_idempotency_key, body_key,
-    idempotency_binding_key, read_seal, seal_key, seal_request,
+    SealAdmission, SealAttempt, SealFailure, admit_seal, admit_seal_async, bind_idempotency_key,
+    bind_idempotency_key_async, body_key, idempotency_binding_key, read_seal, read_seal_async,
+    seal_key, seal_request, seal_request_async,
 };
 pub use crate::suite::{
     CAPACITY_PROBE_LIMITS, ConformanceCheck, ConformanceReport, run_authority_conformance,

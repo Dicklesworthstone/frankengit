@@ -33,6 +33,7 @@ use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::identity::{PrincipalId, RepositoryId, TenantId, TransactionSealId, TxId};
 use fgit_types::vocabulary::RequestRejectionCode;
 
+use crate::async_contract::AsyncAuthorityStore;
 use crate::contract::AuthorityStore;
 use crate::identity::{
     IdempotencyKey, IdentityRefusal, TxIdPreimage, canonical_body_id, derive_tx_id,
@@ -334,26 +335,44 @@ where
         &attempt.idempotency_key,
     )?;
     let body = encode_tx_id(tx_id)?;
-    match store.put_if_absent(&key, &body)? {
-        PutOutcome::Created => Ok(KeyBinding::Bound(tx_id)),
-        PutOutcome::IdenticalRetry => Ok(KeyBinding::Retry(tx_id)),
-        PutOutcome::Conflict => {
-            let bound = match store.read_immutable(&key)? {
-                ImmutableRead::Present(stored) => decode_tx_id(&stored)?,
-                ImmutableRead::Absent => {
-                    return Err(SealFailure::SlotContentUnexpected {
-                        slot: "idempotency-binding",
-                    });
-                }
-            };
-            Err(SealFailure::Rejected(Box::new(
-                RequestRejection::IdempotencyKeyReuse {
-                    bound,
-                    attempted: tx_id,
-                },
-            )))
-        }
+    match classify_binding(store.put_if_absent(&key, &body)?, tx_id) {
+        Some(settled) => settled,
+        None => interpret_binding_conflict(store.read_immutable(&key)?, tx_id),
     }
+}
+
+/// What a binding write means, when the store's answer settles it alone.
+///
+/// Shared decision core. `None` means the answer is not yet determined and the
+/// slot must be read back — the only step where the two surfaces differ.
+const fn classify_binding(
+    outcome: PutOutcome,
+    tx_id: TxId,
+) -> Option<Result<KeyBinding, SealFailure>> {
+    match outcome {
+        PutOutcome::Created => Some(Ok(KeyBinding::Bound(tx_id))),
+        PutOutcome::IdenticalRetry => Some(Ok(KeyBinding::Retry(tx_id))),
+        PutOutcome::Conflict => None,
+    }
+}
+
+/// What the slot's existing contents mean after a binding conflict.
+///
+/// The other half of the shared core. A conflict is a client-visible rejection
+/// (§5.2 key reuse), so the two surfaces must reach it identically or one of
+/// them turns a rejection into an internal error.
+fn interpret_binding_conflict(read: ImmutableRead, tx_id: TxId) -> Result<KeyBinding, SealFailure> {
+    let ImmutableRead::Present(stored) = read else {
+        return Err(SealFailure::SlotContentUnexpected {
+            slot: "idempotency-binding",
+        });
+    };
+    Err(SealFailure::Rejected(Box::new(
+        RequestRejection::IdempotencyKeyReuse {
+            bound: decode_tx_id(&stored)?,
+            attempted: tx_id,
+        },
+    )))
 }
 
 /// Bind the idempotency key and then conditionally create the seal.
@@ -374,28 +393,39 @@ pub fn admit_seal<S>(store: &S, seal: &TransactionSealBody) -> Result<SealAdmiss
 where
     S: AuthorityStore + ?Sized,
 {
-    let seal_id = TransactionSealId::from_internal_object_id(canonical_body_id(
-        IdentityDomain::TransactionSeal,
-        CANONICAL_CODEC_VERSION,
-        seal,
-    )?)
-    .map_err(|_| SealFailure::SlotContentUnexpected { slot: "seal" })?;
+    let seal_id = seal_identity(seal)?;
     let key = seal_key(seal.tenant_id, seal.repository_id, seal.tx_id)?;
     let body = encode_body(seal)?;
-    match store.put_if_absent(&key, &body)? {
-        PutOutcome::Created => Ok(SealAdmission::Created {
-            seal_id,
-            tx_id: seal.tx_id,
-        }),
-        PutOutcome::IdenticalRetry => Ok(SealAdmission::IdenticalRetry {
-            seal_id,
-            tx_id: seal.tx_id,
-        }),
+    classify_seal(store.put_if_absent(&key, &body)?, seal_id, seal.tx_id)
+}
+
+/// What a seal write means. Shared decision core; total, with no read-back.
+const fn classify_seal(
+    outcome: PutOutcome,
+    seal_id: TransactionSealId,
+    tx_id: TxId,
+) -> Result<SealAdmission, SealFailure> {
+    match outcome {
+        PutOutcome::Created => Ok(SealAdmission::Created { seal_id, tx_id }),
+        PutOutcome::IdenticalRetry => Ok(SealAdmission::IdenticalRetry { seal_id, tx_id }),
         // The slot key is a function of the identity, and the identity is a
         // function of the body, so a different body here is an invariant
         // breach rather than a client-visible condition.
         PutOutcome::Conflict => Err(SealFailure::SlotContentUnexpected { slot: "seal" }),
     }
+}
+
+/// The identity a seal body publishes under.
+///
+/// Extracted so both surfaces derive it once rather than each spelling out the
+/// domain and codec version.
+fn seal_identity(seal: &TransactionSealBody) -> Result<TransactionSealId, SealFailure> {
+    TransactionSealId::from_internal_object_id(canonical_body_id(
+        IdentityDomain::TransactionSeal,
+        CANONICAL_CODEC_VERSION,
+        seal,
+    )?)
+    .map_err(|_| SealFailure::SlotContentUnexpected { slot: "seal" })
 }
 
 /// Read back one sealed transaction by exact key.
@@ -423,3 +453,137 @@ where
 }
 
 const _: () = assert!(size_of::<SealFailure>() <= crate::request::MAX_ERROR_BYTES);
+
+// --- the production surface -------------------------------------------------
+//
+// The asynchronous siblings of `bind_idempotency_key`, `admit_seal` and
+// `seal_request`. Deliberately not a second protocol: every decision either
+// surface makes is taken by the same pure core above — `classify_binding` and
+// `interpret_binding_conflict` for what a binding write means,
+// `classify_seal` for what a seal write means, `seal_identity` for what the
+// body is called. Only the waiting differs.
+//
+// They exist because `FsqliteAuthorityStore` implements `AsyncAuthorityStore`
+// only, so a node that must seal before publishing had no route to these rules
+// and would otherwise keep a local copy. §5.2's "one seal body owns one logical
+// identity; key reuse with different semantics fails closed" is not a property
+// that survives being reimplemented per caller.
+
+/// Bind one idempotency key to one transaction identity, asynchronously.
+///
+/// The asynchronous twin of [`bind_idempotency_key`], with the same ordering
+/// obligation: reuse is a **pre-decision** rejection and must be settled before
+/// any seal exists.
+///
+/// # Errors
+///
+/// [`SealFailure::Rejected`] with [`RequestRejection::IdempotencyKeyReuse`] when
+/// the key is already bound to a different transaction, and
+/// [`SealFailure::SlotContentUnexpected`] when a conflicting slot reads back
+/// empty.
+pub async fn bind_idempotency_key_async<S>(
+    store: &S,
+    cx: &S::Context,
+    attempt: &SealAttempt,
+    tx_id: TxId,
+) -> Result<KeyBinding, SealFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = idempotency_binding_key(
+        attempt.tenant_id,
+        attempt.repository_id,
+        attempt.authenticated_principal_id,
+        &attempt.idempotency_key,
+    )?;
+    let body = encode_tx_id(tx_id)?;
+    match classify_binding(store.put_if_absent(cx, &key, &body).await?, tx_id) {
+        Some(settled) => settled,
+        None => interpret_binding_conflict(store.read_immutable(cx, &key).await?, tx_id),
+    }
+}
+
+/// Conditionally create one seal body, asynchronously.
+///
+/// The asynchronous twin of [`admit_seal`].
+///
+/// # Errors
+///
+/// [`SealFailure::SlotContentUnexpected`] when the slot holds a different body,
+/// which is an invariant breach rather than a client-visible condition: the key
+/// is a function of the identity and the identity is a function of the body.
+pub async fn admit_seal_async<S>(
+    store: &S,
+    cx: &S::Context,
+    seal: &TransactionSealBody,
+) -> Result<SealAdmission, SealFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let seal_id = seal_identity(seal)?;
+    let key = seal_key(seal.tenant_id, seal.repository_id, seal.tx_id)?;
+    let body = encode_body(seal)?;
+    classify_seal(
+        store.put_if_absent(cx, &key, &body).await?,
+        seal_id,
+        seal.tx_id,
+    )
+}
+
+/// Bind the idempotency key and then conditionally create the seal,
+/// asynchronously.
+///
+/// The asynchronous twin of [`seal_request`], and the entry point a node uses
+/// before publishing its first RCR. The order is the one [`seal_request`]
+/// documents and is not a detail: reuse is a pre-decision rejection, so it is
+/// settled before any seal exists.
+///
+/// # Errors
+///
+/// Whatever [`bind_idempotency_key_async`] or [`admit_seal_async`] refuse,
+/// unchanged.
+pub async fn seal_request_async<S>(
+    store: &S,
+    cx: &S::Context,
+    attempt: &SealAttempt,
+) -> Result<SealAdmission, SealFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let (tx_id, seal) = attempt.derive()?;
+    bind_idempotency_key_async(store, cx, attempt, tx_id).await?;
+    admit_seal_async(store, cx, &seal).await
+}
+
+/// Read back one sealed transaction by exact key, asynchronously.
+///
+/// The asynchronous twin of [`read_seal`], including its cross-check: the
+/// decoded body's `tx_id` must equal the one whose slot was read.
+///
+/// # Errors
+///
+/// [`SealFailure::SlotContentUnexpected`] when the slot holds a seal for a
+/// different transaction.
+pub async fn read_seal_async<S>(
+    store: &S,
+    cx: &S::Context,
+    tenant_id: TenantId,
+    repository_id: RepositoryId,
+    tx_id: TxId,
+) -> Result<Option<TransactionSealBody>, SealFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = seal_key(tenant_id, repository_id, tx_id)?;
+    match store.read_immutable(cx, &key).await? {
+        ImmutableRead::Absent => Ok(None),
+        ImmutableRead::Present(bytes) => {
+            let seal: TransactionSealBody = decode_body(&bytes, DecodeLimits::DEFAULT)?;
+            if seal.tx_id == tx_id {
+                Ok(Some(seal))
+            } else {
+                Err(SealFailure::SlotContentUnexpected { slot: "seal" })
+            }
+        }
+    }
+}
