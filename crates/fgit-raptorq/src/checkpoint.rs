@@ -544,13 +544,13 @@ mod tests {
             let stub = StubVerifier { accept: true };
             let verifier: Option<&dyn CheckpointAeadVerifier> =
                 if aead { Some(&stub) } else { None };
-            let verified =
+            let accepted =
                 reconstruct_checkpoint(protected.scope(), protected.symbols(), &security, verifier)
                     .expect("a full symbol set must reconstruct");
-            assert_eq!(verified.bytes(), bytes.as_slice());
-            assert_eq!(verified.scope().class(), class);
+            assert_eq!(accepted.bytes(), bytes.as_slice());
+            assert_eq!(accepted.scope().class(), class);
             assert_eq!(
-                verified.authenticated_plaintext().is_some(),
+                accepted.authenticated_plaintext().is_some(),
                 aead,
                 "plaintext is present exactly when the class is AEAD-wrapped"
             );
@@ -735,6 +735,97 @@ mod tests {
     /// Malicious-symbol corpus. These are built in-module because
     /// `ScopedCheckpointSymbol` has private fields and no public constructor,
     /// so an external test could not forge them at all.
+    /// Section-11 destructive drill: every source symbol destroyed, rebuilt
+    /// from repair material alone, byte-identical for both classes.
+    ///
+    /// Run per class because the two do not share an acceptance rule, and the
+    /// DUR-014 rebuild must still clear the AEAD gate rather than being handed
+    /// a pass because the bytes happened to reconstruct.
+    #[test]
+    fn the_destructive_drill_rebuilds_both_classes_from_repair_material_alone() {
+        let security = security();
+        for class in [CheckpointClass::ForgeEvent, CheckpointClass::PolicyKey] {
+            let original = canonical(0x9a, 600);
+            let protected = protect_checkpoint(class, &original, &security)
+                .expect("canonical input must protect");
+            let source_count = usize::from(
+                protected
+                    .scope()
+                    .source_symbols()
+                    .expect("scope must yield a source count"),
+            );
+
+            let repair_only: Vec<ScopedCheckpointSymbol> = protected
+                .symbols()
+                .iter()
+                .filter(|s| !s.symbol.kind().is_source())
+                .cloned()
+                .collect();
+
+            assert_eq!(
+                repair_only.len(),
+                CheckpointRaptorProfile::REPAIR_SYMBOLS,
+                "the drill must run against the full repair set, not a subset"
+            );
+            assert!(
+                repair_only.len() >= source_count,
+                "the drill is only meaningful when repair material alone can cover the block"
+            );
+            assert!(
+                repair_only.iter().all(|s| !s.symbol.kind().is_source()),
+                "no source symbol may survive into a destructive drill"
+            );
+
+            let accepting = StubVerifier { accept: true };
+            let verifier: Option<&dyn CheckpointAeadVerifier> = if class.requires_aead() {
+                Some(&accepting)
+            } else {
+                None
+            };
+            let rebuilt =
+                reconstruct_checkpoint(protected.scope(), &repair_only, &security, verifier)
+                    .expect("repair material alone must rebuild the checkpoint");
+            assert_eq!(
+                rebuilt.bytes(),
+                original.as_slice(),
+                "the rebuild must be byte-identical, not merely successful"
+            );
+            assert_eq!(rebuilt.scope(), protected.scope());
+        }
+    }
+
+    /// A symbol flood must be refused on the budget BEFORE decoding starts,
+    /// not absorbed and then rejected.
+    #[test]
+    fn the_decode_budget_refuses_a_flood_before_decoding() {
+        let security = security();
+        let bytes = canonical(0xb2, 600);
+        let protected = protect_checkpoint(CheckpointClass::ForgeEvent, &bytes, &security)
+            .expect("input must protect");
+
+        let mut flood = Vec::new();
+        while flood.len() <= CheckpointRaptorProfile::MAX_DECODE_SYMBOLS {
+            flood.extend(protected.symbols().iter().cloned());
+        }
+        assert!(
+            flood.len() > CheckpointRaptorProfile::MAX_DECODE_SYMBOLS,
+            "the flood must actually exceed the budget or it tests nothing"
+        );
+
+        let refusal = reconstruct_checkpoint(protected.scope(), &flood, &security, None)
+            .expect_err("a flood past the decode budget must refuse");
+        assert!(
+            matches!(refusal, RaptorRefusal::DecodeBudgetExceeded { .. }),
+            "the refusal must name the budget, not fail generically: {refusal:?}"
+        );
+
+        // Permitted twin at the boundary: the legitimate set is well inside the
+        // budget and still reconstructs, so the refusal is a bound and not a
+        // blanket rejection.
+        reconstruct_checkpoint(protected.scope(), protected.symbols(), &security, None)
+            .expect("the legitimate symbol set must remain within budget");
+    }
+
     /// Acceptance requires a corpus PER CLASS, so this runs the whole corpus
     /// against each class in turn rather than against one and assuming the
     /// other behaves the same. They do not share an acceptance rule, so that
