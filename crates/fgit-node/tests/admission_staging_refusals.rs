@@ -59,7 +59,7 @@ use fgit_node::{AdmissionMaterializationRefusal, DurableAdmissionMaterializer};
 use fgit_resource::{CacheScope, OpaqueHandle};
 use fgit_types::{HeadGeneration, OPAQUE_ID_LEN, RepositoryId};
 
-fn repository() -> RepositoryId {
+const fn repository() -> RepositoryId {
     RepositoryId::from_bytes([0x71; OPAQUE_ID_LEN])
 }
 
@@ -301,4 +301,193 @@ fn the_conflict_refusal_is_attributable_to_the_store_and_not_to_the_input() {
             .is_ok(),
         "the same call against a real store proceeds, so the input is not what refused"
     );
+}
+
+// ---------------------------------------------------------------------------
+// frankengit-sfr9: the materialization path's opening chain
+//
+//   1  read_head                  -> Authority(_) / HeadAbsent
+//   2  authenticate_head_receipt  -> Authority(_)
+//   3  authenticated.body()       -> HeadBody
+//
+// HeadAbsent and HeadBody are the two ends of that chain and nothing in the
+// tree told them apart. Both mean "materialization cannot proceed"; they mean
+// different things to an operator, which is the whole reason they are separate
+// variants — nothing is written yet, versus something IS written that this
+// build cannot decode.
+// ---------------------------------------------------------------------------
+
+fn head_key() -> HeadKey {
+    HeadKey::new(b"sfr9/head".to_vec()).expect("bounded head key")
+}
+
+fn never_cancelled() -> impl Fn() -> bool + Sync {
+    || false
+}
+
+/// **Stage 1.** An empty head slot is `HeadAbsent`, not an authority failure.
+#[test]
+fn an_uninitialized_head_slot_is_head_absent() {
+    let store = StagingStore::real();
+    let refusal = poll_ready(materializer().materialize_current_in(
+        &store,
+        &(),
+        &head_key(),
+        repository(),
+        &never_cancelled(),
+    ))
+    .expect_err("materializing a slot that was never written must refuse");
+    assert!(
+        matches!(refusal, AdmissionMaterializationRefusal::HeadAbsent),
+        "expected HeadAbsent, got {refusal:?}"
+    );
+}
+
+/// **Stage 3.** A head slot holding bytes this build cannot decode is
+/// `HeadBody` — a *different* refusal from an empty slot.
+///
+/// Driven through the real store: `initialize_head` takes arbitrary bytes, so
+/// planting a non-canonical head body needs no fault injection. This is the
+/// cross-version case §6 cares about — the authority holds a head, and this
+/// build cannot read it. Saying "absent" there would be wrong and dangerous:
+/// absent invites initialization, which would overwrite a head that exists.
+#[test]
+fn a_head_slot_holding_undecodable_bytes_is_head_body_and_not_head_absent() {
+    let store = StagingStore::real();
+    poll_ready(store.initialize_head(&(), &head_key(), HeadGeneration::FIRST, b"not-a-head-body"))
+        .expect("the store accepts arbitrary head bytes");
+
+    let refusal = poll_ready(materializer().materialize_current_in(
+        &store,
+        &(),
+        &head_key(),
+        repository(),
+        &never_cancelled(),
+    ))
+    .expect_err("a head this build cannot decode must refuse");
+
+    assert!(
+        matches!(refusal, AdmissionMaterializationRefusal::HeadBody(_)),
+        "expected HeadBody, got {refusal:?}"
+    );
+    assert!(
+        !matches!(refusal, AdmissionMaterializationRefusal::HeadAbsent),
+        "a head that EXISTS but does not decode must never be reported as absent: \
+         absent invites initialization, which would overwrite it"
+    );
+}
+
+/// **The ordering.** With the slot empty, stage 1 owns the refusal even though
+/// a later stage would also have refused.
+///
+/// Paired with the probe above: that one keeps stage 1 satisfied and reaches
+/// stage 3, this one fails stage 1 and never gets there. Either alone would be
+/// satisfied by an arbitrary order.
+#[test]
+fn the_absent_head_is_reported_before_anything_downstream_is_attempted() {
+    let store = StagingStore::real();
+    // A repository id unrelated to anything staged, so a later stage would have
+    // something to complain about too — but the slot is empty, so stage 1 wins.
+    let refusal = poll_ready(materializer().materialize_current_in(
+        &store,
+        &(),
+        &head_key(),
+        RepositoryId::from_bytes([0x99; OPAQUE_ID_LEN]),
+        &never_cancelled(),
+    ))
+    .expect_err("an empty slot refuses");
+    assert!(
+        matches!(refusal, AdmissionMaterializationRefusal::HeadAbsent),
+        "the first stage of the chain owns the refusal, got {refusal:?}"
+    );
+}
+
+/// **§5.1 — an inconsistent authority chain is refused, not walked.**
+///
+/// A head that names a predecessor but carries no decision tail is
+/// structurally broken: it claims to succeed something while providing no
+/// decisions that could have produced it. `DecisionHistoryUnbound` is that
+/// refusal, and nothing named it before.
+///
+/// Planted through the real store rather than a double — `initialize_head`
+/// takes arbitrary bytes, so a head that DECODES CLEANLY but is internally
+/// inconsistent is exactly what this plants. That distinction matters: this is
+/// not the undecodable-bytes case above, it is a well-formed head whose
+/// *content* cannot be reconciled, which is a different failure and a different
+/// variant.
+#[test]
+fn a_head_claiming_a_predecessor_without_a_decision_tail_is_unbound() {
+    let store = StagingStore::real();
+
+    // The materializer resolves the head's ref state by root BEFORE it walks
+    // the decision history, so an unstaged frame refuses as `ImmutableAbsent`
+    // first. Measured, not assumed: the first draft of this test hit exactly
+    // that and named the stage for me. Stage the frame so the walk is reached.
+    let ref_root =
+        poll_ready(materializer().stage_ref_state_in(&store, &(), repository(), ref_state()))
+            .expect("staging the canonical ref state succeeds");
+
+    let mut head = genesis_head_body();
+    head.ref_root = ref_root;
+    head.predecessor_head_id = Some(fgit_types::RepositoryAuthorityHeadId::from_digest(
+        fgit_types::DigestAlgorithmId::try_new(2).expect("a nonzero algorithm slot"),
+        fgit_types::CANONICAL_CODEC_VERSION,
+        fgit_types::DigestBytes::try_new(&[0x5b; 32]).expect("32-byte digest body"),
+    ));
+    head.decision_tail_id = None;
+
+    let bytes = fgit_codec::wire::encode_body(&head).expect("the inconsistent head still encodes");
+    poll_ready(store.initialize_head(&(), &head_key(), HeadGeneration::FIRST, &bytes))
+        .expect("the store accepts the planted head");
+
+    let refusal = poll_ready(materializer().materialize_current_in(
+        &store,
+        &(),
+        &head_key(),
+        repository(),
+        &never_cancelled(),
+    ))
+    .expect_err("a head that names a predecessor with no decision tail must refuse");
+
+    assert!(
+        matches!(
+            refusal,
+            AdmissionMaterializationRefusal::DecisionHistoryUnbound
+        ),
+        "expected DecisionHistoryUnbound, got {refusal:?}"
+    );
+    assert!(
+        !matches!(refusal, AdmissionMaterializationRefusal::HeadBody(_)),
+        "this head DECODES; refusing it as HeadBody would confuse an unreadable \
+         head with a well-formed but inconsistent one"
+    );
+}
+
+/// A canonical genesis head body, used to plant both well-formed and
+/// deliberately inconsistent heads.
+fn genesis_head_body() -> fgit_codec::RepositoryAuthorityHeadBody {
+    fn digest(tag: u8) -> fgit_types::Digest {
+        fgit_types::Digest::new(
+            fgit_types::DigestAlgorithmId::try_new(2).expect("a nonzero algorithm slot"),
+            fgit_types::DigestBytes::try_new(&[tag; 32]).expect("32-byte digest body"),
+        )
+    }
+    fgit_codec::RepositoryAuthorityHeadBody {
+        repository_id: repository(),
+        generation: HeadGeneration::FIRST,
+        predecessor_head_id: None,
+        decision_tail_id: None,
+        latest_decision_sequence: None,
+        latest_committed_rcr_id: None,
+        latest_repository_sequence: None,
+        ref_root: digest(0x10),
+        forge_position_root: digest(0x11),
+        outcome_index_root: digest(0x12),
+        retention_root: digest(0x13),
+        outbox_root: digest(0x14),
+        configuration_root: digest(0x15),
+        policy_epoch: fgit_types::PolicyEpoch::FIRST,
+        format_registry_epoch: fgit_types::RegistryEpoch::FIRST,
+        last_checkpoint_id: None,
+    }
 }
