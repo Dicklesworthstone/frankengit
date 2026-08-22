@@ -108,12 +108,25 @@ pub const CORPUS_RESERVED_CODE_POINTS: core::ops::RangeInclusive<u16> = 0xfff0..
 
 // A registered construction must never land in the corpus-reserved range.
 //
-// This block cannot fail to fire: it is evaluated on every build, so a
-// violating row makes the crate not compile and "the crate built" is itself the
-// presence case. It therefore has no `compile_fail` twin, unlike the guards in
-// `keys.rs`, `body_identity.rs` and `native.rs` -- a doctest cannot add a row to
-// a const registry, so any in-tree version would assert against a COPY of this
-// block and drift from it.
+// WHY THIS BLOCK IS NON-VACUOUS, AND IT IS NOT THE CONSTRUCT. A `while` loop
+// over a const array asserts nothing about an EMPTY array: the body never runs
+// and the guard compiles while proving nothing. Measured, not reasoned --
+// YellowOak (cc_2) compiled this shape against an empty registry and it passed
+// clean, against one violating row and it failed E0080. So the pattern is
+// silently vacuous if transplanted to a registry that can be empty.
+//
+// What saves THIS one is a sibling three hundred lines down:
+//     registry.rs  const _: () = assert!(ALGORITHM_REGISTRY.len() == DigestAlgorithm::ALL.len());
+// pinning the array to a two-variant enum, so the array cannot be empty and the
+// loop cannot be. The guarantee is real; it comes from the neighbour rather than
+// from the construct, and anyone copying this pattern must copy that too.
+//
+// Given the length is pinned, the block then cannot fail to fire -- it is
+// evaluated every build, so a violating row makes the crate not compile and
+// "the crate built" is the presence case. That is why it has no `compile_fail`
+// twin, unlike the guards in `keys.rs`, `body_identity.rs` and `native.rs`: a
+// doctest cannot add a row to a const registry, so any in-tree version would
+// assert against a COPY of this block and drift from it.
 //
 // Its boundary was characterised out-of-tree by YellowOak (cc_2) on 2026-08-22,
 // by compiling this block verbatim against synthetic registries: `0xfff1`
