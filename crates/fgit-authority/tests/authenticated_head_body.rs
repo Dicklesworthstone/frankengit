@@ -332,6 +332,7 @@ fn publish_one(store: &SkewedHeadStore) {
         resulting_outbox_root: digest(1),
         resulting_policy_epoch: PolicyEpoch::FIRST,
         batch_evidence_root: digest(1),
+        compaction_generation_link: None,
     };
     let batch_id: RepositoryDecisionBatchId =
         fgit_authority::decision_batch_identity(&batch).expect("the batch identifies");
