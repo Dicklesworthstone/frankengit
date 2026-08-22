@@ -7,7 +7,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use asupersync::runtime::JoinError;
@@ -140,7 +140,7 @@ impl LocalFilesystemFabric {
             fabric.retention_bodies_dir(),
             fabric.retention_roots_dir(),
         ] {
-            Self::create_directory(&directory)?;
+            fabric.create_directory(&directory)?;
         }
         Ok(fabric)
     }
@@ -193,10 +193,35 @@ impl LocalFilesystemFabric {
         ))
     }
 
-    fn create_directory(directory: &Path) -> Result<(), StoreRefusal> {
-        fs::create_dir_all(directory)
+    fn create_directory(&self, directory: &Path) -> Result<(), StoreRefusal> {
+        let directories = directory_chain(&self.root, directory)?;
+        let root_was_directory = self.root.is_dir();
+        fs::create_dir_all(&self.root)
             .map_err(|error| storage_error(StorageOperation::CreateDirectory, error))?;
-        sync_directory(directory)
+
+        let mut created_directory = !root_was_directory;
+        for child in directories.iter().skip(1) {
+            match fs::create_dir(child) {
+                Ok(()) => created_directory = true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if !child.is_dir() {
+                        return Err(storage_error(StorageOperation::CreateDirectory, error));
+                    }
+                }
+                Err(error) => {
+                    return Err(storage_error(StorageOperation::CreateDirectory, error));
+                }
+            }
+        }
+
+        if created_directory {
+            for created_or_parent in directories.iter().rev() {
+                sync_directory(created_or_parent)?;
+            }
+            Ok(())
+        } else {
+            sync_directory(directory)
+        }
     }
 
     fn placement_for(&self, envelope: ObjectEnvelopeId) -> Result<PlacementReceipt, StoreRefusal> {
@@ -269,7 +294,7 @@ impl LocalFilesystemFabric {
 
     fn fresh_stage(&self) -> Result<(PathBuf, File), StoreRefusal> {
         let directory = self.staging_dir();
-        Self::create_directory(&directory)?;
+        self.create_directory(&directory)?;
         for _ in 0..MAX_STAGE_ATTEMPTS {
             let sequence = NEXT_STAGE.fetch_add(1, Ordering::Relaxed);
             let path = directory.join(format!("{sequence:016x}.stage"));
@@ -348,7 +373,7 @@ impl LocalFilesystemFabric {
         let parent = final_path
             .parent()
             .ok_or(StoreRefusal::MalformedStoredObject)?;
-        Self::create_directory(parent)?;
+        self.create_directory(parent)?;
         match fs::hard_link(stage, &final_path) {
             Ok(()) => {
                 self.crash_if(LocalCrashPoint::AfterImmutablePublish)?;
@@ -386,7 +411,7 @@ impl LocalFilesystemFabric {
         let parent = final_path
             .parent()
             .ok_or(StoreRefusal::MalformedStoredObject)?;
-        Self::create_directory(parent)?;
+        self.create_directory(parent)?;
         let (stage_path, mut stage) = self.fresh_stage()?;
         self.crash_if(LocalCrashPoint::BeforeStageWrite)?;
         stage
@@ -793,6 +818,32 @@ fn storage_error(operation: StorageOperation, error: std::io::Error) -> StoreRef
     }
 }
 
+/// Lists the store-root-bounded directory chain that a new descendant must sync.
+///
+/// Callers sync this list in reverse so the leaf reaches stable storage before
+/// every parent directory entry up to the configured store root.
+fn directory_chain(root: &Path, directory: &Path) -> Result<Vec<PathBuf>, StoreRefusal> {
+    let relative = directory
+        .strip_prefix(root)
+        .map_err(|_| StoreRefusal::MalformedStoredObject)?;
+    let mut directories = Vec::with_capacity(relative.components().count().saturating_add(1));
+    let mut current = root.to_path_buf();
+    directories.push(current.clone());
+    for component in relative.components() {
+        match component {
+            Component::Normal(segment) => {
+                current.push(segment);
+                directories.push(current.clone());
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(StoreRefusal::MalformedStoredObject);
+            }
+        }
+    }
+    Ok(directories)
+}
+
 fn sync_directory(directory: &Path) -> Result<(), StoreRefusal> {
     File::open(directory)
         .and_then(|file| file.sync_all())
@@ -919,6 +970,42 @@ mod tests {
             .with_crash_injection(point),
         )
         .expect("fault-injected test fabric must open")
+    }
+
+    #[test]
+    fn newly_created_nested_directories_sync_a_chain_bounded_by_store_root() {
+        let root = TestRoot::new();
+        let fabric = fabric(root.path());
+        let namespace = fabric.objects_dir().join("namespace");
+        let leaf = namespace.join("algorithm");
+        let expected_chain = vec![
+            fabric.root().to_path_buf(),
+            fabric.objects_dir(),
+            namespace.clone(),
+            leaf.clone(),
+        ];
+        assert_eq!(
+            directory_chain(fabric.root(), &leaf)
+                .expect("object descendants must stay beneath the store root"),
+            expected_chain
+        );
+
+        fabric
+            .create_directory(&leaf)
+            .expect("new nested object directory must be made durable through the store root");
+        assert!(namespace.is_dir());
+        assert!(leaf.is_dir());
+    }
+
+    #[test]
+    fn directory_sync_chain_refuses_a_path_outside_the_store_root() {
+        let root = TestRoot::new();
+        let store_root = root.path().join("store");
+        let outside = root.path().join("outside");
+        assert_eq!(
+            directory_chain(&store_root, &outside),
+            Err(StoreRefusal::MalformedStoredObject)
+        );
     }
 
     fn object(payload: &[u8]) -> VerifiedObject {
