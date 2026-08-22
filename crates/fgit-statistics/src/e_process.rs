@@ -252,6 +252,18 @@ impl EProcess {
             PARTS_PER_MILLION - loss
         };
 
+        // Defensive, and measured to be unreachable while the latch above holds:
+        // wealth alarms at `1 / alpha` -- at most 1e12 ppm, since alpha is a
+        // non-zero u32 in parts per million -- and the latch then freezes it,
+        // whereas this ceiling is around 2.7e32. A run of successes therefore
+        // always latches long before it can overflow, which is what the comment
+        // on the latch means by "keeps a long run after an alarm from
+        // overflowing for no benefit".
+        //
+        // So this arm has no presence case and cannot honestly be given one.
+        // What guarantees it is `the_alarm_latches_and_the_wealth_stops_moving`
+        // in tests/e_process_alarm.rs: if that latch is ever removed or made
+        // conditional, this becomes reachable and needs its own test.
         let Some(scaled) = self.wealth.checked_mul(multiplier) else {
             return Err(EProcessRefusal::WealthOverflow);
         };
