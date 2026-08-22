@@ -206,11 +206,33 @@ pub enum ExpectedLossRefusal {
         /// Terms this evaluation admits.
         maximum: u64,
     },
+    /// The peak term would materialize more integer factors than admitted.
+    ///
+    /// The balanced product represents `T(peak)` as two factor lists whose
+    /// combined length is linear in the BETA parameters as well as the
+    /// alphas, so an admitted posterior can otherwise demand allocations
+    /// proportional to billions of observed failures before any arithmetic
+    /// runs. Refusing by count keeps the whole evaluation bounded.
+    TooManyPeakFactors {
+        /// Factors the balanced product would materialize.
+        offered: u64,
+        /// Factors this evaluation admits.
+        maximum: u64,
+    },
 }
 
 /// The largest `alpha_b` this evaluation will walk.
 pub const MAX_TERMS: u64 = 1 << 16;
 
+ /// The largest combined factor count [`peak_term`](fn@peak_term) materializes.
+/// The largest combined factor count [`peak_term`](fn@peak_term) materializes.
+///
+/// The four numerator runs and two denominator runs of the balanced product
+/// are linear in the beta parameters, not only the alphas that [`MAX_TERMS`]
+/// bounds, so this is the bound that actually caps the policy-path memory
+/// and work: at most `MAX_PEAK_FACTORS` factors are ever collected or
+/// multiplied.
+pub const MAX_PEAK_FACTORS: u64 = 1 << 18;
 /// `P(theta_b > theta_a)` in parts per million, or a typed refusal.
 ///
 /// Both posteriors carry integer counts by construction, so the closed form
@@ -450,14 +472,30 @@ fn tail_sum(
     alpha_a: u64,
     beta_a: u64,
     alpha_b: u64,
-    beta_b: u64,
-) -> Result<u128, ExpectedLossRefusal> {
     let peak = peak_index(alpha_a, beta_a, alpha_b, beta_b);
-    let peak_value = peak_term(alpha_a, beta_a, beta_b, peak).ok_or_else(|| {
-        ExpectedLossRefusal::PeakTermUnrepresentable {
-            peak: u32::try_from(peak).unwrap_or(u32::MAX),
-        }
-    })?;
+
+    // BOUND BEFORE ALLOCATION. `peak_term` materializes one integer per
+    // element of six input-derived runs, and those runs are linear in the
+    // beta parameters that [`MAX_TERMS`] never sees: an admitted posterior
+    // can carry billions of observed failures. Counting the runs first keeps
+    // the whole evaluation bounded and refuses with its own typed refusal
+    // instead of aborting inside an allocation.
+    let factors = peak_factor_count(alpha_a, beta_a, beta_b, peak).ok_or(
+        ExpectedLossRefusal::TooManyPeakFactors {
+            offered: u64::MAX,
+            maximum: MAX_PEAK_FACTORS,
+        },
+    )?;
+    if factors > MAX_PEAK_FACTORS {
+        return Err(ExpectedLossRefusal::TooManyPeakFactors {
+            offered: factors,
+            maximum: MAX_PEAK_FACTORS,
+        });
+    }
+
+     let peak_value = peak_term(alpha_a, beta_a, beta_b, peak).ok_or_else(|| {
+         ExpectedLossRefusal::PeakTermUnrepresentable {
+             peak: u32::try_from(peak).unwrap_or(u32::MAX),
 
     let mut total = peak_value;
 

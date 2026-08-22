@@ -176,8 +176,9 @@ impl Error for CliRefusal {
             Self::Listener(error) => Some(error),
             Self::Serve(error) => Some(error),
             Self::ExportMaterialization(error) => Some(error.as_ref()),
-            Self::ExportFile { source, .. } => Some(source.as_ref()),
-            Self::ExportFileCleanup { source, .. } => Some(source.as_ref()),
+            Self::ExportFile { source, .. } | Self::ExportFileCleanup { source, .. } => {
+                Some(source.as_ref())
+            }
             Self::ExportVisibleCleanup { cleanup, .. } => Some(cleanup.as_ref()),
             Self::DoctorCleanup { inspection, .. } => Some(inspection),
             Self::ServeCleanup { serving, .. } => Some(serving),
@@ -311,6 +312,23 @@ fn write_new_export(destination: &Path, bytes: &[u8]) -> Result<(), CliRefusal> 
     drop(staged);
 
     if let Err(source) = fs::hard_link(&temporary, destination) {
+        if source.kind() == io::ErrorKind::AlreadyExists {
+            // Another writer published this exact destination first, and a
+            // new export never replaces one. Reap the staged bytes and name
+            // the collision with its purpose-built typed refusal rather
+            // than the generic staging-operation error.
+            return match fs::remove_file(&temporary) {
+                Ok(()) => Err(CliRefusal::ExportDestinationExists(Box::new(
+                    destination.to_path_buf(),
+                ))),
+                Err(cleanup) => Err(CliRefusal::ExportFileCleanup {
+                    operation: "publish staged export",
+                    temporary: Box::new(temporary),
+                    source: Box::new(source),
+                    cleanup: Box::new(cleanup),
+                }),
+            };
+        }
         return abort_staged_export("publish staged export", temporary, source);
     }
     if let Err(cleanup) = fs::remove_file(&temporary) {
@@ -345,7 +363,7 @@ fn create_export_staging_file(destination: &Path) -> Result<(PathBuf, File), Cli
             .open(&temporary)
         {
             Ok(file) => return Ok((temporary, file)),
-            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
             Err(source) => {
                 return Err(CliRefusal::ExportFile {
                     operation: "create staged export",
