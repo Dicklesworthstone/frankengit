@@ -588,7 +588,9 @@ use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
     AuthorityVersionToken, DuplicateAbsenceWitness, HeadInit, HeadReadReceipt, ImmutableKey,
     ImmutableRead, PutOutcome, authority_head_identity, decision_batch_identity,
-    initialize_repository_async, publish_decisions_async, resolve_outcome_async,
+    initialize_repository_async, publish_decisions_async, read_authority_head_body,
+    read_authority_head_body_async, read_decision_batch_body, read_decision_batch_body_async,
+    resolve_outcome_async,
 };
 use fgit_types::numeric::HeadGeneration as AsyncHeadGeneration;
 use std::future::Future;
@@ -1556,4 +1558,117 @@ fn both_surfaces_initialize_a_repository_identically() {
         "the two surfaces must bring a repository into existence identically"
     );
     assert!(sync_init.is_ok(), "genesis must initialize: {sync_init:?}");
+}
+
+// ---------------------------------------------------------------------------
+// The public body readers, on the production surface (frankengit-iefx)
+// ---------------------------------------------------------------------------
+//
+// The sync twins and the full refusal matrix live in `body_readers.rs`. These
+// cases live here because `AsyncView` does, and a second delegating fixture
+// would be free to drift from this one — which is the defect these readers'
+// re-identification check exists to prevent, reproduced in the test suite.
+//
+// What is proven here is that the async surface is not merely present but
+// reaches the SAME answers as the deterministic one: the permitted read, and
+// the re-identification refusal. A production reader that decoded without
+// checking would pass the first and fail the second.
+
+#[test]
+fn both_surfaces_read_a_staged_head_body_by_identity() {
+    let (verification_store, published_head) = published_repository();
+    let on_verification =
+        read_authority_head_body(&verification_store, head_id_of(&published_head));
+
+    let view = AsyncView(published_repository().0);
+    let on_production = poll_ready(read_authority_head_body_async(
+        &view,
+        &(),
+        head_id_of(&published_head),
+    ));
+
+    assert_eq!(
+        on_verification, on_production,
+        "the surfaces must return the same head body for the same identity"
+    );
+    assert_eq!(
+        on_verification.expect("the published head is readable"),
+        published_head,
+        "and it must be the body that was published"
+    );
+}
+
+#[test]
+fn both_surfaces_resolve_a_decision_tail_by_identity() {
+    let (verification_store, published_head) = published_repository();
+    let tail = published_head
+        .decision_tail_id
+        .expect("a published head names its decision tail");
+
+    let on_verification = read_decision_batch_body(&verification_store, tail);
+    let view = AsyncView(published_repository().0);
+    let on_production = poll_ready(read_decision_batch_body_async(&view, &(), tail));
+
+    assert_eq!(
+        on_verification, on_production,
+        "the surfaces must resolve the same decision tail identically"
+    );
+    let batch = on_verification.expect("the tail resolves");
+    assert_eq!(
+        batch_id_of(&batch),
+        tail,
+        "the resolved batch must re-identify as the tail that named it"
+    );
+}
+
+#[test]
+fn the_async_reidentification_actually_fires_too() {
+    // The presence case on the production surface. Without it, the agreement
+    // asserted above is satisfied by two readers that both skip the check.
+    let plant = |store: &MemoryAuthorityStore| {
+        let head_b = RepositoryAuthorityHeadBody {
+            ref_root: digest(0xB0),
+            ..genesis_head()
+        };
+        let key = body_key(IdentityDomain::RepositoryAuthorityHead, &genesis_head())
+            .expect("a derivable body key");
+        // Genesis is already staged under its own key by `initialize_repository`,
+        // so plant into a store that has published nothing.
+        assert_eq!(
+            store
+                .put_if_absent(&key, &encode_body(&head_b).expect("a head body encodes"))
+                .expect("the store accepts the write"),
+            PutOutcome::Created,
+            "the plant must land, or this test proves nothing"
+        );
+        head_id_of(&head_b)
+    };
+
+    let verification_store = store();
+    let planted_id = plant(&verification_store);
+    let on_verification =
+        read_authority_head_body(&verification_store, head_id_of(&genesis_head()));
+
+    let backing = store();
+    plant(&backing);
+    let view = AsyncView(backing);
+    let on_production = poll_ready(read_authority_head_body_async(
+        &view,
+        &(),
+        head_id_of(&genesis_head()),
+    ));
+
+    assert_eq!(
+        format!("{on_verification:?}"),
+        format!("{on_production:?}"),
+        "both surfaces must refuse a misfiled body, and refuse it the same way"
+    );
+    let Err(OutcomeFailure::BodyIdentityMismatch { identities, .. }) = on_production else {
+        panic!("the production surface must refuse a misfiled body: {on_production:?}");
+    };
+    assert_eq!(
+        identities.found,
+        planted_id.into_internal_object_id(),
+        "the refusal must name the body that was actually found"
+    );
 }

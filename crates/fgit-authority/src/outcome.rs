@@ -37,8 +37,8 @@ use fgit_crypto::{IdentityDomain, internal_digest_over_parts};
 use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::{
-    RefusalRecordId, RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryDecisionBatchId,
-    RepositoryId, TenantId, TxId,
+    InternalObjectId, RefusalRecordId, RepositoryAuthorityHeadId, RepositoryCommitId,
+    RepositoryDecisionBatchId, RepositoryId, TenantId, TxId,
 };
 use fgit_types::numeric::DecisionSequence;
 use fgit_types::vocabulary::{DecisionOutcome, RefusalCode};
@@ -47,7 +47,7 @@ use crate::async_contract::{AsyncAuthorityStore, DuplicateAbsenceWitness};
 use crate::contract::AuthorityStore;
 use crate::identity::canonical_body_id;
 use crate::keys::{HeadKey, ImmutableKey};
-use crate::seal::{SealFailure, body_key};
+use crate::seal::{BODY_KEY_PREFIX, SealFailure, body_key};
 use fgit_types::HeadGeneration;
 
 use crate::tokens::AuthorityVersionToken;
@@ -110,10 +110,40 @@ pub enum OutcomeFailure {
         /// The bound.
         limit: usize,
     },
+    /// The bytes stored under a body's own identity key are a different body.
+    ///
+    /// A body key is derived from the body's canonical identity, so the store
+    /// is being asked "give me the bytes that hash to this". Bytes that decode
+    /// to something else did not come from the body that was requested,
+    /// whatever the reason -- a corrupted slot, a backend that resolved the key
+    /// loosely, or a caller handed an identity from another repository.
+    ///
+    /// This fails closed rather than returning the body it found. Accepting it
+    /// would be §4's "decoder result accepted without original commitments",
+    /// and on the replay path it would let a walk that thinks it is proving one
+    /// repository's decision stream read another's.
+    BodyIdentityMismatch {
+        /// Which link was being resolved.
+        link: &'static str,
+        /// The identity asked for and the identity the bytes carry.
+        ///
+        /// Boxed to keep [`OutcomeFailure`] inside `MAX_ERROR_BYTES`; two
+        /// identities inline are wider than the whole error budget.
+        identities: Box<IdentityDisagreement>,
+    },
     /// Sealing, storage, identity, or codec failed underneath.
     Seal(Box<SealFailure>),
     /// A canonical body could not be encoded or decoded.
     Codec(CodecRefusal),
+}
+
+/// The identity a read asked for beside the identity the bytes actually carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdentityDisagreement {
+    /// The identity whose key was read.
+    pub requested: InternalObjectId,
+    /// The identity the decoded body re-derives.
+    pub found: InternalObjectId,
 }
 
 impl core::fmt::Display for OutcomeFailure {
@@ -129,6 +159,11 @@ impl core::fmt::Display for OutcomeFailure {
             Self::ReplayBoundExceeded { limit } => {
                 write!(f, "decision-stream replay exceeded {limit} batches")
             }
+            Self::BodyIdentityMismatch { link, identities } => write!(
+                f,
+                "the {link} stored under {} decodes to {} instead",
+                identities.requested, identities.found
+            ),
             Self::Seal(failure) => write!(f, "{failure}"),
             Self::Codec(refusal) => write!(f, "canonical encoding refused: {refusal}"),
         }
@@ -278,46 +313,135 @@ where
     interpret_indexed_outcome(store.read_immutable(cx, &key).await?)
 }
 
-fn read_head_body<S>(
+/// Read one authority head body by identity, on the verification surface.
+///
+/// The bytes are read by the key the identity derives, decoded under
+/// [`DecodeLimits::DEFAULT`], and required to re-identify as `head_id`.
+///
+/// # Why this is public
+///
+/// A consumer resolving `predecessor_head_id` or `decision_tail_id` off an
+/// authenticated head needs the bytes those identities name. Without this it
+/// reconstructs the `fg/body/v1/` key convention itself, and a second copy of a
+/// key derivation is a second copy of a rule nobody can hold it to. The
+/// synchronous twin exists for the same reason the trait does: this surface is
+/// the deterministic one, not a legacy one, and a consumer writing a
+/// reproducible test of its own walk should not have to go async to do it.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::StreamBodyMissing`] when the slot is empty,
+/// [`OutcomeFailure::Codec`] when the bytes do not decode, and
+/// [`OutcomeFailure::BodyIdentityMismatch`] when they decode to a different
+/// head than the one requested.
+pub fn read_authority_head_body<S>(
     store: &S,
     head_id: RepositoryAuthorityHeadId,
 ) -> Result<RepositoryAuthorityHeadBody, OutcomeFailure>
 where
     S: AuthorityStore + ?Sized,
 {
-    let key = body_key_for_id(b"fg/body/v1/", head_id.as_internal_object_id())?;
+    let key = body_key_for_id(head_id.as_internal_object_id())?;
     match store.read_immutable(&key)? {
         ImmutableRead::Absent => Err(OutcomeFailure::StreamBodyMissing { link: "head body" }),
-        ImmutableRead::Present(bytes) => Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?),
+        ImmutableRead::Present(bytes) => identified_head_body(&bytes, head_id),
     }
 }
 
-fn read_batch_body<S>(
+/// Read one decision batch body by identity, on the verification surface.
+///
+/// See [`read_authority_head_body`] for why this is public and what it checks.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::StreamBodyMissing`] when the slot is empty,
+/// [`OutcomeFailure::Codec`] when the bytes do not decode, and
+/// [`OutcomeFailure::BodyIdentityMismatch`] when they decode to a different
+/// batch than the one requested.
+pub fn read_decision_batch_body<S>(
     store: &S,
     batch_id: RepositoryDecisionBatchId,
 ) -> Result<RepositoryDecisionBatchBody, OutcomeFailure>
 where
     S: AuthorityStore + ?Sized,
 {
-    let key = body_key_for_id(b"fg/body/v1/", batch_id.as_internal_object_id())?;
+    let key = body_key_for_id(batch_id.as_internal_object_id())?;
     match store.read_immutable(&key)? {
         ImmutableRead::Absent => Err(OutcomeFailure::StreamBodyMissing {
             link: "decision batch",
         }),
-        ImmutableRead::Present(bytes) => Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?),
+        ImmutableRead::Present(bytes) => identified_batch_body(&bytes, batch_id),
     }
 }
 
-fn body_key_for_id(
-    prefix: &[u8],
-    id: &fgit_types::identity::InternalObjectId,
-) -> Result<ImmutableKey, SealFailure> {
-    let mut bytes = Vec::with_capacity(prefix.len() + 80);
-    bytes.extend_from_slice(prefix);
+/// The immutable slot an already-identified body occupies.
+///
+/// The twin of [`body_key`], which derives the identity from the body. This one
+/// is for the walk, which has the identity and wants the bytes.
+///
+/// It takes no prefix parameter. Every caller passed the same literal, and a
+/// parameter with one possible value is an invitation to pass a second one:
+/// this function spelled `b"fg/body/v1/"` out while [`BODY_KEY_PREFIX`] sat
+/// exported two modules over, so the two derivations were already free to
+/// drift. They cannot now.
+fn body_key_for_id(id: &InternalObjectId) -> Result<ImmutableKey, SealFailure> {
+    let mut bytes = Vec::with_capacity(BODY_KEY_PREFIX.len() + 80);
+    bytes.extend_from_slice(BODY_KEY_PREFIX);
     bytes.extend_from_slice(id.domain().as_bytes());
     bytes.push(b'/');
     bytes.extend_from_slice(id.digest().as_bytes());
     Ok(ImmutableKey::new(bytes)?)
+}
+
+/// Decode a head body's bytes and require them to re-identify as `expected`.
+///
+/// Shared by both surfaces so the check cannot hold on one and lapse on the
+/// other, which is the drift the sibling-surface doctrine exists to prevent.
+///
+/// # Cost
+///
+/// One canonical re-encode per body read. That is real, it is on the replay
+/// path, and it is bounded by [`MAX_REPLAY_BATCHES`]. It buys the property that
+/// a body is never trusted on the strength of the key it was filed under.
+fn identified_head_body(
+    bytes: &[u8],
+    expected: RepositoryAuthorityHeadId,
+) -> Result<RepositoryAuthorityHeadBody, OutcomeFailure> {
+    let body: RepositoryAuthorityHeadBody = decode_body(bytes, DecodeLimits::DEFAULT)?;
+    let found = authority_head_identity(&body)?;
+    if found == expected {
+        Ok(body)
+    } else {
+        Err(OutcomeFailure::BodyIdentityMismatch {
+            link: "head body",
+            identities: Box::new(IdentityDisagreement {
+                requested: expected.into_internal_object_id(),
+                found: found.into_internal_object_id(),
+            }),
+        })
+    }
+}
+
+/// Decode a decision batch's bytes and require them to re-identify as `expected`.
+///
+/// See [`identified_head_body`]; the same reasoning and the same cost.
+fn identified_batch_body(
+    bytes: &[u8],
+    expected: RepositoryDecisionBatchId,
+) -> Result<RepositoryDecisionBatchBody, OutcomeFailure> {
+    let body: RepositoryDecisionBatchBody = decode_body(bytes, DecodeLimits::DEFAULT)?;
+    let found = decision_batch_identity(&body)?;
+    if found == expected {
+        Ok(body)
+    } else {
+        Err(OutcomeFailure::BodyIdentityMismatch {
+            link: "decision batch",
+            identities: Box::new(IdentityDisagreement {
+                requested: expected.into_internal_object_id(),
+                found: found.into_internal_object_id(),
+            }),
+        })
+    }
 }
 
 /// Resolve one identity's terminal decision by replaying the authenticated stream.
@@ -441,7 +565,7 @@ where
     let mut found: Vec<(TxId, TerminalOutcome)> = Vec::new();
 
     while let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? {
-        let batch = read_batch_body(store, batch_id)?;
+        let batch = read_decision_batch_body(store, batch_id)?;
         for tx_id in tx_ids {
             if let Some(outcome) = scan_batch_for(&batch, *tx_id) {
                 found.push((*tx_id, outcome));
@@ -482,7 +606,7 @@ where
         let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? else {
             return Ok(OutcomeLookup::Undecided);
         };
-        let batch = read_batch_body(store, batch_id)?;
+        let batch = read_decision_batch_body(store, batch_id)?;
         if let Some(found) = scan_batch_for(&batch, tx_id) {
             return Ok(OutcomeLookup::Decided(found));
         }
@@ -501,7 +625,7 @@ fn read_predecessor<S>(
 where
     S: AuthorityStore + ?Sized,
 {
-    let body = read_head_body(store, head_id)?;
+    let body = read_authority_head_body(store, head_id)?;
     // The genesis head has no decision tail, so the walk ends there.
     Ok(body.decision_tail_id.map(|_| body))
 }
@@ -1015,8 +1139,19 @@ where
 
 const _: () = assert!(size_of::<OutcomeFailure>() <= crate::request::MAX_ERROR_BYTES);
 
-/// Read one head body by identity, asynchronously.
-async fn read_head_body_async<S>(
+/// Read one authority head body by identity, on the production surface.
+///
+/// The asynchronous twin of [`read_authority_head_body`]: same key, same
+/// bounded decode, same re-identification, same refusals. Only the waiting
+/// differs.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::StreamBodyMissing`] when the slot is empty,
+/// [`OutcomeFailure::Codec`] when the bytes do not decode, and
+/// [`OutcomeFailure::BodyIdentityMismatch`] when they decode to a different
+/// head than the one requested.
+pub async fn read_authority_head_body_async<S>(
     store: &S,
     cx: &S::Context,
     head_id: RepositoryAuthorityHeadId,
@@ -1024,15 +1159,26 @@ async fn read_head_body_async<S>(
 where
     S: AsyncAuthorityStore + ?Sized,
 {
-    let key = body_key_for_id(b"fg/body/v1/", head_id.as_internal_object_id())?;
+    let key = body_key_for_id(head_id.as_internal_object_id())?;
     match store.read_immutable(cx, &key).await? {
         ImmutableRead::Absent => Err(OutcomeFailure::StreamBodyMissing { link: "head body" }),
-        ImmutableRead::Present(bytes) => Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?),
+        ImmutableRead::Present(bytes) => identified_head_body(&bytes, head_id),
     }
 }
 
-/// Read one decision batch body by identity, asynchronously.
-async fn read_batch_body_async<S>(
+/// Read one decision batch body by identity, on the production surface.
+///
+/// The asynchronous twin of [`read_decision_batch_body`]. This is the reader a
+/// node uses to resolve an authenticated head's `decision_tail_id` into the
+/// batch it commits to.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::StreamBodyMissing`] when the slot is empty,
+/// [`OutcomeFailure::Codec`] when the bytes do not decode, and
+/// [`OutcomeFailure::BodyIdentityMismatch`] when they decode to a different
+/// batch than the one requested.
+pub async fn read_decision_batch_body_async<S>(
     store: &S,
     cx: &S::Context,
     batch_id: RepositoryDecisionBatchId,
@@ -1040,12 +1186,12 @@ async fn read_batch_body_async<S>(
 where
     S: AsyncAuthorityStore + ?Sized,
 {
-    let key = body_key_for_id(b"fg/body/v1/", batch_id.as_internal_object_id())?;
+    let key = body_key_for_id(batch_id.as_internal_object_id())?;
     match store.read_immutable(cx, &key).await? {
         ImmutableRead::Absent => Err(OutcomeFailure::StreamBodyMissing {
             link: "decision batch",
         }),
-        ImmutableRead::Present(bytes) => Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?),
+        ImmutableRead::Present(bytes) => identified_batch_body(&bytes, batch_id),
     }
 }
 
@@ -1058,7 +1204,7 @@ async fn read_predecessor_async<S>(
 where
     S: AsyncAuthorityStore + ?Sized,
 {
-    let body = read_head_body_async(store, cx, head_id).await?;
+    let body = read_authority_head_body_async(store, cx, head_id).await?;
     // The genesis head has no decision tail, so the walk ends there.
     Ok(body.decision_tail_id.map(|_| body))
 }
@@ -1093,7 +1239,7 @@ where
     let mut found: Vec<(TxId, TerminalOutcome)> = Vec::new();
 
     while let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? {
-        let batch = read_batch_body_async(store, cx, batch_id).await?;
+        let batch = read_decision_batch_body_async(store, cx, batch_id).await?;
         for tx_id in tx_ids {
             if let Some(outcome) = scan_batch_for(&batch, *tx_id) {
                 found.push((*tx_id, outcome));
@@ -1296,7 +1442,7 @@ where
         let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? else {
             return Ok(OutcomeLookup::Undecided);
         };
-        let batch = read_batch_body_async(store, cx, batch_id).await?;
+        let batch = read_decision_batch_body_async(store, cx, batch_id).await?;
         if let Some(found) = scan_batch_for(&batch, tx_id) {
             return Ok(OutcomeLookup::Decided(found));
         }
