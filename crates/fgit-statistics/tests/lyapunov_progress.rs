@@ -10,7 +10,7 @@ use fgit_statistics::lyapunov::{
     LyapunovAssumptionFailure, LyapunovConfig, LyapunovGovernor, LyapunovRefusal, ProgressVerdict,
 };
 
-fn config() -> LyapunovConfig {
+const fn config() -> LyapunovConfig {
     LyapunovConfig {
         drift_bound: 10,
         required_decrease: 5,

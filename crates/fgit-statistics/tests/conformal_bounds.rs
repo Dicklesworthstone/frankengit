@@ -14,7 +14,7 @@ use fgit_statistics::conformal::{
 /// `alpha = 0.05`, in parts per million.
 const ALPHA_05: u32 = 50_000;
 
-fn config(alpha_parts_per_million: u32, calibration_size: u32) -> ConformalConfig {
+const fn config(alpha_parts_per_million: u32, calibration_size: u32) -> ConformalConfig {
     ConformalConfig {
         alpha_parts_per_million,
         calibration_size,

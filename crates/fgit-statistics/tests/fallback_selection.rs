@@ -9,15 +9,9 @@
 use fgit_statistics::{FallbackTrigger, PolicyGate, PolicySelection};
 
 /// Sets exactly one condition, leaving the other four clear.
-fn only(trigger: FallbackTrigger) -> PolicyGate {
+const fn only(trigger: FallbackTrigger) -> PolicyGate {
     let mut gate = PolicyGate::all_clear();
-    match trigger {
-        FallbackTrigger::EvidenceGap => gate.evidence_gap = true,
-        FallbackTrigger::SupportFailure => gate.support_failure = true,
-        FallbackTrigger::RegimeAlarm => gate.regime_alarm = true,
-        FallbackTrigger::NumericBoundViolation => gate.numeric_bound_violation = true,
-        FallbackTrigger::StaleWindow => gate.stale_window = true,
-    }
+    gate.set(trigger);
     gate
 }
 
@@ -54,13 +48,10 @@ fn the_trigger_set_is_exhaustive_over_the_gate() {
     // PolicyGate and omitted from ALL, `select` would silently never check it --
     // the exact rot this module is shaped to prevent. Setting every field and
     // requiring each trigger to be individually observable catches that.
-    let all_set = PolicyGate {
-        evidence_gap: true,
-        support_failure: true,
-        regime_alarm: true,
-        numeric_bound_violation: true,
-        stale_window: true,
-    };
+    let mut all_set = PolicyGate::all_clear();
+    for trigger in FallbackTrigger::ALL {
+        all_set.set(trigger);
+    }
     for trigger in FallbackTrigger::ALL {
         assert!(
             all_set.is_set(trigger),
@@ -82,8 +73,8 @@ fn simultaneous_conditions_report_the_same_trigger_every_time() {
     // disagree about WHY the fallback was taken, which is unreplayable even
     // though the selection itself matches.
     let mut gate = PolicyGate::all_clear();
-    gate.regime_alarm = true;
-    gate.stale_window = true;
+    gate.set(FallbackTrigger::RegimeAlarm);
+    gate.set(FallbackTrigger::StaleWindow);
 
     // RegimeAlarm precedes StaleWindow in ALL, so it wins deterministically.
     for _ in 0..100 {
@@ -96,7 +87,7 @@ fn simultaneous_conditions_report_the_same_trigger_every_time() {
     // And the ordering is a property of ALL, not of the struct's field order:
     // a later-ordered condition alone still reports itself.
     let mut only_stale = PolicyGate::all_clear();
-    only_stale.stale_window = true;
+    only_stale.set(FallbackTrigger::StaleWindow);
     assert_eq!(
         only_stale.select(),
         PolicySelection::Fallback(FallbackTrigger::StaleWindow)
@@ -111,7 +102,7 @@ fn a_saturated_detector_is_a_numeric_bound_violation_not_a_silent_pass() {
     // using an adaptive candidate on it would be acting on a number the system
     // knows is wrong.
     let mut gate = PolicyGate::all_clear();
-    gate.numeric_bound_violation = true;
+    gate.set(FallbackTrigger::NumericBoundViolation);
     assert_eq!(
         gate.select(),
         PolicySelection::Fallback(FallbackTrigger::NumericBoundViolation)

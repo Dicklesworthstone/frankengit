@@ -5,7 +5,7 @@
 //!
 //! The test that matters most is
 //! `a_confident_looking_prior_with_no_trials_is_refused`: a `Beta(90, 10)` prior
-//! reports a posterior mean of 900_000 after zero observations. Nothing about
+//! reports a posterior mean of `900_000` after zero observations. Nothing about
 //! that number distinguishes it from the same value after ten thousand trials,
 //! which is exactly why the comparison counts trials rather than pseudo-counts.
 
@@ -13,11 +13,11 @@ use fgit_statistics::beta_bernoulli::{
     ArmComparison, ArmVerdict, BetaAssumptionFailure, BetaPrior, BetaRefusal, Outcomes,
 };
 
-fn outcomes(successes: u32, trials: u32) -> Outcomes {
+const fn outcomes(successes: u32, trials: u32) -> Outcomes {
     Outcomes { successes, trials }
 }
 
-fn comparison() -> ArmComparison {
+const fn comparison() -> ArmComparison {
     ArmComparison {
         min_trials_per_arm: 100,
         indifference_margin: 10_000,
@@ -89,7 +89,7 @@ fn more_successes_than_trials_is_refused_rather_than_clamped() {
 
 #[test]
 fn a_confident_looking_prior_with_no_trials_is_refused() {
-    // Beta(90, 10) reports a posterior mean of 900_000 after zero observations.
+    // Beta(90, 10) reports a posterior mean of `900_000` after zero observations.
     // The number is indistinguishable from the same value after ten thousand
     // trials, and a comparison on means alone would rank this arm first.
     let strong = BetaPrior::try_new(90, 10).expect("proper");

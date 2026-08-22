@@ -106,7 +106,7 @@ fn the_leader_is_never_eliminated_even_when_every_arm_is_far_apart() {
         .advance(&[1_000_000, 0, 0, 0, 0])
         .expect("well-formed means");
     assert_eq!(again.surviving, vec![0]);
-    assert!(again.eliminated.is_empty());
+    assert_eq!(again.eliminated, Vec::<u32>::new());
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn tied_arms_are_never_separated() {
     let mut selector = SuccessiveElimination::new(3, vec![0, 0, 0]).expect("a zero-width schedule");
     for _ in 0..3 {
         let outcome = selector.advance(&[500_000; 3]).expect("well-formed means");
-        assert!(outcome.eliminated.is_empty());
+        assert_eq!(outcome.eliminated, Vec::<u32>::new());
         assert_eq!(outcome.surviving, vec![0, 1, 2]);
     }
 }

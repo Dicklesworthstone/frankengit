@@ -39,7 +39,7 @@ impl Lcg {
     }
 
     /// The next raw value.
-    fn next(&mut self) -> u64 {
+    const fn next(&mut self) -> u64 {
         self.0 = self
             .0
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -49,15 +49,24 @@ impl Lcg {
     }
 
     /// A value in `0..span`, for `span > 0`.
-    fn below(&mut self, span: u64) -> u64 {
+    const fn below(&mut self, span: u64) -> u64 {
         self.next() % span
     }
 
     /// A value in `low..=high`.
     fn between(&mut self, low: i64, high: i64) -> i64 {
         debug_assert!(low <= high);
-        let span = (high - low) as u64 + 1;
-        low + self.below(span) as i64
+        // `abs_diff` yields the span as a `u64` directly, so neither end needs a
+        // sign-losing cast.
+        let span = high.abs_diff(low) + 1;
+        low + i64::try_from(self.below(span)).unwrap_or(0)
+    }
+
+    /// A `u32` in `low..=high`, so call sites need no narrowing cast.
+    fn between_u32(&mut self, low: u32, high: u32) -> u32 {
+        debug_assert!(low <= high);
+        let span = u64::from(high - low) + 1;
+        low + u32::try_from(self.below(span)).unwrap_or(0)
     }
 }
 
@@ -176,8 +185,8 @@ fn the_effective_sample_size_never_exceeds_the_batch_it_came_from() {
         for size in [1_usize, 2, 10, 100, 1_000] {
             let samples: Vec<LoggedSample> = (0..size)
                 .map(|_| LoggedSample {
-                    behavior_parts_per_million: rng.between(1_000, 1_000_000) as u32,
-                    target_parts_per_million: rng.between(1, 1_000_000) as u32,
+                    behavior_parts_per_million: rng.between_u32(1_000, 1_000_000),
+                    target_parts_per_million: rng.between_u32(1, 1_000_000),
                     reward: rng.between(-1_000, 1_000),
                 })
                 .collect();
@@ -267,7 +276,7 @@ fn the_surviving_arm_set_never_empties_and_never_grows() {
         assert_eq!(previous, 6);
 
         for round in 0..widths.len() {
-            let means: Vec<u32> = (0..6).map(|_| rng.between(0, 1_000_000) as u32).collect();
+            let means: Vec<u32> = (0..6).map(|_| rng.between_u32(0, 1_000_000)).collect();
             let outcome = selector.advance(&means).expect("well-formed means");
 
             assert!(
@@ -340,9 +349,9 @@ fn more_successes_never_lower_the_posterior_mean() {
     for seed in SEEDS {
         let mut rng = Lcg::new(seed);
         for _ in 0..2_000 {
-            let prior = BetaPrior::try_new(rng.between(1, 50) as u32, rng.between(1, 50) as u32)
-                .expect("proper");
-            let trials = rng.between(1, 5_000) as u32;
+            let prior =
+                BetaPrior::try_new(rng.between_u32(1, 50), rng.between_u32(1, 50)).expect("proper");
+            let trials = rng.between_u32(1, 5_000);
 
             let mut previous = 0;
             for successes in [0, trials / 4, trials / 2, (trials * 3) / 4, trials] {

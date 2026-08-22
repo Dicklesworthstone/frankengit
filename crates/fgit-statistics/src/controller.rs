@@ -34,7 +34,7 @@ use fgit_types::{AsciiSlug, PolicyEpoch, TypeRefusal};
 
 use crate::authority::AdvisoryDecision;
 use crate::evidence::{AssumptionSet, BindingRefusal, RegimeBinding, SequenceWindow};
-use crate::fallback::{PolicyGate, PolicySelection};
+use crate::fallback::{FallbackTrigger, PolicyGate, PolicySelection};
 use crate::regime::{AssumptionFailure, Cusum, CusumConfig, Scaled};
 
 /// How the controller is configured.
@@ -158,7 +158,7 @@ impl RetryBackoffController {
             // A sequence number that is not the immediate successor means the
             // stream is missing observations it declared it would have.
             if sequence != last.saturating_add(1) {
-                self.gate.evidence_gap = true;
+                self.gate.set(FallbackTrigger::EvidenceGap);
             }
         } else {
             self.first_sequence = Some(sequence);
@@ -170,19 +170,19 @@ impl RetryBackoffController {
         // against, so its statistic is not one this mechanism can stand behind.
         let deviation = value.saturating_sub(self.config.cusum.target);
         if deviation.saturating_abs() > self.config.cusum.max_deviation {
-            self.gate.support_failure = true;
+            self.gate.set(FallbackTrigger::SupportFailure);
         }
 
         if self.detector.observe(value).is_some() {
-            self.gate.regime_alarm = true;
+            self.gate.set(FallbackTrigger::RegimeAlarm);
         }
         if self.detector.saturated() {
-            self.gate.numeric_bound_violation = true;
+            self.gate.set(FallbackTrigger::NumericBoundViolation);
         }
 
         self.retained = self.retained.saturating_add(1);
         if self.retained > self.config.max_retained_observations {
-            self.gate.stale_window = true;
+            self.gate.set(FallbackTrigger::StaleWindow);
         }
 
         let selection = self.gate.select();
@@ -284,6 +284,7 @@ impl RetryBackoffController {
     ///
     /// Returns [`BindingRefusal::WindowInverted`] when the observed sequence
     /// numbers ran backwards, which the controller records rather than repairs.
+    #[must_use]
     pub const fn window(&self) -> Option<Result<SequenceWindow, BindingRefusal>> {
         match (self.first_sequence, self.last_sequence) {
             (Some(first), Some(last)) => Some(SequenceWindow::try_new(first, last)),

@@ -130,11 +130,16 @@ impl Posterior {
     /// downstream feeds back into it, so the truncation quantises rather than
     /// compounds.
     #[must_use]
-    pub const fn mean_parts_per_million(self) -> u32 {
+    pub fn mean_parts_per_million(self) -> u32 {
         let total = self.alpha + self.beta;
         // `alpha >= 1` and `beta >= 1` are enforced at construction, so `total`
-        // is at least two and the division is safe.
-        (self.alpha * PARTS_PER_MILLION / total) as u32
+        // is at least two and the division is safe. The quotient is at most
+        // `PARTS_PER_MILLION` because `alpha < total`, so the conversion cannot
+        // fail; `try_from` rather than `as` so that a future change to the
+        // invariant is a visible saturation rather than a silent wrap.
+        u32::try_from(self.alpha * PARTS_PER_MILLION / total)
+            .unwrap_or(u32::MAX)
+            .min(1_000_000)
     }
 
     /// The posterior's success pseudo-count.
@@ -272,7 +277,7 @@ impl ArmComparison {
     /// Returns [`BetaRefusal::InsufficientEvidence`] when either arm has fewer
     /// than [`Self::min_trials_per_arm`] observations. The thinner arm is named,
     /// since that is the one needing more data.
-    pub const fn compare(
+    pub fn compare(
         self,
         candidate: Posterior,
         fallback: Posterior,

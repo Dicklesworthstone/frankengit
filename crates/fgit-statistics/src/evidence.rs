@@ -110,6 +110,14 @@ impl SequenceWindow {
     ///
     /// Never zero: the inclusive bounds and the ordering check together make
     /// the smallest representable window one position wide.
+    /// Always false: the inclusive bounds and the ordering check together make
+    /// the smallest representable window one position wide. Present because a
+    /// public `len` without an `is_empty` invites the reader to wonder.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        false
+    }
+
     #[must_use]
     pub const fn len(self) -> u64 {
         // `last >= first` is an invariant, so this cannot wrap, and the `+ 1` is
@@ -174,9 +182,7 @@ impl AssumptionSet {
         checked.sort_unstable();
         for window in checked.windows(2) {
             if window[0] == window[1] {
-                return Err(BindingRefusal::AssumptionDuplicated {
-                    label: window[0].clone(),
-                });
+                return Err(BindingRefusal::AssumptionDuplicated { label: window[0] });
             }
         }
         Ok(Self { checked })
@@ -190,13 +196,13 @@ impl AssumptionSet {
 
     /// How many assumptions were declared. Never zero.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.checked.len()
     }
 
     /// Always false; present because clippy asks for it beside [`Self::len`].
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.checked.is_empty()
     }
 }
@@ -238,7 +244,7 @@ fn policy_from_tag(tag: u8, offset: u64) -> Result<PolicySelection, CodecRefusal
         .get(index)
         .copied()
         .map(PolicySelection::Fallback)
-        .ok_or(CodecRefusal::VariantUnknown {
+        .ok_or_else(|| CodecRefusal::VariantUnknown {
             field: "policy",
             observed: u32::from(tag),
             offset,

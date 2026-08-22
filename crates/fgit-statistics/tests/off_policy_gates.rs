@@ -13,7 +13,7 @@ use fgit_statistics::off_policy::{
 const HALF: u32 = 500_000;
 const ONE: u32 = 1_000_000;
 
-fn config() -> OffPolicyConfig {
+const fn config() -> OffPolicyConfig {
     OffPolicyConfig {
         min_behavior_parts_per_million: 1_000,
         max_behavior_parts_per_million: ONE,
@@ -25,7 +25,7 @@ fn evaluator() -> OffPolicyEvaluator {
     OffPolicyEvaluator::new(config()).expect("assumptions hold")
 }
 
-fn sample(behavior: u32, target: u32, reward: i64) -> LoggedSample {
+const fn sample(behavior: u32, target: u32, reward: i64) -> LoggedSample {
     LoggedSample {
         behavior_parts_per_million: behavior,
         target_parts_per_million: target,
@@ -297,7 +297,13 @@ fn the_declared_floor_bounds_the_largest_weight() {
 #[test]
 fn the_same_batch_evaluates_identically_every_time() {
     let samples: Vec<LoggedSample> = (1..=20)
-        .map(|index| sample(HALF, 400_000 + index as u32 * 1_000, index))
+        .map(|index| {
+            sample(
+                HALF,
+                400_000 + u32::try_from(index).unwrap_or(0) * 1_000,
+                index,
+            )
+        })
         .collect();
     let first = evaluator().evaluate(&samples);
     for _ in 0..50 {

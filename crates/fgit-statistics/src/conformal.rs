@@ -107,11 +107,11 @@ impl SplitConformal {
     /// Returns the failed assumption. In particular
     /// [`ConformalAssumptionFailure::CalibrationTooSmall`] when the level needs
     /// more calibration scores than will be supplied.
-    pub const fn new(config: ConformalConfig) -> Result<Self, ConformalAssumptionFailure> {
+    pub fn new(config: ConformalConfig) -> Result<Self, ConformalAssumptionFailure> {
         if config.alpha_parts_per_million == 0 {
             return Err(ConformalAssumptionFailure::AlphaZero);
         }
-        if config.alpha_parts_per_million as u64 >= PARTS_PER_MILLION {
+        if u64::from(config.alpha_parts_per_million) >= PARTS_PER_MILLION {
             return Err(ConformalAssumptionFailure::AlphaNotBelowOne {
                 alpha_parts_per_million: config.alpha_parts_per_million,
             });
@@ -122,21 +122,19 @@ impl SplitConformal {
 
         // rank = ceil((n + 1) * (1 - alpha)), all in parts per million.
         // `ceil(a / b)` is `(a + b - 1) / b`, exact on integers.
-        let keep = PARTS_PER_MILLION - config.alpha_parts_per_million as u64;
-        let numerator = (config.calibration_size as u64 + 1) * keep;
+        let keep = PARTS_PER_MILLION - u64::from(config.alpha_parts_per_million);
+        let numerator = (u64::from(config.calibration_size) + 1) * keep;
         let rank = numerator.div_ceil(PARTS_PER_MILLION);
 
-        if rank > config.calibration_size as u64 {
+        if rank > u64::from(config.calibration_size) {
             return Err(ConformalAssumptionFailure::CalibrationTooSmall {
                 required_rank: rank,
                 available: config.calibration_size,
             });
         }
-        // `rank <= calibration_size` here, so the cast cannot truncate.
-        Ok(Self {
-            config,
-            rank: rank as u32,
-        })
+        // `rank <= calibration_size` was just proved, so this cannot fail.
+        let rank = u32::try_from(rank).unwrap_or(config.calibration_size);
+        Ok(Self { config, rank })
     }
 
     /// The one-based rank of the order statistic this level takes.

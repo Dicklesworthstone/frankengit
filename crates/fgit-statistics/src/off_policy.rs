@@ -273,10 +273,12 @@ impl OffPolicyEvaluator {
         let effective_sample_size = squared_total / sum_squares;
 
         Ok(OffPolicyEstimate {
-            value: i64::try_from(value).unwrap_or(if value.is_negative() {
-                i64::MIN
-            } else {
-                i64::MAX
+            value: i64::try_from(value).unwrap_or_else(|_| {
+                if value.is_negative() {
+                    i64::MIN
+                } else {
+                    i64::MAX
+                }
             }),
             effective_sample_size: u64::try_from(effective_sample_size).unwrap_or(u64::MAX),
             samples: u32::try_from(samples.len()).unwrap_or(u32::MAX),

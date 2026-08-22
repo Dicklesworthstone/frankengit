@@ -21,7 +21,7 @@ const TARGET: i64 = 100;
 const BASE_BACKOFF: u64 = 1_000;
 const PINNED_FALLBACK: u64 = 250_000;
 
-fn config() -> ControllerConfig {
+const fn config() -> ControllerConfig {
     ControllerConfig {
         cusum: CusumConfig {
             target: TARGET,
@@ -297,11 +297,14 @@ fn a_saturating_accumulator_sets_the_numeric_bound_condition_even_when_a_regime_
 
     let gate = controller.gate();
     assert!(
-        gate.numeric_bound_violation,
+        gate.is_set(FallbackTrigger::NumericBoundViolation),
         "the accumulator saturated and the condition was not recorded; a saturated statistic is a \
          lower bound rather than a value"
     );
-    assert!(gate.regime_alarm, "an excursion that large also alarms");
+    assert!(
+        gate.is_set(FallbackTrigger::RegimeAlarm),
+        "an excursion that large also alarms"
+    );
     assert_eq!(
         controller.selection(),
         PolicySelection::Fallback(FallbackTrigger::RegimeAlarm),
@@ -311,8 +314,8 @@ fn a_saturating_accumulator_sets_the_numeric_bound_condition_even_when_a_regime_
     // The permitted twin: an ordinary run records neither.
     let mut quiet = fresh();
     quiet.observe(1, TARGET).expect("step");
-    assert!(!quiet.gate().numeric_bound_violation);
-    assert!(!quiet.gate().regime_alarm);
+    assert!(!quiet.gate().is_set(FallbackTrigger::NumericBoundViolation));
+    assert!(!quiet.gate().is_set(FallbackTrigger::RegimeAlarm));
 }
 
 // ------------------------------------------------- construction-time refusals
@@ -386,7 +389,7 @@ fn the_controller_produces_a_bindable_evidence_body() {
     };
 
     let bytes = canonical_body_bytes(&body).expect("encodes");
-    assert!(!bytes.is_empty());
+    assert_ne!(bytes.len(), 0, "the body must encode to bytes");
 
     // The regime binding carries the detector state that justified the fallback,
     // not merely the epoch, so a reader can check the alarm rather than trust it.

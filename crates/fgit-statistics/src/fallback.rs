@@ -49,13 +49,32 @@ impl FallbackTrigger {
     /// the same one every time. A gate that reported whichever condition it
     /// happened to check first would make the decision path unreplayable, which
     /// §8 forbids for anything affecting a decision.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; Self::COUNT] = [
         Self::EvidenceGap,
         Self::SupportFailure,
         Self::RegimeAlarm,
         Self::NumericBoundViolation,
         Self::StaleWindow,
     ];
+
+    /// How many disqualifying conditions section 33 names.
+    pub const COUNT: usize = 5;
+
+    /// This trigger's position in [`Self::ALL`].
+    ///
+    /// The one place the ordering is written down, so [`PolicyGate`] can store
+    /// its observations positionally instead of as one named field per
+    /// condition — which is what kept the field list and the lookup in step.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::EvidenceGap => 0,
+            Self::SupportFailure => 1,
+            Self::RegimeAlarm => 2,
+            Self::NumericBoundViolation => 3,
+            Self::StaleWindow => 4,
+        }
+    }
 }
 
 /// What a controller may use for one decision.
@@ -85,24 +104,20 @@ impl PolicySelection {
     }
 }
 
-/// The observed state of every §33 disqualifying condition.
+/// The observed state of every section 33 disqualifying condition.
 ///
-/// One field per [`FallbackTrigger`] variant. Constructing this requires the
-/// caller to have an answer for each condition — there is no `Default`, because
-/// defaulting an unknown condition to "fine" is exactly the silent permission
-/// this module exists to prevent.
+/// Stored positionally, one slot per [`FallbackTrigger`], rather than as one
+/// named `bool` per condition. The named-field form kept a second copy of the
+/// condition list — the struct's fields — that had to be walked in step with
+/// [`FallbackTrigger::ALL`], and a sixth condition added to one and not the
+/// other is exactly the silent gap this module exists to prevent. With an array
+/// there is one list, and it is [`FallbackTrigger::ALL`].
+///
+/// There is no `Default`, because defaulting an unknown condition to "fine" is
+/// the silent permission this module exists to prevent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PolicyGate {
-    /// Observations are missing from the declared stream.
-    pub evidence_gap: bool,
-    /// An input fell outside the mechanism's declared support.
-    pub support_failure: bool,
-    /// A regime detector alarmed.
-    pub regime_alarm: bool,
-    /// A declared numeric bound was violated, or an accumulator saturated.
-    pub numeric_bound_violation: bool,
-    /// The evidence window does not cover this decision.
-    pub stale_window: bool,
+    observed: [bool; FallbackTrigger::COUNT],
 }
 
 impl PolicyGate {
@@ -114,24 +129,19 @@ impl PolicyGate {
     #[must_use]
     pub const fn all_clear() -> Self {
         Self {
-            evidence_gap: false,
-            support_failure: false,
-            regime_alarm: false,
-            numeric_bound_violation: false,
-            stale_window: false,
+            observed: [false; FallbackTrigger::COUNT],
         }
+    }
+
+    /// Records that one condition was observed.
+    pub const fn set(&mut self, trigger: FallbackTrigger) {
+        self.observed[trigger.index()] = true;
     }
 
     /// Whether one specific condition is set.
     #[must_use]
     pub const fn is_set(&self, trigger: FallbackTrigger) -> bool {
-        match trigger {
-            FallbackTrigger::EvidenceGap => self.evidence_gap,
-            FallbackTrigger::SupportFailure => self.support_failure,
-            FallbackTrigger::RegimeAlarm => self.regime_alarm,
-            FallbackTrigger::NumericBoundViolation => self.numeric_bound_violation,
-            FallbackTrigger::StaleWindow => self.stale_window,
-        }
+        self.observed[trigger.index()]
     }
 
     /// Selects the candidate only if **every** condition is clear.

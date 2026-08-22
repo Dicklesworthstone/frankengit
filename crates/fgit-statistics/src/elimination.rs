@@ -195,13 +195,13 @@ impl SuccessiveElimination {
         let gap = u64::from(width) * 2;
 
         let mut eliminated = Vec::new();
-        for arm in 0..arms {
+        for (arm, mean) in means.iter().enumerate() {
             if !self.active[arm] {
                 continue;
             }
             // The leader can never satisfy this against itself, so it always
             // survives.
-            if u64::from(leader) - u64::from(means[arm]) > gap {
+            if u64::from(leader) - u64::from(*mean) > gap {
                 self.active[arm] = false;
                 eliminated.push(u32::try_from(arm).unwrap_or(u32::MAX));
             }

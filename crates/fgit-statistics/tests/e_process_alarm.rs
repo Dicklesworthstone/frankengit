@@ -2,7 +2,7 @@
 //!
 //! Every wealth below comes from tracing the exact integer recurrence, not from
 //! a run of the implementation. The step-4 value is included on purpose: the
-//! exact wealth there is 2_441_406.25 and the computed one is 2_441_406, so the
+//! exact wealth there is `2_441_406.25` and the computed one is `2_441_406`, so the
 //! lower-bound rounding is visible in a concrete number rather than only in the
 //! module's argument for it.
 
@@ -11,7 +11,7 @@ use fgit_statistics::e_process::{
 };
 
 /// `p0 = 0.5`, `lambda = 0.5`, `alpha = 0.05`.
-fn config() -> EProcessConfig {
+const fn config() -> EProcessConfig {
     EProcessConfig {
         null_rate_parts_per_million: 500_000,
         bet_parts_per_million: 500_000,
