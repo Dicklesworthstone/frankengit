@@ -2612,6 +2612,7 @@ mod tests {
     use fgit_chronicle::PublicationBasis;
     use fgit_codec::harness::{advanced_head, decision_batch, tx_id};
     use fgit_codec::{CryptoBodyIdentity, body_id, decode_body};
+    use fgit_object_fabric::fabric::StoreRefusal;
     use fgit_types::{
         GitHashAlgorithm, GitOid, RefName, RefusalCode, RepositoryAuthorityHeadId, RepositoryId,
         TenantId,
@@ -3421,6 +3422,52 @@ mod tests {
             fgit_types::HeadGeneration::FIRST
         );
         reopened.shutdown().expect("reopened node closes cleanly");
+    }
+
+    #[test]
+    fn doctor_reports_a_seeded_immutable_object_corruption() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) =
+            OneNode::init(test_config(scratch.path().to_path_buf())).expect("node opens");
+        let stored = node
+            .put_git_object(
+                fgit_git_object::ObjectType::Blob,
+                b"doctor corruption sample".to_vec(),
+            )
+            .expect("sample stores");
+
+        let namespace_directory = only_directory_entry(&scratch.path().join("objects"));
+        let algorithm_directory = only_directory_entry(&namespace_directory);
+        let object_path = only_directory_entry(&algorithm_directory);
+        let mut bytes = fs::read(&object_path).expect("stored immutable body reads for fault seed");
+        let last = bytes
+            .last_mut()
+            .expect("stored immutable body includes the sample payload");
+        *last ^= 0x01;
+        fs::write(&object_path, bytes).expect("fault seed flips one immutable payload byte");
+
+        let request = node.request_context();
+        let report = node
+            .runtime()
+            .block_on(node.doctor_in(&request, Some(stored.identity())));
+        assert!(matches!(
+            report,
+            Err(NodeRefusal::Fabric(StoreRefusal::PayloadCommitmentMismatch))
+        ));
+        node.shutdown()
+            .expect("node drains and shuts down after a corruption finding");
+    }
+
+    fn only_directory_entry(directory: &Path) -> PathBuf {
+        let mut entries = fs::read_dir(directory)
+            .expect("fault drill directory opens")
+            .map(|entry| entry.expect("fault drill directory entry reads"));
+        let entry = entries.next().expect("fault drill has one expected entry");
+        assert!(
+            entries.next().is_none(),
+            "fault drill isolates one node-owned immutable body"
+        );
+        entry.path()
     }
 
     #[test]
