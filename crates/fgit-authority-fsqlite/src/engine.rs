@@ -1054,27 +1054,6 @@ const fn head_generation_from_unsigned(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{EngineError, HeadGeneration, MarshalError, head_generation_from_unsigned};
-
-    #[test]
-    fn head_generation_conversion_accepts_live_values_and_truthfully_refuses_zero() {
-        assert_eq!(
-            head_generation_from_unsigned(HeadGeneration::FIRST.get(), 4),
-            Ok(HeadGeneration::FIRST),
-            "the first live generation must survive the SQL boundary"
-        );
-        assert_eq!(
-            head_generation_from_unsigned(0, 4),
-            Err(EngineError::Marshal(MarshalError::HeadGenerationZero {
-                column: 4,
-            })),
-            "zero is reserved, not a fabricated negative integer"
-        );
-    }
-}
-
 /// Run one whole logical transaction under the retry law, awaiting the wait.
 ///
 /// This is the asynchronous driver of the law in [`crate::retry`]. It shares
@@ -1248,5 +1227,26 @@ impl AsyncAuthorityStore for FsqliteAuthorityStore {
         Self::authenticate_head_receipt(self, cx, receipt)
             .await
             .map_err(EngineError::into_failure)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EngineError, HeadGeneration, MarshalError, head_generation_from_unsigned};
+
+    #[test]
+    fn head_generation_conversion_accepts_live_values_and_truthfully_refuses_zero() {
+        assert_eq!(
+            head_generation_from_unsigned(HeadGeneration::FIRST.get(), 4),
+            Ok(HeadGeneration::FIRST),
+            "the first live generation must survive the SQL boundary"
+        );
+        assert_eq!(
+            head_generation_from_unsigned(0, 4),
+            Err(EngineError::Marshal(MarshalError::HeadGenerationZero {
+                column: 4,
+            })),
+            "zero is reserved, not a fabricated negative integer"
+        );
     }
 }
