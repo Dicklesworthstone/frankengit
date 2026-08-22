@@ -22,18 +22,18 @@ use std::fmt::{self, Display, Formatter};
 
 use fgit_authority::{
     AuthenticatedHead, AuthorityFailure, AuthorityStore, HeadKey, HeadRead, IdempotencyKey,
-    OutcomeFailure, OutcomeLookup, SealAttempt, SealFailure, seal_request,
+    OutcomeFailure, OutcomeLookup, SealAttempt, SealFailure, initialize_repository, seal_request,
 };
 use fgit_chronicle::{
     PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots, publish,
 };
 use fgit_codec::{
-    CryptoBodyIdentity, RefusalRecordBody, RepositoryAuthorityHeadBody, RepositoryCommitRecord,
-    body_id, decode_body, encode_body,
+    CanonicalBody, CodecRefusal, CryptoBodyIdentity, Decoder, Encoder, RefusalRecordBody,
+    RepositoryAuthorityHeadBody, RepositoryCommitRecord, body_id, encode_body,
 };
 use fgit_crypto::IdentityDomain;
 use fgit_pack::QuarantinedPack;
-use fgit_reference::effect::{FoldBasis, FoldOutcome};
+use fgit_reference::effect::{FoldBasis, FoldOutcome, RefEffect};
 use fgit_reference::intent::{
     DurabilityProfile, IdempotencyKey as ModelIdempotencyKey, Intent, RefIntent, Statement,
     TransactionRequest,
@@ -41,8 +41,9 @@ use fgit_reference::intent::{
 use fgit_reference::refs::ExpectedRefState;
 use fgit_txn::{IntentEvaluator, TransactionFoldReport};
 use fgit_types::{
-    AsciiSlug, DecisionOutcome, Digest, PrincipalId, RefName, RefusalCode, RefusalRecordId,
-    RepositoryCommitId, RepositoryId, SchemaFamily, SchemaId, TenantId, TransactionSealId, TxId,
+    AsciiSlug, DecisionOutcome, Digest, DomainTag, PrincipalId, PrincipalSnapshotId, RefName,
+    RefusalCode, RefusalRecordId, RepositoryCommitId, RepositoryId, RepositorySequence,
+    SchemaFamily, SchemaId, TenantId, TransactionSealId, TxId,
 };
 use fgit_wire::receive::{
     QuarantineReceipt, ReceiveCommand, ReceiveCommandKind, ReceiveCommandStatus, ReceiveError,
@@ -195,32 +196,32 @@ where
 
 /// A read-only, head-pinned view of the materialized repository state.
 ///
-/// `refs` and the other collections are a projection of `head`, never storage
-/// owned by this crate.  The lifetime makes a caller retain ownership of that
-/// projection through intent evaluation; no mutable map is retained between
-/// admissions.
-#[derive(Clone, Copy, Debug)]
-pub struct AdmissionSnapshot<'a> {
+/// All fields are immutable copies resolved from the supplied authenticated
+/// head.  Owning the values is deliberate: a durable state store may return a
+/// decoded immutable body rather than a borrow into a process-local map, and
+/// admission must never turn such a map into a second source of truth.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AdmissionSnapshot {
     /// Ref state at the authenticated basis.
-    pub refs: &'a BTreeMap<RefName, fgit_types::GitOid>,
+    pub refs: BTreeMap<RefName, fgit_types::GitOid>,
     /// Forge stream positions at that same basis.
-    pub forge_positions: &'a BTreeMap<
+    pub forge_positions: BTreeMap<
         fgit_reference::intent::ForgeStreamId,
         fgit_reference::intent::ForgeStreamPosition,
     >,
     /// Retention roots at that same basis.
-    pub retention: &'a BTreeSet<fgit_reference::intent::RetentionRoot>,
+    pub retention: BTreeSet<fgit_reference::intent::RetentionRoot>,
     /// External-effect delivery keys at that same basis.
-    pub outbox: &'a BTreeMap<fgit_reference::intent::OutboxDeliveryKey, Digest>,
+    pub outbox: BTreeMap<fgit_reference::intent::OutboxDeliveryKey, Digest>,
 }
 
-impl AdmissionSnapshot<'_> {
+impl AdmissionSnapshot {
     const fn as_fold_basis(&self) -> FoldBasis<'_> {
         FoldBasis {
-            refs: self.refs,
-            forge_positions: self.forge_positions,
-            retention: self.retention,
-            outbox: self.outbox,
+            refs: &self.refs,
+            forge_positions: &self.forge_positions,
+            retention: &self.retention,
+            outbox: &self.outbox,
         }
     }
 }
@@ -257,11 +258,11 @@ pub struct RefusalMaterialization {
 /// request has been sealed by this crate.
 pub trait AdmissionProjection {
     /// Opens a read-only projection rooted in exactly this authenticated head.
-    fn snapshot<'a>(
-        &'a self,
+    fn snapshot(
+        &self,
         basis: &PublicationBasis,
         authenticated: &AuthenticatedHead,
-    ) -> Result<AdmissionSnapshot<'a>, RefusalCode>;
+    ) -> Result<AdmissionSnapshot, RefusalCode>;
 
     /// Materializes a committed fold into an RCR and its successor roots.
     fn materialize_commit(
@@ -279,6 +280,518 @@ pub trait AdmissionProjection {
         tx_id: TxId,
         code: RefusalCode,
     ) -> Result<RefusalMaterialization, RefusalCode>;
+}
+
+/// The one canonical immutable ref-state body selected by an authority head's
+/// `ref_root`.
+///
+/// The payload is a canonical map from validated ref names to native Git
+/// object identities.  [`Encoder::write_canonical_map`] sorts by each key's
+/// encoded bytes and refuses duplicate keys; the explicit codec operation is
+/// the ordering rule, rather than an incidental property of `BTreeMap`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CanonicalRefState {
+    refs: BTreeMap<RefName, fgit_types::GitOid>,
+}
+
+impl CanonicalRefState {
+    /// Builds an immutable ref state from uniquely keyed validated refs.
+    #[must_use]
+    pub fn new(refs: BTreeMap<RefName, fgit_types::GitOid>) -> Self {
+        Self { refs }
+    }
+
+    /// The resolved ref map.
+    #[must_use]
+    pub const fn refs(&self) -> &BTreeMap<RefName, fgit_types::GitOid> {
+        &self.refs
+    }
+
+    fn apply(&self, effects: &BTreeMap<RefName, RefEffect>) -> Self {
+        let mut refs = self.refs.clone();
+        for (name, effect) in effects {
+            match effect {
+                RefEffect::Set(oid) => {
+                    refs.insert(name.clone(), *oid);
+                }
+                RefEffect::Delete => {
+                    refs.remove(name);
+                }
+            }
+        }
+        Self { refs }
+    }
+}
+
+impl CanonicalBody for CanonicalRefState {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/admission-ref-state/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("admission-ref-state");
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        let entries = self
+            .refs
+            .iter()
+            .map(|(name, oid)| (name.clone(), *oid))
+            .collect::<Vec<_>>();
+        out.write_canonical_map(
+            "ref-state.refs",
+            &entries,
+            |encoder, name| encoder.write_ref_name(name),
+            |encoder, oid| {
+                encoder.write_git_oid(oid);
+                Ok(())
+            },
+        )
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let refs = input
+            .read_canonical_map(
+                "ref-state.refs",
+                Decoder::read_ref_name,
+                Decoder::read_git_oid,
+            )?
+            .into_iter()
+            .collect();
+        Ok(Self { refs })
+    }
+}
+
+/// The canonical immutable set of native objects a validated receive may use.
+///
+/// Elements are canonical-set encoded by their full native-object encoding,
+/// including the Git hash algorithm; a SHA-1 and SHA-256 OID with overlapping
+/// bytes therefore cannot alias this commitment.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PermittedObjectClosure {
+    objects: BTreeSet<fgit_types::GitOid>,
+}
+
+impl PermittedObjectClosure {
+    /// Builds a closure from exactly the validated native object identities.
+    #[must_use]
+    pub fn new(objects: BTreeSet<fgit_types::GitOid>) -> Self {
+        Self { objects }
+    }
+
+    /// The native object identities permitted by this closure.
+    #[must_use]
+    pub const fn objects(&self) -> &BTreeSet<fgit_types::GitOid> {
+        &self.objects
+    }
+}
+
+impl CanonicalBody for PermittedObjectClosure {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/admission-object-closure/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("admission-object-closure");
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        let objects = self.objects.iter().copied().collect::<Vec<_>>();
+        out.write_canonical_set(
+            "permitted-object-closure.objects",
+            &objects,
+            |encoder, oid| {
+                encoder.write_git_oid(oid);
+                Ok(())
+            },
+        )
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let objects = input
+            .read_canonical_set("permitted-object-closure.objects", Decoder::read_git_oid)?
+            .into_iter()
+            .collect();
+        Ok(Self { objects })
+    }
+}
+
+/// The canonical ref delta recorded by one commit materialization.
+///
+/// A `None` value means deletion; a present OID means replacement.  It has a
+/// separate domain from the resulting state so an old state cannot be replayed
+/// where the audit trail expects a change set.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CanonicalRefDelta {
+    changes: BTreeMap<RefName, Option<fgit_types::GitOid>>,
+}
+
+impl CanonicalRefDelta {
+    fn from_effects(effects: &BTreeMap<RefName, RefEffect>) -> Self {
+        let changes = effects
+            .iter()
+            .map(|(name, effect)| {
+                let value = match effect {
+                    RefEffect::Set(oid) => Some(*oid),
+                    RefEffect::Delete => None,
+                };
+                (name.clone(), value)
+            })
+            .collect();
+        Self { changes }
+    }
+}
+
+impl CanonicalBody for CanonicalRefDelta {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/admission-ref-delta/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("admission-ref-delta");
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        let entries = self
+            .changes
+            .iter()
+            .map(|(name, oid)| (name.clone(), *oid))
+            .collect::<Vec<_>>();
+        out.write_canonical_map(
+            "ref-delta.changes",
+            &entries,
+            |encoder, name| encoder.write_ref_name(name),
+            |encoder, oid| {
+                encoder.write_option(oid.as_ref(), |encoder, oid| {
+                    encoder.write_git_oid(oid);
+                    Ok(())
+                })
+            },
+        )
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let changes = input
+            .read_canonical_map("ref-delta.changes", Decoder::read_ref_name, |decoder| {
+                decoder.read_option("ref-delta.value", Decoder::read_git_oid)
+            })?
+            .into_iter()
+            .collect();
+        Ok(Self { changes })
+    }
+}
+
+/// Computes the domain-pinned commitment used in an authority head's
+/// `ref_root`.
+pub fn canonical_ref_state_root(state: &CanonicalRefState) -> Result<Digest, RefusalCode> {
+    canonical_body_root(state)
+}
+
+/// Computes the domain-pinned commitment recorded as an RCR object closure.
+pub fn permitted_object_closure_root(
+    closure: &PermittedObjectClosure,
+) -> Result<Digest, RefusalCode> {
+    canonical_body_root(closure)
+}
+
+fn canonical_ref_delta_root(delta: &CanonicalRefDelta) -> Result<Digest, RefusalCode> {
+    canonical_body_root(delta)
+}
+
+fn canonical_body_root<Body>(body: &Body) -> Result<Digest, RefusalCode>
+where
+    Body: CanonicalBody,
+{
+    let identity =
+        body_id(&CryptoBodyIdentity, body).map_err(|_| RefusalCode::CanonicalFramingInvalid)?;
+    Ok(Digest::new(identity.algorithm(), *identity.digest()))
+}
+
+/// Immutable backing for canonical admission commitments.
+///
+/// The backing is an object store, not an authority source: it stages and
+/// resolves content-addressed bodies, while only the authenticated authority
+/// head selects which ref-state root is canonical.  Implementations must
+/// return the body named by `root`; [`CanonicalAdmissionProjection`] verifies
+/// that relationship again before evaluating a request.
+pub trait CanonicalAdmissionStore {
+    /// Resolves a staged ref-state body by its canonical root.
+    fn resolve_ref_state(&self, root: Digest) -> Result<CanonicalRefState, RefusalCode>;
+
+    /// Stages a ref-state body under the supplied canonical root.
+    fn stage_ref_state(&self, root: Digest, state: CanonicalRefState) -> Result<(), RefusalCode>;
+
+    /// Resolves a staged permitted-object closure by its canonical root.
+    fn resolve_permitted_object_closure(
+        &self,
+        root: Digest,
+    ) -> Result<PermittedObjectClosure, RefusalCode>;
+
+    /// Stages a permitted-object closure under its canonical root.
+    fn stage_permitted_object_closure(
+        &self,
+        root: Digest,
+        closure: PermittedObjectClosure,
+    ) -> Result<(), RefusalCode>;
+}
+
+/// Immutable non-ref evidence consumed by admission materialization.
+///
+/// This is supplied by the policy/invariant/outbox owners.  The projection
+/// computes the ref state, delta, and closure itself; accepting an unrelated
+/// bare digest here would make this layer invent policy or effect evidence it
+/// does not own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommitEvidence {
+    /// Principal/capability snapshot that authorized this commit.
+    pub principal_snapshot_id: PrincipalSnapshotId,
+    /// Root over forge events (empty for the receive-only slice).
+    pub forge_event_batch_root: Digest,
+    /// Resulting authenticated outcome-index root.
+    pub outcome_index_root: Digest,
+    /// Root over policy evaluation evidence.
+    pub policy_decision_root: Digest,
+    /// Root over invariant checks for the candidate.
+    pub invariant_evidence_root: Digest,
+    /// Root over external-effect obligations created by this candidate.
+    pub outbox_effect_root: Digest,
+    /// Root over retention changes created by this candidate.
+    pub retention_delta_root: Digest,
+    /// Root over the decision batch evidence.
+    pub batch_evidence_root: Digest,
+}
+
+/// Policy and evidence owner used by the production projection.
+pub trait AdmissionEvidence {
+    /// Produces evidence for a committing ref-only fold at this exact basis.
+    fn commit_evidence(
+        &self,
+        basis: &PublicationBasis,
+        request: &TransactionRequest,
+        fold: &TransactionFoldReport,
+    ) -> Result<CommitEvidence, RefusalCode>;
+
+    /// Produces the immutable refusal evidence for this exact basis and code.
+    fn refusal_evidence(
+        &self,
+        basis: &PublicationBasis,
+        tx_id: TxId,
+        code: RefusalCode,
+    ) -> Result<RefusalMaterialization, RefusalCode>;
+}
+
+/// Production implementation of [`AdmissionProjection`].
+///
+/// It resolves the state selected by the supplied authenticated head, verifies
+/// its content-addressed root, applies the folded ref effects, then stages the
+/// successor body before returning the same successor root to chronicle.  It
+/// never reads a connection-local ref map or treats staged objects as
+/// canonical visibility.
+#[derive(Clone, Debug)]
+pub struct CanonicalAdmissionProjection<Store, Evidence> {
+    store: Store,
+    evidence: Evidence,
+}
+
+impl<Store, Evidence> CanonicalAdmissionProjection<Store, Evidence> {
+    /// Connects a canonical immutable object store to its policy/evidence
+    /// provider.  Authority-head publication remains the caller's CAS path.
+    #[must_use]
+    pub const fn new(store: Store, evidence: Evidence) -> Self {
+        Self { store, evidence }
+    }
+
+    /// Stages canonical genesis/import state and returns the corresponding
+    /// ref and closure roots.  [`initialize_canonical_repository`] is the
+    /// matching root-last authority publication path.
+    pub fn stage_initial_state(
+        &self,
+        refs: CanonicalRefState,
+        closure: PermittedObjectClosure,
+    ) -> Result<CanonicalCommitments, RefusalCode>
+    where
+        Store: CanonicalAdmissionStore,
+    {
+        let ref_root = canonical_ref_state_root(&refs)?;
+        let object_closure_root = permitted_object_closure_root(&closure)?;
+        self.store.stage_ref_state(ref_root, refs)?;
+        self.store
+            .stage_permitted_object_closure(object_closure_root, closure)?;
+        Ok(CanonicalCommitments {
+            ref_root,
+            object_closure_root,
+        })
+    }
+
+    fn resolve_ref_state(&self, root: Digest) -> Result<CanonicalRefState, RefusalCode>
+    where
+        Store: CanonicalAdmissionStore,
+    {
+        let state = self.store.resolve_ref_state(root)?;
+        if canonical_ref_state_root(&state)? == root {
+            Ok(state)
+        } else {
+            Err(RefusalCode::InternalInvariantBreach)
+        }
+    }
+}
+
+/// The two canonical commitments produced together for import or a validated
+/// receive.  The ref root enters the authority head; the closure root enters
+/// the RCR that commits the receive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CanonicalCommitments {
+    /// Root selected by an authority head.
+    pub ref_root: Digest,
+    /// Root recorded in the committing RCR.
+    pub object_closure_root: Digest,
+}
+
+/// First authority head plus the canonical commitments staged before it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CanonicalGenesis {
+    /// The exact initial head published through authority initialization.
+    pub head: RepositoryAuthorityHeadBody,
+    /// The separately recorded ref and closure commitments.
+    pub commitments: CanonicalCommitments,
+}
+
+/// Stages canonical import state, computes the initial `ref_root` with the
+/// same code used for later commits, then publishes the first authority head.
+///
+/// The closure root has no head field by design: it belongs to the RCR for a
+/// validated receive.  It is staged here so import and steady-state use one
+/// canonical closure format rather than two incompatible definitions.
+pub fn initialize_canonical_repository<Authority, Store, Evidence>(
+    authority: &Authority,
+    head_key: &HeadKey,
+    mut head: RepositoryAuthorityHeadBody,
+    projection: &CanonicalAdmissionProjection<Store, Evidence>,
+    refs: CanonicalRefState,
+    closure: PermittedObjectClosure,
+) -> Result<CanonicalGenesis, CanonicalGenesisFailure>
+where
+    Authority: AuthorityStore + ?Sized,
+    Store: CanonicalAdmissionStore,
+{
+    let commitments = projection
+        .stage_initial_state(refs, closure)
+        .map_err(CanonicalGenesisFailure::Refusal)?;
+    head.ref_root = commitments.ref_root;
+    initialize_repository(authority, head_key, &head)
+        .map_err(CanonicalGenesisFailure::Authority)?;
+    Ok(CanonicalGenesis { head, commitments })
+}
+
+/// Failure while staging import commitments or publishing the initial head.
+#[derive(Debug)]
+pub enum CanonicalGenesisFailure {
+    /// A canonical state or closure could not be staged.
+    Refusal(RefusalCode),
+    /// Authority refused the initial root-last publication.
+    Authority(OutcomeFailure),
+}
+
+impl Display for CanonicalGenesisFailure {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Refusal(code) => write!(formatter, "canonical genesis refused: {code:?}"),
+            Self::Authority(failure) => {
+                write!(formatter, "canonical genesis authority failure: {failure}")
+            }
+        }
+    }
+}
+
+impl Error for CanonicalGenesisFailure {}
+
+impl<Store, Evidence> AdmissionProjection for CanonicalAdmissionProjection<Store, Evidence>
+where
+    Store: CanonicalAdmissionStore,
+    Evidence: AdmissionEvidence,
+{
+    fn snapshot(
+        &self,
+        basis: &PublicationBasis,
+        authenticated: &AuthenticatedHead,
+    ) -> Result<AdmissionSnapshot, RefusalCode> {
+        let authenticated_body = authenticated
+            .body()
+            .map_err(|_| RefusalCode::AuthorityReceiptInvalid)?;
+        if authenticated_body != *basis.body() {
+            return Err(RefusalCode::AuthorityReceiptStale);
+        }
+        let state = self.resolve_ref_state(authenticated_body.ref_root)?;
+        Ok(AdmissionSnapshot {
+            refs: state.refs,
+            forge_positions: BTreeMap::new(),
+            retention: BTreeSet::new(),
+            outbox: BTreeMap::new(),
+        })
+    }
+
+    fn materialize_commit(
+        &self,
+        basis: &PublicationBasis,
+        request: &TransactionRequest,
+        fold: &TransactionFoldReport,
+        closure: &ValidatedClosure,
+    ) -> Result<CommitMaterialization, RefusalCode> {
+        let effects = fold
+            .effects()
+            .ok_or(RefusalCode::ConflictingSemanticEffects)?;
+        if !effects.forge.is_empty() || !effects.retention.is_empty() || !effects.outbox.is_empty()
+        {
+            return Err(RefusalCode::ConflictingSemanticEffects);
+        }
+
+        let current = self.resolve_ref_state(basis.body().ref_root)?;
+        let next = current.apply(&effects.refs);
+        let ref_root = canonical_ref_state_root(&next)?;
+        self.store.stage_ref_state(ref_root, next)?;
+
+        let closure_body = PermittedObjectClosure::new(closure.objects.clone());
+        let object_closure_root = permitted_object_closure_root(&closure_body)?;
+        if object_closure_root != closure.object_closure_root {
+            return Err(RefusalCode::ObjectClosureIncomplete);
+        }
+        self.store
+            .stage_permitted_object_closure(object_closure_root, closure_body)?;
+
+        let evidence = self.evidence.commit_evidence(basis, request, fold)?;
+        let ref_delta_root =
+            canonical_ref_delta_root(&CanonicalRefDelta::from_effects(&effects.refs))?;
+        let roots = ResultingRoots {
+            ref_root,
+            forge_position_root: basis.body().forge_position_root,
+            outcome_index_root: evidence.outcome_index_root,
+            retention_root: basis.body().retention_root,
+            outbox_root: basis.body().outbox_root,
+            policy_epoch: basis.body().policy_epoch,
+            batch_evidence_root: evidence.batch_evidence_root,
+        };
+        Ok(CommitMaterialization {
+            record: RepositoryCommitRecord {
+                repository_id: request.repository,
+                repository_sequence: RepositorySequence::FIRST,
+                parent_rcr_id: None,
+                tx_id: request.tx_id,
+                principal_snapshot_id: evidence.principal_snapshot_id,
+                canonical_request_digest: request.canonical_request_digest,
+                ref_delta_root,
+                resulting_ref_root: roots.ref_root,
+                object_closure_root,
+                forge_event_batch_root: evidence.forge_event_batch_root,
+                resulting_forge_position_root: roots.forge_position_root,
+                policy_epoch: roots.policy_epoch,
+                policy_decision_root: evidence.policy_decision_root,
+                invariant_evidence_root: evidence.invariant_evidence_root,
+                outbox_effect_root: evidence.outbox_effect_root,
+                retention_delta_root: evidence.retention_delta_root,
+            },
+            roots,
+        })
+    }
+
+    fn materialize_refusal(
+        &self,
+        basis: &PublicationBasis,
+        tx_id: TxId,
+        code: RefusalCode,
+    ) -> Result<RefusalMaterialization, RefusalCode> {
+        self.evidence.refusal_evidence(basis, tx_id, code)
+    }
 }
 
 /// The stable session-to-transaction mapping returned by admission.
@@ -687,25 +1200,24 @@ where
         )? {
             return Ok(terminal);
         }
-        let (basis, receipt) = read_basis(store, &context.head_key)?;
+        let (basis, receipt, authenticated) = read_basis(store, &context.head_key)?;
         let closure = &validated.closure;
-        let snapshot =
-            match projection.snapshot(&basis, &store.authenticate_head_receipt(&receipt)?) {
-                Ok(snapshot) => snapshot,
-                Err(code) => match publish_refusal(
-                    store,
-                    context,
-                    &basis,
-                    receipt.token(),
-                    admission.seal_id(),
-                    tx_id,
-                    code,
-                    projection,
-                )? {
-                    Some(terminal) => return Ok(terminal),
-                    None => continue,
-                },
-            };
+        let snapshot = match projection.snapshot(&basis, &authenticated) {
+            Ok(snapshot) => snapshot,
+            Err(code) => match publish_refusal(
+                store,
+                context,
+                &basis,
+                receipt.token(),
+                admission.seal_id(),
+                tx_id,
+                code,
+                projection,
+            )? {
+                Some(terminal) => return Ok(terminal),
+                None => continue,
+            },
+        };
         let model_request = model_request(context, &lowered.semantic, tx_id, closure)?;
         let fold = IntentEvaluator::new().evaluate(snapshot.as_fold_basis(), &model_request);
         let terminal = match &fold.outcome {
@@ -756,7 +1268,14 @@ where
 fn read_basis<S>(
     store: &S,
     head_key: &HeadKey,
-) -> Result<(PublicationBasis, fgit_authority::HeadReadReceipt), AdmissionError>
+) -> Result<
+    (
+        PublicationBasis,
+        fgit_authority::HeadReadReceipt,
+        AuthenticatedHead,
+    ),
+    AdmissionError,
+>
 where
     S: AuthorityStore + ?Sized,
 {
@@ -765,22 +1284,19 @@ where
         HeadRead::Absent => return Err(AdmissionError::HeadAbsent),
     };
     let authenticated = store.authenticate_head_receipt(&receipt)?;
-    let body: RepositoryAuthorityHeadBody =
-        decode_body(receipt.body(), fgit_codec::DecodeLimits::DEFAULT)
-            .map_err(AdmissionError::HeadCodec)?;
-    if body.generation != receipt.generation() {
-        return Err(AdmissionError::MaterializationMismatch(
-            "head receipt generation",
-        ));
-    }
+    let body = authenticated.body().map_err(|failure| match failure {
+        fgit_authority::HeadBodyRefusal::Codec(refusal) => AdmissionError::HeadCodec(refusal),
+        fgit_authority::HeadBodyRefusal::GenerationMismatch { .. } => {
+            AdmissionError::MaterializationMismatch("head receipt generation")
+        }
+    })?;
     let id = body_id(&CryptoBodyIdentity, &body)
         .map_err(AdmissionError::HeadIdentity)
         .and_then(|id| {
             fgit_types::RepositoryAuthorityHeadId::from_internal_object_id(id)
                 .map_err(|refusal| AdmissionError::HeadIdentity(refusal.into()))
         })?;
-    let _ = authenticated;
-    Ok((PublicationBasis::new(id, body), receipt))
+    Ok((PublicationBasis::new(id, body), receipt, authenticated))
 }
 
 fn model_request(
@@ -1055,7 +1571,7 @@ mod tests {
         FaultableAuthorityStore, HeadKey, MemoryAuthorityStore, OpIndex, StoreInstanceId,
         initialize_repository, resolve_outcome,
     };
-    use fgit_codec::{RepositoryAuthorityHeadBody, RepositoryCommitRecord};
+    use fgit_codec::{RepositoryAuthorityHeadBody, RepositoryCommitRecord, decode_body};
     use fgit_reference::effect::FoldOutcome;
     use fgit_types::{
         DigestAlgorithmId, DigestBytes, HeadGeneration, PolicyEpoch, PrincipalSnapshotId,
@@ -1078,16 +1594,16 @@ mod tests {
     }
 
     impl AdmissionProjection for FixtureProjection {
-        fn snapshot<'a>(
-            &'a self,
+        fn snapshot(
+            &self,
             _basis: &PublicationBasis,
             _authenticated: &AuthenticatedHead,
-        ) -> Result<AdmissionSnapshot<'a>, RefusalCode> {
+        ) -> Result<AdmissionSnapshot, RefusalCode> {
             Ok(AdmissionSnapshot {
-                refs: &self.refs,
-                forge_positions: &self.forge_positions,
-                retention: &self.retention,
-                outbox: &self.outbox,
+                refs: self.refs.clone(),
+                forge_positions: self.forge_positions.clone(),
+                retention: self.retention.clone(),
+                outbox: self.outbox.clone(),
             })
         }
 

@@ -23,18 +23,20 @@
 //! invisible by construction. The property is untestable through a
 //! basis-ignoring adapter no matter how the race is injected.
 //!
-//! So [`PinnedProjection`] is **basis-derived**: its ref table is a function of
-//! `basis.body().ref_root`. Two different heads therefore produce two different
-//! snapshots, which is exactly the sensitivity a TOCTOU probe needs.
+//! So the production [`CanonicalAdmissionProjection`] is **basis-derived**:
+//! its ref table is resolved from `basis.body().ref_root`. Two different heads
+//! therefore produce two different snapshots, which is exactly the sensitivity
+//! a TOCTOU probe needs. [`PinnedProjection`] below is only the race injector
+//! around that production implementation.
 //!
 //! ## The race is real, not simulated
 //!
 //! `FaultKind` has no "concurrent modification" variant, so the fault plan
 //! cannot express this. The injection here is a genuine competing writer:
 //! [`PinnedProjection::race_the_head`] calls the public `publish_decisions`
-//! from inside `snapshot()` — which is, precisely, the window between the basis
-//! read and the publication. Nothing is stubbed; the head really does advance
-//! underneath an in-flight admission.
+//! immediately after the production `snapshot()` returns — precisely the
+//! window between the basis read and the publication. Nothing is stubbed; the
+//! head really does advance underneath an in-flight admission.
 //!
 //! ## Every claim here carries a presence case
 //!
@@ -55,30 +57,30 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use fgit_admission::{
-    AdmissionContext, AdmissionLimits, AdmissionProjection, AdmissionSnapshot,
-    CommitMaterialization, QuarantineValidator, RefusalMaterialization, ValidatedClosure,
-    ValidatedReceive, admit_validated_receive, validate_receive,
+    AdmissionContext, AdmissionEvidence, AdmissionLimits, AdmissionProjection, AdmissionSnapshot,
+    CanonicalAdmissionProjection, CanonicalAdmissionStore, CanonicalRefState, CommitEvidence,
+    CommitMaterialization, PermittedObjectClosure, QuarantineValidator, RefusalMaterialization,
+    ValidatedClosure, ValidatedReceive, admit_validated_receive, canonical_ref_state_root,
+    initialize_canonical_repository, permitted_object_closure_root, validate_receive,
 };
 use fgit_authority::{
     AuthenticatedHead, AuthorityStore, HeadKey, HeadRead, IdempotencyKey, MemoryAuthorityStore,
-    OutcomeLookup, StoreInstanceId, initialize_repository, publish_decisions, resolve_outcome,
+    OutcomeLookup, StoreInstanceId, publish_decisions, resolve_outcome,
 };
-use fgit_chronicle::{PublicationBasis, ResultingRoots};
+use fgit_chronicle::PublicationBasis;
 use fgit_codec::{
-    RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecisionBatchBody,
+    RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody, decode_body, encode_body,
 };
-use fgit_reference::effect::FoldOutcome;
-use fgit_reference::intent::{
-    ForgeStreamId, ForgeStreamPosition, OutboxDeliveryKey, RetentionRoot, TransactionRequest,
-};
+use fgit_reference::intent::TransactionRequest;
 use fgit_txn::TransactionFoldReport;
 use fgit_types::native::GitHashAlgorithm;
 use fgit_types::{
     DecisionOutcome, DecisionSequence, Digest, DigestAlgorithmId, DigestBytes, GitOid,
     HeadGeneration, PolicyEpoch, PrincipalId, PrincipalSnapshotId, RefName, RefusalCode,
-    RegistryEpoch, RepositoryId, RepositorySequence, TenantId, TxId,
+    RegistryEpoch, RepositoryId, TenantId, TxId,
 };
 use fgit_wire::receive::{
     QuarantineReceipt, ReceiveContext, ReceiveEvent, ReceiveLimits, ReceivePack, ReceiveRequest,
@@ -90,15 +92,6 @@ const ZERO: &str = "0000000000000000000000000000000000000000";
 const MAIN_OID: &str = "2222222222222222222222222222222222222222";
 const MAIN_REF: &[u8] = b"refs/heads/main";
 
-/// The `ref_root` the genesis head carries.
-const GENESIS_REF_ROOT: u8 = 1;
-/// The `ref_root` the competing writer installs. Distinct from genesis, which
-/// is what makes the projection's answer change under the race.
-const RIVAL_REF_ROOT: u8 = 200;
-
-type ForgeMap = BTreeMap<ForgeStreamId, ForgeStreamPosition>;
-type OutboxMap = BTreeMap<OutboxDeliveryKey, Digest>;
-type RetentionSet = BTreeSet<RetentionRoot>;
 type RefMap = BTreeMap<RefName, GitOid>;
 
 // ---------------------------------------------------------------------------
@@ -136,7 +129,7 @@ fn context() -> AdmissionContext {
     }
 }
 
-fn genesis(context: &AdmissionContext) -> RepositoryAuthorityHeadBody {
+fn genesis(context: &AdmissionContext, ref_root: Digest) -> RepositoryAuthorityHeadBody {
     RepositoryAuthorityHeadBody {
         repository_id: context.repository_id,
         generation: HeadGeneration::FIRST,
@@ -145,7 +138,7 @@ fn genesis(context: &AdmissionContext) -> RepositoryAuthorityHeadBody {
         latest_decision_sequence: None,
         latest_committed_rcr_id: None,
         latest_repository_sequence: None,
-        ref_root: digest(GENESIS_REF_ROOT),
+        ref_root,
         forge_position_root: digest(16),
         outcome_index_root: digest(17),
         retention_root: digest(18),
@@ -157,13 +150,6 @@ fn genesis(context: &AdmissionContext) -> RepositoryAuthorityHeadBody {
     }
 }
 
-fn store_with_genesis(context: &AdmissionContext) -> MemoryAuthorityStore {
-    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(31));
-    initialize_repository(&store, &context.head_key, &genesis(context))
-        .expect("genesis head initializes");
-    store
-}
-
 struct DeleteOnlyValidator;
 
 impl QuarantineValidator for DeleteOnlyValidator {
@@ -173,8 +159,10 @@ impl QuarantineValidator for DeleteOnlyValidator {
         _pack: Option<&fgit_pack::QuarantinedPack>,
         _receipt: &QuarantineReceipt,
     ) -> Result<ValidatedClosure, RefusalCode> {
+        let closure = PermittedObjectClosure::default();
         Ok(ValidatedClosure {
-            object_closure_root: digest(14),
+            object_closure_root: permitted_object_closure_root(&closure)
+                .expect("empty closure has a registered canonical root"),
             objects: BTreeSet::new(),
         })
     }
@@ -227,28 +215,108 @@ fn delete_main() -> ValidatedReceive {
 // The basis-derived projection
 // ---------------------------------------------------------------------------
 
-/// A projection whose snapshot is a **function of the authenticated head**.
+/// A tiny immutable commitment store used only to drive the production
+/// projection through its public storage contract.
+#[derive(Default)]
+struct TestCommitmentStore {
+    refs: RefCell<BTreeMap<Digest, CanonicalRefState>>,
+    closures: RefCell<BTreeMap<Digest, PermittedObjectClosure>>,
+}
+
+#[derive(Clone, Default)]
+struct TestStore(Rc<TestCommitmentStore>);
+
+impl CanonicalAdmissionStore for TestStore {
+    fn resolve_ref_state(&self, root: Digest) -> Result<CanonicalRefState, RefusalCode> {
+        self.0
+            .refs
+            .borrow()
+            .get(&root)
+            .cloned()
+            .ok_or(RefusalCode::EvidenceMissing)
+    }
+
+    fn stage_ref_state(&self, root: Digest, state: CanonicalRefState) -> Result<(), RefusalCode> {
+        self.0.refs.borrow_mut().insert(root, state);
+        Ok(())
+    }
+
+    fn resolve_permitted_object_closure(
+        &self,
+        root: Digest,
+    ) -> Result<PermittedObjectClosure, RefusalCode> {
+        self.0
+            .closures
+            .borrow()
+            .get(&root)
+            .cloned()
+            .ok_or(RefusalCode::EvidenceMissing)
+    }
+
+    fn stage_permitted_object_closure(
+        &self,
+        root: Digest,
+        closure: PermittedObjectClosure,
+    ) -> Result<(), RefusalCode> {
+        self.0.closures.borrow_mut().insert(root, closure);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TestEvidence;
+
+impl AdmissionEvidence for TestEvidence {
+    fn commit_evidence(
+        &self,
+        _basis: &PublicationBasis,
+        _request: &TransactionRequest,
+        _fold: &fgit_txn::TransactionFoldReport,
+    ) -> Result<CommitEvidence, RefusalCode> {
+        Ok(CommitEvidence {
+            principal_snapshot_id: principal_snapshot(),
+            forge_event_batch_root: digest(8),
+            outcome_index_root: digest(4),
+            policy_decision_root: digest(9),
+            invariant_evidence_root: digest(10),
+            outbox_effect_root: digest(11),
+            retention_delta_root: digest(12),
+            batch_evidence_root: digest(6),
+        })
+    }
+
+    fn refusal_evidence(
+        &self,
+        basis: &PublicationBasis,
+        _tx_id: TxId,
+        _code: RefusalCode,
+    ) -> Result<RefusalMaterialization, RefusalCode> {
+        Ok(RefusalMaterialization {
+            policy_epoch: basis.body().policy_epoch,
+            detail: "fg008 toctou probe refusal".to_owned(),
+            evidence_root: digest(13),
+        })
+    }
+}
+
+type ProductionProjection = CanonicalAdmissionProjection<TestStore, TestEvidence>;
+
+/// A race injector around the production projection.
 ///
-/// This is the whole point of the file. The ref table it exposes is chosen by
-/// `basis.body().ref_root`: the genesis root yields a table carrying
-/// `refs/heads/main`, and any other root yields an empty table. A delete of
-/// `main` therefore folds cleanly against the genesis basis and becomes a
-/// stale-ref refusal against any successor — so the decision *observably*
-/// depends on which head was pinned, and a race that slipped through would
-/// change the answer.
-struct PinnedProjection<'s> {
-    store: &'s MemoryAuthorityStore,
+/// The wrapper has no ref-state behavior of its own: it delegates every
+/// projection decision and materialization to [`CanonicalAdmissionProjection`]
+/// and only moves the authority head after the production snapshot has been
+/// opened.  This keeps the race real without turning test scaffolding into a
+/// second projection implementation.
+struct PinnedProjection {
+    production: ProductionProjection,
+    commitments: TestStore,
+    store: Rc<MemoryAuthorityStore>,
     head_key: HeadKey,
     repository_id: RepositoryId,
     tenant_id: TenantId,
-
-    /// Ref table returned for the genesis basis.
-    refs_at_genesis: RefMap,
-    /// Ref table returned for any other basis.
-    refs_after_race: RefMap,
-    forge_positions: ForgeMap,
-    retention: RetentionSet,
-    outbox: OutboxMap,
+    genesis_ref_root: Digest,
+    rival_ref_root: Digest,
 
     /// Whether to run a competing writer inside the first `snapshot`.
     race: bool,
@@ -263,24 +331,25 @@ struct PinnedProjection<'s> {
     generation_after: Cell<u64>,
 }
 
-impl<'s> PinnedProjection<'s> {
-    fn new(store: &'s MemoryAuthorityStore, context: &AdmissionContext, race: bool) -> Self {
-        let mut refs_at_genesis = RefMap::new();
-        refs_at_genesis.insert(
-            RefName::try_new(MAIN_REF).expect("fixture ref name"),
-            oid(MAIN_OID),
-        );
-
+impl PinnedProjection {
+    fn new(
+        production: ProductionProjection,
+        commitments: TestStore,
+        store: Rc<MemoryAuthorityStore>,
+        context: &AdmissionContext,
+        genesis_ref_root: Digest,
+        rival_ref_root: Digest,
+        race: bool,
+    ) -> Self {
         Self {
+            production,
+            commitments,
             store,
             head_key: context.head_key.clone(),
             repository_id: context.repository_id,
             tenant_id: context.tenant_id,
-            refs_at_genesis,
-            refs_after_race: RefMap::new(),
-            forge_positions: ForgeMap::new(),
-            retention: RetentionSet::new(),
-            outbox: OutboxMap::new(),
+            genesis_ref_root,
+            rival_ref_root,
             race,
             observed: RefCell::new(Vec::new()),
             raced: Cell::new(false),
@@ -322,7 +391,7 @@ impl<'s> PinnedProjection<'s> {
         let mut rival = basis.body().clone();
         rival.generation = next_generation;
         rival.predecessor_head_id = Some(basis.id());
-        rival.ref_root = digest(RIVAL_REF_ROOT);
+        rival.ref_root = self.rival_ref_root;
 
         let batch = RepositoryDecisionBatchBody {
             repository_id: self.repository_id,
@@ -341,7 +410,7 @@ impl<'s> PinnedProjection<'s> {
         };
 
         let landed = publish_decisions(
-            self.store,
+            self.store.as_ref(),
             &self.head_key,
             read.token(),
             &batch,
@@ -364,22 +433,15 @@ impl<'s> PinnedProjection<'s> {
     }
 }
 
-impl AdmissionProjection for PinnedProjection<'_> {
-    fn snapshot<'a>(
-        &'a self,
+impl AdmissionProjection for PinnedProjection {
+    fn snapshot(
+        &self,
         basis: &PublicationBasis,
-        _authenticated: &AuthenticatedHead,
-    ) -> Result<AdmissionSnapshot<'a>, RefusalCode> {
+        authenticated: &AuthenticatedHead,
+    ) -> Result<AdmissionSnapshot, RefusalCode> {
         let root = basis.body().ref_root;
         self.observed.borrow_mut().push(root);
-
-        // The refs are chosen by the head we were handed, never by a cached
-        // local table. That is the property under test.
-        let refs = if root == digest(GENESIS_REF_ROOT) {
-            &self.refs_at_genesis
-        } else {
-            &self.refs_after_race
-        };
+        let snapshot = self.production.snapshot(basis, authenticated)?;
 
         // Race only on the first snapshot: the replan must be allowed to
         // succeed, or the drill would measure the replan limit instead of the
@@ -389,12 +451,7 @@ impl AdmissionProjection for PinnedProjection<'_> {
             self.race_the_head(basis);
         }
 
-        Ok(AdmissionSnapshot {
-            refs,
-            forge_positions: &self.forge_positions,
-            retention: &self.retention,
-            outbox: &self.outbox,
-        })
+        Ok(snapshot)
     }
 
     fn materialize_commit(
@@ -404,58 +461,95 @@ impl AdmissionProjection for PinnedProjection<'_> {
         fold: &TransactionFoldReport,
         closure: &ValidatedClosure,
     ) -> Result<CommitMaterialization, RefusalCode> {
-        if !matches!(fold.outcome, FoldOutcome::Folded(_)) {
-            return Err(RefusalCode::ConflictingSemanticEffects);
-        }
-        let roots = ResultingRoots {
-            ref_root: digest(2),
-            forge_position_root: digest(3),
-            outcome_index_root: digest(4),
-            retention_root: basis.body().retention_root,
-            outbox_root: digest(5),
-            policy_epoch: basis.body().policy_epoch,
-            batch_evidence_root: digest(6),
-        };
-        Ok(CommitMaterialization {
-            record: RepositoryCommitRecord {
-                repository_id: request.repository,
-                repository_sequence: RepositorySequence::FIRST,
-                parent_rcr_id: None,
-                tx_id: request.tx_id,
-                principal_snapshot_id: principal_snapshot(),
-                canonical_request_digest: request.canonical_request_digest,
-                ref_delta_root: digest(7),
-                resulting_ref_root: roots.ref_root,
-                object_closure_root: closure.object_closure_root,
-                forge_event_batch_root: digest(8),
-                resulting_forge_position_root: roots.forge_position_root,
-                policy_epoch: roots.policy_epoch,
-                policy_decision_root: digest(9),
-                invariant_evidence_root: digest(10),
-                outbox_effect_root: digest(11),
-                retention_delta_root: digest(12),
-            },
-            roots,
-        })
+        self.production
+            .materialize_commit(basis, request, fold, closure)
     }
 
     fn materialize_refusal(
         &self,
         basis: &PublicationBasis,
-        _tx_id: TxId,
-        _code: RefusalCode,
+        tx_id: TxId,
+        code: RefusalCode,
     ) -> Result<RefusalMaterialization, RefusalCode> {
-        Ok(RefusalMaterialization {
-            policy_epoch: basis.body().policy_epoch,
-            detail: "fg008 toctou probe refusal".to_owned(),
-            evidence_root: digest(13),
-        })
+        self.production.materialize_refusal(basis, tx_id, code)
     }
+}
+
+fn store_with_genesis(
+    context: &AdmissionContext,
+    race: bool,
+) -> (Rc<MemoryAuthorityStore>, PinnedProjection) {
+    let commitments = TestStore::default();
+    let production = CanonicalAdmissionProjection::new(commitments.clone(), TestEvidence);
+    let mut refs = RefMap::new();
+    refs.insert(
+        RefName::try_new(MAIN_REF).expect("fixture ref name"),
+        oid(MAIN_OID),
+    );
+    let store = Rc::new(MemoryAuthorityStore::new(StoreInstanceId::from_raw(31)));
+    let canonical_genesis = initialize_canonical_repository(
+        store.as_ref(),
+        &context.head_key,
+        genesis(context, digest(1)),
+        &production,
+        CanonicalRefState::new(refs),
+        PermittedObjectClosure::default(),
+    )
+    .expect("genesis head publishes the production-computed ref root");
+    let rival_ref_root = canonical_ref_state_root(&CanonicalRefState::default())
+        .expect("empty rival state has a canonical root");
+    commitments
+        .stage_ref_state(rival_ref_root, CanonicalRefState::default())
+        .expect("rival state stages canonically");
+
+    let projection = PinnedProjection::new(
+        production,
+        commitments,
+        Rc::clone(&store),
+        context,
+        canonical_genesis.commitments.ref_root,
+        rival_ref_root,
+        race,
+    );
+    (store, projection)
 }
 
 // ---------------------------------------------------------------------------
 // Drills
 // ---------------------------------------------------------------------------
+
+/// The ref-state commitment names the same state regardless of insertion
+/// order.  This proves the explicit codec ordering rather than relying on the
+/// map implementation's traversal as a hidden protocol rule.
+#[test]
+fn canonical_ref_state_root_is_independent_of_input_insertion_order() {
+    let main = RefName::try_new(MAIN_REF).expect("fixture main ref");
+    let dev = RefName::try_new(b"refs/heads/dev").expect("fixture dev ref");
+
+    let mut first = RefMap::new();
+    first.insert(main.clone(), oid(MAIN_OID));
+    first.insert(dev.clone(), oid("3333333333333333333333333333333333333333"));
+    let mut second = RefMap::new();
+    second.insert(dev, oid("3333333333333333333333333333333333333333"));
+    second.insert(main, oid(MAIN_OID));
+
+    let first = CanonicalRefState::new(first);
+    let second = CanonicalRefState::new(second);
+    assert_eq!(
+        canonical_ref_state_root(&first),
+        canonical_ref_state_root(&second),
+        "canonical map encoding must erase construction order while retaining exact ref/OID pairs"
+    );
+    let decoded: CanonicalRefState = decode_body(
+        &encode_body(&first).expect("canonical ref state encodes"),
+        fgit_codec::DecodeLimits::DEFAULT,
+    )
+    .expect("canonical ref state decodes");
+    assert_eq!(
+        decoded, first,
+        "the root names a reconstructable ref state body"
+    );
+}
 
 /// PRESENCE CASE for the projection itself: the snapshot really does change
 /// with the head, observed through the real admission path.
@@ -469,20 +563,18 @@ impl AdmissionProjection for PinnedProjection<'_> {
 fn the_snapshot_answer_changes_with_the_head_it_is_pinned_to() {
     let context = context();
 
-    let unraced_store = store_with_genesis(&context);
-    let unraced = PinnedProjection::new(&unraced_store, &context, false);
+    let (unraced_store, unraced) = store_with_genesis(&context, false);
     let unraced_result = admit_validated_receive(
-        &unraced_store,
+        unraced_store.as_ref(),
         &context,
         &delete_main(),
         AdmissionLimits::default(),
         &unraced,
     );
 
-    let raced_store = store_with_genesis(&context);
-    let raced = PinnedProjection::new(&raced_store, &context, true);
+    let (raced_store, raced) = store_with_genesis(&context, true);
     let raced_result = admit_validated_receive(
-        &raced_store,
+        raced_store.as_ref(),
         &context,
         &delete_main(),
         AdmissionLimits::default(),
@@ -491,11 +583,11 @@ fn the_snapshot_answer_changes_with_the_head_it_is_pinned_to() {
 
     assert_eq!(
         unraced.observed_roots(),
-        vec![digest(GENESIS_REF_ROOT)],
+        vec![unraced.genesis_ref_root],
         "without a competing writer the basis must never change"
     );
     assert!(
-        raced.observed_roots().contains(&digest(RIVAL_REF_ROOT)),
+        raced.observed_roots().contains(&raced.rival_ref_root),
         "the raced attempt never saw the head the race installed, so the snapshot \
          is not tracking the head at all"
     );
@@ -513,11 +605,11 @@ fn the_snapshot_answer_changes_with_the_head_it_is_pinned_to() {
         "the unraced control must be admissible"
     );
     let unraced_committed = matches!(
-        terminal_for(&unraced_store, &context, &unraced_result),
+        terminal_for(unraced_store.as_ref(), &context, &unraced_result),
         Some(DecisionOutcome::Committed { .. })
     );
     let raced_committed = matches!(
-        terminal_for(&raced_store, &context, &raced_result),
+        terminal_for(raced_store.as_ref(), &context, &raced_result),
         Some(DecisionOutcome::Committed { .. })
     );
     assert!(
@@ -561,11 +653,10 @@ fn terminal_for(
 #[test]
 fn the_injected_race_actually_lands() {
     let context = context();
-    let store = store_with_genesis(&context);
-    let projection = PinnedProjection::new(&store, &context, true);
+    let (store, projection) = store_with_genesis(&context, true);
 
     let _ = admit_validated_receive(
-        &store,
+        store.as_ref(),
         &context,
         &delete_main(),
         AdmissionLimits::default(),
@@ -594,12 +685,11 @@ fn the_injected_race_actually_lands() {
 #[test]
 fn a_concurrent_head_change_cannot_slip_past_the_pinned_snapshot() {
     let context = context();
-    let store = store_with_genesis(&context);
-    let projection = PinnedProjection::new(&store, &context, true);
+    let (store, projection) = store_with_genesis(&context, true);
     let validated = delete_main();
 
     let result = admit_validated_receive(
-        &store,
+        store.as_ref(),
         &context,
         &validated,
         AdmissionLimits::default(),
@@ -617,13 +707,12 @@ fn a_concurrent_head_change_cannot_slip_past_the_pinned_snapshot() {
 
     let observed = projection.observed_roots();
     assert_eq!(
-        observed[0],
-        digest(GENESIS_REF_ROOT),
+        observed[0], projection.genesis_ref_root,
         "the first snapshot must be pinned to the genesis head"
     );
     assert_eq!(
         observed[observed.len() - 1],
-        digest(RIVAL_REF_ROOT),
+        projection.rival_ref_root,
         "the final snapshot must be pinned to the head the race installed, not the \
          one the attempt started from"
     );
@@ -637,7 +726,7 @@ fn a_concurrent_head_change_cannot_slip_past_the_pinned_snapshot() {
     };
     let tx_id = result.session.tx_ids[0];
     let resolved = resolve_outcome(
-        &store,
+        store.as_ref(),
         &context.head_key,
         context.tenant_id,
         context.repository_id,
@@ -667,12 +756,11 @@ fn a_concurrent_head_change_cannot_slip_past_the_pinned_snapshot() {
 #[test]
 fn a_permitted_twin_proceeds_without_the_race() {
     let context = context();
-    let store = store_with_genesis(&context);
-    let projection = PinnedProjection::new(&store, &context, false);
+    let (store, projection) = store_with_genesis(&context, false);
     let validated = delete_main();
 
     let result = admit_validated_receive(
-        &store,
+        store.as_ref(),
         &context,
         &validated,
         AdmissionLimits::default(),
@@ -687,7 +775,7 @@ fn a_permitted_twin_proceeds_without_the_race() {
     );
     assert_eq!(
         projection.observed_roots()[0],
-        digest(GENESIS_REF_ROOT),
+        projection.genesis_ref_root,
         "the single snapshot is pinned to the genesis head"
     );
     assert!(
@@ -697,7 +785,7 @@ fn a_permitted_twin_proceeds_without_the_race() {
 
     let tx_id = result.session.tx_ids[0];
     let resolved = resolve_outcome(
-        &store,
+        store.as_ref(),
         &context.head_key,
         context.tenant_id,
         context.repository_id,
@@ -717,5 +805,70 @@ fn a_permitted_twin_proceeds_without_the_race() {
     assert_eq!(
         result.commands[0].terminal, terminal,
         "the caller was told a decision the authenticated stream does not hold"
+    );
+}
+
+/// The successor root returned by the production materializer is resolvable
+/// through the same immutable commitment store, and a missing root refuses.
+#[test]
+fn production_successor_ref_root_round_trips_and_missing_root_refuses() {
+    let context = context();
+    let (store, projection) = store_with_genesis(&context, false);
+
+    let result = admit_validated_receive(
+        store.as_ref(),
+        &context,
+        &delete_main(),
+        AdmissionLimits::default(),
+        &projection,
+    )
+    .expect("the production projection commits the permitted control");
+    let tx_id = result.session.tx_ids[0];
+    let terminal = resolve_outcome(
+        store.as_ref(),
+        &context.head_key,
+        context.tenant_id,
+        context.repository_id,
+        tx_id,
+    )
+    .expect("the terminal outcome resolves");
+    assert!(
+        matches!(terminal, OutcomeLookup::Decided(ref outcome) if matches!(outcome.outcome, DecisionOutcome::Committed { .. })),
+        "the round-trip requires a real production commit, not an uncommitted candidate"
+    );
+
+    let HeadRead::Present(head) = store
+        .read_head(&context.head_key)
+        .expect("the committed head is readable")
+    else {
+        panic!("the committed repository head must exist");
+    };
+    let authenticated = store
+        .authenticate_head_receipt(&head)
+        .expect("the committed head authenticates");
+    let body = authenticated
+        .body()
+        .expect("the committed head body decodes");
+    let resolved = projection
+        .commitments
+        .resolve_ref_state(body.ref_root)
+        .expect("the authority-selected successor root resolves");
+    assert!(
+        resolved.refs().is_empty(),
+        "deleting the only ref must be reflected by the state named in the successor root"
+    );
+    assert_eq!(
+        projection.commitments.resolve_ref_state(digest(255)),
+        Err(RefusalCode::EvidenceMissing),
+        "a root absent from immutable storage must refuse rather than fall back to a local map"
+    );
+    let closure_root = permitted_object_closure_root(&PermittedObjectClosure::default())
+        .expect("the delete-only closure has a canonical root");
+    assert_eq!(
+        projection
+            .commitments
+            .resolve_permitted_object_closure(closure_root),
+        Ok(PermittedObjectClosure::default()),
+        "the RCR-validated closure commitment must resolve from the same immutable store"
     );
 }

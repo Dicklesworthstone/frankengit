@@ -426,6 +426,12 @@ pub enum IdentityDomain {
     /// protocol-normative body, which is why it is an `owned_row` with no
     /// `fgit-types` derived identity pinning it.
     AuthorityHistory,
+    /// One canonical immutable admission ref-state body.
+    AdmissionRefState,
+    /// One canonical immutable admission permitted-object closure body.
+    AdmissionObjectClosure,
+    /// One canonical immutable admission ref delta body.
+    AdmissionRefDelta,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -643,6 +649,24 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         33,
         IdentityDomain::AuthorityHistory,
         "frankengit/authority-history/v1",
+        None,
+    ),
+    owned_row(
+        34,
+        IdentityDomain::AdmissionRefState,
+        "frankengit/admission-ref-state/v1",
+        None,
+    ),
+    owned_row(
+        35,
+        IdentityDomain::AdmissionObjectClosure,
+        "frankengit/admission-object-closure/v1",
+        None,
+    ),
+    owned_row(
+        36,
+        IdentityDomain::AdmissionRefDelta,
+        "frankengit/admission-ref-delta/v1",
         None,
     ),
 ];
@@ -866,6 +890,9 @@ impl IdentityDomain {
         Self::KeyLifecycleReceipt,
         Self::RestoreReport,
         Self::AuthorityHistory,
+        Self::AdmissionRefState,
+        Self::AdmissionObjectClosure,
+        Self::AdmissionRefDelta,
     ];
 
     /// Position of this domain in [`DOMAIN_REGISTRY`].

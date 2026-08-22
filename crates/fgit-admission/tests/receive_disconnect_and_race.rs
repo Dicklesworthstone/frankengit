@@ -182,16 +182,16 @@ impl UnboundAdapter {
 }
 
 impl AdmissionProjection for UnboundAdapter {
-    fn snapshot<'a>(
-        &'a self,
+    fn snapshot(
+        &self,
         _basis: &PublicationBasis,
         _authenticated: &AuthenticatedHead,
-    ) -> Result<AdmissionSnapshot<'a>, RefusalCode> {
+    ) -> Result<AdmissionSnapshot, RefusalCode> {
         Ok(AdmissionSnapshot {
-            refs: &self.refs,
-            forge_positions: &self.forge_positions,
-            retention: &self.retention,
-            outbox: &self.outbox,
+            refs: self.refs.clone(),
+            forge_positions: self.forge_positions.clone(),
+            retention: self.retention.clone(),
+            outbox: self.outbox.clone(),
         })
     }
 
