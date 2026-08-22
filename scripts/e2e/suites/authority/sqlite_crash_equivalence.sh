@@ -153,6 +153,16 @@ fge_run sqlite-fault-conformance \
   cargo test --locked -p fgit-authority-fsqlite --test fault_conformance || true
 sq_fault_exit=$FGE_LAST_EXIT
 
+# The measurement the frankengit-w1ik fix is designed around: fsqlite returns
+# FrankenError::Interrupt for BOTH a pre-dispatch and an after-dispatch cancel,
+# so the store cannot narrow cancellation to a refusal and must answer
+# Ambiguous. Run in the lane rather than left as a one-off, because the whole
+# mapping becomes wrong the day that stops being true -- and the probe asserts
+# the observation, so it fails instead of going quietly stale.
+fge_run sqlite-cancellation-error-probe \
+  cargo test --locked -p fgit-authority-fsqlite --test cancellation_error_probe || true
+sq_probe_exit=$FGE_LAST_EXIT
+
 fge_phase assert
 
 fge_assert_exit FG-005B-E2E-010 0 "$sq_campaign_exit" \
@@ -171,6 +181,8 @@ fge_assert_exit FG-005B-E2E-022 0 "$sq_cancellation_exit" \
   'cancellation before dispatch refuses AND leaves no effect, and is never retried'
 fge_assert_exit FG-005B-E2E-020 0 "$sq_fault_exit" \
   'AF-01..AF-08 pass against a real FrankenSQLite database: effects reach real SQL, ambiguity resolves by real exact-key read, and lost-request is distinguished from lost-response by the effect log. Scope: faults are injected at the STORE BOUNDARY, so faults originating inside SQLite are not exercised'
+fge_assert_exit FG-005B-E2E-025 0 "$sq_probe_exit" \
+  'the premise frankengit-w1ik was fixed on still holds: fsqlite returns Interrupt for BOTH a pre-dispatch and an after-dispatch cancel, so the store cannot narrow cancellation to a refusal and must answer Ambiguous. If this cell fails the two points have become separable and the mapping should be re-derived, not patched'
 
 fge_assert_eq FG-005B-E2E-013 '' "$sq_missing" \
   'every mechanism the campaign depends on is still present in it'
@@ -192,9 +204,8 @@ fi
 #
 # FG-005b's acceptance says the report publishes the support matrix and that
 # any unproved cell is "unsupported/non-pass and is admission-capped in
-# production". Two cells are still unproved -- one for absent capability and
-# one because a filed defect blocks it -- so both are recorded as TYPED
-# UNSUPPORTED assertions rather than as prose notes.
+# production". One cell is still unproved, so it is recorded as a TYPED
+# UNSUPPORTED assertion rather than as a prose note.
 #
 # That makes this lane's terminal status non-pass, and it should: the harness
 # treats an unsupported assertion as non-pass precisely so a partially proved
@@ -207,26 +218,27 @@ fi
 # a defect in the implementation; it is absent capability in the surface
 # available to a verifier.
 #
-# E2E-024 is the opposite kind and is recorded separately for that reason: the
-# capability exists, the test is written, and it FAILS because the store has a
-# defect. It is unsupported here rather than a `fge_fail` because the cell is
-# unproved, not because this lane broke something -- but it must not be
-# invisible. An ignored `#[test]` that no cell names would let this lane report
-# clean while a P1 it discovered went unrepresented, which is the same
-# hole-hiding the paragraph above exists to prevent.
+# THREE cells used to sit here and no longer do, and they left for three
+# different reasons worth keeping straight:
 #
-# Two cells used to sit here and no longer do. Cancellation was assumed
-# undrivable and was drivable; fault injection was assumed unreachable for this
-# backend "by anyone" and was reachable through a wrapper. That is why these
-# reasons are re-measured at every pass instead of inherited: on this bead the
-# base rate of a wrong impossibility claim has been high, and every one of them
-# was derived by reading a single layer of a stack.
+#   - cancellation was assumed undrivable and was drivable;
+#   - fault injection was assumed unreachable for this backend "by anyone" and
+#     was reachable through a wrapper;
+#   - E2E-024 was a cell BLOCKED BY A DEFECT rather than by absent capability --
+#     the test existed and failed because the store reported non-commit for a
+#     cancellation that had committed. That was `frankengit-w1ik`, and it was
+#     fixed in the store, so the cell is gone and the test runs.
+#
+# The first two are why these reasons are re-measured at every pass instead of
+# inherited: on this bead the base rate of a wrong impossibility claim has been
+# high, and every one was derived by reading a single layer of a stack.
+#
+# The third is why "unsupported" must stay honest about WHICH kind it is. A
+# defect-blocked cell and an absent-capability cell both read as non-pass, but
+# one is waiting on a capability and the other on a bug nobody may be fixing.
 
 fge_unsupported FG-005B-E2E-021 \
   'cancellation of a statement the VDBE is ACTIVELY STEPPING, plus the commit-ambiguous and reply-lost cancellation cells. FG-005B-E2E-022 now covers cancellation before dispatch, between retry attempts, and after dispatch before completion. What remains: the store statements are too short to reach a VDBE opcode checkpoint reliably, and commit-ambiguous needs a lost response and a cancel arriving together -- buildable now that FG-005B-E2E-020 supplies a fault engine, but not written, so not claimed. Narrowed twice rather than deleted. CLAUSE PROVENANCE, because a reason is a conjunction and only one conjunct usually gets checked: the VDBE clause is MEASURED (31 poll sites read, store statements sized against the opcode checkpoint interval); the commit-ambiguous clause is a STRUCTURAL ASSERTION I have not tried, and it may well be wrong the way the last five were'
-
-fge_unsupported FG-005B-E2E-024 \
-  'no-mixed-state under LATE cancellation is BLOCKED BY A DEFECT, not by absent capability. The test exists and is correct: cancellation_matrix::no_cancellation_position_leaves_a_mixture, currently #[ignore]. It measures the store reporting ok=false while the body IS committed -- e.g. "after 1335 of about 1525 suspensions" -- because a cancelled operation returns Refused(Unavailable), and Refused asserts non-commit, which NPC 5.2 forbids for cancellation. Filed as frankengit-w1ik (P1) by BoldIbis from a reading of into_failure; this lane measured the same defect from the outside. Un-ignore the test and delete this cell when w1ik lands'
 
 # The structural PRECONDITION for that cell, which IS checkable today.
 #
