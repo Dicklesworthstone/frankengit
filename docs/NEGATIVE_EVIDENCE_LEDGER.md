@@ -2,7 +2,7 @@
 
 **Status:** normative evidence profile  
 **Version:** 1.0  
-**Last revised:** 2026-08-21
+**Last revised:** 2026-08-22
 
 FrankenGit records failed hypotheses, invalidated designs, unsafe shortcuts, non-reproducing benchmarks, and incomplete proof attempts as durable project knowledge. Positive evidence alone creates selection bias: agents repeatedly rediscover attractive ideas whose failure artifacts were never preserved.
 
@@ -165,6 +165,60 @@ in question.
 floating point and owes its own constitutional argument), or arbitrary-precision rationals (no
 admitted crate provides them), or restructures the summation to begin at the peak term and work
 outward so no value near `T0` is ever represented. The last is plausible and unanalysed.
+
+**Superseded 2026-08-22 by `529b8a7` (`frankengit-s76z`), on the third route.** The clause above is
+discharged as written: `crates/fgit-statistics/src/expected_loss.rs` finds the peak index, evaluates
+`T(peak)` directly as a balanced product of consecutive-integer runs, and walks outward in both
+directions. No value near `T0` is ever represented.
+
+**The registry row stays `active`, deliberately.** Section 6 speaks of supersession, but
+`registries/negative_evidence.tsv` admits only
+`active|specified|implemented|verified|experimental|rejected`, so there is no `superseded` value to
+set -- and on the merits `active` is the right one anyway. This row warns against evaluating the
+recurrence upward from `T0` in fixed point, and that warning is exactly as true now as it was
+before. What changed is that one of its three named revisit routes was taken. The supersession is a
+link, recorded here, not a retraction. If a machine-readable supersession status is wanted, that is
+a checker-vocabulary change and belongs to whoever owns `tools/registry-check`.
+
+Per section 6 this entry is not rewritten, because **most of it is still true and still
+load-bearing**:
+
+- the hypothesis as stated — that iterating the recurrence *from `T0`* at a fixed scale suffices —
+  remains **disproven**, and the measured `T0` values above remain the reason;
+- the dynamic-range analysis is what *selected* the replacement, so it is the entry's most useful
+  part, not its obsolete part;
+- the underflow region did not disappear. Concentrated far-from-even posteriors still push
+  `T(peak)` itself below `2^-96`. What changed is that underflow is now **observable** rather than
+  silent: the running value reaches zero and the function returns
+  `ExpectedLossRefusal::PeakTermUnrepresentable` instead of a plausible `0 ppm`. Measured over the
+  sweep below, every set that refuses has an exact value under `1 ppm`, and that property is
+  asserted rather than assumed.
+
+What the replacement owes and pays, measured against exact rational evaluation of the same closed
+form (generator committed at `crates/fgit-statistics/tests/oracle/generate.py`, swept by
+`crates/fgit-statistics/tests/expected_loss_error_evidence.rs`):
+
+| region | measurement |
+|---|---|
+| 500 deterministic sets, all parameters in `1..=300` | 457 answer, 43 refuse |
+| the 457 answers | every one equals the exact floor **exactly**; 327 have a non-zero exact value |
+| direction | **zero overestimates** — every division floors |
+| the 43 refusals | every one has an exact value below `1 ppm` |
+| exact ppm boundaries (a posterior against itself) | short by **exactly 1 ppm, never more**, over `Beta(n,n)` for `n` in `1..=200` |
+
+The stated bound is therefore **1 ppm, one-directional**, attained only at exact ppm boundaries. The
+random sweep alone would have supported a tighter claim of `0`; it is not made, because a randomly
+drawn parameter set essentially never lands on a boundary, and the boundary is the only place the
+flooring can move the reported integer.
+
+The one-directional half is the part a controller depends on. An under-stated
+`P(theta_b exceeds theta_a)` under-states a candidate policy's advantage over its fallback, so the
+error can delay a policy switch but never provoke one. Rounding the final conversion to nearest
+would make the boundary cases exact and would cost exactly that property, so it is not done.
+
+**Still unattempted, and still owed their own constitutional argument:** the other two routes named
+above. Widening the representable region past `2^-96` needs a mantissa-plus-exponent representation
+or arbitrary-precision rationals, and neither is introduced here.
 
 ## 5. Integration with agents
 
