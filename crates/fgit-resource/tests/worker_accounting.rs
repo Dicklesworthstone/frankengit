@@ -14,7 +14,8 @@
 
 use fgit_resource::algebra::{GRADE_COUNT, Grade};
 use fgit_resource::workers::{
-    BatchPlan, VarianceClass, WorkerBudgetInputs, WorkerMode, plan, plan_for_batch,
+    BatchPlan, VarianceClass, WorkerBudgetInputs, WorkerBudgetRefusal, WorkerMode, plan,
+    plan_for_batch,
 };
 
 const fn inputs(mode: WorkerMode, variance: VarianceClass) -> WorkerBudgetInputs {
@@ -220,4 +221,74 @@ fn plan_for_batch_narrows_the_fleet_to_the_batch_and_never_widens_it() {
         1,
         "the cap floors at one worker, never zero"
     );
+}
+
+// ---------------------------------------------------------------------------
+// plan()'s input validation: three refusals that had no presence case
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_zero_cpu_cap_is_refused_and_a_single_cpu_proceeds() {
+    // plan() checks the cap first, so this is the one refusal reachable with
+    // every other input left valid.
+    let mut none = inputs(WorkerMode::Batch, VarianceClass::Tight);
+    none.cpu_cap = 0;
+    assert_eq!(plan(none), Err(WorkerBudgetRefusal::ZeroCpuCap));
+
+    // The permitted twin at the exact boundary: one CPU is a fleet, not an
+    // error. A guard written as `<= 1` rather than `== 0` would refuse this,
+    // and a refusal-only test could not tell the two apart.
+    let mut one = inputs(WorkerMode::Batch, VarianceClass::Tight);
+    one.cpu_cap = 1;
+    let planned = plan(one).expect("one CPU admits a fleet");
+    assert_eq!(
+        planned.workers(),
+        1,
+        "a single-CPU cap plans exactly one worker"
+    );
+}
+
+#[test]
+fn a_zero_per_job_estimate_is_refused_and_one_byte_proceeds() {
+    // Checked after the cap, so the cap stays valid here or this would report
+    // ZeroCpuCap instead and prove nothing about the estimate.
+    let mut none = inputs(WorkerMode::Batch, VarianceClass::Tight);
+    none.per_job_rss_bytes = 0;
+    assert_eq!(plan(none), Err(WorkerBudgetRefusal::ZeroPerJobEstimate));
+
+    // The boundary twin: one byte is a real estimate. Zero is refused because
+    // it would make the memory division meaningless, not because small is bad.
+    let mut one = inputs(WorkerMode::Batch, VarianceClass::Tight);
+    one.per_job_rss_bytes = 1;
+    assert!(
+        plan(one).is_ok(),
+        "a one-byte estimate divides cleanly and must not be refused"
+    );
+}
+
+#[test]
+fn an_estimate_whose_headroom_overflows_is_refused_distinctly_from_one_that_merely_does_not_fit() {
+    // inflate() is checked_mul(headroom).div_ceil(100), so u64::MAX against
+    // Tight's 100 percent overflows the multiply before any division happens.
+    let mut overflowing = inputs(WorkerMode::Batch, VarianceClass::Tight);
+    overflowing.per_job_rss_bytes = u64::MAX;
+    assert_eq!(
+        plan(overflowing),
+        Err(WorkerBudgetRefusal::EstimateOverflow {
+            per_job_rss_bytes: u64::MAX,
+            headroom_percent: 100,
+        }),
+        "an estimate whose inflated size is not representable must refuse rather than wrap"
+    );
+
+    // The discriminating twin, and the reason this is not just "big is refused":
+    // an estimate one hundredth of the way down does NOT overflow, and fails
+    // through a DIFFERENT door -- the budget check -- proving the overflow guard
+    // is about representability rather than about magnitude.
+    let mut large_but_representable = inputs(WorkerMode::Batch, VarianceClass::Tight);
+    large_but_representable.per_job_rss_bytes = u64::MAX / 100;
+    match plan(large_but_representable) {
+        Err(WorkerBudgetRefusal::BudgetBelowOneJob { .. }) => {}
+        other => panic!("expected a budget refusal, not an overflow refusal, got {other:?}"),
+    }
 }
