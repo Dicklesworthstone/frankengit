@@ -59,11 +59,12 @@ use std::sync::{Arc, Mutex};
 
 use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionProjection,
-    AdmissionResult, AdmissionSnapshotProjection, AsyncAdmissionProjection,
-    CanonicalAdmissionProjection, CanonicalAdmissionStore, CanonicalRefState, CommitEvidence,
-    CommitMaterialization, PermittedObjectClosure, QuarantineValidator, RefusalMaterialization,
-    ValidatedClosure, ValidatedReceive, admit_validated_receive, admit_validated_receive_async,
-    canonical_ref_state_root, permitted_object_closure_root, validate_receive,
+    AdmissionResult, AdmissionSnapshot, AdmissionSnapshotProjection, AsyncAdmissionProjection,
+    AsyncProjectionFailure, CanonicalAdmissionProjection, CanonicalAdmissionStore,
+    CanonicalRefState, CommitEvidence, CommitMaterialization, PermittedObjectClosure,
+    QuarantineValidator, RefusalMaterialization, ValidatedClosure, ValidatedReceive,
+    admit_validated_receive, admit_validated_receive_async, canonical_ref_state_root,
+    permitted_object_closure_root, validate_receive,
 };
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, AuthorityStore,
@@ -473,6 +474,20 @@ impl AdmissionSnapshotProjection for AsyncMaterializingProjection {
 }
 
 impl AsyncAdmissionProjection<AsyncView> for AsyncMaterializingProjection {
+    fn snapshot_async<'a>(
+        &'a self,
+        _authority: &'a AsyncView,
+        _cx: &'a <AsyncView as AsyncAuthorityStore>::Context,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+    ) -> impl Future<Output = Result<AdmissionSnapshot, AsyncProjectionFailure>> + Send + 'a {
+        std::future::ready(
+            self.inner
+                .snapshot(basis, authenticated)
+                .map_err(AsyncProjectionFailure::Refuse),
+        )
+    }
+
     fn materialize_commit_async<'a>(
         &'a self,
         _authority: &'a AsyncView,
@@ -481,8 +496,13 @@ impl AsyncAdmissionProjection<AsyncView> for AsyncMaterializingProjection {
         request: &'a TransactionRequest,
         fold: &'a fgit_txn::TransactionFoldReport,
         closure: &'a ValidatedClosure,
-    ) -> impl Future<Output = Result<CommitMaterialization, RefusalCode>> + Send + 'a {
-        std::future::ready(self.inner.materialize_commit(basis, request, fold, closure))
+    ) -> impl Future<Output = Result<CommitMaterialization, AsyncProjectionFailure>> + Send + 'a
+    {
+        std::future::ready(
+            self.inner
+                .materialize_commit(basis, request, fold, closure)
+                .map_err(AsyncProjectionFailure::Refuse),
+        )
     }
 
     fn materialize_refusal_async<'a>(
@@ -492,8 +512,67 @@ impl AsyncAdmissionProjection<AsyncView> for AsyncMaterializingProjection {
         basis: &'a PublicationBasis,
         tx_id: TxId,
         code: RefusalCode,
-    ) -> impl Future<Output = Result<RefusalMaterialization, RefusalCode>> + Send + 'a {
-        std::future::ready(self.inner.materialize_refusal(basis, tx_id, code))
+    ) -> impl Future<Output = Result<RefusalMaterialization, AsyncProjectionFailure>> + Send + 'a
+    {
+        std::future::ready(
+            self.inner
+                .materialize_refusal(basis, tx_id, code)
+                .map_err(AsyncProjectionFailure::Refuse),
+        )
+    }
+}
+
+/// Projection that reaches the post-fold durable boundary but cannot obtain
+/// the required material. The driver must return this as an undecided error;
+/// publishing it as a refusal would permanently decide a retryable request.
+struct UnavailableCommitProjection {
+    inner: CanonicalAdmissionProjection<StagingStore, StubEvidence>,
+}
+
+impl AsyncAdmissionProjection<AsyncView> for UnavailableCommitProjection {
+    fn snapshot_async<'a>(
+        &'a self,
+        _authority: &'a AsyncView,
+        _cx: &'a <AsyncView as AsyncAuthorityStore>::Context,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+    ) -> impl Future<Output = Result<AdmissionSnapshot, AsyncProjectionFailure>> + Send + 'a {
+        std::future::ready(
+            self.inner
+                .snapshot(basis, authenticated)
+                .map_err(AsyncProjectionFailure::Refuse),
+        )
+    }
+
+    fn materialize_commit_async<'a>(
+        &'a self,
+        _authority: &'a AsyncView,
+        _cx: &'a <AsyncView as AsyncAuthorityStore>::Context,
+        _basis: &'a PublicationBasis,
+        _request: &'a TransactionRequest,
+        _fold: &'a fgit_txn::TransactionFoldReport,
+        _closure: &'a ValidatedClosure,
+    ) -> impl Future<Output = Result<CommitMaterialization, AsyncProjectionFailure>> + Send + 'a
+    {
+        std::future::ready(Err(AsyncProjectionFailure::Unavailable(
+            RefusalCode::EvidenceMissing,
+        )))
+    }
+
+    fn materialize_refusal_async<'a>(
+        &'a self,
+        _authority: &'a AsyncView,
+        _cx: &'a <AsyncView as AsyncAuthorityStore>::Context,
+        basis: &'a PublicationBasis,
+        tx_id: TxId,
+        code: RefusalCode,
+    ) -> impl Future<Output = Result<RefusalMaterialization, AsyncProjectionFailure>> + Send + 'a
+    {
+        std::future::ready(
+            self.inner
+                .materialize_refusal(basis, tx_id, code)
+                .map_err(AsyncProjectionFailure::Refuse),
+        )
     }
 }
 
@@ -672,6 +751,49 @@ fn async_driver_uses_the_async_materialization_boundary() {
              expected {expected}, observed {observed}"
         );
     }
+}
+
+/// An unavailable durable materialization leaves the sealed request undecided.
+///
+/// This is the negative companion to the committing async boundary. A failure
+/// after a fold but before durable successor staging is not a policy result;
+/// converting it to a terminal refusal would violate the retry rule in §5.2.
+#[test]
+fn unavailable_async_materialization_never_publishes_a_terminal_refusal() {
+    let context = context(b"600m-unavailable-durable-materialization");
+    let validated = delete_main();
+    let (store, inner) = setup(&context, Basis::NamedPredecessor);
+    let before = store
+        .read_head(&context.head_key)
+        .expect("fixture authority head reads before admission");
+    let projection = UnavailableCommitProjection { inner };
+    let view = AsyncView(store);
+
+    let result = poll_ready(admit_validated_receive_async(
+        &view,
+        &(),
+        &context,
+        &validated,
+        AdmissionLimits::default(),
+        &projection,
+    ));
+    assert!(
+        matches!(
+            &result,
+            Err(AdmissionError::AsyncProjectionUnavailable(
+                RefusalCode::EvidenceMissing
+            ))
+        ),
+        "an unavailable durable materialization must return before publication, got {result:?}"
+    );
+    let after = view
+        .0
+        .read_head(&context.head_key)
+        .expect("fixture authority head reads after admission");
+    assert_eq!(
+        after, before,
+        "the unavailable materializer advanced the authority head and therefore published a terminal decision"
+    );
 }
 
 /// The corpus produces three distinct answers.

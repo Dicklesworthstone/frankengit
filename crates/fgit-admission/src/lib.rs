@@ -530,6 +530,51 @@ pub struct CommitMaterialization {
     pub roots: ResultingRoots,
 }
 
+/// Canonical successor bodies prepared from one folded transaction.
+///
+/// A caller must stage both immutable bodies before it consumes the enclosed
+/// [`CommitMaterialization`].  The type keeps ref folding and RCR construction
+/// in this crate while allowing an asynchronous owner of durable storage to
+/// await those staging writes without rebuilding the semantic request or fold.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedCanonicalCommit {
+    next_ref_state: CanonicalRefState,
+    object_closure: PermittedObjectClosure,
+    materialization: CommitMaterialization,
+}
+
+impl PreparedCanonicalCommit {
+    /// Immutable successor ref state whose root is named by the materialization.
+    #[must_use]
+    pub const fn next_ref_state(&self) -> &CanonicalRefState {
+        &self.next_ref_state
+    }
+
+    /// Immutable closure body whose root is bound by the RCR.
+    #[must_use]
+    pub const fn object_closure(&self) -> &PermittedObjectClosure {
+        &self.object_closure
+    }
+
+    /// Root the materialization binds to [`Self::next_ref_state`].
+    #[must_use]
+    pub const fn ref_root(&self) -> Digest {
+        self.materialization.roots.ref_root
+    }
+
+    /// Root the RCR binds to [`Self::object_closure`].
+    #[must_use]
+    pub const fn object_closure_root(&self) -> Digest {
+        self.materialization.record.object_closure_root
+    }
+
+    /// The record and resulting roots to publish after both bodies were staged.
+    #[must_use]
+    pub fn into_materialization(self) -> CommitMaterialization {
+        self.materialization
+    }
+}
+
 /// Evidence used to construct one immutable terminal refusal record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RefusalMaterialization {
@@ -583,23 +628,35 @@ pub trait AdmissionProjection: AdmissionSnapshotProjection {
     ) -> Result<RefusalMaterialization, RefusalCode>;
 }
 
-/// Asynchronous materialization capability for an [`AdmissionProjection`].
+/// Asynchronous materialization capability for an admission driver.
 ///
-/// The projection still opens its snapshot synchronously from an exact,
-/// authenticated materialization.  Only successor-frame staging and refusal
-/// evidence may require I/O after a fold has produced them.  Keeping that
-/// narrow asynchronous boundary separate from [`AdmissionProjection`] lets a
-/// blocking caller retain its synchronous contract while the asynchronous
-/// authority driver never introduces an in-projection `block_on` bridge.
+/// This trait intentionally does not extend [`AdmissionProjection`] or
+/// [`AdmissionSnapshotProjection`]. An asynchronous durable projection must
+/// not type-check at a blocking entrypoint, where a staging refusal would
+/// otherwise become a permanent canonical terminal decision. It also loads
+/// the snapshot asynchronously from the exact authenticated basis selected by
+/// each CAS attempt, so a normal CAS replan cannot reuse a stale cache entry
+/// or turn that race into a terminal refusal.
 ///
 /// `Authority` and its request context are passed explicitly rather than
-/// captured in a projection cache.  An implementation therefore stages each
-/// immutable body through the same authority operation that will later select
-/// it by exact-head publication; no local materialization becomes authority.
-pub trait AsyncAdmissionProjection<Authority>: AdmissionSnapshotProjection + Sync
+/// captured in a projection cache. An implementation therefore loads and
+/// stages immutable bodies through the same authority operation that will
+/// later select them by exact-head publication; no local materialization
+/// becomes authority.
+pub trait AsyncAdmissionProjection<Authority>: Sync
 where
     Authority: AsyncAuthorityStore + ?Sized,
 {
+    /// Opens a read-only snapshot at the exact authenticated basis for this
+    /// attempt. The driver invokes this again after every CAS replan.
+    fn snapshot_async<'a>(
+        &'a self,
+        authority: &'a Authority,
+        cx: &'a Authority::Context,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+    ) -> impl Future<Output = Result<AdmissionSnapshot, AsyncProjectionFailure>> + Send + 'a;
+
     /// Materializes a committing fold after the async driver has authenticated
     /// its publication basis.
     fn materialize_commit_async<'a>(
@@ -610,7 +667,7 @@ where
         request: &'a TransactionRequest,
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
-    ) -> impl Future<Output = Result<CommitMaterialization, RefusalCode>> + Send + 'a;
+    ) -> impl Future<Output = Result<CommitMaterialization, AsyncProjectionFailure>> + Send + 'a;
 
     /// Materializes evidence for a terminal refusal before its decision can
     /// become visible through the authority-head replacement.
@@ -621,7 +678,23 @@ where
         basis: &'a PublicationBasis,
         tx_id: TxId,
         code: RefusalCode,
-    ) -> impl Future<Output = Result<RefusalMaterialization, RefusalCode>> + Send + 'a;
+    ) -> impl Future<Output = Result<RefusalMaterialization, AsyncProjectionFailure>> + Send + 'a;
+}
+
+/// The outcome of an asynchronous projection operation before a terminal
+/// decision is published.
+///
+/// [`Self::Refuse`] is an evaluated terminal policy result. [`Self::Unavailable`]
+/// says the projection could not acquire or verify the material required to
+/// decide; the driver returns an [`AdmissionError`] and publishes nothing.
+/// In particular, a cancellation or durable I/O failure must not become a
+/// canonical refusal solely because it occurred while awaiting a projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AsyncProjectionFailure {
+    /// The projection evaluated a terminal refusal for this exact basis.
+    Refuse(RefusalCode),
+    /// Required material was unavailable before any terminal decision.
+    Unavailable(RefusalCode),
 }
 
 /// The one canonical immutable ref-state body selected by an authority head's
@@ -913,6 +986,77 @@ pub trait AdmissionEvidence {
     ) -> Result<RefusalMaterialization, RefusalCode>;
 }
 
+/// Prepare the canonical successor bodies and RCR for one folded commit.
+///
+/// This is pure over the exact folded request, authenticated basis, resolved
+/// current ref state, validated closure, and evidence.  It does not stage or
+/// publish anything.  A synchronous projection and an asynchronous durable
+/// adapter therefore share the only code that turns effects into a successor
+/// ref root, closure root, ref-delta root, and RCR fields.
+pub fn prepare_canonical_commit(
+    basis: &PublicationBasis,
+    request: &TransactionRequest,
+    fold: &TransactionFoldReport,
+    closure: &ValidatedClosure,
+    current: CanonicalRefState,
+    evidence: CommitEvidence,
+) -> Result<PreparedCanonicalCommit, RefusalCode> {
+    let effects = fold
+        .effects()
+        .ok_or(RefusalCode::ConflictingSemanticEffects)?;
+    if !effects.forge.is_empty() || !effects.retention.is_empty() || !effects.outbox.is_empty() {
+        return Err(RefusalCode::ConflictingSemanticEffects);
+    }
+
+    let next_ref_state = current.apply(&effects.refs);
+    let ref_root = canonical_ref_state_root(&next_ref_state)?;
+    let object_closure = PermittedObjectClosure::new(closure.objects.clone());
+    let object_closure_root = permitted_object_closure_root(&object_closure)?;
+    if object_closure_root != closure.object_closure_root {
+        return Err(RefusalCode::ObjectClosureIncomplete);
+    }
+
+    let ref_delta_root = canonical_ref_delta_root(&CanonicalRefDelta::from_effects(&effects.refs))?;
+    let roots = ResultingRoots {
+        ref_root,
+        forge_position_root: basis.body().forge_position_root,
+        outcome_index_root: evidence.outcome_index_root,
+        retention_root: basis.body().retention_root,
+        outbox_root: basis.body().outbox_root,
+        policy_epoch: basis.body().policy_epoch,
+        batch_evidence_root: evidence.batch_evidence_root,
+    };
+    let materialization = CommitMaterialization {
+        record: RepositoryCommitRecord {
+            repository_id: request.repository,
+            // `PublicationPlan` owns final sequence and predecessor stamping.
+            // These values only satisfy the complete RCR shape before it is
+            // handed to that plan; they are never identified.
+            repository_sequence: RepositorySequence::FIRST,
+            parent_rcr_id: None,
+            tx_id: request.tx_id,
+            principal_snapshot_id: evidence.principal_snapshot_id,
+            canonical_request_digest: request.canonical_request_digest,
+            ref_delta_root,
+            resulting_ref_root: roots.ref_root,
+            object_closure_root,
+            forge_event_batch_root: evidence.forge_event_batch_root,
+            resulting_forge_position_root: roots.forge_position_root,
+            policy_epoch: roots.policy_epoch,
+            policy_decision_root: evidence.policy_decision_root,
+            invariant_evidence_root: evidence.invariant_evidence_root,
+            outbox_effect_root: evidence.outbox_effect_root,
+            retention_delta_root: evidence.retention_delta_root,
+        },
+        roots,
+    };
+    Ok(PreparedCanonicalCommit {
+        next_ref_state,
+        object_closure,
+        materialization,
+    })
+}
+
 /// Production implementation of [`AdmissionProjection`].
 ///
 /// It resolves the state selected by the supplied authenticated head, verifies
@@ -1075,63 +1219,18 @@ where
         fold: &TransactionFoldReport,
         closure: &ValidatedClosure,
     ) -> Result<CommitMaterialization, RefusalCode> {
-        let effects = fold
-            .effects()
-            .ok_or(RefusalCode::ConflictingSemanticEffects)?;
-        if !effects.forge.is_empty() || !effects.retention.is_empty() || !effects.outbox.is_empty()
-        {
-            return Err(RefusalCode::ConflictingSemanticEffects);
-        }
-
         let current = self.resolve_ref_state(basis.body().ref_root)?;
-        let next = current.apply(&effects.refs);
-        let ref_root = canonical_ref_state_root(&next)?;
-        self.store.stage_ref_state(ref_root, next)?;
-
-        let closure_body = PermittedObjectClosure::new(closure.objects.clone());
-        let object_closure_root = permitted_object_closure_root(&closure_body)?;
-        if object_closure_root != closure.object_closure_root {
-            return Err(RefusalCode::ObjectClosureIncomplete);
-        }
-        self.store
-            .stage_permitted_object_closure(object_closure_root, closure_body)?;
-
         let evidence = self.evidence.commit_evidence(basis, request, fold)?;
-        let ref_delta_root =
-            canonical_ref_delta_root(&CanonicalRefDelta::from_effects(&effects.refs))?;
-        let roots = ResultingRoots {
-            ref_root,
-            forge_position_root: basis.body().forge_position_root,
-            outcome_index_root: evidence.outcome_index_root,
-            retention_root: basis.body().retention_root,
-            outbox_root: basis.body().outbox_root,
-            policy_epoch: basis.body().policy_epoch,
-            batch_evidence_root: evidence.batch_evidence_root,
-        };
-        Ok(CommitMaterialization {
-            record: RepositoryCommitRecord {
-                repository_id: request.repository,
-                // `PublicationPlan` owns final sequence and predecessor
-                // stamping. These values only satisfy the complete RCR shape
-                // before it is handed to that plan; they are never identified.
-                repository_sequence: RepositorySequence::FIRST,
-                parent_rcr_id: None,
-                tx_id: request.tx_id,
-                principal_snapshot_id: evidence.principal_snapshot_id,
-                canonical_request_digest: request.canonical_request_digest,
-                ref_delta_root,
-                resulting_ref_root: roots.ref_root,
-                object_closure_root,
-                forge_event_batch_root: evidence.forge_event_batch_root,
-                resulting_forge_position_root: roots.forge_position_root,
-                policy_epoch: roots.policy_epoch,
-                policy_decision_root: evidence.policy_decision_root,
-                invariant_evidence_root: evidence.invariant_evidence_root,
-                outbox_effect_root: evidence.outbox_effect_root,
-                retention_delta_root: evidence.retention_delta_root,
-            },
-            roots,
-        })
+        let prepared = prepare_canonical_commit(basis, request, fold, closure, current, evidence)?;
+        let ref_root = canonical_ref_state_root(prepared.next_ref_state())?;
+        self.store
+            .stage_ref_state(ref_root, prepared.next_ref_state().clone())?;
+        let object_closure_root = permitted_object_closure_root(prepared.object_closure())?;
+        self.store.stage_permitted_object_closure(
+            object_closure_root,
+            prepared.object_closure().clone(),
+        )?;
+        Ok(prepared.into_materialization())
     }
 
     fn materialize_refusal(
@@ -1151,6 +1250,19 @@ where
     Store: CanonicalAdmissionStore + Sync,
     Evidence: AdmissionEvidence + Sync,
 {
+    fn snapshot_async<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _cx: &'a Authority::Context,
+        basis: &'a PublicationBasis,
+        authenticated: &'a AuthenticatedHead,
+    ) -> impl Future<Output = Result<AdmissionSnapshot, AsyncProjectionFailure>> + Send + 'a {
+        std::future::ready(
+            AdmissionSnapshotProjection::snapshot(self, basis, authenticated)
+                .map_err(AsyncProjectionFailure::Refuse),
+        )
+    }
+
     fn materialize_commit_async<'a>(
         &'a self,
         _authority: &'a Authority,
@@ -1159,8 +1271,12 @@ where
         request: &'a TransactionRequest,
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
-    ) -> impl Future<Output = Result<CommitMaterialization, RefusalCode>> + Send + 'a {
-        std::future::ready(self.materialize_commit(basis, request, fold, closure))
+    ) -> impl Future<Output = Result<CommitMaterialization, AsyncProjectionFailure>> + Send + 'a
+    {
+        std::future::ready(
+            self.materialize_commit(basis, request, fold, closure)
+                .map_err(AsyncProjectionFailure::Refuse),
+        )
     }
 
     fn materialize_refusal_async<'a>(
@@ -1170,8 +1286,12 @@ where
         basis: &'a PublicationBasis,
         tx_id: TxId,
         code: RefusalCode,
-    ) -> impl Future<Output = Result<RefusalMaterialization, RefusalCode>> + Send + 'a {
-        std::future::ready(self.materialize_refusal(basis, tx_id, code))
+    ) -> impl Future<Output = Result<RefusalMaterialization, AsyncProjectionFailure>> + Send + 'a
+    {
+        std::future::ready(
+            self.materialize_refusal(basis, tx_id, code)
+                .map_err(AsyncProjectionFailure::Refuse),
+        )
     }
 }
 
@@ -1264,6 +1384,9 @@ pub enum AdmissionError {
     Chronicle(fgit_chronicle::ChronicleRefusal),
     /// Publication or replay refused to answer.
     Outcome(Box<OutcomeFailure>),
+    /// Asynchronous projection material was unavailable before a terminal
+    /// decision could be published.
+    AsyncProjectionUnavailable(RefusalCode),
     /// A materializer gave a commit record inconsistent with the sealed request.
     MaterializationMismatch(&'static str),
     /// A terminal decision published but its `TxId` could not be resolved.
@@ -1310,6 +1433,10 @@ impl Display for AdmissionError {
             Self::Outcome(failure) => {
                 write!(formatter, "terminal outcome resolution failed: {failure}")
             }
+            Self::AsyncProjectionUnavailable(code) => write!(
+                formatter,
+                "asynchronous admission projection was unavailable before publication: {code:?}"
+            ),
             Self::MaterializationMismatch(field) => {
                 write!(formatter, "materializer supplied inconsistent {field}")
             }
@@ -1527,6 +1654,22 @@ where
         Ok(snapshot) => snapshot,
         Err(code) => return Ok(PublicationPreparation::Refuse(code)),
     };
+    prepare_publication_from_snapshot(context, lowered, closure, tx_id, snapshot)
+}
+
+/// Evaluate one exact admission snapshot with the shared transaction model.
+///
+/// The blocking and asynchronous projection surfaces both call this after
+/// obtaining an immutable snapshot. Keeping fold evaluation here means their
+/// only difference is how that snapshot was loaded and successor frames were
+/// staged.
+fn prepare_publication_from_snapshot(
+    context: &AdmissionContext,
+    lowered: &LoweredRequest,
+    closure: &ValidatedClosure,
+    tx_id: TxId,
+    snapshot: AdmissionSnapshot,
+) -> Result<PublicationPreparation, AdmissionError> {
     let model_request = model_request(context, &lowered.semantic, tx_id, closure)?;
     let fold = IntentEvaluator::new().evaluate(snapshot.as_fold_basis(), &model_request);
     match &fold.outcome {
@@ -1536,6 +1679,39 @@ where
             fold,
         })),
     }
+}
+
+/// Open and evaluate an exact authenticated basis through an asynchronous
+/// projection. The driver calls this once per CAS attempt, including every
+/// replan, rather than treating a cache mismatch as a terminal refusal.
+async fn prepare_publication_async<S, Projection>(
+    projection: &Projection,
+    authority: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    basis: &PublicationBasis,
+    authenticated: &AuthenticatedHead,
+    lowered: &LoweredRequest,
+    closure: &ValidatedClosure,
+    tx_id: TxId,
+) -> Result<PublicationPreparation, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    Projection: AsyncAdmissionProjection<S> + ?Sized,
+{
+    let snapshot = match projection
+        .snapshot_async(authority, cx, basis, authenticated)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(AsyncProjectionFailure::Refuse(code)) => {
+            return Ok(PublicationPreparation::Refuse(code));
+        }
+        Err(AsyncProjectionFailure::Unavailable(code)) => {
+            return Err(AdmissionError::AsyncProjectionUnavailable(code));
+        }
+    };
+    prepare_publication_from_snapshot(context, lowered, closure, tx_id, snapshot)
 }
 
 /// Translate one projection materialization result into the shared publication
@@ -1550,6 +1726,20 @@ fn complete_commit_materialization(
     match materialization {
         Ok(materialization) => PlannedPublication::Commit(Box::new(materialization)),
         Err(code) => PlannedPublication::Refuse(code),
+    }
+}
+
+/// Translate an asynchronous materialization result without converting an
+/// unavailable durable dependency into a terminal refusal.
+fn complete_async_commit_materialization(
+    materialization: Result<CommitMaterialization, AsyncProjectionFailure>,
+) -> Result<PlannedPublication, AdmissionError> {
+    match materialization {
+        Ok(materialization) => Ok(PlannedPublication::Commit(Box::new(materialization))),
+        Err(AsyncProjectionFailure::Refuse(code)) => Ok(PlannedPublication::Refuse(code)),
+        Err(AsyncProjectionFailure::Unavailable(code)) => {
+            Err(AdmissionError::AsyncProjectionUnavailable(code))
+        }
     }
 }
 
@@ -1685,7 +1875,17 @@ where
     let materialization = projection
         .materialize_refusal_async(authority, cx, basis, tx_id, code)
         .await;
-    refusal_record_from_materialization(basis, seal_id, tx_id, code, materialization)
+    match materialization {
+        Ok(materialization) => {
+            refusal_record_from_materialization(basis, seal_id, tx_id, code, Ok(materialization))
+        }
+        Err(AsyncProjectionFailure::Refuse(fallback)) => {
+            refusal_record_from_materialization(basis, seal_id, tx_id, code, Err(fallback))
+        }
+        Err(AsyncProjectionFailure::Unavailable(unavailable)) => {
+            Err(AdmissionError::AsyncProjectionUnavailable(unavailable))
+        }
+    }
 }
 
 /// The immutable key and canonical bytes of a refusal record.
@@ -2429,17 +2629,20 @@ where
         }
         let (basis, receipt, authenticated) =
             read_basis_async(store, cx, &context.head_key).await?;
-        let preparation = prepare_publication(
+        let preparation = prepare_publication_async(
             projection,
+            store,
+            cx,
             context,
             &basis,
             &authenticated,
             lowered,
             closure,
             tx_id,
-        )?;
+        )
+        .await?;
         let planned = match preparation {
-            PublicationPreparation::Commit(prepared) => complete_commit_materialization(
+            PublicationPreparation::Commit(prepared) => complete_async_commit_materialization(
                 projection
                     .materialize_commit_async(
                         store,
@@ -2450,7 +2653,7 @@ where
                         closure,
                     )
                     .await,
-            ),
+            )?,
             PublicationPreparation::Refuse(code) => PlannedPublication::Refuse(code),
         };
         let terminal = match planned {
