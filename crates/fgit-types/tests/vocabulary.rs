@@ -196,6 +196,38 @@ fn mismatch_policy_and_publication_epoch_round_trip() {
     assert!(PublicationEpoch::Visible < PublicationEpoch::Durable);
 }
 
+/// Compile-time completeness for the sample array below.
+///
+/// The array is hand-written, so nothing in the language forces it to list
+/// every `TypeRefusal`. It had fallen to seven of eight — `RefNameStructureInvalid`
+/// was missing from a test whose name says *every* — and that gap was invisible
+/// because adding a variant to the enum compiles cleanly and simply is not
+/// sampled.
+///
+/// This match is exhaustive with no wildcard, so a ninth variant fails to
+/// compile here and whoever adds it is sent to the array. It mirrors the
+/// compile-time guard `fgit-crypto` uses at `registry.rs:110` to keep registered
+/// code points out of the reserved range: the type system holds the invariant
+/// that a reader would otherwise have to remember.
+///
+/// It cannot force the sample to be *added* — only to be considered. That is
+/// the honest limit, and it is strictly more than the array had before.
+///
+/// DELETION CONDITION: goes if `TypeRefusal` ever gains a canonical `ALL`
+/// slice, which would let the array be derived rather than maintained.
+const fn _every_refusal_variant_is_sampled(refusal: &TypeRefusal) {
+    match refusal {
+        TypeRefusal::LengthOutOfRange { .. }
+        | TypeRefusal::ByteNotPermitted { .. }
+        | TypeRefusal::ValueOutOfRange { .. }
+        | TypeRefusal::CodePointUnknown { .. }
+        | TypeRefusal::DomainMismatch { .. }
+        | TypeRefusal::HashDomainMismatch { .. }
+        | TypeRefusal::RefNameStructureInvalid { .. }
+        | TypeRefusal::DigestLengthMismatch { .. } => {}
+    }
+}
+
 #[test]
 fn every_construction_refusal_maps_to_a_live_refusal_code() {
     let samples = [
@@ -232,6 +264,10 @@ fn every_construction_refusal_maps_to_a_live_refusal_code() {
             algorithm: DigestAlgorithmId::try_new(2).expect("valid slot"),
             expected: 32,
             observed: 20,
+        },
+        TypeRefusal::RefNameStructureInvalid {
+            reason: "component_ends_with_dot_lock",
+            offset: 4,
         },
     ];
     // Every refusal must print distinguishably: two construction failures that
