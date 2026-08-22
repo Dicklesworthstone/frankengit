@@ -23,7 +23,7 @@
 
 use fgit_statistics::beta_bernoulli::{BetaPrior, Outcomes, Posterior};
 use fgit_statistics::expected_loss::{
-    ExpectedLossRefusal, compare_ppm, probability_b_exceeds_a_ppm,
+    ExpectedLossRefusal, MAX_TERMS, compare_ppm, probability_b_exceeds_a_ppm,
 };
 
 /// Build a posterior with exactly the parameters `(alpha, beta)`.
@@ -344,4 +344,54 @@ fn a_low_probability_is_answered_rather_than_refused() {
         "the permitted case must actually be a LOW probability, or it does not pair with the \
          refusal it exists to justify; got {low} ppm"
     );
+}
+
+#[test]
+fn the_term_bound_is_checked_in_both_directions_and_not_at_the_boundary_itself() {
+    // `probability_b_exceeds_a_ppm` walks BOTH tails, so both term counts need
+    // the bound. Its own source says so: "checking only alpha_b would leave one
+    // direction unbounded, and 'bounded evaluation' is the claim this makes."
+    //
+    // The loop is `for offered in [alpha_b, alpha_a]`, so alpha_b is tested
+    // first. A guard that checked only the forward direction would pass a test
+    // that only ever oversized `b` -- which is why the second case below keeps
+    // `b` inside the bound and oversizes `a` alone.
+    let over = u32::try_from(MAX_TERMS + 1).expect("the bound fits in a u32");
+    let at = u32::try_from(MAX_TERMS).expect("the bound fits in a u32");
+
+    // Direction one: b's alpha exceeds the bound.
+    assert_eq!(
+        probability_b_exceeds_a_ppm(posterior(2, 2), posterior(over, 2)),
+        Err(ExpectedLossRefusal::TooManyTerms {
+            offered: MAX_TERMS + 1,
+            maximum: MAX_TERMS,
+        }),
+        "an oversized forward tail must refuse rather than walk unbounded work"
+    );
+
+    // Direction two, and this is the one a one-sided guard would miss: b is
+    // comfortably inside the bound, so the first loop iteration passes, and
+    // only the reverse tail is oversized.
+    assert_eq!(
+        probability_b_exceeds_a_ppm(posterior(over, 2), posterior(2, 2)),
+        Err(ExpectedLossRefusal::TooManyTerms {
+            offered: MAX_TERMS + 1,
+            maximum: MAX_TERMS,
+        }),
+        "the reverse tail is walked too, so its term count is equally bounded"
+    );
+
+    // The exact boundary, which is the only case separating `>` from `>=`.
+    // MAX_TERMS itself is admissible: the guard refuses what EXCEEDS the bound,
+    // not what reaches it. This may still refuse for an unrelated reason -- a
+    // posterior that extreme underflows the scale -- so the assertion is that
+    // it is NOT a term-count refusal rather than that it succeeds.
+    if let Err(ExpectedLossRefusal::TooManyTerms { offered, maximum }) =
+        probability_b_exceeds_a_ppm(posterior(2, 2), posterior(at, 2))
+    {
+        panic!(
+            "MAX_TERMS is the largest ADMISSIBLE count; refusing it means the guard reads >= \
+             where it should read >  (offered {offered}, maximum {maximum})"
+        );
+    }
 }
