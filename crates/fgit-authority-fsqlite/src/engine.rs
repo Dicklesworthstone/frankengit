@@ -802,15 +802,15 @@ impl FsqliteAuthorityStore {
         // through to the ordinary CAS disambiguation below.
         let token_limit = self.limits.version_tokens;
         let issued = self.occupancy(cx, "issuance.count").await?;
-        if issued >= token_limit {
-            if let Some((current, current_generation, _)) = self.head_row(cx, key).await? {
-                if current == expected && new_generation > current_generation {
-                    return Err(EngineError::Contract(AuthorityRefusal::CapacityExhausted {
-                        occupancy: issued,
-                        limit: token_limit,
-                    }));
-                }
-            }
+        if issued >= token_limit
+            && let Some((current, current_generation, _)) = self.head_row(cx, key).await?
+            && current == expected
+            && new_generation > current_generation
+        {
+            return Err(EngineError::Contract(AuthorityRefusal::CapacityExhausted {
+                occupancy: issued,
+                limit: token_limit,
+            }));
         }
 
         let sequence = self.next_sequence(cx).await?;
