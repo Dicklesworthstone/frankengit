@@ -345,6 +345,133 @@ planted_uninit="$work/planted_uninit.sh"
 sed 's/^RA_V_TIMEOUTS=0$//' "$E2E_ROOT/run_all.sh" >"$planted_uninit"
 planted_uninit_found=$(detect_uninitialised_state "$planted_uninit")
 
+# ---------------------------------------------------------------------------
+# root-level orphan detection
+#
+# run_all discovers `suites/**` and nothing else, and says so in its own header.
+# A suite that lands anywhere else is not refused -- it simply never runs, and
+# its acceptance ids go on reading as coverage for whatever bead cited them.
+# The silence is the defect. Two real instances:
+#   * scripts/e2e/verify_artifact_probe.sh carried 28 FG-001-PROBE-* ids through
+#     the CLOSURE of FG-001 without ever executing (bead frankengit-osqi);
+#   * scripts/e2e/oracle/selftest.sh held the pinned-Git sandbox's fail-closed
+#     evidence -- relied on by five discovered suites -- until FG-000B moved it.
+#
+# Two escapes are legitimate and must not fire:
+#   * a script another file DRIVES by name. The 20 selftests/fixtures live this
+#     way, and self_test.sh names them by RUN ID (`selftests-fixtures-<stem>`)
+#     rather than by filename, which is why the stem is the token searched for
+#     and not the basename with its extension.
+#   * a script whose own header says why it sits outside suites/. self_test.sh
+#     does, because it drives this runner and would otherwise recurse into
+#     itself. verify_artifact_probe.sh gives no such reason.
+#
+# The candidate list is built here rather than reusing `harness_scripts`,
+# which excludes `*/oracle/*`. That exclusion is right for the tooling sweep --
+# the oracle legitimately spawns git -- but reusing it here would make this gate
+# blind to an orphan under an oracle/ directory, which is precisely where one of
+# the two real instances lived.
+# ---------------------------------------------------------------------------
+# This suite is excluded from the invoker search for the same reason it is
+# excluded from its own tooling sweep: it necessarily NAMES the orphan it gates
+# on, and the search reads file contents. Without the exclusion the gate becomes
+# its own alibi -- verify_artifact_probe.sh never names itself, so the only hit
+# was the comment in this file, and the detector spared the very file it exists
+# to catch.
+orphan_self_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+is_orphan_candidate() {
+  # A suite SOURCES the library and CALLS fge_init. lib.sh defines fge_init
+  # without sourcing itself; run_all.sh sources the library without calling it.
+  # Neither is a suite, so neither can be orphaned.
+  grep -qE '^[[:space:]]*(\.|source)[[:space:]].*lib\.sh' "$1" || return 1
+  grep -qE '^[[:space:]]*fge_init\b' "$1" || return 1
+  return 0
+}
+
+detect_root_orphan() {
+  # $1 = candidate script, $2 = tree to search for an invoker (default E2E_ROOT).
+  # Returns 0 when the candidate is an orphan.
+  local p=$1 root=${2:-$E2E_ROOT} stem hits h
+  case $p in
+    */suites/*) return 1 ;;
+  esac
+  is_orphan_candidate "$p" || return 1
+  head -n 20 "$p" |
+    grep -qiE 'deliberately (lives )?outside|would recurse|drives this runner' &&
+    return 1
+  stem=$(basename "$p" .sh)
+  # Deliberately NOT `grep -rl ... | grep -q ...`. `grep -q` exits on its first
+  # match and closes the pipe, the producer dies of SIGPIPE, and `set -o
+  # pipefail` turns that into 141. A stem with MANY references then looks
+  # identical to a stem with none, while a stem with exactly one reference
+  # passes -- an inversion that reported lib.sh as an orphan and spared the real
+  # one on this gate's first run. The list is captured, then walked.
+  hits=$(grep -rl -- "$stem" "$root" || true)
+  while IFS= read -r h; do
+    [ -z "$h" ] && continue
+    [ "$h" = "$p" ] && continue
+    [ "$h" = "$orphan_self_path" ] && continue
+    return 1
+  done <<<"$hits"
+  return 0
+}
+
+root_orphans=''
+orphan_candidates=0
+while IFS= read -r -d '' p; do
+  case $p in
+    */suites/*) continue ;;
+  esac
+  is_orphan_candidate "$p" || continue
+  orphan_candidates=$((orphan_candidates + 1))
+  detect_root_orphan "$p" && root_orphans+="$(basename "$p" .sh) "
+done < <(find "$E2E_ROOT" -type f -name '*.sh' -print0 | LC_ALL=C sort -z)
+
+# Planted controls, exercised through the REAL detector rather than a copy of
+# it: a reimplementation could drift from the thing actually gating the swarm.
+orphan_probe="$work/orphan-probe"
+mkdir -p "$orphan_probe"
+
+planted_orphan="$orphan_probe/planted_orphan.sh"
+cat >"$planted_orphan" <<'PLANTEDEOF'
+#!/usr/bin/env bash
+. "$SCRIPT_DIR/lib.sh"
+fge_init planted-orphan
+PLANTEDEOF
+
+# Permitted twin 1: identical, except a driver names it.
+driven_twin="$orphan_probe/driven_twin.sh"
+cat >"$driven_twin" <<'PLANTEDEOF'
+#!/usr/bin/env bash
+. "$SCRIPT_DIR/lib.sh"
+fge_init driven-twin
+PLANTEDEOF
+cat >"$orphan_probe/driver.sh" <<'PLANTEDEOF'
+#!/usr/bin/env bash
+# names the stem the way self_test.sh names a fixture: by run id, not filename
+run_case selftests-fixtures-driven_twin
+PLANTEDEOF
+
+# Permitted twin 2: identical, except its header declares the exception.
+declared_twin="$orphan_probe/declared_twin.sh"
+cat >"$declared_twin" <<'PLANTEDEOF'
+#!/usr/bin/env bash
+# This deliberately lives outside suites/ because it drives this runner and
+# would recurse into itself if discovered.
+. "$SCRIPT_DIR/lib.sh"
+fge_init declared-twin
+PLANTEDEOF
+
+orphan_detector_fires=no
+detect_root_orphan "$planted_orphan" "$orphan_probe" && orphan_detector_fires=yes
+orphan_detector_spares_driven=yes
+detect_root_orphan "$driven_twin" "$orphan_probe" && orphan_detector_spares_driven=no
+orphan_detector_spares_declared=yes
+detect_root_orphan "$declared_twin" "$orphan_probe" && orphan_detector_spares_declared=no
+
+fge_field root_orphan_candidates "$orphan_candidates"
+
 fge_phase assert
 
 # concurrency
@@ -486,3 +613,28 @@ fge_assert_match FG-000A-PORT-022 "$FGE_DIGEST_TOOL" '^(sha256sum|shasum|openssl
   'the sha-256 helper actually in use is named in the record'
 fge_assert_match FG-000A-PORT-023 "$FGE_TIME_RES" '^(us|ns|s)$' \
   'the clock resolution actually in use is named in the record'
+
+# discovery integrity: nothing outside suites/ may assert in silence
+#
+# Pinned to the ONE orphan already filed as a bead rather than to the empty
+# string, because verify_artifact_probe.sh has never executed and moving it into
+# suites/ could turn the lane red for all sixteen panes on the next run -- that
+# sequencing is the orchestrator's to make, not this suite's to spring. The
+# expectation is still a real gate: a SECOND orphan changes this string and
+# fails here immediately.
+#
+# DELETION CONDITION: when frankengit-osqi dispositions verify_artifact_probe.sh
+# -- relocated under suites/, or retired -- the expected value below becomes the
+# empty string. It is written as an exact match precisely so that resolving the
+# bead cannot leave a stale allowance behind: the assertion fails until it is
+# updated.
+fge_assert_eq FG-000A-PORT-036 'verify_artifact_probe ' "$root_orphans" \
+  'the only unrun root-level suite is the one frankengit-osqi tracks'
+fge_assert_eq FG-000A-PORT-037 yes "$orphan_detector_fires" \
+  'the orphan detector fires on a planted root-level suite with no invoker'
+fge_assert_eq FG-000A-PORT-038 yes "$orphan_detector_spares_driven" \
+  'the orphan detector spares a root-level suite a driver names by stem'
+fge_assert_eq FG-000A-PORT-039 yes "$orphan_detector_spares_declared" \
+  'the orphan detector spares a root-level suite that declares why in its header'
+fge_assert_cmd FG-000A-PORT-040 'the orphan scan covered a real candidate set' \
+  test "$orphan_candidates" -ge 15
