@@ -1175,6 +1175,10 @@ impl<Evidence> AsyncAdmissionProjection<FsqliteAuthorityStore>
 where
     Evidence: AdmissionEvidence + Sync,
 {
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "the explicit + Send future is the cross-thread async projection contract"
+    )]
     fn snapshot_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
@@ -1208,6 +1212,10 @@ where
         }
     }
 
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "the explicit + Send future is the cross-thread async projection contract"
+    )]
     fn materialize_commit_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
