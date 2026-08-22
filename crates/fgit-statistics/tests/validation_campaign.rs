@@ -28,6 +28,9 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
+use fgit_statistics::authority::{
+    AdvisoryDecision, DecisionRefusal, EffectClass, ForbiddenTarget, ProposedTarget, resolve,
+};
 use fgit_statistics::beta_bernoulli::{BetaAssumptionFailure, BetaPrior, Outcomes};
 use fgit_statistics::conformal::{ConformalAssumptionFailure, ConformalConfig, SplitConformal};
 use fgit_statistics::e_process::{EProcess, EProcessAssumptionFailure, EProcessConfig};
@@ -672,6 +675,56 @@ fn validate_fallback_gate() -> Record {
     }
 }
 
+fn validate_authority_boundary() -> Record {
+    // Section 33.4's forbidden decisions. This is fg054b acceptance line 3, and
+    // it had no record in this receipt while the fallback gate — also a boundary
+    // rather than a mechanism — did. That asymmetry meant one acceptance line's
+    // evidence was readable only as log text.
+    //
+    // The structural half cannot be exercised at runtime by design: AdvisoryDecision
+    // has no variant for any forbidden target, so there is nothing to construct
+    // and nothing to assert. What IS checkable is that no permitted decision
+    // reaches canonical state, and that the runtime path refuses each forbidden
+    // target by name.
+    for decision in AdvisoryDecision::ALL {
+        assert_ne!(
+            decision.effect_class(),
+            EffectClass::CanonicalStateAffecting,
+            "{decision:?} classifies as canonical-state-affecting"
+        );
+    }
+
+    let mut refusals = 0;
+    for target in ForbiddenTarget::ALL {
+        assert_eq!(
+            resolve(ProposedTarget::Forbidden(target)),
+            Err(DecisionRefusal::ForbiddenTarget { target }),
+            "{target:?} was not refused by name"
+        );
+        refusals += 1;
+    }
+
+    // The permitted twin, without which the refusals above are satisfied by a
+    // resolve() that refuses everything.
+    let mut permitted = 0;
+    for target in ProposedTarget::PERMITTED {
+        assert!(
+            resolve(target).is_ok(),
+            "{target:?} is permitted and must resolve"
+        );
+        permitted += 1;
+    }
+    assert_eq!(refusals, 5, "section 33.4 names five forbidden targets");
+    assert_eq!(permitted, 4);
+
+    Record {
+        mechanism: "forbidden-decision-boundary",
+        refusals_exercised: refusals,
+        known_answer_cases: permitted,
+        seeded_observations: 0,
+    }
+}
+
 // ------------------------------------------------------------------ campaign
 
 #[test]
@@ -686,14 +739,15 @@ fn the_validation_campaign_covers_every_mechanism_and_writes_its_receipt() {
         validate_lyapunov(),
         validate_expected_loss(),
         validate_fallback_gate(),
+        validate_authority_boundary(),
     ];
 
     // The denominator, asserted here as well as in the e2e lane: a campaign that
     // silently stopped covering a mechanism must fail, not shrink quietly.
     assert_eq!(
         records.len(),
-        9,
-        "the campaign must cover all eight mechanisms plus the fallback gate"
+        10,
+        "the campaign must cover all eight mechanisms, the fallback gate, and the 33.4 boundary"
     );
     for record in &records {
         assert!(

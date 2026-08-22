@@ -35,6 +35,7 @@ readonly EXPECTED_MECHANISMS=(
   'lyapunov-progress-governor'
   'beta-bernoulli-expected-loss'
   'deterministic-fallback-gate'
+  'forbidden-decision-boundary'
 )
 
 main() {
