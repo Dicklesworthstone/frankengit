@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 asupersync = { version = "0.4.9", default-features = false }
+fgit-crypto.workspace = true
 fgit-object-fabric.workspace = true
 fgit-resource.workspace = true
 fgit-types.workspace = true

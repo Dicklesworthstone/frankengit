@@ -7,6 +7,8 @@
 //! quarantine and must pass the object-fabric segment reader again before a
 //! placement authority can make them visible.
 
+pub mod checkpoint;
+
 use std::error::Error;
 use std::fmt;
 use std::time::Duration;
@@ -241,15 +243,24 @@ impl VerifiedMicrosegment {
 /// Typed refusal from profile admission, symbol validation, reconstruction, or publication.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RaptorRefusal {
-    SourceTooLarge { offered: u64, maximum: u64 },
+    SourceTooLarge {
+        offered: u64,
+        maximum: u64,
+    },
     RecordCountTooLarge,
     SourceSegmentInvalid,
     ScopeMismatch,
     EngineObjectIdMismatch,
     SourceBlockMismatch,
     EncodingSymbolKindMismatch,
-    SymbolSizeMismatch { offered: usize, expected: usize },
-    DecodeBudgetExceeded { offered: usize, maximum: usize },
+    SymbolSizeMismatch {
+        offered: usize,
+        expected: usize,
+    },
+    DecodeBudgetExceeded {
+        offered: usize,
+        maximum: usize,
+    },
     AuthenticationRejected,
     DecodeFailed,
     CandidateLengthMismatch,
@@ -263,6 +274,12 @@ pub enum RaptorRefusal {
     PlacementPublicationRefused,
     RepairReservationRefused,
     RepairSettlementRefused,
+    /// A `DUR-014` reconstruction was attempted with no AEAD verifier.
+    AeadVerifierRequired,
+    /// An AEAD verifier was offered for a class that carries no ciphertext.
+    AeadVerifierNotPermitted,
+    /// The decoded candidate did not authenticate under the caller's key.
+    AeadUnauthenticated,
 }
 
 impl fmt::Display for RaptorRefusal {
@@ -336,6 +353,15 @@ impl fmt::Display for RaptorRefusal {
             Self::RepairSettlementRefused => {
                 formatter.write_str("repair permit settlement was refused")
             }
+            Self::AeadVerifierRequired => formatter.write_str(
+                "DUR-014 reconstruction requires an AEAD verifier; digest agreement alone is not authentication",
+            ),
+            Self::AeadVerifierNotPermitted => formatter.write_str(
+                "an AEAD verifier was offered for a checkpoint class that carries no ciphertext",
+            ),
+            Self::AeadUnauthenticated => formatter.write_str(
+                "the decoded checkpoint candidate did not authenticate under the offered key",
+            ),
         }
     }
 }
@@ -649,7 +675,7 @@ fn validate_symbol(
     Ok(())
 }
 
-const fn encoding_config() -> EncodingConfig {
+pub(crate) const fn encoding_config() -> EncodingConfig {
     EncodingConfig {
         repair_overhead: 1.0,
         max_block_size: MicrosegmentRaptorProfile::MAX_SOURCE_BYTES,
@@ -659,7 +685,7 @@ const fn encoding_config() -> EncodingConfig {
     }
 }
 
-const fn decoding_config() -> DecodingConfig {
+pub(crate) const fn decoding_config() -> DecodingConfig {
     DecodingConfig {
         symbol_size: MicrosegmentRaptorProfile::SYMBOL_BYTES,
         max_block_size: MicrosegmentRaptorProfile::MAX_SOURCE_BYTES,
@@ -671,7 +697,7 @@ const fn decoding_config() -> DecodingConfig {
     }
 }
 
-fn symbol_pool() -> SymbolPool {
+pub(crate) fn symbol_pool() -> SymbolPool {
     SymbolPool::new_with_pool_id(
         PoolConfig::new(
             MicrosegmentRaptorProfile::SYMBOL_BYTES,
