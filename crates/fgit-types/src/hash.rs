@@ -208,3 +208,76 @@ impl fmt::Display for Digest {
         write!(formatter, "{}:{}", self.algorithm, self.bytes)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{DigestBytes, MAX_DIGEST_LEN, MIN_DIGEST_LEN};
+    use crate::TypeRefusal;
+
+    /// The refusal a length outside the range must produce.
+    fn length_refusal(observed: u32) -> TypeRefusal {
+        TypeRefusal::LengthOutOfRange {
+            field: "DigestBytes",
+            observed,
+            minimum: 16,
+            maximum: 64,
+        }
+    }
+
+    #[test]
+    fn both_extremes_of_the_permitted_range_construct() {
+        // THE PERMITTED HALF, at the extremes rather than in the comfortable
+        // middle. Every one of the 123 call sites in this workspace passes 32
+        // or 16 bytes, so the top of the range had never been constructed at
+        // all before this test.
+        for len in [MIN_DIGEST_LEN, 17, 32, MAX_DIGEST_LEN - 1, MAX_DIGEST_LEN] {
+            let source = vec![0xab_u8; len];
+            let digest = DigestBytes::try_new(&source)
+                .unwrap_or_else(|refusal| panic!("{len} bytes is inside 16..=64; got {refusal:?}"));
+            assert_eq!(
+                digest.as_bytes(),
+                source.as_slice(),
+                "{len} bytes must round-trip exactly; this pins the `len` bookkeeping beside \
+                 the guard, since the body is stored in a fixed-capacity array and only `len` \
+                 distinguishes payload from padding"
+            );
+        }
+    }
+
+    #[test]
+    fn one_step_outside_each_end_refuses_by_payload() {
+        // THE FORBIDDEN HALF, one step outside each extreme -- the values an
+        // off-by-one moves across. Asserted by PAYLOAD rather than `is_err`,
+        // because the observed length is what tells an operator which side of
+        // the range was violated, and `is_err` would pass against a refusal
+        // that named the wrong field or lost the measurement.
+        for len in [0_usize, 1, MIN_DIGEST_LEN - 1] {
+            assert_eq!(
+                DigestBytes::try_new(&vec![0xcd_u8; len]),
+                Err(length_refusal(
+                    u32::try_from(len).expect("a test length fits in u32")
+                )),
+                "{len} bytes is below the minimum and must refuse"
+            );
+        }
+
+        // MAX + 1 IS THE ONE THAT MATTERS MOST, and it is why this test is
+        // filed at P2 rather than as tidying. `DigestBytes` stores its body in
+        // an inline `[u8; MAX_DIGEST_LEN]`, and `try_new` copies with
+        // `bytes[..source.len()].copy_from_slice(source)` AFTER this check. A
+        // guard that admitted 65 bytes would index that array out of range and
+        // PANIC. The crate forbids unsafe, so the panic is memory-safe -- but
+        // AGENTS.md 3.1 requires a typed refusal, not an abort, and this is
+        // the only thing standing between the two.
+        for len in [MAX_DIGEST_LEN + 1, MAX_DIGEST_LEN * 2] {
+            assert_eq!(
+                DigestBytes::try_new(&vec![0xef_u8; len]),
+                Err(length_refusal(
+                    u32::try_from(len).expect("a test length fits in u32")
+                )),
+                "{len} bytes is above the maximum and must refuse rather than panic on the \
+                 fixed-capacity copy below the guard"
+            );
+        }
+    }
+}
