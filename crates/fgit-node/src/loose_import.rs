@@ -1169,6 +1169,21 @@ mod tests {
         node.shutdown().expect("node drains");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn loose_import_maps_an_invalid_source_path_to_the_typed_io_refusal() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("invalid\0source");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::Io { operation, path, .. })
+                if operation == "inspect Git source" && *path == source
+        ));
+        node.shutdown().expect("node drains");
+    }
+
     #[test]
     fn loose_import_refuses_a_file_where_the_packed_object_directory_belongs() {
         let scratch = ScratchDirectory::new();
@@ -1253,6 +1268,30 @@ mod tests {
         assert!(matches!(
             node.stage_loose_git_import(&source),
             Err(LooseGitImportRefusal::PackedRefContents(path)) if *path == packed_refs
+        ));
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_packed_refs_over_the_direct_ref_limit() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        fs::create_dir_all(source.join("objects")).expect("object directory creates");
+        let oid = "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0";
+        let mut packed_refs = String::with_capacity((super::MAX_IMPORT_REFS + 1) * 64);
+        for index in 0..=super::MAX_IMPORT_REFS {
+            packed_refs.push_str(oid);
+            packed_refs.push_str(" refs/heads/ref-");
+            packed_refs.push_str(&index.to_string());
+            packed_refs.push('\n');
+        }
+        fs::write(source.join("packed-refs"), packed_refs).expect("packed refs fixture writes");
+        let node = node(scratch.0.join("node"));
+
+        assert!(matches!(
+            node.stage_loose_git_import(&source),
+            Err(LooseGitImportRefusal::RefLimitExceeded { limit })
+                if limit == super::MAX_IMPORT_REFS
         ));
         node.shutdown().expect("node drains");
     }
