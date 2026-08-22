@@ -11,7 +11,7 @@
 /// used by the counterexample, event, and schedule grammars are reserved, as
 /// are control characters so a single-line rendering remains one line.
 #[must_use]
-pub(crate) fn escape_delimited_field(value: &str) -> String {
+fn escape_delimited_field(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         if matches!(character, '%' | '|' | ',' | '=' | ':' | '@') || character.is_control() {
