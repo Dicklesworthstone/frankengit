@@ -1659,3 +1659,124 @@ fn the_enumeration_guard_can_actually_fire() {
         "the guard must allow an exact-key lookup, which is the whole permitted shape"
     );
 }
+
+// ------------------------------- projection-style read/rebuild interference
+
+#[test]
+fn a_projection_rebuild_never_observes_authority_going_backwards() {
+    // The last unaudited row of FG-005b's matrix. Nothing in the crate
+    // mentioned projection or rebuild: `checkpoint_under_load.rs` drives a
+    // sequential write load with no reader, and `contend` runs CAS attempts one
+    // after another on a single connection. So the interference case was
+    // uncovered rather than covered under another name.
+    //
+    // §5.1 is what makes it matter: "materializations, indexes, and caches are
+    // hints/projections". A projection is rebuilt by reading authority while
+    // authority keeps moving, and the two properties it needs are that its
+    // reading does not disturb the writer, and that what it reads never runs
+    // backwards -- a rebuild that observed generation 4 and then generation 3
+    // would materialise a rollback that never happened, which §5.5 forbids
+    // ("never silently roll back to an older valid root").
+    //
+    // The reader is a SECOND connection on the same file, which is the
+    // "multiple connections with readers plus bounded writers" scenario §3.5
+    // admits and `envelope_admission.rs` checks the admission of. This drives
+    // the admitted topology rather than asserting it is admissible.
+    let scratch = Scratch::new("projection-rebuild");
+    let node = node();
+
+    let writer = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+    let projection = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+
+    let key = head_key();
+    let created = writer
+        .initialize_head(&key, generation(1), b"gen-1")
+        .expect("the head is created");
+    let mut token = match created {
+        fgit_authority::HeadInit::Created(receipt) => receipt.token(),
+        other => panic!("the first creation must succeed, got {other:?}"),
+    };
+
+    let mut observed = Vec::new();
+    for step in 2..=8_u64 {
+        // Authority advances on the writer's connection.
+        let body = format!("gen-{step}").into_bytes();
+        let outcome = writer
+            .compare_exchange_head(&key, token, generation(step), &body)
+            .expect("a conditional replacement inside the admitted envelope");
+        let receipt = match outcome {
+            CasOutcome::Committed(receipt) => receipt,
+            other => panic!("the writer must win uncontended, got {other:?}"),
+        };
+        token = receipt.token();
+
+        // The projection rebuilds by reading through its own connection,
+        // interleaved between publications rather than after them.
+        match projection.read_head(&key).expect("the projection reads") {
+            HeadRead::Present(seen) => observed.push(seen.generation()),
+            HeadRead::Absent => panic!("a published head must be visible to a second connection"),
+        }
+    }
+
+    // 1. The rebuild never went backwards.
+    for pair in observed.windows(2) {
+        assert!(
+            pair[1] >= pair[0],
+            "a projection rebuild observed generation {:?} after {:?}; §5.5 forbids materialising \
+             a rollback that authority never performed",
+            pair[1],
+            pair[0]
+        );
+    }
+
+    // 1b. NON-VACUITY, and this is the assertion that makes the one above mean
+    //     something. A projection stuck on a stale snapshot would observe
+    //     1,1,1,1,1,1,1 -- perfectly monotonic, and evidence of nothing except
+    //     that the second connection cannot see the writer at all. So the
+    //     rebuild must actually track authority forward.
+    assert_eq!(
+        observed.first().copied(),
+        Some(generation(2)),
+        "the projection must observe the writer's first replacement; if it is pinned to the          creation generation the monotonicity check above is vacuous"
+    );
+    assert_eq!(
+        observed.last().copied(),
+        Some(generation(8)),
+        "the projection must have tracked authority all the way forward, or it read a snapshot          rather than rebuilding against a moving head"
+    );
+
+    // 2. The reader did not disturb the writer. Every publication above was
+    //    asserted to commit as it happened, so reaching here means seven
+    //    conditional replacements succeeded with a second connection reading
+    //    between each one.
+    assert_eq!(
+        observed.len(),
+        7,
+        "the interleaving must have run to completion for the monotonicity check to mean anything"
+    );
+
+    // 3. The projection is a hint, not authority: the final word comes from the
+    //    head slot, and it is what the writer published last.
+    match writer
+        .read_head(&key)
+        .expect("the writer reads its own head")
+    {
+        HeadRead::Present(receipt) => {
+            assert_eq!(
+                receipt.generation(),
+                generation(8),
+                "authority must end where the writer left it, regardless of what any projection \
+                 observed on the way"
+            );
+            assert_eq!(
+                receipt.body(),
+                b"gen-8",
+                "the head body must be the last one published, not a value a reader cached"
+            );
+        }
+        HeadRead::Absent => panic!("the head cannot vanish"),
+    }
+
+    writer.close().expect("the writer closes cleanly");
+    projection.close().expect("the projection closes cleanly");
+}
