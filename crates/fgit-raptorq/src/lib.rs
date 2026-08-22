@@ -762,12 +762,18 @@ mod tests {
     use asupersync::types::{SymbolId, SymbolKind};
 
     fn canonical_segment() -> Vec<u8> {
+        // Delegates so a second, DIFFERENT segment can be built for the
+        // scope-divergence probe. The arguments reproduce the original literals
+        // exactly, so every existing caller gets byte-identical output.
+        segment_with(b"raptorq protected canonical microsegment", 7)
+    }
+
+    fn segment_with(payload: &[u8], oid_fill: u8) -> Vec<u8> {
         let limits = SegmentLimits::default();
-        let payload = b"raptorq protected canonical microsegment";
         let digest = CryptoDigest;
         let envelope = ObjectEnvelope::new(
             b"tenant-a".to_vec(),
-            GitOid::Sha1(GitOidSha1::from_bytes([7; GitOidSha1::LEN])),
+            GitOid::Sha1(GitOidSha1::from_bytes([oid_fill; GitOidSha1::LEN])),
             ObjectKind::Blob,
             u64::try_from(payload.len()).expect("test payload length fits u64"),
             digest
@@ -1412,6 +1418,69 @@ mod tests {
         assert!(
             expired_ledger.close().is_quiescent(),
             "the reservation must be settled on the retention-expired path, not leaked"
+        );
+    }
+
+    /// `ManifestScopeMismatch`: a manifest that describes a DIFFERENT segment
+    /// than the scope being repaired.
+    ///
+    /// This guard sits ahead of every decode, so the probe depends on no decoder
+    /// behaviour at all -- it is settled entirely by the two accessors the guard
+    /// compares.
+    #[test]
+    fn a_manifest_describing_a_different_segment_is_refused_before_any_decode() {
+        let security = security();
+        let bytes = canonical_segment();
+        let other = segment_with(b"a divergent canonical body for the scope probe", 8);
+        let protected = protect_microsegment(&bytes, &SegmentLimits::default(), &security)
+            .expect("canonical microsegment is profile-admitted");
+        let foreign = manifest(&other);
+
+        // Vacuity guard on exactly what the production check compares.
+        assert_ne!(
+            foreign.segment_digest(),
+            protected.scope().segment_digest(),
+            "the two segments must differ or this probe asserts nothing"
+        );
+
+        let plan = RepairPlan {
+            expected: protected.scope(),
+            manifest: &foreign,
+            authority_basis: head(6),
+        };
+        let led = ledger(12);
+        let authority = TestAuthority {
+            revalidation: AuthorityRevalidation::StillCurrent,
+            published: Cell::new(false),
+        };
+        let budget = led
+            .grant(ResourceVector::from_grades(&[
+                (Grade::Bytes, 4096),
+                (Grade::CpuMicros, 100),
+            ]))
+            .expect("test repair budget is available");
+
+        assert_eq!(
+            repair_microsegment(
+                plan,
+                &lossy_symbols(&protected),
+                &SegmentLimits::default(),
+                &security,
+                &led,
+                budget,
+                &authority,
+            ),
+            Err(RaptorRefusal::ManifestScopeMismatch)
+        );
+        assert!(
+            !authority.published.get(),
+            "a mismatched manifest must never reach publication"
+        );
+        // This arm releases the grant rather than settling a reservation -- it
+        // refuses before one is taken -- so quiescence witnesses the release.
+        assert!(
+            led.close().is_quiescent(),
+            "the budget must be released on the scope-mismatch path, not leaked"
         );
     }
 }
