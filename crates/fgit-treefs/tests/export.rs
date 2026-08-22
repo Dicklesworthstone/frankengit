@@ -1439,14 +1439,31 @@ fn exported_empty_tree_matches_the_published_git_identity() {
     );
 }
 
-/// `ExportedObject::verify` detects a body that no longer hashes to its filed
-/// identity.
+/// An exported object's identity is DERIVED from its body and kind, never
+/// supplied.
 ///
-/// The plan is a set keyed by identity, so a body mutated in memory would
-/// otherwise be served under a name it no longer has. `verify_all` is asserted
-/// elsewhere on healthy plans; this pins that it can actually fail.
+/// CORRECTING WHAT THIS TEST USED TO CLAIM. It was named
+/// `..._verify_detects_a_mismatched_body` and its doc said it pinned that
+/// `verify` "can actually fail". It does not, and it never did: nothing below
+/// observes `verify()` returning false, because the public API cannot produce
+/// an object whose body and identity disagree. `new` computes the identity from
+/// the body, there is no constructor taking an explicit oid, there is no
+/// mutable body accessor, and `#![forbid(unsafe_code)]` closes the rest. So the
+/// mismatch this claimed to detect is unconstructible, and a test name asserting
+/// otherwise is the exact "right impression, wrong basis" shape being hunted
+/// elsewhere in this crate -- worse here, because the overclaim was in the
+/// documentation of a test rather than in code.
+///
+/// What is genuinely established, and what the name now says: the identity is a
+/// function of body AND kind, so two different bodies cannot collide and the
+/// same bytes under a different type label are a different object. That is the
+/// property `verify` and `verify_all` rest on.
+///
+/// UPGRADE CONDITION: if a constructor taking an explicit oid is ever added, or
+/// any mutable access to `body`, a genuine mismatch becomes constructible and
+/// the falsifiability case belongs here.
 #[test]
-fn exported_object_verify_detects_a_mismatched_body() {
+fn exported_object_identity_is_derived_from_body_and_kind() {
     let honest = fgit_treefs::export::ExportedObject::<Sha1>::new(
         GitObjectKind::Blob,
         b"the real body\n".to_vec(),
