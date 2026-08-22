@@ -54,9 +54,10 @@
 //!   statement already executing inside the VDBE needs a second thread racing a
 //!   running query; the poll site exists (page-lock waits) but nothing here
 //!   drives it. `commit-ambiguous` and `reply-lost` cancellation remain
-//!   unproved for this backend for the reason `FG-005B-E2E-020` gives: fault
-//!   injection is bound `S: FaultableAuthorityStore`, and `MemoryAuthorityStore`
-//!   is still the only implementor in the workspace.
+//!   unproved for this backend -- but that gap is narrower than it was when
+//!   this file was written. `fault_conformance.rs` now supplies the fault
+//!   engine over a real database, so what is missing is a cancel *interleaved*
+//!   with an in-flight operation, not the ability to inject at all.
 //! - **Not that cancellation is distinguishable from failure.** See
 //!   `cancellation_is_not_separately_typed_at_the_public_surface`, which pins
 //!   the current behaviour and names the gap rather than blessing it.

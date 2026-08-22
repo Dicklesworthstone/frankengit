@@ -46,11 +46,14 @@
 //!   conformance bridge, these tests block per operation, so a cancel cannot be
 //!   interleaved with an operation in flight. That gap is named in
 //!   `engine_conformance.rs` and is still open.
-//! * **The injected-fault half of FG-005b is absent, not passing.** AF-01..AF-08
-//!   require `FaultableAuthorityStore`, and `MemoryAuthorityStore` is the only
-//!   implementation in the workspace. Ambiguity, duplication and
-//!   lost-request-versus-lost-response are therefore **unproved for this
-//!   backend**, and a green run of this file must not be read as covering them.
+//! * **The injected-fault half of FG-005b is not in this file**, but it is no
+//!   longer absent: AF-01..AF-08 now pass against a real database in
+//!   `fault_conformance.rs`, which implements `FaultableAuthorityStore` as a
+//!   wrapper that delegates to this same engine. This paragraph previously said
+//!   those cells were unprovable for this backend because `MemoryAuthorityStore`
+//!   was the only implementor -- true of the workspace, and a non-sequitur about
+//!   what a test could do. A green run of *this* file still does not cover them;
+//!   it is `fault_conformance.rs` that does.
 
 use std::path::PathBuf;
 use std::time::Duration;
