@@ -35,10 +35,21 @@
 //!
 //! *Objects*, not refs: ATP-Git transfers objects and neither path here
 //! publishes a reference, so the "ref equality" half of the acceptance line is
-//! **not** covered and is not implied. One corpus of blobs, not "every corpus
-//! repo" — trees and commits reach the same pipeline through the same entry
-//! constructor, but that is an argument, not a measurement, and this file does
-//! not make it. Nothing here touches `fgit-atp-git/src`.
+//! **not** covered and is not implied.
+//!
+//! One corpus, not "every corpus repo". It is a real repository shape —
+//! two blobs, a tree over them, a commit at the root — rather than the flat
+//! bag of blobs this file started with. That change mattered: the two paths
+//! handle object kind differently, the pack side framing it in the entry
+//! header while ATP carries it on the manifest entry and re-derives identity
+//! from it, so a kind-handling divergence is precisely what a blob-only corpus
+//! cannot see. An earlier version of this note claimed trees and commits
+//! "reach the same pipeline through the same entry constructor" and admitted
+//! that was an argument rather than a measurement; it is now measured, and
+//! the argument is withdrawn.
+//!
+//! What remains unmeasured is scale and variety — tags, deltas, large objects,
+//! multiple roots. Nothing here touches `fgit-atp-git/src`.
 
 use std::collections::BTreeMap;
 
@@ -48,7 +59,6 @@ use fgit_atp_git::{
     ReconstructionPipeline, TransferLimits, TransferManifest, TransferObjectEntry, TransferPayload,
     VerifiedObjectLookup,
 };
-use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_git_object::{ObjectType, Sha1, native_object_oid};
 use fgit_object_fabric::fabric::VerifiedObject;
 use fgit_object_fabric::{ObjectKind, SegmentLimits};
@@ -58,43 +68,148 @@ use fgit_pack::{
 };
 use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId};
 
-/// The corpus both paths carry. Real Git blobs, identified by real Git hashing.
-const CORPUS: [&[u8]; 4] = [
-    b"the first object",
-    b"a second, longer object with different bytes",
-    b"third",
-    b"a fourth object so the pack has something to order",
-];
+/// One object of the corpus: a real Git object, identified by real Git hashing.
+#[derive(Clone)]
+struct CorpusObject {
+    id: ObjectId,
+    object_type: ObjectType,
+    kind: ObjectKind,
+    body: Vec<u8>,
+    references: Vec<ObjectId>,
+}
+
+fn raw_oid_bytes(id: ObjectId) -> Vec<u8> {
+    match id {
+        ObjectId::Sha1(oid) => oid.as_bytes().to_vec(),
+        ObjectId::Sha256(oid) => oid.as_bytes().to_vec(),
+    }
+}
+
+fn hex_oid(id: ObjectId) -> String {
+    raw_oid_bytes(id)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn blob(content: &[u8]) -> CorpusObject {
+    let body = content.to_vec();
+    CorpusObject {
+        id: ObjectId::from(native_object_oid::<Sha1>(ObjectType::Blob, &body)),
+        object_type: ObjectType::Blob,
+        kind: ObjectKind::Blob,
+        body,
+        references: Vec::new(),
+    }
+}
+
+/// A tree over `(mode, name, id)`, in Git's required entry order.
+fn tree(entries: &[(&str, &str, ObjectId)]) -> CorpusObject {
+    let mut sorted = entries.to_vec();
+    sorted.sort_by_key(|(mode, name, _)| {
+        let mut key = name.as_bytes().to_vec();
+        if *mode == "40000" {
+            key.push(b'/');
+        }
+        key
+    });
+    let mut body = Vec::new();
+    let mut references = Vec::new();
+    for (mode, name, id) in &sorted {
+        body.extend_from_slice(mode.as_bytes());
+        body.push(b' ');
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&raw_oid_bytes(*id));
+        references.push(*id);
+    }
+    CorpusObject {
+        id: ObjectId::from(native_object_oid::<Sha1>(ObjectType::Tree, &body)),
+        object_type: ObjectType::Tree,
+        kind: ObjectKind::Tree,
+        body,
+        references,
+    }
+}
+
+/// A commit with a FIXED timestamp: a clock would make the pack bytes differ
+/// between runs and destroy the determinism this differential depends on.
+fn commit(tree_id: ObjectId, message: &str) -> CorpusObject {
+    let mut body = Vec::new();
+    body.extend_from_slice(b"tree ");
+    body.extend_from_slice(hex_oid(tree_id).as_bytes());
+    body.push(b'\n');
+    body.extend_from_slice(b"author FrankenGit Corpus <corpus@invalid.example> 1700000000 +0000\n");
+    body.extend_from_slice(
+        b"committer FrankenGit Corpus <corpus@invalid.example> 1700000000 +0000\n",
+    );
+    body.push(b'\n');
+    body.extend_from_slice(message.as_bytes());
+    body.push(b'\n');
+    CorpusObject {
+        id: ObjectId::from(native_object_oid::<Sha1>(ObjectType::Commit, &body)),
+        object_type: ObjectType::Commit,
+        kind: ObjectKind::Commit,
+        body,
+        references: vec![tree_id],
+    }
+}
+
+/// A real repository shape: two blobs, a tree over them, and a commit.
+///
+/// The first version of this differential carried blobs only, and its own
+/// non-claim said trees and commits "reach the same pipeline through the same
+/// entry constructor, but that is an argument, not a measurement". This makes
+/// it the measurement. It matters because the two paths treat object kind
+/// differently -- the pack side frames it in the entry header, ATP carries it
+/// in the manifest entry and re-derives identity from it -- so a kind-handling
+/// divergence is exactly the sort of disagreement a blob-only corpus cannot
+/// see.
+fn corpus() -> Vec<CorpusObject> {
+    let readme = blob(b"the first object\n");
+    let src = blob(b"a second, longer object with different bytes\n");
+    let root = tree(&[
+        ("100644", "README.md", readme.id),
+        ("100644", "main.rs", src.id),
+    ]);
+    let head = commit(root.id, "corpus commit for the FG-022b differential");
+    vec![readme, src, root, head]
+}
 
 // ---------------------------------------------------------- ordinary pack path
 
 struct CorpusSource {
-    objects: BTreeMap<ObjectId, (Vec<u8>, u64)>,
+    objects: BTreeMap<ObjectId, (CorpusObject, u64)>,
 }
 
 impl CorpusSource {
     fn new() -> Self {
         let mut objects = BTreeMap::new();
-        for (index, content) in CORPUS.iter().enumerate() {
-            let body = content.to_vec();
-            let id = ObjectId::from(native_object_oid::<Sha1>(ObjectType::Blob, &body));
+        for (index, object) in corpus().into_iter().enumerate() {
             let recency = u64::try_from(index).unwrap_or(u64::MAX);
-            objects.insert(id, (body, recency));
+            objects.insert(object.id, (object, recency));
         }
         Self { objects }
     }
 
-    fn roots(&self) -> Vec<ObjectId> {
-        self.objects.keys().copied().collect()
+    /// The commit alone. The planner walks the closure from it, so a corpus
+    /// whose tree or blobs failed to be reached would produce a short pack --
+    /// which the whole-corpus assertions below would catch.
+    fn roots() -> Vec<ObjectId> {
+        corpus()
+            .last()
+            .map(|head| vec![head.id])
+            .expect("a non-empty corpus")
     }
 }
 
 impl CanonicalObjectSource for CorpusSource {
     fn load(&self, id: &ObjectId) -> Result<CanonicalPackObject, PackWriteError> {
-        let (body, recency) = self
+        let (object, recency) = self
             .objects
             .get(id)
             .unwrap_or_else(|| panic!("the corpus is missing an object it referenced: {id:?}"));
+        let body = &object.body;
         // A deterministic spread, not a digest: it feeds only the profile's
         // grouping heuristic and nothing downstream reads it as identity.
         let mut path_hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -104,9 +219,9 @@ impl CanonicalObjectSource for CorpusSource {
         }
         Ok(CanonicalPackObject::new(
             *id,
-            ObjectType::Blob,
+            object.object_type,
             body.clone(),
-            Vec::new(),
+            object.references.clone(),
             *recency,
             path_hash,
         ))
@@ -124,7 +239,7 @@ fn ordinary_pack_end_state() -> Vec<GitOid> {
         PackWriteProfile::STORED_V1,
         pack_limits.clone(),
     )
-    .plan(&source, &source.roots(), &mut deadline)
+    .plan(&source, &CorpusSource::roots(), &mut deadline)
     .expect("the corpus plans");
 
     let (bytes, _receipt) = PackWriter::new(pack_limits.clone())
@@ -149,10 +264,21 @@ fn ordinary_pack_end_state() -> Vec<GitOid> {
     //
     // The profile is STORED_V1 and the corpus is blobs, so every entry is a
     // base object and `inflated` is the object body.
+    // The corpus is small and its bodies are unique, so each delivered body is
+    // matched back to the object it must be. Deriving the identity from the
+    // DELIVERED BYTES rather than from a field is the point: it is what native
+    // identity verification does, and it means a path that delivered the wrong
+    // bytes under the right header cannot pass.
+    let by_body: BTreeMap<Vec<u8>, ObjectId> =
+        corpus().into_iter().map(|o| (o.body, o.id)).collect();
     let mut identities: Vec<GitOid> = quarantined
         .entries()
         .iter()
-        .map(|entry| ObjectId::from(native_object_oid::<Sha1>(ObjectType::Blob, &entry.inflated)))
+        .map(|entry| {
+            *by_body.get(&entry.inflated).unwrap_or_else(|| {
+                panic!("the pack delivered bytes that are not in the corpus at all")
+            })
+        })
         .collect();
     identities.sort();
     identities
@@ -202,11 +328,10 @@ fn capable(byte: u8) -> AuthenticatedPeerCapabilities {
 
 /// Everything the ATP-Git path leaves in quarantine, in canonical order.
 fn atp_end_state() -> Vec<GitOid> {
-    let mut entries: Vec<TransferObjectEntry> = CORPUS
-        .iter()
-        .map(|content| {
-            let identity = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, content);
-            TransferObjectEntry::from_payload(identity, ObjectKind::Blob, content, None)
+    let mut entries: Vec<TransferObjectEntry> = corpus()
+        .into_iter()
+        .map(|object| {
+            TransferObjectEntry::from_payload(object.id, object.kind, &object.body, None)
                 .expect("a payload identified by its own digest")
         })
         .collect();
@@ -225,9 +350,9 @@ fn atp_end_state() -> Vec<GitOid> {
     let have = HaveSummary::exact_objects(Vec::new(), atp_limits()).expect("an empty inventory");
     let plan = PlanSelector::new(atp_limits()).select(&manifest, &capable(1), &capable(2), &have);
 
-    let payloads: Vec<TransferPayload> = CORPUS
-        .iter()
-        .map(|content| TransferPayload::new(content.to_vec()).expect("a valid payload"))
+    let payloads: Vec<TransferPayload> = corpus()
+        .into_iter()
+        .map(|object| TransferPayload::new(object.body).expect("a valid payload"))
         .collect();
 
     let mut quarantine = Quarantine::default();
@@ -254,10 +379,7 @@ fn atp_end_state() -> Vec<GitOid> {
 
 /// What both paths are supposed to arrive at, derived from the corpus alone.
 fn expected_identities() -> Vec<GitOid> {
-    let mut identities: Vec<GitOid> = CORPUS
-        .iter()
-        .map(|content| git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, content))
-        .collect();
+    let mut identities: Vec<GitOid> = corpus().into_iter().map(|object| object.id).collect();
     identities.sort();
     identities
 }
@@ -307,7 +429,7 @@ fn the_atp_path_and_the_ordinary_pack_path_end_in_the_same_object_state() {
     // one way equality above could hold while proving nothing.
     assert_eq!(
         atp.len(),
-        CORPUS.len(),
+        corpus().len(),
         "the agreed end state must contain the whole corpus, not be an agreed emptiness"
     );
 }
