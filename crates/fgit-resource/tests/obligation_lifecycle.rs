@@ -21,10 +21,13 @@ use fgit_resource::kinds::{
     ObjectClass, OutboxDispatch, OutboxEffectPermit, StructureVerdict,
 };
 use fgit_resource::settlement::DownstreamIdempotency;
-use fgit_resource::twophase::{DeferralReason, ObligationClass, ObligationKind, ObservationMode};
+use fgit_resource::twophase::{
+    DeferralReason, EscalationReason, ObligationClass, ObligationKind, ObservationMode,
+    TerminalFailureReason,
+};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, GitOid, GitOidSha1,
-    ObjectEnvelopeId, RepositoryCommitId,
+    OPAQUE_ID_LEN, ObjectEnvelopeId, PrincipalId, RepositoryCommitId,
 };
 
 fn digest(tag: u8) -> Digest {
@@ -682,4 +685,107 @@ fn closing_with_a_live_obligation_reports_containment_rather_than_quiescence() {
         reason: DispatchAbortReason::Cancelled,
     });
     assert_eq!(settled.state(), ObligationState::Aborted);
+}
+
+#[test]
+fn escalation_leaves_the_region_still_owing_the_effect() {
+    // `UnacknowledgedEffect::escalate` documents a strong claim: "The ledger
+    // keeps the obligation outstanding, so region close still reports a
+    // containment failure naming this owner. Escalation is an admission that
+    // automation stopped, never a settlement."
+    //
+    // The state machine half of that is already covered elsewhere, on
+    // `ObligationState::apply(LifecycleEvent::Escalate)`. What was not covered
+    // is the METHOD -- and the method also calls `guard.disarm()`. A disarm
+    // paired with a ledger that settled would leave region close quiescent, so
+    // the "automation stopped" signal would vanish silently while the state
+    // enum still read `Escalated`. That is the failure this test exists for.
+    let ledger = ObligationLedger::root(
+        RegionId::new(41),
+        LeakDisposition::RecordAndContinue,
+        outbox_budget(),
+    );
+    let grant = ledger.grant(outbox_budget()).expect("capacity covers it");
+    let obligation = ledger
+        .reserve::<OutboxEffectPermit>(outbox_reservation(DownstreamIdempotency::Strong), grant)
+        .expect("egress is the required grade");
+    let id = obligation.id();
+    let handle = ledger.handle();
+
+    let deferred = obligation
+        .commit(EffectDispatched { attempt: 1 }, &outbox_budget())
+        .expect("dispatch fits inside the reservation")
+        .defer_acknowledgement(DeferralReason::AwaitingObservation);
+
+    let owner = PrincipalId::from_bytes([0x5a; OPAQUE_ID_LEN]);
+    let receipt = deferred.escalate(owner, EscalationReason::IndeterminateDelivery);
+
+    assert_eq!(
+        receipt.id(),
+        id,
+        "the receipt must name the escalated effect"
+    );
+    assert_eq!(
+        handle.state_of(id),
+        Some(ObligationState::Escalated),
+        "the method must drive the same transition the event does"
+    );
+    assert_eq!(
+        handle.outstanding().len(),
+        1,
+        "escalation is not a settlement -- the region still owes this effect"
+    );
+
+    let outcome = ledger.close();
+    assert!(
+        !outcome.is_quiescent(),
+        "region close must report containment failure after an escalation, got {outcome:?}"
+    );
+}
+
+#[test]
+fn terminal_failure_settles_where_escalation_does_not() {
+    // The contrast that gives the test above its meaning. Both methods disarm
+    // the guard and both leave the effect undelivered, so a reader could
+    // reasonably expect them to behave alike -- and an implementation that
+    // settled on escalate would pass every assertion about `Escalated` while
+    // silently dropping the containment failure. Only the pair distinguishes
+    // them.
+    let ledger = ObligationLedger::root(
+        RegionId::new(42),
+        LeakDisposition::RecordAndContinue,
+        outbox_budget(),
+    );
+    let grant = ledger.grant(outbox_budget()).expect("capacity covers it");
+    let obligation = ledger
+        .reserve::<OutboxEffectPermit>(outbox_reservation(DownstreamIdempotency::Strong), grant)
+        .expect("egress is the required grade");
+    let id = obligation.id();
+    let handle = ledger.handle();
+
+    let settled = obligation
+        .commit(EffectDispatched { attempt: 1 }, &outbox_budget())
+        .expect("dispatch fits inside the reservation")
+        .defer_acknowledgement(DeferralReason::AwaitingObservation)
+        .fail_terminally(TerminalFailureReason::PermanentDownstreamRejection);
+
+    assert_eq!(settled.summary().id(), id);
+    assert!(
+        !handle
+            .state_of(id)
+            .expect("the ledger still knows the obligation")
+            .is_outstanding(),
+        "a terminal failure settles the obligation"
+    );
+    assert_eq!(
+        handle.outstanding(),
+        [],
+        "the region owes nothing once the effect is known never to land"
+    );
+
+    let outcome = ledger.close();
+    assert!(
+        outcome.is_quiescent(),
+        "a settled region closes quiescent, got {outcome:?}"
+    );
 }
