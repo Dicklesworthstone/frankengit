@@ -42,8 +42,30 @@
 //! | policy epoch counter | [`fgit_types`] |
 //! | coordination class vocabulary | `fgit-calm` |
 //! | evidence record and its context | `fgit-evidence` |
-//! | fixed-point probability | `fgit-witness` |
+//! | fixed-point probability | [`fgit_types::Probability`] |
 //! | canonical framing and digest preimage | `fgit-codec` |
+//!
+//! `Probability` moved from `fgit-witness` to `fgit-types` at `413b8c8`, gaining
+//! the checked `try_new` that returns a typed refusal, with the lossy path kept
+//! under the self-describing `saturating_from_parts_per_million` and never
+//! aliased to a bare `from_*`. This crate reports probabilities as plain
+//! parts-per-million `u32` and could now adopt that type; doing so is tracked
+//! rather than done here, because it belongs with the consolidation below.
+//!
+//! # And one this crate did not avoid
+//!
+//! The rule above has a sixth case that this crate **broke**, and saying so here
+//! is cheaper than letting someone rediscover it. `beta_bernoulli::Posterior`
+//! duplicates `fgit_witness::retry::Posterior`: both are Beta-Bernoulli, both
+//! integer, both compute a posterior mean in parts per million. Witness's
+//! predates this crate, so nothing was copied — but two implementations of one
+//! concept now exist and will drift.
+//!
+//! Tracked as `frankengit-6q2r`. It is deliberately **not** filed as a defect:
+//! witness bounds the blast radius by construction, checking its starvation
+//! escalator before consulting the posterior and capping the result at
+//! `MAX_BACKOFF_TICKS`, so a low-evidence estimate can only tune a backoff on a
+//! transaction that escalates anyway.
 //!
 //! So the typed statistical body this crate will publish is bound into the
 //! existing immutable evidence record **by digest**, as an artifact commitment:
