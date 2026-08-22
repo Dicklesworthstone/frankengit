@@ -153,6 +153,12 @@ fn a_delta_producing_fewer_bytes_than_declared_is_refused() {
 /// appended -- the refusal is what keeps the overrun from being written at all,
 /// so `actual` here is the length the append WOULD have reached, not a length
 /// the buffer ever held.
+///
+/// On its own this test does NOT establish which site refused. Delete the eager
+/// check at `:803` and the post-loop check at `:681` catches the same delta and
+/// reports the SAME variant with the SAME payload. That is what
+/// `an_overrun_is_refused_at_the_offending_instruction` below is for, and why
+/// this test is not sufficient by itself.
 #[test]
 fn a_delta_producing_more_bytes_than_declared_is_refused() {
     let declared = LITERAL.len() - 1;
@@ -198,5 +204,50 @@ fn the_two_result_size_refusals_are_told_apart_only_by_direction() {
     assert!(
         long_actual > long_declared,
         "over-production must report actual above declared",
+    );
+}
+
+/// The overrun is refused AT the offending instruction, not after the whole
+/// stream has been walked.
+///
+/// This is the probe that separates the two raise sites, and it exists because
+/// the test above cannot: with `delta.rs:803` deleted, `append_copy` writes the
+/// overrunning bytes, the loop finishes, and `:681` reports an identical
+/// `DeltaResultSizeMismatch { declared: 3, actual: 4 }`. Two different guards,
+/// one indistinguishable observation -- a single-instruction over-production
+/// test proves the refusal happens, never that it happened early.
+///
+/// So this delta puts a deliberately truncated instruction AFTER the
+/// overrunning one: an insert claiming ten bytes while supplying two. If the
+/// overrun is refused eagerly, that second instruction is never read. If it is
+/// not, the decoder walks on and refuses with `Truncated` instead, and this
+/// assertion fails.
+///
+/// The difference is eagerness, and eagerness is the whole promise of a bounded
+/// reader under §6 -- refuse before doing the work, not after.
+#[test]
+fn an_overrun_is_refused_at_the_offending_instruction() {
+    let declared = LITERAL.len() - 1;
+    let mut delta = Vec::new();
+    push_size(BASE.len(), &mut delta);
+    push_size(declared, &mut delta);
+
+    // Instruction one: inserts LITERAL, overrunning `declared` immediately.
+    delta.push(u8::try_from(LITERAL.len()).expect("literal fits one byte"));
+    delta.extend_from_slice(LITERAL);
+
+    // Instruction two: claims ten literal bytes and supplies two. Reachable
+    // only if instruction one was allowed to complete.
+    delta.push(0x0a);
+    delta.extend_from_slice(b"..");
+
+    assert_eq!(
+        apply(&delta),
+        Err(PackError::DeltaResultSizeMismatch {
+            declared,
+            actual: LITERAL.len(),
+        }),
+        "the overrun must be refused at its own instruction; walking on to the \
+         truncated instruction that follows would report Truncated instead",
     );
 }
