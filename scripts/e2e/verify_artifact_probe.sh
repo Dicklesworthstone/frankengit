@@ -139,7 +139,32 @@ first_failure_json="$(read_if_regular "${first_failure_artifact}")"
 second_failure_json="$(read_if_regular "${second_failure_artifact}")"
 if [[ "${docs_outcome}" == 'BLOCKED_ON_BUILD_LOCK' ]]; then
   fge_assert_eq FG-001-PROBE-009 '' "${docs_artifact}" "lock-blocked docs leaves no partial replay artifact"
-  fge_assert_eq FG-001-PROBE-010 BLOCKED_ON_BUILD_LOCK "${docs_outcome}" "lock-blocked docs emits the typed bounded-wait outcome"
+  # Bound to the OBSERVED exit rather than to docs_outcome. The previous form
+  # asserted docs_outcome == BLOCKED_ON_BUILD_LOCK inside a branch guarded by
+  # that same test, so it could not fail in the direction it existed to cover.
+  # Comparing against docs_exit checks a real consistency property -- that the
+  # typed outcome is backed by the timeout that is supposed to produce it --
+  # which a future edit to the outcome assignment could genuinely break.
+  fge_assert_exit FG-001-PROBE-010 124 "${docs_exit}" "the bounded-wait outcome is backed by an observed timeout exit"
+  # The seven artifact-content cells below are NOT skipped silently. Emitting
+  # them as typed non-claims keeps the id count at 28 on both paths, so a
+  # contended run is a visible non-pass naming what went unexercised instead of
+  # a green that quietly proved seven fewer things.
+  #
+  # Written as seven literal calls rather than a loop over an id list. A loop
+  # would emit each id through a variable, which is invisible to every static
+  # id scan in the tree -- the same blind spot that hides 55 corpus-driven ids
+  # today -- and would make an id ungreppable for anyone tracing where a cell
+  # is produced. Verbosity is the correct trade here.
+  __probe_lock_reason="docs lane exceeded its ${DOCS_TIMEOUT_SECONDS}s bound and emitted no replay artifact, so this field could not be read; raise VERIFY_ARTIFACT_PROBE_DOCS_TIMEOUT_SECONDS to exercise it"
+  fge_unsupported FG-001-PROBE-011 "${__probe_lock_reason}"
+  fge_unsupported FG-001-PROBE-012 "${__probe_lock_reason}"
+  fge_unsupported FG-001-PROBE-013 "${__probe_lock_reason}"
+  fge_unsupported FG-001-PROBE-014 "${__probe_lock_reason}"
+  fge_unsupported FG-001-PROBE-015 "${__probe_lock_reason}"
+  fge_unsupported FG-001-PROBE-016 "${__probe_lock_reason}"
+  fge_unsupported FG-001-PROBE-017 "${__probe_lock_reason}"
+  unset __probe_lock_reason
 else
   fge_assert_file FG-001-PROBE-009 "${docs_artifact}" "docs replay artifact exists"
   fge_assert_ndjson FG-001-PROBE-010 "${docs_artifact}" "docs replay artifact is a parseable JSON object"
