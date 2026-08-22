@@ -34,6 +34,11 @@ fn domain_rows_match_the_enumeration() {
         assert_eq!(row.domain, domain, "row {index} names its own domain");
         assert_eq!(domain.index(), index, "the discriminant is the row index");
         assert_eq!(
+            domain.row(),
+            row,
+            "every listed domain resolves its own registry row through the closed index"
+        );
+        assert_eq!(
             usize::from(row.registry_id),
             index + 1,
             "registry identifiers are dense and one-based"

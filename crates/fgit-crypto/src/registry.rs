@@ -880,10 +880,9 @@ pub const ALGORITHM_REGISTRY: &[AlgorithmRow] = &[
     },
 ];
 
-// A variant without a row would make `IdentityDomain::row` index past the end
-// of the registry and panic at runtime. These assertions turn that into a
-// compile error instead, and pin the discriminant-is-the-row-index invariant
-// that `row` depends on.
+// `IdentityDomain::ALL` and `DOMAIN_REGISTRY` must grow together. The
+// completeness guard beside `ALL` makes adding an enum variant a compiler-held
+// decision; these assertions then pin the matching row and stable identifier.
 const _: () = assert!(DOMAIN_REGISTRY.len() == IdentityDomain::ALL.len());
 const _: () = {
     let mut index = 0;
@@ -943,6 +942,66 @@ impl IdentityDomain {
         Self::AdmissionRefDelta,
         Self::AtpTrustCacheKey,
     ];
+
+    /// Compile-time completeness guard for [`IdentityDomain::ALL`].
+    ///
+    /// `ALL` is written by hand, and the registry closure and domain-sweep
+    /// tests intentionally iterate it. A variant omitted from the array would
+    /// otherwise shrink each “every domain” check silently; worse, its
+    /// discriminant would select past [`DOMAIN_REGISTRY`] at runtime. This is
+    /// the same hand-maintained-enumeration defect class guarded in
+    /// `fgit-types` by `frankengit-13ng`.
+    ///
+    /// This match has no wildcard, so a new variant fails to compile here,
+    /// beside the array that must be updated. Once it is listed, the
+    /// `DOMAIN_REGISTRY.len() == IdentityDomain::ALL.len()` assertion below
+    /// requires a corresponding registry row before compilation can proceed.
+    ///
+    /// The guard cannot make an author add the variant to `ALL`; it makes the
+    /// omission explicit. Remove it only if `ALL` becomes mechanically derived
+    /// from the enum, at which point this hand-maintained drift boundary no
+    /// longer exists.
+    const fn _every_identity_domain_is_listed(value: Self) {
+        match value {
+            Self::RefTransaction
+            | Self::TransactionSeal
+            | Self::PreparedTransactionCapsule
+            | Self::RepositoryCommitRecord
+            | Self::RepositoryDecisionBatch
+            | Self::RepositoryAuthorityHead
+            | Self::RefusalRecord
+            | Self::RepositoryCapsule
+            | Self::PrincipalSnapshot
+            | Self::ObjectEnvelope
+            | Self::SegmentManifest
+            | Self::ForgeEvent
+            | Self::EvidenceRecord
+            | Self::Generation
+            | Self::GitPayloadCommitment
+            | Self::RepositorySegment
+            | Self::GitObjectMicrosegment
+            | Self::ForgeCheckpoint
+            | Self::PolicyCheckpoint
+            | Self::ClaimRecord
+            | Self::TreefsSnapshot
+            | Self::BackupExportBundle
+            | Self::ReleaseAsset
+            | Self::AtpTransferManifest
+            | Self::CiArtifact
+            | Self::MerkleLeaf
+            | Self::MerkleNode
+            | Self::AdmissionReceipt
+            | Self::DocumentAnchor
+            | Self::SignedEnvelope
+            | Self::KeyLifecycleReceipt
+            | Self::RestoreReport
+            | Self::AuthorityHistory
+            | Self::AdmissionRefState
+            | Self::AdmissionObjectClosure
+            | Self::AdmissionRefDelta
+            | Self::AtpTrustCacheKey => (),
+        }
+    }
 
     /// Position of this domain in [`DOMAIN_REGISTRY`].
     #[must_use]
