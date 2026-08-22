@@ -306,11 +306,14 @@ done
 # before spending a full corpus run to arrive at the same answer.
 # ---------------------------------------------------------------------------
 declare -a S_MANIFEST_REQUIRED=()
+declare -a S_MANIFEST_TERM=()
+declare -a S_MANIFEST_WRONGTERM=()
 declare -a S_MANIFEST_OPTIONAL=()
 declare -a S_MANIFEST_MISSING=()
 declare -a S_MANIFEST_UNREGISTERED=()
 declare -a S_MANIFEST_NOTPASSED=()
 if [ -n "$RA_PROFILE" ]; then
+  declare -a RA_MANIFEST_TERM=()
   RA_MANIFEST="$RA_DIR/manifests/$RA_PROFILE.tsv"
   if [ ! -f "$RA_MANIFEST" ]; then
     printf 'run_all: profile %s has no manifest at %s\n' "$RA_PROFILE" "$RA_MANIFEST" >&2
@@ -361,6 +364,12 @@ if [ -n "$RA_PROFILE" ]; then
       exit 2
     fi
     RA_MANIFEST_SEEN+=("$m_id")
+    # The declared terminal status, kept rather than discarded. It was parsed
+    # and checked for non-emptiness and then thrown away, which made it a column
+    # the manifest advertised and the runner never consulted -- the same
+    # declared-but-not-consulted shape this gate exists to catch, in the gate's
+    # own input.
+    RA_MANIFEST_TERM+=("$m_id=$m_term")
     if [ "$m_class" != required ]; then
       # OPTIONAL ENTRIES ARE RECORDED, NOT DISCARDED. "Optional-by-accident" is
       # a non-pass condition in the bead, and an optional row nobody ever sees
@@ -1085,6 +1094,27 @@ suite_status=pass
 for m_id in "${S_MANIFEST_REQUIRED[@]+"${S_MANIFEST_REQUIRED[@]}"}"; do
   ra_in_set "$m_id" "${S_PASSED[@]+"${S_PASSED[@]}"}" || S_MANIFEST_NOTPASSED+=("$m_id")
 done
+
+# A row declaring expected_terminal=pass must actually have passed. A row
+# declaring anything else is asserting the suite is EXPECTED to be non-pass --
+# a documented capability gap rather than a regression -- and the runner has to
+# tell those apart, or a suite silently flipping from pass to unsupported reads
+# the same as one that was always unsupported.
+for pair in "${RA_MANIFEST_TERM[@]+"${RA_MANIFEST_TERM[@]}"}"; do
+  term_id=${pair%%=*}
+  term_want=${pair#*=}
+  ra_in_set "$term_id" "${S_MANIFEST_REQUIRED[@]+"${S_MANIFEST_REQUIRED[@]}"}" || continue
+  if [ "$term_want" = pass ]; then
+    ra_in_set "$term_id" "${S_PASSED[@]+"${S_PASSED[@]}"}" ||
+      S_MANIFEST_WRONGTERM+=("$term_id:want=$term_want")
+  else
+    # Declared non-pass: passing is ALSO a mismatch, because the gap the row
+    # documents has evidently closed and the manifest now understates the suite.
+    ra_in_set "$term_id" "${S_PASSED[@]+"${S_PASSED[@]}"}" &&
+      S_MANIFEST_WRONGTERM+=("$term_id:want=$term_want,got=pass")
+  fi
+done
+[ "${#S_MANIFEST_WRONGTERM[@]}" -gt 0 ] && suite_status=fail
 [ "${#S_MANIFEST_NOTPASSED[@]}" -gt 0 ] && suite_status=fail
 
 FGE__J=''
@@ -1107,7 +1137,8 @@ for pair in \
   "manifest_required:S_MANIFEST_REQUIRED" "manifest_optional:S_MANIFEST_OPTIONAL" \
   "manifest_missing:S_MANIFEST_MISSING" \
   "manifest_unregistered:S_MANIFEST_UNREGISTERED" \
-  "manifest_required_not_passed:S_MANIFEST_NOTPASSED"; do
+  "manifest_required_not_passed:S_MANIFEST_NOTPASSED" \
+  "manifest_wrong_terminal:S_MANIFEST_WRONGTERM"; do
   name=${pair%%:*}
   var=${pair#*:}
   declare -n arr=$var
