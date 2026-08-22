@@ -607,7 +607,37 @@ fn cancel_after_spins(spins: usize) -> (bool, bool) {
 }
 
 #[test]
+#[ignore = "red: reproduces frankengit-w1ik, a filed P1 defect. Un-ignore with the fix."]
 fn no_cancellation_position_leaves_a_mixture() {
+    // THIS TEST IS RED, AND IT IS NOT FLAKY. Read this before touching it.
+    //
+    // It fails roughly half the time, and it fails for a reason: at late
+    // cancellation positions the store reports
+    //
+    //     ok=false   while the database holds   stored=true
+    //
+    // Measured instances: "cancelling after 1335 of about 1525 suspensions"
+    // and "after 1526 of about 1743". A cancel that lands once the commit has
+    // gone through returns `Refused(Unavailable)`, and in this vocabulary
+    // `Refused` asserts the operation did not take effect. §5.2 says client
+    // cancellation never proves non-commit. The commit stands and the caller
+    // is told it did not happen: exactly the mixture this test names.
+    //
+    // It is intermittent because the defect needs the cancel to land after the
+    // commit, and how many busy-poll spins that takes depends on machine load.
+    // Run alone the target passed five times running; run beside one other
+    // test binary it failed three times in six. **A flakiness check that does
+    // not reproduce the real execution environment is not a flakiness check**
+    // -- and here it would have mislabelled a defect as noise.
+    //
+    // Filed by BoldIbis as `frankengit-w1ik` (P1) from a reading of
+    // `into_failure`'s catch-all. This is the same defect measured from the
+    // outside. It is ignored rather than deleted, weakened, or inverted into a
+    // characterization of the broken behaviour: the assertion is correct as
+    // written and must start passing when w1ik is fixed. Do not relax it to
+    // make the suite green -- that is RH-1, and the point of this whole file
+    // is that the words must not outrun the measurement.
+    //
     // §5.2's no-mixed-state rule, checked at cancellation points spread across
     // the operation's whole duration rather than at one convenient instant.
     //

@@ -192,8 +192,9 @@ fi
 #
 # FG-005b's acceptance says the report publishes the support matrix and that
 # any unproved cell is "unsupported/non-pass and is admission-capped in
-# production". One cell is still unproved, so it is recorded as a TYPED
-# UNSUPPORTED assertion rather than as a prose note.
+# production". Two cells are still unproved -- one for absent capability and
+# one because a filed defect blocks it -- so both are recorded as TYPED
+# UNSUPPORTED assertions rather than as prose notes.
 #
 # That makes this lane's terminal status non-pass, and it should: the harness
 # treats an unsupported assertion as non-pass precisely so a partially proved
@@ -202,9 +203,17 @@ fi
 # assertion it ran, and misleading about the profile as a whole. A support
 # matrix with holes in it must not look like a support matrix without them.
 #
-# This converts to a pass the moment the named capability exists. It is not a
-# defect in the implementation; it is absent capability in the surface
+# E2E-021 converts to a pass the moment the named capability exists. It is not
+# a defect in the implementation; it is absent capability in the surface
 # available to a verifier.
+#
+# E2E-024 is the opposite kind and is recorded separately for that reason: the
+# capability exists, the test is written, and it FAILS because the store has a
+# defect. It is unsupported here rather than a `fge_fail` because the cell is
+# unproved, not because this lane broke something -- but it must not be
+# invisible. An ignored `#[test]` that no cell names would let this lane report
+# clean while a P1 it discovered went unrepresented, which is the same
+# hole-hiding the paragraph above exists to prevent.
 #
 # Two cells used to sit here and no longer do. Cancellation was assumed
 # undrivable and was drivable; fault injection was assumed unreachable for this
@@ -215,6 +224,9 @@ fi
 
 fge_unsupported FG-005B-E2E-021 \
   'cancellation of a statement the VDBE is ACTIVELY STEPPING, plus the commit-ambiguous and reply-lost cancellation cells. FG-005B-E2E-022 now covers cancellation before dispatch, between retry attempts, and after dispatch before completion. What remains: the store statements are too short to reach a VDBE opcode checkpoint reliably, and commit-ambiguous needs a lost response and a cancel arriving together -- buildable now that FG-005B-E2E-020 supplies a fault engine, but not written, so not claimed. Narrowed twice rather than deleted'
+
+fge_unsupported FG-005B-E2E-024 \
+  'no-mixed-state under LATE cancellation is BLOCKED BY A DEFECT, not by absent capability. The test exists and is correct: cancellation_matrix::no_cancellation_position_leaves_a_mixture, currently #[ignore]. It measures the store reporting ok=false while the body IS committed -- e.g. "after 1335 of about 1525 suspensions" -- because a cancelled operation returns Refused(Unavailable), and Refused asserts non-commit, which NPC 5.2 forbids for cancellation. Filed as frankengit-w1ik (P1) by BoldIbis from a reading of into_failure; this lane measured the same defect from the outside. Un-ignore the test and delete this cell when w1ik lands'
 
 # The structural PRECONDITION for that cell, which IS checkable today.
 #

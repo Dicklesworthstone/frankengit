@@ -1,5 +1,5 @@
 //! FG-005b: the AF-01..AF-08 injected-fault cells, driven against the real
-//! FrankenSQLite backend.
+//! `FrankenSQLite` backend.
 //!
 //! # The reason this cell carried, and why it was wrong
 //!
@@ -29,7 +29,7 @@
 //!
 //! The faults are injected at the **store boundary**, not inside SQLite. So
 //! what this establishes is that the caller-visible contract holds against a
-//! real FrankenSQLite database when responses are lost, requests are lost,
+//! real `FrankenSQLite` database when responses are lost, requests are lost,
 //! requests are duplicated, and the endpoint dies: the effects really are
 //! applied to real SQLite, the ambiguity really is resolved by an exact-key
 //! read against real SQLite, and the answers agree with the reference.
@@ -83,7 +83,7 @@ struct FaultState {
     effects: Vec<EffectRecord>,
 }
 
-/// A real FrankenSQLite store behind a deterministic fault script.
+/// A real `FrankenSQLite` store behind a deterministic fault script.
 ///
 /// The database is genuine: every effect that is not suppressed reaches real
 /// SQL, and every resolution reads it back. Only the *delivery* of requests and
@@ -167,7 +167,11 @@ impl<'a> FaultingStore<'a> {
         effect: &dyn Fn() -> Result<T, AuthorityFailure>,
         mutated: &dyn Fn(&Result<T, AuthorityFailure>) -> bool,
     ) -> Result<T, AuthorityFailure> {
-        let (at, within_kind, directives) = {
+        // The guard is dropped explicitly before the effect runs. Holding it
+        // across `block_on` would serialise every operation behind the fault
+        // bookkeeping, which is both unnecessary and the wrong shape: the
+        // engine's own concurrency is what the campaign is meant to exercise.
+        let (at, directives) = {
             let mut state = self.locked();
             if state.crashed {
                 return Err(AuthorityFailure::Refused(AuthorityRefusal::Unavailable));
@@ -178,9 +182,9 @@ impl<'a> FaultingStore<'a> {
             let within_kind = OpIndex::from_raw(*seen);
             *seen = seen.saturating_add(1);
             let directives = state.plan.selecting(at, within_kind, op_kind);
-            (at, within_kind, directives)
+            drop(state);
+            (at, directives)
         };
-        let _ = within_kind;
 
         for directive in &directives {
             match directive.kind {
@@ -429,7 +433,7 @@ const AF_CELLS: [&str; 8] = [
 #[test]
 fn the_injected_fault_cells_pass_against_the_real_backend() {
     // AF-01..AF-08, driven by the same campaign the reference runs, over a real
-    // FrankenSQLite database.
+    // `FrankenSQLite` database.
     let node = node();
     let report = run_fault_conformance(|instance| FaultingStore::open(&node, instance));
 
