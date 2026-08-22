@@ -435,6 +435,28 @@ fn a_terminal_machine_refuses_reuse_instead_of_accepting_a_second_request() {
     let mut always = || true;
     let _ = machine.finish_with_handoff(&mut handoff, &mut always);
 
+    // The permitted twin for `a_delete_only_push_hands_off_no_pack_at_all`,
+    // which asserts `!saw_pack_bytes`. Nothing in this corpus asserted that flag
+    // TRUE anywhere, so the delete-only probe would pass unchanged on a machine
+    // that handed `None` to admission for *every* push — it could not fail for
+    // the reason it names. §16.3 requires the pairing and this file's header
+    // claims it; the claim was not true for this pair.
+    //
+    // This setup already drives the positive path — a create carrying a valid
+    // pack — and already discarded the evidence, so the witness is free.
+    //
+    // Pinned rather than assumed: `cancelling_at_every_checkpoint_leaves_no_
+    // stuck_intermediate` already asserts this exact input reaches
+    // `ReceivePhase::Complete`, and `Complete` is set only immediately after
+    // `handoff(&request, Some(&pack), ..)`. So a green corpus already entails
+    // this flag is set.
+    assert!(
+        handoff.saw_pack_bytes,
+        "a create carrying a valid pack handed None to admission, so the \
+         delete-only probe's !saw_pack_bytes assertion cannot fail for the \
+         reason it states"
+    );
+
     let error = machine
         .push_packet(command(ZERO, OTHER, "refs/heads/second", None))
         .expect_err("a terminal machine must refuse a second request");
