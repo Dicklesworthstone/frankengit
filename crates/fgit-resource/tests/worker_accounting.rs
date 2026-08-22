@@ -13,7 +13,9 @@
 //! as a budget that ran out for no visible reason.
 
 use fgit_resource::algebra::{GRADE_COUNT, Grade};
-use fgit_resource::workers::{BatchPlan, VarianceClass, WorkerBudgetInputs, WorkerMode, plan};
+use fgit_resource::workers::{
+    BatchPlan, VarianceClass, WorkerBudgetInputs, WorkerMode, plan, plan_for_batch,
+};
 
 const fn inputs(mode: WorkerMode, variance: VarianceClass) -> WorkerBudgetInputs {
     WorkerBudgetInputs {
@@ -133,33 +135,89 @@ fn a_wider_variance_never_plans_more_workers_than_a_tighter_one() {
 }
 
 #[test]
-fn a_batch_plan_reports_the_job_count_it_was_assigned() {
-    // `BatchPlan::job_count` exists so a caller can tell how many jobs a fleet
-    // was assembled for, independently of how wide the fleet is. Never asserted
-    // before, and it is the only way to distinguish "few jobs, narrow fleet"
-    // from "many jobs, fleet capped by resources" from the outside.
+fn a_batch_plan_records_its_job_count_and_carries_the_fleet_width_unchanged() {
+    // `BatchPlan::new` is a pairing, not a planner: it records `job_count` and
+    // copies `budget.workers` verbatim. Narrowing a fleet to the batch it
+    // serves is a DIFFERENT function -- `plan_for_batch` -- and the test below
+    // pins that contract where it actually lives.
+    //
+    // This test previously asserted `small.workers() <= 2` and
+    // `empty.workers() == 0` against `BatchPlan::new`. Both are
+    // `plan_for_batch`'s semantics asserted against the wrong constructor, and
+    // both were wrong from the moment they were written; they went in red
+    // because the commit landed under the code-first wave without the test
+    // being run.
     let budget = plan(inputs(WorkerMode::Batch, VarianceClass::Tight)).expect("a plan fits");
 
-    let small = BatchPlan::new(2, &budget);
-    assert_eq!(small.job_count(), 2);
-    assert!(
-        small.workers() <= 2,
-        "a plan is never wider than the batch it serves"
-    );
+    for job_count in [0_usize, 2, 10_000] {
+        let batch = BatchPlan::new(job_count, &budget);
+        assert_eq!(batch.job_count(), job_count);
+        assert_eq!(
+            batch.workers(),
+            budget.workers(),
+            "BatchPlan::new must carry the fleet width unchanged for {job_count} jobs; \
+             narrowing belongs to plan_for_batch"
+        );
+    }
 
-    // The permitted twin: a batch larger than the fleet leaves the fleet at its
-    // resource-derived width rather than growing to match the job count. That
-    // is the direction a bug would go, because widening to fit looks helpful.
-    let large = BatchPlan::new(10_000, &budget);
-    assert_eq!(large.job_count(), 10_000);
-    assert_eq!(
-        large.workers(),
-        budget.workers(),
-        "job count above the fleet width must not widen the fleet"
-    );
-
-    // And the degenerate case: no jobs needs no workers.
+    // What "no jobs" actually means here: the width is untouched, but no index
+    // is owned and every worker is idle. That is the property a caller depends
+    // on, and it is observable without pretending the width collapsed.
     let empty = BatchPlan::new(0, &budget);
-    assert_eq!(empty.job_count(), 0);
-    assert_eq!(empty.workers(), 0, "an empty batch plans no workers");
+    assert_eq!(empty.owner_of(0), None, "an empty batch owns no job index");
+    for worker in 0..budget.workers() {
+        assert!(
+            empty.jobs_for(worker).is_empty(),
+            "worker {worker} must have no work in an empty batch"
+        );
+    }
+
+    // The discriminating twin: a non-empty batch does assign work, so the
+    // emptiness above is a real distinction rather than accessors that always
+    // return nothing.
+    let two = BatchPlan::new(2, &budget);
+    assert_eq!(two.owner_of(0), Some(0), "the first job has an owner");
+    assert_eq!(two.owner_of(2), None, "index 2 is outside a two-job batch");
+}
+
+#[test]
+fn plan_for_batch_narrows_the_fleet_to_the_batch_and_never_widens_it() {
+    // The capping contract the test above was mistakenly asserting, pinned
+    // against the function that actually implements it (`workers.rs:401`).
+    let uncapped = plan(inputs(WorkerMode::Batch, VarianceClass::Tight)).expect("a plan fits");
+    assert!(
+        uncapped.workers() > 2,
+        "the fixture must plan more than two workers ({} planned) or the narrowing below \
+         proves nothing",
+        uncapped.workers()
+    );
+
+    let narrowed =
+        plan_for_batch(inputs(WorkerMode::Batch, VarianceClass::Tight), 2).expect("a plan fits");
+    assert_eq!(
+        narrowed.workers(),
+        2,
+        "two jobs must not reserve a fleet wider than two"
+    );
+
+    // The permitted twin: a batch at or above the resource-derived width is
+    // returned unchanged rather than widened to match the job count. Widening
+    // is the direction a bug would go, because growing to fit looks helpful.
+    let wide = plan_for_batch(inputs(WorkerMode::Batch, VarianceClass::Tight), 10_000)
+        .expect("a plan fits");
+    assert_eq!(
+        wide.workers(),
+        uncapped.workers(),
+        "a job count above the fleet width must not widen the fleet"
+    );
+
+    // The floor: zero jobs still plans one worker rather than an unusable
+    // zero-width fleet that could divide by zero downstream.
+    let none =
+        plan_for_batch(inputs(WorkerMode::Batch, VarianceClass::Tight), 0).expect("a plan fits");
+    assert_eq!(
+        none.workers(),
+        1,
+        "the cap floors at one worker, never zero"
+    );
 }
