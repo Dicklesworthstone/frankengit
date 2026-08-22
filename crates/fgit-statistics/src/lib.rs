@@ -74,6 +74,7 @@
 //! them.
 
 pub mod authority;
+pub mod beta_bernoulli;
 pub mod conformal;
 pub mod controller;
 pub mod evidence;
@@ -85,6 +86,9 @@ pub mod regime;
 pub use authority::{
     AdmissibleShape, AdvisoryDecision, DecisionRefusal, EffectClass, ForbiddenTarget,
     ProposedTarget,
+};
+pub use beta_bernoulli::{
+    ArmComparison, ArmVerdict, BetaAssumptionFailure, BetaPrior, BetaRefusal, Outcomes, Posterior,
 };
 pub use conformal::{
     ConformalAssumptionFailure, ConformalConfig, ConformalRefusal, SplitConformal,
