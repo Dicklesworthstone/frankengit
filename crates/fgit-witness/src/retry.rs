@@ -267,7 +267,7 @@ impl RetryController {
     /// # Errors
     ///
     /// Returns the shared controller refusal if the pinned profile is invalid.
-    pub fn new(identity: RetryEvidenceIdentity) -> Result<Self, ControllerRefusal> {
+    pub const fn new(identity: RetryEvidenceIdentity) -> Result<Self, ControllerRefusal> {
         match RetryBackoffController::new(controller_config()) {
             Ok(controller) => Ok(Self {
                 controller,
@@ -282,7 +282,7 @@ impl RetryController {
     /// # Errors
     ///
     /// Returns the shared controller refusal if the pinned profile is invalid.
-    pub fn new_at_epoch(
+    pub const fn new_at_epoch(
         identity: RetryEvidenceIdentity,
         epoch: PolicyEpoch,
     ) -> Result<Self, ControllerRefusal> {
@@ -384,8 +384,8 @@ impl RetryController {
         let assumptions =
             RetryBackoffController::assumptions().map_err(RetryEvidenceRefusal::Binding)?;
         Ok(StatisticalEvidenceBody {
-            population: self.identity.population.clone(),
-            selection: self.identity.selection.clone(),
+            population: self.identity.population,
+            selection: self.identity.selection,
             window,
             regime: self.controller.regime_binding(),
             policy: self.controller.selection(),
