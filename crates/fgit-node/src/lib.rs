@@ -670,6 +670,7 @@ impl DurableAdmissionMaterializer {
             .write()
             .map_err(|_| RefusalCode::InternalInvariantBreach)?;
         *guard = None;
+        drop(guard);
         Ok(())
     }
 }
@@ -2916,7 +2917,7 @@ mod tests {
                 node.durable_admission_upload_pack_repository_in(&request, &WireLimits::default()),
             )
             .expect("first-clone view comes from durable admission materialization");
-        assert!(upload_pack.advertised_refs().is_empty());
+        assert_eq!(upload_pack.advertised_refs(), []);
         node.shutdown().expect("node closes cleanly");
     }
 
