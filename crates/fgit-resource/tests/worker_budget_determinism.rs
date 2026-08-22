@@ -22,7 +22,7 @@
 
 use fgit_resource::workers::{
     BatchMergeRefusal, BatchPlan, BindingConstraint, VarianceClass, WorkerBudget,
-    WorkerBudgetInputs, WorkerBudgetRefusal, WorkerMode, merge_in_job_order, plan,
+    WorkerBudgetInputs, WorkerBudgetRefusal, WorkerMode, merge_in_job_order, plan, plan_for_batch,
 };
 
 /// The batch under test: a pure job -> result function, so any difference in
@@ -354,4 +354,126 @@ fn planning_is_a_pure_function_of_its_inputs() {
     for _ in 0..64 {
         assert_eq!(plan(inputs), Ok(first), "planning is not deterministic");
     }
+}
+
+#[test]
+fn a_fleet_is_never_larger_than_the_batch_it_serves() {
+    // Found by comparing against fgit-doc's independent implementation, which
+    // caps by input count while the first cut of this one did not.
+    let roomy = WorkerBudgetInputs {
+        cpu_cap: 64,
+        memory_budget_bytes: 1 << 40,
+        per_job_rss_bytes: 1024,
+        mode: WorkerMode::Batch,
+        variance: VarianceClass::Tight,
+    };
+
+    let uncapped = plan(roomy).expect("must plan");
+    assert_eq!(
+        uncapped.workers(),
+        64,
+        "the drill needs an uncapped fleet of 64"
+    );
+
+    let capped = plan_for_batch(roomy, 3).expect("must plan");
+    assert_eq!(
+        capped.workers(),
+        3,
+        "three jobs cannot occupy sixty-four workers"
+    );
+    assert_eq!(capped.binding(), BindingConstraint::BatchSize);
+}
+
+#[test]
+fn capping_by_batch_size_shrinks_the_reservation_too() {
+    // The tempting bug: cap the worker count but carry the uncapped
+    // reservation, over-reporting memory the batch will never hold.
+    let inputs = WorkerBudgetInputs {
+        cpu_cap: 32,
+        memory_budget_bytes: 1 << 30,
+        per_job_rss_bytes: 4096,
+        mode: WorkerMode::Batch,
+        variance: VarianceClass::Tight,
+    };
+    let capped = plan_for_batch(inputs, 2).expect("must plan");
+
+    assert_eq!(capped.workers(), 2);
+    assert_eq!(
+        capped.memory_reserved_bytes(),
+        2 * 4096,
+        "the reservation must track the capped fleet, not the uncapped one"
+    );
+    assert_eq!(
+        u64::from(capped.workers()) * capped.effective_per_job_bytes(),
+        capped.memory_reserved_bytes()
+    );
+}
+
+#[test]
+fn capping_never_raises_the_count_or_relaxes_the_memory_bound() {
+    // The cap must be a floor-preserving narrowing, never an escape hatch: if
+    // memory already bound the fleet to 3, asking for a 100-job batch must not
+    // yield 100 workers.
+    let tight = WorkerBudgetInputs {
+        cpu_cap: 64,
+        memory_budget_bytes: 3 * 1024,
+        per_job_rss_bytes: 1024,
+        mode: WorkerMode::Batch,
+        variance: VarianceClass::Tight,
+    };
+    let capped = plan_for_batch(tight, 100).expect("must plan");
+
+    assert_eq!(
+        capped.workers(),
+        3,
+        "batch size must not override the memory bound"
+    );
+    assert_eq!(capped.binding(), BindingConstraint::Memory);
+    assert!(capped.memory_reserved_bytes() <= 3 * 1024);
+}
+
+#[test]
+fn an_empty_batch_still_gets_a_fleet_that_could_make_progress() {
+    let inputs = WorkerBudgetInputs {
+        cpu_cap: 8,
+        memory_budget_bytes: 1 << 30,
+        per_job_rss_bytes: 1024,
+        mode: WorkerMode::Batch,
+        variance: VarianceClass::Tight,
+    };
+    let capped = plan_for_batch(inputs, 0).expect("must plan");
+    assert_eq!(capped.workers(), 1, "zero is not a fleet");
+}
+
+#[test]
+fn a_batch_capped_fleet_still_merges_deterministically() {
+    // The cap must not create a hole in the determinism contract: a batch
+    // planned through plan_for_batch reassembles exactly as one planned
+    // through plan.
+    let job_count = 5;
+    let inputs = WorkerBudgetInputs {
+        cpu_cap: 64,
+        memory_budget_bytes: 1 << 40,
+        per_job_rss_bytes: 1024,
+        mode: WorkerMode::Batch,
+        variance: VarianceClass::Tight,
+    };
+    let budget = plan_for_batch(inputs, job_count).expect("must plan");
+    assert_eq!(budget.workers(), 5);
+
+    let batch = BatchPlan::new(job_count, &budget);
+    let completed: Vec<Vec<(usize, String)>> = (0..budget.workers())
+        .map(|worker| {
+            let mut produced: Vec<(usize, String)> = batch
+                .jobs_for(worker)
+                .into_iter()
+                .map(|index| (index, result_for(index)))
+                .collect();
+            produced.reverse();
+            produced
+        })
+        .collect();
+
+    let merged = merge_in_job_order(job_count, completed).expect("must reassemble");
+    assert_eq!(merged, expected_output(job_count));
 }

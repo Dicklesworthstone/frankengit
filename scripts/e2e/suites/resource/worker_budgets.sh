@@ -38,7 +38,7 @@ REPOSITORY_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd -P)"
 
 readonly TEST_NAME='worker_budget_determinism'
 # The drill count the Rust suite is expected to run. Asserted, not assumed.
-readonly EXPECTED_DRILLS=12
+readonly EXPECTED_DRILLS=17
 
 main() {
   local artifacts='' worker_exit=0 output=''
@@ -134,6 +134,25 @@ main() {
   fge_assert_contains 'FG-089-E2E-013' "$output" \
     'a_result_from_outside_the_batch_is_a_refusal' \
     'a result claiming an out-of-range index is a typed refusal'
+
+  # Batch-size cap. The bound was missing from the first cut and was found by
+  # comparing against fgit-doc's independent implementation; these assert that
+  # the cap narrows without becoming an escape hatch.
+  fge_assert_contains 'FG-089-E2E-014' "$output" \
+    'a_fleet_is_never_larger_than_the_batch_it_serves' \
+    'the fleet is capped by the batch it serves'
+
+  fge_assert_contains 'FG-089-E2E-015' "$output" \
+    'capping_never_raises_the_count_or_relaxes_the_memory_bound' \
+    'the batch-size cap never overrides the memory bound'
+
+  fge_assert_contains 'FG-089-E2E-016' "$output" \
+    'capping_by_batch_size_shrinks_the_reservation_too' \
+    'a capped fleet reserves less memory rather than carrying the uncapped figure'
+
+  fge_assert_contains 'FG-089-E2E-017' "$output" \
+    'a_batch_capped_fleet_still_merges_deterministically' \
+    'the cap opens no hole in the determinism contract'
 
   fge_phase report
 }

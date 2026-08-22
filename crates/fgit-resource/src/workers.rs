@@ -215,6 +215,13 @@ pub enum BindingConstraint {
     Memory,
     /// Both limits landed on the same count.
     Both,
+    /// The batch is smaller than either limit allows.
+    ///
+    /// Planning more workers than there are jobs is not wrong so much as
+    /// meaningless: the surplus workers are handed no work. Reporting it as a
+    /// distinct binding keeps "your budget is tight" separate from "your batch
+    /// is small", which are different things to act on.
+    BatchSize,
 }
 
 impl fmt::Display for BindingConstraint {
@@ -223,6 +230,7 @@ impl fmt::Display for BindingConstraint {
             Self::Cpu => "cpu",
             Self::Memory => "memory",
             Self::Both => "cpu and memory",
+            Self::BatchSize => "batch size",
         };
         f.write_str(name)
     }
@@ -362,6 +370,45 @@ pub fn plan(inputs: WorkerBudgetInputs) -> Result<WorkerBudget, WorkerBudgetRefu
         effective_per_job_bytes,
         memory_reserved_bytes,
         binding,
+    })
+}
+
+/// Plan a fleet for a batch of known size.
+///
+/// Identical to [`plan`], then capped so the fleet is never larger than the
+/// batch it serves. A calculator that answers "sixty-four workers" for a
+/// three-job batch is not merely inefficient: it is reporting a bound that has
+/// nothing to do with the work, and callers size thread pools and reservations
+/// from that number.
+///
+/// The cap never raises the count and never relaxes the memory bound, so every
+/// guarantee [`plan`] makes still holds here. An empty batch still yields one
+/// worker: a fleet must be able to make progress if the batch later grows, and
+/// zero is not a fleet.
+///
+/// # Errors
+///
+/// Returns the same [`WorkerBudgetRefusal`] cases as [`plan`]; capping by batch
+/// size introduces no new refusal.
+pub fn plan_for_batch(
+    inputs: WorkerBudgetInputs,
+    job_count: usize,
+) -> Result<WorkerBudget, WorkerBudgetRefusal> {
+    let uncapped = plan(inputs)?;
+
+    let cap = u32::try_from(job_count).unwrap_or(u32::MAX).max(1);
+    if cap >= uncapped.workers {
+        return Ok(uncapped);
+    }
+
+    Ok(WorkerBudget {
+        workers: cap,
+        effective_per_job_bytes: uncapped.effective_per_job_bytes,
+        // Recomputed, never carried over: a smaller fleet reserves less. Keeping
+        // the uncapped reservation would over-report memory this batch will
+        // never hold, which is the same class of error as under-reporting it.
+        memory_reserved_bytes: u64::from(cap) * uncapped.effective_per_job_bytes,
+        binding: BindingConstraint::BatchSize,
     })
 }
 
