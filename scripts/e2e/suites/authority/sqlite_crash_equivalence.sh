@@ -171,6 +171,16 @@ fge_run sqlite-resource-ceilings \
   cargo test --locked -p fgit-authority-fsqlite --test resource_ceilings || true
 sq_ceilings_exit=$FGE_LAST_EXIT
 
+# frankengit-6cs9: worker/thread quiescence across close/join. Its own binary
+# on purpose -- /proc/self/task is process-global and cargo runs one file's
+# tests concurrently, so a probe sharing a binary with twenty other tests
+# measures them too. Written first inside crash_equivalence.rs, it reported the
+# thread count going DOWN across eight cycles and still failed one run in five
+# with a shared mutex. Isolation, not a wider tolerance.
+fge_run sqlite-process-quiescence \
+  cargo test --locked -p fgit-authority-fsqlite --test process_quiescence || true
+sq_quiescence_exit=$FGE_LAST_EXIT
+
 fge_phase assert
 
 fge_assert_exit FG-005B-E2E-010 0 "$sq_campaign_exit" \
@@ -189,6 +199,8 @@ fge_assert_exit FG-005B-E2E-022 0 "$sq_cancellation_exit" \
   'cancellation before dispatch refuses AND leaves no effect, and is never retried'
 fge_assert_exit FG-005B-E2E-020 0 "$sq_fault_exit" \
   'AF-01..AF-08 pass against a real FrankenSQLite database: effects reach real SQL, ambiguity resolves by real exact-key read, and lost-request is distinguished from lost-response by the effect log. Scope: faults are injected at the STORE BOUNDARY, so faults originating inside SQLite are not exercised'
+fge_assert_exit FG-005B-E2E-028 0 "$sq_quiescence_exit" \
+  'close/join releases the per-store worker THREAD, not just its descriptors: holding 8 stores open raises the live thread count and closing them gives it back. Paired with a presence case proving the metric can see the worker at all. NON-CLAIM: this is "no per-store retention", weaker than the acceptance line zero DB workers, because a pooled thread reused across stores is invisible to it'
 fge_assert_exit FG-005B-E2E-026 0 "$sq_ceilings_exit" \
   'every ceiling the store DECLARES through limits() it also ENFORCES, and it refuses with the same typed CapacityExhausted the reference uses. Was frankengit-nv0a: three of the four were published and unenforced, so limits() advertised guarantees no code applied. Each refusal is paired with an at-capacity PRESENCE case -- a body or head already stored is still admitted -- so a store that simply refused everything could not pass this cell'
 fge_assert_exit FG-005B-E2E-025 0 "$sq_probe_exit" \
