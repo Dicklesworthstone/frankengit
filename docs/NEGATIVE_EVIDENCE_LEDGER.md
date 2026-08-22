@@ -127,6 +127,45 @@ A rejected idea may be revisited only when the proposal identifies:
 
 A new benchmark on different hardware without addressing the old correctness counterexample is not a revisit.
 
+### NEG-025 — a fixed-point Beta expected-loss recurrence returns 0 ppm, silently (FG-054)
+
+**Hypothesis.** `P(theta_b > theta_a)` for two Beta posteriors can be evaluated in bounded
+fixed-point integer arithmetic by iterating its exact term recurrence at a large scale, so
+`fgit-statistics` needs no arbitrary-precision rationals to implement Beta-Bernoulli expected loss.
+
+**Disposition: DISPROVEN BY MEASUREMENT, and the failure mode is the dangerous one.** A `u128`
+implementation at scale `1e24` returns **exactly `0` ppm** for ordinary parameter sizes. That is not
+an inaccurate answer, it is a confidently wrong one: `0 ppm` reads as *the candidate policy never
+beats the fallback*, which would pin a controller to its fallback permanently while presenting as
+evidence. The closed form and its recurrence are exact and were independently confirmed; it is the
+fixed-point **evaluation** that fails.
+
+This is recorded because the approach is the obvious one and looks sound from every angle that
+usually matters. The recurrence is factorial-free, every factor is a small rational of the
+parameters, and nothing in its shape suggests underflow.
+
+**Evidence.** The series spans more dynamic range than any fixed scale can hold. Measured `T0`
+against exact rational values:
+
+| parameters | `T0` | peak term |
+|---|---|---|
+| `Beta(3,4)` vs `Beta(5,2)` | `3.571e-01` | `3.571e-01` |
+| `Beta(101,101)` vs `Beta(151,51)` | `7.166e-14` | `3.275e-02` |
+| `Beta(501,501)` vs `Beta(601,401)` | `2.955e-96` | `1.053e-02` |
+| `Beta(1001,1001)` vs `Beta(1501,501)` | `1.169e-129` | `1.031e-02` |
+
+The peak term is `~1e-2` in every case, so the series **starts negligibly small and grows**,
+spanning roughly 127 orders of magnitude between its first term and its peak, while `u128` offers
+about 38 decimal digits. `T0` truncates to `0` at scale `1e24`, and every later term is `0 * ratio
+= 0`. Exact-rational evaluation agrees with numerical integration on four parameter sets, including
+the symmetric control `Beta(2,2)` vs `Beta(3,3)` = `500000` ppm exactly, so the mathematics is not
+in question.
+
+**Revisit when** someone implements a mantissa-plus-exponent representation (which is reinventing
+floating point and owes its own constitutional argument), or arbitrary-precision rationals (no
+admitted crate provides them), or restructures the summation to begin at the peak term and work
+outward so no value near `T0` is ever represented. The last is plausible and unanalysed.
+
 ## 5. Integration with agents
 
 Context Packets for architecture/performance work include relevant negative-evidence rows. An agent proposing a known-rejected dependency or mechanism must cite and rebut the row. The system does not block creative reconsideration; it prevents amnesia.
