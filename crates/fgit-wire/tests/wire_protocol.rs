@@ -11,6 +11,9 @@ use fgit_wire::{
 const WANT: &str = "1111111111111111111111111111111111111111";
 const HAVE: &str = "2222222222222222222222222222222222222222";
 const ORACLE_WANT: &str = "ba6bb24deaace591e8936c9e8de324de298cedc6";
+const TAG: &str = "3333333333333333333333333333333333333333";
+const PEELED: &str = "4444444444444444444444444444444444444444";
+const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 
 #[derive(Clone, Debug)]
 struct Repository {
@@ -623,4 +626,59 @@ fn repeated_transcript_transitions_are_deterministic() {
 #[test]
 fn multi_ack_default_is_not_selected_without_client_capability() {
     assert_eq!(AckMode::default(), AckMode::None);
+}
+
+/// Upstream v0/v1 servers append a `<peeled> <ref>{}` record after every
+/// annotated tag, and the empty-repository advertisement is a single
+/// `capabilities^{}` pseudo-ref. Both names carry `^{}`, which a bare ref
+/// name forbids; an advertisement parser that routed them through the strict
+/// grammar refused nearly every real upstream repository. The suffix is now
+/// admitted as a validated base name plus the exact marker, and the parse
+/// round-trips through this crate's own encoder byte for byte.
+#[test]
+fn v1_advertisement_accepts_peeled_tag_records_and_round_trips() {
+    let packets = vec![
+        Packet::Data(format!("{WANT} refs/heads/main\n").into_bytes()),
+        Packet::Data(format!("{TAG} refs/tags/v1.0\n").into_bytes()),
+        Packet::Data(format!("{PEELED} refs/tags/v1.0^{{}}\n").into_bytes()),
+        Packet::Flush,
+    ];
+    let advertisement =
+        V1Advertisement::parse(&packets, GitObjectFormat::Sha1, &WireLimits::default())
+            .expect("upstream peel lines are valid advertisement records");
+    assert_eq!(advertisement.refs.len(), 3);
+    assert_eq!(advertisement.refs[2].name, b"refs/tags/v1.0^{}");
+    assert_eq!(
+        advertisement
+            .encode(&WireLimits::default())
+            .expect("peel records re-encode"),
+        packets
+    );
+}
+
+#[test]
+fn v1_advertisement_accepts_the_empty_repository_capabilities_record() {
+    let packets = vec![
+        Packet::Data(format!("{ZERO_OID} capabilities^{{}}\n").into_bytes()),
+        Packet::Flush,
+    ];
+    let advertisement =
+        V1Advertisement::parse(&packets, GitObjectFormat::Sha1, &WireLimits::default())
+            .expect("the empty-repository pseudo-ref is a valid record");
+    assert_eq!(advertisement.refs.len(), 1);
+    assert_eq!(advertisement.refs[0].name, b"capabilities^{}");
+}
+
+#[test]
+fn v1_advertisement_still_refuses_an_invalid_name_under_the_peel_suffix() {
+    // The suffix widens nothing else: the base name must still satisfy the
+    // full check-ref-format grammar.
+    let packets = vec![
+        Packet::Data(format!("{TAG} refs/heads/..^{{}}\n").into_bytes()),
+        Packet::Flush,
+    ];
+    assert!(matches!(
+        V1Advertisement::parse(&packets, GitObjectFormat::Sha1, &WireLimits::default()),
+        Err(WireError::InvalidRefName)
+    ));
 }

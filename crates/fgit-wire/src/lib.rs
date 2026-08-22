@@ -1237,6 +1237,27 @@ pub(crate) fn parse_ref_name(text: &[u8], limits: &WireLimits) -> Result<Vec<u8>
         .map_err(|_| WireError::InvalidRefName)
 }
 
+/// Validates one ADVERTISED ref name: a strict ref name, optionally carrying
+/// the exact `^{}` peel suffix that upstream v0/v1 advertisements append for
+/// annotated tags and for the empty-repository `capabilities^{}` record.
+///
+/// Request-side names keep the strict grammar; only advertisement records
+/// widen, and only by this one checked suffix.
+pub(crate) fn parse_advertised_ref_name(
+    text: &[u8],
+    limits: &WireLimits,
+) -> Result<Vec<u8>, WireError> {
+    const PEEL_SUFFIX: &[u8] = b"^{}";
+    let base = text.strip_suffix(PEEL_SUFFIX).unwrap_or(text);
+    let mut name = parse_ref_name(base, limits)?;
+    if base.len() != text.len() {
+        name.try_reserve(PEEL_SUFFIX.len())
+            .map_err(|_| WireError::AllocationFailure)?;
+        name.extend_from_slice(PEEL_SUFFIX);
+    }
+    Ok(name)
+}
+
 fn parse_ref_prefix(text: &[u8], limits: &WireLimits) -> Result<Vec<u8>, WireError> {
     if text.is_empty() || text.len() > limits.max_ref_name_bytes {
         return Err(WireError::RefNameTooLarge {
@@ -1286,10 +1307,17 @@ pub struct AdvertisedRef {
 
 impl AdvertisedRef {
     /// Constructs a bounded wire-safe ref record.
+    ///
+    /// Advertised names come in two shapes a bare ref name rejects, both
+    /// emitted by upstream servers and by this crate's own encoder: the
+    /// empty-repository `capabilities^{}` pseudo-ref and the `<ref>{}`
+    /// peeled-annotated-tag record. Each is validated as a strict ref name
+    /// (the part before the suffix) plus the exact `^{}` marker, so a name is
+    /// never accepted on the strength of bytes that were never checked.
     pub fn new(oid: AnyGitOid, name: &[u8], limits: &WireLimits) -> Result<Self, WireError> {
         Ok(Self {
             oid,
-            name: parse_ref_name(name, limits)?,
+            name: parse_advertised_ref_name(name, limits)?,
         })
     }
 }
@@ -1702,7 +1730,7 @@ fn validate_advertised_refs(
                 observed: reference.oid.algorithm(),
             });
         }
-        parse_ref_name(&reference.name, limits)?;
+        parse_advertised_ref_name(&reference.name, limits)?;
         if let Some(previous_name) = previous
             && previous_name >= reference.name.as_slice()
         {

@@ -566,6 +566,7 @@ fn collect_commits(
     limits: &ClosureLimits,
 ) -> Result<(BTreeMap<AnyGitOid, CommitNode>, BTreeSet<AnyGitOid>), ClosureError> {
     let mut commits = BTreeMap::new();
+    let mut depths: BTreeMap<AnyGitOid, u32> = BTreeMap::new();
     let mut boundaries = BTreeSet::new();
     let mut pending = Vec::new();
     pending
@@ -575,48 +576,107 @@ fn collect_commits(
         pending.push((*want, 1_u32));
     }
     let mut edge_count = 0_usize;
-    while let Some((oid, depth)) = pending.pop() {
-        ensure_format(repository, oid)?;
-        if commits.contains_key(&oid) || excluded.contains(&oid) {
-            continue;
-        }
-        if commits.len() == limits.max_commits {
-            return Err(limit_error("commits", limits.max_commits));
-        }
-        let object = repository.object(oid)?;
-        let ClosureObject::Commit(commit) = object else {
-            return Err(ClosureError::ExpectedCommit {
-                oid,
-                observed: object.object_type(),
-            });
-        };
-        ensure_format(repository, commit.tree)?;
-        let is_depth_boundary = shallow.deepen.is_some_and(|maximum| depth >= maximum);
-        let is_time_boundary = shallow
-            .deepen_since
-            .is_some_and(|minimum| commit.committer_time < minimum);
-        let has_excluded_parent = commit
-            .parents
-            .iter()
-            .any(|parent| excluded.contains(parent));
-        edge_count = edge_count
-            .checked_add(commit.parents.len())
+    let charge_edges = |count: usize,
+                        edge_count: &mut usize,
+                        limits: &ClosureLimits|
+     -> Result<(), ClosureError> {
+        *edge_count = edge_count
+            .checked_add(count)
             .ok_or_else(|| limit_error("graph edges", limits.max_edges))?;
-        if edge_count > limits.max_edges {
+        if *edge_count > limits.max_edges {
             return Err(limit_error("graph edges", limits.max_edges));
         }
-        if is_depth_boundary || is_time_boundary || has_excluded_parent {
-            boundaries.insert(oid);
-        } else {
-            let next_depth = depth
-                .checked_add(1)
-                .ok_or(ClosureError::InconsistentGraph { oid })?;
-            for parent in commit.parents.iter().rev() {
-                ensure_format(repository, *parent)?;
-                pending.push((*parent, next_depth));
+        Ok(())
+    };
+    while let Some((oid, depth)) = pending.pop() {
+        ensure_format(repository, oid)?;
+        if excluded.contains(&oid) {
+            continue;
+        }
+        match depths.get(&oid).copied() {
+            // A previous arrival already recorded this commit at an equal or
+            // shorter path length; nothing about this visit can improve it.
+            Some(previous) if depth >= previous => {}
+            // A SHORTER PATH arrived. A commit's effective generation is its
+            // minimum over all paths -- merge history makes unequal paths
+            // common -- so an earlier visit's boundary decision is stale
+            // whenever depth alone produced it. Re-derive every condition
+            // from the commit itself: time and excluded-parent boundaries
+            // are path-independent and survive, while a depth boundary that
+            // no longer holds is released and its parents finally expand.
+            Some(_) => {
+                let object = repository.object(oid)?;
+                let ClosureObject::Commit(commit) = &object else {
+                    return Err(ClosureError::ExpectedCommit {
+                        oid,
+                        observed: object.object_type(),
+                    });
+                };
+                ensure_format(repository, commit.tree)?;
+                depths.insert(oid, depth);
+                let is_time_boundary = shallow
+                    .deepen_since
+                    .is_some_and(|minimum| commit.committer_time < minimum);
+                let has_excluded_parent = commit
+                    .parents
+                    .iter()
+                    .any(|parent| excluded.contains(parent));
+                let is_depth_boundary = shallow.deepen.is_some_and(|maximum| depth >= maximum);
+                if is_time_boundary || has_excluded_parent || is_depth_boundary {
+                    boundaries.insert(oid);
+                } else {
+                    boundaries.remove(&oid);
+                    let next_depth = depth
+                        .checked_add(1)
+                        .ok_or(ClosureError::InconsistentGraph { oid })?;
+                    charge_edges(commit.parents.len(), &mut edge_count, limits)?;
+                    for parent in commit.parents.iter().rev() {
+                        ensure_format(repository, *parent)?;
+                        pending.push((*parent, next_depth));
+                    }
+                }
+            }
+            None => {
+                if commits.len() == limits.max_commits {
+                    return Err(limit_error("commits", limits.max_commits));
+                }
+                let object = repository.object(oid)?;
+                let ClosureObject::Commit(commit) = object else {
+                    return Err(ClosureError::ExpectedCommit {
+                        oid,
+                        observed: object.object_type(),
+                    });
+                };
+                ensure_format(repository, commit.tree)?;
+                depths.insert(oid, depth);
+                let is_depth_boundary = shallow.deepen.is_some_and(|maximum| depth >= maximum);
+                let is_time_boundary = shallow
+                    .deepen_since
+                    .is_some_and(|minimum| commit.committer_time < minimum);
+                let has_excluded_parent = commit
+                    .parents
+                    .iter()
+                    .any(|parent| excluded.contains(parent));
+                edge_count = edge_count
+                    .checked_add(commit.parents.len())
+                    .ok_or_else(|| limit_error("graph edges", limits.max_edges))?;
+                if edge_count > limits.max_edges {
+                    return Err(limit_error("graph edges", limits.max_edges));
+                }
+                if is_depth_boundary || is_time_boundary || has_excluded_parent {
+                    boundaries.insert(oid);
+                } else {
+                    let next_depth = depth
+                        .checked_add(1)
+                        .ok_or(ClosureError::InconsistentGraph { oid })?;
+                    for parent in commit.parents.iter().rev() {
+                        ensure_format(repository, *parent)?;
+                        pending.push((*parent, next_depth));
+                    }
+                }
+                commits.insert(oid, commit);
             }
         }
-        commits.insert(oid, commit);
     }
     Ok((commits, boundaries))
 }

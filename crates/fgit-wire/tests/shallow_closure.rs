@@ -208,6 +208,86 @@ fn criss_cross_deepen_crosses_old_boundary_and_is_deterministic() {
     assert!(object_ids(&first).contains(&oid(RIGHT)));
 }
 
+/// A commit reachable by paths of unequal length must be placed at its
+/// SHORTEST generation, not at whichever path the traversal happens to walk
+/// first. Here `BASE` sits at depth 3 through `LEFT` and at depth 4 through
+/// `RIGHT`, and the depth-4 arrival is explored first; a first-visit-wins
+/// walker pins it past the deepen cut, never delivers its history, and
+/// reports it shallow -- under-delivering exactly the generations the client
+/// asked for. The relaxation releases that stale boundary and walks on.
+#[test]
+fn an_unequal_path_relaxes_a_premature_depth_boundary() {
+    let root = oid(ROOT_TREE);
+    let graph = FixtureGraph {
+        objects: vec![
+            (
+                oid(TOP),
+                ClosureObject::Commit(CommitNode {
+                    tree: root,
+                    parents: vec![oid(LEFT)],
+                    committer_time: 100,
+                }),
+            ),
+            (
+                oid(LEFT),
+                ClosureObject::Commit(CommitNode {
+                    tree: root,
+                    parents: vec![oid(RIGHT), oid(BASE)],
+                    committer_time: 90,
+                }),
+            ),
+            (
+                oid(RIGHT),
+                ClosureObject::Commit(CommitNode {
+                    tree: root,
+                    parents: vec![oid(BASE)],
+                    committer_time: 80,
+                }),
+            ),
+            (
+                oid(BASE),
+                ClosureObject::Commit(CommitNode {
+                    tree: root,
+                    parents: vec![oid(THIRD)],
+                    committer_time: 70,
+                }),
+            ),
+            (
+                oid(THIRD),
+                ClosureObject::Commit(CommitNode {
+                    tree: root,
+                    parents: Vec::new(),
+                    committer_time: 60,
+                }),
+            ),
+            (root, ClosureObject::Tree(Vec::new())),
+        ],
+    };
+    let mut request = request(vec![oid(TOP)]);
+    request.deepen = Some(4);
+
+    let first = compute_pack_closure(&graph, &request, &ClosureLimits::default())
+        .expect("bounded unequal-path closure");
+    let second = compute_pack_closure(&graph, &request, &ClosureLimits::default())
+        .expect("repeat bounded unequal-path closure");
+
+    assert_eq!(first, second);
+    let ids = object_ids(&first);
+    assert!(
+        ids.contains(&oid(THIRD)),
+        "the generation one step below the relaxed boundary must be delivered"
+    );
+    assert_eq!(
+        first.shallow_update.shallow,
+        vec![oid(THIRD)],
+        "the true depth-4 frontier replaces the premature BASE boundary"
+    );
+    assert!(
+        !first.shallow_update.shallow.contains(&oid(BASE)),
+        "BASE sits at depth 3 on its shorter path and is not a boundary"
+    );
+}
+
 #[test]
 fn octopus_depth_boundary_is_complete_and_sorted() {
     let mut graph = FixtureGraph::with_criss_cross();
