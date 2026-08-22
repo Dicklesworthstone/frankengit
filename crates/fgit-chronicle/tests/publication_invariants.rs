@@ -1063,3 +1063,91 @@ fn a_second_committed_record_that_skips_a_repository_position_is_refused_and_its
         "a contiguous two-record batch verifies"
     );
 }
+
+#[test]
+fn each_exhausted_counter_refuses_under_its_own_name_and_stops_one_short() {
+    // SequenceExhausted had no test, and it is a THREE-axis refusal: three
+    // separate counters reach it, each supplying its own `counter` label.
+    //
+    //   origin.rs:59   open_decision_sequence    -> "decision sequence"
+    //   origin.rs:73   open_repository_sequence  -> "repository sequence"
+    //   origin.rs:85   successor_generation      -> "head generation"
+    //
+    // The label is the whole diagnostic value: an operator reading a refusal
+    // needs to know WHICH counter ran out, because the three have entirely
+    // different consequences. Three near-identical `map_err` closures is
+    // exactly the shape a copy-paste mislabels, and a single-axis test would
+    // pass with two of the three naming the wrong counter.
+    //
+    // Each axis is paired with its own boundary twin at MAX - 1, which must
+    // succeed. Without the twin these assert only that a saturated counter
+    // refuses, not that an unsaturated one still advances.
+    let last = u64::MAX;
+    let penultimate = u64::MAX - 1;
+
+    // Axis one: the decision order, which counts refusals as well as commits.
+    let mut body = genesis_head();
+    body.latest_decision_sequence =
+        Some(DecisionSequence::try_new(last).expect("the last position is a valid counter"));
+    let exhausted = PublicationBasis::new(derived!(RepositoryAuthorityHeadId, 0x20), body);
+    assert_eq!(
+        exhausted.open_decision_sequence(),
+        Err(ChronicleRefusal::SequenceExhausted {
+            counter: "decision sequence",
+        })
+    );
+
+    let mut body = genesis_head();
+    body.latest_decision_sequence =
+        Some(DecisionSequence::try_new(penultimate).expect("a valid counter"));
+    let room = PublicationBasis::new(derived!(RepositoryAuthorityHeadId, 0x20), body);
+    assert_eq!(
+        room.open_decision_sequence(),
+        Ok(DecisionSequence::try_new(last).expect("a valid counter")),
+        "one position short of the ceiling must still open"
+    );
+
+    // Axis two: the committed-only order, a different counter with a different
+    // label, reached through a different accessor.
+    let mut body = genesis_head();
+    body.latest_repository_sequence =
+        Some(RepositorySequence::try_new(last).expect("a valid counter"));
+    let exhausted = PublicationBasis::new(derived!(RepositoryAuthorityHeadId, 0x20), body);
+    assert_eq!(
+        exhausted.open_repository_sequence(),
+        Err(ChronicleRefusal::SequenceExhausted {
+            counter: "repository sequence",
+        })
+    );
+
+    let mut body = genesis_head();
+    body.latest_repository_sequence =
+        Some(RepositorySequence::try_new(penultimate).expect("a valid counter"));
+    let room = PublicationBasis::new(derived!(RepositoryAuthorityHeadId, 0x20), body);
+    assert_eq!(
+        room.open_repository_sequence(),
+        Ok(RepositorySequence::try_new(last).expect("a valid counter"))
+    );
+
+    // Axis three: the head generation, which is not optional -- it always has a
+    // value -- so it exhausts by reaching the ceiling rather than by carrying a
+    // saturated predecessor.
+    let mut body = genesis_head();
+    body.generation = HeadGeneration::try_new(last).expect("a valid counter");
+    let exhausted = PublicationBasis::new(derived!(RepositoryAuthorityHeadId, 0x20), body);
+    assert_eq!(
+        exhausted.successor_generation(),
+        Err(ChronicleRefusal::SequenceExhausted {
+            counter: "head generation",
+        })
+    );
+
+    let mut body = genesis_head();
+    body.generation = HeadGeneration::try_new(penultimate).expect("a valid counter");
+    let room = PublicationBasis::new(derived!(RepositoryAuthorityHeadId, 0x20), body);
+    assert_eq!(
+        room.successor_generation(),
+        Ok(HeadGeneration::try_new(last).expect("a valid counter")),
+        "a head one generation short of the ceiling can still be succeeded"
+    );
+}
