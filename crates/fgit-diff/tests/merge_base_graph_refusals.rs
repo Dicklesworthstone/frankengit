@@ -73,7 +73,7 @@ impl CommitGraph for Graph {
 }
 
 /// Generous limits, so no probe about graph SHAPE can be refused for budget.
-fn unbounded() -> MergeBaseLimits {
+const fn unbounded() -> MergeBaseLimits {
     MergeBaseLimits {
         max_commits: 1_000,
         max_edges: 1_000,
