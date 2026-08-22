@@ -31,9 +31,9 @@ use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1};
 use fgit_git_object::{AcceptanceProfile, ParseLimits, TreeEntry, emit_tree};
 use fgit_treefs::base::{BaseView, ObjectSource, ObjectSourceError};
 use fgit_treefs::capability::{ReadGrant, TreeCapability, WorkspaceId};
-use fgit_treefs::export::{ExportLimits, ExportPlanner};
+use fgit_treefs::export::{ExportLimits, ExportPlan, ExportPlanner};
 use fgit_treefs::journal::{CancellationState, ExportJournal, ExportPhase, JournalRefusal};
-use fgit_treefs::materialize::materialize;
+use fgit_treefs::materialize::{MaterializeRefusal, ReferenceLayout, materialize};
 use fgit_treefs::overlay::{ContentRef, EntryClass, FileMode, Overlay, OverlayEntry};
 use fgit_treefs::path::{PathPolicy, TreePath};
 use fgit_types::identity::RepositoryCommitId;
@@ -721,10 +721,30 @@ fn point_04_is_absent_because_nothing_is_ever_durable() {
     }
 }
 
+// Point 5's premise, pinned by the type system rather than by prose.
+//
+// The assertion in the test below cannot carry the claim alone: checking that
+// placements sit under `objects/` stays true even if `materialize` gained a
+// writer, so a test resting only on that would survive its own premise
+// breaking. What actually enforces "writes nothing" is the signature --
+// `materialize` is handed a plan and parse limits and no filesystem handle, so
+// it has nothing to write through. Gaining a writer means gaining a parameter,
+// and this binding then fails to compile.
+//
+// That the detector is the compiler rather than an assertion is the reason to
+// state it here. It was true before this binding existed and nothing said so,
+// which made point 5 falsifiable by accident.
+//
+// DELETION CONDITION: goes when point 5 becomes reachable and earns a real
+// rename drill -- the same day this binding stops compiling.
+const _: fn(&ExportPlan<Sha1>, &ParseLimits) -> Result<ReferenceLayout, MaterializeRefusal> =
+    materialize::<Sha1>;
+
 /// Point 5 is unreachable because materialization writes nothing to rename.
 ///
-/// Falsifiable: `materialize` returning something that performs I/O, or gaining
-/// a writer, breaks the premise this asserts.
+/// The structural fact is pinned by the signature binding above. This test adds
+/// what `materialize` does instead: it describes loose placements. So the point
+/// is absent because there is no write to interrupt, not because nothing runs.
 #[test]
 fn point_05_is_absent_because_materialize_only_describes_placements() {
     let (source, root, mut capability) = plan_fixture();
