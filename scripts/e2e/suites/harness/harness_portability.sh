@@ -712,6 +712,11 @@ probe_rename=$(probe_manifest "$(printf '%s\n' "$good_manifest" |
 # A row whose path column points at a different suite than its id column. Both
 # describe the same thing, so they can drift apart -- and after a rename it is
 # normal for one to be updated and the other missed.
+# An OPTIONAL row must be accepted, not refused -- and must not be selected.
+# Without this the optional branch is unexercised: the loader would reject every
+# optional entry, or silently drop it, and nothing here would notice.
+probe_optional=$(probe_manifest "$good_manifest
+suites-treefs-path_security	frankengit-fg026a-treefs-path-security	g6	scripts/e2e/suites/treefs/path_security.sh	any	optional	mechanism	pass")
 probe_path_mismatch=$(probe_manifest "$(printf '%s\n' "$good_manifest" |
   sed 's|g0	scripts/e2e/suites/harness/harness_json.sh|g0	scripts/e2e/suites/harness/harness_mechanics.sh|')")
 rm -f -- "$probe_manifest_path"
@@ -729,3 +734,5 @@ fge_assert_eq FG-000A-PORT-045 1 "$probe_rename" \
   'a renamed suite fails the set check: a rename is a release-surface change needing approval'
 fge_assert_eq FG-000A-PORT-046 2 "$probe_path_mismatch" \
   'a row whose declared path derives a different id than the row declares is refused'
+fge_assert_eq FG-000A-PORT-047 0 "$probe_optional" \
+  'an optional manifest row is accepted rather than refused, so the optional branch is exercised'

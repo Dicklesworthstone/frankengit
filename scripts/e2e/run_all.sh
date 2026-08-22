@@ -306,6 +306,7 @@ done
 # before spending a full corpus run to arrive at the same answer.
 # ---------------------------------------------------------------------------
 declare -a S_MANIFEST_REQUIRED=()
+declare -a S_MANIFEST_OPTIONAL=()
 declare -a S_MANIFEST_MISSING=()
 declare -a S_MANIFEST_UNREGISTERED=()
 declare -a S_MANIFEST_NOTPASSED=()
@@ -360,7 +361,16 @@ if [ -n "$RA_PROFILE" ]; then
       exit 2
     fi
     RA_MANIFEST_SEEN+=("$m_id")
-    [ "$m_class" = required ] || continue
+    if [ "$m_class" != required ]; then
+      # OPTIONAL ENTRIES ARE RECORDED, NOT DISCARDED. "Optional-by-accident" is
+      # a non-pass condition in the bead, and an optional row nobody ever sees
+      # is exactly how a suite becomes optional by accident: it stops being
+      # required, appears in no receipt set, and no reviewer is ever prompted to
+      # ask whether that was intended. Naming them in the receipt is what makes
+      # the choice re-examinable.
+      S_MANIFEST_OPTIONAL+=("$m_id")
+      continue
+    fi
     S_MANIFEST_REQUIRED+=("$m_id")
   done <"$RA_MANIFEST"
 
@@ -1084,7 +1094,8 @@ for pair in \
   "duplicate_id:S_DUPID" "containment_failed:S_CONTAINMENT" \
   "exit_mismatch:S_EXITMISMATCH" "cleanup_failed:S_CLEANUPFAILED" \
   "not_run:S_NOTRUN" "flaky:S_FLAKY" "filtered:S_FILTERED" \
-  "manifest_required:S_MANIFEST_REQUIRED" "manifest_missing:S_MANIFEST_MISSING" \
+  "manifest_required:S_MANIFEST_REQUIRED" "manifest_optional:S_MANIFEST_OPTIONAL" \
+  "manifest_missing:S_MANIFEST_MISSING" \
   "manifest_unregistered:S_MANIFEST_UNREGISTERED" \
   "manifest_required_not_passed:S_MANIFEST_NOTPASSED"; do
   name=${pair%%:*}
