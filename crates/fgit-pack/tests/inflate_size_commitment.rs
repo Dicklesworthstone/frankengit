@@ -18,7 +18,9 @@
 //! * `reader.rs:244`, after the stream finishes -- the entry inflated SHORT of
 //!   its declaration. Reachable for any declared size.
 //! * `reader.rs:297`, inside `append_inflated` -- appending would OVERRUN the
-//!   declaration. Reachable at exactly one declared size: **zero**.
+//!   declaration. Executes at exactly one declared size, zero, and is
+//!   REDUNDANT even there: deleting it leaves `:244` reporting the identical
+//!   variant with the identical payload. Measured, not assumed.
 //!
 //! The reason is `inflate_limits` (reader.rs:272), which hands the inflater
 //! `max_output_bytes: declared_size.max(1)`. For any declared size of one or
@@ -127,10 +129,25 @@ fn an_oversize_entry_is_refused_by_the_inflater_before_the_reader_sees_it() {
 
 /// A zero-length entry that inflates any bytes at all is refused.
 ///
-/// This is `reader.rs:297`, and this is the ONLY input that reaches it. The
-/// `.max(1)` in `inflate_limits` permits the inflater one byte of output even
-/// when the entry declared none, so the overrun branch is what catches that
-/// byte. At every other declared size the inflater refuses first.
+/// `reader.rs:297` is what fires here in the unmutated tree -- the `.max(1)` in
+/// `inflate_limits` permits the inflater one byte of output even when the entry
+/// declared none, and the overrun branch catches that byte. At every other
+/// declared size the inflater refuses first.
+///
+/// # This test does NOT discriminate `:297`, and that is a measured result
+///
+/// Deleting `:297` leaves this test passing. `append_inflated` then appends the
+/// byte, the stream finishes, and `:244` observes `output.len() == 1` against a
+/// declaration of `0` and reports `InflatedEntrySizeMismatch { declared: 0,
+/// actual: 1 }` -- the same variant with the SAME payload. The two sites are
+/// indistinguishable from outside for the only input that reaches the earlier
+/// one.
+///
+/// So `:297` is redundant for observable behaviour. Its remaining value is
+/// bounding memory: it refuses before `extend_from_slice` rather than after.
+/// That is worth keeping and is not something a public-API test can see. The
+/// mutation matrix on this bead records `:297` as SURVIVED rather than
+/// implying this test covers it.
 #[test]
 fn a_zero_length_entry_that_inflates_any_bytes_is_refused() {
     assert_eq!(
