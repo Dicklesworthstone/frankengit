@@ -27,6 +27,7 @@
 //! well as reachable through the head slot, which is why [`publish_decisions`]
 //! stages the head body as an immutable object before replacing the slot.
 
+use crate::vocabulary::AuthenticatedHead;
 use fgit_codec::wire::encode_body;
 use fgit_codec::{
     CodecRefusal, DecodeLimits, Decoder, Encoder, RepositoryAuthorityHeadBody,
@@ -1340,4 +1341,94 @@ where
     let replayed = replay_outcome_async(store, cx, head_key, tx_id).await?;
     let indexed = indexed_outcome_async(store, cx, tenant_id, repository_id, tx_id).await?;
     reconcile_outcome(indexed, replayed)
+}
+
+// --- the authenticated head, read as a typed body ------------------------------
+//
+// `AuthenticatedHead` proves a receipt was issued by the store that returned it.
+// It does not hand back the head; `receipt().body()` is opaque bytes, so every
+// consumer has to decode them itself and remember the cross-check that makes the
+// decode trustworthy.
+//
+// `fgit-admission` does that today in about fifteen lines, correctly. The next
+// consumer -- the authenticated-head-bound reader FG-028a is blocked on -- would
+// be the second copy, and a third would follow. Two implementations of "what
+// does this head say" are free to disagree, which is the drift `frankengit-0kqi`
+// was filed for one crate over: a model checked only against itself is a mirror,
+// not a guard.
+//
+// So the decode and its cross-check live once, here, behind the type that
+// already proves authenticity.
+
+/// Why an authenticated head's body could not be read as a typed head.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HeadBodyRefusal {
+    /// The receipt's bytes are not a decodable head body.
+    Codec(CodecRefusal),
+    /// The decoded body's generation disagrees with the receipt's.
+    ///
+    /// Authentication proves the store issued this receipt; it does not prove
+    /// the bytes inside describe the same head the receipt names. A caller that
+    /// decodes without this check can act on a body one generation away from
+    /// the head it authenticated, which §5.1 forbids: only the exact
+    /// predecessor may be replaced.
+    GenerationMismatch {
+        /// What the authenticated receipt says.
+        receipt: HeadGeneration,
+        /// What the decoded body says.
+        body: HeadGeneration,
+    },
+}
+
+impl core::fmt::Display for HeadBodyRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Codec(refusal) => write!(f, "head body is not decodable: {refusal}"),
+            Self::GenerationMismatch { receipt, body } => write!(
+                f,
+                "authenticated receipt names generation {} but its body says {}",
+                receipt.get(),
+                body.get()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for HeadBodyRefusal {}
+
+impl From<CodecRefusal> for HeadBodyRefusal {
+    fn from(refusal: CodecRefusal) -> Self {
+        Self::Codec(refusal)
+    }
+}
+
+impl AuthenticatedHead {
+    /// The typed head body carried by this authenticated receipt.
+    ///
+    /// Decoding is bounded by [`DecodeLimits::DEFAULT`], and the decoded
+    /// generation is required to equal the receipt's. That cross-check is the
+    /// reason this exists rather than callers writing `decode_body` themselves:
+    /// authentication proves *the store issued this receipt*, and nothing more.
+    /// It does not prove the bytes inside describe the head the receipt names,
+    /// so a decode without the check can hand a caller a body one generation
+    /// away from the head it just authenticated.
+    ///
+    /// # Errors
+    ///
+    /// [`HeadBodyRefusal::Codec`] if the bytes are not a decodable head body,
+    /// [`HeadBodyRefusal::GenerationMismatch`] if the decoded generation
+    /// disagrees with the authenticated receipt.
+    pub fn body(&self) -> Result<RepositoryAuthorityHeadBody, HeadBodyRefusal> {
+        let body: RepositoryAuthorityHeadBody =
+            decode_body(self.receipt().body(), DecodeLimits::DEFAULT)?;
+        let declared = self.receipt().generation();
+        if body.generation == declared {
+            Ok(body)
+        } else {
+            Err(HeadBodyRefusal::GenerationMismatch {
+                receipt: declared,
+                body: body.generation,
+            })
+        }
+    }
 }

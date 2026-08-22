@@ -97,8 +97,8 @@ pub use crate::injection::{
 };
 pub use crate::keys::{HeadKey, ImmutableKey, KeyError, MAX_KEY_BYTES};
 pub use crate::outcome::{
-    DuplicateScan, MAX_REPLAY_BATCHES, OUTCOME_KEY_PREFIX, OutcomeFailure, OutcomeLookup,
-    PublicationOutcome, PublishedBatch, TerminalOutcome, authority_head_identity,
+    DuplicateScan, HeadBodyRefusal, MAX_REPLAY_BATCHES, OUTCOME_KEY_PREFIX, OutcomeFailure,
+    OutcomeLookup, PublicationOutcome, PublishedBatch, TerminalOutcome, authority_head_identity,
     decision_batch_identity, indexed_outcome, indexed_outcome_async, initialize_repository,
     initialize_repository_async, interpret_indexed_outcome, next_batch_to_replay,
     outcome_index_root, outcome_key, publish_decisions, publish_decisions_async, reconcile_outcome,
