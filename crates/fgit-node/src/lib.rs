@@ -67,6 +67,10 @@ use fgit_wire::{
 };
 use fsqlite_types::cx::Cx as FsqliteCx;
 
+mod loose_import;
+
+pub use loose_import::{LooseGitImportRefusal, StagedLooseGitImport};
+
 const OBJECT_CODEC_NAMESPACE: &[u8] = b"git-object-body/v1";
 const HEAD_KEY_PREFIX: &[u8] = b"frankengit/node/head/";
 const FABRIC_NAMESPACE_PREFIX: &[u8] = b"frankengit/node/object/";
