@@ -602,6 +602,18 @@ pub enum FullFallbackReason {
     /// into one flat variant would lose the distinction a caller needs --
     /// `EvidenceGap` and `RegimeAlarm` call for different operator responses,
     /// and a merged `EvidenceGapRegimeShift` could not tell them apart.
+    ///
+    /// **Carry this trigger; do not match on it.** `fgit-statistics` makes a
+    /// sixth section 33 condition a compile error inside its own crate --
+    /// `FallbackTrigger::ALL` is pinned to `COUNT` and `PolicyGate` stores
+    /// positionally -- but that protection stops at its crate boundary. A
+    /// consumer that matched here with a wildcard arm would compile cleanly
+    /// against a sixth condition and silently mishandle it, relocating the
+    /// exact silent-permission failure that module exists to prevent. This
+    /// crate therefore has zero matches over `FallbackTrigger`, so a new
+    /// condition needs no change here and cannot be mishandled. Requested by
+    /// the `fgit-statistics` owner as the property a third consumer must also
+    /// preserve.
     ControllerEvidenceFallback(FallbackTrigger),
 }
 
