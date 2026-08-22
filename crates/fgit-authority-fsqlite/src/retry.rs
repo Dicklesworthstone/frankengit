@@ -386,23 +386,35 @@ pub const fn decide_after_failure(
     match class {
         TransientClass::FreshSnapshotRequired => RetryVerdict::FreshSnapshotRequired,
         TransientClass::OutcomeIndeterminate => RetryVerdict::OutcomeIndeterminate,
-        // Named explicitly, and the fallback below is why it must be: that arm
-        // binds `retryable`, so a class with no arm here is silently treated as
-        // retryable -- and a retried cancellation is a loop that ignores the
-        // caller's request to stop.
+        // Both named explicitly, and the fallback below is why they must be:
+        // that arm binds `retryable`, so a class with no arm here is silently
+        // treated as retryable -- and a retried cancellation is a loop that
+        // ignores the caller's request to stop.
         //
-        // Given its OWN arm rather than folded in beside `Permanent`, even
-        // though the verdict coincides today. The two agree by accident of the
-        // retry law, not by kinship: `Permanent` means the store cannot make
-        // progress, `Cancelled` means the caller asked it to stop. If
-        // `Permanent` ever earns a different verdict, sharing an arm would move
-        // cancellation with it silently, and that is the failure this whole
-        // bead is about -- two unlike things reaching the same answer because
-        // one code path served both.
-        TransientClass::Cancelled => RetryVerdict::Permanent,
-        // Unchanged: only the failure the caller sees changed, never the retry
-        // behaviour.
-        TransientClass::Permanent => RetryVerdict::Permanent,
+        // They share an arm only because their bodies are identical, and
+        // clippy's `match_same_arms` is right that identical bodies are one
+        // arm. This crate forbids `#[allow]`, and writing the two bodies
+        // differently purely to keep them textually apart would be dodging the
+        // lint rather than answering it. They are NOT kin: `Permanent` means
+        // the store cannot make progress, `Cancelled` means the caller asked it
+        // to stop, and they agree only by accident of the current retry law.
+        //
+        // So if `Permanent` ever earns a different verdict, SPLIT this arm
+        // rather than editing it in place. That instruction is not left to a
+        // comment to enforce. `the_shared_decision_is_what_both_drivers_consult`
+        // pins BOTH classes to this verdict directly, so changing the shared
+        // body fails two assertions at once; and
+        // `a_cancelled_attempt_is_not_retried` drives the real loop and
+        // requires it to end `Permanent` on its first attempt.
+        //
+        // Deliberately NOT cited as guards, having been checked rather than
+        // assumed: `exactly_the_seven_specified_classes_are_retryable` and
+        // `cancellation_is_not_one_of_the_seven_retryable_classes` both test
+        // `TransientClass::is_retryable()`, which this arm does not feed, and
+        // `both_drivers_agree_on_every_transient_class` compares the two
+        // drivers against each other, so it stays green if they move together.
+        // None of the three would notice this arm changing.
+        TransientClass::Cancelled | TransientClass::Permanent => RetryVerdict::Permanent,
         retryable => {
             if attempt_number >= budget.max_attempts() {
                 return RetryVerdict::Exhausted(RetryExhausted {

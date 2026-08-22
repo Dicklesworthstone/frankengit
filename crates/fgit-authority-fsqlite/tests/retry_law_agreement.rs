@@ -250,6 +250,19 @@ fn the_shared_decision_is_what_both_drivers_consult() {
         decide_after_failure(budget(), backoff(), 1, 0, TransientClass::Permanent),
         RetryVerdict::Permanent
     );
+    // `Cancelled` shares `Permanent`'s arm in `decide_after_failure`, because
+    // their bodies are identical and the crate forbids the `#[allow]` that
+    // would let them sit apart. Sharing is only safe if something fails when
+    // the shared body changes, so that is pinned here rather than trusted to
+    // the comment above the arm: the two classes are unlike -- `Permanent`
+    // means the store cannot progress, `Cancelled` means the caller asked it to
+    // stop -- and they agree only by accident of the current retry law. Change
+    // the arm and BOTH this and the assertion above it fail, which is the
+    // signal to split the arm rather than edit it in place.
+    assert_eq!(
+        decide_after_failure(budget(), backoff(), 1, 0, TransientClass::Cancelled),
+        RetryVerdict::Permanent
+    );
     assert_eq!(
         decide_after_failure(
             budget(),
