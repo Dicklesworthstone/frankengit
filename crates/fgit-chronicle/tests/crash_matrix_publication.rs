@@ -180,12 +180,7 @@ fn seal_against(
 ) -> Result<VerifiedPublication, fgit_chronicle::ChronicleRefusal> {
     let outcomes =
         collect_cumulative_outcomes(store, &head_key()).expect("outcomes collect from the basis");
-    plan.seal(
-        &CryptoBodyIdentity,
-        roots.clone(),
-        &outcomes,
-        current_token(store),
-    )
+    plan.seal(&CryptoBodyIdentity, *roots, &outcomes, current_token(store))
 }
 
 fn commit_candidate(
