@@ -217,17 +217,17 @@ impl Error for AdmissionUploadPackRefusal {
 #[derive(Debug)]
 pub enum NodeAdmissionViewRefusal {
     /// The durable authority read or authentication refused.
-    Authority(NodeRefusal),
+    Authority(Box<NodeRefusal>),
     /// The durable canonical-admission materializer refused the selected head.
-    Materialization(AdmissionMaterializationRefusal),
+    Materialization(Box<AdmissionMaterializationRefusal>),
     /// The authenticated receipt did not carry one usable authority-head body.
-    HeadBody(fgit_authority::HeadBodyRefusal),
+    HeadBody(Box<fgit_authority::HeadBodyRefusal>),
     /// The canonical authority-head body could not be re-identified.
-    HeadIdentity(fgit_codec::CodecRefusal),
+    HeadIdentity(Box<fgit_codec::CodecRefusal>),
     /// The re-identified body did not belong to the authority-head domain.
-    HeadIdentityDomain(fgit_types::TypeRefusal),
+    HeadIdentityDomain(Box<fgit_types::TypeRefusal>),
     /// Canonical admission or wire-view construction refused.
-    View(AdmissionUploadPackRefusal),
+    View(Box<AdmissionUploadPackRefusal>),
 }
 
 impl Display for NodeAdmissionViewRefusal {
@@ -246,13 +246,49 @@ impl Display for NodeAdmissionViewRefusal {
 impl Error for NodeAdmissionViewRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Authority(error) => Some(error),
-            Self::Materialization(error) => Some(error),
-            Self::HeadBody(error) => Some(error),
-            Self::HeadIdentity(error) => Some(error),
-            Self::HeadIdentityDomain(error) => Some(error),
-            Self::View(error) => Some(error),
+            Self::Authority(error) => Some(error.as_ref()),
+            Self::Materialization(error) => Some(error.as_ref()),
+            Self::HeadBody(error) => Some(error.as_ref()),
+            Self::HeadIdentity(error) => Some(error.as_ref()),
+            Self::HeadIdentityDomain(error) => Some(error.as_ref()),
+            Self::View(error) => Some(error.as_ref()),
         }
+    }
+}
+
+impl From<NodeRefusal> for NodeAdmissionViewRefusal {
+    fn from(value: NodeRefusal) -> Self {
+        Self::Authority(Box::new(value))
+    }
+}
+
+impl From<AdmissionMaterializationRefusal> for NodeAdmissionViewRefusal {
+    fn from(value: AdmissionMaterializationRefusal) -> Self {
+        Self::Materialization(Box::new(value))
+    }
+}
+
+impl From<fgit_authority::HeadBodyRefusal> for NodeAdmissionViewRefusal {
+    fn from(value: fgit_authority::HeadBodyRefusal) -> Self {
+        Self::HeadBody(Box::new(value))
+    }
+}
+
+impl From<fgit_codec::CodecRefusal> for NodeAdmissionViewRefusal {
+    fn from(value: fgit_codec::CodecRefusal) -> Self {
+        Self::HeadIdentity(Box::new(value))
+    }
+}
+
+impl From<fgit_types::TypeRefusal> for NodeAdmissionViewRefusal {
+    fn from(value: fgit_types::TypeRefusal) -> Self {
+        Self::HeadIdentityDomain(Box::new(value))
+    }
+}
+
+impl From<AdmissionUploadPackRefusal> for NodeAdmissionViewRefusal {
+    fn from(value: AdmissionUploadPackRefusal) -> Self {
+        Self::View(Box::new(value))
     }
 }
 
@@ -1251,11 +1287,11 @@ pub enum NodeRefusal {
     /// A caller-selected worker count was outside this slice's finite profile.
     InvalidWorkerCount,
     /// The runtime could not establish its finite production profile.
-    Runtime(RuntimeRefusal),
+    Runtime(Box<RuntimeRefusal>),
     /// Authority-head staging or initialization refused or was ambiguous.
-    Authority(fgit_authority::OutcomeFailure),
+    Authority(Box<fgit_authority::OutcomeFailure>),
     /// Durable canonical-admission staging or refresh refused.
-    AdmissionMaterialization(AdmissionMaterializationRefusal),
+    AdmissionMaterialization(Box<AdmissionMaterializationRefusal>),
     /// A non-initializing open found no canonical authority head.
     AuthorityHeadAbsent,
     /// A supplied authority materialization names another repository.
@@ -1263,7 +1299,7 @@ pub enum NodeRefusal {
     /// The operator-selected storage root cannot name the embedded database.
     StoragePathEncoding,
     /// The derived authority-head key was outside the bounded key vocabulary.
-    HeadKey(fgit_authority::KeyError),
+    HeadKey(Box<fgit_authority::KeyError>),
     /// A newly constructed durable authority unexpectedly held another head.
     HeadInitializationConflict,
     /// Authority initialization failed and its explicit worker cleanup failed too.
@@ -1281,19 +1317,19 @@ pub enum NodeRefusal {
         cleanup: Box<Self>,
     },
     /// The local immutable object fabric refused the requested operation.
-    Fabric(StoreRefusal),
+    Fabric(Box<StoreRefusal>),
     /// Object bytes exceeded this node's configured storage bound.
     ObjectTooLarge { offered: u64, maximum: u64 },
     /// A platform-sized object length could not be represented canonically.
     ObjectLengthOverflow,
     /// Resource custody could not issue the bounded placement grant.
-    Resource(ResourceError),
+    Resource(Box<ResourceError>),
     /// A storage effect failed to settle its obligation region.
     ResourceContainment,
     /// The node root did not quiesce within its bounded shutdown interval.
     RuntimeContainment,
     /// A fixed node identity handle failed its bounded representation.
-    Identity(fgit_resource::IdentityError),
+    Identity(Box<fgit_resource::IdentityError>),
 }
 
 impl Display for NodeRefusal {
@@ -1352,15 +1388,15 @@ impl Display for NodeRefusal {
 impl Error for NodeRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Runtime(error) => Some(error),
-            Self::Authority(error) => Some(error),
-            Self::AdmissionMaterialization(error) => Some(error),
-            Self::HeadKey(error) => Some(error),
+            Self::Runtime(error) => Some(error.as_ref()),
+            Self::Authority(error) => Some(error.as_ref()),
+            Self::AdmissionMaterialization(error) => Some(error.as_ref()),
+            Self::HeadKey(error) => Some(error.as_ref()),
             Self::AuthorityInitializationCleanup { initialization, .. } => Some(initialization),
             Self::ExistingOpenCleanup { opening, .. } => Some(opening),
-            Self::Fabric(error) => Some(error),
-            Self::Resource(error) => Some(error),
-            Self::Identity(error) => Some(error),
+            Self::Fabric(error) => Some(error.as_ref()),
+            Self::Resource(error) => Some(error.as_ref()),
+            Self::Identity(error) => Some(error.as_ref()),
             Self::EmptyStorageRoot
             | Self::InvalidWorkerCount
             | Self::AuthorityHeadAbsent
@@ -1372,6 +1408,48 @@ impl Error for NodeRefusal {
             | Self::ResourceContainment
             | Self::RuntimeContainment => None,
         }
+    }
+}
+
+impl From<RuntimeRefusal> for NodeRefusal {
+    fn from(value: RuntimeRefusal) -> Self {
+        Self::Runtime(Box::new(value))
+    }
+}
+
+impl From<fgit_authority::OutcomeFailure> for NodeRefusal {
+    fn from(value: fgit_authority::OutcomeFailure) -> Self {
+        Self::Authority(Box::new(value))
+    }
+}
+
+impl From<AdmissionMaterializationRefusal> for NodeRefusal {
+    fn from(value: AdmissionMaterializationRefusal) -> Self {
+        Self::AdmissionMaterialization(Box::new(value))
+    }
+}
+
+impl From<fgit_authority::KeyError> for NodeRefusal {
+    fn from(value: fgit_authority::KeyError) -> Self {
+        Self::HeadKey(Box::new(value))
+    }
+}
+
+impl From<StoreRefusal> for NodeRefusal {
+    fn from(value: StoreRefusal) -> Self {
+        Self::Fabric(Box::new(value))
+    }
+}
+
+impl From<ResourceError> for NodeRefusal {
+    fn from(value: ResourceError) -> Self {
+        Self::Resource(Box::new(value))
+    }
+}
+
+impl From<fgit_resource::IdentityError> for NodeRefusal {
+    fn from(value: fgit_resource::IdentityError) -> Self {
+        Self::Identity(Box::new(value))
     }
 }
 
@@ -1679,11 +1757,11 @@ impl GitDaemonSessionOutcome {
 #[derive(Debug)]
 pub enum NodeGitDaemonServeRefusal {
     /// The daemon socket or protocol framing was refused.
-    Transport(GitDaemonTransportRefusal),
+    Transport(Box<GitDaemonTransportRefusal>),
     /// The authenticated authority-backed admission view could not be read.
-    Admission(NodeAdmissionViewRefusal),
+    Admission(Box<NodeAdmissionViewRefusal>),
     /// The authority-selected closure could not become a bounded pack payload.
-    Pack(NodePackMaterializationRefusal),
+    Pack(Box<NodePackMaterializationRefusal>),
     /// The request selected another repository endpoint before authority work.
     RepositoryPathMismatch,
 }
@@ -1704,11 +1782,29 @@ impl Display for NodeGitDaemonServeRefusal {
 impl Error for NodeGitDaemonServeRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Transport(error) => Some(error),
-            Self::Admission(error) => Some(error),
-            Self::Pack(error) => Some(error),
+            Self::Transport(error) => Some(error.as_ref()),
+            Self::Admission(error) => Some(error.as_ref()),
+            Self::Pack(error) => Some(error.as_ref()),
             Self::RepositoryPathMismatch => None,
         }
+    }
+}
+
+impl From<GitDaemonTransportRefusal> for NodeGitDaemonServeRefusal {
+    fn from(value: GitDaemonTransportRefusal) -> Self {
+        Self::Transport(Box::new(value))
+    }
+}
+
+impl From<NodeAdmissionViewRefusal> for NodeGitDaemonServeRefusal {
+    fn from(value: NodeAdmissionViewRefusal) -> Self {
+        Self::Admission(Box::new(value))
+    }
+}
+
+impl From<NodePackMaterializationRefusal> for NodeGitDaemonServeRefusal {
+    fn from(value: NodePackMaterializationRefusal) -> Self {
+        Self::Pack(Box::new(value))
     }
 }
 
@@ -1716,8 +1812,8 @@ fn node_git_daemon_serve_error(
     error: GitDaemonServeError<NodePackMaterializationRefusal>,
 ) -> NodeGitDaemonServeRefusal {
     match error {
-        GitDaemonServeError::Transport(error) => NodeGitDaemonServeRefusal::Transport(error),
-        GitDaemonServeError::Pack(error) => NodeGitDaemonServeRefusal::Pack(error),
+        GitDaemonServeError::Transport(error) => NodeGitDaemonServeRefusal::from(error),
+        GitDaemonServeError::Pack(error) => NodeGitDaemonServeRefusal::from(error),
     }
 }
 
@@ -2260,7 +2356,7 @@ impl OneNode {
             )) {
             Ok(root) => root,
             Err(staging) => {
-                let initialization = NodeRefusal::AdmissionMaterialization(staging);
+                let initialization = NodeRefusal::from(staging);
                 return match node.shutdown() {
                     Ok(()) => Err(initialization),
                     Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
@@ -2279,7 +2375,7 @@ impl OneNode {
                     PermittedObjectClosure::default(),
                 ),
         ) {
-            let initialization = NodeRefusal::AdmissionMaterialization(staging);
+            let initialization = NodeRefusal::from(staging);
             return match node.shutdown() {
                 Ok(()) => Err(initialization),
                 Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
@@ -2341,13 +2437,13 @@ impl OneNode {
 
         let runtime = RuntimeProfile::production(config.worker_threads)
             .build()
-            .map_err(NodeRefusal::Runtime)?;
+            .map_err(NodeRefusal::from)?;
         let authority_path = authority_database_path(&config.storage_root)?;
         let namespace = object_namespace(config.repository_id);
         let failure_domain = fgit_resource::OpaqueHandle::new(b"node-local-filesystem")
-            .map_err(NodeRefusal::Identity)?;
+            .map_err(NodeRefusal::from)?;
         let encryption_dependency =
-            fgit_resource::OpaqueHandle::new(b"node-local-key").map_err(NodeRefusal::Identity)?;
+            fgit_resource::OpaqueHandle::new(b"node-local-key").map_err(NodeRefusal::from)?;
         let fabric = LocalFilesystemFabric::open(LocalFilesystemConfig::new(
             config.storage_root,
             namespace.clone(),
@@ -2356,10 +2452,10 @@ impl OneNode {
             config.max_object_bytes,
             config.segment_limits.clone(),
         ))
-        .map_err(NodeRefusal::Fabric)?;
+        .map_err(NodeRefusal::from)?;
 
         let head_key = head_key(config.repository_id)?;
-        let admission_cache_scope = admission_cache_scope().map_err(NodeRefusal::Identity)?;
+        let admission_cache_scope = admission_cache_scope().map_err(NodeRefusal::from)?;
         let opening_cx = authority_context_for(&runtime);
         let authority = runtime
             .block_on(FsqliteAuthorityStore::open(
@@ -2600,13 +2696,13 @@ impl OneNode {
         let materialized = self
             .materialize_admission_in(request)
             .await
-            .map_err(NodeAdmissionViewRefusal::Materialization)?;
+            .map_err(NodeAdmissionViewRefusal::from)?;
         AdmissionUploadPackRepository::from_snapshot(
             materialized.snapshot(),
             self.object_format,
             limits,
         )
-        .map_err(NodeAdmissionViewRefusal::View)
+        .map_err(NodeAdmissionViewRefusal::from)
     }
 
     /// Accepts and completes one legacy git-daemon upload-pack session.
@@ -2638,13 +2734,13 @@ impl OneNode {
         limits: WireLimits,
     ) -> Result<GitDaemonSessionOutcome, NodeGitDaemonServeRefusal> {
         let (mut stream, _) = listener.accept().map_err(|source| {
-            NodeGitDaemonServeRefusal::Transport(GitDaemonTransportRefusal::Io {
+            NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::Io {
                 operation: "accept git-daemon connection",
                 source,
             })
         })?;
         let greeting = read_git_daemon_request(&mut stream, &limits)
-            .map_err(NodeGitDaemonServeRefusal::Transport)?;
+            .map_err(NodeGitDaemonServeRefusal::from)?;
         if greeting.repository_path() != &self.git_daemon_repository_path {
             return Err(NodeGitDaemonServeRefusal::RepositoryPathMismatch);
         }
@@ -2654,20 +2750,16 @@ impl OneNode {
             .runtime
             .block_on(self.materialize_admission_in(&request))
             .map_err(|error| {
-                NodeGitDaemonServeRefusal::Admission(NodeAdmissionViewRefusal::Materialization(
-                    error,
-                ))
+                NodeGitDaemonServeRefusal::from(NodeAdmissionViewRefusal::from(error))
             })?;
         let repository = AdmissionUploadPackRepository::from_snapshot(
             materialized.snapshot(),
             self.object_format,
             &limits,
         )
-        .map_err(|error| {
-            NodeGitDaemonServeRefusal::Admission(NodeAdmissionViewRefusal::View(error))
-        })?;
+        .map_err(|error| NodeGitDaemonServeRefusal::from(NodeAdmissionViewRefusal::from(error)))?;
         let mut writer = stream.try_clone().map_err(|source| {
-            NodeGitDaemonServeRefusal::Transport(GitDaemonTransportRefusal::Io {
+            NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::Io {
                 operation: "duplicate git-daemon connection for response writes",
                 source,
             })
@@ -2687,7 +2779,7 @@ impl OneNode {
         )
         .map_err(node_git_daemon_serve_error)?;
         writer.shutdown(Shutdown::Write).map_err(|source| {
-            NodeGitDaemonServeRefusal::Transport(GitDaemonTransportRefusal::Io {
+            NodeGitDaemonServeRefusal::from(GitDaemonTransportRefusal::Io {
                 operation: "send git-daemon response EOF",
                 source,
             })
@@ -2717,15 +2809,15 @@ impl OneNode {
         let authenticated = self
             .authenticate_authority_head_in(request)
             .await
-            .map_err(NodeAdmissionViewRefusal::Authority)?;
+            .map_err(NodeAdmissionViewRefusal::from)?;
         let body = authenticated
             .body()
-            .map_err(NodeAdmissionViewRefusal::HeadBody)?;
+            .map_err(NodeAdmissionViewRefusal::from)?;
         let id = body_id(&CryptoBodyIdentity, &body)
-            .map_err(NodeAdmissionViewRefusal::HeadIdentity)
+            .map_err(NodeAdmissionViewRefusal::from)
             .and_then(|identity| {
                 RepositoryAuthorityHeadId::from_internal_object_id(identity)
-                    .map_err(NodeAdmissionViewRefusal::HeadIdentityDomain)
+                    .map_err(NodeAdmissionViewRefusal::from)
             })?;
         let basis = PublicationBasis::new(id, body);
         AdmissionUploadPackRepository::from_projection(
@@ -2735,7 +2827,7 @@ impl OneNode {
             self.object_format,
             limits,
         )
-        .map_err(NodeAdmissionViewRefusal::View)
+        .map_err(NodeAdmissionViewRefusal::from)
     }
 
     /// Resolves one sealed transaction outcome through authoritative durable state.
@@ -2758,7 +2850,7 @@ impl OneNode {
             transaction_id,
         )
         .await
-        .map_err(NodeRefusal::Authority)
+        .map_err(NodeRefusal::from)
     }
 
     /// Resolves one sealed transaction outcome with a fresh bounded context.
@@ -2802,7 +2894,7 @@ impl OneNode {
             self.tenant_id,
         )
         .await
-        .map_err(NodeRefusal::Authority)
+        .map_err(NodeRefusal::from)
     }
 
     /// Performs the currently published bounded doctor checks.
@@ -2887,8 +2979,8 @@ impl OneNode {
             None,
             &self.segment_limits,
         )
-        .map_err(|error| NodeRefusal::Fabric(StoreRefusal::Fabric(error)))?;
-        let verified = VerifiedObject::new(envelope, body).map_err(NodeRefusal::Fabric)?;
+        .map_err(|error| NodeRefusal::from(StoreRefusal::Fabric(error)))?;
+        let verified = VerifiedObject::new(envelope, body).map_err(NodeRefusal::from)?;
         let ledger = ObligationLedger::root(
             RegionId::new(1),
             LeakDisposition::RecordAndContinue,
@@ -2896,7 +2988,7 @@ impl OneNode {
         );
         let grant = ledger
             .grant(placement_resources(offered))
-            .map_err(NodeRefusal::Resource)?;
+            .map_err(NodeRefusal::from)?;
         let outcome = self
             .fabric
             .put_if_absent(verified, PlacementAdmission::new(&ledger, grant));
@@ -2904,7 +2996,7 @@ impl OneNode {
         if !matches!(closed, RegionCloseOutcome::Quiescent(_)) {
             return Err(NodeRefusal::ResourceContainment);
         }
-        match outcome.map_err(NodeRefusal::Fabric)? {
+        match outcome.map_err(NodeRefusal::from)? {
             PutIfAbsent::Created { .. } => Ok(StoredObject::Created(identity)),
             PutIfAbsent::AlreadyPresent { .. } => Ok(StoredObject::AlreadyPresent(identity)),
         }
@@ -2913,14 +3005,14 @@ impl OneNode {
     /// Reads one exact immutable Git object from the local fabric.
     pub fn read_git_object(&self, identity: GitOid) -> Result<VerifiedObject, NodeRefusal> {
         if identity.algorithm() != self.object_format {
-            return Err(NodeRefusal::Fabric(
+            return Err(NodeRefusal::from(
                 StoreRefusal::NativeObjectIdentityMismatch,
             ));
         }
         self.fabric
             .read_whole(identity)
             .map(|read| read.object)
-            .map_err(NodeRefusal::Fabric)
+            .map_err(NodeRefusal::from)
     }
 }
 
@@ -2957,7 +3049,7 @@ fn head_key(repository_id: RepositoryId) -> Result<HeadKey, NodeRefusal> {
     let mut bytes = Vec::with_capacity(HEAD_KEY_PREFIX.len() + repository_id.as_bytes().len());
     bytes.extend_from_slice(HEAD_KEY_PREFIX);
     bytes.extend_from_slice(repository_id.as_bytes());
-    HeadKey::new(bytes).map_err(NodeRefusal::HeadKey)
+    HeadKey::new(bytes).map_err(NodeRefusal::from)
 }
 
 fn authority_database_path(storage_root: &Path) -> Result<String, NodeRefusal> {
@@ -2975,11 +3067,13 @@ fn authority_context_for(runtime: &NodeRuntime) -> FsqliteCx {
 }
 
 fn authority_engine_refusal(error: EngineError) -> NodeRefusal {
-    NodeRefusal::Authority(error.into_failure().into())
+    let failure: fgit_authority::OutcomeFailure = error.into_failure().into();
+    NodeRefusal::from(failure)
 }
 
 fn authority_failure_refusal(error: fgit_authority::AuthorityFailure) -> NodeRefusal {
-    NodeRefusal::Authority(error.into())
+    let failure: fgit_authority::OutcomeFailure = error.into();
+    NodeRefusal::from(failure)
 }
 
 fn initialize_embedded_repository(
@@ -2996,7 +3090,7 @@ fn initialize_embedded_repository(
             head_key,
             genesis,
         ))
-        .map_err(NodeRefusal::Authority)
+        .map_err(NodeRefusal::from)
 }
 
 fn object_namespace(repository_id: RepositoryId) -> Vec<u8> {
@@ -4217,14 +4311,48 @@ mod tests {
         let (node, _) = OneNode::init(config).expect("node initializes canonical refs");
         let request = node.request_context();
         let limits = WireLimits::default();
+        let is_cancelled = || false;
 
+        require_send(node.admission_materializer.stage_ref_state_in(
+            &node.authority,
+            request.authority(),
+            node.repository_id(),
+            CanonicalRefState::default(),
+        ));
+        require_send(
+            node.admission_materializer
+                .stage_permitted_object_closure_in(
+                    &node.authority,
+                    request.authority(),
+                    node.repository_id(),
+                    PermittedObjectClosure::default(),
+                ),
+        );
+        require_send(node.admission_materializer.materialize_current_in(
+            &node.authority,
+            request.authority(),
+            &node.head_key,
+            node.repository_id(),
+            &is_cancelled,
+        ));
+        require_send(node.read_authority_head_in(&request));
+        require_send(node.read_authority_head());
+        require_send(node.authenticate_authority_head_in(&request));
+        require_send(node.authenticate_authority_head());
         require_send(node.materialize_admission_in(&request));
+        require_send(node.materialize_admission());
         require_send(node.admission_upload_pack_repository_in(
             &request,
             node.admission_projection(),
             &limits,
         ));
         require_send(node.authority_selected_pack_payload_in(&request));
+        require_send(node.authority_selected_pack_payload());
+        require_send(node.durable_admission_upload_pack_repository_in(&request, &limits));
+        require_send(node.resolve_outcome_in(&request, distinct_tx_id()));
+        require_send(node.resolve_outcome(distinct_tx_id()));
+        require_send(node.doctor_in(&request, None));
+        require_send(node.doctor(None));
         node.shutdown().expect("node closes cleanly");
     }
 
@@ -4322,7 +4450,7 @@ mod tests {
             .block_on(node.doctor_in(&request, Some(stored.identity())));
         assert!(matches!(
             report,
-            Err(NodeRefusal::Fabric(StoreRefusal::PayloadCommitmentMismatch))
+            Err(NodeRefusal::Fabric(error)) if *error == StoreRefusal::PayloadCommitmentMismatch
         ));
         node.shutdown()
             .expect("node drains and shuts down after a corruption finding");
