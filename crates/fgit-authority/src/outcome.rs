@@ -131,6 +131,24 @@ pub enum OutcomeFailure {
         /// identities inline are wider than the whole error budget.
         identities: Box<IdentityDisagreement>,
     },
+    /// A head receipt's declared generation disagrees with the body it carries.
+    ///
+    /// The store told us the slot holds generation N and handed back bytes that
+    /// say something else. Continuing would mint a duplicate-absence witness
+    /// against a token that names one head while scanning the history of
+    /// another, which is §5.2's "one sealed transaction has at most one terminal
+    /// decision" resting on a body the token does not cover.
+    ///
+    /// Unreachable through this crate's own publication: every write derives the
+    /// generation from the body it writes (see [`head_generation`] and
+    /// [`initialize_repository`]). It fires only where a store is already
+    /// inconsistent.
+    HeadGenerationSkew {
+        /// What the receipt declares.
+        receipt: HeadGeneration,
+        /// What the decoded body carries.
+        body: HeadGeneration,
+    },
     /// Sealing, storage, identity, or codec failed underneath.
     Seal(Box<SealFailure>),
     /// A canonical body could not be encoded or decoded.
@@ -164,6 +182,12 @@ impl core::fmt::Display for OutcomeFailure {
                 "the {link} stored under {} decodes to {} instead",
                 identities.requested, identities.found
             ),
+            Self::HeadGenerationSkew { receipt, body } => write!(
+                f,
+                "the head receipt declares generation {} but its body carries {}",
+                receipt.get(),
+                body.get()
+            ),
             Self::Seal(failure) => write!(f, "{failure}"),
             Self::Codec(refusal) => write!(f, "canonical encoding refused: {refusal}"),
         }
@@ -181,6 +205,17 @@ impl From<SealFailure> for OutcomeFailure {
 impl From<CodecRefusal> for OutcomeFailure {
     fn from(refusal: CodecRefusal) -> Self {
         Self::Codec(refusal)
+    }
+}
+
+impl From<HeadBodyRefusal> for OutcomeFailure {
+    fn from(refusal: HeadBodyRefusal) -> Self {
+        match refusal {
+            HeadBodyRefusal::Codec(codec) => Self::Codec(codec),
+            HeadBodyRefusal::GenerationMismatch { receipt, body } => {
+                Self::HeadGenerationSkew { receipt, body }
+            }
+        }
     }
 }
 
@@ -374,6 +409,39 @@ where
     }
 }
 
+/// Decode a head receipt's bytes, requiring the two generations to agree.
+///
+/// A receipt is the store's claim that a slot holds these bytes at this
+/// generation. Those are two separate statements and nothing makes the store
+/// keep them consistent, so this compares them before anything acts on the
+/// body.
+///
+/// # Why this is a function rather than four inline decodes
+///
+/// It used to be four inline decodes plus one cross-checked accessor, which is
+/// two implementations of "what does this head say" — free to disagree, which
+/// is the drift `frankengit-0kqi` was filed for one crate over. The accessor's
+/// own documentation said a caller who skips the comparison "can act on a body
+/// one generation away from the head it just authenticated"; four callers in
+/// this file were doing exactly that.
+///
+/// # Errors
+///
+/// [`HeadBodyRefusal::Codec`] when the bytes do not decode, and
+/// [`HeadBodyRefusal::GenerationMismatch`] when the generations disagree.
+fn head_body_of(receipt: &HeadReadReceipt) -> Result<RepositoryAuthorityHeadBody, HeadBodyRefusal> {
+    let body: RepositoryAuthorityHeadBody = decode_body(receipt.body(), DecodeLimits::DEFAULT)?;
+    let declared = receipt.generation();
+    if body.generation == declared {
+        Ok(body)
+    } else {
+        Err(HeadBodyRefusal::GenerationMismatch {
+            receipt: declared,
+            body: body.generation,
+        })
+    }
+}
+
 /// The immutable slot an already-identified body occupies.
 ///
 /// The twin of [`body_key`], which derives the identity from the body. This one
@@ -560,7 +628,7 @@ where
         ));
     };
     let observed = receipt.token();
-    let mut head: RepositoryAuthorityHeadBody = decode_body(receipt.body(), DecodeLimits::DEFAULT)?;
+    let mut head: RepositoryAuthorityHeadBody = head_body_of(&receipt)?;
     let mut walked = 0_usize;
     let mut found: Vec<(TxId, TerminalOutcome)> = Vec::new();
 
@@ -600,7 +668,7 @@ where
     let HeadRead::Present(receipt) = store.read_head(head_key)? else {
         return Ok(OutcomeLookup::Undecided);
     };
-    let mut head: RepositoryAuthorityHeadBody = decode_body(receipt.body(), DecodeLimits::DEFAULT)?;
+    let mut head: RepositoryAuthorityHeadBody = head_body_of(&receipt)?;
     let mut walked = 0_usize;
     loop {
         let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? else {
@@ -1234,7 +1302,7 @@ where
         ));
     };
     let observed = receipt.token();
-    let mut head: RepositoryAuthorityHeadBody = decode_body(receipt.body(), DecodeLimits::DEFAULT)?;
+    let mut head: RepositoryAuthorityHeadBody = head_body_of(&receipt)?;
     let mut walked = 0_usize;
     let mut found: Vec<(TxId, TerminalOutcome)> = Vec::new();
 
@@ -1436,7 +1504,7 @@ where
     let HeadRead::Present(receipt) = store.read_head(cx, head_key).await? else {
         return Ok(OutcomeLookup::Undecided);
     };
-    let mut head: RepositoryAuthorityHeadBody = decode_body(receipt.body(), DecodeLimits::DEFAULT)?;
+    let mut head: RepositoryAuthorityHeadBody = head_body_of(&receipt)?;
     let mut walked = 0_usize;
     loop {
         let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? else {
@@ -1565,16 +1633,6 @@ impl AuthenticatedHead {
     /// [`HeadBodyRefusal::GenerationMismatch`] if the decoded generation
     /// disagrees with the authenticated receipt.
     pub fn body(&self) -> Result<RepositoryAuthorityHeadBody, HeadBodyRefusal> {
-        let body: RepositoryAuthorityHeadBody =
-            decode_body(self.receipt().body(), DecodeLimits::DEFAULT)?;
-        let declared = self.receipt().generation();
-        if body.generation == declared {
-            Ok(body)
-        } else {
-            Err(HeadBodyRefusal::GenerationMismatch {
-                receipt: declared,
-                body: body.generation,
-            })
-        }
+        head_body_of(self.receipt())
     }
 }

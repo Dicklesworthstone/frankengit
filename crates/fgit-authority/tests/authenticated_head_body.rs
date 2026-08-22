@@ -22,7 +22,8 @@ use fgit_codec::RepositoryAuthorityHeadBody;
 use fgit_codec::wire::encode_body;
 use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::RepositoryId;
-use fgit_types::numeric::{HeadGeneration, PolicyEpoch, RegistryEpoch};
+use fgit_types::numeric::HeadGeneration;
+use fgit_types::numeric::{PolicyEpoch, RegistryEpoch};
 
 fn digest(byte: u8) -> Digest {
     Digest::new(
@@ -153,5 +154,281 @@ fn undecodable_bytes_are_refused_as_codec_rather_than_panicking() {
         matches!(refusal, HeadBodyRefusal::Codec(_)),
         "undecodable bytes must refuse as Codec rather than as a generation mismatch; got \
          {refusal:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The same cross-check, on the replay path (frankengit-cnsi)
+// ---------------------------------------------------------------------------
+//
+// The accessor above is not the only place this crate turns a head receipt into
+// a body. `replay_outcome` and `scan_for_existing_decisions` do it too, on both
+// surfaces — four sites that decoded with no comparison at all while this file
+// documented why the comparison matters.
+//
+// Worth being precise about what is being defended. Those four sites take the
+// receipt straight from `read_head` and never call `authenticate_head_receipt`,
+// so they hold a receipt whose authenticity was never established. The store
+// itself is the thing making two separate claims — "this slot is at generation
+// N" and "these are its bytes" — and nothing outside the store makes it keep
+// them consistent. This check is a cheap partial substitute for authentication
+// at those sites, not a replacement for it.
+
+use fgit_authority::{
+    AuthorityFailure, AuthorityLimits, AuthorityStore, CasOutcome, DuplicateAbsenceWitness,
+    HeadInit, HeadRead, ImmutableKey, ImmutableRead, MemoryAuthorityStore, OutcomeFailure,
+    OutcomeLookup, PublicationOutcome, PutOutcome, initialize_repository, publish_decisions,
+    replay_outcome,
+};
+use fgit_codec::{RepositoryDecision, RepositoryDecisionBatchBody};
+use fgit_types::identity::{RepositoryCommitId, RepositoryDecisionBatchId, TenantId};
+use fgit_types::numeric::DecisionSequence;
+use fgit_types::vocabulary::DecisionOutcome;
+
+/// A store that reports one generation for the slot and returns bytes carrying
+/// another.
+///
+/// It delegates everything to a real store and skews exactly one thing: the
+/// generation on the receipt `read_head` hands back. That models a backend
+/// whose slot metadata and slot bytes have drifted apart — a class this
+/// workspace verifies empirically per backend rather than assuming away.
+struct SkewedHeadStore {
+    inner: MemoryAuthorityStore,
+    skew: bool,
+}
+
+impl AuthorityStore for SkewedHeadStore {
+    fn instance_id(&self) -> fgit_authority::StoreInstanceId {
+        self.inner.instance_id()
+    }
+
+    fn limits(&self) -> AuthorityLimits {
+        self.inner.limits()
+    }
+
+    fn put_if_absent(
+        &self,
+        key: &ImmutableKey,
+        body: &[u8],
+    ) -> Result<PutOutcome, AuthorityFailure> {
+        self.inner.put_if_absent(key, body)
+    }
+
+    fn read_immutable(&self, key: &ImmutableKey) -> Result<ImmutableRead, AuthorityFailure> {
+        self.inner.read_immutable(key)
+    }
+
+    fn initialize_head(
+        &self,
+        key: &HeadKey,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> Result<HeadInit, AuthorityFailure> {
+        self.inner.initialize_head(key, generation, body)
+    }
+
+    fn read_head(&self, key: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
+        let read = self.inner.read_head(key)?;
+        if !self.skew {
+            return Ok(read);
+        }
+        let HeadRead::Present(receipt) = read else {
+            return Ok(read);
+        };
+        // Same key, same token, same bytes — only the declared generation moves.
+        let bumped = HeadGeneration::try_new(receipt.generation().get().saturating_add(1))
+            .expect("a successor generation is admissible");
+        Ok(HeadRead::Present(HeadReadReceipt::new(
+            key.clone(),
+            receipt.token(),
+            bumped,
+            receipt.body().to_vec(),
+        )))
+    }
+
+    fn compare_exchange_head(
+        &self,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        self.inner
+            .compare_exchange_head(key, expected, new_generation, new_body)
+    }
+
+    fn publish_head_with_outcomes(
+        &self,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+        outcomes: &[(ImmutableKey, Vec<u8>)],
+        witness: &DuplicateAbsenceWitness,
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        self.inner.publish_head_with_outcomes(
+            key,
+            expected,
+            new_generation,
+            new_body,
+            outcomes,
+            witness,
+        )
+    }
+
+    fn authenticate_head_receipt(
+        &self,
+        receipt: &HeadReadReceipt,
+    ) -> Result<AuthenticatedHead, AuthorityFailure> {
+        self.inner.authenticate_head_receipt(receipt)
+    }
+}
+
+const fn tenant() -> TenantId {
+    TenantId::from_bytes([0x11; 16])
+}
+
+fn slot() -> HeadKey {
+    HeadKey::new(b"fg/head/v1/repo-22".to_vec()).expect("an admissible head key")
+}
+
+fn tx(byte: u8) -> fgit_types::identity::TxId {
+    fgit_types::identity::TxId::from_digest(
+        fgit_crypto::IdentityDomain::RefTransaction.algorithm().id(),
+        fgit_types::CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[byte; 32]).expect("a bounded digest"),
+    )
+}
+
+/// Genesis plus one published batch deciding `tx(0xA1)`, over `store`.
+fn publish_one(store: &SkewedHeadStore) {
+    let genesis = head_at(HeadGeneration::FIRST, 0);
+    initialize_repository(store, &slot(), &genesis).expect("genesis publishes");
+
+    let batch = RepositoryDecisionBatchBody {
+        repository_id: repository(),
+        predecessor_head_id: fgit_authority::authority_head_identity(&genesis)
+            .expect("genesis identifies"),
+        predecessor_head_generation: genesis.generation,
+        first_decision_sequence: DecisionSequence::try_new(1).expect("positive"),
+        decisions: vec![RepositoryDecision {
+            tx_id: tx(0xA1),
+            decision_sequence: DecisionSequence::try_new(1).expect("positive"),
+            outcome: DecisionOutcome::Committed {
+                repository_commit_id: RepositoryCommitId::from_digest(
+                    fgit_crypto::IdentityDomain::RepositoryCommitRecord
+                        .algorithm()
+                        .id(),
+                    fgit_types::CANONICAL_CODEC_VERSION,
+                    DigestBytes::try_new(&[0x51; 32]).expect("a bounded digest"),
+                ),
+            },
+        }],
+        committed_rcrs: Vec::new(),
+        resulting_ref_root: digest(1),
+        resulting_forge_position_root: digest(1),
+        resulting_outcome_index_root: digest(1),
+        resulting_retention_root: digest(1),
+        resulting_outbox_root: digest(1),
+        resulting_policy_epoch: PolicyEpoch::FIRST,
+        batch_evidence_root: digest(1),
+    };
+    let batch_id: RepositoryDecisionBatchId =
+        fgit_authority::decision_batch_identity(&batch).expect("the batch identifies");
+    let successor = RepositoryAuthorityHeadBody {
+        generation: HeadGeneration::try_new(2).expect("positive"),
+        predecessor_head_id: Some(
+            fgit_authority::authority_head_identity(&genesis).expect("genesis identifies"),
+        ),
+        decision_tail_id: Some(batch_id),
+        latest_decision_sequence: Some(DecisionSequence::try_new(1).expect("positive")),
+        ..genesis.clone()
+    };
+    let HeadRead::Present(receipt) = store.read_head(&slot()).expect("a readable head") else {
+        panic!("genesis must be published");
+    };
+    let outcome = publish_decisions(
+        store,
+        &slot(),
+        receipt.token(),
+        &batch,
+        &successor,
+        tenant(),
+    )
+    .expect("publication succeeds");
+    assert!(
+        matches!(outcome, PublicationOutcome::Published(_)),
+        "the fixture must actually publish"
+    );
+}
+
+#[test]
+fn replay_answers_normally_when_the_receipt_and_its_body_agree() {
+    // The control. Without it the refusal below is satisfied by a replay that
+    // refuses everything, and the fixture itself would be unproven.
+    let store = SkewedHeadStore {
+        inner: MemoryAuthorityStore::new(StoreInstanceId::from_raw(1)),
+        skew: false,
+    };
+    publish_one(&store);
+
+    assert!(
+        matches!(
+            replay_outcome(&store, &slot(), tx(0xA1)).expect("the walk completes"),
+            OutcomeLookup::Decided(_)
+        ),
+        "a consistent store must replay to the decision it published"
+    );
+}
+
+#[test]
+fn replay_refuses_a_head_receipt_whose_generation_disagrees_with_its_body() {
+    // The presence case for the check on the replay path. Before this, all four
+    // replay sites decoded the receipt with no comparison; the identical fixture
+    // returned Decided and the skew was invisible.
+    let store = SkewedHeadStore {
+        inner: MemoryAuthorityStore::new(StoreInstanceId::from_raw(1)),
+        skew: false,
+    };
+    publish_one(&store);
+    let skewed = SkewedHeadStore {
+        inner: store.inner,
+        skew: true,
+    };
+
+    let failure = replay_outcome(&skewed, &slot(), tx(0xA1))
+        .expect_err("a self-inconsistent head receipt must be refused, not walked");
+
+    let OutcomeFailure::HeadGenerationSkew { receipt, body } = failure else {
+        panic!("the skew must refuse as HeadGenerationSkew; got {failure:?}");
+    };
+    assert_eq!(
+        receipt.get(),
+        body.get() + 1,
+        "the refusal must name both generations so an operator can tell which side moved: \
+         receipt {receipt:?}, body {body:?}"
+    );
+}
+
+#[test]
+fn the_accessor_and_the_replay_path_refuse_the_same_skew() {
+    // The two used to be separate implementations of "what does this head say".
+    // This is what holds them to one answer.
+    let generation = HeadGeneration::try_new(4).expect("admissible");
+    let skewed_body = head_at(HeadGeneration::try_new(5).expect("admissible"), 9);
+
+    let via_accessor = authenticated(generation, &skewed_body)
+        .body()
+        .expect_err("the accessor refuses a skewed body");
+    let lifted: OutcomeFailure = via_accessor.into();
+
+    assert_eq!(
+        lifted,
+        OutcomeFailure::HeadGenerationSkew {
+            receipt: generation,
+            body: HeadGeneration::try_new(5).expect("admissible"),
+        },
+        "the accessor's refusal must lift into the replay path's vocabulary unchanged; two \
+         refusals for one condition is the drift this consolidation removes"
     );
 }
