@@ -211,12 +211,19 @@ pub fn decode_entry_header(
 }
 
 /// Decodes the backwards `OFS_DELTA` distance and returns its absolute base
-/// offset. A base at or after the current entry is always invalid.
+/// offset.
+///
+/// A base at or after the current entry is always invalid, and so is a base
+/// inside the 12-byte pack header: no entry can start there. Refusing at the
+/// boundary where the lie is detectable names the malformed distance instead
+/// of deferring it to delta resolution as a missing base.
 pub fn decode_ofs_delta_base(
     current_offset: u64,
     input: &[u8],
     deadline: &mut impl Deadline,
 ) -> Result<(u64, usize), PackError> {
+    /// The first offset a pack entry can legally start at.
+    const FIRST_ENTRY_OFFSET: u64 = 12;
     checkpoint(deadline)?;
     let Some(&first) = input.first() else {
         return Err(PackError::Truncated {
@@ -246,7 +253,11 @@ pub fn decode_ofs_delta_base(
     if distance == 0 || distance > current_offset {
         return Err(PackError::InvalidOfsDelta);
     }
-    Ok((current_offset - distance, index))
+    let base_offset = current_offset - distance;
+    if base_offset < FIRST_ENTRY_OFFSET {
+        return Err(PackError::InvalidOfsDelta);
+    }
+    Ok((base_offset, index))
 }
 
 /// Parses the delta base discriminator required by a decoded delta header.
@@ -412,6 +423,25 @@ mod tests {
                 consumed: 20,
             })
         );
+    }
+
+    #[test]
+    fn an_ofs_distance_into_the_pack_header_region_is_refused_at_decode() {
+        // The first entry starts at offset 12, so a distance that lands the
+        // base anywhere inside the signature/version/count header is a lie
+        // about the pack's structure and is named here rather than surfacing
+        // later as a missing delta base.
+        assert_eq!(
+            decode_ofs_delta_base(12, &[12], &mut always),
+            Err(PackError::InvalidOfsDelta)
+        );
+        assert_eq!(
+            decode_ofs_delta_base(13, &[2], &mut always),
+            Err(PackError::InvalidOfsDelta)
+        );
+        // The exact boundary: distance 12 from offset 24 targets offset 12,
+        // the first entry that can exist.
+        assert_eq!(decode_ofs_delta_base(24, &[12], &mut always), Ok((12, 1)));
     }
 
     #[test]
