@@ -43,7 +43,7 @@ struct StageFile {
 }
 
 impl StageFile {
-    fn new(path: PathBuf, file: File) -> Self {
+    const fn new(path: PathBuf, file: File) -> Self {
         Self {
             path,
             file: Some(file),
@@ -55,23 +55,27 @@ impl StageFile {
     }
 
     fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        match self.file.as_mut() {
-            Some(file) => file.write_all(bytes),
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "staging file is already closed",
-            )),
-        }
+        self.file.as_mut().map_or_else(
+            || {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "staging file is already closed",
+                ))
+            },
+            |file| file.write_all(bytes),
+        )
     }
 
     fn sync_all(&self) -> std::io::Result<()> {
-        match self.file.as_ref() {
-            Some(file) => file.sync_all(),
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "staging file is already closed",
-            )),
-        }
+        self.file.as_ref().map_or_else(
+            || {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "staging file is already closed",
+                ))
+            },
+            File::sync_all,
+        )
     }
 
     fn close(&mut self) {
