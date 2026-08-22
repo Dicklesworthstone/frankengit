@@ -32,7 +32,7 @@ pub fn batch_evidence_root(
 
 /// Derives the root while `PublicationPlan::seal` still owns the pre-body
 /// decision and record vectors.
-pub(crate) fn derive_batch_evidence_root(
+pub fn derive_batch_evidence_root(
     decisions: &[RepositoryDecision],
     committed_rcrs: &[RepositoryCommitRecord],
 ) -> Result<Digest, ChronicleRefusal> {
