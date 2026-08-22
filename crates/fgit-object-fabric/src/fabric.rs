@@ -1357,6 +1357,17 @@ mod tests {
         )
     }
 
+    /// A placement differing from [`placement`] only in its locator, so tests
+    /// can build distinct receipts without varying anything else.
+    fn placement_at(locator: &[u8]) -> PlacementReceipt {
+        PlacementReceipt::new(
+            PlacementBackend::LocalFilesystem,
+            OpaqueHandle::new(locator).expect("fixture locator must fit"),
+            OpaqueHandle::new(b"rack-a").expect("fixture failure domain must fit"),
+            OpaqueHandle::new(b"key-a").expect("fixture key dependency must fit"),
+        )
+    }
+
     fn oid(value: u8) -> GitOid {
         GitOid::Sha1(GitOidSha1::from_bytes([value; GitOidSha1::LEN]))
     }
@@ -1571,5 +1582,231 @@ mod tests {
             stale.revalidate_root(&proposal),
             Err(StoreRefusal::RetentionRevalidationFailed)
         );
+    }
+
+    // -----------------------------------------------------------------
+    // frankengit-s0vo: `validate_manifest_parts`' refusal surface.
+    //
+    // Both adjacent-pair scans in that function are three-arm matches, and in
+    // both the `Greater` arm was tested while the `Equal` arm was not. The
+    // `Greater` arm enforces ordering; the `Equal` arm is the whole of the
+    // duplicate half, and NPC §5.3 is explicit that ambiguous duplicates must
+    // never be preserved. On a sorted input, `Equal` is the ONLY way two
+    // adjacent items compare equal, so dropping that arm looks harmless right
+    // up until a manifest binds two entries to one object identity.
+    //
+    // ORDERING. The function checks namespace emptiness, then namespace size,
+    // then entry count, then placement count, then the two scans. Every case
+    // below keeps each earlier check satisfied, and says so, or it would prove
+    // an earlier refusal instead of its own.
+    // -----------------------------------------------------------------
+
+    /// A second entry for the same object identity is a duplicate, even when
+    /// the rest of the entry differs.
+    ///
+    /// The two entries share `object_identity` and differ in `record_offset`,
+    /// which is what shows the scan keys on the identity rather than on whole-
+    /// entry equality. Earlier checks satisfied: one-byte namespace, two
+    /// entries and one placement, all inside `manifest_limits`.
+    #[test]
+    fn manifest_refuses_two_entries_sharing_one_object_identity() {
+        let mut second = manifest_entry(b'a');
+        second.record_offset = 999;
+
+        assert_eq!(
+            SegmentManifest::new(
+                vec![b'n'],
+                [9; 32],
+                vec![manifest_entry(b'a'), second],
+                vec![placement()],
+                &manifest_limits(),
+            ),
+            Err(StoreRefusal::DuplicateObjectIdentity),
+        );
+
+        // The permitted twin: distinct identities in the same positions are
+        // accepted, so the refusal is attributable to the equality and not to
+        // the pair being adjacent or to the entry count.
+        SegmentManifest::new(
+            vec![b'n'],
+            [9; 32],
+            vec![manifest_entry(b'a'), manifest_entry(b'b')],
+            vec![placement()],
+            &manifest_limits(),
+        )
+        .expect("two distinct identities in canonical order are admissible");
+    }
+
+    /// Two placements that canonicalize identically are a duplicate.
+    ///
+    /// Earlier checks satisfied as above; the entries are the canonical pair,
+    /// so the entry scan passes before the placement scan is reached.
+    #[test]
+    fn manifest_refuses_two_placements_that_canonicalize_identically() {
+        assert_eq!(
+            SegmentManifest::new(
+                vec![b'n'],
+                [9; 32],
+                vec![manifest_entry(b'a'), manifest_entry(b'b')],
+                vec![placement(), placement()],
+                &manifest_limits(),
+            ),
+            Err(StoreRefusal::DuplicatePlacement),
+        );
+
+        // The permitted twin: two DIFFERENT placements, ordered by the same key
+        // the scan uses, are accepted.
+        let mut distinct = vec![placement(), placement_at(b"local-b")];
+        distinct.sort_by_key(|receipt| {
+            receipt
+                .canonical_bytes()
+                .expect("fixture placements canonicalize")
+        });
+        SegmentManifest::new(
+            vec![b'n'],
+            [9; 32],
+            vec![manifest_entry(b'a'), manifest_entry(b'b')],
+            distinct,
+            &manifest_limits(),
+        )
+        .expect("two distinct placements in canonical order are admissible");
+    }
+
+    /// An empty namespace is refused, and one byte is enough.
+    ///
+    /// This is the first check in the function, so nothing earlier can
+    /// pre-empt it; the twin shows the guard is emptiness and not size.
+    #[test]
+    fn manifest_refuses_an_empty_namespace_and_permits_a_single_byte() {
+        assert_eq!(
+            SegmentManifest::new(
+                Vec::new(),
+                [9; 32],
+                vec![manifest_entry(b'a')],
+                vec![placement()],
+                &manifest_limits(),
+            ),
+            Err(StoreRefusal::EmptyNamespace),
+        );
+
+        SegmentManifest::new(
+            vec![b'n'],
+            [9; 32],
+            vec![manifest_entry(b'a')],
+            vec![placement()],
+            &manifest_limits(),
+        )
+        .expect("a one-byte namespace is admissible");
+    }
+
+    /// The namespace bound refuses one byte over and permits exactly the limit.
+    ///
+    /// The comparison is `>`, so exactly `max_namespace_bytes` is admissible;
+    /// this is the case a `>`/`>=` slip flips.
+    #[test]
+    fn manifest_refuses_a_namespace_past_the_bound_and_permits_exactly_it() {
+        let limits = manifest_limits();
+
+        assert_eq!(
+            SegmentManifest::new(
+                vec![b'n'; limits.max_namespace_bytes + 1],
+                [9; 32],
+                vec![manifest_entry(b'a')],
+                vec![placement()],
+                &limits,
+            ),
+            Err(StoreRefusal::NamespaceTooLarge),
+        );
+
+        SegmentManifest::new(
+            vec![b'n'; limits.max_namespace_bytes],
+            [9; 32],
+            vec![manifest_entry(b'a')],
+            vec![placement()],
+            &limits,
+        )
+        .expect("a namespace of exactly the bound is admissible");
+    }
+
+    /// The entry-count bound, refused one over and permitted at exactly the
+    /// limit.
+    ///
+    /// The entries are generated distinct and in ascending identity order, so
+    /// neither scan arm can fire and the count guard is the only thing that
+    /// can refuse.
+    #[test]
+    fn manifest_refuses_more_entries_than_the_bound_and_permits_exactly_it() {
+        let limits = manifest_limits();
+        let at_limit = usize::try_from(limits.max_entries).expect("fixture limit fits usize");
+        let entries = |count: usize| -> Vec<ManifestEntry> {
+            (0..count)
+                .map(|index| manifest_entry(u8::try_from(index).expect("fixture count fits u8")))
+                .collect()
+        };
+
+        assert_eq!(
+            SegmentManifest::new(
+                vec![b'n'],
+                [9; 32],
+                entries(at_limit + 1),
+                vec![placement()],
+                &limits,
+            ),
+            Err(StoreRefusal::TooManyEntries),
+        );
+
+        SegmentManifest::new(
+            vec![b'n'],
+            [9; 32],
+            entries(at_limit),
+            vec![placement()],
+            &limits,
+        )
+        .expect("exactly max_entries is admissible");
+    }
+
+    /// The placement-count bound, refused one over and permitted at exactly the
+    /// limit.
+    ///
+    /// The placements are generated distinct and sorted by the same key the
+    /// scan uses, so neither placement scan arm can fire first.
+    #[test]
+    fn manifest_refuses_more_placements_than_the_bound_and_permits_exactly_it() {
+        let limits = manifest_limits();
+        let at_limit = usize::try_from(limits.max_placements).expect("fixture limit fits usize");
+        let placements = |count: usize| -> Vec<PlacementReceipt> {
+            let mut built: Vec<PlacementReceipt> = (0..count)
+                .map(|index| {
+                    let tag = [b'l', u8::try_from(index).expect("fixture count fits u8")];
+                    placement_at(&tag)
+                })
+                .collect();
+            built.sort_by_key(|receipt| {
+                receipt
+                    .canonical_bytes()
+                    .expect("fixture placements canonicalize")
+            });
+            built
+        };
+
+        assert_eq!(
+            SegmentManifest::new(
+                vec![b'n'],
+                [9; 32],
+                vec![manifest_entry(b'a')],
+                placements(at_limit + 1),
+                &limits,
+            ),
+            Err(StoreRefusal::TooManyPlacements),
+        );
+
+        SegmentManifest::new(
+            vec![b'n'],
+            [9; 32],
+            vec![manifest_entry(b'a')],
+            placements(at_limit),
+            &limits,
+        )
+        .expect("exactly max_placements is admissible");
     }
 }
