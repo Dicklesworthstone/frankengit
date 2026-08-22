@@ -767,8 +767,10 @@ dependencies = [
 name = "fgit-node"
 version = "0.0.1"
 dependencies = [
+ "fgit-admission",
  "fgit-authority",
  "fgit-authority-fsqlite",
+ "fgit-chronicle",
  "fgit-codec",
  "fgit-crypto",
  "fgit-git-object",

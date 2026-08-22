@@ -8,8 +8,10 @@ publish = false
 description = "One-process FrankenGit node assembly over published subsystem contracts."
 
 [dependencies]
+fgit-admission.workspace = true
 fgit-authority.workspace = true
 fgit-authority-fsqlite.workspace = true
+fgit-chronicle.workspace = true
 fgit-codec.workspace = true
 fgit-crypto.workspace = true
 fgit-git-object.workspace = true

@@ -18,13 +18,16 @@ use std::net::{Shutdown, TcpListener};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use fgit_admission::{AdmissionProjection, AdmissionSnapshot};
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityLimits, AuthorityVersionToken, HeadInit,
     HeadKey, HeadRead, OutcomeLookup, PublicationOutcome, StoreInstanceId,
     initialize_repository_async, publish_decisions_async, resolve_outcome_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
+use fgit_chronicle::PublicationBasis;
 use fgit_codec::schema::{RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody};
+use fgit_codec::{CryptoBodyIdentity, body_id};
 use fgit_crypto::{GitObjectKind, IdentityDomain, git_object_id, git_payload_commitment};
 use fgit_git_object::ObjectType;
 use fgit_object_fabric::fabric::{
@@ -39,12 +42,12 @@ use fgit_resource::{
 use fgit_runtime::{BudgetClass, NodeRuntime, RuntimeProfile, RuntimeRefusal};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, GitHashAlgorithm, GitOid, HeadGeneration, PolicyEpoch,
-    RegistryEpoch, RepositoryId, TenantId,
+    RegistryEpoch, RepositoryAuthorityHeadId, RepositoryId, TenantId,
 };
 use fgit_wire::{
-    Capabilities, LegacyUploadPack, PackPayloadSource, PackRequest, Packet, PktLineDecoder,
-    UploadPackRepository, UploadPackVersion, V1Advertisement, WireError, WireEvent, WireLimits,
-    encode_packets, sideband_pack_chunk,
+    AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, PackPayloadSource, PackRequest,
+    Packet, PktLineDecoder, UploadPackRepository, UploadPackVersion, V1Advertisement, WireError,
+    WireEvent, WireLimits, encode_packets, sideband_pack_chunk,
 };
 use fsqlite_types::cx::Cx as FsqliteCx;
 
@@ -54,6 +57,181 @@ const FABRIC_NAMESPACE_PREFIX: &[u8] = b"frankengit/node/object/";
 const DEFAULT_MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 const AUTHORITY_DATABASE_FILE: &str = "authority.fsqlite";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Immutable upload-pack facts derived from one authenticated admission snapshot.
+///
+/// This view carries no mutable ref map and does not infer object reachability
+/// from the local object fabric.  Its advertised refs come exclusively from a
+/// caller-supplied [`AdmissionProjection`] evaluated against an authenticated
+/// authority basis.  The first-clone git-daemon transport is legacy V0, whose
+/// wants must name an advertised ref; therefore this view deliberately refuses
+/// every non-advertised want until the decision-history closure reader is wired
+/// as a separate production slice.
+#[derive(Clone, Debug)]
+pub struct AdmissionUploadPackRepository {
+    object_format: GitHashAlgorithm,
+    refs: Vec<AdvertisedRef>,
+}
+
+impl AdmissionUploadPackRepository {
+    /// Creates a bounded upload-pack view from a canonical admission snapshot.
+    ///
+    /// The snapshot is an owned immutable result of a projection rooted in an
+    /// authenticated authority head; it is not a node-local source of truth.
+    pub fn from_snapshot(
+        snapshot: &AdmissionSnapshot,
+        object_format: GitHashAlgorithm,
+        limits: &WireLimits,
+    ) -> Result<Self, AdmissionUploadPackRefusal> {
+        if snapshot.refs.len() > limits.max_advertised_refs {
+            return Err(AdmissionUploadPackRefusal::Wire(
+                WireError::TooManyAdvertisedRefs {
+                    limit: limits.max_advertised_refs,
+                },
+            ));
+        }
+        let mut refs = Vec::with_capacity(snapshot.refs.len());
+        for (name, oid) in &snapshot.refs {
+            if oid.algorithm() != object_format {
+                return Err(AdmissionUploadPackRefusal::ObjectFormatMismatch {
+                    expected: object_format,
+                    observed: oid.algorithm(),
+                });
+            }
+            refs.push(
+                AdvertisedRef::new(*oid, name.as_bytes(), limits)
+                    .map_err(AdmissionUploadPackRefusal::Wire)?,
+            );
+        }
+        Ok(Self {
+            object_format,
+            refs,
+        })
+    }
+
+    /// Evaluates the production admission surface at exactly one authority basis.
+    ///
+    /// [`fgit_admission::CanonicalAdmissionProjection`] refuses if
+    /// `basis` and `authenticated` disagree, so a stale or mixed receipt does
+    /// not become a transport snapshot.  The generic signature keeps node
+    /// assembly bound to the published projection contract, rather than to a
+    /// node-owned representation of canonical refs.
+    pub fn from_projection<Projection>(
+        projection: &Projection,
+        basis: &PublicationBasis,
+        authenticated: &AuthenticatedHead,
+        object_format: GitHashAlgorithm,
+        limits: &WireLimits,
+    ) -> Result<Self, AdmissionUploadPackRefusal>
+    where
+        Projection: AdmissionProjection + ?Sized,
+    {
+        let snapshot = projection
+            .snapshot(basis, authenticated)
+            .map_err(AdmissionUploadPackRefusal::Projection)?;
+        Self::from_snapshot(&snapshot, object_format, limits)
+    }
+}
+
+impl UploadPackRepository for AdmissionUploadPackRepository {
+    fn object_format(&self) -> GitHashAlgorithm {
+        self.object_format
+    }
+
+    fn advertised_refs(&self) -> &[AdvertisedRef] {
+        &self.refs
+    }
+
+    fn contains_want(&self, oid: AnyGitOid) -> bool {
+        self.refs.iter().any(|reference| reference.oid == oid)
+    }
+
+    fn is_common(&self, oid: AnyGitOid) -> bool {
+        self.contains_want(oid)
+    }
+}
+
+/// Refusal while deriving a transport view from canonical admission state.
+#[derive(Debug)]
+pub enum AdmissionUploadPackRefusal {
+    /// The canonical projection refused the supplied authenticated basis.
+    Projection(fgit_types::RefusalCode),
+    /// A canonical ref has a native identity domain unlike this repository.
+    ObjectFormatMismatch {
+        /// The node's declared native object format.
+        expected: GitHashAlgorithm,
+        /// The format carried by the canonical ref target.
+        observed: GitHashAlgorithm,
+    },
+    /// The wire adapter refused the bounded advertisement representation.
+    Wire(WireError),
+}
+
+impl Display for AdmissionUploadPackRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Projection(code) => {
+                write!(
+                    formatter,
+                    "admission projection refused upload-pack snapshot: {code:?}"
+                )
+            }
+            Self::ObjectFormatMismatch { expected, observed } => write!(
+                formatter,
+                "canonical ref object format {observed:?} differs from node format {expected:?}"
+            ),
+            Self::Wire(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for AdmissionUploadPackRefusal {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Wire(error) => Some(error),
+            Self::Projection(_) | Self::ObjectFormatMismatch { .. } => None,
+        }
+    }
+}
+
+/// Refusal while reading the current node head into an upload-pack view.
+#[derive(Debug)]
+pub enum NodeAdmissionViewRefusal {
+    /// The durable authority read or authentication refused.
+    Authority(NodeRefusal),
+    /// The authenticated receipt did not carry one usable authority-head body.
+    HeadBody(fgit_authority::HeadBodyRefusal),
+    /// The canonical authority-head body could not be re-identified.
+    HeadIdentity(fgit_codec::CodecRefusal),
+    /// The re-identified body did not belong to the authority-head domain.
+    HeadIdentityDomain(fgit_types::TypeRefusal),
+    /// Canonical admission or wire-view construction refused.
+    View(AdmissionUploadPackRefusal),
+}
+
+impl Display for NodeAdmissionViewRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Authority(error) => Display::fmt(error, formatter),
+            Self::HeadBody(error) => Display::fmt(error, formatter),
+            Self::HeadIdentity(error) => Display::fmt(error, formatter),
+            Self::HeadIdentityDomain(error) => Display::fmt(error, formatter),
+            Self::View(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for NodeAdmissionViewRefusal {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Authority(error) => Some(error),
+            Self::HeadBody(error) => Some(error),
+            Self::HeadIdentity(error) => Some(error),
+            Self::HeadIdentityDomain(error) => Some(error),
+            Self::View(error) => Some(error),
+        }
+    }
+}
 
 /// Typed refusal from the node assembly boundary.
 #[derive(Debug)]
@@ -1102,6 +1280,47 @@ impl OneNode {
         self.authenticate_authority_head_in(&request).await
     }
 
+    /// Opens the current durable authority state as a bounded V0 upload-pack view.
+    ///
+    /// This reads and authenticates the head through the node's production
+    /// async authority contract, derives the exact [`PublicationBasis`] from
+    /// that receipt, then delegates ref resolution to the supplied admission
+    /// projection.  The resulting view is safe only for the legacy V0
+    /// first-clone transport: non-advertised closure wants are deliberately
+    /// refused until the decision-history closure reader is composed.
+    pub async fn admission_upload_pack_repository_in<Projection>(
+        &self,
+        request: &NodeRequestContext,
+        projection: &Projection,
+        limits: &WireLimits,
+    ) -> Result<AdmissionUploadPackRepository, NodeAdmissionViewRefusal>
+    where
+        Projection: AdmissionProjection + ?Sized,
+    {
+        let authenticated = self
+            .authenticate_authority_head_in(request)
+            .await
+            .map_err(NodeAdmissionViewRefusal::Authority)?;
+        let body = authenticated
+            .body()
+            .map_err(NodeAdmissionViewRefusal::HeadBody)?;
+        let id = body_id(&CryptoBodyIdentity, &body)
+            .map_err(NodeAdmissionViewRefusal::HeadIdentity)
+            .and_then(|identity| {
+                RepositoryAuthorityHeadId::from_internal_object_id(identity)
+                    .map_err(NodeAdmissionViewRefusal::HeadIdentityDomain)
+            })?;
+        let basis = PublicationBasis::new(id, body);
+        AdmissionUploadPackRepository::from_projection(
+            projection,
+            &basis,
+            &authenticated,
+            self.object_format,
+            limits,
+        )
+        .map_err(NodeAdmissionViewRefusal::View)
+    }
+
     /// Resolves one sealed transaction outcome through authoritative durable state.
     ///
     /// This reconciles the authenticated decision stream with its derived
@@ -1427,6 +1646,7 @@ fn placement_resources(object_bytes: u64) -> ResourceVector {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::convert::Infallible;
     use std::fs;
     use std::io::{Cursor, Read};
@@ -1436,18 +1656,19 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use fgit_admission::AdmissionSnapshot;
     use fgit_authority::{HeadRead, OutcomeLookup};
     use fgit_codec::harness::{advanced_head, decision_batch, tx_id};
-    use fgit_types::{RepositoryId, TenantId};
+    use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryId, TenantId};
     use fgit_wire::{
         AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, PackPayloadSource, Packet,
         UploadPackRepository, WireError, WireLimits, encode_packets,
     };
 
     use super::{
-        GitDaemonServeError, GitDaemonTransportRefusal, NodeConfig, NodeInitialization,
-        NodeRefusal, OneNode, parse_git_daemon_request, serve_git_daemon_tcp_once,
-        serve_git_daemon_upload_pack,
+        AdmissionUploadPackRefusal, AdmissionUploadPackRepository, GitDaemonServeError,
+        GitDaemonTransportRefusal, NodeConfig, NodeInitialization, NodeRefusal, OneNode,
+        parse_git_daemon_request, serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
     };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -1522,6 +1743,135 @@ mod tests {
         fn is_common(&self, _oid: AnyGitOid) -> bool {
             false
         }
+    }
+
+    #[test]
+    fn admission_snapshot_view_advertises_exact_canonical_refs_in_order() {
+        let main = GitOid::from_hex(
+            GitHashAlgorithm::Sha1,
+            "1111111111111111111111111111111111111111",
+        )
+        .expect("fixed SHA-1 object id");
+        let release = GitOid::from_hex(
+            GitHashAlgorithm::Sha1,
+            "2222222222222222222222222222222222222222",
+        )
+        .expect("fixed SHA-1 object id");
+        let mut refs = BTreeMap::new();
+        refs.insert(
+            RefName::try_new(b"refs/heads/main").expect("fixed valid ref"),
+            main,
+        );
+        refs.insert(
+            RefName::try_new(b"refs/tags/v1.0").expect("fixed valid ref"),
+            release,
+        );
+        let snapshot = AdmissionSnapshot {
+            refs,
+            ..AdmissionSnapshot::default()
+        };
+
+        let repository = AdmissionUploadPackRepository::from_snapshot(
+            &snapshot,
+            GitHashAlgorithm::Sha1,
+            &WireLimits::default(),
+        )
+        .expect("canonical SHA-1 snapshot becomes an upload-pack view");
+
+        assert_eq!(
+            repository
+                .advertised_refs()
+                .iter()
+                .map(|reference| reference.name.as_slice())
+                .collect::<Vec<_>>(),
+            vec![b"refs/heads/main".as_slice(), b"refs/tags/v1.0".as_slice()],
+        );
+        assert!(repository.contains_want(main));
+        assert!(repository.is_common(release));
+        assert!(
+            !repository.contains_want(
+                GitOid::from_hex(
+                    GitHashAlgorithm::Sha1,
+                    "3333333333333333333333333333333333333333",
+                )
+                .expect("fixed SHA-1 object id"),
+            )
+        );
+    }
+
+    #[test]
+    fn admission_snapshot_view_refuses_cross_domain_ref_targets() {
+        let mut refs = BTreeMap::new();
+        refs.insert(
+            RefName::try_new(b"refs/heads/main").expect("fixed valid ref"),
+            GitOid::from_hex(
+                GitHashAlgorithm::Sha256,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .expect("fixed SHA-256 object id"),
+        );
+        let snapshot = AdmissionSnapshot {
+            refs,
+            ..AdmissionSnapshot::default()
+        };
+
+        let refusal = AdmissionUploadPackRepository::from_snapshot(
+            &snapshot,
+            GitHashAlgorithm::Sha1,
+            &WireLimits::default(),
+        )
+        .expect_err("a mixed hash-domain advertisement is not Git-compatible");
+
+        assert!(matches!(
+            refusal,
+            AdmissionUploadPackRefusal::ObjectFormatMismatch {
+                expected: GitHashAlgorithm::Sha1,
+                observed: GitHashAlgorithm::Sha256,
+            }
+        ));
+    }
+
+    #[test]
+    fn admission_snapshot_view_checks_advertisement_bound_before_copying_refs() {
+        let main = GitOid::from_hex(
+            GitHashAlgorithm::Sha1,
+            "1111111111111111111111111111111111111111",
+        )
+        .expect("fixed SHA-1 object id");
+        let release = GitOid::from_hex(
+            GitHashAlgorithm::Sha1,
+            "2222222222222222222222222222222222222222",
+        )
+        .expect("fixed SHA-1 object id");
+        let mut refs = BTreeMap::new();
+        refs.insert(
+            RefName::try_new(b"refs/heads/main").expect("fixed valid ref"),
+            main,
+        );
+        refs.insert(
+            RefName::try_new(b"refs/tags/v1.0").expect("fixed valid ref"),
+            release,
+        );
+        let snapshot = AdmissionSnapshot {
+            refs,
+            ..AdmissionSnapshot::default()
+        };
+        let limits = WireLimits {
+            max_advertised_refs: 1,
+            ..WireLimits::default()
+        };
+
+        let refusal = AdmissionUploadPackRepository::from_snapshot(
+            &snapshot,
+            GitHashAlgorithm::Sha1,
+            &limits,
+        )
+        .expect_err("the adapter must reject before allocating a second advertisement copy");
+
+        assert!(matches!(
+            refusal,
+            AdmissionUploadPackRefusal::Wire(WireError::TooManyAdvertisedRefs { limit: 1 })
+        ));
     }
 
     struct FixturePack {
