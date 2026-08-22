@@ -1457,6 +1457,12 @@ fn classify_duplicates(
 }
 
 /// The accelerator entries this batch publishes, in decision order.
+///
+/// One sealed transaction has at most one terminal decision, so a batch that
+/// lists one transaction identity twice is malformed no matter whether the two
+/// entries agree: publication would have to pick a survivor by slice order,
+/// which is exactly the discretion §5.2 withholds. Refused before anything is
+/// staged.
 fn outcome_entries(
     tenant_id: TenantId,
     batch: &RepositoryDecisionBatchBody,
@@ -1464,6 +1470,13 @@ fn outcome_entries(
     let mut entries: Vec<(ImmutableKey, Vec<u8>)> = Vec::with_capacity(batch.decisions.len());
     for decision in &batch.decisions {
         let key = outcome_key(tenant_id, batch.repository_id, decision.tx_id)?;
+        if entries.iter().any(|(staged, _)| staged == &key) {
+            return Err(OutcomeFailure::Seal(Box::new(
+                SealFailure::SlotContentUnexpected {
+                    slot: "decision batch",
+                },
+            )));
+        }
         let entry = TerminalOutcome {
             decision_sequence: decision.decision_sequence,
             outcome: decision.outcome,

@@ -597,9 +597,22 @@ impl AuthorityStore for MemoryAuthorityStore {
 
                 // Outcome entries must be absent or byte-identical. A slot
                 // holding different bytes is a second terminal decision for a
-                // transaction that already has one: fail closed, write nothing.
+                // transaction that already has one: fail closed, write
+                // nothing. The same rule governs THIS call's own slice: two
+                // entries for one key are checked against each other here,
+                // before either is staged, so a duplicated identity cannot
+                // win by list order the way a deferred insert would let it.
                 let mut to_insert: Vec<(ImmutableKey, Vec<u8>)> = Vec::new();
                 for (outcome_key, bytes) in outcomes {
+                    if let Some((_, staged)) = to_insert
+                        .iter_mut()
+                        .find(|(staged_key, _)| staged_key == outcome_key)
+                    {
+                        if staged.as_slice() != bytes.as_slice() {
+                            return Err(AuthorityRefusal::TokenBodyMismatch);
+                        }
+                        continue;
+                    }
                     match state.immutable.get(outcome_key) {
                         Some(existing) if existing.as_slice() == bytes.as_slice() => {}
                         Some(_) => return Err(AuthorityRefusal::TokenBodyMismatch),

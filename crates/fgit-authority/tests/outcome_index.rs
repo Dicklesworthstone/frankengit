@@ -2439,3 +2439,171 @@ fn a_saturated_walk_counter_still_refuses_rather_than_wrapping_past_the_bound() 
         "the counter saturates; wrapping to 0 here would defeat the bound entirely",
     );
 }
+
+/// §5.2 begins at construction: one sealed transaction carries one terminal
+/// decision per batch. A batch listing one identity twice is malformed even
+/// when both entries agree, because publication would otherwise pick the
+/// surviving decision by list order -- discretion §5.2 withholds from every
+/// layer, including this one.
+#[test]
+fn a_batch_listing_one_transaction_twice_is_refused_before_staging() {
+    let store = store();
+    let genesis = genesis_head();
+    initialize_repository(&store, &head_slot(), &genesis).expect("genesis");
+
+    let duplicate = batch(
+        &genesis,
+        1,
+        vec![committed(tx(0xA1), 1, 0x51), refused(tx(0xA1), 2, 0x52)],
+    );
+    let head = successor_head(&genesis, batch_id_of(&duplicate), 2);
+    let HeadRead::Present(receipt) = store.read_head(&head_slot()).expect("a readable head") else {
+        panic!("genesis must be published");
+    };
+    let failure = publish_decisions(
+        &store,
+        &head_slot(),
+        receipt.token(),
+        &duplicate,
+        &head,
+        tenant(),
+    )
+    .expect_err("one identity cannot carry two decisions in one batch");
+    assert!(
+        matches!(
+            &failure,
+            OutcomeFailure::Seal(inner)
+                if matches!(
+                    inner.as_ref(),
+                    fgit_authority::SealFailure::SlotContentUnexpected {
+                        slot: "decision batch"
+                    }
+                )
+        ),
+        "got {failure:?}"
+    );
+}
+
+/// The publication primitive is reachable by callers other than
+/// `publish_decisions`, so the BACKEND must hold the same rule the protocol
+/// layer does: two bodies for one key inside ONE atomic call are either
+/// byte-identical or a closed refusal. The fsqlite backend already refuses
+/// (`PutOutcome::Conflict` on the second write); this pins the reference
+/// backend to the same semantics so the two cannot diverge on malformed
+/// input. Driven through a delegating wrapper because the absence witness is
+/// minted inside the duplicate walk; the wrapper forwards that real witness
+/// untouched and only corrupts the entry slice.
+struct ConflictingOutcomeInjector(MemoryAuthorityStore);
+
+impl AuthorityStore for ConflictingOutcomeInjector {
+    fn instance_id(&self) -> StoreInstanceId {
+        self.0.instance_id()
+    }
+
+    fn limits(&self) -> AuthorityLimits {
+        self.0.limits()
+    }
+
+    fn put_if_absent(
+        &self,
+        key: &ImmutableKey,
+        body: &[u8],
+    ) -> Result<PutOutcome, AuthorityFailure> {
+        self.0.put_if_absent(key, body)
+    }
+
+    fn read_immutable(&self, key: &ImmutableKey) -> Result<ImmutableRead, AuthorityFailure> {
+        self.0.read_immutable(key)
+    }
+
+    fn initialize_head(
+        &self,
+        key: &HeadKey,
+        generation: HeadGeneration,
+        body: &[u8],
+    ) -> Result<HeadInit, AuthorityFailure> {
+        self.0.initialize_head(key, generation, body)
+    }
+
+    fn read_head(&self, key: &HeadKey) -> Result<HeadRead, AuthorityFailure> {
+        self.0.read_head(key)
+    }
+
+    fn compare_exchange_head(
+        &self,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        self.0
+            .compare_exchange_head(key, expected, new_generation, new_body)
+    }
+
+    fn publish_head_with_outcomes(
+        &self,
+        key: &HeadKey,
+        expected: AuthorityVersionToken,
+        new_generation: HeadGeneration,
+        new_body: &[u8],
+        outcomes: &[(ImmutableKey, Vec<u8>)],
+        witness: &DuplicateAbsenceWitness,
+    ) -> Result<CasOutcome, AuthorityFailure> {
+        let mut corrupted = outcomes.to_vec();
+        if let Some((first_key, first_bytes)) = corrupted.first().cloned() {
+            let mut flipped = first_bytes;
+            let last = flipped.len() - 1;
+            flipped[last] ^= 0xff;
+            corrupted.push((first_key, flipped));
+        }
+        self.0.publish_head_with_outcomes(
+            key,
+            expected,
+            new_generation,
+            new_body,
+            &corrupted,
+            witness,
+        )
+    }
+
+    fn authenticate_head_receipt(
+        &self,
+        receipt: &HeadReadReceipt,
+    ) -> Result<AuthenticatedHead, AuthorityFailure> {
+        self.0.authenticate_head_receipt(receipt)
+    }
+}
+
+#[test]
+fn the_reference_backend_refuses_conflicting_duplicate_keys_in_one_call() {
+    let injector = ConflictingOutcomeInjector(store());
+    let genesis = genesis_head();
+    initialize_repository(&injector, &head_slot(), &genesis).expect("genesis");
+
+    let first = batch(&genesis, 1, vec![committed(tx(0xA1), 1, 0x51)]);
+    let head = successor_head(&genesis, batch_id_of(&first), 2);
+    let HeadRead::Present(receipt) = injector.read_head(&head_slot()).expect("a readable head")
+    else {
+        panic!("genesis must be published");
+    };
+    let failure = publish_decisions(
+        &injector,
+        &head_slot(),
+        receipt.token(),
+        &first,
+        &head,
+        tenant(),
+    )
+    .expect_err("conflicting duplicates inside one call must fail closed");
+    assert!(
+        matches!(
+            &failure,
+            OutcomeFailure::Seal(inner)
+                if matches!(inner.as_ref(), fgit_authority::SealFailure::Store(refused)
+                    if matches!(refused, fgit_authority::AuthorityFailure::Refused(
+                        fgit_authority::AuthorityRefusal::TokenBodyMismatch
+                    )))
+        ) || matches!(&failure, OutcomeFailure::AcceleratorConflict { .. }),
+        "the primitive refusal must surface as the accelerator-conflict shape, got {failure:?}"
+    );
+}
