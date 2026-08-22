@@ -4007,6 +4007,82 @@ mod tests {
     }
 
     #[test]
+    fn materializer_refuses_a_head_with_a_pre_stamp_rcr_identity() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
+            .expect("node initializes empty canonical state");
+        let request = node.request_context();
+        let oid = GitOid::from_hex(
+            GitHashAlgorithm::Sha1,
+            "1111111111111111111111111111111111111111",
+        )
+        .expect("fixed object identity parses");
+        let mut refs = BTreeMap::new();
+        refs.insert(
+            RefName::try_new(b"refs/heads/main").expect("fixed ref name is valid"),
+            oid,
+        );
+        let ref_root = node
+            .runtime()
+            .block_on(node.admission_materializer.stage_ref_state_in(
+                &node.authority,
+                request.authority(),
+                node.repository_id(),
+                CanonicalRefState::new(refs),
+            ))
+            .expect("future RCR ref state stages before head publication");
+
+        let HeadRead::Present(first_receipt) = node
+            .runtime()
+            .block_on(node.read_authority_head_in(&request))
+            .expect("genesis head reads")
+        else {
+            panic!("node initialization publishes genesis");
+        };
+        let first_head: fgit_codec::RepositoryAuthorityHeadBody =
+            decode_body(first_receipt.body(), fgit_codec::DecodeLimits::DEFAULT)
+                .expect("authenticated fixture head decodes");
+        let first_basis = PublicationBasis::new(
+            authority_head_id(&first_head).expect("genesis head re-identifies"),
+            first_head,
+        );
+        let mut record = commit_record();
+        record.repository_id = node.repository_id();
+        record.resulting_ref_root = ref_root;
+        record.object_closure_root = digest_of(0xb1);
+        record.resulting_forge_position_root = first_basis.body().forge_position_root;
+        record.policy_epoch = first_basis.body().policy_epoch;
+        let stale_record_id =
+            super::repository_commit_id(&record).expect("pre-stamp RCR re-identifies");
+
+        let mut roots = ResultingRoots::carried_forward(&first_basis, digest_of(0xb2));
+        roots.ref_root = ref_root;
+        let mut plan = PublicationPlan::open(first_basis).expect("genesis opens a plan");
+        plan.commit(stale_record_id, record);
+        let committed = plan
+            .seal(&CryptoBodyIdentity, roots)
+            .expect("the chronicle still exposes a malformed RCR identity to its reader");
+        node.runtime()
+            .block_on(node.publish_decisions_in(
+                &request,
+                first_receipt.token(),
+                committed.batch(),
+                committed.head(),
+            ))
+            .expect("schema-valid stale fixture publishes through authority");
+
+        assert!(matches!(
+            node.runtime()
+                .block_on(node.materialize_admission_in(&request)),
+            Err(AdmissionMaterializationRefusal::LatestCommitMismatch {
+                observed: Some(observed),
+                ..
+            }) if observed == stale_record_id
+        ));
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
     fn nonempty_genesis_refuses_even_when_a_closure_frame_is_staged() {
         let scratch = ScratchDirectory::new();
         let config = test_config(scratch.path().to_path_buf());
