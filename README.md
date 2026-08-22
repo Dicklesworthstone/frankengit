@@ -20,6 +20,40 @@ The project is a synthesis of concrete machinery from Asupersync, FrankenSQLite,
 
 Those product-stack choices are settled, while integration is deliberately gated on their owned sibling repositories converging to one Asupersync 0.4.x constellation and registry-resolvable FrankenSQLite dependencies. The exact runtime, cancellation, connection, retry, shutdown, and verification contract is in [`docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md`](docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md).
 
+## Current executable one-node boundary
+
+The repository remains pre-release and is not yet a general-purpose Git server.
+The checked-in `fg` binary nevertheless has a narrow, configuration-free
+one-node bootstrap surface for exercising the durable authority profile. It
+does not consult a configuration file: callers supply the storage directory,
+tenant ID, and repository ID explicitly.
+
+```bash
+cargo run -p fgit-cli -- init ./fgit-data \
+  11111111111111111111111111111111 \
+  22222222222222222222222222222222
+
+cargo run -p fgit-cli -- doctor ./fgit-data \
+  11111111111111111111111111111111 \
+  22222222222222222222222222222222
+```
+
+`init` creates or re-authenticates only the empty canonical authority head;
+`doctor` authenticates that head and can re-verify one explicitly named native
+object. `serve` accepts one bounded legacy git-daemon upload-pack session, and
+`export` writes only an authority-selected pack to a previously absent path.
+Neither command treats local object placement or a connection-local ref map as
+canonical state.
+
+The production import-publication path is still being completed: the existing
+`OneNode::stage_loose_git_import` API validates direct or packed refs and a
+bounded loose-object closure into immutable fabric, but staging alone cannot
+make refs visible. An imported repository becomes observable only after the
+ordinary sealed admission and RCR/head-publication path selects its canonical
+ref and closure commitments. Until that API is exposed through `fg import`, an
+empty initialized repository is the only complete CLI lifecycle; this section
+makes no clone/fetch/push claim.
+
 ---
 
 ## TL;DR
