@@ -1340,7 +1340,7 @@ fn a_refusal_only_batch_that_moved_the_outbox_root_is_refused() {
 /// The omission is the point. `verify_refusal_only` freezes four roots and
 /// leaves `outcome_index_root` free, which matches the normative contract
 /// exactly: "Refusals consume decision sequence but do not advance repository
-/// sequence or source/forge roots" (NORMATIVE_PROTOCOL_CONTRACTS.md line 285).
+/// sequence or source/forge roots" (`NORMATIVE_PROTOCOL_CONTRACTS.md` line 285).
 /// The outcome index is absent from that list and must be, because refusals
 /// ARE outcome-index entries -- a refusal-only batch is precisely the batch
 /// whose index has to move.
