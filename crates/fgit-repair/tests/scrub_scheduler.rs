@@ -149,6 +149,12 @@ struct ScriptedSource {
     loaded: Cell<u32>,
     probed: Cell<u32>,
     published: Cell<u32>,
+    /// Attempt index from which `publish_verified` refuses; `None` never refuses.
+    ///
+    /// Added for `frankengit-0om4`. The existing counters are untouched: a
+    /// refused attempt does not increment `published`, so every assertion that
+    /// already reads that counter keeps its original meaning.
+    refuse_publish_from: Cell<Option<u32>>,
 }
 
 impl ScriptedSource {
@@ -159,7 +165,19 @@ impl ScriptedSource {
             loaded: Cell::new(0),
             probed: Cell::new(0),
             published: Cell::new(0),
+            refuse_publish_from: Cell::new(None),
         }
+    }
+
+    /// Refuse `publish_verified` from this attempt index onward.
+    ///
+    /// Attempts are counted in publication order, so `refusing_publish_from(1)`
+    /// lets the first target publish and refuses the second -- the permitted
+    /// case and the forbidden case in one run, differing only in the port's
+    /// answer.
+    fn refusing_publish_from(self, attempt: u32) -> Self {
+        self.refuse_publish_from.set(Some(attempt));
+        self
     }
 
     const fn probe_count(&self) -> u32 {
@@ -182,7 +200,18 @@ impl RepairPlacementAuthority for ScriptedSource {
         _manifest: &SegmentManifest,
         _authority_basis: RepositoryAuthorityHeadId,
     ) -> Result<(), RaptorRefusal> {
-        self.published.set(self.published.get().saturating_add(1));
+        let attempt = self.published.get();
+        if self
+            .refuse_publish_from
+            .get()
+            .is_some_and(|from| attempt >= from)
+        {
+            // A refusal DISTINCT from the one `repair_microsegment` reports, so
+            // the probe shows the placement failure is MAPPED to
+            // `PlacementPublicationRefused` rather than propagated verbatim.
+            return Err(RaptorRefusal::AuthorityHeadMoved);
+        }
+        self.published.set(attempt.saturating_add(1));
         Ok(())
     }
 }
@@ -502,3 +531,124 @@ fn drill_cadence_flags_an_overdue_class_and_a_fresh_drill_proceeds() {
 // Non-production fixture identity: this reserved tag deliberately has no registered digest width.
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
 const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
+
+/// frankengit-0om4: a refused placement publication is reported as such.
+///
+/// # What this reaches, and why the refusal is attributable
+///
+/// `PlacementPublicationRefused` is raised inside `repair_microsegment` only
+/// after the whole repair chain has already succeeded: manifest identity,
+/// decode budget, the `RepairPermit` reservation, microsegment reconstruction,
+/// reader open, `verify_segment_reality`, authority revalidation, and the
+/// settlement pre-check. It is the last thing that can fail before publication.
+///
+/// So the probe drives the real chain rather than an inner helper, and the
+/// FIRST target publishing is what proves every earlier stage works. The second
+/// target differs in exactly one respect -- the placement port's answer -- which
+/// is what makes its refusal attributable to that port and nothing else.
+///
+/// The scripted port returns `AuthorityHeadMoved`, deliberately NOT the refusal
+/// under test, so the assertion also shows `repair_microsegment` MAPS a
+/// placement failure to `PlacementPublicationRefused` rather than propagating
+/// whatever the port said.
+#[test]
+fn a_refused_placement_publication_is_named_in_the_health_record() {
+    let basis = head(7);
+    let batch = canonical_batch(basis, 40, 3, vec![target(1, basis), target(2, basis)]);
+    let source = ScriptedSource::new(
+        batch,
+        vec![ScrubObservation::Missing, ScrubObservation::Corrupt],
+    )
+    .refusing_publish_from(1);
+    let health = RecordingHealthLedger::default();
+    let obligations = ledger(1);
+    let worker = ScrubWorker::new(profile(2, 2), SegmentLimits::default());
+    let cx = Cx::detached_cancel_context();
+
+    let Outcome::Ok(report) = worker.walk(&cx, &source, &obligations, &health, &security(), None)
+    else {
+        panic!("a refused publication is a recorded outcome, not a walk failure");
+    };
+
+    assert_eq!(report.suspect_targets, 2, "both targets must enter repair");
+    assert_eq!(
+        (report.repairs_published, report.repairs_refused),
+        (1, 1),
+        "the permitted twin published and the refused one did not, in one run",
+    );
+    assert_eq!(
+        source.published.get(),
+        1,
+        "a refused attempt must not increment the publication counter",
+    );
+
+    let records = health.records();
+    let published = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                HealthRecord::Repair {
+                    outcome: RepairOutcome::Published,
+                    ..
+                }
+            )
+        })
+        .count();
+    let refused = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                HealthRecord::Repair {
+                    outcome: RepairOutcome::Refused(RaptorRefusal::PlacementPublicationRefused),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        (published, refused),
+        (1, 1),
+        "the refusal must reach durable evidence NAMED, not merely counted; got {records:?}",
+    );
+
+    assert!(
+        obligations.close().is_quiescent(),
+        "the refused repair must settle its reservation rather than leak it",
+    );
+}
+
+/// The permitted twin at the boundary the mode itself introduces.
+///
+/// `refusing_publish_from(2)` is one past the last attempt, so the scripted
+/// failure mode is armed and never fires. Without this, the probe above is
+/// equally satisfied by a harness that refuses whenever the mode is set at all,
+/// which would prove nothing about the attempt index.
+#[test]
+fn an_armed_but_unreached_publish_refusal_leaves_every_repair_published() {
+    let basis = head(7);
+    let batch = canonical_batch(basis, 40, 3, vec![target(1, basis), target(2, basis)]);
+    let source = ScriptedSource::new(
+        batch,
+        vec![ScrubObservation::Missing, ScrubObservation::Corrupt],
+    )
+    .refusing_publish_from(2);
+    let health = RecordingHealthLedger::default();
+    let obligations = ledger(1);
+    let worker = ScrubWorker::new(profile(2, 2), SegmentLimits::default());
+    let cx = Cx::detached_cancel_context();
+
+    let Outcome::Ok(report) = worker.walk(&cx, &source, &obligations, &health, &security(), None)
+    else {
+        panic!("an unreached refusal must not disturb the repair path");
+    };
+
+    assert_eq!(
+        (report.repairs_published, report.repairs_refused),
+        (2, 0),
+        "the mode is armed at an attempt index the run never reaches",
+    );
+    assert_eq!(source.published.get(), 2);
+    assert!(obligations.close().is_quiescent());
+}
