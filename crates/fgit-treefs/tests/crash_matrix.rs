@@ -156,6 +156,20 @@ fn classify(journal: &ExportJournal) -> Recovered {
     if journal.left_consumable_artifact() {
         return Recovered::RefusedAsIncomplete;
     }
+    // A finalized cancellation is resolved: drain completed, every staged object
+    // was reclaimed, nothing survives. It must classify as Absent.
+    //
+    // This case has to be answered BEFORE local_outcome() because
+    // finalize_cancel sets the phase to Settled, and Settled is outside
+    // outcome_is_locally_decidable() -- correctly so, since a journal that
+    // reached Settled by way of Proposed genuinely does not know whether the
+    // authority accepted it. The phase alone therefore cannot distinguish
+    // "settled because cancellation reclaimed everything" from "settled after
+    // handing a proposal over", and only the cancellation state separates them.
+    // Reading the phase alone reported a clean cancellation as incomplete.
+    if journal.cancellation() == CancellationState::Finalized {
+        return Recovered::Absent;
+    }
     match journal.local_outcome() {
         Err(JournalRefusal::OutcomeNotLocallyDecidable { .. }) => Recovered::RefusedAsIncomplete,
         Err(_) => Recovered::RefusedAsIncomplete,
@@ -277,6 +291,15 @@ fn base_view(root: Oid) -> BaseView<Sha1> {
 /// A journal driven to `phase`, staging `objects` along the way.
 fn journal_at(phase: ExportPhase, objects: usize, bytes: usize) -> ExportJournal {
     let mut journal = ExportJournal::open(workspace());
+    // Unstarted is where a fresh journal already is, so it must return here.
+    // Without this the loop below never matches its break condition -- it skips
+    // Unstarted and then compares every later phase against it -- and runs all
+    // the way to Settled. Every caller asking for Unstarted silently got a
+    // settled journal instead, which classifies as RefusedAsIncomplete rather
+    // than Absent. Found by that assertion failing rather than by reading.
+    if phase == ExportPhase::Unstarted {
+        return journal;
+    }
     for step in ExportPhase::ALL {
         if *step == ExportPhase::Unstarted {
             continue;
