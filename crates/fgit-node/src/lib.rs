@@ -43,8 +43,8 @@ use fgit_object_fabric::fabric::{
 use fgit_object_fabric::local::{LocalFilesystemConfig, LocalFilesystemFabric};
 use fgit_object_fabric::{ObjectEnvelope, ObjectKind, SegmentLimits};
 use fgit_resource::{
-    Grade, LeakDisposition, ObligationLedger, RegionCloseOutcome, RegionId, ResourceError,
-    ResourceVector,
+    CacheBinding, CacheGrant, CacheGrantRefusal, CachePermit, CacheScope, Grade, LeakDisposition,
+    ObligationLedger, OpaqueHandle, RegionCloseOutcome, RegionId, ResourceError, ResourceVector,
 };
 use fgit_runtime::{BudgetClass, NodeRuntime, RuntimeProfile, RuntimeRefusal};
 use fgit_types::{
@@ -63,6 +63,7 @@ const HEAD_KEY_PREFIX: &[u8] = b"frankengit/node/head/";
 const FABRIC_NAMESPACE_PREFIX: &[u8] = b"frankengit/node/object/";
 const ADMISSION_REF_STATE_KEY_PREFIX: &[u8] = b"frankengit/admission/ref-state/v1/";
 const ADMISSION_CLOSURE_KEY_PREFIX: &[u8] = b"frankengit/admission/object-closure/v1/";
+const ADMISSION_CACHE_SCOPE: &[u8] = b"node/admission-materialization/v1";
 const DEFAULT_MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 const AUTHORITY_DATABASE_FILE: &str = "authority.fsqlite";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -255,15 +256,17 @@ impl Error for NodeAdmissionViewRefusal {
 /// treats its cache as canonical.  A caller must first refresh it through the
 /// async authority contract, and its projection refuses a different head,
 /// basis, repository, policy epoch, or configuration root.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct DurableAdmissionMaterializer {
     materialized: RwLock<Option<MaterializedAdmissionState>>,
+    cache_scope: CacheScope,
 }
 
 #[derive(Clone, Debug)]
 struct MaterializedAdmissionState {
     authenticated: AuthenticatedHead,
     basis: PublicationBasis,
+    cache_permit: CachePermit,
     ref_state: CanonicalRefState,
     policy_epoch: PolicyEpoch,
     configuration_root: Digest,
@@ -337,6 +340,12 @@ pub enum AdmissionMaterializationRefusal {
     ImmutableConflict,
     /// The caller-derived immutable key exceeded the authority key contract.
     Key(KeyError),
+    /// The bounded resource ledger could not fund a cache materialization.
+    Resource(ResourceError),
+    /// The exact authenticated basis could not accept the cache grant.
+    CacheGrant(CacheGrantRefusal),
+    /// The cache grant ledger did not reach quiescence after the attempt.
+    CacheContainment,
     /// The process-local materialization cache was poisoned.
     CachePoisoned,
 }
@@ -369,6 +378,11 @@ impl Display for AdmissionMaterializationRefusal {
                 formatter.write_str("canonical admission immutable slot conflicts")
             }
             Self::Key(error) => Display::fmt(error, formatter),
+            Self::Resource(error) => Display::fmt(error, formatter),
+            Self::CacheGrant(error) => Display::fmt(error, formatter),
+            Self::CacheContainment => {
+                formatter.write_str("canonical admission cache grant did not reach quiescence")
+            }
             Self::CachePoisoned => formatter.write_str("canonical admission cache is poisoned"),
         }
     }
@@ -382,18 +396,33 @@ impl Error for AdmissionMaterializationRefusal {
             Self::HeadIdentity(error) | Self::CanonicalFrame(error) => Some(error),
             Self::HeadIdentityDomain(error) => Some(error),
             Self::Key(error) => Some(error),
+            Self::Resource(error) => Some(error),
+            Self::CacheGrant(error) => Some(error),
             Self::HeadAbsent
             | Self::Cancelled
             | Self::RepositoryMismatch { .. }
             | Self::CanonicalRoot(_)
             | Self::ImmutableAbsent(_)
             | Self::ImmutableConflict
+            | Self::CacheContainment
             | Self::CachePoisoned => None,
         }
     }
 }
 
 impl DurableAdmissionMaterializer {
+    /// Creates the bounded cache view for one caller-authorized scope.
+    ///
+    /// The scope cannot grant authority: every served entry is still checked
+    /// against an exact authenticated authority head through its cache permit.
+    #[must_use]
+    pub const fn new(cache_scope: CacheScope) -> Self {
+        Self {
+            materialized: RwLock::new(None),
+            cache_scope,
+        }
+    }
+
     /// Stages one immutable canonical ref-state frame through the async
     /// authority contract and returns the root its bytes prove.
     ///
@@ -493,47 +522,82 @@ impl DurableAdmissionMaterializer {
                     .map_err(AdmissionMaterializationRefusal::HeadIdentityDomain)
             })?;
         let basis = PublicationBasis::new(head_id, body.clone());
-        let key =
-            admission_immutable_key(ADMISSION_REF_STATE_KEY_PREFIX, repository_id, body.ref_root)
-                .map_err(AdmissionMaterializationRefusal::Key)?;
-        let ImmutableRead::Present(frame) = authority
-            .read_immutable(cx, &key)
-            .await
-            .map_err(AdmissionMaterializationRefusal::Authority)?
-        else {
-            return Err(AdmissionMaterializationRefusal::ImmutableAbsent(
-                body.ref_root,
-            ));
-        };
+        let cache_binding =
+            CacheBinding::new(repository_id, head_id, body.generation, self.cache_scope);
         ensure_materializer_catch_up_live(is_cancelled)?;
-        let ref_state = decode_body::<CanonicalRefState>(&frame, fgit_codec::DecodeLimits::DEFAULT)
-            .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
-        if canonical_ref_state_root(&ref_state)
-            .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
-            != body.ref_root
-        {
-            return Err(AdmissionMaterializationRefusal::CanonicalRoot(
-                RefusalCode::InternalInvariantBreach,
-            ));
+        let cache_resources = admission_cache_resources();
+        let cache_ledger = ObligationLedger::root(
+            RegionId::new(body.generation.get()),
+            LeakDisposition::RecordAndContinue,
+            cache_resources,
+        );
+        let cache_budget = cache_ledger
+            .grant(cache_resources)
+            .map_err(AdmissionMaterializationRefusal::Resource)?;
+        let cache_result = async {
+            // The reservation comes before the immutable read, decode, and
+            // resident snapshot construction it funds. Any error or
+            // cancellation drops/discards it and leaves no permit to install.
+            let cache_grant = CacheGrant::reserve(cache_binding, cache_budget)
+                .map_err(AdmissionMaterializationRefusal::CacheGrant)?;
+            ensure_materializer_catch_up_live(is_cancelled)?;
+            let key = admission_immutable_key(
+                ADMISSION_REF_STATE_KEY_PREFIX,
+                repository_id,
+                body.ref_root,
+            )
+            .map_err(AdmissionMaterializationRefusal::Key)?;
+            let ImmutableRead::Present(frame) = authority
+                .read_immutable(cx, &key)
+                .await
+                .map_err(AdmissionMaterializationRefusal::Authority)?
+            else {
+                return Err(AdmissionMaterializationRefusal::ImmutableAbsent(
+                    body.ref_root,
+                ));
+            };
+            ensure_materializer_catch_up_live(is_cancelled)?;
+            let ref_state =
+                decode_body::<CanonicalRefState>(&frame, fgit_codec::DecodeLimits::DEFAULT)
+                    .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
+            if canonical_ref_state_root(&ref_state)
+                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
+                != body.ref_root
+            {
+                return Err(AdmissionMaterializationRefusal::CanonicalRoot(
+                    RefusalCode::InternalInvariantBreach,
+                ));
+            }
+            let snapshot = AdmissionSnapshot {
+                refs: ref_state.refs().clone(),
+                forge_positions: Default::default(),
+                retention: Default::default(),
+                outbox: Default::default(),
+            };
+            let cache_permit = cache_grant
+                .accept(cache_binding)
+                .map_err(AdmissionMaterializationRefusal::CacheGrant)?;
+            ensure_materializer_catch_up_live(is_cancelled)?;
+            let materialized = MaterializedAdmission {
+                authenticated: authenticated.clone(),
+                basis: basis.clone(),
+                snapshot,
+            };
+            let state = MaterializedAdmissionState {
+                authenticated,
+                basis,
+                cache_permit,
+                ref_state,
+                policy_epoch: body.policy_epoch,
+                configuration_root: body.configuration_root,
+            };
+            Ok((materialized, state))
         }
-        let snapshot = AdmissionSnapshot {
-            refs: ref_state.refs().clone(),
-            forge_positions: Default::default(),
-            retention: Default::default(),
-            outbox: Default::default(),
-        };
-        let materialized = MaterializedAdmission {
-            authenticated: authenticated.clone(),
-            basis: basis.clone(),
-            snapshot,
-        };
-        let state = MaterializedAdmissionState {
-            authenticated,
-            basis,
-            ref_state,
-            policy_epoch: body.policy_epoch,
-            configuration_root: body.configuration_root,
-        };
+        .await;
+        if !cache_ledger.close().is_quiescent() {
+            return Err(AdmissionMaterializationRefusal::CacheContainment);
+        }
+        let (materialized, state) = cache_result?;
         // No await follows this final catch-up checkpoint. A cancelled scope
         // therefore cannot install a readable partial materialization.
         ensure_materializer_catch_up_live(is_cancelled)?;
@@ -555,22 +619,34 @@ impl DurableAdmissionMaterializer {
         if authenticated_body != *basis.body() {
             return Err(RefusalCode::AuthorityReceiptStale);
         }
-        let guard = self
+        let cache_binding = CacheBinding::new(
+            authenticated_body.repository_id,
+            basis.id(),
+            authenticated_body.generation,
+            self.cache_scope,
+        );
+        let mut guard = self
             .materialized
-            .read()
+            .write()
             .map_err(|_| RefusalCode::InternalInvariantBreach)?;
         let Some(materialized) = guard.as_ref() else {
             return Err(RefusalCode::EvidenceMissing);
         };
-        if materialized.authenticated != *authenticated
+        let mismatched = materialized.authenticated != *authenticated
             || materialized.basis != *basis
             || materialized.basis.body().repository_id != authenticated_body.repository_id
             || materialized.policy_epoch != authenticated_body.policy_epoch
             || materialized.configuration_root != authenticated_body.configuration_root
             || canonical_ref_state_root(&materialized.ref_state)? != authenticated_body.ref_root
-        {
+            || CachePermit::require_matching(Some(&materialized.cache_permit), cache_binding)
+                .is_err();
+        if mismatched {
+            // CALM-015: an absent or mismatched authenticated basis cannot
+            // leave a reusable derived view behind.
+            *guard = None;
             return Err(RefusalCode::AuthorityReceiptStale);
         }
+        let materialized = guard.as_ref().ok_or(RefusalCode::EvidenceMissing)?;
         Ok(AdmissionSnapshot {
             refs: materialized.ref_state.refs().clone(),
             forge_positions: Default::default(),
@@ -589,7 +665,15 @@ impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
         let Some(materialized) = guard.as_ref() else {
             return Err(RefusalCode::EvidenceMissing);
         };
-        if materialized.basis.body().ref_root != root {
+        let binding = CacheBinding::new(
+            materialized.basis.body().repository_id,
+            materialized.basis.id(),
+            materialized.basis.generation(),
+            self.cache_scope,
+        );
+        if materialized.basis.body().ref_root != root
+            || CachePermit::require_matching(Some(&materialized.cache_permit), binding).is_err()
+        {
             return Err(RefusalCode::AuthorityReceiptStale);
         }
         Ok(materialized.ref_state.clone())
@@ -1654,6 +1738,7 @@ impl OneNode {
         .map_err(NodeRefusal::Fabric)?;
 
         let head_key = head_key(config.repository_id)?;
+        let admission_cache_scope = admission_cache_scope().map_err(NodeRefusal::Identity)?;
         let opening_cx = authority_context_for(&runtime);
         let authority = runtime
             .block_on(FsqliteAuthorityStore::open(
@@ -1666,7 +1751,7 @@ impl OneNode {
         Ok(Self {
             runtime,
             authority,
-            admission_materializer: DurableAdmissionMaterializer::default(),
+            admission_materializer: DurableAdmissionMaterializer::new(admission_cache_scope),
             head_key,
             fabric,
             tenant_id: config.tenant_id,
@@ -2194,6 +2279,20 @@ const fn crypto_object_kind(object_type: ObjectType) -> GitObjectKind {
 
 fn placement_resources(object_bytes: u64) -> ResourceVector {
     ResourceVector::from_grades(&[(Grade::Bytes, object_bytes.max(1)), (Grade::Objects, 1)])
+}
+
+fn admission_cache_scope() -> Result<CacheScope, fgit_resource::IdentityError> {
+    OpaqueHandle::new(ADMISSION_CACHE_SCOPE).map(CacheScope::new)
+}
+
+fn admission_cache_resources() -> ResourceVector {
+    let frame_bytes = fgit_codec::DecodeLimits::DEFAULT.frame_bytes;
+    ResourceVector::from_grades(&[
+        (Grade::Bytes, frame_bytes),
+        (Grade::Objects, 1),
+        (Grade::CpuMicros, frame_bytes),
+        (Grade::MemoryBytes, frame_bytes),
+    ])
 }
 
 #[cfg(test)]
@@ -2780,6 +2879,14 @@ mod tests {
             Err(RefusalCode::AuthorityReceiptStale),
             "a cache entry never answers for a different basis"
         );
+        assert_eq!(
+            CanonicalAdmissionStore::resolve_ref_state(
+                &node.admission_materializer,
+                materialized.basis().body().ref_root,
+            ),
+            Err(RefusalCode::EvidenceMissing),
+            "a mismatched authenticated basis discards the derived cache view"
+        );
 
         let upload_pack = node
             .runtime()
@@ -2806,11 +2913,11 @@ mod tests {
                 request.authority(),
                 &node.head_key,
                 node.repository_id(),
-                &|| polls.fetch_add(1, Ordering::AcqRel) >= 3,
+                &|| polls.fetch_add(1, Ordering::AcqRel) >= 6,
             ));
         assert!(
             matches!(result, Err(AdmissionMaterializationRefusal::Cancelled)),
-            "the cancellation is observed after durable reads and before cache installation"
+            "the cancellation is observed after the cache permit but before cache installation"
         );
         let cancelled_request = node.request_context();
         cancelled_request.authority().cancel();
