@@ -28,7 +28,7 @@ pub struct PrincipalSnapshot {
 }
 
 impl PrincipalSnapshot {
-    fn from_context(context: &AdmissionContext, basis: &PublicationBasis) -> Self {
+    const fn from_context(context: &AdmissionContext, basis: &PublicationBasis) -> Self {
         Self {
             tenant_id: context.tenant_id,
             repository_id: context.repository_id,
@@ -210,7 +210,7 @@ impl DecisionEvidenceBodies {
         Ok(Self {
             policy_decision: PolicyDecisionEvidence {
                 tx_id: request.tx_id,
-                request_digest: request.canonical_request_digest.clone(),
+                request_digest: request.canonical_request_digest,
                 principal_snapshot_id,
                 policy_epoch: basis.body().policy_epoch,
             },
@@ -367,7 +367,7 @@ mod tests {
             ),
             canonical_request_digest: digest_of(7),
             statements: Vec::new(),
-            promised_closure: Default::default(),
+            promised_closure: std::collections::BTreeSet::default(),
             atomic: true,
             durability: DurabilityProfile::CanonicalSource,
         };
