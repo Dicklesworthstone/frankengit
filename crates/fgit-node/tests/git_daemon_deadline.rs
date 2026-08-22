@@ -20,7 +20,7 @@ struct EmptyRepository;
 
 impl UploadPackRepository for EmptyRepository {
     fn object_format(&self) -> GitObjectFormat {
-        GitObjectFormat::from(GitHashAlgorithm::Sha1)
+        GitHashAlgorithm::Sha1
     }
 
     fn advertised_refs(&self) -> &[fgit_wire::AdvertisedRef] {
