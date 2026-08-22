@@ -22,6 +22,26 @@ readonly VERIFY_ARTIFACT_SCHEMA_VERSION=1
 
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 
+# Every cargo invocation below runs on THIS machine.
+#
+# `cargo` on PATH is the rch shim, which routes `build|test|check|clippy|bench|
+# doc|nextest` through `rch exec` to a worker fleet and leaves everything else
+# local. Without this export the split falls out of which subcommands the shim
+# happens to intercept: `cargo run` (docs, constitution) and `cargo fmt` stayed
+# local while check, test and clippy -- the three lanes that decide whether the
+# tree is green -- left the machine. Nobody chose that split.
+#
+# It is also not merely a preference. The shim offloads with
+# `RCH_REQUIRE_REMOTE=1`, which does NOT fall back locally, so those lanes could
+# not complete at all without a reachable fleet. That contradicts AGENTS.md §16.2
+# ("Builds run locally (128 cores): always set RCH_CARGO_WRAPPER_BYPASS=1"), §1's
+# "local reproducibility over hosted-service dependence", and §14's review
+# question "Can the complete verification/release path run locally?".
+#
+# Set deliberately rather than defaulted, so re-enabling offload is a visible
+# diff to this line and not an environment variable someone exported once.
+export RCH_CARGO_WRAPPER_BYPASS=1
+
 echo_step() { printf '\033[1;36m==> %s\033[0m\n' "$*" >&2; }
 artifact_warning() { printf 'verify: replay artifact unavailable: %s\n' "$1" >&2 || true; }
 print_usage() {
@@ -47,6 +67,7 @@ run_constitution() {
 run_fast() {
   run_docs
   run_constitution
+  echo_step "Building locally (RCH_CARGO_WRAPPER_BYPASS=${RCH_CARGO_WRAPPER_BYPASS})"
   echo_step "Checking formatting"
   cargo fmt --all -- --check
   echo_step "Checking workspace"
