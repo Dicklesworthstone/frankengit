@@ -343,6 +343,16 @@ impl TransferManifest {
                 });
             }
             if let Some(previous) = prior {
+                // LOAD-BEARING ARM SPLIT. Greater and Equal are two different
+                // faults with two different refusals: a caller that sent an
+                // out-of-order list gets NonCanonicalObjectOrder, a caller that
+                // sent the same object twice gets DuplicateObjectIdentity. Do
+                // not collapse these arms, and do not let a lint suggestion
+                // merge them -- both branches refuse, so a merge is invisible to
+                // any test that only checks that construction failed. A clippy
+                // pattern-nesting suggestion destroyed a semantically identical
+                // arm split elsewhere in this project during a lint drain.
+                // `tests/transfer_closure_admission.rs` pins the distinction.
                 match previous.cmp(&entry.identity) {
                     std::cmp::Ordering::Greater => return Err(AtpRefusal::NonCanonicalObjectOrder),
                     std::cmp::Ordering::Equal => return Err(AtpRefusal::DuplicateObjectIdentity),

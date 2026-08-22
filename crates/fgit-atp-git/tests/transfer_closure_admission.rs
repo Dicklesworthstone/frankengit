@@ -32,6 +32,17 @@
 //! different `identity` each time. Both are probed, and each asserts *which*
 //! identity was rejected.
 //!
+//! This discipline already has an in-crate precedent:
+//! `tests/fallback_reasons.rs::distinct_triggers_do_not_collapse_into_one_reason`
+//! asserts two neighbouring `FullFallbackReason` values differ from each other
+//! rather than merely firing, for the same reason. That path is unrelated to
+//! `TransferManifest`, so there is no overlap — but the argument is the crate's
+//! own, not imported.
+//!
+//! The arm split this file depends on is marked load-bearing at its `match` in
+//! `src/lib.rs`, because a lint suggestion that merged the two arms would leave
+//! both faults refusing and every coarser test green.
+//!
 //! **One helper, different refusals per caller.** `ensure_strictly_sorted` is
 //! called with `(NonCanonicalRootOrder, DuplicateRequestedRoot)` from
 //! `TransferManifest` and with `(NonCanonicalInventoryOrder,
