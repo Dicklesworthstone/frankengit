@@ -173,10 +173,17 @@ fn pinned_git_gitlink_tree_preserves_oid_without_cross_repository_lookup() {
     )
     .expect("pinned Git tree bytes parse under the import profile");
 
-    assert_eq!(tree.len(), 1, "the oracle fixture has exactly one gitlink");
-    assert_eq!(tree[0].mode, b"160000");
-    assert_eq!(tree[0].name, b"vendor");
-    assert_eq!(hex(&tree[0].object_id), gitlink_hex);
+    let gitlinks: Vec<_> = tree
+        .iter()
+        .filter(|entry| entry.mode == b"160000")
+        .collect();
+    assert_eq!(
+        gitlinks.len(),
+        1,
+        "the oracle fixture has exactly one gitlink alongside its ordinary parent files"
+    );
+    assert_eq!(gitlinks[0].name, b"vendor");
+    assert_eq!(hex(&gitlinks[0].object_id), gitlink_hex);
     assert_gitlink_boundary(root, gitlink);
 }
 

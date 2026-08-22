@@ -66,14 +66,16 @@ prepare_oracle_repositories() {
   oracle_run parent-gitlink parent update-index --add --cacheinfo "160000,${private_oid},vendor" || return
   oracle_run parent-commit parent commit --quiet -m gitlink || return
   oracle_capture parent-tree parent rev-parse 'HEAD^{tree}' || return
-  oracle_capture parent-entry parent ls-tree HEAD -- vendor || return
+  # The sandbox oracle refuses a Git `--` argument because it could bypass
+  # its option boundary.  `ls-tree` accepts this unambiguous path without it.
+  oracle_capture parent-entry parent ls-tree HEAD vendor || return
   oracle_capture parent-tree-body parent cat-file tree 'HEAD^{tree}' || return
 
   oracle_run parent-bare . init --quiet --bare parent.git || return
   oracle_run parent-push parent push --quiet ../parent.git HEAD:refs/heads/main || return
   oracle_capture clone-parent . clone --quiet --no-local --no-recurse-submodules --branch main parent.git checkout || return
   oracle_capture clone-tree checkout rev-parse 'HEAD^{tree}' || return
-  oracle_capture clone-index checkout ls-files -s -- vendor
+  oracle_capture clone-index checkout ls-files -s vendor
 }
 
 fge_init fg085-submodule-gitlink
@@ -158,6 +160,8 @@ fge_assert_exit FG-085-E2E-008 0 "${bridge_exit}" \
   'the pure-Rust closure parses the oracle gitlink and refuses parent-repository traversal or recursive completion'
 
 receipt="${work_root}/submodule-gitlink-oracle.tsv"
+parent_entry_receipt="${work_root}/submodule-parent-entry-oracle-receipt.tsv"
+clone_index_receipt="${work_root}/submodule-clone-index-oracle-receipt.tsv"
 {
   printf 'schema=frankengit.submodule-gitlink-oracle.v1\n'
   printf 'oracle_pin=%s\n' "${PIN_ID}"
@@ -168,6 +172,8 @@ receipt="${work_root}/submodule-gitlink-oracle.tsv"
   printf 'clone_index=%s\n' "${clone_index}"
   printf 'non_claim=finite SHA-1 corpus; no recursive submodule checkout or credential delegation is implemented\n'
 } > "${receipt}"
+cp -- "${RUN_DIRECTORY}/transcripts/parent-entry/receipt.tsv" "${parent_entry_receipt}"
+cp -- "${RUN_DIRECTORY}/transcripts/clone-index/receipt.tsv" "${clone_index_receipt}"
 fge_artifact "${receipt}" submodule-gitlink-oracle-result
-fge_artifact "${RUN_DIRECTORY}/transcripts/parent-entry/receipt.tsv" submodule-parent-entry-oracle-transcript
-fge_artifact "${RUN_DIRECTORY}/transcripts/clone-index/receipt.tsv" submodule-clone-index-oracle-transcript
+fge_artifact "${parent_entry_receipt}" submodule-parent-entry-oracle-transcript
+fge_artifact "${clone_index_receipt}" submodule-clone-index-oracle-transcript
