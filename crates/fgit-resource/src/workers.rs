@@ -427,7 +427,9 @@ pub struct BatchPlan {
 
 impl BatchPlan {
     /// Build a plan for `job_count` jobs across `budget.workers()` workers.
-    #[must_use]
+    ///
+    /// No `#[must_use]` here: `BatchPlan` already carries it at the type level,
+    /// so repeating it on the constructor adds nothing.
     pub const fn new(job_count: usize, budget: &WorkerBudget) -> Self {
         Self {
             job_count,
