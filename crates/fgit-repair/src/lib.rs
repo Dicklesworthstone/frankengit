@@ -32,7 +32,7 @@ use fgit_types::{RepositoryAuthorityHeadId, SegmentManifestId};
 /// The sole durable class this first repair slice can scrub.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DurableClass {
-    /// `DUR-016`, the `microsegment_v1` RaptorQ profile.
+    /// `DUR-016`, the `microsegment_v1` `RaptorQ` profile.
     MicrosegmentV1,
 }
 
@@ -236,7 +236,7 @@ impl AuthenticatedScrubTarget {
         self.expected.source_len()
     }
 
-    fn repair_plan(&self) -> RepairPlan<'_> {
+    const fn repair_plan(&self) -> RepairPlan<'_> {
         RepairPlan {
             expected: &self.expected,
             manifest: &self.manifest,
@@ -410,14 +410,14 @@ impl HealthRecord {
     }
 }
 
-/// Terminal result of the RaptorQ repair state machine after a scrub trigger.
+/// Terminal result of the `RaptorQ` repair state machine after a scrub trigger.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RepairOutcome {
     /// Verified bytes were published under the revalidated authority basis.
     Published,
     /// The worker retained the suspect but lacked another complete repair budget.
     DeferredForBudget,
-    /// The existing RaptorQ repair machinery refused the candidate or publication.
+    /// The existing `RaptorQ` repair machinery refused the candidate or publication.
     Refused(RaptorRefusal),
 }
 
@@ -459,7 +459,7 @@ impl DurabilityHealth {
     }
 
     /// Applies one appended record to this derived view.
-    pub fn apply(&mut self, record: &HealthRecord) -> Result<(), ScrubRefusal> {
+    pub const fn apply(&mut self, record: &HealthRecord) -> Result<(), ScrubRefusal> {
         if let Some(previous) = self.last_record_sequence
             && record.sequence() < previous
         {
@@ -576,14 +576,13 @@ impl DurabilityHealthMetrics {
     /// The latest-walk coverage ratio, rounded down in thousandths.
     #[must_use]
     pub fn coverage_per_mille(&self) -> u16 {
-        match self.last_walk_checked_targets {
-            Some(checked_targets) => coverage_per_mille(
+        self.last_walk_checked_targets.map_or(0, |checked_targets| {
+            coverage_per_mille(
                 u64::from(checked_targets),
                 u64::from(self.last_walk_skipped_targets.unwrap_or(0)),
                 u64::from(self.remaining_targets),
-            ),
-            None => 0,
-        }
+            )
+        })
     }
 }
 
@@ -597,7 +596,7 @@ pub struct HealthThresholds {
 
 impl HealthThresholds {
     /// Builds bounded thresholds without interpreting wall-clock time.
-    pub fn new(
+    pub const fn new(
         maximum_scrub_lag: u64,
         minimum_coverage_per_mille: u16,
         maximum_drill_age: u64,
@@ -689,7 +688,7 @@ impl ScrubWorker {
     ///
     /// Cancellation is observed before the source read and before each target.
     /// One `microsegment_v1` repair is bounded to the registered 8 KiB profile;
-    /// the existing RaptorQ repair path owns the decode/verify/publish interval.
+    /// the existing `RaptorQ` repair path owns the decode/verify/publish interval.
     pub fn walk<Caps>(
         &self,
         cx: &Cx<Caps>,
@@ -903,7 +902,7 @@ pub enum ScrubRefusal {
         /// Available bucket count.
         denominator: u16,
     },
-    /// Target-size bound was zero or exceeded the registered RaptorQ profile.
+    /// Target-size bound was zero or exceeded the registered `RaptorQ` profile.
     TargetBytesOutOfProfile {
         /// Requested or observed size.
         offered: u64,
@@ -919,7 +918,7 @@ pub enum ScrubRefusal {
     WorkerBudgetCannotFundRepair(ResourceError),
     /// The authenticated manifest could not reproduce its typed identity.
     ManifestIdentityUnavailable,
-    /// A manifest and protected RaptorQ scope disagreed.
+    /// A manifest and protected `RaptorQ` scope disagreed.
     ManifestScopeMismatch,
     /// A batch mixed targets from distinct authority bases.
     BatchAuthorityMismatch,
@@ -956,7 +955,7 @@ pub enum ScrubRefusal {
     CoverageThresholdOutOfRange(u16),
     /// A runtime checkpoint rejected without an attached cancellation reason.
     RuntimeCheckpointRejected,
-    /// A RaptorQ repair refusal was retained in the health evidence.
+    /// A `RaptorQ` repair refusal was retained in the health evidence.
     Raptor(RaptorRefusal),
     /// Resource algebra refused a pre-work or budget operation.
     Resource(ResourceError),

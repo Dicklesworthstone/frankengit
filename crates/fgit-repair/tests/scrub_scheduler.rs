@@ -151,7 +151,7 @@ struct ScriptedSource {
 }
 
 impl ScriptedSource {
-    fn new(batch: AuthenticatedScrubBatch, observations: Vec<ScrubObservation>) -> Self {
+    const fn new(batch: AuthenticatedScrubBatch, observations: Vec<ScrubObservation>) -> Self {
         Self {
             batch,
             observations,
@@ -161,7 +161,7 @@ impl ScriptedSource {
         }
     }
 
-    fn probe_count(&self) -> u32 {
+    const fn probe_count(&self) -> u32 {
         self.probed.get()
     }
 }
@@ -348,7 +348,7 @@ fn cancellation_between_targets_releases_worker_budget() {
 #[test]
 fn sample_selection_is_deterministic_across_input_order() {
     let basis = head(10);
-    let targets = vec![target(6, basis), target(7, basis), target(8, basis)];
+    let targets = [target(6, basis), target(7, basis), target(8, basis)];
     let mode = ScrubMode::sample(1, 2).expect("one half is a valid sample");
     let mut first: Vec<_> = targets
         .iter()
