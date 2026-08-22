@@ -36,7 +36,10 @@ def lp(b):  return u32(len(b)) + b            # length-prefixed bytes
 
 CODEC_MAJOR, CODEC_MINOR = 1, 0
 MAGIC = b"FGC1"
-ALG = 1                                       # DigestAlgorithmId used in fixtures
+ALG = 0xfff1                                  # DigestAlgorithmId used in fixtures:
+                                              # corpus-reserved, never a real algorithm.
+                                              # Was 1 (SHA-1) until the ADR-0003 Amendment 1
+                                              # remedy was extended to the digest vocabulary.
 
 def internal_id(domain, digest, alg=ALG, major=CODEC_MAJOR, minor=CODEC_MINOR):
     return u16(alg) + lp(domain.encode()) + u16(major) + u16(minor) + lp(digest)

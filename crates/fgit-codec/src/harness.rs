@@ -57,6 +57,20 @@ pub const CORPUS_ALGORITHM_CODE_POINT: u16 = 0xfff1;
 /// point: a fixture must never be mistakable for a production signature.
 pub const FIXTURE_SIGNATURE_SCHEME_CODE_POINT: u16 = 0xfff1;
 
+// Both corpus slots must stay inside `fgit-crypto`'s reserved range. This is
+// the mirror of the assertion `registry.rs` already makes in the other
+// direction -- there, no registered construction may land at or above 0xfff0;
+// here, no corpus slot may land below it. Between them the two ranges cannot
+// overlap, and neither side can drift into the other without failing a build.
+//
+// The upper bound needs no assertion: these are `u16`, so 0xffff is the
+// ceiling. `CORPUS_RESERVED_CODE_POINTS` is a `RangeInclusive`, whose accessors
+// are not usable in const context here, so the floor is spelled as a literal
+// and `the_corpus_slots_sit_inside_the_range_crypto_reserves` ties that literal
+// back to the range itself.
+const _: () = assert!(CORPUS_ALGORITHM_CODE_POINT >= 0xfff0);
+const _: () = assert!(FIXTURE_SIGNATURE_SCHEME_CODE_POINT >= 0xfff0);
+
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -178,7 +192,22 @@ impl SplitMix64 {
 
 // ------------------------------------------------------------------- fixtures
 
-pub const ALGORITHM: u16 = 1;
+/// Digest-algorithm slot for corpus and fixture digests.
+///
+/// Sits in `fgit-crypto`'s `CORPUS_RESERVED_CODE_POINTS` (`0xfff0..=0xffff`)
+/// for the same reason [`FIXTURE_SIGNATURE_SCHEME_CODE_POINT`] does, one
+/// vocabulary over. This constant was `1` — the code point `fgit-crypto`
+/// allocates to SHA-1 — so every fixture digest carried a real algorithm tag.
+/// It was saved from being mistakable for a production digest only by being
+/// malformed: a 32-byte body under a 20-byte algorithm. "Correcting" the width
+/// would have produced right-algorithm, right-length fixtures, which is the
+/// hazard ADR-0003 Amendment 1 named rather than the cure.
+///
+/// The signature and corpus-identity vocabularies received that remedy; the
+/// digest vocabulary did not, and this is that omission closed. Bodies stay at
+/// 32 bytes: a reserved point makes no width claim, so there is no width to
+/// match.
+pub const ALGORITHM: u16 = CORPUS_ALGORITHM_CODE_POINT;
 
 #[must_use]
 pub fn algorithm() -> DigestAlgorithmId {
