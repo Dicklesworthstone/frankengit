@@ -68,6 +68,47 @@ impl ExportPhase {
         Self::Settled,
     ];
 
+    /// Compile-time completeness for [`ExportPhase::ALL`].
+    ///
+    /// `ALL` is hand-written, so nothing in the language forces it to list
+    /// every variant, and several tests rely on it doing so —
+    /// `crash_matrix.rs` drives five cells over `ALL` precisely *"so a new
+    /// phase is automatically covered"*, including the durability tripwire.
+    /// That claim was not enforced.
+    ///
+    /// The gap is narrow and specific. `export.rs` already pins the code
+    /// points of `ALL` to the literal `[0, 1, 2, 3, 4, 5]`, which catches a
+    /// reorder, a dropped entry, and a variant added to *both* enum and
+    /// `ALL`. What it cannot catch is a variant added to the enum and left
+    /// out of `ALL`: `code_point` below is exhaustive and forces the author
+    /// to assign a code point, but that sends them to `code_point`, not
+    /// here — the crate compiles, the literal still reads `[0..5]`, and every
+    /// `ALL`-driven test silently covers one phase fewer.
+    ///
+    /// This match is exhaustive with no wildcard, so a seventh phase fails to
+    /// compile *at this site*, where the doc says what to do about it. It
+    /// mirrors `fgit-crypto`'s guard at `registry.rs:110` and the one
+    /// `fgit-types` carries in `vocabulary.rs`: the type system holds an
+    /// invariant a reader would otherwise have to remember.
+    ///
+    /// HONEST LIMIT: it forces the addition to be *considered*, not made. An
+    /// author can add the arm here and still not touch `ALL`. That is
+    /// strictly more than the array had, and less than a derived list would
+    /// give.
+    ///
+    /// DELETION CONDITION: goes if `ExportPhase` ever gains a derived
+    /// enumeration, which would let `ALL` be generated rather than maintained.
+    const fn _every_phase_is_listed_in_all(phase: Self) {
+        match phase {
+            Self::Unstarted
+            | Self::Reserved
+            | Self::Planned
+            | Self::Staged
+            | Self::Proposed
+            | Self::Settled => {}
+        }
+    }
+
     /// Stable code point for evidence records.
     #[must_use]
     pub const fn code_point(self) -> u16 {
