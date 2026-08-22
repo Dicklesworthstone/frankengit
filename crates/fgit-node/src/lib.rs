@@ -539,9 +539,9 @@ pub enum AdmissionMaterializationRefusal {
     /// A re-identified RCR did not agree with the successor head's latest record.
     LatestCommitMismatch {
         /// RCR identity recomputed from the selected record.
-        expected: RepositoryCommitId,
+        expected: Box<RepositoryCommitId>,
         /// RCR identity carried by the selected authority head.
-        observed: Option<RepositoryCommitId>,
+        observed: Option<Box<RepositoryCommitId>>,
     },
     /// The selected RCR did not describe the successor head's repository state.
     SelectedCommitStateMismatch { field: &'static str },
@@ -1160,8 +1160,8 @@ where
             let record_id = repository_commit_id(record)?;
             if successor.latest_committed_rcr_id != Some(record_id) {
                 return Err(AdmissionMaterializationRefusal::LatestCommitMismatch {
-                    expected: record_id,
-                    observed: successor.latest_committed_rcr_id,
+                    expected: Box::new(record_id),
+                    observed: successor.latest_committed_rcr_id.map(Box::new),
                 });
             }
             if record.repository_id != successor.repository_id {
