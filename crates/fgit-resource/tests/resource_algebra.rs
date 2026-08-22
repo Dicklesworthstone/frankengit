@@ -614,3 +614,120 @@ fn funding_a_child_from_another_region_mints_nothing_and_is_reported() {
         }
     }
 }
+
+#[test]
+fn a_multi_grade_deficit_always_names_the_earliest_grade_in_declaration_order() {
+    // `first_deficit` promises "the first grade in which `other` exceeds this
+    // amount", and two production callers turn that promise into a refusal that
+    // names a grade: `twophase.rs:411` and `custody.rs:1174`. If the scan ever
+    // stopped being ordered -- a parallel search, or `Grade::ALL` reordered
+    // without the enum -- both would keep refusing correctly while naming a
+    // different grade from one run to the next. That is a refusal whose
+    // decision path does not replay, which section 8 forbids for anything
+    // affecting a decision.
+    //
+    // Nothing else in this file sees it. Every other Conservation case here
+    // plants a deficit in exactly ONE grade, and with a single deficit any
+    // tie-break at all -- ordered, reversed, arbitrary -- returns the same
+    // answer. The property only becomes observable with two.
+    for (earlier_position, earlier) in Grade::ALL.into_iter().enumerate() {
+        for later in Grade::ALL.into_iter().skip(earlier_position + 1) {
+            let available = ResourceVector::from_grades(&[(earlier, 1), (later, 1)]);
+            let requested = ResourceVector::from_grades(&[(earlier, 2), (later, 2)]);
+
+            let expected = Some(ResourceError::Conservation {
+                grade: earlier,
+                available: 1,
+                requested: 2,
+            });
+            assert_eq!(
+                available.first_deficit(&requested),
+                expected,
+                "deficits in both {earlier} and {later} must name {earlier}, which precedes it \
+                 in Grade::ALL"
+            );
+
+            // Determinism, stated directly rather than inferred from the scan:
+            // repeated calls on identical inputs must agree, or a receipt
+            // cannot be reproduced from the inputs it records.
+            assert_eq!(
+                available.first_deficit(&requested),
+                expected,
+                "{earlier}/{later} deficit reported a different grade on a repeat call"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_lone_deficit_in_any_grade_names_that_grade_and_a_sufficient_amount_names_none() {
+    // The pairing for the test above, and it is load-bearing rather than
+    // decorative: there the earliest-declared grade is ALWAYS the answer, so an
+    // implementation that ignored its input and returned `Grade::Bytes` -- or
+    // simply the lowest-indexed deficient slot regardless of which grades were
+    // asked about -- would satisfy every assertion in it. Requiring each of the
+    // ten grades to be named on its own is what rules that out.
+    for (position, grade) in Grade::ALL.into_iter().enumerate() {
+        let available = ResourceVector::from_grades(&[(grade, 3)]);
+        let requested = ResourceVector::from_grades(&[(grade, 4)]);
+        assert_eq!(
+            available.first_deficit(&requested),
+            Some(ResourceError::Conservation {
+                grade,
+                available: 3,
+                requested: 4,
+            }),
+            "a lone deficit in {grade} (declaration position {position}) must name {grade}"
+        );
+    }
+
+    // The absence half: an amount that covers the request reports no deficit,
+    // including the boundary where the two are exactly equal. Without this the
+    // tests above are satisfied by a function that reports a deficit always.
+    let plenty = ResourceVector::from_grades(&[(Grade::Bytes, 10), (Grade::Objects, 10)]);
+    let covered = ResourceVector::from_grades(&[(Grade::Bytes, 10), (Grade::Objects, 9)]);
+    assert_eq!(
+        plenty.first_deficit(&covered),
+        None,
+        "an amount that covers the request in every grade has no deficit"
+    );
+    assert_eq!(
+        plenty.first_deficit(&plenty),
+        None,
+        "equality is not a deficit: `available < requested` is strict"
+    );
+    assert!(plenty.dominates(&covered));
+}
+
+#[test]
+fn every_grade_name_is_non_empty_distinct_and_agrees_with_display() {
+    // `as_str` is documented as the "stable lowercase name, used in receipts
+    // and refusals". Two grades sharing a string would leave an evidence record
+    // ambiguous about which budget was exhausted, and the refusal would still
+    // look perfectly well-formed -- the reader simply could not tell which
+    // resource ran out.
+    //
+    // `grade_list_is_closed_and_ordered` pins the count, the index and the
+    // disposition of every grade, but never touches the names, and no other
+    // test in this crate reads `as_str` at all.
+    let mut seen: Vec<&'static str> = Vec::new();
+    for grade in Grade::ALL {
+        let name = grade.as_str();
+        assert!(!name.is_empty(), "{grade:?} has an empty name");
+        assert!(
+            !seen.contains(&name),
+            "{grade:?} reuses the name {name:?}; a refusal naming it could mean either grade"
+        );
+        assert_eq!(
+            grade.to_string(),
+            name,
+            "Display drifted from as_str for {grade:?}: receipts read one and humans the other"
+        );
+        seen.push(name);
+    }
+    assert_eq!(
+        seen.len(),
+        Grade::ALL.len(),
+        "every grade must contribute one distinct name"
+    );
+}
