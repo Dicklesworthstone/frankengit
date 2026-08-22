@@ -52,11 +52,30 @@
 //! - **Not the full request -> drain -> finalize protocol.** These cells cover
 //!   cancellation *before dispatch*, *between retry attempts*, and *after
 //!   dispatch and before completion*. What is still open is narrower than any
-//!   of those: cancelling a statement the VDBE is actively stepping through
-//!   (the poll sites are there -- 31 of them, including the main instruction
-//!   loop every N opcodes -- but the store's statements are far too short to
-//!   reach an opcode checkpoint reliably; reaching it needs sustained page-lock
-//!   contention, which nothing here builds). That is now the ONLY open clause.
+//!   of those: observing the **engine-side** cancellation rather than the
+//!   caller-side one -- a cancel that the VDBE itself reports while stepping a
+//!   statement. That is now the ONLY open clause, and it is structurally
+//!   unreachable through this store's published surface rather than merely
+//!   awkward.
+//!
+//!   **The reason given here before was false, and it carried a MEASURED
+//!   label.** It said the store's statements are too short to reach an opcode
+//!   checkpoint. The guard is
+//!
+//!   ```text
+//!   if opcode_count & (VDBE_EXECUTION_CHECKPOINT_INTERVAL - 1) == 0 { ... }
+//!   ```
+//!
+//!   with `opcode_count` initialised to `0` and incremented *after* the test,
+//!   so it fires on opcode 0 of **every** statement however short. Length was
+//!   never the barrier. The barrier is preemption: the caller's await observes
+//!   cancellation first and returns, so the VDBE's `Abort` never becomes the
+//!   answer the caller sees. `cancellation_error_probe.rs` pins exactly that --
+//!   an after-dispatch cancel surfaces as `Interrupt`, the caller-side value,
+//!   not `Abort`, the engine-side one.
+//!
+//!   Third correction to this clause and the worst of the three: a false
+//!   mechanism wearing the label that exists to mark checked ones.
 //!
 //!   **This list used to include `reply-lost`, and that was wrong too.** At
 //!   this boundary it is not a distinct cell: the probe measures that a cancel
