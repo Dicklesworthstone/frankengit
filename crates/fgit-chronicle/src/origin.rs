@@ -123,6 +123,23 @@ impl ResultingRoots {
         Self {
             ref_root: head.ref_root,
             forge_position_root: head.forge_position_root,
+            // KNOWN DEFECT, tracked as frankengit-d6nl. Carrying this one
+            // forward is wrong: a batch cannot be empty, refusals ARE outcome
+            // index entries (fgit-authority encode_outcome matches Refused), and
+            // the index is cumulative. So a refusal-only publication ships a
+            // head whose index root omits the very refusals it just made
+            // canonical. Demonstrated: two refusal-only batches differing in
+            // refusal code AND refusal-record identity publish byte-identical
+            // roots, both equal to the predecessor's.
+            //
+            // NOT fixed here, deliberately. The correct value needs the
+            // cumulative leaf set, and no incremental fold exists because
+            // outcome_index_root sorts leaves by digest (outcome.rs:806), so a
+            // new leaf's position depends on leaves a root does not carry. The
+            // remedy is a pending design decision -- see d6nl and boet -- and
+            // choosing one here would be this crate taking a cross-crate call
+            // that fgit-authority explicitly declines to take alone
+            // (outcome.rs:789).
             outcome_index_root: head.outcome_index_root,
             retention_root: head.retention_root,
             outbox_root: head.outbox_root,
