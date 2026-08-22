@@ -3965,7 +3965,7 @@ fn is_forbidden_ftui_surface(name: &str, features: &BTreeSet<String>) -> bool {
 
 /// Telemetry exporters that open their own egress path out of a truth process.
 ///
-/// FG-094a excludes "blocking telemetry exporters" from the FrankenTUI kernel
+/// FG-094a excludes "blocking telemetry exporters" from the `FrankenTUI` kernel
 /// closure. The rule is deliberately narrow: it names the OpenTelemetry export
 /// family only. `tracing`, `tracing-core` and `log` are pure-Rust facades
 /// already resolved in this workspace and are NOT exporters, so banning them
@@ -5854,9 +5854,11 @@ mod tests {
         let path = workspace.root.join("Cargo.lock");
         let mut text = fs::read_to_string(&path).expect("read lock");
         for (name, version) in packages {
-            text.push_str(&format!(
+            write!(
+                text,
                 "\n[[package]]\nname = \"{name}\"\nversion = \"{version}\"\n"
-            ));
+            )
+            .expect("write in-memory Cargo.lock fixture");
         }
         fs::write(path, text).expect("write lock");
     }
@@ -5917,7 +5919,7 @@ mod tests {
         assert_no_error(&report, "forbidden native transport `miniz_oxide`");
     }
 
-    /// Records the reason FG-048c cannot admit fastapi_rust today.
+    /// Records the reason FG-048c cannot admit `fastapi_rust` today.
     ///
     /// Every published fastapi-core 0.4.x (0.4.0 through 0.4.3, each checked
     /// separately) carries a non-optional `futures-executor` dependency, and
