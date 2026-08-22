@@ -1217,3 +1217,171 @@ fn an_unavailable_identity_is_reported_against_the_body_that_needed_it() {
         "the fixture record identifies under the real identity"
     );
 }
+
+// ---------------------------------------------------------------------------
+// verify_refusal_only freezes four roots, and leaves a fifth deliberately free
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_refusal_only_batch_that_moved_the_forge_position_root_is_refused() {
+    let mut plan = PublicationPlan::open(basis()).expect("genesis basis opens");
+    plan.refuse(
+        derived!(TxId, 0xD0),
+        RefusalCode::QuotaExceeded,
+        derived!(RefusalRecordId, 0xD1),
+    );
+    let published = seal(plan, &refusal_only_roots());
+    let basis = basis();
+    let mut batch = published.batch().clone();
+    let mut head = published.head().clone();
+
+    // Planted negative: a batch that committed nothing moves the forge position.
+    // The head is rebound to the edited batch so the pair carries exactly one
+    // defect and the assertion is about refusal-only semantics, not staleness.
+    batch.resulting_forge_position_root = digest(0xD2);
+    head.forge_position_root = digest(0xD2);
+    head.decision_tail_id =
+        Some(batch_identity(&CryptoBodyIdentity, &batch).expect("the batch has an identity"));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::RefusalOnlyBatchAdvancedCommittedState {
+            field: "resulting_forge_position_root"
+        }),
+        "refusals consume decision sequence but never advance the forge position"
+    );
+
+    // Near-identical permitted case: the same refusal leaving the root alone.
+    batch.resulting_forge_position_root = genesis_head().forge_position_root;
+    head.forge_position_root = genesis_head().forge_position_root;
+    head.decision_tail_id =
+        Some(batch_identity(&CryptoBodyIdentity, &batch).expect("the batch has an identity"));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_refusal_only_batch_that_moved_the_retention_root_is_refused() {
+    let mut plan = PublicationPlan::open(basis()).expect("genesis basis opens");
+    plan.refuse(
+        derived!(TxId, 0xD3),
+        RefusalCode::QuotaExceeded,
+        derived!(RefusalRecordId, 0xD4),
+    );
+    let published = seal(plan, &refusal_only_roots());
+    let basis = basis();
+    let mut batch = published.batch().clone();
+    let mut head = published.head().clone();
+
+    // Planted negative: retention is committed state, so a refusal cannot move
+    // it even though nothing was committed.
+    batch.resulting_retention_root = digest(0xD5);
+    head.retention_root = digest(0xD5);
+    head.decision_tail_id =
+        Some(batch_identity(&CryptoBodyIdentity, &batch).expect("the batch has an identity"));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::RefusalOnlyBatchAdvancedCommittedState {
+            field: "resulting_retention_root"
+        }),
+        "a refusal cannot advance retention state"
+    );
+
+    // Near-identical permitted case.
+    batch.resulting_retention_root = genesis_head().retention_root;
+    head.retention_root = genesis_head().retention_root;
+    head.decision_tail_id =
+        Some(batch_identity(&CryptoBodyIdentity, &batch).expect("the batch has an identity"));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_refusal_only_batch_that_moved_the_outbox_root_is_refused() {
+    let mut plan = PublicationPlan::open(basis()).expect("genesis basis opens");
+    plan.refuse(
+        derived!(TxId, 0xD6),
+        RefusalCode::QuotaExceeded,
+        derived!(RefusalRecordId, 0xD7),
+    );
+    let published = seal(plan, &refusal_only_roots());
+    let basis = basis();
+    let mut batch = published.batch().clone();
+    let mut head = published.head().clone();
+
+    // Planted negative: an outbox obligation is an externally observed effect,
+    // so a batch that committed nothing may not create one.
+    batch.resulting_outbox_root = digest(0xD8);
+    head.outbox_root = digest(0xD8);
+    head.decision_tail_id =
+        Some(batch_identity(&CryptoBodyIdentity, &batch).expect("the batch has an identity"));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::RefusalOnlyBatchAdvancedCommittedState {
+            field: "resulting_outbox_root"
+        }),
+        "a refusal cannot create an external-effect obligation"
+    );
+
+    // Near-identical permitted case.
+    batch.resulting_outbox_root = genesis_head().outbox_root;
+    head.outbox_root = genesis_head().outbox_root;
+    head.decision_tail_id =
+        Some(batch_identity(&CryptoBodyIdentity, &batch).expect("the batch has an identity"));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
+}
+
+/// The omission is the point. `verify_refusal_only` freezes four roots and
+/// leaves `outcome_index_root` free, which matches the normative contract
+/// exactly: "Refusals consume decision sequence but do not advance repository
+/// sequence or source/forge roots" (NORMATIVE_PROTOCOL_CONTRACTS.md line 285).
+/// The outcome index is absent from that list and must be, because refusals
+/// ARE outcome-index entries -- a refusal-only batch is precisely the batch
+/// whose index has to move.
+///
+/// The three tests above pin the four frozen roots. This one pins the fifth as
+/// deliberately free, with every frozen root held at the predecessor's value so
+/// the outcome index is the only field that differs. Without it, a fifth entry
+/// added to the `unchanged` array would still fail tests, but would fail them
+/// as an unexplained break somewhere else rather than here.
+#[test]
+fn a_refusal_only_batch_may_advance_the_outcome_index_root_alone() {
+    let mut plan = PublicationPlan::open(basis()).expect("genesis basis opens");
+    plan.refuse(
+        derived!(TxId, 0xE0),
+        RefusalCode::QuotaExceeded,
+        derived!(RefusalRecordId, 0xE1),
+    );
+    let published = seal(plan, &refusal_only_roots());
+    let basis = basis();
+    let batch = published.batch().clone();
+    let head = published.head().clone();
+    let previous = genesis_head();
+
+    // Isolate the variable: every root the contract freezes stays put.
+    assert_eq!(batch.resulting_ref_root, previous.ref_root);
+    assert_eq!(
+        batch.resulting_forge_position_root,
+        previous.forge_position_root
+    );
+    assert_eq!(batch.resulting_retention_root, previous.retention_root);
+    assert_eq!(batch.resulting_outbox_root, previous.outbox_root);
+
+    // And the index genuinely moves, so a pass here is not vacuous.
+    assert_ne!(
+        batch.resulting_outcome_index_root, previous.outcome_index_root,
+        "the fixture must actually advance the index or this test proves nothing"
+    );
+
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(()),
+        "a refusal-only batch may advance the outcome index: refusals are entries in it"
+    );
+}
