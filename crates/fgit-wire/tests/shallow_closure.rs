@@ -291,9 +291,20 @@ fn an_unequal_path_relaxes_a_premature_depth_boundary() {
     // change a boundary decision. The unique graph has five parent edges;
     // re-expanding BASE would charge its one parent a second time and reject
     // this otherwise-admissible closure at the exact resource ceiling.
+    let unbounded_request = PackRequest {
+        version: UploadPackVersion::V2,
+        wants: vec![oid(TOP)],
+        haves: Vec::new(),
+        shallows: Vec::new(),
+        deepen: None,
+        deepen_since: None,
+        deepen_not: Vec::new(),
+        filter: None,
+        options: PackOptions::SIDE_BAND_64K,
+    };
     let unbounded = compute_pack_closure(
         &graph,
-        &request(vec![oid(TOP)]),
+        &unbounded_request,
         &ClosureLimits {
             max_commits: 5,
             max_objects: 16,

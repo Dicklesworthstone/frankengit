@@ -675,8 +675,10 @@ fn v1_advertisement_accepts_the_empty_repository_capabilities_record() {
 #[test]
 fn v1_advertisement_counts_the_peel_suffix_against_the_ref_name_limit() {
     let accepted_base = b"refs/heads/x";
-    let mut limits = WireLimits::default();
-    limits.max_ref_name_bytes = accepted_base.len() + b"^{}".len();
+    let limits = WireLimits {
+        max_ref_name_bytes: accepted_base.len() + b"^{}".len(),
+        ..WireLimits::default()
+    };
 
     let mut accepted_line = format!("{TAG} ").into_bytes();
     accepted_line.extend_from_slice(accepted_base);
