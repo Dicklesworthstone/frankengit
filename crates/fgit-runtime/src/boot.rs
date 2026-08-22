@@ -213,10 +213,9 @@ impl RuntimeProfile {
     ///
     /// # Errors
     ///
-    /// [`RuntimeRefusal::TopologyInvalid`] is not used here; instead a
-    /// deterministic profile refuses via
-    /// [`RuntimeRefusal::CapabilityWidening`]-free explicit validation in
-    /// [`build`](Self::build). This setter records intent only.
+    /// This setter records intent only. [`RuntimeRefusal::SchedulerInputsUnpinned`]
+    /// is raised by [`validate`](Self::validate) before a replay-sensitive
+    /// profile can build with a host-derived scheduler input.
     #[must_use]
     pub fn with_host_derived_parallelism(mut self, workers: usize) -> Self {
         self.host_derived_parallelism = true;
@@ -331,6 +330,8 @@ impl RuntimeProfile {
     ///   carries an unbounded budget.
     /// - [`RuntimeRefusal::LeakPolicyInsufficient`] when a class that must fail
     ///   fast was given a recovering policy.
+    /// - [`RuntimeRefusal::SchedulerInputsUnpinned`] when a replay-sensitive
+    ///   class leaves a scheduler input host-derived or otherwise unpinned.
     pub fn validate(&self) -> Result<(), RuntimeRefusal> {
         self.budgets.verify_finite()?;
         if self.class.requires_fail_fast_leaks() && !self.leak_policy.is_fail_fast() {
@@ -338,12 +339,19 @@ impl RuntimeProfile {
                 policy: "recovering",
             });
         }
-        if self.class.requires_pinned_scheduler()
-            && (self.host_derived_parallelism || self.worker_threads != 1 || self.enable_parking)
-        {
-            return Err(RuntimeRefusal::LeakPolicyInsufficient {
-                policy: "unpinned_deterministic_profile",
-            });
+        if self.class.requires_pinned_scheduler() {
+            let input = if self.host_derived_parallelism {
+                Some("host_derived_parallelism")
+            } else if self.worker_threads != 1 {
+                Some("worker_threads")
+            } else if self.enable_parking {
+                Some("parking")
+            } else {
+                None
+            };
+            if let Some(input) = input {
+                return Err(RuntimeRefusal::SchedulerInputsUnpinned { input });
+            }
         }
         Ok(())
     }
@@ -760,10 +768,24 @@ mod tests {
             .with_host_derived_parallelism(16)
             .validate()
             .expect_err("a replay profile may not take its worker count from the host");
-        assert!(matches!(
+        assert_eq!(
             refusal,
-            RuntimeRefusal::LeakPolicyInsufficient { .. }
-        ));
+            RuntimeRefusal::SchedulerInputsUnpinned {
+                input: "host_derived_parallelism",
+            }
+        );
+        assert_eq!(refusal.code(), "runtime.scheduler.pinning_required");
+
+        // The same replay profile must also pin parking; normal deterministic
+        // construction above is the permitted twin.
+        let mut parking_enabled = RuntimeProfile::deterministic();
+        parking_enabled.enable_parking = true;
+        assert_eq!(
+            parking_enabled
+                .validate()
+                .expect_err("a replay profile may not enable scheduler parking"),
+            RuntimeRefusal::SchedulerInputsUnpinned { input: "parking" }
+        );
     }
 
     #[test]
@@ -891,8 +913,8 @@ mod tests {
             .expect_err("a pinned scheduler cannot receive a multi-worker plan");
         assert_eq!(
             refusal,
-            DeclaredWorkerBudgetRefusal::Profile(RuntimeRefusal::LeakPolicyInsufficient {
-                policy: "unpinned_deterministic_profile",
+            DeclaredWorkerBudgetRefusal::Profile(RuntimeRefusal::SchedulerInputsUnpinned {
+                input: "worker_threads",
             })
         );
 

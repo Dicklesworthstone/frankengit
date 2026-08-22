@@ -143,6 +143,15 @@ pub enum RuntimeRefusal {
         /// The rejected policy name.
         policy: &'static str,
     },
+    /// A replay-sensitive profile left a scheduler input unpinned.
+    ///
+    /// This is deliberately separate from [`LeakPolicyInsufficient`](Self::LeakPolicyInsufficient):
+    /// an operator fixes scheduler identity by pinning this input, not by
+    /// changing the region-closure policy.
+    SchedulerInputsUnpinned {
+        /// The scheduler input that must be pinned for replay.
+        input: &'static str,
+    },
     /// `Recover` was selected without the controls that make it admissible.
     LeakRecoveryUncontrolled {
         /// Which required control was missing.
@@ -276,6 +285,7 @@ impl RuntimeRefusal {
             Self::DetachedAuthorityRetained { .. } => "runtime.capability.detached_authority",
             Self::UnboundedServiceBudget { .. } => "runtime.budget.unbounded_service",
             Self::LeakPolicyInsufficient { .. } => "runtime.obligation.leak_policy_insufficient",
+            Self::SchedulerInputsUnpinned { .. } => "runtime.scheduler.pinning_required",
             Self::LeakRecoveryUncontrolled { .. } => "runtime.obligation.recovery_uncontrolled",
             Self::BudgetExhausted { .. } => "runtime.budget.exhausted",
             Self::TopologyInvalid { .. } => "runtime.topology.invalid",
@@ -322,6 +332,10 @@ impl fmt::Display for RuntimeRefusal {
             Self::LeakPolicyInsufficient { policy } => write!(
                 f,
                 "obligation leak policy `{policy}` cannot satisfy region closure"
+            ),
+            Self::SchedulerInputsUnpinned { input } => write!(
+                f,
+                "replay-sensitive scheduler input `{input}` must be pinned"
             ),
             Self::LeakRecoveryUncontrolled { missing } => {
                 write!(f, "obligation leak policy `Recover` requires `{missing}`")
@@ -379,6 +393,9 @@ mod tests {
             },
             RuntimeRefusal::UnboundedServiceBudget { class: "request" },
             RuntimeRefusal::LeakPolicyInsufficient { policy: "Silent" },
+            RuntimeRefusal::SchedulerInputsUnpinned {
+                input: "host_derived_parallelism",
+            },
             RuntimeRefusal::LeakRecoveryUncontrolled {
                 missing: "escalation",
             },
@@ -503,6 +520,12 @@ mod tests {
         );
         assert!(!RuntimeRefusal::CapabilityWidening { missing: "io" }.is_retryable());
         assert!(!RuntimeRefusal::LeakPolicyInsufficient { policy: "Log" }.is_retryable());
+        assert!(
+            !RuntimeRefusal::SchedulerInputsUnpinned {
+                input: "worker_threads",
+            }
+            .is_retryable()
+        );
         // Paired permitted case: admission pressure is the one retryable class.
         assert!(RuntimeRefusal::AdmissionRefused { limit: 4 }.is_retryable());
     }
