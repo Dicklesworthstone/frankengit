@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 fgit-crypto.workspace = true
 fgit-object-fabric.workspace = true
+fgit-statistics.workspace = true
 fgit-types.workspace = true
 
 # Test-only, for the FG-022b end-state differential: the bead requires object

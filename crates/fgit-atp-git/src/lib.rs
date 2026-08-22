@@ -23,6 +23,7 @@ use fgit_object_fabric::{
     Commitment, CryptoDigest, DigestAlgorithm, DigestDomain, FabricError, ObjectEnvelope,
     ObjectKind, SegmentLimits,
 };
+use fgit_statistics::{FallbackTrigger, PolicySelection};
 use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, SegmentManifestId};
 
 /// The only presently implemented ATP-Git profile.
@@ -592,6 +593,16 @@ pub enum FullFallbackReason {
     RepositoryScopeMismatch,
     /// A probabilistic summary exceeded its request bound.
     ProbabilisticSummaryTooLarge,
+    /// The controller's accumulated path evidence stopped supporting the
+    /// adaptive plan, so transport falls back to the ordinary pack path.
+    ///
+    /// Carries the section 33 [`FallbackTrigger`] rather than restating it.
+    /// `fgit-statistics` owns the vocabulary for *why statistical evidence
+    /// failed*; this crate owns *why transport fell back*. Collapsing the two
+    /// into one flat variant would lose the distinction a caller needs --
+    /// `EvidenceGap` and `RegimeAlarm` call for different operator responses,
+    /// and a merged `EvidenceGapRegimeShift` could not tell them apart.
+    ControllerEvidenceFallback(FallbackTrigger),
 }
 
 /// Deterministic plan class selected from one manifest and have summary.
@@ -809,6 +820,62 @@ impl PlanSelector {
             }
             _ => None,
         }
+    }
+}
+
+/// Evidence that the controller fell back, and on which section 33 condition.
+///
+/// A receipt rather than a bare reason because the fallback is an authority-side
+/// control-plane outcome: a later reader must be able to replay *which*
+/// repository stopped being supported and *why*, not merely that something did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControllerFallbackReceipt {
+    repository: RepositoryId,
+    trigger: FallbackTrigger,
+}
+
+impl ControllerFallbackReceipt {
+    /// Repository whose transfer fell back.
+    #[must_use]
+    pub const fn repository(&self) -> RepositoryId {
+        self.repository
+    }
+
+    /// The section 33 condition that fired.
+    #[must_use]
+    pub const fn trigger(&self) -> FallbackTrigger {
+        self.trigger
+    }
+
+    /// The typed transport reason this receipt evidences.
+    #[must_use]
+    pub const fn reason(&self) -> FullFallbackReason {
+        FullFallbackReason::ControllerEvidenceFallback(self.trigger)
+    }
+}
+
+/// Maps a section 33 policy selection into a transport-level fallback.
+///
+/// Returns `None` when the gate admits the adaptive candidate, so "evidence is
+/// sufficient" is the type's own answer rather than a caller-side convention --
+/// there is no path on which a clear gate silently yields a fallback, and none
+/// on which a fired trigger silently yields nothing.
+///
+/// The controller supplies the [`PolicySelection`]; this crate does not observe
+/// evidence itself, because deciding whether a stream is still the one a policy
+/// was calibrated against is `fgit-statistics`' job and duplicating that
+/// judgement here would put two answers in the tree.
+#[must_use]
+pub const fn controller_evidence_fallback(
+    repository: RepositoryId,
+    selection: PolicySelection,
+) -> Option<ControllerFallbackReceipt> {
+    match selection {
+        PolicySelection::Candidate => None,
+        PolicySelection::Fallback(trigger) => Some(ControllerFallbackReceipt {
+            repository,
+            trigger,
+        }),
     }
 }
 

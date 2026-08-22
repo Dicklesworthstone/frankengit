@@ -41,13 +41,20 @@
 use fgit_atp_git::{
     AtpGitProfile, AtpRefusal, AuthenticatedPeerCapabilities, FullFallbackReason, HaveSummary,
     PeerCapabilities, PeerCapabilityVerifier, PeerIdentity, PlanSelector, TransferLimits,
-    TransferManifest, TransferObjectEntry, TransferPlanKind,
+    TransferManifest, TransferObjectEntry, TransferPlanKind, controller_evidence_fallback,
 };
 use fgit_crypto::{GitObjectKind, git_object_id};
 use fgit_object_fabric::ObjectKind;
+use fgit_statistics::{FallbackTrigger, PolicyGate, PolicySelection};
 use fgit_types::{GitHashAlgorithm, RepositoryId};
 
-/// Every reason the selector may report.
+/// Every reason **the selector** may report.
+///
+/// Deliberately not every `FullFallbackReason`: `ControllerEvidenceFallback` is
+/// emitted by `controller_evidence_fallback`, not by the plan selector, so
+/// listing it here would claim the selector can produce something it cannot.
+/// Its own producibility is guarded by
+/// `the_controller_fallback_is_produced_only_by_a_fired_gate` below.
 ///
 /// Transcribed from the enum rather than iterated, so that adding a variant
 /// breaks the exhaustive match in `every_reason_in_the_closed_set_is_actually_producible`
@@ -334,6 +341,16 @@ fn every_reason_in_the_closed_set_is_actually_producible() {
             FullFallbackReason::ProbabilisticSummaryTooLarge => {
                 (capable(1), capable(2), oversize_summary())
             }
+            // Not selector-produced, and deliberately absent from
+            // ALL_FALLBACK_REASONS, so this arm is unreachable rather than
+            // pending. It exists because the exhaustive match is the guard: a
+            // future variant that IS selector-produced must be added to the
+            // array and given a condition, and removing this arm to silence the
+            // compiler would remove that guard for everyone.
+            FullFallbackReason::ControllerEvidenceFallback(_) => unreachable!(
+                "controller fallback is not selector-produced; see \
+                 the_controller_fallback_is_produced_only_by_a_fired_gate"
+            ),
         };
 
         assert_eq!(
@@ -343,4 +360,71 @@ fn every_reason_in_the_closed_set_is_actually_producible() {
              it; a reason nothing can produce is a control that exists only on paper"
         );
     }
+}
+
+// --- FG-8srg: the controller evidence-gap / regime-shift fallback ------------
+//
+// The selector cannot produce `ControllerEvidenceFallback`, so its producibility
+// needs its own guard. These are the paired halves the bead's acceptance names:
+// a fired gate must yield the typed reason and receipt with the exact trigger,
+// and a clear gate must yield nothing.
+
+#[test]
+fn the_controller_fallback_is_produced_only_by_a_fired_gate() {
+    // FORBIDDEN half: every section 33 trigger must survive to the caller as
+    // itself, not flattened into one merged "evidence or regime" variant.
+    for trigger in FallbackTrigger::ALL {
+        let mut gate = PolicyGate::all_clear();
+        gate.set(trigger);
+
+        let receipt = controller_evidence_fallback(repository(), gate.select())
+            .expect("a fired gate must produce a fallback receipt");
+
+        assert_eq!(
+            receipt.trigger(),
+            trigger,
+            "the receipt must carry the exact trigger that fired, not a merged one"
+        );
+        assert_eq!(receipt.repository(), repository());
+        assert_eq!(
+            receipt.reason(),
+            FullFallbackReason::ControllerEvidenceFallback(trigger),
+            "the typed reason must carry the same trigger the receipt does"
+        );
+    }
+
+    // PERMITTED half. Without it, a mapping that returned a fallback for every
+    // input would satisfy the loop above.
+    assert!(
+        controller_evidence_fallback(repository(), PolicyGate::all_clear().select()).is_none(),
+        "an all-clear gate must admit the candidate and produce no fallback"
+    );
+}
+
+#[test]
+fn distinct_triggers_do_not_collapse_into_one_reason() {
+    // The whole argument for carrying `FallbackTrigger` instead of minting a
+    // merged `EvidenceGapRegimeShift`: these two conditions call for different
+    // operator responses, so they must not compare equal.
+    let gap = controller_evidence_fallback(
+        repository(),
+        PolicySelection::Fallback(FallbackTrigger::EvidenceGap),
+    )
+    .expect("a fired gate produces a receipt");
+    let regime = controller_evidence_fallback(
+        repository(),
+        PolicySelection::Fallback(FallbackTrigger::RegimeAlarm),
+    )
+    .expect("a fired gate produces a receipt");
+
+    assert_ne!(gap.reason(), regime.reason());
+    assert_ne!(gap.trigger(), regime.trigger());
+
+    // And the denominator is asserted, so a section 33 sixth condition cannot
+    // be added without this file noticing.
+    assert_eq!(
+        FallbackTrigger::ALL.len(),
+        5,
+        "section 33 names five conditions; a sixth needs a decision here"
+    );
 }
