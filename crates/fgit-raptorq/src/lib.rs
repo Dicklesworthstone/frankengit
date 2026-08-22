@@ -553,6 +553,20 @@ pub fn repair_microsegment(
             });
         }
     };
+    // NOT EXERCISABLE THROUGH THE CURRENT SOLE CALLER, and the distinction
+    // matters: this one is caller-DEPENDENT, unlike the two below.
+    // `reserve` refuses when a grade in `RepairPermit::REQUIRED_GRADES`
+    // (`fgit-resource` kinds.rs:915 -- `[Bytes, CpuMicros]`) is zero in the
+    // grant. The only production caller is `fgit-repair` (lib.rs:795), which
+    // passes a `ScrubProfile` budget, and `ScrubProfile::new` already rejects a
+    // zero over `[Grade::Bytes, Grade::CpuMicros]` (fgit-repair lib.rs:131) --
+    // the SAME two grades. The profile constructor therefore pre-empts this
+    // refusal today.
+    //
+    // `repair_microsegment` is `pub` and takes `budget` as a parameter, so a
+    // second caller supplying a zero-grade grant reaches this immediately. It
+    // is uncovered because nothing can currently reach it, NOT because it
+    // cannot be reached (frankengit-zrxa, frankengit-0om4).
     let reservation = ledger
         .reserve::<RepairPermit>(
             RepairRequest {
@@ -593,6 +607,14 @@ pub fn repair_microsegment(
             return Err(RaptorRefusal::RetentionExpired);
         }
     }
+    // UNREACHABLE BY CONSTRUCTION, caller-independent. `spent` is
+    // `reservation.reserved()`, taken above, and `can_settle(actual)` is
+    // `self.reserved().first_deficit(actual)` (fgit-resource twophase.rs:409),
+    // where `first_deficit` yields `Some` only where `available < requested`
+    // (algebra.rs:231). This compares the reservation against ITSELF, so no
+    // grade can be short and no caller can change that. Kept as a
+    // fail-closed guard against a future change that makes `spent` a real
+    // measurement rather than the reservation (frankengit-zrxa).
     if reservation.can_settle(&spent).is_err() {
         let _settled = reservation.abort_unused(RepairNotPublished {
             reason: RepairAbortReason::PlacementWriteFailed,
@@ -607,6 +629,11 @@ pub fn repair_microsegment(
         }
     }
     let placement = manifest_id;
+    // UNREACHABLE BY CONSTRUCTION, caller-independent. `RepairPublished::verified`
+    // refuses only on its first three arguments, and all three are passed here
+    // as literal accepting constants. The `Err` arm below is therefore dead
+    // until one of them becomes a computed value -- which is exactly when it
+    // starts earning its keep (frankengit-zrxa).
     let receipt = match RepairPublished::verified(
         DecodeOutcome::Succeeded,
         CommitmentCheck::AllVerified,
