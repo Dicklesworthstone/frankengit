@@ -53,17 +53,29 @@
 //!
 //! # Status
 //!
-//! The first vertical slice is the regime detector in [`regime`], with its
-//! assumptions executable rather than documented, and the fail-closed selection
-//! rule in [`fallback`]. The evidence body and the
-//! remaining mechanisms of the section 33 library — conformal bounds,
+//! Implemented: the regime detector in [`regime`], with its assumptions
+//! executable rather than documented; the fail-closed selection rule in
+//! [`fallback`]; and the typed evidence body in [`evidence`], which carries all
+//! seven of `AGENTS.md` section 8's bindings as types and has canonical bytes.
+//!
+//! The evidence body has **no digest identity yet**. Computing one requires
+//! `frankengit/statistical-evidence/v1` to be registered in `fgit-crypto`'s
+//! `DOMAIN_REGISTRY`, which is another crate's frozen surface and is routed to
+//! its owner by mail under section 16.1. The canonical bytes do not depend on
+//! that, so they are complete; the artifact commitment is what waits.
+//!
+//! The remaining mechanisms of the section 33 library — conformal bounds,
 //! e-processes, bandit arm selection, off-policy evaluation with support and
 //! effective-sample-size gates, Beta-Bernoulli expected loss, and Lyapunov
 //! governors — are **not** implemented here yet, and this crate does not claim
 //! them.
 
+pub mod evidence;
 pub mod fallback;
 pub mod regime;
 
+pub use evidence::{
+    AssumptionSet, BindingRefusal, RegimeBinding, SequenceWindow, StatisticalEvidenceBody,
+};
 pub use fallback::{FallbackTrigger, PolicyGate, PolicySelection};
 pub use regime::{AssumptionFailure, Cusum, CusumConfig, Scaled, Shift};

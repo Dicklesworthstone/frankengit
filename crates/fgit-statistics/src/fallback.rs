@@ -59,7 +59,7 @@ impl FallbackTrigger {
 }
 
 /// What a controller may use for one decision.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PolicySelection {
     /// No trigger fired: the adaptive candidate is admissible.
     Candidate,
