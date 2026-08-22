@@ -36,13 +36,14 @@ use std::sync::{Arc, Mutex};
 
 use asupersync::runtime::{Runtime, RuntimeBuilder};
 use fgit_authority::{
-    AmbiguityReason, AsyncAuthorityStore, AuthorityLimits, CasOutcome, HeadGeneration, HeadInit,
-    HeadKey, HeadRead, ImmutableKey, ImmutableRead, StoreInstanceId,
+    AmbiguityReason, AsyncAuthorityStore, AuthorityLimits, AuthorityOp, AuthorityResponse,
+    AuthorityStore, CasOutcome, HeadGeneration, HeadInit, HeadKey, HeadRead, ImmutableKey,
+    ImmutableRead, MemoryAuthorityStore, StoreInstanceId,
 };
 use fgit_object_store::{
-    CanonicalHmacSha256Signer, ObjectStoreAuthority, ObjectStoreEndpoint, ObjectStoreMethod,
-    ObjectStoreRequest, ObjectStoreResponse, ObjectStoreTransport, ObjectStoreTransportError,
-    ProbeRunId, VersionTokenProfile,
+    CanonicalHmacSha256Signer, CapabilityProbeFailure, ObjectStoreAuthority, ObjectStoreEndpoint,
+    ObjectStoreMethod, ObjectStoreRequest, ObjectStoreResponse, ObjectStoreTransport,
+    ObjectStoreTransportError, ProbeRunId, VersionTokenProfile,
 };
 
 /// The adapter takes its transport by value, so the campaign holds the provider
@@ -109,6 +110,10 @@ struct ProviderState {
     requests: Vec<ObjectStoreRequest>,
     faults: Vec<Fault>,
     duplicates_delivered: usize,
+    /// When set, a write of bytes this key has held before reissues the EARLIER
+    /// token instead of minting a fresh one — i.e. the token is derived from
+    /// content, as a bare content-`ETag` backend's would be.
+    content_derived: bool,
 }
 
 /// An independent conditional object store with an injectable fault schedule.
@@ -118,6 +123,17 @@ struct FaultyProvider {
 }
 
 impl FaultyProvider {
+    /// Make this provider derive its version tokens from content.
+    ///
+    /// This is the profile the adapter must REFUSE at admission: delete plus a
+    /// byte-identical restore returns the earlier token, so a stale CAS holding
+    /// that token would succeed against what is logically a different write.
+    /// That is the ABA hazard, and refusing it is the whole purpose of the
+    /// admission probe.
+    fn make_content_derived(&self) {
+        self.lock().content_derived = true;
+    }
+
     fn arm(&self, faults: impl IntoIterator<Item = Fault>) {
         let mut state = self.lock();
         state.faults = faults.into_iter().collect();
@@ -273,9 +289,22 @@ impl ProviderState {
                     return plain(412);
                 }
 
-                self.next_token = self.next_token.checked_add(1).expect("token capacity");
-                let mut token = [0_u8; TOKEN_BYTES];
-                token[8..].copy_from_slice(&self.next_token.to_be_bytes());
+                let derived = if self.content_derived {
+                    self.objects.get(&url).and_then(|versions| {
+                        versions
+                            .iter()
+                            .find(|version| version.body == request.body)
+                            .map(|version| version.token)
+                    })
+                } else {
+                    None
+                };
+                let token = derived.unwrap_or_else(|| {
+                    self.next_token = self.next_token.checked_add(1).expect("token capacity");
+                    let mut fresh = [0_u8; TOKEN_BYTES];
+                    fresh[8..].copy_from_slice(&self.next_token.to_be_bytes());
+                    fresh
+                });
                 let versions = self.objects.entry(url).or_default();
                 versions.push(StoredVersion {
                     token,
@@ -720,4 +749,196 @@ fn without_the_stale_fault_the_same_read_observes_the_commit() {
         "a clean read observes the committed generation"
     );
     assert_eq!(receipt.body(), b"head-v2");
+}
+
+// ---------------------------------------------------------------------------
+// differential against the maintained reference profile
+// ---------------------------------------------------------------------------
+//
+// The oracle here is `MemoryAuthorityStore`, the reference profile this project
+// already maintains and exports, driven through the shared
+// `AuthorityOp`/`AuthorityResponse` vocabulary.
+//
+// IT IS DELIBERATELY NOT A HAND-WRITTEN MODEL. `fgit-authority`'s own campaign
+// contains a 124-line `SequentialSpec` implementing these semantics, but it
+// lives in a tests file and is unreachable from here. Writing a second copy
+// would create two models of one thing, free to drift apart — which is the
+// failure this workspace has been paying for elsewhere: a model tested only
+// against itself is a mirror, not a guard. Comparing against the maintained
+// reference has no such surface, because there is only ever one model and
+// somebody else owns keeping it right.
+
+/// Run one operation against the adapter, in the shared vocabulary.
+///
+/// This is a TRANSLATION, not a model: it records what the adapter actually
+/// answered in the vocabulary the reference also speaks. No semantics are
+/// decided here — that is the whole point of routing through `AuthorityOp`.
+fn adapter_execute(
+    runtime: &Runtime,
+    cx: &asupersync::Cx,
+    adapter: &ObjectStoreAuthority<ProviderHandle, CanonicalHmacSha256Signer>,
+    op: &AuthorityOp,
+) -> AuthorityResponse {
+    match op {
+        AuthorityOp::PutIfAbsent { key, body } => {
+            match block(runtime, adapter.put_if_absent(cx, key, body)) {
+                Ok(outcome) => AuthorityResponse::PutIfAbsent(outcome),
+                Err(failure) => failure.into_response(),
+            }
+        }
+        AuthorityOp::ReadImmutable { key } => match block(runtime, adapter.read_immutable(cx, key))
+        {
+            Ok(read) => AuthorityResponse::ReadImmutable(read),
+            Err(failure) => failure.into_response(),
+        },
+        AuthorityOp::InitializeHead {
+            key,
+            generation,
+            body,
+        } => match block(runtime, adapter.initialize_head(cx, key, *generation, body)) {
+            Ok(init) => AuthorityResponse::InitializeHead(init),
+            Err(failure) => failure.into_response(),
+        },
+        AuthorityOp::ReadHead { key } => match block(runtime, adapter.read_head(cx, key)) {
+            Ok(read) => AuthorityResponse::ReadHead(read),
+            Err(failure) => failure.into_response(),
+        },
+        other => panic!("this differential does not drive {other:?} yet"),
+    }
+}
+
+/// The adapter and the maintained reference agree operation by operation.
+///
+/// Immutable slots only, and deliberately so: head tokens are provider-issued
+/// and differ between backends by construction, so a naive equality on a head
+/// receipt would compare two correct answers and call them a disagreement. The
+/// immutable vocabulary has no such term, which makes it the honest subset to
+/// compare directly.
+#[test]
+fn the_adapter_and_the_reference_profile_agree_on_immutable_history() {
+    let (runtime, cx, adapter, _provider) = admit(9);
+    let reference = MemoryAuthorityStore::new(StoreInstanceId::from_raw(6006));
+
+    let key = ImmutableKey::new(b"campaign/differential".to_vec()).expect("key");
+    let other = ImmutableKey::new(b"campaign/absent".to_vec()).expect("key");
+
+    let script = vec![
+        AuthorityOp::ReadImmutable { key: key.clone() },
+        AuthorityOp::PutIfAbsent {
+            key: key.clone(),
+            body: b"differential body\n".to_vec(),
+        },
+        AuthorityOp::ReadImmutable { key: key.clone() },
+        // Byte-identical retry: idempotent, and distinct from a conflict.
+        AuthorityOp::PutIfAbsent {
+            key: key.clone(),
+            body: b"differential body\n".to_vec(),
+        },
+        // Different bytes at an occupied slot: immutability forbids replacement.
+        AuthorityOp::PutIfAbsent {
+            key: key.clone(),
+            body: b"a different body\n".to_vec(),
+        },
+        AuthorityOp::ReadImmutable { key: other.clone() },
+    ];
+
+    let mut agreed = 0_usize;
+    for (index, op) in script.iter().enumerate() {
+        let observed = adapter_execute(&runtime, &cx, &adapter, op);
+        let expected = reference.execute(op);
+        assert_eq!(
+            observed, expected,
+            "operation {index} diverged from the reference profile: {op:?}"
+        );
+        agreed += 1;
+    }
+
+    assert_eq!(
+        agreed,
+        script.len(),
+        "every scripted operation must have been compared; a short loop would agree vacuously"
+    );
+
+    // The script must actually exercise the interesting outcomes, or "they
+    // agree" is a statement about six reads of an empty store. Asserting the
+    // reference's own answers pins that the corpus discriminates.
+    assert_eq!(
+        reference.execute(&AuthorityOp::ReadImmutable { key }),
+        AuthorityResponse::ReadImmutable(ImmutableRead::Present(b"differential body\n".to_vec())),
+        "the differential script leaves the slot written, so it exercised a create"
+    );
+    assert_eq!(
+        reference.execute(&AuthorityOp::ReadImmutable { key: other }),
+        AuthorityResponse::ReadImmutable(ImmutableRead::Absent),
+        "and it exercised an absent read, so agreement is not agreement-on-one-shape"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the ABA drill fails closed — demonstrated, not inferred
+// ---------------------------------------------------------------------------
+
+/// A content-derived provider is REFUSED at admission, by name.
+///
+/// This is the acceptance's "fails closed on a content-ETag backend profile"
+/// half. Until now the campaign only showed the drill RAN; this shows it
+/// discriminates. A provider whose token is a function of content reissues the
+/// earlier token when identical bytes are restored — so a stale CAS holding
+/// that token would succeed against what is logically a later, different write.
+/// That is the ABA hazard, and admission must refuse rather than admit-and-hope.
+///
+/// The refusal is asserted BY VARIANT, not merely as "an error": an endpoint
+/// rejected for a malformed token or an unavailable conditional write would
+/// also be `Err`, and would prove nothing about ABA.
+#[test]
+fn a_content_derived_provider_is_refused_at_admission() {
+    let provider = ProviderHandle::default();
+    provider.0.make_content_derived();
+    let (runtime, cx) = runtime();
+
+    let failure = block(
+        &runtime,
+        ObjectStoreAuthority::<ProviderHandle, CanonicalHmacSha256Signer>::probe(
+            &cx,
+            &provider,
+            &signer(),
+            &endpoint(),
+            ProbeRunId::new([10; TOKEN_BYTES]),
+            VersionTokenProfile::Unique,
+        ),
+    )
+    .expect_err("a content-derived provider cannot prove no-ABA authority publication");
+
+    assert_eq!(
+        failure,
+        CapabilityProbeFailure::ContentDerivedVersionToken,
+        "the refusal must name content derivation specifically; any other failure would mean the \
+         endpoint was rejected for an unrelated reason and the ABA property was never tested"
+    );
+}
+
+/// The permitted twin, stated as a pair with the test above.
+///
+/// The SAME provider, differing only in whether tokens are content-derived, is
+/// admitted. Without this the refusal test is satisfied by a probe that refuses
+/// every endpoint — and `admit()` is used by nine other tests, so a probe that
+/// refused everything would have failed the whole file. This makes the pairing
+/// explicit rather than incidental.
+#[test]
+fn the_same_provider_with_unique_tokens_is_admitted() {
+    let provider = ProviderHandle::default();
+    let (runtime, cx) = runtime();
+
+    block(
+        &runtime,
+        ObjectStoreAuthority::<ProviderHandle, CanonicalHmacSha256Signer>::probe(
+            &cx,
+            &provider,
+            &signer(),
+            &endpoint(),
+            ProbeRunId::new([11; TOKEN_BYTES]),
+            VersionTokenProfile::Unique,
+        ),
+    )
+    .expect("a unique-token provider is admitted; only content derivation is disqualifying");
 }
