@@ -73,6 +73,38 @@ impl Grade {
         Self::ApprovalCapacity,
     ];
 
+    /// Compile-time completeness guard for [`Grade::ALL`].
+    ///
+    /// `ALL` is written by hand, but the vector algebra and its tests use it
+    /// to mean every resource dimension.  Omitting a future variant would
+    /// otherwise silently leave its discriminant outside the vector and turn
+    /// reads into zero and writes into no-ops.  The former length assertion
+    /// could not detect that omission: `ALL` is already typed as
+    /// `[Self; GRADE_COUNT]`, so comparing its length with `GRADE_COUNT` only
+    /// compared a constant with itself.
+    ///
+    /// This match has no wildcard, so adding a variant fails to compile beside
+    /// the hand-maintained list that has to be considered.  It deliberately
+    /// leaves [`Grade::index`] as the declaration-order discriminant because
+    /// the vector layout depends on that stable correspondence.
+    ///
+    /// Remove this guard only if the list becomes mechanically derived from
+    /// the enum, eliminating this drift boundary altogether.
+    const fn _every_grade_is_listed(value: Self) {
+        match value {
+            Self::Bytes
+            | Self::Objects
+            | Self::CpuMicros
+            | Self::MemoryBytes
+            | Self::FileDescriptors
+            | Self::EgressBytes
+            | Self::MoneyMicros
+            | Self::SecretExposureMicros
+            | Self::FailureDomainSlots
+            | Self::ApprovalCapacity => (),
+        }
+    }
+
     /// Position of this grade inside a [`ResourceVector`].
     #[must_use]
     pub const fn index(self) -> usize {
@@ -113,8 +145,6 @@ impl Grade {
         }
     }
 }
-
-const _: () = assert!(Grade::ALL.len() == GRADE_COUNT);
 
 impl fmt::Display for Grade {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

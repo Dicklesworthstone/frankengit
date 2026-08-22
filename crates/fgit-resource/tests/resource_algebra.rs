@@ -92,6 +92,24 @@ fn grade_list_is_closed_and_ordered() {
 }
 
 #[test]
+fn every_declared_grade_round_trips_through_its_vector_slot() {
+    // The exhaustive compiler guard beside `Grade::ALL` makes a newly added
+    // enum variant stop at that list. This runtime twin then checks the other
+    // half of the invariant for the declared set: every listed grade selects
+    // a real vector slot rather than being silently read as zero or ignored
+    // by `with`.
+    for grade in Grade::ALL {
+        let amount = u64::try_from(grade.index() + 1).expect("grade count fits u64");
+        let vector = ResourceVector::single(grade, amount);
+        assert_eq!(
+            vector.get(grade),
+            amount,
+            "{grade:?} must retain its amount in its declared vector slot"
+        );
+    }
+}
+
+#[test]
 fn combine_is_a_commutative_monoid_with_zero() {
     for seed in SEEDS {
         let mut rng = Prng::new(seed);
