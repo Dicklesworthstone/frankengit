@@ -859,6 +859,10 @@ dependencies = [
 [[package]]
 name = "fgit-statistics"
 version = "0.0.1"
+dependencies = [
+ "fgit-codec",
+ "fgit-types",
+]
 
 [[package]]
 name = "fgit-treefs"
