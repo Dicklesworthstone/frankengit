@@ -726,6 +726,9 @@ mod tests {
     use fgit_types::{CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, GitOid, GitOidSha1};
 
     use super::*;
+    // Not imported by the parent: production reads symbol ids and kinds,
+    // never constructs them. The forgeries below have to.
+    use asupersync::types::{SymbolId, SymbolKind};
 
     fn canonical_segment() -> Vec<u8> {
         let limits = SegmentLimits::default();
@@ -974,5 +977,189 @@ mod tests {
         assert_eq!(placement, manifest.identity().expect("manifest identifies"));
         assert!(current_authority.published.get());
         assert!(current_ledger.close().is_quiescent());
+    }
+
+    /// The microsegment twins of the checkpoint accept-chain probes.
+    ///
+    /// These are NOT redundant with the ones in `checkpoint.rs`. The two chains
+    /// are byte-for-byte indistinguishable from their refusals, payload
+    /// included, because `CheckpointRaptorProfile::SYMBOL_BYTES` and
+    /// `MicrosegmentRaptorProfile::SYMBOL_BYTES` are both 128. The only thing
+    /// that tells the two sites apart is which entry point the caller invoked,
+    /// so a probe against one chain says nothing about the other. If either
+    /// profile constant ever diverges, these are the tests that keep the split
+    /// honest.
+    fn forged_scoped(
+        scope: &MicrosegmentScope,
+        sbn: u8,
+        esi: u32,
+        len: usize,
+        kind: SymbolKind,
+        security: &SecurityContext,
+    ) -> ScopedSymbol {
+        let data = vec![0x5a_u8; len];
+        let symbol = Symbol::from_slice(
+            SymbolId::new(scope.engine_object_id(), sbn, esi),
+            &data,
+            kind,
+        );
+        ScopedSymbol {
+            scope: scope.clone(),
+            tag: security.sign_symbol_tag(&symbol),
+            symbol,
+        }
+    }
+
+    #[test]
+    fn a_microsegment_symbol_naming_a_second_source_block_is_refused_for_that_reason() {
+        let security = security();
+        let protected =
+            protect_microsegment(&canonical_segment(), &SegmentLimits::default(), &security)
+                .expect("canonical microsegment is profile-admitted");
+        let scope = protected.scope();
+        let size = usize::from(MicrosegmentRaptorProfile::SYMBOL_BYTES);
+
+        let refusal = reconstruct_microsegment(
+            scope,
+            &[forged_scoped(
+                scope,
+                1,
+                0,
+                size,
+                SymbolKind::Source,
+                &security,
+            )],
+            &SegmentLimits::default(),
+            &security,
+        );
+        assert!(
+            matches!(refusal, Err(RaptorRefusal::SourceBlockMismatch)),
+            "a non-zero source block number must refuse as SourceBlockMismatch, got {refusal:?}"
+        );
+
+        let twin = reconstruct_microsegment(
+            scope,
+            &[forged_scoped(
+                scope,
+                0,
+                0,
+                size,
+                SymbolKind::Source,
+                &security,
+            )],
+            &SegmentLimits::default(),
+            &security,
+        );
+        assert!(
+            !matches!(twin, Err(RaptorRefusal::SourceBlockMismatch)),
+            "sbn 0 must clear the source-block guard on the microsegment chain too"
+        );
+    }
+
+    #[test]
+    fn a_microsegment_repair_symbol_in_a_source_slot_is_refused_as_a_kind_mismatch() {
+        let security = security();
+        let protected =
+            protect_microsegment(&canonical_segment(), &SegmentLimits::default(), &security)
+                .expect("canonical microsegment is profile-admitted");
+        let scope = protected.scope();
+        let size = usize::from(MicrosegmentRaptorProfile::SYMBOL_BYTES);
+        let source_symbols = scope
+            .source_symbols()
+            .expect("a protected scope counts its source symbols");
+        assert!(
+            source_symbols > 0,
+            "the denominator must be non-zero or esi 0 would not name a source slot"
+        );
+
+        let refusal = reconstruct_microsegment(
+            scope,
+            &[forged_scoped(
+                scope,
+                0,
+                0,
+                size,
+                SymbolKind::Repair,
+                &security,
+            )],
+            &SegmentLimits::default(),
+            &security,
+        );
+        assert!(
+            matches!(refusal, Err(RaptorRefusal::EncodingSymbolKindMismatch)),
+            "a repair-kind symbol in a source slot must refuse as EncodingSymbolKindMismatch, got {refusal:?}"
+        );
+
+        let twin = reconstruct_microsegment(
+            scope,
+            &[forged_scoped(
+                scope,
+                0,
+                0,
+                size,
+                SymbolKind::Source,
+                &security,
+            )],
+            &SegmentLimits::default(),
+            &security,
+        );
+        assert!(
+            !matches!(twin, Err(RaptorRefusal::EncodingSymbolKindMismatch)),
+            "an agreeing kind must clear the guard; it is keyed on the disagreement"
+        );
+    }
+
+    #[test]
+    fn a_short_microsegment_symbol_is_refused_with_both_sizes_named() {
+        let security = security();
+        let protected =
+            protect_microsegment(&canonical_segment(), &SegmentLimits::default(), &security)
+                .expect("canonical microsegment is profile-admitted");
+        let scope = protected.scope();
+        let size = usize::from(MicrosegmentRaptorProfile::SYMBOL_BYTES);
+
+        let refusal = reconstruct_microsegment(
+            scope,
+            &[forged_scoped(
+                scope,
+                0,
+                0,
+                size - 1,
+                SymbolKind::Source,
+                &security,
+            )],
+            &SegmentLimits::default(),
+            &security,
+        );
+        match refusal {
+            Err(RaptorRefusal::SymbolSizeMismatch { offered, expected }) => {
+                assert_eq!(offered, size - 1, "the refusal must name the offered size");
+                assert_eq!(
+                    expected, size,
+                    "the refusal must name this profile's symbol size"
+                );
+            }
+            other => panic!("a short symbol must refuse as SymbolSizeMismatch, got {other:?}"),
+        }
+    }
+
+    /// `protect_microsegment` refuses bytes that are not a readable segment
+    /// before it derives a scope, so a malformed source can never acquire an
+    /// identity it would then be encoded under.
+    #[test]
+    fn bytes_that_are_not_a_readable_segment_are_refused_before_a_scope_exists() {
+        let security = security();
+        let limits = SegmentLimits::default();
+
+        let refusal = protect_microsegment(b"not a canonical microsegment", &limits, &security);
+        assert!(
+            matches!(refusal, Err(RaptorRefusal::SourceSegmentInvalid)),
+            "unreadable source bytes must refuse as SourceSegmentInvalid, got {refusal:?}"
+        );
+
+        // Permitted twin: the canonical builder's output protects, so the guard
+        // discriminates on readability rather than refusing every input.
+        protect_microsegment(&canonical_segment(), &limits, &security)
+            .expect("a canonical segment must still protect");
     }
 }
