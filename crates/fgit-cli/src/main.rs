@@ -41,6 +41,13 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Ok(fgit_cli::CliOutcome::Exported { destination, bytes }) => {
+            println!(
+                "exported {bytes} authority-selected pack bytes to {}",
+                destination.display()
+            );
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("fg: {error}");
             ExitCode::from(2)

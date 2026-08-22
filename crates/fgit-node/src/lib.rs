@@ -435,6 +435,17 @@ impl AuthoritySelectedPackPayload {
     pub const fn receipt(&self) -> &PackWriteReceipt {
         &self.receipt
     }
+
+    /// Consumes this completed payload and returns the exact Git pack bytes.
+    ///
+    /// This does not re-materialize the closure or consult the object fabric:
+    /// the returned bytes are the already completed pack whose receipt remains
+    /// available until this call consumes the payload.  A file-export caller
+    /// may therefore publish only this immutable, authority-selected result.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
 }
 
 impl PackPayloadSource for AuthoritySelectedPackPayload {

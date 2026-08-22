@@ -4,15 +4,21 @@
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_node::{
     DoctorReport, GitDaemonSessionOutcome, NodeConfig, NodeGitDaemonServeRefusal,
     NodeInitialization, OneNode,
 };
 use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, TenantId};
+
+const EXPORT_TEMPORARY_ATTEMPTS: usize = 16;
+
+static NEXT_EXPORT_TEMPORARY: AtomicU64 = AtomicU64::new(1);
 
 /// Typed refusal from the minimal `fg` command parser.
 #[derive(Debug)]
@@ -31,6 +37,45 @@ pub enum CliRefusal {
     Listener(io::Error),
     /// A one-session git-daemon serve attempt refused.
     Serve(NodeGitDaemonServeRefusal),
+    /// The authority-selected pack could not be materialized for export.
+    ExportMaterialization(Box<fgit_node::NodePackMaterializationRefusal>),
+    /// The export destination had no final filename component.
+    ExportDestination,
+    /// A new export must never replace a pre-existing file.
+    ExportDestinationExists(Box<PathBuf>),
+    /// Staging or publishing an export file refused.
+    ExportFile {
+        /// The root-last export operation that failed.
+        operation: &'static str,
+        /// The file involved in that operation.
+        path: Box<PathBuf>,
+        /// The operating-system refusal.
+        source: Box<io::Error>,
+    },
+    /// A staged export failed and its temporary artifact could not be reaped.
+    ExportFileCleanup {
+        /// The original failed export operation.
+        operation: &'static str,
+        /// The temporary artifact that still needs operator attention.
+        temporary: Box<PathBuf>,
+        /// The original export refusal.
+        source: Box<io::Error>,
+        /// The failed cleanup refusal.
+        cleanup: Box<io::Error>,
+    },
+    /// The output became visible, but its staged hard link could not be reaped.
+    ///
+    /// The error intentionally does not claim the export failed: the named
+    /// destination is already visible and the retained staging path must be
+    /// reported rather than silently leaked.
+    ExportVisibleCleanup {
+        /// The visible, completed destination.
+        destination: Box<PathBuf>,
+        /// The orphaned staging link to the same immutable bytes.
+        temporary: Box<PathBuf>,
+        /// The failed staging cleanup.
+        cleanup: Box<io::Error>,
+    },
     /// Doctor inspection refused and the following mandatory node shutdown
     /// also failed, so neither failure is discarded.
     DoctorCleanup {
@@ -47,13 +92,21 @@ pub enum CliRefusal {
         /// The failed explicit lifecycle close.
         cleanup: Box<fgit_node::NodeRefusal>,
     },
+    /// Export refused and mandatory node shutdown also failed, so neither
+    /// failure is discarded.
+    ExportCleanup {
+        /// The export failure before lifecycle cleanup.
+        export: Box<Self>,
+        /// The failed explicit lifecycle close.
+        cleanup: Box<fgit_node::NodeRefusal>,
+    },
 }
 
 impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex>; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address>",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex>; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path>; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address>",
             ),
             Self::Tenant(error) | Self::Repository(error) | Self::Object(error) => {
                 Display::fmt(error, formatter)
@@ -61,6 +114,41 @@ impl Display for CliRefusal {
             Self::Node(error) => Display::fmt(error, formatter),
             Self::Listener(error) => write!(formatter, "cannot bind fg serve listener: {error}"),
             Self::Serve(error) => Display::fmt(error, formatter),
+            Self::ExportMaterialization(error) => {
+                write!(formatter, "cannot materialize authority-selected export: {error}")
+            }
+            Self::ExportDestination => {
+                formatter.write_str("export destination must name a new file")
+            }
+            Self::ExportDestinationExists(path) => {
+                write!(formatter, "export destination already exists: {}", path.display())
+            }
+            Self::ExportFile {
+                operation,
+                path,
+                source,
+            } => write!(formatter, "cannot {operation} {}: {source}", path.display()),
+            Self::ExportFileCleanup {
+                operation,
+                temporary,
+                source,
+                cleanup,
+            } => write!(
+                formatter,
+                "cannot {operation} {} ({source}); cannot reap staged export {}: {cleanup}",
+                temporary.display(),
+                temporary.display(),
+            ),
+            Self::ExportVisibleCleanup {
+                destination,
+                temporary,
+                cleanup,
+            } => write!(
+                formatter,
+                "export is visible at {}; cannot reap staged export {}: {cleanup}",
+                destination.display(),
+                temporary.display(),
+            ),
             Self::DoctorCleanup {
                 inspection,
                 cleanup,
@@ -71,6 +159,10 @@ impl Display for CliRefusal {
             Self::ServeCleanup { serving, cleanup } => write!(
                 formatter,
                 "serve session failed ({serving}) and node shutdown also failed ({cleanup})"
+            ),
+            Self::ExportCleanup { export, cleanup } => write!(
+                formatter,
+                "export failed ({export}) and node shutdown also failed ({cleanup})"
             ),
         }
     }
@@ -83,9 +175,14 @@ impl Error for CliRefusal {
             Self::Node(error) => Some(error),
             Self::Listener(error) => Some(error),
             Self::Serve(error) => Some(error),
+            Self::ExportMaterialization(error) => Some(error.as_ref()),
+            Self::ExportFile { source, .. } => Some(source.as_ref()),
+            Self::ExportFileCleanup { source, .. } => Some(source.as_ref()),
+            Self::ExportVisibleCleanup { cleanup, .. } => Some(cleanup.as_ref()),
             Self::DoctorCleanup { inspection, .. } => Some(inspection),
             Self::ServeCleanup { serving, .. } => Some(serving),
-            Self::Usage => None,
+            Self::ExportCleanup { export, .. } => Some(export.as_ref()),
+            Self::Usage | Self::ExportDestination | Self::ExportDestinationExists(_) => None,
         }
     }
 }
@@ -108,6 +205,15 @@ pub enum CliOutcome {
         /// Whether the session completed an empty advertisement or a pack.
         session: GitDaemonSessionOutcome,
     },
+    /// `fg export` made a completed authority-selected Git pack visible at a
+    /// previously absent local path.
+    Exported {
+        /// Destination that was linked only after pack materialization and a
+        /// successful temporary-file sync.
+        destination: PathBuf,
+        /// Exact byte count of the completed pack.
+        bytes: usize,
+    },
 }
 
 /// Executes a bounded command invocation without ambient configuration.
@@ -127,6 +233,9 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             let sample =
                 GitOid::from_hex(GitHashAlgorithm::Sha1, sample).map_err(CliRefusal::Object)?;
             run_doctor(storage_root, tenant, repository, Some(sample))
+        }
+        [command, storage_root, tenant, repository, destination] if command == "export" => {
+            run_export(storage_root, tenant, repository, PathBuf::from(destination))
         }
         [command, storage_root, tenant, repository, listen_address] if command == "serve" => {
             let listener = TcpListener::bind(listen_address).map_err(CliRefusal::Listener)?;
@@ -149,6 +258,130 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             }
         }
         _ => Err(CliRefusal::Usage),
+    }
+}
+
+fn run_export(
+    storage_root: &str,
+    tenant: &str,
+    repository: &str,
+    destination: PathBuf,
+) -> Result<CliOutcome, CliRefusal> {
+    let node = OneNode::open_existing(node_config(storage_root, tenant, repository)?)
+        .map_err(CliRefusal::Node)?;
+    let exported = node
+        .runtime()
+        .block_on(node.authority_selected_pack_payload())
+        .map_err(|error| CliRefusal::ExportMaterialization(Box::new(error)))
+        .and_then(|payload| {
+            let bytes = payload.into_bytes();
+            write_new_export(&destination, &bytes)?;
+            Ok(CliOutcome::Exported {
+                destination,
+                bytes: bytes.len(),
+            })
+        });
+    let cleanup = node.shutdown();
+    match (exported, cleanup) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Err(export), Ok(())) => Err(export),
+        (Ok(_), Err(cleanup)) => Err(CliRefusal::Node(cleanup)),
+        (Err(export), Err(cleanup)) => Err(CliRefusal::ExportCleanup {
+            export: Box::new(export),
+            cleanup: Box::new(cleanup),
+        }),
+    }
+}
+
+/// Writes a completed pack through a same-directory staging file and publishes
+/// it only by linking to a previously absent destination.
+///
+/// `hard_link` is deliberately used rather than `rename`: it fails if another
+/// writer made the destination visible first, so this command cannot silently
+/// replace an operator's prior export.  Both paths share a directory, making
+/// the publication one filesystem operation over the synced completed bytes.
+fn write_new_export(destination: &Path, bytes: &[u8]) -> Result<(), CliRefusal> {
+    let (temporary, mut staged) = create_export_staging_file(destination)?;
+    if let Err(source) = staged.write_all(bytes) {
+        return abort_staged_export("write staged export", temporary, source);
+    }
+    if let Err(source) = staged.sync_all() {
+        return abort_staged_export("sync staged export", temporary, source);
+    }
+    drop(staged);
+
+    if let Err(source) = fs::hard_link(&temporary, destination) {
+        return abort_staged_export("publish staged export", temporary, source);
+    }
+    if let Err(cleanup) = fs::remove_file(&temporary) {
+        return Err(CliRefusal::ExportVisibleCleanup {
+            destination: Box::new(destination.to_path_buf()),
+            temporary: Box::new(temporary),
+            cleanup: Box::new(cleanup),
+        });
+    }
+    Ok(())
+}
+
+fn create_export_staging_file(destination: &Path) -> Result<(PathBuf, File), CliRefusal> {
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = destination
+        .file_name()
+        .ok_or(CliRefusal::ExportDestination)?;
+    for _ in 0..EXPORT_TEMPORARY_ATTEMPTS {
+        let sequence = NEXT_EXPORT_TEMPORARY.fetch_add(1, Ordering::Relaxed);
+        let mut temporary_name = file_name.to_os_string();
+        temporary_name.push(format!(
+            ".fgit-export-{}-{sequence}.tmp",
+            std::process::id()
+        ));
+        let temporary = parent.join(temporary_name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => return Ok((temporary, file)),
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(CliRefusal::ExportFile {
+                    operation: "create staged export",
+                    path: Box::new(temporary),
+                    source: Box::new(source),
+                });
+            }
+        }
+    }
+    Err(CliRefusal::ExportFile {
+        operation: "create a unique staged export",
+        path: Box::new(destination.to_path_buf()),
+        source: Box::new(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "all bounded export staging names already exist",
+        )),
+    })
+}
+
+fn abort_staged_export(
+    operation: &'static str,
+    temporary: PathBuf,
+    source: io::Error,
+) -> Result<(), CliRefusal> {
+    match fs::remove_file(&temporary) {
+        Ok(()) => Err(CliRefusal::ExportFile {
+            operation,
+            path: Box::new(temporary),
+            source: Box::new(source),
+        }),
+        Err(cleanup) => Err(CliRefusal::ExportFileCleanup {
+            operation,
+            temporary: Box::new(temporary),
+            source: Box::new(source),
+            cleanup: Box::new(cleanup),
+        }),
     }
 }
 
@@ -247,5 +480,45 @@ mod tests {
             "not-an-object".to_owned(),
         ];
         assert!(matches!(run(&command), Err(CliRefusal::Object(_))));
+    }
+
+    #[test]
+    fn export_writes_a_new_authority_selected_pack_without_replacing_a_file() {
+        let scratch = ScratchDirectory::new();
+        let storage_root = scratch.0.to_string_lossy().into_owned();
+        let tenant = "11111111111111111111111111111111".to_owned();
+        let repository = "22222222222222222222222222222222".to_owned();
+        let init = vec![
+            "init".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+        ];
+        assert!(matches!(run(&init), Ok(CliOutcome::Initialized(_))));
+
+        let destination = scratch.0.join("empty.pack");
+        let export = vec![
+            "export".to_owned(),
+            storage_root,
+            tenant,
+            repository,
+            destination.to_string_lossy().into_owned(),
+        ];
+        let outcome = run(&export).expect("empty canonical closure exports as a real pack");
+        let CliOutcome::Exported {
+            destination: reported,
+            bytes,
+        } = outcome
+        else {
+            panic!("export command reports its completed pack");
+        };
+        assert_eq!(reported, destination);
+        let pack = fs::read(&destination).expect("new export is visible at its requested path");
+        assert_eq!(pack.len(), bytes);
+        assert_eq!(&pack[..4], b"PACK");
+        assert!(matches!(
+            run(&export),
+            Err(CliRefusal::ExportDestinationExists(existing)) if *existing == destination
+        ));
     }
 }
