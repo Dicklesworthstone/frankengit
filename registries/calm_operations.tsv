@@ -14,3 +14,4 @@ CALM-011	merge_bounded_telemetry	commutative_but_bounded	telemetry_profile	decla
 CALM-012	rank_context_candidates	local_deterministic	context_planner	ordering does not change source truth	return_initial_results	specified
 CALM-013	add_review_comment_event	head_cas_required	repository_authority	entity sequence and permission evaluation require one decision order	refuse_or_rebase	specified
 CALM-014	merge_peer_availability_map	commutative_but_bounded	availability_profile	retractable observations under declared merge algebra and reset semantics	reset_to_safe_default	specified
+CALM-015	warm_authenticated_admission_materialization	monotone_scoped	authenticated_repository_authority_head	one bounded cache entry is derived from one exact authenticated basis and can be discarded without changing canonical truth	discard_cache_and_refuse_unmaterialized_or_mismatched_basis	specified

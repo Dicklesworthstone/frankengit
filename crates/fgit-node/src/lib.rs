@@ -14,20 +14,27 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Read, Write};
+use std::mem::size_of;
 use std::net::{Shutdown, TcpListener};
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use std::time::Duration;
 
-use fgit_admission::{AdmissionProjection, AdmissionSnapshot};
+use fgit_admission::{
+    AdmissionProjection, AdmissionSnapshot, CanonicalAdmissionStore, CanonicalRefState,
+    CommitMaterialization, PermittedObjectClosure, RefusalMaterialization, ValidatedClosure,
+    canonical_ref_state_root, permitted_object_closure_root,
+};
 use fgit_authority::{
-    AsyncAuthorityStore, AuthenticatedHead, AuthorityLimits, AuthorityVersionToken, HeadInit,
-    HeadKey, HeadRead, OutcomeLookup, PublicationOutcome, StoreInstanceId,
-    initialize_repository_async, publish_decisions_async, resolve_outcome_async,
+    AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
+    AuthorityVersionToken, HeadInit, HeadKey, HeadRead, ImmutableKey, ImmutableRead, KeyError,
+    OutcomeLookup, PublicationOutcome, PutOutcome, StoreInstanceId, initialize_repository_async,
+    publish_decisions_async, resolve_outcome_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
 use fgit_chronicle::PublicationBasis;
 use fgit_codec::schema::{RepositoryAuthorityHeadBody, RepositoryDecisionBatchBody};
-use fgit_codec::{CryptoBodyIdentity, body_id};
+use fgit_codec::{CodecRefusal, CryptoBodyIdentity, body_id, decode_body, encode_body};
 use fgit_crypto::{GitObjectKind, IdentityDomain, git_object_id, git_payload_commitment};
 use fgit_git_object::ObjectType;
 use fgit_object_fabric::fabric::{
@@ -42,7 +49,7 @@ use fgit_resource::{
 use fgit_runtime::{BudgetClass, NodeRuntime, RuntimeProfile, RuntimeRefusal};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, GitHashAlgorithm, GitOid, HeadGeneration, PolicyEpoch,
-    RegistryEpoch, RepositoryAuthorityHeadId, RepositoryId, TenantId,
+    RefusalCode, RegistryEpoch, RepositoryAuthorityHeadId, RepositoryId, TenantId,
 };
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, PackPayloadSource, PackRequest,
@@ -54,6 +61,8 @@ use fsqlite_types::cx::Cx as FsqliteCx;
 const OBJECT_CODEC_NAMESPACE: &[u8] = b"git-object-body/v1";
 const HEAD_KEY_PREFIX: &[u8] = b"frankengit/node/head/";
 const FABRIC_NAMESPACE_PREFIX: &[u8] = b"frankengit/node/object/";
+const ADMISSION_REF_STATE_KEY_PREFIX: &[u8] = b"frankengit/admission/ref-state/v1/";
+const ADMISSION_CLOSURE_KEY_PREFIX: &[u8] = b"frankengit/admission/object-closure/v1/";
 const DEFAULT_MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 const AUTHORITY_DATABASE_FILE: &str = "authority.fsqlite";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -199,6 +208,8 @@ impl Error for AdmissionUploadPackRefusal {
 pub enum NodeAdmissionViewRefusal {
     /// The durable authority read or authentication refused.
     Authority(NodeRefusal),
+    /// The durable canonical-admission materializer refused the selected head.
+    Materialization(AdmissionMaterializationRefusal),
     /// The authenticated receipt did not carry one usable authority-head body.
     HeadBody(fgit_authority::HeadBodyRefusal),
     /// The canonical authority-head body could not be re-identified.
@@ -213,6 +224,7 @@ impl Display for NodeAdmissionViewRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Authority(error) => Display::fmt(error, formatter),
+            Self::Materialization(error) => Display::fmt(error, formatter),
             Self::HeadBody(error) => Display::fmt(error, formatter),
             Self::HeadIdentity(error) => Display::fmt(error, formatter),
             Self::HeadIdentityDomain(error) => Display::fmt(error, formatter),
@@ -225,12 +237,429 @@ impl Error for NodeAdmissionViewRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Authority(error) => Some(error),
+            Self::Materialization(error) => Some(error),
             Self::HeadBody(error) => Some(error),
             Self::HeadIdentity(error) => Some(error),
             Self::HeadIdentityDomain(error) => Some(error),
             Self::View(error) => Some(error),
         }
     }
+}
+
+/// Authority-backed materialization of the canonical admission state selected
+/// by one exact authenticated repository head.
+///
+/// Canonical ref frames live in immutable authority slots.  The synchronous
+/// [`CanonicalAdmissionStore`] view below is deliberately only a cache of one
+/// such materialization: it never reads the database, calls `block_on`, or
+/// treats its cache as canonical.  A caller must first refresh it through the
+/// async authority contract, and its projection refuses a different head,
+/// basis, repository, policy epoch, or configuration root.
+#[derive(Debug, Default)]
+pub struct DurableAdmissionMaterializer {
+    materialized: RwLock<Option<MaterializedAdmissionState>>,
+}
+
+#[derive(Clone, Debug)]
+struct MaterializedAdmissionState {
+    authenticated: AuthenticatedHead,
+    basis: PublicationBasis,
+    ref_state: CanonicalRefState,
+    policy_epoch: PolicyEpoch,
+    configuration_root: Digest,
+}
+
+/// One immutable admission snapshot paired with the authority receipt that
+/// selected it.
+///
+/// The receipt is intentionally retained with the snapshot.  A user that
+/// needs the generic admission interface can pass the same receipt and basis
+/// to [`AdmissionProjection::snapshot`]; mixing an otherwise-valid snapshot
+/// with another head is a typed refusal.
+#[derive(Clone, Debug)]
+pub struct MaterializedAdmission {
+    authenticated: AuthenticatedHead,
+    basis: PublicationBasis,
+    snapshot: AdmissionSnapshot,
+}
+
+impl MaterializedAdmission {
+    /// The exact authenticated receipt whose head selected this snapshot.
+    #[must_use]
+    pub const fn authenticated(&self) -> &AuthenticatedHead {
+        &self.authenticated
+    }
+
+    /// The exact publication basis reconstructed from that receipt.
+    #[must_use]
+    pub const fn basis(&self) -> &PublicationBasis {
+        &self.basis
+    }
+
+    /// The immutable ref view selected by the authenticated head.
+    #[must_use]
+    pub const fn snapshot(&self) -> &AdmissionSnapshot {
+        &self.snapshot
+    }
+}
+
+/// Failure while staging or refreshing canonical admission state through the
+/// durable async authority surface.
+#[derive(Debug)]
+pub enum AdmissionMaterializationRefusal {
+    /// The repository head has not been initialized.
+    HeadAbsent,
+    /// The authority operation refused or became ambiguous.
+    Authority(AuthorityFailure),
+    /// The authenticated receipt could not be decoded as its typed head.
+    HeadBody(fgit_authority::HeadBodyRefusal),
+    /// The authenticated head belongs to a different repository.
+    RepositoryMismatch {
+        /// Repository selected by the caller/node configuration.
+        expected: RepositoryId,
+        /// Repository encoded in the authenticated head.
+        observed: RepositoryId,
+    },
+    /// Re-identifying the typed authority head failed.
+    HeadIdentity(CodecRefusal),
+    /// The head identity carried a different domain than an authority head.
+    HeadIdentityDomain(fgit_types::TypeRefusal),
+    /// A canonical admission frame could not be encoded or decoded.
+    CanonicalFrame(CodecRefusal),
+    /// A canonical frame did not reproduce the root named by authority.
+    CanonicalRoot(RefusalCode),
+    /// No immutable canonical frame existed for the authority-selected root.
+    ImmutableAbsent(Digest),
+    /// A deterministic immutable key was already occupied by different bytes.
+    ImmutableConflict,
+    /// The caller-derived immutable key exceeded the authority key contract.
+    Key(KeyError),
+    /// The process-local materialization cache was poisoned.
+    CachePoisoned,
+}
+
+impl Display for AdmissionMaterializationRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::HeadAbsent => formatter.write_str("canonical admission head is absent"),
+            Self::Authority(error) => Display::fmt(error, formatter),
+            Self::HeadBody(error) => Display::fmt(error, formatter),
+            Self::RepositoryMismatch { expected, observed } => write!(
+                formatter,
+                "authenticated admission head repository {observed:?} differs from {expected:?}"
+            ),
+            Self::HeadIdentity(error) | Self::CanonicalFrame(error) => {
+                Display::fmt(error, formatter)
+            }
+            Self::HeadIdentityDomain(error) => Display::fmt(error, formatter),
+            Self::CanonicalRoot(code) => write!(
+                formatter,
+                "canonical admission body did not reproduce its authority root: {code:?}"
+            ),
+            Self::ImmutableAbsent(root) => {
+                write!(formatter, "canonical admission body {root} is absent")
+            }
+            Self::ImmutableConflict => {
+                formatter.write_str("canonical admission immutable slot conflicts")
+            }
+            Self::Key(error) => Display::fmt(error, formatter),
+            Self::CachePoisoned => formatter.write_str("canonical admission cache is poisoned"),
+        }
+    }
+}
+
+impl Error for AdmissionMaterializationRefusal {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Authority(error) => Some(error),
+            Self::HeadBody(error) => Some(error),
+            Self::HeadIdentity(error) | Self::CanonicalFrame(error) => Some(error),
+            Self::HeadIdentityDomain(error) => Some(error),
+            Self::Key(error) => Some(error),
+            Self::HeadAbsent
+            | Self::RepositoryMismatch { .. }
+            | Self::CanonicalRoot(_)
+            | Self::ImmutableAbsent(_)
+            | Self::ImmutableConflict
+            | Self::CachePoisoned => None,
+        }
+    }
+}
+
+impl DurableAdmissionMaterializer {
+    /// Stages one immutable canonical ref-state frame through the async
+    /// authority contract and returns the root its bytes prove.
+    ///
+    /// The frame becomes durable (or is proven an identical retry) before any
+    /// authority head may name its root.  A collision is refused rather than
+    /// overwritten.
+    pub async fn stage_ref_state_in<Authority>(
+        &self,
+        authority: &Authority,
+        cx: &Authority::Context,
+        repository_id: RepositoryId,
+        state: CanonicalRefState,
+    ) -> Result<Digest, AdmissionMaterializationRefusal>
+    where
+        Authority: AsyncAuthorityStore + ?Sized,
+    {
+        let root = canonical_ref_state_root(&state)
+            .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
+        let frame = encode_body(&state).map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
+        let key = admission_immutable_key(ADMISSION_REF_STATE_KEY_PREFIX, repository_id, root)
+            .map_err(AdmissionMaterializationRefusal::Key)?;
+        stage_immutable_frame(authority, cx, &key, &frame).await?;
+        Ok(root)
+    }
+
+    /// Stages one immutable validated object-closure frame through authority.
+    ///
+    /// This deliberately does not make the closure current: only the selected
+    /// RCR can do that, and a head does not carry a closure root.  Until the
+    /// chronicle reader is composed, synchronous closure resolution remains a
+    /// typed absence rather than an invented association.
+    pub async fn stage_permitted_object_closure_in<Authority>(
+        &self,
+        authority: &Authority,
+        cx: &Authority::Context,
+        repository_id: RepositoryId,
+        closure: PermittedObjectClosure,
+    ) -> Result<Digest, AdmissionMaterializationRefusal>
+    where
+        Authority: AsyncAuthorityStore + ?Sized,
+    {
+        let root = permitted_object_closure_root(&closure)
+            .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
+        let frame =
+            encode_body(&closure).map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
+        let key = admission_immutable_key(ADMISSION_CLOSURE_KEY_PREFIX, repository_id, root)
+            .map_err(AdmissionMaterializationRefusal::Key)?;
+        stage_immutable_frame(authority, cx, &key, &frame).await?;
+        Ok(root)
+    }
+
+    /// Reads, authenticates, and materializes the authority-selected canonical
+    /// ref frame for one repository.
+    ///
+    /// The one mutable field in this type is only a bounded decoded cache.
+    /// It is replaced after the immutable frame and every binding have been
+    /// validated, and is never consulted as an authority source.
+    pub async fn materialize_current_in<Authority>(
+        &self,
+        authority: &Authority,
+        cx: &Authority::Context,
+        head_key: &HeadKey,
+        repository_id: RepositoryId,
+    ) -> Result<MaterializedAdmission, AdmissionMaterializationRefusal>
+    where
+        Authority: AsyncAuthorityStore + ?Sized,
+    {
+        let HeadRead::Present(receipt) = authority
+            .read_head(cx, head_key)
+            .await
+            .map_err(AdmissionMaterializationRefusal::Authority)?
+        else {
+            return Err(AdmissionMaterializationRefusal::HeadAbsent);
+        };
+        let authenticated = authority
+            .authenticate_head_receipt(cx, &receipt)
+            .await
+            .map_err(AdmissionMaterializationRefusal::Authority)?;
+        let body = authenticated
+            .body()
+            .map_err(AdmissionMaterializationRefusal::HeadBody)?;
+        if body.repository_id != repository_id {
+            return Err(AdmissionMaterializationRefusal::RepositoryMismatch {
+                expected: repository_id,
+                observed: body.repository_id,
+            });
+        }
+        let head_id = body_id(&CryptoBodyIdentity, &body)
+            .map_err(AdmissionMaterializationRefusal::HeadIdentity)
+            .and_then(|identity| {
+                RepositoryAuthorityHeadId::from_internal_object_id(identity)
+                    .map_err(AdmissionMaterializationRefusal::HeadIdentityDomain)
+            })?;
+        let basis = PublicationBasis::new(head_id, body.clone());
+        let key =
+            admission_immutable_key(ADMISSION_REF_STATE_KEY_PREFIX, repository_id, body.ref_root)
+                .map_err(AdmissionMaterializationRefusal::Key)?;
+        let ImmutableRead::Present(frame) = authority
+            .read_immutable(cx, &key)
+            .await
+            .map_err(AdmissionMaterializationRefusal::Authority)?
+        else {
+            return Err(AdmissionMaterializationRefusal::ImmutableAbsent(
+                body.ref_root,
+            ));
+        };
+        let ref_state = decode_body::<CanonicalRefState>(&frame, fgit_codec::DecodeLimits::DEFAULT)
+            .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
+        if canonical_ref_state_root(&ref_state)
+            .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
+            != body.ref_root
+        {
+            return Err(AdmissionMaterializationRefusal::CanonicalRoot(
+                RefusalCode::InternalInvariantBreach,
+            ));
+        }
+        let snapshot = AdmissionSnapshot {
+            refs: ref_state.refs().clone(),
+            forge_positions: Default::default(),
+            retention: Default::default(),
+            outbox: Default::default(),
+        };
+        let materialized = MaterializedAdmission {
+            authenticated: authenticated.clone(),
+            basis: basis.clone(),
+            snapshot,
+        };
+        let state = MaterializedAdmissionState {
+            authenticated,
+            basis,
+            ref_state,
+            policy_epoch: body.policy_epoch,
+            configuration_root: body.configuration_root,
+        };
+        *self
+            .materialized
+            .write()
+            .map_err(|_| AdmissionMaterializationRefusal::CachePoisoned)? = Some(state);
+        Ok(materialized)
+    }
+
+    fn snapshot_for(
+        &self,
+        basis: &PublicationBasis,
+        authenticated: &AuthenticatedHead,
+    ) -> Result<AdmissionSnapshot, RefusalCode> {
+        let authenticated_body = authenticated
+            .body()
+            .map_err(|_| RefusalCode::AuthorityReceiptInvalid)?;
+        if authenticated_body != *basis.body() {
+            return Err(RefusalCode::AuthorityReceiptStale);
+        }
+        let guard = self
+            .materialized
+            .read()
+            .map_err(|_| RefusalCode::InternalInvariantBreach)?;
+        let Some(materialized) = guard.as_ref() else {
+            return Err(RefusalCode::EvidenceMissing);
+        };
+        if materialized.authenticated != *authenticated
+            || materialized.basis != *basis
+            || materialized.basis.body().repository_id != authenticated_body.repository_id
+            || materialized.policy_epoch != authenticated_body.policy_epoch
+            || materialized.configuration_root != authenticated_body.configuration_root
+            || canonical_ref_state_root(&materialized.ref_state)? != authenticated_body.ref_root
+        {
+            return Err(RefusalCode::AuthorityReceiptStale);
+        }
+        Ok(AdmissionSnapshot {
+            refs: materialized.ref_state.refs().clone(),
+            forge_positions: Default::default(),
+            retention: Default::default(),
+            outbox: Default::default(),
+        })
+    }
+}
+
+impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
+    fn resolve_ref_state(&self, root: Digest) -> Result<CanonicalRefState, RefusalCode> {
+        let guard = self
+            .materialized
+            .read()
+            .map_err(|_| RefusalCode::InternalInvariantBreach)?;
+        let Some(materialized) = guard.as_ref() else {
+            return Err(RefusalCode::EvidenceMissing);
+        };
+        if materialized.basis.body().ref_root != root {
+            return Err(RefusalCode::AuthorityReceiptStale);
+        }
+        Ok(materialized.ref_state.clone())
+    }
+
+    fn stage_ref_state(&self, _root: Digest, _state: CanonicalRefState) -> Result<(), RefusalCode> {
+        Err(RefusalCode::DurabilityProfileUnavailable)
+    }
+
+    fn resolve_permitted_object_closure(
+        &self,
+        _root: Digest,
+    ) -> Result<PermittedObjectClosure, RefusalCode> {
+        Err(RefusalCode::EvidenceMissing)
+    }
+
+    fn stage_permitted_object_closure(
+        &self,
+        _root: Digest,
+        _closure: PermittedObjectClosure,
+    ) -> Result<(), RefusalCode> {
+        Err(RefusalCode::DurabilityProfileUnavailable)
+    }
+}
+
+impl AdmissionProjection for DurableAdmissionMaterializer {
+    fn snapshot(
+        &self,
+        basis: &PublicationBasis,
+        authenticated: &AuthenticatedHead,
+    ) -> Result<AdmissionSnapshot, RefusalCode> {
+        self.snapshot_for(basis, authenticated)
+    }
+
+    fn materialize_commit(
+        &self,
+        _basis: &PublicationBasis,
+        _request: &fgit_reference::intent::TransactionRequest,
+        _fold: &fgit_txn::TransactionFoldReport,
+        _closure: &ValidatedClosure,
+    ) -> Result<CommitMaterialization, RefusalCode> {
+        Err(RefusalCode::DurabilityProfileUnavailable)
+    }
+
+    fn materialize_refusal(
+        &self,
+        _basis: &PublicationBasis,
+        _tx_id: fgit_types::TxId,
+        _code: RefusalCode,
+    ) -> Result<RefusalMaterialization, RefusalCode> {
+        Err(RefusalCode::DurabilityProfileUnavailable)
+    }
+}
+
+async fn stage_immutable_frame<Authority>(
+    authority: &Authority,
+    cx: &Authority::Context,
+    key: &ImmutableKey,
+    frame: &[u8],
+) -> Result<(), AdmissionMaterializationRefusal>
+where
+    Authority: AsyncAuthorityStore + ?Sized,
+{
+    match authority
+        .put_if_absent(cx, key, frame)
+        .await
+        .map_err(AdmissionMaterializationRefusal::Authority)?
+    {
+        PutOutcome::Created | PutOutcome::IdenticalRetry => Ok(()),
+        PutOutcome::Conflict => Err(AdmissionMaterializationRefusal::ImmutableConflict),
+    }
+}
+
+fn admission_immutable_key(
+    namespace: &[u8],
+    repository_id: RepositoryId,
+    root: Digest,
+) -> Result<ImmutableKey, KeyError> {
+    let mut bytes = Vec::with_capacity(
+        namespace.len() + repository_id.as_bytes().len() + size_of::<u16>() + root.bytes().len(),
+    );
+    bytes.extend_from_slice(namespace);
+    bytes.extend_from_slice(repository_id.as_bytes());
+    bytes.extend_from_slice(&root.algorithm().code_point().to_be_bytes());
+    bytes.extend_from_slice(root.bytes().as_bytes());
+    ImmutableKey::new(bytes)
 }
 
 /// Typed refusal from the node assembly boundary.
@@ -244,6 +673,8 @@ pub enum NodeRefusal {
     Runtime(RuntimeRefusal),
     /// Authority-head staging or initialization refused or was ambiguous.
     Authority(fgit_authority::OutcomeFailure),
+    /// Durable canonical-admission staging or refresh refused.
+    AdmissionMaterialization(AdmissionMaterializationRefusal),
     /// A non-initializing open found no canonical authority head.
     AuthorityHeadAbsent,
     /// A supplied authority materialization names another repository.
@@ -291,6 +722,7 @@ impl Display for NodeRefusal {
             Self::InvalidWorkerCount => formatter.write_str("node worker count must be non-zero"),
             Self::Runtime(error) => Display::fmt(error, formatter),
             Self::Authority(error) => Display::fmt(error, formatter),
+            Self::AdmissionMaterialization(error) => Display::fmt(error, formatter),
             Self::AuthorityHeadAbsent => {
                 formatter.write_str("node authority head is absent; run fg init before doctor")
             }
@@ -341,6 +773,7 @@ impl Error for NodeRefusal {
         match self {
             Self::Runtime(error) => Some(error),
             Self::Authority(error) => Some(error),
+            Self::AdmissionMaterialization(error) => Some(error),
             Self::HeadKey(error) => Some(error),
             Self::AuthorityInitializationCleanup { initialization, .. } => Some(initialization),
             Self::ExistingOpenCleanup { opening, .. } => Some(opening),
@@ -1082,6 +1515,7 @@ impl DoctorReport {
 #[derive(Debug)]
 pub struct OneNode {
     authority: FsqliteAuthorityStore,
+    admission_materializer: DurableAdmissionMaterializer,
     head_key: HeadKey,
     fabric: LocalFilesystemFabric,
     tenant_id: TenantId,
@@ -1100,9 +1534,30 @@ impl OneNode {
     /// such as [`Self::read_authority_head`] remain async over the runtime-owned
     /// database context.
     pub fn init(config: NodeConfig) -> Result<(Self, NodeInitialization), NodeRefusal> {
-        let genesis = genesis_head(config.repository_id);
+        let repository_id = config.repository_id;
         let node = Self::open_components(config)?;
         let initialization_cx = node.authority_context();
+        let ref_root = match node
+            .runtime
+            .block_on(node.admission_materializer.stage_ref_state_in(
+                &node.authority,
+                &initialization_cx,
+                repository_id,
+                CanonicalRefState::default(),
+            )) {
+            Ok(root) => root,
+            Err(staging) => {
+                let initialization = NodeRefusal::AdmissionMaterialization(staging);
+                return match node.shutdown() {
+                    Ok(()) => Err(initialization),
+                    Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
+                        initialization: Box::new(initialization),
+                        cleanup: Box::new(cleanup),
+                    }),
+                };
+            }
+        };
+        let genesis = genesis_head(repository_id, ref_root);
         let initialization = match initialize_embedded_repository(
             &node.runtime,
             &node.authority,
@@ -1185,6 +1640,7 @@ impl OneNode {
         Ok(Self {
             runtime,
             authority,
+            admission_materializer: DurableAdmissionMaterializer::default(),
             head_key,
             fabric,
             tenant_id: config.tenant_id,
@@ -1278,6 +1734,70 @@ impl OneNode {
     pub async fn authenticate_authority_head(&self) -> Result<AuthenticatedHead, NodeRefusal> {
         let request = self.request_context();
         self.authenticate_authority_head_in(&request).await
+    }
+
+    /// Materializes the canonical ref state selected by the current durable
+    /// head into the node's bounded, exact-head cache.
+    ///
+    /// This is the production bridge from the asynchronous authority store to
+    /// the synchronous admission trait.  It performs no request-path blocking:
+    /// the authority head and immutable ref frame are both awaited before the
+    /// cache is updated, and a missing or mismatched frame refuses the read.
+    pub async fn materialize_admission_in(
+        &self,
+        request: &NodeRequestContext,
+    ) -> Result<MaterializedAdmission, AdmissionMaterializationRefusal> {
+        self.admission_materializer
+            .materialize_current_in(
+                &self.authority,
+                request.authority(),
+                &self.head_key,
+                self.repository_id,
+            )
+            .await
+    }
+
+    /// Materializes canonical admission state with a fresh bounded context.
+    pub async fn materialize_admission(
+        &self,
+    ) -> Result<MaterializedAdmission, AdmissionMaterializationRefusal> {
+        let request = self.request_context();
+        self.materialize_admission_in(&request).await
+    }
+
+    /// Returns the read-only canonical admission projection backed by this
+    /// node's last successful async materialization.
+    ///
+    /// A caller must materialize the exact head first.  Until then, and for a
+    /// different authenticated basis thereafter, this projection returns a
+    /// typed refusal instead of consulting any connection-local ref map.
+    #[must_use]
+    pub const fn admission_projection(&self) -> &DurableAdmissionMaterializer {
+        &self.admission_materializer
+    }
+
+    /// Opens a V0 upload-pack view directly from the durable materialization.
+    ///
+    /// Unlike a local ref map, this path accepts only a frame whose canonical
+    /// root is named by an authenticated authority head.  The materialized
+    /// snapshot retains the exact receipt and basis, so a caller can also pass
+    /// it through the generic admission projection boundary without mixing
+    /// generations.
+    pub async fn durable_admission_upload_pack_repository_in(
+        &self,
+        request: &NodeRequestContext,
+        limits: &WireLimits,
+    ) -> Result<AdmissionUploadPackRepository, NodeAdmissionViewRefusal> {
+        let materialized = self
+            .materialize_admission_in(request)
+            .await
+            .map_err(NodeAdmissionViewRefusal::Materialization)?;
+        AdmissionUploadPackRepository::from_snapshot(
+            materialized.snapshot(),
+            self.object_format,
+            limits,
+        )
+        .map_err(NodeAdmissionViewRefusal::View)
     }
 
     /// Opens the current durable authority state as a bounded V0 upload-pack view.
@@ -1590,7 +2110,7 @@ fn object_namespace(repository_id: RepositoryId) -> Vec<u8> {
     namespace
 }
 
-fn genesis_head(repository_id: RepositoryId) -> RepositoryAuthorityHeadBody {
+fn genesis_head(repository_id: RepositoryId, ref_root: Digest) -> RepositoryAuthorityHeadBody {
     RepositoryAuthorityHeadBody {
         repository_id,
         generation: HeadGeneration::FIRST,
@@ -1599,7 +2119,7 @@ fn genesis_head(repository_id: RepositoryId) -> RepositoryAuthorityHeadBody {
         latest_decision_sequence: None,
         latest_committed_rcr_id: None,
         latest_repository_sequence: None,
-        ref_root: genesis_root(repository_id, b"refs"),
+        ref_root,
         forge_position_root: genesis_root(repository_id, b"forge-position"),
         outcome_index_root: genesis_root(repository_id, b"outcome-index"),
         retention_root: genesis_root(repository_id, b"retention"),
@@ -1656,19 +2176,29 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use fgit_admission::AdmissionSnapshot;
-    use fgit_authority::{HeadRead, OutcomeLookup};
+    use fgit_admission::{
+        AdmissionProjection, AdmissionSnapshot, CanonicalAdmissionStore, CanonicalRefState,
+        PermittedObjectClosure,
+    };
+    use fgit_authority::{AsyncAuthorityStore, HeadInit, HeadRead, ImmutableRead, OutcomeLookup};
+    use fgit_chronicle::PublicationBasis;
     use fgit_codec::harness::{advanced_head, decision_batch, tx_id};
-    use fgit_types::{GitHashAlgorithm, GitOid, RefName, RepositoryId, TenantId};
+    use fgit_codec::{CryptoBodyIdentity, body_id, decode_body};
+    use fgit_types::{
+        GitHashAlgorithm, GitOid, RefName, RefusalCode, RepositoryAuthorityHeadId, RepositoryId,
+        TenantId,
+    };
     use fgit_wire::{
         AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, PackPayloadSource, Packet,
         UploadPackRepository, WireError, WireLimits, encode_packets,
     };
 
     use super::{
-        AdmissionUploadPackRefusal, AdmissionUploadPackRepository, GitDaemonServeError,
-        GitDaemonTransportRefusal, NodeConfig, NodeInitialization, NodeRefusal, OneNode,
-        parse_git_daemon_request, serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
+        ADMISSION_CLOSURE_KEY_PREFIX, AdmissionMaterializationRefusal, AdmissionUploadPackRefusal,
+        AdmissionUploadPackRepository, GitDaemonServeError, GitDaemonTransportRefusal, NodeConfig,
+        NodeInitialization, NodeRefusal, OneNode, admission_immutable_key, genesis_head,
+        genesis_root, initialize_embedded_repository, parse_git_daemon_request,
+        serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
     };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -2113,6 +2643,153 @@ mod tests {
             .expect("reopened head reads");
         assert_eq!(second_head, first_head);
         second.shutdown().expect("reopened node closes cleanly");
+    }
+
+    #[test]
+    fn durable_admission_materialization_is_head_bound_and_never_sync_stages() {
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf());
+        let (node, _) = OneNode::init(config).expect("node initializes canonical empty refs first");
+        let request = node.request_context();
+
+        let materialized = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request))
+            .expect("authority-selected empty ref frame materializes");
+        assert!(materialized.snapshot().refs.is_empty());
+        assert_eq!(
+            CanonicalAdmissionStore::resolve_ref_state(
+                &node.admission_materializer,
+                materialized.basis().body().ref_root,
+            )
+            .expect("only the materialized authority root resolves"),
+            CanonicalRefState::default()
+        );
+        assert_eq!(
+            CanonicalAdmissionStore::stage_ref_state(
+                &node.admission_materializer,
+                materialized.basis().body().ref_root,
+                CanonicalRefState::default(),
+            ),
+            Err(RefusalCode::DurabilityProfileUnavailable),
+            "the synchronous trait cannot claim durable staging"
+        );
+
+        let projection_snapshot = AdmissionProjection::snapshot(
+            &node.admission_materializer,
+            materialized.basis(),
+            materialized.authenticated(),
+        )
+        .expect("the exact authenticated basis resolves");
+        assert_eq!(projection_snapshot, *materialized.snapshot());
+
+        let closure = PermittedObjectClosure::default();
+        let closure_root = node
+            .runtime()
+            .block_on(
+                node.admission_materializer
+                    .stage_permitted_object_closure_in(
+                        &node.authority,
+                        request.authority(),
+                        node.repository_id(),
+                        closure.clone(),
+                    ),
+            )
+            .expect("closure frame stages through durable authority");
+        let closure_key = admission_immutable_key(
+            ADMISSION_CLOSURE_KEY_PREFIX,
+            node.repository_id(),
+            closure_root,
+        )
+        .expect("fixed closure key is bounded");
+        let ImmutableRead::Present(closure_frame) = node
+            .runtime()
+            .block_on(AsyncAuthorityStore::read_immutable(
+                &node.authority,
+                request.authority(),
+                &closure_key,
+            ))
+            .expect("staged closure reads through durable authority")
+        else {
+            panic!("successful closure staging created an immutable frame");
+        };
+        assert_eq!(
+            decode_body::<PermittedObjectClosure>(
+                &closure_frame,
+                fgit_codec::DecodeLimits::DEFAULT
+            )
+            .expect("durable closure frame decodes"),
+            closure
+        );
+        assert_eq!(
+            CanonicalAdmissionStore::resolve_permitted_object_closure(
+                &node.admission_materializer,
+                closure_root,
+            ),
+            Err(RefusalCode::EvidenceMissing),
+            "a staged closure is not current without an authenticated RCR"
+        );
+
+        let mut other_body = materialized.basis().body().clone();
+        other_body.configuration_root = genesis_root(node.repository_id(), b"different-policy");
+        let other_id = body_id(&CryptoBodyIdentity, &other_body)
+            .map_err(|_| ())
+            .and_then(|identity| {
+                RepositoryAuthorityHeadId::from_internal_object_id(identity).map_err(|_| ())
+            })
+            .expect("fixed alternate test body identifies");
+        let other_basis = PublicationBasis::new(other_id, other_body);
+        assert_eq!(
+            AdmissionProjection::snapshot(
+                &node.admission_materializer,
+                &other_basis,
+                materialized.authenticated(),
+            ),
+            Err(RefusalCode::AuthorityReceiptStale),
+            "a cache entry never answers for a different basis"
+        );
+
+        let upload_pack = node
+            .runtime()
+            .block_on(
+                node.durable_admission_upload_pack_repository_in(&request, &WireLimits::default()),
+            )
+            .expect("first-clone view comes from durable admission materialization");
+        assert!(upload_pack.advertised_refs().is_empty());
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn durable_admission_materializer_refuses_a_head_without_its_ref_frame() {
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf());
+        let node = OneNode::open_components(config).expect("components open");
+        let missing_root = genesis_root(node.repository_id(), b"unstaged-canonical-refs");
+        let head = genesis_head(node.repository_id(), missing_root);
+        let initialization_cx = node.authority_context();
+        let initialized = initialize_embedded_repository(
+            node.runtime(),
+            &node.authority,
+            &initialization_cx,
+            &node.head_key,
+            &head,
+        );
+        assert!(matches!(initialized, Ok(HeadInit::Created(_))));
+
+        let request = node.request_context();
+        let result = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&request));
+        assert!(matches!(
+            result,
+            Err(AdmissionMaterializationRefusal::ImmutableAbsent(root)) if root == missing_root
+        ));
+        assert_eq!(
+            CanonicalAdmissionStore::resolve_ref_state(&node.admission_materializer, missing_root),
+            Err(RefusalCode::EvidenceMissing),
+            "an absent durable frame never falls back to a node-local map"
+        );
+        node.shutdown().expect("node closes cleanly");
     }
 
     #[test]

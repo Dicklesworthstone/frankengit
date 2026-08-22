@@ -18,6 +18,8 @@ fgit-git-object.workspace = true
 fgit-object-fabric.workspace = true
 fgit-resource.workspace = true
 fgit-runtime.workspace = true
+fgit-reference.workspace = true
+fgit-txn.workspace = true
 fgit-types.workspace = true
 fgit-wire.workspace = true
 # This names the FrankenSQLite context held for the authority store lifetime.
