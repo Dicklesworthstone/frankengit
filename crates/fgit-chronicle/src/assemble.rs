@@ -103,7 +103,7 @@ impl PublicationPlan {
         self.decisions.push(PlannedDecision {
             tx_id: record.tx_id,
             decision_sequence: sequence,
-            outcome: PlannedOutcome::Committed(record),
+            outcome: PlannedOutcome::Committed(Box::new(record)),
         });
         self
     }
@@ -152,7 +152,8 @@ impl PublicationPlan {
                     code,
                     refusal_record_id,
                 },
-                PlannedOutcome::Committed(mut record) => {
+                PlannedOutcome::Committed(record) => {
+                    let mut record = *record;
                     record.parent_rcr_id = parent_rcr;
                     let repository_commit_id = repository_commit_identity(identity, &record)?;
                     parent_rcr = Some(repository_commit_id);
@@ -280,7 +281,7 @@ enum PlannedOutcome {
         code: RefusalCode,
         refusal_record_id: RefusalRecordId,
     },
-    Committed(RepositoryCommitRecord),
+    Committed(Box<RepositoryCommitRecord>),
 }
 
 /// A batch and head pair that passed every chronicle invariant.
