@@ -2087,47 +2087,86 @@ fn the_absent_head_set_cannot_be_folded_against_any_real_head() {
 /// POSITIVE -- a set collected at `H`, folded against `H`, produces exactly the
 /// root a recompute over the union produces.
 ///
-/// FORBIDDEN -- the same set folded against a different head is a TYPED
-/// refusal naming both tokens, not a silently wrong root. The two halves run
-/// over one collected set so the only difference is the head named at the fold,
-/// which is what makes the refusal attributable to the binding.
+/// FORBIDDEN -- the same set folded against the head that REPLACED `H` is a
+/// typed refusal naming both tokens, not a silently wrong root.
+///
+/// # Why the head is advanced on the same store
+///
+/// An earlier version of this test built a second `published_repository()` and
+/// used its token as the foreign basis. That was vacuous and the guard below
+/// caught it: `store()` hardcodes `StoreInstanceId::from_raw(1)`, and both
+/// stores then issue the same per-instance sequence, so the two tokens were
+/// byte-identical and the "forbidden" fold was folding against its own basis.
+///
+/// Advancing the head on one store is also the faithful scenario. The hazard is
+/// not a set from another repository -- it is a CAS loser: this transaction
+/// collected at `H`, another writer published, and the basis moved underneath
+/// it. Same store, same repository, new token.
 #[test]
-fn a_set_collected_at_one_head_refuses_to_fold_against_another() {
-    let (store, _) = published_repository();
+fn a_set_collected_at_one_head_refuses_to_fold_against_the_head_that_replaced_it() {
+    let (store, head) = published_repository();
     let collected = fgit_authority::collect_cumulative_outcomes(&store, &head_slot())
         .expect("a walk within the replay bound");
     let basis = current_token(&store);
-    let stamped = [commit_entry(0xa9, 3, 0x59)];
+    let stamped = [commit_entry(0xa9, 4, 0x59)];
 
-    // PERMITTED: same head.
+    // PERMITTED: the head it was collected from.
     let folded = collected
         .fold_against(basis, &stamped)
         .expect("folding against the head it was collected from is the whole point");
 
-    // FORBIDDEN: a different head. A second store issues its own tokens, and
-    // `AuthorityVersionToken` embeds the store instance, so this token cannot
-    // collide with the first store's.
-    let (other_store, _) = published_repository();
-    let other_basis = current_token(&other_store);
-    assert_ne!(
-        basis, other_basis,
-        "the two heads must differ or the forbidden case below is vacuous",
+    // Another writer wins the CAS and the basis moves.
+    let intervening = batch(&head, 3, vec![committed(tx(0xC3), 3, 0x53)]);
+    let advanced = successor_head(&head, batch_id_of(&intervening), 3);
+    let outcome = publish_decisions(
+        &store,
+        &head_slot(),
+        basis,
+        &intervening,
+        &advanced,
+        tenant(),
+    )
+    .expect("the intervening publication");
+    assert!(
+        matches!(outcome, PublicationOutcome::Published(_)),
+        "the intervening batch must actually publish or the head never moves",
     );
 
+    let moved = current_token(&store);
+    assert_ne!(
+        basis, moved,
+        "the head must genuinely have moved or the forbidden case below is vacuous",
+    );
+
+    // FORBIDDEN: the stale set against the new basis.
     let failure = collected
-        .fold_against(other_basis, &stamped)
+        .fold_against(moved, &stamped)
         .expect_err("a CAS loser must not fold its stale set against the new basis");
     let OutcomeFailure::CumulativeIndexStale { observed, expected } = failure else {
         panic!("expected CumulativeIndexStale, got {failure:?}");
     };
     assert_eq!(observed, basis, "the refusal must name the head walked");
     assert_eq!(
-        expected, other_basis,
+        expected, moved,
         "the refusal must name the head the caller tried to publish against",
     );
 
-    // And the permitted half really did produce the right value, so the
-    // refusal above is the binding firing rather than the fold being broken.
+    // The refusal is about the BINDING, not about the entries being wrong: the
+    // set really is stale now -- it predates tx(0xC3) -- and a freshly collected
+    // set folds against the new basis without complaint.
+    let refreshed = fgit_authority::collect_cumulative_outcomes(&store, &head_slot())
+        .expect("a walk within the replay bound");
+    assert_eq!(
+        refreshed.len(),
+        3,
+        "the refreshed set must include the intervening decision",
+    );
+    refreshed
+        .fold_against(moved, &stamped)
+        .expect("re-collecting per basis read is the correct CAS-loser response");
+
+    // And the permitted half produced the right value, so the refusal above is
+    // the binding firing rather than the fold being broken.
     let mut union = vec![
         (
             tx(0xA1),
