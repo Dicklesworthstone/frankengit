@@ -130,12 +130,26 @@ main() {
     'the_effective_sample_size_never_exceeds_the_batch_it_came_from' \
     'the seeded-stream invariant sweep actually ran'
 
-  # The permitted twin for the assertions above: they check that named tests are
-  # PRESENT, which a log containing every name and zero results would also
-  # satisfy. This checks no binary reported an empty run.
-  fge_assert_not_contains 'FG-054-E2E-016' "${output}" \
-    '0 passed' \
-    'no test binary in the crate reported zero passing tests'
+  # The denominator, and it replaces a check that was WRONG. This first asserted
+  # the output did not contain '0 passed' -- but the lib target has no unit
+  # tests and legitimately reports exactly that on a healthy run, so the
+  # assertion failed the suite for a reason unrelated to the crate. Verified
+  # against a real captured run before rewriting.
+  #
+  # What matters is that no target was silently skipped, which is a COUNT, not a
+  # substring. The expected count is derived from the filesystem so adding a test
+  # file cannot silently shrink the coverage this suite believes it saw.
+  local expected_targets actual_results
+  expected_targets=$(( $(find "${CRATE_TESTS}" -maxdepth 1 -name '*.rs' | wc -l) + 1 ))
+  actual_results=$(grep -c '^test result:' "${FGE_LAST_STDOUT_FILE}" 2>/dev/null || echo 0)
+  fge_assert_eq 'FG-054-E2E-016' "${expected_targets}" "${actual_results}" \
+    'every test target reported a result line; a missing one is a silently skipped binary'
+
+  # And the explicit failure check, since a full set of result lines says nothing
+  # about whether they passed.
+  fge_assert_not_contains 'FG-054-E2E-017' "${output}" \
+    'test result: FAILED' \
+    'no test target reported a failure'
 
   fge_phase teardown
   return 0
