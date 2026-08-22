@@ -64,6 +64,8 @@ main() {
     'the e-process alarm is present'
   fge_assert_file 'FG-054-E2E-022' "${CRATE_SRC}/elimination.rs" \
     'successive elimination is present'
+  fge_assert_file 'FG-054-E2E-023' "${CRATE_TESTS}/seeded_properties.rs" \
+    'the seeded-stream property tests are present'
 
   fge_phase action
   fge_capture statistics-tests \
@@ -123,6 +125,10 @@ main() {
   fge_assert_contains 'FG-054-E2E-035' "${output}" \
     'a_widening_schedule_is_refused' \
     'successive elimination refuses a schedule that is not a confidence schedule'
+
+  fge_assert_contains 'FG-054-E2E-036' "${output}" \
+    'the_effective_sample_size_never_exceeds_the_batch_it_came_from' \
+    'the seeded-stream invariant sweep actually ran'
 
   # The permitted twin for the assertions above: they check that named tests are
   # PRESENT, which a log containing every name and zero results would also
