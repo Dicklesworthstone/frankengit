@@ -99,6 +99,7 @@ const _: () = {
     assert!(size_of::<ids::IdentityError>() <= LIMIT);
     assert!(size_of::<custody::LifecycleError>() <= LIMIT);
     assert!(size_of::<custody::ReserveError>() <= LIMIT);
+    assert!(size_of::<cache_grant::CacheGrantRefusal>() <= LIMIT);
     assert!(size_of::<kinds::AdmissionRefusal>() <= LIMIT);
     assert!(size_of::<kinds::RepairRefusal>() <= LIMIT);
     assert!(size_of::<kinds::ContextRefusal>() <= LIMIT);
@@ -106,6 +107,7 @@ const _: () = {
 };
 
 pub mod algebra;
+pub mod cache_grant;
 pub mod custody;
 pub mod ids;
 pub mod kinds;
@@ -116,6 +118,9 @@ pub mod workers;
 pub use algebra::{
     BudgetGrant, GRADE_COUNT, Grade, GradeDisposition, ReleaseReceipt, ResourceError,
     ResourceVector,
+};
+pub use cache_grant::{
+    CACHE_REQUIRED_GRADES, CacheBinding, CacheGrant, CacheGrantRefusal, CachePermit, CacheScope,
 };
 pub use custody::{
     ContainmentFailure, LeakClass, LeakDisposition, LeakRecord, LeakSubject, LedgerHandle,
