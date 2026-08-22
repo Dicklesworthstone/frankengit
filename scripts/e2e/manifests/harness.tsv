@@ -1,0 +1,33 @@
+# FG-091 expected-suite manifest -- profile: harness
+#
+# WHY A MANIFEST AND NOT A COUNT. The bead is explicit: "a minimum script count
+# is forbidden: it can false-green while required suites are missing." A count
+# passes when the right number of the wrong suites run. This file names the
+# exact set, and run_all --profile enforces SET EQUALITY against what discovery
+# actually found: no missing, no unregistered, no renamed alias.
+#
+# OWNERSHIP IS DELIBERATELY INDEPENDENT OF DISCOVERY. run_all discovers whatever
+# is executable under suites/; this file states what MUST be there. If those two
+# disagree the profile fails, which is the entire point -- a suite that silently
+# stopped being discovered, or one that appeared without being declared, is a
+# change to the release surface and must be approved rather than absorbed.
+#
+# SCOPE OF THIS PROFILE, stated honestly: the three harness suites, which I own
+# and can describe truthfully. It is NOT a release profile and does not claim to
+# be. Other profiles belong to the owners of the suites they name; inventing
+# owning-bead and proof-class values for fifty suites I do not own would be
+# fabricated evidence, which is worse than a small true manifest.
+#
+# columns, tab-separated:
+#   suite_id           the id run_all derives from the script path
+#   owning_bead        the capability bead that owns the suite
+#   gate               the gate/profile this entry belongs to
+#   script_path        repository-relative path
+#   targets            supported target classes, or "any"
+#   classification     required | optional
+#   proof_class        what a pass establishes, in claim-lattice terms
+#   expected_terminal  the terminal status a pass must carry
+#
+suites-harness-harness_json	frankengit-fg000a-e2e-harness-4ci	g0	scripts/e2e/suites/harness/harness_json.sh	any	required	mechanism	pass
+suites-harness-harness_mechanics	frankengit-fg000a-e2e-harness-4ci	g0	scripts/e2e/suites/harness/harness_mechanics.sh	any	required	mechanism	pass
+suites-harness-harness_portability	frankengit-fg000a-e2e-harness-4ci	g0	scripts/e2e/suites/harness/harness_portability.sh	any	required	mechanism	pass

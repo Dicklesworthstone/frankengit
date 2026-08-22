@@ -127,6 +127,10 @@ RA_OUT=''
 RA_TIMEOUT=900
 RA_ATTEMPTS=1
 RA_LIST=0
+# FG-091: an expected-suite manifest, enforced as SET EQUALITY against what
+# discovery found. Empty means no profile was selected and no set check runs.
+RA_PROFILE=''
+RA_MANIFEST=''
 # Whether --dir was supplied. Script ids are named relative to an explicitly
 # requested discovery root, and relative to the repository for the default one;
 # see ra_script_id.
@@ -157,6 +161,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --attempts)
       RA_ATTEMPTS=${2-}
+      shift 2
+      ;;
+    --profile)
+      RA_PROFILE=${2-}
       shift 2
       ;;
     --list)
@@ -245,6 +253,29 @@ ra_script_id() {
   printf '%s' "$id"
 }
 
+# Set membership without a subshell or a pipe, so `set -o pipefail` cannot turn
+# a lookup into a spurious failure the way it did in the orphan gate.
+ra_in_set() {
+  local needle=$1
+  shift
+  local candidate
+  for candidate in "$@"; do
+    [ "$candidate" = "$needle" ] && return 0
+  done
+  return 1
+}
+
+# A profile pins the RELEASE SURFACE, which is named in full-corpus ids. `--dir`
+# deliberately scopes ids to the requested root (see ra_script_id), so the two
+# together compare `harness_json` against `suites-harness-harness_json` and
+# report every entry as simultaneously missing AND unregistered -- three
+# confusing failures from one contradiction. Refused explicitly rather than
+# allowed to produce that.
+if [ -n "$RA_PROFILE" ] && [ "$RA_DIR_EXPLICIT" -eq 1 ]; then
+  printf 'run_all: --profile pins full-corpus suite ids and cannot be combined with --dir\n' >&2
+  exit 2
+fi
+
 declare -a RA_SCRIPTS=()
 if [ "${#RA_EXPLICIT[@]}" -gt 0 ]; then
   RA_SCRIPTS=("${RA_EXPLICIT[@]}")
@@ -253,6 +284,83 @@ else
     [ -n "$f" ] || continue
     RA_SCRIPTS+=("$f")
   done < <(ra_discover "$RA_SUITE_DIR")
+fi
+
+# ---------------------------------------------------------------------------
+# FG-091: load the profile manifest and enforce STRUCTURE before running.
+#
+# "FAIL outranks INCOMPLETE; structurally invalid suites fail before reporting
+# missing coverage." A profile whose required set is not present is broken
+# regardless of how the suites that DO exist behave, so it is refused here --
+# before spending a full corpus run to arrive at the same answer.
+# ---------------------------------------------------------------------------
+declare -a S_MANIFEST_REQUIRED=()
+declare -a S_MANIFEST_MISSING=()
+declare -a S_MANIFEST_UNREGISTERED=()
+declare -a S_MANIFEST_NOTPASSED=()
+if [ -n "$RA_PROFILE" ]; then
+  RA_MANIFEST="$RA_DIR/manifests/$RA_PROFILE.tsv"
+  if [ ! -f "$RA_MANIFEST" ]; then
+    printf 'run_all: profile %s has no manifest at %s\n' "$RA_PROFILE" "$RA_MANIFEST" >&2
+    exit 2
+  fi
+  while IFS=$'\t' read -r m_id _m_bead _m_gate _m_path _m_targets m_class _m_proof _m_term; do
+    case $m_id in ''|'#'*) continue ;; esac
+    [ "$m_class" = required ] || continue
+    S_MANIFEST_REQUIRED+=("$m_id")
+  done <"$RA_MANIFEST"
+
+  # A manifest declaring nothing required would make every profile pass.
+  if [ "${#S_MANIFEST_REQUIRED[@]}" -eq 0 ]; then
+    printf 'run_all: profile %s declares no required suite\n' "$RA_PROFILE" >&2
+    exit 2
+  fi
+
+  declare -a RA_DISCOVERED_IDS=()
+  for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
+    RA_DISCOVERED_IDS+=("$(ra_script_id "$f")")
+  done
+
+  declare -a RA_PROFILE_AREAS=()
+  for m_id in "${S_MANIFEST_REQUIRED[@]}"; do
+    area=${m_id%-*}
+    ra_in_set "$area" "${RA_PROFILE_AREAS[@]+"${RA_PROFILE_AREAS[@]}"}" ||
+      RA_PROFILE_AREAS+=("$area")
+  done
+
+  for m_id in "${S_MANIFEST_REQUIRED[@]}"; do
+    ra_in_set "$m_id" "${RA_DISCOVERED_IDS[@]+"${RA_DISCOVERED_IDS[@]}"}" ||
+      S_MANIFEST_MISSING+=("$m_id")
+  done
+  # UNREGISTERED IS SCOPED TO THE AREAS THE PROFILE CLAIMS. A harness profile
+  # must not report the other forty-odd suites as unregistered -- they are
+  # outside it. What it MUST catch is a NEW suite appearing inside an area it
+  # owns, because that is the release surface growing without the manifest being
+  # updated to approve it.
+  for d_id in "${RA_DISCOVERED_IDS[@]+"${RA_DISCOVERED_IDS[@]}"}"; do
+    d_area=${d_id%-*}
+    ra_in_set "$d_area" "${RA_PROFILE_AREAS[@]+"${RA_PROFILE_AREAS[@]}"}" || continue
+    ra_in_set "$d_id" "${S_MANIFEST_REQUIRED[@]}" || S_MANIFEST_UNREGISTERED+=("$d_id")
+  done
+
+  if [ "${#S_MANIFEST_MISSING[@]}" -gt 0 ] || [ "${#S_MANIFEST_UNREGISTERED[@]}" -gt 0 ]; then
+    printf 'run_all: profile %s set mismatch -- missing:[%s] unregistered:[%s]\n' \
+      "$RA_PROFILE" "${S_MANIFEST_MISSING[*]-}" "${S_MANIFEST_UNREGISTERED[*]-}" >&2
+    exit 1
+  fi
+
+  # A PROFILE SELECTS ITS DECLARED SCRIPTS. The set check above has already
+  # proved discovery and the manifest agree, so narrowing selection here cannot
+  # hide a missing suite -- it would have failed before reaching this line. What
+  # it does is make the profile mean "run exactly this surface" rather than "run
+  # everything and then grade a subset", which is what "exact set equality for
+  # the selected profile" asks for.
+  declare -a RA_PROFILE_SCRIPTS=()
+  for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
+    ra_in_set "$(ra_script_id "$f")" "${S_MANIFEST_REQUIRED[@]}" &&
+      RA_PROFILE_SCRIPTS+=("$f")
+  done
+  RA_SCRIPTS=("${RA_PROFILE_SCRIPTS[@]+"${RA_PROFILE_SCRIPTS[@]}"}")
 fi
 
 if [ "$RA_LIST" -eq 1 ]; then
@@ -860,6 +968,33 @@ suite_status=pass
 # structural failure, not a vacuous pass.
 [ "${#S_SELECTED[@]}" -eq 0 ] && suite_status=fail
 
+# ---------------------------------------------------------------------------
+# FG-091: exact-set enforcement against a checked-in manifest
+#
+# A MINIMUM COUNT IS FORBIDDEN, and this is why: a count is satisfied by the
+# right NUMBER of the wrong suites. What must hold is set equality between the
+# suites a profile declares required and the suites discovery actually found and
+# ran. Three distinct failures fall out of that and each is reported by name
+# rather than folded into one:
+#
+#   missing       declared required, not discovered -- coverage silently gone
+#   unregistered  discovered, not declared          -- release surface grew
+#                                                      without approval
+#   required_not_passed  declared required, discovered, did not pass
+#
+# `required == passed` is the only green condition. A required suite that
+# skipped, was unsupported, timed out, or was filtered is NON-PASS: those are
+# all ways of not having the evidence, and treating any of them as acceptable is
+# how a gate stops gating.
+# ---------------------------------------------------------------------------
+# required == passed is the only green condition. A required suite that skipped,
+# was unsupported, timed out or was filtered is NON-PASS: each is a way of not
+# having the evidence, and accepting any of them is how a gate stops gating.
+for m_id in "${S_MANIFEST_REQUIRED[@]+"${S_MANIFEST_REQUIRED[@]}"}"; do
+  ra_in_set "$m_id" "${S_PASSED[@]+"${S_PASSED[@]}"}" || S_MANIFEST_NOTPASSED+=("$m_id")
+done
+[ "${#S_MANIFEST_NOTPASSED[@]}" -gt 0 ] && suite_status=fail
+
 FGE__J=''
 fge__jstr status "$suite_status"
 FGE__J+=','
@@ -876,7 +1011,10 @@ for pair in \
   "missing_terminal:S_MISSINGTERM" "zero_assertion:S_ZEROASSERT" \
   "duplicate_id:S_DUPID" "containment_failed:S_CONTAINMENT" \
   "exit_mismatch:S_EXITMISMATCH" "cleanup_failed:S_CLEANUPFAILED" \
-  "not_run:S_NOTRUN" "flaky:S_FLAKY"; do
+  "not_run:S_NOTRUN" "flaky:S_FLAKY" \
+  "manifest_required:S_MANIFEST_REQUIRED" "manifest_missing:S_MANIFEST_MISSING" \
+  "manifest_unregistered:S_MANIFEST_UNREGISTERED" \
+  "manifest_required_not_passed:S_MANIFEST_NOTPASSED"; do
   name=${pair%%:*}
   var=${pair#*:}
   declare -n arr=$var
