@@ -30,7 +30,7 @@ fn observations_accumulate_and_the_posterior_matches_the_batch_form() {
     assert_eq!(incremental.counts(), (3, 1));
     assert_eq!(incremental.trials(), 4);
 
-    let posterior = incremental.posterior().expect("consistent counts");
+    let posterior = incremental.posterior();
     // Beta(1+3, 1+1) = Beta(4, 2): 4 / 6 = 666_666 ppm after truncation.
     assert_eq!(posterior.alpha(), 4);
     assert_eq!(posterior.beta(), 2);
@@ -54,7 +54,7 @@ fn the_trial_count_excludes_the_priors_pseudo_counts() {
     assert_eq!(strong.trials(), 0, "the prior is belief, not evidence");
     assert_eq!(strong.counts(), (0, 0));
 
-    let posterior = strong.posterior().expect("consistent");
+    let posterior = strong.posterior();
     assert_eq!(posterior.alpha(), 90);
     assert_eq!(
         posterior.mean_parts_per_million(),
@@ -88,9 +88,7 @@ fn a_regime_reset_returns_the_evidence_gate_to_refusing() {
     assert_eq!(arm.trials(), 40);
     // With evidence, the gate admits a verdict.
     assert!(
-        comparison
-            .compare(arm.posterior().expect("consistent"), reference)
-            .is_ok(),
+        comparison.compare(arm.posterior(), reference).is_ok(),
         "40 observations must satisfy a requirement of 10"
     );
 
@@ -99,7 +97,7 @@ fn a_regime_reset_returns_the_evidence_gate_to_refusing() {
     assert_eq!(arm.trials(), 0, "the reset must discard the evidence count");
     assert_eq!(arm.counts(), (0, 0));
     assert_eq!(
-        comparison.compare(arm.posterior().expect("consistent"), reference),
+        comparison.compare(arm.posterior(), reference),
         Err(BetaRefusal::InsufficientEvidence {
             observed: 0,
             required: 10
@@ -119,16 +117,11 @@ fn a_regime_reset_keeps_the_prior_rather_than_becoming_uniform() {
         arm.observe(false);
     }
     // Beta(9, 21) with the failures folded in: well below the prior's mean.
-    assert!(
-        arm.posterior()
-            .expect("consistent")
-            .mean_parts_per_million()
-            < 400_000
-    );
+    assert!(arm.posterior().mean_parts_per_million() < 400_000);
 
     arm.reset_for_regime();
 
-    let after = arm.posterior().expect("consistent");
+    let after = arm.posterior();
     assert_eq!(
         after.alpha(),
         9,
@@ -153,7 +146,7 @@ fn the_typed_mean_agrees_with_the_parts_per_million_mean() {
     for success in [true, false, true, true, true, false, true] {
         arm.observe(success);
     }
-    let posterior = arm.posterior().expect("consistent");
+    let posterior = arm.posterior();
     let ppm = posterior.mean_parts_per_million();
 
     assert_eq!(
@@ -161,10 +154,7 @@ fn the_typed_mean_agrees_with_the_parts_per_million_mean() {
         Probability::saturating_from_parts_per_million(ppm)
     );
     assert_eq!(posterior.mean().parts_per_million(), ppm);
-    assert_eq!(
-        arm.success_probability().expect("consistent"),
-        posterior.mean()
-    );
+    assert_eq!(arm.success_probability(), posterior.mean());
 
     // And the boundary cases are inside the type's range, so the checked
     // constructor would have accepted them too -- the saturating path is a
@@ -185,8 +175,8 @@ fn the_extremes_stay_inside_the_unit_interval() {
         all_success.observe(true);
         all_failure.observe(false);
     }
-    let high = all_success.posterior().expect("consistent").mean();
-    let low = all_failure.posterior().expect("consistent").mean();
+    let high = all_success.posterior().mean();
+    let low = all_failure.posterior().mean();
 
     assert!(high < Probability::ONE, "certainty must remain unreachable");
     assert!(
@@ -218,4 +208,40 @@ fn a_saturated_count_does_not_wrap_into_looking_inexperienced() {
     }
     assert_eq!(counted.counts(), (0, 1_000));
     assert_eq!(counted.trials(), 1_000);
+}
+
+#[test]
+fn the_posterior_is_built_from_the_counters_rather_than_from_their_difference() {
+    // This is what makes `posterior()` infallible AND exact, and the two are
+    // the same property. Deriving failures as `trials - successes` would be
+    // correct until `trials` saturated, after which it would misreport them --
+    // and it is the shape that makes a `MoreSuccessesThanTrials` refusal look
+    // necessary in the first place.
+    //
+    // Asserted on alpha and beta directly, so a change to a difference-based
+    // derivation fails here rather than only at a count no test can reach.
+    let mut arm = IncrementalPosterior::new(BetaPrior::try_new(7, 3).expect("proper"));
+    for _ in 0..11 {
+        arm.observe(true);
+    }
+    for _ in 0..4 {
+        arm.observe(false);
+    }
+
+    let posterior = arm.posterior();
+    assert_eq!(arm.counts(), (11, 4));
+    assert_eq!(arm.trials(), 15);
+    assert_eq!(posterior.alpha(), 7 + 11, "alpha is prior plus successes");
+    assert_eq!(
+        posterior.beta(),
+        3 + 4,
+        "beta is prior plus FAILURES, not trials minus successes"
+    );
+    assert_eq!(posterior.trials(), 15);
+
+    // And the invariant the infallibility rests on holds by construction: the
+    // successes can never exceed the trial count, because trials is their sum.
+    let (successes, failures) = arm.counts();
+    assert!(successes <= arm.trials());
+    assert_eq!(successes.saturating_add(failures), arm.trials());
 }

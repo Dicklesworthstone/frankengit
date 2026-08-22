@@ -398,23 +398,36 @@ impl IncrementalPosterior {
 
     /// The posterior implied by the prior and the observations so far.
     ///
-    /// # Errors
+    /// **Infallible, and that is a property of this type rather than a
+    /// convenience.** The fields are private and [`Self::observe`] only ever
+    /// increments one of two independent counters, so `successes <= trials`
+    /// holds by construction — including under saturation, where `trials`
+    /// saturates to `u32::MAX` and every `successes` is at most that. There is
+    /// no reachable inconsistency for a refusal to report.
     ///
-    /// Returns [`BetaRefusal::MoreSuccessesThanTrials`] only if the internal
-    /// counts were somehow inconsistent, which [`Self::observe`] cannot produce.
-    pub const fn posterior(self) -> Result<Posterior, BetaRefusal> {
-        self.prior.update(Outcomes {
-            successes: self.successes,
+    /// Returning a `Result` here would be worse than redundant. A caller like a
+    /// retry controller returns a decision, not a `Result`, so an unreachable
+    /// `Err` forces it to choose between a panic and an invented fallback —
+    /// and an invented fallback is a silent default wearing a refusal's
+    /// clothes, which is the shape section 3.1 exists to prevent.
+    ///
+    /// Built from the counters directly rather than through
+    /// [`BetaPrior::update`], which also makes it exact under saturation:
+    /// deriving failures as `trials - successes` would misreport them once
+    /// `trials` had saturated, while `self.failures` never does.
+    #[must_use]
+    pub const fn posterior(self) -> Posterior {
+        Posterior {
+            alpha: self.prior.alpha as u64 + self.successes as u64,
+            beta: self.prior.beta as u64 + self.failures as u64,
             trials: self.trials(),
-        })
+        }
     }
 
-    /// The posterior mean as a typed probability.
-    ///
-    /// # Errors
-    ///
-    /// Propagates [`Self::posterior`].
-    pub fn success_probability(self) -> Result<Probability, BetaRefusal> {
-        Ok(self.posterior()?.mean())
+    /// The posterior mean as a typed probability. Infallible, per
+    /// [`Self::posterior`].
+    #[must_use]
+    pub fn success_probability(self) -> Probability {
+        self.posterior().mean()
     }
 }
