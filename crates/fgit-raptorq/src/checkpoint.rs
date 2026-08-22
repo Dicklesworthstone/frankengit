@@ -688,17 +688,37 @@ mod tests {
     /// Malicious-symbol corpus. These are built in-module because
     /// `ScopedCheckpointSymbol` has private fields and no public constructor,
     /// so an external test could not forge them at all.
+    /// Acceptance requires a corpus PER CLASS, so this runs the whole corpus
+    /// against each class in turn rather than against one and assuming the
+    /// other behaves the same. They do not share an acceptance rule, so that
+    /// assumption would be exactly the wrong one to make.
     #[test]
     fn malicious_symbol_corpus_yields_zero_acceptances() {
+        for target_class in [CheckpointClass::ForgeEvent, CheckpointClass::PolicyKey] {
+            malicious_corpus_for(target_class);
+        }
+    }
+
+    fn malicious_corpus_for(target_class: CheckpointClass) {
         let security = security();
+        let other_class = match target_class {
+            CheckpointClass::ForgeEvent => CheckpointClass::PolicyKey,
+            CheckpointClass::PolicyKey => CheckpointClass::ForgeEvent,
+        };
+        let accepting = StubVerifier { accept: true };
+        let verifier: Option<&dyn CheckpointAeadVerifier> = if target_class.requires_aead() {
+            Some(&accepting)
+        } else {
+            None
+        };
         let victim = canonical(0x77, 600);
         let other = canonical(0x88, 600);
-        let target = protect_checkpoint(CheckpointClass::ForgeEvent, &victim, &security)
-            .expect("victim must protect");
-        let foreign = protect_checkpoint(CheckpointClass::ForgeEvent, &other, &security)
-            .expect("foreign must protect");
-        let cross_class = protect_checkpoint(CheckpointClass::PolicyKey, &victim, &security)
-            .expect("cross-class must protect");
+        let target =
+            protect_checkpoint(target_class, &victim, &security).expect("victim must protect");
+        let foreign =
+            protect_checkpoint(target_class, &other, &security).expect("foreign must protect");
+        let cross_class =
+            protect_checkpoint(other_class, &victim, &security).expect("cross-class must protect");
 
         let mut corpus: Vec<(&str, Vec<ScopedCheckpointSymbol>)> = Vec::new();
 
@@ -739,27 +759,63 @@ mod tests {
         }
         corpus.push(("swapped authentication tags", swapped));
 
+        // 4. A scope that agrees on the engine key but not on the scope itself.
+        //
+        //    Mutation testing found that entries 1-3 are all caught by
+        //    EngineObjectIdMismatch, so disabling the scope equality check
+        //    changed nothing and ScopeMismatch was dead from the corpus's point
+        //    of view. It is not redundant: engine_object_id is the digest
+        //    TRUNCATED to 128 bits, so a scope differing only in a field the
+        //    truncation drops still routes to the same decoder. That is
+        //    unreachable through the public API -- it needs a forged scope --
+        //    which is exactly why it is built here, in-module, where the
+        //    private fields are reachable.
+        let mut forged_scope = target.scope().clone();
+        forged_scope.source_len = target.scope().source_len() + 1;
+        assert_eq!(
+            forged_scope.engine_object_id(),
+            target.scope().engine_object_id(),
+            "the forged scope must keep the same engine key, or it tests the wrong guard"
+        );
+        corpus.push((
+            "scope forged past the 128-bit engine key truncation",
+            target
+                .symbols()
+                .iter()
+                .map(|s| ScopedCheckpointSymbol {
+                    scope: forged_scope.clone(),
+                    symbol: s.symbol.clone(),
+                    tag: s.tag,
+                })
+                .collect(),
+        ));
+
         let mut acceptances = 0usize;
         for (label, symbols) in &corpus {
-            if reconstruct_checkpoint(target.scope(), symbols, &security, None).is_ok() {
+            if reconstruct_checkpoint(target.scope(), symbols, &security, verifier).is_ok() {
                 acceptances += 1;
-                eprintln!("ACCEPTED a malicious corpus entry: {label}");
+                eprintln!(
+                    "ACCEPTED a malicious corpus entry for {}: {label}",
+                    target_class.durable_class()
+                );
             }
         }
         assert_eq!(
-            acceptances, 0,
-            "every malicious corpus entry must be refused"
+            acceptances,
+            0,
+            "every malicious corpus entry must be refused for {}",
+            target_class.durable_class()
         );
         assert_eq!(
             corpus.len(),
-            3,
+            4,
             "the corpus denominator is asserted, so a silently empty corpus cannot pass"
         );
 
         // Permitted twin: the untampered symbol set from the same builder still
         // reconstructs, so the zero above is discrimination and not a store
         // that refuses everything.
-        reconstruct_checkpoint(target.scope(), target.symbols(), &security, None)
+        reconstruct_checkpoint(target.scope(), target.symbols(), &security, verifier)
             .expect("the untampered set must still reconstruct");
     }
 }
