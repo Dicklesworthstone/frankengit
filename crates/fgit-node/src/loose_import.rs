@@ -28,6 +28,7 @@ const MAX_IMPORT_REFS: usize = 65_536;
 const MAX_IMPORT_OBJECTS: usize = 1_000_000;
 const MAX_IMPORT_TOTAL_OBJECT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_IMPORT_COMPRESSED_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_IMPORT_COMPRESSED_OBJECT_BYTES_USIZE: usize = 64 * 1024 * 1024;
 const MAX_IMPORT_REF_DEPTH: usize = 32;
 const MAX_IMPORT_DIRECTORY_ENTRIES: usize = 1_000_000;
 
@@ -358,8 +359,7 @@ impl OneNode {
                 });
             }
             let next_total = total_object_bytes
-                .checked_add(u64::try_from(loose.body.len()).unwrap_or(u64::MAX))
-                .unwrap_or(u64::MAX);
+                .saturating_add(u64::try_from(loose.body.len()).unwrap_or(u64::MAX));
             if next_total > MAX_IMPORT_TOTAL_OBJECT_BYTES {
                 return Err(LooseGitImportRefusal::TotalObjectBytesExceeded {
                     limit: MAX_IMPORT_TOTAL_OBJECT_BYTES,
@@ -676,8 +676,8 @@ fn read_loose_object(
         fs::read(&path).map_err(|error| io_refusal("read loose object", path, error))?;
     let maximum = usize::try_from(max_object_bytes).unwrap_or(usize::MAX);
     let inflate_limits = InflateLimits {
-        max_input_bytes: MAX_IMPORT_COMPRESSED_OBJECT_BYTES as usize,
-        max_pending_input_bytes: MAX_IMPORT_COMPRESSED_OBJECT_BYTES as usize,
+        max_input_bytes: MAX_IMPORT_COMPRESSED_OBJECT_BYTES_USIZE,
+        max_pending_input_bytes: MAX_IMPORT_COMPRESSED_OBJECT_BYTES_USIZE,
         max_output_bytes: maximum,
         ..InflateLimits::GIT_OBJECT
     };
@@ -867,18 +867,21 @@ mod tests {
     }
 
     fn decode_hex(text: &str) -> Vec<u8> {
-        text.trim()
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                std::str::from_utf8(pair)
-                    .expect("fixture is ASCII hex")
-                    .chars()
-                    .fold(0_u8, |value, nibble| {
-                        value * 16 + nibble.to_digit(16).expect("fixture contains hex") as u8
-                    })
-            })
+        let (pairs, remainder) = text.trim().as_bytes().as_chunks::<2>();
+        assert!(remainder.is_empty(), "fixture has an even hex length");
+        pairs
+            .iter()
+            .map(|[high, low]| (hex_nibble(*high) * 16) + hex_nibble(*low))
             .collect()
+    }
+
+    fn hex_nibble(byte: u8) -> u8 {
+        match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => panic!("fixture contains hex"),
+        }
     }
 
     fn node(root: PathBuf) -> OneNode {
@@ -891,7 +894,7 @@ mod tests {
         .0
     }
 
-    fn write_loose_blob_repository(root: &PathBuf) -> GitOid {
+    fn write_loose_blob_repository(root: &Path) -> GitOid {
         let oid = GitOid::from_hex(
             GitHashAlgorithm::Sha1,
             "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0",
