@@ -180,10 +180,63 @@ pub const MAX_TERMS: u64 = 1 << 16;
 /// bound is stated in the module documentation: at most 1 ppm, and never above
 /// the exact value.
 ///
+/// # Examples
+///
+/// ```
+/// use fgit_statistics::beta_bernoulli::{BetaPrior, Outcomes, Posterior};
+/// use fgit_statistics::expected_loss::probability_b_exceeds_a_ppm;
+///
+/// fn posterior(alpha: u32, beta: u32) -> Posterior {
+///     BetaPrior::try_new(alpha, beta)
+///         .expect("a proper prior")
+///         .update(Outcomes { successes: 0, trials: 0 })
+///         .expect("zero observations update cleanly")
+/// }
+///
+/// // An ordinary comparison, exact against the closed form.
+/// assert_eq!(
+///     probability_b_exceeds_a_ppm(posterior(3, 4), posterior(5, 2)),
+///     Ok(878_787),
+/// );
+///
+/// // A LOW probability comes back as a number, not a refusal.
+/// assert_eq!(
+///     probability_b_exceeds_a_ppm(posterior(20, 10), posterior(10, 20)),
+///     Ok(4_037),
+/// );
+///
+/// // THE ONE THAT SURPRISES CALLERS. An arm against itself is exactly one
+/// // half, so the true answer is 500000 ppm -- and this returns 499999. Every
+/// // division floors, and an exact ppm boundary is the one place that shows.
+/// // Assert a range here, never equality against the ideal value.
+/// let even = probability_b_exceeds_a_ppm(posterior(17, 17), posterior(17, 17))
+///     .expect("representable");
+/// assert_eq!(even, 499_999);
+/// assert!((499_999..=500_000).contains(&even));
+/// ```
+///
 /// # Errors
 ///
 /// Returns [`ExpectedLossRefusal`] when the peak term is unrepresentable at
 /// this scale, or when the term count exceeds [`MAX_TERMS`].
+///
+/// A refusal is not a small probability. `Beta(90,10)` against `Beta(10,90)`
+/// refuses rather than returning `Ok(0)`, because its peak term underflows the
+/// scale; returning a number there was the whole of `NEG-025`'s defect. Callers
+/// must distinguish the two:
+///
+/// ```
+/// # use fgit_statistics::beta_bernoulli::{BetaPrior, Outcomes, Posterior};
+/// # use fgit_statistics::expected_loss::{ExpectedLossRefusal, probability_b_exceeds_a_ppm};
+/// # fn posterior(alpha: u32, beta: u32) -> Posterior {
+/// #     BetaPrior::try_new(alpha, beta).unwrap()
+/// #         .update(Outcomes { successes: 0, trials: 0 }).unwrap()
+/// # }
+/// assert!(matches!(
+///     probability_b_exceeds_a_ppm(posterior(90, 10), posterior(10, 90)),
+///     Err(ExpectedLossRefusal::PeakTermUnrepresentable { .. }),
+/// ));
+/// ```
 pub fn probability_b_exceeds_a_ppm(a: Posterior, b: Posterior) -> Result<u32, ExpectedLossRefusal> {
     let (alpha_a, beta_a) = (a.alpha(), a.beta());
     let (alpha_b, beta_b) = (b.alpha(), b.beta());
