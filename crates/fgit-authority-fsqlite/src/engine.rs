@@ -1033,12 +1033,46 @@ fn token_from_row(row: &Row, column: usize) -> Result<AuthorityVersionToken, Eng
 /// Read a head generation from an `INTEGER` column.
 fn generation_from_row(row: &Row, column: usize) -> Result<HeadGeneration, EngineError> {
     let raw = read_unsigned(row, column)?;
-    HeadGeneration::try_new(raw).map_err(|_| {
-        EngineError::Marshal(MarshalError::IntegerNegative {
-            observed: -1,
+    head_generation_from_unsigned(raw, column)
+}
+
+/// Validate the unsigned SQL value as a live head generation.
+///
+/// [`read_unsigned`] already refuses negative SQL integers.  This second
+/// conversion is deliberately separate: zero is non-negative at the SQL
+/// boundary but reserved by [`HeadGeneration`], so describing it as a
+/// fabricated negative would hide the actual damaged-row condition.
+const fn head_generation_from_unsigned(
+    raw: u64,
+    column: usize,
+) -> Result<HeadGeneration, EngineError> {
+    match HeadGeneration::try_new(raw) {
+        Ok(generation) => Ok(generation),
+        Err(_) => Err(EngineError::Marshal(MarshalError::HeadGenerationZero {
             column,
-        })
-    })
+        })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EngineError, HeadGeneration, MarshalError, head_generation_from_unsigned};
+
+    #[test]
+    fn head_generation_conversion_accepts_live_values_and_truthfully_refuses_zero() {
+        assert_eq!(
+            head_generation_from_unsigned(HeadGeneration::FIRST.get(), 4),
+            Ok(HeadGeneration::FIRST),
+            "the first live generation must survive the SQL boundary"
+        );
+        assert_eq!(
+            head_generation_from_unsigned(0, 4),
+            Err(EngineError::Marshal(MarshalError::HeadGenerationZero {
+                column: 4,
+            })),
+            "zero is reserved, not a fabricated negative integer"
+        );
+    }
 }
 
 /// Run one whole logical transaction under the retry law, awaiting the wait.

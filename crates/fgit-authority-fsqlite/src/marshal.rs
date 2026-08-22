@@ -42,6 +42,15 @@ pub enum MarshalError {
         /// Which column.
         column: usize,
     },
+    /// A head-generation column held the reserved zero value.
+    ///
+    /// Zero is an `INTEGER` and therefore an unsigned value, but it is not a
+    /// live [`fgit_types::HeadGeneration`].  Keep this distinct from a
+    /// negative column so a damaged row is reported truthfully.
+    HeadGenerationZero {
+        /// Which column held the reserved value.
+        column: usize,
+    },
     /// A column was absent from the row.
     ColumnMissing {
         /// Which column.
@@ -68,6 +77,11 @@ impl core::fmt::Display for MarshalError {
                 f,
                 "column {column} holds {observed} where an unsigned value belongs; nothing \
                  this crate writes can produce it"
+            ),
+            Self::HeadGenerationZero { column } => write!(
+                f,
+                "column {column} holds zero where a live head generation belongs; zero is \
+                 reserved and this crate never publishes it"
             ),
             Self::ColumnMissing { column } => write!(f, "column {column} is absent from the row"),
             Self::ColumnTypeUnexpected { column, expected } => {
