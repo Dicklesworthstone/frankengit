@@ -4640,7 +4640,7 @@ mod tests {
         record.object_closure_root = closure_root;
         record.resulting_forge_position_root = genesis_basis.body().forge_position_root;
         record.policy_epoch = genesis_basis.body().policy_epoch;
-        let mut roots = ResultingRoots::carried_forward(&genesis_basis, digest_of(0x91));
+        let mut roots = ResultingRoots::carried_forward(&genesis_basis);
         roots.ref_root = ref_root;
         let mut commit_plan = PublicationPlan::open(genesis_basis).expect("genesis opens a plan");
         commit_plan.commit(record);
@@ -4678,8 +4678,7 @@ mod tests {
             authority_head_id(&successor_body).expect("committed head re-identifies"),
             successor_body,
         );
-        let refusal_result_roots =
-            ResultingRoots::carried_forward(&successor_basis, digest_of(0x92));
+        let refusal_result_roots = ResultingRoots::carried_forward(&successor_basis);
         let mut refusal_publication =
             PublicationPlan::open(successor_basis).expect("committed head opens");
         refusal_publication.refuse(
@@ -4838,7 +4837,7 @@ mod tests {
         let stale_record_id =
             super::repository_commit_id(&record).expect("pre-stamp RCR re-identifies");
 
-        let mut roots = ResultingRoots::carried_forward(&genesis_basis, digest_of(0xb2));
+        let mut roots = ResultingRoots::carried_forward(&genesis_basis);
         roots.ref_root = ref_root;
         let mut plan = PublicationPlan::open(genesis_basis).expect("genesis opens a plan");
         plan.commit(record);
