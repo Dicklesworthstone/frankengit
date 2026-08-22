@@ -4,7 +4,7 @@ use fgit_authority::{
     AuthorityStore, CumulativeOutcomes, HeadKey, HeadRead, MemoryAuthorityStore, StoreInstanceId,
     authority_head_identity, collect_cumulative_outcomes, initialize_repository,
 };
-use fgit_chronicle::{PublicationBasis, PublicationPlan, ResultingRoots};
+use fgit_chronicle::{LostCandidate, PublicationBasis, PublicationPlan, ResultingRoots};
 use fgit_codec::schema::{RepositoryAuthorityHeadBody, RepositoryCommitRecord};
 use fgit_codec::{CryptoBodyIdentity, DecodeLimits, decode_body, encode_body};
 use fgit_compaction::{
@@ -147,11 +147,18 @@ fn roots(compaction_generation_link: Option<Digest>) -> ResultingRoots {
 }
 
 fn commit_record(compaction_generation_link: Digest) -> RepositoryCommitRecord {
+    commit_record_for_transaction(compaction_generation_link, derived!(TxId, 0x61))
+}
+
+fn commit_record_for_transaction(
+    compaction_generation_link: Digest,
+    tx_id: TxId,
+) -> RepositoryCommitRecord {
     RepositoryCommitRecord {
         repository_id: repository(),
         repository_sequence: RepositorySequence::FIRST,
         parent_rcr_id: None,
-        tx_id: derived!(TxId, 0x61),
+        tx_id,
         principal_snapshot_id: derived!(PrincipalSnapshotId, 0x62),
         canonical_request_digest: digest(0x63),
         ref_delta_root: digest(0x64),
@@ -197,8 +204,19 @@ fn publication(
     input: PublicationBasis,
     staged: &StagedCompaction,
 ) -> fgit_chronicle::VerifiedPublication {
+    publication_for_transaction(input, staged, derived!(TxId, 0x61))
+}
+
+fn publication_for_transaction(
+    input: PublicationBasis,
+    staged: &StagedCompaction,
+    tx_id: TxId,
+) -> fgit_chronicle::VerifiedPublication {
     let mut plan = PublicationPlan::open(input).expect("authenticated basis opens a plan");
-    plan.commit(commit_record(staged.compaction_generation_link()));
+    plan.commit(commit_record_for_transaction(
+        staged.compaction_generation_link(),
+        tx_id,
+    ));
     seal_fixture(plan, &roots(Some(staged.compaction_generation_link())))
 }
 
@@ -730,28 +748,16 @@ fn a_basis_mismatch_outranks_a_compaction_generation_link_mismatch() {
 // publish — the three outcomes, told apart from each other
 // ---------------------------------------------------------------------------
 
-/// **§5.1.** A stale expected token loses the race; nothing it staged becomes
-/// canonical, and the staged output survives for a replan.
+/// **§5.1 and §5.2.** A stale expected token makes this attempt
+/// noncanonical, but the authenticated loss classification still matters.
 ///
-/// **Comment corrected (`frankengit-q77o`).** This test originally asserted
-/// "a moved head is a lost race, not an already-decided duplicate". That is
-/// **false for this very fixture**, and I wrote it. Driving the same scenario
-/// through `fgit_chronicle::publish` directly returns
-/// `Lost(Superseded { decided: [(tx, Committed(..))] })` — the transaction IS
-/// already decided, and chronicle says so while naming the committed RCR.
-///
-/// `StagedCompaction::publish` matches `Lost(_)` with a wildcard, so both
-/// `LostCandidate` arms become `AuthorityRaceLost` even though their own docs
-/// carry opposite instructions: `Replannable` may be replanned, `Superseded`
-/// must not be retried. What this test pins is therefore what the compaction
-/// layer *reports*, which is not the same as what the authority layer
-/// *classified*.
-///
-/// The assertion is left as-is deliberately: whether that mapping should change
-/// is a refusal-vocabulary decision recorded on `frankengit-q77o` and not
-/// settled here. Only the misleading claim is removed.
+/// The winner moved the head and committed this candidate's transaction, so
+/// Chronicle returns `Lost(Superseded { decided: .. })`. The compaction
+/// refusal must preserve that result rather than telling its caller the staged
+/// output may be replanned: re-deciding the named sealed transaction violates
+/// the one-terminal-decision rule.
 #[test]
-fn a_stale_expected_token_reports_a_lost_race() {
+fn a_stale_expected_token_preserves_a_superseded_terminal_decision() {
     let input = basis();
     let head_key = HeadKey::new(b"oq73/race-head".to_vec()).expect("bounded head key");
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7b));
@@ -769,15 +775,53 @@ fn a_stale_expected_token_reports_a_lost_race() {
     let loser_staged = stage(&input);
     let loser = publication(input, &loser_staged);
     match loser_staged.publish(&store, &head_key, stale, &loser, tenant()) {
+        CompactionExecution::Unpublished(unpublished) => match unpublished.reason() {
+            CompactionPublicationRefusal::AuthorityRaceLost(LostCandidate::Superseded {
+                decided,
+            }) => {
+                assert_eq!(decided.len(), 1, "the winner decided one transaction");
+                assert_eq!(
+                    decided[0].0,
+                    derived!(TxId, 0x61),
+                    "the refusal names the sealed transaction that must not be retried"
+                );
+            }
+            other => panic!("the lost race must retain its terminal classification: {other:?}"),
+        },
+        other => panic!("a stale predecessor cannot publish: {other:?}"),
+    }
+}
+
+/// **§5.1.** A lost race whose candidate transactions remain undecided is
+/// distinctly replannable. This is the necessary twin for the superseded case:
+/// mapping every lost race to a terminal refusal would be just as incorrect as
+/// flattening every lost race to a replan.
+#[test]
+fn a_stale_expected_token_with_undecided_transaction_is_replannable() {
+    let input = basis();
+    let head_key = HeadKey::new(b"q77o/replannable-race-head".to_vec()).expect("bounded head key");
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7f));
+    initialize_repository(&store, &head_key, input.body()).expect("genesis initializes");
+    let stale = current_token(&store, &head_key);
+
+    let winner_staged = stage(&input);
+    let winner = publication(input.clone(), &winner_staged);
+    match winner_staged.publish(&store, &head_key, stale, &winner, tenant()) {
+        CompactionExecution::Visible(_) => {}
+        other => panic!("the first publication must land: {other:?}"),
+    }
+
+    let loser_staged = stage(&input);
+    let loser = publication_for_transaction(input, &loser_staged, derived!(TxId, 0x6d));
+    match loser_staged.publish(&store, &head_key, stale, &loser, tenant()) {
         CompactionExecution::Unpublished(unpublished) => {
             assert_eq!(
                 unpublished.reason(),
-                &CompactionPublicationRefusal::AuthorityRaceLost,
-                "the compaction layer reports a lost race here -- but see the note \
-                 above: chronicle classified this same candidate as Superseded"
+                &CompactionPublicationRefusal::AuthorityRaceLost(LostCandidate::Replannable),
+                "a head move without a terminal decision leaves this candidate replannable"
             );
         }
-        other => panic!("a stale predecessor cannot publish: {other:?}"),
+        other => panic!("an undecided stale candidate must lose without publishing: {other:?}"),
     }
 }
 
@@ -1286,9 +1330,11 @@ fn a_transaction_that_is_already_terminal_reports_already_decided_not_a_lost_rac
                 &CompactionPublicationRefusal::AlreadyDecided,
                 "an already-terminal transaction must not be re-decided"
             );
-            assert_ne!(
-                unpublished.reason(),
-                &CompactionPublicationRefusal::AuthorityRaceLost,
+            assert!(
+                !matches!(
+                    unpublished.reason(),
+                    CompactionPublicationRefusal::AuthorityRaceLost(_)
+                ),
                 "the head did not move, so this is not a lost race; reporting one \
                  would tell the caller to discard positions that are still valid"
             );
@@ -1308,7 +1354,7 @@ fn a_transaction_that_is_already_terminal_reports_already_decided_not_a_lost_rac
 ///
 /// Asserted separately because it is what makes the reason worth reporting: the
 /// caller still holds everything it staged, and the reason is the only thing
-/// telling it whether replanning is appropriate.
+/// telling it whether a later authenticated plan is appropriate.
 #[test]
 fn an_already_decided_refusal_keeps_the_staged_output() {
     let input = basis();
@@ -1349,7 +1395,7 @@ fn an_already_decided_refusal_keeps_the_staged_output() {
                 recovered.generation(),
                 handed_in,
                 "into_staged must hand back exactly the compaction that was attempted, \
-                 so a caller can re-plan it against a fresh authenticated basis"
+                 so a caller can inspect it without treating recovery as re-plan permission"
             );
         }
         other => panic!("expected an already-decided refusal: {other:?}"),

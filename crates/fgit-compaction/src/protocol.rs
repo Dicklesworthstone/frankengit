@@ -11,7 +11,7 @@ use std::fmt;
 use fgit_authority::{
     AuthorityStore, AuthorityVersionToken, HeadKey, OutcomeFailure, authority_head_identity,
 };
-use fgit_chronicle::{PublicationVerdict, VerifiedPublication, publish};
+use fgit_chronicle::{LostCandidate, PublicationVerdict, VerifiedPublication, publish};
 use fgit_codec::{CodecRefusal, CryptoBodyIdentity};
 use fgit_object_fabric::fabric::{
     AuthenticatedRetentionRegistry, PublicationState, RetentionRootProposal, StoreRefusal,
@@ -175,10 +175,10 @@ impl StagedCompaction {
                     receipt,
                 })
             }
-            Ok(PublicationVerdict::Lost(_)) => {
+            Ok(PublicationVerdict::Lost(candidate)) => {
                 CompactionExecution::Unpublished(UnpublishedCompaction {
                     staged: self,
-                    reason: CompactionPublicationRefusal::AuthorityRaceLost,
+                    reason: CompactionPublicationRefusal::AuthorityRaceLost(candidate),
                 })
             }
             Ok(PublicationVerdict::AlreadyDecided { .. }) => {
@@ -202,7 +202,8 @@ pub enum CompactionExecution {
     /// The ordinary authority decision made the generation visible.
     Visible(VisibleCompaction),
     /// Nothing was published through this attempt; the complete staged output
-    /// remains available for inspection or re-planning.
+    /// remains available for inspection and, only when its refusal permits it,
+    /// authenticated re-planning.
     Unpublished(UnpublishedCompaction),
     /// The store did not establish whether the CAS took effect.  The caller
     /// must resolve from the authenticated authority state, never delete source
@@ -224,7 +225,13 @@ impl UnpublishedCompaction {
         &self.reason
     }
 
-    /// Recovers the staged output for a fresh, authenticated re-plan.
+    /// Recovers the staged output after the caller has acted on [`Self::reason`].
+    ///
+    /// A recovered output is not authority-visible and does not itself permit a
+    /// re-plan. In particular, an
+    /// [`CompactionPublicationRefusal::AuthorityRaceLost`] carrying
+    /// [`LostCandidate::Superseded`] names terminal transactions that must not
+    /// be re-decided.
     pub fn into_staged(self) -> StagedCompaction {
         self.staged
     }
@@ -436,8 +443,11 @@ pub enum CompactionPublicationRefusal {
     RefusalOnlyPublication,
     /// The successor head could not be canonically identified before CAS.
     SuccessorIdentityUnavailable,
-    /// Another authority publication won; staged output is still noncanonical.
-    AuthorityRaceLost,
+    /// Another authority publication won; staged output is still
+    /// noncanonical. The authenticated classification preserves whether the
+    /// candidate may be replanned or contains a transaction that is already
+    /// terminal.
+    AuthorityRaceLost(LostCandidate),
     /// The batch's transaction was already terminal; it must not be re-decided.
     AlreadyDecided,
     /// Canonical record encoding or identity computation refused.
@@ -468,8 +478,15 @@ impl fmt::Display for CompactionPublicationRefusal {
             Self::SuccessorIdentityUnavailable => {
                 formatter.write_str("compaction successor authority head could not be identified")
             }
-            Self::AuthorityRaceLost => {
-                formatter.write_str("compaction authority publication lost its race")
+            Self::AuthorityRaceLost(LostCandidate::Replannable) => {
+                formatter.write_str("compaction authority publication lost a replannable race")
+            }
+            Self::AuthorityRaceLost(LostCandidate::Superseded { decided }) => {
+                write!(
+                    formatter,
+                    "compaction authority publication lost its race after {} transaction(s) became terminal",
+                    decided.len()
+                )
             }
             Self::AlreadyDecided => {
                 formatter.write_str("compaction publication transaction was already terminal")
