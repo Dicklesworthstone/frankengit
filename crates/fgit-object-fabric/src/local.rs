@@ -32,6 +32,60 @@ const OBJECT_MAGIC: &[u8; 4] = b"FGOB";
 const MAX_STAGE_ATTEMPTS: u64 = 1_024;
 static NEXT_STAGE: AtomicU64 = AtomicU64::new(1);
 
+/// One locally-owned staging file, removed whenever its placement returns.
+///
+/// A physical crash cannot run [`Drop`], so recovery continues to treat any
+/// residue as non-authoritative. Returned refusals, however, must not grow the
+/// staging directory: they close the handle and remove this one known path.
+struct StageFile {
+    path: PathBuf,
+    file: Option<File>,
+}
+
+impl StageFile {
+    fn new(path: PathBuf, file: File) -> Self {
+        Self {
+            path,
+            file: Some(file),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        match self.file.as_mut() {
+            Some(file) => file.write_all(bytes),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "staging file is already closed",
+            )),
+        }
+    }
+
+    fn sync_all(&self) -> std::io::Result<()> {
+        match self.file.as_ref() {
+            Some(file) => file.sync_all(),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "staging file is already closed",
+            )),
+        }
+    }
+
+    fn close(&mut self) {
+        drop(self.file.take());
+    }
+}
+
+impl Drop for StageFile {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        let _cleanup = fs::remove_file(&self.path);
+    }
+}
+
 /// Configuration for one namespace-scoped local object fabric.
 #[derive(Debug, Clone)]
 pub struct LocalFilesystemConfig {
@@ -292,14 +346,14 @@ impl LocalFilesystemFabric {
         fs::read(path).map_err(|error| storage_error(StorageOperation::ReadBody, error))
     }
 
-    fn fresh_stage(&self) -> Result<(PathBuf, File), StoreRefusal> {
+    fn fresh_stage(&self) -> Result<StageFile, StoreRefusal> {
         let directory = self.staging_dir();
         self.create_directory(&directory)?;
         for _ in 0..MAX_STAGE_ATTEMPTS {
             let sequence = NEXT_STAGE.fetch_add(1, Ordering::Relaxed);
             let path = directory.join(format!("{sequence:016x}.stage"));
             match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => return Ok((path, file)),
+                Ok(file) => return Ok(StageFile::new(path, file)),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(storage_error(StorageOperation::WriteStage, error)),
             }
@@ -313,7 +367,7 @@ impl LocalFilesystemFabric {
     fn write_object_stage(
         &self,
         object: &VerifiedObject,
-    ) -> Result<PathBuf, PlacementAttemptError> {
+    ) -> Result<StageFile, PlacementAttemptError> {
         let envelope = object
             .envelope()
             .encode()
@@ -337,7 +391,7 @@ impl LocalFilesystemFabric {
         }
         let envelope_len = u32::try_from(envelope.len())
             .map_err(|_| PlacementAttemptError::before_write(StoreRefusal::LengthOverflow))?;
-        let (path, mut stage) = self
+        let mut stage = self
             .fresh_stage()
             .map_err(PlacementAttemptError::before_write)?;
         self.crash_if(LocalCrashPoint::BeforeStageWrite)
@@ -360,12 +414,13 @@ impl LocalFilesystemFabric {
         })?;
         self.crash_if(LocalCrashPoint::AfterStageSync)
             .map_err(PlacementAttemptError::after_write)?;
-        Ok(path)
+        stage.close();
+        Ok(stage)
     }
 
     fn publish_object_stage(
         &self,
-        stage: &Path,
+        stage: StageFile,
         object: &VerifiedObject,
     ) -> Result<ImmutableWrite, StoreRefusal> {
         self.crash_if(LocalCrashPoint::BeforeImmutablePublish)?;
@@ -374,13 +429,12 @@ impl LocalFilesystemFabric {
             .parent()
             .ok_or(StoreRefusal::MalformedStoredObject)?;
         self.create_directory(parent)?;
-        match fs::hard_link(stage, &final_path) {
+        match fs::hard_link(stage.path(), &final_path) {
             Ok(()) => {
                 self.crash_if(LocalCrashPoint::AfterImmutablePublish)?;
                 sync_directory(parent)?;
                 self.crash_if(LocalCrashPoint::AfterPublishDirectorySync)?;
                 self.crash_if(LocalCrashPoint::BeforeStageCleanup)?;
-                let _cleanup = fs::remove_file(stage);
                 Ok(ImmutableWrite::Created)
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -388,7 +442,6 @@ impl LocalFilesystemFabric {
                 if stored != *object {
                     return Err(StoreRefusal::StoredObjectMismatch);
                 }
-                let _cleanup = fs::remove_file(stage);
                 Ok(ImmutableWrite::AlreadyPresent)
             }
             Err(error) => Err(storage_error(StorageOperation::PublishImmutableBody, error)),
@@ -412,7 +465,7 @@ impl LocalFilesystemFabric {
             .parent()
             .ok_or(StoreRefusal::MalformedStoredObject)?;
         self.create_directory(parent)?;
-        let (stage_path, mut stage) = self.fresh_stage()?;
+        let mut stage = self.fresh_stage()?;
         self.crash_if(LocalCrashPoint::BeforeStageWrite)?;
         stage
             .write_all(body)
@@ -423,13 +476,13 @@ impl LocalFilesystemFabric {
             .map_err(|error| storage_error(StorageOperation::SyncStage, error))?;
         self.crash_if(LocalCrashPoint::AfterStageSync)?;
         self.crash_if(LocalCrashPoint::BeforeImmutablePublish)?;
-        match fs::hard_link(&stage_path, final_path) {
+        stage.close();
+        match fs::hard_link(stage.path(), final_path) {
             Ok(()) => {
                 self.crash_if(LocalCrashPoint::AfterImmutablePublish)?;
                 sync_directory(parent)?;
                 self.crash_if(LocalCrashPoint::AfterPublishDirectorySync)?;
                 self.crash_if(LocalCrashPoint::BeforeStageCleanup)?;
-                let _cleanup = fs::remove_file(stage_path);
                 Ok(ImmutableWrite::Created)
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -437,7 +490,6 @@ impl LocalFilesystemFabric {
                 if existing != body {
                     return Err(StoreRefusal::StoredObjectMismatch);
                 }
-                let _cleanup = fs::remove_file(stage_path);
                 Ok(ImmutableWrite::AlreadyPresent)
             }
             Err(error) => Err(storage_error(operation, error)),
@@ -560,7 +612,7 @@ impl ImmutableObjectFabric for LocalFilesystemFabric {
                 return Err(failure.refusal);
             }
         };
-        match self.publish_object_stage(&stage, &object) {
+        match self.publish_object_stage(stage, &object) {
             Ok(ImmutableWrite::AlreadyPresent) => {
                 settle_admission_abort(reserved, AdmissionAbortReason::Superseded, &actual)?;
                 Ok(PutIfAbsent::AlreadyPresent {
@@ -972,6 +1024,16 @@ mod tests {
         .expect("fault-injected test fabric must open")
     }
 
+    fn assert_staging_is_empty(fabric: &LocalFilesystemFabric) {
+        assert_eq!(
+            fs::read_dir(fabric.staging_dir())
+                .expect("local staging directory must remain readable")
+                .count(),
+            0,
+            "a returned failure must release its staging file instead of growing the placement volume"
+        );
+    }
+
     #[test]
     fn newly_created_nested_directories_sync_a_chain_bounded_by_store_root() {
         let root = TestRoot::new();
@@ -1245,16 +1307,32 @@ mod tests {
                     "crash point {point:?} exposed neither absence nor the exact immutable body: {error}"
                 ),
             }
-            let staged = fs::read_dir(reopened.staging_dir())
-                .expect("local staging directory must remain readable after interruption");
-            for entry in staged {
-                let entry = entry.expect("staging entry must remain inspectable");
-                assert!(
-                    entry.file_name().to_string_lossy().ends_with(".stage"),
-                    "only non-authoritative stage residue may remain"
-                );
-            }
+            assert_staging_is_empty(&reopened);
         }
+    }
+
+    #[test]
+    fn returned_immutable_body_failure_releases_its_stage_file() {
+        let root = TestRoot::new();
+        let crashing = fabric_with_crash(root.path(), LocalCrashPoint::BeforeImmutablePublish);
+        let final_path = crashing.root().join("test").join("body");
+
+        assert_eq!(
+            crashing.write_immutable_bytes(
+                &final_path,
+                b"body",
+                StorageOperation::PublishImmutableBody,
+            ),
+            Err(StoreRefusal::StorageIo {
+                operation: StorageOperation::PublishImmutableBody,
+                kind: std::io::ErrorKind::Interrupted,
+            })
+        );
+        assert_staging_is_empty(&crashing);
+        assert!(
+            !final_path.exists(),
+            "the pre-publish interruption must not expose an immutable body"
+        );
     }
 
     #[test]
