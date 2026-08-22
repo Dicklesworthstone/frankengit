@@ -22,10 +22,27 @@ catch a *specification* that is itself wrong: if the layout documented in
 agree perfectly. Closing that gap would need a description maintained
 separately from the code, and nothing here should be read as having closed it.
 
-The generator is deliberately *not* in this repository. It is a separate
-implementation in another language, kept outside the tree so that no future
-refactor can quietly couple it to `fgit-codec` and destroy the independence.
-Its absence is the point; do not add a Rust regeneration helper here.
+The generator is `generate.py`, next to these files. It is a separate
+implementation in another language, it reads only the documented layout, and
+nothing in the Rust tests invokes it — the same arrangement as
+`crates/fgit-crypto/goldens/derive.py`.
+
+**This paragraph used to say the opposite**, and the correction is worth keeping
+because the reasoning was the interesting part. It said the generator was
+deliberately kept *outside* the tree so no future refactor could couple it to
+`fgit-codec`, and that "its absence is the point". Distance is not what protects
+the independence — behaviour is. A Python file cannot link `fgit-codec`; what
+would destroy the property is someone porting it to Rust or making it a `cargo`
+target, and that is forbidden below whether the file lives here or not.
+
+Meanwhile the absence had a cost that was not noticed when the rule was written:
+the only copy lived in an agent's scratch directory, so the control step in the
+procedure below — the step that makes a re-bless auditable at all — was minutes
+away from being impossible for everyone, permanently. A safeguard that quietly
+disables the audit it exists to protect is a bad trade.
+
+Do not add a **Rust** regeneration helper here, do not let `generate.py` import
+or shell out to `fgit-codec`, and do not wire it into `cargo`.
 
 ## Reserved code points
 
@@ -59,12 +76,22 @@ diff rather than resting on the committer's word.
    If a test is red and the format did not change, the code is wrong, not the
    corpus.
 
-2. **Run the control before the treatment.** Regenerate with the change *not*
-   applied and confirm the output reproduces the currently committed corpus
-   **byte-identically**. Without this, a diff cannot be attributed to your
-   change rather than to drift that accumulated since the last re-bless. If the
-   control does not reproduce the corpus, stop: something already diverged and
-   that is the real finding.
+2. **Run the control before the treatment.** With the change *not* applied, run
+
+   ```
+   python3 crates/fgit-codec/tests/goldens/generate.py
+   git diff --quiet crates/fgit-codec/tests/goldens/   # must exit 0
+   ```
+
+   and confirm it reproduces the committed corpus **byte-identically**. Without
+   this, a diff cannot be attributed to your change rather than to drift that
+   accumulated since the last re-bless. If the control does not reproduce the
+   corpus, stop: something already diverged and that is the real finding.
+
+   This control has been run: **63/63 byte-identical**, `git diff` empty. That
+   is the first execution of it since the corpus moved to the reserved code
+   point, and until it was run the claim above this section was asserted rather
+   than checked — the procedure had been written but never exercised.
 
 3. **Characterise the diff before landing it.** Record how many files move and
    why every one of them had to. Check specifically that:
