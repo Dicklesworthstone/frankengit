@@ -265,7 +265,7 @@ fn an_export_is_written_once_and_a_second_refuses_to_replace_it() {
         &scratch.root(),
         TENANT,
         REPOSITORY,
-        &destination.to_string_lossy().into_owned(),
+        &destination.to_string_lossy(),
     ];
 
     let outcome = run(&words(&arguments)).expect("the first export is written");
