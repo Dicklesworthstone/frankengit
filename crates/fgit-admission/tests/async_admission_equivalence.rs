@@ -55,8 +55,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionResult,
@@ -316,19 +315,23 @@ fn delete_main() -> ValidatedReceive {
         .expect("a delete-only receive is admissible without a pack")
 }
 
+/// Interior mutability behind a mutex rather than a `RefCell`: the async
+/// surface requires `Projection: Sync` so its futures are `Send` and can be
+/// spawned on a multi-threaded runtime, and a `RefCell` fixture would not be a
+/// legal projection for it.
 struct CommitmentStore {
-    refs: RefCell<BTreeMap<Digest, CanonicalRefState>>,
-    closures: RefCell<BTreeMap<Digest, PermittedObjectClosure>>,
+    refs: Mutex<BTreeMap<Digest, CanonicalRefState>>,
+    closures: Mutex<BTreeMap<Digest, PermittedObjectClosure>>,
 }
 
 #[derive(Clone, Default)]
-struct StagingStore(Rc<CommitmentStore>);
+struct StagingStore(Arc<CommitmentStore>);
 
 impl Default for CommitmentStore {
     fn default() -> Self {
         Self {
-            refs: RefCell::new(BTreeMap::new()),
-            closures: RefCell::new(BTreeMap::new()),
+            refs: Mutex::new(BTreeMap::new()),
+            closures: Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -337,14 +340,19 @@ impl CanonicalAdmissionStore for StagingStore {
     fn resolve_ref_state(&self, root: Digest) -> Result<CanonicalRefState, RefusalCode> {
         self.0
             .refs
-            .borrow()
+            .lock()
+            .expect("fixture staging mutex")
             .get(&root)
             .cloned()
             .ok_or(RefusalCode::EvidenceMissing)
     }
 
     fn stage_ref_state(&self, root: Digest, state: CanonicalRefState) -> Result<(), RefusalCode> {
-        self.0.refs.borrow_mut().insert(root, state);
+        self.0
+            .refs
+            .lock()
+            .expect("fixture staging mutex")
+            .insert(root, state);
         Ok(())
     }
 
@@ -354,7 +362,8 @@ impl CanonicalAdmissionStore for StagingStore {
     ) -> Result<PermittedObjectClosure, RefusalCode> {
         self.0
             .closures
-            .borrow()
+            .lock()
+            .expect("fixture staging mutex")
             .get(&root)
             .cloned()
             .ok_or(RefusalCode::EvidenceMissing)
@@ -365,7 +374,11 @@ impl CanonicalAdmissionStore for StagingStore {
         root: Digest,
         closure: PermittedObjectClosure,
     ) -> Result<(), RefusalCode> {
-        self.0.closures.borrow_mut().insert(root, closure);
+        self.0
+            .closures
+            .lock()
+            .expect("fixture staging mutex")
+            .insert(root, closure);
         Ok(())
     }
 }
@@ -483,13 +496,13 @@ fn setup(
 /// code is part of the answer, not just the fact of refusing.
 fn label(result: &Result<AdmissionResult, AdmissionError>) -> String {
     match result {
-        Ok(admission) => match admission.commands.first() {
-            None => "ok:no-commands".to_owned(),
-            Some(command) => match command.terminal.outcome {
+        Ok(admission) => admission.commands.first().map_or_else(
+            || "ok:no-commands".to_owned(),
+            |command| match command.terminal.outcome {
                 DecisionOutcome::Committed { .. } => "committed".to_owned(),
                 DecisionOutcome::Refused { code, .. } => format!("refused:{code:?}"),
             },
-        },
+        ),
         Err(error) => format!("error:{error:?}"),
     }
 }

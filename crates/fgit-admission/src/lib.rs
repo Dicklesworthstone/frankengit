@@ -1780,7 +1780,7 @@ pub async fn admit_validated_receive_async<S, Projection>(
 ) -> Result<AdmissionResult, AdmissionError>
 where
     S: AsyncAuthorityStore + ?Sized,
-    Projection: AdmissionProjection + ?Sized,
+    Projection: AdmissionProjection + Sync + ?Sized,
 {
     let plan = plan_session(context, validated, limits)?;
     let terminals = if plan.atomic {
@@ -1827,7 +1827,7 @@ async fn admit_one_async<S, Projection>(
 ) -> Result<fgit_authority::TerminalOutcome, AdmissionError>
 where
     S: AsyncAuthorityStore + ?Sized,
-    Projection: AdmissionProjection + ?Sized,
+    Projection: AdmissionProjection + Sync + ?Sized,
 {
     let attempt = seal_attempt(context, lowered);
     let admission = fgit_authority::seal_request_async(store, cx, &attempt).await?;
@@ -1992,7 +1992,7 @@ async fn publish_refusal_async<S, Projection>(
 ) -> Result<Option<fgit_authority::TerminalOutcome>, AdmissionError>
 where
     S: AsyncAuthorityStore + ?Sized,
-    Projection: AdmissionProjection + ?Sized,
+    Projection: AdmissionProjection + Sync + ?Sized,
 {
     let refusal = prepare_refusal_record(projection, basis, seal_id, tx_id, code)?;
     let (key, bytes) = refusal_body_bytes(&refusal)?;
