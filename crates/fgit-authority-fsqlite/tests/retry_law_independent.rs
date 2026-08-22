@@ -68,7 +68,7 @@ const SPEC_RETRYABLE: [TransientClass; 7] = [
 /// Every class the type declares. Kept exhaustive deliberately: a new variant
 /// must be added here, which forces a decision about which side of the law it
 /// falls on instead of letting it default in silently.
-const ALL_CLASSES: [TransientClass; 10] = [
+const ALL_CLASSES: [TransientClass; 11] = [
     TransientClass::Busy,
     TransientClass::BusyRecovery,
     TransientClass::BusySnapshot,
@@ -78,6 +78,7 @@ const ALL_CLASSES: [TransientClass; 10] = [
     TransientClass::PageBufferCapacityExhausted,
     TransientClass::OutcomeIndeterminate,
     TransientClass::FreshSnapshotRequired,
+    TransientClass::Cancelled,
     TransientClass::Permanent,
 ];
 
@@ -207,6 +208,7 @@ fn the_class_list_here_is_exhaustive() {
             TransientClass::PageBufferCapacityExhausted => "page_buffer_capacity_exhausted",
             TransientClass::OutcomeIndeterminate => "outcome_indeterminate",
             TransientClass::FreshSnapshotRequired => "fresh_snapshot_required",
+            TransientClass::Cancelled => "cancelled",
             TransientClass::Permanent => "permanent",
         };
         assert!(!named.is_empty(), "every class needs a stable receipt name");

@@ -54,9 +54,22 @@ pub const fn classify_franken_error(error: &FrankenError) -> TransientClass {
         FrankenError::DatabaseImagePublicationOutcomeIndeterminate { .. } => {
             TransientClass::OutcomeIndeterminate
         }
+        // Cancellation of the caller's own context. Named rather than left to
+        // the catch-all because the catch-all reaches the caller as
+        // `Refused(Unavailable)`, which asserts non-commit -- and §5.2 says
+        // cancellation never proves non-commit. `frankengit-w1ik`.
+        //
+        // `Interrupt` covers both the pre-dispatch and the after-dispatch
+        // cancel: `tests/cancellation_error_probe.rs` measures fsqlite
+        // returning the same value for both, because the cancel is observed by
+        // the caller's await rather than inside the engine. `Abort` is
+        // deliberately NOT included -- it is a general engine code produced at
+        // 83 sites across the fsqlite crates, and claiming all of them "may
+        // have committed" would be the same error in the other direction.
+        FrankenError::Interrupt => TransientClass::Cancelled,
         // Everything else. Corruption, schema and constraint errors, invariant
-        // failures, cancellation, resource ceilings and permanent I/O all land
-        // here, and none of them is a retry.
+        // failures, resource ceilings and permanent I/O all land here, and none
+        // of them is a retry.
         _ => TransientClass::Permanent,
     }
 }
