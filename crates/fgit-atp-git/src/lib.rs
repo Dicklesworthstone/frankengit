@@ -26,6 +26,8 @@ use fgit_object_fabric::{
 use fgit_statistics::{FallbackTrigger, PolicySelection};
 use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, SegmentManifestId};
 
+pub mod cache;
+
 /// The only presently implemented ATP-Git profile.
 ///
 /// It transfers complete verified objects.  Chunk, pack-view, coded, and
