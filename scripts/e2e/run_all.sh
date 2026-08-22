@@ -276,6 +276,13 @@ if [ -n "$RA_PROFILE" ] && [ "$RA_DIR_EXPLICIT" -eq 1 ]; then
   exit 2
 fi
 
+# The discovered set is captured BEFORE any profile narrowing. Without this,
+# S_DISCOVERED is built from the already-narrowed RA_SCRIPTS and the receipt
+# reports the selected suites as though they were everything discovery found --
+# a receipt quietly agreeing with whatever the profile chose, which is the one
+# thing it must not do.
+declare -a RA_ALL_DISCOVERED=()
+
 declare -a RA_SCRIPTS=()
 if [ "${#RA_EXPLICIT[@]}" -gt 0 ]; then
   RA_SCRIPTS=("${RA_EXPLICIT[@]}")
@@ -285,6 +292,10 @@ else
     RA_SCRIPTS+=("$f")
   done < <(ra_discover "$RA_SUITE_DIR")
 fi
+
+for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
+  RA_ALL_DISCOVERED+=("$(ra_script_id "$f")")
+done
 
 # ---------------------------------------------------------------------------
 # FG-091: load the profile manifest and enforce STRUCTURE before running.
@@ -346,10 +357,6 @@ if [ -n "$RA_PROFILE" ]; then
     exit 2
   fi
 
-  declare -a RA_DISCOVERED_IDS=()
-  for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
-    RA_DISCOVERED_IDS+=("$(ra_script_id "$f")")
-  done
 
   declare -a RA_PROFILE_AREAS=()
   for m_id in "${S_MANIFEST_REQUIRED[@]}"; do
@@ -359,7 +366,7 @@ if [ -n "$RA_PROFILE" ]; then
   done
 
   for m_id in "${S_MANIFEST_REQUIRED[@]}"; do
-    ra_in_set "$m_id" "${RA_DISCOVERED_IDS[@]+"${RA_DISCOVERED_IDS[@]}"}" ||
+    ra_in_set "$m_id" "${RA_ALL_DISCOVERED[@]+"${RA_ALL_DISCOVERED[@]}"}" ||
       S_MANIFEST_MISSING+=("$m_id")
   done
   # UNREGISTERED IS SCOPED TO THE AREAS THE PROFILE CLAIMS. A harness profile
@@ -367,7 +374,7 @@ if [ -n "$RA_PROFILE" ]; then
   # outside it. What it MUST catch is a NEW suite appearing inside an area it
   # owns, because that is the release surface growing without the manifest being
   # updated to approve it.
-  for d_id in "${RA_DISCOVERED_IDS[@]+"${RA_DISCOVERED_IDS[@]}"}"; do
+  for d_id in "${RA_ALL_DISCOVERED[@]+"${RA_ALL_DISCOVERED[@]}"}"; do
     d_area=${d_id%-*}
     ra_in_set "$d_area" "${RA_PROFILE_AREAS[@]+"${RA_PROFILE_AREAS[@]}"}" || continue
     ra_in_set "$d_id" "${S_MANIFEST_REQUIRED[@]}" || S_MANIFEST_UNREGISTERED+=("$d_id")
@@ -403,6 +410,11 @@ if [ -n "$RA_PROFILE" ]; then
   done
   RA_SCRIPTS=("${RA_PROFILE_SCRIPTS[@]+"${RA_PROFILE_SCRIPTS[@]}"}")
 fi
+
+declare -a RA_SELECTED_IDS=()
+for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
+  RA_SELECTED_IDS+=("$(ra_script_id "$f")")
+done
 
 if [ "$RA_LIST" -eq 1 ]; then
   for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
@@ -747,8 +759,14 @@ declare -a S_CLEANUPFAILED=()
 declare -a ALL_IDS=() CROSS_DUP=()
 declare -A ID_OWNER=()
 
-for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
-  S_DISCOVERED+=("$(ra_script_id "$f")")
+S_DISCOVERED=("${RA_ALL_DISCOVERED[@]+"${RA_ALL_DISCOVERED[@]}"}")
+# FILTERED: discovered, then excluded by the selected profile. Recorded because
+# a narrowing that leaves no trace is indistinguishable from a corpus that never
+# had those suites -- and "we ran three of fifty-three" is a materially
+# different claim from "we ran everything".
+declare -a S_FILTERED=()
+for d_id in "${S_DISCOVERED[@]+"${S_DISCOVERED[@]}"}"; do
+  ra_in_set "$d_id" "${RA_SELECTED_IDS[@]+"${RA_SELECTED_IDS[@]}"}" || S_FILTERED+=("$d_id")
 done
 
 FGE__J=''
@@ -1052,7 +1070,7 @@ for pair in \
   "missing_terminal:S_MISSINGTERM" "zero_assertion:S_ZEROASSERT" \
   "duplicate_id:S_DUPID" "containment_failed:S_CONTAINMENT" \
   "exit_mismatch:S_EXITMISMATCH" "cleanup_failed:S_CLEANUPFAILED" \
-  "not_run:S_NOTRUN" "flaky:S_FLAKY" \
+  "not_run:S_NOTRUN" "flaky:S_FLAKY" "filtered:S_FILTERED" \
   "manifest_required:S_MANIFEST_REQUIRED" "manifest_missing:S_MANIFEST_MISSING" \
   "manifest_unregistered:S_MANIFEST_UNREGISTERED" \
   "manifest_required_not_passed:S_MANIFEST_NOTPASSED"; do
