@@ -47,10 +47,10 @@ use fgit_types::{
     TenantId, TransactionSealId, TxId,
 };
 use fgit_wire::receive::{
-    QuarantineReceipt, ReceiveCommand, ReceiveCommandKind, ReceiveCommandStatus, ReceiveError,
-    ReceiveRequest, UnpackStatus, report_status,
+    QuarantineReceipt, ReceiveCommandStatus, ReceiveError, ReceiveRequest, UnpackStatus,
+    report_status,
 };
-use fgit_wire::{GitObjectFormat, Packet};
+use fgit_wire::{AnyGitOid, GitObjectFormat, Packet};
 
 /// Schema for a receive-pack ref transaction produced by this admission layer.
 pub const RECEIVE_ADMISSION_SCHEMA: SchemaId =
@@ -193,6 +193,297 @@ where
         receipt: receipt.clone(),
         closure,
     })
+}
+
+// --- source-import admission ------------------------------------------------
+//
+// A node importing an existing repository has already proven its refs and
+// object closure by its own means, and has no pack to quarantine. Receive-pack
+// admission cannot express that: `validate_receive` requires a
+// `QuarantinedPack` for any non-delete command, and `ValidatedReceive`'s fields
+// are private precisely so a caller cannot manufacture one.
+//
+// That guard is correct and stays. What was missing is a second, honestly typed
+// way in — not a hole in the first. So the provenance is a distinct type rather
+// than a synthesized `QuarantineReceipt`: an audit trail that reported
+// "quarantine validated this" about objects no quarantine ever saw would be a
+// counterfeit witness, and the guard would be intact in form while defeated in
+// substance.
+//
+// What the two paths DO share is the decision: the same lowering, the same
+// seal, the same fold, the same materialization, the same CAS. A source import
+// of a given set of refs produces the same decision record as a push of those
+// refs, because after admission there is nothing left to distinguish them —
+// canonical history records what the repository holds, not how it arrived.
+
+/// Where an imported source came from.
+///
+/// Typed so the provenance is recorded rather than inferred. Non-exhaustive
+/// because new import origins are expected and must not be a breaking change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SourceImportOrigin {
+    /// An ordinary local Git directory, bare or with a worktree, whose native
+    /// objects the import path read and verified before placing them in the
+    /// node's fabric.
+    ///
+    /// Deliberately *not* "a store this node already controls". The two differ
+    /// in who did the verifying, and that is the entire content of a
+    /// provenance label: a directory the node merely has filesystem access to
+    /// has vouched for nothing, so the import path's own verification is what
+    /// this origin records. Naming it after the destination rather than the
+    /// source would overstate the evidence in exactly the way a forged
+    /// quarantine receipt would.
+    LocalGitDirectory,
+}
+
+/// Evidence that an import path established a source's object closure by its
+/// own means, with no pack to quarantine.
+///
+/// The deliberate sibling of [`QuarantineReceipt`], and deliberately **not**
+/// convertible into one. Both record what an admission's closure evidence
+/// rests on; they disagree about what did the establishing, and that
+/// disagreement is the point.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceImportReceipt {
+    /// The repository-native object domain of the imported objects.
+    pub object_format: GitObjectFormat,
+    /// Number of objects the import path established.
+    pub object_count: u32,
+    /// Whether the update list is expected to delete every ref it names.
+    ///
+    /// Carried for the same reason the quarantine receipt carries it: admission
+    /// cross-checks the declared shape against the updates, so a caller whose
+    /// receipt and update list disagree is refused rather than believed.
+    pub delete_only: bool,
+    /// Where the objects came from.
+    pub origin: SourceImportOrigin,
+}
+
+/// One ref update in a source import.
+///
+/// The same `(old, new, name)` shape the authority lowers from, in its own type
+/// so an import never presents itself as a wire command. A `ReceiveRequest`
+/// carries client capabilities and push options; a source import is not a
+/// client request, and synthesizing one would be the same counterfeit as
+/// forging a quarantine receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceRefUpdate {
+    /// Expected predecessor, or all-zero to require the ref be absent.
+    pub old: AnyGitOid,
+    /// Proposed new object, or all-zero to delete the ref.
+    pub new: AnyGitOid,
+    /// Full Git ref name, validated during lowering.
+    pub ref_name: Vec<u8>,
+}
+
+/// Source-import input after the import path established its closure.
+///
+/// The fields are private for the same reason [`ValidatedReceive`]'s are: a
+/// caller must not be able to turn a set of refs it merely holds into an
+/// authority-admissible input. Construct it with [`validate_source_import`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatedSourceImport {
+    updates: Vec<SourceRefUpdate>,
+    receipt: SourceImportReceipt,
+    closure: ValidatedClosure,
+}
+
+impl ValidatedSourceImport {
+    /// The ref updates whose semantics were validated.
+    #[must_use]
+    pub fn updates(&self) -> &[SourceRefUpdate] {
+        &self.updates
+    }
+
+    /// The source-import provenance from the same validation handoff.
+    ///
+    /// Returns a [`SourceImportReceipt`], never a [`QuarantineReceipt`]: a
+    /// caller reading provenance off an admission learns which path admitted
+    /// it from the type alone.
+    #[must_use]
+    pub const fn receipt(&self) -> &SourceImportReceipt {
+        &self.receipt
+    }
+}
+
+/// Bind an already-verified closure and its ref updates into an admissible
+/// source import.
+///
+/// The closure is supplied rather than computed: establishing it is the import
+/// path's job, and this crate never reads objects. What is enforced here is the
+/// same completeness rule `validate_receive` enforces — **every ref this import
+/// proposes must name an object the closure actually covers.** Without it a
+/// caller could publish a ref pointing at an object no evidence covers, which
+/// is the exact failure quarantine validation exists to prevent, and the reason
+/// this constructor is not simply "trust the caller".
+///
+/// This does not weaken receive-pack admission in any way:
+/// [`validate_receive`] still refuses a non-delete command with no
+/// [`QuarantinedPack`], and nothing here can produce a [`ValidatedReceive`].
+pub fn validate_source_import(
+    updates: &[SourceRefUpdate],
+    receipt: &SourceImportReceipt,
+    closure: ValidatedClosure,
+) -> Result<ValidatedSourceImport, RefusalCode> {
+    if updates
+        .iter()
+        .any(|update| !update.new.is_zero() && !closure.objects.contains(&update.new))
+    {
+        return Err(RefusalCode::ObjectClosureIncomplete);
+    }
+    Ok(ValidatedSourceImport {
+        updates: updates.to_vec(),
+        receipt: receipt.clone(),
+        closure,
+    })
+}
+
+/// One ref update, viewed uniformly regardless of which path supplied it.
+#[derive(Clone, Copy, Debug)]
+struct RefUpdateView<'a> {
+    old: AnyGitOid,
+    new: AnyGitOid,
+    ref_name: &'a [u8],
+}
+
+impl RefUpdateView<'_> {
+    /// The receive-pack zero-sentinel rule: an all-zero new ID deletes.
+    fn deletes(&self) -> bool {
+        self.new.is_zero() && !self.old.is_zero()
+    }
+}
+
+/// What the decision core needs from an admission input, with the provenance
+/// already reduced to the facts that bear on the decision.
+///
+/// This is the seam that lets receive-pack and source-import admission share
+/// one core. Everything that differs between the paths — how the closure was
+/// established, what type carries it, what a caller had to prove — has been
+/// settled by the time an input exists. What remains is identical, and that is
+/// why the two produce identical decisions for the same refs.
+struct AdmissionInput<'a> {
+    updates: Vec<RefUpdateView<'a>>,
+    push_options: &'a [Vec<u8>],
+    object_format: GitObjectFormat,
+    atomic: bool,
+    deletes_only: bool,
+    declared_delete_only: bool,
+    /// Names the receipt whose declared shape disagreed, so a mismatch refusal
+    /// says which provenance made the claim.
+    delete_only_label: &'static str,
+    closure: &'a ValidatedClosure,
+}
+
+/// View a validated receive-pack session as an admission input.
+fn receive_input(validated: &ValidatedReceive) -> AdmissionInput<'_> {
+    let updates: Vec<RefUpdateView<'_>> = validated
+        .request
+        .commands
+        .iter()
+        .map(|command| RefUpdateView {
+            old: command.old,
+            new: command.new,
+            ref_name: &command.ref_name,
+        })
+        .collect();
+    AdmissionInput {
+        updates,
+        push_options: &validated.request.push_options,
+        object_format: validated.receipt.object_format,
+        atomic: validated.request.has_capability(b"atomic"),
+        deletes_only: validated.request.deletes_only(),
+        declared_delete_only: validated.receipt.delete_only,
+        delete_only_label: "quarantine delete-only receipt",
+        closure: &validated.closure,
+    }
+}
+
+/// View a validated source import as an admission input.
+///
+/// Atomic by construction: an import publishes a repository's refs as one
+/// state, and admitting them as independent transactions would allow a partial
+/// import to become canonical. There is no client capability negotiation to
+/// consult, so the choice is made here rather than read from a request — and
+/// made in the safe direction.
+fn source_import_input(validated: &ValidatedSourceImport) -> AdmissionInput<'_> {
+    let updates: Vec<RefUpdateView<'_>> = validated
+        .updates
+        .iter()
+        .map(|update| RefUpdateView {
+            old: update.old,
+            new: update.new,
+            ref_name: &update.ref_name,
+        })
+        .collect();
+    let deletes_only = !updates.is_empty() && updates.iter().all(RefUpdateView::deletes);
+    AdmissionInput {
+        updates,
+        // A source import carries no client push options; there is no client.
+        push_options: &[],
+        object_format: validated.receipt.object_format,
+        atomic: true,
+        deletes_only,
+        declared_delete_only: validated.receipt.delete_only,
+        delete_only_label: "source-import delete-only receipt",
+        closure: &validated.closure,
+    }
+}
+
+/// Admit a verified source import against the authority.
+///
+/// The source-import sibling of [`admit_validated_receive`], and it reaches the
+/// authority through the same driver. For the same refs and the same closure it
+/// produces the same lowered request, the same transaction identity, the same
+/// commit record, and the same head transition as a push would — because after
+/// admission the two are the same event, and canonical history records what the
+/// repository holds rather than how it arrived.
+pub fn admit_validated_source_import<S, Projection>(
+    store: &S,
+    context: &AdmissionContext,
+    validated: &ValidatedSourceImport,
+    limits: AdmissionLimits,
+    projection: &Projection,
+) -> Result<AdmissionResult, AdmissionError>
+where
+    S: AuthorityStore + ?Sized,
+    Projection: AdmissionProjection + ?Sized,
+{
+    admit_input(
+        store,
+        context,
+        &source_import_input(validated),
+        limits,
+        projection,
+    )
+}
+
+/// Admit a verified source import against the authority, asynchronously.
+///
+/// The asynchronous sibling of [`admit_validated_source_import`], for a backend
+/// that implements [`AsyncAuthorityStore`] only. This is the entrypoint
+/// `fgit-node`'s import path uses.
+pub async fn admit_validated_source_import_async<S, Projection>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    validated: &ValidatedSourceImport,
+    limits: AdmissionLimits,
+    projection: &Projection,
+) -> Result<AdmissionResult, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    Projection: AdmissionProjection + Sync + ?Sized,
+{
+    admit_input_async(
+        store,
+        cx,
+        context,
+        &source_import_input(validated),
+        limits,
+        projection,
+    )
+    .await
 }
 
 /// A read-only, head-pinned view of the materialized repository state.
@@ -1000,12 +1291,38 @@ where
     S: AuthorityStore + ?Sized,
     Projection: AdmissionProjection + ?Sized,
 {
-    let plan = plan_session(context, validated, limits)?;
+    admit_input(
+        store,
+        context,
+        &receive_input(validated),
+        limits,
+        projection,
+    )
+}
+
+/// Admit one already-planned session against the authority.
+///
+/// The single blocking driver. Both public entrypoints reach the authority
+/// through it, so receive-pack and source-import admission share not only the
+/// per-attempt decisions but the session's control flow — the atomic/per-command
+/// split, the order of attempts, and how their outcomes are assembled.
+fn admit_input<S, Projection>(
+    store: &S,
+    context: &AdmissionContext,
+    input: &AdmissionInput<'_>,
+    limits: AdmissionLimits,
+    projection: &Projection,
+) -> Result<AdmissionResult, AdmissionError>
+where
+    S: AuthorityStore + ?Sized,
+    Projection: AdmissionProjection + ?Sized,
+{
+    let plan = plan_session(context, input, limits)?;
     let terminals = if plan.atomic {
         SessionTerminals::Atomic(admit_one(
             store,
             context,
-            validated,
+            input.closure,
             &plan.lowered[0],
             projection,
             limits,
@@ -1014,7 +1331,12 @@ where
         let mut outcomes = Vec::with_capacity(plan.lowered.len());
         for request in &plan.lowered {
             outcomes.push(admit_one(
-                store, context, validated, request, projection, limits,
+                store,
+                context,
+                input.closure,
+                request,
+                projection,
+                limits,
             )?);
         }
         SessionTerminals::PerCommand(outcomes)
@@ -1229,22 +1551,21 @@ struct SessionPlan {
 /// authority.
 fn plan_session(
     context: &AdmissionContext,
-    validated: &ValidatedReceive,
+    input: &AdmissionInput<'_>,
     limits: AdmissionLimits,
 ) -> Result<SessionPlan, AdmissionError> {
     limits.validate()?;
-    validate_admission_input(context, validated, limits)?;
-    let atomic = validated.request.has_capability(b"atomic");
-    let lowered = lower_session(context, &validated.request, atomic)?;
+    validate_admission_input(context, input, limits)?;
+    let lowered = lower_input(context, input)?;
     let tx_ids = lowered
         .iter()
         .map(|request| derive_tx_id(context, request))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(SessionPlan {
-        atomic,
+        atomic: input.atomic,
         lowered,
         tx_ids,
-        command_count: validated.request.commands.len(),
+        command_count: input.updates.len(),
     })
 }
 
@@ -1296,44 +1617,54 @@ fn assemble_result(plan: SessionPlan, terminals: SessionTerminals) -> AdmissionR
 
 fn validate_admission_input(
     context: &AdmissionContext,
-    validated: &ValidatedReceive,
+    input: &AdmissionInput<'_>,
     limits: AdmissionLimits,
 ) -> Result<(), AdmissionError> {
-    if validated.receipt.object_format != context.object_format {
+    if input.object_format != context.object_format {
         return Err(AdmissionError::ObjectFormatMismatch);
     }
-    if validated.request.commands.len() > limits.max_commands {
+    if input.updates.len() > limits.max_commands {
         return Err(AdmissionError::CommandLimitExceeded {
             limit: limits.max_commands,
         });
     }
-    if validated.request.commands.is_empty() {
+    if input.updates.is_empty() {
         return Err(AdmissionError::CommandLimitExceeded { limit: 0 });
     }
-    if validated.request.deletes_only() != validated.receipt.delete_only {
+    // The provenance declared a shape; the commands must actually have it. This
+    // catches a caller whose receipt and command list disagree, on either path.
+    if input.deletes_only != input.declared_delete_only {
         return Err(AdmissionError::MaterializationMismatch(
-            "quarantine delete-only receipt",
+            input.delete_only_label,
         ));
     }
     Ok(())
 }
 
-fn lower_session(
+/// Build the sealed semantic requests for one admission session.
+///
+/// Both admission paths reach the authority through this function, over
+/// already-lowered ref commands. `RECEIVE_ADMISSION_SCHEMA` is deliberately the
+/// schema for both: the schema names the *shape of the decision* — ref commands
+/// admitted against an authority head — not the transport that carried it. A
+/// separate schema per provenance would give the same refs two transaction
+/// identities and split one canonical history in half, which is precisely what
+/// §5.2's single stable identity derivation forbids.
+fn lower_input(
     context: &AdmissionContext,
-    receive: &ReceiveRequest,
-    atomic: bool,
+    input: &AdmissionInput<'_>,
 ) -> Result<Vec<LoweredRequest>, AdmissionError> {
-    let push_options = receive
+    let push_options = input
         .push_options
         .iter()
         .cloned()
         .map(fgit_authority::PushOption::new)
         .collect::<Result<Vec<_>, _>>()?;
-    if atomic {
-        let commands = receive
-            .commands
+    if input.atomic {
+        let commands = input
+            .updates
             .iter()
-            .map(lower_command)
+            .map(|update| lower_ref_update(update.old, update.new, update.ref_name))
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(vec![LoweredRequest {
             semantic: fgit_authority::SemanticRequest::build(
@@ -1348,17 +1679,17 @@ fn lower_session(
         }]);
     }
 
-    receive
-        .commands
+    input
+        .updates
         .iter()
         .enumerate()
-        .map(|(index, command)| {
+        .map(|(index, update)| {
             Ok(LoweredRequest {
                 semantic: fgit_authority::SemanticRequest::build(
                     RECEIVE_ADMISSION_SCHEMA,
                     context.object_format,
                     false,
-                    vec![lower_command(command)?],
+                    vec![lower_ref_update(update.old, update.new, update.ref_name)?],
                     push_options.clone(),
                     Vec::new(),
                 )?,
@@ -1368,18 +1699,32 @@ fn lower_session(
         .collect()
 }
 
-fn lower_command(command: &ReceiveCommand) -> Result<fgit_authority::RefCommand, AdmissionError> {
-    let name = RefName::try_new(&command.ref_name).map_err(AdmissionError::RefName)?;
-    let expected_old = command.expected_old().map_or(
-        fgit_authority::ExpectedOld::Absent,
-        fgit_authority::ExpectedOld::Exactly,
-    );
-    let proposed_new = match command.kind() {
-        ReceiveCommandKind::Create | ReceiveCommandKind::Update => {
-            fgit_authority::ProposedNew::Update(command.new)
-        }
-        ReceiveCommandKind::Delete => fgit_authority::ProposedNew::Delete,
-        ReceiveCommandKind::InvalidZeroPair => return Err(AdmissionError::InvalidZeroPair),
+/// Lower one ref update into the authority's typed command.
+///
+/// Shared by receive-pack and source-import admission. Both paths reach the
+/// authority through this one function, so a given `(old, new, name)` triple
+/// lowers to the same `RefCommand` regardless of how it arrived — which is what
+/// makes the two paths produce identical semantic requests, and therefore
+/// identical decision records, for the same refs. A second lowering would let
+/// the two drift silently in exactly the way a shared identity must not.
+fn lower_ref_update(
+    old: AnyGitOid,
+    new: AnyGitOid,
+    ref_name: &[u8],
+) -> Result<fgit_authority::RefCommand, AdmissionError> {
+    let name = RefName::try_new(ref_name).map_err(AdmissionError::RefName)?;
+    let expected_old = if old.is_zero() {
+        fgit_authority::ExpectedOld::Absent
+    } else {
+        fgit_authority::ExpectedOld::Exactly(old)
+    };
+    // The classification is the receive-pack zero-sentinel rule, applied to any
+    // source: two zero IDs name nothing and are refused, a zero new deletes,
+    // and anything else proposes that object.
+    let proposed_new = match (old.is_zero(), new.is_zero()) {
+        (true, true) => return Err(AdmissionError::InvalidZeroPair),
+        (_, true) => fgit_authority::ProposedNew::Delete,
+        (_, false) => fgit_authority::ProposedNew::Update(new),
     };
     Ok(fgit_authority::RefCommand {
         name,
@@ -1388,6 +1733,7 @@ fn lower_command(command: &ReceiveCommand) -> Result<fgit_authority::RefCommand,
         // Receive-pack carries an expected old OID rather than a separate
         // force bit. Ref protection/fast-forward policy is evaluated by the
         // projection; it never treats the transport as evidence of a force.
+        // A source import is held to the same rule: being local is not a force.
         force: false,
     })
 }
@@ -1425,7 +1771,7 @@ fn non_atomic_key(base: &IdempotencyKey, index: usize) -> Result<IdempotencyKey,
 fn admit_one<S, Projection>(
     store: &S,
     context: &AdmissionContext,
-    validated: &ValidatedReceive,
+    closure: &ValidatedClosure,
     lowered: &LoweredRequest,
     projection: &Projection,
     limits: AdmissionLimits,
@@ -1458,7 +1804,6 @@ where
             return Ok(terminal);
         }
         let (basis, receipt, authenticated) = read_basis(store, &context.head_key)?;
-        let closure = &validated.closure;
         let terminal = match plan_publication(
             projection,
             context,
@@ -1782,14 +2127,40 @@ where
     S: AsyncAuthorityStore + ?Sized,
     Projection: AdmissionProjection + Sync + ?Sized,
 {
-    let plan = plan_session(context, validated, limits)?;
+    admit_input_async(
+        store,
+        cx,
+        context,
+        &receive_input(validated),
+        limits,
+        projection,
+    )
+    .await
+}
+
+/// Admit one already-planned session against the authority, asynchronously.
+///
+/// The single asynchronous driver, and the sibling of [`admit_input`].
+async fn admit_input_async<S, Projection>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    input: &AdmissionInput<'_>,
+    limits: AdmissionLimits,
+    projection: &Projection,
+) -> Result<AdmissionResult, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    Projection: AdmissionProjection + Sync + ?Sized,
+{
+    let plan = plan_session(context, input, limits)?;
     let terminals = if plan.atomic {
         SessionTerminals::Atomic(
             admit_one_async(
                 store,
                 cx,
                 context,
-                validated,
+                input.closure,
                 &plan.lowered[0],
                 projection,
                 limits,
@@ -1800,7 +2171,16 @@ where
         let mut outcomes = Vec::with_capacity(plan.lowered.len());
         for request in &plan.lowered {
             outcomes.push(
-                admit_one_async(store, cx, context, validated, request, projection, limits).await?,
+                admit_one_async(
+                    store,
+                    cx,
+                    context,
+                    input.closure,
+                    request,
+                    projection,
+                    limits,
+                )
+                .await?,
             );
         }
         SessionTerminals::PerCommand(outcomes)
@@ -1820,7 +2200,7 @@ async fn admit_one_async<S, Projection>(
     store: &S,
     cx: &S::Context,
     context: &AdmissionContext,
-    validated: &ValidatedReceive,
+    closure: &ValidatedClosure,
     lowered: &LoweredRequest,
     projection: &Projection,
     limits: AdmissionLimits,
@@ -1860,7 +2240,6 @@ where
         }
         let (basis, receipt, authenticated) =
             read_basis_async(store, cx, &context.head_key).await?;
-        let closure = &validated.closure;
         let terminal = match plan_publication(
             projection,
             context,
@@ -2075,6 +2454,7 @@ mod tests {
         RegistryEpoch, RepositorySequence,
     };
     use fgit_wire::Capability;
+    use fgit_wire::receive::ReceiveCommand;
 
     use super::*;
 
@@ -2568,7 +2948,7 @@ mod tests {
             vec![create(b"refs/heads/one", 35), create(b"refs/heads/two", 36)],
             true,
         );
-        let lowered = lower_session(&context, completion.request(), true)
+        let lowered = lower_input(&context, &receive_input(&completion))
             .expect("atomic request lowers before the injected store failure");
         let tx_id = derive_tx_id(&context, &lowered[0]).expect("transaction id derives");
 
