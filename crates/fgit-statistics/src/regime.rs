@@ -1,11 +1,26 @@
-//! FG-054 deliverable 3, prototype: regime-shift detection in EXACT INTEGER arithmetic.
+//! FG-054 deliverable 3: regime-shift detection in EXACT INTEGER arithmetic.
 //!
-//! Not yet a crate. NPC §33's mechanism library is conventionally floating point
-//! end to end; this workspace has **no floating point at all** — `CanonicalScalar`
-//! is sealed to the eight fixed-width integers, and `f32`/`f64`/`usize`/`isize`
-//! are excluded so canonical bytes can never depend on rounding mode, NaN payload,
-//! signed zero, or host width. §33.1 also requires an arithmetic fingerprint
-//! precisely so a stream's numbers replay exactly.
+//! NPC §33's mechanism library is conventionally floating point end to end. Here
+//! it is not, because `CanonicalScalar` is sealed to the eight fixed-width
+//! integers — `f32`, `f64`, `usize` and `isize` are all excluded — so canonical
+//! bytes can never depend on rounding mode, `NaN` payload, signed zero, or host
+//! width. §33.1 also requires an arithmetic fingerprint precisely so a stream's
+//! numbers replay exactly.
+//!
+//! This header previously said the workspace has "no floating point at all".
+//! **That was wrong**, and the correction is worth carrying because the reason it
+//! was wrong is instructive: `crates/fgit-raptorq/src/lib.rs` passes
+//! `repair_overhead: 1.0` to `asupersync`'s `EncodingConfig` and `DecodingConfig`,
+//! whose field is float-typed in the admitted runtime's own API. Both JadeFalcon
+//! and I had measured the claim by grepping for the type *names*, and the name
+//! never appears there — it is inferred from the struct field. A float can enter
+//! production source without anyone writing its type.
+//!
+//! The accurate statement, which is what this crate actually relies on: **no
+//! first-party float types and no float arithmetic**, with two exact float
+//! constants at an admitted runtime's API boundary. Those are `const`, exactly
+//! representable, and configuration rather than accumulation, so nothing there
+//! makes canonical bytes depend on rounding — which is the property that matters.
 //!
 //! So a detector here must be integer *throughout*, not float-internally-then-
 //! quantised: an alarm that depends on `f64` accumulation is irreproducible across
