@@ -105,9 +105,11 @@
 //!
 //! # Why that bound is structural rather than lucky
 //!
-//! Each step of the outward walk floors one division, costing at most `2^-96`
-//! relative; the walk is at most `alpha_b` steps and `alpha_b <= 300` over the
-//! measured region, so accumulated error is bounded by roughly
+//! Every **answered** step of the outward walk floors one division, costing at
+//! most `2^-96` relative; a step whose exact product exceeds `u128` is a typed
+//! refusal rather than a divide-first approximation. The walk is at most
+//! `alpha_b` steps and `alpha_b <= 300` over the measured region, so
+//! accumulated error is bounded by roughly
 //! `300 * 2^-96 ~ 4e-27` against a `1e-6` quantum — twenty-one orders of
 //! headroom. The computed value therefore lands within `4e-27` of the exact
 //! one, and the reported ppm can differ from the exact floor **only** when the
@@ -153,6 +155,13 @@
 //! has an exact value below `1 ppm`**, so the refusal region currently contains
 //! no answer a parts-per-million caller could have used. That is asserted, not
 //! assumed: if a representable answer ever falls into it, the sweep fails.
+//!
+//! A distinct refusal covers an outward recurrence whose exact intermediate
+//! product would exceed `u128`. Dividing before multiplying in that case would
+//! change the floor and can erase a positive term, so the evaluator returns
+//! [`ExpectedLossRefusal::StepProductOverflow`] and the policy path takes its
+//! pinned deterministic fallback. This module does not claim an answer for
+//! that numeric-degradation region.
 //!
 //! **That failure is detected, not returned.** It is the same region `NEG-025`
 //! fell into; the difference is that underflow is observable here — the running
@@ -219,6 +228,13 @@ pub enum ExpectedLossRefusal {
         /// Factors this evaluation admits.
         maximum: u64,
     },
+    /// A recurrence step needs an intermediate wider than `u128`.
+    ///
+    /// Dividing before multiplying would avoid the overflow only by changing
+    /// where truncation occurs. That can silently discard a positive term, so
+    /// this bounded implementation refuses and lets the caller select its
+    /// deterministic fallback instead.
+    StepProductOverflow,
 }
 
 /// The largest `alpha_b` this evaluation will walk.
@@ -286,8 +302,9 @@ pub const MAX_PEAK_FACTORS: u64 = 1 << 18;
 /// # Errors
 ///
 /// Returns [`ExpectedLossRefusal`] when the peak term is unrepresentable at
-/// this scale, when the term count exceeds [`MAX_TERMS`], or when the peak
-/// term's factor runs exceed [`MAX_PEAK_FACTORS`].
+/// this scale, when the term count exceeds [`MAX_TERMS`], when the peak term's
+/// factor runs exceed [`MAX_PEAK_FACTORS`], or when a recurrence product
+/// exceeds `u128`.
 ///
 /// A refusal is not a small probability. `Beta(90,10)` against `Beta(10,90)`
 /// refuses rather than returning `Ok(0)`, because its peak term underflows the
@@ -423,8 +440,9 @@ impl TailComparison {
 /// # Errors
 ///
 /// Returns [`ExpectedLossRefusal`] when either tail's peak is unrepresentable
-/// at this scale, when either term count exceeds [`MAX_TERMS`], or when a
-/// peak term's factor runs exceed [`MAX_PEAK_FACTORS`].
+/// at this scale, when either term count exceeds [`MAX_TERMS`], when a peak
+/// term's factor runs exceed [`MAX_PEAK_FACTORS`], or when a recurrence product
+/// exceeds `u128`.
 pub fn compare_ppm(a: Posterior, b: Posterior) -> Result<TailComparison, ExpectedLossRefusal> {
     let (alpha_a, beta_a) = (a.alpha(), a.beta());
     let (alpha_b, beta_b) = (b.alpha(), b.beta());
@@ -502,7 +520,7 @@ fn tail_sum(
     let mut value = peak_value;
     for index in (0..peak).rev() {
         let (numerator, denominator) = ratio(alpha_a, beta_a, beta_b, index);
-        value = mul_div(value, denominator, numerator);
+        value = mul_div(value, denominator, numerator)?;
         if value == 0 {
             break;
         }
@@ -513,7 +531,7 @@ fn tail_sum(
     value = peak_value;
     for index in peak..alpha_b.saturating_sub(1) {
         let (numerator, denominator) = ratio(alpha_a, beta_a, beta_b, index);
-        value = mul_div(value, numerator, denominator);
+        value = mul_div(value, numerator, denominator)?;
         if value == 0 {
             break;
         }
@@ -631,14 +649,42 @@ fn peak_term(alpha_a: u64, beta_a: u64, beta_b: u64, peak: u64) -> Option<u128> 
     Some(value)
 }
 
-/// `value * numerator / denominator`, refusing to wrap.
+/// `value * numerator / denominator`, with one well-defined floor.
 ///
-/// Saturation rather than wrapping: a wrapped term would re-enter the sum as a
-/// plausible value, which is the failure class this whole module exists to
-/// avoid.
-fn mul_div(value: u128, numerator: u128, denominator: u128) -> u128 {
-    value.checked_mul(numerator).map_or_else(
-        || (value / denominator).saturating_mul(numerator),
-        |scaled| scaled / denominator,
-    )
+/// # Errors
+///
+/// Returns [`ExpectedLossRefusal::StepProductOverflow`] when the exact
+/// multiplication would exceed `u128`. Dividing first is not an equivalent
+/// rescue: it moves the floor before multiplication and can turn a positive
+/// quotient into zero. Refusing preserves the stated rounding contract and
+/// lets callers select the pinned fallback for a numeric-bound violation.
+fn mul_div(value: u128, numerator: u128, denominator: u128) -> Result<u128, ExpectedLossRefusal> {
+    value
+        .checked_mul(numerator)
+        .map(|scaled| scaled / denominator)
+        .ok_or(ExpectedLossRefusal::StepProductOverflow)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExpectedLossRefusal, mul_div};
+
+    #[test]
+    fn an_overflowing_step_refuses_instead_of_moving_the_floor() {
+        // The exact quotient is 2^65. The old fallback divided the left
+        // operand first (`2^66 / 2^67 == 0`) and consequently returned zero,
+        // even though the mathematically floored result is positive.
+        assert_eq!(
+            mul_div(1_u128 << 66, 1_u128 << 66, 1_u128 << 67),
+            Err(ExpectedLossRefusal::StepProductOverflow)
+        );
+    }
+
+    #[test]
+    fn a_nearby_representable_step_keeps_its_single_floor() {
+        assert_eq!(
+            mul_div(1_u128 << 60, 1_u128 << 60, 1_u128 << 67),
+            Ok(1_u128 << 53)
+        );
+    }
 }
