@@ -74,7 +74,7 @@ fn repository_grant(
     .expect("a repository-private grant has an explicit owner")
 }
 
-fn context(
+const fn context(
     principal_id: PrincipalId,
     tenant_id: TenantId,
     repository_id: RepositoryId,
@@ -250,11 +250,11 @@ fn poisoned_candidate_is_quarantined_and_excludes_its_peer_before_a_cache_hit() 
     let access = context(principal(3), tenant(1), repository(2), None, 1);
     let claimed = identity(b"claimed object");
     let poisoner = peer(5);
-    let poisoned = CachePieceCandidate::new(claimed, b"different payload".to_vec());
+    let suspect_candidate = CachePieceCandidate::new(claimed, b"different payload".to_vec());
 
     assert_eq!(
         cache
-            .store_shareable(&grant, access, poisoner, poisoned)
+            .store_shareable(&grant, access, poisoner, suspect_candidate)
             .expect("a bounded suspect candidate must be quarantined, not served"),
         CacheWriteReceipt::Quarantined {
             penalty: 1,
