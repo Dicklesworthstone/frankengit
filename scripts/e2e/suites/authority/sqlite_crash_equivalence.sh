@@ -190,7 +190,7 @@ fge_assert_exit FG-005B-E2E-022 0 "$sq_cancellation_exit" \
 fge_assert_exit FG-005B-E2E-020 0 "$sq_fault_exit" \
   'AF-01..AF-08 pass against a real FrankenSQLite database: effects reach real SQL, ambiguity resolves by real exact-key read, and lost-request is distinguished from lost-response by the effect log. Scope: faults are injected at the STORE BOUNDARY, so faults originating inside SQLite are not exercised'
 fge_assert_exit FG-005B-E2E-026 0 "$sq_ceilings_exit" \
-  'the reference genuinely refuses past its declared ceiling -- the presence case the engine cells below are measured against'
+  'every ceiling the store DECLARES through limits() it also ENFORCES, and it refuses with the same typed CapacityExhausted the reference uses. Was frankengit-nv0a: three of the four were published and unenforced, so limits() advertised guarantees no code applied. Each refusal is paired with an at-capacity PRESENCE case -- a body or head already stored is still admitted -- so a store that simply refused everything could not pass this cell'
 fge_assert_exit FG-005B-E2E-025 0 "$sq_probe_exit" \
   'the premise any frankengit-w1ik fix must rest on: fsqlite returns Interrupt for BOTH a pre-dispatch and an after-dispatch cancel, so the store cannot narrow cancellation to a refusal and must answer Ambiguous. If this cell fails the two points have become separable and the mapping should be re-derived, not patched'
 
@@ -214,10 +214,16 @@ fi
 #
 # FG-005b's acceptance says the report publishes the support matrix and that
 # any unproved cell is "unsupported/non-pass and is admission-capped in
-# production". Two cells are unproved, so both are recorded as TYPED
-# UNSUPPORTED assertions rather than as prose notes. They are unproved for
-# DIFFERENT reasons and the cells say which: E2E-021 is absent capability,
-# E2E-027 is present capability blocked by a defect (frankengit-nv0a).
+# production". One cell is unproved, and it is recorded as a TYPED UNSUPPORTED
+# assertion rather than as a prose note.
+#
+# E2E-027 used to sit beside it and no longer does. The distinction it carried
+# is worth keeping even though the cell is gone: it was PRESENT CAPABILITY
+# BLOCKED BY A DEFECT (frankengit-nv0a -- the store published four resource
+# ceilings and enforced one), whereas E2E-021 is ABSENT CAPABILITY. Both read
+# as non-pass, but one waits on a bug and the other on a capability, and a
+# reader deciding where to spend an hour needs to know which. nv0a was fixed by
+# the crate owner, so the reproduction runs green and the cell retired.
 #
 # That makes this lane's terminal status non-pass, and it should: the harness
 # treats an unsupported assertion as non-pass precisely so a partially proved
@@ -255,9 +261,6 @@ fi
 
 fge_unsupported FG-005B-E2E-021 \
   'cancellation of a statement the VDBE is ACTIVELY STEPPING, i.e. observing the ENGINE-SIDE cancellation rather than the caller-side one. Not reachable through this store published surface, and the reason is structural rather than a matter of effort. CORRECTED: this cell previously said the store statements are too short to reach a VDBE opcode checkpoint, and stamped that MEASURED. It is false. The guard is opcode_count & (4096-1) == 0 with opcode_count initialised to 0 and incremented AFTER the test, so the checkpoint fires on opcode 0 of EVERY statement however short. Length was never the barrier. The real barrier is preemption: the caller await observes cancellation first and returns, so the VDBE Abort never becomes the caller-visible answer. Measured by FG-005B-E2E-025, which pins an after-dispatch cancel surfacing as Interrupt (caller-side) and not Abort (engine-side). This was the third correction to this cell and the worst of them, because a false mechanism carrying a MEASURED label is exactly what the labelling was introduced to prevent
-
-fge_unsupported FG-005B-E2E-027 \
-  'resource/mailbox/connection admission exhaustion is DEFECT-BLOCKED, not unwritten. The tests exist and are correct: resource_ceilings::the_engine_enforces_every_ceiling_it_declares and ::the_engine_enforces_the_head_slot_ceiling_it_declares, both #[ignore] naming frankengit-nv0a. MEASURED: AuthorityLimits declares four ceilings and FsqliteAuthorityStore enforces one -- self.limits.body_bytes at engine.rs:466 is the only limits.-field access in the crate, while MemoryAuthorityStore enforces all four and refuses with CapacityExhausted. The store ACCEPTS and PUBLISHES limits it does not apply, which NPC 3.1 calls a secret fallback. Nothing caught it because the shared FG-004 suite tests body_bytes (ac_16) and has no CapacityExhausted check at all, so covering one member of the family made the other three look covered. Un-ignore both and delete this cell when nv0a lands
 
 # The structural PRECONDITION for that cell, which IS checkable today.
 #
