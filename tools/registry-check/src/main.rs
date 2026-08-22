@@ -1621,6 +1621,22 @@ fn check_rust_sources(root: &Path, report: &mut Report) {
                 "crate root lacks #![forbid(unsafe_code)]: {display}"
             ));
         }
+        // Production source only. `tests/` is NOT swept today because
+        // `crates/fgit-pack/tests/writer_benchmark.rs` computes percentiles in
+        // `f64` -- measurement, not canonical bytes, and legitimate. Permitting
+        // it by path would be a hardcoded exemption; permitting `tests/`
+        // wholesale would miss the case this check exists for, a mechanism's own
+        // unit test accumulating in float. Scoping to `src/` is the honest first
+        // slice, and the gap is named rather than papered over.
+        let is_production_source = path
+            .components()
+            .any(|component| component.as_os_str() == OsStr::new("src"));
+        if is_production_source && let Some(token) = find_floating_point_construct(&text) {
+            report.error(format!(
+                "floating point is excluded from canonical scalars; \
+                 forbidden construct `{token}` in {display}"
+            ));
+        }
         if let Some(token) = find_unsafe_construct(&text) {
             report.error(format!("forbidden Rust construct `{token}` in {display}"));
         }
@@ -1643,6 +1659,71 @@ fn check_rust_sources(root: &Path, report: &mut Report) {
             }
         }
     }
+}
+
+/// Scans production Rust for floating-point, which `CanonicalScalar` excludes
+/// by construction so canonical bytes never depend on rounding mode, NaN
+/// payload, signed zero, or host width.
+///
+/// COMMENT-AWARE ON PURPOSE. This repository documents the prohibition in
+/// prose -- `fgit-types`, `fgit-witness` and `fgit-statistics` all carry doc
+/// comments that NAME `f64` in order to forbid it. A line scan would flag every
+/// one of them, and a checker whose output is mostly false positives gets muted
+/// or weakened, which is how enforcement dies. So comments are stripped before
+/// the scan rather than filtered out of its results, reusing the existing
+/// [`strip_rust_comments`] rather than adding a second stripper -- that one is
+/// already string-aware and handles nested blocks, which a fresh one would have
+/// had to relearn.
+///
+/// DELIBERATELY NOT A FLOAT-LITERAL CHECK. `33.4` is lexically identical to a
+/// float literal, and this codebase cites clauses like that constantly
+/// (`section 33.4`, `16.1`, `5.2`) -- in a crate whose clause density is
+/// increasing. A literal scan needs real token positions; until it has them it
+/// would produce noise, not evidence. The type and the arithmetic are what a
+/// mechanism accumulating in float actually needs, and both are caught here.
+fn find_floating_point_construct(text: &str) -> Option<String> {
+    let code = strip_rust_comments(text);
+    let bytes = code.as_bytes();
+    // Split with concat! for the same reason the forbidden-construct list above
+    // is: `strip_rust_comments` deliberately keeps string literals, so a needle
+    // written whole would make this function trip on its own source. It did,
+    // on the first run.
+    for needle in [concat!("f", "64"), concat!("f", "32")] {
+        let mut search = 0;
+        while let Some(pos) = code[search..].find(needle) {
+            let start = search + pos;
+            let end = start + needle.len();
+            search = end;
+            let prev_is_ident =
+                start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+            let next_is_ident =
+                end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
+            if prev_is_ident || next_is_ident {
+                continue;
+            }
+            return Some(needle.to_owned());
+        }
+    }
+    // Transcendental and power arithmetic reaches the same place by another
+    // road: a mechanism can hold its state in an integer newtype and still
+    // accumulate through `sqrt`/`ln`/`exp`, which are float-only.
+    for method in [
+        concat!(".sq", "rt()"),
+        concat!(".", "ln()"),
+        concat!(".e", "xp()"),
+        concat!(".po", "wf("),
+        concat!(".lo", "g2()"),
+        concat!(".lo", "g10()"),
+        concat!(".ln", "_1p()"),
+        concat!(".ex", "p_m1()"),
+        concat!(".cb", "rt()"),
+        concat!(".hy", "pot("),
+    ] {
+        if code.contains(method) {
+            return Some(method.to_owned());
+        }
+    }
+    None
 }
 
 /// Whitespace-tolerant scan for the `unsafe` keyword introducing a block,
@@ -5368,6 +5449,97 @@ mod tests {
     }
 
     /// The workspace root, derived from this crate's manifest directory.
+    /// The needle this suite plants, assembled rather than written. This file
+    /// lives under `tools/registry-check/src/`, so the check under test scans
+    /// it: a fixture containing the literal token would make the constitution
+    /// lane fail on its own test suite. Proving that is awkward is part of
+    /// proving the check works.
+    fn planted_float_type() -> String {
+        concat!("f", "64").to_owned()
+    }
+
+    #[test]
+    fn a_planted_float_type_in_production_source_is_refused() {
+        let source = format!(
+            "pub fn ratio(numerator: u64) -> {} {{ 0.0 }}",
+            planted_float_type()
+        );
+        assert!(
+            find_floating_point_construct(&source).is_some(),
+            "a float type in production source must be refused"
+        );
+    }
+
+    #[test]
+    fn float_arithmetic_is_refused_even_when_the_type_is_never_named() {
+        // The escape hatch worth closing: state can live in an integer newtype
+        // and still accumulate through transcendental methods, which are
+        // float-only. Naming no float type must not buy a pass.
+        let source = format!("let bound = variance{};", concat!(".sq", "rt()"));
+        assert!(
+            find_floating_point_construct(&source).is_some(),
+            "transcendental arithmetic must be refused on its own"
+        );
+    }
+
+    #[test]
+    fn a_doc_comment_forbidding_floats_is_permitted() {
+        // THE PAIRED PERMITTED CASE, and the one that decides whether this
+        // check survives contact. `fgit-types`, `fgit-witness` and
+        // `fgit-statistics` all document the prohibition by NAMING the type.
+        // A checker that flagged those would be reverted within the hour.
+        let source = format!(
+            "//! No floating point. `{}` and `{}` do not implement the trait.\npub fn width() -> u64 {{ 8 }}",
+            planted_float_type(),
+            concat!("f", "32")
+        );
+        assert!(
+            find_floating_point_construct(&source).is_none(),
+            "prose that forbids a float must not be read as a use of one"
+        );
+    }
+
+    #[test]
+    fn an_identifier_that_merely_contains_the_token_is_permitted() {
+        // Word-boundary check. Without it, `parse_f64_from_text` or a field
+        // named `f64_disabled` would be refused, and the first person to hit
+        // that would weaken the check rather than rename the field.
+        let source = format!(
+            "struct Limits {{ {}_disabled: bool }} fn parse_{}_text() {{}}",
+            planted_float_type(),
+            planted_float_type()
+        );
+        assert!(
+            find_floating_point_construct(&source).is_none(),
+            "an identifier containing the token is not a float use"
+        );
+    }
+
+    #[test]
+    fn the_float_check_runs_over_a_non_empty_tree_and_the_tree_is_clean() {
+        // Non-vacuity plus the live result. If the walker stopped finding Rust
+        // files, every assertion above would still pass while the gate scanned
+        // nothing -- the decorative-gate failure this whole lane exists to
+        // prevent one layer down.
+        let root = calm_repo_root();
+        let mut report = Report::new();
+        check_rust_sources(&root, &mut report);
+        assert!(
+            report.rust_files > 100,
+            "expected a substantial Rust tree, saw {}",
+            report.rust_files
+        );
+        let floats: Vec<&String> = report
+            .errors
+            .iter()
+            .filter(|error| error.contains("floating point is excluded"))
+            .collect();
+        assert!(
+            floats.is_empty(),
+            "first-party production source must carry no floating point: {floats:?}"
+        );
+    }
+
     fn calm_repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
