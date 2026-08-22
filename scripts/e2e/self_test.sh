@@ -343,36 +343,50 @@ fge_assert_eq FG-000A-ST-DISCOVER-RC 0 "$disc_rc" \
 # legitimate area-scoped profile into an all-corpus gate
 # ---------------------------------------------------------------------------
 fge_phase action
+profile_manifest="$HERE/manifests/profile-coverage-probe.tsv"
+profile_probe_dir="$HERE/suites/profile_coverage_probe"
+profile_probe_script="$profile_probe_dir/undeclared.sh"
 profile_root=$(fge_tempdir profile-coverage)
-mkdir -p "$profile_root/manifests" \
-  "$profile_root/suites/harness" "$profile_root/suites/outside"
-cp "$RUN_ALL" "$profile_root/run_all.sh"
-cp "$HERE/lib.sh" "$profile_root/lib.sh"
-cp "$FIXTURES/pos_control.sh" "$profile_root/suites/harness/declared.sh"
-cp "$FIXTURES/pos_control.sh" "$profile_root/suites/outside/undeclared.sh"
-chmod +x "$profile_root/run_all.sh" \
-  "$profile_root/suites/harness/declared.sh" \
-  "$profile_root/suites/outside/undeclared.sh"
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-  suites-harness-declared frankengit-fg000a-e2e-harness-4ci g0 \
-  scripts/e2e/suites/harness/declared.sh any required mechanism pass \
-  >"$profile_root/manifests/harness.tsv"
+profile_probe_ready=false
+if [ -e "$profile_manifest" ] || [ -e "$profile_probe_dir" ]; then
+  fge_fail FG-000A-ST-PROFILE-PRECONDITION \
+    'profile-coverage probe paths already exist; refusing to overwrite them'
+else
+  # Cleanup is registered before either real-tree probe path exists. The test
+  # must exercise repo-relative discovery -- a copied runner derives a different
+  # ID namespace and can make an empty profile result look like a valid pass.
+  fge_cleanup_register rm -f -- "$profile_manifest"
+  fge_cleanup_register rmdir -- "$profile_probe_dir"
+  fge_cleanup_register rm -f -- "$profile_probe_script"
+  mkdir -p "$profile_probe_dir"
+  cp "$FIXTURES/pos_control.sh" "$profile_probe_script"
+  chmod +x "$profile_probe_script"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    suites-harness-harness_json frankengit-fg000a-e2e-harness-4ci g0 \
+    scripts/e2e/suites/harness/harness_json.sh any required mechanism pass \
+    >"$profile_manifest"
+  profile_probe_ready=true
+fi
 
-profile_rc=0
-FGE_LIB="$profile_root/lib.sh" "$profile_root/run_all.sh" --profile harness \
-  --out "$profile_root/run" --timeout 60 \
-  >"$profile_root/stdout.log" 2>"$profile_root/stderr.log" || profile_rc=$?
-profile_terminal=$(grep -m1 '"kind":"suite_terminal"' \
-  "$profile_root/run/receipt.ndjson" 2>/dev/null || printf '')
+profile_rc=1
+profile_terminal=''
 profile_status=''
 declare -a profile_uncovered_areas=() profile_unregistered=()
-if [ -n "$profile_terminal" ] && fge_json_top "$profile_terminal"; then
-  profile_status=$(fge_json_unquote "${FGE_JSON[status]-\"\"}")
-  if fge_json_array_strings "${FGE_JSON[manifest_uncovered_areas]-[]}"; then
-    profile_uncovered_areas=("${FGE_JSON_ARRAY[@]+"${FGE_JSON_ARRAY[@]}"}")
-  fi
-  if fge_json_array_strings "${FGE_JSON[manifest_unregistered]-[]}"; then
-    profile_unregistered=("${FGE_JSON_ARRAY[@]+"${FGE_JSON_ARRAY[@]}"}")
+if [ "$profile_probe_ready" = true ]; then
+  profile_rc=0
+  "$RUN_ALL" --profile profile-coverage-probe \
+    --out "$profile_root/run" --timeout 60 \
+    >"$profile_root/stdout.log" 2>"$profile_root/stderr.log" || profile_rc=$?
+  profile_terminal=$(grep -m1 '"kind":"suite_terminal"' \
+    "$profile_root/run/receipt.ndjson" 2>/dev/null || printf '')
+  if [ -n "$profile_terminal" ] && fge_json_top "$profile_terminal"; then
+    profile_status=$(fge_json_unquote "${FGE_JSON[status]-\"\"}")
+    if fge_json_array_strings "${FGE_JSON[manifest_uncovered_areas]-[]}"; then
+      profile_uncovered_areas=("${FGE_JSON_ARRAY[@]+"${FGE_JSON_ARRAY[@]}"}")
+    fi
+    if fge_json_array_strings "${FGE_JSON[manifest_unregistered]-[]}"; then
+      profile_unregistered=("${FGE_JSON_ARRAY[@]+"${FGE_JSON_ARRAY[@]}"}")
+    fi
   fi
 fi
 
@@ -383,10 +397,8 @@ fge_assert_eq FG-000A-ST-PROFILE-SCOPED-STATUS pass "$profile_status" \
   'the controlled scoped profile retains its passing terminal status'
 fge_assert_eq FG-000A-ST-PROFILE-SCOPED-UNREGISTERED 0 "${#profile_unregistered[@]}" \
   'a suite in an unowned area is not misreported as unregistered in the owned area'
-fge_assert_eq FG-000A-ST-PROFILE-UNCOVERED-COUNT 1 "${#profile_uncovered_areas[@]}" \
-  'the receipt counts the planted undeclared area'
-fge_assert_eq FG-000A-ST-PROFILE-UNCOVERED-NAME suites-outside \
-  "${profile_uncovered_areas[*]}" \
+fge_assert_contains FG-000A-ST-PROFILE-UNCOVERED-NAME \
+  "${profile_uncovered_areas[*]}" suites-profile_coverage_probe \
   'the receipt names the planted undeclared area rather than hiding it by scope'
 
 # ---------------------------------------------------------------------------
