@@ -218,7 +218,7 @@ fn generation(value: u64) -> HeadGeneration {
 /// `check_authority` normalizes each backend's opaque token equality class to
 /// the `fgithist || issuance` representatives minted below. Keeping this
 /// oracle in the external binding test makes it independent of both the
-/// FrankenSQLite implementation and the test bridge; it is not a second
+/// `FrankenSQLite` implementation and the test bridge; it is not a second
 /// production authority implementation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct HistoryOracleState {
@@ -520,7 +520,7 @@ fn fg004_history_checker_accepts_a_recorded_fsqlite_authority_history() {
     );
 
     let final_receipt =
-        present_receipt(recorder.execute(&store, 3, AuthorityOp::ReadHead { key: head.clone() }));
+        present_receipt(recorder.execute(&store, 3, AuthorityOp::ReadHead { key: head }));
     assert_eq!(final_receipt.body(), b"head-2");
     assert!(matches!(
         recorder.execute(
@@ -565,7 +565,7 @@ fn fg004_history_checker_accepts_a_recorded_fsqlite_authority_history() {
         "the real FrankenSQLite authority history must pass the FG-004 checker: {report:?}"
     );
     assert_eq!(report.completed_operations, HISTORY_OPERATION_COUNT);
-    assert!(report.pending_operations.is_empty());
+    assert_eq!(report.pending_operations, Vec::<OperationId>::new());
 }
 
 #[test]
