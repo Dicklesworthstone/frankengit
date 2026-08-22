@@ -1229,4 +1229,42 @@ mod tests {
             "a repair-kind symbol in a repair slot agrees with its id and must clear the guard"
         );
     }
+
+    /// The oversize direction of the microsegment size guard, for the same
+    /// reason as its checkpoint counterpart: the guard is an inequality and the
+    /// short-side probe alone would not catch a `len <` implementation.
+    #[test]
+    fn an_oversized_microsegment_symbol_is_refused_and_reports_its_real_length() {
+        let security = security();
+        let protected =
+            protect_microsegment(&canonical_segment(), &SegmentLimits::default(), &security)
+                .expect("canonical microsegment is profile-admitted");
+        let scope = protected.scope();
+        let size = usize::from(MicrosegmentRaptorProfile::SYMBOL_BYTES);
+
+        let refusal = reconstruct_microsegment(
+            scope,
+            &[forged_scoped(
+                scope,
+                0,
+                0,
+                size + 1,
+                SymbolKind::Source,
+                &security,
+            )],
+            &SegmentLimits::default(),
+            &security,
+        );
+        match refusal {
+            Err(RaptorRefusal::SymbolSizeMismatch { offered, expected }) => {
+                assert_eq!(
+                    offered,
+                    size + 1,
+                    "the refusal must report the oversized length as offered"
+                );
+                assert_eq!(expected, size, "the expected size is the profile constant");
+            }
+            other => panic!("an oversized symbol must refuse as SymbolSizeMismatch, got {other:?}"),
+        }
+    }
 }

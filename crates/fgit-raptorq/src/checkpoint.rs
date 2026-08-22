@@ -1141,4 +1141,39 @@ mod tests {
             "a repair-kind symbol in a repair slot agrees with its id and must clear the guard"
         );
     }
+
+    /// The oversize direction of the size guard.
+    ///
+    /// `scoped.symbol.len() != expected_size` is an inequality, so it too has
+    /// two directions, and the probe above only covers the short one. A guard
+    /// written as `len < expected_size` would pass that test and admit an
+    /// oversized symbol -- extra bytes the decoder was never told about.
+    ///
+    /// This also witnesses that `offered` reports the ACTUAL length in the over
+    /// direction, not a saturated or clamped value.
+    #[test]
+    fn an_oversized_symbol_is_refused_and_reports_its_real_length() {
+        let security = security();
+        let protected = borrowed_scope(&security);
+        let scope = protected.scope();
+        let size = usize::from(CheckpointRaptorProfile::SYMBOL_BYTES);
+
+        let refusal = reconstruct_checkpoint(
+            scope,
+            &[forged(scope, 0, 0, size + 1, SymbolKind::Source, &security)],
+            &security,
+            None,
+        );
+        match refusal {
+            Err(RaptorRefusal::SymbolSizeMismatch { offered, expected }) => {
+                assert_eq!(
+                    offered,
+                    size + 1,
+                    "the refusal must report the oversized length as offered"
+                );
+                assert_eq!(expected, size, "the expected size is the profile constant");
+            }
+            other => panic!("an oversized symbol must refuse as SymbolSizeMismatch, got {other:?}"),
+        }
+    }
 }
