@@ -731,13 +731,31 @@ fn point_04_is_absent_because_nothing_is_ever_durable() {
 // it has nothing to write through. A writer added as a PARAMETER changes the
 // signature, and this binding then fails to compile.
 //
-// WHAT THIS DOES NOT CATCH, measured rather than assumed. A writer that arrives
-// INSIDE an existing type is invisible here: the binding names types, so
-// `ParseLimits` gaining a path field, or `ReferenceLayout` gaining one, leaves
-// the signature identical. Measured by giving `ReferenceLayout` a `PathBuf`
-// field and initialising it -- the crate still compiles clean, exit 0, and this
-// binding says nothing. So the pin covers the function's own shape and not the
-// reachability of a filesystem through its arguments or its result.
+// WHAT THIS DOES NOT CATCH. The rule, not a list, because a list of the types
+// that happen to be named today goes stale the moment the signature gains one
+// -- which is the maintenance failure this comment exists to prevent.
+//
+// THE BINDING PINS THE SPELLING OF THE SIGNATURE. A capability reachable
+// THROUGH any type the signature names is therefore invisible to it: the type's
+// name does not change when its contents do, so the binding typechecks
+// identically. That covers every name below, not only the ones anyone has
+// thought to worry about:
+//
+//     ExportPlan<Sha1>      the most plausible carrier -- a plan is the thing
+//                           that would naturally grow a destination
+//     ParseLimits           a scratch or output path added to limits
+//     ReferenceLayout       a layout that owns a writer
+//     MaterializeRefusal    least likely, and covered by the same rule
+//
+// Measured on one of them rather than argued: giving `ReferenceLayout` a
+// `PathBuf` field and initialising it leaves the crate compiling clean at
+// exit 0 with zero errors at this binding, so `materialize` can return a value
+// owning a filesystem path while the pin says nothing. That is an INSTANCE of
+// the rule, not the extent of it -- the mechanism is a property of nominal
+// typing and is not specific to the type it was demonstrated on.
+//
+// So the pin covers the function's own shape, and not the reachability of a
+// filesystem through anything that shape names.
 //
 // That bound is worth stating because the honest scope is narrower than the
 // first version of this comment claimed, and a guard trusted past its scope is
