@@ -315,18 +315,25 @@ fn an_rcr_identity_binds_the_stamped_sequence_and_predecessor() {
         first_id
     );
 
-    let mut successor = first.clone();
-    successor.repository_sequence = first
+    let mut different_sequence = first.clone();
+    different_sequence.repository_sequence = first
         .repository_sequence
         .next()
         .expect("the first repository sequence has a successor");
-    successor.parent_rcr_id = Some(first_id);
-    let successor_id = repository_commit_identity(&CryptoBodyIdentity, &successor)
-        .expect("the successor stamped record identifies");
-
     assert_ne!(
-        successor_id, first_id,
-        "records that differ only in plan-stamped sequence and predecessor must not collide"
+        repository_commit_identity(&CryptoBodyIdentity, &different_sequence)
+            .expect("the sequence-successor record identifies"),
+        first_id,
+        "changing the stamped repository sequence alone changes the RCR identity"
+    );
+
+    let mut different_parent = first.clone();
+    different_parent.parent_rcr_id = Some(first_id);
+    assert_ne!(
+        repository_commit_identity(&CryptoBodyIdentity, &different_parent)
+            .expect("the predecessor-linked record identifies"),
+        first_id,
+        "changing the stamped predecessor alone changes the RCR identity"
     );
 }
 
