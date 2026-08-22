@@ -155,9 +155,21 @@ done
 # ---------------------------------------------------------------------------
 # static and tooling constraints the harness claims for itself
 # ---------------------------------------------------------------------------
+# The pinned-oracle DRIVERS are exempt: they exist to launch upstream Git inside
+# Bubblewrap, so the git and forbidden-tool detectors would fire on them by
+# design. The exemption is scoped to that one directory by absolute path rather
+# than to the glob `*/oracle/*`, which was the original form and had quietly
+# widened: when FG-000B relocated its selftest to suites/oracle/, that glob
+# exempted a DISCOVERED SUITE from the syntax, shebang, strict-mode and tooling
+# checks every other suite is held to -- silently, because nothing states the
+# exemption exists. It hid nothing (that suite invokes neither git nor a
+# forbidden tool, and carries both a shebang and strict mode), but a gate whose
+# scope drifts with a peer's directory naming is a gate that cannot be relied on.
+# Anything under suites/ is now always swept.
 declare -a harness_scripts=()
 while IFS= read -r -d '' p; do harness_scripts+=("$p"); done < <(
-  find "$E2E_ROOT" -type f -name '*.sh' -not -path '*/oracle/*' -print0 | LC_ALL=C sort -z
+  find "$E2E_ROOT" -type f -name '*.sh' -not -path "$E2E_ROOT/oracle/*" -print0 |
+    LC_ALL=C sort -z
 )
 
 syntax_failures=''
