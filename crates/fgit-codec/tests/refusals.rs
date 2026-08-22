@@ -13,8 +13,12 @@ use fgit_codec::{
     CanonicalBody, CodecRefusal, DecodeLimits, Decoder, Encoder, decode_body, encode_body,
     peek_frame_domain,
 };
-use fgit_types::identity::InternalObjectId;
-use fgit_types::{DomainTag, RefusalCode, SchemaFamily, SchemaId, TypeRefusal};
+use fgit_crypto::{CORPUS_RESERVED_CODE_POINTS, DigestAlgorithm};
+use fgit_types::hash::{Digest, DigestBytes};
+use fgit_types::identity::{InternalObjectId, TxId};
+use fgit_types::{
+    CANONICAL_CODEC_VERSION, DomainTag, RefusalCode, SchemaFamily, SchemaId, TypeRefusal,
+};
 
 fn seal_bytes() -> Vec<u8> {
     encode_body(&support::transaction_seal()).expect("the fixture encodes")
@@ -484,4 +488,136 @@ fn every_codec_refusal_reports_a_live_protocol_code_and_prints() {
         );
     }
     assert_eq!(kinds.len(), samples.len());
+}
+
+// ------------------------------------------------ digest width at the boundary
+//
+// `DigestBytes` enforces a generic 16..=64 shell bound, which is algorithm-blind.
+// Until `read_digest` consulted the registry, a frame could declare SHA-256 and
+// carry a 20-byte body: the stronger algorithm's name over 96 fewer bits of
+// collision resistance. `TypeRefusal::DigestLengthMismatch` existed and was
+// asserted on in a sample array, but nothing on any decode path could fire it.
+//
+// Every case below reaches the check through `decode_body` on an encoded frame.
+// None constructs the refusal by hand.
+
+/// A digest body whose width contradicts its own algorithm tag.
+fn seal_with_digest(digest: Digest) -> Vec<u8> {
+    let mut body = support::transaction_seal();
+    body.idempotency_key_digest = digest;
+    // The encoder does not validate width -- this is precisely the frame a
+    // hostile peer can put on the wire, built the only way it can be built.
+    encode_body(&body).expect("a malformed digest still encodes")
+}
+
+fn body_of(fill: u8, length: usize) -> DigestBytes {
+    DigestBytes::try_new(&vec![fill; length]).expect("length is inside the shell bound")
+}
+
+#[test]
+fn a_digest_body_of_the_wrong_width_for_its_algorithm_is_refused_on_the_way_in() {
+    let sha256 = DigestAlgorithm::Sha256;
+    let frame = seal_with_digest(Digest::new(sha256.id(), body_of(0x77, 20)));
+
+    let refusal = decode_body::<TransactionSealBody>(&frame, DecodeLimits::DEFAULT)
+        .expect_err("a 20-byte body must not pass as SHA-256");
+    assert_eq!(
+        refusal,
+        CodecRefusal::Type(TypeRefusal::DigestLengthMismatch {
+            algorithm: sha256.id(),
+            expected: 32,
+            observed: 20,
+        })
+    );
+
+    // Permitted twin: the same algorithm at the width it declares.
+    let honest = seal_with_digest(Digest::new(sha256.id(), body_of(0x77, 32)));
+    assert!(decode_body::<TransactionSealBody>(&honest, DecodeLimits::DEFAULT).is_ok());
+}
+
+#[test]
+fn the_width_check_discriminates_on_the_algorithm_and_not_on_the_number_twenty() {
+    // The body that is wrong for SHA-256 is exactly right for SHA-1. Without
+    // this case the refusal above is consistent with a check that simply
+    // dislikes short bodies, which would be a different and weaker guard.
+    let sha1 = DigestAlgorithm::Sha1;
+    assert_eq!(sha1.digest_len(), 20);
+    let frame = seal_with_digest(Digest::new(sha1.id(), body_of(0x77, 20)));
+    assert!(decode_body::<TransactionSealBody>(&frame, DecodeLimits::DEFAULT).is_ok());
+
+    // And the width that is right for SHA-256 is wrong for SHA-1, so the check
+    // is symmetric rather than a one-directional floor.
+    let swapped = seal_with_digest(Digest::new(sha1.id(), body_of(0x77, 32)));
+    let refusal = decode_body::<TransactionSealBody>(&swapped, DecodeLimits::DEFAULT)
+        .expect_err("32 bytes is not a SHA-1 output");
+    assert_eq!(
+        refusal,
+        CodecRefusal::Type(TypeRefusal::DigestLengthMismatch {
+            algorithm: sha1.id(),
+            expected: 20,
+            observed: 32,
+        })
+    );
+}
+
+#[test]
+fn a_code_point_naming_no_construction_carries_no_width_claim() {
+    // The corpus algorithm sits in `CORPUS_RESERVED_CODE_POINTS`, a range
+    // `fgit-crypto` asserts at compile time that no registered construction
+    // occupies. It resolves to no construction, so it declares no width and
+    // there is nothing to match -- which is what lets the golden corpus round
+    // trip through the production reader rather than being refused by it.
+    assert!(
+        DigestAlgorithm::from_id(support::algorithm()).is_none(),
+        "the corpus slot must never resolve to a real construction"
+    );
+    let wide = seal_with_digest(Digest::new(support::algorithm(), body_of(0x77, 64)));
+    assert!(decode_body::<TransactionSealBody>(&wide, DecodeLimits::DEFAULT).is_ok());
+    assert!(decode_body::<TransactionSealBody>(&seal_bytes(), DecodeLimits::DEFAULT).is_ok());
+}
+
+#[test]
+fn the_same_width_check_guards_the_internal_object_id_door() {
+    // `read_internal_object_id` reads an algorithm and a digest body through a
+    // different function, so guarding only `read_digest` would close the hole
+    // under one name and leave it open under another.
+    let sha256 = DigestAlgorithm::Sha256;
+    let mut body = support::transaction_seal();
+    body.tx_id = TxId::from_internal_object_id(InternalObjectId::new(
+        sha256.id(),
+        TxId::DOMAIN_TAG,
+        CANONICAL_CODEC_VERSION,
+        body_of(0x77, 20),
+    ))
+    .expect("own domain");
+    let frame = encode_body(&body).expect("a malformed identity still encodes");
+
+    let refusal = decode_body::<TransactionSealBody>(&frame, DecodeLimits::DEFAULT)
+        .expect_err("a truncated identity digest must not decode");
+    assert_eq!(
+        refusal,
+        CodecRefusal::Type(TypeRefusal::DigestLengthMismatch {
+            algorithm: sha256.id(),
+            expected: 32,
+            observed: 20,
+        })
+    );
+
+    // Permitted twin: the corpus identity through the same door, unchanged.
+    assert!(decode_body::<TransactionSealBody>(&seal_bytes(), DecodeLimits::DEFAULT).is_ok());
+}
+
+#[test]
+fn the_corpus_slots_sit_inside_the_range_crypto_reserves() {
+    // Ties the literal floor in `harness.rs` back to the range `fgit-crypto`
+    // actually publishes, so the two cannot drift apart silently.
+    assert_eq!(*CORPUS_RESERVED_CODE_POINTS.start(), 0xfff0);
+    assert!(CORPUS_RESERVED_CODE_POINTS.contains(&support::CORPUS_ALGORITHM_CODE_POINT));
+    assert!(CORPUS_RESERVED_CODE_POINTS.contains(&support::FIXTURE_SIGNATURE_SCHEME_CODE_POINT));
+
+    // Presence case: the same predicate must REJECT the production slots.
+    // Without this the assertions above pass for a range that contains
+    // everything, which is the shape a vacuous guard takes.
+    assert!(!CORPUS_RESERVED_CODE_POINTS.contains(&DigestAlgorithm::Sha1.code_point()));
+    assert!(!CORPUS_RESERVED_CODE_POINTS.contains(&DigestAlgorithm::Sha256.code_point()));
 }

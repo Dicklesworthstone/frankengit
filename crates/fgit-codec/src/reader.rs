@@ -12,6 +12,7 @@
 //! one-byte-string-per-value rule would hold only for bodies this process
 //! happened to write itself.
 
+use fgit_crypto::DigestAlgorithm;
 use fgit_types::hash::{Digest, DigestAlgorithmId, DigestBytes};
 use fgit_types::identity::InternalObjectId;
 use fgit_types::numeric::{CanonicalScalar, CodecVersion};
@@ -361,24 +362,30 @@ impl<'a> Decoder<'a> {
         DigestAlgorithmId::try_new(code_point).map_err(CodecRefusal::from)
     }
 
-    /// Reads an algorithm-tagged digest.
+    /// Reads an algorithm-tagged digest, checking the body against the output
+    /// width its algorithm declares.
     pub fn read_digest(&mut self) -> Result<Digest, CodecRefusal> {
         let algorithm = self.read_digest_algorithm()?;
         let bytes = self.read_digest_bytes()?;
-        Ok(Digest::new(algorithm, bytes))
+        checked_digest(algorithm, bytes)
     }
 
     /// Reads an internal object identity.
+    ///
+    /// The digest body is width-checked exactly as [`Self::read_digest`] checks
+    /// one. This site carries the same hostile-frame exposure and is reached by
+    /// a different door, so guarding only `read_digest` would close the hole
+    /// under one name and leave it open under another.
     pub fn read_internal_object_id(&mut self) -> Result<InternalObjectId, CodecRefusal> {
         let algorithm = self.read_digest_algorithm()?;
         let domain = self.read_domain_tag()?;
         let codec_version = self.read_codec_version("InternalObjectId.codec_version")?;
-        let digest = self.read_digest_bytes()?;
+        let digest = checked_digest(algorithm, self.read_digest_bytes()?)?;
         Ok(InternalObjectId::new(
             algorithm,
             domain,
             codec_version,
-            digest,
+            *digest.bytes(),
         ))
     }
 
@@ -423,4 +430,42 @@ impl<'a> Decoder<'a> {
         let bytes = self.read_bytes("RefName")?;
         RefName::try_new(bytes).map_err(CodecRefusal::from)
     }
+}
+
+/// Validates a decoded digest body against the output width its algorithm
+/// declares in the registry.
+///
+/// `DigestBytes` already enforces the generic `16..=64` shell bound, but that
+/// bound is algorithm-blind: it admits a 20-byte body under the SHA-256 code
+/// point. Such a digest claims the stronger construction while carrying 96
+/// fewer bits of collision resistance, and nothing downstream re-derives the
+/// width, so the frame is accepted on its own say-so. This is the check that
+/// makes `TypeRefusal::DigestLengthMismatch` reachable from the wire; before
+/// it, the variant could be constructed and asserted on but never fired.
+///
+/// `fgit-types` is L0 and cannot see the registry, which is why
+/// [`Digest::new_checked`] takes the expected width as a parameter rather than
+/// looking it up. `fgit-codec` is L2 and already depends on `fgit-crypto`, so
+/// the lookup is available here at no architectural cost.
+///
+/// # Non-claim
+///
+/// A code point that resolves to no construction is accepted with no width
+/// enforced. That covers two distinct regions the registry keeps apart --
+/// `CORPUS_RESERVED_CODE_POINTS` (`0xfff0..=0xffff`, which
+/// `fgit-crypto` asserts at compile time no registered construction occupies,
+/// and which the golden corpus needs in order to round-trip through this
+/// reader) and code points that are simply unregistered. This function does
+/// not distinguish them and does not enforce registry MEMBERSHIP; that is a
+/// separate invariant with a separate refusal, and it is not claimed here.
+/// What is closed is the case where a resolvable construction is named and the
+/// body does not match its declared width.
+fn checked_digest(
+    algorithm: DigestAlgorithmId,
+    bytes: DigestBytes,
+) -> Result<Digest, CodecRefusal> {
+    let Some(construction) = DigestAlgorithm::from_id(algorithm) else {
+        return Ok(Digest::new(algorithm, bytes));
+    };
+    Digest::new_checked(algorithm, bytes, construction.digest_len()).map_err(CodecRefusal::from)
 }
