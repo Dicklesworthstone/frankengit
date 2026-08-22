@@ -22,13 +22,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use fgit_admission::evidence::{
+    DecisionEvidenceBodies, ForgeEventBatch, InvariantEvidence, OutboxEffectBatch,
+    PolicyDecisionEvidence, PrincipalSnapshot, RetentionDelta, evidence_root,
+    principal_snapshot_id,
+};
 use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionResult,
     AdmissionSnapshot, AdmissionSnapshotProjection, AsyncAdmissionProjection,
-    AsyncProjectionFailure, CanonicalAdmissionStore, CanonicalRefState, CommitMaterialization,
-    PermittedObjectClosure, RefusalMaterialization, ValidatedClosure, ValidatedReceive,
-    ValidatedSourceImport, admit_validated_receive_async, admit_validated_source_import_async,
-    canonical_ref_state_root, permitted_object_closure_root, prepare_canonical_commit,
+    AsyncProjectionFailure, CanonicalAdmissionStore, CanonicalRefState, CommitEvidence,
+    CommitMaterialization, PermittedObjectClosure, RefusalMaterialization, ValidatedClosure,
+    ValidatedReceive, ValidatedSourceImport, admit_validated_receive_async,
+    admit_validated_source_import_async, canonical_ref_state_root, permitted_object_closure_root,
+    prepare_canonical_commit,
 };
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
@@ -42,7 +48,9 @@ use fgit_chronicle::{PublicationBasis, verify_pair};
 use fgit_codec::schema::{
     RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecisionBatchBody,
 };
-use fgit_codec::{CodecRefusal, CryptoBodyIdentity, body_id, decode_body, encode_body};
+use fgit_codec::{
+    CanonicalBody, CodecRefusal, CryptoBodyIdentity, body_id, decode_body, encode_body,
+};
 use fgit_crypto::{GitObjectKind, IdentityDomain, git_object_id, git_payload_commitment};
 use fgit_git_object::ObjectType;
 use fgit_object_fabric::fabric::{
@@ -64,7 +72,7 @@ use fgit_txn::TransactionFoldReport;
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, GitHashAlgorithm, GitOid, HeadGeneration, PolicyEpoch,
     RefusalCode, RegistryEpoch, RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId,
-    TenantId,
+    TenantId, TxId,
 };
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, PackPayloadSource, PackRequest,
@@ -82,6 +90,15 @@ const HEAD_KEY_PREFIX: &[u8] = b"frankengit/node/head/";
 const FABRIC_NAMESPACE_PREFIX: &[u8] = b"frankengit/node/object/";
 const ADMISSION_REF_STATE_KEY_PREFIX: &[u8] = b"frankengit/admission/ref-state/v1/";
 const ADMISSION_CLOSURE_KEY_PREFIX: &[u8] = b"frankengit/admission/object-closure/v1/";
+const ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX: &[u8] =
+    b"frankengit/admission/principal-snapshot/v1/";
+const ADMISSION_POLICY_DECISION_KEY_PREFIX: &[u8] = b"frankengit/admission/policy-decision/v1/";
+const ADMISSION_INVARIANT_EVIDENCE_KEY_PREFIX: &[u8] =
+    b"frankengit/admission/invariant-evidence/v1/";
+const ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX: &[u8] = b"frankengit/admission/forge-event-batch/v1/";
+const ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX: &[u8] =
+    b"frankengit/admission/outbox-effect-batch/v1/";
+const ADMISSION_RETENTION_DELTA_KEY_PREFIX: &[u8] = b"frankengit/admission/retention-delta/v1/";
 const ADMISSION_CACHE_SCOPE: &[u8] = b"node/admission-cache/v1";
 const DEFAULT_MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 const AUTHORITY_DATABASE_FILE: &str = "authority.fsqlite";
@@ -315,6 +332,92 @@ impl From<AdmissionUploadPackRefusal> for NodeAdmissionViewRefusal {
 pub struct DurableAdmissionMaterializer {
     materialized: RwLock<Option<MaterializedAdmissionState>>,
     cache_scope: CacheScope,
+}
+
+/// An [`AdmissionEvidence`] provider whose roots have been read from the
+/// durable immutable authority store and re-derived from their decoded bodies.
+///
+/// The fields stay private deliberately.  A caller may receive this provider
+/// only from [`DurableAdmissionMaterializer::stage_decision_evidence_in`] or
+/// [`DurableAdmissionMaterializer::read_decision_evidence_in`]; neither path
+/// accepts a caller-minted evidence root.
+#[derive(Clone, Debug)]
+pub struct DurableAdmissionEvidence {
+    context: AdmissionContext,
+    basis_id: RepositoryAuthorityHeadId,
+    request_tx_id: TxId,
+    request_digest: Digest,
+    bodies: DecisionEvidenceBodies,
+    evidence: CommitEvidence,
+}
+
+impl DurableAdmissionEvidence {
+    fn from_bodies(
+        context: AdmissionContext,
+        basis: &PublicationBasis,
+        request: &TransactionRequest,
+        bodies: DecisionEvidenceBodies,
+    ) -> Result<Self, AdmissionMaterializationRefusal> {
+        let evidence = CommitEvidence {
+            principal_snapshot_id: principal_snapshot_id(bodies.principal_snapshot())
+                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?,
+            forge_event_batch_root: evidence_root(bodies.forge_event_batch())
+                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?,
+            policy_decision_root: evidence_root(bodies.policy_decision())
+                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?,
+            invariant_evidence_root: evidence_root(bodies.invariant_evidence())
+                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?,
+            outbox_effect_root: evidence_root(bodies.outbox_effect_batch())
+                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?,
+            retention_delta_root: evidence_root(bodies.retention_delta())
+                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?,
+        };
+        Ok(Self {
+            context,
+            basis_id: basis.id(),
+            request_tx_id: request.tx_id,
+            request_digest: request.canonical_request_digest,
+            bodies,
+            evidence,
+        })
+    }
+
+    /// Returns the RCR fields proved by this durable evidence provider.
+    #[must_use]
+    pub const fn commit_evidence_record(&self) -> CommitEvidence {
+        self.evidence
+    }
+}
+
+impl AdmissionEvidence for DurableAdmissionEvidence {
+    fn commit_evidence(
+        &self,
+        basis: &PublicationBasis,
+        request: &TransactionRequest,
+        fold: &TransactionFoldReport,
+    ) -> Result<CommitEvidence, RefusalCode> {
+        if basis.id() != self.basis_id
+            || request.tx_id != self.request_tx_id
+            || request.canonical_request_digest != self.request_digest
+            || !request_matches_admission_context(request, &self.context)
+        {
+            return Err(RefusalCode::EvidenceInvalid);
+        }
+        let derived = DecisionEvidenceBodies::derive(&self.context, basis, request, fold)?;
+        if derived != self.bodies {
+            return Err(RefusalCode::EvidenceMissing);
+        }
+        Ok(self.evidence)
+    }
+
+    fn refusal_evidence(
+        &self,
+        _basis: &PublicationBasis,
+        _tx_id: TxId,
+        _code: RefusalCode,
+    ) -> Result<RefusalMaterialization, RefusalCode> {
+        Err(RefusalCode::EvidenceMissing)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -691,6 +794,240 @@ impl DurableAdmissionMaterializer {
             materialized: RwLock::new(None),
             cache_scope,
         }
+    }
+
+    /// Derives and stages every immutable body that an admitted committing
+    /// decision must quote, then returns the provider bound to those exact
+    /// durable bytes.
+    ///
+    /// Staging happens before a provider exists, so an RCR cannot name a root
+    /// that was only computed in memory.  A cancellation may leave harmless
+    /// immutable pre-staged frames, but never returns a provider that could be
+    /// used to publish them.
+    pub async fn stage_decision_evidence_in<Authority, IsCancelled>(
+        &self,
+        authority: &Authority,
+        cx: &Authority::Context,
+        context: AdmissionContext,
+        basis: &PublicationBasis,
+        request: &TransactionRequest,
+        fold: &TransactionFoldReport,
+        is_cancelled: &IsCancelled,
+    ) -> Result<DurableAdmissionEvidence, AdmissionMaterializationRefusal>
+    where
+        Authority: AsyncAuthorityStore + ?Sized,
+        IsCancelled: Fn() -> bool + Sync,
+    {
+        if context.repository_id != basis.body().repository_id {
+            return Err(AdmissionMaterializationRefusal::RepositoryMismatch {
+                expected: context.repository_id,
+                observed: basis.body().repository_id,
+            });
+        }
+        if !request_matches_admission_context(request, &context) {
+            return Err(AdmissionMaterializationRefusal::CanonicalRoot(
+                RefusalCode::EvidenceInvalid,
+            ));
+        }
+        ensure_materializer_catch_up_live(is_cancelled)?;
+        let bodies = DecisionEvidenceBodies::derive(&context, basis, request, fold)
+            .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
+        let provider = DurableAdmissionEvidence::from_bodies(context, basis, request, bodies)?;
+        self.stage_evidence_bodies_in(authority, cx, &provider.bodies, is_cancelled)
+            .await?;
+        ensure_materializer_catch_up_live(is_cancelled)?;
+        Ok(provider)
+    }
+
+    /// Reads every named evidence body from immutable authority storage,
+    /// verifies its content root, and rebuilds the provider only if those
+    /// decoded bodies are exactly the bodies the supplied decision requires.
+    pub async fn read_decision_evidence_in<Authority, IsCancelled>(
+        &self,
+        authority: &Authority,
+        cx: &Authority::Context,
+        context: AdmissionContext,
+        basis: &PublicationBasis,
+        request: &TransactionRequest,
+        fold: &TransactionFoldReport,
+        evidence: CommitEvidence,
+        is_cancelled: &IsCancelled,
+    ) -> Result<DurableAdmissionEvidence, AdmissionMaterializationRefusal>
+    where
+        Authority: AsyncAuthorityStore + ?Sized,
+        IsCancelled: Fn() -> bool + Sync,
+    {
+        if context.repository_id != basis.body().repository_id {
+            return Err(AdmissionMaterializationRefusal::RepositoryMismatch {
+                expected: context.repository_id,
+                observed: basis.body().repository_id,
+            });
+        }
+        if !request_matches_admission_context(request, &context) {
+            return Err(AdmissionMaterializationRefusal::CanonicalRoot(
+                RefusalCode::EvidenceInvalid,
+            ));
+        }
+        ensure_materializer_catch_up_live(is_cancelled)?;
+        let principal_snapshot =
+            read_evidence_body_in::<Authority, PrincipalSnapshot, IsCancelled>(
+                authority,
+                cx,
+                context.repository_id,
+                ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
+                Digest::new(
+                    evidence
+                        .principal_snapshot_id
+                        .as_internal_object_id()
+                        .algorithm(),
+                    *evidence
+                        .principal_snapshot_id
+                        .as_internal_object_id()
+                        .digest(),
+                ),
+                is_cancelled,
+            )
+            .await?;
+        let policy_decision =
+            read_evidence_body_in::<Authority, PolicyDecisionEvidence, IsCancelled>(
+                authority,
+                cx,
+                context.repository_id,
+                ADMISSION_POLICY_DECISION_KEY_PREFIX,
+                evidence.policy_decision_root,
+                is_cancelled,
+            )
+            .await?;
+        let invariant_evidence =
+            read_evidence_body_in::<Authority, InvariantEvidence, IsCancelled>(
+                authority,
+                cx,
+                context.repository_id,
+                ADMISSION_INVARIANT_EVIDENCE_KEY_PREFIX,
+                evidence.invariant_evidence_root,
+                is_cancelled,
+            )
+            .await?;
+        let forge_event_batch = read_evidence_body_in::<Authority, ForgeEventBatch, IsCancelled>(
+            authority,
+            cx,
+            context.repository_id,
+            ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX,
+            evidence.forge_event_batch_root,
+            is_cancelled,
+        )
+        .await?;
+        let outbox_effect_batch =
+            read_evidence_body_in::<Authority, OutboxEffectBatch, IsCancelled>(
+                authority,
+                cx,
+                context.repository_id,
+                ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX,
+                evidence.outbox_effect_root,
+                is_cancelled,
+            )
+            .await?;
+        let retention_delta = read_evidence_body_in::<Authority, RetentionDelta, IsCancelled>(
+            authority,
+            cx,
+            context.repository_id,
+            ADMISSION_RETENTION_DELTA_KEY_PREFIX,
+            evidence.retention_delta_root,
+            is_cancelled,
+        )
+        .await?;
+        let bodies = DecisionEvidenceBodies::from_decoded(
+            principal_snapshot,
+            policy_decision,
+            invariant_evidence,
+            forge_event_batch,
+            outbox_effect_batch,
+            retention_delta,
+        );
+        let provider =
+            DurableAdmissionEvidence::from_bodies(context.clone(), basis, request, bodies)?;
+        if provider.evidence != evidence {
+            return Err(AdmissionMaterializationRefusal::CanonicalRoot(
+                RefusalCode::InternalInvariantBreach,
+            ));
+        }
+        let derived = DecisionEvidenceBodies::derive(&context, basis, request, fold)
+            .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
+        if provider.bodies != derived {
+            return Err(AdmissionMaterializationRefusal::CanonicalRoot(
+                RefusalCode::InternalInvariantBreach,
+            ));
+        }
+        ensure_materializer_catch_up_live(is_cancelled)?;
+        Ok(provider)
+    }
+
+    async fn stage_evidence_bodies_in<Authority, IsCancelled>(
+        &self,
+        authority: &Authority,
+        cx: &Authority::Context,
+        bodies: &DecisionEvidenceBodies,
+        is_cancelled: &IsCancelled,
+    ) -> Result<(), AdmissionMaterializationRefusal>
+    where
+        Authority: AsyncAuthorityStore + ?Sized,
+        IsCancelled: Fn() -> bool + Sync,
+    {
+        let repository_id = bodies.principal_snapshot().repository_id();
+        stage_evidence_body_in(
+            authority,
+            cx,
+            repository_id,
+            ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
+            bodies.principal_snapshot(),
+            is_cancelled,
+        )
+        .await?;
+        stage_evidence_body_in(
+            authority,
+            cx,
+            repository_id,
+            ADMISSION_POLICY_DECISION_KEY_PREFIX,
+            bodies.policy_decision(),
+            is_cancelled,
+        )
+        .await?;
+        stage_evidence_body_in(
+            authority,
+            cx,
+            repository_id,
+            ADMISSION_INVARIANT_EVIDENCE_KEY_PREFIX,
+            bodies.invariant_evidence(),
+            is_cancelled,
+        )
+        .await?;
+        stage_evidence_body_in(
+            authority,
+            cx,
+            repository_id,
+            ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX,
+            bodies.forge_event_batch(),
+            is_cancelled,
+        )
+        .await?;
+        stage_evidence_body_in(
+            authority,
+            cx,
+            repository_id,
+            ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX,
+            bodies.outbox_effect_batch(),
+            is_cancelled,
+        )
+        .await?;
+        stage_evidence_body_in(
+            authority,
+            cx,
+            repository_id,
+            ADMISSION_RETENTION_DELTA_KEY_PREFIX,
+            bodies.retention_delta(),
+            is_cancelled,
+        )
+        .await
     }
 
     /// Stages one immutable canonical ref-state frame through the async
@@ -1358,6 +1695,72 @@ where
         PutOutcome::Created | PutOutcome::IdenticalRetry => Ok(()),
         PutOutcome::Conflict => Err(AdmissionMaterializationRefusal::ImmutableConflict),
     }
+}
+
+async fn stage_evidence_body_in<Authority, Body, IsCancelled>(
+    authority: &Authority,
+    cx: &Authority::Context,
+    repository_id: RepositoryId,
+    namespace: &[u8],
+    body: &Body,
+    is_cancelled: &IsCancelled,
+) -> Result<(), AdmissionMaterializationRefusal>
+where
+    Authority: AsyncAuthorityStore + ?Sized,
+    Body: CanonicalBody,
+    IsCancelled: Fn() -> bool + Sync,
+{
+    ensure_materializer_catch_up_live(is_cancelled)?;
+    let root = evidence_root(body).map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
+    let frame = encode_body(body).map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
+    let key = admission_immutable_key(namespace, repository_id, root)
+        .map_err(AdmissionMaterializationRefusal::Key)?;
+    ensure_materializer_catch_up_live(is_cancelled)?;
+    stage_immutable_frame(authority, cx, &key, &frame).await?;
+    ensure_materializer_catch_up_live(is_cancelled)
+}
+
+async fn read_evidence_body_in<Authority, Body, IsCancelled>(
+    authority: &Authority,
+    cx: &Authority::Context,
+    repository_id: RepositoryId,
+    namespace: &[u8],
+    root: Digest,
+    is_cancelled: &IsCancelled,
+) -> Result<Body, AdmissionMaterializationRefusal>
+where
+    Authority: AsyncAuthorityStore + ?Sized,
+    Body: CanonicalBody,
+    IsCancelled: Fn() -> bool + Sync,
+{
+    ensure_materializer_catch_up_live(is_cancelled)?;
+    let key = admission_immutable_key(namespace, repository_id, root)
+        .map_err(AdmissionMaterializationRefusal::Key)?;
+    let ImmutableRead::Present(frame) = authority
+        .read_immutable(cx, &key)
+        .await
+        .map_err(AdmissionMaterializationRefusal::Authority)?
+    else {
+        return Err(AdmissionMaterializationRefusal::ImmutableAbsent(root));
+    };
+    ensure_materializer_catch_up_live(is_cancelled)?;
+    let body = decode_body::<Body>(&frame, fgit_codec::DecodeLimits::DEFAULT)
+        .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
+    if evidence_root(&body).map_err(AdmissionMaterializationRefusal::CanonicalRoot)? != root {
+        return Err(AdmissionMaterializationRefusal::CanonicalRoot(
+            RefusalCode::InternalInvariantBreach,
+        ));
+    }
+    Ok(body)
+}
+
+fn request_matches_admission_context(
+    request: &TransactionRequest,
+    context: &AdmissionContext,
+) -> bool {
+    request.tenant == context.tenant_id
+        && request.repository == context.repository_id
+        && request.principal == context.principal_id
 }
 
 fn ensure_materializer_catch_up_live(
@@ -3787,7 +4190,7 @@ mod tests {
     use std::time::Duration;
 
     use fgit_admission::{
-        AdmissionEvidence, AdmissionSnapshot, AdmissionSnapshotProjection,
+        AdmissionContext, AdmissionEvidence, AdmissionSnapshot, AdmissionSnapshotProjection,
         AsyncAdmissionProjection, AsyncProjectionFailure, CanonicalAdmissionStore,
         CanonicalRefState, CommitEvidence, PermittedObjectClosure, RefusalMaterialization,
         canonical_ref_state_root,
@@ -3804,12 +4207,14 @@ mod tests {
     };
     use fgit_codec::{CryptoBodyIdentity, body_id, decode_body};
     use fgit_object_fabric::fabric::StoreRefusal;
+    use fgit_reference::effect::{FoldOutcome, FoldReport, NetEffects};
     use fgit_reference::intent::TransactionRequest;
+    use fgit_reference::intent::{DurabilityProfile, IdempotencyKey as ModelIdempotencyKey};
     use fgit_txn::TransactionFoldReport;
     use fgit_types::{
         CANONICAL_CODEC_VERSION, DecisionOutcome, DigestBytes, GitHashAlgorithm, GitOid,
-        InternalObjectId, RefName, RefusalCode, RepositoryAuthorityHeadId, RepositoryId, TenantId,
-        TxId,
+        InternalObjectId, PrincipalId, RefName, RefusalCode, RepositoryAuthorityHeadId,
+        RepositoryId, SchemaFamily, SchemaId, TenantId, TxId,
     };
     use fgit_wire::{
         AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, PackPayloadSource, Packet,
@@ -3885,6 +4290,41 @@ mod tests {
             DigestBytes::try_new(&[0x9a; 32]).expect("fixed test digest has canonical length"),
         ))
         .expect("fixed transaction identity uses its own domain")
+    }
+
+    fn evidence_request(
+        node: &OneNode,
+    ) -> (AdmissionContext, TransactionRequest, TransactionFoldReport) {
+        let context = AdmissionContext {
+            head_key: node.head_key.clone(),
+            tenant_id: node.tenant_id(),
+            repository_id: node.repository_id(),
+            principal_id: PrincipalId::from_bytes([0x44; 16]),
+            idempotency_key: fgit_authority::IdempotencyKey::new(b"node-evidence".to_vec())
+                .expect("fixed bounded authority idempotency key"),
+            object_format: node.object_format,
+        };
+        let request = TransactionRequest {
+            tx_id: distinct_tx_id(),
+            tenant: context.tenant_id,
+            repository: context.repository_id,
+            principal: context.principal_id,
+            schema: SchemaId::new(SchemaFamily::from_static("node-evidence"), 1, 0),
+            idempotency_key: ModelIdempotencyKey::new(
+                fgit_types::AsciiSlug::try_new("test", b"node-evidence-request")
+                    .expect("fixed model idempotency key"),
+            ),
+            canonical_request_digest: digest_of(0x7a),
+            statements: Vec::new(),
+            promised_closure: BTreeSet::new(),
+            atomic: true,
+            durability: DurabilityProfile::CanonicalSource,
+        };
+        let fold = FoldReport {
+            outcome: FoldOutcome::Folded(NetEffects::default()),
+            mappings: Vec::new(),
+        };
+        (context, request, fold)
     }
 
     /// Test-only evidence owner that proves the production node adapter never
@@ -5055,6 +5495,114 @@ mod tests {
             Err(RefusalCode::EvidenceMissing),
             "a cancelled catch-up scope leaves no readable partial cache record"
         );
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn durable_decision_evidence_stages_reads_and_rejects_forged_or_cancelled_lookup() {
+        let scratch = ScratchDirectory::new();
+        let config = test_config(scratch.path().to_path_buf());
+        let (node, _) = OneNode::init(config).expect("node initializes canonical refs");
+        let authority_request = node.request_context();
+        let materialized = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&authority_request))
+            .expect("the initialized head materializes");
+        let (context, request, fold) = evidence_request(&node);
+        let is_live = || false;
+
+        let staged = node
+            .runtime()
+            .block_on(node.admission_materializer.stage_decision_evidence_in(
+                &node.authority,
+                authority_request.authority(),
+                context.clone(),
+                materialized.basis(),
+                &request,
+                &fold,
+                &is_live,
+            ))
+            .expect("all committing evidence bodies stage before provider construction");
+        let evidence = staged.commit_evidence_record();
+        assert_eq!(
+            staged
+                .commit_evidence(materialized.basis(), &request, &fold)
+                .expect("staged provider is bound to its exact inputs"),
+            evidence
+        );
+
+        let loaded = node
+            .runtime()
+            .block_on(node.admission_materializer.read_decision_evidence_in(
+                &node.authority,
+                authority_request.authority(),
+                context.clone(),
+                materialized.basis(),
+                &request,
+                &fold,
+                evidence,
+                &is_live,
+            ))
+            .expect("the durable frames re-read through the async authority contract");
+        assert_eq!(
+            loaded
+                .commit_evidence(materialized.basis(), &request, &fold)
+                .expect("decoded provider preserves the exact binding"),
+            evidence
+        );
+
+        let forged = CommitEvidence {
+            policy_decision_root: evidence.forge_event_batch_root,
+            ..evidence
+        };
+        assert!(matches!(
+            node.runtime()
+                .block_on(node.admission_materializer.read_decision_evidence_in(
+                    &node.authority,
+                    authority_request.authority(),
+                    context.clone(),
+                    materialized.basis(),
+                    &request,
+                    &fold,
+                    forged,
+                    &is_live,
+                )),
+            Err(AdmissionMaterializationRefusal::ImmutableAbsent(root))
+                if root == forged.policy_decision_root
+        ));
+
+        let cancelled = || true;
+        assert!(matches!(
+            node.runtime()
+                .block_on(node.admission_materializer.stage_decision_evidence_in(
+                    &node.authority,
+                    authority_request.authority(),
+                    context.clone(),
+                    materialized.basis(),
+                    &request,
+                    &fold,
+                    &cancelled,
+                )),
+            Err(AdmissionMaterializationRefusal::Cancelled)
+        ));
+
+        let mut cross_principal = request.clone();
+        cross_principal.principal = PrincipalId::from_bytes([0x55; 16]);
+        assert!(matches!(
+            node.runtime()
+                .block_on(node.admission_materializer.stage_decision_evidence_in(
+                    &node.authority,
+                    authority_request.authority(),
+                    context,
+                    materialized.basis(),
+                    &cross_principal,
+                    &fold,
+                    &is_live,
+                )),
+            Err(AdmissionMaterializationRefusal::CanonicalRoot(
+                RefusalCode::EvidenceInvalid
+            ))
+        ));
         node.shutdown().expect("node closes cleanly");
     }
 

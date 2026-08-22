@@ -54,6 +54,8 @@ use fgit_wire::receive::{
 };
 use fgit_wire::{AnyGitOid, GitObjectFormat, Packet};
 
+pub mod evidence;
+
 /// Schema for a receive-pack ref transaction produced by this admission layer.
 pub const RECEIVE_ADMISSION_SCHEMA: SchemaId =
     SchemaId::new(SchemaFamily::from_static("receive-admission"), 1, 0);
@@ -966,7 +968,7 @@ pub struct CommitEvidence {
 
 /// Policy and evidence owner used by the production projection.
 pub trait AdmissionEvidence {
-    /// Produces evidence for a committing ref-only fold at this exact basis.
+    /// Produces evidence for a committing fold at this exact basis.
     fn commit_evidence(
         &self,
         basis: &PublicationBasis,

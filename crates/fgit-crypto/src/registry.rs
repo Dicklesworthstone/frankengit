@@ -474,6 +474,16 @@ pub enum IdentityDomain {
     /// gets its own domain rather than borrowing `AtpTransferManifest`, which
     /// means something else.
     AtpTrustCacheKey,
+    /// One immutable admission policy-decision evidence body.
+    AdmissionPolicyDecision,
+    /// One immutable admission invariant-evidence body.
+    AdmissionInvariantEvidence,
+    /// One immutable batch of forge effects from an admitted decision.
+    ForgeEventBatch,
+    /// One immutable batch of outbox effects from an admitted decision.
+    OutboxEffectBatch,
+    /// One immutable retention delta from an admitted decision.
+    RetentionDelta,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -717,6 +727,36 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/atp-trust-cache-key/v1",
         None,
     ),
+    owned_row(
+        38,
+        IdentityDomain::AdmissionPolicyDecision,
+        "frankengit/admission-policy-decision/v1",
+        None,
+    ),
+    owned_row(
+        39,
+        IdentityDomain::AdmissionInvariantEvidence,
+        "frankengit/admission-invariant-evidence/v1",
+        None,
+    ),
+    owned_row(
+        40,
+        IdentityDomain::ForgeEventBatch,
+        "frankengit/forge-event-batch/v1",
+        None,
+    ),
+    owned_row(
+        41,
+        IdentityDomain::OutboxEffectBatch,
+        "frankengit/outbox-effect-batch/v1",
+        None,
+    ),
+    owned_row(
+        42,
+        IdentityDomain::RetentionDelta,
+        "frankengit/retention-delta/v1",
+        None,
+    ),
 ];
 
 const fn pinned_row(
@@ -941,6 +981,11 @@ impl IdentityDomain {
         Self::AdmissionObjectClosure,
         Self::AdmissionRefDelta,
         Self::AtpTrustCacheKey,
+        Self::AdmissionPolicyDecision,
+        Self::AdmissionInvariantEvidence,
+        Self::ForgeEventBatch,
+        Self::OutboxEffectBatch,
+        Self::RetentionDelta,
     ];
 
     /// Compile-time completeness guard for [`IdentityDomain::ALL`].
@@ -999,7 +1044,12 @@ impl IdentityDomain {
             | Self::AdmissionRefState
             | Self::AdmissionObjectClosure
             | Self::AdmissionRefDelta
-            | Self::AtpTrustCacheKey => (),
+            | Self::AtpTrustCacheKey
+            | Self::AdmissionPolicyDecision
+            | Self::AdmissionInvariantEvidence
+            | Self::ForgeEventBatch
+            | Self::OutboxEffectBatch
+            | Self::RetentionDelta => (),
         }
     }
 

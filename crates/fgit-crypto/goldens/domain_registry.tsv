@@ -37,3 +37,8 @@ id	domain_tag	algorithm	durable_object_row	derived_identity	status
 35	frankengit/admission-object-closure/v1	sha256	-	-	active
 36	frankengit/admission-ref-delta/v1	sha256	-	-	active
 37	frankengit/atp-trust-cache-key/v1	sha256	-	-	active
+38	frankengit/admission-policy-decision/v1	sha256	-	-	active
+39	frankengit/admission-invariant-evidence/v1	sha256	-	-	active
+40	frankengit/forge-event-batch/v1	sha256	-	-	active
+41	frankengit/outbox-effect-batch/v1	sha256	-	-	active
+42	frankengit/retention-delta/v1	sha256	-	-	active

@@ -273,6 +273,37 @@ pub fn canonical_effect_bytes(effects: &NetEffects) -> Result<Vec<u8>, CodecRefu
     Ok(out.into_bytes())
 }
 
+/// Encodes the forge partition of a target-disjoint normal form.
+///
+/// This intentionally has its own framing from [`canonical_effect_bytes`]:
+/// a forge-evidence body must not commit ref, retention, or outbox effects
+/// merely because they happened to share the same transaction.
+pub fn canonical_forge_effect_bytes(effects: &NetEffects) -> Result<Vec<u8>, CodecRefusal> {
+    let mut out = Encoder::new();
+    out.write_raw(b"fgit-txn/forge-effects");
+    out.write_scalar(NORMAL_FORM_FORMAT_VERSION);
+    write_forge_effects(&mut out, effects)?;
+    Ok(out.into_bytes())
+}
+
+/// Encodes the outbox partition of a target-disjoint normal form.
+pub fn canonical_outbox_effect_bytes(effects: &NetEffects) -> Result<Vec<u8>, CodecRefusal> {
+    let mut out = Encoder::new();
+    out.write_raw(b"fgit-txn/outbox-effects");
+    out.write_scalar(NORMAL_FORM_FORMAT_VERSION);
+    write_outbox_effects(&mut out, effects)?;
+    Ok(out.into_bytes())
+}
+
+/// Encodes the retention partition of a target-disjoint normal form.
+pub fn canonical_retention_effect_bytes(effects: &NetEffects) -> Result<Vec<u8>, CodecRefusal> {
+    let mut out = Encoder::new();
+    out.write_raw(b"fgit-txn/retention-effects");
+    out.write_scalar(NORMAL_FORM_FORMAT_VERSION);
+    write_retention_effects(&mut out, effects)?;
+    Ok(out.into_bytes())
+}
+
 fn target_is_surviving(effects: &NetEffects, target: &EffectTarget) -> bool {
     match target {
         EffectTarget::Ref(name) => effects.refs.contains_key(name),
@@ -350,6 +381,13 @@ fn effect_targets(effects: &NetEffects) -> BTreeSet<EffectTarget> {
 }
 
 fn write_effects(out: &mut Encoder, effects: &NetEffects) -> Result<(), CodecRefusal> {
+    write_ref_effects(out, effects)?;
+    write_forge_effects(out, effects)?;
+    write_retention_effects(out, effects)?;
+    write_outbox_effects(out, effects)
+}
+
+fn write_ref_effects(out: &mut Encoder, effects: &NetEffects) -> Result<(), CodecRefusal> {
     let refs: Vec<_> = effects
         .refs
         .iter()
@@ -363,8 +401,10 @@ fn write_effects(out: &mut Encoder, effects: &NetEffects) -> Result<(), CodecRef
             write_ref_effect(writer, *effect);
             Ok(())
         },
-    )?;
+    )
+}
 
+fn write_forge_effects(out: &mut Encoder, effects: &NetEffects) -> Result<(), CodecRefusal> {
     let forge: Vec<_> = effects
         .forge
         .iter()
@@ -375,8 +415,10 @@ fn write_effects(out: &mut Encoder, effects: &NetEffects) -> Result<(), CodecRef
         &forge,
         |writer, stream| write_stream_id(writer, *stream),
         |writer, events| writer.write_sequence("forge-events", events, write_forge_event),
-    )?;
+    )
+}
 
+fn write_retention_effects(out: &mut Encoder, effects: &NetEffects) -> Result<(), CodecRefusal> {
     let retention: Vec<_> = effects
         .retention
         .iter()
@@ -393,8 +435,10 @@ fn write_effects(out: &mut Encoder, effects: &NetEffects) -> Result<(), CodecRef
             write_retention_effect(writer, *effect);
             Ok(())
         },
-    )?;
+    )
+}
 
+fn write_outbox_effects(out: &mut Encoder, effects: &NetEffects) -> Result<(), CodecRefusal> {
     let outbox: Vec<_> = effects
         .outbox
         .iter()
@@ -719,6 +763,61 @@ mod tests {
             canonical_effect_bytes(right_report.effects().expect("right report folded"))
                 .expect("right effects are canonical"),
             "canonical effect bytes may not depend on input map construction order"
+        );
+    }
+
+    #[test]
+    fn evidence_partitions_commit_only_their_own_effect_class() {
+        let mut effects = NetEffects::default();
+        let stream = ForgeStreamId::new(label("evidence-forge"));
+        effects.forge.insert(
+            stream,
+            vec![ForgeEventKind::PullRequestClosed {
+                pull_request: ForgeEntityId::new(label("evidence-pr")),
+            }],
+        );
+        let forge_only =
+            canonical_forge_effect_bytes(&effects).expect("forge partition encodes canonically");
+        let outbox_with_forge =
+            canonical_outbox_effect_bytes(&effects).expect("empty outbox partition encodes");
+        let retention_with_forge =
+            canonical_retention_effect_bytes(&effects).expect("empty retention partition encodes");
+
+        effects.outbox.insert(
+            OutboxDeliveryKey::new(label("evidence-outbox")),
+            Digest::new(
+                fgit_codec::harness::algorithm(),
+                fgit_types::DigestBytes::try_new(&[0x44; 32])
+                    .expect("fixture digest width is valid"),
+            ),
+        );
+        assert_eq!(
+            canonical_forge_effect_bytes(&effects).expect("forge partition remains canonical"),
+            forge_only,
+            "an outbox change cannot change forge evidence bytes"
+        );
+        assert_ne!(
+            canonical_outbox_effect_bytes(&effects).expect("outbox partition changes"),
+            outbox_with_forge,
+            "the outbox partition commits its own delivery"
+        );
+
+        effects.retention.insert(
+            RetentionRoot {
+                object: oid(9),
+                class: RetentionClass::ReferencedByRef,
+            },
+            RetentionEffect::Add,
+        );
+        assert_eq!(
+            canonical_forge_effect_bytes(&effects).expect("forge partition remains canonical"),
+            forge_only,
+            "a retention change cannot change forge evidence bytes"
+        );
+        assert_ne!(
+            canonical_retention_effect_bytes(&effects).expect("retention partition changes"),
+            retention_with_forge,
+            "the retention partition commits its own delta"
         );
     }
 
