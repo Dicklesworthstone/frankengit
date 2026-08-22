@@ -327,7 +327,7 @@ fn an_rcr_identity_binds_the_stamped_sequence_and_predecessor() {
         "changing the stamped repository sequence alone changes the RCR identity"
     );
 
-    let mut different_parent = first.clone();
+    let mut different_parent = first;
     different_parent.parent_rcr_id = Some(first_id);
     assert_ne!(
         repository_commit_identity(&CryptoBodyIdentity, &different_parent)
@@ -703,5 +703,59 @@ fn a_duplicate_transaction_is_refused_in_a_pair_that_arrives_as_data() {
     assert_eq!(
         verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
         Ok(())
+    );
+}
+
+#[test]
+fn a_committed_decision_bound_to_another_transaction_is_refused_and_the_matching_twin_is_not() {
+    // `ChronicleRefusal::CommitRecordNotBound` had no test at all, and after
+    // 9aeaa53 it is producible from exactly one place: `verify_pair`, the path
+    // that validates a batch arriving as DATA rather than one we sealed
+    // ourselves. Sealing can no longer produce it, because
+    // `PlannedOutcome::Committed` now owns its record and there is no parallel
+    // vector to desynchronise — which is the right fix, and which also makes
+    // this the only remaining producer. An unexercised refusal on the
+    // untrusted-input path is a §5.2 terminal non-pass.
+    //
+    // Of the three construction sites in `audit.rs`, only `:221` is reachable:
+    // `:219` cannot fire because the count check above the loop already pins
+    // `committed.len() == committed_rcrs.len()`, and `:224` cannot fire because
+    // `committed` is filtered to `Committed` outcomes and `commit_id_of`
+    // returns `None` only for `Refused`. So this is the one axis worth a case,
+    // not three.
+    let (basis, mut batch, head) = well_formed_pair();
+
+    // The decision and the record it is paired with must name the SAME
+    // transaction. Point the decision at a different one and nothing else.
+    batch
+        .decisions
+        .first_mut()
+        .expect("the pair carries one committed decision")
+        .tx_id = derived!(TxId, 0xC1);
+
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::CommitRecordNotBound { index: 0 }),
+        "a committed decision may not be paired with a record from a different transaction: the \
+         decision would publish an outcome for a transaction whose bytes it does not carry"
+    );
+
+    // The near-identical permitted case: restore the binding and the same pair
+    // verifies, so the refusal above is about the transaction binding rather
+    // than anything else the mutation disturbed.
+    let bound = batch
+        .committed_rcrs
+        .first()
+        .expect("the pair carries one committed record")
+        .tx_id;
+    batch
+        .decisions
+        .first_mut()
+        .expect("the pair carries one committed decision")
+        .tx_id = bound;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(()),
+        "the pair is otherwise well formed, so the refusal must be specific to the binding"
     );
 }
