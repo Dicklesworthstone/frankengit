@@ -234,3 +234,33 @@ fn the_accumulator_sequence_is_reproducible_from_the_inputs_alone() {
     // agreement between two copies of the same bug.
     assert_eq!(left.observations(), 10);
 }
+
+#[test]
+fn the_assumption_check_is_callable_directly_and_agrees_with_the_constructor() {
+    // `check_assumptions` is public, so a caller can validate a configuration
+    // before building a detector -- but every test reached it only THROUGH
+    // `Cusum::new`. A divergence between the two would leave that caller
+    // validating something the constructor does not enforce, or refusing a
+    // configuration the constructor would accept.
+    let good = cfg();
+    assert_eq!(good.check_assumptions(), Ok(()));
+    assert!(Cusum::new(good).is_ok());
+
+    // Agreement asserted per failing configuration rather than once, so a
+    // constructor that started refusing for its own reasons is visible.
+    let mut slack = cfg();
+    slack.slack = 0;
+    let mut threshold = cfg();
+    threshold.threshold = 0;
+    let mut deviation = cfg();
+    deviation.max_deviation = -1;
+
+    for bad in [slack, threshold, deviation] {
+        let direct = bad.check_assumptions().expect_err("must refuse");
+        let through_constructor = Cusum::new(bad).expect_err("must refuse");
+        assert_eq!(
+            direct, through_constructor,
+            "the direct check and the constructor disagree about why this configuration fails"
+        );
+    }
+}

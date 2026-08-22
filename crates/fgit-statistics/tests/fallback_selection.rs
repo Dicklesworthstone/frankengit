@@ -112,3 +112,71 @@ fn a_saturated_detector_is_a_numeric_bound_violation_not_a_silent_pass() {
     // above is not a blanket refusal.
     assert!(PolicyGate::all_clear().select().admits_candidate());
 }
+
+#[test]
+fn the_trigger_index_agrees_with_its_position_in_all() {
+    // `index()` is used SYMMETRICALLY -- `PolicyGate::set` writes the slot it
+    // names and `is_set` reads the same one -- so a permuted mapping stays
+    // self-consistent and every other test in this file still passes. Swap
+    // EvidenceGap and SupportFailure in `index()` and nothing goes red: `set`
+    // and `is_set` agree, `select` walks `ALL` and still reports the trigger it
+    // was given, and the exhaustiveness test still finds every variant readable.
+    //
+    // The defect is only visible against the one thing `index()` claims to be:
+    // a position in `ALL`. Anything that reads the array positionally -- a
+    // serialised gate, a receipt, a future `from_index` -- would then disagree
+    // with `ALL` while every in-memory round trip looked correct.
+    for (position, trigger) in FallbackTrigger::ALL.iter().copied().enumerate() {
+        assert_eq!(
+            trigger.index(),
+            position,
+            "{trigger:?} indexes slot {} but sits at position {position} in ALL",
+            trigger.index()
+        );
+    }
+}
+
+#[test]
+fn the_trigger_index_is_a_bijection_onto_the_slot_range() {
+    // The collision half. Two triggers sharing a slot is also invisible to a
+    // symmetric read/write: setting one would set the other, and `select`
+    // returns whichever comes first in `ALL`, so the reported trigger is still
+    // a real one and the test above would pass on its own.
+    let mut seen = [false; FallbackTrigger::COUNT];
+    for trigger in FallbackTrigger::ALL {
+        let slot = trigger.index();
+        assert!(
+            slot < FallbackTrigger::COUNT,
+            "{trigger:?} indexes slot {slot}, outside the gate's {} slots",
+            FallbackTrigger::COUNT
+        );
+        assert!(
+            !seen[slot],
+            "{trigger:?} shares slot {slot} with an earlier trigger; setting one would set both"
+        );
+        seen[slot] = true;
+    }
+    assert!(
+        seen.iter().all(|slot| *slot),
+        "some gate slot is unreachable by any trigger, so a condition could never be recorded"
+    );
+}
+
+#[test]
+fn setting_one_condition_leaves_every_other_slot_clear() {
+    // The behavioural consequence, asserted directly rather than inferred from
+    // the index. This is what a collision would actually break, and it is
+    // stated in terms a caller cares about rather than in terms of slots.
+    for trigger in FallbackTrigger::ALL {
+        let mut gate = PolicyGate::all_clear();
+        gate.set(trigger);
+        for other in FallbackTrigger::ALL {
+            assert_eq!(
+                gate.is_set(other),
+                other == trigger,
+                "setting {trigger:?} left {other:?} reading as {}",
+                gate.is_set(other)
+            );
+        }
+    }
+}
