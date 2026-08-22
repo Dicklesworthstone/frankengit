@@ -79,8 +79,8 @@ use crate::machine::{
 };
 use crate::refs::ExpectedRefState;
 use crate::state::{
-    GenesisConfiguration, ModelResult, PolicySnapshot, PrincipalCapabilities, QuarantinedObject,
-    RepositoryState,
+    GenesisConfiguration, InvariantBreach, ModelResult, PolicySnapshot, PrincipalCapabilities,
+    QuarantinedObject, RepositoryState,
 };
 use crate::trace::{TraceStep, encode_roots};
 use crate::transition::{
@@ -220,7 +220,8 @@ impl Violation {
         let mut steps = Vec::with_capacity(self.path.len());
         for input in &self.path {
             let ModelStep { next, output } = step(&state, input)?;
-            let roots = encode_roots(next.roots()).unwrap_or_default();
+            let roots = encode_roots(next.roots())
+                .map_err(|_| Box::new(InvariantBreach::TraceStepUnencodable))?;
             steps.push(TraceStep {
                 input: input.clone(),
                 observed: crate::trace::ObservedOutcome::of(&output),
@@ -250,6 +251,13 @@ pub struct CampaignReport {
     pub refused_transitions: usize,
     /// Whether the walk hit its own state ceiling before exhausting the space.
     pub truncated: bool,
+    /// Successor states whose canonical key failed to encode.
+    ///
+    /// A key-encoding refusal means the walk could not deduplicate — and
+    /// therefore could not explore — that successor, so the space it reports
+    /// on is smaller than the model's. Any nonzero count makes a clean
+    /// verdict inconclusive rather than clean; see [`Self::is_clean`].
+    pub codec_faults: usize,
     /// How many reached states **materially exercised** each property.
     ///
     /// A property whose count is zero was checked over nothing: its verdict is
@@ -323,7 +331,10 @@ impl CampaignReport {
     /// mean nothing.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        self.violations.is_empty() && !self.truncated && self.vacuous_properties().is_empty()
+        self.violations.is_empty()
+            && !self.truncated
+            && self.codec_faults == 0
+            && self.vacuous_properties().is_empty()
     }
 
     /// Properties no reached state exercised, in declaration order.
@@ -364,6 +375,7 @@ impl CampaignReport {
         push_num(&mut out, "refused_transitions", self.refused_transitions);
         out.push_str(",\"truncated\":");
         out.push_str(if self.truncated { "true" } else { "false" });
+        push_num(&mut out, "codec_faults", self.codec_faults);
         push_num(&mut out, "violations", self.violations.len());
         push_num(
             &mut out,
@@ -1092,9 +1104,16 @@ pub fn run_with(universe: &Universe, defect: Option<PlantedDefect>) -> CampaignR
     let mut defects_detected = 0_usize;
     let mut lost_batches: BTreeSet<RepositoryDecisionBatchId> = BTreeSet::new();
     let mut truncated = false;
+    let mut codec_faults = 0_usize;
 
-    if let Ok(key) = state_key(&genesis) {
-        seen.insert(key);
+    // A genesis key that cannot encode means the walk cannot deduplicate at
+    // all; counting it keeps the report honest about that instead of
+    // exploring an unbounded duplicate space silently.
+    match state_key(&genesis) {
+        Ok(key) => {
+            seen.insert(key);
+        }
+        Err(_) => codec_faults += 1,
     }
     queue.push_back((genesis, Vec::new()));
 
@@ -1119,8 +1138,16 @@ pub fn run_with(universe: &Universe, defect: Option<PlantedDefect>) -> CampaignR
             // observed. Coverage counts observed transitions.
             observe(&mut coverage, &mut lost_batches, &output, &input, &next);
 
-            let Ok(key) = state_key(&next) else {
-                continue;
+            // A successor whose canonical key fails to encode shrinks the
+            // explored space, so it is counted as a fault rather than
+            // silently skipped: a clean verdict must never rest on states
+            // the walk could not deduplicate.
+            let key = match state_key(&next) {
+                Ok(key) => key,
+                Err(_) => {
+                    codec_faults += 1;
+                    continue;
+                }
             };
             if !seen.insert(key) {
                 continue;
@@ -1173,6 +1200,7 @@ pub fn run_with(universe: &Universe, defect: Option<PlantedDefect>) -> CampaignR
         transitions_explored: transitions,
         refused_transitions: refused,
         truncated,
+        codec_faults,
         property_witnesses: witnesses,
         coverage,
         planted_defect: defect,
@@ -1564,6 +1592,7 @@ mod tests {
             transitions_explored: 1,
             refused_transitions: 0,
             truncated: false,
+            codec_faults: 0,
             property_witnesses: Property::ALL
                 .iter()
                 .map(|property| (*property, 1))

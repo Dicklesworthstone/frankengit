@@ -765,9 +765,14 @@ pub fn decide_against(
             // basis, because the remedy differs: re-prepare under the new
             // policy rather than merely rebase onto the new roots. Neither is
             // terminal — see `RepreparationReason`.
-            // The budget is spent when this capsule is the last preparation the
-            // sealed request is entitled to; only then is a stale basis
-            // terminal.
+            // The budget is spent when this capsule is the last preparation
+            // the sealed request is entitled to; only then is a stale basis
+            // terminal. NOTE (fresh-eyes pass): this boundary contradicts the
+            // module doc on REPREPARATION_BUDGET ("the first BUDGET
+            // preparations may be superseded" implies ordinals <= BUDGET
+            // defer) while the tests and this comment pin ordinals < BUDGET.
+            // Filed as frankengit reference-budget contradiction; behaviour
+            // left as committed pending the owner's ruling.
             let exhausted = state.preparations_of(capsule.tx_id) >= REPREPARATION_BUDGET;
             if capsule.witness.policy_epoch != policy_epoch {
                 return if exhausted {
@@ -943,7 +948,7 @@ pub fn stage(
                 scratch.outcome_index.insert(capsule.tx_id, outcome);
             }
             DecisionVerdict::Commit(effects) => {
-                apply_effects(&mut scratch, &effects);
+                apply_effects(&mut scratch, &effects)?;
                 let candidate = CommitCandidate {
                     id: bodies.commit,
                     repository: state.repository,
@@ -1059,7 +1064,15 @@ fn build_candidate_head(
 }
 
 /// Applies target-disjoint effects to scratch roots.
-fn apply_effects(roots: &mut RepositoryRoots, effects: &NetEffects) {
+///
+/// Forge positions are advanced only when the stream can actually advance:
+/// a stream already at [`u64::MAX`] refuses with
+/// [`InvariantBreach::SequenceExhausted`] rather than saturating in place,
+/// which would silently give two committed events one position.
+fn apply_effects(
+    roots: &mut RepositoryRoots,
+    effects: &NetEffects,
+) -> Result<(), Box<InvariantBreach>> {
     for (name, effect) in &effects.refs {
         match effect {
             RefEffect::Set(oid) => {
@@ -1076,6 +1089,11 @@ fn apply_effects(roots: &mut RepositoryRoots, effects: &NetEffects) {
             .entry(*stream)
             .or_insert(ForgeStreamPosition::GENESIS);
         for _ in events {
+            if position.is_exhausted() {
+                return Err(Box::new(InvariantBreach::SequenceExhausted {
+                    kind: "forge stream",
+                }));
+            }
             *position = position.successor();
         }
     }
@@ -1092,6 +1110,7 @@ fn apply_effects(roots: &mut RepositoryRoots, effects: &NetEffects) {
     for (key, parameters) in &effects.outbox {
         roots.outbox.insert(*key, *parameters);
     }
+    Ok(())
 }
 
 /// One configuration head transition.

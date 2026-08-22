@@ -193,6 +193,11 @@ pub enum InvariantBreach {
         /// The object that escaped.
         object: GitOid,
     },
+    /// A counterexample step's canonical roots could not be encoded, so the
+    /// violation cannot be rendered as the replayable trace it claims to be.
+    /// Reported instead of writing empty roots bytes that a replay would read
+    /// as a spurious divergence.
+    TraceStepUnencodable,
 }
 
 impl InvariantBreach {
@@ -219,6 +224,7 @@ impl InvariantBreach {
             Self::RepositoryMismatch { .. } => "repository_mismatch",
             Self::ResultingRootMismatch { .. } => "resulting_root_mismatch",
             Self::QuarantineEscape { .. } => "quarantine_escape",
+            Self::TraceStepUnencodable => "trace_step_unencodable",
         }
     }
 
@@ -559,10 +565,7 @@ impl IdentityLedger {
         if let Some(bound_inputs) = self.inputs_by_tx.get(&tx_id)
             && *bound_inputs != inputs
         {
-            return Err(Box::new(InvariantBreach::TxIdDerivationInconsistent {
-                bound: tx_id,
-                observed: tx_id,
-            }));
+            return Err(Box::new(InvariantBreach::TxIdInputsInconsistent { tx_id }));
         }
         self.tx_by_inputs.insert(inputs, tx_id);
         self.inputs_by_tx.insert(tx_id, inputs);
