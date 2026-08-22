@@ -523,6 +523,24 @@ pub fn repair_microsegment(
     budget: BudgetGrant,
     authority: &impl RepairPlacementAuthority,
 ) -> Result<SegmentManifestId, RaptorRefusal> {
+    // UNREACHABLE BY CONSTRUCTION, caller-independent -- and the analysis is
+    // worth keeping because the guard looks input-driven and is not.
+    // `identity()` (fgit-object-fabric fabric.rs:620) fails only if `encode()`
+    // fails or the domain check fails.
+    //   * The domain check cannot fail: `identity()` passes
+    //     `IdentityDomain::SegmentManifest` literally, and
+    //     `from_internal_object_id` refuses only a MISMATCHED domain
+    //     (fgit-types identity.rs:262).
+    //   * `encode()` refuses only namespace > u16::MAX, entries > u32::MAX, or
+    //     placements > u32::MAX -- and every construction path validates FIRST
+    //     against strictly tighter bounds: `validate_manifest_parts`
+    //     (fabric.rs:676) caps namespace at min(max_namespace_bytes, u16::MAX)
+    //     and entries/placements at the `ManifestLimits` values, 256 / 65_536 /
+    //     256 by default. The wire format also reads the namespace length as a
+    //     u16, so a decoded manifest cannot exceed it either.
+    // No `SegmentManifest` that can exist reaches this arm. Uncovered on
+    // purpose (frankengit-zrxa); a fixture would have to fake a manifest whose
+    // fields are private and validated on every path in.
     let manifest_id = match plan.manifest.identity() {
         Ok(identity) => identity,
         Err(_) => {
