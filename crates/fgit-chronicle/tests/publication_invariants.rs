@@ -899,3 +899,105 @@ fn a_committed_record_naming_the_wrong_predecessor_is_refused_and_its_twin_is_no
         "restoring the predecessor leaves the pair verifiable"
     );
 }
+
+#[test]
+fn a_successor_head_not_bound_to_its_predecessor_is_refused_and_the_bound_twin_is_not() {
+    // The head must name the exact basis it was built on. Without this a head
+    // carrying a valid batch could be re-parented onto a different predecessor
+    // and still look internally consistent, which is the shape section 5.1
+    // exists to forbid: only replacement of the EXACT predecessor publishes.
+    let (basis, batch, mut head) = well_formed_pair();
+    head.predecessor_head_id = Some(derived!(RepositoryAuthorityHeadId, 0x66));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::SuccessorPredecessorNotBound),
+        "a successor naming a predecessor other than its basis is not a successor to it"
+    );
+
+    // The absent case is the same refusal, not a different one: a head that
+    // names NO predecessor is equally unbound, and a check written as
+    // `is_some()` rather than an equality would let it through.
+    head.predecessor_head_id = None;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::SuccessorPredecessorNotBound),
+        "a head naming no predecessor at all is unbound in the same way"
+    );
+
+    head.predecessor_head_id = Some(basis.id());
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(()),
+        "restoring the exact predecessor leaves the pair verifiable"
+    );
+}
+
+#[test]
+fn a_head_naming_the_wrong_latest_record_is_refused_and_the_matching_twin_is_not() {
+    // The head's latest_committed_rcr_id must be the identity the batch's own
+    // last record derives to. This is the field a reader follows to walk the
+    // chain backwards, so a head that names a plausible-but-wrong record sends
+    // every later reader down a chain the batch never published.
+    let (basis, batch, mut head) = well_formed_pair();
+    let bound = head.latest_committed_rcr_id;
+    assert!(
+        bound.is_some(),
+        "the fixture must publish a committed record, or this proves nothing"
+    );
+
+    head.latest_committed_rcr_id = Some(derived!(RepositoryCommitId, 0x67));
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::LatestCommittedRecordMismatch),
+        "the head's latest record must be the one the batch actually committed"
+    );
+
+    // And dropping it entirely is the same refusal: a head that forgets its
+    // latest record is as wrong as one that misnames it.
+    head.latest_committed_rcr_id = None;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::LatestCommittedRecordMismatch),
+        "a head that names no latest record after a committing batch is also a mismatch"
+    );
+
+    head.latest_committed_rcr_id = bound;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_batch_not_opening_at_the_next_repository_position_is_refused_and_its_twin_is_not() {
+    // The repository sequence is the committed-only order, distinct from the
+    // decision order that includes refusals. A batch whose first record does
+    // not open at the next free repository position would leave a hole no later
+    // batch can fill, exactly as with the decision sequence.
+    let (basis, mut batch, head) = well_formed_pair();
+    let gap = RepositorySequence::try_new(2).expect("two is a valid repository position");
+    batch
+        .committed_rcrs
+        .first_mut()
+        .expect("the pair carries one committed record")
+        .repository_sequence = gap;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::RepositorySequenceNotContinuing {
+            expected: RepositorySequence::FIRST,
+            observed: gap,
+        }),
+        "the first committed record of a genesis batch must occupy the first repository position"
+    );
+
+    batch
+        .committed_rcrs
+        .first_mut()
+        .expect("the pair carries one committed record")
+        .repository_sequence = RepositorySequence::FIRST;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(()),
+        "the refusal is specific to the position, not to the record"
+    );
+}
