@@ -1329,6 +1329,10 @@ impl<'a> ManifestCursor<'a> {
     }
 }
 
+// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
+const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1569,7 +1573,3 @@ mod tests {
         );
     }
 }
-
-// Non-production fixture identity: this reserved tag deliberately has no registered digest width.
-const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
-const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
