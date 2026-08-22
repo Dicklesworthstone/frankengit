@@ -111,6 +111,7 @@ pub mod ids;
 pub mod kinds;
 pub mod settlement;
 pub mod twophase;
+pub mod workers;
 
 pub use algebra::{
     BudgetGrant, GRADE_COUNT, Grade, GradeDisposition, ReleaseReceipt, ResourceError,
@@ -132,4 +133,8 @@ pub use twophase::{
     InternalEffect, ObligationClass, ObligationKind, ObservationMode, ReservedObligation,
     SettledObligation, SettlementRefused, SettlementSummary, TerminalEvidence,
     TerminalFailureReason, TrivialAck, UnacknowledgedEffect,
+};
+pub use workers::{
+    BatchMergeRefusal, BatchPlan, BindingConstraint, VarianceClass, WorkerBudget,
+    WorkerBudgetInputs, WorkerBudgetRefusal, WorkerMode, merge_in_job_order, plan,
 };
