@@ -1068,7 +1068,7 @@ where
 }
 
 fn ensure_materializer_catch_up_live(
-    is_cancelled: &impl Fn() -> bool,
+    is_cancelled: &(impl Fn() -> bool + Sync),
 ) -> Result<(), AdmissionMaterializationRefusal> {
     if is_cancelled() {
         Err(AdmissionMaterializationRefusal::Cancelled)
@@ -1110,7 +1110,7 @@ async fn select_authority_closure_in<Authority>(
     cx: &Authority::Context,
     current_head: RepositoryAuthorityHeadBody,
     current_refs: &CanonicalRefState,
-    is_cancelled: &impl Fn() -> bool,
+    is_cancelled: &(impl Fn() -> bool + Sync),
 ) -> Result<(Digest, ClosureSelectionSource), AdmissionMaterializationRefusal>
 where
     Authority: AsyncAuthorityStore + ?Sized,
