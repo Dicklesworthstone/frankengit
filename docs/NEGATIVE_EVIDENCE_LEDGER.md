@@ -87,6 +87,34 @@ Section 3 records what design review rejected before code existed. This subsecti
 
 22. **A successful authority publication establishes the `Durable` epoch** (`NEG-023`) — rejected as an active applicability limit, not as a claim that checkpointing is unreachable. `FsqliteAuthorityStore` witnesses a candidate body as `Staged` before the exact-predecessor head CAS and as `Visible` after CAS plus a head read; `PublicationOutcome::Published` therefore establishes only `Visible`. A checkpoint is driveable and observable from a **test-owned second connection** issuing `PRAGMA wal_checkpoint`, but not from the store's published surface, whose closed statement set has no `PRAGMA`. More importantly, that result is whole-log backfill state (`busy`, `log`, `checkpointed`), not an event attributable to one publication. It cannot answer whether a particular transaction has reached `Durable`; WAL sidecar size is likewise not a per-publication witness. This does not contradict `NEG-022`: that row preserves the disproven hypothesis that the checkpoint-under-load cell was unreachable, whereas this row records the true, expected-to-remain limit of the shipped authority surface. The reopen condition is concrete: a caller that needs durable-before-acknowledge must define the required per-publication durability profile and witness before a new production surface is justified.
 
+### NEG-024 — CALM registry coverage is not enforceable yet (FG-012 acceptance 5c)
+
+**Hypothesis.** Every operation classified in `registries/calm_operations.tsv` can be shown to have a
+first-party implementation, making registry *coverage* — a built operation must have a row —
+mechanically enforceable.
+
+**Disposition: NOT ENFORCED, recorded as a named open weakness rather than dropped.** Two facts
+block it. Zero of the fourteen classified operations have a first-party implementation today, so
+there is nothing to check coverage against; and no checker can currently enumerate "the operations
+this system implements" in order to prove a built one is missing its row. Enforcing coverage now
+would create an obligation nobody can discharge, and quietly dropping it would discard a real future
+requirement because it is inconvenient today.
+
+**What IS enforced instead.** FG-012 acceptance 5a: every value in the registry's `class` column must
+be one of the seven coordination classes declared in
+[`docs/CALM_AND_OBLIGATIONS.md`](CALM_AND_OBLIGATIONS.md) section 1, validated by
+`tools/registry-check` and parsed from that document rather than restated in the checker. That makes
+the rows load-bearing today — running code branches on them — and guards the vocabulary against
+drift while coverage remains unenforceable.
+
+**Revisit condition.** The first operation named in `calm_operations.tsv` gains a first-party
+implementation. At that point coverage is checkable for at least that operation, and the enumeration
+question stops being hypothetical.
+
+**Why this is retained rather than closed.** The registry is a design-time classification of a system
+that is mostly unbuilt. An unenforced obligation that is *named* stays visible to the next reader; an
+unenforced obligation that is deleted becomes a gap nobody knows to look for.
+
 ## 4. Revisit protocol
 
 A rejected idea may be revisited only when the proposal identifies:

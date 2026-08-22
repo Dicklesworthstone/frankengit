@@ -361,6 +361,9 @@ fn check_required_files(root: &Path, report: &mut Report) {
     }
 }
 
+/// How many coordination classes `docs/CALM_AND_OBLIGATIONS.md` section 1 declares.
+const CALM_CLASS_COUNT: usize = 7;
+
 fn registry_schemas() -> BTreeMap<&'static str, &'static [&'static str]> {
     BTreeMap::from([
         (
@@ -516,8 +519,61 @@ fn registry_marker_for(file_name: &str) -> &'static str {
     }
 }
 
+/// The closed set of CALM coordination classes, parsed from the one document
+/// that defines them.
+///
+/// Deliberately parsed rather than restated here. A hard-coded list in this
+/// checker would be a second source of truth for a closed set that already has
+/// an authoritative home, and the two would drift the first time someone edited
+/// one of them -- which is exactly the failure this check exists to prevent one
+/// layer down, in the registry.
+fn calm_coordination_classes(root: &Path, report: &mut Report) -> BTreeSet<String> {
+    let path = root.join("docs/CALM_AND_OBLIGATIONS.md");
+    let display = relative(root, &path);
+    let mut classes = BTreeSet::new();
+    let text = match fs::read_to_string(&path) {
+        Ok(value) => value,
+        Err(error) => {
+            report.error(format!("cannot read {display}: {error}"));
+            return classes;
+        }
+    };
+    let mut in_section = false;
+    for line in text.lines() {
+        if line.starts_with("## 1.") {
+            in_section = true;
+            continue;
+        }
+        if in_section && line.starts_with("## ") {
+            break;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("- `")
+            && let Some((name, _)) = rest.split_once("`:")
+        {
+            classes.insert(name.to_owned());
+        }
+    }
+    // Non-vacuity guard. If a documentation restructure breaks this parse, the
+    // set goes empty and every registry value would match nothing -- or worse,
+    // an empty set would be treated as "no constraint". Fail loudly instead: a
+    // closed-set check that silently stopped constraining anything is the
+    // decorative-gate failure this project keeps finding.
+    if classes.len() != CALM_CLASS_COUNT {
+        report.error(format!(
+            "expected {CALM_CLASS_COUNT} coordination classes in {display} section 1, parsed {}; \
+             the calm_operations class check would be vacuous",
+            classes.len()
+        ));
+    }
+    classes
+}
+
 fn check_registries(root: &Path, report: &mut Report) {
     let schemas = registry_schemas();
+    let calm_classes = calm_coordination_classes(root, report);
     let registry_dir = root.join("registries");
     for (file_name, expected_header) in schemas {
         let path = registry_dir.join(file_name);
@@ -562,6 +618,13 @@ fn check_registries(root: &Path, report: &mut Report) {
         }
 
         let status_index = actual_header.iter().position(|field| *field == "status");
+        // Only `calm_operations.tsv` carries a coordination class; every other
+        // registry's `class`-like column means something else.
+        let class_index = if file_name == "calm_operations.tsv" {
+            actual_header.iter().position(|field| *field == "class")
+        } else {
+            None
+        };
         let id_index = actual_header
             .iter()
             .position(|field| *field == "id")
@@ -588,6 +651,23 @@ fn check_registries(root: &Path, report: &mut Report) {
                         "empty registry field `{}` at {display}:{}",
                         actual_header[index],
                         line_index + 1
+                    ));
+                }
+            }
+            // FG-012 acceptance 5a: the coordination class must be one of the
+            // seven declared classes. This is what makes the registry rows
+            // load-bearing today -- running code branches on them -- rather
+            // than a design-time note nothing validates.
+            if let Some(index) = class_index
+                && let Some(value) = fields.get(index)
+            {
+                let value = value.trim();
+                if !calm_classes.is_empty() && !calm_classes.contains(value) {
+                    report.error(format!(
+                        "unknown coordination class `{value}` at {display}:{}: \
+                         docs/CALM_AND_OBLIGATIONS.md section 1 declares only {:?}",
+                        line_index + 1,
+                        calm_classes
                     ));
                 }
             }
@@ -5285,6 +5365,100 @@ mod tests {
             find_inline_assembly_construct(concat!("global_as", "m!(\"nop\");")),
             Some(concat!("global_as", "m!").to_owned())
         );
+    }
+
+    /// The workspace root, derived from this crate's manifest directory.
+    fn calm_repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("tools/registry-check sits two levels under the workspace root")
+            .to_path_buf()
+    }
+
+    #[test]
+    fn calm_classes_are_parsed_from_the_authoritative_document() {
+        // The closed set must come from the document, not from this checker.
+        let root = calm_repo_root();
+        let mut report = Report::new();
+        let classes = calm_coordination_classes(&root, &mut report);
+        assert_eq!(
+            classes.len(),
+            CALM_CLASS_COUNT,
+            "section 1 must declare exactly {CALM_CLASS_COUNT} classes; parsed {classes:?}"
+        );
+        for expected in [
+            "monotone_with_authentication",
+            "monotone_scoped",
+            "commutative_but_bounded",
+            "local_deterministic",
+            "ordered_projection",
+            "head_cas_required",
+            "exclusive_external_effect",
+        ] {
+            assert!(
+                classes.contains(expected),
+                "`{expected}` missing from the parsed closed set: {classes:?}"
+            );
+        }
+        assert!(
+            report.errors.is_empty(),
+            "parsing the authoritative document must not itself report errors: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn every_registry_coordination_class_is_declared() {
+        // The PRESENCE half: the shipped registry satisfies the closed set.
+        // Without this, the rejection test below could pass against a registry
+        // that was already broken.
+        let root = calm_repo_root();
+        let mut report = Report::new();
+        let classes = calm_coordination_classes(&root, &mut report);
+        let text = fs::read_to_string(root.join("registries/calm_operations.tsv"))
+            .expect("the calm operations registry must be readable");
+        let mut checked = 0_usize;
+        for line in text.lines() {
+            if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                continue;
+            }
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields.first().copied() == Some("id") {
+                continue;
+            }
+            let Some(value) = fields.get(2) else { continue };
+            checked += 1;
+            assert!(
+                classes.contains(value.trim()),
+                "registry row uses undeclared class `{}`",
+                value.trim()
+            );
+        }
+        assert!(
+            checked > 0,
+            "no registry rows were checked; this assertion would be vacuous"
+        );
+    }
+
+    #[test]
+    fn an_undeclared_coordination_class_is_rejected() {
+        // The ABSENCE half. A closed-set check nobody has watched reject
+        // something is not known to constrain anything.
+        let root = calm_repo_root();
+        let mut report = Report::new();
+        let classes = calm_coordination_classes(&root, &mut report);
+        for planted in [
+            "monotone",                    // a plausible truncation
+            "head_cas",                    // the near-homonym of the obligation type
+            "monotone_with_authorisation", // one-letter spelling drift
+            "totally_ordered_broadcast",   // an invented eighth class
+        ] {
+            assert!(
+                !classes.contains(planted),
+                "planted class `{planted}` must not be accepted as declared"
+            );
+        }
     }
 
     #[test]
