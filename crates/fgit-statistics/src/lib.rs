@@ -74,6 +74,7 @@
 //! them.
 
 pub mod authority;
+pub mod conformal;
 pub mod controller;
 pub mod evidence;
 pub mod fallback;
@@ -82,6 +83,9 @@ pub mod regime;
 pub use authority::{
     AdmissibleShape, AdvisoryDecision, DecisionRefusal, EffectClass, ForbiddenTarget,
     ProposedTarget,
+};
+pub use conformal::{
+    ConformalAssumptionFailure, ConformalConfig, ConformalRefusal, SplitConformal,
 };
 pub use controller::{ControllerConfig, ControllerRefusal, ControllerStep, RetryBackoffController};
 pub use evidence::{
