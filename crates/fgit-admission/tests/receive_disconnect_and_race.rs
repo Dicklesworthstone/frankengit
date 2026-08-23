@@ -218,6 +218,11 @@ impl AdmissionProjection for UnboundAdapter {
         if !matches!(fold.outcome, FoldOutcome::Folded(_)) {
             return Err(RefusalCode::ConflictingSemanticEffects);
         }
+        // `005fd92` made admission validate these carried-forward roots against
+        // the authenticated basis. This fixture is deliberately ref-only, so
+        // it must continue that basis rather than minting forge, retention, or
+        // outbox roots from `seed`; otherwise every fault-free probe refuses
+        // before it reaches the disconnect/race behavior under test.
         let roots = ResultingRoots {
             ref_root: self.digest(2),
             forge_position_root: basis.body().forge_position_root,
