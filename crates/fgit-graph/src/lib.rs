@@ -12,10 +12,13 @@ mod algorithms;
 mod generation;
 
 pub use crate::algorithms::{
-    ArticulationBridgeReport, BipartiteMatching, ComplexityTerm, CriticalPath, DeterministicGraph,
-    GraphAlgorithm, GraphBuilder, GraphBuilderError, GraphDecision, GraphDecisionWitness,
-    GraphEdge, GraphLimits, GraphNodeId, GraphQuery, GraphRefusal, GraphResult, GraphSnapshot,
-    GraphViewPolicy, MinimumCut, Reachability, StronglyConnectedComponents, TopologicalOrder,
+    AdvisoryRank, ArticulationBridgeReport, BetweennessCentrality, BipartiteMatching,
+    ComplexityTerm, CriticalPath, DeterministicGraph, FlowCost, GraphAlgorithm, GraphBuilder,
+    GraphBuilderError, GraphDecision, GraphDecisionWitness, GraphEdge, GraphLimits, GraphNodeId,
+    GraphQuery, GraphRefusal, GraphResult, GraphSnapshot, GraphViewPolicy, HitsConfig, HitsScores,
+    KShortestPaths, MinCostFlow, MinCostFlowRequest, MinimumCut, PageRankConfig,
+    PersonalizedPageRank, RationalScore, Reachability, SetCover, SetCoverCandidate,
+    SetCoverRequest, ShortestPath, SteinerTree, StronglyConnectedComponents, TopologicalOrder,
 };
 pub use crate::generation::{
     BuilderProfileId, ExactGraphGeneration, GenerationActivation, GenerationAuthority,

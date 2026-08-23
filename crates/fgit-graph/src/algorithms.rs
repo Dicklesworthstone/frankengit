@@ -11,6 +11,14 @@ use crate::generation::{
     GraphAuthorityClassRefusal, GraphGenerationBody, GraphGenerationId, GraphSourceStamp,
 };
 
+mod wave_two;
+
+pub use wave_two::{
+    AdvisoryRank, BetweennessCentrality, FlowCost, HitsConfig, HitsScores, KShortestPaths,
+    MinCostFlow, MinCostFlowRequest, PageRankConfig, PersonalizedPageRank, RationalScore, SetCover,
+    SetCoverCandidate, SetCoverRequest, ShortestPath, SteinerTree,
+};
+
 const WITNESS_SCHEMA: SchemaId = SchemaId::new(SchemaFamily::from_static("graph-witness"), 1, 0);
 
 /// Stable external identity of one graph vertex.
@@ -87,6 +95,22 @@ pub enum GraphDecision {
     TopologicalOrder,
     /// Deterministic directed acyclic critical path.
     CriticalPath,
+    /// Exact capacity-constrained, minimum-cost source-to-sink flow.
+    MinCostFlow,
+    /// Bounded deterministic enumeration of shortest simple paths.
+    KShortestPaths,
+    /// Exact shortest-path betweenness measurement.
+    BetweennessCentrality,
+    /// Deterministic fixed-point `PageRank` proposal.
+    PageRank,
+    /// Deterministic fixed-point HITS proposal.
+    Hits,
+    /// Deterministic personalized-PageRank context proposal.
+    PersonalizedPageRank,
+    /// Deterministic greedy Steiner-tree context proposal.
+    SteinerTree,
+    /// Deterministic greedy set-cover context proposal.
+    SetCover,
 }
 
 /// Algorithm profile named in a [`GraphDecisionWitness`].
@@ -108,6 +132,22 @@ pub enum GraphAlgorithm {
     TopologicalOrderV1,
     /// Longest-path dynamic program over the deterministic topological order.
     CriticalPathV1,
+    /// Bellman-Ford residual min-cost flow with stable predecessor selection.
+    MinCostFlowV1,
+    /// Uniform-cost bounded simple-path enumeration.
+    KShortestPathsV1,
+    /// Weighted Brandes shortest-path betweenness accumulation.
+    BetweennessCentralityV1,
+    /// Fixed-point `PageRank` with deterministic residual distribution.
+    PageRankV1,
+    /// Fixed-point HITS with deterministic normalization.
+    HitsV1,
+    /// Fixed-point personalized `PageRank` with deterministic residual distribution.
+    PersonalizedPageRankV1,
+    /// Rooted greedy shortest-path Steiner-tree approximation.
+    SteinerTreeGreedyV1,
+    /// Maximum-new-coverage-per-cost set-cover approximation.
+    SetCoverGreedyV1,
 }
 
 impl GraphAlgorithm {
@@ -121,6 +161,14 @@ impl GraphAlgorithm {
             Self::BipartiteMatchingV1 => GraphDecision::BipartiteMatching,
             Self::TopologicalOrderV1 => GraphDecision::TopologicalOrder,
             Self::CriticalPathV1 => GraphDecision::CriticalPath,
+            Self::MinCostFlowV1 => GraphDecision::MinCostFlow,
+            Self::KShortestPathsV1 => GraphDecision::KShortestPaths,
+            Self::BetweennessCentralityV1 => GraphDecision::BetweennessCentrality,
+            Self::PageRankV1 => GraphDecision::PageRank,
+            Self::HitsV1 => GraphDecision::Hits,
+            Self::PersonalizedPageRankV1 => GraphDecision::PersonalizedPageRank,
+            Self::SteinerTreeGreedyV1 => GraphDecision::SteinerTree,
+            Self::SetCoverGreedyV1 => GraphDecision::SetCover,
         }
     }
 
@@ -134,6 +182,14 @@ impl GraphAlgorithm {
             Self::BipartiteMatchingV1 => b"bipartite-matching-v1",
             Self::TopologicalOrderV1 => b"topological-order-v1",
             Self::CriticalPathV1 => b"critical-path-v1",
+            Self::MinCostFlowV1 => b"min-cost-flow-v1",
+            Self::KShortestPathsV1 => b"k-shortest-paths-v1",
+            Self::BetweennessCentralityV1 => b"betweenness-centrality-v1",
+            Self::PageRankV1 => b"page-rank-v1",
+            Self::HitsV1 => b"hits-v1",
+            Self::PersonalizedPageRankV1 => b"personalized-page-rank-v1",
+            Self::SteinerTreeGreedyV1 => b"steiner-tree-greedy-v1",
+            Self::SetCoverGreedyV1 => b"set-cover-greedy-v1",
         }
     }
 }
@@ -149,6 +205,10 @@ pub enum ComplexityTerm {
     CubicVertices,
     /// O(V * E).
     VertexTimesEdges,
+    /// O(F * V * E) for requested flow F under Bellman-Ford residual relaxation.
+    FlowTimesVerticesEdges,
+    /// Bounded simple-path enumeration, with the query operation limit as the hard cap.
+    OperationBoundedPathEnumeration,
 }
 
 /// A view-local allowlist for graph decisions.
@@ -178,6 +238,9 @@ impl GraphViewPolicy {
             GraphDecision::BipartiteMatching,
             GraphDecision::TopologicalOrder,
             GraphDecision::CriticalPath,
+            GraphDecision::MinCostFlow,
+            GraphDecision::KShortestPaths,
+            GraphDecision::BetweennessCentrality,
         ])
     }
 
@@ -291,6 +354,61 @@ pub enum GraphRefusal {
         /// Class carried by the query.
         observed: GraphAuthorityClass,
     },
+    /// A min-cost flow request named a cost for an edge outside this graph.
+    UnknownFlowCost { from: GraphNodeId, to: GraphNodeId },
+    /// A min-cost flow request named one edge cost more than once.
+    DuplicateFlowCost { from: GraphNodeId, to: GraphNodeId },
+    /// A min-cost flow request omitted the cost of a graph edge.
+    MissingFlowCost { edge: GraphEdge },
+    /// A flow source and sink must be distinct graph nodes.
+    IdenticalFlowEndpoints { node: GraphNodeId },
+    /// The graph cannot deliver the requested source-to-sink flow.
+    InsufficientFlow {
+        /// Flow demanded before work began.
+        requested: u64,
+        /// Flow delivered before no residual source-to-sink path remained.
+        delivered: u64,
+    },
+    /// A bounded path request asked for no paths or exceeded the fixed request bound.
+    InvalidPathCount { requested: u64, limit: u64 },
+    /// A ranking configuration is outside the deterministic profile's bounds.
+    InvalidRankConfiguration {
+        /// Bounded iteration count requested by the caller.
+        iterations: u32,
+        /// Fixed-point damping in parts per million.
+        damping_parts_per_million: u32,
+    },
+    /// A personalized ranking seed does not identify a graph node.
+    UnknownRankingSeed { node: GraphNodeId },
+    /// A personalized ranking seed was repeated.
+    DuplicateRankingSeed { node: GraphNodeId },
+    /// A personalized ranking seed must have positive integer weight.
+    ZeroRankingSeedWeight { node: GraphNodeId },
+    /// Personalized `PageRank` requires at least one positive seed.
+    EmptyRankingSeeds,
+    /// A Steiner-tree request supplied no terminals.
+    EmptyTerminalSet,
+    /// A Steiner-tree request repeated a terminal.
+    DuplicateTerminal { node: GraphNodeId },
+    /// A Steiner-tree terminal cannot be reached from the selected root.
+    UnreachableTerminal { node: GraphNodeId },
+    /// A set-cover universe element does not identify a graph node.
+    UnknownCoverElement { node: GraphNodeId },
+    /// A set-cover universe repeated one requested element.
+    DuplicateCoverUniverse { element: GraphNodeId },
+    /// A set-cover candidate was repeated.
+    DuplicateCoverCandidate { candidate: GraphNodeId },
+    /// A set-cover candidate must carry a positive integral cost.
+    ZeroCoverCost { candidate: GraphNodeId },
+    /// A set-cover candidate repeated one of its covered elements.
+    DuplicateCoverElement {
+        candidate: GraphNodeId,
+        element: GraphNodeId,
+    },
+    /// No remaining candidate covers this universe element.
+    UncoverableElement { element: GraphNodeId },
+    /// Exact rational score arithmetic exceeded its bounded integer domain.
+    RationalOverflow,
     /// A bound would be exceeded before this core allocates graph or result state.
     ResourceLimit {
         /// The bounded resource.
@@ -1276,6 +1394,88 @@ impl GraphSnapshot {
     ) -> Result<GraphResult<CriticalPath>, GraphRefusal> {
         self.require_query(query)?;
         self.graph.critical_path(query)
+    }
+
+    /// Computes a deterministic minimum-cost flow proposal over this snapshot.
+    pub fn min_cost_flow(
+        &self,
+        query: &GraphQuery,
+        request: &MinCostFlowRequest,
+    ) -> Result<GraphResult<MinCostFlow>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.min_cost_flow(query, request)
+    }
+
+    /// Enumerates the first `k` shortest simple paths under stable tie-breaking.
+    pub fn k_shortest_paths(
+        &self,
+        query: &GraphQuery,
+        source: GraphNodeId,
+        target: GraphNodeId,
+        k: u64,
+    ) -> Result<GraphResult<KShortestPaths>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.k_shortest_paths(query, source, target, k)
+    }
+
+    /// Computes exact shortest-path betweenness values with rational scores.
+    pub fn betweenness_centrality(
+        &self,
+        query: &GraphQuery,
+    ) -> Result<GraphResult<BetweennessCentrality>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.betweenness_centrality(query)
+    }
+
+    /// Computes a bounded deterministic `PageRank` proposal.
+    pub fn page_rank(
+        &self,
+        query: &GraphQuery,
+        config: PageRankConfig,
+    ) -> Result<GraphResult<AdvisoryRank>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.page_rank(query, config)
+    }
+
+    /// Computes a bounded deterministic personalized-PageRank proposal.
+    pub fn personalized_page_rank(
+        &self,
+        query: &GraphQuery,
+        config: PageRankConfig,
+        seeds: &[(GraphNodeId, u64)],
+    ) -> Result<GraphResult<PersonalizedPageRank>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.personalized_page_rank(query, config, seeds)
+    }
+
+    /// Computes a bounded deterministic HITS proposal.
+    pub fn hits(
+        &self,
+        query: &GraphQuery,
+        config: HitsConfig,
+    ) -> Result<GraphResult<HitsScores>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.hits(query, config)
+    }
+
+    /// Computes a deterministic greedy Steiner-tree context proposal.
+    pub fn steiner_tree(
+        &self,
+        query: &GraphQuery,
+        terminals: &[GraphNodeId],
+    ) -> Result<GraphResult<SteinerTree>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.steiner_tree(query, terminals)
+    }
+
+    /// Computes a deterministic greedy set-cover context proposal.
+    pub fn set_cover(
+        &self,
+        query: &GraphQuery,
+        request: &SetCoverRequest,
+    ) -> Result<GraphResult<SetCover>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.set_cover(query, request)
     }
 
     fn require_query(&self, query: &GraphQuery) -> Result<(), GraphRefusal> {
