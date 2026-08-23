@@ -56,8 +56,10 @@ impl fmt::Display for RunId {
 /// mistaken for one. §4.1 warns that *"a backend ETag/version without an
 /// authenticated head-body check is insufficient"*; carrying four fields of a
 /// fourteen-field receipt and calling it the receipt would be exactly that
-/// substitution. Binding a run to the complete receipt is a later slice, and
-/// belongs where both halves are visible.
+/// substitution. [`IntentRun::new_authenticated`] binds a run to the complete
+/// receipt in the protocol slice; this legacy reference remains only for the
+/// compatibility constructor and cannot authorize a workspace, context packet,
+/// or publication request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthorityBasisRef {
     /// The repository the read was against.

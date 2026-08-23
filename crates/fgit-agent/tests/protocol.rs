@@ -2,9 +2,9 @@
 //! Real authority and context-packet boundary tests for FG-030.
 
 use fgit_agent::{
-    AuthorityReadReceipt, ClassSet, ContextControl, ContextPacket, ContextSource, IntentRun,
-    LogicalTime, MAX_CONTEXT_SOURCE_BYTES, ProtocolRefusal, RetrievalChannel, RunId,
-    WorkspaceBinding,
+    AuthorityBasisRef, AuthorityReadReceipt, ClassSet, ContextControl, ContextPacket,
+    ContextSource, IntentRun, LogicalTime, MAX_CONTEXT_SOURCE_BYTES, ProtocolRefusal,
+    RetrievalChannel, RunId, WorkspaceBinding,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, SealAdmission, StoreInstanceId,
@@ -146,10 +146,8 @@ fn workspace_run(receipt: AuthorityReadReceipt) -> IntentRun {
     .expect("authenticated TreeFS run opens")
 }
 
-#[test]
-fn workspace_binding_uses_the_real_treefs_snapshot_and_refuses_a_different_authority_base() {
-    let receipt = authority_receipt();
-    let snapshot = WorkspaceSnapshotBody::<Sha1>::new(
+fn snapshot_for(receipt: &AuthorityReadReceipt) -> WorkspaceSnapshotBody<Sha1> {
+    WorkspaceSnapshotBody::<Sha1>::new(
         WorkspaceId::from_bytes([0x41; 16]),
         receipt.repository_id(),
         receipt
@@ -162,7 +160,13 @@ fn workspace_binding_uses_the_real_treefs_snapshot_and_refuses_a_different_autho
             .stage()
             .publish()
             .expect("visible after staging"),
-    );
+    )
+}
+
+#[test]
+fn workspace_binding_uses_the_real_treefs_snapshot_and_refuses_a_different_authority_base() {
+    let receipt = authority_receipt();
+    let snapshot = snapshot_for(&receipt);
     let binding = WorkspaceBinding::bind(workspace_run(receipt.clone()), snapshot)
         .expect("TreeFS snapshot at the authenticated RCR is bindable");
     assert_eq!(binding.workspace_id(), WorkspaceId::from_bytes([0x41; 16]));
@@ -185,6 +189,41 @@ fn workspace_binding_uses_the_real_treefs_snapshot_and_refuses_a_different_autho
     assert!(matches!(
         WorkspaceBinding::bind(workspace_run(receipt), mismatched),
         Err(ProtocolRefusal::WorkspaceBaseMismatch { .. })
+    ));
+}
+
+#[test]
+fn workspace_binding_refuses_legacy_or_non_treefs_runs_before_using_snapshot_state() {
+    let receipt = authority_receipt();
+    let legacy = IntentRun::new(
+        RunId::new(92),
+        AuthorityBasisRef {
+            repository_id: u128::from_be_bytes(*receipt.repository_id().as_bytes()),
+            authority_head_generation: receipt.authority_head_generation().get(),
+            authority_head_digest: [0; 32],
+            verified_at: receipt.verified_at_logical_time(),
+        },
+        ClassSet::from_classes(&[fgit_agent::OperationClass::TreeFsWorkspace]),
+        ResourceVector::single(Grade::Bytes, 4_096),
+        LogicalTime::new(99),
+    )
+    .expect("legacy run only identifies its authority basis");
+    assert!(matches!(
+        WorkspaceBinding::bind(legacy, snapshot_for(&receipt)),
+        Err(ProtocolRefusal::RunAuthorityReceiptRequired)
+    ));
+
+    let no_treefs_scope = IntentRun::new_authenticated(
+        RunId::new(93),
+        receipt.clone(),
+        ClassSet::from_classes(&[fgit_agent::OperationClass::ReadCanonicalObject]),
+        ResourceVector::single(Grade::Bytes, 4_096),
+        LogicalTime::new(99),
+    )
+    .expect("authenticated run with an unrelated scope opens");
+    assert!(matches!(
+        WorkspaceBinding::bind(no_treefs_scope, snapshot_for(&receipt)),
+        Err(ProtocolRefusal::WorkspaceOperationOutsideRun)
     ));
 }
 

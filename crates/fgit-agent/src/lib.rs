@@ -42,9 +42,12 @@
 //! not emit. It does **not**
 //! deliver the rest of the §10 bundle — the proposed object/tree closure and
 //! diff commitment (they need §8's `TreeFS` export), the reconciliation record
-//! (that is `fgit-authority` and fg073's ledger), or context-packet bodies — nor most of
-//! §11: the deterministic verification services of §11.1 and the human review
-//! view of §11.3 are absent. [`ecc`]'s own header lists these individually.
+//! (that is `fgit-authority` and fg073's ledger), or context-packet bodies in
+//! the ECC itself — nor most of §11: the deterministic verification services
+//! of §11.1 and the human review view of §11.3 are absent. [`ecc`]'s own
+//! header lists these individually. The separate [`protocol`] module does bind
+//! real context packets, TreeFS snapshots, and a normal sealed-ref attempt; it
+//! does not claim to synthesize those fields into an ECC.
 //!
 //! The obligation lifecycle is not reimplemented either. `fgit-resource` owns
 //! it, and [`broker`] explains exactly which half of an effect's reservation

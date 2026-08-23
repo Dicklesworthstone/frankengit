@@ -484,9 +484,9 @@ impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
     ///
     /// # Errors
     ///
-    /// Refuses a legacy run without a full authority receipt, a run/packet from
-    /// another authority position, a proposal from another TreeFS workspace or
-    /// base RCR, and a run that lacks `PreparePublication` authority.
+    /// Refuses a packet from another authority position, a proposal from
+    /// another TreeFS workspace or base RCR, and a run that lacks
+    /// `PreparePublication` authority.
     pub fn prepare_ref_transaction(
         &self,
         proposal: ProposedTransaction<A>,
@@ -750,8 +750,6 @@ pub enum ProtocolRefusal {
     /// A legacy run supplied an identifying reference rather than a complete
     /// authenticated authority receipt.
     RunAuthorityReceiptRequired,
-    /// The run was opened against a different authority position.
-    RunAuthorityReceiptMismatch,
     /// The run does not authorize publication preparation.
     PublicationOperationOutsideRun,
     /// The proposal came from another TreeFS workspace.
@@ -818,9 +816,6 @@ impl fmt::Display for ProtocolRefusal {
             ),
             Self::RunAuthorityReceiptRequired => formatter.write_str(
                 "publication preparation requires a run with a complete authenticated authority receipt",
-            ),
-            Self::RunAuthorityReceiptMismatch => formatter.write_str(
-                "intent run authority receipt differs from the bound TreeFS workspace",
             ),
             Self::PublicationOperationOutsideRun => formatter.write_str(
                 "intent run does not authorize publication preparation",
