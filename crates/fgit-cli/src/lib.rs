@@ -12,9 +12,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_node::{
     DoctorReport, GitDaemonSessionOutcome, NodeConfig, NodeGitDaemonServeRefusal,
-    NodeInitialization, OneNode,
+    NodeInitialization, NodeSourceImportRefusal, OneNode,
 };
-use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, TenantId};
+use fgit_types::{
+    DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefusalCode, RepositoryId, TenantId,
+};
 
 const EXPORT_TEMPORARY_ATTEMPTS: usize = 16;
 
@@ -29,10 +31,22 @@ pub enum CliRefusal {
     Tenant(fgit_types::TypeRefusal),
     /// The supplied repository identity was not canonical lowercase hex.
     Repository(fgit_types::TypeRefusal),
+    /// The supplied caller principal identity was not canonical lowercase hex.
+    Principal(fgit_types::TypeRefusal),
     /// The supplied doctor sample was not a native SHA-1 object identity.
     Object(fgit_types::TypeRefusal),
     /// Node initialization refused before a usable service existed.
     Node(fgit_node::NodeRefusal),
+    /// A verified loose source could not become an authenticated source-import
+    /// decision.
+    Import(Box<NodeSourceImportRefusal>),
+    /// Source-import admission reached an authenticated terminal refusal.
+    ///
+    /// This is deliberately distinct from source verification or authority
+    /// infrastructure failure: callers may safely retry a terminal decision
+    /// with the same explicit idempotency key, but must not treat it as an
+    /// imported repository.
+    ImportRefused(RefusalCode),
     /// The requested listener address could not become a bounded local socket.
     Listener(io::Error),
     /// A one-session git-daemon serve attempt refused.
@@ -76,6 +90,22 @@ pub enum CliRefusal {
         /// The failed staging cleanup.
         cleanup: Box<io::Error>,
     },
+    /// Import refused and mandatory node shutdown also failed, so neither
+    /// failure is discarded.
+    ImportCleanup {
+        /// The import refusal before lifecycle cleanup.
+        import: Box<NodeSourceImportRefusal>,
+        /// The failed explicit lifecycle close.
+        cleanup: Box<fgit_node::NodeRefusal>,
+    },
+    /// Source import reached a terminal refusal and mandatory node shutdown
+    /// also failed, so neither outcome is discarded.
+    ImportRefusedCleanup {
+        /// The authenticated terminal decision.
+        code: RefusalCode,
+        /// The failed explicit lifecycle close.
+        cleanup: Box<fgit_node::NodeRefusal>,
+    },
     /// Doctor inspection refused and the following mandatory node shutdown
     /// also failed, so neither failure is discarded.
     DoctorCleanup {
@@ -106,12 +136,19 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex>; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path>; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address>",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex>; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory>; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path>; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address>",
             ),
-            Self::Tenant(error) | Self::Repository(error) | Self::Object(error) => {
+            Self::Tenant(error)
+            | Self::Repository(error)
+            | Self::Principal(error)
+            | Self::Object(error) => {
                 Display::fmt(error, formatter)
             }
             Self::Node(error) => Display::fmt(error, formatter),
+            Self::Import(error) => Display::fmt(error, formatter),
+            Self::ImportRefused(code) => {
+                write!(formatter, "source import reached terminal refusal: {code:?}")
+            }
             Self::Listener(error) => write!(formatter, "cannot bind fg serve listener: {error}"),
             Self::Serve(error) => Display::fmt(error, formatter),
             Self::ExportMaterialization(error) => {
@@ -149,6 +186,14 @@ impl Display for CliRefusal {
                 destination.display(),
                 temporary.display(),
             ),
+            Self::ImportCleanup { import, cleanup } => write!(
+                formatter,
+                "import failed ({import}) and node shutdown also failed ({cleanup})"
+            ),
+            Self::ImportRefusedCleanup { code, cleanup } => write!(
+                formatter,
+                "import reached terminal refusal {code:?} and node shutdown also failed ({cleanup})"
+            ),
             Self::DoctorCleanup {
                 inspection,
                 cleanup,
@@ -171,8 +216,12 @@ impl Display for CliRefusal {
 impl Error for CliRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Tenant(error) | Self::Repository(error) | Self::Object(error) => Some(error),
+            Self::Tenant(error)
+            | Self::Repository(error)
+            | Self::Principal(error)
+            | Self::Object(error) => Some(error),
             Self::Node(error) => Some(error),
+            Self::Import(error) => Some(error.as_ref()),
             Self::Listener(error) => Some(error),
             Self::Serve(error) => Some(error),
             Self::ExportMaterialization(error) => Some(error.as_ref()),
@@ -180,10 +229,13 @@ impl Error for CliRefusal {
                 Some(source.as_ref())
             }
             Self::ExportVisibleCleanup { cleanup, .. } => Some(cleanup.as_ref()),
+            Self::ImportCleanup { import, .. } => Some(import.as_ref()),
+            Self::ImportRefusedCleanup { cleanup, .. } => Some(cleanup.as_ref()),
             Self::DoctorCleanup { inspection, .. } => Some(inspection),
             Self::ServeCleanup { serving, .. } => Some(serving),
             Self::ExportCleanup { export, .. } => Some(export.as_ref()),
             Self::Usage | Self::ExportDestination | Self::ExportDestinationExists(_) => None,
+            Self::ImportRefused(_) => None,
         }
     }
 }
@@ -193,6 +245,12 @@ impl Error for CliRefusal {
 pub enum CliOutcome {
     /// `fg init` created or found the durable authority head.
     Initialized(NodeInitialization),
+    /// `fg import` published every source ref as an authenticated terminal
+    /// source-import decision.
+    Imported {
+        /// Number of source ref commands represented in the admission result.
+        command_count: usize,
+    },
     /// `fg doctor` authenticated the current authority receipt.
     ///
     /// This first doctor slice does not claim an RCR replay proof or a storage
@@ -227,6 +285,25 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             node.shutdown().map_err(CliRefusal::Node)?;
             Ok(CliOutcome::Initialized(initialization))
         }
+        [
+            command,
+            storage_root,
+            tenant,
+            repository,
+            principal,
+            idempotency_key,
+            source,
+        ] if command == "import" => {
+            let principal = PrincipalId::from_hex(principal).map_err(CliRefusal::Principal)?;
+            run_import(
+                storage_root,
+                tenant,
+                repository,
+                principal,
+                idempotency_key.as_bytes(),
+                Path::new(source),
+            )
+        }
         [command, storage_root, tenant, repository] if command == "doctor" => {
             run_doctor(storage_root, tenant, repository, None)
         }
@@ -259,6 +336,64 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             }
         }
         _ => Err(CliRefusal::Usage),
+    }
+}
+
+fn run_import(
+    storage_root: &str,
+    tenant: &str,
+    repository: &str,
+    principal: PrincipalId,
+    idempotency_key: &[u8],
+    source: &Path,
+) -> Result<CliOutcome, CliRefusal> {
+    let node = OneNode::open_existing(node_config(storage_root, tenant, repository)?)
+        .map_err(CliRefusal::Node)?;
+    let request = node.request_context();
+    let imported = node
+        .runtime()
+        .block_on(node.import_loose_git_directory_durable_in(
+            &request,
+            source,
+            principal,
+            idempotency_key,
+        ));
+    let cleanup = node.shutdown();
+    match (imported, cleanup) {
+        (Ok(admission), Ok(())) => {
+            if let Some(code) = admission.commands.iter().find_map(|command| {
+                let DecisionOutcome::Refused { code, .. } = command.terminal.outcome else {
+                    return None;
+                };
+                Some(code)
+            }) {
+                Err(CliRefusal::ImportRefused(code))
+            } else {
+                Ok(CliOutcome::Imported {
+                    command_count: admission.commands.len(),
+                })
+            }
+        }
+        (Err(import), Ok(())) => Err(CliRefusal::Import(Box::new(import))),
+        (Ok(admission), Err(cleanup)) => {
+            if let Some(code) = admission.commands.iter().find_map(|command| {
+                let DecisionOutcome::Refused { code, .. } = command.terminal.outcome else {
+                    return None;
+                };
+                Some(code)
+            }) {
+                Err(CliRefusal::ImportRefusedCleanup {
+                    code,
+                    cleanup: Box::new(cleanup),
+                })
+            } else {
+                Err(CliRefusal::Node(cleanup))
+            }
+        }
+        (Err(import), Err(cleanup)) => Err(CliRefusal::ImportCleanup {
+            import: Box::new(import),
+            cleanup: Box::new(cleanup),
+        }),
     }
 }
 
@@ -441,12 +576,66 @@ fn node_config(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use fgit_crypto::{GitObjectKind, git_object_id};
+    use fgit_types::{GitHashAlgorithm, GitOid};
 
     use super::{CliOutcome, CliRefusal, run};
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+    fn write_loose_commit_repository(root: &Path) -> GitOid {
+        fs::create_dir_all(root).expect("source repository directory creates");
+        let blob = write_loose_object(root, GitObjectKind::Blob, b"first clone fixture\n");
+        let mut tree = b"100644 README\0".to_vec();
+        tree.extend_from_slice(blob.require_sha1().expect("fixture is SHA-1").as_bytes());
+        let tree = write_loose_object(root, GitObjectKind::Tree, &tree);
+        let commit = format!(
+            "tree {tree}\nauthor FrankenGit <fg@example.invalid> 0 +0000\ncommitter FrankenGit <fg@example.invalid> 0 +0000\n\nfirst clone fixture\n"
+        );
+        let commit = write_loose_object(root, GitObjectKind::Commit, commit.as_bytes());
+        let ref_path = root.join("refs/heads/main");
+        fs::create_dir_all(ref_path.parent().expect("source ref parent exists"))
+            .expect("source ref directory creates");
+        fs::write(ref_path, format!("{commit}\n")).expect("source direct ref writes");
+        commit
+    }
+
+    fn write_loose_object(root: &Path, kind: GitObjectKind, body: &[u8]) -> GitOid {
+        let identity = git_object_id(GitHashAlgorithm::Sha1, kind, body);
+        let text = identity.to_string();
+        let (directory, file) = text.split_at(2);
+        let path = root.join("objects").join(directory).join(file);
+        fs::create_dir_all(path.parent().expect("loose object parent exists"))
+            .expect("loose object directory creates");
+        let mut framed = format!("{} {}\0", kind.label(), body.len()).into_bytes();
+        framed.extend_from_slice(body);
+        fs::write(path, zlib_stored_member(&framed)).expect("loose object writes");
+        identity
+    }
+
+    fn zlib_stored_member(bytes: &[u8]) -> Vec<u8> {
+        let length = u16::try_from(bytes.len()).expect("fixture member fits one stored block");
+        let mut member = Vec::with_capacity(bytes.len() + 11);
+        member.extend_from_slice(&[0x78, 0x01, 0x01]);
+        member.extend_from_slice(&length.to_le_bytes());
+        member.extend_from_slice(&(!length).to_le_bytes());
+        member.extend_from_slice(bytes);
+        member.extend_from_slice(&adler32(bytes).to_be_bytes());
+        member
+    }
+
+    fn adler32(bytes: &[u8]) -> u32 {
+        let mut a = 1_u32;
+        let mut b = 0_u32;
+        for byte in bytes {
+            a = (a + u32::from(*byte)) % 65_521;
+            b = (b + a) % 65_521;
+        }
+        (b << 16) | a
+    }
 
     struct ScratchDirectory(PathBuf);
 
@@ -498,6 +687,117 @@ mod tests {
             "not-an-object".to_owned(),
         ];
         assert!(matches!(run(&command), Err(CliRefusal::Object(_))));
+    }
+
+    #[test]
+    fn import_publishes_a_verified_loose_commit_then_doctor_and_export_follow_it() {
+        let scratch = ScratchDirectory::new();
+        let storage_root = scratch.0.join("node").to_string_lossy().into_owned();
+        let source = scratch.0.join("source.git");
+        let imported_commit = write_loose_commit_repository(&source);
+        let tenant = "11111111111111111111111111111111".to_owned();
+        let repository = "22222222222222222222222222222222".to_owned();
+        let principal = "33333333333333333333333333333333".to_owned();
+        let init = vec![
+            "init".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+        ];
+        assert!(matches!(run(&init), Ok(CliOutcome::Initialized(_))));
+
+        let import = vec![
+            "import".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+            principal,
+            "one-node-import-fixture".to_owned(),
+            source.to_string_lossy().into_owned(),
+        ];
+        assert!(matches!(
+            run(&import),
+            Ok(CliOutcome::Imported { command_count: 1 })
+        ));
+        assert!(matches!(
+            run(&import),
+            Ok(CliOutcome::Imported { command_count: 1 })
+        ));
+
+        let doctor = vec![
+            "doctor".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+            imported_commit.to_string(),
+        ];
+        assert!(matches!(run(&doctor), Ok(CliOutcome::Doctor(_))));
+
+        let destination = scratch.0.join("imported.pack");
+        let export = vec![
+            "export".to_owned(),
+            storage_root,
+            tenant,
+            repository,
+            destination.to_string_lossy().into_owned(),
+        ];
+        let outcome = run(&export).expect("imported authority closure exports as a real pack");
+        let CliOutcome::Exported { bytes, .. } = outcome else {
+            panic!("export reports a completed imported pack");
+        };
+        let pack = fs::read(destination).expect("imported pack is visible");
+        assert_eq!(pack.len(), bytes);
+        assert_eq!(&pack[..4], b"PACK");
+    }
+
+    #[test]
+    fn import_never_reports_an_expected_old_refusal_as_success() {
+        let scratch = ScratchDirectory::new();
+        let storage_root = scratch.0.join("node").to_string_lossy().into_owned();
+        let first_source = scratch.0.join("first.git");
+        let second_source = scratch.0.join("second.git");
+        write_loose_commit_repository(&first_source);
+        write_loose_commit_repository(&second_source);
+        let tenant = "11111111111111111111111111111111".to_owned();
+        let repository = "22222222222222222222222222222222".to_owned();
+        let principal = "33333333333333333333333333333333".to_owned();
+        let init = vec![
+            "init".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+        ];
+        assert!(matches!(run(&init), Ok(CliOutcome::Initialized(_))));
+
+        let first_import = vec![
+            "import".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+            principal.clone(),
+            "first-import".to_owned(),
+            first_source.to_string_lossy().into_owned(),
+        ];
+        assert!(matches!(
+            run(&first_import),
+            Ok(CliOutcome::Imported { command_count: 1 })
+        ));
+
+        let conflicting_import = vec![
+            "import".to_owned(),
+            storage_root,
+            tenant,
+            repository,
+            principal,
+            "second-import".to_owned(),
+            second_source.to_string_lossy().into_owned(),
+        ];
+        assert!(matches!(
+            run(&conflicting_import),
+            Err(CliRefusal::ImportRefused(
+                fgit_types::RefusalCode::ExpectedOldRefMismatch
+            ))
+        ));
     }
 
     #[test]

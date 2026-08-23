@@ -328,9 +328,24 @@ impl OneNode {
         &self,
         source: &Path,
     ) -> Result<StagedLooseGitImport, LooseGitImportRefusal> {
+        self.stage_loose_git_import_with_ref_limit(source, MAX_IMPORT_REFS)
+    }
+
+    /// Stages a loose source under a caller-owned ref limit before opening
+    /// any object named by that source.
+    ///
+    /// The durable admission entrypoint uses this narrower form so its
+    /// command bound is enforced before it starts closure traversal and
+    /// immutable object placement.  The public staging-only profile retains
+    /// its independently documented import ceiling above.
+    pub(crate) fn stage_loose_git_import_with_ref_limit(
+        &self,
+        source: &Path,
+        max_refs: usize,
+    ) -> Result<StagedLooseGitImport, LooseGitImportRefusal> {
         let git_directory = resolve_git_directory(source)?;
         reject_unsupported_object_sources(&git_directory)?;
-        let refs = read_direct_refs(&git_directory, self.object_format)?;
+        let refs = read_direct_refs(&git_directory, self.object_format, max_refs)?;
         let mut pending = refs.values().copied().collect::<BTreeSet<_>>();
         let mut closure = BTreeSet::new();
         let mut total_object_bytes = 0_u64;
@@ -467,8 +482,9 @@ fn reject_unsupported_object_sources(git_directory: &Path) -> Result<(), LooseGi
 fn read_direct_refs(
     git_directory: &Path,
     object_format: GitHashAlgorithm,
+    max_refs: usize,
 ) -> Result<BTreeMap<RefName, GitOid>, LooseGitImportRefusal> {
-    let mut refs = read_packed_refs(git_directory, object_format)?;
+    let mut refs = read_packed_refs(git_directory, object_format, max_refs)?;
     let loose_root = git_directory.join("refs");
     let Some(metadata) = path_metadata(&loose_root, "inspect loose refs directory")? else {
         return Ok(refs);
@@ -482,11 +498,16 @@ fn read_direct_refs(
             path: Box::new(loose_root),
         });
     }
-    collect_loose_refs(&loose_root, &loose_root, object_format, 0, &mut refs)?;
-    if refs.len() > MAX_IMPORT_REFS {
-        return Err(LooseGitImportRefusal::RefLimitExceeded {
-            limit: MAX_IMPORT_REFS,
-        });
+    collect_loose_refs(
+        &loose_root,
+        &loose_root,
+        object_format,
+        0,
+        max_refs,
+        &mut refs,
+    )?;
+    if refs.len() > max_refs {
+        return Err(LooseGitImportRefusal::RefLimitExceeded { limit: max_refs });
     }
     Ok(refs)
 }
@@ -494,6 +515,7 @@ fn read_direct_refs(
 fn read_packed_refs(
     git_directory: &Path,
     object_format: GitHashAlgorithm,
+    max_refs: usize,
 ) -> Result<BTreeMap<RefName, GitOid>, LooseGitImportRefusal> {
     let packed = git_directory.join("packed-refs");
     let Some(metadata) = path_metadata(&packed, "inspect packed refs")? else {
@@ -546,10 +568,8 @@ fn read_packed_refs(
                 packed.clone(),
             )));
         }
-        if refs.len() > MAX_IMPORT_REFS {
-            return Err(LooseGitImportRefusal::RefLimitExceeded {
-                limit: MAX_IMPORT_REFS,
-            });
+        if refs.len() > max_refs {
+            return Err(LooseGitImportRefusal::RefLimitExceeded { limit: max_refs });
         }
     }
     Ok(refs)
@@ -560,6 +580,7 @@ fn collect_loose_refs(
     directory: &Path,
     object_format: GitHashAlgorithm,
     depth: usize,
+    max_refs: usize,
     refs: &mut BTreeMap<RefName, GitOid>,
 ) -> Result<(), LooseGitImportRefusal> {
     if depth > MAX_IMPORT_REF_DEPTH {
@@ -575,7 +596,7 @@ fn collect_loose_refs(
             return Err(LooseGitImportRefusal::SymbolicLink(Box::new(path)));
         }
         if metadata.is_dir() {
-            collect_loose_refs(root, &path, object_format, depth + 1, refs)?;
+            collect_loose_refs(root, &path, object_format, depth + 1, max_refs, refs)?;
             continue;
         }
         if !metadata.is_file() {
@@ -589,10 +610,8 @@ fn collect_loose_refs(
             fs::read(&path).map_err(|error| io_refusal("read loose ref", path.clone(), error))?;
         let identity = parse_direct_ref(&path, &bytes, object_format)?;
         refs.insert(name, identity);
-        if refs.len() > MAX_IMPORT_REFS {
-            return Err(LooseGitImportRefusal::RefLimitExceeded {
-                limit: MAX_IMPORT_REFS,
-            });
+        if refs.len() > max_refs {
+            return Err(LooseGitImportRefusal::RefLimitExceeded { limit: max_refs });
         }
     }
     Ok(())

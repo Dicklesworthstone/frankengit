@@ -684,6 +684,7 @@ version = "0.0.1"
 name = "fgit-cli"
 version = "0.0.1"
 dependencies = [
+ "fgit-crypto",
  "fgit-node",
  "fgit-types",
 ]

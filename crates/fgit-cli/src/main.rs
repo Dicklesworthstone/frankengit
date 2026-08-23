@@ -13,6 +13,10 @@ fn main() -> ExitCode {
             println!("authority head already initialized");
             ExitCode::SUCCESS
         }
+        Ok(fgit_cli::CliOutcome::Imported { command_count }) => {
+            println!("published {command_count} source-import ref commands");
+            ExitCode::SUCCESS
+        }
         Ok(fgit_cli::CliOutcome::Doctor(report)) => {
             println!(
                 "authenticated authority head at generation {}{}",

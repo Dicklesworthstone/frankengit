@@ -31,17 +31,18 @@ use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionResult,
     AdmissionSnapshot, AdmissionSnapshotProjection, AsyncAdmissionProjection,
     AsyncProjectionFailure, CanonicalAdmissionStore, CanonicalRefState, CommitEvidence,
-    CommitMaterialization, PermittedObjectClosure, RefusalMaterialization, ValidatedClosure,
-    ValidatedReceive, ValidatedSourceImport, admit_validated_receive_async,
-    admit_validated_source_import_async, canonical_ref_state_root, permitted_object_closure_root,
-    prepare_canonical_commit,
+    CommitMaterialization, PermittedObjectClosure, RefusalMaterialization, SourceImportOrigin,
+    SourceImportReceipt, SourceRefUpdate, ValidatedClosure, ValidatedReceive,
+    ValidatedSourceImport, admit_validated_receive_async, admit_validated_source_import_async,
+    canonical_ref_state_root, permitted_object_closure_root, prepare_canonical_commit,
+    validate_source_import,
 };
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
-    AuthorityVersionToken, HeadInit, HeadKey, HeadRead, ImmutableKey, ImmutableRead, KeyError,
-    OutcomeLookup, PublicationOutcome, PutOutcome, StoreInstanceId, initialize_repository_async,
-    outcome_index_root, publish_decisions_async, read_authority_head_body_async,
-    read_decision_batch_body_async, resolve_outcome_async,
+    AuthorityVersionToken, HeadInit, HeadKey, HeadRead, IdempotencyKey, ImmutableKey,
+    ImmutableRead, KeyError, OutcomeLookup, PublicationOutcome, PutOutcome, StoreInstanceId,
+    initialize_repository_async, outcome_index_root, publish_decisions_async,
+    read_authority_head_body_async, read_decision_batch_body_async, resolve_outcome_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
 use fgit_chronicle::{PublicationBasis, verify_pair};
@@ -70,9 +71,9 @@ use fgit_resource::{
 use fgit_runtime::{BudgetClass, NodeRuntime, RuntimeProfile, RuntimeRefusal};
 use fgit_txn::TransactionFoldReport;
 use fgit_types::{
-    CANONICAL_CODEC_VERSION, Digest, GitHashAlgorithm, GitOid, HeadGeneration, PolicyEpoch,
-    RefusalCode, RegistryEpoch, RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId,
-    TenantId, TxId,
+    CANONICAL_CODEC_VERSION, Digest, GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256,
+    HeadGeneration, PolicyEpoch, PrincipalId, RefusalCode, RegistryEpoch,
+    RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, TenantId, TxId,
 };
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, PackPayloadSource, PackRequest,
@@ -2231,6 +2232,65 @@ impl From<fgit_resource::IdentityError> for NodeRefusal {
     }
 }
 
+/// Typed refusal while converting a verified local Git directory into a
+/// durable source-import decision.
+///
+/// The variants preserve the boundary that produced the failure: source
+/// staging is not admission, source-import validation is not authority
+/// publication, and an infrastructure failure while driving the async
+/// admission core does not become a terminal source-import decision.
+#[derive(Debug)]
+pub enum NodeSourceImportRefusal {
+    /// The caller's retry key cannot name one stable seal identity.
+    Idempotency(Box<fgit_authority::IdentityRefusal>),
+    /// The local source could not be verified and staged as immutable objects.
+    Staging(Box<LooseGitImportRefusal>),
+    /// The bounded staging profile produced an object count outside the
+    /// canonical source-import receipt vocabulary.
+    ObjectCountOutOfRange { count: usize },
+    /// The immutable closure body could not derive its canonical commitment.
+    ClosureRoot(RefusalCode),
+    /// The staged refs and closure did not form an admissible source import.
+    Validation(RefusalCode),
+    /// The shared async admission driver could not publish or resolve a
+    /// terminal outcome.
+    Admission(Box<AdmissionError>),
+}
+
+impl Display for NodeSourceImportRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Idempotency(error) => Display::fmt(error, formatter),
+            Self::Staging(error) => Display::fmt(error, formatter),
+            Self::ObjectCountOutOfRange { count } => write!(
+                formatter,
+                "source import object count {count} exceeds the receipt vocabulary"
+            ),
+            Self::ClosureRoot(code) => {
+                write!(
+                    formatter,
+                    "cannot derive source-import closure root: {code:?}"
+                )
+            }
+            Self::Validation(code) => {
+                write!(formatter, "source import validation refused: {code:?}")
+            }
+            Self::Admission(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for NodeSourceImportRefusal {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Idempotency(error) => Some(error.as_ref()),
+            Self::Staging(error) => Some(error.as_ref()),
+            Self::Admission(error) => Some(error.as_ref()),
+            Self::ObjectCountOutOfRange { .. } | Self::ClosureRoot(_) | Self::Validation(_) => None,
+        }
+    }
+}
+
 /// A repository path accepted by the git-daemon transport boundary.
 ///
 /// This is an opaque authority lookup key, never a filesystem path.  The
@@ -3707,6 +3767,79 @@ impl OneNode {
             &projection,
         )
         .await
+    }
+
+    /// Verifies a bounded loose Git source and publishes its direct refs
+    /// through the node-owned asynchronous source-import admission path.
+    ///
+    /// Every staged source ref is lowered with the native all-zero
+    /// expected-old identity. This makes the command an establish-if-absent
+    /// import rather than a node-local ref-map merge, and preserves the same
+    /// sealed request identity if a caller retries after an ambiguous response.
+    /// A pre-existing source ref therefore receives the canonical
+    /// `ExpectedOldRefMismatch` terminal decision; this initial import profile
+    /// never silently overwrites or deletes an authority-selected ref.
+    ///
+    /// `principal_id` must come from the caller's authentication boundary, and
+    /// `idempotency_key` is explicit rather than derived from a source path or
+    /// mutable filesystem metadata. The method itself accepts neither
+    /// caller-supplied closure roots nor a caller-supplied publication basis.
+    pub async fn import_loose_git_directory_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        source: &Path,
+        principal_id: PrincipalId,
+        idempotency_key: &[u8],
+    ) -> Result<AdmissionResult, NodeSourceImportRefusal> {
+        let idempotency_key = IdempotencyKey::new(idempotency_key.to_vec())
+            .map_err(|error| NodeSourceImportRefusal::Idempotency(Box::new(error)))?;
+        let limits = AdmissionLimits::default();
+        let staged = self
+            .stage_loose_git_import_with_ref_limit(source, limits.max_commands)
+            .map_err(|error| NodeSourceImportRefusal::Staging(Box::new(error)))?;
+        let object_count = u32::try_from(staged.object_count()).map_err(|_| {
+            NodeSourceImportRefusal::ObjectCountOutOfRange {
+                count: staged.object_count(),
+            }
+        })?;
+        let closure = ValidatedClosure {
+            object_closure_root: permitted_object_closure_root(staged.closure())
+                .map_err(NodeSourceImportRefusal::ClosureRoot)?,
+            objects: staged.closure().objects().clone(),
+        };
+        let absent = match self.object_format {
+            GitHashAlgorithm::Sha1 => GitOid::Sha1(GitOidSha1::ZERO),
+            GitHashAlgorithm::Sha256 => GitOid::Sha256(GitOidSha256::ZERO),
+        };
+        let updates = staged
+            .refs()
+            .refs()
+            .iter()
+            .map(|(name, new)| SourceRefUpdate {
+                old: absent,
+                new: *new,
+                ref_name: name.as_bytes().to_vec(),
+            })
+            .collect::<Vec<_>>();
+        let receipt = SourceImportReceipt {
+            object_format: self.object_format,
+            object_count,
+            delete_only: updates.iter().all(|update| update.new.is_zero()),
+            origin: SourceImportOrigin::LocalGitDirectory,
+        };
+        let validated = validate_source_import(&updates, &receipt, closure)
+            .map_err(NodeSourceImportRefusal::Validation)?;
+        let context = AdmissionContext {
+            head_key: self.head_key.clone(),
+            tenant_id: self.tenant_id,
+            repository_id: self.repository_id,
+            principal_id,
+            idempotency_key,
+            object_format: self.object_format,
+        };
+        self.admit_validated_source_import_durable_in(request, &context, &validated, limits)
+            .await
+            .map_err(|error| NodeSourceImportRefusal::Admission(Box::new(error)))
     }
 
     /// Materializes a bounded Git pack from exactly one authority-selected closure.
