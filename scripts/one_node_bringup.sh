@@ -35,6 +35,12 @@ case "$listen_address" in
     exit 64
     ;;
 esac
+listen_port=${listen_address##*:}
+if [[ ! "$listen_port" =~ ^[0-9]+$ ]] \
+  || ((10#$listen_port == 0 || 10#$listen_port > 65535)); then
+  printf 'listener port must be in 1..65535: %s\n' "$listen_address" >&2
+  exit 64
+fi
 
 if [ -e "$storage_root" ] && [ ! -d "$storage_root" ]; then
   printf 'storage root is not a directory: %s\n' "$storage_root" >&2
@@ -80,6 +86,29 @@ reap_serve() {
 }
 trap reap_serve EXIT
 
+wait_for_listener() {
+  local endpoint
+  local attempt
+
+  if [ ! -r /proc/net/tcp ]; then
+    printf 'cannot observe the loopback listener: /proc/net/tcp is unavailable\n' >&2
+    return 1
+  fi
+  printf -v endpoint '0100007F:%04X' "$((10#$listen_port))"
+  for attempt in $(seq 1 100); do
+    if grep -E \
+      "^[[:space:]]*[0-9]+:[[:space:]]+${endpoint}[[:space:]]+00000000:0000[[:space:]]+0A([[:space:]]|$)" \
+      /proc/net/tcp >/dev/null; then
+      return 0
+    fi
+    if ! kill -0 "$serve_pid" 2>/dev/null; then
+      return 1
+    fi
+    sleep 0.05
+  done
+  return 1
+}
+
 record_fg init "$storage_root" "$tenant_id" "$repository_id"
 grep -Fqx 'initialized authority head' "$transcript"
 
@@ -92,21 +121,14 @@ fg serve "$storage_root" "$tenant_id" "$repository_id" "$listen_address" \
   >"$serve_output" 2>&1 &
 serve_pid=$!
 
-# A failed connect is before the listener accepts a session. The one successful
-# connection below is the only session consumed by `fg serve`.
-connected=0
-for _attempt in $(seq 1 100); do
-  if exec 3<>"/dev/tcp/${listen_address%:*}/${listen_address##*:}"; then
-    connected=1
-    break
-  fi
-  sleep 0.05
-done
-if [ "$connected" -ne 1 ]; then
+# Checking the kernel listener table does not consume a connection. The one
+# `/dev/tcp` open below is therefore the only session consumed by `fg serve`.
+if ! wait_for_listener; then
   printf 'fg serve did not accept the bounded loopback session\n' >&2
   cat "$serve_output" >&2
   exit 1
 fi
+exec 3<>"/dev/tcp/${listen_address%:*}/${listen_port}"
 
 service="git-upload-pack /${repository_id}.git"
 host='host=loopback'
