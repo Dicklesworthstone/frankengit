@@ -20,7 +20,8 @@ use fgit_crypto::IdentityDomain;
 use fgit_types::{Digest, RepositoryCapsuleId};
 
 use crate::{
-    BackupProfile, CapsulePointer, ChronicleRefusal, RepositoryCapsuleBody, capsule_identity,
+    BackupProfile, CapsuleDefect, CapsulePointer, ChronicleRefusal, RepositoryCapsuleBody,
+    RestoreClassification, capsule_identity,
 };
 
 /// Inputs naming immutable closure material that the object-fabric owner has
@@ -130,6 +131,86 @@ impl fmt::Display for LiveCapsuleRefusal {
 }
 
 impl std::error::Error for LiveCapsuleRefusal {}
+
+/// The result of inspecting capsule bytes at a declared immutable identity.
+///
+/// The decoder, identity check, and predecessor check are deliberately here
+/// rather than in a fixture. A restore executor can therefore only hand the
+/// classifier defects it actually derived from the bytes and pointer chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapsuleInspection {
+    capsule: RepositoryCapsuleBody,
+    classification: RestoreClassification,
+}
+
+/// Why a capsule could not be inspected as restore input.
+#[derive(Debug)]
+pub enum CapsuleInspectionRefusal {
+    /// The supplied bytes are not a canonical capsule body.
+    Decode(CodecRefusal),
+    /// The decoded body has no registered canonical identity.
+    Identity(ChronicleRefusal),
+}
+
+impl fmt::Display for CapsuleInspectionRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Decode(error) => write!(formatter, "capsule bytes did not decode: {error}"),
+            Self::Identity(error) => write!(formatter, "capsule identity was unavailable: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for CapsuleInspectionRefusal {}
+
+impl CapsuleInspection {
+    /// The decoded capsule body.
+    #[must_use]
+    pub const fn capsule(&self) -> &RepositoryCapsuleBody {
+        &self.capsule
+    }
+
+    /// Classification of the byte-derived defects.
+    #[must_use]
+    pub const fn classification(&self) -> &RestoreClassification {
+        &self.classification
+    }
+}
+
+/// Decode a capsule and derive the identity and pointer-chain defects that
+/// restore can determine without asking a placement backend to enumerate.
+pub fn inspect_capsule_bytes<I>(
+    identity: &I,
+    declared_id: RepositoryCapsuleId,
+    bytes: &[u8],
+    expected_predecessor: Option<RepositoryCapsuleId>,
+) -> Result<CapsuleInspection, CapsuleInspectionRefusal>
+where
+    I: BodyIdentity + ?Sized,
+{
+    let capsule: RepositoryCapsuleBody =
+        decode_body(bytes, DecodeLimits::DEFAULT).map_err(CapsuleInspectionRefusal::Decode)?;
+    let recomputed =
+        capsule_identity(identity, &capsule).map_err(CapsuleInspectionRefusal::Identity)?;
+    let mut defects = Vec::with_capacity(2);
+    if recomputed != declared_id {
+        defects.push(CapsuleDefect::IdentityMismatch {
+            declared: declared_id,
+            recomputed,
+        });
+    }
+    if capsule.predecessor_capsule_id != expected_predecessor {
+        defects.push(CapsuleDefect::PredecessorStale {
+            named: capsule.predecessor_capsule_id,
+            expected: expected_predecessor,
+        });
+    }
+    let classification = RestoreClassification::classify(&capsule, &defects);
+    Ok(CapsuleInspection {
+        capsule,
+        classification,
+    })
+}
 
 /// Freeze the authenticated head, stage its capsule, and return a pointer
 /// candidate only if that exact head remains current.

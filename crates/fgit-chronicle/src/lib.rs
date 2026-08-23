@@ -79,7 +79,8 @@ pub use capsule::{
 };
 pub use evidence::batch_evidence_root;
 pub use live::{
-    CapsuleClosure, FrozenCapsule, LiveCapsuleRefusal, freeze_capsule, freeze_capsule_async,
+    CapsuleClosure, CapsuleInspection, CapsuleInspectionRefusal, FrozenCapsule, LiveCapsuleRefusal,
+    freeze_capsule, freeze_capsule_async, inspect_capsule_bytes,
 };
 pub use origin::{PublicationBasis, ResultingRoots};
 pub use publish::{

@@ -3,8 +3,11 @@
 use fgit_authority::{
     AuthorityStore, HeadKey, HeadRead, MemoryAuthorityStore, StoreInstanceId, initialize_repository,
 };
-use fgit_chronicle::{BackupProfile, CapsuleClosure, LiveCapsuleRefusal, freeze_capsule};
-use fgit_codec::{CryptoBodyIdentity, RepositoryAuthorityHeadBody};
+use fgit_chronicle::{
+    BackupProfile, CapsuleClosure, LiveCapsuleRefusal, RestoreOutcome, freeze_capsule,
+    inspect_capsule_bytes,
+};
+use fgit_codec::{CryptoBodyIdentity, RepositoryAuthorityHeadBody, encode_body};
 use fgit_types::{
     Digest, DigestAlgorithmId, DigestBytes, HeadGeneration, OPAQUE_ID_LEN, PolicyEpoch,
     RegistryEpoch, RepositoryId,
@@ -86,4 +89,48 @@ fn a_receipt_from_another_authority_is_refused_before_staging() {
         freeze_capsule(&destination, &CryptoBodyIdentity, &receipt, None, closure()),
         Err(LiveCapsuleRefusal::HeadUnauthenticated(_))
     ));
+}
+
+#[test]
+fn inspection_derives_identity_and_predecessor_defects_from_capsule_bytes() {
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x46));
+    let key = HeadKey::new(b"chronicle/live-capsule-inspection".to_vec()).expect("bounded key");
+    initialize_repository(&store, &key, &head()).expect("head initializes");
+    let receipt = match store.read_head(&key).expect("head reads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("initialized head is present"),
+    };
+    let frozen = freeze_capsule(&store, &CryptoBodyIdentity, &receipt, None, closure())
+        .expect("current head freezes");
+    let mut altered = frozen.capsule().clone();
+    altered.predecessor_capsule_id = Some(frozen.capsule_id());
+    let bytes = encode_body(&altered).expect("altered canonical capsule encodes");
+
+    let inspected = inspect_capsule_bytes(&CryptoBodyIdentity, frozen.capsule_id(), &bytes, None)
+        .expect("inspection reads the actual bytes");
+
+    assert_eq!(
+        inspected.classification().outcome(),
+        RestoreOutcome::FailClosed
+    );
+    assert!(
+        inspected
+            .classification()
+            .defects()
+            .iter()
+            .any(|defect| matches!(
+                defect,
+                fgit_chronicle::CapsuleDefect::IdentityMismatch { .. }
+            ))
+    );
+    assert!(
+        inspected
+            .classification()
+            .defects()
+            .iter()
+            .any(|defect| matches!(
+                defect,
+                fgit_chronicle::CapsuleDefect::PredecessorStale { .. }
+            ))
+    );
 }
