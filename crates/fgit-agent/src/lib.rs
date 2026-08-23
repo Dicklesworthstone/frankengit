@@ -21,12 +21,17 @@
 //!
 //! # What is deliberately not here
 //!
-//! The Context Packet (§7), the `TreeFS` workspace (§8), the refresh relations
-//! of §4.3, and revocation interpreted at a canonical position (§6.3) are all
-//! outside this slice. They are named here so their absence reads as scope
+//! The Context Packet (§7), the `TreeFS` workspace (§8), and revocation
+//! interpreted at a canonical position (§6.3) are all outside this slice. They are named here so their absence reads as scope
 //! rather than as coverage: §6.3 in particular is a real property this crate
 //! does *not* deliver — [`Capability::is_valid_at`] checks a window, which is
 //! freshness, not revocation.
+//!
+//! §4.3's refresh relations ARE here, in [`refresh`] — but only the typed
+//! record of a refresh and the constraints on it, not the act. Rebasing,
+//! replaying intents and merging are workspace operations owned by
+//! `fgit-treefs`; a receipt binds identities, it does not compute them. The
+//! module header says which half is which.
 //!
 //! §10 and §11 are **partly** here, and the boundary matters. [`ecc`] delivers
 //! the evidence classes, the requirement dispositions of §10.2, the non-claims
@@ -35,8 +40,8 @@
 //! codec encoding for the bundle checked against a golden corpus this crate did
 //! not emit. It does **not**
 //! deliver the rest of the §10 bundle — the proposed object/tree closure and
-//! diff commitment (they need §8's `TreeFS` export), the refreshed authority
-//! receipt and reconciliation record, or context-packet bodies — nor most of
+//! diff commitment (they need §8's `TreeFS` export), the reconciliation record
+//! (that is `fgit-authority` and fg073's ledger), or context-packet bodies — nor most of
 //! §11: the deterministic verification services of §11.1 and the human review
 //! view of §11.3 are absent. [`ecc`]'s own header lists these individually.
 //!
@@ -49,6 +54,7 @@ pub mod capability;
 pub mod classes;
 pub mod ecc;
 pub mod intent;
+pub mod refresh;
 
 pub use broker::{BrokerRefusal, EffectBroker, EffectGrant, EffectId, EffectRecord, EffectRequest};
 pub use capability::{
@@ -62,3 +68,4 @@ pub use ecc::{
     VerifierAttestation, classify_independence,
 };
 pub use intent::{AuthorityBasisRef, IntentRun, RunId, RunRefused};
+pub use refresh::{RefreshReceipt, RefreshRelation, RefreshSide};

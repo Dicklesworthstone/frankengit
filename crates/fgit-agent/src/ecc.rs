@@ -44,6 +44,8 @@
 
 use core::fmt;
 
+use crate::refresh::{RefreshReceipt, RefreshRelation, RefreshSide};
+
 use fgit_codec::{CanonicalBody, CodecRefusal, Decoder, Encoder};
 use fgit_types::{DomainTag, SchemaFamily};
 
@@ -516,6 +518,27 @@ pub enum EccRefusal {
         /// The dimension the policy required and nobody stated.
         dimension: IndependenceDimension,
     },
+    /// Policy required a refreshed-authority receipt (§4.3) and none is present.
+    MissingRefreshReceipt,
+    /// A refresh receipt is present, but it records that the refresh did not
+    /// complete, and the policy requires one that did.
+    ///
+    /// Carries the relation so the reader learns *how* it ended rather than
+    /// only that it did not succeed.
+    RefreshDidNotComplete {
+        /// The relation the receipt recorded.
+        relation: RefreshRelation,
+    },
+    /// A required evidence class is present, but no record of it was checked
+    /// after the refresh that moved the basis.
+    ///
+    /// Distinct from [`Self::MissingEvidenceClass`]: the evidence exists, it is
+    /// simply stale. The remedy is to re-run the check against the new base,
+    /// not to gather a class the bundle lacks.
+    EvidenceNotRevalidatedAfterRefresh {
+        /// The class whose records are all pre-refresh or unstated.
+        required: EvidenceClass,
+    },
     /// Policy demanded at least one verifier and the bundle carries none.
     NoVerifierAttestation,
 }
@@ -548,6 +571,16 @@ impl fmt::Display for EccRefusal {
                 formatter,
                 "verifier {verifier:032x} cannot be judged on {dimension}: it was never reported"
             ),
+            Self::MissingRefreshReceipt => formatter
+                .write_str("policy requires a refreshed-authority receipt and none is present"),
+            Self::RefreshDidNotComplete { relation } => write!(
+                formatter,
+                "refresh ended as {relation}, so the workspace never reached the new base"
+            ),
+            Self::EvidenceNotRevalidatedAfterRefresh { required } => write!(
+                formatter,
+                "{required} evidence was not re-checked after the refresh moved the basis"
+            ),
             Self::NoVerifierAttestation => {
                 formatter.write_str("policy requires a verifier attestation and none is present")
             }
@@ -568,6 +601,16 @@ pub struct EvidenceRecordRef {
     pub class: EvidenceClass,
     /// Identity of the artifact or receipt the record points at.
     pub artifact: u128,
+    /// Which side of a refresh this check was performed on (§4.3), or `None`
+    /// if the record does not state it.
+    ///
+    /// `None` is not "current". A record that never said when it was checked
+    /// cannot vouch for a basis that has since moved, and
+    /// [`EvidenceCarryingChange::evaluate`] treats it as not re-validated. That
+    /// is the same fail-closed rule [`PartyFacts`] uses for an unreported
+    /// dimension, for the same reason: absence must never read as the
+    /// permissive answer.
+    pub refresh_side: Option<RefreshSide>,
 }
 
 /// The publication policy an Evidence-Carrying Change is evaluated against.
@@ -579,6 +622,16 @@ pub struct EccPolicy {
     pub required_independence: Vec<IndependenceDimension>,
     /// Whether any verifier attestation is required at all.
     pub requires_verifier: bool,
+    /// Whether the bundle must carry a refreshed-authority receipt (§4.3).
+    pub requires_refreshed_authority: bool,
+    /// Whether that refresh must have COMPLETED.
+    ///
+    /// Separate from [`Self::requires_refreshed_authority`] because a
+    /// `ConflictRefused` receipt is a perfectly good receipt — §4.3 lists the
+    /// refusal beside the four successes — and a policy that merely wants the
+    /// refresh *recorded* is satisfied by it. A policy that needs the workspace
+    /// to actually be on the new base is not.
+    pub requires_completed_refresh: bool,
 }
 
 /// The bundle a producer submits for publication.
@@ -596,6 +649,9 @@ pub struct EvidenceCarryingChange {
     pub non_claims: Vec<u128>,
     /// Verifier attestations, unclassified as submitted.
     pub verifiers: Vec<VerifierAttestation>,
+    /// The refreshed-authority receipt of §10's bundle, when the workspace was
+    /// refreshed (§4.3). `None` when no refresh took place.
+    pub refreshed_authority: Option<RefreshReceipt>,
 }
 
 impl EvidenceCarryingChange {
@@ -604,8 +660,9 @@ impl EvidenceCarryingChange {
     /// # Errors
     ///
     /// Returns the first [`EccRefusal`] the change violates. Checks run in a
-    /// fixed order — dispositions, then evidence classes, then verifiers — so
-    /// a bundle wrong in several ways reports the same refusal on every run.
+    /// fixed order — dispositions, then the refresh gate, then evidence
+    /// classes, then verifiers — so a bundle wrong in several ways reports the
+    /// same refusal on every run.
     pub fn evaluate(
         &self,
         policy: &EccPolicy,
@@ -615,6 +672,32 @@ impl EvidenceCarryingChange {
                 return Err(EccRefusal::RequirementWithoutDisposition { requirement });
             }
         }
+
+        // The refresh gate runs before the evidence loop, because whether the
+        // basis moved decides what counts as satisfying an evidence
+        // requirement below. Asking "is this evidence current?" before knowing
+        // "did the ground move?" gets the two questions the wrong way round.
+        match (
+            &self.refreshed_authority,
+            policy.requires_refreshed_authority,
+        ) {
+            (None, true) => return Err(EccRefusal::MissingRefreshReceipt),
+            (Some(receipt), _) if policy.requires_completed_refresh && !receipt.advanced() => {
+                return Err(EccRefusal::RefreshDidNotComplete {
+                    relation: receipt.relation,
+                });
+            }
+            _ => {}
+        }
+
+        // Re-validation is owed only when the basis actually MOVED. A refresh
+        // that recorded a relation but left `from_base == to_base` changed
+        // nothing, so evidence gathered before it is still about the same
+        // state; demanding a re-run there would be ceremony, and would train
+        // callers to stamp `AfterRefresh` on everything to get past it.
+        let basis_moved = self
+            .refreshed_authority
+            .is_some_and(|receipt| receipt.changed_basis());
 
         for required in &policy.required_classes {
             // Policy coherence first. `Omitted` and `Unresolved` record the
@@ -630,6 +713,21 @@ impl EvidenceCarryingChange {
             let present = self.evidence.iter().any(|record| record.class == *required);
             if !present {
                 return Err(EccRefusal::MissingEvidenceClass {
+                    required: *required,
+                });
+            }
+            // §4.3's final clause, enforced. `None` fails closed alongside
+            // `BeforeRefresh`: a record that never stated when it was checked
+            // cannot vouch for a basis that has since moved, and treating
+            // silence as "current" is exactly how absent evidence becomes the
+            // permissive answer.
+            if basis_moved
+                && !self.evidence.iter().any(|record| {
+                    record.class == *required
+                        && record.refresh_side == Some(RefreshSide::AfterRefresh)
+                })
+            {
+                return Err(EccRefusal::EvidenceNotRevalidatedAfterRefresh {
                     required: *required,
                 });
             }
@@ -710,6 +808,8 @@ impl EvidenceCarryingChange {
 /// evidence                  u32 count, then per record:
 ///                             u16 class code point
 ///                             16 bytes artifact id
+///                             u8  0x00 = refresh side unstated
+///                                 0x01 = present, followed by u16 side code point
 /// requirement_dispositions  u32 count, then per requirement:
 ///                             u8  0x00 = no disposition
 ///                                 0x01 = present, followed by u16 code point
@@ -718,6 +818,11 @@ impl EvidenceCarryingChange {
 ///                             16 bytes verifier id
 ///                             7 x optional identity, same order as producer
 ///                             u8 upheld (0x00 / 0x01)
+/// refreshed_authority       u8  0x00 = no refresh took place
+///                               0x01 = present, followed by:
+///                                 u16 relation code point
+///                                 16 bytes from_base
+///                                 16 bytes to_base
 /// ```
 ///
 /// An unreported dimension is encoded, not omitted, for the same reason the
@@ -748,7 +853,10 @@ impl CanonicalBody for EvidenceCarryingChange {
         out.write_sequence("evidence", &self.evidence, |out, record| {
             out.write_scalar(record.class.code_point());
             out.write_opaque_id(&record.artifact.to_be_bytes());
-            Ok(())
+            out.write_option(record.refresh_side.as_ref(), |out, side| {
+                out.write_scalar(side.code_point());
+                Ok(())
+            })
         })?;
 
         out.write_sequence(
@@ -772,6 +880,13 @@ impl CanonicalBody for EvidenceCarryingChange {
             write_party_facts(out, &attestation.facts)?;
             out.write_bool(attestation.upheld);
             Ok(())
+        })?;
+
+        out.write_option(self.refreshed_authority.as_ref(), |out, receipt| {
+            out.write_scalar(receipt.relation.code_point());
+            out.write_opaque_id(&receipt.from_base.to_be_bytes());
+            out.write_opaque_id(&receipt.to_base.to_be_bytes());
+            Ok(())
         })
     }
 
@@ -789,9 +904,20 @@ impl CanonicalBody for EvidenceCarryingChange {
                     offset,
                 }
             })?;
+            let artifact = read_identity(input, "evidence.artifact")?;
+            let refresh_side = input.read_option("evidence.refresh_side", |input| {
+                let offset = input.offset();
+                let code = input.read_scalar::<u16>("evidence.refresh_side")?;
+                RefreshSide::from_code_point(code).ok_or_else(|| CodecRefusal::VariantUnknown {
+                    field: "evidence.refresh_side",
+                    observed: u32::from(code),
+                    offset,
+                })
+            })?;
             Ok(EvidenceRecordRef {
                 class,
-                artifact: read_identity(input, "evidence.artifact")?,
+                artifact,
+                refresh_side,
             })
         })?;
 
@@ -821,6 +947,23 @@ impl CanonicalBody for EvidenceCarryingChange {
             })
         })?;
 
+        let refreshed_authority = input.read_option("refreshed_authority", |input| {
+            let offset = input.offset();
+            let code = input.read_scalar::<u16>("refreshed_authority.relation")?;
+            let relation = RefreshRelation::from_code_point(code).ok_or_else(|| {
+                CodecRefusal::VariantUnknown {
+                    field: "refreshed_authority.relation",
+                    observed: u32::from(code),
+                    offset,
+                }
+            })?;
+            Ok(RefreshReceipt {
+                relation,
+                from_base: read_identity(input, "refreshed_authority.from_base")?,
+                to_base: read_identity(input, "refreshed_authority.to_base")?,
+            })
+        })?;
+
         Ok(Self {
             intent_run,
             producer,
@@ -828,6 +971,7 @@ impl CanonicalBody for EvidenceCarryingChange {
             requirement_dispositions,
             non_claims,
             verifiers,
+            refreshed_authority,
         })
     }
 }

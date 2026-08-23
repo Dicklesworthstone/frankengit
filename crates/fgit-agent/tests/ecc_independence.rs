@@ -286,6 +286,7 @@ fn a_policy_requiring_independence_on_an_unreported_dimension_refuses_typed() {
     let mut change = change_with(vec![EvidenceRecordRef {
         class: EvidenceClass::Executed,
         artifact: 0xa8,
+        refresh_side: None,
     }]);
     change.verifiers = vec![attestation(unreported_only(IndependenceDimension::Oracle))];
 
@@ -341,6 +342,7 @@ fn change_with(evidence: Vec<EvidenceRecordRef>) -> EvidenceCarryingChange {
         requirement_dispositions: vec![Some(RequirementDisposition::SatisfiedWithEvidence)],
         non_claims: vec![],
         verifiers: vec![attestation(independent_facts())],
+        refreshed_authority: None,
     }
 }
 
@@ -350,6 +352,7 @@ fn a_change_missing_a_required_evidence_class_is_refused_typed() {
     let change = change_with(vec![EvidenceRecordRef {
         class: EvidenceClass::Observed,
         artifact: 0xa1,
+        refresh_side: None,
     }]);
     let policy = EccPolicy {
         required_classes: vec![EvidenceClass::Executed],
@@ -367,6 +370,7 @@ fn a_change_missing_a_required_evidence_class_is_refused_typed() {
     let satisfied = change_with(vec![EvidenceRecordRef {
         class: EvidenceClass::Executed,
         artifact: 0xa2,
+        refresh_side: None,
     }]);
     assert!(satisfied.evaluate(&policy).is_ok());
 }
@@ -387,6 +391,7 @@ fn a_policy_requiring_a_class_that_records_absence_is_refused() {
         let change = change_with(vec![EvidenceRecordRef {
             class: required,
             artifact: 0xa5,
+            refresh_side: None,
         }]);
         let policy = EccPolicy {
             required_classes: vec![required],
@@ -409,6 +414,7 @@ fn a_policy_requiring_a_class_that_records_absence_is_refused() {
     let no_matching_row = change_with(vec![EvidenceRecordRef {
         class: EvidenceClass::Executed,
         artifact: 0xa7,
+        refresh_side: None,
     }]);
     assert_eq!(
         no_matching_row.evaluate(&EccPolicy {
@@ -432,6 +438,7 @@ fn a_policy_requiring_a_class_that_records_absence_is_refused() {
         let change = change_with(vec![EvidenceRecordRef {
             class: required,
             artifact: 0xa6,
+            refresh_side: None,
         }]);
         let policy = EccPolicy {
             required_classes: vec![required],
@@ -451,6 +458,7 @@ fn a_requirement_without_a_disposition_is_refused() {
     let mut change = change_with(vec![EvidenceRecordRef {
         class: EvidenceClass::Executed,
         artifact: 0xa3,
+        refresh_side: None,
     }]);
     change.requirement_dispositions = vec![
         Some(RequirementDisposition::SatisfiedWithEvidence),
@@ -470,6 +478,7 @@ fn a_policy_requiring_independence_refuses_a_verifier_that_shares_that_dimension
     let mut change = change_with(vec![EvidenceRecordRef {
         class: EvidenceClass::Executed,
         artifact: 0xa4,
+        refresh_side: None,
     }]);
     change.verifiers = vec![attestation(sharing_only(IndependenceDimension::Oracle))];
 

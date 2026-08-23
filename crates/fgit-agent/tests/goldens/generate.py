@@ -31,6 +31,9 @@ SCHEMA_MINOR = 0
 # ---- code points, from ecc.rs -------------------------------------------
 OBSERVED, EXECUTED, INFERRED, STATISTICAL, OMITTED, UNRESOLVED = 1, 2, 3, 4, 5, 6
 SATISFIED, PARTIAL, NOT_APPLICABLE, BLOCKED, UNSATISFIED = 1, 2, 3, 4, 5
+# refresh relations, from refresh.rs
+FAST_FORWARDED, REBASED_REPLAY, REBASED_PATCH, MERGED_PROOF, CONFLICT_REFUSED = 1, 2, 3, 4, 5
+BEFORE_REFRESH, AFTER_REFRESH = 1, 2
 
 
 def u16(value):
@@ -70,11 +73,20 @@ def party_facts(base, unreported=()):
     )
 
 
+def refresh_receipt(relation, from_base, to_base):
+    """u16 relation code point, then two 16-byte bases."""
+    return u16(relation) + ident(from_base) + ident(to_base)
+
+
 def payload(intent_run, producer_base, evidence, dispositions, non_claims, verifiers,
-            producer_unreported=()):
+            producer_unreported=(), refreshed=None):
     out = ident(intent_run)
     out += party_facts(producer_base, producer_unreported)
-    out += sequence([u16(cls) + ident(artifact) for cls, artifact in evidence])
+    out += sequence([
+        u16(record[0]) + ident(record[1])
+        + option(None if len(record) < 3 or record[2] is None else u16(record[2]))
+        for record in evidence
+    ])
     out += sequence(
         [option(None if code is None else u16(code)) for code in dispositions]
     )
@@ -83,6 +95,7 @@ def payload(intent_run, producer_base, evidence, dispositions, non_claims, verif
         [ident(verifier) + party_facts(base, unreported) + (b"\x01" if upheld else b"\x00")
          for verifier, base, upheld, unreported in verifiers]
     )
+    out += option(refreshed)
     return out
 
 
@@ -143,6 +156,24 @@ UNREPORTED = payload(
     producer_unreported={4, 5},
 )
 
+# A refreshed bundle: the basis MOVED, so the same class appears twice --
+# once checked before the refresh and once after. A decoder that lost the side,
+# or that read an unstated side as "after", would let the stale record vouch
+# for the new base.
+REFRESHED = payload(
+    intent_run=0x77,
+    producer_base=0x10,
+    evidence=[
+        (EXECUTED, 0xD1, BEFORE_REFRESH),
+        (EXECUTED, 0xD2, AFTER_REFRESH),
+        (OBSERVED, 0xD3, None),
+    ],
+    dispositions=[SATISFIED],
+    non_claims=[],
+    verifiers=[(0x96, 0x20, True, ())],
+    refreshed=refresh_receipt(REBASED_REPLAY, 0xBA5E, 0xBA5F),
+)
+
 CASES = []
 
 
@@ -170,6 +201,13 @@ case(
     UNREPORTED,
 )
 
+case(
+    "ecc__refreshed",
+    "A refresh receipt (RebasedByIntentReplay, basis 0xba5e -> 0xba5f) with one evidence\n"
+    "record checked BEFORE the refresh, one AFTER, and one that does not state its side.",
+    REFRESHED,
+)
+
 # Planted defects. Each must produce a typed refusal, never a decode.
 case(
     "ecc__populated__unknown_evidence_class",
@@ -193,6 +231,20 @@ case(
                       u16(SATISFIED) + b"\x02" + b"\x01" + u16(PARTIAL), 1),
     kind="defect",
     expect="OptionTagInvalid",
+)
+case(
+    "ecc__refreshed__unknown_relation",
+    "The refresh receipt names relation code point 0x00fd, which no build defines.",
+    REFRESHED.replace(u16(REBASED_REPLAY) + ident(0xBA5E), u16(0x00FD) + ident(0xBA5E), 1),
+    kind="defect",
+    expect="VariantUnknown",
+)
+case(
+    "ecc__refreshed__unknown_refresh_side",
+    "An evidence record claims refresh side 0x00fc, which no build defines.",
+    REFRESHED.replace(b"\x01" + u16(BEFORE_REFRESH), b"\x01" + u16(0x00FC), 1),
+    kind="defect",
+    expect="VariantUnknown",
 )
 case(
     "ecc__populated__trailing_byte_appended",

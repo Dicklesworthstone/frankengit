@@ -16,8 +16,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use fgit_agent::{
-    EvidenceCarryingChange, EvidenceClass, IndependenceDimension, RequirementDisposition,
-    classify_independence,
+    EvidenceCarryingChange, EvidenceClass, IndependenceDimension, RefreshRelation, RefreshSide,
+    RequirementDisposition, classify_independence,
 };
 use fgit_codec::{CanonicalBody, DecodeLimits, canonical_body_bytes, decode_body, encode_body};
 
@@ -109,12 +109,12 @@ fn load_goldens() -> Vec<GoldenCase> {
 #[test]
 fn the_corpus_is_present_and_has_both_kinds() {
     let cases = load_goldens();
-    assert_eq!(cases.len(), 11, "corpus size changed; update this count");
+    assert_eq!(cases.len(), 14, "corpus size changed; update this count");
 
     let valid = cases.iter().filter(|case| case.kind == "valid").count();
     let defects = cases.iter().filter(|case| case.kind == "defect").count();
-    assert_eq!(valid, 3, "expected 3 valid vectors");
-    assert_eq!(defects, 8, "expected 8 planted defects");
+    assert_eq!(valid, 4, "expected 4 valid vectors");
+    assert_eq!(defects, 10, "expected 10 planted defects");
     assert_eq!(valid + defects, cases.len(), "a case has an unknown kind");
 
     for case in &cases {
@@ -159,7 +159,7 @@ fn valid_goldens_round_trip_byte_for_byte() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 3, "every valid vector must have been exercised");
+    assert_eq!(checked, 4, "every valid vector must have been exercised");
 }
 
 /// Every planted defect is refused, with the refusal the corpus names.
@@ -190,7 +190,7 @@ fn planted_defects_are_refused_with_the_named_refusal() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 8, "every planted defect must have been exercised");
+    assert_eq!(checked, 10, "every planted defect must have been exercised");
 }
 
 /// The populated vector decodes to the values the corpus describes.
@@ -291,6 +291,49 @@ fn the_unreported_vector_keeps_its_absences() {
     assert!(classification.is_unreported_on(IndependenceDimension::Human));
     assert!(classification.is_unreported_on(IndependenceDimension::Oracle));
     assert!(classification.is_independent_on(IndependenceDimension::Workspace));
+}
+
+/// The refreshed vector decodes to the relation and sides the corpus describes.
+///
+/// Byte equality cannot catch a *symmetric* error — swap the two side code
+/// points in both the encoder and the decoder and every golden still
+/// round-trips perfectly while every record means the opposite of what it says.
+/// Only pinning the decoded values catches that, and here it matters more than
+/// usual: swapping `BeforeRefresh` and `AfterRefresh` turns a stale check into
+/// a re-validated one, which is the exact failure §4.3 exists to prevent.
+#[test]
+fn the_refreshed_vector_decodes_to_the_documented_relation_and_sides() {
+    let case = load_goldens()
+        .into_iter()
+        .find(|case| case.name == "ecc__refreshed")
+        .expect("the refreshed vector is in the corpus");
+    let decoded = decode_body::<EvidenceCarryingChange>(&case.bytes, DecodeLimits::DEFAULT)
+        .expect("refreshed vector decodes");
+
+    let receipt = decoded
+        .refreshed_authority
+        .expect("the vector carries a refresh receipt");
+    assert_eq!(receipt.relation, RefreshRelation::RebasedByIntentReplay);
+    assert_eq!(receipt.from_base, 0xba5e);
+    assert_eq!(receipt.to_base, 0xba5f);
+    assert!(receipt.advanced());
+    assert!(receipt.changed_basis());
+
+    // One record per side, in corpus order, including the unstated one.
+    let sides: Vec<Option<RefreshSide>> = decoded
+        .evidence
+        .iter()
+        .map(|record| record.refresh_side)
+        .collect();
+    assert_eq!(
+        sides,
+        vec![
+            Some(RefreshSide::BeforeRefresh),
+            Some(RefreshSide::AfterRefresh),
+            None,
+        ],
+        "the sides must survive decoding in order, and the unstated one must stay unstated",
+    );
 }
 
 /// The domain tag and schema identifier are what the corpus was framed under.
