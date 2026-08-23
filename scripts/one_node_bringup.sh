@@ -83,6 +83,7 @@ reap_serve() {
     kill "$serve_pid" 2>/dev/null || true
     wait "$serve_pid" 2>/dev/null || true
   fi
+  return 0
 }
 trap reap_serve EXIT
 
