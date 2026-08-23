@@ -45,8 +45,8 @@ pub use idx::{
     validate_idx_pack_count,
 };
 pub use midx::{
-    MidxCompleteness, MidxLimits, MidxProfile, MidxRefusal, MidxSource, MidxV1, MidxV1Receipt,
-    MidxVerification,
+    MidxCompleteness, MidxLimits, MidxLocation, MidxProfile, MidxRefusal, MidxSource, MidxV1,
+    MidxV1Receipt, MidxVerification,
 };
 pub use pack::{
     EntryKind, PackEntryHeader, PackHeader, PackTrailerVerifier, ParsedDeltaBase,

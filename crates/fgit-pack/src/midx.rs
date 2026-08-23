@@ -193,6 +193,39 @@ pub struct MidxV1 {
     receipt: MidxV1Receipt,
 }
 
+/// One derived MIDX location hint selected for a native object identity.
+///
+/// The name and offset only identify where a subsequent pack read may begin.
+/// They do not authenticate pack bytes, establish object existence, or replace
+/// a current authority read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MidxLocation {
+    pack_index: u32,
+    pack_name: Vec<u8>,
+    pack_offset: u64,
+}
+
+impl MidxLocation {
+    /// Zero-based index into the MIDX's canonical `PNAM` pack order.
+    #[must_use]
+    pub const fn pack_index(&self) -> u32 {
+        self.pack_index
+    }
+
+    /// Exact NUL-free `PNAM` pack name bytes selected by the MIDX record.
+    #[must_use]
+    pub fn pack_name(&self) -> &[u8] {
+        &self.pack_name
+    }
+
+    /// Candidate entry offset in the selected pack.  The caller must validate
+    /// the native pack and object at this offset before using it.
+    #[must_use]
+    pub const fn pack_offset(&self) -> u64 {
+        self.pack_offset
+    }
+}
+
 impl MidxV1 {
     /// Materializes a deterministic MIDX V1 over structurally checked idx V2
     /// records.
@@ -362,6 +395,335 @@ impl MidxV1 {
     pub const fn receipt(&self) -> &MidxV1Receipt {
         &self.receipt
     }
+
+    /// Looks up a native object identity through this immutable MIDX output.
+    ///
+    /// The lookup parses the retained standard chunks instead of carrying a
+    /// second object-location map.  It verifies the materialization checksum,
+    /// shape, and bounded chunk layout before consulting the hint.  `None`
+    /// means this MIDX has no location for `oid`; it makes no canonical-state
+    /// or object-admission claim.
+    pub fn locate(
+        &self,
+        oid: &ObjectId,
+        deadline: &mut impl Deadline,
+    ) -> Result<Option<MidxLocation>, MidxRefusal> {
+        let layout = MidxLookupLayout::parse(&self.bytes, &self.receipt)?;
+        if oid.algorithm() != layout.format {
+            return Err(MidxRefusal::ObjectFormatMismatch {
+                subject: "lookup object",
+                expected: layout.format,
+                observed: oid.algorithm(),
+            });
+        }
+        let mut lower = 0_usize;
+        let mut upper = layout.object_count;
+        while lower < upper {
+            checkpoint(deadline).map_err(MidxRefusal::Pack)?;
+            let middle = lower
+                .checked_add((upper - lower) / 2)
+                .ok_or(MidxRefusal::SizeOverflow)?;
+            let entry_offset = layout
+                .oid_lookup
+                .checked_add(
+                    middle
+                        .checked_mul(layout.format.digest_len())
+                        .ok_or(MidxRefusal::SizeOverflow)?,
+                )
+                .ok_or(MidxRefusal::SizeOverflow)?;
+            let entry = self
+                .bytes
+                .get(entry_offset..entry_offset + layout.format.digest_len())
+                .ok_or(MidxRefusal::MaterializationMismatch {
+                    subject: "OIDL record",
+                })?;
+            match entry.cmp(oid.as_bytes()) {
+                core::cmp::Ordering::Less => lower = middle.saturating_add(1),
+                core::cmp::Ordering::Greater => upper = middle,
+                core::cmp::Ordering::Equal => {
+                    let location_offset = layout
+                        .object_offsets
+                        .checked_add(
+                            middle
+                                .checked_mul(MIDX_OBJECT_OFFSET_BYTES)
+                                .ok_or(MidxRefusal::SizeOverflow)?,
+                        )
+                        .ok_or(MidxRefusal::SizeOverflow)?;
+                    let pack_index = read_u32(&self.bytes, location_offset).ok_or(
+                        MidxRefusal::MaterializationMismatch {
+                            subject: "OOFF pack index",
+                        },
+                    )?;
+                    if usize::try_from(pack_index).map_err(|_| {
+                        MidxRefusal::MaterializationMismatch {
+                            subject: "OOFF pack index",
+                        }
+                    })? >= layout.pack_count
+                    {
+                        return Err(MidxRefusal::MaterializationMismatch {
+                            subject: "OOFF pack index range",
+                        });
+                    }
+                    let direct_offset = read_u32(&self.bytes, location_offset + 4).ok_or(
+                        MidxRefusal::MaterializationMismatch {
+                            subject: "OOFF pack offset",
+                        },
+                    )?;
+                    let pack_offset =
+                        if direct_offset & LARGE_OFFSET_BIT == 0 {
+                            u64::from(direct_offset)
+                        } else {
+                            let loff = layout.large_offsets.ok_or(
+                                MidxRefusal::MaterializationMismatch {
+                                    subject: "missing LOFF chunk",
+                                },
+                            )?;
+                            let index = usize::try_from(direct_offset & !LARGE_OFFSET_BIT)
+                                .map_err(|_| MidxRefusal::MaterializationMismatch {
+                                    subject: "LOFF index",
+                                })?;
+                            let location = loff
+                                .checked_add(index.checked_mul(8).ok_or(MidxRefusal::SizeOverflow)?)
+                                .ok_or(MidxRefusal::SizeOverflow)?;
+                            if location >= layout.pack_names {
+                                return Err(MidxRefusal::MaterializationMismatch {
+                                    subject: "LOFF index range",
+                                });
+                            }
+                            read_u64(&self.bytes, location).ok_or(
+                                MidxRefusal::MaterializationMismatch {
+                                    subject: "LOFF record",
+                                },
+                            )?
+                        };
+                    if pack_offset < PACK_HEADER_BYTES {
+                        return Err(MidxRefusal::MaterializationMismatch {
+                            subject: "OOFF pack offset range",
+                        });
+                    }
+                    let pack_name = layout.pack_name(&self.bytes, pack_index, deadline)?;
+                    return Ok(Some(MidxLocation {
+                        pack_index,
+                        pack_name,
+                        pack_offset,
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MidxLookupLayout {
+    format: ObjectFormat,
+    object_count: usize,
+    pack_count: usize,
+    oid_lookup: usize,
+    object_offsets: usize,
+    large_offsets: Option<usize>,
+    pack_names: usize,
+    body_end: usize,
+}
+
+impl MidxLookupLayout {
+    fn parse(input: &[u8], receipt: &MidxV1Receipt) -> Result<Self, MidxRefusal> {
+        let format = receipt.source().source_commit_oid().algorithm();
+        let digest_len = format.digest_len();
+        let body_end =
+            input
+                .len()
+                .checked_sub(digest_len)
+                .ok_or(MidxRefusal::MaterializationMismatch {
+                    subject: "trailing checksum length",
+                })?;
+        let expected_format = match format {
+            ObjectFormat::Sha1 => 1,
+            ObjectFormat::Sha256 => 2,
+        };
+        if input.len() != receipt.output_bytes()
+            || input.get(..4) != Some(MIDX_SIGNATURE)
+            || input.get(4) != Some(&MIDX_VERSION_V1)
+            || input.get(5) != Some(&expected_format)
+            || input.get(7) != Some(&0)
+            || input.get(body_end..) != Some(receipt.checksum().as_bytes())
+            || checksum(format, &input[..body_end]) != *receipt.checksum()
+        {
+            return Err(MidxRefusal::MaterializationMismatch {
+                subject: "header or checksum",
+            });
+        }
+        let chunk_count =
+            usize::from(*input.get(6).ok_or(MidxRefusal::MaterializationMismatch {
+                subject: "chunk count",
+            })?);
+        let expected_chunk_count = if input.get(6) == Some(&5) { 5 } else { 4 };
+        if chunk_count != expected_chunk_count {
+            return Err(MidxRefusal::MaterializationMismatch {
+                subject: "chunk count profile",
+            });
+        }
+        let pack_count = usize::try_from(read_u32(input, 8).ok_or(
+            MidxRefusal::MaterializationMismatch {
+                subject: "pack count",
+            },
+        )?)
+        .map_err(|_| MidxRefusal::MaterializationMismatch {
+            subject: "pack count",
+        })?;
+        if pack_count != receipt.pack_count() {
+            return Err(MidxRefusal::MaterializationMismatch {
+                subject: "receipt pack count",
+            });
+        }
+        let toc_count = chunk_count
+            .checked_add(1)
+            .ok_or(MidxRefusal::SizeOverflow)?;
+        let toc_end = MIDX_HEADER_BYTES
+            .checked_add(
+                toc_count
+                    .checked_mul(MIDX_TOC_ENTRY_BYTES)
+                    .ok_or(MidxRefusal::SizeOverflow)?,
+            )
+            .ok_or(MidxRefusal::SizeOverflow)?;
+        if toc_end > body_end {
+            return Err(MidxRefusal::MaterializationMismatch {
+                subject: "chunk table extent",
+            });
+        }
+        let expected_ids: &[[u8; 4]] = if chunk_count == 5 {
+            &[
+                CHUNK_OID_FANOUT,
+                CHUNK_OID_LOOKUP,
+                CHUNK_OBJECT_OFFSETS,
+                CHUNK_LARGE_OFFSETS,
+                CHUNK_PACK_NAMES,
+            ]
+        } else {
+            &[
+                CHUNK_OID_FANOUT,
+                CHUNK_OID_LOOKUP,
+                CHUNK_OBJECT_OFFSETS,
+                CHUNK_PACK_NAMES,
+            ]
+        };
+        let mut offsets = [0_usize; 6];
+        for index in 0..toc_count {
+            let position = MIDX_HEADER_BYTES
+                .checked_add(
+                    index
+                        .checked_mul(MIDX_TOC_ENTRY_BYTES)
+                        .ok_or(MidxRefusal::SizeOverflow)?,
+                )
+                .ok_or(MidxRefusal::SizeOverflow)?;
+            let id =
+                input
+                    .get(position..position + 4)
+                    .ok_or(MidxRefusal::MaterializationMismatch {
+                        subject: "chunk table id",
+                    })?;
+            let expected_id = if index == chunk_count {
+                &[0; 4][..]
+            } else {
+                &expected_ids[index][..]
+            };
+            let offset = usize::try_from(read_u64(input, position + 4).ok_or(
+                MidxRefusal::MaterializationMismatch {
+                    subject: "chunk table offset",
+                },
+            )?)
+            .map_err(|_| MidxRefusal::MaterializationMismatch {
+                subject: "chunk table offset",
+            })?;
+            if id != expected_id
+                || offset < toc_end
+                || offset > body_end
+                || (index > 0 && offset <= offsets[index - 1])
+            {
+                return Err(MidxRefusal::MaterializationMismatch {
+                    subject: "canonical chunk table",
+                });
+            }
+            offsets[index] = offset;
+        }
+        if offsets[chunk_count] != body_end
+            || offsets[1].checked_sub(offsets[0]) != Some(MIDX_FANOUT_BYTES)
+            || offsets[2].checked_sub(offsets[1]) != receipt.object_count().checked_mul(digest_len)
+            || offsets[3].checked_sub(offsets[2])
+                != receipt.object_count().checked_mul(MIDX_OBJECT_OFFSET_BYTES)
+        {
+            return Err(MidxRefusal::MaterializationMismatch {
+                subject: "fixed chunk extent",
+            });
+        }
+        let large_offsets = (chunk_count == 5).then_some(offsets[3]);
+        let pack_names = if chunk_count == 5 {
+            offsets[4]
+        } else {
+            offsets[3]
+        };
+        if large_offsets.is_some_and(|offset| (pack_names - offset) % 8 != 0) {
+            return Err(MidxRefusal::MaterializationMismatch {
+                subject: "LOFF extent",
+            });
+        }
+        Ok(Self {
+            format,
+            object_count: receipt.object_count(),
+            pack_count,
+            oid_lookup: offsets[1],
+            object_offsets: offsets[2],
+            large_offsets,
+            pack_names,
+            body_end,
+        })
+    }
+
+    fn pack_name(
+        self,
+        input: &[u8],
+        index: u32,
+        deadline: &mut impl Deadline,
+    ) -> Result<Vec<u8>, MidxRefusal> {
+        let index = usize::try_from(index).map_err(|_| MidxRefusal::MaterializationMismatch {
+            subject: "PNAM index",
+        })?;
+        let mut offset = self.pack_names;
+        for current in 0..self.pack_count {
+            checkpoint(deadline).map_err(MidxRefusal::Pack)?;
+            let rest =
+                input
+                    .get(offset..self.body_end)
+                    .ok_or(MidxRefusal::MaterializationMismatch {
+                        subject: "PNAM extent",
+                    })?;
+            let length = rest.iter().position(|byte| *byte == 0).ok_or(
+                MidxRefusal::MaterializationMismatch {
+                    subject: "PNAM terminator",
+                },
+            )?;
+            let end = offset
+                .checked_add(length)
+                .ok_or(MidxRefusal::SizeOverflow)?;
+            if current == index {
+                let name = input
+                    .get(offset..end)
+                    .ok_or(MidxRefusal::MaterializationMismatch {
+                        subject: "PNAM record",
+                    })?;
+                if name.is_empty() || !name.is_ascii() {
+                    return Err(MidxRefusal::MaterializationMismatch {
+                        subject: "PNAM name",
+                    });
+                }
+                return Ok(name.to_vec());
+            }
+            offset = end.checked_add(1).ok_or(MidxRefusal::SizeOverflow)?;
+        }
+        Err(MidxRefusal::MaterializationMismatch {
+            subject: "PNAM index range",
+        })
+    }
 }
 
 /// Why an MIDX V1 materialization was refused.
@@ -397,6 +759,12 @@ pub enum MidxRefusal {
     /// A source or pack identity used Git's all-zero non-object sentinel.
     ZeroObjectId {
         /// Identity role being checked.
+        subject: &'static str,
+    },
+    /// The retained MIDX bytes disagree with their receipt or the strict
+    /// profile required by this materializer and must not answer a lookup.
+    MaterializationMismatch {
+        /// Inconsistent binary component.
         subject: &'static str,
     },
     /// Two input indexes named the same standard pack file.
@@ -470,6 +838,9 @@ impl Display for MidxRefusal {
             ),
             Self::ZeroObjectId { subject } => {
                 write!(formatter, "MIDX {subject} uses the zero non-object ID")
+            }
+            Self::MaterializationMismatch { subject } => {
+                write!(formatter, "MIDX materialization {subject} is inconsistent")
             }
             Self::DuplicatePack { checksum } => {
                 write!(formatter, "duplicate MIDX pack checksum {checksum}")
@@ -715,6 +1086,22 @@ fn append_chunk_toc(output: &mut Vec<u8>, id: [u8; 4], offset: usize) -> Result<
 
 fn append_u32(output: &mut Vec<u8>, value: u32) {
     output.extend_from_slice(&value.to_be_bytes());
+}
+
+fn read_u32(input: &[u8], offset: usize) -> Option<u32> {
+    input
+        .get(offset..offset.checked_add(4)?)?
+        .try_into()
+        .ok()
+        .map(u32::from_be_bytes)
+}
+
+fn read_u64(input: &[u8], offset: usize) -> Option<u64> {
+    input
+        .get(offset..offset.checked_add(8)?)?
+        .try_into()
+        .ok()
+        .map(u64::from_be_bytes)
 }
 
 fn checksum(format: ObjectFormat, body: &[u8]) -> ObjectId {

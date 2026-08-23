@@ -10,7 +10,8 @@
 
 use fgit_crypto::sha1_digest;
 use fgit_pack::{
-    IdxV2, MidxLimits, MidxRefusal, MidxSource, MidxV1, ObjectFormat, ObjectId, PackLimits,
+    IdxV2, MidxLimits, MidxRefusal, MidxSource, MidxV1, ObjectFormat, ObjectId, PackError,
+    PackLimits,
 };
 use fgit_types::{
     CodecVersion, DigestAlgorithmId, DigestBytes, GitOidSha1, RepositoryCommitId, RepositoryId,
@@ -189,6 +190,38 @@ fn midx_v1_sorts_packs_deduplicates_oids_and_receipts_exact_bytes() {
         first.receipt().checksum().as_bytes(),
         &bytes[bytes.len() - SHA1_BYTES..],
     );
+    let mut source_lookup_live = || true;
+    let source_location = first
+        .locate(&source_commit, &mut source_lookup_live)
+        .expect("the emitted MIDX layout yields its selected source location")
+        .expect("source commit occurs in the supplied indexes");
+    assert_eq!(source_location.pack_index(), 0);
+    assert_eq!(
+        source_location.pack_name(),
+        format!("pack-{}.idx", oid(0x10)).as_bytes(),
+        "lookup uses the writer's lexicographically selected pack"
+    );
+    assert_eq!(source_location.pack_offset(), 80);
+    let mut alternate_lookup_live = || true;
+    let alternate_location = first
+        .locate(&oid(0x02), &mut alternate_lookup_live)
+        .expect("the emitted MIDX layout yields its alternate location")
+        .expect("the object occurs in the second supplied index");
+    assert_eq!(alternate_location.pack_index(), 1);
+    assert_eq!(alternate_location.pack_offset(), 60);
+    let mut absent_lookup_live = || true;
+    assert_eq!(
+        first
+            .locate(&oid(0x04), &mut absent_lookup_live)
+            .expect("an absent object is an ordinary non-answer"),
+        None
+    );
+    let mut cancelled_lookup = || false;
+    assert_eq!(
+        first.locate(&source_commit, &mut cancelled_lookup),
+        Err(MidxRefusal::Pack(PackError::DeadlineExceeded)),
+        "lookup cancellation refuses before any binary-search result is exposed"
+    );
 }
 
 #[test]
@@ -216,6 +249,13 @@ fn midx_v1_emits_large_offsets_and_refuses_missing_source_and_bound_twins() {
     let ooff_offset = usize::try_from(read_u64(bytes, ooff_toc + 4))
         .expect("fixture offset fits the host address space");
     assert_eq!(read_u32(bytes, ooff_offset + 4), 0x8000_0000);
+    let mut large_lookup_live = || true;
+    let large_location = materialized
+        .locate(&source_commit, &mut large_lookup_live)
+        .expect("LOFF-backed record remains queryable")
+        .expect("source occurs in the one supplied index");
+    assert_eq!(large_location.pack_index(), 0);
+    assert_eq!(large_location.pack_offset(), large);
 
     let missing_source = oid(0x09);
     let mut missing_live = || true;
