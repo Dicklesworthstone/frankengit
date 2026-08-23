@@ -46,7 +46,7 @@ fn digest(fill: u8) -> Digest {
     )
 }
 
-fn identity(fill: u8) -> GitOid {
+const fn identity(fill: u8) -> GitOid {
     GitOid::Sha1(GitOidSha1::from_bytes([fill; GitOidSha1::LEN]))
 }
 
