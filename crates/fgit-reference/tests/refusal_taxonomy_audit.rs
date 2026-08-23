@@ -26,25 +26,37 @@
 //! documents a security posture nothing enforces, and would be cited as
 //! evidence that some category of refusal is handled.
 //!
-//! ## What this file does NOT prove, and where that check actually belongs
+//! ## What this file does NOT prove, and where that check actually lives
 //!
-//! **`RefusalCode::ALL` completeness is not provable at runtime**, and the
-//! obvious attempt is the circular-check trap: `RefusalCode::from_code_point`
-//! is implemented by *searching* `ALL`, so a test comparing the decodable
-//! surface against `ALL` compares `ALL` with itself and passes no matter what
-//! is missing.
+//! `RefusalCode::ALL` completeness is **not proved here** — but it *is* proved,
+//! in `fgit-types/tests/vocabulary_all_membership.rs`, which asserts that
+//! `ALL`'s distinct members number exactly `core::mem::variant_count::<RefusalCode>()`.
+//! Distinct members equalling the type's own variant total leaves no variant
+//! unlisted, and the total is read **from the type**, so that corpus cannot
+//! drift the way a hand-written one does. The same file covers
+//! `RequestRejectionCode`, `MismatchPolicy` and `PublicationEpoch`. It needs
+//! `#![feature(variant_count)]`, which was this repository's first `#![feature]`
+//! gate — worth knowing if you are weighing the approach elsewhere.
 //!
-//! A sound check does exist, but not as a Rust test. `RefusalClass::of` is an
-//! **exhaustive match**, so the compiler forces every real variant to appear in
-//! `refusal.rs` — which makes that file an independent enumeration of the enum,
-//! and comparing it against `ALL` non-circular. That comparison is over source
-//! text, so it belongs in a checker or constitution-lane rule rather than here.
-//! Measured once by hand at the time of writing: the two agree on 61 variants,
-//! with nothing missing from `ALL`.
+//! The trap that makes it look impossible is still worth stating, because the
+//! obvious attempt is circular: `RefusalCode::from_code_point` is implemented by
+//! *searching* `ALL`, so a test comparing the decodable surface against `ALL`
+//! compares `ALL` with itself and passes no matter what is missing.
+//! `variant_count` escapes that by not consulting `ALL` at all.
 //!
-//! Recorded precisely because an earlier draft of this paragraph said the check
-//! was *unenforceable*, which was wrong, and a stale impossibility claim is how
-//! a gap stops being looked at.
+//! A second, source-level check also exists and remains valid: `RefusalClass::of`
+//! is an **exhaustive match**, so the compiler forces every real variant to
+//! appear in `refusal.rs`, making that file an independent enumeration to
+//! compare `ALL` against. That one is over source text, so it belongs in a
+//! checker or constitution-lane rule rather than in a Rust test.
+//!
+//! **This paragraph has now been wrong twice, in opposite directions**, and that
+//! is the part worth keeping. An early draft called the check *unenforceable*;
+//! the next called it *not provable at runtime and belonging in a checker*.
+//! Both were claims about what could not be done, and both aged silently while
+//! the codebase moved. A claim that something IS done gets checked by the
+//! compiler; a claim that something CANNOT be done gets checked by nobody, and
+//! a stale impossibility claim is how a gap stops being looked at.
 
 use std::collections::{BTreeMap, BTreeSet};
 
