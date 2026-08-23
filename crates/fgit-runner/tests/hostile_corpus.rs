@@ -40,17 +40,26 @@ fn ceilings() -> ResourceCeilings {
     ResourceCeilings::new(100, 100, 100, 0, 1, 100).expect("fixture ceilings are valid")
 }
 
+fn cancellation_ceilings() -> ResourceCeilings {
+    ResourceCeilings::new(100, 100, 100, 0, 3, 100)
+        .expect("three-process cancellation fixture ceiling is valid")
+}
+
 fn policy(domain: &str) -> RunnerPolicy {
+    policy_with_ceilings(domain, ceilings())
+}
+
+fn policy_with_ceilings(domain: &str, resource_ceilings: ResourceCeilings) -> RunnerPolicy {
     RunnerPolicy::new(
         TrustDomain::new(text(domain)),
         SandboxProfile::ProcessIsolated,
         NetworkPolicy::Denied,
-        ceilings(),
+        resource_ceilings,
     )
     .expect("Linux process-isolated denied-egress policy is supported")
 }
 
-fn usage(network_bytes: u64, processes: u32) -> ResourceUsage {
+const fn usage(network_bytes: u64, processes: u32) -> ResourceUsage {
     ResourceUsage {
         cpu_micros: 1,
         memory_bytes: 1,
@@ -206,11 +215,12 @@ fn missing_filesystem_isolation_refuses_without_unconfined_fallback_and_revokes_
 #[test]
 fn cancellation_reaps_the_full_observed_tree_and_keeps_the_cancelled_outcome() {
     let mut broker = SecretBroker::default();
-    let mut control = RunnerControlPlane::new(ceilings(), 1).expect("capacity");
+    let cancellation_ceilings = cancellation_ceilings();
+    let mut control = RunnerControlPlane::new(cancellation_ceilings, 1).expect("capacity");
     let admitted = control
         .admit(
             capsule(),
-            policy("trusted"),
+            policy_with_ceilings("trusted", cancellation_ceilings),
             JobRequest::new(false, Vec::new(), Vec::new(), 4).expect("safe request"),
             &mut broker,
             1,
