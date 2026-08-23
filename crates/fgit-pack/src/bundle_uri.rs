@@ -11,6 +11,8 @@ use core::fmt::{self, Display, Formatter};
 use fgit_crypto::sha256_digest;
 use std::collections::BTreeSet;
 
+const BUNDLE_URI_V1_ANY_HEADER: &[u8] = b"[bundle]\nversion = 1\nmode = any\n";
+
 /// Bounds selected before a bundle-URI list retains entry metadata or emits
 /// its config text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,11 +70,7 @@ impl BundleUriEntry {
     /// grammar (ASCII alphanumeric or `-`); the URI is a conservative absolute
     /// HTTP(S) spelling safe to emit unquoted into Git config text.
     pub fn new(name: String, uri: String, bundle: BundleV2) -> Result<Self, BundleUriRefusal> {
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
+        if !valid_bundle_uri_name(&name) {
             return Err(BundleUriRefusal::InvalidName { name });
         }
         if !valid_absolute_http_uri(&uri) {
@@ -97,6 +95,188 @@ impl BundleUriEntry {
     #[must_use]
     pub const fn bundle(&self) -> &BundleV2 {
         &self.bundle
+    }
+}
+
+/// Bounds selected before an untrusted bundle-URI list is retained or parsed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BundleUriReadLimits {
+    /// Most input bytes accepted from the remote list resource.
+    pub max_input_bytes: usize,
+    /// Most mirror entries retained from one accepted list.
+    pub max_entries: usize,
+}
+
+impl Default for BundleUriReadLimits {
+    fn default() -> Self {
+        Self {
+            max_input_bytes: 1024 * 1024,
+            max_entries: 1_024,
+        }
+    }
+}
+
+/// One validated location selected from an untrusted bundle-URI list.
+///
+/// The location is not a proof that its endpoint exists, serves a bundle, or
+/// is authorized for a repository.  A subsequent fetch must remain bounded,
+/// verify the selected bundle, and bind it to a current authority read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuarantinedBundleUriEntry {
+    name: String,
+    uri: String,
+}
+
+impl QuarantinedBundleUriEntry {
+    /// The validated Git bundle-list section name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The validated absolute HTTP(S) endpoint spelling.
+    #[must_use]
+    pub fn uri(&self) -> &str {
+        &self.uri
+    }
+}
+
+/// A bounded, strict bundle-URI V1 input retained in quarantine.
+///
+/// This reader accepts only the exact `mode=any` mirror-list profile emitted
+/// by [`BundleUriListV1::write`].  Creation tokens, `mode=all`, relative
+/// endpoints, and incremental bundle semantics are not silently generalized:
+/// callers receive a typed refusal before a remote endpoint can be used.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuarantinedBundleUriListV1 {
+    entries: Vec<QuarantinedBundleUriEntry>,
+    input_sha256: [u8; 32],
+    input_bytes: usize,
+}
+
+impl QuarantinedBundleUriListV1 {
+    /// Parses a canonical V1 `mode=any` mirror list into a non-authoritative,
+    /// fetch-unready quarantine representation.
+    pub fn parse(
+        input: &[u8],
+        limits: BundleUriReadLimits,
+        deadline: &mut impl Deadline,
+    ) -> Result<Self, BundleUriRefusal> {
+        if input.len() > limits.max_input_bytes {
+            return Err(BundleUriRefusal::InputBytesExceeded {
+                observed: input.len(),
+                limit: limits.max_input_bytes,
+            });
+        }
+        if !input.starts_with(BUNDLE_URI_V1_ANY_HEADER) {
+            return Err(BundleUriRefusal::UnsupportedInputProfile);
+        }
+        let mut offset = BUNDLE_URI_V1_ANY_HEADER.len();
+        let mut entries: Vec<QuarantinedBundleUriEntry> = Vec::new();
+        let mut uris = BTreeSet::new();
+        while offset < input.len() {
+            checkpoint(deadline).map_err(BundleUriRefusal::Pack)?;
+            let section_prefix = b"\n[bundle \"";
+            if !input[offset..].starts_with(section_prefix) {
+                return Err(BundleUriRefusal::UnexpectedInputSyntax { offset });
+            }
+            offset = offset
+                .checked_add(section_prefix.len())
+                .ok_or(BundleUriRefusal::SizeOverflow)?;
+            let name_start = offset;
+            let Some(name_length) = input[offset..]
+                .windows(3)
+                .position(|window| window == b"\"]\n")
+            else {
+                return Err(BundleUriRefusal::UnexpectedInputSyntax { offset });
+            };
+            offset = offset
+                .checked_add(name_length)
+                .ok_or(BundleUriRefusal::SizeOverflow)?;
+            let name = core::str::from_utf8(&input[name_start..offset])
+                .map_err(|_| BundleUriRefusal::InputNotUtf8 { offset: name_start })?
+                .to_owned();
+            if !valid_bundle_uri_name(&name) {
+                return Err(BundleUriRefusal::InvalidName { name });
+            }
+            offset = offset
+                .checked_add(3)
+                .ok_or(BundleUriRefusal::SizeOverflow)?;
+            let uri_prefix = b"uri = ";
+            if !input[offset..].starts_with(uri_prefix) {
+                return Err(BundleUriRefusal::UnexpectedInputSyntax { offset });
+            }
+            offset = offset
+                .checked_add(uri_prefix.len())
+                .ok_or(BundleUriRefusal::SizeOverflow)?;
+            let uri_start = offset;
+            let Some(uri_length) = input[offset..].iter().position(|byte| *byte == b'\n') else {
+                return Err(BundleUriRefusal::UnexpectedInputSyntax { offset });
+            };
+            offset = offset
+                .checked_add(uri_length)
+                .ok_or(BundleUriRefusal::SizeOverflow)?;
+            let uri = core::str::from_utf8(&input[uri_start..offset])
+                .map_err(|_| BundleUriRefusal::InputNotUtf8 { offset: uri_start })?
+                .to_owned();
+            if !valid_absolute_http_uri(&uri) {
+                return Err(BundleUriRefusal::InvalidUri { uri });
+            }
+            offset = offset
+                .checked_add(1)
+                .ok_or(BundleUriRefusal::SizeOverflow)?;
+            if entries.len() >= limits.max_entries {
+                return Err(BundleUriRefusal::EntryLimitExceeded {
+                    observed: entries.len().saturating_add(1),
+                    limit: limits.max_entries,
+                });
+            }
+            if let Some(previous) = entries.last() {
+                if name == previous.name {
+                    return Err(BundleUriRefusal::DuplicateName { name });
+                }
+                if name < previous.name {
+                    return Err(BundleUriRefusal::NonCanonicalEntryOrder {
+                        previous: previous.name.clone(),
+                        current: name,
+                    });
+                }
+            }
+            if !uris.insert(uri.clone()) {
+                return Err(BundleUriRefusal::DuplicateUri { uri });
+            }
+            entries
+                .try_reserve(1)
+                .map_err(|_| BundleUriRefusal::AllocationFailed { requested: 1 })?;
+            entries.push(QuarantinedBundleUriEntry { name, uri });
+        }
+        if entries.is_empty() {
+            return Err(BundleUriRefusal::EmptyEntrySet);
+        }
+        Ok(Self {
+            entries,
+            input_sha256: sha256_digest(input),
+            input_bytes: input.len(),
+        })
+    }
+
+    /// Canonically ordered, validated endpoint candidates.  They remain
+    /// non-authoritative until a bounded fetch and bundle inspection succeed.
+    #[must_use]
+    pub fn entries(&self) -> &[QuarantinedBundleUriEntry] {
+        &self.entries
+    }
+
+    /// SHA-256 of the exact untrusted config bytes accepted by this parser.
+    #[must_use]
+    pub const fn input_sha256(&self) -> &[u8; 32] {
+        &self.input_sha256
+    }
+
+    /// Exact input length used for the quarantine receipt.
+    #[must_use]
+    pub const fn input_bytes(&self) -> usize {
+        self.input_bytes
     }
 }
 
@@ -296,6 +476,21 @@ impl BundleUriListV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BundleUriRefusal {
     EmptyEntrySet,
+    /// An untrusted list exceeded its configured bound before parsing.
+    InputBytesExceeded {
+        observed: usize,
+        limit: usize,
+    },
+    /// The received list is outside this strict reader's supported profile.
+    UnsupportedInputProfile,
+    /// A named text field in the untrusted list was not valid UTF-8.
+    InputNotUtf8 {
+        offset: usize,
+    },
+    /// The received list diverged from the canonical V1 grammar at this byte.
+    UnexpectedInputSyntax {
+        offset: usize,
+    },
     EntryLimitExceeded {
         observed: usize,
         limit: usize,
@@ -311,6 +506,11 @@ pub enum BundleUriRefusal {
     },
     DuplicateUri {
         uri: String,
+    },
+    /// Input entries were not strictly ordered by their section name.
+    NonCanonicalEntryOrder {
+        previous: String,
+        current: String,
     },
     /// An entry is not byte-identical to the selected completed Bundle V2.
     BundleSourceMismatch {
@@ -335,6 +535,18 @@ impl Display for BundleUriRefusal {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyEntrySet => f.write_str("bundle URI list needs one mirror"),
+            Self::InputBytesExceeded { observed, limit } => {
+                write!(f, "bundle URI input has {observed} bytes, limit is {limit}")
+            }
+            Self::UnsupportedInputProfile => f.write_str(
+                "bundle URI input is outside the strict V1 mode=any complete-mirror profile",
+            ),
+            Self::InputNotUtf8 { offset } => {
+                write!(f, "bundle URI input is not UTF-8 at byte {offset}")
+            }
+            Self::UnexpectedInputSyntax { offset } => {
+                write!(f, "bundle URI input has unexpected syntax at byte {offset}")
+            }
             Self::EntryLimitExceeded { observed, limit } => {
                 write!(f, "{observed} bundle URI entries exceeds limit {limit}")
             }
@@ -342,6 +554,10 @@ impl Display for BundleUriRefusal {
             Self::InvalidUri { uri } => write!(f, "invalid absolute HTTP(S) bundle URI {uri:?}"),
             Self::DuplicateName { name } => write!(f, "duplicate bundle URI name {name:?}"),
             Self::DuplicateUri { uri } => write!(f, "duplicate bundle URI {uri:?}"),
+            Self::NonCanonicalEntryOrder { previous, current } => write!(
+                f,
+                "bundle URI entry {current:?} appears after non-greater entry {previous:?}"
+            ),
             Self::BundleSourceMismatch { name } => write!(
                 f,
                 "bundle URI mirror {name:?} differs from selected completed bundle"
@@ -377,4 +593,11 @@ fn valid_absolute_http_uri(uri: &str) -> bool {
         && uri
             .bytes()
             .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'"' | b'\\' | b'#' | b';'))
+}
+
+fn valid_bundle_uri_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }

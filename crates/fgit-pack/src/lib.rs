@@ -27,7 +27,8 @@ pub use bundle::{
 };
 pub use bundle_uri::{
     BundleUriCompleteness, BundleUriEntry, BundleUriLimits, BundleUriListReceipt, BundleUriListV1,
-    BundleUriProfile, BundleUriRefusal, BundleUriVerification,
+    BundleUriProfile, BundleUriReadLimits, BundleUriRefusal, BundleUriVerification,
+    QuarantinedBundleUriEntry, QuarantinedBundleUriListV1,
 };
 pub use commit_graph::{
     CommitGraphCompleteness, CommitGraphInput, CommitGraphLimits, CommitGraphProfile,

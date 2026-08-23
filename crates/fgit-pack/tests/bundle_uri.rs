@@ -10,8 +10,9 @@ use fgit_crypto::{git_object_id, sha256_digest};
 use fgit_git_object::ObjectType;
 use fgit_pack::{
     BundleReference, BundleSource, BundleUriEntry, BundleUriLimits, BundleUriListV1,
-    BundleUriRefusal, BundleV2, BundleV2Limits, CanonicalObjectSource, CanonicalPackObject,
-    ObjectFormat, ObjectId, PackLimits, PackPlanner, PackWriteError, PackWriteProfile, PackWriter,
+    BundleUriReadLimits, BundleUriRefusal, BundleV2, BundleV2Limits, CanonicalObjectSource,
+    CanonicalPackObject, ObjectFormat, ObjectId, PackLimits, PackPlanner, PackWriteError,
+    PackWriteProfile, PackWriter, QuarantinedBundleUriListV1,
 };
 use fgit_types::{
     CodecVersion, DigestAlgorithmId, DigestBytes, RefName, RepositoryCommitId, RepositoryId,
@@ -200,5 +201,79 @@ fn bundle_uri_v1_refuses_config_injection_duplicate_mirror_and_output_boundary()
     assert!(matches!(
         BundleUriListV1::write(source(commit), &only, limits, &mut bounded_live),
         Err(BundleUriRefusal::OutputBytesExceeded { .. })
+    ));
+}
+
+#[test]
+fn bundle_uri_v1_quarantine_reader_accepts_only_canonical_writer_bytes() {
+    let (bundle, commit) = completed_bundle();
+    let entries = [
+        entry(
+            "alpha",
+            "https://cdn-a.example.invalid/repo.bundle",
+            bundle.clone(),
+        ),
+        entry("zeta", "https://cdn-z.example.invalid/repo.bundle", bundle),
+    ];
+    let mut write_live = || true;
+    let rendered = BundleUriListV1::write(
+        source(commit),
+        &entries,
+        BundleUriLimits::default(),
+        &mut write_live,
+    )
+    .expect("writer emitted a canonical complete-mirror list");
+    let mut parse_live = || true;
+    let parsed = QuarantinedBundleUriListV1::parse(
+        rendered.bytes(),
+        BundleUriReadLimits::default(),
+        &mut parse_live,
+    )
+    .expect("the strict quarantine reader accepts the emitted profile");
+    assert_eq!(parsed.entries().len(), 2);
+    assert_eq!(parsed.entries()[0].name(), "alpha");
+    assert_eq!(
+        parsed.entries()[1].uri(),
+        "https://cdn-z.example.invalid/repo.bundle"
+    );
+    assert_eq!(parsed.input_sha256(), &sha256_digest(rendered.bytes()));
+    assert_eq!(parsed.input_bytes(), rendered.bytes().len());
+}
+
+#[test]
+fn bundle_uri_v1_quarantine_reader_refuses_noncanonical_or_oversized_input() {
+    let noncanonical = concat!(
+        "[bundle]\nversion = 1\nmode = any\n",
+        "\n[bundle \"zeta\"]\nuri = https://cdn-z.example.invalid/repo.bundle\n",
+        "\n[bundle \"alpha\"]\nuri = https://cdn-a.example.invalid/repo.bundle\n",
+    );
+    let mut order_live = || true;
+    assert!(matches!(
+        QuarantinedBundleUriListV1::parse(
+            noncanonical.as_bytes(),
+            BundleUriReadLimits::default(),
+            &mut order_live,
+        ),
+        Err(BundleUriRefusal::NonCanonicalEntryOrder { .. })
+    ));
+    let injected = concat!(
+        "[bundle]\nversion = 1\nmode = any\n",
+        "\n[bundle \"safe\"]\nuri = https://cdn.example.invalid/repo.bundle#comment\n",
+    );
+    let mut injection_live = || true;
+    assert!(matches!(
+        QuarantinedBundleUriListV1::parse(
+            injected.as_bytes(),
+            BundleUriReadLimits::default(),
+            &mut injection_live,
+        ),
+        Err(BundleUriRefusal::InvalidUri { .. })
+    ));
+    let mut limits = BundleUriReadLimits::default();
+    limits.max_input_bytes = noncanonical.len() - 1;
+    let mut bounded_live = || true;
+    assert!(matches!(
+        QuarantinedBundleUriListV1::parse(noncanonical.as_bytes(), limits, &mut bounded_live),
+        Err(BundleUriRefusal::InputBytesExceeded { .. })
     ));
 }
