@@ -1,0 +1,237 @@
+//! Full Bundle V2 materialization behaviour for FG-052.
+//!
+//! The fixture supplies canonical objects and explicit closure edges to the
+//! real pack planner.  The bundle writer then owns only the Git bundle header
+//! and refuses an intentionally selected-but-incomplete plan before pack work.
+
+use fgit_crypto::{git_object_id, sha256_digest};
+use fgit_git_object::ObjectType;
+use fgit_pack::{
+    BundleProfile, BundleReference, BundleSource, BundleV2, BundleV2Limits, BundleV2Refusal,
+    CanonicalObjectSource, CanonicalPackObject, ObjectFormat, ObjectId, PackLimits, PackPlanner,
+    PackWriteError, PackWriteProfile, PackWriter,
+};
+use fgit_types::{
+    CodecVersion, DigestAlgorithmId, DigestBytes, GitOidSha256, RefName, RepositoryCommitId,
+    RepositoryId,
+};
+use std::collections::BTreeMap;
+
+const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0x8044;
+
+#[derive(Clone, Default)]
+struct FixtureSource {
+    objects: BTreeMap<ObjectId, CanonicalPackObject>,
+}
+
+impl FixtureSource {
+    fn insert(&mut self, object: CanonicalPackObject) {
+        self.objects.insert(object.id(), object);
+    }
+}
+
+impl CanonicalObjectSource for FixtureSource {
+    fn load(&self, id: &ObjectId) -> Result<CanonicalPackObject, PackWriteError> {
+        self.objects
+            .get(id)
+            .cloned()
+            .ok_or(PackWriteError::MissingCanonicalObject(*id))
+    }
+}
+
+fn rcr_id() -> RepositoryCommitId {
+    RepositoryCommitId::from_digest(
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("fixture code point is nonzero"),
+        CodecVersion::new(1, 0),
+        DigestBytes::try_new(&[0x44; 32]).expect("fixture digest is long enough"),
+    )
+}
+
+const fn repository_id() -> RepositoryId {
+    RepositoryId::from_bytes([0x81; 16])
+}
+
+fn object(kind: ObjectType, body: &[u8], references: Vec<ObjectId>) -> CanonicalPackObject {
+    let id = git_object_id(ObjectFormat::Sha1, kind, body);
+    CanonicalPackObject::new(id, kind, body.to_vec(), references, 0, 0)
+}
+
+fn source_with_commit_and_tree() -> (FixtureSource, ObjectId) {
+    let mut source = FixtureSource::default();
+    let tree = object(ObjectType::Tree, b"", Vec::new());
+    let commit_body = format!(
+        "tree {}\nauthor Bundle Test <bundle@example.invalid> 0 +0000\ncommitter Bundle Test <bundle@example.invalid> 0 +0000\n\ninitial\n",
+        tree.id()
+    );
+    let commit = object(ObjectType::Commit, commit_body.as_bytes(), vec![tree.id()]);
+    let commit_id = commit.id();
+    source.insert(tree);
+    source.insert(commit);
+    (source, commit_id)
+}
+
+fn source(commit: ObjectId) -> BundleSource {
+    BundleSource::new(repository_id(), rcr_id(), commit)
+        .expect("fixture uses a nonzero SHA-1 source commit")
+}
+
+fn reference(commit: ObjectId) -> BundleReference {
+    BundleReference::new(
+        commit,
+        RefName::try_new(b"refs/heads/main").expect("fixture ref is valid"),
+    )
+}
+
+fn plan(source: &FixtureSource, roots: &[ObjectId]) -> fgit_pack::PackPlan {
+    let mut live = || true;
+    PackPlanner::new(
+        ObjectFormat::Sha1,
+        PackWriteProfile::STORED_V1,
+        PackLimits::default(),
+    )
+    .plan(source, roots, &mut live)
+    .expect("fixture closure is valid")
+}
+
+#[test]
+fn full_bundle_v2_is_byte_stable_and_receipted_to_its_source() {
+    let (objects, commit) = source_with_commit_and_tree();
+    let plan = plan(&objects, &[commit]);
+    let writer = PackWriter::new(PackLimits::default());
+    let mut first_live = || true;
+    let first = BundleV2::write_full(
+        source(commit),
+        &[reference(commit)],
+        &plan,
+        &writer,
+        &mut first_live,
+        BundleV2Limits::default(),
+    )
+    .expect("closure-complete SHA-1 plan renders as Bundle V2");
+    let mut second_live = || true;
+    let second = BundleV2::write_full(
+        source(commit),
+        &[reference(commit)],
+        &plan,
+        &writer,
+        &mut second_live,
+        BundleV2Limits::default(),
+    )
+    .expect("the same source, refs, and plan reproduce bundle bytes");
+
+    assert_eq!(first, second);
+    let expected_header = format!("# v2 git bundle\n{commit} refs/heads/main\n\n");
+    assert!(first.bytes().starts_with(expected_header.as_bytes()));
+    assert_eq!(
+        first.receipt().header_sha256(),
+        &sha256_digest(expected_header.as_bytes())
+    );
+    assert_eq!(first.receipt().source().repository_id(), repository_id());
+    assert_eq!(first.receipt().source().source_rcr_id(), rcr_id());
+    assert_eq!(first.receipt().source().source_commit_oid(), &commit);
+    assert_eq!(first.receipt().profile(), BundleProfile::FullV2Sha1);
+    assert_eq!(first.receipt().reference_count(), 1);
+    assert_eq!(first.receipt().output_bytes(), first.bytes().len());
+    let pack = &first.bytes()[expected_header.len()..];
+    assert!(pack.starts_with(b"PACK\0\0\0\x02"));
+    assert_eq!(
+        pack.len(),
+        first.receipt().pack_receipt().output_bytes,
+        "bundle pack bytes carry the writer's exact immutable receipt"
+    );
+}
+
+#[test]
+fn full_bundle_v2_refuses_a_selected_plan_with_a_missing_closure_edge() {
+    let (objects, commit) = source_with_commit_and_tree();
+    let mut live = || true;
+    let selected = PackPlanner::new(
+        ObjectFormat::Sha1,
+        PackWriteProfile::STORED_V1,
+        PackLimits::default(),
+    )
+    .plan_selected(&objects, &[commit], &mut live)
+    .expect("selected plans deliberately allow an authenticated omission");
+    let writer = PackWriter::new(PackLimits::default());
+    let mut bundle_live = || true;
+    assert!(matches!(
+        BundleV2::write_full(
+            source(commit),
+            &[reference(commit)],
+            &selected,
+            &writer,
+            &mut bundle_live,
+            BundleV2Limits::default(),
+        ),
+        Err(BundleV2Refusal::ClosureEdgeMissing { source, .. }) if source == commit
+    ));
+}
+
+#[test]
+fn full_bundle_v2_refuses_zero_sha256_and_tight_header_twins() {
+    let sha256 = ObjectId::from(GitOidSha256::from_bytes([0x55; 32]));
+    assert!(matches!(
+        BundleSource::new(repository_id(), rcr_id(), sha256),
+        Err(BundleV2Refusal::ObjectFormatUnsupported { .. })
+    ));
+
+    let (objects, commit) = source_with_commit_and_tree();
+    let plan = plan(&objects, &[commit]);
+    let writer = PackWriter::new(PackLimits::default());
+    let header_len = format!("# v2 git bundle\n{commit} refs/heads/main\n\n").len();
+    let mut too_small_live = || true;
+    assert_eq!(
+        BundleV2::write_full(
+            source(commit),
+            &[reference(commit)],
+            &plan,
+            &writer,
+            &mut too_small_live,
+            BundleV2Limits {
+                max_header_bytes: header_len - 1,
+                ..BundleV2Limits::default()
+            },
+        ),
+        Err(BundleV2Refusal::HeaderBytesExceeded {
+            observed: header_len,
+            limit: header_len - 1,
+        })
+    );
+
+    let mut output_too_small_live = || true;
+    assert_eq!(
+        BundleV2::write_full(
+            source(commit),
+            &[reference(commit)],
+            &plan,
+            &writer,
+            &mut output_too_small_live,
+            BundleV2Limits {
+                max_output_bytes: header_len - 1,
+                ..BundleV2Limits::default()
+            },
+        ),
+        Err(BundleV2Refusal::OutputBytesExceeded {
+            observed: header_len,
+            limit: header_len - 1,
+        })
+    );
+
+    let mut exact_live = || true;
+    assert!(
+        BundleV2::write_full(
+            source(commit),
+            &[reference(commit)],
+            &plan,
+            &writer,
+            &mut exact_live,
+            BundleV2Limits {
+                max_header_bytes: header_len,
+                ..BundleV2Limits::default()
+            },
+        )
+        .is_ok(),
+        "the one-byte-larger header-bound twin proceeds"
+    );
+}

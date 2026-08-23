@@ -5,6 +5,7 @@
 //! hashing: callers supply those dependency-owned operations at the
 //! quarantine boundary.
 
+mod bundle;
 mod delta;
 mod idx;
 mod pack;
@@ -12,6 +13,10 @@ mod reader;
 mod verify;
 mod writer;
 
+pub use bundle::{
+    BundleProfile, BundleReference, BundleSource, BundleV2, BundleV2Limits, BundleV2Receipt,
+    BundleV2Refusal,
+};
 pub use delta::{
     CachedResolver, DeltaBase, DeltaObject, ExternalBaseLookup, PackObject, ScalarResolver,
     apply_delta,
