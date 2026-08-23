@@ -2167,7 +2167,7 @@ mod tests {
             ),
             Err(GraphRefusal::UnknownFlowCost { from, to }) if from == node(6) && to == node(1)
         ));
-        let mut duplicated = complete_costs.clone();
+        let mut duplicated = complete_costs;
         duplicated.push(FlowCost::new(node(1), node(2), 2));
         assert!(matches!(
             graph.min_cost_flow(
