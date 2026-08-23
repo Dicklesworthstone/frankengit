@@ -112,6 +112,33 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 // degenerating to a bare pkt-line flush.
 const GIT_DAEMON_CAPABILITIES: &[u8] = b"agent=frankengit-node";
 
+/// The git-daemon capability advertisement for one repository object format.
+///
+/// A stock Git client selects the OID domain of a v0/v1 advertisement from the
+/// `object-format` capability. Without it the client keeps Git's SHA-1 default,
+/// so a SHA-256 repository advertises 64-hex OIDs (and a 64-zero empty-view
+/// identity) that the client cannot parse — the node would permit a
+/// configuration it cannot serve compatibly, which §6 makes a compatibility
+/// defect rather than a cosmetic one.
+///
+/// SHA-1 keeps the historical bytes exactly. `sha1` is Git's default and a
+/// client that sees no `object-format` selects it, so emitting a redundant
+/// token would change every existing SHA-1 advertisement for no compatibility
+/// gain. The match is exhaustive on purpose: a future object format is a
+/// compile error here rather than a silently unadvertised domain.
+fn git_daemon_capabilities(object_format: GitHashAlgorithm) -> Vec<u8> {
+    match object_format {
+        GitHashAlgorithm::Sha1 => GIT_DAEMON_CAPABILITIES.to_vec(),
+        GitHashAlgorithm::Sha256 => {
+            let mut tokens = GIT_DAEMON_CAPABILITIES.to_vec();
+            tokens.push(b' ');
+            tokens.extend_from_slice(b"object-format=");
+            tokens.extend_from_slice(object_format.as_str().as_bytes());
+            tokens
+        }
+    }
+}
+
 /// Immutable upload-pack facts derived from one authenticated admission snapshot.
 ///
 /// This view carries no mutable ref map and does not infer object reachability
@@ -4086,7 +4113,8 @@ impl OneNode {
             &limits,
         )
         .map_err(|error| NodeGitDaemonServeRefusal::from(NodeAdmissionViewRefusal::from(error)))?;
-        let capabilities = Capabilities::parse_v1(GIT_DAEMON_CAPABILITIES, &limits)
+        let advertised_capabilities = git_daemon_capabilities(self.object_format);
+        let capabilities = Capabilities::parse_v1(&advertised_capabilities, &limits)
             .map_err(GitDaemonTransportRefusal::Wire)
             .map_err(NodeGitDaemonServeRefusal::from)?;
         let mut writer = DeadlineTcpStream::new(&mut response_stream, deadline);
@@ -4589,8 +4617,9 @@ mod tests {
         ClosureSelectionSource, GitDaemonServeError, GitDaemonSessionOutcome,
         GitDaemonSessionTimeout, GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal,
         NodeInitialization, NodeRefusal, NodeRequestContext, OneNode, admission_immutable_key,
-        authority_head_id, genesis_head, genesis_root, initialize_embedded_repository,
-        parse_git_daemon_request, serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
+        authority_head_id, genesis_head, genesis_root, git_daemon_capabilities,
+        initialize_embedded_repository, parse_git_daemon_request, serve_git_daemon_tcp_once,
+        serve_git_daemon_upload_pack,
     };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -5175,6 +5204,104 @@ mod tests {
         assert_eq!(
             response, expected,
             "the empty V0 advertisement carries Git's zero-identity capability pseudo-ref and no pack"
+        );
+    }
+
+    #[test]
+    fn git_daemon_capabilities_advertise_the_object_format_only_for_sha256() {
+        let limits = WireLimits::default();
+
+        // The permitted twin: SHA-1 keeps the historical bytes exactly. A client
+        // that sees no `object-format` selects Git's SHA-1 default, so a
+        // redundant token would change every existing SHA-1 advertisement for
+        // no compatibility gain.
+        let sha1 = git_daemon_capabilities(GitHashAlgorithm::Sha1);
+        assert_eq!(sha1.as_slice(), b"agent=frankengit-node");
+        assert!(
+            !Capabilities::parse_v1(&sha1, &limits)
+                .expect("the SHA-1 daemon capability list stays wire-valid")
+                .contains(b"object-format"),
+            "SHA-1 must not gain a capability it did not previously advertise",
+        );
+
+        // SHA-256 gains exactly one token, in Git's own spelling, and the bytes
+        // are asserted through the parser the daemon actually feeds them to --
+        // a string comparison alone would not prove they are wire-valid.
+        let sha256 = git_daemon_capabilities(GitHashAlgorithm::Sha256);
+        assert_eq!(
+            sha256.as_slice(),
+            b"agent=frankengit-node object-format=sha256"
+        );
+        let parsed = Capabilities::parse_v1(&sha256, &limits)
+            .expect("the SHA-256 daemon capability list is wire-valid");
+        assert!(
+            parsed.contains(b"object-format"),
+            "without this capability a stock client keeps the SHA-1 default and cannot parse a 64-hex advertisement",
+        );
+        assert!(
+            parsed.contains(b"agent"),
+            "the object-format token must be added to the agent profile, not replace it",
+        );
+    }
+
+    #[test]
+    fn one_node_advertises_object_format_sha256_for_its_empty_sha256_repository() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(
+            test_config(scratch.path().to_path_buf()).with_object_format(GitHashAlgorithm::Sha256),
+        )
+        .expect("node initializes a canonical empty SHA-256 repository");
+        let repository_path = node.git_daemon_repository_path().as_bytes().to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
+        let address = listener
+            .local_addr()
+            .expect("listener reports its bound loopback address");
+        let worker = thread::spawn(move || {
+            let served = node.serve_git_daemon_once_with_limits(&listener, WireLimits::default());
+            let shutdown = node.shutdown();
+            (served, shutdown)
+        });
+
+        let mut client = TcpStream::connect(address).expect("client connects to node listener");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("client read timeout configures");
+        let greeting_payload = [
+            b"git-upload-pack ".as_slice(),
+            repository_path.as_slice(),
+            b"\0host=loopback\0".as_slice(),
+        ]
+        .concat();
+        let greeting = daemon_greeting(&greeting_payload);
+        std::io::Write::write_all(&mut client, &greeting).expect("client greeting writes");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client closes its greeting half");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .expect("empty SHA-256 advertisement reaches EOF");
+
+        let (session_result, shutdown) = worker.join().expect("node server thread joins");
+        shutdown.expect("node drains and shuts down after the one session");
+        let session = session_result.expect("empty canonical SHA-256 admission state serves");
+        assert!(matches!(
+            session,
+            GitDaemonSessionOutcome::EmptyRepository(_)
+        ));
+
+        // The zero identity is 64 hex digits here, not 40, which is precisely
+        // why the capability must be present: without it a stock client keeps
+        // the SHA-1 domain and cannot parse this advertisement.
+        let identity = "0".repeat(GitHashAlgorithm::Sha256.digest_len() * 2);
+        let line =
+            format!("{identity} capabilities^{{}}\0agent=frankengit-node object-format=sha256\n");
+        let mut expected = format!("{:04x}", line.len() + 4).into_bytes();
+        expected.extend_from_slice(line.as_bytes());
+        expected.extend_from_slice(b"0000");
+        assert_eq!(
+            response, expected,
+            "the empty SHA-256 V0 advertisement must carry a 64-zero identity AND the object-format capability that lets a client select the domain",
         );
     }
 
