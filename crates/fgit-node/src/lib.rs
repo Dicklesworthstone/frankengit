@@ -5372,6 +5372,145 @@ mod tests {
         );
     }
 
+    /// Publishes one real ref into a SHA-256 node through the owned import and
+    /// authority APIs, so the non-empty advertisement below is produced by the
+    /// node's own admission path rather than by hand-built state. The object id
+    /// is whatever `put_git_object` derives under the node's configured format,
+    /// which is what makes this a SHA-256 advertisement rather than a fixture
+    /// asserting its own input.
+    fn sha256_node_with_one_published_ref(scratch: &ScratchDirectory) -> (OneNode, String) {
+        let (node, _) = OneNode::init(
+            test_config(scratch.path().to_path_buf()).with_object_format(GitHashAlgorithm::Sha256),
+        )
+        .expect("node initializes a canonical empty SHA-256 repository");
+        let authority_request = node.request_context();
+        let stored = node
+            .put_git_object(
+                ObjectType::Blob,
+                b"fg058 sha256 advertisement subject".to_vec(),
+            )
+            .expect("the node places a verified native object in its configured format");
+        let objects = BTreeSet::from([stored.identity()]);
+        let closure = ValidatedClosure {
+            object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(
+                objects.clone(),
+            ))
+            .expect("the import closure root derives"),
+            objects,
+        };
+        let absent = AnyGitOid::from_hex(GitObjectFormat::Sha256, &"0".repeat(64))
+            .expect("the SHA-256 absent-ref sentinel parses");
+        let updates = [SourceRefUpdate {
+            old: absent,
+            new: stored.identity(),
+            ref_name: b"refs/heads/sha256-main".to_vec(),
+        }];
+        let receipt = SourceImportReceipt {
+            object_format: GitObjectFormat::Sha256,
+            object_count: 1,
+            delete_only: false,
+            origin: SourceImportOrigin::LocalGitDirectory,
+        };
+        let validated = validate_source_import(&updates, &receipt, closure)
+            .expect("a covering SHA-256 source-import closure is admissible");
+        let (context, _, _) = evidence_request(&node);
+        node.runtime()
+            .block_on(node.admit_validated_source_import_durable_in(
+                &authority_request,
+                &context,
+                &validated,
+                AdmissionLimits::default(),
+            ))
+            .expect("the node publishes the SHA-256 source-import RCR");
+        let identity = stored.identity().to_string();
+        (node, identity)
+    }
+
+    /// Serves exactly one git-daemon session and returns the bytes the client
+    /// saw. The session outcome is deliberately not asserted here: a client that
+    /// closes after the greeting leaves a NON-EMPTY negotiation incomplete, and
+    /// these tests are about the advertisement that was already written.
+    fn read_one_daemon_advertisement(node: OneNode, greeting_tail: &[u8]) -> Vec<u8> {
+        let repository_path = node.git_daemon_repository_path().as_bytes().to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
+        let address = listener
+            .local_addr()
+            .expect("listener reports its bound loopback address");
+        let worker = thread::spawn(move || {
+            let served = node.serve_git_daemon_once_with_limits(&listener, WireLimits::default());
+            let shutdown = node.shutdown();
+            (served, shutdown)
+        });
+        let mut client = TcpStream::connect(address).expect("client connects to node listener");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("client read timeout configures");
+        let greeting_payload = [
+            b"git-upload-pack ".as_slice(),
+            repository_path.as_slice(),
+            greeting_tail,
+        ]
+        .concat();
+        let greeting = daemon_greeting(&greeting_payload);
+        std::io::Write::write_all(&mut client, &greeting).expect("client greeting writes");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client closes its greeting half");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .expect("the advertisement reaches EOF");
+        let (_served, shutdown) = worker.join().expect("node server thread joins");
+        shutdown.expect("node drains and shuts down after the one session");
+        response
+    }
+
+    fn packet(payload: &str) -> Vec<u8> {
+        let mut out = format!("{:04x}", payload.len() + 4).into_bytes();
+        out.extend_from_slice(payload.as_bytes());
+        out
+    }
+
+    #[test]
+    fn one_node_advertises_object_format_sha256_for_a_non_empty_sha256_repository() {
+        let scratch = ScratchDirectory::new();
+        let (node, identity) = sha256_node_with_one_published_ref(&scratch);
+        assert_eq!(
+            identity.len(),
+            GitHashAlgorithm::Sha256.digest_len() * 2,
+            "the published ref must carry a 64-hex SHA-256 identity, which is the whole reason a client needs the capability",
+        );
+
+        let response = read_one_daemon_advertisement(node, b"\0host=loopback\0");
+
+        let mut expected = packet(&format!(
+            "{identity} refs/heads/sha256-main\0agent=frankengit-node object-format=sha256\n"
+        ));
+        expected.extend_from_slice(b"0000");
+        assert_eq!(
+            response, expected,
+            "a non-empty SHA-256 v0 advertisement must carry the real 64-hex ref AND object-format=sha256",
+        );
+    }
+
+    #[test]
+    fn one_node_advertises_object_format_sha256_for_a_non_empty_repository_on_protocol_v1() {
+        let scratch = ScratchDirectory::new();
+        let (node, identity) = sha256_node_with_one_published_ref(&scratch);
+
+        let response = read_one_daemon_advertisement(node, b"\0host=loopback\0version=1\0");
+
+        let mut expected = packet("version 1\n");
+        expected.extend_from_slice(&packet(&format!(
+            "{identity} refs/heads/sha256-main\0agent=frankengit-node object-format=sha256\n"
+        )));
+        expected.extend_from_slice(b"0000");
+        assert_eq!(
+            response, expected,
+            "protocol v1 on a non-empty SHA-256 repository must carry its prelude, the real ref, and object-format=sha256",
+        );
+    }
+
     #[test]
     fn one_node_refuses_a_different_daemon_path_before_authority_materialization() {
         let scratch = ScratchDirectory::new();
