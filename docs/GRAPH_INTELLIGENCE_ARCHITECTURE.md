@@ -52,6 +52,7 @@ Every graph view publishes immutable generations:
 struct GraphGenerationBody {
     graph_view_id: GraphViewId,
     schema_id: GraphSchemaId,
+    authority_class: GraphAuthorityClass,
     source_rcr_id: RepositoryCommitId,
     source_forge_position_root: Digest,
     builder_profile: BuilderProfileId,

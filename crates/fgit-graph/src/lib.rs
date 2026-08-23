@@ -18,6 +18,7 @@ pub use crate::algorithms::{
     GraphViewPolicy, MinimumCut, Reachability, StronglyConnectedComponents, TopologicalOrder,
 };
 pub use crate::generation::{
-    BuilderProfileId, GenerationActivation, GenerationAuthority, GenerationAuthorityError,
-    GraphGenerationBody, GraphGenerationId, GraphSchemaId, GraphSourceStamp, GraphViewId,
+    BuilderProfileId, ExactGraphGeneration, GenerationActivation, GenerationAuthority,
+    GenerationAuthorityError, GraphAuthorityClass, GraphAuthorityClassRefusal, GraphGenerationBody,
+    GraphGenerationId, GraphSchemaId, GraphSourceStamp, GraphViewId,
 };

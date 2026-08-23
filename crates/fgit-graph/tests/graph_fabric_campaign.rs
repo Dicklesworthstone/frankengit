@@ -15,9 +15,10 @@ use fgit_crypto::{
 };
 use fgit_graph::{
     ArticulationBridgeReport, BipartiteMatching, BuilderProfileId, CriticalPath,
-    DeterministicGraph, GenerationAuthority, GenerationAuthorityError, GraphDecision, GraphEdge,
-    GraphGenerationBody, GraphGenerationId, GraphLimits, GraphNodeId, GraphQuery, GraphRefusal,
-    GraphResult, GraphSourceStamp, GraphViewId, GraphViewPolicy, MinimumCut, Reachability,
+    DeterministicGraph, ExactGraphGeneration, GenerationAuthority, GenerationAuthorityError,
+    GraphAuthorityClass, GraphAuthorityClassRefusal, GraphDecision, GraphEdge, GraphGenerationBody,
+    GraphGenerationId, GraphLimits, GraphNodeId, GraphQuery, GraphRefusal, GraphResult,
+    GraphSourceStamp, GraphViewId, GraphViewPolicy, MinimumCut, Reachability,
     StronglyConnectedComponents, TopologicalOrder,
 };
 use fgit_types::{CodecVersion, Digest, RepositoryCommitId, SchemaFamily, SchemaId};
@@ -63,10 +64,15 @@ fn source() -> GraphSourceStamp {
     }
 }
 
-fn generation_body(label: &[u8], predecessor: Option<GraphGenerationId>) -> GraphGenerationBody {
+fn generation_body_with_class(
+    label: &[u8],
+    authority_class: GraphAuthorityClass,
+    predecessor: Option<GraphGenerationId>,
+) -> GraphGenerationBody {
     GraphGenerationBody::new(
         GraphViewId::try_new(b"commit-ancestry").expect("static graph view is canonical"),
         SchemaId::new(SchemaFamily::from_static("fg031b-graph-schema"), 1, 0),
+        authority_class,
         source(),
         labeled_digest(b"vertices-", label),
         labeled_digest(b"edges-", label),
@@ -74,6 +80,52 @@ fn generation_body(label: &[u8], predecessor: Option<GraphGenerationId>) -> Grap
         labeled_digest(b"evidence-", label),
         predecessor,
     )
+}
+
+fn generation_body(label: &[u8], predecessor: Option<GraphGenerationId>) -> GraphGenerationBody {
+    generation_body_with_class(label, GraphAuthorityClass::Exact, predecessor)
+}
+
+fn accepts_exact_generation(_: ExactGraphGeneration<'_>) {}
+
+#[test]
+fn authority_class_is_canonical_and_exact_call_sites_refuse_non_exact_generations() {
+    let exact = generation_body_with_class(b"class", GraphAuthorityClass::Exact, None);
+    let deterministic =
+        generation_body_with_class(b"class", GraphAuthorityClass::DeterministicDerived, None);
+    let statistical = generation_body_with_class(b"class", GraphAuthorityClass::Statistical, None);
+
+    assert_ne!(
+        exact.generation_id().expect("exact class has an identity"),
+        deterministic
+            .generation_id()
+            .expect("derived class has an identity")
+    );
+    assert_ne!(
+        exact.generation_id().expect("exact class has an identity"),
+        statistical
+            .generation_id()
+            .expect("statistical class has an identity")
+    );
+
+    let exact_proof = exact.require_exact().expect("exact class is accepted");
+    assert_eq!(
+        exact_proof.body().authority_class(),
+        GraphAuthorityClass::Exact
+    );
+    accepts_exact_generation(exact_proof);
+    assert_eq!(
+        deterministic.require_exact(),
+        Err(GraphAuthorityClassRefusal::ExactRequired {
+            observed: GraphAuthorityClass::DeterministicDerived,
+        })
+    );
+    assert_eq!(
+        statistical.require_exact(),
+        Err(GraphAuthorityClassRefusal::ExactRequired {
+            observed: GraphAuthorityClass::Statistical,
+        })
+    );
 }
 
 fn query(generation_id: GraphGenerationId, policy: GraphViewPolicy) -> GraphQuery {

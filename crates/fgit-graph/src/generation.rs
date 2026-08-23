@@ -19,6 +19,72 @@ pub type GraphGenerationId = GenerationId;
 /// The schema selected for a graph view.
 pub type GraphSchemaId = SchemaId;
 
+/// The authority semantics of one immutable graph generation.
+///
+/// The class is identity material: an exact generation cannot be silently
+/// reinterpreted as a deterministic-derived or statistical one (or vice
+/// versa) after it has been activated.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum GraphAuthorityClass {
+    /// Derived directly from canonical source records and eligible only for
+    /// exact verification paths.
+    Exact,
+    /// Reproducible from canonical inputs under a pinned parser or
+    /// normalization profile, but not itself canonical source truth.
+    DeterministicDerived,
+    /// Inferred or probabilistic graph material, which remains advisory.
+    Statistical,
+}
+
+impl GraphAuthorityClass {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Exact => 0,
+            Self::DeterministicDerived => 1,
+            Self::Statistical => 2,
+        }
+    }
+
+    fn from_tag(tag: u8, offset: u64) -> Result<Self, CodecRefusal> {
+        match tag {
+            0 => Ok(Self::Exact),
+            1 => Ok(Self::DeterministicDerived),
+            2 => Ok(Self::Statistical),
+            observed => Err(CodecRefusal::VariantUnknown {
+                field: "graph_generation.authority_class",
+                observed: u32::from(observed),
+                offset,
+            }),
+        }
+    }
+}
+
+/// Why a caller requiring exact graph material was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphAuthorityClassRefusal {
+    /// A deterministic-derived or statistical generation cannot stand in for
+    /// exact graph material.
+    ExactRequired { observed: GraphAuthorityClass },
+}
+
+/// Proof that a borrowed graph generation is classified as exact.
+///
+/// Only [`GraphGenerationBody::require_exact`] can construct this token, so
+/// APIs that require exact graph material can take it directly instead of
+/// trusting a caller-supplied boolean or documentation claim.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExactGraphGeneration<'a> {
+    body: &'a GraphGenerationBody,
+}
+
+impl<'a> ExactGraphGeneration<'a> {
+    /// The exact immutable generation body admitted by the checked boundary.
+    #[must_use]
+    pub const fn body(self) -> &'a GraphGenerationBody {
+        self.body
+    }
+}
+
 /// A bounded identifier for the graph view a generation serves.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GraphViewId(AsciiSlug);
@@ -75,6 +141,7 @@ pub struct GraphSourceStamp {
 pub struct GraphGenerationBody {
     graph_view_id: GraphViewId,
     schema_id: GraphSchemaId,
+    authority_class: GraphAuthorityClass,
     source: GraphSourceStamp,
     vertices_root: Digest,
     edges_root: Digest,
@@ -89,6 +156,7 @@ impl GraphGenerationBody {
     pub const fn new(
         graph_view_id: GraphViewId,
         schema_id: GraphSchemaId,
+        authority_class: GraphAuthorityClass,
         source: GraphSourceStamp,
         vertices_root: Digest,
         edges_root: Digest,
@@ -99,6 +167,7 @@ impl GraphGenerationBody {
         Self {
             graph_view_id,
             schema_id,
+            authority_class,
             source,
             vertices_root,
             edges_root,
@@ -118,6 +187,26 @@ impl GraphGenerationBody {
     #[must_use]
     pub const fn graph_schema_id(&self) -> GraphSchemaId {
         self.schema_id
+    }
+
+    /// The distinct authority semantics bound into this generation's identity.
+    #[must_use]
+    pub const fn authority_class(&self) -> GraphAuthorityClass {
+        self.authority_class
+    }
+
+    /// Produces the exact-only proof required by exact graph call sites.
+    ///
+    /// Deterministic-derived and statistical generations remain useful for
+    /// their declared advisory or derived consumers, but cannot be promoted
+    /// through this boundary.
+    pub const fn require_exact(
+        &self,
+    ) -> Result<ExactGraphGeneration<'_>, GraphAuthorityClassRefusal> {
+        match self.authority_class {
+            GraphAuthorityClass::Exact => Ok(ExactGraphGeneration { body: self }),
+            observed => Err(GraphAuthorityClassRefusal::ExactRequired { observed }),
+        }
     }
 
     /// The canonical source position and builder profile.
@@ -143,11 +232,12 @@ impl CanonicalBody for GraphGenerationBody {
     const DOMAIN: fgit_types::DomainTag = GraphGenerationId::DOMAIN_TAG;
     const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("graph-generation");
     const SCHEMA_MAJOR: u16 = 1;
-    const SCHEMA_MINOR: u16 = 0;
+    const SCHEMA_MINOR: u16 = 1;
 
     fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         out.write_bytes("graph_generation.view", self.graph_view_id.as_bytes())?;
         out.write_schema_id(self.schema_id)?;
+        out.write_scalar(self.authority_class.tag());
         out.write_internal_object_id(self.source.source_rcr_id.as_internal_object_id())?;
         out.write_digest(&self.source.source_forge_position_root)?;
         out.write_bytes(
@@ -170,6 +260,11 @@ impl CanonicalBody for GraphGenerationBody {
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
         let graph_view_id = GraphViewId::try_new(input.read_bytes("graph_generation.view")?)?;
         let schema_id = input.read_schema_id()?;
+        let authority_class_offset = input.offset();
+        let authority_class = GraphAuthorityClass::from_tag(
+            input.read_scalar::<u8>("graph_generation.authority_class")?,
+            authority_class_offset,
+        )?;
         let source_rcr_id =
             RepositoryCommitId::from_internal_object_id(input.read_internal_object_id()?)?;
         let source_forge_position_root = input.read_digest()?;
@@ -189,6 +284,7 @@ impl CanonicalBody for GraphGenerationBody {
         Ok(Self::new(
             graph_view_id,
             schema_id,
+            authority_class,
             GraphSourceStamp {
                 source_rcr_id,
                 source_forge_position_root,
@@ -382,7 +478,7 @@ fn immutable_generation_key(
 #[cfg(test)]
 mod tests {
     use fgit_authority::{HeadKey, MemoryAuthorityStore, StoreInstanceId};
-    use fgit_codec::{DecodeLimits, decode_body, encode_body};
+    use fgit_codec::{CodecRefusal, DecodeLimits, decode_body, encode_body};
     use fgit_crypto::{
         IdentityDomain, internal_algorithm_id, internal_digest_value, internal_object_id,
     };
@@ -391,8 +487,9 @@ mod tests {
     };
 
     use super::{
-        BuilderProfileId, GenerationAuthority, GenerationAuthorityError, GraphGenerationBody,
-        GraphGenerationId, GraphSourceStamp, GraphViewId,
+        BuilderProfileId, ExactGraphGeneration, GenerationAuthority, GenerationAuthorityError,
+        GraphAuthorityClass, GraphAuthorityClassRefusal, GraphGenerationBody, GraphGenerationId,
+        GraphSourceStamp, GraphViewId,
     };
 
     fn digest(label: &[u8]) -> Digest {
@@ -421,10 +518,14 @@ mod tests {
         }
     }
 
-    fn generation(predecessor: Option<GraphGenerationId>) -> GraphGenerationBody {
+    fn generation_with_class(
+        authority_class: GraphAuthorityClass,
+        predecessor: Option<GraphGenerationId>,
+    ) -> GraphGenerationBody {
         GraphGenerationBody::new(
             GraphViewId::try_new(b"commit-ancestry").expect("static graph view is canonical"),
             SchemaId::new(SchemaFamily::from_static("graph-test"), 1, 0),
+            authority_class,
             source(),
             digest(b"vertices"),
             digest(b"edges"),
@@ -433,6 +534,12 @@ mod tests {
             predecessor,
         )
     }
+
+    fn generation(predecessor: Option<GraphGenerationId>) -> GraphGenerationBody {
+        generation_with_class(GraphAuthorityClass::Exact, predecessor)
+    }
+
+    fn accepts_exact_generation(_: ExactGraphGeneration<'_>) {}
 
     #[test]
     fn activation_stages_immutable_generation_then_requires_the_exact_predecessor() {
@@ -480,6 +587,58 @@ mod tests {
                 .generation_id()
                 .expect("registered generation identity"),
             id
+        );
+        assert_eq!(decoded.authority_class(), GraphAuthorityClass::Exact);
+    }
+
+    #[test]
+    fn authority_class_is_identity_material_and_exact_callers_refuse_other_classes() {
+        let exact = generation_with_class(GraphAuthorityClass::Exact, None);
+        let deterministic = generation_with_class(GraphAuthorityClass::DeterministicDerived, None);
+        let statistical = generation_with_class(GraphAuthorityClass::Statistical, None);
+
+        assert_ne!(
+            exact.generation_id().expect("exact identity is registered"),
+            deterministic
+                .generation_id()
+                .expect("derived identity is registered")
+        );
+        assert_ne!(
+            exact.generation_id().expect("exact identity is registered"),
+            statistical
+                .generation_id()
+                .expect("statistical identity is registered")
+        );
+
+        let exact_proof = exact.require_exact().expect("exact class is admitted");
+        assert_eq!(
+            exact_proof.body().authority_class(),
+            GraphAuthorityClass::Exact
+        );
+        accepts_exact_generation(exact_proof);
+        assert_eq!(
+            deterministic.require_exact(),
+            Err(GraphAuthorityClassRefusal::ExactRequired {
+                observed: GraphAuthorityClass::DeterministicDerived,
+            })
+        );
+        assert_eq!(
+            statistical.require_exact(),
+            Err(GraphAuthorityClassRefusal::ExactRequired {
+                observed: GraphAuthorityClass::Statistical,
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_authority_class_wire_tag_is_refused() {
+        assert_eq!(
+            GraphAuthorityClass::from_tag(3, 41),
+            Err(CodecRefusal::VariantUnknown {
+                field: "graph_generation.authority_class",
+                observed: 3,
+                offset: 41,
+            })
         );
     }
 }
