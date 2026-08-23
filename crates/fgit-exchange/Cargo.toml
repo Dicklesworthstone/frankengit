@@ -1,0 +1,18 @@
+[package]
+name = "fgit-exchange"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+description = "Signed, policy-bound import of foreign immutable evidence"
+
+[dependencies]
+fgit-claim.workspace = true
+fgit-codec.workspace = true
+fgit-crypto.workspace = true
+fgit-evidence.workspace = true
+fgit-types.workspace = true
+
+[lints]
+workspace = true

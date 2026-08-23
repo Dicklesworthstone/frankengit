@@ -762,6 +762,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-exchange"
+version = "0.0.1"
+dependencies = [
+ "fgit-claim",
+ "fgit-codec",
+ "fgit-crypto",
+ "fgit-evidence",
+ "fgit-types",
+]
+
+[[package]]
 name = "fgit-git-object"
 version = "0.1.0"
 dependencies = [
