@@ -49,6 +49,7 @@ pub mod overlay;
 pub mod path;
 pub mod proposal;
 pub mod snapshot;
+pub mod sparse;
 
 pub use archive::{
     ArchiveCompleteness, ArchiveProfile, ArchiveReceipt, ArchiveRefusal, ArchiveVerification,
@@ -81,4 +82,8 @@ pub use proposal::{
 pub use snapshot::{
     AntiRollbackRefusal, EpochRefusal, EpochSet, OverlayRoot, SessionRecord, WorkspaceEpoch,
     WorkspaceSnapshotBody,
+};
+pub use sparse::{
+    SparseCompleteness, SparseEntry, SparseEntryKind, SparseLimits, SparseManifest, SparseProfile,
+    SparseReceipt, SparseRefusal, SparseVerification,
 };
