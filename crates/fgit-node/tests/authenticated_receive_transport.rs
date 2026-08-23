@@ -68,9 +68,10 @@ fn decode_hex(text: &str) -> Vec<u8> {
         .bytes()
         .filter(|byte| !byte.is_ascii_whitespace())
         .collect::<Vec<_>>();
-    assert_eq!(compact.len() % 2, 0, "fixed fixture has whole hex bytes");
-    compact
-        .chunks_exact(2)
+    let (pairs, remainder) = compact.as_chunks::<2>();
+    assert!(remainder.is_empty(), "fixed fixture has whole hex bytes");
+    pairs
+        .iter()
         .map(|pair| (digit(pair[0]) * 16) + digit(pair[1]))
         .collect()
 }

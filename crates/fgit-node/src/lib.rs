@@ -2336,7 +2336,7 @@ pub struct AuthenticatedReceiveSession {
 impl AuthenticatedReceiveSession {
     /// Forms an authenticated receive session from authority-bound identity.
     #[must_use]
-    pub fn new(principal_id: PrincipalId, client_idempotency_key: IdempotencyKey) -> Self {
+    pub const fn new(principal_id: PrincipalId, client_idempotency_key: IdempotencyKey) -> Self {
         Self {
             principal_id,
             client_idempotency_key,
@@ -2371,7 +2371,7 @@ pub enum LoopbackReceiveSession {
 impl LoopbackReceiveSession {
     /// Creates an authenticated loopback session from caller-authenticated data.
     #[must_use]
-    pub fn authenticated(
+    pub const fn authenticated(
         principal_id: PrincipalId,
         client_idempotency_key: IdempotencyKey,
     ) -> Self {
@@ -2387,7 +2387,7 @@ impl LoopbackReceiveSession {
         Self::Anonymous
     }
 
-    fn authenticated_session(&self) -> Option<&AuthenticatedReceiveSession> {
+    const fn authenticated_session(&self) -> Option<&AuthenticatedReceiveSession> {
         match self {
             Self::Authenticated(session) => Some(session),
             Self::Anonymous => None,
