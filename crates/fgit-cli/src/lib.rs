@@ -234,8 +234,10 @@ impl Error for CliRefusal {
             Self::DoctorCleanup { inspection, .. } => Some(inspection),
             Self::ServeCleanup { serving, .. } => Some(serving),
             Self::ExportCleanup { export, .. } => Some(export.as_ref()),
-            Self::Usage | Self::ExportDestination | Self::ExportDestinationExists(_) => None,
-            Self::ImportRefused(_) => None,
+            Self::Usage
+            | Self::ExportDestination
+            | Self::ExportDestinationExists(_)
+            | Self::ImportRefused(_) => None,
         }
     }
 }
