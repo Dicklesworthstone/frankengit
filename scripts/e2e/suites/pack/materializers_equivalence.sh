@@ -13,12 +13,13 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 readonly PACK_ROOT="$E2E_ROOT/../../crates/fgit-pack"
+readonly TREEFS_ROOT="$E2E_ROOT/../../crates/fgit-treefs"
 
 fge_init fg052-materializers-equivalence
 fge_context bead frankengit-fg052-materializers-gy4
 fge_context evidence_class E1
-fge_context materializers 'commit-graph-v1,pack-bitmap-v1,midx-v1,bundle-uri-v1'
-fge_context non_claim 'this lane establishes in-repository exact-computation equivalence only; it does not establish pinned-Git parser acceptance, archive/FUSE behaviour, or authority freshness'
+fge_context materializers 'commit-graph-v1,pack-bitmap-v1,midx-v1,bundle-uri-v1,ustar-v1,zip-store-v1,sparse-manifest-v1'
+fge_context non_claim 'this lane establishes bounded in-repository materializer behavior only; it does not establish pinned-Git parser acceptance, a FUSE host adapter, or authority freshness'
 
 fge_phase setup
 fge_assert_file FG-052-E2E-001 "$PACK_ROOT/tests/commit_graph.rs" \
@@ -35,9 +36,13 @@ fge_assert_cmd FG-052-E2E-005 \
 fge_assert_cmd FG-052-E2E-006 \
   'the commit-walk comparison retains an independent exact side' \
   grep -q exact_parents "$PACK_ROOT/tests/commit_graph.rs"
+fge_assert_file FG-052-E2E-007 "$TREEFS_ROOT/tests/archive.rs" \
+  'the deterministic USTAR and ZIP path-safety corpus is checked in'
+fge_assert_file FG-052-E2E-008 "$TREEFS_ROOT/tests/sparse.rs" \
+  'the capability-checked sparse-manifest corpus is checked in'
 
 fge_phase action
-materializers_exit=0
+pack_materializers_exit=0
 fge_run FG-052-E2E-010-run \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
   cargo test --locked -p fgit-pack \
@@ -45,8 +50,17 @@ fge_run FG-052-E2E-010-run \
     --test bitmap \
     --test midx \
     --test bundle_uri \
-  || materializers_exit=$?
+  || pack_materializers_exit=$?
+treefs_materializers_exit=0
+fge_run FG-052-E2E-011-run \
+  env RCH_CARGO_WRAPPER_BYPASS=1 \
+  cargo test --locked -p fgit-treefs \
+    --test archive \
+    --test sparse \
+  || treefs_materializers_exit=$?
 
 fge_phase assert
-fge_assert_exit FG-052-E2E-010 0 "$materializers_exit" \
-  'every materializer corpus agrees with its named exact computation and refusal controls'
+fge_assert_exit FG-052-E2E-010 0 "$pack_materializers_exit" \
+  'every pack materializer corpus agrees with its named exact computation and refusal controls'
+fge_assert_exit FG-052-E2E-011 0 "$treefs_materializers_exit" \
+  'archive determinism/path-safety and sparse-manifest corpora retain their bounded guarantees'
