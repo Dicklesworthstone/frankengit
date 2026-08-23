@@ -275,7 +275,7 @@ impl RedactionNeedle {
     }
 }
 
-/// Immutable receipt that proves the committed log was redacted first.
+/// Immutable record of the substrate's log-redaction accounting.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct LogRedactionReceipt {
     log_root: Commitment,
