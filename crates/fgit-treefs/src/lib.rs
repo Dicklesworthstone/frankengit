@@ -37,6 +37,7 @@
 //! * Discovery is not authorisation, and a capability can only ever be
 //!   narrowed.
 
+pub mod archive;
 pub mod base;
 pub mod capability;
 pub mod export;
@@ -49,6 +50,7 @@ pub mod path;
 pub mod proposal;
 pub mod snapshot;
 
+pub use archive::{ArchiveProfile, ArchiveReceipt, ArchiveRefusal, TarLimits, UstarArchive};
 pub use base::{BaseEntry, BaseError, BaseView, DirectoryListing, ObjectSource, ObjectSourceError};
 pub use capability::{
     CapabilityRefusal, GrantScope, ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId,
