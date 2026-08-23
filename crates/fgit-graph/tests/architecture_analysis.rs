@@ -12,7 +12,7 @@ use fgit_graph::{
 };
 use fgit_types::{CodecVersion, Digest, RepositoryCommitId, SchemaFamily, SchemaId};
 
-fn node(value: u64) -> GraphNodeId {
+const fn node(value: u64) -> GraphNodeId {
     GraphNodeId::new(value)
 }
 
@@ -59,7 +59,7 @@ fn snapshot(label: &[u8], nodes: &[GraphNodeId], edges: &[GraphEdge]) -> fgit_gr
         .expect("bounded graph fixture")
 }
 
-fn analysis<'a>(snapshot: &'a fgit_graph::GraphSnapshot) -> ArchitectureAnalysis<'a> {
+fn analysis(snapshot: &fgit_graph::GraphSnapshot) -> ArchitectureAnalysis<'_> {
     ArchitectureAnalysis::try_new(snapshot, ArchitectureLimits::default())
         .expect("bounded architecture analysis")
 }
@@ -246,8 +246,8 @@ fn receipt_bound_temporal_join_produces_structural_drift() {
         drift.value.added_edges,
         vec![GraphEdge::new(node(2), node(3), 1)]
     );
-    assert!(drift.value.removed_nodes.is_empty());
-    assert!(drift.value.removed_edges.is_empty());
+    assert_eq!(drift.value.removed_nodes, Vec::<GraphNodeId>::new());
+    assert_eq!(drift.value.removed_edges, Vec::<GraphEdge>::new());
     assert_eq!(
         drift.authority_fence(),
         ArchitectureAdvisoryFence::AdvisoryOnly

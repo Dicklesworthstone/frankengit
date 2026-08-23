@@ -276,10 +276,10 @@ impl<'a> ArchitectureAnalysis<'a> {
                 .enumerate()
                 .filter_map(|(index, edge)| ((mask & (1_u64 << index)) == 0).then_some(*edge))
                 .collect();
-            if !has_directed_cycle(self.snapshot.graph().nodes(), &retained) {
-                if selected.as_ref().is_none_or(|best| removed < *best) {
-                    selected = Some(removed);
-                }
+            if !has_directed_cycle(self.snapshot.graph().nodes(), &retained)
+                && selected.as_ref().is_none_or(|best| removed < *best)
+            {
+                selected = Some(removed);
             }
         }
         let removed_edges = selected.ok_or(ArchitectureRefusal::ArithmeticOverflow)?;
@@ -321,7 +321,7 @@ impl<'a> ArchitectureAnalysis<'a> {
             if has_path_excluding(graph.edges(), edge.from, edge.to, index) {
                 redundant_edges.push(edge);
                 trace.write_raw_byte(1);
-                encode_edge(&mut trace, edge)?;
+                encode_edge(&mut trace, edge);
             } else {
                 retained_edges.push(edge);
             }
@@ -375,12 +375,11 @@ impl<'a> ArchitectureAnalysis<'a> {
             remaining.remove(&node);
             cores.insert(node, degree);
             for neighbor in neighbors.get(&node).into_iter().flatten() {
-                if remaining.contains(neighbor) {
-                    if let Some(current) = degrees.get(neighbor).copied() {
-                        if current > degree {
-                            degrees.insert(*neighbor, current - 1);
-                        }
-                    }
+                if remaining.contains(neighbor)
+                    && let Some(current) = degrees.get(neighbor).copied()
+                    && current > degree
+                {
+                    degrees.insert(*neighbor, current - 1);
                 }
             }
         }
@@ -516,7 +515,7 @@ impl<'a> ArchitectureAnalysis<'a> {
         )
     }
 
-    fn require_directed(
+    const fn require_directed(
         &self,
         algorithm: ArchitectureAlgorithm,
     ) -> Result<(), ArchitectureRefusal> {
@@ -720,11 +719,10 @@ fn encode_nodes(
     })
 }
 
-fn encode_edge(out: &mut Encoder, edge: GraphEdge) -> Result<(), CodecRefusal> {
+fn encode_edge(out: &mut Encoder, edge: GraphEdge) {
     out.write_scalar(edge.from.get());
     out.write_scalar(edge.to.get());
     out.write_scalar(edge.capacity);
-    Ok(())
 }
 
 fn encode_edges(
@@ -732,7 +730,10 @@ fn encode_edges(
     field: &'static str,
     edges: &[GraphEdge],
 ) -> Result<(), CodecRefusal> {
-    out.write_sequence(field, edges, |out, edge| encode_edge(out, *edge))
+    out.write_sequence(field, edges, |out, edge| {
+        encode_edge(out, *edge);
+        Ok(())
+    })
 }
 
 fn encode_components(
