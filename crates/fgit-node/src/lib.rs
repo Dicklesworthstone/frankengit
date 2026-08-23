@@ -23,9 +23,9 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use fgit_admission::evidence::{
-    DecisionEvidenceBodies, ForgeEventBatch, InvariantEvidence, OutboxEffectBatch,
-    PolicyDecisionEvidence, PrincipalSnapshot, RetentionDelta, evidence_root,
-    principal_snapshot_id,
+    DURABLE_REFUSAL_EVIDENCE_DETAIL, DecisionEvidenceBodies, ForgeEventBatch, InvariantEvidence,
+    OutboxEffectBatch, PolicyDecisionEvidence, PrincipalSnapshot, RefusalEvidenceBodies,
+    RetentionDelta, evidence_root, principal_snapshot_id,
 };
 use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionResult,
@@ -92,6 +92,7 @@ const ADMISSION_REF_STATE_KEY_PREFIX: &[u8] = b"frankengit/admission/ref-state/v
 const ADMISSION_CLOSURE_KEY_PREFIX: &[u8] = b"frankengit/admission/object-closure/v1/";
 const ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX: &[u8] =
     b"frankengit/admission/principal-snapshot/v1/";
+const ADMISSION_REFUSAL_EVIDENCE_KEY_PREFIX: &[u8] = b"frankengit/admission/refusal-evidence/v1/";
 const ADMISSION_POLICY_DECISION_KEY_PREFIX: &[u8] = b"frankengit/admission/policy-decision/v1/";
 const ADMISSION_INVARIANT_EVIDENCE_KEY_PREFIX: &[u8] =
     b"frankengit/admission/invariant-evidence/v1/";
@@ -416,7 +417,9 @@ impl AdmissionEvidence for DurableAdmissionEvidence {
         _tx_id: TxId,
         _code: RefusalCode,
     ) -> Result<RefusalMaterialization, RefusalCode> {
-        Err(RefusalCode::EvidenceMissing)
+        // This provider proves a committing record only. A refusal requires
+        // authority-backed staging and is produced by DurableAsyncAdmissionProjection.
+        Err(RefusalCode::DurabilityProfileUnavailable)
     }
 }
 
@@ -839,6 +842,47 @@ impl DurableAdmissionMaterializer {
         Ok(provider)
     }
 
+    /// Derives and stages the immutable evidence body quoted by one terminal
+    /// refusal record.
+    ///
+    /// A refusal has no committing decision provider to carry its root.  Its
+    /// principal snapshot and refusal witness are therefore staged here from
+    /// the exact authenticated basis, transaction identity, and evaluated
+    /// refusal code before the async admission driver can publish the record.
+    pub async fn stage_refusal_evidence_in<Authority, IsCancelled>(
+        &self,
+        authority: &Authority,
+        cx: &Authority::Context,
+        context: &AdmissionContext,
+        basis: &PublicationBasis,
+        tx_id: TxId,
+        code: RefusalCode,
+        is_cancelled: &IsCancelled,
+    ) -> Result<RefusalMaterialization, AdmissionMaterializationRefusal>
+    where
+        Authority: AsyncAuthorityStore + ?Sized,
+        IsCancelled: Fn() -> bool + Sync,
+    {
+        if context.repository_id != basis.body().repository_id {
+            return Err(AdmissionMaterializationRefusal::RepositoryMismatch {
+                expected: context.repository_id,
+                observed: basis.body().repository_id,
+            });
+        }
+        ensure_materializer_catch_up_live(is_cancelled)?;
+        let bodies = RefusalEvidenceBodies::derive(context, basis, tx_id, code)
+            .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
+        self.stage_refusal_evidence_bodies_in(authority, cx, &bodies, is_cancelled)
+            .await?;
+        ensure_materializer_catch_up_live(is_cancelled)?;
+        Ok(RefusalMaterialization {
+            policy_epoch: basis.body().policy_epoch,
+            detail: DURABLE_REFUSAL_EVIDENCE_DETAIL.to_owned(),
+            evidence_root: evidence_root(bodies.refusal_evidence())
+                .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?,
+        })
+    }
+
     /// Reads every named evidence body from immutable authority storage,
     /// verifies its content root, and rebuilds the provider only if those
     /// decoded bodies are exactly the bodies the supplied decision requires.
@@ -1025,6 +1069,38 @@ impl DurableAdmissionMaterializer {
             repository_id,
             ADMISSION_RETENTION_DELTA_KEY_PREFIX,
             bodies.retention_delta(),
+            is_cancelled,
+        )
+        .await
+    }
+
+    async fn stage_refusal_evidence_bodies_in<Authority, IsCancelled>(
+        &self,
+        authority: &Authority,
+        cx: &Authority::Context,
+        bodies: &RefusalEvidenceBodies,
+        is_cancelled: &IsCancelled,
+    ) -> Result<(), AdmissionMaterializationRefusal>
+    where
+        Authority: AsyncAuthorityStore + ?Sized,
+        IsCancelled: Fn() -> bool + Sync,
+    {
+        let repository_id = bodies.principal_snapshot().repository_id();
+        stage_evidence_body_in(
+            authority,
+            cx,
+            repository_id,
+            ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
+            bodies.principal_snapshot(),
+            is_cancelled,
+        )
+        .await?;
+        stage_evidence_body_in(
+            authority,
+            cx,
+            repository_id,
+            ADMISSION_REFUSAL_EVIDENCE_KEY_PREFIX,
+            bodies.refusal_evidence(),
             is_cancelled,
         )
         .await
@@ -1477,41 +1553,32 @@ struct AsyncMaterializedBasis {
 /// by the async driver, then the matching materialization stages successor
 /// bodies before `fgit-admission` can attempt the authority-head CAS.
 ///
-/// `Evidence` is supplied by the evidence-owning integration. A provider that
-/// cannot derive a required root returns an unavailable error and this adapter
-/// publishes nothing; this type does not mint placeholder evidence.
+/// The node owns the authenticated admission context.  It derives a committing
+/// provider only after the driver supplies the exact fold and stages refusal
+/// evidence directly through authority; it never accepts caller-minted roots.
 #[derive(Debug)]
-pub struct DurableAsyncAdmissionProjection<'materializer, 'evidence, Evidence> {
+pub struct DurableAsyncAdmissionProjection<'materializer> {
     materializer: &'materializer DurableAdmissionMaterializer,
-    repository_id: RepositoryId,
-    evidence: &'evidence Evidence,
+    context: AdmissionContext,
     prepared: Mutex<Option<AsyncMaterializedBasis>>,
 }
 
-impl<'materializer, 'evidence, Evidence>
-    DurableAsyncAdmissionProjection<'materializer, 'evidence, Evidence>
-{
-    /// Connects the node's durable frame materializer to an evidence owner.
+impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
+    /// Connects the durable frame materializer to one node-owned admission context.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         materializer: &'materializer DurableAdmissionMaterializer,
-        repository_id: RepositoryId,
-        evidence: &'evidence Evidence,
+        context: AdmissionContext,
     ) -> Self {
         Self {
             materializer,
-            repository_id,
-            evidence,
+            context,
             prepared: Mutex::new(None),
         }
     }
 }
 
-impl<Evidence> AsyncAdmissionProjection<FsqliteAuthorityStore>
-    for DurableAsyncAdmissionProjection<'_, '_, Evidence>
-where
-    Evidence: AdmissionEvidence + Sync,
-{
+impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionProjection<'_> {
     #[expect(
         clippy::manual_async_fn,
         reason = "the explicit + Send future is the cross-thread async projection contract"
@@ -1531,7 +1598,7 @@ where
                 .materialize_exact_in(
                     authority,
                     &catch_up,
-                    self.repository_id,
+                    self.context.repository_id,
                     basis,
                     authenticated,
                     &is_cancelled,
@@ -1579,8 +1646,22 @@ where
                     RefusalCode::AuthorityReceiptStale,
                 ));
             }
-            let evidence = self
-                .evidence
+            let stage_context = cx.create_child();
+            let is_cancelled = || stage_context.checkpoint().is_err();
+            let provider = self
+                .materializer
+                .stage_decision_evidence_in(
+                    authority,
+                    &stage_context,
+                    self.context.clone(),
+                    basis,
+                    request,
+                    fold,
+                    &is_cancelled,
+                )
+                .await
+                .map_err(async_projection_unavailable)?;
+            let evidence = provider
                 .commit_evidence(basis, request, fold)
                 .map_err(AsyncProjectionFailure::Unavailable)?;
             let prepared = prepare_canonical_commit(
@@ -1597,7 +1678,7 @@ where
                 .stage_ref_state_in(
                     authority,
                     cx,
-                    self.repository_id,
+                    self.context.repository_id,
                     prepared.next_ref_state().clone(),
                 )
                 .await
@@ -1612,7 +1693,7 @@ where
                 .stage_permitted_object_closure_in(
                     authority,
                     cx,
-                    self.repository_id,
+                    self.context.repository_id,
                     prepared.object_closure().clone(),
                 )
                 .await
@@ -1628,18 +1709,29 @@ where
 
     fn materialize_refusal_async<'a>(
         &'a self,
-        _authority: &'a FsqliteAuthorityStore,
-        _cx: &'a FsqliteCx,
+        authority: &'a FsqliteAuthorityStore,
+        cx: &'a FsqliteCx,
         basis: &'a PublicationBasis,
         tx_id: fgit_types::TxId,
         code: RefusalCode,
     ) -> impl Future<Output = Result<RefusalMaterialization, AsyncProjectionFailure>> + Send + 'a
     {
-        std::future::ready(
-            self.evidence
-                .refusal_evidence(basis, tx_id, code)
-                .map_err(AsyncProjectionFailure::Unavailable),
-        )
+        async move {
+            let stage_context = cx.create_child();
+            let is_cancelled = || stage_context.checkpoint().is_err();
+            self.materializer
+                .stage_refusal_evidence_in(
+                    authority,
+                    &stage_context,
+                    &self.context,
+                    basis,
+                    tx_id,
+                    code,
+                    &is_cancelled,
+                )
+                .await
+                .map_err(async_projection_unavailable)
+        }
     }
 }
 
@@ -3548,30 +3640,40 @@ impl OneNode {
         self.materialize_admission_in(&request).await
     }
 
-    /// Admits one verified receive-pack session through the node's durable
+    fn durable_admission_projection(
+        &self,
+        context: &AdmissionContext,
+    ) -> Result<DurableAsyncAdmissionProjection<'_>, AdmissionError> {
+        if context.head_key != self.head_key
+            || context.tenant_id != self.tenant_id
+            || context.repository_id != self.repository_id
+            || context.object_format != self.object_format
+        {
+            return Err(AdmissionError::AsyncProjectionUnavailable(
+                RefusalCode::EvidenceInvalid,
+            ));
+        }
+        Ok(DurableAsyncAdmissionProjection::new(
+            &self.admission_materializer,
+            context.clone(),
+        ))
+    }
+
+    /// Admits one verified receive-pack session through the node-owned durable
     /// asynchronous materialization boundary.
     ///
-    /// The supplied evidence owner is responsible for deriving the roots it
-    /// signs into the RCR or refusal record. If it cannot do so, the adapter
-    /// returns [`AdmissionError::AsyncProjectionUnavailable`] before a head
-    /// replacement; it never substitutes fixture roots. Source import uses the
-    /// same projection in [`Self::admit_validated_source_import_durable_in`].
-    pub async fn admit_validated_receive_durable_in<Evidence>(
+    /// The projection creates evidence only after the driver has supplied the
+    /// exact authenticated basis and fold. A refused decision gets its own
+    /// canonical, authority-staged witness before publication. Source import
+    /// uses the same projection in [`Self::admit_validated_source_import_durable_in`].
+    pub async fn admit_validated_receive_durable_in(
         &self,
         request: &NodeRequestContext,
         context: &AdmissionContext,
         validated: &ValidatedReceive,
         limits: AdmissionLimits,
-        evidence: &Evidence,
-    ) -> Result<AdmissionResult, AdmissionError>
-    where
-        Evidence: AdmissionEvidence + Sync,
-    {
-        let projection = DurableAsyncAdmissionProjection::new(
-            &self.admission_materializer,
-            self.repository_id,
-            evidence,
-        );
+    ) -> Result<AdmissionResult, AdmissionError> {
+        let projection = self.durable_admission_projection(context)?;
         admit_validated_receive_async(
             &self.authority,
             request.authority(),
@@ -3591,22 +3693,14 @@ impl OneNode {
     /// [`Self::admit_validated_receive_durable_in`]. It deliberately does not
     /// claim a selected durability epoch; staged frames become visible only
     /// when the authority-head publication completes its selected profile.
-    pub async fn admit_validated_source_import_durable_in<Evidence>(
+    pub async fn admit_validated_source_import_durable_in(
         &self,
         request: &NodeRequestContext,
         context: &AdmissionContext,
         validated: &ValidatedSourceImport,
         limits: AdmissionLimits,
-        evidence: &Evidence,
-    ) -> Result<AdmissionResult, AdmissionError>
-    where
-        Evidence: AdmissionEvidence + Sync,
-    {
-        let projection = DurableAsyncAdmissionProjection::new(
-            &self.admission_materializer,
-            self.repository_id,
-            evidence,
-        );
+    ) -> Result<AdmissionResult, AdmissionError> {
+        let projection = self.durable_admission_projection(context)?;
         admit_validated_source_import_async(
             &self.authority,
             request.authority(),
@@ -4207,11 +4301,14 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use fgit_admission::evidence::{
+        DURABLE_REFUSAL_EVIDENCE_DETAIL, RefusalEvidence, RefusalEvidenceBodies, evidence_root,
+    };
     use fgit_admission::{
-        AdmissionContext, AdmissionEvidence, AdmissionSnapshot, AdmissionSnapshotProjection,
-        AsyncAdmissionProjection, AsyncProjectionFailure, CanonicalAdmissionStore,
-        CanonicalRefState, CommitEvidence, PermittedObjectClosure, RefusalMaterialization,
-        canonical_ref_state_root,
+        AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionSnapshot,
+        AdmissionSnapshotProjection, AsyncAdmissionProjection, CanonicalAdmissionStore,
+        CanonicalRefState, CommitEvidence, PermittedObjectClosure, ValidatedClosure,
+        canonical_ref_state_root, permitted_object_closure_root,
     };
     use fgit_authority::{
         AsyncAuthorityStore, HeadInit, HeadRead, ImmutableRead, OutcomeLookup,
@@ -4240,12 +4337,12 @@ mod tests {
     };
 
     use super::{
-        ADMISSION_CLOSURE_KEY_PREFIX, AdmissionMaterializationRefusal, AdmissionUploadPackRefusal,
-        AdmissionUploadPackRepository, ClosureSelectionSource, DurableAsyncAdmissionProjection,
-        GitDaemonServeError, GitDaemonSessionOutcome, GitDaemonSessionTimeout,
-        GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal, NodeInitialization,
-        NodeRefusal, OneNode, admission_immutable_key, authority_head_id, genesis_head,
-        genesis_root, initialize_embedded_repository, parse_git_daemon_request,
+        ADMISSION_CLOSURE_KEY_PREFIX, ADMISSION_REFUSAL_EVIDENCE_KEY_PREFIX,
+        AdmissionMaterializationRefusal, AdmissionUploadPackRefusal, AdmissionUploadPackRepository,
+        ClosureSelectionSource, GitDaemonServeError, GitDaemonSessionOutcome,
+        GitDaemonSessionTimeout, GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal,
+        NodeInitialization, NodeRefusal, OneNode, admission_immutable_key, authority_head_id,
+        genesis_head, genesis_root, initialize_embedded_repository, parse_git_daemon_request,
         serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
     };
 
@@ -4343,30 +4440,6 @@ mod tests {
             mappings: Vec::new(),
         };
         (context, request, fold)
-    }
-
-    /// Test-only evidence owner that proves the production node adapter never
-    /// invents a root when its real provider is unavailable.
-    struct MissingEvidence;
-
-    impl AdmissionEvidence for MissingEvidence {
-        fn commit_evidence(
-            &self,
-            _basis: &PublicationBasis,
-            _request: &TransactionRequest,
-            _fold: &TransactionFoldReport,
-        ) -> Result<CommitEvidence, RefusalCode> {
-            Err(RefusalCode::EvidenceMissing)
-        }
-
-        fn refusal_evidence(
-            &self,
-            _basis: &PublicationBasis,
-            _tx_id: TxId,
-            _code: RefusalCode,
-        ) -> Result<RefusalMaterialization, RefusalCode> {
-            Err(RefusalCode::EvidenceMissing)
-        }
     }
 
     #[derive(Clone, Debug)]
@@ -4936,12 +5009,18 @@ mod tests {
         )
         .expect("the exact authenticated basis resolves");
         assert_eq!(projection_snapshot, *materialized.snapshot());
-        let evidence = MissingEvidence;
-        let async_projection = DurableAsyncAdmissionProjection::new(
-            &node.admission_materializer,
-            node.repository_id(),
-            &evidence,
-        );
+        let (context, evidence_request, fold) = evidence_request(&node);
+        let async_projection = node
+            .durable_admission_projection(&context)
+            .expect("one node owns the durable evidence projection for its authority slot");
+        let mut wrong_tenant = context.clone();
+        wrong_tenant.tenant_id = TenantId::from_bytes([0x99; 16]);
+        assert!(matches!(
+            node.durable_admission_projection(&wrong_tenant),
+            Err(AdmissionError::AsyncProjectionUnavailable(
+                RefusalCode::EvidenceInvalid
+            ))
+        ));
         let async_snapshot = node
             .runtime()
             .block_on(AsyncAdmissionProjection::snapshot_async(
@@ -4953,20 +5032,103 @@ mod tests {
             ))
             .expect("the async-only projection reloads the driver-selected basis");
         assert_eq!(async_snapshot, *materialized.snapshot());
+        let empty_closure = PermittedObjectClosure::default();
+        let validated_closure = ValidatedClosure {
+            object_closure_root: permitted_object_closure_root(&empty_closure)
+                .expect("empty closure root derives"),
+            objects: BTreeSet::new(),
+        };
+        let committing = node
+            .runtime()
+            .block_on(AsyncAdmissionProjection::materialize_commit_async(
+                &async_projection,
+                &node.authority,
+                request.authority(),
+                materialized.basis(),
+                &evidence_request,
+                &fold,
+                &validated_closure,
+            ))
+            .expect("the fold-bound projection stages and quotes real decision evidence");
+        let committed_evidence = CommitEvidence {
+            principal_snapshot_id: committing.record.principal_snapshot_id,
+            forge_event_batch_root: committing.record.forge_event_batch_root,
+            policy_decision_root: committing.record.policy_decision_root,
+            invariant_evidence_root: committing.record.invariant_evidence_root,
+            outbox_effect_root: committing.record.outbox_effect_root,
+            retention_delta_root: committing.record.retention_delta_root,
+        };
+        let rederived = node
+            .runtime()
+            .block_on(node.admission_materializer.read_decision_evidence_in(
+                &node.authority,
+                request.authority(),
+                context.clone(),
+                materialized.basis(),
+                &evidence_request,
+                &fold,
+                committed_evidence,
+                &is_live,
+            ))
+            .expect("the evidence quoted by the proposed RCR re-derives from durable frames");
         assert_eq!(
-            node.runtime()
-                .block_on(AsyncAdmissionProjection::materialize_refusal_async(
-                    &async_projection,
-                    &node.authority,
-                    request.authority(),
-                    materialized.basis(),
-                    distinct_tx_id(),
-                    RefusalCode::EvidenceMissing,
-                )),
-            Err(AsyncProjectionFailure::Unavailable(
-                RefusalCode::EvidenceMissing
-            )),
-            "a missing production evidence provider must not mint a refusal root"
+            rederived
+                .commit_evidence(materialized.basis(), &evidence_request, &fold)
+                .expect("re-derived provider remains bound to the exact fold"),
+            committed_evidence
+        );
+        let refusal_tx_id = distinct_tx_id();
+        let refusal = node
+            .runtime()
+            .block_on(AsyncAdmissionProjection::materialize_refusal_async(
+                &async_projection,
+                &node.authority,
+                request.authority(),
+                materialized.basis(),
+                refusal_tx_id,
+                RefusalCode::ExpectedOldRefMismatch,
+            ))
+            .expect("the production projection stages canonical refusal evidence");
+        let expected_refusal = RefusalEvidenceBodies::derive(
+            &context,
+            materialized.basis(),
+            refusal_tx_id,
+            RefusalCode::ExpectedOldRefMismatch,
+        )
+        .expect("fixed terminal refusal has canonical evidence");
+        assert_eq!(
+            refusal.policy_epoch,
+            materialized.basis().body().policy_epoch
+        );
+        assert_eq!(refusal.detail, DURABLE_REFUSAL_EVIDENCE_DETAIL);
+        assert_eq!(
+            refusal.evidence_root,
+            evidence_root(expected_refusal.refusal_evidence())
+                .expect("expected refusal evidence root derives"),
+            "the terminal materialization quotes the root of its canonical body"
+        );
+        let refusal_key = admission_immutable_key(
+            ADMISSION_REFUSAL_EVIDENCE_KEY_PREFIX,
+            node.repository_id(),
+            refusal.evidence_root,
+        )
+        .expect("fixed refusal evidence key is bounded");
+        let ImmutableRead::Present(refusal_frame) = node
+            .runtime()
+            .block_on(AsyncAuthorityStore::read_immutable(
+                &node.authority,
+                request.authority(),
+                &refusal_key,
+            ))
+            .expect("staged refusal evidence reads through durable authority")
+        else {
+            panic!("successful refusal materialization created an immutable evidence frame");
+        };
+        assert_eq!(
+            decode_body::<RefusalEvidence>(&refusal_frame, fgit_codec::DecodeLimits::DEFAULT)
+                .expect("durable refusal evidence frame decodes"),
+            expected_refusal.refusal_evidence().clone(),
+            "the stored body exactly re-derives the root quoted by the terminal refusal"
         );
 
         let closure = PermittedObjectClosure::default();
@@ -5599,6 +5761,19 @@ mod tests {
                     materialized.basis(),
                     &request,
                     &fold,
+                    &cancelled,
+                )),
+            Err(AdmissionMaterializationRefusal::Cancelled)
+        ));
+        assert!(matches!(
+            node.runtime()
+                .block_on(node.admission_materializer.stage_refusal_evidence_in(
+                    &node.authority,
+                    authority_request.authority(),
+                    &context,
+                    materialized.basis(),
+                    distinct_tx_id(),
+                    RefusalCode::ExpectedOldRefMismatch,
                     &cancelled,
                 )),
             Err(AdmissionMaterializationRefusal::Cancelled)
