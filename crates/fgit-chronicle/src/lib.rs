@@ -79,9 +79,11 @@ pub use capsule::{
 };
 pub use evidence::batch_evidence_root;
 pub use live::{
-    ActivatedCapsule, CapsuleClosure, CapsuleInspection, CapsuleInspectionRefusal, FrozenCapsule,
-    LiveCapsuleRefusal, activate_frozen_capsule, activate_frozen_capsule_async, freeze_capsule,
-    freeze_capsule_async, inspect_capsule_against_authority_head_bytes, inspect_capsule_bytes,
+    ActivatedCapsule, AttestedBackupExport, BackupExportRefusal, CapsuleClosure, CapsuleInspection,
+    CapsuleInspectionRefusal, FrozenCapsule, LiveCapsuleRefusal, ReplayCompleteness,
+    RestoreExecutionRefusal, RestoredAuthorityBoundary, activate_frozen_capsule,
+    activate_frozen_capsule_async, export_frozen_capsule, freeze_capsule, freeze_capsule_async,
+    inspect_capsule_against_authority_head_bytes, inspect_capsule_bytes, restore_attested_backup,
 };
 pub use origin::{PublicationBasis, ResultingRoots};
 pub use publish::{

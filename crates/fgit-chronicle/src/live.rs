@@ -676,6 +676,157 @@ fn collect_authority_head_defects(
     }
 }
 
+/// Export a frozen capsule with the existing attestation-only bundle body.
+///
+/// The source receipt is authenticated again and the source immutable capsule
+/// slot is read byte-for-byte. The resulting export therefore never treats an
+/// in-memory `FrozenCapsule` as proof that another machine can read the
+/// capsule. Its declared export profile is intentionally
+/// [`BackupProfile::DecisionHistoryOnly`]: this type carries only the
+/// capsule/head boundary, not the object, segment, suffix, or repair bytes a
+/// full-closure archive would require.
+pub fn export_frozen_capsule<S, I>(
+    store: &S,
+    identity: &I,
+    basis: &HeadReadReceipt,
+    frozen: &FrozenCapsule,
+    export_inventory_root: Digest,
+    durability_evidence_root: Digest,
+) -> Result<AttestedBackupExport, BackupExportRefusal>
+where
+    S: AuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized,
+{
+    store
+        .authenticate_head_receipt(basis)
+        .map_err(BackupExportRefusal::SourceHeadUnauthenticated)?;
+    let capsule_bytes =
+        encode_body(frozen.capsule()).map_err(BackupExportRefusal::CapsuleEncoding)?;
+    let key = body_key(IdentityDomain::RepositoryCapsule, frozen.capsule())
+        .map_err(|error| BackupExportRefusal::CapsuleKey(Box::new(error.into())))?;
+    let staged = store
+        .read_immutable(&key)
+        .map_err(BackupExportRefusal::CapsuleRead)?;
+    match staged {
+        ImmutableRead::Absent => return Err(BackupExportRefusal::CapsuleNotStaged),
+        ImmutableRead::Present(found) if found != capsule_bytes => {
+            return Err(BackupExportRefusal::CapsuleReadbackMismatch);
+        }
+        ImmutableRead::Present(_) => {}
+    }
+
+    let inspection = inspect_capsule_against_authority_head_bytes(
+        identity,
+        frozen.capsule_id(),
+        &capsule_bytes,
+        basis.body(),
+        frozen.capsule().predecessor_capsule_id,
+    )
+    .map_err(|error| BackupExportRefusal::Inspection(Box::new(error)))?;
+    if inspection.classification().outcome() != RestoreOutcome::Restorable {
+        return Err(BackupExportRefusal::NotRestorable(
+            inspection.classification().outcome(),
+        ));
+    }
+
+    let bundle = BackupExportBundleBody {
+        repository_id: frozen.capsule().repository_id,
+        capsule_id: frozen.capsule_id(),
+        exported_profile: BackupProfile::DecisionHistoryOnly,
+        export_inventory_root,
+        durability_evidence_root,
+    };
+    Ok(AttestedBackupExport::new(
+        bundle,
+        capsule_bytes,
+        basis.body().to_vec(),
+    ))
+}
+
+/// Restore an attestation-only export into a fresh authority namespace.
+///
+/// All capsule/head checks occur before any destination write. Once the exact
+/// bytes classify as restorable, the capsule is staged and read back, the
+/// destination's fresh head is initialized from the verified source body, and
+/// the checkpoint pointer is activated root-last. No routing API is called or
+/// exposed here. The returned receipt explicitly says that the omitted
+/// archive classes must be supplied before a full replay can be claimed.
+pub fn restore_attested_backup<S, I>(
+    destination: &S,
+    destination_key: &HeadKey,
+    identity: &I,
+    backup: &AttestedBackupExport,
+) -> Result<RestoredAuthorityBoundary, RestoreExecutionRefusal>
+where
+    S: AuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized,
+{
+    if backup.bundle().exported_profile != BackupProfile::DecisionHistoryOnly {
+        return Err(RestoreExecutionRefusal::UnsupportedExportProfile(
+            backup.bundle().exported_profile,
+        ));
+    }
+    let inspection = inspect_capsule_against_authority_head_bytes(
+        identity,
+        backup.bundle().capsule_id,
+        backup.capsule_bytes(),
+        backup.authority_head_bytes(),
+        None,
+    )
+    .map_err(|error| RestoreExecutionRefusal::Inspection(Box::new(error)))?;
+    if inspection.capsule().repository_id != backup.bundle().repository_id {
+        return Err(RestoreExecutionRefusal::RepositoryMismatch);
+    }
+    if inspection.classification().outcome() != RestoreOutcome::Restorable {
+        return Err(RestoreExecutionRefusal::NotRestorable(
+            inspection.classification().outcome(),
+        ));
+    }
+
+    let capsule = inspection.capsule().clone();
+    let capsule_key = body_key(IdentityDomain::RepositoryCapsule, &capsule)
+        .map_err(|error| RestoreExecutionRefusal::DestinationInitialize(Box::new(error.into())))?;
+    match destination
+        .put_if_absent(&capsule_key, backup.capsule_bytes())
+        .map_err(RestoreExecutionRefusal::CapsuleStage)?
+    {
+        PutOutcome::Created | PutOutcome::IdenticalRetry => {}
+        PutOutcome::Conflict => return Err(RestoreExecutionRefusal::CapsuleSlotConflict),
+    }
+    if !matches!(destination.read_immutable(&capsule_key), Ok(ImmutableRead::Present(found)) if found == backup.capsule_bytes())
+    {
+        return Err(RestoreExecutionRefusal::CapsuleReadbackMismatch);
+    }
+
+    let source_head: RepositoryAuthorityHeadBody =
+        decode_body(backup.authority_head_bytes(), DecodeLimits::DEFAULT).map_err(|error| {
+            RestoreExecutionRefusal::Inspection(Box::new(CapsuleInspectionRefusal::HeadDecode(
+                error,
+            )))
+        })?;
+    let basis = match initialize_repository(destination, destination_key, &source_head)
+        .map_err(|error| RestoreExecutionRefusal::DestinationInitialize(Box::new(error)))?
+    {
+        HeadInit::Created(receipt) | HeadInit::IdenticalRetry(receipt) => receipt,
+        HeadInit::Conflict => return Err(RestoreExecutionRefusal::DestinationHeadConflict),
+    };
+    let pointer = CapsulePointer::genesis(backup.bundle().capsule_id, &capsule)
+        .map_err(RestoreExecutionRefusal::CapsulePointer)?;
+    let frozen = FrozenCapsule {
+        capsule,
+        capsule_id: backup.bundle().capsule_id,
+        pointer,
+    };
+    let activated = activate_frozen_capsule(destination, &basis, &frozen)
+        .map_err(|error| RestoreExecutionRefusal::Activation(Box::new(error)))?;
+    Ok(RestoredAuthorityBoundary {
+        head: activated.head,
+        capsule_id: frozen.capsule_id,
+        classification: inspection.classification().clone(),
+        replay_completeness: ReplayCompleteness::VerifiableIfArtifactsSupplied,
+    })
+}
+
 /// Stage and activate a frozen capsule through the exact authority head it
 /// checkpointed.
 ///
