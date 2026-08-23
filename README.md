@@ -24,9 +24,10 @@ Those product-stack choices are settled, while integration is deliberately gated
 
 The repository remains pre-release and is not yet a general-purpose Git server.
 The checked-in `fg` binary nevertheless has a narrow, configuration-free
-one-node bootstrap surface for exercising the durable authority profile. It
-does not consult a configuration file: callers supply the storage directory,
-tenant ID, and repository ID explicitly.
+one-node bootstrap surface for exercising canonical authority-head visibility.
+It does not consult a configuration file: callers supply the storage directory,
+tenant ID, and repository ID explicitly. This is not a claim that a selected
+durable publication epoch has completed.
 
 ```bash
 cargo run -p fgit-cli -- init ./fgit-data \
@@ -45,14 +46,29 @@ object. `serve` accepts one bounded legacy git-daemon upload-pack session, and
 Neither command treats local object placement or a connection-local ref map as
 canonical state.
 
-The production import-publication path is still being completed: the existing
-`OneNode::stage_loose_git_import` API validates direct or packed refs and a
-bounded loose-object closure into immutable fabric, but staging alone cannot
-make refs visible. An imported repository becomes observable only after the
-ordinary sealed admission and RCR/head-publication path selects its canonical
-ref and closure commitments. Until that API is exposed through `fg import`, an
-empty initialized repository is the only complete CLI lifecycle; this section
-makes no clone/fetch/push claim.
+For a clean-machine transcript of the implemented empty-repository lifecycle,
+run [`scripts/one_node_bringup.sh`](scripts/one_node_bringup.sh) with a new
+empty storage directory, an unused loopback address, and an absent export path:
+
+```bash
+scripts/one_node_bringup.sh "$(mktemp -d)" \
+  11111111111111111111111111111111 \
+  22222222222222222222222222222222 \
+  127.0.0.1:9418 \
+  /tmp/frankengit-one-node.pack
+```
+
+The script records the exact `fg init` → `fg doctor` → one bounded `fg serve`
+session → `fg export` commands and their observed output in
+`bring-up.transcript` below the supplied storage directory. Set `FG_BIN` to a
+prebuilt `fg` binary to avoid its default `cargo run -p fgit-cli --` launcher.
+It intentionally exercises an empty repository and does not claim a complete
+clone, fetch, or push workflow.
+
+`fg import` accepts a verified bounded loose-object source and publishes its
+source ref commands through the ordinary sealed admission/RCR/head-publication
+path. That bounded import surface does not widen the one-node lifecycle above
+into a general Git-server compatibility claim.
 
 ---
 
