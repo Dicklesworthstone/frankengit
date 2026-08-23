@@ -5400,6 +5400,11 @@ fn collect_files(root: &Path, output: &mut Vec<PathBuf>) {
         let name = entry.file_name();
         if name == OsStr::new(".git")
             || name == OsStr::new("target")
+            // Generated compliance-audit scratch is gitignored by the
+            // skill's own hard rule, but its reports carry relative links
+            // into per-pass artifacts and broke this lane twice on
+            // 2026-08-23. Scratch trees are not review surface.
+            || name == OsStr::new("beads_compliance_audit")
             || is_registry_checker_fixture_dir(&path)
         {
             continue;
