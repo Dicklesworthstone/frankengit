@@ -596,6 +596,38 @@ pub struct PackWriteReceipt {
     pub compression: Vec<DeflateReceipt>,
 }
 
+/// One promoted pack artifact bound to the exact plan and receipt that wrote
+/// it.  Its fields are intentionally private: a downstream caller cannot pair
+/// an arbitrary plan with an unrelated checksum and present the combination as
+/// a writer-produced artifact.  Derived materializers that depend on pack
+/// order, such as a bitmap, consume this value rather than loose coordinates.
+#[derive(Debug)]
+pub struct MaterializedPack {
+    plan: PackPlan,
+    bytes: Vec<u8>,
+    receipt: PackWriteReceipt,
+}
+
+impl MaterializedPack {
+    /// Exact complete pack bytes after promotion, including native trailer.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Exact ordered plan whose entries produced [`Self::bytes`].
+    #[must_use]
+    pub const fn plan(&self) -> &PackPlan {
+        &self.plan
+    }
+
+    /// Final writer receipt for this exact promoted pack.
+    #[must_use]
+    pub const fn receipt(&self) -> &PackWriteReceipt {
+        &self.receipt
+    }
+}
+
 /// Deterministic stream writer over one already validated [`PackPlan`].
 #[derive(Clone, Debug)]
 pub struct PackWriter {
@@ -622,6 +654,23 @@ impl PackWriter {
         let receipt = self.write_into(plan, deadline, &mut encoder, &mut sink)?;
         let bytes = sink.promoted.ok_or(PackWriteError::PromotionRefused)?;
         Ok((bytes, receipt))
+    }
+
+    /// Materializes a promoted pack and retains the exact plan/receipt binding
+    /// for a downstream derived accelerator.  This is the final seam for
+    /// products whose bit positions depend on pack order; it is not a second
+    /// storage or publication authority.
+    pub fn materialize(
+        &self,
+        plan: &PackPlan,
+        deadline: &mut impl Deadline,
+    ) -> Result<MaterializedPack, PackWriteError> {
+        let (bytes, receipt) = self.write(plan, deadline)?;
+        Ok(MaterializedPack {
+            plan: plan.clone(),
+            bytes,
+            receipt,
+        })
     }
 
     /// Streams a pack through a caller-supplied encoder and temporary-artifact

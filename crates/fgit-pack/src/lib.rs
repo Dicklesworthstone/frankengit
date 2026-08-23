@@ -5,6 +5,7 @@
 //! hashing: callers supply those dependency-owned operations at the
 //! quarantine boundary.
 
+mod bitmap;
 mod bundle;
 mod commit_graph;
 mod delta;
@@ -15,6 +16,10 @@ mod reader;
 mod verify;
 mod writer;
 
+pub use bitmap::{
+    PackBitmapCompleteness, PackBitmapLimits, PackBitmapProfile, PackBitmapRefusal,
+    PackBitmapSource, PackBitmapV1, PackBitmapV1Receipt, PackBitmapVerification,
+};
 pub use bundle::{
     BundleProfile, BundleReference, BundleSource, BundleV2, BundleV2Limits, BundleV2Receipt,
     BundleV2Refusal, QuarantinedBundleV2,
@@ -47,9 +52,9 @@ pub use verify::{
     NativeChecksumVerifier, object_type_from_base_entry, verify_base_entry, verify_native_object,
 };
 pub use writer::{
-    CanonicalObjectSource, CanonicalPackObject, DeterministicPackEncoder, PackArtifactSink,
-    PackEntryEncoder, PackPlan, PackPlanEntry, PackPlanner, PackWriteError, PackWriteProfile,
-    PackWriteReceipt, PackWriter, PlannedDelta,
+    CanonicalObjectSource, CanonicalPackObject, DeterministicPackEncoder, MaterializedPack,
+    PackArtifactSink, PackEntryEncoder, PackPlan, PackPlanEntry, PackPlanner, PackWriteError,
+    PackWriteProfile, PackWriteReceipt, PackWriter, PlannedDelta,
 };
 
 use std::error::Error;
