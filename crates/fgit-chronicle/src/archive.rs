@@ -1201,7 +1201,7 @@ fn read_policy(
     })
 }
 
-fn lifecycle_discriminant(value: KeyLifecycle) -> u8 {
+const fn lifecycle_discriminant(value: KeyLifecycle) -> u8 {
     match value {
         KeyLifecycle::Active => 1,
         KeyLifecycle::Retired => 2,
@@ -1210,7 +1210,7 @@ fn lifecycle_discriminant(value: KeyLifecycle) -> u8 {
     }
 }
 
-fn lifecycle_from_discriminant(value: u8) -> Option<KeyLifecycle> {
+const fn lifecycle_from_discriminant(value: u8) -> Option<KeyLifecycle> {
     match value {
         1 => Some(KeyLifecycle::Active),
         2 => Some(KeyLifecycle::Retired),
@@ -1262,7 +1262,7 @@ impl<'a> ArchiveReader<'a> {
         self.remaining.is_empty()
     }
 
-    fn take(&mut self, length: usize) -> Result<&'a [u8], PortableArchiveRefusal> {
+    const fn take(&mut self, length: usize) -> Result<&'a [u8], PortableArchiveRefusal> {
         if length > self.remaining.len() {
             return Err(PortableArchiveRefusal::Truncated);
         }

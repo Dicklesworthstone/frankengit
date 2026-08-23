@@ -188,10 +188,13 @@ fn tampered_bytes_stale_policy_and_truncation_are_typed_refusals() {
     tampered[capsule_last] ^= 0x01;
     let tampered = SignedPortableCapsuleArchive::from_bytes(&tampered)
         .expect("one capsule-byte mutation remains a representable archive");
-    assert!(matches!(
-        tampered.verify(&trusted),
-        Err(PortableArchiveRefusal::InventoryMismatch)
-    ));
+    assert!(
+        matches!(
+            tampered.verify(&trusted),
+            Err(PortableArchiveRefusal::BundleCapsuleMismatch)
+        ),
+        "the signed bundle's canonical capsule identifier rejects a mutated capsule before the broader inventory check"
+    );
 
     let (signer, _, _) = signer_and_policy();
     let stale = TrustedCapsuleArchivePolicy::from_out_of_band(
