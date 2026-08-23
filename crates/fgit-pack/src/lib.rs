@@ -6,6 +6,7 @@
 //! quarantine boundary.
 
 mod bundle;
+mod commit_graph;
 mod delta;
 mod idx;
 mod midx;
@@ -17,6 +18,11 @@ mod writer;
 pub use bundle::{
     BundleProfile, BundleReference, BundleSource, BundleV2, BundleV2Limits, BundleV2Receipt,
     BundleV2Refusal, QuarantinedBundleV2,
+};
+pub use commit_graph::{
+    CommitGraphCompleteness, CommitGraphInput, CommitGraphLimits, CommitGraphProfile,
+    CommitGraphRefusal, CommitGraphSource, CommitGraphV1, CommitGraphV1Receipt,
+    CommitGraphVerification,
 };
 pub use delta::{
     CachedResolver, DeltaBase, DeltaObject, ExternalBaseLookup, PackObject, ScalarResolver,
