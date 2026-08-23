@@ -86,7 +86,7 @@ pub struct GraphGenerationBody {
 impl GraphGenerationBody {
     /// Assembles one generation body from committed source and graph roots.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         graph_view_id: GraphViewId,
         schema_id: GraphSchemaId,
         source: GraphSourceStamp,
@@ -122,7 +122,7 @@ impl GraphGenerationBody {
 
     /// The canonical source position and builder profile.
     #[must_use]
-    pub fn source(&self) -> &GraphSourceStamp {
+    pub const fn source(&self) -> &GraphSourceStamp {
         &self.source
     }
 
@@ -216,18 +216,22 @@ pub enum GenerationAuthorityError {
     /// The authority backend failed or reported ambiguity; callers must reconcile it.
     Authority(AuthorityFailure),
     /// An immutable key already names different bytes.
-    ImmutableConflict { generation_id: GraphGenerationId },
+    ImmutableConflict {
+        generation_id: Box<GraphGenerationId>,
+    },
     /// Genesis cannot claim a predecessor.
-    GenesisHasPredecessor { generation_id: GraphGenerationId },
+    GenesisHasPredecessor {
+        generation_id: Box<GraphGenerationId>,
+    },
     /// A non-genesis candidate did not name the active generation exactly.
     PredecessorMismatch {
-        expected: GraphGenerationId,
-        supplied: Option<GraphGenerationId>,
+        expected: Box<GraphGenerationId>,
+        supplied: Option<Box<GraphGenerationId>>,
     },
     /// A head key must serve exactly one graph view.
     ViewMismatch {
-        active: GraphViewId,
-        proposed: GraphViewId,
+        active: Box<GraphViewId>,
+        proposed: Box<GraphViewId>,
     },
     /// Another generation already initialized the vacant head slot.
     HeadAlreadyInitialized,
@@ -283,7 +287,7 @@ pub struct GenerationAuthority<'a, S> {
 impl<'a, S: AuthorityStore> GenerationAuthority<'a, S> {
     /// Binds the graph activation protocol to one authority backend and head key.
     #[must_use]
-    pub fn new(store: &'a S, head_key: HeadKey) -> Self {
+    pub const fn new(store: &'a S, head_key: HeadKey) -> Self {
         Self { store, head_key }
     }
 
@@ -298,7 +302,9 @@ impl<'a, S: AuthorityStore> GenerationAuthority<'a, S> {
         match self.store.put_if_absent(&immutable_key, &body)? {
             PutOutcome::Created | PutOutcome::IdenticalRetry => {}
             PutOutcome::Conflict => {
-                return Err(GenerationAuthorityError::ImmutableConflict { generation_id });
+                return Err(GenerationAuthorityError::ImmutableConflict {
+                    generation_id: Box::new(generation_id),
+                });
             }
         }
 
@@ -309,15 +315,15 @@ impl<'a, S: AuthorityStore> GenerationAuthority<'a, S> {
                     decode_body::<GraphGenerationBody>(receipt.body(), DecodeLimits::default())?;
                 if active.graph_view_id != candidate.graph_view_id {
                     return Err(GenerationAuthorityError::ViewMismatch {
-                        active: active.graph_view_id,
-                        proposed: candidate.graph_view_id,
+                        active: Box::new(active.graph_view_id),
+                        proposed: Box::new(candidate.graph_view_id),
                     });
                 }
                 let active_id = active.generation_id()?;
                 if candidate.predecessor_generation_id != Some(active_id) {
                     return Err(GenerationAuthorityError::PredecessorMismatch {
-                        expected: active_id,
-                        supplied: candidate.predecessor_generation_id,
+                        expected: Box::new(active_id),
+                        supplied: candidate.predecessor_generation_id.map(Box::new),
                     });
                 }
                 let next_generation = receipt.generation().next()?;
@@ -346,7 +352,9 @@ impl<'a, S: AuthorityStore> GenerationAuthority<'a, S> {
         body: &[u8],
     ) -> Result<GenerationActivation, GenerationAuthorityError> {
         if candidate.predecessor_generation_id.is_some() {
-            return Err(GenerationAuthorityError::GenesisHasPredecessor { generation_id });
+            return Err(GenerationAuthorityError::GenesisHasPredecessor {
+                generation_id: Box::new(generation_id),
+            });
         }
         match self
             .store

@@ -946,7 +946,7 @@ impl DeterministicGraph {
         }
     }
 
-    fn require_directed(&self, algorithm: GraphAlgorithm) -> Result<(), GraphRefusal> {
+    const fn require_directed(&self, algorithm: GraphAlgorithm) -> Result<(), GraphRefusal> {
         if self.directed {
             Ok(())
         } else {
@@ -1089,13 +1089,13 @@ pub struct GraphBuilder {
 impl GraphBuilder {
     /// Binds a builder to an immutable position-stamped generation body.
     #[must_use]
-    pub fn new(generation: GraphGenerationBody, limits: GraphLimits) -> Self {
+    pub const fn new(generation: GraphGenerationBody, limits: GraphLimits) -> Self {
         Self { generation, limits }
     }
 
     /// The source position and pinned builder facts being materialized.
     #[must_use]
-    pub fn source_stamp(&self) -> &GraphSourceStamp {
+    pub const fn source_stamp(&self) -> &GraphSourceStamp {
         self.generation.source()
     }
 
@@ -1137,7 +1137,7 @@ impl GraphSnapshot {
 
     /// Starts a query pinned to this snapshot's exact generation.
     #[must_use]
-    pub fn query(
+    pub const fn query(
         &self,
         policy: GraphViewPolicy,
         resource_receipt_root: Digest,
@@ -1156,14 +1156,14 @@ impl GraphSnapshot {
 #[derive(Debug)]
 pub enum GraphBuilderError {
     /// The generation body or its registered identity refused validation.
-    Generation(GenerationAuthorityError),
+    Generation(Box<GenerationAuthorityError>),
     /// The graph rows or bounds were not admissible.
     Graph(GraphRefusal),
 }
 
 impl From<GenerationAuthorityError> for GraphBuilderError {
     fn from(value: GenerationAuthorityError) -> Self {
-        Self::Generation(value)
+        Self::Generation(Box::new(value))
     }
 }
 
