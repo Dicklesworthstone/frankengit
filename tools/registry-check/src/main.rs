@@ -4469,8 +4469,14 @@ struct PackageSource {
 }
 
 const MIT_OPENAI_ANTHROPIC_RIDER: &str = "LicenseRef-MIT-OpenAI-Anthropic-Rider";
+/// The repository-canonical LICENSE carries a leading
+/// `SPDX-License-Identifier: LicenseRef-MIT-OpenAI-Anthropic-Rider` marker
+/// line; crates.io-published family members ship the identical rider text
+/// without that repository-local line. Both forms are byte-pinned.
 const MIT_OPENAI_ANTHROPIC_RIDER_SHA256: &str =
     "bbcd5ea29292d9d5df0bb055ceed2ddd846731717ff294d32ddd1349d541ef42";
+const MIT_OPENAI_ANTHROPIC_RIDER_CRATES_IO_SHA256: &str =
+    "32a82e0a5754e72e51fae44b65a936c831c07376f21c90f5fb9e76897fcc3509";
 
 /// Cargo permits a package to state its license through `license-file` instead
 /// of the SPDX-like `license` metadata field. The constellation schema keeps
@@ -4509,7 +4515,9 @@ fn package_license_evidence(source: &PackageSource) -> Result<String, String> {
         )
     })?;
     let digest = sha256_hex(&license_bytes);
-    if digest == MIT_OPENAI_ANTHROPIC_RIDER_SHA256 {
+    if digest == MIT_OPENAI_ANTHROPIC_RIDER_SHA256
+        || digest == MIT_OPENAI_ANTHROPIC_RIDER_CRATES_IO_SHA256
+    {
         return Ok(MIT_OPENAI_ANTHROPIC_RIDER.to_owned());
     }
     Err(format!(
