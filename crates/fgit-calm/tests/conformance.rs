@@ -387,8 +387,9 @@ fn observation_partial_order_preserves_terminal_incomparability() {
         for right in Observation::ALL {
             match left.partial_cmp(right) {
                 Some(Ordering::Less) => assert_eq!(left.join(*right), *right),
-                Some(Ordering::Equal) => assert_eq!(left.join(*right), *left),
-                Some(Ordering::Greater) => assert_eq!(left.join(*right), *left),
+                Some(Ordering::Equal | Ordering::Greater) => {
+                    assert_eq!(left.join(*right), *left);
+                }
                 None => {
                     assert!(
                         left.is_terminal() && right.is_terminal() && left != right,

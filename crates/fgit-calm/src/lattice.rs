@@ -59,17 +59,34 @@ impl PartialOrd for Observation {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         use Observation::{Committed, Conflict, Refused, Reserved, Unknown};
 
-        match (*self, *other) {
-            (Unknown, Unknown)
-            | (Reserved, Reserved)
-            | (Committed, Committed)
-            | (Refused, Refused)
-            | (Conflict, Conflict) => Some(Ordering::Equal),
-            (Unknown, _) | (_, Conflict) => Some(Ordering::Less),
-            (_, Unknown) | (Conflict, _) => Some(Ordering::Greater),
-            (Reserved, Committed | Refused) => Some(Ordering::Less),
-            (Committed | Refused, Reserved) => Some(Ordering::Greater),
-            (Committed, Refused) | (Refused, Committed) => None,
+        // The rows make the partial-order relation explicit. In particular,
+        // each terminal has one distinct peer terminal that is incomparable.
+        match *self {
+            Unknown => match *other {
+                Unknown => Some(Ordering::Equal),
+                _ => Some(Ordering::Less),
+            },
+            Reserved => match *other {
+                Unknown => Some(Ordering::Greater),
+                Reserved => Some(Ordering::Equal),
+                Committed | Refused | Conflict => Some(Ordering::Less),
+            },
+            Committed => match *other {
+                Unknown | Reserved => Some(Ordering::Greater),
+                Committed => Some(Ordering::Equal),
+                Refused => None,
+                Conflict => Some(Ordering::Less),
+            },
+            Refused => match *other {
+                Unknown | Reserved => Some(Ordering::Greater),
+                Committed => None,
+                Refused => Some(Ordering::Equal),
+                Conflict => Some(Ordering::Less),
+            },
+            Conflict => match *other {
+                Conflict => Some(Ordering::Equal),
+                _ => Some(Ordering::Greater),
+            },
         }
     }
 }
