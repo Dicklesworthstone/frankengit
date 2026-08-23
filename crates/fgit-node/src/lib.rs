@@ -105,6 +105,11 @@ const ADMISSION_CACHE_SCOPE: &[u8] = b"node/admission-cache/v1";
 const DEFAULT_MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 const AUTHORITY_DATABASE_FILE: &str = "authority.fsqlite";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+// The git-daemon profile always advertises an `agent` capability. Besides
+// identifying the deterministic server profile, this keeps an authenticated
+// empty repository on Git's `capabilities^{}` advertisement form rather than
+// degenerating to a bare pkt-line flush.
+const GIT_DAEMON_CAPABILITIES: &[u8] = b"agent=frankengit-node";
 
 /// Immutable upload-pack facts derived from one authenticated admission snapshot.
 ///
@@ -3999,13 +4004,16 @@ impl OneNode {
             &limits,
         )
         .map_err(|error| NodeGitDaemonServeRefusal::from(NodeAdmissionViewRefusal::from(error)))?;
+        let capabilities = Capabilities::parse_v1(GIT_DAEMON_CAPABILITIES, &limits)
+            .map_err(GitDaemonTransportRefusal::Wire)
+            .map_err(NodeGitDaemonServeRefusal::from)?;
         let mut writer = DeadlineTcpStream::new(&mut response_stream, deadline);
         let served = serve_git_daemon_upload_pack_after_greeting(
             &mut reader,
             &mut writer,
             greeting,
             &repository,
-            Capabilities::default(),
+            capabilities,
             limits,
             |_request, _pack_request| {
                 let pack_context = request.authority().create_child();
@@ -5055,9 +5063,19 @@ mod tests {
                 .as_bytes(),
             repository_path
         );
+        let mut expected = format!(
+            "{:04x}",
+            b"0000000000000000000000000000000000000000 capabilities^{}\0agent=frankengit-node\n"
+                .len()
+                + 4
+        )
+        .into_bytes();
+        expected.extend_from_slice(
+            b"0000000000000000000000000000000000000000 capabilities^{}\0agent=frankengit-node\n0000",
+        );
         assert_eq!(
-            response, b"0000",
-            "the empty V0 advertisement is supplied by fgit-wire and no fixture pack follows"
+            response, expected,
+            "the empty V0 advertisement carries Git's zero-identity capability pseudo-ref and no pack"
         );
     }
 
