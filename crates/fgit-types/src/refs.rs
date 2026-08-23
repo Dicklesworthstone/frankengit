@@ -70,6 +70,23 @@ impl RefName {
         if source == b"@" {
             return Err(structure("name_is_bare_at_sign", 0));
         }
+        // These two arms are NOT ordered relative to each other, unlike every
+        // other guard in this chain. `pair` is a two-byte window, so it cannot
+        // equal both `..` and `@{`; at most one arm can fire per offset, and
+        // which refusal a name receives is decided by which pattern occurs
+        // EARLIER IN THE STRING, never by which `if` is written first:
+        //
+        //     refs/heads/a..b@{c  ->  double_dot
+        //     refs/heads/a@{b..c  ->  at_brace_sequence
+        //
+        // So swapping these two blocks is a no-op. Do not "fix" their order and
+        // do not document one as taking priority: there is no precedence here to
+        // state. The derivation above is the reason, so it can be re-checked
+        // rather than taken on trust — and `frankengit-refname-guard-order-3mpp`
+        // measured it, with a control proving the suite can tell a real
+        // prioritisation from this positional one. The executable form is
+        // tests/refname_guard_order.rs, in
+        // `the_double_dot_and_at_brace_scan_is_positional_not_prioritised`.
         for (offset, pair) in source.windows(2).enumerate() {
             if pair == b".." {
                 return Err(structure("double_dot", at(offset + 1)));
