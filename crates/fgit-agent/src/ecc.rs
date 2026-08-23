@@ -37,10 +37,33 @@
 //! unenforced reads as a control that exists.
 //!
 //! Absent by scope, not by oversight: the proposed object/tree closure and diff
-//! commitment (they need the `TreeFS` export of §8), the refreshed authority
-//! receipt and reconciliation record (§4.3 refresh relations), context-packet
-//! *bodies* (§7 owns those; only their ids are bound here), and codec goldens
-//! for the bundle. Each is a real part of §10 that this slice does not deliver.
+//! commitment (they need the `TreeFS` export of §8), the reconciliation record,
+//! and context-packet *bodies* (§7 owns those; only their ids are bound here).
+//! Each is a real part of §10 that this slice does not deliver.
+//!
+//! On the reconciliation record specifically, because "absent" is doing precise
+//! work: reconciliation types do exist elsewhere in the workspace, in
+//! `fgit-authority::outcome` and `fgit-resource::custody`. This crate binds
+//! none of them, so it does not deliver the field — but *exists elsewhere* and
+//! *delivered here* are different claims and the distinction is worth keeping,
+//! since only the second one lets a caller rely on it. FG-073 owns the ledger.
+//!
+//! # Two things this paragraph used to claim were missing, and why that matters
+//!
+//! It listed the **refreshed authority receipt** and the **codec goldens** as
+//! absent. Both are here: [`crate::refresh`] carries the receipt and §4.3's
+//! relations, and `tests/goldens/` holds the corpus. The goldens line was false
+//! from the moment it was written, in the same commit that added them, and it
+//! survived two rounds of central verification.
+//!
+//! Neither survived because anyone checked and got it wrong. They survived
+//! because **nothing checks an absence claim.** "This is implemented" is
+//! verified by the compiler and by every test run; "this is not here" is
+//! verified by nobody, and decays silently in whichever direction the code
+//! moves. A reader trusting the old text would have concluded the crate had no
+//! golden corpus while fourteen vectors sat beside it, and might reasonably
+//! have gone and built one. That is the cost, and it is why the correction is
+//! recorded here rather than quietly applied.
 
 use core::fmt;
 
