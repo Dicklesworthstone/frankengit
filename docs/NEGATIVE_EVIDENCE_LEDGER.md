@@ -270,6 +270,58 @@ method as the first inherits the blind spot rather than removing it.
 configuration surface for `repair_overhead`, at which point the literal ban
 becomes dischargeable and should be reconsidered.
 
+### NEG-027 — the tree parser's overflow arm is unreachable, and the exclusion is the record (FG-xd45 follow-on)
+
+**Hypothesis.** `MissingTreeNameTerminator`'s second construction site — the
+`mode_end.checked_add(1)` overflow guard at
+`crates/fgit-git-object/src/lib.rs:543-545` — is a reachable refusal that a test
+corpus can cover, so leaving it uncovered is a coverage gap.
+
+**Why it looked right.** It is a real `?`-propagating arm on a public parse path,
+it names a variant the crate's refusal vocabulary genuinely uses, and a coverage
+scan counting construction sites sees an untested one. Every signal a mechanical
+sweep can read says "gap".
+
+**What settled it.** `mode_end` is derived as `cursor + position(..)` over
+`body[cursor..]`, so it is a byte position *inside* `body`. Therefore
+`mode_end + 1 <= body.len()` for any slice that exists, the `checked_add` can
+never return `None`, and the arm cannot be entered from any input. It is a
+defensive guard, correctly written, and permanently unreachable.
+
+`frankengit-xd45` settled it by reading and recorded the disposition in its
+acceptance, verbatim:
+
+> `MissingTreeNameTerminator`'s SECOND site is `mode_end.checked_add(1)` at
+> `src/lib.rs:543-545` — an overflow guard on a byte position INSIDE `body`, so
+> it cannot overflow `usize` for any slice that exists. UNREACHABLE, documented
+> at the exclusion, no fixture manufactured, NOT counted as a covered site.
+
+Its non-claim block counts **three** newly covered variants and excludes this
+site from that total, so the coverage figure that bead published already reflects
+the exclusion.
+
+**Why this is a ledger row and not just a bead comment.** The analysis lived only
+in the bead that performed it, and that bead is closed. Without a row, the next
+coverage sweep meets the same untested construction site with none of the
+reasoning attached, and has two bad options: re-derive the proof, or manufacture
+a fixture — and a fixture here can only be reached by lying about the input,
+which would convert a correct defensive guard into a test that asserts something
+untrue. **Preserving the negative result is what stops the second outcome.** The
+reachable `MissingTreeNameTerminator` site — the NUL scan — is separately covered
+by `crates/fgit-git-object/tests/tree_entry_refusals.rs`; this row is only about
+the overflow arm.
+
+**Non-claim.** This says nothing about whether the guard should exist. Failing
+closed if the surrounding derivation ever changes is reasonable, and the guard is
+cheap. The claim is narrower: it cannot be entered today, and it must not be
+counted as covered.
+
+**Revisit condition.** `parse_tree_entries` stops deriving `name_start` from a
+position inside `body` — for example `mode_end` becomes caller-supplied, is
+widened from a different integer domain, or the parser is refactored to compute
+offsets before bounds-checking them. At that point overflow becomes expressible,
+the arm becomes reachable, and it needs a fixture rather than this row.
+
 ## 5. Integration with agents
 
 Context Packets for architecture/performance work include relevant negative-evidence rows. An agent proposing a known-rejected dependency or mechanism must cite and rebut the row. The system does not block creative reconsideration; it prevents amnesia.
