@@ -4324,6 +4324,13 @@ fn is_alternate_runtime(name: &str) -> bool {
 }
 
 fn is_forbidden_sqlmodel_backend(name: &str, features: &BTreeSet<String>) -> bool {
+    // `frankensqlite` contains the `sqlite` needle as a substring, so the name
+    // scan below would refuse the ONE backend ADR-0012 admits. Exempt it
+    // first; every other sqlmodel* package matching a backend needle, and any
+    // sqlmodel* crate requesting a C-backend feature closure, stays refused.
+    if name.starts_with("sqlmodel") && name.contains("frankensqlite") {
+        return false;
+    }
     let forbidden_name = ["sqlite", "postgres", "mysql", "c-sqlite", "native"]
         .iter()
         .any(|needle| name.starts_with("sqlmodel") && name.contains(needle));
@@ -6618,6 +6625,32 @@ mod tests {
             "forbidden ftui demo/showcase package `ftui-showcase`",
         );
     }
+
+    #[test]
+    fn sqlmodel_backend_predicate_admits_only_the_frankensqlite_backend() {
+        let no_features = BTreeSet::new();
+        assert!(!is_forbidden_sqlmodel_backend(
+            "sqlmodel-frankensqlite",
+            &no_features
+        ));
+        assert!(is_forbidden_sqlmodel_backend(
+            "sqlmodel-sqlite",
+            &no_features
+        ));
+        assert!(is_forbidden_sqlmodel_backend(
+            "sqlmodel-postgres",
+            &no_features
+        ));
+        assert!(is_forbidden_sqlmodel_backend(
+            "sqlmodel-mysql",
+            &no_features
+        ));
+        assert!(is_forbidden_sqlmodel_backend(
+            "sqlmodel-core",
+            &BTreeSet::from(["c-sqlite".to_owned()])
+        ));
+    }
+
     #[test]
     fn sqlmodel_substrate_with_default_feature_fsqlite_is_refused() {
         let packages = vec![

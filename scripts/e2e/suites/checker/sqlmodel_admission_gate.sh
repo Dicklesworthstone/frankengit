@@ -86,6 +86,11 @@ sm_resolve() {
   SM_RESOLVE_EXIT=$FGE_LAST_EXIT
 }
 
+# Run the constellation gate against a fixture and capture the FULL diagnostic.
+# The substrate case legitimately emits many co-refusals (evidence drift,
+# missing rows) BEFORE the caller-profile lines, which overflows the
+# FGE_MAX_CAPTURE window on the in-memory copies; assert against the complete
+# artifact captures instead of the truncated variables.
 sm_gate() {
   local fixture=$1 case_name=$2 expected=$3
   fge_field fixture "$case_name"
@@ -96,7 +101,7 @@ sm_gate() {
     --manifest-path "$SM_REPO/tools/registry-check/Cargo.toml" \
     -- constellation --root "$fixture" || true
   SM_EXIT=$FGE_LAST_EXIT
-  SM_DIAGNOSTIC="$FGE_LAST_STDERR"$'\n'"$FGE_LAST_STDOUT"
+  SM_DIAGNOSTIC="$(cat "$FGE_LAST_STDERR_FILE" 2>/dev/null)"$'\n'"$(cat "$FGE_LAST_STDOUT_FILE" 2>/dev/null)"
 }
 
 fge_phase action
