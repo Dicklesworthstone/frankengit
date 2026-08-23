@@ -40,6 +40,13 @@ pub struct TarLimits {
     pub max_output_bytes: usize,
 }
 
+/// Bounds for the stored-ZIP archive profile.
+///
+/// ZIP and USTAR retain the same bounded member set and complete output stream,
+/// so they deliberately share the same limit shape.  The format-specific
+/// representability checks remain separate typed refusals.
+pub type ZipLimits = TarLimits;
+
 impl Default for TarLimits {
     fn default() -> Self {
         Self {
@@ -60,6 +67,9 @@ pub enum ArchiveProfile {
     /// Portable USTAR with fixed metadata and explicit typed refusals for
     /// unrepresentable entries.
     UstarV1,
+    /// ZIP without compression, ZIP64, timestamps, or non-UTF-8 name
+    /// recoding.  Symlinks are Unix-mode members whose body is link-text data.
+    ZipStoreV1,
 }
 
 /// The format and deterministic metadata of a rendered archive.
@@ -158,7 +168,7 @@ impl<A: GitHashAlgorithm> UstarArchive<A> {
         let mut entries = BTreeMap::new();
         discover_directory(base, source, capability, None, now, limits, &mut entries)?;
 
-        let entry_paths: Vec<TreePath> = entries.keys().cloned().collect();
+        let entry_paths = receipt_paths(&entries)?;
         let entry_count = entry_paths.len();
         let mut bytes = Vec::new();
         let mut regular_file_bytes = 0_usize;
@@ -216,7 +226,7 @@ impl<A: GitHashAlgorithm> UstarArchive<A> {
             }
         }
 
-        ensure_append_capacity(&bytes, TAR_END_BYTES, limits.max_output_bytes)?;
+        reserve_append_capacity(&mut bytes, TAR_END_BYTES, limits.max_output_bytes)?;
         bytes.resize(bytes.len() + TAR_END_BYTES, 0);
 
         let receipt = ArchiveReceipt {
@@ -245,6 +255,293 @@ impl<A: GitHashAlgorithm> UstarArchive<A> {
     }
 }
 
+const ZIP_LOCAL_HEADER_BYTES: usize = 30;
+const ZIP_CENTRAL_HEADER_BYTES: usize = 46;
+const ZIP_END_BYTES: usize = 22;
+const ZIP_VERSION: u16 = 20;
+const ZIP_VERSION_MADE_BY_UNIX: u16 = (3 << 8) | ZIP_VERSION;
+const ZIP_UTF8_FLAG: u16 = 1 << 11;
+const ZIP_DOS_EPOCH_DATE: u16 = 1 << 5 | 1;
+
+/// A complete deterministic stored-ZIP materialization and its provenance.
+///
+/// This profile intentionally does no DEFLATE: all compressed and
+/// uncompressed sizes are equal, which keeps the first ZIP adapter auditable
+/// while the shared limits still bound retained output.  A compression profile
+/// can arrive later without changing source verification or receipt shape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZipArchive<A: GitHashAlgorithm> {
+    bytes: Vec<u8>,
+    receipt: ArchiveReceipt<A>,
+}
+
+impl<A: GitHashAlgorithm> ZipArchive<A> {
+    /// Renders the capability-visible base as a deterministic stored ZIP.
+    ///
+    /// ZIP names are explicitly UTF-8 in this profile.  Git names are byte
+    /// strings, so a non-UTF-8 path is refused rather than silently encoded as
+    /// CP437, lossily normalized, or declared UTF-8 under a false flag.
+    pub fn render<S: ObjectSource<A>>(
+        base: &BaseView<A>,
+        source: &S,
+        capability: &mut TreeCapability,
+        now: u64,
+        limits: ZipLimits,
+    ) -> Result<Self, ArchiveRefusal> {
+        let mut entries = BTreeMap::new();
+        discover_directory(base, source, capability, None, now, limits, &mut entries)?;
+
+        let entry_paths = receipt_paths(&entries)?;
+        let entry_count = entry_paths.len();
+        let mut bytes = Vec::new();
+        let mut central = Vec::new();
+        central
+            .try_reserve_exact(entry_count)
+            .map_err(|_| ArchiveRefusal::AllocationFailed {
+                requested: entry_count,
+            })?;
+        let mut regular_file_bytes = 0_usize;
+        for (path, entry) in entries {
+            let (kind, mode, body) = match entry {
+                PlannedEntry::Directory => (ZipEntryKind::Directory, 0o755, Vec::new()),
+                PlannedEntry::File { oid, mode } => {
+                    let body = read_blob(base, source, capability, &path, &oid, now)?;
+                    ensure_zip_entry_bytes(&path, body.len(), limits.max_entry_bytes)?;
+                    regular_file_bytes = regular_file_bytes
+                        .checked_add(body.len())
+                        .ok_or(ArchiveRefusal::OutputSizeOverflow)?;
+                    (ZipEntryKind::File, file_mode(&path, &mode)?, body)
+                }
+                PlannedEntry::Symlink { oid } => {
+                    let body = read_blob(base, source, capability, &path, &oid, now)?;
+                    ensure_zip_entry_bytes(&path, body.len(), limits.max_entry_bytes)?;
+                    (ZipEntryKind::Symlink, 0o777, body)
+                }
+            };
+            let name = zip_member_name(&path, kind)?;
+            central.push(append_zip_local(
+                &mut bytes,
+                name,
+                kind,
+                mode,
+                &body,
+                limits.max_output_bytes,
+            )?);
+        }
+        append_zip_central_directory(&mut bytes, &central, limits.max_output_bytes)?;
+
+        let receipt = ArchiveReceipt {
+            repository_id: base.repository_id(),
+            source_rcr_id: base.base_rcr_id(),
+            source_tree_oid: base.base_tree_oid().clone(),
+            profile: ArchiveProfile::ZipStoreV1,
+            entry_paths,
+            entry_count,
+            regular_file_bytes,
+            stream_bytes: bytes.len(),
+        };
+        Ok(Self { bytes, receipt })
+    }
+
+    /// The exact stored-ZIP stream.  It has no host-path side effect.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The immutable source and output metadata for this stream.
+    #[must_use]
+    pub const fn receipt(&self) -> &ArchiveReceipt<A> {
+        &self.receipt
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ZipEntryKind {
+    File,
+    Directory,
+    Symlink,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ZipCentralEntry {
+    name: Vec<u8>,
+    kind: ZipEntryKind,
+    mode: u64,
+    crc32: u32,
+    size: u32,
+    local_offset: u32,
+}
+
+fn ensure_zip_entry_bytes(
+    path: &TreePath,
+    observed: usize,
+    limit: usize,
+) -> Result<(), ArchiveRefusal> {
+    if observed > limit {
+        return Err(ArchiveRefusal::EntryBytesExceeded {
+            path: path.clone(),
+            observed,
+            limit,
+        });
+    }
+    Ok(())
+}
+
+fn zip_member_name(path: &TreePath, kind: ZipEntryKind) -> Result<Vec<u8>, ArchiveRefusal> {
+    if std::str::from_utf8(path.as_bytes()).is_err() {
+        return Err(ArchiveRefusal::ZipPathNotUtf8 { path: path.clone() });
+    }
+    let mut name = path.as_bytes().to_vec();
+    if kind == ZipEntryKind::Directory {
+        name.push(b'/');
+    }
+    let _ = zip_u16(name.len(), "member name length")?;
+    Ok(name)
+}
+
+fn append_zip_local(
+    bytes: &mut Vec<u8>,
+    name: Vec<u8>,
+    kind: ZipEntryKind,
+    mode: u64,
+    body: &[u8],
+    max_output_bytes: usize,
+) -> Result<ZipCentralEntry, ArchiveRefusal> {
+    let local_offset = zip_u32(bytes.len(), "local header offset")?;
+    let name_len = zip_u16(name.len(), "member name length")?;
+    let size = zip_u32(body.len(), "member payload size")?;
+    let record_bytes = ZIP_LOCAL_HEADER_BYTES
+        .checked_add(name.len())
+        .and_then(|value| value.checked_add(body.len()))
+        .ok_or(ArchiveRefusal::OutputSizeOverflow)?;
+    reserve_append_capacity(bytes, record_bytes, max_output_bytes)?;
+
+    push_u32_le(bytes, 0x0403_4b50);
+    push_u16_le(bytes, ZIP_VERSION);
+    push_u16_le(bytes, ZIP_UTF8_FLAG);
+    push_u16_le(bytes, 0);
+    push_u16_le(bytes, 0);
+    push_u16_le(bytes, ZIP_DOS_EPOCH_DATE);
+    let crc32 = zip_crc32(body);
+    push_u32_le(bytes, crc32);
+    push_u32_le(bytes, size);
+    push_u32_le(bytes, size);
+    push_u16_le(bytes, name_len);
+    push_u16_le(bytes, 0);
+    bytes.extend_from_slice(&name);
+    bytes.extend_from_slice(body);
+
+    Ok(ZipCentralEntry {
+        name,
+        kind,
+        mode,
+        crc32,
+        size,
+        local_offset,
+    })
+}
+
+fn append_zip_central_directory(
+    bytes: &mut Vec<u8>,
+    entries: &[ZipCentralEntry],
+    max_output_bytes: usize,
+) -> Result<(), ArchiveRefusal> {
+    let entry_count = zip_u16(entries.len(), "archive entry count")?;
+    let central_offset = zip_u32(bytes.len(), "central directory offset")?;
+    let central_start = bytes.len();
+    for entry in entries {
+        let name_len = zip_u16(entry.name.len(), "central member name length")?;
+        let record_bytes = ZIP_CENTRAL_HEADER_BYTES
+            .checked_add(entry.name.len())
+            .ok_or(ArchiveRefusal::OutputSizeOverflow)?;
+        reserve_append_capacity(bytes, record_bytes, max_output_bytes)?;
+
+        push_u32_le(bytes, 0x0201_4b50);
+        push_u16_le(bytes, ZIP_VERSION_MADE_BY_UNIX);
+        push_u16_le(bytes, ZIP_VERSION);
+        push_u16_le(bytes, ZIP_UTF8_FLAG);
+        push_u16_le(bytes, 0);
+        push_u16_le(bytes, 0);
+        push_u16_le(bytes, ZIP_DOS_EPOCH_DATE);
+        push_u32_le(bytes, entry.crc32);
+        push_u32_le(bytes, entry.size);
+        push_u32_le(bytes, entry.size);
+        push_u16_le(bytes, name_len);
+        push_u16_le(bytes, 0);
+        push_u16_le(bytes, 0);
+        push_u16_le(bytes, 0);
+        push_u16_le(bytes, 0);
+        push_u32_le(bytes, zip_external_attributes(entry.kind, entry.mode));
+        push_u32_le(bytes, entry.local_offset);
+        bytes.extend_from_slice(&entry.name);
+    }
+    let central_size = bytes
+        .len()
+        .checked_sub(central_start)
+        .ok_or(ArchiveRefusal::OutputSizeOverflow)?;
+    let central_size = zip_u32(central_size, "central directory size")?;
+    reserve_append_capacity(bytes, ZIP_END_BYTES, max_output_bytes)?;
+    push_u32_le(bytes, 0x0605_4b50);
+    push_u16_le(bytes, 0);
+    push_u16_le(bytes, 0);
+    push_u16_le(bytes, entry_count);
+    push_u16_le(bytes, entry_count);
+    push_u32_le(bytes, central_size);
+    push_u32_le(bytes, central_offset);
+    push_u16_le(bytes, 0);
+    Ok(())
+}
+
+fn zip_u16(value: usize, field: &'static str) -> Result<u16, ArchiveRefusal> {
+    u16::try_from(value).map_err(|_| ArchiveRefusal::ZipFieldOverflow {
+        field,
+        observed: u64::try_from(value).unwrap_or(u64::MAX),
+        limit: u64::from(u16::MAX),
+    })
+}
+
+fn zip_u32(value: usize, field: &'static str) -> Result<u32, ArchiveRefusal> {
+    u32::try_from(value).map_err(|_| ArchiveRefusal::ZipFieldOverflow {
+        field,
+        observed: u64::try_from(value).unwrap_or(u64::MAX),
+        limit: u64::from(u32::MAX),
+    })
+}
+
+fn push_u16_le(bytes: &mut Vec<u8>, value: u16) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u32_le(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn zip_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0_u32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 0 {
+                crc >> 1
+            } else {
+                (crc >> 1) ^ 0xedb8_8320
+            };
+        }
+    }
+    !crc
+}
+
+fn zip_external_attributes(kind: ZipEntryKind, mode: u64) -> u32 {
+    let unix_mode = match kind {
+        ZipEntryKind::File => 0o100_000 | mode,
+        ZipEntryKind::Directory => 0o040_000 | mode,
+        ZipEntryKind::Symlink => 0o120_000 | mode,
+    };
+    let dos_attributes = u32::from(kind == ZipEntryKind::Directory) << 4;
+    ((unix_mode as u32) << 16) | dos_attributes
+}
+
 /// Why an archive materialization was refused.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArchiveRefusal {
@@ -266,9 +563,9 @@ pub enum ArchiveRefusal {
         /// Configured maximum.
         limit: usize,
     },
-    /// A regular file exceeds its per-entry body bound.
+    /// An archive payload exceeds its per-entry body bound.
     EntryBytesExceeded {
-        /// The file path.
+        /// The member path.
         path: TreePath,
         /// Bytes returned by the verified object read.
         observed: usize,
@@ -303,6 +600,21 @@ pub enum ArchiveRefusal {
         /// USTAR's link-name ceiling.
         limit: usize,
     },
+    /// A Git byte path cannot be truthfully labeled UTF-8 in the stored-ZIP
+    /// profile.
+    ZipPathNotUtf8 {
+        /// The path whose raw bytes are not UTF-8.
+        path: TreePath,
+    },
+    /// A value would need ZIP64 or another unsupported ZIP extension.
+    ZipFieldOverflow {
+        /// The ZIP field that could not represent the value.
+        field: &'static str,
+        /// The value that did not fit.
+        observed: u64,
+        /// The largest value the selected non-ZIP64 profile represents.
+        limit: u64,
+    },
     /// A Git file mode was not canonical octal bytes.
     InvalidFileMode {
         /// The file path.
@@ -321,6 +633,11 @@ pub enum ArchiveRefusal {
     },
     /// A size calculation overflowed the platform's address space.
     OutputSizeOverflow,
+    /// The bounded output or receipt metadata could not reserve memory.
+    AllocationFailed {
+        /// Additional elements or bytes requested from the allocator.
+        requested: usize,
+    },
     /// The complete output would exceed the configured byte ceiling.
     OutputBytesExceeded {
         /// Bytes that would have been retained.
@@ -376,6 +693,18 @@ impl Display for ArchiveRefusal {
                 formatter,
                 "symlink target at {path} is {observed} bytes, USTAR limit is {limit}"
             ),
+            Self::ZipPathNotUtf8 { path } => write!(
+                formatter,
+                "path {path} is not UTF-8 and cannot enter the stored-ZIP profile"
+            ),
+            Self::ZipFieldOverflow {
+                field,
+                observed,
+                limit,
+            } => write!(
+                formatter,
+                "ZIP {field} value {observed} exceeds the non-ZIP64 limit of {limit}"
+            ),
             Self::InvalidFileMode { path, mode } => write!(
                 formatter,
                 "file {path} has non-octal Git mode {:?}",
@@ -386,6 +715,12 @@ impl Display for ArchiveRefusal {
                 "USTAR {field} field for {path} cannot encode {value}"
             ),
             Self::OutputSizeOverflow => formatter.write_str("archive output size overflowed"),
+            Self::AllocationFailed { requested } => {
+                write!(
+                    formatter,
+                    "archive could not reserve {requested} bytes or entries"
+                )
+            }
             Self::OutputBytesExceeded { observed, limit } => write!(
                 formatter,
                 "archive would retain {observed} bytes, limit is {limit}"
@@ -630,7 +965,7 @@ fn append_header_and_body(
         .checked_add(body.len())
         .and_then(|value| value.checked_add(padding))
         .ok_or(ArchiveRefusal::OutputSizeOverflow)?;
-    ensure_append_capacity(bytes, record_bytes, max_output_bytes)?;
+    reserve_append_capacity(bytes, record_bytes, max_output_bytes)?;
     bytes.extend_from_slice(&header);
     bytes.extend_from_slice(body);
     bytes.resize(bytes.len() + padding, 0);
@@ -653,6 +988,32 @@ fn ensure_append_capacity(
         });
     }
     Ok(())
+}
+
+fn reserve_append_capacity(
+    bytes: &mut Vec<u8>,
+    additional: usize,
+    max_output_bytes: usize,
+) -> Result<(), ArchiveRefusal> {
+    ensure_append_capacity(bytes, additional, max_output_bytes)?;
+    bytes
+        .try_reserve(additional)
+        .map_err(|_| ArchiveRefusal::AllocationFailed {
+            requested: additional,
+        })
+}
+
+fn receipt_paths<A: GitHashAlgorithm>(
+    entries: &BTreeMap<TreePath, PlannedEntry<A>>,
+) -> Result<Vec<TreePath>, ArchiveRefusal> {
+    let mut paths = Vec::new();
+    paths
+        .try_reserve_exact(entries.len())
+        .map_err(|_| ArchiveRefusal::AllocationFailed {
+            requested: entries.len(),
+        })?;
+    paths.extend(entries.keys().cloned());
+    Ok(paths)
 }
 
 fn write_octal_field(field: &mut [u8], mut value: u64) -> Option<()> {

@@ -7,7 +7,7 @@
 
 use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1};
 use fgit_git_object::{AcceptanceProfile, ParseLimits, TreeEntry, emit_tree};
-use fgit_treefs::archive::{ArchiveProfile, ArchiveRefusal, TarLimits, UstarArchive};
+use fgit_treefs::archive::{ArchiveProfile, ArchiveRefusal, TarLimits, UstarArchive, ZipArchive};
 use fgit_treefs::base::{BaseView, ObjectSource, ObjectSourceError};
 use fgit_treefs::capability::{ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId};
 use fgit_treefs::path::{PathPolicy, TreePath};
@@ -218,6 +218,103 @@ fn members(bytes: &[u8]) -> Vec<TarMember> {
     out
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct ZipMember {
+    name: Vec<u8>,
+    body: Vec<u8>,
+    external_attributes: u32,
+}
+
+fn le_u16(bytes: &[u8]) -> u16 {
+    u16::from_le_bytes(bytes.try_into().expect("fixed ZIP field width"))
+}
+
+fn le_u32(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes(bytes.try_into().expect("fixed ZIP field width"))
+}
+
+fn zip_members(bytes: &[u8]) -> Vec<ZipMember> {
+    let mut cursor = 0_usize;
+    let mut out = Vec::new();
+    let mut local_offsets = Vec::new();
+    while le_u32(&bytes[cursor..cursor + 4]) == 0x0403_4b50 {
+        local_offsets.push(u32::try_from(cursor).expect("fixture offset fits ZIP32"));
+        assert_eq!(le_u16(&bytes[cursor + 4..cursor + 6]), 20);
+        assert_eq!(le_u16(&bytes[cursor + 6..cursor + 8]), 1 << 11);
+        assert_eq!(le_u16(&bytes[cursor + 8..cursor + 10]), 0);
+        assert_eq!(le_u16(&bytes[cursor + 10..cursor + 12]), 0);
+        assert_eq!(le_u16(&bytes[cursor + 12..cursor + 14]), 33);
+        let crc32 = le_u32(&bytes[cursor + 14..cursor + 18]);
+        let size = usize::try_from(le_u32(&bytes[cursor + 18..cursor + 22]))
+            .expect("fixture size fits usize");
+        assert_eq!(le_u32(&bytes[cursor + 22..cursor + 26]), size as u32);
+        let name_len = usize::from(le_u16(&bytes[cursor + 26..cursor + 28]));
+        let extra_len = usize::from(le_u16(&bytes[cursor + 28..cursor + 30]));
+        assert_eq!(extra_len, 0);
+        let name_start = cursor + 30;
+        let body_start = name_start + name_len;
+        let body_end = body_start + size;
+        let body = bytes[body_start..body_end].to_vec();
+        assert_eq!(
+            crc32,
+            zip_crc32(&body),
+            "each stored local member carries the CRC of its exact bytes"
+        );
+        out.push(ZipMember {
+            name: bytes[name_start..body_start].to_vec(),
+            body,
+            external_attributes: 0,
+        });
+        cursor = body_end;
+    }
+
+    let central_start = cursor;
+    for (member, local_offset) in out.iter_mut().zip(local_offsets) {
+        assert_eq!(le_u32(&bytes[cursor..cursor + 4]), 0x0201_4b50);
+        assert_eq!(le_u16(&bytes[cursor + 4..cursor + 6]), 0x0314);
+        assert_eq!(le_u16(&bytes[cursor + 6..cursor + 8]), 20);
+        assert_eq!(le_u16(&bytes[cursor + 8..cursor + 10]), 1 << 11);
+        assert_eq!(le_u16(&bytes[cursor + 10..cursor + 12]), 0);
+        let name_len = usize::from(le_u16(&bytes[cursor + 28..cursor + 30]));
+        assert_eq!(le_u16(&bytes[cursor + 30..cursor + 32]), 0);
+        assert_eq!(le_u16(&bytes[cursor + 32..cursor + 34]), 0);
+        assert_eq!(&bytes[cursor + 46..cursor + 46 + name_len], member.name);
+        member.external_attributes = le_u32(&bytes[cursor + 38..cursor + 42]);
+        assert_eq!(le_u32(&bytes[cursor + 42..cursor + 46]), local_offset);
+        cursor += 46 + name_len;
+    }
+    let central_size = cursor - central_start;
+    assert_eq!(le_u32(&bytes[cursor..cursor + 4]), 0x0605_4b50);
+    assert_eq!(le_u16(&bytes[cursor + 8..cursor + 10]), out.len() as u16);
+    assert_eq!(le_u16(&bytes[cursor + 10..cursor + 12]), out.len() as u16);
+    assert_eq!(
+        le_u32(&bytes[cursor + 12..cursor + 16]),
+        central_size as u32
+    );
+    assert_eq!(
+        le_u32(&bytes[cursor + 16..cursor + 20]),
+        central_start as u32
+    );
+    assert_eq!(le_u16(&bytes[cursor + 20..cursor + 22]), 0);
+    assert_eq!(cursor + 22, bytes.len());
+    out
+}
+
+fn zip_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0_u32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 0 {
+                crc >> 1
+            } else {
+                (crc >> 1) ^ 0xedb8_8320
+            };
+        }
+    }
+    !crc
+}
+
 #[test]
 fn capability_scoped_ustar_is_byte_stable_and_never_follows_symlinks() {
     let (source, root) = fixture();
@@ -320,6 +417,89 @@ fn submodules_are_refused_while_the_near_identical_scoped_archive_succeeds() {
         }),
         "the USTAR profile refuses a submodule instead of substituting a fake directory or blob"
     );
+}
+
+#[test]
+fn stored_zip_is_byte_stable_and_represents_symlinks_as_data() {
+    let (source, root) = fixture();
+    let view = base(root);
+    let mut first_capability = capability(&[b"docs", b"src"]);
+    let first = ZipArchive::render(
+        &view,
+        &source,
+        &mut first_capability,
+        9,
+        TarLimits::default(),
+    )
+    .expect("the capability-visible fixture is representable by stored ZIP");
+    let mut second_capability = capability(&[b"docs", b"src"]);
+    let second = ZipArchive::render(
+        &view,
+        &source,
+        &mut second_capability,
+        9,
+        TarLimits::default(),
+    )
+    .expect("the same authenticated inputs render again");
+
+    assert_eq!(first.bytes(), second.bytes());
+    assert_eq!(first.receipt().profile(), ArchiveProfile::ZipStoreV1);
+    let rendered = zip_members(first.bytes());
+    assert_eq!(
+        rendered
+            .iter()
+            .map(|member| &member.name)
+            .collect::<Vec<_>>(),
+        vec![
+            &b"docs/".to_vec(),
+            &b"docs/readme.md".to_vec(),
+            &b"src/".to_vec(),
+            &b"src/link".to_vec(),
+            &b"src/tool".to_vec(),
+        ],
+        "directory suffixes, paths, and order are fixed by the profile"
+    );
+    assert_eq!(rendered[3].body, b"../../outside-the-workspace");
+    assert_eq!(rendered[3].external_attributes >> 16, 0o120777);
+    assert_eq!(rendered[4].body, b"#!/bin/sh\necho archive\n");
+    assert_eq!(rendered[4].external_attributes >> 16, 0o100755);
+}
+
+#[test]
+fn stored_zip_refuses_non_utf8_paths_while_the_utf8_twin_renders() {
+    let mut source = MemorySource::default();
+    let blob = source.blob(b"raw Git path test");
+    let non_utf8 = vec![0xff];
+    let root = source.tree(&[entry(b"100644", &non_utf8, &blob)]);
+    let view = base(root);
+    let mut non_utf8_capability = capability(&[&non_utf8]);
+    assert_eq!(
+        ZipArchive::render(
+            &view,
+            &source,
+            &mut non_utf8_capability,
+            0,
+            TarLimits::default(),
+        ),
+        Err(ArchiveRefusal::ZipPathNotUtf8 {
+            path: path(&non_utf8),
+        }),
+        "stored ZIP never lies with the UTF-8 flag for an arbitrary Git byte path"
+    );
+
+    let mut permitted_source = MemorySource::default();
+    let permitted_blob = permitted_source.blob(b"raw Git path test");
+    let permitted_root = permitted_source.tree(&[entry(b"100644", b"v", &permitted_blob)]);
+    let permitted_view = base(permitted_root);
+    let mut permitted_capability = capability(&[b"v"]);
+    ZipArchive::render(
+        &permitted_view,
+        &permitted_source,
+        &mut permitted_capability,
+        0,
+        TarLimits::default(),
+    )
+    .expect("the UTF-8 near twin renders under the same stored-ZIP profile");
 }
 
 #[test]

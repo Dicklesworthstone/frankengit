@@ -50,7 +50,9 @@ pub mod path;
 pub mod proposal;
 pub mod snapshot;
 
-pub use archive::{ArchiveProfile, ArchiveReceipt, ArchiveRefusal, TarLimits, UstarArchive};
+pub use archive::{
+    ArchiveProfile, ArchiveReceipt, ArchiveRefusal, TarLimits, UstarArchive, ZipArchive, ZipLimits,
+};
 pub use base::{BaseEntry, BaseError, BaseView, DirectoryListing, ObjectSource, ObjectSourceError};
 pub use capability::{
     CapabilityRefusal, GrantScope, ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId,
