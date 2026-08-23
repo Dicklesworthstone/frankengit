@@ -148,13 +148,17 @@ fn read_only_capability() -> Capability {
     .expect("the corpus read capability is valid")
 }
 
-fn request(effect_id: u128, operation: OperationClass, cost: ResourceVector) -> EffectRequest {
+const fn request(
+    effect_id: u128,
+    operation: OperationClass,
+    cost: ResourceVector,
+) -> EffectRequest {
     EffectRequest {
         effect_id: EffectId::new(effect_id),
         parent_effect_id: None,
         operation,
         cost,
-        input_commitment: [effect_id as u8; 32],
+        input_commitment: [effect_id.to_le_bytes()[0]; 32],
     }
 }
 
@@ -362,7 +366,7 @@ fn fabricated_evidence_identity_is_refused_by_the_real_evidence_verifier() {
 
 fn external_run() -> IntentRun {
     IntentRun::new(
-        RunId::new(0x030c_e),
+        RunId::new(0x0000_30ce),
         basis(),
         ClassSet::from_classes(&[OperationClass::ExternalIntegration]),
         egress(1_024),
@@ -373,7 +377,7 @@ fn external_run() -> IntentRun {
 
 fn external_capability() -> Capability {
     Capability::issue(
-        CapabilityId::new(0x030c_e),
+        CapabilityId::new(0x0000_30ce),
         ClassSet::from_classes(&[OperationClass::ExternalIntegration]),
         egress(1_024),
         time(0),
