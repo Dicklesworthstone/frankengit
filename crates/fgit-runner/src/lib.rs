@@ -28,7 +28,7 @@ use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_claim::ClaimRank;
-use fgit_codec::DecodeLimits;
+use fgit_codec::{DecodeLimits, Encoder};
 use fgit_crypto::{Digest, DigestAlgorithm, DigestBytes, sha256_digest};
 use fgit_evidence::{
     EvidenceArtifact, EvidenceContext, EvidenceRecord, EvidenceRecordBody, EvidenceText,
@@ -874,7 +874,7 @@ pub struct RunnerControlPlane {
 
 impl RunnerControlPlane {
     /// Creates a controller with a finite, predeclared capacity.
-    pub fn new(maximum: ResourceCeilings, slots: u16) -> Result<Self, RunnerRefusal> {
+    pub const fn new(maximum: ResourceCeilings, slots: u16) -> Result<Self, RunnerRefusal> {
         if slots == 0 {
             return Err(RunnerRefusal::NoRunnerCapacity);
         }
@@ -1437,7 +1437,7 @@ fn receipt_evidence(
     outcome: CheckOutcome,
     observation: &SubstrateObservation,
 ) -> Result<EvidenceRecord, RunnerRefusal> {
-    let mut sources = vec![
+    let sources = vec![
         evidence_text("capsule", format!("capsule-{}", plan.capsule.id()))?,
         evidence_text(
             "authority",
@@ -1448,13 +1448,13 @@ fn receipt_evidence(
             format!("dependency-{}", plan.capsule.dependency_lock()),
         )?,
     ];
-    sources.sort_unstable();
-    let mut assumptions = vec![
+    let sources = canonical_evidence_text_set(sources, "source_input")?;
+    let assumptions = vec![
         evidence_text("assumption", "ambient-env-cleared".to_owned())?,
         evidence_text("assumption", "metadata-egress-denied".to_owned())?,
         evidence_text("assumption", "secrets-brokered".to_owned())?,
     ];
-    assumptions.sort_unstable();
+    let assumptions = canonical_evidence_text_set(assumptions, "assumption")?;
     let mut artifacts = vec![EvidenceArtifact::new(
         evidence_text("log_root", "runner-log-root".to_owned())?,
         observation.log_root.digest(),
@@ -1465,6 +1465,7 @@ fn receipt_evidence(
             artifact.digest(),
         ));
     }
+    let artifacts = canonical_evidence_artifact_set(artifacts)?;
     let context = EvidenceContext::new(
         sources,
         evidence_text("implementation", "fgit-runner-v1".to_owned())?,
@@ -1496,6 +1497,50 @@ fn receipt_evidence(
 
 fn evidence_text(field: &'static str, value: String) -> Result<EvidenceText, RunnerRefusal> {
     EvidenceText::parse(field, &value).map_err(|_| RunnerRefusal::EvidenceConstruction)
+}
+
+/// Sorts an evidence set by exactly the same element bytes as its codec frame.
+///
+/// `EvidenceText`'s Rust ordering is not the protocol ordering: the codec
+/// prefixes every element with its length. Keeping the in-memory body in codec
+/// order makes decode/encode round-trips structurally identical as well as
+/// identity-equivalent.
+fn canonical_evidence_text_set(
+    values: Vec<EvidenceText>,
+    field: &'static str,
+) -> Result<Vec<EvidenceText>, RunnerRefusal> {
+    let mut encoded = values
+        .into_iter()
+        .map(|value| {
+            let mut encoder = Encoder::new();
+            encoder
+                .write_text(field, value.as_str())
+                .map_err(|_| RunnerRefusal::EvidenceConstruction)?;
+            Ok((encoder.into_bytes(), value))
+        })
+        .collect::<Result<Vec<_>, RunnerRefusal>>()?;
+    encoded.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    Ok(encoded.into_iter().map(|(_, value)| value).collect())
+}
+
+/// Sorts evidence artifacts by the exact bytes the canonical evidence codec
+/// uses for one artifact set element.
+fn canonical_evidence_artifact_set(
+    values: Vec<EvidenceArtifact>,
+) -> Result<Vec<EvidenceArtifact>, RunnerRefusal> {
+    let mut encoded = values
+        .into_iter()
+        .map(|value| {
+            let mut encoder = Encoder::new();
+            encoder
+                .write_text("artifact_location", value.location().as_str())
+                .and_then(|()| encoder.write_digest(value.commitment()))
+                .map_err(|_| RunnerRefusal::EvidenceConstruction)?;
+            Ok((encoder.into_bytes(), value))
+        })
+        .collect::<Result<Vec<_>, RunnerRefusal>>()?;
+    encoded.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    Ok(encoded.into_iter().map(|(_, value)| value).collect())
 }
 
 #[cfg(test)]
