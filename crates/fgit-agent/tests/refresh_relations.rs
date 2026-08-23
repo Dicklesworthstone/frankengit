@@ -10,8 +10,9 @@
 //! distinction the policy does not act on is decoration.
 
 use fgit_agent::{
-    EccPolicy, EccRefusal, EvidenceCarryingChange, EvidenceClass, EvidenceRecordRef, PartyFacts,
-    RefreshReceipt, RefreshRelation, RefreshSide, RequirementDisposition, VerifierAttestation,
+    EccPolicy, EccRefusal, EvidenceCarryingChange, EvidenceClass, EvidenceRecordRef,
+    IndependenceDimension, PartyFacts, RefreshReceipt, RefreshRelation, RefreshSide,
+    RequirementDisposition, VerifierAttestation,
 };
 
 const fn facts(base: u128) -> PartyFacts {
@@ -312,6 +313,126 @@ fn a_receipt_reports_whether_it_moved_and_whether_it_advanced() {
     let refused = receipt(RefreshRelation::ConflictRefused, 0xba5e, 0xba5f);
     assert!(!refused.advanced());
     assert!(refused.changed_basis());
+}
+
+/// The documented check order, pinned with a bundle that is wrong FOUR ways.
+///
+/// `evaluate`'s doc comment promises a fixed sequence — dispositions, then the
+/// refresh gate, then evidence classes, then verifiers — "so a bundle wrong in
+/// several ways reports the same refusal on every run". That is a determinism
+/// guarantee, and until this test it was a sentence nothing checked.
+///
+/// Every other case in the crate is a SINGLE-FAULT probe: it makes one thing
+/// wrong and asserts one refusal. A complete single-fault corpus is
+/// structurally blind to a stage swap, because moving a stage cannot change
+/// which refusal fires when only one stage can fire at all. The faults have to
+/// overlap before the order becomes observable.
+///
+/// So this peels the bundle one fault at a time and asserts the refusal changes
+/// in the documented sequence. Each step also proves the *previous* stage was
+/// genuinely masking the next one, which is what makes it an ordering test
+/// rather than four more single-fault assertions.
+#[test]
+fn a_bundle_wrong_several_ways_reports_the_stages_in_the_documented_order() {
+    // Every field listed explicitly, with no `..default()`. Clippy pointed out
+    // the spread was dead, and the exhaustive form is the better one to keep:
+    // adding a field to `EccPolicy` will stop this test compiling until someone
+    // decides where the new stage belongs in the order. A `..default()` would
+    // have silently absorbed it and left the sequence below quietly incomplete
+    // — the same way an `ALL`-driven loop silently shrinks.
+    let policy = EccPolicy {
+        required_classes: vec![EvidenceClass::Executed],
+        required_independence: vec![IndependenceDimension::Oracle],
+        requires_verifier: true,
+        requires_refreshed_authority: true,
+        requires_completed_refresh: true,
+    };
+
+    // Wrong four ways at once: a requirement with no disposition, no refresh
+    // receipt, no Executed evidence, and no verifier.
+    let mut change = change(vec![], None);
+    change.requirement_dispositions = vec![None];
+    change.verifiers = vec![];
+
+    // 1. Dispositions first.
+    assert_eq!(
+        change.evaluate(&policy),
+        Err(EccRefusal::RequirementWithoutDisposition { requirement: 0 }),
+        "the disposition check must run before everything else",
+    );
+
+    // 2. Fix only that, and the refresh gate is next — NOT the evidence check,
+    //    even though the bundle has no Executed record either.
+    change.requirement_dispositions = vec![Some(RequirementDisposition::SatisfiedWithEvidence)];
+    assert_eq!(
+        change.evaluate(&policy),
+        Err(EccRefusal::MissingRefreshReceipt),
+        "the refresh gate must run before the evidence loop",
+    );
+
+    // 3. Supply a receipt that did not complete. Still the refresh gate, and
+    //    still ahead of the missing evidence class.
+    change.refreshed_authority = Some(receipt(RefreshRelation::ConflictRefused, 0xba5e, 0xba5f));
+    assert_eq!(
+        change.evaluate(&policy),
+        Err(EccRefusal::RefreshDidNotComplete {
+            relation: RefreshRelation::ConflictRefused
+        }),
+        "completion is decided at the refresh gate, before evidence",
+    );
+
+    // 4. Let the refresh succeed and move the basis. Evidence is next.
+    change.refreshed_authority = Some(receipt(
+        RefreshRelation::RebasedByIntentReplay,
+        0xba5e,
+        0xba5f,
+    ));
+    assert_eq!(
+        change.evaluate(&policy),
+        Err(EccRefusal::MissingEvidenceClass {
+            required: EvidenceClass::Executed
+        }),
+        "the evidence loop must run before the verifier checks",
+    );
+
+    // 5. Add the class but only checked BEFORE the refresh — still the evidence
+    //    stage, on its re-validation rule, and still ahead of the verifiers.
+    change.evidence = vec![record(
+        EvidenceClass::Executed,
+        Some(RefreshSide::BeforeRefresh),
+    )];
+    assert_eq!(
+        change.evaluate(&policy),
+        Err(EccRefusal::EvidenceNotRevalidatedAfterRefresh {
+            required: EvidenceClass::Executed
+        }),
+        "re-validation is part of the evidence stage, not a later one",
+    );
+
+    // 6. Re-check it after the refresh, and only now do the verifiers speak.
+    change.evidence = vec![record(
+        EvidenceClass::Executed,
+        Some(RefreshSide::AfterRefresh),
+    )];
+    assert_eq!(
+        change.evaluate(&policy),
+        Err(EccRefusal::NoVerifierAttestation),
+        "the verifier checks run last",
+    );
+
+    // 7. Permitted twin. With every fault repaired the same policy accepts, so
+    //    the sequence above is six stages masking each other rather than a
+    //    bundle that could never pass at all.
+    change.verifiers = vec![VerifierAttestation {
+        verifier: 0x96,
+        facts: facts(0x20),
+        upheld: true,
+    }];
+    let classifications = change
+        .evaluate(&policy)
+        .expect("every fault repaired, the bundle must publish");
+    assert_eq!(classifications.len(), 1);
+    assert!(classifications[0].is_independent_on(IndependenceDimension::Oracle));
 }
 
 /// Both sides are structurally distinct and round-trip through their codes.
