@@ -46,7 +46,7 @@
 //! the ECC itself — nor most of §11: the deterministic verification services
 //! of §11.1 and the human review view of §11.3 are absent. [`ecc`]'s own
 //! header lists these individually. The separate [`protocol`] module does bind
-//! real context packets, TreeFS snapshots, and a normal sealed-ref attempt; it
+//! real context packets, `TreeFS` snapshots, and a normal sealed-ref attempt; it
 //! does not claim to synthesize those fields into an ECC.
 //!
 //! The obligation lifecycle is not reimplemented either. `fgit-resource` owns

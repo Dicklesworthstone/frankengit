@@ -72,7 +72,7 @@ impl AuthorityReadReceipt {
     ///
     /// The caller cannot supply a body, token, or head identity independently:
     /// all three are taken from the authenticated authority result. This keeps
-    /// a backend ETag or a decoded but unverified body from masquerading as the
+    /// a backend `ETag` or a decoded but unverified body from masquerading as the
     /// agent's canonical base.
     ///
     /// # Errors
@@ -309,7 +309,7 @@ impl ContextControl {
     /// bytes. Coverage and omission commitments remain visible even when no
     /// source body is retained.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         request_intent_commitment: [u8; 32],
         authorization_scope: ClassSet,
         ranking_and_fusion_identity: [u8; 32],
@@ -377,7 +377,7 @@ pub struct ContextPacket {
     sources: Vec<ContextSource>,
 }
 
-/// A TreeFS workspace manifest bound to the exact authenticated base used by
+/// A `TreeFS` workspace manifest bound to the exact authenticated base used by
 /// the agent run.
 ///
 /// The wrapped snapshot is the real `fgit-treefs` immutable body, not a second
@@ -395,7 +395,7 @@ pub struct WorkspaceBinding<A: GitHashAlgorithm> {
 }
 
 impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
-    /// Binds one immutable TreeFS snapshot to the authenticated run and
+    /// Binds one immutable `TreeFS` snapshot to the authenticated run and
     /// authority receipt that supplied its base.
     ///
     /// # Errors
@@ -404,7 +404,7 @@ impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
     /// `TreeFsWorkspace` authority, a workspace over another repository, a
     /// workspace whose base RCR differs from the receipt, or a receipt before
     /// the first committed RCR. The latter is not silently replaced by an
-    /// authority-head generation: TreeFS names a base RCR and the two are
+    /// authority-head generation: `TreeFS` names a base RCR and the two are
     /// distinct protocol positions.
     pub fn bind(
         run: IntentRun,
@@ -428,8 +428,8 @@ impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
             .ok_or(ProtocolRefusal::WorkspaceBaseMissing)?;
         if snapshot.base_rcr_id() != expected_base {
             return Err(ProtocolRefusal::WorkspaceBaseMismatch {
-                expected: expected_base,
-                observed: snapshot.base_rcr_id(),
+                expected: Box::new(expected_base),
+                observed: Box::new(snapshot.base_rcr_id()),
             });
         }
         if !snapshot.epochs().invariant_holds() {
@@ -450,31 +450,31 @@ impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
         &self.authority_read_receipt
     }
 
-    /// Exact run that authorized this TreeFS workspace.
+    /// Exact run that authorized this `TreeFS` workspace.
     #[must_use]
     pub const fn run(&self) -> &IntentRun {
         &self.run
     }
 
-    /// The immutable TreeFS snapshot this binding authenticated.
+    /// The immutable `TreeFS` snapshot this binding authenticated.
     #[must_use]
     pub const fn snapshot(&self) -> &WorkspaceSnapshotBody<A> {
         &self.snapshot
     }
 
-    /// The workspace identity assigned by TreeFS.
+    /// The workspace identity assigned by `TreeFS`.
     #[must_use]
     pub const fn workspace_id(&self) -> WorkspaceId {
         self.snapshot.workspace_id()
     }
 
-    /// Commitment of the immutable TreeFS manifest body.
+    /// Commitment of the immutable `TreeFS` manifest body.
     #[must_use]
     pub const fn manifest_commitment(&self) -> [u8; 32] {
         self.manifest_commitment
     }
 
-    /// Converts a real TreeFS proposal into the ordinary sealed-ref-transaction
+    /// Converts a real `TreeFS` proposal into the ordinary sealed-ref-transaction
     /// request shape.
     ///
     /// This method deliberately has no authority-head mutation API. It proves
@@ -485,7 +485,7 @@ impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
     /// # Errors
     ///
     /// Refuses a packet from another authority position, a proposal from
-    /// another TreeFS workspace or base RCR, and a run that lacks
+    /// another `TreeFS` workspace or base RCR, and a run that lacks
     /// `PreparePublication` authority.
     pub fn prepare_ref_transaction(
         &self,
@@ -507,8 +507,8 @@ impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
         }
         if proposal.receipt().base_rcr_id != self.snapshot.base_rcr_id() {
             return Err(ProtocolRefusal::ProposalBaseMismatch {
-                expected: self.snapshot.base_rcr_id(),
-                observed: proposal.receipt().base_rcr_id,
+                expected: Box::new(self.snapshot.base_rcr_id()),
+                observed: Box::new(proposal.receipt().base_rcr_id),
             });
         }
         for packet in context_packets {
@@ -535,11 +535,11 @@ impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
 /// An agent proposal in the same sealed transaction universe as non-agent
 /// mutations.
 ///
-/// It contains a real TreeFS proposal and the canonical authority request it
+/// It contains a real `TreeFS` proposal and the canonical authority request it
 /// became. It is not a terminal outcome and it has no API for moving an
 /// authority head. [`Self::seal_attempt`] produces only the ordinary input to
 /// the authority seal path. The agent does not own the effectful call: an
-/// EffectBroker grant and its lifecycle ledger must authorize and record that
+/// `EffectBroker` grant and its lifecycle ledger must authorize and record that
 /// call before an executor submits this attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentRefTransaction<A: GitHashAlgorithm> {
@@ -570,7 +570,7 @@ impl<A: GitHashAlgorithm> AgentRefTransaction<A> {
         &self.authority_read_receipt
     }
 
-    /// TreeFS manifest commitment from which the request was derived.
+    /// `TreeFS` manifest commitment from which the request was derived.
     #[must_use]
     pub const fn workspace_manifest_commitment(&self) -> [u8; 32] {
         self.workspace_manifest_commitment
@@ -585,7 +585,7 @@ impl<A: GitHashAlgorithm> AgentRefTransaction<A> {
         &self.context_packet_ids
     }
 
-    /// The inert TreeFS proposal, which cannot assert a commit outcome.
+    /// The inert `TreeFS` proposal, which cannot assert a commit outcome.
     #[must_use]
     pub const fn proposal(&self) -> &ProposedTransaction<A> {
         &self.proposal
@@ -731,7 +731,7 @@ pub enum ProtocolRefusal {
         /// Configured maximum.
         limit: usize,
     },
-    /// The TreeFS snapshot names another repository.
+    /// The `TreeFS` snapshot names another repository.
     WorkspaceRepositoryMismatch,
     /// The authenticated authority receipt has no committed RCR to pin a
     /// workspace base.
@@ -739,29 +739,29 @@ pub enum ProtocolRefusal {
     /// The snapshot names a different base RCR from its authority receipt.
     WorkspaceBaseMismatch {
         /// RCR named by the authenticated authority receipt.
-        expected: RepositoryCommitId,
-        /// RCR named by the TreeFS snapshot.
-        observed: RepositoryCommitId,
+        expected: Box<RepositoryCommitId>,
+        /// RCR named by the `TreeFS` snapshot.
+        observed: Box<RepositoryCommitId>,
     },
-    /// The TreeFS snapshot violated its staged/visible/durable invariant.
+    /// The `TreeFS` snapshot violated its staged/visible/durable invariant.
     WorkspaceEpochInvariant,
-    /// The run does not authorize TreeFS workspace creation or use.
+    /// The run does not authorize `TreeFS` workspace creation or use.
     WorkspaceOperationOutsideRun,
     /// A legacy run supplied an identifying reference rather than a complete
     /// authenticated authority receipt.
     RunAuthorityReceiptRequired,
     /// The run does not authorize publication preparation.
     PublicationOperationOutsideRun,
-    /// The proposal came from another TreeFS workspace.
+    /// The proposal came from another `TreeFS` workspace.
     ProposalWorkspaceMismatch,
     /// The proposal targets another repository.
     ProposalRepositoryMismatch,
     /// The proposal was based on another committed repository record.
     ProposalBaseMismatch {
         /// RCR named by the bound workspace.
-        expected: RepositoryCommitId,
+        expected: Box<RepositoryCommitId>,
         /// RCR named by the proposal receipt.
-        observed: RepositoryCommitId,
+        observed: Box<RepositoryCommitId>,
     },
     /// A context packet belongs to a different authority position.
     ContextAuthorityMismatch,

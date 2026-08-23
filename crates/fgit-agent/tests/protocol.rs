@@ -447,7 +447,7 @@ fn authenticated_workspace_proposal_uses_the_ordinary_retry_safe_ref_seal() {
     );
     assert!(transaction.semantic_request().atomic());
     assert_eq!(transaction.semantic_request().ref_commands().len(), 1);
-    assert!(transaction.semantic_request().scoped_entries().is_empty());
+    assert_eq!(transaction.semantic_request().scoped_entries(), []);
     assert_eq!(transaction.context_packet_ids().len(), 1);
 
     let attempt = transaction.seal_attempt(
