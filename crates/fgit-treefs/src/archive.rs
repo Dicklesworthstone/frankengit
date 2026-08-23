@@ -167,6 +167,7 @@ impl<A: GitHashAlgorithm> UstarArchive<A> {
     ) -> Result<Self, ArchiveRefusal> {
         let mut entries = BTreeMap::new();
         discover_directory(base, source, capability, None, now, limits, &mut entries)?;
+        preflight_ustar_paths(entries.keys())?;
 
         let entry_paths = receipt_paths(&entries)?;
         let entry_count = entry_paths.len();
@@ -293,6 +294,10 @@ impl<A: GitHashAlgorithm> ZipArchive<A> {
 
         let entry_paths = receipt_paths(&entries)?;
         let entry_count = entry_paths.len();
+        let _ = zip_u16(entry_count, "archive entry count")?;
+        for (path, entry) in &entries {
+            validate_zip_member_name(path, zip_entry_kind(entry))?;
+        }
         let mut bytes = Vec::new();
         let mut central = Vec::new();
         central
@@ -389,15 +394,38 @@ fn ensure_zip_entry_bytes(
 }
 
 fn zip_member_name(path: &TreePath, kind: ZipEntryKind) -> Result<Vec<u8>, ArchiveRefusal> {
-    if std::str::from_utf8(path.as_bytes()).is_err() {
-        return Err(ArchiveRefusal::ZipPathNotUtf8 { path: path.clone() });
-    }
+    validate_zip_member_name(path, kind)?;
     let mut name = path.as_bytes().to_vec();
     if kind == ZipEntryKind::Directory {
         name.push(b'/');
     }
-    let _ = zip_u16(name.len(), "member name length")?;
     Ok(name)
+}
+
+fn validate_zip_member_name(path: &TreePath, kind: ZipEntryKind) -> Result<(), ArchiveRefusal> {
+    if std::str::from_utf8(path.as_bytes()).is_err() {
+        return Err(ArchiveRefusal::ZipPathNotUtf8 { path: path.clone() });
+    }
+    let directory_suffix = if kind == ZipEntryKind::Directory {
+        1
+    } else {
+        0
+    };
+    let length = path
+        .as_bytes()
+        .len()
+        .checked_add(directory_suffix)
+        .ok_or(ArchiveRefusal::OutputSizeOverflow)?;
+    let _ = zip_u16(length, "member name length")?;
+    Ok(())
+}
+
+fn zip_entry_kind<A: GitHashAlgorithm>(entry: &PlannedEntry<A>) -> ZipEntryKind {
+    match entry {
+        PlannedEntry::Directory => ZipEntryKind::Directory,
+        PlannedEntry::File { .. } => ZipEntryKind::File,
+        PlannedEntry::Symlink { .. } => ZipEntryKind::Symlink,
+    }
 }
 
 fn append_zip_local(
@@ -871,6 +899,16 @@ fn append_record_with_link(
     header[157..157 + target.len()].copy_from_slice(target);
     finalize_checksum(&mut header);
     append_header_and_body(bytes, header, &[], max_output_bytes)
+}
+
+fn preflight_ustar_paths<'a>(
+    paths: impl Iterator<Item = &'a TreePath>,
+) -> Result<(), ArchiveRefusal> {
+    for path in paths {
+        let mut header = [0_u8; TAR_BLOCK_BYTES];
+        write_ustar_path(&mut header, path)?;
+    }
+    Ok(())
 }
 
 fn header_for(
