@@ -4470,7 +4470,7 @@ struct PackageSource {
 
 const MIT_OPENAI_ANTHROPIC_RIDER: &str = "LicenseRef-MIT-OpenAI-Anthropic-Rider";
 const MIT_OPENAI_ANTHROPIC_RIDER_SHA256: &str =
-    "32a82e0a5754e72e51fae44b65a936c831c07376f21c90f5fb9e76897fcc3509";
+    "bbcd5ea29292d9d5df0bb055ceed2ddd846731717ff294d32ddd1349d541ef42";
 
 /// Cargo permits a package to state its license through `license-file` instead
 /// of the SPDX-like `license` metadata field. The constellation schema keeps
