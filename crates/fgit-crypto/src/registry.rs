@@ -484,6 +484,8 @@ pub enum IdentityDomain {
     OutboxEffectBatch,
     /// One immutable retention delta from an admitted decision.
     RetentionDelta,
+    /// One immutable evidence body supporting a terminal admission refusal.
+    AdmissionRefusalEvidence,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -757,6 +759,12 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/retention-delta/v1",
         None,
     ),
+    owned_row(
+        43,
+        IdentityDomain::AdmissionRefusalEvidence,
+        "frankengit/admission-refusal-evidence/v1",
+        None,
+    ),
 ];
 
 const fn pinned_row(
@@ -986,6 +994,7 @@ impl IdentityDomain {
         Self::ForgeEventBatch,
         Self::OutboxEffectBatch,
         Self::RetentionDelta,
+        Self::AdmissionRefusalEvidence,
     ];
 
     /// Compile-time completeness guard for [`IdentityDomain::ALL`].
@@ -1049,7 +1058,8 @@ impl IdentityDomain {
             | Self::AdmissionInvariantEvidence
             | Self::ForgeEventBatch
             | Self::OutboxEffectBatch
-            | Self::RetentionDelta => (),
+            | Self::RetentionDelta
+            | Self::AdmissionRefusalEvidence => (),
         }
     }
 

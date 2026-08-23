@@ -12,11 +12,19 @@ use fgit_txn::{
     canonical_outbox_effect_bytes, canonical_retention_effect_bytes,
 };
 use fgit_types::{
-    Digest, DomainTag, PolicyEpoch, PrincipalId, PrincipalSnapshotId, RefusalCode, RepositoryId,
-    SchemaFamily, TenantId, TxId,
+    Digest, DomainTag, PolicyEpoch, PrincipalId, PrincipalSnapshotId, RefusalCode,
+    RepositoryAuthorityHeadId, RepositoryId, SchemaFamily, TenantId, TxId,
 };
 
 use crate::AdmissionContext;
+
+/// Stable refusal-record detail for a refusal supported by
+/// [`RefusalEvidence`].
+///
+/// The terminal code and policy epoch are separate typed fields of the
+/// refusal record; this text only identifies the durable evidence mechanism
+/// and therefore cannot vary by caller input.
+pub const DURABLE_REFUSAL_EVIDENCE_DETAIL: &str = "durable canonical refusal evidence";
 
 /// Immutable principal identity and configuration basis for one admission decision.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -182,6 +190,102 @@ bytes_body!(
     "retention_delta.effects",
     effect_bytes
 );
+
+/// Immutable evidence for one terminal refusal at one exact authority basis.
+///
+/// This is intentionally not a [`fgit_codec::RefusalRecordBody`]. The refusal
+/// record quotes this body's root, so using the record itself here would make
+/// the commitment circular. The snapshot identity binds the authenticated
+/// principal and configuration, while the head identity binds the exact
+/// authority basis on which the policy code was evaluated.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefusalEvidence {
+    principal_snapshot_id: PrincipalSnapshotId,
+    basis_head_id: RepositoryAuthorityHeadId,
+    tx_id: TxId,
+    policy_epoch: PolicyEpoch,
+    code: RefusalCode,
+}
+
+impl CanonicalBody for RefusalEvidence {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/admission-refusal-evidence/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("admission-refusal-evidence");
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        out.write_internal_object_id(self.principal_snapshot_id.as_internal_object_id())?;
+        out.write_internal_object_id(self.basis_head_id.as_internal_object_id())?;
+        out.write_internal_object_id(self.tx_id.as_internal_object_id())?;
+        out.write_scalar(self.policy_epoch.get());
+        out.write_scalar(self.code.code_point());
+        Ok(())
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        Ok(Self {
+            principal_snapshot_id: PrincipalSnapshotId::from_internal_object_id(
+                input.read_internal_object_id()?,
+            )
+            .map_err(CodecRefusal::from)?,
+            basis_head_id: RepositoryAuthorityHeadId::from_internal_object_id(
+                input.read_internal_object_id()?,
+            )
+            .map_err(CodecRefusal::from)?,
+            tx_id: TxId::from_internal_object_id(input.read_internal_object_id()?)
+                .map_err(CodecRefusal::from)?,
+            policy_epoch: PolicyEpoch::try_new(input.read_scalar("policy_epoch")?)
+                .map_err(CodecRefusal::from)?,
+            code: RefusalCode::from_code_point(input.read_scalar("refusal_code")?)
+                .map_err(CodecRefusal::from)?,
+        })
+    }
+}
+
+/// Immutable bodies needed to materialize one durable terminal refusal.
+///
+/// The principal snapshot is staged beside its referring refusal-evidence
+/// body. This keeps the refusal root derivable from typed bytes while also
+/// leaving an independently identifiable configuration/principal witness.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefusalEvidenceBodies {
+    principal_snapshot: PrincipalSnapshot,
+    refusal_evidence: RefusalEvidence,
+}
+
+impl RefusalEvidenceBodies {
+    /// Derives the complete refusal witness from the authenticated context,
+    /// exact basis, terminal transaction identity, and evaluated refusal.
+    pub fn derive(
+        context: &AdmissionContext,
+        basis: &PublicationBasis,
+        tx_id: TxId,
+        code: RefusalCode,
+    ) -> Result<Self, RefusalCode> {
+        let principal_snapshot = PrincipalSnapshot::from_context(context, basis);
+        let principal_snapshot_id = principal_snapshot_id(&principal_snapshot)?;
+        Ok(Self {
+            refusal_evidence: RefusalEvidence {
+                principal_snapshot_id,
+                basis_head_id: basis.id(),
+                tx_id,
+                policy_epoch: basis.body().policy_epoch,
+                code,
+            },
+            principal_snapshot,
+        })
+    }
+
+    #[must_use]
+    pub const fn principal_snapshot(&self) -> &PrincipalSnapshot {
+        &self.principal_snapshot
+    }
+
+    #[must_use]
+    pub const fn refusal_evidence(&self) -> &RefusalEvidence {
+        &self.refusal_evidence
+    }
+}
 
 /// All immutable evidence bodies required for one committing decision.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -457,6 +561,73 @@ mod tests {
             DecisionEvidenceBodies::derive(&context, &basis, &request, &fold),
             Err(RefusalCode::ConflictingSemanticEffects),
             "a terminal refusal must use the refusal-evidence path, never a committing body set"
+        );
+    }
+
+    #[test]
+    fn refusal_evidence_is_a_distinct_canonical_basis_bound_body() {
+        let (context, basis, request, _) = fixture();
+        let first = RefusalEvidenceBodies::derive(
+            &context,
+            &basis,
+            request.tx_id,
+            RefusalCode::ExpectedOldRefMismatch,
+        )
+        .expect("typed refusal derives its witness");
+        let second = RefusalEvidenceBodies::derive(
+            &context,
+            &basis,
+            request.tx_id,
+            RefusalCode::ExpectedOldRefMismatch,
+        )
+        .expect("same refusal derives the same witness");
+        let different_code = RefusalEvidenceBodies::derive(
+            &context,
+            &basis,
+            request.tx_id,
+            RefusalCode::NonFastForwardRefused,
+        )
+        .expect("a distinct terminal code derives a distinct witness");
+        let mut different_head_body = basis.body().clone();
+        different_head_body.configuration_root = digest_of(8);
+        let different_basis = PublicationBasis::new(
+            fgit_types::RepositoryAuthorityHeadId::from_internal_object_id(
+                body_id(&CryptoBodyIdentity, &different_head_body)
+                    .expect("fixed authority head body identifies"),
+            )
+            .expect("authority-head identity has its pinned domain"),
+            different_head_body,
+        );
+        let different_basis_witness = RefusalEvidenceBodies::derive(
+            &context,
+            &different_basis,
+            request.tx_id,
+            RefusalCode::ExpectedOldRefMismatch,
+        )
+        .expect("a distinct authenticated basis derives a witness");
+
+        let frame = encode_body(first.refusal_evidence()).expect("refusal evidence frames");
+        assert_eq!(
+            decode_body::<RefusalEvidence>(&frame, fgit_codec::DecodeLimits::DEFAULT)
+                .expect("refusal evidence frame decodes"),
+            first.refusal_evidence().clone()
+        );
+        assert_eq!(first, second, "same refusal derivation is deterministic");
+        assert_ne!(
+            evidence_root(first.refusal_evidence()).expect("first refusal root"),
+            evidence_root(different_code.refusal_evidence()).expect("different-code root"),
+            "the supporting evidence commits the terminal refusal code"
+        );
+        assert_ne!(
+            evidence_root(first.refusal_evidence()).expect("first refusal root"),
+            evidence_root(different_basis_witness.refusal_evidence())
+                .expect("different-basis root"),
+            "the supporting evidence commits the exact authenticated basis"
+        );
+        assert_ne!(
+            evidence_root(first.refusal_evidence()).expect("refusal root"),
+            evidence_root(first.principal_snapshot()).expect("snapshot root"),
+            "refusal evidence uses a domain distinct from its principal witness"
         );
     }
 }
