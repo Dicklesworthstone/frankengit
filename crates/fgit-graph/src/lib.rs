@@ -9,6 +9,7 @@
 //! depend on hash-table or scheduler order.
 
 mod algorithms;
+mod architecture;
 mod generation;
 mod temporal;
 
@@ -20,6 +21,12 @@ pub use crate::algorithms::{
     KShortestPaths, MinCostFlow, MinCostFlowRequest, MinimumCut, PageRankConfig,
     PersonalizedPageRank, RationalScore, Reachability, SetCover, SetCoverCandidate,
     SetCoverRequest, ShortestPath, SteinerTree, StronglyConnectedComponents, TopologicalOrder,
+};
+pub use crate::architecture::{
+    ArchitecturalDriftReport, ArchitectureAdvisoryFence, ArchitectureAlgorithm,
+    ArchitectureAnalysis, ArchitectureDecisionWitness, ArchitectureLimits, ArchitectureProposal,
+    ArchitectureRefusal, CommunityBoundary, CommunityPartitionProposal, CoreDecompositionProposal,
+    CoreMembership, FeedbackEdgeSetProposal, TransitiveReductionProposal,
 };
 pub use crate::generation::{
     BuilderProfileId, ExactGraphGeneration, GenerationActivation, GenerationAuthority,
