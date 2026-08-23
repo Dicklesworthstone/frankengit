@@ -35,6 +35,7 @@ fgit-pack	L1	L0,L1	pack	active
 fgit-raptorq	L2	L0,L1,L2	object-fabric	active
 fgit-reference	L2	L0,L1,L2	reference-model	active
 fgit-registry-check	L0	none	constitution	active
+fgit-release	L2	L0,L1,L2	release-engineering	active
 fgit-repair	L2	L0,L1,L2	repair	active
 fgit-resource	L0	L0	resource	active
 fgit-runtime	L2	L0,L1,L2	concurrency	active

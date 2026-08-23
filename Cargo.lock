@@ -843,6 +843,13 @@ name = "fgit-registry-check"
 version = "0.0.1"
 
 [[package]]
+name = "fgit-release"
+version = "0.0.1"
+dependencies = [
+ "fgit-crypto",
+]
+
+[[package]]
 name = "fgit-repair"
 version = "0.1.0"
 dependencies = [
