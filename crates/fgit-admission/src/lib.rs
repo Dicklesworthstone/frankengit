@@ -2217,16 +2217,16 @@ where
     for replan in 0..limits.max_cas_replans {
         // The pre-loop probe already covered the first attempt. Every later
         // replan must resolve a terminal decision that won the preceding CAS.
-        if replan != 0 {
-            if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome(
+        if replan != 0
+            && let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome(
                 store,
                 &context.head_key,
                 context.tenant_id,
                 context.repository_id,
                 tx_id,
-            )? {
-                return Ok(terminal);
-            }
+            )?
+        {
+            return Ok(terminal);
         }
         let (basis, receipt, authenticated) = read_basis(store, &context.head_key)?;
         let cumulative_outcomes = collect_cumulative_outcomes(store, &context.head_key)?;
@@ -2709,8 +2709,8 @@ where
         // Keep the asynchronous retry surface equivalent to the blocking
         // sibling: the pre-loop probe owns attempt zero, later replans probe
         // only after a predecessor CAS could have won.
-        if replan != 0 {
-            if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+        if replan != 0
+            && let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
                 store,
                 cx,
                 &context.head_key,
@@ -2719,9 +2719,8 @@ where
                 tx_id,
             )
             .await?
-            {
-                return Ok(terminal);
-            }
+        {
+            return Ok(terminal);
         }
         let (basis, receipt, authenticated) =
             read_basis_async(store, cx, &context.head_key).await?;
