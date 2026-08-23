@@ -382,6 +382,16 @@ fn capability_scoped_ustar_is_byte_stable_and_never_follows_symlinks() {
         first.receipt().stream_sha256(),
         &sha256_digest(first.bytes())
     );
+    assert!(first.receipt().matches_stream(first.bytes()));
+    let mut tampered = first.bytes().to_vec();
+    let last = tampered
+        .last_mut()
+        .expect("USTAR trailer makes a successful archive non-empty");
+    *last ^= 1;
+    assert!(
+        !first.receipt().matches_stream(&tampered),
+        "matching source coordinates do not make modified derived bytes valid"
+    );
 
     let rendered = members(first.bytes());
     assert_eq!(
@@ -472,6 +482,7 @@ fn stored_zip_is_byte_stable_and_represents_symlinks_as_data() {
         first.receipt().stream_sha256(),
         &sha256_digest(first.bytes())
     );
+    assert!(first.receipt().matches_stream(first.bytes()));
     let rendered = zip_members(first.bytes());
     assert_eq!(
         rendered

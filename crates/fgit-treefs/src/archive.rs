@@ -202,6 +202,17 @@ impl<A: GitHashAlgorithm> ArchiveReceipt<A> {
     pub const fn stream_sha256(&self) -> &[u8; 32] {
         &self.stream_sha256
     }
+
+    /// Whether `stream` is exactly the derived byte sequence this receipt
+    /// names.
+    ///
+    /// This checks only disposable materialization bytes.  It does not make a
+    /// matching stream current, durable, or authorized; callers still need to
+    /// read and validate the authority-selected source RCR before serving it.
+    #[must_use]
+    pub fn matches_stream(&self, stream: &[u8]) -> bool {
+        stream.len() == self.stream_bytes && sha256_digest(stream) == self.stream_sha256
+    }
 }
 
 /// A complete USTAR materialization and its provenance receipt.
