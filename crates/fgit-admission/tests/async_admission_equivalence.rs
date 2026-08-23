@@ -496,11 +496,7 @@ impl AsyncAdmissionProjection<AsyncView> for AsyncMaterializingProjection {
         closure: &'a ValidatedClosure,
     ) -> impl Future<Output = Result<CommitMaterialization, AsyncProjectionFailure>> + Send + 'a
     {
-        std::future::ready(
-            self.inner
-                .materialize_commit(basis, request, fold, closure)
-                .map_err(AsyncProjectionFailure::Refuse),
-        )
+        std::future::ready(self.inner.materialize_commit(basis, request, fold, closure))
     }
 
     fn materialize_refusal_async<'a>(

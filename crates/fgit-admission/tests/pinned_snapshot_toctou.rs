@@ -63,9 +63,9 @@ use fgit_admission::{
     AdmissionContext, AdmissionEvidence, AdmissionLimits, AdmissionProjection, AdmissionSnapshot,
     AdmissionSnapshotProjection, CanonicalAdmissionProjection, CanonicalAdmissionStore,
     CanonicalRefState, CommitEvidence, CommitMaterialization, PermittedObjectClosure,
-    QuarantineValidator, RefusalMaterialization, ValidatedClosure, ValidatedReceive,
-    admit_validated_receive, canonical_ref_state_root, initialize_canonical_repository,
-    permitted_object_closure_root, validate_receive,
+    ProjectionFailure, QuarantineValidator, RefusalMaterialization, ValidatedClosure,
+    ValidatedReceive, admit_validated_receive, canonical_ref_state_root,
+    initialize_canonical_repository, permitted_object_closure_root, validate_receive,
 };
 use fgit_authority::{
     AuthenticatedHead, AuthorityStore, HeadKey, HeadRead, IdempotencyKey, MemoryAuthorityStore,
@@ -464,7 +464,7 @@ impl AdmissionProjection for PinnedProjection {
         request: &TransactionRequest,
         fold: &TransactionFoldReport,
         closure: &ValidatedClosure,
-    ) -> Result<CommitMaterialization, RefusalCode> {
+    ) -> Result<CommitMaterialization, ProjectionFailure> {
         self.production
             .materialize_commit(basis, request, fold, closure)
     }

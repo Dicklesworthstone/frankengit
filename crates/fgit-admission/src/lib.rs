@@ -614,13 +614,18 @@ pub trait AdmissionSnapshotProjection {
 /// permanent canonical terminal decision for a retryable request.
 pub trait AdmissionProjection: AdmissionSnapshotProjection {
     /// Materializes a committed fold into an RCR and its successor roots.
+    ///
+    /// A refusal is an evaluated terminal decision for this exact basis. An
+    /// unavailable result means staging or resolving immutable material failed
+    /// after the request was sealed but before a head CAS; callers must leave
+    /// that transaction undecided so the same request can retry.
     fn materialize_commit(
         &self,
         basis: &PublicationBasis,
         request: &TransactionRequest,
         fold: &TransactionFoldReport,
         closure: &ValidatedClosure,
-    ) -> Result<CommitMaterialization, RefusalCode>;
+    ) -> Result<CommitMaterialization, ProjectionFailure>;
 
     /// Supplies the policy evidence for a terminal refusal.
     fn materialize_refusal(
@@ -658,7 +663,7 @@ where
         cx: &'a Authority::Context,
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
-    ) -> impl Future<Output = Result<AdmissionSnapshot, AsyncProjectionFailure>> + Send + 'a;
+    ) -> impl Future<Output = Result<AdmissionSnapshot, ProjectionFailure>> + Send + 'a;
 
     /// Materializes a committing fold after the async driver has authenticated
     /// its publication basis.
@@ -670,7 +675,7 @@ where
         request: &'a TransactionRequest,
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
-    ) -> impl Future<Output = Result<CommitMaterialization, AsyncProjectionFailure>> + Send + 'a;
+    ) -> impl Future<Output = Result<CommitMaterialization, ProjectionFailure>> + Send + 'a;
 
     /// Materializes evidence for a terminal refusal before its decision can
     /// become visible through the authority-head replacement.
@@ -681,24 +686,28 @@ where
         basis: &'a PublicationBasis,
         tx_id: TxId,
         code: RefusalCode,
-    ) -> impl Future<Output = Result<RefusalMaterialization, AsyncProjectionFailure>> + Send + 'a;
+    ) -> impl Future<Output = Result<RefusalMaterialization, ProjectionFailure>> + Send + 'a;
 }
 
-/// The outcome of an asynchronous projection operation before a terminal
-/// decision is published.
+/// The outcome of a projection operation before a terminal decision is
+/// published.
 ///
 /// [`Self::Refuse`] is an evaluated terminal policy result. [`Self::Unavailable`]
 /// says the projection could not acquire or verify the material required to
 /// decide; the driver returns an [`AdmissionError`] and publishes nothing.
 /// In particular, a cancellation or durable I/O failure must not become a
-/// canonical refusal solely because it occurred while awaiting a projection.
+/// canonical refusal solely because it occurred before publication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AsyncProjectionFailure {
+pub enum ProjectionFailure {
     /// The projection evaluated a terminal refusal for this exact basis.
     Refuse(RefusalCode),
     /// Required material was unavailable before any terminal decision.
     Unavailable(RefusalCode),
 }
+
+/// Compatibility name for projection failures returned through the async
+/// admission surface.
+pub type AsyncProjectionFailure = ProjectionFailure;
 
 /// The one canonical immutable ref-state body selected by an authority head's
 /// `ref_root`.
@@ -1216,18 +1225,26 @@ where
         request: &TransactionRequest,
         fold: &TransactionFoldReport,
         closure: &ValidatedClosure,
-    ) -> Result<CommitMaterialization, RefusalCode> {
-        let current = self.resolve_ref_state(basis.body().ref_root)?;
-        let evidence = self.evidence.commit_evidence(basis, request, fold)?;
-        let prepared = prepare_canonical_commit(basis, request, fold, closure, current, evidence)?;
-        let ref_root = canonical_ref_state_root(prepared.next_ref_state())?;
+    ) -> Result<CommitMaterialization, ProjectionFailure> {
+        let current = self
+            .resolve_ref_state(basis.body().ref_root)
+            .map_err(ProjectionFailure::Unavailable)?;
+        let evidence = self
+            .evidence
+            .commit_evidence(basis, request, fold)
+            .map_err(ProjectionFailure::Refuse)?;
+        let prepared = prepare_canonical_commit(basis, request, fold, closure, current, evidence)
+            .map_err(ProjectionFailure::Refuse)?;
+        let ref_root = canonical_ref_state_root(prepared.next_ref_state())
+            .map_err(ProjectionFailure::Refuse)?;
         self.store
-            .stage_ref_state(ref_root, prepared.next_ref_state().clone())?;
-        let object_closure_root = permitted_object_closure_root(prepared.object_closure())?;
-        self.store.stage_permitted_object_closure(
-            object_closure_root,
-            prepared.object_closure().clone(),
-        )?;
+            .stage_ref_state(ref_root, prepared.next_ref_state().clone())
+            .map_err(ProjectionFailure::Unavailable)?;
+        let object_closure_root = permitted_object_closure_root(prepared.object_closure())
+            .map_err(ProjectionFailure::Refuse)?;
+        self.store
+            .stage_permitted_object_closure(object_closure_root, prepared.object_closure().clone())
+            .map_err(ProjectionFailure::Unavailable)?;
         Ok(prepared.into_materialization())
     }
 
@@ -1254,10 +1271,10 @@ where
         _cx: &'a Authority::Context,
         basis: &'a PublicationBasis,
         authenticated: &'a AuthenticatedHead,
-    ) -> impl Future<Output = Result<AdmissionSnapshot, AsyncProjectionFailure>> + Send + 'a {
+    ) -> impl Future<Output = Result<AdmissionSnapshot, ProjectionFailure>> + Send + 'a {
         std::future::ready(
             AdmissionSnapshotProjection::snapshot(self, basis, authenticated)
-                .map_err(AsyncProjectionFailure::Refuse),
+                .map_err(ProjectionFailure::Refuse),
         )
     }
 
@@ -1269,12 +1286,8 @@ where
         request: &'a TransactionRequest,
         fold: &'a TransactionFoldReport,
         closure: &'a ValidatedClosure,
-    ) -> impl Future<Output = Result<CommitMaterialization, AsyncProjectionFailure>> + Send + 'a
-    {
-        std::future::ready(
-            self.materialize_commit(basis, request, fold, closure)
-                .map_err(AsyncProjectionFailure::Refuse),
-        )
+    ) -> impl Future<Output = Result<CommitMaterialization, ProjectionFailure>> + Send + 'a {
+        std::future::ready(self.materialize_commit(basis, request, fold, closure))
     }
 
     fn materialize_refusal_async<'a>(
@@ -1284,11 +1297,10 @@ where
         basis: &'a PublicationBasis,
         tx_id: TxId,
         code: RefusalCode,
-    ) -> impl Future<Output = Result<RefusalMaterialization, AsyncProjectionFailure>> + Send + 'a
-    {
+    ) -> impl Future<Output = Result<RefusalMaterialization, ProjectionFailure>> + Send + 'a {
         std::future::ready(
             self.materialize_refusal(basis, tx_id, code)
-                .map_err(AsyncProjectionFailure::Refuse),
+                .map_err(ProjectionFailure::Refuse),
         )
     }
 }
@@ -1393,6 +1405,15 @@ pub enum AdmissionError {
     /// Asynchronous projection material was unavailable before a terminal
     /// decision could be published.
     AsyncProjectionUnavailable(RefusalCode),
+    /// Synchronous projection material was unavailable after sealing but
+    /// before head CAS, so this exact transaction remains undecided and
+    /// retryable.
+    ProjectionUnavailable {
+        /// The sealed transaction that was left undecided.
+        tx_id: TxId,
+        /// The unavailable material's typed refusal code.
+        code: RefusalCode,
+    },
     /// A materializer gave a commit record inconsistent with the sealed request.
     MaterializationMismatch(&'static str),
     /// A terminal decision published but its `TxId` could not be resolved.
@@ -1448,6 +1469,10 @@ impl Display for AdmissionError {
             Self::AsyncProjectionUnavailable(code) => write!(
                 formatter,
                 "asynchronous admission projection was unavailable before publication: {code:?}"
+            ),
+            Self::ProjectionUnavailable { tx_id, code } => write!(
+                formatter,
+                "admission projection was unavailable for sealed transaction {tx_id:?} before publication: {code:?}"
             ),
             Self::MaterializationMismatch(field) => {
                 write!(formatter, "materializer supplied inconsistent {field}")
@@ -1734,27 +1759,31 @@ where
 /// Translate one projection materialization result into the shared publication
 /// vocabulary.
 ///
-/// Both authority drivers call this function.  A projection refusal therefore
-/// selects the same terminal refusal on the synchronous and asynchronous
-/// surfaces instead of becoming a second, wait-specific policy branch.
+/// The blocking driver uses this classifier; the asynchronous sibling uses
+/// [`complete_async_commit_materialization`]. Both preserve the distinction
+/// between a terminal projection refusal and unavailable pre-CAS material.
 fn complete_commit_materialization(
-    materialization: Result<CommitMaterialization, RefusalCode>,
-) -> PlannedPublication {
+    materialization: Result<CommitMaterialization, ProjectionFailure>,
+    tx_id: TxId,
+) -> Result<PlannedPublication, AdmissionError> {
     match materialization {
-        Ok(materialization) => PlannedPublication::Commit(Box::new(materialization)),
-        Err(code) => PlannedPublication::Refuse(code),
+        Ok(materialization) => Ok(PlannedPublication::Commit(Box::new(materialization))),
+        Err(ProjectionFailure::Refuse(code)) => Ok(PlannedPublication::Refuse(code)),
+        Err(ProjectionFailure::Unavailable(code)) => {
+            Err(AdmissionError::ProjectionUnavailable { tx_id, code })
+        }
     }
 }
 
 /// Translate an asynchronous materialization result without converting an
 /// unavailable durable dependency into a terminal refusal.
 fn complete_async_commit_materialization(
-    materialization: Result<CommitMaterialization, AsyncProjectionFailure>,
+    materialization: Result<CommitMaterialization, ProjectionFailure>,
 ) -> Result<PlannedPublication, AdmissionError> {
     match materialization {
         Ok(materialization) => Ok(PlannedPublication::Commit(Box::new(materialization))),
-        Err(AsyncProjectionFailure::Refuse(code)) => Ok(PlannedPublication::Refuse(code)),
-        Err(AsyncProjectionFailure::Unavailable(code)) => {
+        Err(ProjectionFailure::Refuse(code)) => Ok(PlannedPublication::Refuse(code)),
+        Err(ProjectionFailure::Unavailable(code)) => {
             Err(AdmissionError::AsyncProjectionUnavailable(code))
         }
     }
@@ -1791,7 +1820,8 @@ where
         PublicationPreparation::Refuse(code) => PlannedPublication::Refuse(code),
         PublicationPreparation::Commit(prepared) => complete_commit_materialization(
             projection.materialize_commit(basis, &prepared.request, &prepared.fold, closure),
-        ),
+            tx_id,
+        )?,
     })
 }
 
@@ -2961,7 +2991,9 @@ where
 mod tests {
     #![forbid(unsafe_code)]
 
+    use std::cell::{Cell, RefCell};
     use std::collections::{BTreeMap, BTreeSet};
+    use std::rc::Rc;
 
     use fgit_authority::{
         AuthorityOpKind, AuthorityVersionToken, DuplicateDelivery, FaultDirective, FaultKind,
@@ -3024,12 +3056,16 @@ mod tests {
             request: &TransactionRequest,
             fold: &TransactionFoldReport,
             closure: &ValidatedClosure,
-        ) -> Result<CommitMaterialization, RefusalCode> {
+        ) -> Result<CommitMaterialization, ProjectionFailure> {
             if self.reject_commit {
-                return Err(RefusalCode::ProtectedRefTransitionDenied);
+                return Err(ProjectionFailure::Refuse(
+                    RefusalCode::ProtectedRefTransitionDenied,
+                ));
             }
             if !matches!(fold.outcome, FoldOutcome::Folded(_)) {
-                return Err(RefusalCode::ConflictingSemanticEffects);
+                return Err(ProjectionFailure::Refuse(
+                    RefusalCode::ConflictingSemanticEffects,
+                ));
             }
             let roots = ResultingRoots {
                 ref_root: digest(2),
@@ -3130,6 +3166,97 @@ mod tests {
         }
     }
 
+    /// A canonical backing that injects exactly one pre-CAS ref-state staging
+    /// failure. The second call stages normally, which makes the retry twin
+    /// distinguish an undecided seal from a terminal refusal.
+    #[derive(Clone, Default)]
+    struct FailOnceCanonicalStore {
+        refs: Rc<RefCell<BTreeMap<Digest, CanonicalRefState>>>,
+        closures: Rc<RefCell<BTreeMap<Digest, PermittedObjectClosure>>>,
+        fail_next_ref_stage: Rc<Cell<bool>>,
+    }
+
+    impl FailOnceCanonicalStore {
+        fn fail_next_ref_stage(&self) {
+            self.fail_next_ref_stage.set(true);
+        }
+    }
+
+    impl CanonicalAdmissionStore for FailOnceCanonicalStore {
+        fn resolve_ref_state(&self, root: Digest) -> Result<CanonicalRefState, RefusalCode> {
+            self.refs
+                .borrow()
+                .get(&root)
+                .cloned()
+                .ok_or(RefusalCode::EvidenceMissing)
+        }
+
+        fn stage_ref_state(
+            &self,
+            root: Digest,
+            state: CanonicalRefState,
+        ) -> Result<(), RefusalCode> {
+            if self.fail_next_ref_stage.replace(false) {
+                return Err(RefusalCode::EvidenceMissing);
+            }
+            self.refs.borrow_mut().insert(root, state);
+            Ok(())
+        }
+
+        fn resolve_permitted_object_closure(
+            &self,
+            root: Digest,
+        ) -> Result<PermittedObjectClosure, RefusalCode> {
+            self.closures
+                .borrow()
+                .get(&root)
+                .cloned()
+                .ok_or(RefusalCode::EvidenceMissing)
+        }
+
+        fn stage_permitted_object_closure(
+            &self,
+            root: Digest,
+            closure: PermittedObjectClosure,
+        ) -> Result<(), RefusalCode> {
+            self.closures.borrow_mut().insert(root, closure);
+            Ok(())
+        }
+    }
+
+    struct CanonicalFixtureEvidence;
+
+    impl AdmissionEvidence for CanonicalFixtureEvidence {
+        fn commit_evidence(
+            &self,
+            _basis: &PublicationBasis,
+            _request: &TransactionRequest,
+            _fold: &TransactionFoldReport,
+        ) -> Result<CommitEvidence, RefusalCode> {
+            Ok(CommitEvidence {
+                principal_snapshot_id: principal_snapshot(),
+                forge_event_batch_root: digest(8),
+                policy_decision_root: digest(9),
+                invariant_evidence_root: digest(10),
+                outbox_effect_root: digest(11),
+                retention_delta_root: digest(12),
+            })
+        }
+
+        fn refusal_evidence(
+            &self,
+            basis: &PublicationBasis,
+            _tx_id: TxId,
+            _code: RefusalCode,
+        ) -> Result<RefusalMaterialization, RefusalCode> {
+            Ok(RefusalMaterialization {
+                policy_epoch: basis.body().policy_epoch,
+                detail: "canonical fixture policy refusal".to_owned(),
+                evidence_root: digest(13),
+            })
+        }
+    }
+
     fn digest(seed: u8) -> Digest {
         Digest::new(
             DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
@@ -3222,6 +3349,31 @@ mod tests {
             receipt,
             closure,
         }
+    }
+
+    fn canonical_store_with_genesis(
+        context: &AdmissionContext,
+    ) -> (
+        MemoryAuthorityStore,
+        FailOnceCanonicalStore,
+        CanonicalAdmissionProjection<FailOnceCanonicalStore, CanonicalFixtureEvidence>,
+    ) {
+        let state = CanonicalRefState::default();
+        let ref_root =
+            canonical_ref_state_root(&state).expect("empty canonical ref state has a root");
+        let staging = FailOnceCanonicalStore::default();
+        staging
+            .stage_ref_state(ref_root, state)
+            .expect("genesis ref state stages before the injected fault");
+
+        let mut head = genesis(context);
+        head.ref_root = ref_root;
+        let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(78));
+        initialize_repository(&store, &context.head_key, &head)
+            .expect("canonical genesis head initializes");
+        let projection =
+            CanonicalAdmissionProjection::new(staging.clone(), CanonicalFixtureEvidence);
+        (store, staging, projection)
     }
 
     fn create(ref_name: &[u8], new: u8) -> ReceiveCommand {
@@ -3684,6 +3836,97 @@ mod tests {
             command.tx_id == tx_id
                 && matches!(command.terminal.outcome, DecisionOutcome::Committed { .. })
         }));
+    }
+
+    #[test]
+    fn canonical_pre_cas_stage_failure_leaves_its_seal_undecided_then_retries() {
+        let context = context();
+        let mut completion = completion(vec![create(b"refs/heads/main", 37)], true);
+        completion.closure.object_closure_root = permitted_object_closure_root(
+            &PermittedObjectClosure::new(completion.closure.objects.clone()),
+        )
+        .expect("the canonical closure commitment derives");
+        let lowered = lower_input(&context, &receive_input(&completion))
+            .expect("the canonical retry request lowers");
+        let tx_id = derive_tx_id(&context, &lowered[0])
+            .expect("the canonical retry transaction identity derives");
+        let (store, staging, projection) = canonical_store_with_genesis(&context);
+        let before = match store
+            .read_head(&context.head_key)
+            .expect("genesis head reads")
+        {
+            HeadRead::Present(receipt) => receipt.token(),
+            HeadRead::Absent => panic!("canonical setup initialized the genesis head"),
+        };
+
+        staging.fail_next_ref_stage();
+        let failure = admit_validated_receive(
+            &store,
+            &context,
+            &completion,
+            AdmissionLimits::default(),
+            &projection,
+        )
+        .expect_err("a pre-CAS canonical staging failure cannot publish a terminal refusal");
+        assert!(
+            matches!(
+                failure,
+                AdmissionError::ProjectionUnavailable {
+                    tx_id: failed_tx_id,
+                    code: RefusalCode::EvidenceMissing,
+                } if failed_tx_id == tx_id
+            ),
+            "the unavailable result must name the sealed retryable transaction, got {failure:?}"
+        );
+        assert_eq!(
+            resolve_outcome(
+                &store,
+                &context.head_key,
+                context.tenant_id,
+                context.repository_id,
+                tx_id,
+            )
+            .expect("undecided canonical outcome lookup succeeds"),
+            OutcomeLookup::Undecided,
+            "a stage failure before head CAS must leave the sealed transaction undecided"
+        );
+        let after = match store
+            .read_head(&context.head_key)
+            .expect("head reads after the failed stage")
+        {
+            HeadRead::Present(receipt) => receipt.token(),
+            HeadRead::Absent => panic!("a pre-CAS failure cannot remove the genesis head"),
+        };
+        assert_eq!(
+            after, before,
+            "a pre-CAS canonical stage failure must not advance the authority head"
+        );
+
+        let retry = admit_validated_receive(
+            &store,
+            &context,
+            &completion,
+            AdmissionLimits::default(),
+            &projection,
+        )
+        .expect("the identical sealed request retries after staging becomes available");
+        assert_eq!(retry.session.tx_ids, vec![tx_id]);
+        assert!(matches!(
+            retry.commands[0].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        assert_eq!(
+            resolve_outcome(
+                &store,
+                &context.head_key,
+                context.tenant_id,
+                context.repository_id,
+                tx_id,
+            )
+            .expect("retry outcome lookup succeeds"),
+            OutcomeLookup::Decided(retry.commands[0].terminal),
+            "the retry must publish the only terminal decision for the original seal"
+        );
     }
 
     #[test]

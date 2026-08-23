@@ -98,9 +98,9 @@ use fgit_admission::{
     AdmissionContext, AdmissionEvidence, AdmissionLimits, AdmissionProjection, AdmissionSnapshot,
     AdmissionSnapshotProjection, CanonicalAdmissionProjection, CanonicalAdmissionStore,
     CanonicalRefState, CommitEvidence, CommitMaterialization, PermittedObjectClosure,
-    QuarantineValidator, RefusalMaterialization, ValidatedClosure, ValidatedReceive,
-    admit_validated_receive, canonical_ref_state_root, permitted_object_closure_root,
-    validate_receive,
+    ProjectionFailure, QuarantineValidator, RefusalMaterialization, ValidatedClosure,
+    ValidatedReceive, admit_validated_receive, canonical_ref_state_root,
+    permitted_object_closure_root, validate_receive,
 };
 use fgit_authority::{
     AuthenticatedHead, AuthorityStore, DuplicateDelivery, FaultDirective, FaultKind, FaultPosition,
@@ -211,12 +211,14 @@ impl AdmissionProjection for UnboundAdapter {
         request: &TransactionRequest,
         fold: &TransactionFoldReport,
         closure: &ValidatedClosure,
-    ) -> Result<CommitMaterialization, RefusalCode> {
+    ) -> Result<CommitMaterialization, ProjectionFailure> {
         if let Some(code) = self.commit_refusal {
-            return Err(code);
+            return Err(ProjectionFailure::Refuse(code));
         }
         if !matches!(fold.outcome, FoldOutcome::Folded(_)) {
-            return Err(RefusalCode::ConflictingSemanticEffects);
+            return Err(ProjectionFailure::Refuse(
+                RefusalCode::ConflictingSemanticEffects,
+            ));
         }
         // `005fd92` made admission validate these carried-forward roots against
         // the authenticated basis. This fixture is deliberately ref-only, so
