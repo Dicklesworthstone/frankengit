@@ -63,6 +63,7 @@ pub mod assemble;
 pub mod audit;
 pub mod capsule;
 mod evidence;
+pub mod live;
 pub mod origin;
 pub mod publish;
 pub mod recovery;
@@ -77,6 +78,7 @@ pub use capsule::{
     advance_pointer_root_last_async, capsule_identity,
 };
 pub use evidence::batch_evidence_root;
+pub use live::{CapsuleClosure, FrozenCapsule, LiveCapsuleRefusal, freeze_capsule};
 pub use origin::{PublicationBasis, ResultingRoots};
 pub use publish::{
     CanonicalBatchReceipt, LostCandidate, PublicationVerdict, publish, publish_async,
