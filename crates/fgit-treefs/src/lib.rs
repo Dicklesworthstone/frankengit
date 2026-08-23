@@ -25,8 +25,10 @@
 //!
 //! It does not fetch objects: the object-source boundary is a trait the caller
 //! implements, so `TreeFS` decides *what* to read and *whether it is authorised*,
-//! then verifies what comes back. FUSE and sparse-directory adapters and
-//! export-to-Git belong to FG-026c and FG-052 and are deliberately absent.
+//! then verifies what comes back. It can produce deterministic sparse manifests
+//! and archive bytes, but these are derived preparation artifacts, not host
+//! adapters. FUSE and sparse-directory writers remain deliberately absent; see
+//! `docs/ADR-0017-TREEFS-HOST-ADAPTER-MATRIX.md` for the support matrix.
 //!
 //! # Load-bearing invariants
 //!
