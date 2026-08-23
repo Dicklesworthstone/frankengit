@@ -52,6 +52,10 @@ pub const MAX_SECRET_LEASES: usize = 64;
 pub const MAX_ARTIFACTS: usize = 1_024;
 /// Maximum bytes accepted in one canonical runner text field.
 pub const MAX_RUNNER_TEXT_BYTES: usize = 256;
+/// Maximum secret byte sequences configured for one log redactor.
+pub const MAX_REDACTION_NEEDLES: usize = 64;
+/// Maximum bytes retained long enough to produce one redacted log object.
+pub const MAX_LOG_BYTES: usize = 4 * 1024 * 1024;
 
 const CAPSULE_DOMAIN: &[u8] = b"frankengit/build-input-capsule/v1\0";
 const CACHE_DOMAIN: &[u8] = b"frankengit/runner-cache-key/v1\0";
@@ -244,6 +248,154 @@ impl BuildCommand {
     #[must_use]
     pub fn commitment(&self) -> Commitment {
         Commitment::of_bytes(&command_bytes(self))
+    }
+}
+
+/// One opaque byte sequence that must never remain in a persisted runner log.
+///
+/// This type intentionally omits `Debug` so secret material cannot be exposed
+/// by diagnostics. The only public operation is to construct a redactor that
+/// replaces this sequence before calculating the log commitment.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RedactionNeedle(Vec<u8>);
+
+impl RedactionNeedle {
+    /// Adopts one bounded nonempty secret byte sequence for log redaction.
+    pub fn new(bytes: Vec<u8>) -> Result<Self, RunnerRefusal> {
+        if bytes.is_empty() {
+            return Err(RunnerRefusal::EmptyRedactionNeedle);
+        }
+        if bytes.len() > MAX_LOG_BYTES {
+            return Err(RunnerRefusal::CollectionTooLarge {
+                field: "redaction_needle_bytes",
+                limit: MAX_LOG_BYTES,
+            });
+        }
+        Ok(Self(bytes))
+    }
+}
+
+/// Immutable receipt that proves the committed log was redacted first.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct LogRedactionReceipt {
+    log_root: Commitment,
+    source_bytes: u64,
+    replacements: u16,
+}
+
+impl LogRedactionReceipt {
+    /// Records a substrate-supplied log root and the redaction accounting that
+    /// produced it. Substrates must calculate `log_root` over redacted bytes.
+    #[must_use]
+    pub const fn new(log_root: Commitment, source_bytes: u64, replacements: u16) -> Self {
+        Self {
+            log_root,
+            source_bytes,
+            replacements,
+        }
+    }
+
+    /// Commitment of the immutable, already-redacted log bytes.
+    #[must_use]
+    pub const fn log_root(self) -> Commitment {
+        self.log_root
+    }
+
+    /// Input byte length before redaction.
+    #[must_use]
+    pub const fn source_bytes(self) -> u64 {
+        self.source_bytes
+    }
+
+    /// Number of secret-sequence replacements applied before commitment.
+    #[must_use]
+    pub const fn replacements(self) -> u16 {
+        self.replacements
+    }
+}
+
+/// Redacts configured secret byte sequences before any log bytes are retained.
+pub struct LogRedactor {
+    needles: Vec<RedactionNeedle>,
+}
+
+impl LogRedactor {
+    /// Creates a deterministic redactor. Longer matching needles win, so
+    /// overlapping secret values cannot produce input-order-dependent output.
+    pub fn new(mut needles: Vec<RedactionNeedle>) -> Result<Self, RunnerRefusal> {
+        if needles.len() > MAX_REDACTION_NEEDLES {
+            return Err(RunnerRefusal::CollectionTooLarge {
+                field: "redaction_needles",
+                limit: MAX_REDACTION_NEEDLES,
+            });
+        }
+        needles.sort_unstable_by(|left, right| {
+            right.0.len().cmp(&left.0.len()).then(left.0.cmp(&right.0))
+        });
+        if needles.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(RunnerRefusal::DuplicateRedactionNeedle);
+        }
+        Ok(Self { needles })
+    }
+
+    /// Replaces every configured secret before computing the immutable root.
+    pub fn redact(&self, bytes: &[u8]) -> Result<RedactedLog, RunnerRefusal> {
+        if bytes.len() > MAX_LOG_BYTES {
+            return Err(RunnerRefusal::CollectionTooLarge {
+                field: "log_bytes",
+                limit: MAX_LOG_BYTES,
+            });
+        }
+        let mut redacted = Vec::with_capacity(bytes.len());
+        let mut cursor = 0;
+        let mut replacements = 0_u16;
+        while cursor < bytes.len() {
+            let matched = self
+                .needles
+                .iter()
+                .find(|needle| bytes[cursor..].starts_with(&needle.0));
+            if let Some(needle) = matched {
+                redacted.extend_from_slice(b"[REDACTED]");
+                cursor += needle.0.len();
+                replacements = replacements
+                    .checked_add(1)
+                    .ok_or(RunnerRefusal::RedactionCountExhausted)?;
+            } else {
+                redacted.push(bytes[cursor]);
+                cursor += 1;
+            }
+        }
+        let source_bytes =
+            u64::try_from(bytes.len()).map_err(|_| RunnerRefusal::CollectionTooLarge {
+                field: "log_bytes",
+                limit: MAX_LOG_BYTES,
+            })?;
+        let receipt =
+            LogRedactionReceipt::new(Commitment::of_bytes(&redacted), source_bytes, replacements);
+        Ok(RedactedLog {
+            bytes: redacted,
+            receipt,
+        })
+    }
+}
+
+/// The sole log body that a runner substrate may persist or turn into evidence.
+pub struct RedactedLog {
+    bytes: Vec<u8>,
+    receipt: LogRedactionReceipt,
+}
+
+impl RedactedLog {
+    /// Bytes safe for log persistence after configured secret replacement.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Immutable redaction accounting and redacted-log commitment.
+    #[must_use]
+    pub const fn receipt(&self) -> LogRedactionReceipt {
+        self.receipt
     }
 }
 
@@ -894,8 +1046,8 @@ pub struct SubstrateObservation {
     pub usage: ResourceUsage,
     /// Evidence that processes were reaped or explicitly contained.
     pub reaped: RunnerReaped,
-    /// Commitment of the immutable log object.
-    pub log_root: Commitment,
+    /// Redaction accounting and commitment of the immutable log object.
+    pub log_redaction: LogRedactionReceipt,
     /// Immutable output artifact commitments in deterministic output order.
     pub artifacts: Vec<Commitment>,
 }
@@ -1044,7 +1196,11 @@ impl RunnerControlPlane {
                 processes_reaped: 0,
                 containment: ContainmentClass::Cooperative,
             },
-            log_root: Commitment::of_bytes(refusal.token().as_bytes()),
+            log_redaction: LogRedactionReceipt::new(
+                Commitment::of_bytes(refusal.token().as_bytes()),
+                0,
+                0,
+            ),
             artifacts: Vec::new(),
         };
         self.finalize(
@@ -1094,6 +1250,7 @@ impl RunnerControlPlane {
             artifacts: observation.artifacts,
             runner_finished,
             reaped: observation.reaped,
+            log_redaction: observation.log_redaction,
             revoked_secrets,
             evidence,
         })
@@ -1221,6 +1378,7 @@ pub struct CheckReceipt {
     artifacts: Vec<Commitment>,
     runner_finished: RunnerFinished,
     reaped: RunnerReaped,
+    log_redaction: LogRedactionReceipt,
     revoked_secrets: u16,
     evidence: EvidenceRecord,
 }
@@ -1280,6 +1438,12 @@ impl CheckReceipt {
         self.reaped
     }
 
+    /// Redaction accounting for the only log body bound into this receipt.
+    #[must_use]
+    pub const fn log_redaction(&self) -> LogRedactionReceipt {
+        self.log_redaction
+    }
+
     /// Number of secret handles revoked while finalizing.
     #[must_use]
     pub const fn revoked_secrets(&self) -> u16 {
@@ -1328,6 +1492,12 @@ pub enum RunnerRefusal {
     DuplicateSourceObject,
     /// A receipt named one immutable output artifact more than once.
     DuplicateArtifactCommitment,
+    /// A redaction input must contain at least one byte.
+    EmptyRedactionNeedle,
+    /// One redactor named the same secret sequence twice.
+    DuplicateRedactionNeedle,
+    /// More redaction replacements occurred than the receipt can represent.
+    RedactionCountExhausted,
     /// The environment allowlist contains an ambiguous duplicate name.
     DuplicateEnvironmentName,
     /// A required resource ceiling was zero.
@@ -1400,6 +1570,13 @@ impl fmt::Display for RunnerRefusal {
             }
             Self::DuplicateArtifactCommitment => {
                 formatter.write_str("receipt contains a duplicate artifact commitment")
+            }
+            Self::EmptyRedactionNeedle => formatter.write_str("redaction needle must not be empty"),
+            Self::DuplicateRedactionNeedle => {
+                formatter.write_str("redactor contains a duplicate secret sequence")
+            }
+            Self::RedactionCountExhausted => {
+                formatter.write_str("redaction replacement count exhausted")
             }
             Self::DuplicateEnvironmentName => {
                 formatter.write_str("environment allowlist contains a duplicate name")
@@ -1537,7 +1714,7 @@ fn receipt_evidence(
     let assumptions = canonical_evidence_text_set(assumptions, "assumption")?;
     let mut artifacts = vec![EvidenceArtifact::new(
         evidence_text("log_root", "runner-log-root".to_owned())?,
-        observation.log_root.digest(),
+        observation.log_redaction.log_root().digest(),
     )];
     for (index, artifact) in observation.artifacts.iter().enumerate() {
         artifacts.push(EvidenceArtifact::new(
@@ -1628,9 +1805,9 @@ mod tests {
     use super::{
         BuildCommand, BuildInputCapsule, CheckOutcome, Commitment, ContainmentFailureKind,
         ContainmentSubstrate, EnvironmentBinding, ForbiddenProbe, ForkPolicy, JobRequest,
-        ResourceCeilings, ResourceDimension, ResourceUsage, RunnerControlPlane, RunnerPolicy,
-        RunnerRefusal, RunnerText, SecretBroker, SecretRequest, SourceObject, SubstrateObservation,
-        TrustDomain,
+        LogRedactor, RedactionNeedle, ResourceCeilings, ResourceDimension, ResourceUsage,
+        RunnerControlPlane, RunnerPolicy, RunnerRefusal, RunnerText, SecretBroker, SecretRequest,
+        SourceObject, SubstrateObservation, TrustDomain,
     };
     use fgit_codec::DecodeLimits;
     use fgit_evidence::EvidenceRecord;
@@ -1704,7 +1881,7 @@ mod tests {
                 processes_reaped: 1,
                 containment: ContainmentClass::Cooperative,
             },
-            log_root: commitment("log-root"),
+            log_redaction: super::LogRedactionReceipt::new(commitment("log-root"), 0, 0),
             artifacts: vec![commitment("artifact-root")],
         }
     }
@@ -1761,6 +1938,30 @@ mod tests {
             .execute(admitted, &mut substrate, &mut broker)
             .expect("successful command-bound receipt");
         assert_eq!(receipt.command(), capsule.command());
+    }
+
+    #[test]
+    fn log_redaction_commits_only_replaced_log_bytes_with_explicit_accounting() {
+        let redactor = LogRedactor::new(vec![
+            RedactionNeedle::new(b"secret-value".to_vec()).expect("nonempty secret"),
+            RedactionNeedle::new(b"secret".to_vec()).expect("overlapping secret"),
+        ])
+        .expect("canonical redactor");
+        let log = redactor
+            .redact(b"token=secret-value\n")
+            .expect("bounded log redaction");
+        assert_eq!(log.bytes(), b"token=[REDACTED]\n");
+        assert!(
+            !log.bytes()
+                .windows(b"secret".len())
+                .any(|part| part == b"secret")
+        );
+        assert_eq!(log.receipt().replacements(), 1);
+        assert_eq!(log.receipt().source_bytes(), 19);
+        assert_eq!(
+            log.receipt().log_root(),
+            Commitment::of_bytes(b"token=[REDACTED]\n")
+        );
     }
 
     #[test]

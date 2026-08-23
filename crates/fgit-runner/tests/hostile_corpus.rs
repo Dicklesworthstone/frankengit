@@ -12,9 +12,9 @@ use fgit_resource::kinds::{
 };
 use fgit_runner::{
     BuildCommand, BuildInputCapsule, CheckOutcome, Commitment, ContainmentSubstrate,
-    ForbiddenProbe, ForkPolicy, JobRequest, ResourceCeilings, ResourceDimension, ResourceUsage,
-    RunnerControlPlane, RunnerPolicy, RunnerRefusal, RunnerText, SecretBroker, SecretRequest,
-    SourceObject, SubstrateObservation, SubstrateRefusal, TrustDomain,
+    ForbiddenProbe, ForkPolicy, JobRequest, LogRedactionReceipt, ResourceCeilings,
+    ResourceDimension, ResourceUsage, RunnerControlPlane, RunnerPolicy, RunnerRefusal, RunnerText,
+    SecretBroker, SecretRequest, SourceObject, SubstrateObservation, SubstrateRefusal, TrustDomain,
 };
 
 fn text(value: &str) -> RunnerText {
@@ -85,7 +85,7 @@ fn observation(
             processes_reaped,
             containment,
         },
-        log_root: commitment("runner-log-root"),
+        log_redaction: LogRedactionReceipt::new(commitment("runner-log-root"), 0, 0),
         artifacts: vec![commitment("artifact-root")],
     }
 }
