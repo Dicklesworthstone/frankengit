@@ -5306,6 +5306,73 @@ mod tests {
     }
 
     #[test]
+    fn one_node_advertises_object_format_sha256_on_protocol_v1_as_well_as_v0() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(
+            test_config(scratch.path().to_path_buf()).with_object_format(GitHashAlgorithm::Sha256),
+        )
+        .expect("node initializes a canonical empty SHA-256 repository");
+        let repository_path = node.git_daemon_repository_path().as_bytes().to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
+        let address = listener
+            .local_addr()
+            .expect("listener reports its bound loopback address");
+        let worker = thread::spawn(move || {
+            let served = node.serve_git_daemon_once_with_limits(&listener, WireLimits::default());
+            let shutdown = node.shutdown();
+            (served, shutdown)
+        });
+
+        let mut client = TcpStream::connect(address).expect("client connects to node listener");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("client read timeout configures");
+        // The only difference from the V0 twin: the greeting names protocol v1,
+        // which adds a prelude packet. The capability list is derived once from
+        // the repository object format and handed to both versions unchanged,
+        // so this pins that the version selection cannot drop it.
+        let greeting_payload = [
+            b"git-upload-pack ".as_slice(),
+            repository_path.as_slice(),
+            b"\0host=loopback\0version=1\0".as_slice(),
+        ]
+        .concat();
+        let greeting = daemon_greeting(&greeting_payload);
+        std::io::Write::write_all(&mut client, &greeting).expect("client greeting writes");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("client closes its greeting half");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .expect("empty SHA-256 V1 advertisement reaches EOF");
+
+        let (session_result, shutdown) = worker.join().expect("node server thread joins");
+        shutdown.expect("node drains and shuts down after the one session");
+        let session = session_result.expect("empty canonical SHA-256 admission state serves");
+        assert!(matches!(
+            session,
+            GitDaemonSessionOutcome::EmptyRepository(_)
+        ));
+
+        let identity = "0".repeat(GitHashAlgorithm::Sha256.digest_len() * 2);
+        let advertisement =
+            format!("{identity} capabilities^{{}}\0agent=frankengit-node object-format=sha256\n");
+        let packet = |payload: &str| {
+            let mut out = format!("{:04x}", payload.len() + 4).into_bytes();
+            out.extend_from_slice(payload.as_bytes());
+            out
+        };
+        let mut expected = packet("version 1\n");
+        expected.extend_from_slice(&packet(&advertisement));
+        expected.extend_from_slice(b"0000");
+        assert_eq!(
+            response, expected,
+            "protocol v1 adds its prelude and must still carry object-format=sha256",
+        );
+    }
+
+    #[test]
     fn one_node_refuses_a_different_daemon_path_before_authority_materialization() {
         let scratch = ScratchDirectory::new();
         let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
