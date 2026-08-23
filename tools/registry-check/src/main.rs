@@ -4828,6 +4828,7 @@ fn check_constellation_model(
         );
         return;
     };
+    check_sqlmodel_substrate_feature_profile(packages, metadata, report);
     check_constellation_exact(constellation, packages, dependencies, metadata, report);
     check_generated_constellation_evidence(constellation, packages, metadata, dependencies, report);
 }
@@ -4981,6 +4982,70 @@ fn check_forbidden_constellation_surfaces(
                 "forbidden native media/GPU dependency `{}` declared in {}",
                 dependency.package, dependency.manifest
             ));
+        }
+    }
+}
+
+/// FrankenSQLite surface markers that ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md
+/// §3.2 keeps off unless a named consumer proves marginal need: the extension
+/// set, session support, and the Linux io_uring profile. Matched as exact
+/// resolved feature names against every `fsqlite*` package closure.
+const FSQLITE_CALLER_PROFILE_EXCLUSIONS: [&str; 9] = [
+    "extensions",
+    "json",
+    "fts5",
+    "rtree",
+    "icu",
+    "misc",
+    "session",
+    "linux-asupersync-uring",
+    "wasm",
+];
+
+/// The sqlmodel projection substrate may enter only alongside the minimal
+/// FrankenSQLite caller profile. The published `sqlmodel-frankensqlite` 0.4.x
+/// requests the fsqlite family WITHOUT `default-features = false`, so wiring
+/// it today would silently widen every workspace consumer's resolved fsqlite
+/// surface -- including the authority adapter pinned at DEP-176..218 -- to
+/// json/fts5/rtree/icu/misc plus an unconditional io_uring profile. Cargo has
+/// no consumer-side feature downgrade, so this gate turns that widening into a
+/// typed refusal naming the upstream prerequisite instead of unnoticed
+/// evidence drift, and goes quiet on its own the moment upstream publishes
+/// minimal-profile requests; no checker edit ships with the fix.
+fn check_sqlmodel_substrate_feature_profile(
+    packages: &[LockPackage],
+    metadata: &MetadataSnapshot,
+    report: &mut Report,
+) {
+    let substrate_linked = packages
+        .iter()
+        .any(|package| package.name == "sqlmodel-frankensqlite");
+    if !substrate_linked {
+        return;
+    }
+    let exclusions: BTreeSet<&str> = FSQLITE_CALLER_PROFILE_EXCLUSIONS.into_iter().collect();
+    for package in packages {
+        if !package.name.starts_with("fsqlite") {
+            continue;
+        }
+        let Some(resolved) = metadata
+            .feature_closures
+            .get(&(package.name.clone(), package.version.clone()))
+        else {
+            continue;
+        };
+        // Iterating the sorted resolved set keeps diagnostics deterministic.
+        for feature in resolved {
+            if exclusions.contains(feature.as_str()) {
+                report.error(format!(
+                    "sqlmodel projection substrate requires the minimal FrankenSQLite caller \
+                     profile: `{}` resolved with excluded feature `{feature}`; integration \
+                     profile §3.2 keeps extensions, session, and io_uring off unless a named \
+                     consumer proves need, so upstream must publish sqlmodel-frankensqlite \
+                     requesting the fsqlite family with default-features = false",
+                    package.name
+                ));
+            }
         }
     }
 }
@@ -6552,6 +6617,73 @@ mod tests {
             &report,
             "forbidden ftui demo/showcase package `ftui-showcase`",
         );
+    }
+    #[test]
+    fn sqlmodel_substrate_with_default_feature_fsqlite_is_refused() {
+        let packages = vec![
+            lock_package("sqlmodel-frankensqlite"),
+            lock_package("fsqlite"),
+        ];
+        let mut metadata = MetadataSnapshot::default();
+        metadata.feature_closures.insert(
+            ("fsqlite".to_owned(), "0.0.0".to_owned()),
+            BTreeSet::from([
+                "async-api".to_owned(),
+                "native".to_owned(),
+                "json".to_owned(),
+                "linux-asupersync-uring".to_owned(),
+            ]),
+        );
+        let mut report = Report::new();
+        check_sqlmodel_substrate_feature_profile(&packages, &metadata, &mut report);
+        assert_error(&report, "`fsqlite` resolved with excluded feature `json`");
+        assert_error(
+            &report,
+            "`fsqlite` resolved with excluded feature `linux-asupersync-uring`",
+        );
+        assert_no_error(&report, "excluded feature `native`");
+        assert_no_error(&report, "excluded feature `async-api`");
+    }
+
+    #[test]
+    fn fsqlite_extension_features_without_substrate_stay_admitted() {
+        // The rule targets the indirect widening vector only: a direct
+        // consumer with its own admission decision must not start failing
+        // because of the substrate gate.
+        let packages = vec![lock_package("fsqlite")];
+        let mut metadata = MetadataSnapshot::default();
+        metadata.feature_closures.insert(
+            ("fsqlite".to_owned(), "0.0.0".to_owned()),
+            BTreeSet::from(["json".to_owned()]),
+        );
+        let mut report = Report::new();
+        check_sqlmodel_substrate_feature_profile(&packages, &metadata, &mut report);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
+
+    #[test]
+    fn sqlmodel_substrate_with_minimal_profile_fsqlite_stays_silent() {
+        // The shape upstream must publish: default-features = false with the
+        // minimal native async set. The gate must not fire against it, so the
+        // future admission attempt fails (if anywhere) on evidence rows, not
+        // here.
+        let packages = vec![
+            lock_package("sqlmodel-frankensqlite"),
+            lock_package("fsqlite"),
+            lock_package("fsqlite-types"),
+        ];
+        let mut metadata = MetadataSnapshot::default();
+        metadata.feature_closures.insert(
+            ("fsqlite".to_owned(), "0.0.0".to_owned()),
+            BTreeSet::from(["async-api".to_owned(), "native".to_owned()]),
+        );
+        metadata.feature_closures.insert(
+            ("fsqlite-types".to_owned(), "0.0.0".to_owned()),
+            BTreeSet::from(["native".to_owned()]),
+        );
+        let mut report = Report::new();
+        check_sqlmodel_substrate_feature_profile(&packages, &metadata, &mut report);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
     }
 
     fn assert_no_error(report: &Report, unexpected: &str) {
