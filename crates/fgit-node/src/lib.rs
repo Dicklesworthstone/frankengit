@@ -19,6 +19,7 @@ use std::io::{self, Read, Write};
 use std::mem::size_of;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -2466,6 +2467,23 @@ impl GitDaemonSessionDeadline {
         }
         Ok(remaining)
     }
+
+    fn expired(self) -> bool {
+        self.remaining().is_err()
+    }
+
+    fn check(self, operation: &'static str) -> Result<(), GitDaemonTransportRefusal> {
+        self.remaining()
+            .map(|_| ())
+            .map_err(|_| GitDaemonTransportRefusal::SessionDeadlineExceeded { operation })
+    }
+}
+
+fn check_session_deadline(
+    deadline: Option<GitDaemonSessionDeadline>,
+    operation: &'static str,
+) -> Result<(), GitDaemonTransportRefusal> {
+    deadline.map_or(Ok(()), |deadline| deadline.check(operation))
 }
 
 /// A socket half whose every operation observes a shared absolute deadline.
@@ -2880,7 +2898,7 @@ pub fn serve_git_daemon_upload_pack<R, W, BuildPack, Payload, PackError>(
     repository: &impl UploadPackRepository,
     capabilities: Capabilities,
     limits: WireLimits,
-    build_pack: BuildPack,
+    mut build_pack: BuildPack,
 ) -> Result<GitDaemonSessionOutcome, GitDaemonServeError<PackError>>
 where
     R: Read,
@@ -2897,7 +2915,10 @@ where
         repository,
         capabilities,
         limits,
-        build_pack,
+        None,
+        |request, pack_request| {
+            build_pack(request, pack_request).map_err(GitDaemonServeError::Pack)
+        },
     )
 }
 
@@ -2947,14 +2968,18 @@ fn serve_git_daemon_upload_pack_after_greeting<R, W, BuildPack, Payload, PackErr
     repository: &impl UploadPackRepository,
     capabilities: Capabilities,
     limits: WireLimits,
+    session_deadline: Option<GitDaemonSessionDeadline>,
     mut build_pack: BuildPack,
 ) -> Result<GitDaemonSessionOutcome, GitDaemonServeError<PackError>>
 where
     R: Read,
     W: Write,
-    BuildPack: FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, PackError>,
+    BuildPack:
+        FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, GitDaemonServeError<PackError>>,
     Payload: PackPayloadSource,
 {
+    check_session_deadline(session_deadline, "prepare upload-pack advertisement")
+        .map_err(GitDaemonServeError::Transport)?;
     let mut advertisement = V1Advertisement::new(
         repository.advertised_refs().to_vec(),
         capabilities.clone(),
@@ -3019,10 +3044,19 @@ where
                     GitDaemonTransportRefusal::IncompleteNegotiation,
                 ));
             }
-            let mut payload =
-                build_pack(&request, &pack_request).map_err(GitDaemonServeError::Pack)?;
-            emit_pack_payload(writer, &mut payload, &pack_request, &limits)
+            check_session_deadline(session_deadline, "build selected git pack")
                 .map_err(GitDaemonServeError::Transport)?;
+            let mut payload = build_pack(&request, &pack_request)?;
+            check_session_deadline(session_deadline, "build selected git pack")
+                .map_err(GitDaemonServeError::Transport)?;
+            emit_pack_payload(
+                writer,
+                &mut payload,
+                &pack_request,
+                &limits,
+                session_deadline,
+            )
+            .map_err(GitDaemonServeError::Transport)?;
             return Ok(GitDaemonSessionOutcome::Pack(GitDaemonSessionReceipt {
                 request,
                 pack_request,
@@ -3043,7 +3077,7 @@ pub fn serve_git_daemon_tcp_once<BuildPack, Payload, PackError>(
     capabilities: Capabilities,
     limits: WireLimits,
     session_timeout: GitDaemonSessionTimeout,
-    build_pack: BuildPack,
+    mut build_pack: BuildPack,
 ) -> Result<GitDaemonSessionOutcome, GitDaemonServeError<PackError>>
 where
     BuildPack: FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, PackError>,
@@ -3064,13 +3098,19 @@ where
     let deadline = GitDaemonSessionDeadline::new(session_timeout);
     let mut reader = DeadlineTcpStream::new(&mut stream, deadline);
     let mut writer = DeadlineTcpStream::new(&mut response_stream, deadline);
-    let receipt = serve_git_daemon_upload_pack(
+    let request =
+        read_git_daemon_request(&mut reader, &limits).map_err(GitDaemonServeError::Transport)?;
+    let receipt = serve_git_daemon_upload_pack_after_greeting(
         &mut reader,
         &mut writer,
+        request,
         repository,
         capabilities,
         limits,
-        build_pack,
+        Some(deadline),
+        |request, pack_request| {
+            build_pack(request, pack_request).map_err(GitDaemonServeError::Pack)
+        },
     )
     .map_err(classify_session_serve_error)?;
     response_stream
@@ -3216,6 +3256,7 @@ fn emit_pack_payload(
     payload: &mut impl PackPayloadSource,
     request: &PackRequest,
     limits: &WireLimits,
+    session_deadline: Option<GitDaemonSessionDeadline>,
 ) -> Result<(), GitDaemonTransportRefusal> {
     let maximum_chunk_bytes = if request.options.sideband_64k() {
         limits
@@ -3227,10 +3268,15 @@ fn emit_pack_payload(
     } else {
         limits.max_packet_bytes
     };
-    while let Some(chunk) = payload
-        .next_chunk(maximum_chunk_bytes)
-        .map_err(GitDaemonTransportRefusal::Wire)?
-    {
+    loop {
+        check_session_deadline(session_deadline, "read materialized git pack payload")?;
+        let chunk = payload
+            .next_chunk(maximum_chunk_bytes)
+            .map_err(GitDaemonTransportRefusal::Wire)?;
+        check_session_deadline(session_deadline, "read materialized git pack payload")?;
+        let Some(chunk) = chunk else {
+            break;
+        };
         if chunk.len() > maximum_chunk_bytes {
             return Err(GitDaemonTransportRefusal::Wire(
                 WireError::PackChunkTooLarge {
@@ -3240,10 +3286,12 @@ fn emit_pack_payload(
             ));
         }
         if request.options.sideband_64k() {
+            check_session_deadline(session_deadline, "write sideband git pack payload")?;
             let packets =
                 sideband_pack_chunk(&chunk, limits).map_err(GitDaemonTransportRefusal::Wire)?;
             write_packet_group(writer, &packets, limits)?;
         } else {
+            check_session_deadline(session_deadline, "write raw git pack payload")?;
             writer
                 .write_all(&chunk)
                 .map_err(|source| GitDaemonTransportRefusal::Io {
@@ -3678,11 +3726,27 @@ impl OneNode {
         &self,
         request: &NodeRequestContext,
     ) -> Result<MaterializedAdmission, AdmissionMaterializationRefusal> {
+        let always_live = || true;
+        self.materialize_admission_while_in(request, &always_live)
+            .await
+    }
+
+    /// Materializes canonical admission state while an enclosing bounded
+    /// operation remains live.
+    ///
+    /// The materializer's own checkpoint predicate remains authoritative for
+    /// request cancellation. This outer predicate lets transport-owned bounds
+    /// stop work before the derived cache may be installed.
+    async fn materialize_admission_while_in(
+        &self,
+        request: &NodeRequestContext,
+        is_live: &(impl Fn() -> bool + Sync),
+    ) -> Result<MaterializedAdmission, AdmissionMaterializationRefusal> {
         // The child is the materializer-catch-up ownership scope. Parent
         // request cancellation propagates to it; its checkpoints fence cache
         // installation without making the cache an authority source.
         let catch_up = request.authority().create_child();
-        let is_cancelled = || catch_up.checkpoint().is_err();
+        let is_cancelled = || !is_live() || catch_up.checkpoint().is_err();
         self.admission_materializer
             .materialize_current_in(
                 &self.authority,
@@ -3992,12 +4056,30 @@ impl OneNode {
         }
 
         let request = self.request_context();
-        let materialized = self
+        deadline
+            .check("materialize authenticated admission")
+            .map_err(NodeGitDaemonServeRefusal::from)?;
+        let admission_deadline_expired = AtomicBool::new(false);
+        let admission_is_live = || {
+            if deadline.expired() {
+                admission_deadline_expired.store(true, Ordering::Relaxed);
+                return false;
+            }
+            true
+        };
+        let admission = self
             .runtime
-            .block_on(self.materialize_admission_in(&request))
-            .map_err(|error| {
-                NodeGitDaemonServeRefusal::from(NodeAdmissionViewRefusal::from(error))
-            })?;
+            .block_on(self.materialize_admission_while_in(&request, &admission_is_live));
+        if admission_deadline_expired.load(Ordering::Relaxed) || deadline.expired() {
+            return Err(NodeGitDaemonServeRefusal::from(
+                GitDaemonTransportRefusal::SessionDeadlineExceeded {
+                    operation: "materialize authenticated admission",
+                },
+            ));
+        }
+        let materialized = admission.map_err(|error| {
+            NodeGitDaemonServeRefusal::from(NodeAdmissionViewRefusal::from(error))
+        })?;
         let repository = AdmissionUploadPackRepository::from_snapshot(
             materialized.snapshot(),
             self.object_format,
@@ -4015,10 +4097,27 @@ impl OneNode {
             &repository,
             capabilities,
             limits,
+            Some(deadline),
             |_request, _pack_request| {
                 let pack_context = request.authority().create_child();
-                let mut is_live = || pack_context.checkpoint().is_ok();
-                self.materialize_selected_pack(&materialized, &mut is_live)
+                let pack_deadline_expired = AtomicBool::new(false);
+                let mut is_live = || {
+                    if deadline.expired() {
+                        pack_deadline_expired.store(true, Ordering::Relaxed);
+                        return false;
+                    }
+                    pack_context.checkpoint().is_ok()
+                };
+                let pack = self.materialize_selected_pack(&materialized, &mut is_live);
+                if pack_deadline_expired.load(Ordering::Relaxed) || deadline.expired() {
+                    Err(GitDaemonServeError::Transport(
+                        GitDaemonTransportRefusal::SessionDeadlineExceeded {
+                            operation: "materialize selected git pack",
+                        },
+                    ))
+                } else {
+                    pack.map_err(GitDaemonServeError::Pack)
+                }
             },
         )
         .map_err(classify_session_serve_error)
