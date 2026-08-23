@@ -72,7 +72,9 @@ Must check:
 - no positive fictional “protocol v2 push” claim;
 - no flattened transfer artifacts or platform junk;
 - registry schemas, sorted unique IDs, status vocabularies, and cross references;
-- README pre-implementation and source-available wording;
+- README pre-implementation wording, and licence wording naming
+  `LicenseRef-MIT-OpenAI-Anthropic-Rider` while still saying source-available
+  (`scripts/license_gate.sh` is the authority; its OSI marker is `no`);
 - plan/normative/architecture link and required contract phrases;
 - workflow actions pinned and delegated to repository-owned scripts.
 

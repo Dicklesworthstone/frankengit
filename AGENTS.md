@@ -193,7 +193,12 @@ A microbenchmark does not establish end-to-end improvement. Preserve disproven h
 - Keep normative schemas/formulas in one authoritative location.
 - Update links, registries, threat model, verification gates, migration, and negative evidence with any material protocol change.
 - Public quantitative claims must be machine-derived or artifact-linked.
-- Current licensing is source-available, not OSI open source.
+- Licensing is `LicenseRef-MIT-OpenAI-Anthropic-Rider` (the MIT licence plus the
+  OpenAI/Anthropic rider), resolved as decision D14 by the repository owner on
+  2026-08-23 and recorded in [`docs/LICENSING_DECISION.md`](docs/LICENSING_DECISION.md).
+  Name it; do not describe it only as "source-available" with no identifier.
+- Because the rider withholds rights from named parties, those terms are not
+  OSI-approved open source. No document may claim open source while that holds.
 
 ## 11. Required change workflow
 

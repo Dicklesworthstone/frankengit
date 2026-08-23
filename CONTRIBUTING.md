@@ -53,4 +53,6 @@ GitHub-hosted Actions are not a project dependency. Run repository-owned lanes l
 
 ## Licensing
 
-The current custom rider is provisional and source-available, not OSI-approved open source. Read [`docs/LICENSING_DECISION.md`](docs/LICENSING_DECISION.md) before contributing code or assuming conventional inbound terms.
+Inbound contributions are under `LicenseRef-MIT-OpenAI-Anthropic-Rider`, the MIT licence plus the OpenAI/Anthropic rider, resolved as decision D14 by the repository owner on 2026-08-23. The full text is in [`LICENSE`](LICENSE).
+
+These terms withhold rights from named parties, so they are **not** OSI-approved open source and the conventional inbound assumptions that come with a bare MIT project do not apply. Read [`docs/LICENSING_DECISION.md`](docs/LICENSING_DECISION.md) before contributing code.

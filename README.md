@@ -4,7 +4,9 @@
 
 > **Status:** pre-implementation architecture and public design review. FrankenGit is not yet a usable Git server or GitHub replacement.
 >
-> **License status:** the current repository license is source-available, not OSI-approved open source. A genuine open-source/commercial structure must be selected before the first code release. See [`docs/LICENSING_DECISION.md`](docs/LICENSING_DECISION.md).
+> **License:** `LicenseRef-MIT-OpenAI-Anthropic-Rider` — the MIT licence plus the OpenAI/Anthropic rider. Decision D14 was resolved by the repository owner on 2026-08-23.
+>
+> Because that rider withholds rights from named parties, the licence is **not** OSI-approved open source; the repository is source-available and must be described that way. See [`docs/LICENSING_DECISION.md`](docs/LICENSING_DECISION.md).
 >
 > **Normative contract:** [`docs/NORMATIVE_PROTOCOL_CONTRACTS.md`](docs/NORMATIVE_PROTOCOL_CONTRACTS.md) governs identity, admission, publication, authority, cancellation, repair, and release-blocking invariants.
 
@@ -531,13 +533,15 @@ The phase plan is in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGIT.md`](COMP
 - not graph/model output used as hidden policy authority;
 - not agent text interpreted as capabilities;
 - not GitHub-hosted Actions used as release truth;
-- not yet implemented, benchmarked, production-ready, or honestly describable as OSI open source under the current license.
+- not yet implemented, benchmarked, production-ready, or honestly describable as OSI open source under the current license (D14 resolved it as `LicenseRef-MIT-OpenAI-Anthropic-Rider`, whose OSI marker is `no`).
 
 ---
 
 ## License
 
-The current license is MIT-shaped source availability with an OpenAI/Anthropic restriction. That restriction means it is **not** an OSI-approved open-source license. The project intends to decide a genuine open-source core/client/protocol plus commercial hosted model before implementation release. Until then, public wording must remain exact.
+The license is `LicenseRef-MIT-OpenAI-Anthropic-Rider`: the MIT licence together with the OpenAI/Anthropic rider, recorded as decision D14 by the repository owner on 2026-08-23. The full text is in [`LICENSE`](LICENSE).
+
+The rider withholds all rights from OpenAI, Anthropic, their affiliates, and anyone acting on their behalf. Because the Open Source Definition forbids discriminating against persons or groups, these terms are **not** an OSI-approved open-source license, and the repository is described as source-available. Public wording must remain exact: name the license, and do not call it open source while the rider stands.
 
 ---
 

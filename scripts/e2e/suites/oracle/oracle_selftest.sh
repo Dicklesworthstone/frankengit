@@ -92,6 +92,14 @@ if [ "$1" = "emit" ]; then
     printf 'stable stderr\n' >&2
     exit 0
 fi
+if [ "$1" = "clone" ]; then
+    [ "${GIT_ALLOW_PROTOCOL}" = git ] || exit 41
+    [ "$2" = "--no-local" ] || exit 42
+    [ "$3" = "git://127.0.0.1:9418/11111111111111111111111111111111.git" ] || exit 43
+    [ "$4" = "loopback-clone" ] || exit 44
+    printf 'loopback clone accepted\n'
+    exit 0
+fi
 printf 'unexpected fake git invocation\n' >&2
 exit 2
 EOF
@@ -116,6 +124,7 @@ config_key_1=''
 config_value_1=''
 askpass=''
 terminal_prompt=''
+allowed_protocol=''
 
 while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
     printf '%s\n' "$1" >> "${FGIT_ORACLE_BWRAP_LOG}"
@@ -143,6 +152,7 @@ while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
                 GIT_CONFIG_VALUE_1) config_value_1=$value ;;
                 GIT_ASKPASS) askpass=$value ;;
                 GIT_TERMINAL_PROMPT) terminal_prompt=$value ;;
+                GIT_ALLOW_PROTOCOL) allowed_protocol=$value ;;
             esac
             ;;
     esac
@@ -169,6 +179,7 @@ if [ "$1" = /oracle/bin/git ]; then
         "GIT_CONFIG_VALUE_1=${config_value_1}" \
         "GIT_ASKPASS=${askpass}" \
         "GIT_TERMINAL_PROMPT=${terminal_prompt}" \
+        "GIT_ALLOW_PROTOCOL=${allowed_protocol}" \
         "${FGIT_ORACLE_FAKE_GIT}" "$@"
 fi
 exit 98
@@ -210,6 +221,9 @@ export PATH="${TEST_ROOT}/bin:/usr/bin:/bin"
 RUN_DIRECTORY="$("${ORACLE}" create-run testgit reproducible)"
 expect_exit FG-000B-ORACLE-004 64 "sandbox path-steering argument is refused" \
     "${ORACLE}" capture testgit "${RUN_DIRECTORY}" . escape -- --git-dir=/etc
+expect_exit FG-000B-ORACLE-013 64 "loopback mode refuses a non-loopback endpoint before Git starts" \
+    "${ORACLE}" clone-loopback testgit "${RUN_DIRECTORY}" nonloopback 192.0.2.1:9418 \
+      /11111111111111111111111111111111.git loopback-clone
 "${ORACLE}" capture testgit "${RUN_DIRECTORY}" . first -- emit >/dev/null
 FIRST_CAPTURE_EXIT=$?
 fge_assert_exit FG-000B-ORACLE-005 0 "${FIRST_CAPTURE_EXIT}" "permitted oracle command captures exact bytes"
@@ -217,12 +231,21 @@ fge_assert_exit FG-000B-ORACLE-005 0 "${FIRST_CAPTURE_EXIT}" "permitted oracle c
 SECOND_CAPTURE_EXIT=$?
 fge_assert_exit FG-000B-ORACLE-006 0 "${SECOND_CAPTURE_EXIT}" "near-identical permitted oracle command is not refused"
 "${ORACLE}" compare "${RUN_DIRECTORY}/transcripts/first" "${RUN_DIRECTORY}/transcripts/second" byte_equal > "${TEST_ROOT}/verdict.json"
+"${ORACLE}" clone-loopback testgit "${RUN_DIRECTORY}" loopback 127.0.0.1:9418 \
+  /11111111111111111111111111111111.git loopback-clone >/dev/null
+LOOPBACK_CAPTURE_EXIT=$?
 
 fge_phase assert
 expect_file_contains FG-000B-ORACLE-007 '"classification":"byte_equal"' "${TEST_ROOT}/verdict.json" "identical transcripts receive a byte-equal NDJSON verdict"
 expect_file_contains FG-000B-ORACLE-008 --clearenv "${FGIT_ORACLE_BWRAP_LOG}" "Bubblewrap clears inherited environment"
 expect_file_contains FG-000B-ORACLE-009 GIT_CONFIG_GLOBAL "${FGIT_ORACLE_BWRAP_LOG}" "oracle explicitly disables the caller global config"
 expect_file_contains FG-000B-ORACLE-010 credential.helper "${FGIT_ORACLE_BWRAP_LOG}" "oracle disables credential helpers at command scope"
+fge_assert_exit FG-000B-ORACLE-014 0 "${LOOPBACK_CAPTURE_EXIT}" "bounded loopback clone mode accepts only its fixed Git invocation"
+expect_file_contains FG-000B-ORACLE-015 --share-net "${FGIT_ORACLE_BWRAP_LOG}" "loopback mode opts into the host loopback network namespace"
+expect_file_contains FG-000B-ORACLE-016 'GIT_ALLOW_PROTOCOL' "${FGIT_ORACLE_BWRAP_LOG}" "loopback mode declares its transport allowlist"
+expect_file_contains FG-000B-ORACLE-017 'network_profile=loopback-git-only' "${RUN_DIRECTORY}/transcripts/loopback/receipt.tsv" "loopback transcript records the constrained network profile"
+expect_file_contains FG-000B-ORACLE-018 'allowed_endpoint=127.0.0.1:9418' "${RUN_DIRECTORY}/transcripts/loopback/receipt.tsv" "loopback transcript binds the single allowed endpoint"
+expect_file_contains FG-000B-ORACLE-019 'oracle_id=testgit' "${RUN_DIRECTORY}/transcripts/loopback/receipt.tsv" "loopback transcript binds the pinned Git identity"
 if grep -F --quiet -- "${HOME}" "${FGIT_ORACLE_BWRAP_LOG}"; then
     fge_fail FG-000B-ORACLE-011 "user HOME leaked into the Bubblewrap invocation"
 else
