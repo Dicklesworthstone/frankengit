@@ -692,11 +692,13 @@ oracle_run_loopback_clone() {
         --setenv GIT_EXEC_PATH /oracle/libexec/git-core \
         --setenv GIT_CEILING_DIRECTORIES /work \
         --setenv GIT_ALLOW_PROTOCOL git \
-        --setenv GIT_CONFIG_COUNT 2 \
+        --setenv GIT_CONFIG_COUNT 3 \
         --setenv GIT_CONFIG_KEY_0 core.hooksPath \
         --setenv GIT_CONFIG_VALUE_0 /home/oracle/empty-hooks \
         --setenv GIT_CONFIG_KEY_1 credential.helper \
         --setenv GIT_CONFIG_VALUE_1 '' \
+        --setenv GIT_CONFIG_KEY_2 protocol.version \
+        --setenv GIT_CONFIG_VALUE_2 1 \
         --setenv GIT_ASKPASS /bin/false \
         --setenv GIT_TERMINAL_PROMPT 0 \
         -- /oracle/bin/git clone --no-local "${remote_url}" "${destination}"
