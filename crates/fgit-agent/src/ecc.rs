@@ -312,28 +312,63 @@ impl fmt::Display for IndependenceDimension {
 /// belongs to whoever mints the handles — but it does insist that the question
 /// be answered by comparing two recorded values rather than by either party's
 /// opinion of its own independence.
+///
+/// # `None` means unreported, and it is not a weaker kind of "different"
+///
+/// Each dimension is an [`Option`] because *"nobody recorded this party's
+/// oracle identity"* is a real state and must be sayable. An earlier version of
+/// this type used bare `u128`, which made the honest answer unrepresentable: a
+/// caller who did not know a dimension had to invent a value, and inventing a
+/// *distinct* one bought independence on that dimension for free. Absent
+/// evidence became the strongest class, which is exactly the self-declaration
+/// this module exists to prevent, arrived at from the other side.
+///
+/// So `None` fails closed — see [`classify_independence`]. Note the asymmetry
+/// that makes this worth a type rather than a convention: two parties that both
+/// default to the same sentinel compare *equal* and are correctly treated as
+/// non-independent, so the dangerous case was never the symmetric one. It was
+/// the mixed case, where one side reports and the other does not.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct PartyFacts {
-    /// Mutable workspace identity.
-    pub workspace: u128,
-    /// Credential / effect-authority identity.
-    pub credentials: u128,
-    /// Model or harness identity.
-    pub model_harness: u128,
-    /// Supplied-context identity.
-    pub context: u128,
-    /// Oracle / toolchain identity.
-    pub oracle: u128,
-    /// Sponsor identity.
-    pub sponsor: u128,
-    /// Human-oversight identity.
-    pub human: u128,
+    /// Mutable workspace identity, or `None` if unreported.
+    pub workspace: Option<u128>,
+    /// Credential / effect-authority identity, or `None` if unreported.
+    pub credentials: Option<u128>,
+    /// Model or harness identity, or `None` if unreported.
+    pub model_harness: Option<u128>,
+    /// Supplied-context identity, or `None` if unreported.
+    pub context: Option<u128>,
+    /// Oracle / toolchain identity, or `None` if unreported.
+    pub oracle: Option<u128>,
+    /// Sponsor identity, or `None` if unreported.
+    pub sponsor: Option<u128>,
+    /// Human-oversight identity, or `None` if unreported.
+    pub human: Option<u128>,
 }
 
 impl PartyFacts {
-    /// The identity this party ran under along one dimension.
+    /// Facts with every dimension unreported.
+    ///
+    /// The most pessimistic party there is: classified non-independent on all
+    /// seven. Useful as a base to fill in only what is actually known, so the
+    /// unknown remainder fails closed by default rather than by remembering.
     #[must_use]
-    pub const fn on(&self, dimension: IndependenceDimension) -> u128 {
+    pub const fn all_unreported() -> Self {
+        Self {
+            workspace: None,
+            credentials: None,
+            model_harness: None,
+            context: None,
+            oracle: None,
+            sponsor: None,
+            human: None,
+        }
+    }
+
+    /// The identity this party ran under along one dimension, or `None` if it
+    /// was never reported.
+    #[must_use]
+    pub const fn on(&self, dimension: IndependenceDimension) -> Option<u128> {
         match dimension {
             IndependenceDimension::Workspace => self.workspace,
             IndependenceDimension::Credentials => self.credentials,
@@ -361,26 +396,46 @@ pub struct VerifierAttestation {
 }
 
 /// The computed independence of one verifier from the producer.
+///
+/// `shared` and `unreported` are kept apart on purpose. Both defeat
+/// independence, but they are different findings with different remedies: a
+/// shared identity is a collusion signal and the remedy is a different
+/// verifier, while an unreported dimension is missing evidence and the remedy
+/// is to record it. Collapsing them into one list would make a report unable to
+/// tell "these two ran in the same workspace" from "nobody wrote down which
+/// workspace either of them used".
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndependenceClassification {
     /// The verifier this classifies.
     pub verifier: u128,
-    /// Dimensions on which producer and verifier shared an identity, in the
-    /// canonical order of [`IndependenceDimension::ALL`].
+    /// Dimensions on which producer and verifier reported the *same* identity,
+    /// in the canonical order of [`IndependenceDimension::ALL`].
     pub shared: Vec<IndependenceDimension>,
+    /// Dimensions at least one side left unreported, in the same canonical
+    /// order. Independence cannot be claimed on these.
+    pub unreported: Vec<IndependenceDimension>,
 }
 
 impl IndependenceClassification {
-    /// True only when no dimension is shared.
+    /// True only when every dimension was reported by both sides and differs.
     #[must_use]
     pub const fn is_fully_independent(&self) -> bool {
-        self.shared.is_empty()
+        self.shared.is_empty() && self.unreported.is_empty()
     }
 
     /// Whether the verifier is independent along one specific dimension.
+    ///
+    /// Requires positive evidence: both sides reported an identity and the two
+    /// differ. An unreported dimension is not independent.
     #[must_use]
     pub fn is_independent_on(&self, dimension: IndependenceDimension) -> bool {
-        !self.shared.contains(&dimension)
+        !self.shared.contains(&dimension) && !self.unreported.contains(&dimension)
+    }
+
+    /// Whether this dimension is undecidable for lack of a recorded identity.
+    #[must_use]
+    pub fn is_unreported_on(&self, dimension: IndependenceDimension) -> bool {
+        self.unreported.contains(&dimension)
     }
 }
 
@@ -389,19 +444,30 @@ impl IndependenceClassification {
 /// This is the enforcement point for normative contract 25. It cannot be
 /// bypassed by an attestation claiming independence, because no such field
 /// exists to claim it with.
+///
+/// Independence requires *positive* evidence on a dimension: both sides
+/// reported an identity and the two differ. Every other case fails closed —
+/// same identity is sharing, and a missing identity on either side is
+/// undecidable, which is not the same thing as independent.
 #[must_use]
 pub fn classify_independence(
     producer: &PartyFacts,
     attestation: &VerifierAttestation,
 ) -> IndependenceClassification {
-    let shared = IndependenceDimension::ALL
-        .iter()
-        .copied()
-        .filter(|dimension| producer.on(*dimension) == attestation.facts.on(*dimension))
-        .collect();
+    let mut shared = Vec::new();
+    let mut unreported = Vec::new();
+    for dimension in IndependenceDimension::ALL.iter().copied() {
+        match (producer.on(dimension), attestation.facts.on(dimension)) {
+            // The only path to independence: both stated, and they differ.
+            (Some(producer_id), Some(verifier_id)) if producer_id != verifier_id => {}
+            (Some(_), Some(_)) => shared.push(dimension),
+            _ => unreported.push(dimension),
+        }
+    }
     IndependenceClassification {
         verifier: attestation.verifier,
         shared,
+        unreported,
     }
 }
 
@@ -437,6 +503,19 @@ pub enum EccRefusal {
         /// The first required dimension found to be shared.
         dimension: IndependenceDimension,
     },
+    /// The policy requires independence on a dimension that no verifier could
+    /// be judged on, because one side never reported an identity for it.
+    ///
+    /// Distinct from [`Self::VerifierNotIndependent`] because the remedy is
+    /// different: that one means "get a different verifier", this one means
+    /// "record the identity". Swapping verifiers would not answer this refusal,
+    /// and recording facts would not answer that one.
+    IndependenceUnreported {
+        /// The verifier whose facts were incomplete.
+        verifier: u128,
+        /// The dimension the policy required and nobody stated.
+        dimension: IndependenceDimension,
+    },
     /// Policy demanded at least one verifier and the bundle carries none.
     NoVerifierAttestation,
 }
@@ -461,6 +540,13 @@ impl fmt::Display for EccRefusal {
             } => write!(
                 formatter,
                 "verifier {verifier:032x} shares {dimension} with the producer"
+            ),
+            Self::IndependenceUnreported {
+                verifier,
+                dimension,
+            } => write!(
+                formatter,
+                "verifier {verifier:032x} cannot be judged on {dimension}: it was never reported"
             ),
             Self::NoVerifierAttestation => {
                 formatter.write_str("policy requires a verifier attestation and none is present")
@@ -563,15 +649,32 @@ impl EvidenceCarryingChange {
             let satisfied = classifications
                 .iter()
                 .any(|classification| classification.is_independent_on(*dimension));
-            if !satisfied {
-                let offender = classifications
-                    .first()
-                    .map_or(0, |classification| classification.verifier);
-                return Err(EccRefusal::VerifierNotIndependent {
+            if satisfied {
+                continue;
+            }
+            let offender = classifications
+                .first()
+                .map_or(0, |classification| classification.verifier);
+            // Which refusal depends on WHY no verifier qualified. If every
+            // candidate failed for want of a recorded identity, reporting "not
+            // independent" would send the reader hunting for a collusion that
+            // is not there. Sharing is reported in preference to absence: a
+            // verifier that demonstrably shares the dimension is the stronger
+            // and more actionable finding.
+            let any_shared = classifications
+                .iter()
+                .any(|classification| classification.shared.contains(dimension));
+            return Err(if any_shared {
+                EccRefusal::VerifierNotIndependent {
                     verifier: offender,
                     dimension: *dimension,
-                });
-            }
+                }
+            } else {
+                EccRefusal::IndependenceUnreported {
+                    verifier: offender,
+                    dimension: *dimension,
+                }
+            });
         }
 
         Ok(classifications)
@@ -599,9 +702,11 @@ impl EvidenceCarryingChange {
 ///
 /// ```text
 /// intent_run                16 bytes
-/// producer                  7 x 16 bytes, in IndependenceDimension::ALL order:
-///                             workspace, credentials, model_harness,
-///                             context, oracle, sponsor, human
+/// producer                  7 x optional identity, in IndependenceDimension::ALL
+///                           order (workspace, credentials, model_harness,
+///                           context, oracle, sponsor, human); each is:
+///                             u8  0x00 = unreported
+///                                 0x01 = present, followed by 16 bytes
 /// evidence                  u32 count, then per record:
 ///                             u16 class code point
 ///                             16 bytes artifact id
@@ -611,9 +716,15 @@ impl EvidenceCarryingChange {
 /// non_claims                u32 count, then 16 bytes each
 /// verifiers                 u32 count, then per attestation:
 ///                             16 bytes verifier id
-///                             7 x 16 bytes facts, same order as producer
+///                             7 x optional identity, same order as producer
 ///                             u8 upheld (0x00 / 0x01)
 /// ```
+///
+/// An unreported dimension is encoded, not omitted, for the same reason the
+/// dispositions below keep their empty slots: the wire form of "we did not
+/// record this" must be distinguishable from the wire form of a party that has
+/// fewer dimensions, and a decoder must not be able to recover a *stronger*
+/// independence claim than the encoder held.
 ///
 /// # Why the dispositions keep their `None`
 ///
@@ -632,7 +743,7 @@ impl CanonicalBody for EvidenceCarryingChange {
 
     fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         out.write_opaque_id(&self.intent_run.to_be_bytes());
-        write_party_facts(out, &self.producer);
+        write_party_facts(out, &self.producer)?;
 
         out.write_sequence("evidence", &self.evidence, |out, record| {
             out.write_scalar(record.class.code_point());
@@ -658,7 +769,7 @@ impl CanonicalBody for EvidenceCarryingChange {
 
         out.write_sequence("verifiers", &self.verifiers, |out, attestation| {
             out.write_opaque_id(&attestation.verifier.to_be_bytes());
-            write_party_facts(out, &attestation.facts);
+            write_party_facts(out, &attestation.facts)?;
             out.write_bool(attestation.upheld);
             Ok(())
         })
@@ -726,10 +837,14 @@ impl CanonicalBody for EvidenceCarryingChange {
 /// Driven from `ALL` rather than field by field, so a dimension added to the
 /// enum is encoded rather than silently dropped from the wire form while the
 /// classifier still compares it.
-fn write_party_facts(out: &mut Encoder, facts: &PartyFacts) {
+fn write_party_facts(out: &mut Encoder, facts: &PartyFacts) -> Result<(), CodecRefusal> {
     for dimension in IndependenceDimension::ALL {
-        out.write_opaque_id(&facts.on(*dimension).to_be_bytes());
+        out.write_option(facts.on(*dimension).as_ref(), |out, identity| {
+            out.write_opaque_id(&identity.to_be_bytes());
+            Ok(())
+        })?;
     }
+    Ok(())
 }
 
 fn read_party_facts(
@@ -737,14 +852,21 @@ fn read_party_facts(
     field: &'static str,
 ) -> Result<PartyFacts, CodecRefusal> {
     Ok(PartyFacts {
-        workspace: read_identity(input, field)?,
-        credentials: read_identity(input, field)?,
-        model_harness: read_identity(input, field)?,
-        context: read_identity(input, field)?,
-        oracle: read_identity(input, field)?,
-        sponsor: read_identity(input, field)?,
-        human: read_identity(input, field)?,
+        workspace: read_optional_identity(input, field)?,
+        credentials: read_optional_identity(input, field)?,
+        model_harness: read_optional_identity(input, field)?,
+        context: read_optional_identity(input, field)?,
+        oracle: read_optional_identity(input, field)?,
+        sponsor: read_optional_identity(input, field)?,
+        human: read_optional_identity(input, field)?,
     })
+}
+
+fn read_optional_identity(
+    input: &mut Decoder<'_>,
+    field: &'static str,
+) -> Result<Option<u128>, CodecRefusal> {
+    input.read_option(field, |input| read_identity(input, field))
 }
 
 fn read_identity(input: &mut Decoder<'_>, field: &'static str) -> Result<u128, CodecRefusal> {

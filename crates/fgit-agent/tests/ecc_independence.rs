@@ -29,26 +29,41 @@ use fgit_agent::{
 /// Facts sharing nothing with [`producer`].
 const fn independent_facts() -> PartyFacts {
     PartyFacts {
-        workspace: 0x20,
-        credentials: 0x21,
-        model_harness: 0x22,
-        context: 0x23,
-        oracle: 0x24,
-        sponsor: 0x25,
-        human: 0x26,
+        workspace: Some(0x20),
+        credentials: Some(0x21),
+        model_harness: Some(0x22),
+        context: Some(0x23),
+        oracle: Some(0x24),
+        sponsor: Some(0x25),
+        human: Some(0x26),
     }
 }
 
 const fn producer() -> PartyFacts {
     PartyFacts {
-        workspace: 0x10,
-        credentials: 0x11,
-        model_harness: 0x12,
-        context: 0x13,
-        oracle: 0x14,
-        sponsor: 0x15,
-        human: 0x16,
+        workspace: Some(0x10),
+        credentials: Some(0x11),
+        model_harness: Some(0x12),
+        context: Some(0x13),
+        oracle: Some(0x14),
+        sponsor: Some(0x15),
+        human: Some(0x16),
     }
+}
+
+/// Copies `independent_facts`, but leaves exactly one dimension unreported.
+const fn unreported_only(dimension: IndependenceDimension) -> PartyFacts {
+    let mut facts = independent_facts();
+    match dimension {
+        IndependenceDimension::Workspace => facts.workspace = None,
+        IndependenceDimension::Credentials => facts.credentials = None,
+        IndependenceDimension::ModelHarness => facts.model_harness = None,
+        IndependenceDimension::Context => facts.context = None,
+        IndependenceDimension::Oracle => facts.oracle = None,
+        IndependenceDimension::Sponsor => facts.sponsor = None,
+        IndependenceDimension::Human => facts.human = None,
+    }
+    facts
 }
 
 /// Copies the producer's identity on exactly one dimension.
@@ -119,6 +134,7 @@ fn a_verifier_sharing_nothing_is_fully_independent() {
 
     assert!(classification.is_fully_independent());
     assert_eq!(classification.shared, vec![]);
+    assert_eq!(classification.unreported, vec![]);
     for dimension in IndependenceDimension::ALL {
         assert!(
             classification.is_independent_on(*dimension),
@@ -160,6 +176,147 @@ fn sharing_any_single_dimension_is_detected_and_does_not_smear() {
             );
         }
     }
+}
+
+/// frankengit-9pdo, the regression this fix exists for.
+///
+/// An UNREPORTED dimension must not classify as independent. Before the fix
+/// `PartyFacts` held bare `u128`, so "nobody recorded this" was unrepresentable
+/// and a caller who did not know a dimension had to invent a value — inventing
+/// a distinct one bought independence on that dimension for free. Absent
+/// evidence produced the strongest class.
+///
+/// Driven from `ALL`, and checked in BOTH directions, because the asymmetry is
+/// the whole point: two parties that both default to the same sentinel compare
+/// equal and were always treated as non-independent. The dangerous case is the
+/// mixed one, where the other side DID report an identity — which is exactly
+/// the case that used to return independent.
+#[test]
+fn an_unreported_dimension_is_never_independent_in_either_direction() {
+    for dimension in IndependenceDimension::ALL {
+        // Verifier silent, producer reported a different identity.
+        let verifier_silent =
+            classify_independence(&producer(), &attestation(unreported_only(*dimension)));
+        assert!(
+            !verifier_silent.is_independent_on(*dimension),
+            "{dimension} unreported by the verifier must not be independent",
+        );
+        assert!(verifier_silent.is_unreported_on(*dimension));
+        assert!(!verifier_silent.is_fully_independent());
+
+        // Producer silent, verifier reported one.
+        let producer_silent = classify_independence(
+            &unreported_only(*dimension),
+            &attestation(independent_facts()),
+        );
+        assert!(
+            !producer_silent.is_independent_on(*dimension),
+            "{dimension} unreported by the producer must not be independent",
+        );
+        assert!(producer_silent.is_unreported_on(*dimension));
+
+        // It must not smear: the other six are still independent.
+        for other in IndependenceDimension::ALL
+            .iter()
+            .filter(|d| *d != dimension)
+        {
+            assert!(
+                verifier_silent.is_independent_on(*other),
+                "{dimension} unreported must not implicate {other}",
+            );
+        }
+    }
+
+    // Permitted twin: the same shape with the dimension actually reported, and
+    // differing, IS independent. Without it, a classifier that called
+    // everything non-independent would satisfy every assertion above.
+    let both_reported = classify_independence(&producer(), &attestation(independent_facts()));
+    assert!(both_reported.is_fully_independent());
+}
+
+/// A missing identity and a shared identity are different findings.
+///
+/// Both defeat independence, so a checker could collapse them and still refuse
+/// correctly — and a report would then be unable to tell "these two ran in the
+/// same workspace" from "nobody wrote down either workspace". The first is a
+/// collusion signal, the second is missing evidence, and they have different
+/// remedies.
+#[test]
+fn sharing_and_not_reporting_are_recorded_separately() {
+    let mut facts = sharing_only(IndependenceDimension::Workspace);
+    facts.oracle = None;
+
+    let classification = classify_independence(&producer(), &attestation(facts));
+
+    assert_eq!(
+        classification.shared,
+        vec![IndependenceDimension::Workspace]
+    );
+    assert_eq!(
+        classification.unreported,
+        vec![IndependenceDimension::Oracle]
+    );
+    assert!(!classification.is_unreported_on(IndependenceDimension::Workspace));
+    assert!(!classification.is_independent_on(IndependenceDimension::Oracle));
+}
+
+/// A party that reports nothing is independent of nobody.
+#[test]
+fn all_unreported_facts_are_independent_on_no_dimension() {
+    let classification =
+        classify_independence(&producer(), &attestation(PartyFacts::all_unreported()));
+
+    assert!(!classification.is_fully_independent());
+    assert_eq!(classification.shared, vec![]);
+    assert_eq!(
+        classification.unreported,
+        IndependenceDimension::ALL.to_vec(),
+        "every dimension must be reported as undecidable, not as shared",
+    );
+}
+
+/// Policy path: an unreported dimension refuses, and with its OWN refusal.
+///
+/// Asserting the refusal by value rather than `is_err()` is the point — the
+/// remedy differs. `VerifierNotIndependent` means "get a different verifier";
+/// `IndependenceUnreported` means "record the identity". Swapping verifiers
+/// would not answer this one.
+#[test]
+fn a_policy_requiring_independence_on_an_unreported_dimension_refuses_typed() {
+    let mut change = change_with(vec![EvidenceRecordRef {
+        class: EvidenceClass::Executed,
+        artifact: 0xa8,
+    }]);
+    change.verifiers = vec![attestation(unreported_only(IndependenceDimension::Oracle))];
+
+    let policy = EccPolicy {
+        required_independence: vec![IndependenceDimension::Oracle],
+        requires_verifier: true,
+        ..EccPolicy::default()
+    };
+
+    assert_eq!(
+        change.evaluate(&policy),
+        Err(EccRefusal::IndependenceUnreported {
+            verifier: 0x99,
+            dimension: IndependenceDimension::Oracle,
+        })
+    );
+
+    // A verifier that SHARES the dimension still gets the other refusal, so the
+    // two paths are distinguished rather than one having swallowed the other.
+    change.verifiers = vec![attestation(sharing_only(IndependenceDimension::Oracle))];
+    assert_eq!(
+        change.evaluate(&policy),
+        Err(EccRefusal::VerifierNotIndependent {
+            verifier: 0x99,
+            dimension: IndependenceDimension::Oracle,
+        })
+    );
+
+    // Permitted twin: reported and differing is accepted.
+    change.verifiers = vec![attestation(independent_facts())];
+    assert!(change.evaluate(&policy).is_ok());
 }
 
 /// The acceptance's named case: same workspace or credentials, automatically

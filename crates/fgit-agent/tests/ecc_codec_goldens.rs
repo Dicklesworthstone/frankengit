@@ -15,7 +15,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use fgit_agent::{EvidenceCarryingChange, EvidenceClass, RequirementDisposition};
+use fgit_agent::{
+    EvidenceCarryingChange, EvidenceClass, IndependenceDimension, RequirementDisposition,
+    classify_independence,
+};
 use fgit_codec::{CanonicalBody, DecodeLimits, canonical_body_bytes, decode_body, encode_body};
 
 struct GoldenCase {
@@ -106,11 +109,11 @@ fn load_goldens() -> Vec<GoldenCase> {
 #[test]
 fn the_corpus_is_present_and_has_both_kinds() {
     let cases = load_goldens();
-    assert_eq!(cases.len(), 10, "corpus size changed; update this count");
+    assert_eq!(cases.len(), 11, "corpus size changed; update this count");
 
     let valid = cases.iter().filter(|case| case.kind == "valid").count();
     let defects = cases.iter().filter(|case| case.kind == "defect").count();
-    assert_eq!(valid, 2, "expected 2 valid vectors");
+    assert_eq!(valid, 3, "expected 3 valid vectors");
     assert_eq!(defects, 8, "expected 8 planted defects");
     assert_eq!(valid + defects, cases.len(), "a case has an unknown kind");
 
@@ -156,7 +159,7 @@ fn valid_goldens_round_trip_byte_for_byte() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 2, "both valid vectors must have been exercised");
+    assert_eq!(checked, 3, "every valid vector must have been exercised");
 }
 
 /// Every planted defect is refused, with the refusal the corpus names.
@@ -240,6 +243,54 @@ fn the_populated_vector_decodes_to_the_documented_values() {
         decoded.verifiers[1].facts.workspace,
         decoded.producer.workspace
     );
+    // Everything in this vector is reported; the unreported state has its own.
+    for dimension in IndependenceDimension::ALL {
+        assert!(decoded.producer.on(*dimension).is_some());
+    }
+}
+
+/// The unreported vector decodes back to unreported, not to an identity.
+///
+/// Byte equality already forces the encoder and decoder to agree, but they
+/// could agree on the wrong thing: a decoder that mapped an absent option to
+/// some default identity, paired with an encoder that wrote that default back
+/// out as absent, would round-trip perfectly while manufacturing independence
+/// out of missing evidence. This pins the decoded values.
+#[test]
+fn the_unreported_vector_keeps_its_absences() {
+    let case = load_goldens()
+        .into_iter()
+        .find(|case| case.name == "ecc__unreported_dimensions")
+        .expect("the unreported vector is in the corpus");
+    let decoded = decode_body::<EvidenceCarryingChange>(&case.bytes, DecodeLimits::DEFAULT)
+        .expect("unreported vector decodes");
+
+    // Producer: oracle and sponsor unreported, the other five stated.
+    assert_eq!(decoded.producer.oracle, None);
+    assert_eq!(decoded.producer.sponsor, None);
+    for dimension in [
+        IndependenceDimension::Workspace,
+        IndependenceDimension::Credentials,
+        IndependenceDimension::ModelHarness,
+        IndependenceDimension::Context,
+        IndependenceDimension::Human,
+    ] {
+        assert!(
+            decoded.producer.on(dimension).is_some(),
+            "{dimension} was stated and must survive as stated",
+        );
+    }
+
+    // Verifier: human unreported.
+    let verifier = &decoded.verifiers[0];
+    assert_eq!(verifier.facts.human, None);
+
+    // And the whole point: that absence defeats independence.
+    let classification = classify_independence(&decoded.producer, verifier);
+    assert!(!classification.is_fully_independent());
+    assert!(classification.is_unreported_on(IndependenceDimension::Human));
+    assert!(classification.is_unreported_on(IndependenceDimension::Oracle));
+    assert!(classification.is_independent_on(IndependenceDimension::Workspace));
 }
 
 /// The domain tag and schema identifier are what the corpus was framed under.

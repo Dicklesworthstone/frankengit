@@ -58,22 +58,30 @@ def option(inner):
     return b"\x00" if inner is None else b"\x01" + inner
 
 
-def party_facts(base):
-    """Seven identities in IndependenceDimension::ALL order."""
-    return b"".join(ident(base + offset) for offset in range(7))
+def party_facts(base, unreported=()):
+    """Seven OPTIONAL identities in IndependenceDimension::ALL order.
+
+    Each is an option tag: 0x00 unreported, or 0x01 followed by 16 bytes.
+    `unreported` is a set of 0-based dimension indices left unstated.
+    """
+    return b"".join(
+        option(None if offset in unreported else ident(base + offset))
+        for offset in range(7)
+    )
 
 
-def payload(intent_run, producer_base, evidence, dispositions, non_claims, verifiers):
+def payload(intent_run, producer_base, evidence, dispositions, non_claims, verifiers,
+            producer_unreported=()):
     out = ident(intent_run)
-    out += party_facts(producer_base)
+    out += party_facts(producer_base, producer_unreported)
     out += sequence([u16(cls) + ident(artifact) for cls, artifact in evidence])
     out += sequence(
         [option(None if code is None else u16(code)) for code in dispositions]
     )
     out += sequence([ident(value) for value in non_claims])
     out += sequence(
-        [ident(verifier) + party_facts(base) + (b"\x01" if upheld else b"\x00")
-         for verifier, base, upheld in verifiers]
+        [ident(verifier) + party_facts(base, unreported) + (b"\x01" if upheld else b"\x00")
+         for verifier, base, upheld, unreported in verifiers]
     )
     return out
 
@@ -118,7 +126,21 @@ POPULATED = payload(
     ],
     dispositions=[SATISFIED, None, PARTIAL, NOT_APPLICABLE, BLOCKED, UNSATISFIED],
     non_claims=[0xC1, 0xC2],
-    verifiers=[(0x99, 0x20, True), (0x98, 0x10, False)],
+    verifiers=[(0x99, 0x20, True, ()), (0x98, 0x10, False, ())],
+)
+
+# The mixed case the bare-u128 encoding could not express at all: the producer
+# never reported its oracle or sponsor, and the verifier never reported its
+# human oversight. Every unreported dimension must decode back as unreported --
+# a decoder that recovered an identity here would manufacture independence.
+UNREPORTED = payload(
+    intent_run=0x55,
+    producer_base=0x10,
+    evidence=[(EXECUTED, 0xB1)],
+    dispositions=[SATISFIED],
+    non_claims=[],
+    verifiers=[(0x97, 0x20, True, {6})],
+    producer_unreported={4, 5},
 )
 
 CASES = []
@@ -139,6 +161,13 @@ case(
     "One evidence record per class, a requirement with NO disposition,\n"
     "two non-claims, and two verifiers -- the second sharing the producer's workspace.",
     POPULATED,
+)
+
+case(
+    "ecc__unreported_dimensions",
+    "The producer leaves oracle and sponsor unreported and the verifier leaves human\n"
+    "unreported. These must decode back as unreported, never as recovered identities.",
+    UNREPORTED,
 )
 
 # Planted defects. Each must produce a typed refusal, never a decode.
