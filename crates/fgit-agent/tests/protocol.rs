@@ -3,14 +3,27 @@
 
 use fgit_agent::{
     AuthorityReadReceipt, ClassSet, ContextControl, ContextPacket, ContextSource, LogicalTime,
-    MAX_CONTEXT_SOURCE_BYTES, ProtocolRefusal, RetrievalChannel,
+    MAX_CONTEXT_SOURCE_BYTES, ProtocolRefusal, RetrievalChannel, WorkspaceBinding,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
     authority_head_identity, initialize_repository, outcome_index_root,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_types::{HeadGeneration, PolicyEpoch, RegistryEpoch, RepositoryId};
+use fgit_crypto::{GitOidSha1, IdentityDomain, Sha1};
+use fgit_treefs::{EpochSet, Overlay, OverlayRoot, WorkspaceId, WorkspaceSnapshotBody};
+use fgit_types::{
+    CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, HeadGeneration, PolicyEpoch,
+    RegistryEpoch, RepositoryCommitId, RepositoryId, RepositorySequence,
+};
+
+fn rcr_id() -> RepositoryCommitId {
+    RepositoryCommitId::from_digest(
+        IdentityDomain::RepositoryCommitRecord.algorithm().id(),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[0x5a; 32]).expect("fixed-width RCR identity digest"),
+    )
+}
 
 fn authority_receipt() -> AuthorityReadReceipt {
     let repository_id = RepositoryId::from_bytes([0x27; 16]);
@@ -21,8 +34,8 @@ fn authority_receipt() -> AuthorityReadReceipt {
         predecessor_head_id: None,
         decision_tail_id: None,
         latest_decision_sequence: None,
-        latest_committed_rcr_id: None,
-        latest_repository_sequence: None,
+        latest_committed_rcr_id: Some(rcr_id()),
+        latest_repository_sequence: Some(RepositorySequence::FIRST),
         ref_root: root,
         forge_position_root: root,
         outcome_index_root: root,
@@ -83,8 +96,53 @@ fn authority_receipt_comes_from_a_real_authenticated_head_and_keeps_all_base_fie
     assert_eq!(receipt.verified_at_logical_time(), LogicalTime::new(41));
     assert_eq!(receipt.verifier_profile(), [0xa3; 32]);
     assert!(receipt.latest_decision_batch_id().is_none());
-    assert!(receipt.latest_repository_sequence().is_none());
-    assert!(receipt.latest_repository_commit_id().is_none());
+    assert_eq!(
+        receipt.latest_repository_sequence(),
+        Some(RepositorySequence::FIRST)
+    );
+    assert_eq!(receipt.latest_repository_commit_id(), Some(rcr_id()));
+}
+
+#[test]
+fn workspace_binding_uses_the_real_treefs_snapshot_and_refuses_a_different_authority_base() {
+    let receipt = authority_receipt();
+    let snapshot = WorkspaceSnapshotBody::<Sha1>::new(
+        WorkspaceId::from_bytes([0x41; 16]),
+        receipt.repository_id(),
+        receipt
+            .latest_repository_commit_id()
+            .expect("test authority receipt carries an RCR"),
+        GitOidSha1::from_bytes([0x42; 20]),
+        GitOidSha1::from_bytes([0x43; 20]),
+        OverlayRoot::of(&Overlay::new()),
+        EpochSet::new()
+            .stage()
+            .publish()
+            .expect("visible after staging"),
+    );
+    let binding = WorkspaceBinding::bind(receipt.clone(), snapshot)
+        .expect("TreeFS snapshot at the authenticated RCR is bindable");
+    assert_eq!(binding.workspace_id(), WorkspaceId::from_bytes([0x41; 16]));
+    assert!(binding.snapshot().epochs().invariant_holds());
+    assert_ne!(binding.manifest_commitment(), [0; 32]);
+
+    let mismatched = WorkspaceSnapshotBody::<Sha1>::new(
+        WorkspaceId::from_bytes([0x41; 16]),
+        receipt.repository_id(),
+        RepositoryCommitId::from_digest(
+            DigestAlgorithmId::try_new(0xfff3).expect("fixture-only nonzero code point"),
+            CANONICAL_CODEC_VERSION,
+            DigestBytes::try_new(&[0x44; 32]).expect("fixed-width mismatch digest"),
+        ),
+        GitOidSha1::from_bytes([0x42; 20]),
+        GitOidSha1::from_bytes([0x43; 20]),
+        OverlayRoot::of(&Overlay::new()),
+        EpochSet::new(),
+    );
+    assert!(matches!(
+        WorkspaceBinding::bind(receipt, mismatched),
+        Err(ProtocolRefusal::WorkspaceBaseMismatch { .. })
+    ));
 }
 
 #[test]

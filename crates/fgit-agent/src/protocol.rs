@@ -24,6 +24,7 @@ use fgit_authority::{
 };
 use fgit_codec::{CodecRefusal, Encoder};
 use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
+use fgit_treefs::{WorkspaceId, WorkspaceSnapshotBody};
 use fgit_types::{
     Digest, HeadGeneration, PolicyEpoch, RegistryEpoch, RepositoryAuthorityHeadId,
     RepositoryCommitId, RepositoryDecisionBatchId, RepositoryId, RepositorySequence,
@@ -373,6 +374,84 @@ pub struct ContextPacket {
     sources: Vec<ContextSource>,
 }
 
+/// A TreeFS workspace manifest bound to the exact authenticated base used by
+/// the agent run.
+///
+/// The wrapped snapshot is the real `fgit-treefs` immutable body, not a second
+/// agent-owned workspace record. Binding refuses a repository mismatch, a
+/// different base RCR, or a receipt that has no committed RCR to pin. The
+/// snapshot retains its own staged/visible/durable epochs; this type exposes
+/// their digest without conflating any of those epochs with canonical
+/// repository publication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceBinding<A: GitHashAlgorithm> {
+    authority_read_receipt: AuthorityReadReceipt,
+    snapshot: WorkspaceSnapshotBody<A>,
+    manifest_commitment: [u8; 32],
+}
+
+impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
+    /// Binds one immutable TreeFS snapshot to the authority receipt that
+    /// supplied its base.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a workspace over another repository, a workspace whose base RCR
+    /// differs from the receipt, or a receipt before the first committed RCR.
+    /// The latter is not silently replaced by an authority-head generation:
+    /// TreeFS names a base RCR and the two are distinct protocol positions.
+    pub fn bind(
+        authority_read_receipt: AuthorityReadReceipt,
+        snapshot: WorkspaceSnapshotBody<A>,
+    ) -> Result<Self, ProtocolRefusal> {
+        if snapshot.repository_id() != authority_read_receipt.repository_id() {
+            return Err(ProtocolRefusal::WorkspaceRepositoryMismatch);
+        }
+        let expected_base = authority_read_receipt
+            .latest_repository_commit_id()
+            .ok_or(ProtocolRefusal::WorkspaceBaseMissing)?;
+        if snapshot.base_rcr_id() != expected_base {
+            return Err(ProtocolRefusal::WorkspaceBaseMismatch {
+                expected: expected_base,
+                observed: snapshot.base_rcr_id(),
+            });
+        }
+        if !snapshot.epochs().invariant_holds() {
+            return Err(ProtocolRefusal::WorkspaceEpochInvariant);
+        }
+        let manifest_commitment = snapshot.snapshot_digest().map_err(ProtocolRefusal::Codec)?;
+        Ok(Self {
+            authority_read_receipt,
+            snapshot,
+            manifest_commitment,
+        })
+    }
+
+    /// The exact authenticated base of the workspace.
+    #[must_use]
+    pub const fn authority_read_receipt(&self) -> &AuthorityReadReceipt {
+        &self.authority_read_receipt
+    }
+
+    /// The immutable TreeFS snapshot this binding authenticated.
+    #[must_use]
+    pub const fn snapshot(&self) -> &WorkspaceSnapshotBody<A> {
+        &self.snapshot
+    }
+
+    /// The workspace identity assigned by TreeFS.
+    #[must_use]
+    pub const fn workspace_id(&self) -> WorkspaceId {
+        self.snapshot.workspace_id()
+    }
+
+    /// Commitment of the immutable TreeFS manifest body.
+    #[must_use]
+    pub const fn manifest_commitment(&self) -> [u8; 32] {
+        self.manifest_commitment
+    }
+}
+
 impl ContextPacket {
     /// Builds a single-generation context packet.
     ///
@@ -479,6 +558,20 @@ pub enum ProtocolRefusal {
         /// Configured maximum.
         limit: usize,
     },
+    /// The TreeFS snapshot names another repository.
+    WorkspaceRepositoryMismatch,
+    /// The authenticated authority receipt has no committed RCR to pin a
+    /// workspace base.
+    WorkspaceBaseMissing,
+    /// The snapshot names a different base RCR from its authority receipt.
+    WorkspaceBaseMismatch {
+        /// RCR named by the authenticated authority receipt.
+        expected: RepositoryCommitId,
+        /// RCR named by the TreeFS snapshot.
+        observed: RepositoryCommitId,
+    },
+    /// The TreeFS snapshot violated its staged/visible/durable invariant.
+    WorkspaceEpochInvariant,
     /// Canonical packet framing could not represent a bounded field.
     Codec(CodecRefusal),
 }
@@ -508,6 +601,19 @@ impl fmt::Display for ProtocolRefusal {
                 formatter,
                 "context packet retains {observed} source bytes, limit {limit}"
             ),
+            Self::WorkspaceRepositoryMismatch => {
+                formatter.write_str("TreeFS snapshot repository differs from authority receipt")
+            }
+            Self::WorkspaceBaseMissing => formatter.write_str(
+                "authority receipt has no committed RCR; it cannot pin a TreeFS workspace base",
+            ),
+            Self::WorkspaceBaseMismatch { expected, observed } => write!(
+                formatter,
+                "TreeFS snapshot base RCR {observed} differs from authority receipt {expected}"
+            ),
+            Self::WorkspaceEpochInvariant => {
+                formatter.write_str("TreeFS snapshot violates staged >= visible >= durable")
+            }
             Self::Codec(refusal) => write!(formatter, "context packet codec refusal: {refusal}"),
         }
     }
