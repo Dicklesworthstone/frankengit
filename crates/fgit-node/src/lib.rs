@@ -109,10 +109,10 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// This view carries no mutable ref map and does not infer object reachability
 /// from the local object fabric.  Its advertised refs come exclusively from a
 /// caller-supplied [`AdmissionSnapshotProjection`] evaluated against an authenticated
-/// authority basis.  The first-clone git-daemon transport is legacy V0, whose
-/// wants must name an advertised ref; therefore this view deliberately refuses
-/// every non-advertised want until the decision-history closure reader is wired
-/// as a separate production slice.
+/// authority basis.  The first-clone git-daemon transport serves the legacy
+/// V0/V1 packet grammar, whose wants must name an advertised ref; therefore
+/// this view deliberately refuses every non-advertised want until the
+/// decision-history closure reader is wired as a separate production slice.
 #[derive(Clone, Debug)]
 pub struct AdmissionUploadPackRepository {
     object_format: GitHashAlgorithm,
@@ -2231,6 +2231,7 @@ impl Error for GitDaemonPathRefusal {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitDaemonRequest {
     repository_path: GitDaemonRepositoryPath,
+    upload_pack_version: UploadPackVersion,
 }
 
 /// A finite wall-clock budget for one accepted git-daemon session.
@@ -2360,6 +2361,16 @@ impl GitDaemonRequest {
     pub const fn repository_path(&self) -> &GitDaemonRepositoryPath {
         &self.repository_path
     }
+
+    /// Returns the legacy upload-pack grammar selected by the greeting.
+    ///
+    /// The git-daemon lane admits the implicit V0 default and an explicit
+    /// `version=1` parameter. V2 remains a typed greeting refusal until its
+    /// distinct ls-refs serving path is attached.
+    #[must_use]
+    pub const fn upload_pack_version(&self) -> UploadPackVersion {
+        self.upload_pack_version
+    }
 }
 
 /// Typed failure at the git-daemon transport boundary.
@@ -2393,7 +2404,7 @@ pub enum GitDaemonTransportRefusal {
     MalformedServiceRequest,
     /// The requested daemon service is not upload-pack.
     UnsupportedService { service_bytes: usize },
-    /// The client requested a protocol generation outside this V0 milestone.
+    /// The client requested a protocol generation not served by this daemon lane.
     UnsupportedProtocolVersion { version_bytes: usize },
     /// More than one version parameter appeared in the service request.
     DuplicateProtocolVersion,
@@ -2692,7 +2703,7 @@ pub fn parse_git_daemon_request(
     parse_git_daemon_request_payload(payload)
 }
 
-/// Serves one bounded legacy V0 git-daemon upload-pack session.
+/// Serves one bounded legacy V0/V1 git-daemon upload-pack session.
 ///
 /// The caller supplies an authority-backed `UploadPackRepository` snapshot and
 /// constructs the pack only after the verified wire machine emits
@@ -2790,13 +2801,15 @@ where
     BuildPack: FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, PackError>,
     Payload: PackPayloadSource,
 {
-    let advertisement = V1Advertisement::new(
+    let mut advertisement = V1Advertisement::new(
         repository.advertised_refs().to_vec(),
         capabilities.clone(),
         repository.object_format(),
         &limits,
     )
     .map_err(|error| GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error)))?;
+    advertisement.version_one_prelude =
+        matches!(request.upload_pack_version(), UploadPackVersion::V1);
     write_packet_group(
         writer,
         &advertisement.encode(&limits).map_err(|error| {
@@ -2813,8 +2826,11 @@ where
         ));
     }
 
-    let mut machine = LegacyUploadPack::new(UploadPackVersion::V0, capabilities, limits.clone())
-        .map_err(|error| GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error)))?;
+    let mut machine =
+        LegacyUploadPack::new(request.upload_pack_version(), capabilities, limits.clone())
+            .map_err(|error| {
+                GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
+            })?;
     let mut input = [0_u8; 16 * 1024];
     loop {
         let read = reader.read(&mut input).map_err(|source| {
@@ -2936,7 +2952,7 @@ fn parse_git_daemon_request_payload(
     }
     let repository_path = GitDaemonRepositoryPath::parse(&service_and_path[separator + 1..])?;
 
-    let mut requested_version_bytes = None;
+    let mut requested_version = None;
     for parameter in parameters.split(|byte| *byte == 0) {
         if parameter.is_empty() {
             continue;
@@ -2944,15 +2960,24 @@ fn parse_git_daemon_request_payload(
         let Some(version) = parameter.strip_prefix(b"version=") else {
             continue;
         };
-        if requested_version_bytes.is_some() {
+        if requested_version.is_some() {
             return Err(GitDaemonTransportRefusal::DuplicateProtocolVersion);
         }
-        requested_version_bytes = Some(version.len());
+        requested_version = Some(version);
     }
-    if let Some(version_bytes) = requested_version_bytes {
-        return Err(GitDaemonTransportRefusal::UnsupportedProtocolVersion { version_bytes });
-    }
-    Ok(GitDaemonRequest { repository_path })
+    let upload_pack_version = match requested_version {
+        None => UploadPackVersion::V0,
+        Some(b"1") => UploadPackVersion::V1,
+        Some(version) => {
+            return Err(GitDaemonTransportRefusal::UnsupportedProtocolVersion {
+                version_bytes: version.len(),
+            });
+        }
+    };
+    Ok(GitDaemonRequest {
+        repository_path,
+        upload_pack_version,
+    })
 }
 
 fn read_git_daemon_request(

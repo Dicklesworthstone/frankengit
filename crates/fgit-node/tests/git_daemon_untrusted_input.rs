@@ -337,7 +337,7 @@ fn a_control_byte_in_a_component_is_refused() {
 #[test]
 fn a_requested_protocol_version_is_refused() {
     let error = parse(&frame(b"git-upload-pack /repo\0version=2\0"))
-        .expect_err("only legacy V0 is served on this lane");
+        .expect_err("V2 serving is not wired on this daemon lane");
     assert!(
         matches!(
             error,
