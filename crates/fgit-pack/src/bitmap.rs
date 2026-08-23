@@ -346,6 +346,136 @@ impl PackBitmapV1 {
     pub const fn receipt(&self) -> &PackBitmapV1Receipt {
         &self.receipt
     }
+
+    /// Answers whether `commit`'s stored reachability bitmap contains
+    /// `object`, after binding this derived index to the exact writer-owned
+    /// pack it names.  `None` means either identity is absent from that pack;
+    /// it is not an authorization or object-existence answer.  Callers must
+    /// still authenticate the authority basis and validate a selected object
+    /// from its native pack bytes before using it.
+    pub fn reaches(
+        &self,
+        pack: &MaterializedPack,
+        commit: &ObjectId,
+        object: &ObjectId,
+        deadline: &mut impl Deadline,
+    ) -> Result<Option<bool>, PackBitmapRefusal> {
+        let object_count = self.validate_bound_pack(pack)?;
+        let mut commit_position = None;
+        let mut object_position = None;
+        for (position, entry) in pack.plan().entries().iter().enumerate() {
+            checkpoint(deadline).map_err(PackBitmapRefusal::Pack)?;
+            if entry.object().id() == *commit {
+                commit_position = Some(position);
+            }
+            if entry.object().id() == *object {
+                object_position = Some(position);
+            }
+        }
+        let (Some(commit_position), Some(object_position)) = (commit_position, object_position)
+        else {
+            return Ok(None);
+        };
+        if commit_position >= object_count || object_position >= object_count {
+            return Err(PackBitmapRefusal::MaterializationMismatch {
+                subject: "pack-plan position",
+            });
+        }
+        self.reaches_positions(commit_position, object_position, deadline)
+            .map(Some)
+    }
+
+    fn validate_bound_pack(&self, pack: &MaterializedPack) -> Result<usize, PackBitmapRefusal> {
+        let object_count = self.receipt.object_count;
+        if pack.receipt().checksum != self.receipt.pack_checksum
+            || pack.receipt().object_count as usize != object_count
+            || pack.plan().entries().len() != object_count
+            || pack.bytes().len() != pack.receipt().output_bytes
+        {
+            return Err(PackBitmapRefusal::WriterArtifactMismatch {
+                subject: "pack binding",
+            });
+        }
+        let expected_bytes = output_bytes(ewah_bytes(object_count)?, self.receipt.commit_count)?;
+        if self.bytes.len() != expected_bytes
+            || self.receipt.output_bytes != expected_bytes
+            || self.bytes.len() < SHA1_BYTES
+            || self.bytes[..4] != *BITMAP_SIGNATURE
+            || read_u16(&self.bytes, 4) != Some(BITMAP_VERSION_V1)
+            || read_u16(&self.bytes, 6) != Some(BITMAP_OPT_FULL_DAG)
+            || read_u32(&self.bytes, 8) != u32::try_from(object_count).ok()
+            || self.bytes.get(12..BITMAP_HEADER_BYTES)
+                != Some(self.receipt.pack_checksum.as_bytes())
+            || self.bytes[self.bytes.len() - SHA1_BYTES..]
+                != sha1_digest(&self.bytes[..self.bytes.len() - SHA1_BYTES])
+        {
+            return Err(PackBitmapRefusal::MaterializationMismatch {
+                subject: "bitmap bytes",
+            });
+        }
+        Ok(object_count)
+    }
+
+    fn reaches_positions(
+        &self,
+        commit_position: usize,
+        object_position: usize,
+        deadline: &mut impl Deadline,
+    ) -> Result<bool, PackBitmapRefusal> {
+        let object_count = self.receipt.object_count;
+        let bitmap_bytes = ewah_bytes(object_count)?;
+        let entry_bytes = BITMAP_ENTRY_PREFIX_BYTES
+            .checked_add(bitmap_bytes)
+            .ok_or(PackBitmapRefusal::SizeOverflow)?;
+        let mut offset = BITMAP_HEADER_BYTES
+            .checked_add(
+                bitmap_bytes
+                    .checked_mul(4)
+                    .ok_or(PackBitmapRefusal::SizeOverflow)?,
+            )
+            .ok_or(PackBitmapRefusal::SizeOverflow)?;
+        for _ in 0..self.receipt.commit_count {
+            checkpoint(deadline).map_err(PackBitmapRefusal::Pack)?;
+            let stored_position = read_u32(&self.bytes, offset).ok_or(
+                PackBitmapRefusal::MaterializationMismatch {
+                    subject: "commit entry position",
+                },
+            )?;
+            let xor_offset =
+                *self
+                    .bytes
+                    .get(offset + 4)
+                    .ok_or(PackBitmapRefusal::MaterializationMismatch {
+                        subject: "commit entry xor offset",
+                    })?;
+            let flags =
+                *self
+                    .bytes
+                    .get(offset + 5)
+                    .ok_or(PackBitmapRefusal::MaterializationMismatch {
+                        subject: "commit entry flags",
+                    })?;
+            if xor_offset != 0 || flags != BITMAP_ENTRY_REUSABLE {
+                return Err(PackBitmapRefusal::MaterializationMismatch {
+                    subject: "unsupported commit bitmap entry",
+                });
+            }
+            if stored_position as usize == commit_position {
+                return ewah_bit(
+                    &self.bytes,
+                    offset + BITMAP_ENTRY_PREFIX_BYTES,
+                    object_count,
+                    object_position,
+                );
+            }
+            offset = offset
+                .checked_add(entry_bytes)
+                .ok_or(PackBitmapRefusal::SizeOverflow)?;
+        }
+        Err(PackBitmapRefusal::MaterializationMismatch {
+            subject: "commit missing from bitmap entries",
+        })
+    }
 }
 
 /// Why pack-bitmap V1 materialization was refused.
@@ -357,6 +487,9 @@ pub enum PackBitmapRefusal {
     ZeroObjectId { subject: &'static str },
     /// The writer-owned pack's bytes and receipt disagreed.
     WriterArtifactMismatch { subject: &'static str },
+    /// A persisted or in-memory bitmap disagreed with its receipt or the
+    /// writer-owned pack supplied for a query.  It must not be consulted.
+    MaterializationMismatch { subject: &'static str },
     /// Selected pack entries exceeded the configured bound.
     ObjectLimitExceeded { observed: usize, limit: usize },
     /// Selected commit entries exceeded the configured bound.
@@ -400,6 +533,12 @@ impl Display for PackBitmapRefusal {
                 write!(
                     formatter,
                     "writer-owned pack {subject} mismatches its receipt"
+                )
+            }
+            Self::MaterializationMismatch { subject } => {
+                write!(
+                    formatter,
+                    "bitmap materialization {subject} is inconsistent"
                 )
             }
             Self::ObjectLimitExceeded { observed, limit } => {
@@ -577,6 +716,76 @@ fn output_bytes(bitmap_bytes: usize, commit_count: usize) -> Result<usize, PackB
         .and_then(|value| value.checked_add(entry.checked_mul(commit_count)?))
         .and_then(|value| value.checked_add(SHA1_BYTES))
         .ok_or(PackBitmapRefusal::SizeOverflow)
+}
+
+fn ewah_bit(
+    input: &[u8],
+    offset: usize,
+    object_count: usize,
+    position: usize,
+) -> Result<bool, PackBitmapRefusal> {
+    if position >= object_count {
+        return Err(PackBitmapRefusal::MaterializationMismatch {
+            subject: "queried object position",
+        });
+    }
+    let words = object_count
+        .checked_add(63)
+        .ok_or(PackBitmapRefusal::SizeOverflow)?
+        / 64;
+    let expected_compressed = words
+        .checked_add(1)
+        .ok_or(PackBitmapRefusal::SizeOverflow)?;
+    if read_u32(input, offset) != u32::try_from(object_count).ok()
+        || read_u32(input, offset + 4) != u32::try_from(expected_compressed).ok()
+        || read_u64(input, offset + 8)
+            != u64::try_from(words)
+                .ok()
+                .and_then(|count| count.checked_shl(33))
+        || read_u32(
+            input,
+            offset
+                .checked_add(16)
+                .and_then(|value| value.checked_add(words.checked_mul(8)?))
+                .ok_or(PackBitmapRefusal::SizeOverflow)?,
+        ) != Some(0)
+    {
+        return Err(PackBitmapRefusal::MaterializationMismatch {
+            subject: "EWAH literal layout",
+        });
+    }
+    let word_offset = offset
+        .checked_add(16)
+        .and_then(|value| value.checked_add((position / 64).checked_mul(8)?))
+        .ok_or(PackBitmapRefusal::SizeOverflow)?;
+    let word = read_u64(input, word_offset).ok_or(PackBitmapRefusal::MaterializationMismatch {
+        subject: "EWAH literal word",
+    })?;
+    Ok(word & (1_u64 << (position % 64)) != 0)
+}
+
+fn read_u16(input: &[u8], offset: usize) -> Option<u16> {
+    input
+        .get(offset..offset.checked_add(2)?)?
+        .try_into()
+        .ok()
+        .map(u16::from_be_bytes)
+}
+
+fn read_u32(input: &[u8], offset: usize) -> Option<u32> {
+    input
+        .get(offset..offset.checked_add(4)?)?
+        .try_into()
+        .ok()
+        .map(u32::from_be_bytes)
+}
+
+fn read_u64(input: &[u8], offset: usize) -> Option<u64> {
+    input
+        .get(offset..offset.checked_add(8)?)?
+        .try_into()
+        .ok()
+        .map(u64::from_be_bytes)
 }
 
 fn zeroed_words(object_count: usize) -> Result<Vec<u64>, PackBitmapRefusal> {

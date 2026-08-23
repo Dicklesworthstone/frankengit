@@ -16,7 +16,7 @@ use fgit_pack::{
     PackWriteProfile, PackWriter,
 };
 use fgit_types::{CodecVersion, DigestAlgorithmId, DigestBytes, RepositoryCommitId, RepositoryId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const SHA1_BYTES: usize = 20;
 const BITMAP_HEADER_BYTES: usize = 32;
@@ -159,7 +159,7 @@ fn read_u64(input: &[u8], offset: usize) -> u64 {
 }
 
 fn ewah_len(object_count: usize) -> usize {
-    16 + 8 * object_count.div_ceil(64)
+    20 + 8 * object_count.div_ceil(64)
 }
 
 fn ewah_literal(input: &[u8], offset: usize, object_count: usize) -> u64 {
@@ -171,6 +171,25 @@ fn ewah_literal(input: &[u8], offset: usize, object_count: usize) -> u64 {
     assert_eq!(read_u64(input, offset + 8), 1_u64 << 33);
     assert_eq!(read_u32(input, offset + 20), 0, "RLW points at itself");
     read_u64(input, offset + 16)
+}
+
+fn exact_reaches(source: &Source, root: ObjectId, expected: ObjectId) -> bool {
+    let mut pending = vec![root];
+    let mut visited = BTreeSet::new();
+    while let Some(current) = pending.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+        if current == expected {
+            return true;
+        }
+        let object = source
+            .objects
+            .get(&current)
+            .expect("the real source closure has every referenced object");
+        pending.extend(object.references.iter().copied());
+    }
+    false
 }
 
 #[test]
@@ -260,6 +279,26 @@ fn bitmap_v1_binds_real_pack_order_and_encodes_full_commit_closure() {
     assert!(
         commit_positions.iter().any(|(_, id)| *id == root),
         "fixture's parent commit remains non-vacuous"
+    );
+    for (_, commit) in &commit_positions {
+        for entry in materialized.plan().entries() {
+            let mut query_live = || true;
+            assert_eq!(
+                bitmap
+                    .reaches(&materialized, commit, &entry.object().id(), &mut query_live)
+                    .expect("writer-bound bitmap query accepts its exact pack"),
+                Some(exact_reaches(&source, *commit, entry.object().id())),
+                "accelerator result equals direct canonical-reference traversal"
+            );
+        }
+    }
+    let absent = ObjectId::from(fgit_types::GitOidSha1::from_bytes([0xee; SHA1_BYTES]));
+    let mut absent_live = || true;
+    assert_eq!(
+        bitmap
+            .reaches(&materialized, &tip, &absent, &mut absent_live)
+            .expect("a missing identity is an ordinary non-answer"),
+        None
     );
 }
 
