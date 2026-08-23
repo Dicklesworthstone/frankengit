@@ -27,7 +27,7 @@ const LIMITS: GraphLimits = GraphLimits {
     edges: 96,
 };
 
-fn node(value: u64) -> GraphNodeId {
+const fn node(value: u64) -> GraphNodeId {
     GraphNodeId::new(value)
 }
 
@@ -85,7 +85,7 @@ fn query(generation_id: GraphGenerationId, policy: GraphViewPolicy) -> GraphQuer
     )
 }
 
-fn next_seed(state: &mut u64) -> u64 {
+const fn next_seed(state: &mut u64) -> u64 {
     *state = state
         .wrapping_mul(6_364_136_223_846_793_005)
         .wrapping_add(1_442_695_040_888_963_407);
