@@ -32,10 +32,16 @@
 //! head, and `Conflict` is not a decision: it is the explicit refusal to
 //! manufacture one.
 
+use core::cmp::Ordering;
 use core::fmt;
 
 /// What a replica currently believes about one transaction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// This is a partially ordered set, not a totally ordered enum:
+/// `Committed` and `Refused` are incomparable.  In particular, it deliberately
+/// does not implement `Ord`, because a total ordering would let `max` discard
+/// their contradiction instead of producing `Conflict` through [`Self::join`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Observation {
     /// Nothing has been observed.
     Unknown,
@@ -47,6 +53,25 @@ pub enum Observation {
     Refused,
     /// Contradictory terminals were observed. Sticky.
     Conflict,
+}
+
+impl PartialOrd for Observation {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        use Observation::{Committed, Conflict, Refused, Reserved, Unknown};
+
+        match (*self, *other) {
+            (Unknown, Unknown)
+            | (Reserved, Reserved)
+            | (Committed, Committed)
+            | (Refused, Refused)
+            | (Conflict, Conflict) => Some(Ordering::Equal),
+            (Unknown, _) | (_, Conflict) => Some(Ordering::Less),
+            (_, Unknown) | (Conflict, _) => Some(Ordering::Greater),
+            (Reserved, Committed | Refused) => Some(Ordering::Less),
+            (Committed | Refused, Reserved) => Some(Ordering::Greater),
+            (Committed, Refused) | (Refused, Committed) => None,
+        }
+    }
 }
 
 impl Observation {

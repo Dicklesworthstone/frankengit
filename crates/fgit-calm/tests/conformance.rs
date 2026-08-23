@@ -366,6 +366,42 @@ fn a_coordinated_row_mislabelled_monotone_is_caught() {
 // ----------------------------------------------------------- lattice algebra
 
 #[test]
+fn observation_partial_order_preserves_terminal_incomparability() {
+    // The lattice does not expose a total `Ord`: the two terminal facts are
+    // incomparable, so a caller cannot use `max` to hide their contradiction.
+    assert_eq!(
+        Observation::Committed.partial_cmp(&Observation::Refused),
+        None,
+        "opposite terminals must be incomparable"
+    );
+    assert_eq!(
+        Observation::Refused.partial_cmp(&Observation::Committed),
+        None,
+        "incomparability must not depend on arrival order"
+    );
+
+    // Exhaustively bind the partial order to the declared join. Comparable
+    // observations join to their greater value; the only incomparable pair
+    // joins to the sticky conflict that blocks service.
+    for left in Observation::ALL {
+        for right in Observation::ALL {
+            match left.partial_cmp(right) {
+                Some(Ordering::Less) => assert_eq!(left.join(*right), *right),
+                Some(Ordering::Equal) => assert_eq!(left.join(*right), *left),
+                Some(Ordering::Greater) => assert_eq!(left.join(*right), *left),
+                None => {
+                    assert!(
+                        left.is_terminal() && right.is_terminal() && left != right,
+                        "only distinct terminals may be incomparable: {left} and {right}"
+                    );
+                    assert_eq!(left.join(*right), Observation::Conflict);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn committed_joined_with_refused_is_sticky_conflict_in_any_order() {
     // Acceptance: "lattice property: joining Committed and Refused yields
     // sticky Conflict across reorderings".
