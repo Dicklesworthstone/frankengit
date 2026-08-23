@@ -29,6 +29,9 @@ use fgit_raptorq::{
 use fgit_resource::{BudgetGrant, Grade, ObligationLedger, ResourceError, ResourceVector};
 use fgit_types::{RepositoryAuthorityHeadId, SegmentManifestId};
 
+/// Authenticated root-mark-grace-revalidate GC over immutable object fabric.
+pub mod gc;
+
 /// The sole durable class this first repair slice can scrub.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DurableClass {
