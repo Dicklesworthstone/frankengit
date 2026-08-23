@@ -106,6 +106,7 @@ pub enum ArchiveVerification {
 pub struct ArchiveReceipt<A: GitHashAlgorithm> {
     repository_id: RepositoryId,
     source_rcr_id: RepositoryCommitId,
+    source_commit_oid: GitOid<A>,
     source_tree_oid: GitOid<A>,
     profile: ArchiveProfile,
     completeness: ArchiveCompleteness,
@@ -128,6 +129,17 @@ impl<A: GitHashAlgorithm> ArchiveReceipt<A> {
     #[must_use]
     pub const fn source_rcr_id(&self) -> RepositoryCommitId {
         self.source_rcr_id
+    }
+
+    /// The immutable commit selected by the source RCR.
+    ///
+    /// The tree identity alone is not a source-head identity: distinct commits
+    /// may intentionally name the same root tree.  Retaining both makes the
+    /// receipt precise about its authority-selected source without elevating
+    /// either derived archive bytes or the receipt itself to authority.
+    #[must_use]
+    pub const fn source_commit_oid(&self) -> &GitOid<A> {
+        &self.source_commit_oid
     }
 
     /// The immutable root tree from which the stream was rendered.
@@ -281,6 +293,7 @@ impl<A: GitHashAlgorithm> UstarArchive<A> {
         let receipt = ArchiveReceipt {
             repository_id: base.repository_id(),
             source_rcr_id: base.base_rcr_id(),
+            source_commit_oid: base.base_commit_oid().clone(),
             source_tree_oid: base.base_tree_oid().clone(),
             profile: ArchiveProfile::UstarV1,
             completeness: ArchiveCompleteness::CapabilityVisibleTreeV1,
@@ -389,6 +402,7 @@ impl<A: GitHashAlgorithm> ZipArchive<A> {
         let receipt = ArchiveReceipt {
             repository_id: base.repository_id(),
             source_rcr_id: base.base_rcr_id(),
+            source_commit_oid: base.base_commit_oid().clone(),
             source_tree_oid: base.base_tree_oid().clone(),
             profile: ArchiveProfile::ZipStoreV1,
             completeness: ArchiveCompleteness::CapabilityVisibleTreeV1,

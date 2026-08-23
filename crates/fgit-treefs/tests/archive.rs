@@ -349,6 +349,7 @@ fn capability_scoped_ustar_is_byte_stable_and_never_follows_symlinks() {
     );
     assert_eq!(first.receipt().repository_id(), repository_id());
     assert_eq!(first.receipt().source_rcr_id(), rcr_id());
+    assert_eq!(first.receipt().source_commit_oid(), &root);
     assert_eq!(first.receipt().source_tree_oid(), &root);
     assert_eq!(first.receipt().profile(), ArchiveProfile::UstarV1);
     assert_eq!(
