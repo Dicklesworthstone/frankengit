@@ -317,7 +317,9 @@ impl ExchangeBundleBody {
                 .iter()
                 .any(|other| other.id == entry.id)
             {
-                return Err(ExchangeRefusal::DuplicateEvidenceRecord { id: entry.id });
+                return Err(ExchangeRefusal::DuplicateEvidenceRecord {
+                    id: Box::new(entry.id),
+                });
             }
         }
         if self.entries.windows(2).any(|pair| pair[0].id >= pair[1].id) {
@@ -449,42 +451,30 @@ pub trait ArtifactResolver {
 /// Maps re-derived foreign replay grades to locally permitted satisfaction.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ReplayGradePolicy {
-    replayable: bool,
-    structural: bool,
-    verifiable_if_supplied: bool,
-    audit_only: bool,
+    permitted: u8,
 }
 
 impl ReplayGradePolicy {
     /// Explicitly configures which foreign replay grades may satisfy a local requirement.
     #[must_use]
-    pub const fn new(
-        replayable: bool,
-        structural: bool,
-        verifiable_if_supplied: bool,
-        audit_only: bool,
-    ) -> Self {
-        Self {
-            replayable,
-            structural,
-            verifiable_if_supplied,
-            audit_only,
+    pub const fn accepting(grades: &[ReplayCompleteness]) -> Self {
+        let mut permitted = 0;
+        let mut index = 0;
+        while index < grades.len() {
+            permitted |= replay_grade_bit(grades[index]);
+            index += 1;
         }
+        Self { permitted }
     }
 
     /// Accepts only fully replayable foreign evidence for requirement satisfaction.
     #[must_use]
     pub const fn replayable_only() -> Self {
-        Self::new(true, false, false, false)
+        Self::accepting(&[ReplayCompleteness::Replayable])
     }
 
     const fn permits(self, grade: ReplayCompleteness) -> bool {
-        match grade {
-            ReplayCompleteness::Replayable => self.replayable,
-            ReplayCompleteness::Structural => self.structural,
-            ReplayCompleteness::VerifiableIfSupplied => self.verifiable_if_supplied,
-            ReplayCompleteness::AuditOnly => self.audit_only,
-        }
+        self.permitted & replay_grade_bit(grade) != 0
     }
 }
 
@@ -638,7 +628,7 @@ pub enum ExchangeRefusal {
     /// A bundle named the same immutable evidence record twice.
     DuplicateEvidenceRecord {
         /// Duplicated immutable evidence identity.
-        id: EvidenceRecordId,
+        id: Box<EvidenceRecordId>,
     },
     /// A carried evidence frame violated a bundle-local bound.
     InvalidFrame {
@@ -689,7 +679,7 @@ pub enum ExchangeRefusal {
     /// The importer found bytes that failed the carried artifact commitment.
     ArtifactCommitmentMismatch {
         /// Immutable record whose artifact was inconsistent.
-        id: EvidenceRecordId,
+        id: Box<EvidenceRecordId>,
     },
     /// Strict decoding accepted a frame that did not re-encode identically.
     FrameNotCanonical,
@@ -811,13 +801,13 @@ fn read_origin(input: &mut Decoder<'_>) -> Result<OriginDescriptor, CodecRefusal
     ));
     let key_history =
         read_bounded_sequence(input, "origin_key_history", MAX_ORIGIN_KEYS, |input| {
-            let epoch = KeyEpoch::new(input.read_scalar("origin_key_epoch")?).ok_or(
+            let epoch = KeyEpoch::new(input.read_scalar("origin_key_epoch")?).ok_or_else(|| {
                 CodecRefusal::VariantUnknown {
                     field: "origin_key_epoch",
                     observed: 0,
                     offset: input.offset(),
-                },
-            )?;
+                }
+            })?;
             let lifecycle_offset = input.offset();
             let lifecycle = key_lifecycle_from_code(
                 input.read_raw_byte("origin_key_lifecycle")?,
@@ -954,7 +944,9 @@ fn rederive_replay_completeness<R: ArtifactResolver>(
             ArtifactAvailability::Verified => {}
             ArtifactAvailability::Missing => missing = true,
             ArtifactAvailability::CommitmentMismatch => {
-                return Err(ExchangeRefusal::ArtifactCommitmentMismatch { id: record.id() });
+                return Err(ExchangeRefusal::ArtifactCommitmentMismatch {
+                    id: Box::new(record.id()),
+                });
             }
         }
     }
@@ -981,6 +973,15 @@ const fn replay_completeness_strength(grade: ReplayCompleteness) -> u8 {
         ReplayCompleteness::Structural => 2,
         ReplayCompleteness::VerifiableIfSupplied => 1,
         ReplayCompleteness::AuditOnly => 0,
+    }
+}
+
+const fn replay_grade_bit(grade: ReplayCompleteness) -> u8 {
+    match grade {
+        ReplayCompleteness::Replayable => 1,
+        ReplayCompleteness::Structural => 2,
+        ReplayCompleteness::VerifiableIfSupplied => 4,
+        ReplayCompleteness::AuditOnly => 8,
     }
 }
 
