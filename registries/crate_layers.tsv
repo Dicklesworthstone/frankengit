@@ -4,7 +4,7 @@
 # means that the crate currently admits no first-party dependency layer.
 crate	layer	allowed_dependency_layers	owner	status
 fgit-admission	L4	L0,L1,L2,L3,L4	receive-pack-admission	active
-fgit-agent	L2	L0,L1,L2	agent	active
+fgit-agent	L4	L0,L1,L2,L3,L4	agent	active
 fgit-atp-git	L3	L0,L1,L2,L3	transport	active
 fgit-authority	L2	L0,L1,L2	authority	active
 fgit-authority-fsqlite	L2	L0,L1,L2	authority	active
