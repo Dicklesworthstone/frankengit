@@ -9,8 +9,9 @@
 use core::fmt;
 
 use fgit_authority::{
-    AsyncAuthorityStore, AuthorityFailure, AuthorityStore, CasOutcome, HeadRead, HeadReadReceipt,
-    ImmutableRead, PutOutcome, authority_head_identity, body_key,
+    AsyncAuthorityStore, AuthorityFailure, AuthorityStore, CasOutcome, HeadInit, HeadKey, HeadRead,
+    HeadReadReceipt, ImmutableRead, PutOutcome, authority_head_identity, body_key,
+    initialize_repository,
 };
 use fgit_codec::attest::BodyIdentity;
 use fgit_codec::{
@@ -20,8 +21,8 @@ use fgit_crypto::IdentityDomain;
 use fgit_types::{Digest, RepositoryCapsuleId};
 
 use crate::{
-    BackupProfile, CapsuleDefect, CapsulePointer, ChronicleRefusal, RepositoryCapsuleBody,
-    RestoreClassification, capsule_identity,
+    BackupExportBundleBody, BackupProfile, CapsuleDefect, CapsulePointer, ChronicleRefusal,
+    RepositoryCapsuleBody, RestoreClassification, RestoreOutcome, capsule_identity,
 };
 
 /// Inputs naming immutable closure material that the object-fabric owner has
@@ -43,6 +44,299 @@ pub struct FrozenCapsule {
     capsule_id: RepositoryCapsuleId,
     pointer: CapsulePointer,
 }
+
+/// The byte-carrying part of an attestation-only backup export.
+///
+/// The existing [`BackupExportBundleBody`] remains the durable vocabulary: it
+/// identifies the repository, capsule, declared coverage, inventory root, and
+/// durability-evidence root. This type deliberately has no canonical-body
+/// implementation, signature, signer, or key-policy field. It carries the
+/// two exact bytes a clean destination needs to verify the capsule/head
+/// boundary before it publishes local authority. A signed portable archive
+/// containing object, segment, suffix, and repair material belongs to the
+/// separately scoped archive slice.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttestedBackupExport {
+    bundle: BackupExportBundleBody,
+    capsule_bytes: Vec<u8>,
+    authority_head_bytes: Vec<u8>,
+}
+
+impl AttestedBackupExport {
+    /// Assemble an export received from an untrusted transport.
+    ///
+    /// This constructor intentionally performs no validation. The restore
+    /// boundary below derives every decision from these actual bytes before it
+    /// stages an immutable body or initializes destination authority.
+    #[must_use]
+    pub const fn new(
+        bundle: BackupExportBundleBody,
+        capsule_bytes: Vec<u8>,
+        authority_head_bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            bundle,
+            capsule_bytes,
+            authority_head_bytes,
+        }
+    }
+
+    /// The existing durable attestation body for this export.
+    #[must_use]
+    pub const fn bundle(&self) -> &BackupExportBundleBody {
+        &self.bundle
+    }
+
+    /// Exact canonical repository-capsule bytes from the source authority.
+    #[must_use]
+    pub fn capsule_bytes(&self) -> &[u8] {
+        &self.capsule_bytes
+    }
+
+    /// Exact canonical authority-head bytes checkpointed by the capsule.
+    #[must_use]
+    pub fn authority_head_bytes(&self) -> &[u8] {
+        &self.authority_head_bytes
+    }
+}
+
+/// The replay claim a restore execution may make.
+///
+/// The reduced attestation-only export has the exact capsule/head boundary but
+/// does not carry object bodies, segment manifests, decision suffixes,
+/// materializations, or verification-tool identity. Its result is therefore
+/// intentionally the third grade from plan section 34.3, never a claim of an
+/// exact or structural replay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum ReplayCompleteness {
+    /// Every deterministic input, schedule, and toolchain artifact is present.
+    Replayable,
+    /// Logical state and control shape reproduce, with named external classes
+    /// absent.
+    StructuralReplay,
+    /// The authority boundary verifies when the named external artifacts are
+    /// supplied.
+    VerifiableIfArtifactsSupplied,
+    /// The record supports inspection but not replay or full verification.
+    AuditOnly,
+}
+
+impl ReplayCompleteness {
+    /// Stable lowercase receipt spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Replayable => "replayable",
+            Self::StructuralReplay => "structural_replay",
+            Self::VerifiableIfArtifactsSupplied => "verifiable_if_artifacts_supplied",
+            Self::AuditOnly => "audit_only",
+        }
+    }
+}
+
+/// A completed authority-boundary restore.
+///
+/// This is a runtime receipt, not a new signed archive/report format. The
+/// existing `BackupExportBundleBody` is the durable attestation; this value
+/// reports what the local restore execution actually did and its explicit
+/// replay limit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestoredAuthorityBoundary {
+    head: HeadReadReceipt,
+    capsule_id: RepositoryCapsuleId,
+    classification: RestoreClassification,
+    replay_completeness: ReplayCompleteness,
+}
+
+impl RestoredAuthorityBoundary {
+    /// The destination authority receipt after root-last capsule activation.
+    #[must_use]
+    pub const fn head(&self) -> &HeadReadReceipt {
+        &self.head
+    }
+
+    /// The capsule activated at the destination authority head.
+    #[must_use]
+    pub const fn capsule_id(&self) -> RepositoryCapsuleId {
+        self.capsule_id
+    }
+
+    /// The byte-derived classification that permitted this execution.
+    #[must_use]
+    pub const fn classification(&self) -> &RestoreClassification {
+        &self.classification
+    }
+
+    /// The replay-completeness grade disclosed by this execution.
+    #[must_use]
+    pub const fn replay_completeness(&self) -> ReplayCompleteness {
+        self.replay_completeness
+    }
+
+    /// External artifact classes still needed to complete the full restore
+    /// protocol.
+    #[must_use]
+    pub const fn missing_artifact_classes(&self) -> &'static [&'static str] {
+        &[
+            "decision suffix",
+            "object closure bodies",
+            "segment manifests",
+            "materializations and projections",
+            "verification-tool identity",
+        ]
+    }
+
+    /// Whether this operation published destination routing.
+    ///
+    /// Routing is deliberately absent: a caller can only publish it after the
+    /// remaining named artifact classes have been supplied and verified.
+    #[must_use]
+    pub const fn routing_published(&self) -> bool {
+        false
+    }
+}
+
+/// Why an attestation-only export could not be formed from live authority.
+#[derive(Debug)]
+pub enum BackupExportRefusal {
+    /// The source receipt was not issued by the source authority endpoint.
+    SourceHeadUnauthenticated(AuthorityFailure),
+    /// The source capsule body could not be encoded for exact-byte comparison.
+    CapsuleEncoding(CodecRefusal),
+    /// Deriving the immutable capsule slot failed.
+    CapsuleKey(Box<fgit_authority::OutcomeFailure>),
+    /// Reading the source immutable capsule slot failed or was ambiguous.
+    CapsuleRead(AuthorityFailure),
+    /// The immutable slot did not contain the frozen capsule.
+    CapsuleNotStaged,
+    /// The source immutable bytes disagreed with the frozen capsule bytes.
+    CapsuleReadbackMismatch,
+    /// The capsule/head bytes could not be inspected.
+    Inspection(Box<CapsuleInspectionRefusal>),
+    /// Byte-derived defects prevent export of this authority boundary.
+    NotRestorable(RestoreOutcome),
+}
+
+impl fmt::Display for BackupExportRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SourceHeadUnauthenticated(error) => {
+                write!(
+                    formatter,
+                    "source head receipt was not authenticated: {error}"
+                )
+            }
+            Self::CapsuleEncoding(error) => {
+                write!(formatter, "frozen capsule could not be encoded: {error}")
+            }
+            Self::CapsuleKey(error) => {
+                write!(
+                    formatter,
+                    "frozen capsule immutable key was unavailable: {error}"
+                )
+            }
+            Self::CapsuleRead(error) => {
+                write!(formatter, "source capsule read did not complete: {error}")
+            }
+            Self::CapsuleNotStaged => formatter.write_str("frozen capsule was not staged"),
+            Self::CapsuleReadbackMismatch => {
+                formatter.write_str("source capsule bytes disagreed with the frozen capsule")
+            }
+            Self::Inspection(error) => {
+                write!(formatter, "source capsule/head inspection refused: {error}")
+            }
+            Self::NotRestorable(outcome) => write!(
+                formatter,
+                "source capsule/head classification does not permit export: {}",
+                outcome.as_str()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BackupExportRefusal {}
+
+/// Why an attestation-only export could not initialize a clean destination.
+#[derive(Debug)]
+pub enum RestoreExecutionRefusal {
+    /// The bundle names a repository other than the decoded capsule.
+    RepositoryMismatch,
+    /// This reduced export has a stricter coverage claim than the bytes it
+    /// transports. A fuller archive is a separate format and execution path.
+    UnsupportedExportProfile(BackupProfile),
+    /// The transported capsule/head bytes could not be inspected.
+    Inspection(Box<CapsuleInspectionRefusal>),
+    /// Byte-derived defects prohibit automatic restore.
+    NotRestorable(RestoreOutcome),
+    /// Staging the destination capsule failed or was ambiguous.
+    CapsuleStage(AuthorityFailure),
+    /// The destination capsule slot already holds different bytes.
+    CapsuleSlotConflict,
+    /// Destination capsule staging lacked an exact byte readback.
+    CapsuleReadbackMismatch,
+    /// Restoring the immutable capsule pointer refused.
+    CapsulePointer(ChronicleRefusal),
+    /// Destination authority initialization failed or was ambiguous.
+    DestinationInitialize(Box<fgit_authority::OutcomeFailure>),
+    /// The destination head namespace was not fresh for this exact restore.
+    DestinationHeadConflict,
+    /// Root-last activation of the destination checkpoint refused.
+    Activation(Box<LiveCapsuleRefusal>),
+}
+
+impl fmt::Display for RestoreExecutionRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RepositoryMismatch => {
+                formatter.write_str("backup bundle repository disagrees with capsule bytes")
+            }
+            Self::UnsupportedExportProfile(profile) => write!(
+                formatter,
+                "attestation-only restore cannot claim {} coverage",
+                profile.as_str()
+            ),
+            Self::Inspection(error) => {
+                write!(formatter, "backup capsule/head inspection refused: {error}")
+            }
+            Self::NotRestorable(outcome) => write!(
+                formatter,
+                "backup capsule/head classification does not permit restore: {}",
+                outcome.as_str()
+            ),
+            Self::CapsuleStage(error) => {
+                write!(
+                    formatter,
+                    "destination capsule staging did not complete: {error}"
+                )
+            }
+            Self::CapsuleSlotConflict => {
+                formatter.write_str("destination capsule slot held different bytes")
+            }
+            Self::CapsuleReadbackMismatch => formatter
+                .write_str("destination capsule staging was not proven by exact byte readback"),
+            Self::CapsulePointer(error) => {
+                write!(formatter, "destination capsule pointer refused: {error}")
+            }
+            Self::DestinationInitialize(error) => {
+                write!(
+                    formatter,
+                    "destination authority initialization refused: {error}"
+                )
+            }
+            Self::DestinationHeadConflict => {
+                formatter.write_str("destination authority namespace is not fresh")
+            }
+            Self::Activation(error) => {
+                write!(
+                    formatter,
+                    "destination checkpoint activation refused: {error}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for RestoreExecutionRefusal {}
 
 /// The result of root-last checkpoint activation.
 ///
