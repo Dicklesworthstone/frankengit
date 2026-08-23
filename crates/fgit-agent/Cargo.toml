@@ -1,0 +1,15 @@
+[package]
+name = "fgit-agent"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+fgit-crypto.workspace = true
+fgit-resource.workspace = true
+fgit-types.workspace = true
+
+[lints]
+workspace = true
