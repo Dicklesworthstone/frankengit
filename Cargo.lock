@@ -624,8 +624,10 @@ version = "0.0.1"
 dependencies = [
  "fgit-admission",
  "fgit-authority",
+ "fgit-claim",
  "fgit-codec",
  "fgit-crypto",
+ "fgit-evidence",
  "fgit-git-object",
  "fgit-resource",
  "fgit-treefs",

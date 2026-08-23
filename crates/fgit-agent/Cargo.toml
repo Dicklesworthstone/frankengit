@@ -16,6 +16,8 @@ fgit-treefs.workspace = true
 fgit-types.workspace = true
 
 [dev-dependencies]
+fgit-claim.workspace = true
+fgit-evidence.workspace = true
 fgit-git-object.workspace = true
 
 [lints]
