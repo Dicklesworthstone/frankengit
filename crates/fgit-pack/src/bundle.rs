@@ -13,7 +13,7 @@ use crate::{
 };
 use core::fmt::{self, Display, Formatter};
 use fgit_crypto::{sha1_digest, sha256_digest};
-use fgit_types::{RefName, RepositoryCommitId, RepositoryId};
+use fgit_types::{GitOidSha1, RefName, RepositoryCommitId, RepositoryId};
 use std::collections::BTreeSet;
 
 const BUNDLE_V2_SIGNATURE: &[u8] = b"# v2 git bundle\n";
@@ -187,6 +187,56 @@ pub struct BundleV2 {
     receipt: BundleV2Receipt,
 }
 
+/// A bounded, checksum-verified Bundle V2 input which remains in quarantine.
+///
+/// The header is restricted to the canonical full-Bundle-V2 profile emitted by
+/// [`BundleV2::write_full`]: SHA-1 references, no prerequisites, and strictly
+/// increasing reference names.  The pack's native checksum is checked to
+/// reject transit corruption, but that is not object admission: callers must
+/// still pass [`Self::pack_bytes`] through the existing bounded pack
+/// quarantine and native-object verification boundaries before storing or
+/// using any object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuarantinedBundleV2<'input> {
+    references: Vec<BundleReference>,
+    header_bytes: &'input [u8],
+    pack_bytes: &'input [u8],
+    header_sha256: [u8; 32],
+    pack_checksum: ObjectId,
+}
+
+impl<'input> QuarantinedBundleV2<'input> {
+    /// Canonically ordered reference advertisements from the untrusted header.
+    #[must_use]
+    pub fn references(&self) -> &[BundleReference] {
+        &self.references
+    }
+
+    /// Exact header bytes through the blank pack delimiter.
+    #[must_use]
+    pub fn header_bytes(&self) -> &'input [u8] {
+        self.header_bytes
+    }
+
+    /// Raw native pack bytes, still requiring object quarantine and admission.
+    #[must_use]
+    pub fn pack_bytes(&self) -> &'input [u8] {
+        self.pack_bytes
+    }
+
+    /// SHA-256 digest of the complete received header.
+    #[must_use]
+    pub const fn header_sha256(&self) -> &[u8; 32] {
+        &self.header_sha256
+    }
+
+    /// Native SHA-1 trailer checksum already matched against the pack bytes.
+    #[must_use]
+    pub const fn pack_checksum(&self) -> ObjectId {
+        self.pack_checksum
+    }
+}
+
 impl BundleV2 {
     /// Writes a full Bundle V2 from one closure-complete [`PackPlan`].
     ///
@@ -264,11 +314,88 @@ impl BundleV2 {
     pub const fn receipt(&self) -> &BundleV2Receipt {
         &self.receipt
     }
+
+    /// Inspects one untrusted, full SHA-1 Bundle V2 stream without admitting it.
+    ///
+    /// This is intentionally a narrow materialization-verification profile,
+    /// not a general Git bundle importer.  In particular, prerequisite lines,
+    /// SHA-256, and Bundle V3 capabilities are refused rather than being
+    /// silently reinterpreted.  The returned value exposes only a checked
+    /// header and a checksum-matched *quarantine* pack; no authority, object
+    /// closure, or object identity claim follows from this call.
+    pub fn inspect_quarantined_full_sha1<'input>(
+        input: &'input [u8],
+        limits: BundleV2Limits,
+        pack_limits: &PackLimits,
+    ) -> Result<QuarantinedBundleV2<'input>, BundleV2Refusal> {
+        if input.len() > limits.max_output_bytes {
+            return Err(BundleV2Refusal::InputBytesExceeded {
+                observed: input.len(),
+                limit: limits.max_output_bytes,
+            });
+        }
+        if !input.starts_with(BUNDLE_V2_SIGNATURE) {
+            return Err(BundleV2Refusal::InvalidSignature);
+        }
+        if BUNDLE_V2_SIGNATURE.len() > limits.max_header_bytes {
+            return Err(BundleV2Refusal::HeaderBytesExceeded {
+                observed: BUNDLE_V2_SIGNATURE.len(),
+                limit: limits.max_header_bytes,
+            });
+        }
+
+        let (references, header_end) = inspect_header(input, limits)?;
+        let header_bytes = &input[..header_end];
+        let pack_bytes = input
+            .get(header_end..)
+            .ok_or(BundleV2Refusal::SizeOverflow)?;
+        let pack_checksum = inspect_pack(pack_bytes, pack_limits)?;
+
+        Ok(QuarantinedBundleV2 {
+            references,
+            header_bytes,
+            pack_bytes,
+            header_sha256: sha256_digest(header_bytes),
+            pack_checksum,
+        })
+    }
 }
 
 /// Why a Bundle V2 materialization was refused.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BundleV2Refusal {
+    /// An untrusted input stream exceeded the caller-selected bound before
+    /// header or pack parsing could retain derived state.
+    InputBytesExceeded {
+        /// Complete input length observed.
+        observed: usize,
+        /// Caller-selected maximum.
+        limit: usize,
+    },
+    /// The input did not start with the exact Bundle V2 signature.
+    InvalidSignature,
+    /// The bounded Bundle V2 header ended before its blank pack delimiter.
+    HeaderDelimiterMissing,
+    /// A nonempty header record was not exactly `40-lower-hex SP refname`.
+    MalformedReferenceRecord {
+        /// One-based header record number after the signature.
+        line: usize,
+    },
+    /// A header reference name violated the shared Git refname grammar.
+    InvalidReferenceName {
+        /// One-based header record number after the signature.
+        line: usize,
+    },
+    /// Header references were not strictly increasing by canonical refname
+    /// byte order.
+    NonCanonicalReferenceOrder {
+        /// Earlier reference name.
+        previous: RefName,
+        /// Later reference name which was not greater than `previous`.
+        next: RefName,
+    },
+    /// The native SHA-1 pack trailer did not match the preceding pack bytes.
+    PackChecksumMismatch,
     /// Bundle V2 cannot represent this object format.
     ObjectFormatUnsupported {
         /// Identity or plan being checked.
@@ -346,6 +473,30 @@ pub enum BundleV2Refusal {
 impl Display for BundleV2Refusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InputBytesExceeded { observed, limit } => write!(
+                formatter,
+                "Bundle V2 input has {observed} bytes, limit is {limit}"
+            ),
+            Self::InvalidSignature => formatter.write_str("invalid Bundle V2 signature"),
+            Self::HeaderDelimiterMissing => {
+                formatter.write_str("Bundle V2 header has no blank pack delimiter")
+            }
+            Self::MalformedReferenceRecord { line } => {
+                write!(formatter, "malformed Bundle V2 reference record {line}")
+            }
+            Self::InvalidReferenceName { line } => {
+                write!(
+                    formatter,
+                    "invalid Bundle V2 reference name at record {line}"
+                )
+            }
+            Self::NonCanonicalReferenceOrder { previous, next } => write!(
+                formatter,
+                "Bundle V2 reference {next} does not follow canonical predecessor {previous}"
+            ),
+            Self::PackChecksumMismatch => {
+                formatter.write_str("Bundle V2 native pack trailer checksum mismatch")
+            }
             Self::ObjectFormatUnsupported { subject, observed } => write!(
                 formatter,
                 "Bundle V2 supports only SHA-1; {subject} uses {observed:?}"
@@ -433,6 +584,136 @@ fn canonical_references(
         }
     }
     Ok(references)
+}
+
+fn inspect_header(
+    input: &[u8],
+    limits: BundleV2Limits,
+) -> Result<(Vec<BundleReference>, usize), BundleV2Refusal> {
+    let mut cursor = BUNDLE_V2_SIGNATURE.len();
+    let mut line = 0_usize;
+    let mut references = Vec::new();
+
+    loop {
+        let remaining = limits.max_header_bytes.checked_sub(cursor).ok_or(
+            BundleV2Refusal::HeaderBytesExceeded {
+                observed: cursor,
+                limit: limits.max_header_bytes,
+            },
+        )?;
+        let scan_end = cursor
+            .checked_add(remaining)
+            .map_or(input.len(), |end| end.min(input.len()));
+        let Some(relative_newline) = input[cursor..scan_end]
+            .iter()
+            .position(|byte| *byte == b'\n')
+        else {
+            if scan_end == input.len() {
+                return Err(BundleV2Refusal::HeaderDelimiterMissing);
+            }
+            return Err(BundleV2Refusal::HeaderBytesExceeded {
+                observed: limits.max_header_bytes.saturating_add(1),
+                limit: limits.max_header_bytes,
+            });
+        };
+        let line_end = cursor
+            .checked_add(relative_newline)
+            .ok_or(BundleV2Refusal::SizeOverflow)?;
+        let next = line_end
+            .checked_add(1)
+            .ok_or(BundleV2Refusal::SizeOverflow)?;
+        let record = &input[cursor..line_end];
+        if record.is_empty() {
+            if references.is_empty() {
+                return Err(BundleV2Refusal::EmptyReferenceSet);
+            }
+            return Ok((references, next));
+        }
+
+        line = line.checked_add(1).ok_or(BundleV2Refusal::SizeOverflow)?;
+        if references.len() >= limits.max_references {
+            return Err(BundleV2Refusal::ReferenceLimitExceeded {
+                observed: references.len().saturating_add(1),
+                limit: limits.max_references,
+            });
+        }
+        let reference = parse_reference_record(record, line)?;
+        if let Some(previous) = references.last().map(BundleReference::name) {
+            if previous >= reference.name() {
+                return Err(BundleV2Refusal::NonCanonicalReferenceOrder {
+                    previous: previous.clone(),
+                    next: reference.name().clone(),
+                });
+            }
+        }
+        references.push(reference);
+        cursor = next;
+    }
+}
+
+fn parse_reference_record(record: &[u8], line: usize) -> Result<BundleReference, BundleV2Refusal> {
+    if record.len() <= BUNDLE_V2_OBJECT_ID_HEX_BYTES
+        || record.get(BUNDLE_V2_OBJECT_ID_HEX_BYTES) != Some(&b' ')
+    {
+        return Err(BundleV2Refusal::MalformedReferenceRecord { line });
+    }
+    let target = parse_sha1_hex(&record[..BUNDLE_V2_OBJECT_ID_HEX_BYTES])
+        .ok_or(BundleV2Refusal::MalformedReferenceRecord { line })?;
+    let target = ObjectId::from(GitOidSha1::from_bytes(target));
+    require_nonzero(&target, "reference target")?;
+    let name = RefName::try_new(&record[BUNDLE_V2_OBJECT_ID_HEX_BYTES + 1..])
+        .map_err(|_| BundleV2Refusal::InvalidReferenceName { line })?;
+    Ok(BundleReference::new(target, name))
+}
+
+fn parse_sha1_hex(input: &[u8]) -> Option<[u8; BUNDLE_V2_OBJECT_ID_BYTES]> {
+    if input.len() != BUNDLE_V2_OBJECT_ID_HEX_BYTES {
+        return None;
+    }
+    let mut output = [0_u8; BUNDLE_V2_OBJECT_ID_BYTES];
+    for (index, chunk) in input.chunks_exact(2).enumerate() {
+        let high = hex_nibble(chunk[0])?;
+        let low = hex_nibble(chunk[1])?;
+        output[index] = (high << 4) | low;
+    }
+    Some(output)
+}
+
+const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn inspect_pack(pack: &[u8], pack_limits: &PackLimits) -> Result<ObjectId, BundleV2Refusal> {
+    if pack.len() > pack_limits.max_input_bytes {
+        return Err(BundleV2Refusal::PackStructure(PackError::InputLimit {
+            actual: pack.len(),
+            limit: pack_limits.max_input_bytes,
+        }));
+    }
+    if pack.len() < PACK_V2_HEADER_BYTES + BUNDLE_V2_OBJECT_ID_BYTES {
+        return Err(BundleV2Refusal::PackReceiptMismatch {
+            context: "pack shorter than v2 header and SHA-1 trailer",
+        });
+    }
+    parse_pack_header(pack, pack_limits).map_err(BundleV2Refusal::PackStructure)?;
+    let split = pack
+        .len()
+        .checked_sub(BUNDLE_V2_OBJECT_ID_BYTES)
+        .ok_or(BundleV2Refusal::SizeOverflow)?;
+    let trailer: [u8; BUNDLE_V2_OBJECT_ID_BYTES] =
+        pack[split..]
+            .try_into()
+            .map_err(|_| BundleV2Refusal::PackReceiptMismatch {
+                context: "SHA-1 trailer length",
+            })?;
+    if sha1_digest(&pack[..split]).as_slice() != trailer {
+        return Err(BundleV2Refusal::PackChecksumMismatch);
+    }
+    Ok(ObjectId::from(GitOidSha1::from_bytes(trailer)))
 }
 
 fn validate_full_closure(

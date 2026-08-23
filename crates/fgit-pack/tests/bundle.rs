@@ -77,9 +77,13 @@ fn source(commit: ObjectId) -> BundleSource {
 }
 
 fn reference(commit: ObjectId) -> BundleReference {
+    named_reference(commit, b"refs/heads/main")
+}
+
+fn named_reference(commit: ObjectId, name: &[u8]) -> BundleReference {
     BundleReference::new(
         commit,
-        RefName::try_new(b"refs/heads/main").expect("fixture ref is valid"),
+        RefName::try_new(name).expect("fixture ref is valid"),
     )
 }
 
@@ -233,5 +237,128 @@ fn full_bundle_v2_refuses_zero_sha256_and_tight_header_twins() {
         )
         .is_ok(),
         "the one-byte-larger header-bound twin proceeds"
+    );
+}
+
+#[test]
+fn quarantined_bundle_inspection_preserves_the_canonical_header_and_pack_boundary() {
+    let (objects, commit) = source_with_commit_and_tree();
+    let plan = plan(&objects, &[commit]);
+    let writer = PackWriter::new(PackLimits::default());
+    let references = [
+        named_reference(commit, b"refs/heads/a"),
+        named_reference(commit, b"refs/heads/z"),
+    ];
+    let mut live = || true;
+    let bundle = BundleV2::write_full(
+        source(commit),
+        &references,
+        &plan,
+        &writer,
+        &mut live,
+        BundleV2Limits::default(),
+    )
+    .expect("fixture plan writes a canonical full bundle");
+
+    let inspection = BundleV2::inspect_quarantined_full_sha1(
+        bundle.bytes(),
+        BundleV2Limits::default(),
+        &PackLimits::default(),
+    )
+    .expect("writer output crosses the bounded quarantine header and checksum checks");
+    let expected_header =
+        format!("# v2 git bundle\n{commit} refs/heads/a\n{commit} refs/heads/z\n\n");
+    assert_eq!(inspection.references(), &references);
+    assert_eq!(inspection.header_bytes(), expected_header.as_bytes());
+    assert_eq!(
+        inspection.header_sha256(),
+        &sha256_digest(expected_header.as_bytes())
+    );
+    assert_eq!(
+        inspection.pack_bytes(),
+        &bundle.bytes()[expected_header.len()..]
+    );
+    assert_eq!(
+        inspection.pack_checksum(),
+        bundle.receipt().pack_receipt().checksum,
+        "checksum inspection does not turn the pack into admitted objects"
+    );
+}
+
+#[test]
+fn quarantined_bundle_inspection_refuses_noncanonical_headers_corruption_and_bound_twins() {
+    let (objects, commit) = source_with_commit_and_tree();
+    let plan = plan(&objects, &[commit]);
+    let writer = PackWriter::new(PackLimits::default());
+    let references = [
+        named_reference(commit, b"refs/heads/a"),
+        named_reference(commit, b"refs/heads/z"),
+    ];
+    let mut live = || true;
+    let bundle = BundleV2::write_full(
+        source(commit),
+        &references,
+        &plan,
+        &writer,
+        &mut live,
+        BundleV2Limits::default(),
+    )
+    .expect("fixture plan writes a canonical full bundle");
+    let canonical_header =
+        format!("# v2 git bundle\n{commit} refs/heads/a\n{commit} refs/heads/z\n\n");
+    let pack = &bundle.bytes()[canonical_header.len()..];
+    let reversed_header =
+        format!("# v2 git bundle\n{commit} refs/heads/z\n{commit} refs/heads/a\n\n");
+    let mut reordered = reversed_header.into_bytes();
+    reordered.extend_from_slice(pack);
+    assert!(matches!(
+        BundleV2::inspect_quarantined_full_sha1(
+            &reordered,
+            BundleV2Limits::default(),
+            &PackLimits::default(),
+        ),
+        Err(BundleV2Refusal::NonCanonicalReferenceOrder { .. })
+    ));
+
+    let mut corrupted = bundle.bytes().to_vec();
+    let last = corrupted
+        .last_mut()
+        .expect("a complete bundle contains a pack trailer");
+    *last ^= 1;
+    assert_eq!(
+        BundleV2::inspect_quarantined_full_sha1(
+            &corrupted,
+            BundleV2Limits::default(),
+            &PackLimits::default(),
+        ),
+        Err(BundleV2Refusal::PackChecksumMismatch)
+    );
+
+    assert_eq!(
+        BundleV2::inspect_quarantined_full_sha1(
+            bundle.bytes(),
+            BundleV2Limits {
+                max_output_bytes: bundle.bytes().len() - 1,
+                ..BundleV2Limits::default()
+            },
+            &PackLimits::default(),
+        ),
+        Err(BundleV2Refusal::InputBytesExceeded {
+            observed: bundle.bytes().len(),
+            limit: bundle.bytes().len() - 1,
+        })
+    );
+
+    assert!(
+        BundleV2::inspect_quarantined_full_sha1(
+            bundle.bytes(),
+            BundleV2Limits {
+                max_output_bytes: bundle.bytes().len(),
+                ..BundleV2Limits::default()
+            },
+            &PackLimits::default(),
+        )
+        .is_ok(),
+        "the one-byte-larger input-bound twin proceeds"
     );
 }

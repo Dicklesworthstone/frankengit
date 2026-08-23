@@ -15,7 +15,7 @@ mod writer;
 
 pub use bundle::{
     BundleProfile, BundleReference, BundleSource, BundleV2, BundleV2Limits, BundleV2Receipt,
-    BundleV2Refusal,
+    BundleV2Refusal, QuarantinedBundleV2,
 };
 pub use delta::{
     CachedResolver, DeltaBase, DeltaObject, ExternalBaseLookup, PackObject, ScalarResolver,
