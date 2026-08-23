@@ -2322,6 +2322,108 @@ impl Error for NodeSourceImportRefusal {
     }
 }
 
+/// Authenticated client identity carried by the receive transport boundary.
+///
+/// The authentication boundary supplies both fields. In particular, the
+/// idempotency key is a client retry identity; it is never derived from a
+/// receive request, connection identifier, or other mutable transport data.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedReceiveSession {
+    principal_id: PrincipalId,
+    client_idempotency_key: IdempotencyKey,
+}
+
+impl AuthenticatedReceiveSession {
+    /// Forms an authenticated receive session from authority-bound identity.
+    #[must_use]
+    pub fn new(principal_id: PrincipalId, client_idempotency_key: IdempotencyKey) -> Self {
+        Self {
+            principal_id,
+            client_idempotency_key,
+        }
+    }
+
+    /// Returns the principal authenticated for this transport session.
+    #[must_use]
+    pub const fn principal_id(&self) -> PrincipalId {
+        self.principal_id
+    }
+
+    /// Returns the client-supplied retry identity bound to this session.
+    #[must_use]
+    pub const fn client_idempotency_key(&self) -> &IdempotencyKey {
+        &self.client_idempotency_key
+    }
+}
+
+/// Authentication state exposed by the loopback receive transport.
+///
+/// The anonymous form exists so a transport adapter can refuse it explicitly;
+/// it cannot be converted into an admission context.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LoopbackReceiveSession {
+    /// A session whose principal and retry key came from authentication.
+    Authenticated(AuthenticatedReceiveSession),
+    /// A connection that has not authenticated a principal.
+    Anonymous,
+}
+
+impl LoopbackReceiveSession {
+    /// Creates an authenticated loopback session from caller-authenticated data.
+    #[must_use]
+    pub fn authenticated(
+        principal_id: PrincipalId,
+        client_idempotency_key: IdempotencyKey,
+    ) -> Self {
+        Self::Authenticated(AuthenticatedReceiveSession::new(
+            principal_id,
+            client_idempotency_key,
+        ))
+    }
+
+    /// Creates an anonymous session that the mutation transport will refuse.
+    #[must_use]
+    pub const fn anonymous() -> Self {
+        Self::Anonymous
+    }
+
+    fn authenticated_session(&self) -> Option<&AuthenticatedReceiveSession> {
+        match self {
+            Self::Authenticated(session) => Some(session),
+            Self::Anonymous => None,
+        }
+    }
+}
+
+/// Typed refusal emitted by the authenticated loopback receive transport.
+#[derive(Debug)]
+pub enum NodeReceiveTransportRefusal {
+    /// The transport supplied no authenticated principal or client retry key.
+    Unauthenticated,
+    /// The authenticated request was refused by canonical admission.
+    Admission(Box<AdmissionError>),
+}
+
+impl Display for NodeReceiveTransportRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unauthenticated => {
+                formatter.write_str("receive transport did not authenticate a principal")
+            }
+            Self::Admission(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for NodeReceiveTransportRefusal {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Unauthenticated => None,
+            Self::Admission(error) => Some(error.as_ref()),
+        }
+    }
+}
+
 /// A repository path accepted by the git-daemon transport boundary.
 ///
 /// This is an opaque authority lookup key, never a filesystem path.  The
@@ -3961,6 +4063,40 @@ impl OneNode {
             &projection,
         )
         .await
+    }
+
+    /// Admits a verified receive through the authenticated loopback transport.
+    ///
+    /// This composition boundary forms its [`AdmissionContext`] only from the
+    /// node authority coordinates and a principal plus idempotency key supplied
+    /// by the caller's authentication boundary. It does not derive either value
+    /// from receive bytes, a socket, or a request identifier. Anonymous
+    /// sessions are refused before admission, sealing, or publication begins.
+    ///
+    /// This is a loopback composition slice, not a claim that the raw
+    /// git-daemon transport accepts push. Object-bearing receives still require
+    /// a pack/object-store quarantine validator before they reach this method.
+    pub async fn admit_loopback_receive_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        validated: &ValidatedReceive,
+        limits: AdmissionLimits,
+    ) -> Result<AdmissionResult, NodeReceiveTransportRefusal> {
+        let authenticated = session
+            .authenticated_session()
+            .ok_or(NodeReceiveTransportRefusal::Unauthenticated)?;
+        let context = AdmissionContext {
+            head_key: self.head_key.clone(),
+            tenant_id: self.tenant_id,
+            repository_id: self.repository_id,
+            principal_id: authenticated.principal_id(),
+            idempotency_key: authenticated.client_idempotency_key().clone(),
+            object_format: self.object_format,
+        };
+        self.admit_validated_receive_durable_in(request, &context, validated, limits)
+            .await
+            .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
     }
 
     /// Admits one verified source import through the same durable projection
