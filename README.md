@@ -416,7 +416,7 @@ artifact no longer matches its exact digest.
 <!-- franken-claims-status:begin -->
 | Claim | Class | Effective status | Scope | Readiness wording |
 | --- | --- | --- | --- | --- |
-| CLM-001 | CLAIM-006 | demoted: artifact `tools/registry-check/src/main.rs` digest changed: expected a6efe8ac0e3e62cd36abd193f6d6e4236312da0f0545d5cffa0f3f29298b2b58, observed 3bcac4cebd37a862da5ccf7a23fc2794f085f5e4f800dccf003189b88c286efa | claim-artifact-identity-binding | artifact-change-demotes-this-narrow-claim |
+| CLM-001 | CLAIM-006 | verified | claim-artifact-identity-binding | artifact-change-demotes-this-narrow-claim |
 <!-- franken-claims-status:end -->
 
 The initial local commands are:
