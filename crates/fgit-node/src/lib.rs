@@ -4302,17 +4302,20 @@ mod tests {
     use std::time::Duration;
 
     use fgit_admission::evidence::{
-        DURABLE_REFUSAL_EVIDENCE_DETAIL, RefusalEvidence, RefusalEvidenceBodies, evidence_root,
+        DURABLE_REFUSAL_EVIDENCE_DETAIL, ForgeEventBatch, InvariantEvidence, OutboxEffectBatch,
+        PolicyDecisionEvidence, PrincipalSnapshot, RefusalEvidence, RefusalEvidenceBodies,
+        RetentionDelta, evidence_root,
     };
     use fgit_admission::{
-        AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionSnapshot,
+        AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionSnapshot,
         AdmissionSnapshotProjection, AsyncAdmissionProjection, CanonicalAdmissionStore,
-        CanonicalRefState, CommitEvidence, PermittedObjectClosure, ValidatedClosure,
-        canonical_ref_state_root, permitted_object_closure_root,
+        CanonicalRefState, CommitEvidence, PermittedObjectClosure, SourceImportOrigin,
+        SourceImportReceipt, SourceRefUpdate, ValidatedClosure, canonical_ref_state_root,
+        permitted_object_closure_root, validate_source_import,
     };
     use fgit_authority::{
         AsyncAuthorityStore, HeadInit, HeadRead, ImmutableRead, OutcomeLookup,
-        collect_cumulative_outcomes_async,
+        collect_cumulative_outcomes_async, read_decision_batch_body_async,
     };
     use fgit_chronicle::{
         ChronicleRefusal, PublicationBasis, PublicationPlan, ResultingRoots, batch_identity,
@@ -4320,14 +4323,14 @@ mod tests {
     use fgit_codec::harness::{
         advanced_head, commit_record, decision_batch, digest_of, refusal_record_id, tx_id,
     };
-    use fgit_codec::{CryptoBodyIdentity, body_id, decode_body};
+    use fgit_codec::{CanonicalBody, CryptoBodyIdentity, body_id, decode_body};
     use fgit_object_fabric::fabric::StoreRefusal;
     use fgit_reference::effect::{FoldOutcome, FoldReport, NetEffects};
     use fgit_reference::intent::TransactionRequest;
     use fgit_reference::intent::{DurabilityProfile, IdempotencyKey as ModelIdempotencyKey};
     use fgit_txn::TransactionFoldReport;
     use fgit_types::{
-        CANONICAL_CODEC_VERSION, DecisionOutcome, DigestBytes, GitHashAlgorithm, GitOid,
+        CANONICAL_CODEC_VERSION, DecisionOutcome, Digest, DigestBytes, GitHashAlgorithm, GitOid,
         InternalObjectId, PrincipalId, RefName, RefusalCode, RepositoryAuthorityHeadId,
         RepositoryId, SchemaFamily, SchemaId, TenantId, TxId,
     };
@@ -4337,13 +4340,16 @@ mod tests {
     };
 
     use super::{
-        ADMISSION_CLOSURE_KEY_PREFIX, ADMISSION_REFUSAL_EVIDENCE_KEY_PREFIX,
+        ADMISSION_CLOSURE_KEY_PREFIX, ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX,
+        ADMISSION_INVARIANT_EVIDENCE_KEY_PREFIX, ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX,
+        ADMISSION_POLICY_DECISION_KEY_PREFIX, ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
+        ADMISSION_REFUSAL_EVIDENCE_KEY_PREFIX, ADMISSION_RETENTION_DELTA_KEY_PREFIX,
         AdmissionMaterializationRefusal, AdmissionUploadPackRefusal, AdmissionUploadPackRepository,
         ClosureSelectionSource, GitDaemonServeError, GitDaemonSessionOutcome,
         GitDaemonSessionTimeout, GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal,
-        NodeInitialization, NodeRefusal, OneNode, admission_immutable_key, authority_head_id,
-        genesis_head, genesis_root, initialize_embedded_repository, parse_git_daemon_request,
-        serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
+        NodeInitialization, NodeRefusal, NodeRequestContext, OneNode, admission_immutable_key,
+        authority_head_id, genesis_head, genesis_root, initialize_embedded_repository,
+        parse_git_daemon_request, serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
     };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -4440,6 +4446,36 @@ mod tests {
             mappings: Vec::new(),
         };
         (context, request, fold)
+    }
+
+    fn assert_published_evidence_body<Body>(
+        node: &OneNode,
+        request: &NodeRequestContext,
+        namespace: &[u8],
+        root: Digest,
+    ) where
+        Body: CanonicalBody,
+    {
+        let key = admission_immutable_key(namespace, node.repository_id(), root)
+            .expect("published evidence key is bounded");
+        let ImmutableRead::Present(frame) = node
+            .runtime()
+            .block_on(AsyncAuthorityStore::read_immutable(
+                &node.authority,
+                request.authority(),
+                &key,
+            ))
+            .expect("published RCR evidence reads through durable authority")
+        else {
+            panic!("every evidence root named by the published RCR has a durable frame");
+        };
+        let body = decode_body::<Body>(&frame, fgit_codec::DecodeLimits::DEFAULT)
+            .expect("published evidence frame decodes canonically");
+        assert_eq!(
+            evidence_root(&body).expect("decoded evidence re-identifies"),
+            root,
+            "the published RCR root is derived from the decoded authority frame"
+        );
     }
 
     #[derive(Clone, Debug)]
@@ -5228,6 +5264,123 @@ mod tests {
             )
             .expect("first-clone view comes from durable admission materialization");
         assert_eq!(upload_pack.advertised_refs(), []);
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn node_owned_projection_publishes_rcr_with_rederivable_evidence() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
+            .expect("node initializes the canonical empty repository");
+        let authority_request = node.request_context();
+        let stored = node
+            .put_git_object(ObjectType::Blob, b"source-import evidence object".to_vec())
+            .expect("the import path places its verified native object first");
+        let objects = BTreeSet::from([stored.identity()]);
+        let closure = ValidatedClosure {
+            object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(
+                objects.clone(),
+            ))
+            .expect("the import closure root derives"),
+            objects,
+        };
+        let zero = AnyGitOid::from_hex(
+            GitObjectFormat::Sha1,
+            "0000000000000000000000000000000000000000",
+        )
+        .expect("the SHA-1 absent-ref sentinel parses");
+        let updates = [SourceRefUpdate {
+            old: zero,
+            new: stored.identity(),
+            ref_name: b"refs/heads/evidence".to_vec(),
+        }];
+        let receipt = SourceImportReceipt {
+            object_format: GitObjectFormat::Sha1,
+            object_count: 1,
+            delete_only: false,
+            origin: SourceImportOrigin::LocalGitDirectory,
+        };
+        let validated = validate_source_import(&updates, &receipt, closure)
+            .expect("a covering source-import closure is admissible");
+        let (context, _, _) = evidence_request(&node);
+        let admission = node
+            .runtime()
+            .block_on(node.admit_validated_source_import_durable_in(
+                &authority_request,
+                &context,
+                &validated,
+                AdmissionLimits::default(),
+            ))
+            .expect("the node-owned projection publishes the source-import RCR");
+        assert_eq!(
+            admission.commands.len(),
+            1,
+            "the one imported ref receives one authenticated terminal outcome"
+        );
+
+        let HeadRead::Present(head) = node
+            .runtime()
+            .block_on(node.read_authority_head_in(&authority_request))
+            .expect("published successor head reads")
+        else {
+            panic!("the admitted source import advances the repository head");
+        };
+        let successor: RepositoryAuthorityHeadBody =
+            decode_body(head.body(), fgit_codec::DecodeLimits::DEFAULT)
+                .expect("published successor head decodes");
+        let batch_id = successor
+            .decision_tail_id
+            .expect("the successor head names its committed decision batch");
+        let batch = node
+            .runtime()
+            .block_on(read_decision_batch_body_async(
+                &node.authority,
+                authority_request.authority(),
+                batch_id,
+            ))
+            .expect("the published decision batch reads through authority");
+        let [record] = batch.committed_rcrs.as_slice() else {
+            panic!("the one admitted import publishes exactly one RCR");
+        };
+        let principal_identity = record.principal_snapshot_id.as_internal_object_id();
+        let principal_snapshot_root =
+            Digest::new(principal_identity.algorithm(), *principal_identity.digest());
+        assert_published_evidence_body::<PrincipalSnapshot>(
+            &node,
+            &authority_request,
+            ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
+            principal_snapshot_root,
+        );
+        assert_published_evidence_body::<PolicyDecisionEvidence>(
+            &node,
+            &authority_request,
+            ADMISSION_POLICY_DECISION_KEY_PREFIX,
+            record.policy_decision_root,
+        );
+        assert_published_evidence_body::<InvariantEvidence>(
+            &node,
+            &authority_request,
+            ADMISSION_INVARIANT_EVIDENCE_KEY_PREFIX,
+            record.invariant_evidence_root,
+        );
+        assert_published_evidence_body::<ForgeEventBatch>(
+            &node,
+            &authority_request,
+            ADMISSION_FORGE_EVENT_BATCH_KEY_PREFIX,
+            record.forge_event_batch_root,
+        );
+        assert_published_evidence_body::<OutboxEffectBatch>(
+            &node,
+            &authority_request,
+            ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX,
+            record.outbox_effect_root,
+        );
+        assert_published_evidence_body::<RetentionDelta>(
+            &node,
+            &authority_request,
+            ADMISSION_RETENTION_DELTA_KEY_PREFIX,
+            record.retention_delta_root,
+        );
         node.shutdown().expect("node closes cleanly");
     }
 
