@@ -55,15 +55,76 @@ fge_field gate_present 1
 
 # -----------------------------------------------------------------------------
 fge_phase assert
-fge_step gate-refuses-while-deferred
+fge_step gate-accepts-the-resolved-live-repository
 # -----------------------------------------------------------------------------
-# The live repository state. While the marker says UNRESOLVED the gate MUST
-# refuse with the typed code 3, not merely warn and not exit 0.
+# The live repository state. D14 was RESOLVED by the repository owner on
+# 2026-08-23 as LicenseRef-MIT-OpenAI-Anthropic-Rider, so the gate must now
+# pass here -- a recorded decision stated identically on every surface.
+#
+# This assertion used to read `fg062-gate-refuses-deferred 3`, and flipping it
+# is the whole reason the fixture immediately below exists. While the live repo
+# was UNRESOLVED, that one live check was the ONLY place the gate's
+# UNRESOLVED -> 3 behaviour was exercised; every other case here is
+# fixture-based. Resolving D14 would therefore have silently deleted the
+# coverage of the refusal this gate was built for, and a suite that stops
+# testing the refusal at the moment the refusal stops firing is gate
+# self-weakening (RH-1) whether or not anyone intended it. So the property
+# moved to a fixture rather than leaving with the live state.
 lic_exit=0
 "$GATE" >/dev/null 2>&1 || lic_exit=$?
 fge_field live_gate_exit "$lic_exit"
-fge_assert_eq fg062-gate-refuses-deferred 3 "$lic_exit" \
-  "the D14 gate refuses with a typed exit while the decision is deferred"
+fge_assert_eq fg062-gate-accepts-resolved-live 0 "$lic_exit" \
+  "the D14 gate passes on the live repository now that the decision is recorded"
+
+# -----------------------------------------------------------------------------
+fge_phase assert
+fge_step gate-still-refuses-an-unresolved-tree
+# -----------------------------------------------------------------------------
+# The property the live check used to carry, now independent of what the live
+# repository happens to have decided. A tree whose marker still says UNRESOLVED
+# must be refused with the typed code 3 -- not warned about, not exit 0.
+#
+# ATTRIBUTION MATTERS HERE, and the first version of this fixture did not have
+# it. Placeholder surfaces stating no identifier at all would also fail a
+# RESOLVED gate, so a refusal against them is over-determined: it cannot
+# distinguish "refused because the marker says UNRESOLVED" from "refused because
+# the surfaces were junk". The surfaces below therefore state a real identifier
+# and are fully consistent, and the very next assertion flips ONLY the marker
+# and requires exit 0. One byte-level difference between a refusal and a pass is
+# what makes the refusal attributable to the marker.
+lic_defer_id="Apache-2.0"
+lic_defer_tree() {
+  local dest="$1" marker="$2" osi="$3"
+  mkdir -p "$dest/docs" "$dest/scripts"
+  cp "$GATE" "$dest/scripts/license_gate.sh"
+  chmod +x "$dest/scripts/license_gate.sh"
+  {
+    echo "# FrankenGit Licensing Decision"
+    echo
+    echo "<!-- fgit-license-decision: $marker -->"
+    echo "<!-- fgit-license-osi: $osi -->"
+  } > "$dest/docs/LICENSING_DECISION.md"
+  echo "$lic_defer_id adopted text goes here." > "$dest/LICENSE"
+  printf '## License\n\nThis project is licensed under %s.\n' "$lic_defer_id" > "$dest/README.md"
+  printf '## Licensing\n\nInbound contributions are under %s.\n' "$lic_defer_id" > "$dest/CONTRIBUTING.md"
+  printf '[workspace.package]\nlicense = "%s"\n' "$lic_defer_id" > "$dest/Cargo.toml"
+}
+
+lic_defer="$(fge_tempdir unresolved)"
+lic_defer_tree "$lic_defer" UNRESOLVED unknown
+lic_defer_exit=0
+(cd "$lic_defer" && ./scripts/license_gate.sh) >/dev/null 2>&1 || lic_defer_exit=$?
+fge_assert_eq fg062-gate-refuses-deferred 3 "$lic_defer_exit" \
+  "the D14 gate refuses with a typed exit while a tree's decision is deferred"
+
+# The attribution twin: same tree, same surfaces, marker resolved. If this did
+# not pass, the refusal above would prove nothing about the marker.
+lic_defer_twin="$(fge_tempdir unresolved-twin)"
+lic_defer_tree "$lic_defer_twin" "$lic_defer_id" yes
+lic_defer_twin_exit=0
+(cd "$lic_defer_twin" && ./scripts/license_gate.sh) >/dev/null 2>&1 || lic_defer_twin_exit=$?
+fge_assert_eq fg062-deferral-refusal-is-attributable 0 "$lic_defer_twin_exit" \
+  "the identical tree with only the marker resolved passes, so the refusal above is the marker's"
 
 lic_marker_count=$(LC_ALL=C grep -c '^<!-- fgit-license-decision:' "$DECISION" || true)
 fge_assert_eq fg062-one-canonical-marker 1 "$lic_marker_count" \
