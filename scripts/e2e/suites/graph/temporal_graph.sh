@@ -24,7 +24,7 @@ fge_phase action
 fge_capture temporal-run-all-discovery "$TG_REPO/scripts/e2e/run_all.sh" --list || true
 tg_discovery_exit=$FGE_LAST_EXIT
 tg_discovery=$(<"$FGE_LAST_STDOUT_FILE")
-fge_run temporal-graph-corpus cargo test --locked -p fgit-graph --test temporal_graph || true
+fge_capture temporal-graph-corpus cargo test --locked -p fgit-graph --test temporal_graph || true
 tg_corpus_exit=$FGE_LAST_EXIT
 tg_corpus=$(<"$FGE_LAST_STDOUT_FILE")
 
