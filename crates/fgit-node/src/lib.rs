@@ -1707,31 +1707,28 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
         }
     }
 
-    fn materialize_refusal_async<'a>(
+    async fn materialize_refusal_async<'a>(
         &'a self,
         authority: &'a FsqliteAuthorityStore,
         cx: &'a FsqliteCx,
         basis: &'a PublicationBasis,
         tx_id: fgit_types::TxId,
         code: RefusalCode,
-    ) -> impl Future<Output = Result<RefusalMaterialization, AsyncProjectionFailure>> + Send + 'a
-    {
-        async move {
-            let stage_context = cx.create_child();
-            let is_cancelled = || stage_context.checkpoint().is_err();
-            self.materializer
-                .stage_refusal_evidence_in(
-                    authority,
-                    &stage_context,
-                    &self.context,
-                    basis,
-                    tx_id,
-                    code,
-                    &is_cancelled,
-                )
-                .await
-                .map_err(async_projection_unavailable)
-        }
+    ) -> Result<RefusalMaterialization, AsyncProjectionFailure> {
+        let stage_context = cx.create_child();
+        let is_cancelled = || stage_context.checkpoint().is_err();
+        self.materializer
+            .stage_refusal_evidence_in(
+                authority,
+                &stage_context,
+                &self.context,
+                basis,
+                tx_id,
+                code,
+                &is_cancelled,
+            )
+            .await
+            .map_err(async_projection_unavailable)
     }
 }
 
