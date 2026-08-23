@@ -936,13 +936,13 @@ for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
 
     disposition=''
     detail=''
-    a_ids=()
-    a_passed=()
-    a_failed=()
-    a_skipped=()
-    a_unsupported=()
-    a_errors=()
-    a_dups=()
+    # The assertion arrays are deliberately NOT reset per attempt: they hold
+    # the LAST VALIDATED attempt's evidence. Wiping here meant an invalid
+    # final attempt (timeout or malformed log) erased IDs the suite really
+    # emitted - shrinking the acceptance-ID union and blinding cross-script
+    # duplicate detection - while the receipt pointed at the final attempt.
+    # ra_validate_log refreshes its own RA_V_* state, so a later valid
+    # attempt overwrites these naturally.
     # A timeout outranks every log-derived disposition. The log of a killed
     # script is legitimately stunted, and `timeout` reports 124 while the
     # terminal record the script managed to write says 143: reading that
