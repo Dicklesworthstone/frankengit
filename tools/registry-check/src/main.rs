@@ -1172,12 +1172,23 @@ fn check_workflows(root: &Path, report: &mut Report) {
 /// workflow file is refused, because these workflows are dispatch-only
 /// manifests.
 fn is_hosted_trigger_line(line: &str) -> bool {
-    const BANNED: [&str; 5] = [
+    // Automatic triggers the `on:` tokenizer preserves verbatim (underscores
+    // survive) must each be named: `pull_request_target` never matches
+    // `pull_request`, and each of these grants hosted-runner execution.
+    const BANNED: [&str; 13] = [
         "push",
         "pull_request",
+        "pull_request_target",
         "schedule",
         "workflow_run",
         "repository_dispatch",
+        "issue_comment",
+        "discussion_comment",
+        "deployment",
+        "deployment_status",
+        "release",
+        "registry_package",
+        "check_suite",
     ];
     let trimmed = line.split('#').next().unwrap_or("").trim();
     for trigger in BANNED {
@@ -1497,39 +1508,215 @@ fn source_item_kind(line: &str) -> Option<SourceItemKind> {
 
 /// Removes straightforward `cfg(test)` items before the production-source
 /// pass. This is intentionally a detector, not a Rust parser: nested or
-/// conditional macro-generated items remain a human-review obligation.
+/// conditional macro-generated items remain a human-review obligation. It
+/// nevertheless carries a small lexical state while skipping an item so a
+/// brace in a string or comment cannot end a test module early.
 fn strip_cfg_test_items(text: &str) -> String {
     let mut output = String::new();
-    let mut cfg_test_pending = false;
-    let mut skipped_brace_depth: Option<usize> = None;
+    let mut pending_cfg_test = false;
+    let mut skipped_item: Option<SkippedCfgTestItem> = None;
     for raw_line in text.lines() {
-        if let Some(depth) = skipped_brace_depth.as_mut() {
-            *depth = depth
-                .saturating_add(raw_line.matches('{').count())
-                .saturating_sub(raw_line.matches('}').count());
-            if *depth == 0 {
-                skipped_brace_depth = None;
+        if let Some(item) = skipped_item.as_mut() {
+            if item.consume(raw_line) {
+                skipped_item = None;
             }
             continue;
         }
         let line = raw_line.trim();
-        if line == "#[cfg(test)]" {
-            cfg_test_pending = true;
+        if let Some(tail) = cfg_test_attribute_tail(line) {
+            pending_cfg_test = true;
+            if !tail.trim().is_empty() {
+                let mut item = SkippedCfgTestItem::default();
+                if !item.consume(tail) {
+                    skipped_item = Some(item);
+                }
+                pending_cfg_test = false;
+            }
             continue;
         }
-        if cfg_test_pending {
-            cfg_test_pending = false;
-            let opens = raw_line.matches('{').count();
-            let closes = raw_line.matches('}').count();
-            if opens > closes {
-                skipped_brace_depth = Some(opens - closes);
+        if pending_cfg_test {
+            if line.is_empty()
+                || line.starts_with("#[")
+                || line.starts_with("//")
+                || line.starts_with("///")
+            {
+                continue;
             }
+            let mut item = SkippedCfgTestItem::default();
+            if !item.consume(raw_line) {
+                skipped_item = Some(item);
+            }
+            pending_cfg_test = false;
             continue;
         }
         output.push_str(raw_line);
         output.push('\n');
     }
     output
+}
+
+fn cfg_test_attribute_tail(line: &str) -> Option<&str> {
+    line.strip_prefix("#[cfg(test)]").filter(|tail| {
+        tail.is_empty()
+            || tail.starts_with("#[")
+            || tail.chars().next().is_some_and(char::is_whitespace)
+    })
+}
+
+#[derive(Default)]
+struct SkippedCfgTestItem {
+    lexical_state: RustLexicalState,
+    brace_depth: usize,
+    opened_brace: bool,
+}
+
+impl SkippedCfgTestItem {
+    /// Returns true only after the whole item is skipped. A declaration with
+    /// no body ends at its top-level semicolon; a body ends when its lexical
+    /// brace depth returns to zero.
+    fn consume(&mut self, line: &str) -> bool {
+        let delimiters = scan_rust_item_delimiters(line, &mut self.lexical_state);
+        self.brace_depth = self
+            .brace_depth
+            .saturating_add(delimiters.open_braces)
+            .saturating_sub(delimiters.close_braces);
+        self.opened_brace |= delimiters.open_braces > 0;
+        (self.opened_brace && self.brace_depth == 0)
+            || (!self.opened_brace && delimiters.top_level_semicolon)
+    }
+}
+
+#[derive(Default)]
+struct RustItemDelimiters {
+    open_braces: usize,
+    close_braces: usize,
+    top_level_semicolon: bool,
+}
+
+#[derive(Default)]
+enum RustLexicalState {
+    #[default]
+    Code,
+    BlockComment {
+        depth: usize,
+    },
+    String {
+        escaped: bool,
+    },
+    Character {
+        escaped: bool,
+    },
+    RawString {
+        hashes: usize,
+    },
+}
+
+/// Counts item delimiters only while Rust is in code. It deliberately covers
+/// ordinary/raw strings and nested block comments, which are enough to keep a
+/// lexical production check from treating test-only text as an item boundary.
+fn scan_rust_item_delimiters(line: &str, state: &mut RustLexicalState) -> RustItemDelimiters {
+    let bytes = line.as_bytes();
+    let mut delimiters = RustItemDelimiters::default();
+    let mut index = 0;
+    while index < bytes.len() {
+        match state {
+            RustLexicalState::Code => match bytes[index] {
+                b'/' if bytes.get(index + 1) == Some(&b'/') => break,
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    *state = RustLexicalState::BlockComment { depth: 1 };
+                    index += 2;
+                }
+                b'"' => {
+                    *state = RustLexicalState::String { escaped: false };
+                    index += 1;
+                }
+                b'\''
+                    if !bytes
+                        .get(index + 1)
+                        .is_some_and(|next| next.is_ascii_alphanumeric() || *next == b'_') =>
+                {
+                    *state = RustLexicalState::Character { escaped: false };
+                    index += 1;
+                }
+                b'r' if let Some(hashes) = raw_string_hashes(bytes, index) => {
+                    *state = RustLexicalState::RawString { hashes };
+                    index += hashes + 2;
+                }
+                b'{' => {
+                    delimiters.open_braces = delimiters.open_braces.saturating_add(1);
+                    index += 1;
+                }
+                b'}' => {
+                    delimiters.close_braces = delimiters.close_braces.saturating_add(1);
+                    index += 1;
+                }
+                b';' => {
+                    delimiters.top_level_semicolon = true;
+                    index += 1;
+                }
+                _ => index += 1,
+            },
+            RustLexicalState::BlockComment { depth } => {
+                if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                    *depth = depth.saturating_add(1);
+                    index += 2;
+                } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    if *depth == 1 {
+                        *state = RustLexicalState::Code;
+                    } else {
+                        *depth = depth.saturating_sub(1);
+                    }
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            RustLexicalState::String { escaped } => {
+                if *escaped {
+                    *escaped = false;
+                } else if bytes[index] == b'\\' {
+                    *escaped = true;
+                } else if bytes[index] == b'"' {
+                    *state = RustLexicalState::Code;
+                }
+                index += 1;
+            }
+            RustLexicalState::Character { escaped } => {
+                if *escaped {
+                    *escaped = false;
+                } else if bytes[index] == b'\\' {
+                    *escaped = true;
+                } else if bytes[index] == b'\'' {
+                    *state = RustLexicalState::Code;
+                }
+                index += 1;
+            }
+            RustLexicalState::RawString { hashes } => {
+                let closing_hashes = *hashes;
+                if bytes[index] == b'"'
+                    && bytes[index + 1..]
+                        .iter()
+                        .take_while(|byte| **byte == b'#')
+                        .count()
+                        == closing_hashes
+                {
+                    *state = RustLexicalState::Code;
+                    index += closing_hashes.saturating_add(1);
+                } else {
+                    index += 1;
+                }
+            }
+        }
+    }
+    delimiters
+}
+
+fn raw_string_hashes(bytes: &[u8], index: usize) -> Option<usize> {
+    let mut cursor = index.saturating_add(1);
+    while bytes.get(cursor) == Some(&b'#') {
+        cursor = cursor.saturating_add(1);
+    }
+    (bytes.get(cursor) == Some(&b'"')).then_some(cursor.saturating_sub(index + 1))
 }
 
 /// Removes line and block comments while retaining quoted messages, which are
@@ -1638,9 +1825,21 @@ fn contains_todo_message(text: &str, macro_name: &str) -> bool {
     false
 }
 
+/// First attribute opener, outer `#[` or inner `#![`, whichever comes first.
+///
+/// Inner attributes were previously invisible to this scan: `"#!["` does not
+/// contain the `"#["` needle, so a crate-root `#![allow(clippy::everything)]`
+/// bypassed the relaxation gate entirely.
+fn position_of_attribute_open(text: &str) -> Option<usize> {
+    match (text.find("#["), text.find("#![")) {
+        (Some(outer), Some(inner)) => Some(outer.min(inner)),
+        (outer, inner) => outer.or(inner),
+    }
+}
+
 fn find_forbidden_lint_relaxation(text: &str) -> Option<String> {
     let mut remaining = text;
-    while let Some(open) = remaining.find("#[") {
+    while let Some(open) = position_of_attribute_open(remaining) {
         let attribute = &remaining[open..];
         let Some(close) = attribute.find(']') else {
             return Some("unterminated attribute".to_owned());
@@ -2169,7 +2368,7 @@ fn workspace_member_path_is_declared(members: &[String], path: &str) -> bool {
 }
 
 fn looks_like_dependency_declaration(line: &str) -> bool {
-    line.contains("path =") || line.contains("git =")
+    inline_field_value(line, "path").is_some() || inline_field_value(line, "git").is_some()
 }
 
 /// Closed-world check over the full resolved graph: every package in
@@ -2357,7 +2556,9 @@ fn generate_admission_ledger(root: &Path, command: CheckSet) -> Result<String, S
         .collect::<BTreeSet<_>>();
     let surface = enabled_macros::resolve_enabled_surface(root)?;
     let mut output = String::new();
-    for (next_id, name) in (next_admission_policy_id(root, config)?..).zip(&unresolved) {
+    for (next_id, name) in
+        (next_admission_policy_id(root, config, unresolved.len())?..).zip(&unresolved)
+    {
         let packages_for_name = packages
             .iter()
             .filter(|package| package.name == *name)
@@ -2501,34 +2702,57 @@ fn direct_parent_edges(
 /// unrelated policy row is appended. On a fresh registry it starts at the next
 /// free ID; once present it is identified by its exact closure identity rather
 /// than by the registry tail.
-fn next_admission_policy_id(root: &Path, config: AdmissionLedgerConfig) -> Result<usize, String> {
+fn next_admission_policy_id(
+    root: &Path,
+    config: AdmissionLedgerConfig,
+    generated_row_count: usize,
+) -> Result<usize, String> {
     let text = fs::read_to_string(root.join("registries/dependency_policy.tsv"))
         .map_err(|error| format!("cannot read dependency policy registry: {error}"))?;
-    let generated_start = text
+    let rows = text
         .lines()
         .filter_map(dependency_policy_fields)
-        .filter(|fields| {
-            fields[3] == config.decision
-                && fields[4] == config.owner
-                && fields[5].starts_with(&format!(
-                    "{}_{}_transitive_direct_parent_",
-                    config.root_package, config.root_version
-                ))
+        .filter_map(|fields| {
+            fields[0]
+                .strip_prefix("DEP-")
+                .and_then(|number| number.parse::<usize>().ok())
+                .map(|id| (id, admission_policy_row_matches_config(&fields, config)))
         })
-        .filter_map(|fields| fields[0].strip_prefix("DEP-"))
-        .filter_map(|number| number.parse::<usize>().ok())
+        .collect::<Vec<_>>();
+    let generated_start = rows
+        .iter()
+        .filter_map(|(id, matches_config)| (*matches_config).then_some(*id))
         .min();
     if let Some(start) = generated_start {
+        let end = start
+            .checked_add(generated_row_count)
+            .ok_or_else(|| "admission policy ID range overflows usize".to_owned())?;
+        for next in start..end {
+            if rows
+                .iter()
+                .any(|(id, matches_config)| *id == next && !*matches_config)
+            {
+                return Err(format!(
+                    "cannot regenerate admission policy rows: DEP-{next:03} is occupied by an unrelated policy; reserve a fresh contiguous ID range before regeneration"
+                ));
+            }
+        }
         return Ok(start);
     }
-    let largest = text
-        .lines()
-        .filter_map(dependency_policy_fields)
-        .filter_map(|fields| fields[0].strip_prefix("DEP-"))
-        .filter_map(|number| number.parse::<usize>().ok())
-        .max()
-        .unwrap_or(0);
+    let largest = rows.iter().map(|(id, _)| *id).max().unwrap_or(0);
     Ok(largest + 1)
+}
+
+fn admission_policy_row_matches_config(
+    fields: &[&str; DEPENDENCY_POLICY_COLUMNS],
+    config: AdmissionLedgerConfig,
+) -> bool {
+    fields[3] == config.decision
+        && fields[4] == config.owner
+        && fields[5].starts_with(&format!(
+            "{}_{}_transitive_direct_parent_",
+            config.root_package, config.root_version
+        ))
 }
 
 fn dependency_policy_fields(line: &str) -> Option<[&str; 12]> {
@@ -3023,15 +3247,7 @@ fn expected_unsafe_policy(package: &str, proc_macro: bool) -> String {
 }
 
 fn unsafe_policy_matches(expected: &str, observed: &str) -> bool {
-    match expected {
-        "ledgered_transitive" => {
-            matches!(
-                observed,
-                "ledgered_transitive" | "ledgered_transitive_unaudited"
-            )
-        }
-        _ => expected == observed,
-    }
+    expected == observed
 }
 
 fn count_unsafe_constructs(text: &str) -> usize {
@@ -5420,6 +5636,39 @@ mod tests {
     }
 
     #[test]
+    fn cfg_test_items_with_spacing_attributes_and_lexical_braces_are_not_production() {
+        for source in [
+            concat!(
+                "#[cfg(test)]\n",
+                "\n",
+                "#[allow(dead_code)]\n",
+                "mod tests {\n",
+                "    const BRACES: &str = \"} ignored {\";\n",
+                "    /* } ignored { */\n",
+                "    fn runs() {}\n",
+                "}\n"
+            ),
+            concat!(
+                "#[cfg(test)] mod tests {\n",
+                "    const RAW: &str = r#\"} ignored {\"#;\n",
+                "    // } ignored {\n",
+                "    fn runs() {}\n",
+                "}\n"
+            ),
+        ] {
+            let assessment = assess_first_party_source(source);
+            assert!(
+                assessment.has_cfg_test_item(),
+                "the fixture must exercise cfg(test) recognition"
+            );
+            assert!(
+                !assessment.has_production_item(),
+                "test-only item leaked into the production assessment: {source}"
+            );
+        }
+    }
+
+    #[test]
     fn layer_registry_fixture_with_downward_edges_emits_a_deterministic_report() {
         let workspace = fixture_workspace_in("layers", "clean");
         let mut report = Report::new();
@@ -5856,6 +6105,10 @@ mod tests {
         assert_eq!(expected_unsafe_policy("rustix", false), "os_abi");
         assert!(unsafe_policy_matches(
             "ledgered_transitive",
+            "ledgered_transitive"
+        ));
+        assert!(!unsafe_policy_matches(
+            "ledgered_transitive",
             "ledgered_transitive_unaudited"
         ));
         assert!(!unsafe_policy_matches(
@@ -6094,6 +6347,24 @@ mod tests {
         assert_error(
             &report,
             "unpublished path dependency `/absolute/unpublished`",
+        );
+
+        let mut report = Report::new();
+        check_manifest_dependency_sources(
+            Path::new("/fixture"),
+            Path::new("/fixture/Cargo.toml"),
+            "fixtures/Cargo.toml",
+            concat!(
+                "[dependencies]\n",
+                "compact-path={version=\"1\",path=\"/absolute/compact\"}\n",
+                "compact-git={version=\"1\",git=\"https://example.invalid/compact.git\"}\n"
+            ),
+            &mut report,
+        );
+        assert_error(&report, "unpublished path dependency `/absolute/compact`");
+        assert_error(
+            &report,
+            "unresolved Git dependency `https://example.invalid/compact.git`",
         );
 
         let workspace = fixture_workspace("admitted");
@@ -6796,8 +7067,36 @@ mod tests {
             next_admission_policy_id(
                 &workspace.root,
                 admission_ledger_config(CheckSet::LedgerPolicy).expect("runtime config"),
+                1,
             ),
             Ok(14)
+        );
+    }
+
+    #[test]
+    fn generated_policy_block_refuses_an_unrelated_occupied_successor_id() {
+        let workspace = fixture_workspace("dormant");
+        let registry = workspace.root.join("registries");
+        fs::create_dir_all(&registry).expect("create registry fixture");
+        fs::write(
+            registry.join("dependency_policy.tsv"),
+            concat!(
+                "# franken-registry-v2\n",
+                "id\tcrate_pattern\tscope\tdecision\towner\trationale\tfeature_policy\tunsafe_policy\tffi_policy\tstatus\tbuild_script\tproc_macro\n",
+                "DEP-014\taead\tproduction\tallow_transitive_admitted_runtime\tconcurrency\tasupersync_0.4.9_transitive_direct_parent_aes-gcm\tresolved_none\tledgered\tno_ffi\tactive\tabsent\tabsent\n",
+                "DEP-015\tunrelated\tproduction\tallow_transitive_admitted_other\tother\tunrelated\tresolved_none\tledgered\tno_ffi\tactive\tabsent\tabsent\n"
+            ),
+        )
+        .expect("write registry fixture");
+        let error = next_admission_policy_id(
+            &workspace.root,
+            admission_ledger_config(CheckSet::LedgerPolicy).expect("runtime config"),
+            2,
+        )
+        .expect_err("an unrelated successor must not be reused by regeneration");
+        assert!(
+            error.contains("DEP-015 is occupied by an unrelated policy"),
+            "unexpected occupied-ID refusal: {error}"
         );
     }
 
