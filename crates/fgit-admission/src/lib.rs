@@ -1376,6 +1376,14 @@ pub enum AdmissionError {
     Authority(AuthorityFailure),
     /// Authority head bytes were not a canonical head body.
     HeadCodec(fgit_codec::CodecRefusal),
+    /// An authenticated head receipt and its decoded body name different
+    /// generations, so no materializer is allowed to treat either as a basis.
+    HeadGenerationMismatch {
+        /// Generation declared by the authenticated receipt.
+        receipt: fgit_types::HeadGeneration,
+        /// Generation carried by the decoded head body.
+        body: fgit_types::HeadGeneration,
+    },
     /// The head identity could not be computed or did not have its pinned type.
     HeadIdentity(fgit_codec::CodecRefusal),
     /// Chronicle refused a batch/head pair before it reached the CAS.
@@ -1422,6 +1430,12 @@ impl Display for AdmissionError {
             Self::HeadCodec(refusal) => {
                 write!(formatter, "authority head decode refused: {refusal}")
             }
+            Self::HeadGenerationMismatch { receipt, body } => write!(
+                formatter,
+                "authority head receipt generation {} disagrees with decoded body generation {}",
+                receipt.get(),
+                body.get()
+            ),
             Self::HeadIdentity(refusal) => {
                 write!(formatter, "authority head identity refused: {refusal}")
             }
@@ -1621,8 +1635,8 @@ fn basis_from_authenticated(
 ) -> Result<PublicationBasis, AdmissionError> {
     let body = authenticated.body().map_err(|failure| match failure {
         fgit_authority::HeadBodyRefusal::Codec(refusal) => AdmissionError::HeadCodec(refusal),
-        fgit_authority::HeadBodyRefusal::GenerationMismatch { .. } => {
-            AdmissionError::MaterializationMismatch("head receipt generation")
+        fgit_authority::HeadBodyRefusal::GenerationMismatch { receipt, body } => {
+            AdmissionError::HeadGenerationMismatch { receipt, body }
         }
     })?;
     let id = body_id(&CryptoBodyIdentity, &body)
@@ -2200,15 +2214,19 @@ where
         return Ok(terminal);
     }
 
-    for _ in 0..limits.max_cas_replans {
-        if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome(
-            store,
-            &context.head_key,
-            context.tenant_id,
-            context.repository_id,
-            tx_id,
-        )? {
-            return Ok(terminal);
+    for replan in 0..limits.max_cas_replans {
+        // The pre-loop probe already covered the first attempt. Every later
+        // replan must resolve a terminal decision that won the preceding CAS.
+        if replan != 0 {
+            if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome(
+                store,
+                &context.head_key,
+                context.tenant_id,
+                context.repository_id,
+                tx_id,
+            )? {
+                return Ok(terminal);
+            }
         }
         let (basis, receipt, authenticated) = read_basis(store, &context.head_key)?;
         let cumulative_outcomes = collect_cumulative_outcomes(store, &context.head_key)?;
@@ -2393,11 +2411,6 @@ fn validate_commit_materialization(
             "resulting ref root",
         ));
     }
-    if record.resulting_forge_position_root != materialization.roots.forge_position_root {
-        return Err(AdmissionError::MaterializationMismatch(
-            "resulting forge root",
-        ));
-    }
     if record.policy_epoch != materialization.roots.policy_epoch {
         return Err(AdmissionError::MaterializationMismatch("policy epoch"));
     }
@@ -2432,6 +2445,16 @@ fn validate_commit_materialization(
     if materialization.roots.compaction_generation_link.is_some() {
         return Err(AdmissionError::MaterializationMismatch(
             "compaction generation link",
+        ));
+    }
+    if record.resulting_forge_position_root != basis.body().forge_position_root {
+        return Err(AdmissionError::MaterializationMismatch(
+            "RCR resulting forge position root",
+        ));
+    }
+    if record.resulting_forge_position_root != materialization.roots.forge_position_root {
+        return Err(AdmissionError::MaterializationMismatch(
+            "resulting forge root",
         ));
     }
     Ok(())
@@ -2682,18 +2705,23 @@ where
         return Ok(terminal);
     }
 
-    for _ in 0..limits.max_cas_replans {
-        if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
-            store,
-            cx,
-            &context.head_key,
-            context.tenant_id,
-            context.repository_id,
-            tx_id,
-        )
-        .await?
-        {
-            return Ok(terminal);
+    for replan in 0..limits.max_cas_replans {
+        // Keep the asynchronous retry surface equivalent to the blocking
+        // sibling: the pre-loop probe owns attempt zero, later replans probe
+        // only after a predecessor CAS could have won.
+        if replan != 0 {
+            if let OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+                store,
+                cx,
+                &context.head_key,
+                context.tenant_id,
+                context.repository_id,
+                tx_id,
+            )
+            .await?
+            {
+                return Ok(terminal);
+            }
         }
         let (basis, receipt, authenticated) =
             read_basis_async(store, cx, &context.head_key).await?;
@@ -2937,9 +2965,9 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use fgit_authority::{
-        AuthorityOpKind, DuplicateDelivery, FaultDirective, FaultKind, FaultPlan,
-        FaultableAuthorityStore, HeadKey, MemoryAuthorityStore, OpIndex, StoreInstanceId,
-        initialize_repository, resolve_outcome,
+        AuthorityOpKind, AuthorityVersionToken, DuplicateDelivery, FaultDirective, FaultKind,
+        FaultPlan, FaultableAuthorityStore, HeadKey, HeadReadReceipt, MemoryAuthorityStore,
+        OpIndex, StoreInstanceId, initialize_repository, resolve_outcome,
     };
     use fgit_codec::{RepositoryAuthorityHeadBody, RepositoryCommitRecord, decode_body};
     use fgit_reference::effect::FoldOutcome;
@@ -2952,9 +2980,20 @@ mod tests {
 
     use super::*;
 
+    #[derive(Clone, Copy, Debug)]
+    enum FixtureMaterializationMutation {
+        ForgePositionRoot,
+        RetentionRoot,
+        OutboxRoot,
+        PolicyEpoch,
+        CompactionGenerationLink,
+        RecordForgePositionRoot,
+    }
+
     #[derive(Default)]
     struct FixtureProjection {
         reject_commit: bool,
+        materialization_mutation: Option<FixtureMaterializationMutation>,
         refs: BTreeMap<RefName, fgit_types::GitOid>,
         forge_positions: BTreeMap<
             fgit_reference::intent::ForgeStreamId,
@@ -3004,7 +3043,7 @@ mod tests {
                 policy_epoch: basis.body().policy_epoch,
                 compaction_generation_link: None,
             };
-            Ok(CommitMaterialization {
+            let mut materialization = CommitMaterialization {
                 record: RepositoryCommitRecord {
                     repository_id: request.repository,
                     repository_sequence: RepositorySequence::FIRST,
@@ -3024,7 +3063,33 @@ mod tests {
                     retention_delta_root: digest(12),
                 },
                 roots,
-            })
+            };
+            match self.materialization_mutation {
+                Some(FixtureMaterializationMutation::ForgePositionRoot) => {
+                    materialization.roots.forge_position_root = digest(3);
+                    materialization.record.resulting_forge_position_root =
+                        materialization.roots.forge_position_root;
+                }
+                Some(FixtureMaterializationMutation::RetentionRoot) => {
+                    materialization.roots.retention_root = digest(4);
+                }
+                Some(FixtureMaterializationMutation::OutboxRoot) => {
+                    materialization.roots.outbox_root = digest(5);
+                }
+                Some(FixtureMaterializationMutation::PolicyEpoch) => {
+                    materialization.roots.policy_epoch =
+                        PolicyEpoch::try_new(2).expect("fixture policy epoch is valid");
+                    materialization.record.policy_epoch = materialization.roots.policy_epoch;
+                }
+                Some(FixtureMaterializationMutation::CompactionGenerationLink) => {
+                    materialization.roots.compaction_generation_link = Some(digest(6));
+                }
+                Some(FixtureMaterializationMutation::RecordForgePositionRoot) => {
+                    materialization.record.resulting_forge_position_root = digest(7);
+                }
+                None => {}
+            }
+            Ok(materialization)
         }
 
         fn materialize_refusal(
@@ -3173,6 +3238,118 @@ mod tests {
             old: oid(old),
             new: oid(new),
             ref_name: ref_name.to_vec(),
+        }
+    }
+
+    #[test]
+    fn fabricated_carried_roots_are_refused_before_publication() {
+        let permitted_context = context();
+        let permitted_store = store_with_genesis(&permitted_context);
+        let permitted = completion(vec![create(b"refs/heads/permitted", 20)], true);
+        assert!(
+            admit_validated_receive(
+                &permitted_store,
+                &permitted_context,
+                &permitted,
+                AdmissionLimits::default(),
+                &FixtureProjection::default(),
+            )
+            .is_ok(),
+            "the unmodified carried-forward basis is the permitted twin"
+        );
+
+        for (mutation, expected_field) in [
+            (
+                FixtureMaterializationMutation::ForgePositionRoot,
+                "carried forge position root",
+            ),
+            (
+                FixtureMaterializationMutation::RetentionRoot,
+                "carried retention root",
+            ),
+            (
+                FixtureMaterializationMutation::OutboxRoot,
+                "carried outbox root",
+            ),
+            (
+                FixtureMaterializationMutation::PolicyEpoch,
+                "carried policy epoch",
+            ),
+            (
+                FixtureMaterializationMutation::CompactionGenerationLink,
+                "compaction generation link",
+            ),
+            (
+                FixtureMaterializationMutation::RecordForgePositionRoot,
+                "RCR resulting forge position root",
+            ),
+        ] {
+            let context = context();
+            let store = store_with_genesis(&context);
+            let projection = FixtureProjection {
+                materialization_mutation: Some(mutation),
+                ..FixtureProjection::default()
+            };
+            let completion = completion(vec![create(b"refs/heads/main", 21)], true);
+
+            let refusal = match admit_validated_receive(
+                &store,
+                &context,
+                &completion,
+                AdmissionLimits::default(),
+                &projection,
+            ) {
+                Err(refusal) => refusal,
+                Ok(_) => panic!("{mutation:?} must not reach publication"),
+            };
+            assert!(
+                matches!(
+                    refusal,
+                    AdmissionError::MaterializationMismatch(field) if field == expected_field
+                ),
+                "{mutation:?} must identify its violated continuation, got {refusal:?}"
+            );
+
+            let receipt = match store.read_head(&context.head_key).expect("head reads") {
+                HeadRead::Present(receipt) => receipt,
+                HeadRead::Absent => panic!("materialization refusal must not remove the head"),
+            };
+            let body: RepositoryAuthorityHeadBody =
+                decode_body(receipt.body(), fgit_codec::DecodeLimits::DEFAULT)
+                    .expect("head remains canonical");
+            assert_eq!(
+                body.latest_repository_sequence, None,
+                "{mutation:?} must fail before publishing a commit"
+            );
+        }
+    }
+
+    #[test]
+    fn head_generation_skew_is_authority_integrity_not_materializer_blame() {
+        let context = context();
+        let receipt_generation = HeadGeneration::try_new(2).expect("fixture generation is valid");
+        let body_generation = HeadGeneration::try_new(3).expect("fixture generation is valid");
+        let mut body = genesis(&context);
+        body.generation = body_generation;
+        let authenticated = AuthenticatedHead::new(
+            HeadReadReceipt::new(
+                context.head_key.clone(),
+                AuthorityVersionToken::from_opaque_bytes(
+                    [0xA5; fgit_authority::VERSION_TOKEN_BYTES],
+                ),
+                receipt_generation,
+                fgit_codec::encode_body(&body).expect("fixture head encodes"),
+            ),
+            StoreInstanceId::from_raw(77),
+        );
+
+        match basis_from_authenticated(&authenticated) {
+            Err(AdmissionError::HeadGenerationMismatch { receipt, body }) => {
+                assert_eq!(receipt, receipt_generation);
+                assert_eq!(body, body_generation);
+            }
+            Err(other) => panic!("generation skew must retain its authority cause, got {other:?}"),
+            Ok(_) => panic!("generation-skewed authenticated head must not form a basis"),
         }
     }
 
