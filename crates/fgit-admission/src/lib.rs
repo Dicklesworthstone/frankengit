@@ -1410,7 +1410,7 @@ pub enum AdmissionError {
     /// retryable.
     ProjectionUnavailable {
         /// The sealed transaction that was left undecided.
-        tx_id: TxId,
+        tx_id: Box<TxId>,
         /// The unavailable material's typed refusal code.
         code: RefusalCode,
     },
@@ -1769,9 +1769,10 @@ fn complete_commit_materialization(
     match materialization {
         Ok(materialization) => Ok(PlannedPublication::Commit(Box::new(materialization))),
         Err(ProjectionFailure::Refuse(code)) => Ok(PlannedPublication::Refuse(code)),
-        Err(ProjectionFailure::Unavailable(code)) => {
-            Err(AdmissionError::ProjectionUnavailable { tx_id, code })
-        }
+        Err(ProjectionFailure::Unavailable(code)) => Err(AdmissionError::ProjectionUnavailable {
+            tx_id: Box::new(tx_id),
+            code,
+        }),
     }
 }
 
@@ -3872,9 +3873,9 @@ mod tests {
             matches!(
                 failure,
                 AdmissionError::ProjectionUnavailable {
-                    tx_id: failed_tx_id,
+                    tx_id: ref failed_tx_id,
                     code: RefusalCode::EvidenceMissing,
-                } if failed_tx_id == tx_id
+                } if failed_tx_id.as_ref() == &tx_id
             ),
             "the unavailable result must name the sealed retryable transaction, got {failure:?}"
         );
