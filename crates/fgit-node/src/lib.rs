@@ -6057,6 +6057,7 @@ mod tests {
                 _request: &ReceiveRequest,
                 _pack: Option<&fgit_pack::QuarantinedPack>,
                 _receipt: &QuarantineReceipt,
+                _deadline: &mut impl fgit_pack::Deadline,
             ) -> Result<ValidatedClosure, RefusalCode> {
                 Ok(self.closure.clone())
             }
@@ -6083,6 +6084,7 @@ mod tests {
                 .expect("the delete-only closure root derives"),
             objects: BTreeSet::new(),
         };
+        let mut deadline = || true;
         let validated_delete = validate_receive(
             &delete_request,
             None,
@@ -6090,6 +6092,7 @@ mod tests {
             &DeleteOnlyValidator {
                 closure: empty_closure,
             },
+            &mut deadline,
         )
         .expect("a pack-free delete-only receive remains a validated receive input");
         let mut receive_context = context;

@@ -53,6 +53,10 @@ use fgit_wire::{Capabilities, GitObjectFormat, Packet, WireLimits};
 const ZERO: &str = "0000000000000000000000000000000000000000";
 const NEW: &str = "1111111111111111111111111111111111111111";
 
+fn live_deadline() -> impl FnMut() -> bool {
+    || true
+}
+
 // ---------------------------------------------------------------------------
 // Fixtures built only from public API
 // ---------------------------------------------------------------------------
@@ -141,6 +145,7 @@ impl QuarantineValidator for StubValidator {
         _request: &ReceiveRequest,
         _pack: Option<&fgit_pack::QuarantinedPack>,
         _receipt: &QuarantineReceipt,
+        _deadline: &mut impl fgit_pack::Deadline,
     ) -> Result<ValidatedClosure, RefusalCode> {
         Ok(ValidatedClosure {
             object_closure_root: digest(),
@@ -159,6 +164,7 @@ impl QuarantineValidator for RefusingValidator {
         _request: &ReceiveRequest,
         _pack: Option<&fgit_pack::QuarantinedPack>,
         _receipt: &QuarantineReceipt,
+        _deadline: &mut impl fgit_pack::Deadline,
     ) -> Result<ValidatedClosure, RefusalCode> {
         Err(self.0)
     }
@@ -180,8 +186,14 @@ fn a_pack_requiring_request_without_a_pack_is_refused_and_the_delete_twin_is_adm
     // Forbidden: creates a ref, so it needs a pack, and none is supplied.
     let create = request_for(&[command(ZERO, NEW, "refs/heads/main", Some("report-status"))]);
     let validator = StubValidator::containing(&[oid(NEW)]);
-    let refusal = validate_receive(&create, None, &receipt(false), &validator)
-        .expect_err("a pack-requiring request without a pack must be refused");
+    let refusal = validate_receive(
+        &create,
+        None,
+        &receipt(false),
+        &validator,
+        &mut live_deadline(),
+    )
+    .expect_err("a pack-requiring request without a pack must be refused");
     assert_eq!(
         refusal,
         RefusalCode::ObjectClosureIncomplete,
@@ -195,8 +207,14 @@ fn a_pack_requiring_request_without_a_pack_is_refused_and_the_delete_twin_is_adm
         "refs/heads/doomed",
         Some("report-status delete-refs"),
     )]);
-    let validated = validate_receive(&delete, None, &receipt(true), &validator)
-        .expect("a delete-only request needs no pack and must be admitted");
+    let validated = validate_receive(
+        &delete,
+        None,
+        &receipt(true),
+        &validator,
+        &mut live_deadline(),
+    )
+    .expect("a delete-only request needs no pack and must be admitted");
     assert!(
         validated.request().deletes_only(),
         "the admitted twin must be the delete-only request"
@@ -221,7 +239,7 @@ fn a_closure_missing_the_commands_target_object_is_refused() {
 
     // Forbidden: the validator says Ok but its closure does not contain NEW.
     let empty = StubValidator::containing(&[]);
-    let refusal = validate_receive(&create, None, &pack_receipt, &empty)
+    let refusal = validate_receive(&create, None, &pack_receipt, &empty, &mut live_deadline())
         .expect_err("a closure omitting the target object must be refused");
     assert_eq!(refusal, RefusalCode::ObjectClosureIncomplete);
 
@@ -230,8 +248,14 @@ fn a_closure_missing_the_commands_target_object_is_refused() {
     // is the *other* gate — so this asserts the two refusals are distinct
     // rather than one catch-all.
     let covering = StubValidator::containing(&[oid(NEW)]);
-    let still_refused = validate_receive(&create, None, &pack_receipt, &covering)
-        .expect_err("no pack was supplied, so the pack gate still applies");
+    let still_refused = validate_receive(
+        &create,
+        None,
+        &pack_receipt,
+        &covering,
+        &mut live_deadline(),
+    )
+    .expect_err("no pack was supplied, so the pack gate still applies");
     assert_eq!(
         still_refused,
         RefusalCode::ObjectClosureIncomplete,
@@ -266,8 +290,14 @@ fn a_validators_refusal_reaches_the_caller_with_its_original_code() {
         RefusalCode::ResourceBudgetExceeded,
     ] {
         let validator = RefusingValidator(expected);
-        let refusal = validate_receive(&delete, None, &pack_receipt, &validator)
-            .expect_err("a refusing validator must refuse the admission");
+        let refusal = validate_receive(
+            &delete,
+            None,
+            &pack_receipt,
+            &validator,
+            &mut live_deadline(),
+        )
+        .expect_err("a refusing validator must refuse the admission");
         assert_eq!(
             refusal, expected,
             "admission reclassified a validator refusal: expected {expected:?}, got {refusal:?}"
@@ -296,8 +326,8 @@ fn the_structural_receipt_is_relayed_intact_and_not_recomputed() {
     original.pack_bytes = 0;
 
     let validator = StubValidator::containing(&[]);
-    let validated =
-        validate_receive(&delete, None, &original, &validator).expect("delete admitted");
+    let validated = validate_receive(&delete, None, &original, &validator, &mut live_deadline())
+        .expect("delete admitted");
 
     assert_eq!(
         validated.receipt(),

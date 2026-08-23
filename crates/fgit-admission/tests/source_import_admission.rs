@@ -81,6 +81,11 @@ const ZERO: &str = "0000000000000000000000000000000000000000";
 const MAIN_OID: &str = "2222222222222222222222222222222222222222";
 const IMPORTED_OID: &str = "4444444444444444444444444444444444444444";
 const MAIN_REF: &[u8] = b"refs/heads/main";
+
+fn live_deadline() -> impl FnMut() -> bool {
+    || true
+}
+
 const IMPORTED_REF: &[u8] = b"refs/heads/imported";
 
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
@@ -151,6 +156,7 @@ impl QuarantineValidator for DeleteOnlyValidator {
         _request: &ReceiveRequest,
         _pack: Option<&fgit_pack::QuarantinedPack>,
         _receipt: &QuarantineReceipt,
+        _deadline: &mut impl fgit_pack::Deadline,
     ) -> Result<ValidatedClosure, RefusalCode> {
         empty_closure()
     }
@@ -218,8 +224,14 @@ fn push_deleting_main() -> ValidatedReceive {
         pack_bytes: 0,
         delete_only: true,
     };
-    validate_receive(&request, None, &receipt, &DeleteOnlyValidator)
-        .expect("a delete-only receive is admissible without a pack")
+    validate_receive(
+        &request,
+        None,
+        &receipt,
+        &DeleteOnlyValidator,
+        &mut live_deadline(),
+    )
+    .expect("a delete-only receive is admissible without a pack")
 }
 
 /// The same delete, arriving as a source import.
@@ -543,7 +555,13 @@ fn receive_pack_still_refuses_a_create_with_no_quarantined_pack() {
         pack_bytes: 0,
         delete_only: false,
     };
-    let refused = validate_receive(&request, None, &receipt, &DeleteOnlyValidator);
+    let refused = validate_receive(
+        &request,
+        None,
+        &receipt,
+        &DeleteOnlyValidator,
+        &mut live_deadline(),
+    );
     assert_eq!(
         refused.expect_err("a create with no quarantined pack must be refused"),
         RefusalCode::ObjectClosureIncomplete,
@@ -565,8 +583,14 @@ fn a_delete_only_push_still_admits_with_no_pack() {
         pack_bytes: 0,
         delete_only: true,
     };
-    validate_receive(&request, None, &receipt, &DeleteOnlyValidator)
-        .expect("a delete-only receive must still be admissible without a pack");
+    validate_receive(
+        &request,
+        None,
+        &receipt,
+        &DeleteOnlyValidator,
+        &mut live_deadline(),
+    )
+    .expect("a delete-only receive must still be admissible without a pack");
 }
 
 /// A source import is not "trust the caller": a ref naming an object the

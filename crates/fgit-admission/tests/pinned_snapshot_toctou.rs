@@ -93,6 +93,10 @@ const ZERO: &str = "0000000000000000000000000000000000000000";
 const MAIN_OID: &str = "2222222222222222222222222222222222222222";
 const MAIN_REF: &[u8] = b"refs/heads/main";
 
+fn live_deadline() -> impl FnMut() -> bool {
+    || true
+}
+
 type RefMap = BTreeMap<RefName, GitOid>;
 
 // ---------------------------------------------------------------------------
@@ -161,6 +165,7 @@ impl QuarantineValidator for DeleteOnlyValidator {
         _request: &ReceiveRequest,
         _pack: Option<&fgit_pack::QuarantinedPack>,
         _receipt: &QuarantineReceipt,
+        _deadline: &mut impl fgit_pack::Deadline,
     ) -> Result<ValidatedClosure, RefusalCode> {
         let closure = PermittedObjectClosure::default();
         Ok(ValidatedClosure {
@@ -210,8 +215,14 @@ fn delete_main() -> ValidatedReceive {
         pack_bytes: 0,
         delete_only: true,
     };
-    validate_receive(&request, None, &receipt, &DeleteOnlyValidator)
-        .expect("a delete-only receive is admissible without a pack")
+    validate_receive(
+        &request,
+        None,
+        &receipt,
+        &DeleteOnlyValidator,
+        &mut live_deadline(),
+    )
+    .expect("a delete-only receive is admissible without a pack")
 }
 
 // ---------------------------------------------------------------------------

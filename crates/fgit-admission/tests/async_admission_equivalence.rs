@@ -94,6 +94,10 @@ const MAIN_OID: &str = "2222222222222222222222222222222222222222";
 const OTHER_OID: &str = "3333333333333333333333333333333333333333";
 const MAIN_REF: &[u8] = b"refs/heads/main";
 
+fn live_deadline() -> impl FnMut() -> bool {
+    || true
+}
+
 /// A corpus-reserved digest algorithm slot, as every fixture in this workspace
 /// uses. Never a real algorithm identifier.
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
@@ -301,6 +305,7 @@ impl QuarantineValidator for DeleteOnlyValidator {
         _request: &ReceiveRequest,
         _pack: Option<&fgit_pack::QuarantinedPack>,
         _receipt: &QuarantineReceipt,
+        _deadline: &mut impl fgit_pack::Deadline,
     ) -> Result<ValidatedClosure, RefusalCode> {
         let objects = BTreeSet::new();
         let object_closure_root =
@@ -346,8 +351,14 @@ fn delete_main() -> ValidatedReceive {
         pack_bytes: 0,
         delete_only: true,
     };
-    validate_receive(&request, None, &receipt, &DeleteOnlyValidator)
-        .expect("a delete-only receive is admissible without a pack")
+    validate_receive(
+        &request,
+        None,
+        &receipt,
+        &DeleteOnlyValidator,
+        &mut live_deadline(),
+    )
+    .expect("a delete-only receive is admissible without a pack")
 }
 
 /// Interior mutability behind a mutex rather than a `RefCell`: the async

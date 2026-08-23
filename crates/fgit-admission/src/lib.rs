@@ -35,7 +35,7 @@ use fgit_codec::{
     RepositoryAuthorityHeadBody, RepositoryCommitRecord, body_id, encode_body,
 };
 use fgit_crypto::IdentityDomain;
-use fgit_pack::QuarantinedPack;
+use fgit_pack::{Deadline, QuarantinedPack};
 use fgit_reference::effect::{FoldBasis, FoldOutcome, RefEffect};
 use fgit_reference::intent::{
     DurabilityProfile, IdempotencyKey as ModelIdempotencyKey, Intent, RefIntent, Statement,
@@ -134,11 +134,17 @@ pub struct ValidatedClosure {
 /// parses a pack or reaches into quarantine bytes.
 pub trait QuarantineValidator {
     /// Returns a closure witness, or a terminal admission refusal.
+    ///
+    /// `deadline` is the caller-owned cancellation and work boundary. An
+    /// implementation must checkpoint it before each bounded unit of
+    /// validation or staging work and return
+    /// [`RefusalCode::CancellationInProgress`] when it has expired.
     fn validate(
         &self,
         request: &ReceiveRequest,
         pack: Option<&QuarantinedPack>,
         receipt: &QuarantineReceipt,
+        deadline: &mut impl Deadline,
     ) -> Result<ValidatedClosure, RefusalCode>;
 }
 
@@ -171,20 +177,25 @@ impl ValidatedReceive {
 /// Validates closure and object availability for a quarantined pack.
 ///
 /// Non-delete commands without that pack are refused before a seal exists;
-/// deleting refs is the permitted near-identical path.
+/// deleting refs is the permitted near-identical path. An expired deadline is
+/// refused before validator work begins.
 pub fn validate_receive<Validator>(
     request: &ReceiveRequest,
     pack: Option<&QuarantinedPack>,
     receipt: &QuarantineReceipt,
     validator: &Validator,
+    deadline: &mut impl Deadline,
 ) -> Result<ValidatedReceive, RefusalCode>
 where
     Validator: QuarantineValidator + ?Sized,
 {
+    if !deadline.checkpoint() {
+        return Err(RefusalCode::CancellationInProgress);
+    }
     if request.requires_pack() && pack.is_none() {
         return Err(RefusalCode::ObjectClosureIncomplete);
     }
-    let closure = validator.validate(request, pack, receipt)?;
+    let closure = validator.validate(request, pack, receipt, deadline)?;
     if request
         .commands
         .iter()
@@ -3150,6 +3161,7 @@ mod tests {
             request: &ReceiveRequest,
             _pack: Option<&QuarantinedPack>,
             receipt: &QuarantineReceipt,
+            _deadline: &mut impl Deadline,
         ) -> Result<ValidatedClosure, RefusalCode> {
             if request.requires_pack() && receipt.object_count == 0 {
                 return Err(RefusalCode::ObjectClosureIncomplete);
@@ -3163,6 +3175,37 @@ mod tests {
             Ok(ValidatedClosure {
                 object_closure_root: digest(14),
                 objects,
+            })
+        }
+    }
+
+    struct DeadlineProbeValidator {
+        calls: Cell<usize>,
+    }
+
+    impl DeadlineProbeValidator {
+        const fn new() -> Self {
+            Self {
+                calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl QuarantineValidator for DeadlineProbeValidator {
+        fn validate(
+            &self,
+            _request: &ReceiveRequest,
+            _pack: Option<&QuarantinedPack>,
+            _receipt: &QuarantineReceipt,
+            deadline: &mut impl Deadline,
+        ) -> Result<ValidatedClosure, RefusalCode> {
+            self.calls.set(self.calls.get() + 1);
+            if !deadline.checkpoint() {
+                return Err(RefusalCode::CancellationInProgress);
+            }
+            Ok(ValidatedClosure {
+                object_closure_root: digest(14),
+                objects: BTreeSet::new(),
             })
         }
     }
@@ -3342,8 +3385,9 @@ mod tests {
             pack_bytes: 64,
             delete_only: false,
         };
+        let mut deadline = || true;
         let closure = FixtureValidator
-            .validate(&request, None, &receipt)
+            .validate(&request, None, &receipt, &mut deadline)
             .expect("fixture closure validates");
         ValidatedReceive {
             request,
@@ -4020,12 +4064,14 @@ mod tests {
     #[test]
     fn validation_requires_quarantined_pack_and_delete_only_twin_is_permitted() {
         let creation = completion(vec![create(b"refs/heads/main", 34)], true);
+        let mut deadline = || true;
         assert_eq!(
             validate_receive(
                 creation.request(),
                 None,
                 creation.receipt(),
                 &FixtureValidator,
+                &mut deadline,
             ),
             Err(RefusalCode::ObjectClosureIncomplete)
         );
@@ -4046,7 +4092,80 @@ mod tests {
             pack_bytes: 0,
             delete_only: true,
         };
-        assert!(validate_receive(&delete, None, &delete_receipt, &FixtureValidator).is_ok());
+        assert!(
+            validate_receive(
+                &delete,
+                None,
+                &delete_receipt,
+                &FixtureValidator,
+                &mut deadline,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validation_deadline_stops_work_and_reaches_the_validator() {
+        let delete = ReceiveRequest {
+            commands: vec![ReceiveCommand {
+                old: oid(9),
+                new: oid(0),
+                ref_name: b"refs/heads/main".to_vec(),
+            }],
+            capabilities: Vec::new(),
+            push_options: Vec::new(),
+            certificate: None,
+        };
+        let receipt = QuarantineReceipt {
+            object_format: GitObjectFormat::Sha1,
+            object_count: 0,
+            pack_bytes: 0,
+            delete_only: true,
+        };
+        let validator = DeadlineProbeValidator::new();
+
+        let mut expired_before_validation = || false;
+        assert_eq!(
+            validate_receive(
+                &delete,
+                None,
+                &receipt,
+                &validator,
+                &mut expired_before_validation,
+            ),
+            Err(RefusalCode::CancellationInProgress)
+        );
+        assert_eq!(
+            validator.calls.get(),
+            0,
+            "an expired deadline must refuse before validator work"
+        );
+
+        let mut checkpoints = [true, false].into_iter();
+        let mut expires_in_validator = || checkpoints.next().unwrap_or(false);
+        assert_eq!(
+            validate_receive(
+                &delete,
+                None,
+                &receipt,
+                &validator,
+                &mut expires_in_validator,
+            ),
+            Err(RefusalCode::CancellationInProgress)
+        );
+        assert_eq!(
+            validator.calls.get(),
+            1,
+            "the same deadline must reach validation after admission's checkpoint"
+        );
+
+        let mut live_deadline = || true;
+        assert!(validate_receive(&delete, None, &receipt, &validator, &mut live_deadline,).is_ok());
+        assert_eq!(
+            validator.calls.get(),
+            2,
+            "the live twin must reach validation"
+        );
     }
 
     #[test]
