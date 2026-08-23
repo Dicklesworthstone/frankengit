@@ -150,6 +150,10 @@ pub enum CapsuleInspectionRefusal {
     Decode(CodecRefusal),
     /// The decoded body has no registered canonical identity.
     Identity(ChronicleRefusal),
+    /// The supplied authority-head bytes are not a canonical authority head.
+    HeadDecode(CodecRefusal),
+    /// The decoded authority head has no canonical identity.
+    HeadIdentity(Box<fgit_authority::OutcomeFailure>),
 }
 
 impl fmt::Display for CapsuleInspectionRefusal {
@@ -157,6 +161,13 @@ impl fmt::Display for CapsuleInspectionRefusal {
         match self {
             Self::Decode(error) => write!(formatter, "capsule bytes did not decode: {error}"),
             Self::Identity(error) => write!(formatter, "capsule identity was unavailable: {error}"),
+            Self::HeadDecode(error) => {
+                write!(formatter, "authority-head bytes did not decode: {error}")
+            }
+            Self::HeadIdentity(error) => write!(
+                formatter,
+                "authority-head identity was unavailable: {error}"
+            ),
         }
     }
 }
@@ -188,11 +199,64 @@ pub fn inspect_capsule_bytes<I>(
 where
     I: BodyIdentity + ?Sized,
 {
+    let (capsule, defects) =
+        decoded_capsule_defects(identity, declared_id, bytes, expected_predecessor)?;
+    Ok(CapsuleInspection::from_defects(capsule, defects))
+}
+
+/// Decode a capsule and its named authority head, deriving every mismatch
+/// between the two from their actual canonical bytes.
+///
+/// A portable restore cannot trust a caller that says a capsule was taken at a
+/// particular head. This function recomputes that head's identity and checks
+/// each field the capsule copies from it before a destination can stage or
+/// initialize anything. The caller supplies bytes rather than a store because
+/// the source authority may no longer exist during a clean-machine restore.
+pub fn inspect_capsule_against_authority_head_bytes<I>(
+    identity: &I,
+    declared_id: RepositoryCapsuleId,
+    capsule_bytes: &[u8],
+    authority_head_bytes: &[u8],
+    expected_predecessor: Option<RepositoryCapsuleId>,
+) -> Result<CapsuleInspection, CapsuleInspectionRefusal>
+where
+    I: BodyIdentity + ?Sized,
+{
+    let (capsule, mut defects) =
+        decoded_capsule_defects(identity, declared_id, capsule_bytes, expected_predecessor)?;
+    let head: RepositoryAuthorityHeadBody =
+        decode_body(authority_head_bytes, DecodeLimits::DEFAULT)
+            .map_err(CapsuleInspectionRefusal::HeadDecode)?;
+    let head_id = authority_head_identity(&head)
+        .map_err(|error| CapsuleInspectionRefusal::HeadIdentity(Box::new(error)))?;
+    collect_authority_head_defects(&capsule, head_id, &head, &mut defects);
+    Ok(CapsuleInspection::from_defects(capsule, defects))
+}
+
+impl CapsuleInspection {
+    fn from_defects(capsule: RepositoryCapsuleBody, defects: Vec<CapsuleDefect>) -> Self {
+        let classification = RestoreClassification::classify(&capsule, &defects);
+        Self {
+            capsule,
+            classification,
+        }
+    }
+}
+
+fn decoded_capsule_defects<I>(
+    identity: &I,
+    declared_id: RepositoryCapsuleId,
+    bytes: &[u8],
+    expected_predecessor: Option<RepositoryCapsuleId>,
+) -> Result<(RepositoryCapsuleBody, Vec<CapsuleDefect>), CapsuleInspectionRefusal>
+where
+    I: BodyIdentity + ?Sized,
+{
     let capsule: RepositoryCapsuleBody =
         decode_body(bytes, DecodeLimits::DEFAULT).map_err(CapsuleInspectionRefusal::Decode)?;
     let recomputed =
         capsule_identity(identity, &capsule).map_err(CapsuleInspectionRefusal::Identity)?;
-    let mut defects = Vec::with_capacity(2);
+    let mut defects = Vec::with_capacity(15);
     if recomputed != declared_id {
         defects.push(CapsuleDefect::IdentityMismatch {
             declared: declared_id,
@@ -205,11 +269,61 @@ where
             expected: expected_predecessor,
         });
     }
-    let classification = RestoreClassification::classify(&capsule, &defects);
-    Ok(CapsuleInspection {
-        capsule,
-        classification,
-    })
+    Ok((capsule, defects))
+}
+
+fn collect_authority_head_defects(
+    capsule: &RepositoryCapsuleBody,
+    head_id: fgit_types::RepositoryAuthorityHeadId,
+    head: &RepositoryAuthorityHeadBody,
+    defects: &mut Vec<CapsuleDefect>,
+) {
+    for (field, agrees) in [
+        ("head_id", capsule.head_id == head_id),
+        ("repository_id", capsule.repository_id == head.repository_id),
+        (
+            "head_generation",
+            capsule.head_generation == head.generation,
+        ),
+        (
+            "decision_tail_id",
+            capsule.decision_tail_id == head.decision_tail_id,
+        ),
+        (
+            "latest_decision_sequence",
+            capsule.latest_decision_sequence == head.latest_decision_sequence,
+        ),
+        (
+            "latest_committed_rcr_id",
+            capsule.latest_committed_rcr_id == head.latest_committed_rcr_id,
+        ),
+        (
+            "latest_repository_sequence",
+            capsule.latest_repository_sequence == head.latest_repository_sequence,
+        ),
+        ("ref_root", capsule.ref_root == head.ref_root),
+        (
+            "forge_position_root",
+            capsule.forge_position_root == head.forge_position_root,
+        ),
+        (
+            "retention_root",
+            capsule.retention_root == head.retention_root,
+        ),
+        (
+            "configuration_root",
+            capsule.configuration_root == head.configuration_root,
+        ),
+        ("policy_epoch", capsule.policy_epoch == head.policy_epoch),
+        (
+            "format_registry_epoch",
+            capsule.format_registry_epoch == head.format_registry_epoch,
+        ),
+    ] {
+        if !agrees {
+            defects.push(CapsuleDefect::AuthorityHeadMismatch { field });
+        }
+    }
 }
 
 /// Freeze the authenticated head, stage its capsule, and return a pointer

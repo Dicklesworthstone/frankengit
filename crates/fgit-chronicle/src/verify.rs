@@ -95,6 +95,15 @@ pub enum CapsuleDefect {
         /// Predecessor the pointer chain requires.
         expected: Option<RepositoryCapsuleId>,
     },
+    /// The authority-head bytes named by the capsule disagree with fields the
+    /// capsule was required to copy from that one exact head.
+    ///
+    /// Never repairable. Repair can reconstruct a missing immutable body; it
+    /// cannot make a checkpoint describe a different authority position.
+    AuthorityHeadMismatch {
+        /// The copied authority-head field that disagreed.
+        field: &'static str,
+    },
 }
 
 impl CapsuleDefect {
@@ -108,7 +117,9 @@ impl CapsuleDefect {
             Self::ObjectBodyMissing { .. }
             | Self::SegmentTruncated { .. }
             | Self::SegmentManifestCorrupt { .. } => true,
-            Self::IdentityMismatch { .. } | Self::PredecessorStale { .. } => false,
+            Self::IdentityMismatch { .. }
+            | Self::PredecessorStale { .. }
+            | Self::AuthorityHeadMismatch { .. } => false,
         }
     }
 
@@ -121,6 +132,7 @@ impl CapsuleDefect {
             Self::SegmentManifestCorrupt { .. } => "segment_manifest_corrupt",
             Self::IdentityMismatch { .. } => "identity_mismatch",
             Self::PredecessorStale { .. } => "predecessor_stale",
+            Self::AuthorityHeadMismatch { .. } => "authority_head_mismatch",
         }
     }
 }

@@ -5,7 +5,7 @@ use fgit_authority::{
 };
 use fgit_chronicle::{
     BackupProfile, CapsuleClosure, LiveCapsuleRefusal, RestoreOutcome, freeze_capsule,
-    inspect_capsule_bytes,
+    inspect_capsule_against_authority_head_bytes, inspect_capsule_bytes,
 };
 use fgit_codec::{CryptoBodyIdentity, RepositoryAuthorityHeadBody, encode_body};
 use fgit_types::{
@@ -131,6 +131,58 @@ fn inspection_derives_identity_and_predecessor_defects_from_capsule_bytes() {
             .any(|defect| matches!(
                 defect,
                 fgit_chronicle::CapsuleDefect::PredecessorStale { .. }
+            ))
+    );
+}
+
+#[test]
+fn inspection_refuses_a_capsule_that_disagrees_with_its_named_authority_head() {
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x47));
+    let key =
+        HeadKey::new(b"chronicle/live-capsule-head-inspection".to_vec()).expect("bounded key");
+    initialize_repository(&store, &key, &head()).expect("head initializes");
+    let receipt = match store.read_head(&key).expect("head reads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("initialized head is present"),
+    };
+    let frozen = freeze_capsule(&store, &CryptoBodyIdentity, &receipt, None, closure())
+        .expect("current head freezes");
+    let capsule_bytes = encode_body(frozen.capsule()).expect("capsule encodes");
+    let mut mismatched_head = head();
+    mismatched_head.ref_root = digest(0x99);
+    let head_bytes = encode_body(&mismatched_head).expect("mismatched head encodes");
+
+    let inspected = inspect_capsule_against_authority_head_bytes(
+        &CryptoBodyIdentity,
+        frozen.capsule_id(),
+        &capsule_bytes,
+        &head_bytes,
+        None,
+    )
+    .expect("both inputs decode for inspection");
+
+    assert_eq!(
+        inspected.classification().outcome(),
+        RestoreOutcome::FailClosed
+    );
+    assert!(
+        inspected
+            .classification()
+            .defects()
+            .iter()
+            .any(|defect| matches!(
+                defect,
+                fgit_chronicle::CapsuleDefect::AuthorityHeadMismatch { field: "head_id" }
+            ))
+    );
+    assert!(
+        inspected
+            .classification()
+            .defects()
+            .iter()
+            .any(|defect| matches!(
+                defect,
+                fgit_chronicle::CapsuleDefect::AuthorityHeadMismatch { field: "ref_root" }
             ))
     );
 }
