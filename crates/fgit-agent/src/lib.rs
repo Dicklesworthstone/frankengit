@@ -21,13 +21,24 @@
 //!
 //! # What is deliberately not here
 //!
-//! The Context Packet (§7), the `TreeFS` workspace (§8), Evidence-Carrying
-//! Change (§10), verification and review (§11), the refresh relations of §4.3,
-//! and revocation interpreted at a canonical position (§6.3) are all outside
-//! this slice. They are named here so their absence reads as scope rather than
-//! as coverage: §6.3 in particular is a real property this crate does *not*
-//! deliver — [`Capability::is_valid_at`] checks a window, which is freshness,
-//! not revocation.
+//! The Context Packet (§7), the `TreeFS` workspace (§8), the refresh relations
+//! of §4.3, and revocation interpreted at a canonical position (§6.3) are all
+//! outside this slice. They are named here so their absence reads as scope
+//! rather than as coverage: §6.3 in particular is a real property this crate
+//! does *not* deliver — [`Capability::is_valid_at`] checks a window, which is
+//! freshness, not revocation.
+//!
+//! §10 and §11 are **partly** here, and the boundary matters. [`ecc`] delivers
+//! the evidence classes, the requirement dispositions of §10.2, the non-claims
+//! of §10.3, the machine-classified verifier independence that normative
+//! contract 25 requires be enforced rather than self-declared, and a canonical
+//! codec encoding for the bundle checked against a golden corpus this crate did
+//! not emit. It does **not**
+//! deliver the rest of the §10 bundle — the proposed object/tree closure and
+//! diff commitment (they need §8's `TreeFS` export), the refreshed authority
+//! receipt and reconciliation record, or context-packet bodies — nor most of
+//! §11: the deterministic verification services of §11.1 and the human review
+//! view of §11.3 are absent. [`ecc`]'s own header lists these individually.
 //!
 //! The obligation lifecycle is not reimplemented either. `fgit-resource` owns
 //! it, and [`broker`] explains exactly which half of an effect's reservation
@@ -36,6 +47,7 @@
 pub mod broker;
 pub mod capability;
 pub mod classes;
+pub mod ecc;
 pub mod intent;
 
 pub use broker::{BrokerRefusal, EffectBroker, EffectGrant, EffectId, EffectRecord, EffectRequest};
@@ -44,4 +56,9 @@ pub use capability::{
     LogicalTime, SealRefused, SealedCapability, verify_chain,
 };
 pub use classes::{CLASS_COUNT, ClassSet, OperationClass, UnknownClassBits};
+pub use ecc::{
+    EccPolicy, EccRefusal, EvidenceCarryingChange, EvidenceClass, EvidenceRecordRef,
+    IndependenceClassification, IndependenceDimension, PartyFacts, RequirementDisposition,
+    VerifierAttestation, classify_independence,
+};
 pub use intent::{AuthorityBasisRef, IntentRun, RunId, RunRefused};
