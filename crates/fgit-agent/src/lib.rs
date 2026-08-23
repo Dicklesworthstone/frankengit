@@ -19,13 +19,14 @@
 //! verifier when it arrives as bytes. Neither substitutes for the other, and
 //! the module documents why.
 //!
-//! # What is deliberately not here
+//! # Current boundary
 //!
-//! The Context Packet (§7), the `TreeFS` workspace (§8), and revocation
-//! interpreted at a canonical position (§6.3) are all outside this slice. They are named here so their absence reads as scope
-//! rather than as coverage: §6.3 in particular is a real property this crate
-//! does *not* deliver — [`Capability::is_valid_at`] checks a window, which is
-//! freshness, not revocation.
+//! [`protocol`] now binds an Intent Run's base to the full authenticated §4.1
+//! `AuthorityReadReceipt` and constructs bounded, single-generation §7 Context
+//! Packets with structurally separate control and untrusted-source channels.
+//! Revocation interpreted at a canonical position (§6.3) remains outside this
+//! slice: [`Capability::is_valid_at`] checks a window, which is freshness, not
+//! revocation.
 //!
 //! §4.3's refresh relations ARE here, in [`refresh`] — but only the typed
 //! record of a refresh and the constraints on it, not the act. Rebasing,
@@ -54,6 +55,7 @@ pub mod capability;
 pub mod classes;
 pub mod ecc;
 pub mod intent;
+pub mod protocol;
 pub mod refresh;
 
 pub use broker::{BrokerRefusal, EffectBroker, EffectGrant, EffectId, EffectRecord, EffectRequest};
@@ -68,4 +70,9 @@ pub use ecc::{
     VerifierAttestation, classify_independence,
 };
 pub use intent::{AuthorityBasisRef, IntentRun, RunId, RunRefused};
+pub use protocol::{
+    AuthorityReadReceipt, ContextControl, ContextPacket, ContextPacketId, ContextSource,
+    MAX_CONTEXT_SOURCE_BYTES, MAX_CONTEXT_SOURCES, MAX_CONTEXT_TOTAL_BYTES, ProtocolRefusal,
+    RetrievalChannel,
+};
 pub use refresh::{RefreshReceipt, RefreshRelation, RefreshSide};

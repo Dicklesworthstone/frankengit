@@ -622,9 +622,11 @@ dependencies = [
 name = "fgit-agent"
 version = "0.0.1"
 dependencies = [
+ "fgit-authority",
  "fgit-codec",
  "fgit-crypto",
  "fgit-resource",
+ "fgit-treefs",
  "fgit-types",
 ]
 
