@@ -11,10 +11,10 @@ use fgit_resource::kinds::{
     ContainmentClass, ExitClass, NetworkPolicy, RunnerReaped, SandboxProfile,
 };
 use fgit_runner::{
-    BuildInputCapsule, CheckOutcome, Commitment, ContainmentSubstrate, ForbiddenProbe, ForkPolicy,
-    JobRequest, ResourceCeilings, ResourceDimension, ResourceUsage, RunnerControlPlane,
-    RunnerPolicy, RunnerRefusal, RunnerText, SecretBroker, SecretRequest, SourceObject,
-    SubstrateObservation, SubstrateRefusal, TrustDomain,
+    BuildCommand, BuildInputCapsule, CheckOutcome, Commitment, ContainmentSubstrate,
+    ForbiddenProbe, ForkPolicy, JobRequest, ResourceCeilings, ResourceDimension, ResourceUsage,
+    RunnerControlPlane, RunnerPolicy, RunnerRefusal, RunnerText, SecretBroker, SecretRequest,
+    SourceObject, SubstrateObservation, SubstrateRefusal, TrustDomain,
 };
 
 fn text(value: &str) -> RunnerText {
@@ -31,6 +31,8 @@ fn capsule() -> BuildInputCapsule {
         vec![SourceObject::new(commitment("source"), 19)],
         commitment("dependency-lock"),
         text("nightly-2026-08-20"),
+        BuildCommand::new(text("cargo"), vec![text("check"), text("--locked")])
+            .expect("fixture command is canonical"),
         Vec::new(),
     )
     .expect("fixture capsule is admitted")

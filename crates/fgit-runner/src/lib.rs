@@ -44,6 +44,8 @@ use fgit_resource::kinds::{
 pub const MAX_SOURCE_OBJECTS: usize = 4_096;
 /// Maximum number of environment bindings admitted into one capsule.
 pub const MAX_ENVIRONMENT_BINDINGS: usize = 128;
+/// Maximum number of argv elements admitted after one command program.
+pub const MAX_COMMAND_ARGUMENTS: usize = 128;
 /// Maximum number of brokered secret handles a job may receive.
 pub const MAX_SECRET_LEASES: usize = 64;
 /// Maximum number of artifact commitments recorded in one receipt.
@@ -53,6 +55,7 @@ pub const MAX_RUNNER_TEXT_BYTES: usize = 256;
 
 const CAPSULE_DOMAIN: &[u8] = b"frankengit/build-input-capsule/v1\0";
 const CACHE_DOMAIN: &[u8] = b"frankengit/runner-cache-key/v1\0";
+const COMMAND_DOMAIN: &[u8] = b"frankengit/build-command/v1\0";
 
 /// A registered SHA-256 commitment used for runner inputs and outputs.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -202,6 +205,48 @@ impl EnvironmentBinding {
     }
 }
 
+/// One shell-free command bound into a build capsule.
+///
+/// The runner never reparses this value through a shell.  The program and
+/// every argv element are separately canonical runner fields, so changing an
+/// argument changes the capsule identity and the terminal receipt evidence.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct BuildCommand {
+    program: RunnerText,
+    arguments: Vec<RunnerText>,
+}
+
+impl BuildCommand {
+    /// Creates one bounded, shell-free program plus argv vector.
+    pub fn new(program: RunnerText, arguments: Vec<RunnerText>) -> Result<Self, RunnerRefusal> {
+        if arguments.len() > MAX_COMMAND_ARGUMENTS {
+            return Err(RunnerRefusal::CollectionTooLarge {
+                field: "command_arguments",
+                limit: MAX_COMMAND_ARGUMENTS,
+            });
+        }
+        Ok(Self { program, arguments })
+    }
+
+    /// Executable selected for this exact build.
+    #[must_use]
+    pub const fn program(&self) -> &RunnerText {
+        &self.program
+    }
+
+    /// Exact argv elements, preserving their declared order.
+    #[must_use]
+    pub fn arguments(&self) -> &[RunnerText] {
+        &self.arguments
+    }
+
+    /// Stable command commitment used by receipt provenance.
+    #[must_use]
+    pub fn commitment(&self) -> Commitment {
+        Commitment::of_bytes(&command_bytes(self))
+    }
+}
+
 /// Identity of every build-relevant input.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct BuildInputCapsule {
@@ -209,6 +254,7 @@ pub struct BuildInputCapsule {
     source_objects: Vec<SourceObject>,
     dependency_lock: Commitment,
     toolchain: RunnerText,
+    command: BuildCommand,
     environment: Vec<EnvironmentBinding>,
     id: CapsuleId,
 }
@@ -224,6 +270,7 @@ impl BuildInputCapsule {
         mut source_objects: Vec<SourceObject>,
         dependency_lock: Commitment,
         toolchain: RunnerText,
+        command: BuildCommand,
         mut environment: Vec<EnvironmentBinding>,
     ) -> Result<Self, RunnerRefusal> {
         if source_objects.is_empty() {
@@ -262,6 +309,7 @@ impl BuildInputCapsule {
             &source_objects,
             dependency_lock,
             &toolchain,
+            &command,
             &environment,
         );
         Ok(Self {
@@ -269,6 +317,7 @@ impl BuildInputCapsule {
             source_objects,
             dependency_lock,
             toolchain,
+            command,
             environment,
             id: CapsuleId(Commitment::of_bytes(&canonical)),
         })
@@ -302,6 +351,12 @@ impl BuildInputCapsule {
     #[must_use]
     pub const fn toolchain(&self) -> &RunnerText {
         &self.toolchain
+    }
+
+    /// Exact shell-free command bound into this immutable build input.
+    #[must_use]
+    pub const fn command(&self) -> &BuildCommand {
+        &self.command
     }
 
     /// Commitment of the pinned toolchain identity for obligation hand-off.
@@ -1031,6 +1086,7 @@ impl RunnerControlPlane {
         };
         Ok(CheckReceipt {
             capsule_id: admitted.plan.capsule.id(),
+            command: admitted.plan.capsule.command.clone(),
             cache_namespace: admitted.plan.cache_namespace,
             runner_request: admitted.runner_request,
             outcome,
@@ -1157,6 +1213,7 @@ impl SubstrateRefusal {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckReceipt {
     capsule_id: CapsuleId,
+    command: BuildCommand,
     cache_namespace: CacheNamespace,
     runner_request: RunnerRequest,
     outcome: CheckOutcome,
@@ -1173,6 +1230,12 @@ impl CheckReceipt {
     #[must_use]
     pub const fn capsule_id(&self) -> CapsuleId {
         self.capsule_id
+    }
+
+    /// Exact command bound by the input capsule and this terminal receipt.
+    #[must_use]
+    pub const fn command(&self) -> &BuildCommand {
+        &self.command
     }
 
     /// Immutable cache namespace used by the job.
@@ -1389,6 +1452,7 @@ fn capsule_bytes(
     source_objects: &[SourceObject],
     dependency_lock: Commitment,
     toolchain: &RunnerText,
+    command: &BuildCommand,
     environment: &[EnvironmentBinding],
 ) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -1401,10 +1465,22 @@ fn capsule_bytes(
     }
     write_digest(&mut bytes, dependency_lock.digest());
     write_text(&mut bytes, toolchain.as_str());
+    bytes.extend_from_slice(&command_bytes(command));
     write_count(&mut bytes, environment.len());
     for binding in environment {
         write_text(&mut bytes, binding.name.as_str());
         write_text(&mut bytes, binding.value.as_str());
+    }
+    bytes
+}
+
+fn command_bytes(command: &BuildCommand) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(COMMAND_DOMAIN);
+    write_text(&mut bytes, command.program.as_str());
+    write_count(&mut bytes, command.arguments.len());
+    for argument in &command.arguments {
+        write_text(&mut bytes, argument.as_str());
     }
     bytes
 }
@@ -1446,6 +1522,10 @@ fn receipt_evidence(
         evidence_text(
             "dependency",
             format!("dependency-{}", plan.capsule.dependency_lock()),
+        )?,
+        evidence_text(
+            "command",
+            format!("command-{}", plan.capsule.command().commitment()),
         )?,
     ];
     let sources = canonical_evidence_text_set(sources, "source_input")?;
@@ -1546,10 +1626,11 @@ fn canonical_evidence_artifact_set(
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildInputCapsule, CheckOutcome, Commitment, ContainmentFailureKind, ContainmentSubstrate,
-        EnvironmentBinding, ForbiddenProbe, ForkPolicy, JobRequest, ResourceCeilings,
-        ResourceDimension, ResourceUsage, RunnerControlPlane, RunnerPolicy, RunnerRefusal,
-        RunnerText, SecretBroker, SecretRequest, SourceObject, SubstrateObservation, TrustDomain,
+        BuildCommand, BuildInputCapsule, CheckOutcome, Commitment, ContainmentFailureKind,
+        ContainmentSubstrate, EnvironmentBinding, ForbiddenProbe, ForkPolicy, JobRequest,
+        ResourceCeilings, ResourceDimension, ResourceUsage, RunnerControlPlane, RunnerPolicy,
+        RunnerRefusal, RunnerText, SecretBroker, SecretRequest, SourceObject, SubstrateObservation,
+        TrustDomain,
     };
     use fgit_codec::DecodeLimits;
     use fgit_evidence::EvidenceRecord;
@@ -1587,6 +1668,8 @@ mod tests {
             objects,
             commitment("dependency-lock"),
             text("rust-nightly-2026-08-20"),
+            BuildCommand::new(text("cargo"), vec![text("check"), text("--locked")])
+                .expect("canonical command"),
             environment,
         )
         .expect("valid capsule")
@@ -1647,6 +1730,40 @@ mod tests {
     }
 
     #[test]
+    fn capsule_identity_and_receipt_bind_the_exact_command() {
+        let capsule = capsule(false);
+        let changed_command = BuildInputCapsule::new(
+            commitment("authority-head"),
+            capsule.source_objects().to_vec(),
+            commitment("dependency-lock"),
+            text("rust-nightly-2026-08-20"),
+            BuildCommand::new(text("cargo"), vec![text("test"), text("--locked")])
+                .expect("changed canonical command"),
+            capsule.environment().to_vec(),
+        )
+        .expect("changed command capsule");
+        assert_ne!(capsule.id(), changed_command.id());
+
+        let request = JobRequest::new(false, Vec::new(), Vec::new(), 5).expect("safe request");
+        let mut broker = SecretBroker::default();
+        let mut control = RunnerControlPlane::new(ceilings(32), 1).expect("capacity");
+        let admitted = control
+            .admit(
+                capsule.clone(),
+                policy("trusted", 32),
+                request,
+                &mut broker,
+                2,
+            )
+            .expect("admitted before launch");
+        let mut substrate = FixedSubstrate(observation(ExitClass::Succeeded, 16));
+        let receipt = control
+            .execute(admitted, &mut substrate, &mut broker)
+            .expect("successful command-bound receipt");
+        assert_eq!(receipt.command(), capsule.command());
+    }
+
+    #[test]
     fn duplicate_source_commitment_is_refused_instead_of_ambiguously_collapsing() {
         let object = SourceObject::new(commitment("object"), 1);
         let result = BuildInputCapsule::new(
@@ -1654,6 +1771,7 @@ mod tests {
             vec![object, object],
             commitment("lock"),
             text("toolchain"),
+            BuildCommand::new(text("cargo"), Vec::new()).expect("canonical command"),
             Vec::new(),
         );
         assert_eq!(result, Err(RunnerRefusal::DuplicateSourceObject));
