@@ -5751,8 +5751,8 @@ mod tests {
         let registry_path = undeclared.root.join(CRATE_LAYERS_FILE);
         let registry = fs::read_to_string(&registry_path).expect("read clean layer registry");
         let narrowed = registry.replace(
-            "fgit-engine\\tL2\\tL0,L1,L2\\tengine\\tactive",
-            "fgit-engine\\tL2\\tL0\\tengine\\tactive",
+            "fgit-engine\tL2\tL0,L1,L2\tengine\tactive",
+            "fgit-engine\tL2\tL0\tengine\tactive",
         );
         assert_ne!(
             registry, narrowed,
