@@ -9,8 +9,8 @@
 use core::fmt;
 
 use fgit_authority::{
-    AuthorityFailure, AuthorityStore, HeadRead, HeadReadReceipt, ImmutableRead, PutOutcome,
-    authority_head_identity, body_key,
+    AsyncAuthorityStore, AuthorityFailure, AuthorityStore, HeadRead, HeadReadReceipt,
+    ImmutableRead, PutOutcome, authority_head_identity, body_key,
 };
 use fgit_codec::attest::BodyIdentity;
 use fgit_codec::{
@@ -178,6 +178,79 @@ where
     }
     match store
         .read_head(receipt.key())
+        .map_err(LiveCapsuleRefusal::CapsuleStage)?
+    {
+        HeadRead::Present(current) if current == *receipt => {}
+        HeadRead::Present(_) => return Err(LiveCapsuleRefusal::HeadMoved),
+        HeadRead::Absent => return Err(LiveCapsuleRefusal::HeadDisappeared),
+    }
+    let pointer = match current_pointer {
+        Some(pointer) => pointer.advance(capsule_id, &capsule),
+        None => CapsulePointer::genesis(capsule_id, &capsule),
+    }
+    .map_err(LiveCapsuleRefusal::Capsule)?;
+    Ok(FrozenCapsule {
+        capsule,
+        capsule_id,
+        pointer,
+    })
+}
+
+/// Async production twin of [`freeze_capsule`].
+///
+/// It has the same identity, staging, readback, and current-head decisions as
+/// the deterministic surface above; only waiting is delegated to the one
+/// runtime-owned authority context.
+pub async fn freeze_capsule_async<S, I>(
+    store: &S,
+    cx: &S::Context,
+    identity: &I,
+    receipt: &HeadReadReceipt,
+    current_pointer: Option<&CapsulePointer>,
+    closure: CapsuleClosure,
+) -> Result<FrozenCapsule, LiveCapsuleRefusal>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized + Sync,
+{
+    store
+        .authenticate_head_receipt(cx, receipt)
+        .await
+        .map_err(LiveCapsuleRefusal::HeadUnauthenticated)?;
+    let head: RepositoryAuthorityHeadBody = decode_body(receipt.body(), DecodeLimits::DEFAULT)
+        .map_err(LiveCapsuleRefusal::HeadDecode)?;
+    if head.generation != receipt.generation() {
+        return Err(LiveCapsuleRefusal::HeadGenerationMismatch);
+    }
+    let head_id = authority_head_identity(&head)
+        .map_err(|error| LiveCapsuleRefusal::HeadIdentity(Box::new(error)))?;
+    let capsule = RepositoryCapsuleBody::at_head(
+        head_id,
+        &head,
+        current_pointer.map(CapsulePointer::capsule_id),
+        closure.object_closure_root,
+        closure.segment_manifest_root,
+        closure.backup_profile,
+    );
+    let capsule_id = capsule_identity(identity, &capsule).map_err(LiveCapsuleRefusal::Capsule)?;
+    let bytes = encode_body(&capsule).map_err(LiveCapsuleRefusal::CapsuleEncoding)?;
+    let key = body_key(IdentityDomain::RepositoryCapsule, &capsule)
+        .map_err(|_| LiveCapsuleRefusal::Capsule(ChronicleRefusal::CapsuleIdentityUnavailable))?;
+    match store
+        .put_if_absent(cx, &key, &bytes)
+        .await
+        .map_err(LiveCapsuleRefusal::CapsuleStage)?
+    {
+        PutOutcome::Created | PutOutcome::IdenticalRetry => {}
+        PutOutcome::Conflict => return Err(LiveCapsuleRefusal::CapsuleSlotConflict),
+    }
+    if !matches!(store.read_immutable(cx, &key).await, Ok(ImmutableRead::Present(found)) if found == bytes)
+    {
+        return Err(LiveCapsuleRefusal::CapsuleReadbackMismatch);
+    }
+    match store
+        .read_head(cx, receipt.key())
+        .await
         .map_err(LiveCapsuleRefusal::CapsuleStage)?
     {
         HeadRead::Present(current) if current == *receipt => {}

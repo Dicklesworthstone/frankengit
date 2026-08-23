@@ -78,7 +78,9 @@ pub use capsule::{
     advance_pointer_root_last_async, capsule_identity,
 };
 pub use evidence::batch_evidence_root;
-pub use live::{CapsuleClosure, FrozenCapsule, LiveCapsuleRefusal, freeze_capsule};
+pub use live::{
+    CapsuleClosure, FrozenCapsule, LiveCapsuleRefusal, freeze_capsule, freeze_capsule_async,
+};
 pub use origin::{PublicationBasis, ResultingRoots};
 pub use publish::{
     CanonicalBatchReceipt, LostCandidate, PublicationVerdict, publish, publish_async,
