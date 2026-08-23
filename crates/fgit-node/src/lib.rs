@@ -114,29 +114,27 @@ const GIT_DAEMON_CAPABILITIES: &[u8] = b"agent=frankengit-node";
 
 /// The git-daemon capability advertisement for one repository object format.
 ///
-/// A stock Git client selects the OID domain of a v0/v1 advertisement from the
-/// `object-format` capability. Without it the client keeps Git's SHA-1 default,
-/// so a SHA-256 repository advertises 64-hex OIDs (and a 64-zero empty-view
-/// identity) that the client cannot parse — the node would permit a
-/// configuration it cannot serve compatibly, which §6 makes a compatibility
-/// defect rather than a cosmetic one.
+/// Measured against pinned git-2.54.0 through the sandboxed oracle: upstream
+/// advertises `object-format` for EVERY format, sha1 included, and on v0/v1 it
+/// orders that token BEFORE `agent=`. This reproduces upstream exactly, because
+/// §6 makes advertisement behaviour compatibility semantics rather than a
+/// stylistic choice. An earlier revision omitted the token for SHA-1 on the
+/// reasoning that a client seeing none selects sha1 anyway; that is compatible
+/// but it is not what Git does, and the differential lane caught it.
 ///
-/// SHA-1 keeps the historical bytes exactly. `sha1` is Git's default and a
-/// client that sees no `object-format` selects it, so emitting a redundant
-/// token would change every existing SHA-1 advertisement for no compatibility
-/// gain. The match is exhaustive on purpose: a future object format is a
-/// compile error here rather than a silently unadvertised domain.
+/// The token is unconditional, so a future object format is advertised correctly
+/// by construction: `as_str()` names it and no arm exists that could silently
+/// omit it.
+///
+/// Anyone extending this node to protocol v2 must NOT carry the order across.
+/// The same oracle run shows v2 emitting `agent=` first and `object-format=`
+/// last, so the v0/v1 order is not a global Git convention.
 fn git_daemon_capabilities(object_format: GitHashAlgorithm) -> Vec<u8> {
-    match object_format {
-        GitHashAlgorithm::Sha1 => GIT_DAEMON_CAPABILITIES.to_vec(),
-        GitHashAlgorithm::Sha256 => {
-            let mut tokens = GIT_DAEMON_CAPABILITIES.to_vec();
-            tokens.push(b' ');
-            tokens.extend_from_slice(b"object-format=");
-            tokens.extend_from_slice(object_format.as_str().as_bytes());
-            tokens
-        }
-    }
+    let mut tokens = b"object-format=".to_vec();
+    tokens.extend_from_slice(object_format.as_str().as_bytes());
+    tokens.push(b' ');
+    tokens.extend_from_slice(GIT_DAEMON_CAPABILITIES);
+    tokens
 }
 
 /// Immutable upload-pack facts derived from one authenticated admission snapshot.
@@ -5194,13 +5192,13 @@ mod tests {
         );
         let mut expected = format!(
             "{:04x}",
-            b"0000000000000000000000000000000000000000 capabilities^{}\0agent=frankengit-node\n"
+            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 agent=frankengit-node\n"
                 .len()
                 + 4
         )
         .into_bytes();
         expected.extend_from_slice(
-            b"0000000000000000000000000000000000000000 capabilities^{}\0agent=frankengit-node\n0000",
+            b"0000000000000000000000000000000000000000 capabilities^{}\0object-format=sha1 agent=frankengit-node\n0000",
         );
         assert_eq!(
             response, expected,
@@ -5209,20 +5207,19 @@ mod tests {
     }
 
     #[test]
-    fn git_daemon_capabilities_advertise_the_object_format_only_for_sha256() {
+    fn git_daemon_capabilities_advertise_the_object_format_for_every_repository_format() {
         let limits = WireLimits::default();
 
-        // The permitted twin: SHA-1 keeps the historical bytes exactly. A client
-        // that sees no `object-format` selects Git's SHA-1 default, so a
-        // redundant token would change every existing SHA-1 advertisement for
-        // no compatibility gain.
+        // SHA-1 carries its OWN object-format token, because pinned git-2.54.0
+        // advertises one for every format. Measured, not assumed: the oracle
+        // shows `object-format=sha1` on an empty --object-format=sha1 repository.
         let sha1 = git_daemon_capabilities(GitHashAlgorithm::Sha1);
-        assert_eq!(sha1.as_slice(), b"agent=frankengit-node");
+        assert_eq!(sha1.as_slice(), b"object-format=sha1 agent=frankengit-node");
         assert!(
-            !Capabilities::parse_v1(&sha1, &limits)
+            Capabilities::parse_v1(&sha1, &limits)
                 .expect("the SHA-1 daemon capability list stays wire-valid")
                 .contains(b"object-format"),
-            "SHA-1 must not gain a capability it did not previously advertise",
+            "upstream advertises object-format for sha1 too; omitting it is a declared divergence, not a default",
         );
 
         // SHA-256 gains exactly one token, in Git's own spelling, and the bytes
@@ -5231,7 +5228,7 @@ mod tests {
         let sha256 = git_daemon_capabilities(GitHashAlgorithm::Sha256);
         assert_eq!(
             sha256.as_slice(),
-            b"agent=frankengit-node object-format=sha256"
+            b"object-format=sha256 agent=frankengit-node"
         );
         let parsed = Capabilities::parse_v1(&sha256, &limits)
             .expect("the SHA-256 daemon capability list is wire-valid");
@@ -5296,7 +5293,7 @@ mod tests {
         // the SHA-1 domain and cannot parse this advertisement.
         let identity = "0".repeat(GitHashAlgorithm::Sha256.digest_len() * 2);
         let line =
-            format!("{identity} capabilities^{{}}\0agent=frankengit-node object-format=sha256\n");
+            format!("{identity} capabilities^{{}}\0object-format=sha256 agent=frankengit-node\n");
         let mut expected = format!("{:04x}", line.len() + 4).into_bytes();
         expected.extend_from_slice(line.as_bytes());
         expected.extend_from_slice(b"0000");
@@ -5358,7 +5355,7 @@ mod tests {
 
         let identity = "0".repeat(GitHashAlgorithm::Sha256.digest_len() * 2);
         let advertisement =
-            format!("{identity} capabilities^{{}}\0agent=frankengit-node object-format=sha256\n");
+            format!("{identity} capabilities^{{}}\0object-format=sha256 agent=frankengit-node\n");
         let packet = |payload: &str| {
             let mut out = format!("{:04x}", payload.len() + 4).into_bytes();
             out.extend_from_slice(payload.as_bytes());
@@ -5485,7 +5482,7 @@ mod tests {
         let response = read_one_daemon_advertisement(node, b"\0host=loopback\0");
 
         let mut expected = packet(&format!(
-            "{identity} refs/heads/sha256-main\0agent=frankengit-node object-format=sha256\n"
+            "{identity} refs/heads/sha256-main\0object-format=sha256 agent=frankengit-node\n"
         ));
         expected.extend_from_slice(b"0000");
         assert_eq!(
@@ -5503,7 +5500,7 @@ mod tests {
 
         let mut expected = packet("version 1\n");
         expected.extend_from_slice(&packet(&format!(
-            "{identity} refs/heads/sha256-main\0agent=frankengit-node object-format=sha256\n"
+            "{identity} refs/heads/sha256-main\0object-format=sha256 agent=frankengit-node\n"
         )));
         expected.extend_from_slice(b"0000");
         assert_eq!(
