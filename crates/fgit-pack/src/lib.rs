@@ -7,6 +7,7 @@
 
 mod bitmap;
 mod bundle;
+mod bundle_uri;
 mod commit_graph;
 mod delta;
 mod idx;
@@ -23,6 +24,10 @@ pub use bitmap::{
 pub use bundle::{
     BundleProfile, BundleReference, BundleSource, BundleV2, BundleV2Limits, BundleV2Receipt,
     BundleV2Refusal, QuarantinedBundleV2,
+};
+pub use bundle_uri::{
+    BundleUriCompleteness, BundleUriEntry, BundleUriLimits, BundleUriListReceipt, BundleUriListV1,
+    BundleUriProfile, BundleUriRefusal, BundleUriVerification,
 };
 pub use commit_graph::{
     CommitGraphCompleteness, CommitGraphInput, CommitGraphLimits, CommitGraphProfile,
