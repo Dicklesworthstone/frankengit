@@ -4,10 +4,12 @@ use fgit_authority::{
     AuthorityStore, HeadKey, HeadRead, MemoryAuthorityStore, StoreInstanceId, initialize_repository,
 };
 use fgit_chronicle::{
-    BackupProfile, CapsuleClosure, LiveCapsuleRefusal, RestoreOutcome, freeze_capsule,
-    inspect_capsule_against_authority_head_bytes, inspect_capsule_bytes,
+    BackupProfile, CapsuleClosure, LiveCapsuleRefusal, RestoreOutcome, activate_frozen_capsule,
+    freeze_capsule, inspect_capsule_against_authority_head_bytes, inspect_capsule_bytes,
 };
-use fgit_codec::{CryptoBodyIdentity, RepositoryAuthorityHeadBody, encode_body};
+use fgit_codec::{
+    CryptoBodyIdentity, DecodeLimits, RepositoryAuthorityHeadBody, decode_body, encode_body,
+};
 use fgit_types::{
     Digest, DigestAlgorithmId, DigestBytes, HeadGeneration, OPAQUE_ID_LEN, PolicyEpoch,
     RegistryEpoch, RepositoryId,
@@ -72,6 +74,45 @@ fn an_authenticated_current_head_yields_a_staged_root_last_candidate() {
     assert_eq!(frozen.capsule().head_generation, HeadGeneration::FIRST);
     assert_eq!(frozen.pointer().capsule_id(), frozen.capsule_id());
     assert_eq!(frozen.pointer().repository_id(), repository());
+}
+
+#[test]
+fn capsule_activation_stages_a_successor_before_advancing_the_checkpoint_pointer() {
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x48));
+    let key = HeadKey::new(b"chronicle/live-capsule-activation".to_vec()).expect("bounded key");
+    initialize_repository(&store, &key, &head()).expect("head initializes");
+    let basis = match store.read_head(&key).expect("head reads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("initialized head is present"),
+    };
+    let frozen = freeze_capsule(&store, &CryptoBodyIdentity, &basis, None, closure())
+        .expect("current head freezes");
+
+    let activated = activate_frozen_capsule(&store, &basis, &frozen)
+        .expect("staged capsule activates through an exact-head CAS");
+
+    assert_eq!(activated.pointer(), frozen.pointer());
+    let activated_head: RepositoryAuthorityHeadBody =
+        decode_body(activated.head().body(), DecodeLimits::DEFAULT)
+            .expect("activated receipt carries canonical head bytes");
+    assert_eq!(
+        activated_head.last_checkpoint_id,
+        Some(frozen.capsule_id()),
+        "the authoritative checkpoint pointer is the last CAS field"
+    );
+    assert_eq!(
+        activated_head.predecessor_head_id,
+        Some(frozen.capsule().head_id)
+    );
+    assert_eq!(
+        activated_head.generation,
+        HeadGeneration::try_new(2).expect("second generation is valid")
+    );
+    assert_eq!(
+        store.read_head(&key).expect("head rereads"),
+        HeadRead::Present(activated.head().clone()),
+        "the returned receipt is the current authority position"
+    );
 }
 
 #[test]

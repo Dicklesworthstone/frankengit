@@ -9,7 +9,7 @@
 use core::fmt;
 
 use fgit_authority::{
-    AsyncAuthorityStore, AuthorityFailure, AuthorityStore, HeadRead, HeadReadReceipt,
+    AsyncAuthorityStore, AuthorityFailure, AuthorityStore, CasOutcome, HeadRead, HeadReadReceipt,
     ImmutableRead, PutOutcome, authority_head_identity, body_key,
 };
 use fgit_codec::attest::BodyIdentity;
@@ -42,6 +42,32 @@ pub struct FrozenCapsule {
     capsule: RepositoryCapsuleBody,
     capsule_id: RepositoryCapsuleId,
     pointer: CapsulePointer,
+}
+
+/// The result of root-last checkpoint activation.
+///
+/// The returned head receipt is the new authority position carrying the
+/// checkpoint pointer. Routing is deliberately absent from this type: it is a
+/// derived publication and cannot become visible until a later consumer has
+/// completed its own verification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActivatedCapsule {
+    pointer: CapsulePointer,
+    head: HeadReadReceipt,
+}
+
+impl ActivatedCapsule {
+    /// The activated anti-rollback checkpoint pointer.
+    #[must_use]
+    pub const fn pointer(&self) -> CapsulePointer {
+        self.pointer
+    }
+
+    /// The new authority-head receipt that records the activated pointer.
+    #[must_use]
+    pub const fn head(&self) -> &HeadReadReceipt {
+        &self.head
+    }
 }
 
 impl FrozenCapsule {
@@ -90,6 +116,18 @@ pub enum LiveCapsuleRefusal {
     HeadDisappeared,
     /// The repository advanced while the capsule was staged.
     HeadMoved,
+    /// The authenticated activation basis does not match the frozen capsule.
+    ActivationBasisMismatch,
+    /// The existing checkpoint pointer is not the frozen capsule's predecessor.
+    CheckpointPredecessorMismatch,
+    /// The authority-head generation cannot advance without overflowing.
+    ActivationGenerationExhausted,
+    /// Staging the successor authority head failed or was ambiguous.
+    ActivationHeadStage(AuthorityFailure),
+    /// The successor authority-head identity slot already held different bytes.
+    ActivationHeadSlotConflict,
+    /// The staged successor authority head did not read back byte-identically.
+    ActivationHeadReadbackMismatch,
 }
 
 impl fmt::Display for LiveCapsuleRefusal {
@@ -126,6 +164,26 @@ impl fmt::Display for LiveCapsuleRefusal {
             Self::HeadMoved => {
                 formatter.write_str("authority head moved while the capsule was staged")
             }
+            Self::ActivationBasisMismatch => formatter.write_str(
+                "activation receipt does not name the exact authority head frozen by this capsule",
+            ),
+            Self::CheckpointPredecessorMismatch => formatter.write_str(
+                "authority head's checkpoint pointer is not the frozen capsule predecessor",
+            ),
+            Self::ActivationGenerationExhausted => formatter
+                .write_str("authority head generation is exhausted before checkpoint activation"),
+            Self::ActivationHeadStage(error) => {
+                write!(
+                    formatter,
+                    "successor authority-head staging did not complete: {error}"
+                )
+            }
+            Self::ActivationHeadSlotConflict => {
+                formatter.write_str("successor authority-head identity slot held different bytes")
+            }
+            Self::ActivationHeadReadbackMismatch => formatter.write_str(
+                "successor authority-head staging was not proven by exact byte readback",
+            ),
         }
     }
 }
@@ -324,6 +382,150 @@ fn collect_authority_head_defects(
             defects.push(CapsuleDefect::AuthorityHeadMismatch { field });
         }
     }
+}
+
+/// Stage and activate a frozen capsule through the exact authority head it
+/// checkpointed.
+///
+/// The successor authority head is an immutable body and is staged/read back
+/// before its head-slot CAS. The CAS is therefore the final visibility point:
+/// neither a capsule nor a successor head object becoming readable publishes a
+/// checkpoint on its own. The function performs no routing publication.
+pub fn activate_frozen_capsule<S>(
+    store: &S,
+    basis: &HeadReadReceipt,
+    frozen: &FrozenCapsule,
+) -> Result<ActivatedCapsule, LiveCapsuleRefusal>
+where
+    S: AuthorityStore + ?Sized,
+{
+    store
+        .authenticate_head_receipt(basis)
+        .map_err(LiveCapsuleRefusal::HeadUnauthenticated)?;
+    let mut head: RepositoryAuthorityHeadBody =
+        decode_body(basis.body(), DecodeLimits::DEFAULT).map_err(LiveCapsuleRefusal::HeadDecode)?;
+    if head.generation != basis.generation() {
+        return Err(LiveCapsuleRefusal::HeadGenerationMismatch);
+    }
+    let head_id = authority_head_identity(&head)
+        .map_err(|error| LiveCapsuleRefusal::HeadIdentity(Box::new(error)))?;
+    let mut basis_defects = Vec::with_capacity(13);
+    collect_authority_head_defects(frozen.capsule(), head_id, &head, &mut basis_defects);
+    if !basis_defects.is_empty() {
+        return Err(LiveCapsuleRefusal::ActivationBasisMismatch);
+    }
+    if head.last_checkpoint_id != frozen.capsule().predecessor_capsule_id {
+        return Err(LiveCapsuleRefusal::CheckpointPredecessorMismatch);
+    }
+
+    head.predecessor_head_id = Some(head_id);
+    head.generation = head
+        .generation
+        .next()
+        .map_err(|_| LiveCapsuleRefusal::ActivationGenerationExhausted)?;
+    head.last_checkpoint_id = Some(frozen.capsule_id());
+    let successor_bytes = encode_body(&head).map_err(LiveCapsuleRefusal::CapsuleEncoding)?;
+    let successor_key = body_key(IdentityDomain::RepositoryAuthorityHead, &head)
+        .map_err(|_| LiveCapsuleRefusal::ActivationBasisMismatch)?;
+    match store
+        .put_if_absent(&successor_key, &successor_bytes)
+        .map_err(LiveCapsuleRefusal::ActivationHeadStage)?
+    {
+        PutOutcome::Created | PutOutcome::IdenticalRetry => {}
+        PutOutcome::Conflict => return Err(LiveCapsuleRefusal::ActivationHeadSlotConflict),
+    }
+    if !matches!(store.read_immutable(&successor_key), Ok(ImmutableRead::Present(found)) if found == successor_bytes)
+    {
+        return Err(LiveCapsuleRefusal::ActivationHeadReadbackMismatch);
+    }
+    let CasOutcome::Committed(head) = store
+        .compare_exchange_head(
+            basis.key(),
+            basis.token(),
+            head.generation,
+            &successor_bytes,
+        )
+        .map_err(LiveCapsuleRefusal::ActivationHeadStage)?
+    else {
+        return Err(LiveCapsuleRefusal::HeadMoved);
+    };
+    Ok(ActivatedCapsule {
+        pointer: frozen.pointer(),
+        head,
+    })
+}
+
+/// Async production twin of [`activate_frozen_capsule`].
+///
+/// It carries the same stage/readback/CAS order as the deterministic surface;
+/// only the waiting belongs to the runtime-owned authority context.
+pub async fn activate_frozen_capsule_async<S>(
+    store: &S,
+    cx: &S::Context,
+    basis: &HeadReadReceipt,
+    frozen: &FrozenCapsule,
+) -> Result<ActivatedCapsule, LiveCapsuleRefusal>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    store
+        .authenticate_head_receipt(cx, basis)
+        .await
+        .map_err(LiveCapsuleRefusal::HeadUnauthenticated)?;
+    let mut head: RepositoryAuthorityHeadBody =
+        decode_body(basis.body(), DecodeLimits::DEFAULT).map_err(LiveCapsuleRefusal::HeadDecode)?;
+    if head.generation != basis.generation() {
+        return Err(LiveCapsuleRefusal::HeadGenerationMismatch);
+    }
+    let head_id = authority_head_identity(&head)
+        .map_err(|error| LiveCapsuleRefusal::HeadIdentity(Box::new(error)))?;
+    let mut basis_defects = Vec::with_capacity(13);
+    collect_authority_head_defects(frozen.capsule(), head_id, &head, &mut basis_defects);
+    if !basis_defects.is_empty() {
+        return Err(LiveCapsuleRefusal::ActivationBasisMismatch);
+    }
+    if head.last_checkpoint_id != frozen.capsule().predecessor_capsule_id {
+        return Err(LiveCapsuleRefusal::CheckpointPredecessorMismatch);
+    }
+
+    head.predecessor_head_id = Some(head_id);
+    head.generation = head
+        .generation
+        .next()
+        .map_err(|_| LiveCapsuleRefusal::ActivationGenerationExhausted)?;
+    head.last_checkpoint_id = Some(frozen.capsule_id());
+    let successor_bytes = encode_body(&head).map_err(LiveCapsuleRefusal::CapsuleEncoding)?;
+    let successor_key = body_key(IdentityDomain::RepositoryAuthorityHead, &head)
+        .map_err(|_| LiveCapsuleRefusal::ActivationBasisMismatch)?;
+    match store
+        .put_if_absent(cx, &successor_key, &successor_bytes)
+        .await
+        .map_err(LiveCapsuleRefusal::ActivationHeadStage)?
+    {
+        PutOutcome::Created | PutOutcome::IdenticalRetry => {}
+        PutOutcome::Conflict => return Err(LiveCapsuleRefusal::ActivationHeadSlotConflict),
+    }
+    if !matches!(store.read_immutable(cx, &successor_key).await, Ok(ImmutableRead::Present(found)) if found == successor_bytes)
+    {
+        return Err(LiveCapsuleRefusal::ActivationHeadReadbackMismatch);
+    }
+    let CasOutcome::Committed(head) = store
+        .compare_exchange_head(
+            cx,
+            basis.key(),
+            basis.token(),
+            head.generation,
+            &successor_bytes,
+        )
+        .await
+        .map_err(LiveCapsuleRefusal::ActivationHeadStage)?
+    else {
+        return Err(LiveCapsuleRefusal::HeadMoved);
+    };
+    Ok(ActivatedCapsule {
+        pointer: frozen.pointer(),
+        head,
+    })
 }
 
 /// Freeze the authenticated head, stage its capsule, and return a pointer
