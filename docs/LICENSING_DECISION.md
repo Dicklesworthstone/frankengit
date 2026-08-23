@@ -1,7 +1,7 @@
 # FrankenGit Licensing Decision
 
-<!-- fgit-license-decision: UNRESOLVED -->
-<!-- fgit-license-osi: unknown -->
+<!-- fgit-license-decision: LicenseRef-MIT-OpenAI-Anthropic-Rider -->
+<!-- fgit-license-osi: no -->
 
 The HTML comment above is the single machine-readable form of this decision and
 the only thing `scripts/license_gate.sh` reads. While it says `UNRESOLVED`,
@@ -27,8 +27,41 @@ Nothing in this document decides D14. **The choice is the repository owner's.**
 This document stops at assembling the options, the criteria, and the machinery
 that makes deferral visible instead of silent.
 
-**Status:** launch-blocking decision; no automatic license change has been made.  
-**Current truth:** source-available under the repository's custom MIT-style rider, not OSI-approved open source.
+**Status:** RESOLVED by the repository owner (Jeffrey Emanuel), 2026-08-23, D14.  
+**Decision:** `LicenseRef-MIT-OpenAI-Anthropic-Rider` — the MIT licence together with the
+OpenAI/Anthropic rider, which is the owner's standard across his projects and the terms this
+repository already carried. No licence text changed; the decision records and ratifies it.  
+**OSI-approved:** no. **Current truth:** source-available under `LicenseRef-MIT-OpenAI-Anthropic-Rider`.
+
+### Why the OSI marker is `no`, and why that is not a defect
+
+The rider denies all rights to named parties (OpenAI, L.L.C.; Anthropic, PBC; their affiliates
+and anyone acting on their behalf). That is discrimination against specific persons and groups,
+which the Open Source Definition forbids, so the licence cannot be OSI-approved however
+permissive its MIT core is. The marker records a fact about the terms, not a judgement about
+whether they are the right terms.
+
+Two consequences follow mechanically and are load-bearing:
+
+* Under `no`, the paragraph above this one already binds: **the repository must keep saying
+  source-available** for as long as the restriction lasts. FG-062's acceptance says it more
+  plainly — *"no doc anywhere claims open source until the license actually is"* — and that rule
+  outlives the decision.
+* Naming the licence precisely and declining to call it open source are therefore **not in
+  tension**. The owner's instruction was to stop describing the terms vaguely as
+  "source-available" with no identifier and to name them; every surface now names
+  `LicenseRef-MIT-OpenAI-Anthropic-Rider` *and* states it is not OSI-approved, because both are
+  true and the second is required by the acceptance and by this document's own `no` rule.
+
+### Provenance
+
+Ruled by the repository owner and relayed on `frankengit-fg062-license-decision-cr5e` by
+BatchOrchestrator at 2026-08-23 04:56 UTC. The owner's words: the licence "is MIT + the
+anthropic/openai rider (Jeff's standard across all his projects) -- this was ALREADY decided",
+with instructions to write the LICENSE file and correct AGENTS.md §10's vague wording. The
+LICENSE file already carried exactly these terms, so nothing about what the software grants has
+changed today; what changed is that the decision is now recorded where `scripts/license_gate.sh`
+can read it, and stated identically on every surface.
 
 ## The inconsistency
 
