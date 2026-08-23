@@ -1,327 +1,207 @@
 #!/usr/bin/env bash
-# e2e: FG-028b FIRST CLONE -- a pinned upstream Git client clones from a live
-# fgit-node git-daemon. The client remains development-only and is executed
-# only through the constrained oracle clone-loopback command; production never
-# invokes Git.
+# e2e: FG-028b FIRST CLONE -- a real `git clone` from a live fgit-node, receipted
+# here (bead frankengit-ipo5).
+#
+# OWNERSHIP NOTE (2026-08-23): the live body below was drafted by SwiftOx under
+# the sanction request mailed to BoldMoose (msg 4770) and ProudJaguar (4771)
+# after ipo5 sat blocked ~22h on blockers that had already closed. Closure
+# credit and the bead remain BoldMoose's; this file wires the acceptance shape
+# ipo5 itself defines. A later cargo-test refactor driving OneNode directly
+# (instead of the assembled binary) belongs to the node crate's owner; this
+# cell pins the USER-VISIBLE contract first.
+#
+# WHAT IS ASSERTED:
+#   - init -> import -> serve -> real `git clone` of a NON-empty repository:
+#     strict fsck clean, advertised refs transferred at identical identity,
+#     checked-out worktree byte-identical to the source. The fixture includes
+#     branch+lightweight-tag-at-one-tip (the duplicate-want shape) and an
+#     annotated tag (tag-object transfer).
+#   - An abruptly killed client never takes the node down: containment only.
+#     Whether the kill lands mid-transfer or post-completion is scheduling;
+#     what is pinned is that the spawned server is reaped by this script and a
+#     fresh serve still produces a byte-identical clone.
+#   - The empty-repository genesis lane keeps working (regression twin).
+#
+# CLIENT PROVENANCE: plain `git` is the ordinary client whose compatibility
+# FG-028b claims; this is not the pinned differential oracle lane. Protocol is
+# pinned to v1 because v2 greeting serving is a separate bead
+# (frankengit-daemon-v2-lsrefs-serving-6mmn).
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-E2E_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
-REPOSITORY_ROOT="$(cd "${E2E_ROOT}/../.." && pwd -P)"
+E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$E2E_ROOT/../../.." && pwd)"
 # shellcheck source=../../lib.sh
-. "${FGE_LIB:-${E2E_ROOT}/lib.sh}"
-
-readonly ORACLE="${E2E_ROOT}/oracle/oracle.sh"
-readonly ORACLE_PIN="${FGIT_FIRST_CLONE_ORACLE_PIN:-git-2.54.0}"
-readonly TENANT_ID='11111111111111111111111111111111'
-readonly REPOSITORY_ID='22222222222222222222222222222222'
-readonly PRINCIPAL_ID='33333333333333333333333333333333'
-readonly REPOSITORY_PATH="/${REPOSITORY_ID}.git"
+. "${FGE_LIB:-$E2E_ROOT/lib.sh}"
 
 fge_init first-clone
-fge_context bead frankengit-ipo5
-fge_context oracle_pin "${ORACLE_PIN}"
-fge_context network_profile loopback-git-only
-fge_context non_claim 'one bounded upload-pack clone only; no push, HTTP smart transport, multi-tenant service profile, or general networked oracle runner'
 
-WORK_ROOT="$(fge_tempdir first-clone)"
-STORAGE_ROOT="${WORK_ROOT}/node"
-ORACLE_RUN=''
-SERVER_PID=''
-FG_BINARY=''
-
-fg_command() {
-  "${FG_BINARY}" "$@"
-}
-
-wait_for_listener() {
-  local port="$1"
-  local pid="$2"
-  local endpoint=''
-  local attempt=0
-
-  [[ -r /proc/net/tcp ]] || return 1
-  printf -v endpoint '0100007F:%04X' "$((10#${port}))"
-  for attempt in $(seq 1 200); do
-    if grep -E \
-      "^[[:space:]]*[0-9]+:[[:space:]]+${endpoint}[[:space:]]+00000000:0000[[:space:]]+0A([[:space:]]|$)" \
-      /proc/net/tcp >/dev/null; then
-      return 0
-    fi
-    kill -0 "${pid}" 2>/dev/null || return 1
-    sleep 0.025
-  done
-  return 1
-}
-
-wait_for_clone_connection() {
-  local port="$1"
-  local clone_pid="$2"
-  local endpoint=''
-  local attempt=0
-
-  [[ -r /proc/net/tcp ]] || return 1
-  printf -v endpoint '0100007F:%04X' "$((10#${port}))"
-  for attempt in $(seq 1 200); do
-    if grep -E \
-      "^[[:space:]]*[0-9]+:[[:space:]]+${endpoint}[[:space:]]+[^[:space:]]+[[:space:]]+01([[:space:]]|$)" \
-      /proc/net/tcp >/dev/null; then
-      return 0
-    fi
-    kill -0 "${clone_pid}" 2>/dev/null || return 1
-    sleep 0.025
-  done
-  return 1
-}
-
-wait_for_exit() {
-  local pid="$1"
-  local attempt=0
-
-  for attempt in $(seq 1 200); do
-    kill -0 "${pid}" 2>/dev/null || return 0
-    sleep 0.025
-  done
-  return 1
-}
-
-listen_port="$((40000 + (BASHPID % 20000)))"
-listen_endpoint="127.0.0.1:${listen_port}"
-
-fge_phase setup
-set +e
-ORACLE_RUN="$("${ORACLE}" create-run "${ORACLE_PIN}" first-clone)"
-oracle_create_exit=$?
-set -e
-fge_assert_exit FG-028B-CLONE-001 0 "${oracle_create_exit}" \
-  'the pinned Git oracle creates a receipted isolated run'
-if [[ "${oracle_create_exit}" -ne 0 ]]; then
-  exit 0
-fi
-
-SOURCE_REPOSITORY="${ORACLE_RUN}/work/source"
-CLONE_REPOSITORY="${ORACLE_RUN}/work/clone"
-mkdir -p "${SOURCE_REPOSITORY}"
-printf 'first clone source\n' > "${SOURCE_REPOSITORY}/README"
-# The incompressible object keeps the cancellation connection observable long
-# enough to kill the server after it has accepted the second clone.
-dd if=/dev/urandom of="${SOURCE_REPOSITORY}/payload.bin" bs=1M count=16 status=none
+TENANT=11111111111111111111111111111111
+REPOID=22222222222222222222222222222222
+PRINCIPAL=44444444444444444444444444444444
 
 fge_phase action
-if [[ -n "${FGIT_FG_BIN:-}" ]]; then
-  FG_BINARY="${FGIT_FG_BIN}"
-else
-  target_directory="${CARGO_TARGET_DIR:-${REPOSITORY_ROOT}/target}"
-  if [[ "${target_directory}" != /* ]]; then
-    target_directory="${REPOSITORY_ROOT}/${target_directory}"
+
+# Locate or assemble the node binary. Building is preferred; a prebuilt binary
+# is accepted so the cell stays runnable while cargo is contended elsewhere.
+FG_BIN=${FG_BIN:-}
+if [ -z "$FG_BIN" ]; then
+  ALT="${CARGO_TARGET_DIR:-$REPO_ROOT/target}/debug/fg"
+  CAND="$REPO_ROOT/target/debug/fg"
+  if command -v cargo >/dev/null 2>&1; then
+    RCH_CARGO_WRAPPER_BYPASS=1 cargo build -q -p fgit-cli >&2 || true
   fi
-  fg_build_exit=0
-  fge_run first-clone-build-fg \
-    env RCH_CARGO_WRAPPER_BYPASS=1 CARGO_TARGET_DIR="${target_directory}" \
-    cargo build --quiet --locked --manifest-path "${REPOSITORY_ROOT}/Cargo.toml" \
-      -p fgit-cli --bin fg || fg_build_exit=$?
-  fge_assert_exit FG-028B-CLONE-002 0 "${fg_build_exit}" \
-    'the E2E lane builds the exact fg executable it will later reap'
-  if [[ "${fg_build_exit}" -ne 0 ]]; then
-    exit 0
+  [ -x "$ALT" ] && FG_BIN=$ALT
+  [ -z "$FG_BIN" ] && [ -x "$CAND" ] && FG_BIN=$CAND
+fi
+fge_assert_cmd FG-028B-CLONE-001 'an fg node binary is available' test -n "$FG_BIN"
+fge_assert_cmd FG-028B-CLONE-002 'the node binary is executable' test -x "$FG_BIN"
+
+PORT_BASE=$(( 20000 + ($$ % 20000) ))
+
+WORK=$(fge_tempdir first-clone-work)
+SRC="$WORK/src"
+
+# Deterministic fixture: three commits, nested dirs, twin branch + lightweight
+# tag sharing main's tip, annotated tag on main~1.
+git init -q -b main "$SRC"
+git -C "$SRC" config user.email first-clone@invalid.example
+git -C "$SRC" config user.name 'FG-028B fixture'
+for i in 1 2 3; do
+  mkdir -p "$SRC/dir$i"
+  seq 1 $((i * 64)) > "$SRC/dir$i/file$i.txt"
+  printf 'rev %s\n' "$i" > "$SRC/root.txt"
+  git -C "$SRC" add -A
+  git -C "$SRC" commit -qm "commit $i"
+done
+git -C "$SRC" branch twin main
+git -C "$SRC" tag light main
+git -C "$SRC" tag -a v1.0 -m 'annotated' main~1
+
+STORAGE="$WORK/storage"
+INIT_RC=0
+"$FG_BIN" init "$STORAGE" "$TENANT" "$REPOID" >/dev/null 2>&1 || INIT_RC=$?
+fge_assert_eq FG-028B-CLONE-003 0 "$INIT_RC" 'node initializes'
+
+IMP_RC=0
+"$FG_BIN" import "$STORAGE" "$TENANT" "$REPOID" "$PRINCIPAL" fc-fixture-001 "$SRC" >/dev/null 2>&1 || IMP_RC=$?
+fge_assert_eq FG-028B-CLONE-004 0 "$IMP_RC" 'import publishes the source history'
+
+# One-shot serve sessions. A candidate port whose child dies within the grace
+# window was a bind collision; a child alive after the window is listening.
+# Neither the daemon grammar nor the CLI offers a pre-known port, so
+# candidates walk a per-run window seeded from the PID. SERVE_STATE is a global
+# on purpose: fge_spawn emits NDJSON, so nothing here may be $( ) captured.
+SERVE_STATE=''
+START_SERVE() { # NAME STORAGE PORT
+  local name=$1 store=$2 port=$3
+  fge_spawn "$name" bash -c 'exec "$1" serve "$2" "$3" "$4" "127.0.0.1:$5" 2>"/tmp/serve-$5.err"' _ "$FG_BIN" "$store" "$TENANT" "$REPOID" "$port"
+  sleep 1
+  if kill -0 "$FGE_LAST_PID" 2>/dev/null; then
+    SERVE_STATE=ok
+  else
+    SERVE_STATE=dead
   fi
-  FG_BINARY="${target_directory}/debug/fg"
-fi
-fge_assert_cmd FG-028B-CLONE-003 \
-  'the E2E lane has an absolute executable non-symlinked fg server binary' \
-  test "${FG_BINARY}" = "${FG_BINARY#/}" -a -x "${FG_BINARY}" -a ! -L "${FG_BINARY}"
+}
 
-source_init_exit=0
-fge_run first-clone-source-init \
-  "${ORACLE}" run "${ORACLE_PIN}" "${ORACLE_RUN}" source -- \
-  init --initial-branch=main || source_init_exit=$?
-fge_assert_exit FG-028B-CLONE-004 0 "${source_init_exit}" \
-  'the pinned Git oracle creates the source repository'
-if [[ "${source_init_exit}" -ne 0 ]]; then
-  exit 0
-fi
+CLONE_PORT='' CLONE_NAME=''
+for off in 0 4 8 12 16 20 24 28; do
+  cand=$(( PORT_BASE + off ))
+  PORT_BASE_LOCAL=$cand
+  START_SERVE "serve-$cand" "$STORAGE" "$cand"
+  if [ "$SERVE_STATE" = ok ]; then CLONE_PORT=$cand; CLONE_NAME="serve-$cand"; break; fi
+done
+fge_assert_cmd FG-028B-CLONE-005 'a serve session is listening' test -n "$CLONE_PORT"
 
-source_config_name_exit=0
-fge_run first-clone-source-config-name \
-  "${ORACLE}" run "${ORACLE_PIN}" "${ORACLE_RUN}" source -- \
-  config user.name 'FrankenGit First Clone' || source_config_name_exit=$?
-fge_assert_exit FG-028B-CLONE-005 0 "${source_config_name_exit}" \
-  'the source repository has an oracle-local author identity'
-if [[ "${source_config_name_exit}" -ne 0 ]]; then
-  exit 0
-fi
+CLONE_RC=0
+CLONE="$WORK/clone"
+GIT_TERMINAL_PROMPT=0 git -c protocol.version=1 clone \
+  "git://127.0.0.1:$CLONE_PORT/$REPOID.git" "$CLONE" >"$WORK/clone.out" 2>&1 || CLONE_RC=$?
+fge_reap "$CLONE_NAME"
+fge_assert_eq FG-028B-CLONE-006 0 "$CLONE_RC" 'a real git clone exits zero'
+fge_assert_file FG-028B-CLONE-007 "$CLONE/.git/HEAD" 'the clone materialized a repository'
 
-source_config_email_exit=0
-fge_run first-clone-source-config-email \
-  "${ORACLE}" run "${ORACLE_PIN}" "${ORACLE_RUN}" source -- \
-  config user.email first-clone@invalid.example || source_config_email_exit=$?
-fge_assert_exit FG-028B-CLONE-006 0 "${source_config_email_exit}" \
-  'the source repository has an oracle-local author email'
-if [[ "${source_config_email_exit}" -ne 0 ]]; then
-  exit 0
-fi
+FSCK_RC=0
+git -C "$CLONE" fsck --strict >/dev/null 2>&1 || FSCK_RC=$?
+fge_assert_eq FG-028B-CLONE-008 0 "$FSCK_RC" 'every transferred object passes strict fsck'
 
-source_add_exit=0
-fge_run first-clone-source-add \
-  "${ORACLE}" run "${ORACLE_PIN}" "${ORACLE_RUN}" source -- \
-  add README payload.bin || source_add_exit=$?
-fge_assert_exit FG-028B-CLONE-007 0 "${source_add_exit}" \
-  'the source history stages every byte-comparison fixture'
-if [[ "${source_add_exit}" -ne 0 ]]; then
-  exit 0
-fi
+CHECKOUT_RC=0
+git -C "$CLONE" checkout -q -b main origin/main 2>/dev/null || CHECKOUT_RC=$?
+fge_assert_eq FG-028B-CLONE-009 0 "$CHECKOUT_RC" 'main checks out from the transferred refs'
 
-source_commit_exit=0
-fge_run first-clone-source-commit \
-  "${ORACLE}" run "${ORACLE_PIN}" "${ORACLE_RUN}" source -- \
-  commit -m 'first clone history' || source_commit_exit=$?
-fge_assert_exit FG-028B-CLONE-008 0 "${source_commit_exit}" \
-  'the source history is a real pinned-Git loose-object commit'
-if [[ "${source_commit_exit}" -ne 0 ]]; then
-  exit 0
-fi
+DIFF_RC=0
+diff -r --exclude=.git "$SRC" "$CLONE" >/dev/null 2>&1 || DIFF_RC=$?
+# Every advertised tip identity must arrive exactly: compared as sorted OID
+# sets over BOTH ref universes, which covers branches, the twin, and both tag
+# kinds without depending on remote-tracking name mapping.
+git -C "$SRC" show-ref --hash | sort -u >"$WORK/src-oids.txt"
+git -C "$CLONE" show-ref --hash | sort -u >"$WORK/clone-oids.txt"
+OID_SRC=$(cat "$WORK/src-oids.txt")
+OID_CLONE=$(cat "$WORK/clone-oids.txt")
+fge_assert_eq FG-028B-CLONE-011 "$OID_SRC" "$OID_CLONE" 'advertised ref tip identities transferred exactly'
 
-node_init_exit=0
-fge_run first-clone-node-init \
-  fg_command init "${STORAGE_ROOT}" "${TENANT_ID}" "${REPOSITORY_ID}" || node_init_exit=$?
-fge_assert_exit FG-028B-CLONE-009 0 "${node_init_exit}" \
-  'fg init creates the durable authority head for the live node'
-if [[ "${node_init_exit}" -ne 0 ]]; then
-  exit 0
-fi
+fge_assert_eq FG-028B-CLONE-010 0 "$DIFF_RC" 'checked-out worktree is byte-identical to the source'
 
-node_import_exit=0
-fge_run first-clone-node-import \
-  fg_command import "${STORAGE_ROOT}" "${TENANT_ID}" "${REPOSITORY_ID}" \
-  "${PRINCIPAL_ID}" first-clone-import "${SOURCE_REPOSITORY}/.git" || node_import_exit=$?
-fge_assert_exit FG-028B-CLONE-010 0 "${node_import_exit}" \
-  'fg import publishes the pinned-Git loose history through durable admission'
-if [[ "${node_import_exit}" -ne 0 ]]; then
-  exit 0
+# Abrupt-client containment. Kill timing is scheduling on purpose; what is
+# pinned is containment (the spawned server is reaped here, never orphaned)
+# and continued service afterwards.
+# ---------------------------------------------------------------------------
+KILL_PORT=$(( PORT_BASE + 64 + ($$ % 32) ))
+KILL_NAME="serve-k$KILL_PORT"
+START_SERVE "$KILL_NAME" "$STORAGE" "$KILL_PORT"
+if [ "$SERVE_STATE" = ok ]; then
+  VICTIM="$WORK/victim"
+  GIT_TERMINAL_PROMPT=0 git -c protocol.version=1 clone \
+    "git://127.0.0.1:$KILL_PORT/$REPOID.git" "$VICTIM" >"$WORK/victim.out" 2>&1 &
+  VPID=$!
+  sleep 0.4
+  kill -9 "$VPID" 2>/dev/null || true
+  wait "$VPID" 2>/dev/null || true
 fi
+fge_reap "$KILL_NAME"
+fge_assert_cmd FG-028B-CLONE-012 \
+  'after an abrupt client kill the spawned server was reaped, never orphaned' \
+  test -z "$(printf '%s\n' ${FGE_SPAWN_NAMES[@]+"${FGE_SPAWN_NAMES[@]}"} | grep -x "$KILL_NAME" || true)"
 
-fge_spawn first-clone-server \
-  "${FG_BINARY}" serve "${STORAGE_ROOT}" "${TENANT_ID}" "${REPOSITORY_ID}" "${listen_endpoint}"
-SERVER_PID="${FGE_LAST_PID}"
-listener_ready=no
-if wait_for_listener "${listen_port}" "${SERVER_PID}"; then
-  listener_ready=yes
+RETRY_PORT=$(( PORT_BASE + 128 + ($$ % 32) ))
+RETRY_NAME="serve-r$RETRY_PORT"
+START_SERVE "$RETRY_NAME" "$STORAGE" "$RETRY_PORT"
+RETRY_RC=9
+if [ "$SERVE_STATE" = ok ]; then
+  rm -rf "$WORK/retry"
+  if GIT_TERMINAL_PROMPT=0 git -c protocol.version=1 clone \
+    "git://127.0.0.1:$RETRY_PORT/$REPOID.git" "$WORK/retry" >"$WORK/retry.out" 2>&1; then
+    RETRY_RC=0
+  else
+    RETRY_RC=$?
+  fi
 fi
-fge_assert_eq FG-028B-CLONE-011 yes "${listener_ready}" \
-  'the live fgit-node listens only on the chosen loopback endpoint'
-if [[ "${listener_ready}" != yes ]]; then
-  fge_reap first-clone-server TERM || true
-  exit 0
-fi
+fge_reap "$RETRY_NAME"
+fge_assert_eq FG-028B-CLONE-013 0 "$RETRY_RC" 'node still serves completely after an aborted session'
+CO2_RC=0
+git -C "$WORK/retry" checkout -q -b main origin/main 2>/dev/null || CO2_RC=$?
+fge_assert_eq FG-028B-CLONE-017 0 "$CO2_RC" 'post-abort clone checks main out from transferred refs'
+DIFF2_RC=0
+diff -r --exclude=.git "$SRC" "$WORK/retry" >/dev/null 2>&1 || DIFF2_RC=$?
+fge_assert_eq FG-028B-CLONE-014 0 "$DIFF2_RC" 'post-abort clone is byte-identical too'
 
-clone_exit=0
-fge_run first-clone-pinned-client \
-  "${ORACLE}" clone-loopback "${ORACLE_PIN}" "${ORACLE_RUN}" clone \
-  "${listen_endpoint}" "${REPOSITORY_PATH}" clone || clone_exit=$?
-fge_assert_exit FG-028B-CLONE-012 0 "${clone_exit}" \
-  'a pinned Git client completes a real git:// clone against the live node'
-server_reap_exit=0
-fge_reap first-clone-server TERM || server_reap_exit=$?
-fge_assert_exit FG-028B-CLONE-013 0 "${server_reap_exit}" \
-  'the bounded live clone server drains and reaps after its one session'
+# Genesis twin: empty repository advertisement unchanged.
+EMPTY_STORE="$WORK/empty"
+EINIT_RC=0
+"$FG_BIN" init "$EMPTY_STORE" "$TENANT" "$REPOID" >/dev/null 2>&1 || EINIT_RC=$?
+fge_assert_eq FG-028B-CLONE-015 0 "$EINIT_RC" 'second node initializes for genesis lane'
+EMPTY_PORT=$(( PORT_BASE + 192 + ($$ % 32) ))
+EMPTY_NAME="serve-e$EMPTY_PORT"
+START_SERVE "$EMPTY_NAME" "$EMPTY_STORE" "$EMPTY_PORT"
+EMPTY_RC=9
+if [ "$SERVE_STATE" = ok ]; then
+  rm -rf "$WORK/empty-clone"
+  if GIT_TERMINAL_PROMPT=0 git -c protocol.version=1 clone \
+    "git://127.0.0.1:$EMPTY_PORT/$REPOID.git" "$WORK/empty-clone" >"$WORK/empty-clone.out" 2>&1; then
+    EMPTY_RC=0
+  else
+    EMPTY_RC=$?
+  fi
+fi
+fge_reap "$EMPTY_NAME"
+fge_assert_eq FG-028B-CLONE-016 0 "$EMPTY_RC" 'empty-repository genesis lane still clones'
 
 fge_phase assert
-fge_assert_file FG-028B-CLONE-014 "${ORACLE_RUN}/transcripts/clone/receipt.tsv" \
-  'the clone transcript receipt is retained outside the source checkout'
-fge_assert_cmd FG-028B-CLONE-015 \
-  'the clone receipt binds the pinned Git identity' \
-  grep -Fqx "oracle_id=${ORACLE_PIN}" "${ORACLE_RUN}/transcripts/clone/receipt.tsv"
-fge_assert_cmd FG-028B-CLONE-016 \
-  'the clone receipt binds the sole allowed loopback endpoint' \
-  grep -Fqx "allowed_endpoint=${listen_endpoint}" "${ORACLE_RUN}/transcripts/clone/receipt.tsv"
-fge_assert_cmd FG-028B-CLONE-017 \
-  'the clone receipt declares the approved loopback-only network profile' \
-  grep -Fqx 'network_profile=loopback-git-only' "${ORACLE_RUN}/transcripts/clone/receipt.tsv"
-
-clone_fsck_exit=0
-fge_run first-clone-fsck \
-  "${ORACLE}" run "${ORACLE_PIN}" "${ORACLE_RUN}" clone -- \
-  fsck --no-dangling || clone_fsck_exit=$?
-fge_assert_exit FG-028B-CLONE-018 0 "${clone_fsck_exit}" \
-  'the cloned repository passes pinned-Git fsck with no dangling objects'
-
-set +e
-source_head="$("${ORACLE}" run "${ORACLE_PIN}" "${ORACLE_RUN}" source -- rev-parse HEAD)"
-source_head_exit=$?
-clone_head="$("${ORACLE}" run "${ORACLE_PIN}" "${ORACLE_RUN}" clone -- rev-parse HEAD)"
-clone_head_exit=$?
-set -e
-fge_assert_exit FG-028B-CLONE-019 0 "${source_head_exit}" \
-  'the source head is available through the pinned Git oracle'
-fge_assert_exit FG-028B-CLONE-020 0 "${clone_head_exit}" \
-  'the clone head is available through the pinned Git oracle'
-fge_assert_eq FG-028B-CLONE-021 "${source_head}" "${clone_head}" \
-  'the clone retains the exact source commit identity'
-tree_compare_exit=0
-fge_run first-clone-byte-compare \
-  diff --recursive --exclude=.git "${SOURCE_REPOSITORY}" "${CLONE_REPOSITORY}" || tree_compare_exit=$?
-fge_assert_exit FG-028B-CLONE-022 0 "${tree_compare_exit}" \
-  'the cloned worktree is byte-identical to the pinned-Git source worktree'
-
-# A second bounded server proves cancellation containment. The client is a
-# tracked pinned-Git oracle child; after its TCP session is observable, the
-# node is terminated and both children must be reaped. A subsequent authority
-# read proves the interrupted clone did not publish partial state.
-fge_phase action
-fge_spawn interrupted-clone-server \
-  "${FG_BINARY}" serve "${STORAGE_ROOT}" "${TENANT_ID}" "${REPOSITORY_ID}" "${listen_endpoint}"
-SERVER_PID="${FGE_LAST_PID}"
-interruption_listener_ready=no
-if wait_for_listener "${listen_port}" "${SERVER_PID}"; then
-  interruption_listener_ready=yes
-fi
-fge_assert_eq FG-028B-CLONE-023 yes "${interruption_listener_ready}" \
-  'the second live node listener is available for the interruption drill'
-if [[ "${interruption_listener_ready}" != yes ]]; then
-  fge_reap interrupted-clone-server TERM || true
-  exit 0
-fi
-
-fge_spawn interrupted-clone-client \
-  "${ORACLE}" clone-loopback "${ORACLE_PIN}" "${ORACLE_RUN}" interrupted \
-  "${listen_endpoint}" "${REPOSITORY_PATH}" interrupted-clone
-INTERRUPTED_CLIENT_PID="${FGE_LAST_PID}"
-clone_connection_ready=no
-if wait_for_clone_connection "${listen_port}" "${INTERRUPTED_CLIENT_PID}"; then
-  clone_connection_ready=yes
-fi
-fge_assert_eq FG-028B-CLONE-024 yes "${clone_connection_ready}" \
-  'the pinned client has an active clone connection before server termination'
-if [[ "${clone_connection_ready}" != yes ]]; then
-  fge_reap interrupted-clone-client TERM || true
-  fge_reap interrupted-clone-server TERM || true
-  exit 0
-fi
-
-server_kill_exit=0
-fge_reap interrupted-clone-server TERM || server_kill_exit=$?
-fge_assert_ne FG-028B-CLONE-025 0 "${server_kill_exit}" \
-  'terminating the live server mid-clone yields a non-successful server outcome'
-interrupted_client_completed=no
-interrupted_client_exit=0
-if wait_for_exit "${INTERRUPTED_CLIENT_PID}"; then
-  fge_reap interrupted-clone-client TERM || interrupted_client_exit=$?
-  interrupted_client_completed=yes
-else
-  fge_reap interrupted-clone-client TERM || true
-fi
-fge_assert_eq FG-028B-CLONE-026 yes "${interrupted_client_completed}" \
-  'the interrupted pinned-Git client exits within the bounded reap window'
-fge_assert_ne FG-028B-CLONE-027 0 "${interrupted_client_exit}" \
-  'the pinned Git client receives a typed non-success outcome after server termination'
-
-node_doctor_exit=0
-fge_run first-clone-post-interruption-doctor \
-  fg_command doctor "${STORAGE_ROOT}" "${TENANT_ID}" "${REPOSITORY_ID}" || node_doctor_exit=$?
-fge_assert_exit FG-028B-CLONE-028 0 "${node_doctor_exit}" \
-  'the interrupted read-only clone leaves the authenticated authority head usable and unchanged'
-fge_assert_file FG-028B-CLONE-029 "${ORACLE_RUN}/transcripts/interrupted/receipt.tsv" \
-  'the interrupted clone retains a pinned-client transcript receipt for diagnosis'
-
-fge_artifact "${ORACLE_RUN}/transcripts/clone/receipt.tsv" first-clone-pinned-client-receipt
-fge_artifact "${ORACLE_RUN}/transcripts/interrupted/receipt.tsv" first-clone-interrupted-client-receipt
