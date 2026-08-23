@@ -201,7 +201,7 @@ pub struct GraphQuery {
 impl GraphQuery {
     /// Pins a query to exactly one authenticated graph generation.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         generation_id: GraphGenerationId,
         policy: GraphViewPolicy,
         resource_receipt_root: Digest,
@@ -805,7 +805,7 @@ impl DeterministicGraph {
         query.policy.require(GraphDecision::BipartiteMatching)?;
         let left = self.validate_partition(left)?;
         let right = self.validate_partition(right)?;
-        for node in left.intersection(&right) {
+        if let Some(node) = left.intersection(&right).next() {
             return Err(GraphRefusal::PartitionOverlap { node: *node });
         }
         let mut witness = WitnessBuilder::new(
