@@ -55,6 +55,17 @@ use fsqlite_types::cx::Cx as FsqliteCx;
 /// two here from each other's samples.
 static RESOURCE_PROBE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The largest post-close wait before this probe calls retained workers a leak.
+///
+/// `close()` has completed before the probe starts this window; the polling is
+/// only for the operating system to observe a worker that is already joining.
+/// The released-state bar below is unchanged. A bounded wait makes the probe
+/// robust to CPU contention without converting a delayed or retained worker
+/// into a success by widening its threshold.
+const RELEASE_SETTLE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+/// Polling interval inside [`RELEASE_SETTLE_WINDOW`].
+const RELEASE_SETTLE_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// Take the probe lock, ignoring poisoning: a panicking probe has already
 /// failed, and poisoning the other would hide which one broke.
 fn probe_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -68,6 +79,22 @@ fn live_threads() -> usize {
     std::fs::read_dir("/proc/self/task")
         .expect("/proc/self/task is readable on linux")
         .count()
+}
+
+/// Waits only for a close that already completed to become visible in `/proc`.
+///
+/// The final sample is returned even when it remains above `limit`, so the
+/// caller still applies the same released-state assertion and reports the
+/// retained count. This helper never makes a higher retained floor acceptable.
+fn settled_threads_at_most(limit: usize) -> usize {
+    let deadline = std::time::Instant::now() + RELEASE_SETTLE_WINDOW;
+    loop {
+        let observed = live_threads();
+        if observed <= limit || std::time::Instant::now() >= deadline {
+            return observed;
+        }
+        std::thread::sleep(RELEASE_SETTLE_POLL);
+    }
 }
 
 /// A self-removing database path, so a failing run cannot leak a file into the
@@ -207,8 +234,6 @@ fn closing_many_concurrent_stores_releases_every_worker_thread() {
         close_store(&node, store, &format!("store {index}"));
     }
 
-    let after = live_threads();
-
     // The rise must be real, or the fall proves nothing.
     let rose_by = while_open.saturating_sub(before);
     assert!(
@@ -220,7 +245,10 @@ fn closing_many_concurrent_stores_releases_every_worker_thread() {
 
     // And it must come back. A per-store worker that is never joined leaves the
     // count elevated by roughly `rose_by`; allowing back a quarter of the rise
-    // tolerates pool retention without tolerating a per-store leak.
+    // tolerates pool retention without tolerating a per-store leak. The
+    // bounded settle window does not relax that bar: it only waits for an
+    // already-completed close to become observable under parallel CPU load.
+    let after = settled_threads_at_most(before.saturating_add(rose_by / 4));
     let retained = after.saturating_sub(before);
     assert!(
         retained <= rose_by / 4,
