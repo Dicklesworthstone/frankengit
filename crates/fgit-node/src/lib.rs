@@ -4323,7 +4323,9 @@ mod tests {
     use fgit_codec::harness::{
         advanced_head, commit_record, decision_batch, digest_of, refusal_record_id, tx_id,
     };
-    use fgit_codec::{CanonicalBody, CryptoBodyIdentity, body_id, decode_body};
+    use fgit_codec::{
+        CanonicalBody, CryptoBodyIdentity, RepositoryAuthorityHeadBody, body_id, decode_body,
+    };
     use fgit_object_fabric::fabric::StoreRefusal;
     use fgit_reference::effect::{FoldOutcome, FoldReport, NetEffects};
     use fgit_reference::intent::TransactionRequest;
@@ -4335,8 +4337,8 @@ mod tests {
         RepositoryId, SchemaFamily, SchemaId, TenantId, TxId,
     };
     use fgit_wire::{
-        AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, PackPayloadSource, Packet,
-        UploadPackRepository, WireError, WireLimits, encode_packets,
+        AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, ObjectType, PackPayloadSource,
+        Packet, UploadPackRepository, WireError, WireLimits, encode_packets,
     };
 
     use super::{
