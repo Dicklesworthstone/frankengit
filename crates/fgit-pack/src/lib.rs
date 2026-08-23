@@ -8,6 +8,7 @@
 mod bundle;
 mod delta;
 mod idx;
+mod midx;
 mod pack;
 mod reader;
 mod verify;
@@ -25,6 +26,10 @@ pub use fgit_types::native::{GitHashAlgorithm as ObjectFormat, GitOid as ObjectI
 pub use idx::{
     IdxChecksumVerifier, IdxEntry, IdxV2, validate_idx_checksum, validate_idx_entry_crc,
     validate_idx_pack_count,
+};
+pub use midx::{
+    MidxCompleteness, MidxLimits, MidxProfile, MidxRefusal, MidxSource, MidxV1, MidxV1Receipt,
+    MidxVerification,
 };
 pub use pack::{
     EntryKind, PackEntryHeader, PackHeader, PackTrailerVerifier, ParsedDeltaBase,

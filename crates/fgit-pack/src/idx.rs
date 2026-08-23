@@ -388,6 +388,12 @@ impl IdxV2 {
         &self.entries
     }
 
+    /// Native object-format domain shared by every index record and checksum.
+    #[must_use]
+    pub const fn format(&self) -> ObjectFormat {
+        self.format
+    }
+
     #[must_use]
     pub const fn pack_checksum(&self) -> &ObjectId {
         &self.pack_checksum
