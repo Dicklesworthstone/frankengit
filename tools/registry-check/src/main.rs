@@ -3773,8 +3773,9 @@ fn evaluate_crate_layers(root: &Path, report: &mut Report) -> LayerReport {
         let allowed = render_allowed_layers(&source_entry.allowed_dependency_layers);
         let outcome = if dependency_entry.layer > source_entry.layer {
             report.error(format!(
-                "crate-layer violation `{source}` ({}) -> `{dependency}` ({}): a crate may not depend on a higher layer; declared allowed layers `{allowed}`",
+                "crate-layer violation `{source}` ({}) -> `{dependency}` ({}): a crate may not depend on a higher layer; raise the source crate layer to at least {}",
                 source_entry.layer.as_str(),
+                dependency_entry.layer.as_str(),
                 dependency_entry.layer.as_str(),
             ));
             "upward_layer_violation"
@@ -5725,6 +5726,55 @@ mod tests {
                 layer_report.render()
             );
         }
+    }
+
+    #[test]
+    fn layer_diagnostics_name_the_rule_that_refused_the_edge() {
+        let upward = fixture_workspace_in("layers", "upward");
+        let mut upward_report = Report::new();
+        let _ = evaluate_crate_layers(&upward.root, &mut upward_report);
+        let upward_error = upward_report
+            .errors
+            .iter()
+            .find(|error| error.contains("`fgit-engine` (L2) -> `fgit-derived` (L3)"))
+            .expect("upward edge must be refused");
+        assert!(
+            upward_error.contains("raise the source crate layer to at least L3"),
+            "upward diagnostic must name the source-layer remedy: {upward_error}"
+        );
+        assert!(
+            !upward_error.contains("declared allowed layers"),
+            "upward diagnostic must not name an unconsulted field: {upward_error}"
+        );
+
+        let undeclared = fixture_workspace_in("layers", "clean");
+        let registry_path = undeclared.root.join(CRATE_LAYERS_FILE);
+        let registry = fs::read_to_string(&registry_path).expect("read clean layer registry");
+        let narrowed = registry.replace(
+            "fgit-engine\\tL2\\tL0,L1,L2\\tengine\\tactive",
+            "fgit-engine\\tL2\\tL0\\tengine\\tactive",
+        );
+        assert_ne!(
+            registry, narrowed,
+            "fixture must narrow only fgit-engine's allowed layers"
+        );
+        fs::write(&registry_path, narrowed).expect("write narrowed layer registry");
+
+        let mut undeclared_report = Report::new();
+        let _ = evaluate_crate_layers(&undeclared.root, &mut undeclared_report);
+        let undeclared_error = undeclared_report
+            .errors
+            .iter()
+            .find(|error| error.contains("`fgit-engine` (L2) -> `fgit-protocol` (L1)"))
+            .expect("same-or-lower edge outside allowed layers must be refused");
+        assert!(
+            undeclared_error.contains("target layer is absent from declared allowed layers `L0`"),
+            "undeclared-layer diagnostic must name the consulted field: {undeclared_error}"
+        );
+        assert!(
+            !undeclared_error.contains("raise the source crate layer"),
+            "undeclared-layer diagnostic must not claim an upward-edge remedy: {undeclared_error}"
+        );
     }
 
     #[test]
