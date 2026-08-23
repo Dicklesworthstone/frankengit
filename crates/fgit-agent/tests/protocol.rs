@@ -7,17 +7,24 @@ use fgit_agent::{
     WorkspaceBinding,
 };
 use fgit_authority::{
-    AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
-    authority_head_identity, initialize_repository, outcome_index_root,
+    AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, SealAdmission, StoreInstanceId,
+    authority_head_identity, initialize_repository, outcome_index_root, seal_request,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_crypto::{GitOidSha1, IdentityDomain, Sha1};
+use fgit_crypto::{GitObjectKind, GitOid, GitOidSha1, IdentityDomain, NativeObjectIdentity, Sha1};
+use fgit_git_object::{AcceptanceProfile, ParseLimits, TreeEntry, emit_tree};
 use fgit_resource::{ResourceVector, algebra::Grade};
-use fgit_treefs::{EpochSet, Overlay, OverlayRoot, WorkspaceId, WorkspaceSnapshotBody};
+use fgit_treefs::{
+    BaseView, ContentRef, EntryClass, EpochSet, ExpectedRef, ExportLimits, ExportPlanner, FileMode,
+    ObjectSource, ObjectSourceError, Overlay, OverlayEntry, OverlayRoot, PathPolicy,
+    PositionReceipt, ProposedRefIntent, ProposedTransaction, ReadGrant, TreeCapability, TreePath,
+    WorkspaceId, WorkspaceSnapshotBody,
+};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, HeadGeneration, PolicyEpoch,
-    RegistryEpoch, RepositoryCommitId, RepositoryId, RepositorySequence,
+    PrincipalId, RegistryEpoch, RepositoryCommitId, RepositoryId, RepositorySequence, TenantId,
 };
+use std::collections::BTreeMap;
 
 fn rcr_id() -> RepositoryCommitId {
     RepositoryCommitId::from_digest(
@@ -27,7 +34,7 @@ fn rcr_id() -> RepositoryCommitId {
     )
 }
 
-fn authority_receipt() -> AuthorityReadReceipt {
+fn authority_store_and_receipt() -> (MemoryAuthorityStore, AuthorityReadReceipt) {
     let repository_id = RepositoryId::from_bytes([0x27; 16]);
     let root = outcome_index_root(&[]).expect("empty outcome-index root is canonical");
     let head = RepositoryAuthorityHeadBody {
@@ -71,7 +78,11 @@ fn authority_receipt() -> AuthorityReadReceipt {
     )
     .expect("a store-authenticated, generation-checked head makes a full agent receipt");
     assert_eq!(receipt.authority_head_id(), expected_head_id);
-    receipt
+    (store, receipt)
+}
+
+fn authority_receipt() -> AuthorityReadReceipt {
+    authority_store_and_receipt().1
 }
 
 fn control() -> ContextControl {
@@ -124,6 +135,17 @@ fn authenticated_intent_run_retains_the_complete_authority_receipt() {
     );
 }
 
+fn workspace_run(receipt: AuthorityReadReceipt) -> IntentRun {
+    IntentRun::new_authenticated(
+        RunId::new(91),
+        receipt,
+        ClassSet::from_classes(&[fgit_agent::OperationClass::TreeFsWorkspace]),
+        ResourceVector::single(Grade::Bytes, 4_096),
+        LogicalTime::new(99),
+    )
+    .expect("authenticated TreeFS run opens")
+}
+
 #[test]
 fn workspace_binding_uses_the_real_treefs_snapshot_and_refuses_a_different_authority_base() {
     let receipt = authority_receipt();
@@ -141,7 +163,7 @@ fn workspace_binding_uses_the_real_treefs_snapshot_and_refuses_a_different_autho
             .publish()
             .expect("visible after staging"),
     );
-    let binding = WorkspaceBinding::bind(receipt.clone(), snapshot)
+    let binding = WorkspaceBinding::bind(workspace_run(receipt.clone()), snapshot)
         .expect("TreeFS snapshot at the authenticated RCR is bindable");
     assert_eq!(binding.workspace_id(), WorkspaceId::from_bytes([0x41; 16]));
     assert!(binding.snapshot().epochs().invariant_holds());
@@ -161,7 +183,7 @@ fn workspace_binding_uses_the_real_treefs_snapshot_and_refuses_a_different_autho
         EpochSet::new(),
     );
     assert!(matches!(
-        WorkspaceBinding::bind(receipt, mismatched),
+        WorkspaceBinding::bind(workspace_run(receipt), mismatched),
         Err(ProtocolRefusal::WorkspaceBaseMismatch { .. })
     ));
 }
@@ -225,4 +247,181 @@ fn oversized_source_is_refused_before_a_packet_can_retain_it() {
             limit: MAX_CONTEXT_SOURCE_BYTES,
         } if observed == MAX_CONTEXT_SOURCE_BYTES + 1
     ));
+}
+
+type Oid = GitOid<Sha1>;
+
+#[derive(Default)]
+struct MemorySource {
+    objects: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+impl MemorySource {
+    fn insert(&mut self, kind: GitObjectKind, body: Vec<u8>) -> Oid {
+        let oid = Oid::of_object(kind, &body);
+        self.objects.insert(oid.digest_bytes().to_vec(), body);
+        oid
+    }
+
+    fn tree(&mut self, entries: &[TreeEntry]) -> Oid {
+        let body = emit_tree(
+            entries,
+            AcceptanceProfile::GitCompatibleImport,
+            &ParseLimits::default(),
+        )
+        .expect("the TreeFS test tree has canonical Git tree framing");
+        self.insert(GitObjectKind::Tree, body)
+    }
+}
+
+impl ObjectSource<Sha1> for MemorySource {
+    fn read_object(
+        &self,
+        oid: &Oid,
+        _kind: GitObjectKind,
+        _grant: &ReadGrant,
+    ) -> Result<Vec<u8>, ObjectSourceError> {
+        self.objects
+            .get(oid.digest_bytes())
+            .cloned()
+            .ok_or_else(|| ObjectSourceError::NotFound {
+                oid_hex: String::new(),
+            })
+    }
+}
+
+fn path(bytes: &[u8]) -> TreePath {
+    TreePath::parse_default(bytes).expect("the fixed TreeFS test path is admissible")
+}
+
+fn agent_workspace_and_proposal(
+    receipt: &AuthorityReadReceipt,
+) -> (WorkspaceSnapshotBody<Sha1>, ProposedTransaction<Sha1>) {
+    let workspace_id = WorkspaceId::from_bytes([0x63; 16]);
+    let mut source = MemorySource::default();
+    let base_blob = source.insert(GitObjectKind::Blob, b"fn original() {}\n".to_vec());
+    let base_src = source.tree(&[TreeEntry {
+        mode: b"100644".to_vec(),
+        name: b"lib.rs".to_vec(),
+        object_id: base_blob.digest_bytes().to_vec(),
+    }]);
+    let base_root = source.tree(&[TreeEntry {
+        mode: b"40000".to_vec(),
+        name: b"src".to_vec(),
+        object_id: base_src.digest_bytes().to_vec(),
+    }]);
+    let base = BaseView::new(
+        receipt.repository_id(),
+        receipt
+            .latest_repository_commit_id()
+            .expect("fixture authority receipt carries an RCR"),
+        base_root,
+        base_root,
+        ParseLimits::default(),
+        PathPolicy::default(),
+    );
+    let scope = path(b"src");
+    let mut capability = TreeCapability::new(
+        workspace_id,
+        receipt.repository_id(),
+        vec![scope.clone()],
+        vec![scope],
+    );
+    let mut overlay = Overlay::new();
+    let content = overlay.intern(b"fn agent_change() {}\n".to_vec());
+    overlay.put(
+        path(b"src/lib.rs"),
+        OverlayEntry::File {
+            content: ContentRef::Overlay(content),
+            mode: FileMode::Regular,
+            class: EntryClass::Content,
+        },
+    );
+    let plan = ExportPlanner::new(ExportLimits::default(), ParseLimits::default())
+        .plan(&base, &source, &mut capability, &overlay, 0, &|| false)
+        .expect("bounded authorized TreeFS export succeeds");
+    let snapshot = WorkspaceSnapshotBody::new(
+        workspace_id,
+        receipt.repository_id(),
+        receipt
+            .latest_repository_commit_id()
+            .expect("fixture authority receipt carries an RCR"),
+        base_root,
+        base_root,
+        OverlayRoot::of(&overlay),
+        EpochSet::new()
+            .stage()
+            .publish()
+            .expect("a staged workspace snapshot becomes visible"),
+    );
+    let proposal = ProposedTransaction::seal(
+        workspace_id,
+        &plan,
+        PositionReceipt {
+            repository_id: receipt.repository_id(),
+            base_rcr_id: receipt
+                .latest_repository_commit_id()
+                .expect("fixture authority receipt carries an RCR"),
+            base_tree_oid: base_root,
+            proposed_tree_oid: *plan.root_tree(),
+            touched_paths: overlay.touched_paths(),
+        },
+        vec![ProposedRefIntent {
+            name: b"refs/heads/main".to_vec(),
+            expected: ExpectedRef::Exactly { oid: base_root },
+            new: *plan.root_tree(),
+        }],
+    )
+    .expect("a real TreeFS export seals a target-disjoint proposal");
+    (snapshot, proposal)
+}
+
+#[test]
+fn authenticated_workspace_proposal_uses_the_ordinary_retry_safe_ref_seal() {
+    let (store, receipt) = authority_store_and_receipt();
+    let (snapshot, proposal) = agent_workspace_and_proposal(&receipt);
+    let binding = WorkspaceBinding::bind(
+        IntentRun::new_authenticated(
+            RunId::new(0x030),
+            receipt.clone(),
+            ClassSet::from_classes(&[
+                fgit_agent::OperationClass::TreeFsWorkspace,
+                fgit_agent::OperationClass::PreparePublication,
+            ]),
+            ResourceVector::single(Grade::Bytes, 4_096),
+            LogicalTime::new(99),
+        )
+        .expect("authenticated TreeFS publication run opens"),
+        snapshot,
+    )
+    .expect("TreeFS workspace is pinned to its authenticated authority base");
+    let packet = ContextPacket::build(receipt, control(), Vec::new())
+        .expect("the same authority generation permits a bounded packet");
+
+    let transaction = binding
+        .prepare_ref_transaction(proposal, &[packet])
+        .expect("the run, workspace, proposal, and context share one authority basis");
+    assert_eq!(
+        transaction.semantic_request().request_schema(),
+        fgit_admission::RECEIVE_ADMISSION_SCHEMA,
+        "agent provenance must not mint a second ref-transaction schema"
+    );
+    assert!(transaction.semantic_request().atomic());
+    assert_eq!(transaction.semantic_request().ref_commands().len(), 1);
+    assert!(transaction.semantic_request().scoped_entries().is_empty());
+    assert_eq!(transaction.context_packet_ids().len(), 1);
+
+    let attempt = transaction.seal_attempt(
+        TenantId::from_bytes([0x71; 16]),
+        PrincipalId::from_bytes([0x72; 16]),
+        fgit_authority::IdempotencyKey::new(b"agent-ref-proposal".to_vec())
+            .expect("bounded idempotency key"),
+    );
+    let first = seal_request(&store, &attempt)
+        .expect("the ordinary authority seal accepts the prepared agent attempt");
+    let retry = seal_request(&store, &attempt)
+        .expect("identical retry resolves through the ordinary authority seal");
+    assert!(first.is_created());
+    assert!(matches!(retry, SealAdmission::IdenticalRetry { .. }));
+    assert_eq!(first.tx_id(), retry.tx_id());
 }

@@ -19,19 +19,22 @@
 use core::fmt;
 
 use fgit_authority::{
-    AuthenticatedHead, AuthorityVersionToken, HeadBodyRefusal, OutcomeFailure,
+    AuthenticatedHead, AuthorityVersionToken, ExpectedOld, HeadBodyRefusal, IdempotencyKey,
+    OutcomeFailure, ProposedNew, RefCommand, RequestRefusal, SealAttempt, SemanticRequest,
     authority_head_identity,
 };
 use fgit_codec::{CodecRefusal, Encoder};
-use fgit_crypto::{DigestHasher, GitHashAlgorithm, Sha256};
-use fgit_treefs::{WorkspaceId, WorkspaceSnapshotBody};
+use fgit_crypto::{DigestHasher, GitHashAlgorithm, NativeObjectIdentity, Sha256};
+use fgit_treefs::{ExpectedRef, ProposedTransaction, WorkspaceId, WorkspaceSnapshotBody};
 use fgit_types::{
-    Digest, HeadGeneration, PolicyEpoch, RegistryEpoch, RepositoryAuthorityHeadId,
-    RepositoryCommitId, RepositoryDecisionBatchId, RepositoryId, RepositorySequence,
+    Digest, HeadGeneration, PolicyEpoch, PrincipalId, RefName, RegistryEpoch,
+    RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryDecisionBatchId, RepositoryId,
+    RepositorySequence, TenantId, TypeRefusal,
 };
 
 use crate::capability::LogicalTime;
 use crate::classes::ClassSet;
+use crate::intent::{IntentRun, RunId};
 
 /// Maximum source entries in one context packet.
 pub const MAX_CONTEXT_SOURCES: usize = 1_024;
@@ -385,25 +388,38 @@ pub struct ContextPacket {
 /// repository publication.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceBinding<A: GitHashAlgorithm> {
+    run: IntentRun,
     authority_read_receipt: AuthorityReadReceipt,
     snapshot: WorkspaceSnapshotBody<A>,
     manifest_commitment: [u8; 32],
 }
 
 impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
-    /// Binds one immutable TreeFS snapshot to the authority receipt that
-    /// supplied its base.
+    /// Binds one immutable TreeFS snapshot to the authenticated run and
+    /// authority receipt that supplied its base.
     ///
     /// # Errors
     ///
-    /// Refuses a workspace over another repository, a workspace whose base RCR
-    /// differs from the receipt, or a receipt before the first committed RCR.
-    /// The latter is not silently replaced by an authority-head generation:
-    /// TreeFS names a base RCR and the two are distinct protocol positions.
+    /// Refuses a legacy run lacking a complete receipt, a run without
+    /// `TreeFsWorkspace` authority, a workspace over another repository, a
+    /// workspace whose base RCR differs from the receipt, or a receipt before
+    /// the first committed RCR. The latter is not silently replaced by an
+    /// authority-head generation: TreeFS names a base RCR and the two are
+    /// distinct protocol positions.
     pub fn bind(
-        authority_read_receipt: AuthorityReadReceipt,
+        run: IntentRun,
         snapshot: WorkspaceSnapshotBody<A>,
     ) -> Result<Self, ProtocolRefusal> {
+        let authority_read_receipt = run
+            .authority_read_receipt()
+            .ok_or(ProtocolRefusal::RunAuthorityReceiptRequired)?
+            .clone();
+        if !run
+            .allowed_operation_classes()
+            .contains(crate::OperationClass::TreeFsWorkspace)
+        {
+            return Err(ProtocolRefusal::WorkspaceOperationOutsideRun);
+        }
         if snapshot.repository_id() != authority_read_receipt.repository_id() {
             return Err(ProtocolRefusal::WorkspaceRepositoryMismatch);
         }
@@ -421,6 +437,7 @@ impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
         }
         let manifest_commitment = snapshot.snapshot_digest().map_err(ProtocolRefusal::Codec)?;
         Ok(Self {
+            run,
             authority_read_receipt,
             snapshot,
             manifest_commitment,
@@ -431,6 +448,12 @@ impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
     #[must_use]
     pub const fn authority_read_receipt(&self) -> &AuthorityReadReceipt {
         &self.authority_read_receipt
+    }
+
+    /// Exact run that authorized this TreeFS workspace.
+    #[must_use]
+    pub const fn run(&self) -> &IntentRun {
+        &self.run
     }
 
     /// The immutable TreeFS snapshot this binding authenticated.
@@ -449,6 +472,156 @@ impl<A: GitHashAlgorithm> WorkspaceBinding<A> {
     #[must_use]
     pub const fn manifest_commitment(&self) -> [u8; 32] {
         self.manifest_commitment
+    }
+
+    /// Converts a real TreeFS proposal into the ordinary sealed-ref-transaction
+    /// request shape.
+    ///
+    /// This method deliberately has no authority-head mutation API. It proves
+    /// that the agent path uses the same canonical request and seal as every
+    /// other mutation; only the existing admission/authority path can turn the
+    /// resulting seal into a terminal decision and successful head CAS.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a legacy run without a full authority receipt, a run/packet from
+    /// another authority position, a proposal from another TreeFS workspace or
+    /// base RCR, and a run that lacks `PreparePublication` authority.
+    pub fn prepare_ref_transaction(
+        &self,
+        proposal: ProposedTransaction<A>,
+        context_packets: &[ContextPacket],
+    ) -> Result<AgentRefTransaction<A>, ProtocolRefusal> {
+        if !self
+            .run
+            .allowed_operation_classes()
+            .contains(crate::OperationClass::PreparePublication)
+        {
+            return Err(ProtocolRefusal::PublicationOperationOutsideRun);
+        }
+        if proposal.workspace_id() != self.workspace_id() {
+            return Err(ProtocolRefusal::ProposalWorkspaceMismatch);
+        }
+        if proposal.receipt().repository_id != self.authority_read_receipt.repository_id() {
+            return Err(ProtocolRefusal::ProposalRepositoryMismatch);
+        }
+        if proposal.receipt().base_rcr_id != self.snapshot.base_rcr_id() {
+            return Err(ProtocolRefusal::ProposalBaseMismatch {
+                expected: self.snapshot.base_rcr_id(),
+                observed: proposal.receipt().base_rcr_id,
+            });
+        }
+        for packet in context_packets {
+            if packet.authority_read_receipt() != &self.authority_read_receipt {
+                return Err(ProtocolRefusal::ContextAuthorityMismatch);
+            }
+        }
+
+        let semantic_request = semantic_request_for_proposal::<A>(&proposal)?;
+        Ok(AgentRefTransaction {
+            run: self.run.clone(),
+            authority_read_receipt: self.authority_read_receipt.clone(),
+            workspace_manifest_commitment: self.manifest_commitment,
+            context_packet_ids: context_packets
+                .iter()
+                .map(ContextPacket::packet_id)
+                .collect(),
+            proposal,
+            semantic_request,
+        })
+    }
+}
+
+/// An agent proposal in the same sealed transaction universe as non-agent
+/// mutations.
+///
+/// It contains a real TreeFS proposal and the canonical authority request it
+/// became. It is not a terminal outcome and it has no API for moving an
+/// authority head. [`Self::seal_attempt`] produces only the ordinary input to
+/// the authority seal path. The agent does not own the effectful call: an
+/// EffectBroker grant and its lifecycle ledger must authorize and record that
+/// call before an executor submits this attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentRefTransaction<A: GitHashAlgorithm> {
+    run: IntentRun,
+    authority_read_receipt: AuthorityReadReceipt,
+    workspace_manifest_commitment: [u8; 32],
+    context_packet_ids: Vec<ContextPacketId>,
+    proposal: ProposedTransaction<A>,
+    semantic_request: SemanticRequest,
+}
+
+impl<A: GitHashAlgorithm> AgentRefTransaction<A> {
+    /// Intent run that authorized the request.
+    #[must_use]
+    pub const fn run_id(&self) -> RunId {
+        self.run.run_id()
+    }
+
+    /// Exact run whose machine scope authorized this preparation.
+    #[must_use]
+    pub const fn run(&self) -> &IntentRun {
+        &self.run
+    }
+
+    /// Exact authenticated authority basis.
+    #[must_use]
+    pub const fn authority_read_receipt(&self) -> &AuthorityReadReceipt {
+        &self.authority_read_receipt
+    }
+
+    /// TreeFS manifest commitment from which the request was derived.
+    #[must_use]
+    pub const fn workspace_manifest_commitment(&self) -> [u8; 32] {
+        self.workspace_manifest_commitment
+    }
+
+    /// Context packets that supplied agent evidence for this proposed effect.
+    ///
+    /// These remain outside [`SemanticRequest`]: request provenance cannot
+    /// split the one canonical transaction identity for the same ref command.
+    #[must_use]
+    pub fn context_packet_ids(&self) -> &[ContextPacketId] {
+        &self.context_packet_ids
+    }
+
+    /// The inert TreeFS proposal, which cannot assert a commit outcome.
+    #[must_use]
+    pub const fn proposal(&self) -> &ProposedTransaction<A> {
+        &self.proposal
+    }
+
+    /// The ordinary canonical request that authority sealing receives.
+    ///
+    /// Its schema and ref-command lowering are exactly the shared
+    /// receive-admission form. Agent provenance remains in this wrapper rather
+    /// than changing a ref mutation's transaction identity.
+    #[must_use]
+    pub const fn semantic_request(&self) -> &SemanticRequest {
+        &self.semantic_request
+    }
+
+    /// Produces the ordinary authority seal attempt for this prepared request.
+    ///
+    /// This does not write anything. The attempt is intentionally handed to
+    /// the effect executor instead of calling `fgit_authority::seal_request`
+    /// here: §9 requires the executor to possess a broker grant, reserve its
+    /// obligation, and record/reconcile the effect lifecycle. The follow-on
+    /// ledger slice owns that effectful boundary.
+    #[must_use]
+    pub fn seal_attempt(
+        &self,
+        tenant_id: TenantId,
+        authenticated_principal_id: PrincipalId,
+        idempotency_key: IdempotencyKey,
+    ) -> SealAttempt {
+        SealAttempt {
+            tenant_id,
+            repository_id: self.authority_read_receipt.repository_id(),
+            authenticated_principal_id,
+            idempotency_key,
+            request: self.semantic_request.clone(),
+        }
     }
 }
 
@@ -572,6 +745,32 @@ pub enum ProtocolRefusal {
     },
     /// The TreeFS snapshot violated its staged/visible/durable invariant.
     WorkspaceEpochInvariant,
+    /// The run does not authorize TreeFS workspace creation or use.
+    WorkspaceOperationOutsideRun,
+    /// A legacy run supplied an identifying reference rather than a complete
+    /// authenticated authority receipt.
+    RunAuthorityReceiptRequired,
+    /// The run was opened against a different authority position.
+    RunAuthorityReceiptMismatch,
+    /// The run does not authorize publication preparation.
+    PublicationOperationOutsideRun,
+    /// The proposal came from another TreeFS workspace.
+    ProposalWorkspaceMismatch,
+    /// The proposal targets another repository.
+    ProposalRepositoryMismatch,
+    /// The proposal was based on another committed repository record.
+    ProposalBaseMismatch {
+        /// RCR named by the bound workspace.
+        expected: RepositoryCommitId,
+        /// RCR named by the proposal receipt.
+        observed: RepositoryCommitId,
+    },
+    /// A context packet belongs to a different authority position.
+    ContextAuthorityMismatch,
+    /// A shared identity type rejected a proposed ref name.
+    Type(TypeRefusal),
+    /// The authority request surface refused a bounded or ambiguous request.
+    Request(RequestRefusal),
     /// Canonical packet framing could not represent a bounded field.
     Codec(CodecRefusal),
 }
@@ -614,6 +813,35 @@ impl fmt::Display for ProtocolRefusal {
             Self::WorkspaceEpochInvariant => {
                 formatter.write_str("TreeFS snapshot violates staged >= visible >= durable")
             }
+            Self::WorkspaceOperationOutsideRun => formatter.write_str(
+                "intent run does not authorize TreeFS workspace creation or use",
+            ),
+            Self::RunAuthorityReceiptRequired => formatter.write_str(
+                "publication preparation requires a run with a complete authenticated authority receipt",
+            ),
+            Self::RunAuthorityReceiptMismatch => formatter.write_str(
+                "intent run authority receipt differs from the bound TreeFS workspace",
+            ),
+            Self::PublicationOperationOutsideRun => formatter.write_str(
+                "intent run does not authorize publication preparation",
+            ),
+            Self::ProposalWorkspaceMismatch => formatter.write_str(
+                "TreeFS proposal belongs to another workspace",
+            ),
+            Self::ProposalRepositoryMismatch => formatter.write_str(
+                "TreeFS proposal targets another repository",
+            ),
+            Self::ProposalBaseMismatch { expected, observed } => write!(
+                formatter,
+                "TreeFS proposal base RCR {observed} differs from bound workspace {expected}"
+            ),
+            Self::ContextAuthorityMismatch => formatter.write_str(
+                "context packet authority receipt differs from the bound workspace",
+            ),
+            Self::Type(refusal) => write!(formatter, "agent protocol type refusal: {refusal}"),
+            Self::Request(refusal) => {
+                write!(formatter, "ordinary ref request refused: {refusal}")
+            }
             Self::Codec(refusal) => write!(formatter, "context packet codec refusal: {refusal}"),
         }
     }
@@ -625,6 +853,49 @@ impl From<CodecRefusal> for ProtocolRefusal {
     fn from(value: CodecRefusal) -> Self {
         Self::Codec(value)
     }
+}
+
+impl From<TypeRefusal> for ProtocolRefusal {
+    fn from(value: TypeRefusal) -> Self {
+        Self::Type(value)
+    }
+}
+
+impl From<RequestRefusal> for ProtocolRefusal {
+    fn from(value: RequestRefusal) -> Self {
+        Self::Request(value)
+    }
+}
+
+fn semantic_request_for_proposal<A: GitHashAlgorithm>(
+    proposal: &ProposedTransaction<A>,
+) -> Result<SemanticRequest, ProtocolRefusal> {
+    let ref_commands = proposal
+        .ref_intents()
+        .iter()
+        .map(|intent| {
+            let expected_old = match intent.expected {
+                ExpectedRef::Absent => ExpectedOld::Absent,
+                ExpectedRef::Exactly { oid } => ExpectedOld::Exactly(oid.erase()),
+            };
+            Ok(RefCommand {
+                name: RefName::try_new(&intent.name)?,
+                expected_old,
+                proposed_new: ProposedNew::Update(intent.new.erase()),
+                force: false,
+            })
+        })
+        .collect::<Result<Vec<_>, ProtocolRefusal>>()?;
+
+    SemanticRequest::build(
+        fgit_admission::RECEIVE_ADMISSION_SCHEMA,
+        A::OBJECT_FORMAT,
+        true,
+        ref_commands,
+        Vec::new(),
+        Vec::new(),
+    )
+    .map_err(ProtocolRefusal::Request)
 }
 
 fn packet_commitment(

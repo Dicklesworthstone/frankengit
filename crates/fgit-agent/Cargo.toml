@@ -11,8 +11,12 @@ fgit-codec.workspace = true
 fgit-crypto.workspace = true
 fgit-resource.workspace = true
 fgit-authority.workspace = true
+fgit-admission.workspace = true
 fgit-treefs.workspace = true
 fgit-types.workspace = true
+
+[dev-dependencies]
+fgit-git-object.workspace = true
 
 [lints]
 workspace = true

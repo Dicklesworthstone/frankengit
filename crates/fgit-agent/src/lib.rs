@@ -71,8 +71,8 @@ pub use ecc::{
 };
 pub use intent::{AuthorityBasisRef, IntentRun, RunId, RunRefused};
 pub use protocol::{
-    AuthorityReadReceipt, ContextControl, ContextPacket, ContextPacketId, ContextSource,
-    MAX_CONTEXT_SOURCE_BYTES, MAX_CONTEXT_SOURCES, MAX_CONTEXT_TOTAL_BYTES, ProtocolRefusal,
-    RetrievalChannel, WorkspaceBinding,
+    AgentRefTransaction, AuthorityReadReceipt, ContextControl, ContextPacket, ContextPacketId,
+    ContextSource, MAX_CONTEXT_SOURCE_BYTES, MAX_CONTEXT_SOURCES, MAX_CONTEXT_TOTAL_BYTES,
+    ProtocolRefusal, RetrievalChannel, WorkspaceBinding,
 };
 pub use refresh::{RefreshReceipt, RefreshRelation, RefreshSide};
