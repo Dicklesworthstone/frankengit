@@ -209,6 +209,10 @@ pub enum ComplexityTerm {
     FlowTimesVerticesEdges,
     /// Bounded simple-path enumeration, with the query operation limit as the hard cap.
     OperationBoundedPathEnumeration,
+    /// Θ((V + E)^2): one exhaustive removal sweep per vertex or edge, each a full traversal.
+    RemovalSweepsSquared,
+    /// O(P · V · E) for `P` iterated set-contraction stabilization passes.
+    ContractionPassesTimesVerticesEdges,
 }
 
 /// A view-local allowlist for graph decisions.
@@ -741,7 +745,7 @@ impl DeterministicGraph {
             query,
             self,
             GraphAlgorithm::DominatorsV1,
-            ComplexityTerm::VertexTimesVerticesEdges,
+            ComplexityTerm::ContractionPassesTimesVerticesEdges,
         )?;
         let all: BTreeSet<_> = self.nodes.iter().copied().collect();
         let mut dominators = BTreeMap::new();
@@ -813,7 +817,7 @@ impl DeterministicGraph {
             query,
             self,
             GraphAlgorithm::ArticulationBridgesV1,
-            ComplexityTerm::VertexTimesVerticesEdges,
+            ComplexityTerm::RemovalSweepsSquared,
         )?;
         let baseline = self.component_count(None, None, &mut witness)?;
         let mut articulations = Vec::new();
@@ -1851,9 +1855,12 @@ mod tests {
     };
     use fgit_types::{CodecVersion, Digest, GenerationId, SchemaFamily, SchemaId};
 
+    use std::collections::{BTreeSet, VecDeque};
+
     use super::{
-        DeterministicGraph, GraphAlgorithm, GraphAuthorityClass, GraphDecision, GraphEdge,
-        GraphLimits, GraphNodeId, GraphQuery, GraphRefusal, GraphViewPolicy,
+        ComplexityTerm, DeterministicGraph, FlowCost, GraphAlgorithm, GraphAuthorityClass,
+        GraphDecision, GraphEdge, GraphLimits, GraphNodeId, GraphQuery, GraphRefusal,
+        GraphViewPolicy, MinCostFlowRequest,
     };
 
     fn node(value: u64) -> GraphNodeId {
@@ -1949,6 +1956,10 @@ mod tests {
             dominators.value.get(&node(5)),
             Some(&vec![node(1), node(4), node(5)])
         );
+        assert_eq!(
+            dominators.witness.dominant_term,
+            ComplexityTerm::ContractionPassesTimesVerticesEdges
+        );
     }
 
     #[test]
@@ -1969,6 +1980,10 @@ mod tests {
             .articulation_bridges(&query)
             .expect("undirected fragility computation is allowed");
         assert_eq!(fragility.value.articulations, vec![node(2)]);
+        assert_eq!(
+            fragility.witness.dominant_term,
+            ComplexityTerm::RemovalSweepsSquared
+        );
         assert_eq!(fragility.value.bridges.len(), 3);
         let cut = graph.minimum_cut(&query).expect("minimum cut is allowed");
         assert_eq!(cut.value.capacity, 1);
@@ -2037,6 +2052,129 @@ mod tests {
                 resource: "nodes",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn dense_graph_fragility_values_match_an_independent_removal_oracle() {
+        // Six vertices, twelve undirected edges (E = 2V): the sweep-declared
+        // profile must keep returning exact removal results on denser input.
+        let nodes: Vec<_> = (1..=6).map(node).collect();
+        let edges = [
+            GraphEdge::new(node(1), node(2), 1),
+            GraphEdge::new(node(1), node(3), 1),
+            GraphEdge::new(node(2), node(3), 1),
+            GraphEdge::new(node(3), node(4), 1),
+            GraphEdge::new(node(4), node(5), 1),
+            GraphEdge::new(node(4), node(6), 1),
+            GraphEdge::new(node(5), node(6), 1),
+            GraphEdge::new(node(2), node(5), 1),
+            GraphEdge::new(node(3), node(6), 1),
+            GraphEdge::new(node(1), node(4), 1),
+            GraphEdge::new(node(2), node(6), 1),
+            GraphEdge::new(node(1), node(5), 1),
+        ];
+        let graph =
+            DeterministicGraph::from_canonical_parts(false, &nodes, &edges, GraphLimits::default())
+                .expect("dense corpus is admissible");
+        let query = query(GraphViewPolicy::exact_all());
+        let report = graph
+            .articulation_bridges(&query)
+            .expect("dense fragility computation is allowed");
+
+        let removal_components =
+            |removed_node: Option<GraphNodeId>, removed_edge: Option<GraphEdge>| {
+                let mut unseen: BTreeSet<_> = nodes.iter().copied().collect();
+                let mut components = 0_usize;
+                while let Some(&start) = unseen.first() {
+                    if Some(start) == removed_node {
+                        unseen.remove(&start);
+                        continue;
+                    }
+                    components += 1;
+                    let mut pending = VecDeque::from([start]);
+                    unseen.remove(&start);
+                    while let Some(current) = pending.pop_front() {
+                        for edge in &edges {
+                            if Some(*edge) == removed_edge {
+                                continue;
+                            }
+                            let other = if edge.from == current {
+                                Some(edge.to)
+                            } else if edge.to == current {
+                                Some(edge.from)
+                            } else {
+                                None
+                            };
+                            if let Some(other) = other
+                                && Some(other) != removed_node
+                                && unseen.remove(&other)
+                            {
+                                pending.push_back(other);
+                            }
+                        }
+                    }
+                }
+                components
+            };
+        let baseline = removal_components(None, None);
+        let expected_articulations: Vec<_> = nodes
+            .iter()
+            .copied()
+            .filter(|&candidate| removal_components(Some(candidate), None) > baseline)
+            .collect();
+        let expected_bridges: Vec<_> = edges
+            .iter()
+            .copied()
+            .filter(|&edge| removal_components(None, Some(edge)) > baseline)
+            .collect();
+        assert_eq!(report.value.articulations, expected_articulations);
+        assert_eq!(report.value.bridges, expected_bridges);
+        assert_eq!(
+            report.witness.dominant_term,
+            ComplexityTerm::RemovalSweepsSquared
+        );
+    }
+
+    #[test]
+    fn min_cost_flow_refusals_name_the_exact_cost_table_defect() {
+        let graph = directed_graph();
+        let query = query(GraphViewPolicy::exact_all());
+        let complete_costs = vec![
+            FlowCost::new(node(1), node(2), 1),
+            FlowCost::new(node(1), node(3), 1),
+            FlowCost::new(node(2), node(4), 1),
+            FlowCost::new(node(3), node(4), 1),
+            FlowCost::new(node(3), node(6), 1),
+            FlowCost::new(node(4), node(5), 1),
+            FlowCost::new(node(5), node(4), 1),
+        ];
+        let mut missing_one = complete_costs.clone();
+        missing_one.remove(3);
+        assert!(matches!(
+            graph.min_cost_flow(
+                &query,
+                &MinCostFlowRequest::new(node(1), node(4), 1, missing_one),
+            ),
+            Err(GraphRefusal::MissingFlowCost { edge }) if edge.to == node(4) && edge.from == node(3)
+        ));
+        let mut unknown_tail = complete_costs.clone();
+        unknown_tail.push(FlowCost::new(node(6), node(1), 1));
+        assert!(matches!(
+            graph.min_cost_flow(
+                &query,
+                &MinCostFlowRequest::new(node(1), node(4), 1, unknown_tail),
+            ),
+            Err(GraphRefusal::UnknownFlowCost { from, to }) if from == node(6) && to == node(1)
+        ));
+        let mut duplicated = complete_costs.clone();
+        duplicated.push(FlowCost::new(node(1), node(2), 2));
+        assert!(matches!(
+            graph.min_cost_flow(
+                &query,
+                &MinCostFlowRequest::new(node(1), node(4), 1, duplicated),
+            ),
+            Err(GraphRefusal::DuplicateFlowCost { from, to }) if from == node(1) && to == node(2)
         ));
     }
 }

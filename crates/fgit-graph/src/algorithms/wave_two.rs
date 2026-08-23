@@ -408,10 +408,6 @@ impl DeterministicGraph {
                 node: request.source,
             });
         }
-        if request.costs.len() != self.edges.len() {
-            let missing = self.edges.first().copied().ok_or(GraphRefusal::Invariant)?;
-            return Err(GraphRefusal::MissingFlowCost { edge: missing });
-        }
 
         let mut cost_table = BTreeMap::new();
         for cost in &request.costs {
