@@ -5272,6 +5272,26 @@ mod tests {
     }
 
     #[test]
+    fn durable_async_projection_never_uses_a_synchronous_runtime_bridge() {
+        let source = include_str!("lib.rs");
+        let marker = "impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionProjection<'_> {";
+        let (_, projection_and_rest) = source
+            .split_once(marker)
+            .expect("the durable async projection implementation remains present");
+        let (projection, _) = projection_and_rest
+            .split_once("\nfn async_projection_unavailable")
+            .expect("the durable async projection has its explicit refusal mapper boundary");
+        assert!(
+            projection.contains(".await"),
+            "the durable projection reaches authority staging through its asynchronous contract"
+        );
+        assert!(
+            !projection.contains("block_on"),
+            "a projection must not hide a synchronous runtime bridge inside async admission"
+        );
+    }
+
+    #[test]
     fn node_owned_projection_publishes_source_receive_and_refusal_rcrs_with_rederivable_evidence() {
         let scratch = ScratchDirectory::new();
         let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
