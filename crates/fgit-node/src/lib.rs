@@ -4309,9 +4309,10 @@ mod tests {
     use fgit_admission::{
         AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionSnapshot,
         AdmissionSnapshotProjection, AsyncAdmissionProjection, CanonicalAdmissionStore,
-        CanonicalRefState, CommitEvidence, PermittedObjectClosure, SourceImportOrigin,
-        SourceImportReceipt, SourceRefUpdate, ValidatedClosure, canonical_ref_state_root,
-        permitted_object_closure_root, validate_source_import,
+        CanonicalRefState, CommitEvidence, PermittedObjectClosure, QuarantineValidator,
+        SourceImportOrigin, SourceImportReceipt, SourceRefUpdate, ValidatedClosure,
+        canonical_ref_state_root, permitted_object_closure_root, validate_receive,
+        validate_source_import,
     };
     use fgit_authority::{
         AsyncAuthorityStore, HeadInit, HeadRead, ImmutableRead, OutcomeLookup,
@@ -4336,6 +4337,7 @@ mod tests {
         InternalObjectId, PrincipalId, RefName, RefusalCode, RepositoryAuthorityHeadId,
         RepositoryId, SchemaFamily, SchemaId, TenantId, TxId,
     };
+    use fgit_wire::receive::{QuarantineReceipt, ReceiveCommand, ReceiveRequest};
     use fgit_wire::{
         AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, ObjectType, PackPayloadSource,
         Packet, UploadPackRepository, WireError, WireLimits, encode_packets,
@@ -5270,7 +5272,7 @@ mod tests {
     }
 
     #[test]
-    fn node_owned_projection_publishes_rcr_with_rederivable_evidence() {
+    fn node_owned_projection_publishes_source_receive_and_refusal_rcrs_with_rederivable_evidence() {
         let scratch = ScratchDirectory::new();
         let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
             .expect("node initializes the canonical empty repository");
@@ -5302,7 +5304,7 @@ mod tests {
             delete_only: false,
             origin: SourceImportOrigin::LocalGitDirectory,
         };
-        let validated = validate_source_import(&updates, &receipt, closure)
+        let validated = validate_source_import(&updates, &receipt, closure.clone())
             .expect("a covering source-import closure is admissible");
         let (context, _, _) = evidence_request(&node);
         let admission = node
@@ -5330,6 +5332,16 @@ mod tests {
         let successor: RepositoryAuthorityHeadBody =
             decode_body(head.body(), fgit_codec::DecodeLimits::DEFAULT)
                 .expect("published successor head decodes");
+        let expected_source_refs = CanonicalRefState::new(BTreeMap::from([(
+            RefName::try_new(b"refs/heads/evidence").expect("fixed source-import ref is valid"),
+            stored.identity(),
+        )]));
+        assert_eq!(
+            successor.ref_root,
+            canonical_ref_state_root(&expected_source_refs)
+                .expect("the imported ref state has one canonical root"),
+            "the authority head carries the source-import successor ref root rather than a staged hint"
+        );
         let batch_id = successor
             .decision_tail_id
             .expect("the successor head names its committed decision batch");
@@ -5382,6 +5394,137 @@ mod tests {
             &authority_request,
             ADMISSION_RETENTION_DELTA_KEY_PREFIX,
             record.retention_delta_root,
+        );
+
+        let stale_old = AnyGitOid::from_hex(
+            GitObjectFormat::Sha1,
+            "1111111111111111111111111111111111111111",
+        )
+        .expect("fixed stale expected-old OID parses");
+        let stale_updates = [SourceRefUpdate {
+            old: stale_old,
+            new: stored.identity(),
+            ref_name: b"refs/heads/evidence".to_vec(),
+        }];
+        let stale_validated = validate_source_import(&stale_updates, &receipt, closure)
+            .expect("a complete stale source import remains structurally admissible");
+        let mut stale_context = context.clone();
+        stale_context.idempotency_key =
+            fgit_authority::IdempotencyKey::new(b"node-evidence-stale".to_vec())
+                .expect("the stale import has its own bounded idempotency key");
+        let basis_before_refusal = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&authority_request))
+            .expect("the current source-import basis materializes before refusal publication");
+        let refusal = node
+            .runtime()
+            .block_on(node.admit_validated_source_import_durable_in(
+                &authority_request,
+                &stale_context,
+                &stale_validated,
+                AdmissionLimits::default(),
+            ))
+            .expect("the durable source-import surface publishes a terminal refusal");
+        assert_eq!(refusal.commands.len(), 1);
+        let refusal_command = refusal.commands[0];
+        let DecisionOutcome::Refused {
+            code: RefusalCode::ExpectedOldRefMismatch,
+            ..
+        } = refusal_command.terminal.outcome
+        else {
+            panic!("the stale expected-old assertion receives its authenticated terminal refusal");
+        };
+        let expected_refusal = RefusalEvidenceBodies::derive(
+            &stale_context,
+            basis_before_refusal.basis(),
+            refusal_command.tx_id,
+            RefusalCode::ExpectedOldRefMismatch,
+        )
+        .expect("the terminal refusal derives its basis-bound evidence");
+        assert_published_evidence_body::<RefusalEvidence>(
+            &node,
+            &authority_request,
+            ADMISSION_REFUSAL_EVIDENCE_KEY_PREFIX,
+            evidence_root(expected_refusal.refusal_evidence())
+                .expect("the staged refusal evidence root derives"),
+        );
+
+        struct DeleteOnlyValidator {
+            closure: ValidatedClosure,
+        }
+
+        impl QuarantineValidator for DeleteOnlyValidator {
+            fn validate(
+                &self,
+                _request: &ReceiveRequest,
+                _pack: Option<&fgit_pack::QuarantinedPack>,
+                _receipt: &QuarantineReceipt,
+            ) -> Result<ValidatedClosure, RefusalCode> {
+                Ok(self.closure.clone())
+            }
+        }
+
+        let delete_request = ReceiveRequest {
+            commands: vec![ReceiveCommand {
+                old: stored.identity(),
+                new: zero,
+                ref_name: b"refs/heads/evidence".to_vec(),
+            }],
+            capabilities: Vec::new(),
+            push_options: Vec::new(),
+            certificate: None,
+        };
+        let delete_receipt = QuarantineReceipt {
+            object_format: GitObjectFormat::Sha1,
+            object_count: 0,
+            pack_bytes: 0,
+            delete_only: true,
+        };
+        let empty_closure = ValidatedClosure {
+            object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::default())
+                .expect("the delete-only closure root derives"),
+            objects: BTreeSet::new(),
+        };
+        let validated_delete = validate_receive(
+            &delete_request,
+            None,
+            &delete_receipt,
+            &DeleteOnlyValidator {
+                closure: empty_closure,
+            },
+        )
+        .expect("a pack-free delete-only receive remains a validated receive input");
+        let mut receive_context = context;
+        receive_context.idempotency_key =
+            fgit_authority::IdempotencyKey::new(b"node-evidence-receive-delete".to_vec())
+                .expect("the receive delete has its own bounded idempotency key");
+        let receive = node
+            .runtime()
+            .block_on(node.admit_validated_receive_durable_in(
+                &authority_request,
+                &receive_context,
+                &validated_delete,
+                AdmissionLimits::default(),
+            ))
+            .expect("the same durable projection publishes the receive-pack RCR");
+        assert_eq!(receive.commands.len(), 1);
+        assert!(matches!(
+            receive.commands[0].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ));
+        let after_receive = node
+            .runtime()
+            .block_on(node.materialize_admission_in(&authority_request))
+            .expect("the receive successor materializes from the authority head");
+        assert!(
+            after_receive.snapshot().refs.is_empty(),
+            "the receive-pack delete and source import both mutate the one authority-selected ref state"
+        );
+        assert_eq!(
+            after_receive.basis().body().ref_root,
+            canonical_ref_state_root(&CanonicalRefState::default())
+                .expect("the empty successor ref state has one canonical root"),
+            "the receive-pack successor head carries the shared materializer's ref root"
         );
         node.shutdown().expect("node closes cleanly");
     }
