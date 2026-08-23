@@ -58,7 +58,6 @@ pub struct ActivatedCapsule {
 
 impl ActivatedCapsule {
     /// The activated anti-rollback checkpoint pointer.
-    #[must_use]
     pub const fn pointer(&self) -> CapsulePointer {
         self.pointer
     }
@@ -85,7 +84,6 @@ impl FrozenCapsule {
 
     /// The root-last pointer candidate. A caller publishes it only after this
     /// function's exact-byte and current-head checks have completed.
-    #[must_use]
     pub const fn pointer(&self) -> CapsulePointer {
         self.pointer
     }
@@ -581,11 +579,12 @@ where
         HeadRead::Present(_) => return Err(LiveCapsuleRefusal::HeadMoved),
         HeadRead::Absent => return Err(LiveCapsuleRefusal::HeadDisappeared),
     }
-    let pointer = match current_pointer {
-        Some(pointer) => pointer.advance(capsule_id, &capsule),
-        None => CapsulePointer::genesis(capsule_id, &capsule),
-    }
-    .map_err(LiveCapsuleRefusal::Capsule)?;
+    let pointer = current_pointer
+        .map_or_else(
+            || CapsulePointer::genesis(capsule_id, &capsule),
+            |pointer| pointer.advance(capsule_id, &capsule),
+        )
+        .map_err(LiveCapsuleRefusal::Capsule)?;
     Ok(FrozenCapsule {
         capsule,
         capsule_id,
@@ -654,11 +653,12 @@ where
         HeadRead::Present(_) => return Err(LiveCapsuleRefusal::HeadMoved),
         HeadRead::Absent => return Err(LiveCapsuleRefusal::HeadDisappeared),
     }
-    let pointer = match current_pointer {
-        Some(pointer) => pointer.advance(capsule_id, &capsule),
-        None => CapsulePointer::genesis(capsule_id, &capsule),
-    }
-    .map_err(LiveCapsuleRefusal::Capsule)?;
+    let pointer = current_pointer
+        .map_or_else(
+            || CapsulePointer::genesis(capsule_id, &capsule),
+            |pointer| pointer.advance(capsule_id, &capsule),
+        )
+        .map_err(LiveCapsuleRefusal::Capsule)?;
     Ok(FrozenCapsule {
         capsule,
         capsule_id,
