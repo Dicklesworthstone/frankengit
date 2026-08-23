@@ -64,13 +64,21 @@
 #                         terminal record claims
 #   zero_assertions       the script discovered no assertions at all
 #   duplicate_ids         an acceptance ID was emitted twice in one script
-#   cross_duplicate_id    two scripts claim the same acceptance ID
-#   timeout               the script hit its wall budget
 #   containment           orphaned child processes or unresolved obligations
-#   skipped / unsupported the script reported a skipped or unsupported assertion
-#   failed                at least one assertion failed
-#   flaky                 a later attempt passed but the FIRST attempt failed
+#   timeout (script)      the script reported its OWN internal timeout
+#   cleanup_failed        a registered cleanup action failed
+#   failed                assertion errors, failed assertions, or the terminal
+#                         status disagrees with exit 0
+#   unsupported / skipped the script reported an unsupported or skipped
+#                         assertion
 #   ok                    everything above is clear
+#
+# Two dispositions live OUTSIDE this per-script chain: `timeout` for the
+# RUNNER's own wall budget is checked before the log is graded at all, and
+# `cross_duplicate_id` (two scripts claiming one acceptance ID) exists only
+# as a suite-terminal aggregate. A retry that passes after a first-attempt
+# failure records disposition `ok` for the final attempt and is additionally
+# bucketed as flaky, which fails the suite.
 #
 # `--attempts N > 1` never launders a first-attempt failure into a green: the
 # first attempt's log is preserved, its status is reported, and the suite is
