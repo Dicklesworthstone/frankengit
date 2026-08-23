@@ -163,13 +163,25 @@ fn ewah_len(object_count: usize) -> usize {
 }
 
 fn ewah_literal(input: &[u8], offset: usize, object_count: usize) -> u64 {
+    let literal_words = object_count.div_ceil(64);
     assert_eq!(
         read_u32(input, offset),
         u32::try_from(object_count).expect("fixture object count fits u32")
     );
-    assert_eq!(read_u32(input, offset + 4), 2, "one RLW plus one literal");
-    assert_eq!(read_u64(input, offset + 8), 1_u64 << 33);
-    assert_eq!(read_u32(input, offset + 20), 0, "RLW points at itself");
+    assert_eq!(
+        read_u32(input, offset + 4),
+        u32::try_from(literal_words + 1).expect("fixture EWAH buffer fits u32"),
+        "one RLW precedes every literal word"
+    );
+    assert_eq!(
+        read_u64(input, offset + 8),
+        u64::try_from(literal_words).expect("fixture literal count fits u64") << 33
+    );
+    assert_eq!(
+        read_u32(input, offset + 16 + 8 * literal_words),
+        0,
+        "RLW position indexes the first word in the EWAH buffer"
+    );
     read_u64(input, offset + 16)
 }
 
