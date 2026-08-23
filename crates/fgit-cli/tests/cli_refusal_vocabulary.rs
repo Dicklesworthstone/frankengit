@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![feature(variant_count)]
 //! The `fg` refusal vocabulary (`frankengit-qsql`).
 //!
 //! **This crate had no `tests/` directory.** Its only coverage was an inline
@@ -65,14 +66,21 @@
 //!
 //! Nothing here modifies `crates/fgit-cli/src/**`.
 
+use std::collections::BTreeSet;
 use std::error::Error as _;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use std::mem::variant_count;
+
 use fgit_cli::{CliOutcome, CliRefusal, run};
-use fgit_node::NodeRefusal;
+use fgit_node::{
+    AdmissionMaterializationRefusal, NodeGitDaemonServeRefusal, NodePackMaterializationRefusal,
+    NodeRefusal, NodeSourceImportRefusal,
+};
+use fgit_types::RefusalCode;
 
 const TENANT: &str = "11111111111111111111111111111111";
 const REPOSITORY: &str = "22222222222222222222222222222222";
@@ -385,21 +393,227 @@ fn export_visible_cleanup_reports_the_cleanup_because_the_export_succeeded() {
     );
 }
 
-/// The three refusals that carry no cause report none.
+/// What a variant's `source()` must do (`frankengit-u3co`).
 ///
-/// `ExportDestinationExists` is the interesting one: it carries a *path* and
-/// still has no source, because nothing underneath it failed — the file simply
-/// already existed.
-#[test]
-fn the_three_causeless_refusals_report_no_source() {
-    assert!(CliRefusal::Usage.source().is_none());
-    assert!(CliRefusal::ExportDestination.source().is_none());
-    assert!(
-        CliRefusal::ExportDestinationExists(Box::new(PathBuf::from("/tmp/qsql/present.pack")))
-            .source()
-            .is_none(),
-        "a pre-existing destination is not an underlying failure"
+/// Written by hand, per variant, in the corpus below. It is deliberately NOT
+/// computed from `source()` and NOT computed from a `matches!` over the same
+/// variant list — either would restate the implementation, and the assertion
+/// would then pass no matter what `source()` did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Cause {
+    /// `source()` returns `None`: nothing underneath this refusal failed.
+    Causeless,
+    /// `source()` returns `Some(_)`: an underlying failure is carried.
+    CarriesSource,
+}
+
+/// A real `TypeRefusal`, obtained by driving the CLI rather than by naming the
+/// enum's internals — so this corpus does not break when those change.
+fn a_type_refusal() -> fgit_types::TypeRefusal {
+    let error = refusal(
+        &["init", "/unused", "not-hex", REPOSITORY],
+        "a non-canonical tenant",
     );
+    let CliRefusal::Tenant(inner) = error else {
+        panic!("expected a tenant refusal, got {error:?}");
+    };
+    inner
+}
+
+/// EVERY `CliRefusal` variant, exactly once, with its expected cause.
+///
+/// The completeness gate below gives this list teeth: add a variant to the
+/// enum and `the_corpus_names_every_cli_refusal_variant` fails until it is
+/// classified here. That is the whole point of the design.
+///
+/// It exists because the test it replaced enumerated three causeless variants
+/// by hand and hardcoded the count in its own name. When `fg028a` added
+/// `ImportRefused` — a fourth causeless variant — nothing failed, and the test
+/// went on reading as complete while covering three quarters of the property.
+fn every_cli_refusal_variant() -> Vec<(&'static str, CliRefusal, Cause)> {
+    let type_refusal = a_type_refusal();
+    let path = || Box::new(PathBuf::from("/tmp/u3co/pack"));
+    let import = || {
+        Box::new(NodeSourceImportRefusal::Validation(
+            RefusalCode::ExpectedOldRefMismatch,
+        ))
+    };
+
+    vec![
+        ("Usage", CliRefusal::Usage, Cause::Causeless),
+        (
+            "Tenant",
+            CliRefusal::Tenant(type_refusal),
+            Cause::CarriesSource,
+        ),
+        (
+            "Repository",
+            CliRefusal::Repository(type_refusal),
+            Cause::CarriesSource,
+        ),
+        (
+            "Principal",
+            CliRefusal::Principal(type_refusal),
+            Cause::CarriesSource,
+        ),
+        (
+            "Object",
+            CliRefusal::Object(type_refusal),
+            Cause::CarriesSource,
+        ),
+        (
+            "Node",
+            CliRefusal::Node(NodeRefusal::AuthorityHeadAbsent),
+            Cause::CarriesSource,
+        ),
+        ("Import", CliRefusal::Import(import()), Cause::CarriesSource),
+        (
+            "ImportRefused",
+            CliRefusal::ImportRefused(RefusalCode::ExpectedOldRefMismatch),
+            Cause::Causeless,
+        ),
+        (
+            "Listener",
+            CliRefusal::Listener(marked_io("LISTENER")),
+            Cause::CarriesSource,
+        ),
+        (
+            "Serve",
+            CliRefusal::Serve(NodeGitDaemonServeRefusal::RepositoryPathMismatch),
+            Cause::CarriesSource,
+        ),
+        (
+            "ExportMaterialization",
+            CliRefusal::ExportMaterialization(Box::new(NodePackMaterializationRefusal::Admission(
+                Box::new(AdmissionMaterializationRefusal::HeadAbsent),
+            ))),
+            Cause::CarriesSource,
+        ),
+        (
+            "ExportDestination",
+            CliRefusal::ExportDestination,
+            Cause::Causeless,
+        ),
+        (
+            "ExportDestinationExists",
+            CliRefusal::ExportDestinationExists(path()),
+            Cause::Causeless,
+        ),
+        (
+            "ExportFile",
+            CliRefusal::ExportFile {
+                operation: "publish",
+                path: path(),
+                source: Box::new(marked_io("SOURCE")),
+            },
+            Cause::CarriesSource,
+        ),
+        (
+            "ExportFileCleanup",
+            CliRefusal::ExportFileCleanup {
+                operation: "publish",
+                temporary: path(),
+                source: Box::new(marked_io("SOURCE")),
+                cleanup: Box::new(marked_io("CLEANUP")),
+            },
+            Cause::CarriesSource,
+        ),
+        (
+            "ExportVisibleCleanup",
+            CliRefusal::ExportVisibleCleanup {
+                destination: path(),
+                temporary: path(),
+                cleanup: Box::new(marked_io("CLEANUP")),
+            },
+            Cause::CarriesSource,
+        ),
+        (
+            "ImportCleanup",
+            CliRefusal::ImportCleanup {
+                import: import(),
+                cleanup: Box::new(NodeRefusal::EmptyStorageRoot),
+            },
+            Cause::CarriesSource,
+        ),
+        (
+            "ImportRefusedCleanup",
+            CliRefusal::ImportRefusedCleanup {
+                code: RefusalCode::ExpectedOldRefMismatch,
+                cleanup: Box::new(NodeRefusal::EmptyStorageRoot),
+            },
+            Cause::CarriesSource,
+        ),
+        (
+            "DoctorCleanup",
+            CliRefusal::DoctorCleanup {
+                inspection: Box::new(NodeRefusal::AuthorityHeadAbsent),
+                cleanup: Box::new(NodeRefusal::EmptyStorageRoot),
+            },
+            Cause::CarriesSource,
+        ),
+        (
+            "ServeCleanup",
+            CliRefusal::ServeCleanup {
+                serving: Box::new(NodeGitDaemonServeRefusal::RepositoryPathMismatch),
+                cleanup: Box::new(NodeRefusal::EmptyStorageRoot),
+            },
+            Cause::CarriesSource,
+        ),
+        (
+            "ExportCleanup",
+            CliRefusal::ExportCleanup {
+                export: Box::new(CliRefusal::ExportDestination),
+                cleanup: Box::new(NodeRefusal::EmptyStorageRoot),
+            },
+            Cause::CarriesSource,
+        ),
+    ]
+}
+
+/// **The completeness gate.** Without it the corpus is just a longer hand list.
+///
+/// `variant_count` reads the total from the TYPE, so this cannot drift the way
+/// a written-down number does. The distinctness check is what stops a
+/// duplicated entry from padding the count to match.
+#[test]
+fn the_corpus_names_every_cli_refusal_variant() {
+    let corpus = every_cli_refusal_variant();
+    let names: BTreeSet<&str> = corpus.iter().map(|(name, ..)| *name).collect();
+
+    assert_eq!(
+        names.len(),
+        corpus.len(),
+        "the corpus names a variant twice, so its length overstates its coverage"
+    );
+    assert_eq!(
+        corpus.len(),
+        variant_count::<CliRefusal>(),
+        "the corpus covers {} of CliRefusal's {} variants — classify the new one \
+         as Causeless or CarriesSource rather than deleting this assertion",
+        corpus.len(),
+        variant_count::<CliRefusal>()
+    );
+}
+
+/// `source()` is `None` for exactly the causeless refusals, and `Some` for
+/// every other variant — checked over the whole enum, not a chosen few.
+///
+/// `ExportDestinationExists` is the interesting causeless case: it carries a
+/// *path* and still has no source, because nothing underneath it failed — the
+/// file simply already existed. `ImportRefused` is the one `fg028a` added.
+#[test]
+fn source_is_none_exactly_for_the_causeless_refusals() {
+    for (name, refusal, expected) in every_cli_refusal_variant() {
+        let observed = if refusal.source().is_none() {
+            Cause::Causeless
+        } else {
+            Cause::CarriesSource
+        };
+        assert_eq!(
+            observed, expected,
+            "CliRefusal::{name} is {observed:?} but the corpus expects {expected:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
