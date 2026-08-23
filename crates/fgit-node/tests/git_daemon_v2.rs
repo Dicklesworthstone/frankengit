@@ -81,6 +81,26 @@ impl UploadPackRepository for EmptyRepository {
     }
 }
 
+struct EmptySha256Repository;
+
+impl UploadPackRepository for EmptySha256Repository {
+    fn object_format(&self) -> GitObjectFormat {
+        GitObjectFormat::Sha256
+    }
+
+    fn advertised_refs(&self) -> &[AdvertisedRef] {
+        &[]
+    }
+
+    fn contains_want(&self, _oid: AnyGitOid) -> bool {
+        false
+    }
+
+    fn is_common(&self, _oid: AnyGitOid) -> bool {
+        false
+    }
+}
+
 struct EmptyPayload;
 
 impl PackPayloadSource for EmptyPayload {
@@ -110,6 +130,28 @@ fn greeting(version: Option<&[u8]>) -> Vec<u8> {
         payload.push(0);
     }
     frame(&payload)
+}
+
+fn v2_ls_refs_request() -> Vec<u8> {
+    let mut wire = greeting(Some(b"2"));
+    wire.extend_from_slice(&pkt_line(b"command=ls-refs"));
+    wire.extend_from_slice(DELIMITER);
+    wire.extend_from_slice(FLUSH);
+    wire
+}
+
+fn expected_v2_advertisement(object_format: &[u8]) -> Vec<u8> {
+    let mut advertisement = Vec::new();
+    for packet in [
+        b"version 2\n".as_slice(),
+        b"ls-refs\n",
+        b"fetch\n",
+        &[b"object-format=".as_slice(), object_format, b"\n"].concat(),
+    ] {
+        advertisement.extend_from_slice(&pkt_line(packet));
+    }
+    advertisement.extend_from_slice(FLUSH);
+    advertisement
 }
 
 fn serve(
@@ -151,18 +193,36 @@ fn version_three_greeting_remains_a_typed_refusal() {
 
 #[test]
 fn an_empty_repository_v2_session_serves_ls_refs_then_ends_cleanly() {
-    let mut wire = greeting(Some(b"2"));
-    wire.extend_from_slice(&pkt_line(b"command=ls-refs"));
-    wire.extend_from_slice(DELIMITER);
-    wire.extend_from_slice(FLUSH);
-
-    let (outcome, output) = serve(wire, &EmptyRepository);
+    let (outcome, output) = serve(v2_ls_refs_request(), &EmptyRepository);
     assert!(matches!(
         outcome,
         Ok(GitDaemonSessionOutcome::EmptyRepository(_))
     ));
     let text = String::from_utf8(output).expect("advertisement is utf-8 pkt-line text");
     assert!(text.contains("version 2"), "the v2 prelude must be present");
+}
+
+#[test]
+fn v2_advertisement_packet_bytes_follow_the_repository_object_format() {
+    let (sha1_outcome, sha1_output) = serve(v2_ls_refs_request(), &EmptyRepository);
+    assert!(matches!(
+        sha1_outcome,
+        Ok(GitDaemonSessionOutcome::EmptyRepository(_))
+    ));
+    assert!(
+        sha1_output.starts_with(&expected_v2_advertisement(b"sha1")),
+        "a SHA-1 repository must advertise its SHA-1 format packet"
+    );
+
+    let (sha256_outcome, sha256_output) = serve(v2_ls_refs_request(), &EmptySha256Repository);
+    assert!(matches!(
+        sha256_outcome,
+        Ok(GitDaemonSessionOutcome::EmptyRepository(_))
+    ));
+    assert!(
+        sha256_output.starts_with(&expected_v2_advertisement(b"sha256")),
+        "a SHA-256 repository must advertise its SHA-256 format packet"
+    );
 }
 
 #[test]
