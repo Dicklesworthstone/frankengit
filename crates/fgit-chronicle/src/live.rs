@@ -715,12 +715,16 @@ where
         ImmutableRead::Present(_) => {}
     }
 
+    let source_head: RepositoryAuthorityHeadBody = decode_body(basis.body(), DecodeLimits::DEFAULT)
+        .map_err(|error| {
+            BackupExportRefusal::Inspection(Box::new(CapsuleInspectionRefusal::HeadDecode(error)))
+        })?;
     let inspection = inspect_capsule_against_authority_head_bytes(
         identity,
         frozen.capsule_id(),
         &capsule_bytes,
         basis.body(),
-        frozen.capsule().predecessor_capsule_id,
+        source_head.last_checkpoint_id,
     )
     .map_err(|error| BackupExportRefusal::Inspection(Box::new(error)))?;
     if inspection.classification().outcome() != RestoreOutcome::Restorable {
@@ -766,12 +770,18 @@ where
             backup.bundle().exported_profile,
         ));
     }
+    let source_head: RepositoryAuthorityHeadBody =
+        decode_body(backup.authority_head_bytes(), DecodeLimits::DEFAULT).map_err(|error| {
+            RestoreExecutionRefusal::Inspection(Box::new(CapsuleInspectionRefusal::HeadDecode(
+                error,
+            )))
+        })?;
     let inspection = inspect_capsule_against_authority_head_bytes(
         identity,
         backup.bundle().capsule_id,
         backup.capsule_bytes(),
         backup.authority_head_bytes(),
-        None,
+        source_head.last_checkpoint_id,
     )
     .map_err(|error| RestoreExecutionRefusal::Inspection(Box::new(error)))?;
     if inspection.capsule().repository_id != backup.bundle().repository_id {
@@ -798,20 +808,13 @@ where
         return Err(RestoreExecutionRefusal::CapsuleReadbackMismatch);
     }
 
-    let source_head: RepositoryAuthorityHeadBody =
-        decode_body(backup.authority_head_bytes(), DecodeLimits::DEFAULT).map_err(|error| {
-            RestoreExecutionRefusal::Inspection(Box::new(CapsuleInspectionRefusal::HeadDecode(
-                error,
-            )))
-        })?;
     let basis = match initialize_repository(destination, destination_key, &source_head)
         .map_err(|error| RestoreExecutionRefusal::DestinationInitialize(Box::new(error)))?
     {
         HeadInit::Created(receipt) | HeadInit::IdenticalRetry(receipt) => receipt,
         HeadInit::Conflict => return Err(RestoreExecutionRefusal::DestinationHeadConflict),
     };
-    let pointer = CapsulePointer::genesis(backup.bundle().capsule_id, &capsule)
-        .map_err(RestoreExecutionRefusal::CapsulePointer)?;
+    let pointer = CapsulePointer::restored_root(backup.bundle().capsule_id, &capsule);
     let frozen = FrozenCapsule {
         capsule,
         capsule_id: backup.bundle().capsule_id,

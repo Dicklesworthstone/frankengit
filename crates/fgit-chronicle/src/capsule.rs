@@ -322,6 +322,24 @@ impl CapsulePointer {
         })
     }
 
+    /// Establishes the first pointer of a freshly restored namespace.
+    ///
+    /// An attestation-only restore imports a capsule whose
+    /// `predecessor_capsule_id` names source-namespace history that no local
+    /// verification can reach; locally the imported capsule is still the
+    /// root. The source chain remains observable through the capsule body
+    /// itself for audit.
+    pub const fn restored_root(
+        capsule_id: RepositoryCapsuleId,
+        capsule: &RepositoryCapsuleBody,
+    ) -> Self {
+        Self {
+            repository_id: capsule.repository_id,
+            capsule_id,
+            head_generation: capsule.head_generation,
+        }
+    }
+
     /// The repository this pointer belongs to.
     #[must_use]
     pub const fn repository_id(&self) -> RepositoryId {

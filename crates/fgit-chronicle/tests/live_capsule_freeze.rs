@@ -395,3 +395,119 @@ fn overclaimed_export_profile_refuses_before_destination_authority_exists() {
         "a declared full-closure archive cannot be substituted for attestation-only bytes"
     );
 }
+
+#[test]
+fn attested_export_restores_a_second_generation_checkpoint() {
+    let source = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x5b));
+    let source_key =
+        HeadKey::new(b"chronicle/attested-export-second-source".to_vec()).expect("bounded key");
+    initialize_repository(&source, &source_key, &head()).expect("source head initializes");
+    let first_basis = match source.read_head(&source_key).expect("head reads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("initialized head is present"),
+    };
+    let first = freeze_capsule(&source, &CryptoBodyIdentity, &first_basis, None, closure())
+        .expect("genesis checkpoint freezes");
+    activate_frozen_capsule(&source, &first_basis, &first).expect("first checkpoint activates");
+    let second_basis = match source.read_head(&source_key).expect("head rereads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("activated head is present"),
+    };
+    let second = freeze_capsule(
+        &source,
+        &CryptoBodyIdentity,
+        &second_basis,
+        Some(&first.pointer()),
+        closure(),
+    )
+    .expect("second checkpoint freezes chained onto its predecessor");
+
+    let export = export_frozen_capsule(
+        &source,
+        &CryptoBodyIdentity,
+        &second_basis,
+        &second,
+        digest(0x5c),
+        digest(0x5d),
+    )
+    .expect("a chaining capsule exports through the attestation-only path");
+
+    let destination = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x5e));
+    let destination_key = HeadKey::new(b"chronicle/attested-export-second-destination".to_vec())
+        .expect("bounded destination key");
+    let restored =
+        restore_attested_backup(&destination, &destination_key, &CryptoBodyIdentity, &export)
+            .expect("a non-genesis checkpoint restores from the attestation-only export");
+
+    let restored_head: RepositoryAuthorityHeadBody =
+        decode_body(restored.head().body(), DecodeLimits::DEFAULT)
+            .expect("restored receipt carries canonical head bytes");
+    assert_eq!(
+        restored_head.last_checkpoint_id,
+        Some(second.capsule_id()),
+        "the restored boundary checkpoints the exported capsule, not its predecessor"
+    );
+    assert_eq!(
+        restored_head.generation,
+        HeadGeneration::try_new(3).expect("third generation is valid"),
+        "restore advances exactly one activation past the imported head"
+    );
+}
+
+#[test]
+fn restore_refuses_a_byte_level_pair_that_disagrees_on_the_checkpoint_chain() {
+    let source = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x5f));
+    let source_key =
+        HeadKey::new(b"chronicle/attested-export-tamper-source".to_vec()).expect("bounded key");
+    initialize_repository(&source, &source_key, &head()).expect("source head initializes");
+    let basis = match source.read_head(&source_key).expect("head reads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("initialized head is present"),
+    };
+    let frozen = freeze_capsule(&source, &CryptoBodyIdentity, &basis, None, closure())
+        .expect("genesis capsule freezes");
+    let export = export_frozen_capsule(
+        &source,
+        &CryptoBodyIdentity,
+        &basis,
+        &frozen,
+        digest(0x60),
+        digest(0x61),
+    )
+    .expect("the consistent pair exports");
+
+    // An untrusted transport may carry a head whose checkpoint pointer names a
+    // capsule the exported capsule does not follow. Every check must derive
+    // from bytes alone and refuse before any destination write.
+    let mut tampered_head: RepositoryAuthorityHeadBody =
+        decode_body(export.authority_head_bytes(), DecodeLimits::DEFAULT)
+            .expect("export carries canonical head bytes");
+    tampered_head.last_checkpoint_id = Some(frozen.capsule_id());
+    let tampered = AttestedBackupExport::new(
+        export.bundle().clone(),
+        export.capsule_bytes().to_vec(),
+        encode_body(&tampered_head).expect("tampered head encodes"),
+    );
+
+    let destination = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x62));
+    let destination_key = HeadKey::new(b"chronicle/attested-export-tamper-destination".to_vec())
+        .expect("bounded destination key");
+    assert!(matches!(
+        restore_attested_backup(
+            &destination,
+            &destination_key,
+            &CryptoBodyIdentity,
+            &tampered
+        ),
+        Err(RestoreExecutionRefusal::NotRestorable(
+            RestoreOutcome::FailClosed
+        ))
+    ));
+    assert!(
+        matches!(
+            destination.read_head(&destination_key),
+            Err(_) | Ok(HeadRead::Absent)
+        ),
+        "a refused pair never initializes destination authority"
+    );
+}
