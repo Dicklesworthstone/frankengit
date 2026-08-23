@@ -20,6 +20,9 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | SHA-256 repositories | planned, constitutionally typed | Native SHA-256 object format and transition fixtures; never digest-byte aliasing with SHA-1 |
 | Blob/tree/commit/annotated-tag parsing | required-v1 | Exact framing, header semantics, ordering, encoding, and resource bounds |
 | Pack v2 parsing/writing | required-v1 | Header/trailer/checksum, OFS/REF delta, thin packs, bounded reconstruction, deterministic writer profiles |
+| Commit-graph V1 materialization | planned compatibility surface | Source-receipted deterministic graph materializer and exact graph-walk comparison exist internally; no pinned-Git reader-parse evidence is declared yet |
+| Reachability bitmap materialization | planned compatibility surface | Source-receipted bitmap materializer and exact reachability comparison exist internally; no pinned-Git bitmap-reader evidence is declared yet |
+| Multi-pack index (MIDX) materialization | planned compatibility surface | Source-receipted deterministic MIDX writer and bounded internal lookup exist; no pinned-Git MIDX-reader evidence is declared yet |
 | Atomic push | required-v1 | All ref commands publish in one decision batch/RCR or none when negotiated |
 | Non-atomic push | required-v1 | Exact per-command success/failure mapping with stable sealed transaction identities |
 | Push options | required-v1 | Preserved in sealed request and policy evidence |
@@ -35,7 +38,7 @@ Base status values used below are `required-v1`, `planned`, `experimental-v1`, `
 | Replace refs / graft-like local behavior | explicitly-out-of-scope server truth | Client-local views cannot alter canonical server state |
 | Reflogs | planned compatibility view | Derived/materialized audit view; canonical decision history remains the authority |
 | Alternates | explicitly-out-of-scope production authority | May appear in conformance fixtures; cannot create hidden canonical dependencies |
-| Git bundles / bundle URI | planned | Authenticated import/export manifests and accelerated clone |
+| Git bundles / bundle URI | planned | Restricted source-receipted Full Bundle V2 and `mode=any` mirror-list profiles exist internally; no pinned-Git bundle/URI consumer evidence is declared yet |
 | Server-side hooks | planned typed subset | Sandboxed/capability-scoped deterministic policy interfaces; no ambient host execution |
 | Arbitrary user wire hooks | explicitly-out-of-scope | Replaced with typed events, policies, obligations, and effect broker |
 | Archive generation | required-v1 subset | Pure-Rust tar/zip generation, path safety, deterministic ordering, resource bounds |
