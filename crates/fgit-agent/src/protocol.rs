@@ -20,8 +20,8 @@ use core::fmt;
 
 use fgit_authority::{
     AuthenticatedHead, AuthorityVersionToken, ExpectedOld, HeadBodyRefusal, IdempotencyKey,
-    OutcomeFailure, ProposedNew, RefCommand, RequestRefusal, SealAttempt, SemanticRequest,
-    authority_head_identity,
+    OutcomeFailure, ProposedNew, RECEIVE_ADMISSION_SCHEMA, RefCommand, RequestRefusal, SealAttempt,
+    SemanticRequest, authority_head_identity,
 };
 use fgit_codec::{CodecRefusal, Encoder};
 use fgit_crypto::{DigestHasher, GitHashAlgorithm, NativeObjectIdentity, Sha256};
@@ -883,7 +883,7 @@ fn semantic_request_for_proposal<A: GitHashAlgorithm>(
         .collect::<Result<Vec<_>, ProtocolRefusal>>()?;
 
     SemanticRequest::build(
-        fgit_admission::RECEIVE_ADMISSION_SCHEMA,
+        RECEIVE_ADMISSION_SCHEMA,
         A::OBJECT_FORMAT,
         true,
         ref_commands,

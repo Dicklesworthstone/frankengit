@@ -23,9 +23,9 @@ use std::future::Future;
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityStore, CumulativeOutcomes,
-    HeadKey, HeadRead, IdempotencyKey, OutcomeFailure, OutcomeLookup, SealAttempt, SealFailure,
-    collect_cumulative_outcomes, collect_cumulative_outcomes_async, initialize_repository,
-    seal_request,
+    HeadKey, HeadRead, IdempotencyKey, OutcomeFailure, OutcomeLookup, RECEIVE_ADMISSION_SCHEMA,
+    SealAttempt, SealFailure, collect_cumulative_outcomes, collect_cumulative_outcomes_async,
+    initialize_repository, seal_request,
 };
 use fgit_chronicle::{
     PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots, publish,
@@ -45,8 +45,8 @@ use fgit_reference::refs::ExpectedRefState;
 use fgit_txn::{IntentEvaluator, TransactionFoldReport};
 use fgit_types::{
     AsciiSlug, DecisionOutcome, Digest, DomainTag, PrincipalId, PrincipalSnapshotId, RefName,
-    RefusalCode, RefusalRecordId, RepositoryId, RepositorySequence, SchemaFamily, SchemaId,
-    TenantId, TransactionSealId, TxId,
+    RefusalCode, RefusalRecordId, RepositoryId, RepositorySequence, SchemaFamily, TenantId,
+    TransactionSealId, TxId,
 };
 use fgit_wire::receive::{
     QuarantineReceipt, ReceiveCommandStatus, ReceiveError, ReceiveRequest, UnpackStatus,
@@ -55,10 +55,6 @@ use fgit_wire::receive::{
 use fgit_wire::{AnyGitOid, GitObjectFormat, Packet};
 
 pub mod evidence;
-
-/// Schema for a receive-pack ref transaction produced by this admission layer.
-pub const RECEIVE_ADMISSION_SCHEMA: SchemaId =
-    SchemaId::new(SchemaFamily::from_static("receive-admission"), 1, 0);
 
 /// Bounds enforced before creating per-command work or retrying a stale plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

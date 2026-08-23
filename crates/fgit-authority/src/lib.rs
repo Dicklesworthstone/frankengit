@@ -78,6 +78,18 @@ mod suite;
 mod tokens;
 mod vocabulary;
 
+/// Schema for an authority-sealed receive-pack ref transaction.
+///
+/// The schema names the canonical decision shape — ref commands admitted
+/// against an authority head — rather than the transport or caller that
+/// produced it. Keeping it at the authority boundary prevents adapters from
+/// minting provenance-specific transaction identities for the same ref set.
+pub const RECEIVE_ADMISSION_SCHEMA: fgit_types::label::SchemaId = fgit_types::label::SchemaId::new(
+    fgit_types::label::SchemaFamily::from_static("receive-admission"),
+    1,
+    0,
+);
+
 pub use crate::admission::{
     ADMISSION_KEY_PREFIX, AdmissionInstant, AdmissionOutcome, AdmissionReceiptBody, admission_key,
     read_admission, read_admission_async, record_admission, record_admission_async,

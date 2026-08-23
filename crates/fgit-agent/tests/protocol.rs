@@ -7,8 +7,9 @@ use fgit_agent::{
     RetrievalChannel, RunId, WorkspaceBinding,
 };
 use fgit_authority::{
-    AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, SealAdmission, StoreInstanceId,
-    authority_head_identity, initialize_repository, outcome_index_root, seal_request,
+    AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, RECEIVE_ADMISSION_SCHEMA,
+    SealAdmission, StoreInstanceId, authority_head_identity, initialize_repository,
+    outcome_index_root, seal_request,
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
 use fgit_crypto::{GitObjectKind, GitOid, GitOidSha1, IdentityDomain, NativeObjectIdentity, Sha1};
@@ -442,7 +443,7 @@ fn authenticated_workspace_proposal_uses_the_ordinary_retry_safe_ref_seal() {
         .expect("the run, workspace, proposal, and context share one authority basis");
     assert_eq!(
         transaction.semantic_request().request_schema(),
-        fgit_admission::RECEIVE_ADMISSION_SCHEMA,
+        RECEIVE_ADMISSION_SCHEMA,
         "agent provenance must not mint a second ref-transaction schema"
     );
     assert!(transaction.semantic_request().atomic());

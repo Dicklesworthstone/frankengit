@@ -622,7 +622,6 @@ dependencies = [
 name = "fgit-agent"
 version = "0.0.1"
 dependencies = [
- "fgit-admission",
  "fgit-authority",
  "fgit-claim",
  "fgit-codec",
