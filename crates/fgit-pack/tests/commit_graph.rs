@@ -10,7 +10,7 @@
 use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest};
 use fgit_pack::{
     CommitGraphInput, CommitGraphLimits, CommitGraphRefusal, CommitGraphSource, CommitGraphV1,
-    ObjectFormat, ObjectId,
+    ObjectFormat, ObjectId, PackError,
 };
 use fgit_types::{
     CodecVersion, DigestAlgorithmId, DigestBytes, GitOidSha1, RepositoryCommitId, RepositoryId,
@@ -185,6 +185,39 @@ fn commit_graph_v1_encodes_closed_native_commit_history_and_extra_edges() {
         0x8000_0000 | u32::try_from(tip_position).expect("fixture position fits u32")
     );
     assert_ne!(root_position, octopus_position, "history is non-vacuous");
+    let exact_parents = BTreeMap::from([
+        (*root.commit_oid(), Vec::new()),
+        (*first.commit_oid(), vec![*root.commit_oid()]),
+        (*side.commit_oid(), vec![*root.commit_oid()]),
+        (*tip.commit_oid(), vec![*first.commit_oid()]),
+        (
+            *octopus.commit_oid(),
+            vec![*first.commit_oid(), *side.commit_oid(), *tip.commit_oid()],
+        ),
+    ]);
+    for (commit, exact) in &exact_parents {
+        let mut query_live = || true;
+        assert_eq!(
+            graph
+                .parents(commit, &mut query_live)
+                .expect("receipt-bound graph accepts its emitted chunks"),
+            Some(exact.clone()),
+            "accelerated parent walk equals the strict source-commit parent order"
+        );
+    }
+    let mut absent_live = || true;
+    assert_eq!(
+        graph
+            .parents(&oid(0xee), &mut absent_live)
+            .expect("an absent graph identity is an ordinary non-answer"),
+        None
+    );
+    let mut cancelled = || false;
+    assert_eq!(
+        graph.parents(octopus.commit_oid(), &mut cancelled),
+        Err(CommitGraphRefusal::Pack(PackError::DeadlineExceeded)),
+        "query cancellation refuses before a parent result is exposed"
+    );
 }
 
 #[test]

@@ -489,6 +489,301 @@ impl CommitGraphV1 {
     pub const fn receipt(&self) -> &CommitGraphV1Receipt {
         &self.receipt
     }
+
+    /// Returns the stored ordered parent identities for `commit` from this
+    /// derived graph.  The returned vector is an acceleration hint only: a
+    /// caller still authenticates its authority basis and verifies native
+    /// commit bytes before treating the result as repository truth.  `None`
+    /// means the named commit is absent from this graph's closed input set.
+    pub fn parents(
+        &self,
+        commit: &ObjectId,
+        deadline: &mut impl Deadline,
+    ) -> Result<Option<Vec<ObjectId>>, CommitGraphRefusal> {
+        let layout = CommitGraphLookupLayout::parse(&self.bytes, &self.receipt)?;
+        if commit.algorithm() != layout.format {
+            return Err(CommitGraphRefusal::ObjectFormatMismatch {
+                subject: "lookup commit",
+                expected: layout.format,
+                observed: commit.algorithm(),
+            });
+        }
+        let Some(position) = layout.find_position(&self.bytes, commit, deadline)? else {
+            return Ok(None);
+        };
+        let record = layout
+            .commit_data
+            .checked_add(
+                position
+                    .checked_mul(layout.record_bytes)
+                    .ok_or(CommitGraphRefusal::SizeOverflow)?,
+            )
+            .ok_or(CommitGraphRefusal::SizeOverflow)?;
+        let first = read_u32(&self.bytes, record + layout.format.digest_len()).ok_or(
+            CommitGraphRefusal::MaterializationMismatch {
+                subject: "CDAT first parent",
+            },
+        )?;
+        let second = read_u32(
+            &self.bytes,
+            record
+                .checked_add(layout.format.digest_len())
+                .and_then(|value| value.checked_add(4))
+                .ok_or(CommitGraphRefusal::SizeOverflow)?,
+        )
+        .ok_or(CommitGraphRefusal::MaterializationMismatch {
+            subject: "CDAT second parent",
+        })?;
+        let mut parents = Vec::new();
+        if first == NO_PARENT {
+            if second != NO_PARENT {
+                return Err(CommitGraphRefusal::MaterializationMismatch {
+                    subject: "CDAT parent sentinel",
+                });
+            }
+            return Ok(Some(parents));
+        }
+        layout.push_parent(&self.bytes, first, &mut parents)?;
+        if second == NO_PARENT {
+            return Ok(Some(parents));
+        }
+        if second & EDGE_LAST_BIT == 0 {
+            layout.push_parent(&self.bytes, second, &mut parents)?;
+            return Ok(Some(parents));
+        }
+        let mut edge = usize::try_from(second & !EDGE_LAST_BIT).map_err(|_| {
+            CommitGraphRefusal::MaterializationMismatch {
+                subject: "EDGE start",
+            }
+        })?;
+        for _ in 0..self.receipt.edge_count {
+            checkpoint(deadline).map_err(CommitGraphRefusal::Pack)?;
+            let edge_offset = layout
+                .edge_data
+                .ok_or(CommitGraphRefusal::MaterializationMismatch {
+                    subject: "missing EDGE chunk",
+                })?
+                .checked_add(
+                    edge.checked_mul(4)
+                        .ok_or(CommitGraphRefusal::SizeOverflow)?,
+                )
+                .ok_or(CommitGraphRefusal::SizeOverflow)?;
+            if edge_offset >= layout.body_end {
+                return Err(CommitGraphRefusal::MaterializationMismatch {
+                    subject: "EDGE index range",
+                });
+            }
+            let encoded = read_u32(&self.bytes, edge_offset).ok_or(
+                CommitGraphRefusal::MaterializationMismatch {
+                    subject: "EDGE record",
+                },
+            )?;
+            layout.push_parent(&self.bytes, encoded & !EDGE_LAST_BIT, &mut parents)?;
+            if encoded & EDGE_LAST_BIT != 0 {
+                return Ok(Some(parents));
+            }
+            edge = edge
+                .checked_add(1)
+                .ok_or(CommitGraphRefusal::SizeOverflow)?;
+        }
+        Err(CommitGraphRefusal::MaterializationMismatch {
+            subject: "unterminated EDGE chain",
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CommitGraphLookupLayout {
+    format: ObjectFormat,
+    commit_count: usize,
+    oid_lookup: usize,
+    commit_data: usize,
+    edge_data: Option<usize>,
+    body_end: usize,
+    record_bytes: usize,
+}
+
+impl CommitGraphLookupLayout {
+    fn parse(input: &[u8], receipt: &CommitGraphV1Receipt) -> Result<Self, CommitGraphRefusal> {
+        let format = receipt.source().source_commit_oid().algorithm();
+        let digest_len = format.digest_len();
+        let body_end = input.len().checked_sub(digest_len).ok_or(
+            CommitGraphRefusal::MaterializationMismatch {
+                subject: "trailing checksum length",
+            },
+        )?;
+        let chunk_count = usize::from(*input.get(6).ok_or(
+            CommitGraphRefusal::MaterializationMismatch {
+                subject: "chunk count",
+            },
+        )?);
+        if !(3..=4).contains(&chunk_count)
+            || input.len() != receipt.output_bytes()
+            || input.get(..4) != Some(COMMIT_GRAPH_SIGNATURE)
+            || input.get(4) != Some(&COMMIT_GRAPH_VERSION_V1)
+            || input.get(5) != Some(&format_code(format))
+            || input.get(7) != Some(&0)
+            || input.get(body_end..) != Some(receipt.checksum().as_bytes())
+            || checksum(format, &input[..body_end]) != *receipt.checksum()
+        {
+            return Err(CommitGraphRefusal::MaterializationMismatch {
+                subject: "header or checksum",
+            });
+        }
+        let expected_ids: &[[u8; 4]] = if chunk_count == 4 {
+            &[
+                CHUNK_OID_FANOUT,
+                CHUNK_OID_LOOKUP,
+                CHUNK_COMMIT_DATA,
+                CHUNK_EXTRA_EDGES,
+            ]
+        } else {
+            &[CHUNK_OID_FANOUT, CHUNK_OID_LOOKUP, CHUNK_COMMIT_DATA]
+        };
+        let toc_end = COMMIT_GRAPH_HEADER_BYTES
+            .checked_add(
+                chunk_count
+                    .checked_add(1)
+                    .and_then(|count| count.checked_mul(COMMIT_GRAPH_TOC_ENTRY_BYTES))
+                    .ok_or(CommitGraphRefusal::SizeOverflow)?,
+            )
+            .ok_or(CommitGraphRefusal::SizeOverflow)?;
+        let mut offsets = [0_usize; 5];
+        for index in 0..=chunk_count {
+            let position = COMMIT_GRAPH_HEADER_BYTES
+                .checked_add(
+                    index
+                        .checked_mul(COMMIT_GRAPH_TOC_ENTRY_BYTES)
+                        .ok_or(CommitGraphRefusal::SizeOverflow)?,
+                )
+                .ok_or(CommitGraphRefusal::SizeOverflow)?;
+            let id = input.get(position..position + 4).ok_or(
+                CommitGraphRefusal::MaterializationMismatch {
+                    subject: "chunk table id",
+                },
+            )?;
+            let expected = if index == chunk_count {
+                &[0; 4][..]
+            } else {
+                &expected_ids[index][..]
+            };
+            let offset = usize::try_from(read_u64(input, position + 4).ok_or(
+                CommitGraphRefusal::MaterializationMismatch {
+                    subject: "chunk table offset",
+                },
+            )?)
+            .map_err(|_| CommitGraphRefusal::MaterializationMismatch {
+                subject: "chunk table offset",
+            })?;
+            if id != expected
+                || offset < toc_end
+                || offset > body_end
+                || (index > 0 && offset <= offsets[index - 1])
+            {
+                return Err(CommitGraphRefusal::MaterializationMismatch {
+                    subject: "canonical chunk table",
+                });
+            }
+            offsets[index] = offset;
+        }
+        let record_bytes = digest_len
+            .checked_add(COMMIT_GRAPH_DATA_SUFFIX_BYTES)
+            .ok_or(CommitGraphRefusal::SizeOverflow)?;
+        if offsets[chunk_count] != body_end
+            || offsets[1].checked_sub(offsets[0]) != Some(COMMIT_GRAPH_FANOUT_BYTES)
+            || offsets[2].checked_sub(offsets[1]) != receipt.commit_count().checked_mul(digest_len)
+            || offsets[3].checked_sub(offsets[2])
+                != receipt.commit_count().checked_mul(record_bytes)
+            || (chunk_count == 3 && receipt.edge_count() != 0)
+            || (chunk_count == 4
+                && offsets[4].checked_sub(offsets[3]) != receipt.edge_count().checked_mul(4))
+        {
+            return Err(CommitGraphRefusal::MaterializationMismatch {
+                subject: "chunk extent",
+            });
+        }
+        Ok(Self {
+            format,
+            commit_count: receipt.commit_count(),
+            oid_lookup: offsets[1],
+            commit_data: offsets[2],
+            edge_data: (chunk_count == 4).then_some(offsets[3]),
+            body_end,
+            record_bytes,
+        })
+    }
+
+    fn find_position(
+        self,
+        input: &[u8],
+        commit: &ObjectId,
+        deadline: &mut impl Deadline,
+    ) -> Result<Option<usize>, CommitGraphRefusal> {
+        let mut lower = 0_usize;
+        let mut upper = self.commit_count;
+        while lower < upper {
+            checkpoint(deadline).map_err(CommitGraphRefusal::Pack)?;
+            let middle = lower + (upper - lower) / 2;
+            let offset = self
+                .oid_lookup
+                .checked_add(
+                    middle
+                        .checked_mul(self.format.digest_len())
+                        .ok_or(CommitGraphRefusal::SizeOverflow)?,
+                )
+                .ok_or(CommitGraphRefusal::SizeOverflow)?;
+            let candidate = input.get(offset..offset + self.format.digest_len()).ok_or(
+                CommitGraphRefusal::MaterializationMismatch {
+                    subject: "OIDL record",
+                },
+            )?;
+            match candidate.cmp(commit.as_bytes()) {
+                core::cmp::Ordering::Less => lower = middle.saturating_add(1),
+                core::cmp::Ordering::Greater => upper = middle,
+                core::cmp::Ordering::Equal => return Ok(Some(middle)),
+            }
+        }
+        Ok(None)
+    }
+
+    fn push_parent(
+        self,
+        input: &[u8],
+        position: u32,
+        output: &mut Vec<ObjectId>,
+    ) -> Result<(), CommitGraphRefusal> {
+        let position =
+            usize::try_from(position).map_err(|_| CommitGraphRefusal::MaterializationMismatch {
+                subject: "parent position",
+            })?;
+        if position >= self.commit_count || output.len() >= self.commit_count {
+            return Err(CommitGraphRefusal::MaterializationMismatch {
+                subject: "parent position range",
+            });
+        }
+        let offset = self
+            .oid_lookup
+            .checked_add(
+                position
+                    .checked_mul(self.format.digest_len())
+                    .ok_or(CommitGraphRefusal::SizeOverflow)?,
+            )
+            .ok_or(CommitGraphRefusal::SizeOverflow)?;
+        let oid = crate::object_id_from_bytes(
+            self.format,
+            input.get(offset..offset + self.format.digest_len()).ok_or(
+                CommitGraphRefusal::MaterializationMismatch {
+                    subject: "parent OIDL record",
+                },
+            )?,
+        )
+        .map_err(CommitGraphRefusal::Pack)?;
+        output
+            .try_reserve(1)
+            .map_err(|_| CommitGraphRefusal::AllocationFailed { requested: 1 })?;
+        output.push(oid);
+        Ok(())
+    }
 }
 
 /// Why a commit-graph V1 materialization was refused.
@@ -508,6 +803,9 @@ pub enum CommitGraphRefusal {
     },
     /// A source, commit, tree, or parent used Git's all-zero non-object sentinel.
     ZeroObjectId { subject: &'static str },
+    /// Retained commit-graph bytes disagree with their receipt or the strict
+    /// materializer profile and must not answer an accelerated walk.
+    MaterializationMismatch { subject: &'static str },
     /// The same commit identity appeared more than once in the input.
     DuplicateCommit { object: ObjectId },
     /// The exact input bytes did not hash to their claimed native commit OID.
@@ -587,6 +885,12 @@ impl Display for CommitGraphRefusal {
                 write!(
                     formatter,
                     "commit graph {subject} uses the zero non-object ID"
+                )
+            }
+            Self::MaterializationMismatch { subject } => {
+                write!(
+                    formatter,
+                    "commit-graph materialization {subject} is inconsistent"
                 )
             }
             Self::DuplicateCommit { object } => write!(formatter, "duplicate commit {object}"),
@@ -1026,6 +1330,22 @@ fn append_chunk_toc(
 
 fn append_u32(output: &mut Vec<u8>, value: u32) {
     output.extend_from_slice(&value.to_be_bytes());
+}
+
+fn read_u32(input: &[u8], offset: usize) -> Option<u32> {
+    input
+        .get(offset..offset.checked_add(4)?)?
+        .try_into()
+        .ok()
+        .map(u32::from_be_bytes)
+}
+
+fn read_u64(input: &[u8], offset: usize) -> Option<u64> {
+    input
+        .get(offset..offset.checked_add(8)?)?
+        .try_into()
+        .ok()
+        .map(u64::from_be_bytes)
 }
 
 fn format_code(format: ObjectFormat) -> u8 {
