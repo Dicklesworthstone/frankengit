@@ -8,12 +8,12 @@
 //! [`ContainmentSubstrate`].  A platform that cannot provide that contract is
 //! refused before a job is admitted; there is no in-process or weaker fallback.
 //!
-//! The first supported profile is the ADR-0007 Linux process-isolation profile
-//! with denied egress.  This control-plane slice deliberately records only a
-//! substrate observation.  Creating namespaces/cgroups and owning their
-//! Asupersync region is a substrate implementation concern, while this crate
+//! The first selected profile is the ADR-0007 Linux process-isolation profile
+//! with denied egress. Selecting that policy is not evidence that a concrete
+//! namespace/cgroup substrate is registered: a missing or incomplete
+//! substrate must return a typed refusal before user work begins. This crate
 //! keeps the same capsule, secret, cache, resource, and receipt rules for each
-//! future platform.
+//! future platform substrate.
 //!
 //! # Non-claims
 //!
@@ -746,6 +746,9 @@ pub struct RunnerPolicy {
 
 impl RunnerPolicy {
     /// Creates a policy that has no implicit egress or platform downgrade.
+    ///
+    /// A policy selects the requested profile; it does not claim that the
+    /// caller has registered a concrete containment substrate for it.
     pub fn new(
         trust_domain: TrustDomain,
         profile: SandboxProfile,
