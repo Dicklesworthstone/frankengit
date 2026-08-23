@@ -3,7 +3,10 @@
 # configuration: init -> doctor -> one bounded git-daemon upload-pack session
 # -> authority-selected export.  The transcript is an operator artifact, not a
 # claim that this profile completed a Durable publication epoch or supports a
-# general clone/fetch/push workflow.
+# general clone/fetch/push workflow.  It deliberately lives outside
+# `scripts/e2e/suites/`: README invokes it as an operator runbook, while the
+# e2e runner discovers every executable suite there and would treat this
+# caller-supplied lifecycle exercise as a CI campaign.
 set -euo pipefail
 
 usage() {
