@@ -107,6 +107,14 @@ fn authority_class_is_canonical_and_exact_call_sites_refuse_non_exact_generation
             .generation_id()
             .expect("statistical class has an identity")
     );
+    assert_ne!(
+        deterministic
+            .generation_id()
+            .expect("derived class has an identity"),
+        statistical
+            .generation_id()
+            .expect("statistical class has an identity")
+    );
 
     let exact_proof = exact.require_exact().expect("exact class is accepted");
     assert_eq!(

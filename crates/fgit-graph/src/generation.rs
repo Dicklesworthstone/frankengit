@@ -574,21 +574,27 @@ mod tests {
 
     #[test]
     fn generation_identity_is_registered_and_body_round_trips() {
-        let body = generation(None);
-        let id = body
-            .generation_id()
-            .expect("registered generation identity");
-        let frame = encode_body(&body).expect("canonical graph-generation frame");
-        let decoded = decode_body::<GraphGenerationBody>(&frame, DecodeLimits::default())
-            .expect("strict graph-generation decode");
-        assert_eq!(decoded, body);
-        assert_eq!(
-            decoded
+        for authority_class in [
+            GraphAuthorityClass::Exact,
+            GraphAuthorityClass::DeterministicDerived,
+            GraphAuthorityClass::Statistical,
+        ] {
+            let body = generation_with_class(authority_class, None);
+            let id = body
                 .generation_id()
-                .expect("registered generation identity"),
-            id
-        );
-        assert_eq!(decoded.authority_class(), GraphAuthorityClass::Exact);
+                .expect("registered generation identity");
+            let frame = encode_body(&body).expect("canonical graph-generation frame");
+            let decoded = decode_body::<GraphGenerationBody>(&frame, DecodeLimits::default())
+                .expect("strict graph-generation decode");
+            assert_eq!(decoded, body);
+            assert_eq!(
+                decoded
+                    .generation_id()
+                    .expect("registered generation identity"),
+                id
+            );
+            assert_eq!(decoded.authority_class(), authority_class);
+        }
     }
 
     #[test]
@@ -605,6 +611,14 @@ mod tests {
         );
         assert_ne!(
             exact.generation_id().expect("exact identity is registered"),
+            statistical
+                .generation_id()
+                .expect("statistical identity is registered")
+        );
+        assert_ne!(
+            deterministic
+                .generation_id()
+                .expect("derived identity is registered"),
             statistical
                 .generation_id()
                 .expect("statistical identity is registered")
