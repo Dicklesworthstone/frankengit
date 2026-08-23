@@ -9,11 +9,23 @@
 //! proves the refusal consumed nothing, which a `remaining == expected`
 //! assertion could pass while the budget had been debited and refunded.
 
+use core::num::NonZeroU32;
 use fgit_agent::{
-    AuthorityBasisRef, BrokerRefusal, Capability, CapabilityId, ClassSet, EffectBroker, EffectId,
-    EffectRequest, IntentRun, LogicalTime, OperationClass, RunId,
+    AgentInstanceId, AuthorityBasisRef, BrokerRefusal, Capability, CapabilityId, ClassSet,
+    EffectBroker, EffectId, EffectRequest, IntentRun, LogicalTime, OperationClass, RunId,
 };
-use fgit_resource::{RegionId, ResourceVector, algebra::Grade};
+
+use fgit_crypto::DigestAlgorithm;
+use fgit_resource::{
+    DownstreamChannel, DownstreamIdempotency, IdempotencyKey, OpaqueHandle, ReconcilePlan,
+    ReconcilePolicy, RegionId, ResourceVector,
+    algebra::Grade,
+    kinds::{DownstreamAck, OutboxDispatch},
+    settlement::{DeliveryVerdict, ProbeVerdict},
+};
+use fgit_types::{
+    CANONICAL_CODEC_VERSION, Digest, DigestBytes, OPAQUE_ID_LEN, PrincipalId, RepositoryCommitId,
+};
 
 const fn t(value: u64) -> LogicalTime {
     LogicalTime::new(value)
@@ -63,6 +75,7 @@ fn capability() -> Capability {
 fn request(id: u128, operation: OperationClass, cost: u64) -> EffectRequest {
     EffectRequest {
         effect_id: EffectId::new(id),
+        parent_effect_id: None,
         operation,
         cost: bytes(cost),
         input_commitment: [0x22; 32],
@@ -70,7 +83,83 @@ fn request(id: u128, operation: OperationClass, cost: u64) -> EffectRequest {
 }
 
 fn broker() -> EffectBroker {
-    EffectBroker::open(run(), RegionId::new(1))
+    EffectBroker::open(run(), RegionId::new(1), AgentInstanceId::new(1))
+}
+
+fn egress(amount: u64) -> ResourceVector {
+    ResourceVector::single(Grade::EgressBytes, amount)
+}
+
+fn external_run() -> IntentRun {
+    IntentRun::new(
+        RunId::new(2),
+        basis(),
+        ClassSet::from_classes(&[OperationClass::ExternalIntegration]),
+        egress(1_000),
+        t(100),
+    )
+    .expect("an external-effect run has a non-empty scope")
+}
+
+fn external_capability() -> Capability {
+    Capability::issue(
+        CapabilityId::new(2),
+        ClassSet::from_classes(&[OperationClass::ExternalIntegration]),
+        egress(1_000),
+        t(0),
+        t(100),
+    )
+    .expect("an external-effect capability issues")
+}
+
+fn external_broker() -> EffectBroker {
+    EffectBroker::open(external_run(), RegionId::new(2), AgentInstanceId::new(2))
+}
+
+fn external_request(id: u128, cost: u64) -> EffectRequest {
+    EffectRequest {
+        effect_id: EffectId::new(id),
+        parent_effect_id: None,
+        operation: OperationClass::ExternalIntegration,
+        cost: egress(cost),
+        input_commitment: [0x33; 32],
+    }
+}
+
+fn digest(tag: u8) -> Digest {
+    Digest::new(
+        DigestAlgorithm::Sha256.id(),
+        DigestBytes::try_new(&[tag; 32]).expect("SHA-256-sized fixture digest"),
+    )
+}
+
+fn rcr(tag: u8) -> RepositoryCommitId {
+    RepositoryCommitId::from_digest(
+        DigestAlgorithm::Sha256.id(),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[tag; 32]).expect("SHA-256-sized fixture RCR digest"),
+    )
+}
+
+fn opaque(tag: u8) -> OpaqueHandle {
+    OpaqueHandle::new(&[tag; 20]).expect("a bounded opaque downstream handle")
+}
+
+fn external_dispatch(tag: u8, strength: DownstreamIdempotency) -> OutboxDispatch {
+    OutboxDispatch {
+        idempotency: IdempotencyKey::new(digest(tag)),
+        precondition_rcr: rcr(tag.wrapping_add(1)),
+        endpoint: opaque(tag.wrapping_add(2)),
+        idempotency_strength: strength,
+    }
+}
+
+const fn reconciliation_policy() -> ReconcilePolicy {
+    ReconcilePolicy::new(NonZeroU32::MIN)
+}
+
+const fn principal(tag: u8) -> PrincipalId {
+    PrincipalId::from_bytes([tag; OPAQUE_ID_LEN])
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +177,7 @@ fn an_authorized_effect_is_accepted_and_recorded() {
         )
         .expect("a class both the run and the capability hold, inside budget, is authorized");
 
-    let record = *grant.record();
+    let record = grant.record().clone();
     assert_eq!(record.effect_id, EffectId::new(1));
     assert_eq!(record.operation, OperationClass::ReadCanonicalObject);
     assert_eq!(record.budget_reserved, bytes(100));
@@ -96,7 +185,7 @@ fn an_authorized_effect_is_accepted_and_recorded() {
 
     // Releasing the reservation is what makes the region quiescent; an accepted
     // effect is a responsibility, not a return value.
-    let _receipt = grant.into_budget().release();
+    let _receipt = broker.abort(grant).expect("the accepted effect can abort");
     assert!(broker.close().is_quiescent());
 }
 
@@ -247,7 +336,7 @@ fn budget_exhaustion_stops_cleanly_and_leaves_every_earlier_record_intact() {
     }
 
     for grant in held {
-        let _receipt = grant.into_budget().release();
+        let _receipt = broker.abort(grant).expect("the accepted effect can abort");
     }
     assert!(broker.close().is_quiescent());
 }
@@ -291,8 +380,12 @@ fn the_refusal_consumes_nothing_so_an_effect_that_still_fits_is_accepted_after_i
         2,
         "only the two acceptances recorded"
     );
-    let _a = big.into_budget().release();
-    let _b = exact.into_budget().release();
+    let _a = broker
+        .abort(big)
+        .expect("the first accepted effect can abort");
+    let _b = broker
+        .abort(exact)
+        .expect("the second accepted effect can abort");
     assert!(broker.close().is_quiescent());
 }
 
@@ -309,7 +402,7 @@ fn an_effect_costing_exactly_the_remaining_budget_is_accepted() {
             &request(1, OperationClass::ReadCanonicalObject, 1_000),
         )
         .expect("an effect costing the whole budget exactly is affordable");
-    let _receipt = grant.into_budget().release();
+    let _receipt = broker.abort(grant).expect("the accepted effect can abort");
     assert!(broker.close().is_quiescent());
 }
 
@@ -345,7 +438,7 @@ fn an_effect_over_the_capabilitys_own_ceiling_is_refused_before_the_run_budget_m
             &request(2, OperationClass::ReadCanonicalObject, 1_000),
         )
         .expect("the capability-ceiling refusal did not spend the run's budget");
-    let _receipt = grant.into_budget().release();
+    let _receipt = broker.abort(grant).expect("the accepted effect can abort");
     assert!(broker.close().is_quiescent());
 }
 
@@ -370,5 +463,206 @@ fn an_accepted_effect_whose_reservation_is_dropped_is_a_containment_failure() {
     assert!(
         !broker.close().is_quiescent(),
         "a dropped reservation must surface at close rather than vanish"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FG-073: stable effect identity, replay, and external reconciliation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn duplicate_effect_id_is_refused_before_a_second_budget_grant_and_permitted_twin_proceeds() {
+    // The old broker appended a second record and consumed a second grant here.
+    // The same request is now a retry of one effect, while a different stable
+    // identity is the near-identical permitted second operation.
+    let mut broker = broker();
+    let capability = capability();
+    let first = broker
+        .request(
+            &capability,
+            t(10),
+            &request(41, OperationClass::ReadCanonicalObject, 400),
+        )
+        .expect("the first stable effect identity is accepted");
+
+    let duplicate = broker.request(
+        &capability,
+        t(10),
+        &request(41, OperationClass::ReadCanonicalObject, 400),
+    );
+    match duplicate {
+        Err(BrokerRefusal::DuplicateEffectId { effect_id }) => {
+            assert_eq!(effect_id, EffectId::new(41));
+        }
+        other => panic!("the second stable identity submit must be refused, got {other:?}"),
+    }
+    assert_eq!(
+        broker.records().len(),
+        1,
+        "the duplicate must not append a second record"
+    );
+
+    let twin = broker
+        .request(
+            &capability,
+            t(10),
+            &request(42, OperationClass::ReadCanonicalObject, 400),
+        )
+        .expect("the distinct effect identity is the permitted twin");
+    assert_eq!(broker.records().len(), 2);
+
+    let _first = broker.abort(first).expect("the first effect can abort");
+    let _twin = broker.abort(twin).expect("the permitted twin can abort");
+    assert!(broker.close().is_quiescent());
+}
+
+struct CrashAfterDispatch {
+    delivered: u32,
+    probed: u32,
+    probe: ProbeVerdict,
+}
+
+impl DownstreamChannel for CrashAfterDispatch {
+    fn deliver(&mut self, _: &IdempotencyKey, _: u32) -> DeliveryVerdict {
+        self.delivered = self.delivered.saturating_add(1);
+        DeliveryVerdict::AmbiguousTimeout
+    }
+
+    fn probe(&mut self, _: &IdempotencyKey) -> ProbeVerdict {
+        self.probed = self.probed.saturating_add(1);
+        self.probe
+    }
+}
+
+#[test]
+fn crash_mid_external_effect_reconciles_to_the_downstream_outcome_and_replays_history() {
+    let mut broker = external_broker();
+    let dispatch = external_dispatch(0x51, DownstreamIdempotency::Strong);
+    let grant = broker
+        .request(&external_capability(), t(10), &external_request(51, 300))
+        .expect("an authorized external effect reserves one grant");
+    let deferred = broker
+        .reserve_outbox(grant, dispatch)
+        .expect("the external effect becomes the real outbox obligation")
+        .dispatch(1, &egress(300))
+        .expect("canonical dispatch ownership commits before reconciliation");
+
+    let mut channel = CrashAfterDispatch {
+        delivered: 0,
+        probed: 0,
+        probe: ProbeVerdict::Delivered,
+    };
+    let mut plan = ReconcilePlan::new(
+        dispatch.idempotency,
+        dispatch.idempotency_strength,
+        reconciliation_policy(),
+    );
+    let outcome = deferred
+        .reconcile(
+            &mut plan,
+            &mut channel,
+            principal(0x51),
+            |attempt| DownstreamAck {
+                receipt: opaque(0x52),
+                attempt,
+            },
+            vec![[0x53; 32]],
+        )
+        .expect("a definite downstream probe settles the crash window");
+    assert!(matches!(
+        outcome,
+        fgit_agent::ExternalEffectOutcome::Acknowledged(_)
+    ));
+    assert_eq!(
+        channel.delivered, 1,
+        "the effect was retried once by stable key"
+    );
+    assert_eq!(
+        channel.probed, 1,
+        "the ambiguous attempt was probed before success"
+    );
+
+    let records = broker.records();
+    let [record] = records.as_slice() else {
+        panic!("one external effect should produce one record: {records:?}");
+    };
+    assert_eq!(record.effect_id, EffectId::new(51));
+    assert_eq!(record.external_idempotency_key, Some(dispatch.idempotency));
+    assert_eq!(
+        record.obligation_state,
+        fgit_resource::ObligationState::Acknowledged
+    );
+    assert_eq!(
+        record.terminal_outcome,
+        Some(fgit_agent::EffectTerminalOutcome::Acknowledged)
+    );
+    assert_eq!(record.output_commitments, vec![[0x53; 32]]);
+    assert_eq!(
+        record
+            .reconciliation_evidence
+            .as_ref()
+            .expect("the crash drill records downstream observations")
+            .transitions
+            .len(),
+        2
+    );
+
+    let replayed = EffectBroker::replay(&broker.journal())
+        .expect("the append-only journal reconstructs this run exactly");
+    assert_eq!(replayed.records(), records.as_slice());
+    assert!(broker.close().is_quiescent());
+}
+
+#[test]
+fn weak_downstream_unknown_probe_is_an_explicit_escalated_record_not_maybe() {
+    let mut broker = external_broker();
+    let dispatch = external_dispatch(0x61, DownstreamIdempotency::Weak);
+    let grant = broker
+        .request(&external_capability(), t(10), &external_request(61, 300))
+        .expect("the external effect starts normally");
+    let deferred = broker
+        .reserve_outbox(grant, dispatch)
+        .expect("the real outbox obligation reserves")
+        .dispatch(1, &egress(300))
+        .expect("the effect reaches the post-commit reconciliation window");
+    let mut plan = ReconcilePlan::new(
+        dispatch.idempotency,
+        dispatch.idempotency_strength,
+        reconciliation_policy(),
+    );
+    let mut channel = CrashAfterDispatch {
+        delivered: 0,
+        probed: 0,
+        probe: ProbeVerdict::Unknown,
+    };
+    let outcome = deferred
+        .reconcile(
+            &mut plan,
+            &mut channel,
+            principal(0x61),
+            |attempt| DownstreamAck {
+                receipt: opaque(0x62),
+                attempt,
+            },
+            Vec::new(),
+        )
+        .expect("an undecidable weak downstream is represented, not hidden");
+    assert!(matches!(
+        outcome,
+        fgit_agent::ExternalEffectOutcome::Escalated(_)
+    ));
+
+    let record = broker.records().pop().expect("the effect remains recorded");
+    assert_eq!(
+        record.obligation_state,
+        fgit_resource::ObligationState::Escalated
+    );
+    assert!(matches!(
+        record.terminal_outcome,
+        Some(fgit_agent::EffectTerminalOutcome::Escalated { .. })
+    ));
+    assert!(
+        !broker.close().is_quiescent(),
+        "an explicit unresolved record blocks quiescence rather than becoming maybe"
     );
 }

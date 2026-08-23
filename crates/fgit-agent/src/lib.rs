@@ -41,9 +41,9 @@
 //! codec encoding for the bundle checked against a golden corpus this crate did
 //! not emit. It does **not**
 //! deliver the rest of the §10 bundle — the proposed object/tree closure and
-//! diff commitment (they need §8's `TreeFS` export), the reconciliation record
-//! (that is `fgit-authority` and fg073's ledger), or context-packet bodies in
-//! the ECC itself — nor most of §11: the deterministic verification services
+//! diff commitment (they need §8's `TreeFS` export), the effect record from
+//! [`broker`] (it is not yet embedded in the ECC body), or context-packet
+//! bodies in the ECC itself — nor most of §11: the deterministic verification services
 //! of §11.1 and the human review view of §11.3 are absent. [`ecc`]'s own
 //! header lists these individually. The separate [`protocol`] module does bind
 //! real context packets, `TreeFS` snapshots, and a normal sealed-ref attempt; it
@@ -61,7 +61,13 @@ pub mod intent;
 pub mod protocol;
 pub mod refresh;
 
-pub use broker::{BrokerRefusal, EffectBroker, EffectGrant, EffectId, EffectRecord, EffectRequest};
+pub use broker::{
+    AgentInstanceId, BrokerRefusal, DeferredOutboxEffect, EffectBroker, EffectClass, EffectGrant,
+    EffectId, EffectJournalEntry, EffectJournalEvent, EffectJournalRefusal, EffectJournalReplay,
+    EffectRecord, EffectRequest, EffectTerminalOutcome, EscalatedOutboxEffect,
+    ExternalEffectOutcome, OutboxCommitRefused, OutboxReservationRefused, ReconciliationEvidence,
+    ReconciliationRefused, ReservedOutboxEffect,
+};
 pub use capability::{
     AttenuationRefused, AttenuationRequest, Capability, CapabilityId, ChainRefused, IssueRefused,
     LogicalTime, SealRefused, SealedCapability, verify_chain,
