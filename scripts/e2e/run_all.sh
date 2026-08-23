@@ -137,6 +137,7 @@ RA_MANIFEST=''
 # see ra_script_id.
 RA_DIR_EXPLICIT=0
 declare -a RA_EXPLICIT=()
+declare -A RA_EXPLICIT_SEEN=()
 
 RA_SCHEMA='frankengit.e2e.suite.v1'
 RA_SCHEMA_VERSION=1
@@ -179,6 +180,11 @@ while [ "$#" -gt 0 ]; do
     --)
       shift
       while [ "$#" -gt 0 ]; do
+        [ -z "${RA_EXPLICIT_SEEN["$1"]+x}" ] || {
+          printf 'run_all: duplicate explicit script argument %s\n' "$1" >&2
+          exit 2
+        }
+        RA_EXPLICIT_SEEN["$1"]=1
         RA_EXPLICIT+=("$1")
         shift
       done
@@ -189,6 +195,11 @@ while [ "$#" -gt 0 ]; do
       exit 2
       ;;
     *)
+      [ -z "${RA_EXPLICIT_SEEN["$1"]+x}" ] || {
+        printf 'run_all: duplicate explicit script argument %s\n' "$1" >&2
+        exit 2
+      }
+      RA_EXPLICIT_SEEN["$1"]=1
       RA_EXPLICIT+=("$1")
       shift
       ;;
@@ -571,10 +582,14 @@ ra_validate_log() {
 
   # A log whose last byte is not a newline was cut off mid-write.
   local lastbyte
-  lastbyte=$(tail -c 1 "$log")
-  if [ -n "$lastbyte" ]; then
+  # Command substitution STRIPS NUL bytes, so `tail -c 1` was empty for a log
+  # ending in a NUL and the truncation check passed on corrupt evidence. od
+  # renders the byte numerically: empty means zero-length, 0 means NUL, and
+  # only 10 (LF) is a complete record terminator.
+  lastbyte=$(tail -c 1 "$log" | od -An -tu1 | tr -d ' \t\n')
+  if [ -n "$lastbyte" ] && [ "$lastbyte" -ne 10 ]; then
     RA_V_DISPOSITION=truncated_log
-    RA_V_DETAIL='log does not end with a newline'
+    RA_V_DETAIL="log does not end with a newline (final byte $lastbyte)"
     return 1
   fi
 
