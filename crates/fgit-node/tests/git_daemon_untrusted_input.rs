@@ -68,7 +68,7 @@
 //! Nothing here modifies `crates/fgit-node/src/**` or any manifest.
 
 use fgit_node::{GitDaemonPathRefusal, GitDaemonTransportRefusal, parse_git_daemon_request};
-use fgit_wire::WireLimits;
+use fgit_wire::{UploadPackVersion, WireLimits};
 
 /// Wraps a payload in one pkt-line frame: four lowercase hex bytes of total
 /// length, then the payload.
@@ -335,9 +335,19 @@ fn a_control_byte_in_a_component_is_refused() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_requested_protocol_version_is_refused() {
-    let error = parse(&frame(b"git-upload-pack /repo\0version=2\0"))
-        .expect_err("V2 serving is not wired on this daemon lane");
+fn a_version_two_request_is_now_admitted_and_selects_the_v2_lane() {
+    // frankengit-daemon-v2-lsrefs-serving-6mmn wired v2 greeting admission;
+    // the formerly-refused parameter now selects the v2 command lane. The
+    // unknown-generation refusal twin below keeps the closed set honest.
+    let request = parse(&frame(b"git-upload-pack /repo\0version=2\0"))
+        .expect("version=2 selects the served v2 lane");
+    assert_eq!(request.upload_pack_version(), UploadPackVersion::V2);
+}
+
+#[test]
+fn an_unknown_protocol_generation_stays_refused() {
+    let error = parse(&frame(b"git-upload-pack /repo\0version=3\0"))
+        .expect_err("no served lane speaks generation 3");
     assert!(
         matches!(
             error,

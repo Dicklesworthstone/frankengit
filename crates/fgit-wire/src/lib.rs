@@ -2653,15 +2653,23 @@ impl V2UploadPack {
             )?;
         }
         add_output_packet(&mut output, Packet::Flush, 4, &mut used_bytes, &self.limits)?;
-        self.state = V2State::Complete;
+        // Protocol v2 allows several commands per connection: a stock clone
+        // sends ls-refs and then fetch on one socket. Report this request's
+        // attributes first, then reset the per-command state so the next
+        // command starts a fresh request; only a completed fetch (pack
+        // emission) terminates the session.
+        let event = WireEvent::LsRefs {
+            prefixes: self.ref_prefixes.clone(),
+            symrefs: self.ls_refs.contains(LsRefsOptions::SYMREFS),
+            peel: self.ls_refs.contains(LsRefsOptions::PEEL),
+            unborn: self.ls_refs.contains(LsRefsOptions::UNBORN),
+        };
+        self.ref_prefixes.clear();
+        self.ls_refs = LsRefsOptions::default();
+        self.state = V2State::AwaitCommand;
         Ok(Transition {
             output,
-            events: vec![WireEvent::LsRefs {
-                prefixes: self.ref_prefixes.clone(),
-                symrefs: self.ls_refs.contains(LsRefsOptions::SYMREFS),
-                peel: self.ls_refs.contains(LsRefsOptions::PEEL),
-                unborn: self.ls_refs.contains(LsRefsOptions::UNBORN),
-            }],
+            events: vec![event],
         })
     }
 

@@ -78,8 +78,8 @@ use fgit_types::{
 };
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, PackPayloadSource, PackRequest,
-    Packet, PktLineDecoder, UploadPackRepository, UploadPackVersion, V1Advertisement, WireError,
-    WireEvent, WireLimits, encode_packets, sideband_pack_chunk,
+    Packet, PktLineDecoder, UploadPackRepository, UploadPackVersion, V1Advertisement, V2UploadPack,
+    WireError, WireEvent, WireLimits, encode_packets, sideband_pack_chunk,
 };
 use fsqlite_types::cx::Cx as FsqliteCx;
 
@@ -3003,6 +3003,17 @@ where
         FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, GitDaemonServeError<PackError>>,
     Payload: PackPayloadSource,
 {
+    if matches!(request.upload_pack_version(), UploadPackVersion::V2) {
+        return serve_v2_upload_pack_after_greeting(
+            reader,
+            writer,
+            request,
+            repository,
+            limits,
+            session_deadline,
+            build_pack,
+        );
+    }
     check_session_deadline(session_deadline, "prepare upload-pack advertisement")
         .map_err(GitDaemonServeError::Transport)?;
     let mut advertisement = V1Advertisement::new(
@@ -3086,6 +3097,120 @@ where
                 request,
                 pack_request,
             }));
+        }
+    }
+}
+
+/// Serves one bounded protocol-v2 upload-pack session after a `version=2`
+/// daemon greeting selected this lane.
+///
+/// The server capability advertisement is built here rather than reusing the
+/// legacy capability set because protocol v2 advertises command names and
+/// feature values (`ls-refs`, `fetch`, `object-format`) instead of the v0/v1
+/// keyword set. Each v2 command request is a complete machine run: after
+/// `ls-refs` completes the loop installs a fresh machine so the same
+/// connection can carry the follow-up `fetch`; after `fetch` emits its pack
+/// the session is done.
+fn serve_v2_upload_pack_after_greeting<R, W, BuildPack, Payload, PackError>(
+    reader: &mut R,
+    writer: &mut W,
+    request: GitDaemonRequest,
+    repository: &impl UploadPackRepository,
+    limits: WireLimits,
+    session_deadline: Option<GitDaemonSessionDeadline>,
+    mut build_pack: BuildPack,
+) -> Result<GitDaemonSessionOutcome, GitDaemonServeError<PackError>>
+where
+    R: Read,
+    W: Write,
+    BuildPack:
+        FnMut(&GitDaemonRequest, &PackRequest) -> Result<Payload, GitDaemonServeError<PackError>>,
+    Payload: PackPayloadSource,
+{
+    check_session_deadline(session_deadline, "prepare protocol-v2 advertisement")
+        .map_err(GitDaemonServeError::Transport)?;
+    let object_format = match repository.object_format() {
+        fgit_wire::GitObjectFormat::Sha1 => "sha1",
+        fgit_wire::GitObjectFormat::Sha256 => "sha256",
+    };
+    let advertisement_packets = vec![
+        Packet::Data(b"version 2\n".to_vec()),
+        Packet::Data(b"ls-refs\n".to_vec()),
+        Packet::Data(b"fetch\n".to_vec()),
+        Packet::Data(format!("object-format={object_format}\n").into_bytes()),
+        Packet::Flush,
+    ];
+    let server_capabilities = Capabilities::parse_v2_advertisement(&advertisement_packets, &limits)
+        .map_err(|error| GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error)))?;
+    write_packet_group(writer, &advertisement_packets, &limits)
+        .map_err(GitDaemonServeError::Transport)?;
+
+    let fresh_machine = || -> Result<V2UploadPack, GitDaemonServeError<PackError>> {
+        V2UploadPack::new(server_capabilities.clone(), limits.clone())
+            .map_err(|error| GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error)))
+    };
+    let mut machine = fresh_machine()?;
+    let mut ls_refs_completed = false;
+    let mut input = [0_u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut input).map_err(|source| {
+            GitDaemonServeError::Transport(GitDaemonTransportRefusal::Io {
+                operation: "read protocol-v2 command stream",
+                source,
+            })
+        })?;
+        if read == 0 {
+            if ls_refs_completed {
+                // The client obtained everything it needed from ls-refs (the
+                // empty-repository shape) and closed the session cleanly.
+                return Ok(GitDaemonSessionOutcome::EmptyRepository(
+                    GitDaemonAdvertisementReceipt { request },
+                ));
+            }
+            return Err(GitDaemonServeError::Transport(
+                GitDaemonTransportRefusal::IncompleteNegotiation,
+            ));
+        }
+
+        let transition = machine
+            .push_bytes(&input[..read], repository)
+            .map_err(|error| {
+                GitDaemonServeError::Transport(GitDaemonTransportRefusal::Wire(error))
+            })?;
+        write_packet_group(writer, &transition.output, &limits)
+            .map_err(GitDaemonServeError::Transport)?;
+
+        let mut next_command = false;
+        for event in transition.events {
+            match event {
+                WireEvent::LsRefs { .. } => {
+                    ls_refs_completed = true;
+                    next_command = true;
+                }
+                WireEvent::PackRequested(pack_request) => {
+                    check_session_deadline(session_deadline, "build selected git pack")
+                        .map_err(GitDaemonServeError::Transport)?;
+                    let mut payload = build_pack(&request, &pack_request)?;
+                    check_session_deadline(session_deadline, "build selected git pack")
+                        .map_err(GitDaemonServeError::Transport)?;
+                    emit_pack_payload(
+                        writer,
+                        &mut payload,
+                        &pack_request,
+                        &limits,
+                        session_deadline,
+                    )
+                    .map_err(GitDaemonServeError::Transport)?;
+                    return Ok(GitDaemonSessionOutcome::Pack(GitDaemonSessionReceipt {
+                        request,
+                        pack_request,
+                    }));
+                }
+                WireEvent::Common(_) => {}
+            }
+        }
+        if next_command {
+            machine = fresh_machine()?;
         }
     }
 }
@@ -3188,6 +3313,7 @@ fn parse_git_daemon_request_payload(
     let upload_pack_version = match requested_version {
         None => UploadPackVersion::V0,
         Some(b"1") => UploadPackVersion::V1,
+        Some(b"2") => UploadPackVersion::V2,
         Some(version) => {
             return Err(GitDaemonTransportRefusal::UnsupportedProtocolVersion {
                 version_bytes: version.len(),

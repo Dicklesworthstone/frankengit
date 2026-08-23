@@ -102,9 +102,11 @@ fn version_one_greeting_emits_only_its_required_prelude_before_the_v0_advertisem
 }
 
 #[test]
-fn version_two_and_unknown_greeting_parameters_remain_typed_refusals() {
+fn unknown_greeting_generations_remain_typed_refusals() {
+    // version=2 left this refusal set when 6mmn wired the v2 lane; every
+    // other generation stays refused with its exact parameter length.
     for (parameter, expected_bytes) in [
-        (b"version=2".as_slice(), 1),
+        (b"version=3".as_slice(), 1),
         (b"version=future".as_slice(), 6),
     ] {
         let refusal = parse_git_daemon_request(&greeting(&[parameter]), WireLimits::default())
