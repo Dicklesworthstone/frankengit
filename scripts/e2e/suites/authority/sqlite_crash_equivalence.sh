@@ -171,14 +171,14 @@ fge_run sqlite-resource-ceilings \
   cargo test --locked -p fgit-authority-fsqlite --test resource_ceilings || true
 sq_ceilings_exit=$FGE_LAST_EXIT
 
-# frankengit-6cs9: worker/thread quiescence across close/join. Its own binary
-# on purpose -- /proc/self/task is process-global and cargo runs one file's
-# tests concurrently, so a probe sharing a binary with twenty other tests
-# measures them too. Written first inside crash_equivalence.rs, it reported the
-# thread count going DOWN across eight cycles and still failed one run in five
-# with a shared mutex. Isolation, not a wider tolerance.
+# frankengit-6cs9 / audit-debt-quiescence-probe-load-0wvg: worker/thread
+# quiescence across close/join. This is the probe's sole execution lane: its
+# `/proc/self/task` sample is process-global and remains #[ignore] in the
+# default Cargo path, so parallel crate tests cannot turn it into unrelated
+# false rework. `-- --ignored` selects it deliberately here; the assertion is
+# not relaxed.
 fge_run sqlite-process-quiescence \
-  cargo test --locked -p fgit-authority-fsqlite --test process_quiescence || true
+  cargo test --locked -p fgit-authority-fsqlite --test process_quiescence -- --ignored || true
 sq_quiescence_exit=$FGE_LAST_EXIT
 
 fge_phase assert

@@ -40,6 +40,15 @@
 //! the worker to expose its own identity, which `frankengit-0kqi` records as
 //! unwired. Stated rather than glossed, because that gap is the whole
 //! difficulty of this bead.
+//!
+//! # Lane ownership
+//!
+//! These tests sample process-global state, so the default Cargo test path
+//! only compiles them. The explicit authority e2e cell
+//! `scripts/e2e/suites/authority/sqlite_crash_equivalence.sh` runs them with
+//! `-- --ignored` under `FG-005B-E2E-028`, where their resource observation is
+//! scheduled as quiescence evidence rather than allowed to flake unrelated
+//! crate tests under swarm load. The assertion itself is unchanged there.
 
 #![cfg(target_os = "linux")]
 
@@ -170,6 +179,7 @@ fn close_store(node: &NodeRuntime, mut held: Held, label: &str) {
 }
 
 #[test]
+#[ignore = "process-global quiescence probe driven by scripts/e2e/suites/authority/sqlite_crash_equivalence.sh"]
 fn opening_a_store_starts_a_thread_this_metric_can_see() {
     // THE PRESENCE CASE, and the reason the release test is worth running.
     //
@@ -199,6 +209,7 @@ fn opening_a_store_starts_a_thread_this_metric_can_see() {
 }
 
 #[test]
+#[ignore = "process-global quiescence probe driven by scripts/e2e/suites/authority/sqlite_crash_equivalence.sh"]
 fn closing_many_concurrent_stores_releases_every_worker_thread() {
     // Many stores at once rather than a baseline-and-cycles comparison: the
     // presence case above measures one open store as worth about +1 thread, so
