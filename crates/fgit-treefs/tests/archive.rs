@@ -5,9 +5,12 @@
 //! reads travel through the same capability and identity verification surface a
 //! production source uses.
 
-use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1};
+use fgit_crypto::{GitObjectKind, GitOid, NativeObjectIdentity, Sha1, sha256_digest};
 use fgit_git_object::{AcceptanceProfile, ParseLimits, TreeEntry, emit_tree};
-use fgit_treefs::archive::{ArchiveProfile, ArchiveRefusal, TarLimits, UstarArchive, ZipArchive};
+use fgit_treefs::archive::{
+    ArchiveCompleteness, ArchiveProfile, ArchiveRefusal, ArchiveVerification, TarLimits,
+    UstarArchive, ZipArchive,
+};
 use fgit_treefs::base::{BaseView, ObjectSource, ObjectSourceError};
 use fgit_treefs::capability::{ReadGrant, SymlinkPolicy, TreeCapability, WorkspaceId};
 use fgit_treefs::path::{PathPolicy, TreePath};
@@ -348,6 +351,14 @@ fn capability_scoped_ustar_is_byte_stable_and_never_follows_symlinks() {
     assert_eq!(first.receipt().source_rcr_id(), rcr_id());
     assert_eq!(first.receipt().source_tree_oid(), &root);
     assert_eq!(first.receipt().profile(), ArchiveProfile::UstarV1);
+    assert_eq!(
+        first.receipt().completeness(),
+        ArchiveCompleteness::CapabilityVisibleTreeV1
+    );
+    assert_eq!(
+        first.receipt().verification(),
+        ArchiveVerification::SourceObjectIdentitiesVerifiedV1
+    );
     assert_eq!(first.receipt().entry_count(), 5);
     assert_eq!(
         first
@@ -366,6 +377,10 @@ fn capability_scoped_ustar_is_byte_stable_and_never_follows_symlinks() {
         "the receipt binds the archive's exact capability-visible member set"
     );
     assert_eq!(first.receipt().stream_bytes(), first.bytes().len());
+    assert_eq!(
+        first.receipt().stream_sha256(),
+        &sha256_digest(first.bytes())
+    );
 
     let rendered = members(first.bytes());
     assert_eq!(
@@ -444,6 +459,18 @@ fn stored_zip_is_byte_stable_and_represents_symlinks_as_data() {
 
     assert_eq!(first.bytes(), second.bytes());
     assert_eq!(first.receipt().profile(), ArchiveProfile::ZipStoreV1);
+    assert_eq!(
+        first.receipt().completeness(),
+        ArchiveCompleteness::CapabilityVisibleTreeV1
+    );
+    assert_eq!(
+        first.receipt().verification(),
+        ArchiveVerification::SourceObjectIdentitiesVerifiedV1
+    );
+    assert_eq!(
+        first.receipt().stream_sha256(),
+        &sha256_digest(first.bytes())
+    );
     let rendered = zip_members(first.bytes());
     assert_eq!(
         rendered

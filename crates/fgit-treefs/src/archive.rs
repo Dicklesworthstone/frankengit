@@ -15,7 +15,7 @@ use crate::base::{BaseError, BaseView, ObjectSource, ObjectSourceError};
 use crate::capability::{CapabilityRefusal, TreeCapability};
 use crate::path::TreePath;
 use core::fmt::{self, Display, Formatter};
-use fgit_crypto::{GitHashAlgorithm, GitObjectKind, GitOid};
+use fgit_crypto::{GitHashAlgorithm, GitObjectKind, GitOid, sha256_digest};
 use fgit_types::{RepositoryCommitId, RepositoryId};
 use std::collections::BTreeMap;
 
@@ -72,6 +72,30 @@ pub enum ArchiveProfile {
     ZipStoreV1,
 }
 
+/// The member-selection rule represented by an archive receipt.
+///
+/// Materialization never widens a TreeFS capability.  This explicit class
+/// distinguishes a capability-scoped archive from a hypothetical complete
+/// repository export of the same source tree.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArchiveCompleteness {
+    /// Every and only the entries visible through the supplied `TreeCapability`
+    /// at render time, in canonical path order.
+    CapabilityVisibleTreeV1,
+}
+
+/// The verification boundary crossed while rendering an archive.
+///
+/// This records a checked fact about the stream's inputs, not a new authority
+/// decision: [`BaseView`] rechecks each read object's Git identity before the
+/// renderer accepts its bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArchiveVerification {
+    /// Every tree and payload read for the selected member set passed
+    /// `BaseView`'s source-object identity check.
+    SourceObjectIdentitiesVerifiedV1,
+}
+
 /// The format and deterministic metadata of a rendered archive.
 ///
 /// The receipt deliberately names the immutable base RCR and tree identity
@@ -84,10 +108,13 @@ pub struct ArchiveReceipt<A: GitHashAlgorithm> {
     source_rcr_id: RepositoryCommitId,
     source_tree_oid: GitOid<A>,
     profile: ArchiveProfile,
+    completeness: ArchiveCompleteness,
+    verification: ArchiveVerification,
     entry_paths: Vec<TreePath>,
     entry_count: usize,
     regular_file_bytes: usize,
     stream_bytes: usize,
+    stream_sha256: [u8; 32],
 }
 
 impl<A: GitHashAlgorithm> ArchiveReceipt<A> {
@@ -113,6 +140,18 @@ impl<A: GitHashAlgorithm> ArchiveReceipt<A> {
     #[must_use]
     pub const fn profile(&self) -> ArchiveProfile {
         self.profile
+    }
+
+    /// The exact capability-scoped member-selection rule used for this output.
+    #[must_use]
+    pub const fn completeness(&self) -> ArchiveCompleteness {
+        self.completeness
+    }
+
+    /// The object-identity verification boundary crossed for this output.
+    #[must_use]
+    pub const fn verification(&self) -> ArchiveVerification {
+        self.verification
     }
 
     /// The complete capability-visible member set, in canonical path order.
@@ -141,6 +180,15 @@ impl<A: GitHashAlgorithm> ArchiveReceipt<A> {
     #[must_use]
     pub const fn stream_bytes(&self) -> usize {
         self.stream_bytes
+    }
+
+    /// SHA-256 of the complete emitted stream, including all format trailers.
+    ///
+    /// This digest identifies derived bytes only.  It neither publishes nor
+    /// replaces the source RCR named by this receipt.
+    #[must_use]
+    pub const fn stream_sha256(&self) -> &[u8; 32] {
+        &self.stream_sha256
     }
 }
 
@@ -235,10 +283,13 @@ impl<A: GitHashAlgorithm> UstarArchive<A> {
             source_rcr_id: base.base_rcr_id(),
             source_tree_oid: base.base_tree_oid().clone(),
             profile: ArchiveProfile::UstarV1,
+            completeness: ArchiveCompleteness::CapabilityVisibleTreeV1,
+            verification: ArchiveVerification::SourceObjectIdentitiesVerifiedV1,
             entry_paths,
             entry_count,
             regular_file_bytes,
             stream_bytes: bytes.len(),
+            stream_sha256: sha256_digest(&bytes),
         };
         Ok(Self { bytes, receipt })
     }
@@ -340,10 +391,13 @@ impl<A: GitHashAlgorithm> ZipArchive<A> {
             source_rcr_id: base.base_rcr_id(),
             source_tree_oid: base.base_tree_oid().clone(),
             profile: ArchiveProfile::ZipStoreV1,
+            completeness: ArchiveCompleteness::CapabilityVisibleTreeV1,
+            verification: ArchiveVerification::SourceObjectIdentitiesVerifiedV1,
             entry_paths,
             entry_count,
             regular_file_bytes,
             stream_bytes: bytes.len(),
+            stream_sha256: sha256_digest(&bytes),
         };
         Ok(Self { bytes, receipt })
     }

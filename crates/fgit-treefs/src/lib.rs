@@ -51,7 +51,8 @@ pub mod proposal;
 pub mod snapshot;
 
 pub use archive::{
-    ArchiveProfile, ArchiveReceipt, ArchiveRefusal, TarLimits, UstarArchive, ZipArchive, ZipLimits,
+    ArchiveCompleteness, ArchiveProfile, ArchiveReceipt, ArchiveRefusal, ArchiveVerification,
+    TarLimits, UstarArchive, ZipArchive, ZipLimits,
 };
 pub use base::{BaseEntry, BaseError, BaseView, DirectoryListing, ObjectSource, ObjectSourceError};
 pub use capability::{
