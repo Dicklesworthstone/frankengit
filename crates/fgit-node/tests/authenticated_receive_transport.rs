@@ -189,7 +189,7 @@ fn authenticated_loopback_session_admits_a_validated_push() {
         .runtime()
         .block_on(node.materialize_admission_in(&node.request_context()))
         .expect("the committed delete materializes from the authority-selected head");
-    assert!(materialized.snapshot().refs().is_empty());
+    assert!(materialized.snapshot().refs.is_empty());
     assert_eq!(retry_key.as_bytes(), b"client-push-retry-key-0001");
     assert_eq!(principal, PrincipalId::from_bytes([0x73; 16]));
     node.shutdown().expect("node closes cleanly");

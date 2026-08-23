@@ -4,8 +4,10 @@ use fgit_authority::{
     AuthorityStore, HeadKey, HeadRead, MemoryAuthorityStore, StoreInstanceId, initialize_repository,
 };
 use fgit_chronicle::{
-    BackupProfile, CapsuleClosure, LiveCapsuleRefusal, RestoreOutcome, activate_frozen_capsule,
+    AttestedBackupExport, BackupProfile, CapsuleClosure, LiveCapsuleRefusal, ReplayCompleteness,
+    RestoreExecutionRefusal, RestoreOutcome, activate_frozen_capsule, export_frozen_capsule,
     freeze_capsule, inspect_capsule_against_authority_head_bytes, inspect_capsule_bytes,
+    restore_attested_backup,
 };
 use fgit_codec::{
     CryptoBodyIdentity, DecodeLimits, RepositoryAuthorityHeadBody, decode_body, encode_body,
@@ -225,5 +227,171 @@ fn inspection_refuses_a_capsule_that_disagrees_with_its_named_authority_head() {
                 defect,
                 fgit_chronicle::CapsuleDefect::AuthorityHeadMismatch { field: "ref_root" }
             ))
+    );
+}
+
+#[test]
+fn attested_export_restores_a_clean_authority_boundary_without_routing() {
+    let source = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x51));
+    let source_key =
+        HeadKey::new(b"chronicle/attested-export-source".to_vec()).expect("bounded source key");
+    initialize_repository(&source, &source_key, &head()).expect("source head initializes");
+    let source_head = match source.read_head(&source_key).expect("source head reads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("initialized source head is present"),
+    };
+    let frozen = freeze_capsule(&source, &CryptoBodyIdentity, &source_head, None, closure())
+        .expect("source boundary freezes");
+    let export = export_frozen_capsule(
+        &source,
+        &CryptoBodyIdentity,
+        &source_head,
+        &frozen,
+        digest(0x52),
+        digest(0x53),
+    )
+    .expect("source export has verified staged bytes");
+
+    let destination = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x54));
+    let destination_key = HeadKey::new(b"chronicle/attested-export-destination".to_vec())
+        .expect("bounded destination key");
+    let restored =
+        restore_attested_backup(&destination, &destination_key, &CryptoBodyIdentity, &export)
+            .expect("a clean authority namespace restores from the export boundary");
+
+    let destination_head: RepositoryAuthorityHeadBody =
+        decode_body(restored.head().body(), DecodeLimits::DEFAULT)
+            .expect("restored receipt carries canonical authority bytes");
+    assert_eq!(
+        destination_head.last_checkpoint_id,
+        Some(frozen.capsule_id())
+    );
+    assert_eq!(
+        destination_head.generation,
+        HeadGeneration::try_new(2).expect("second generation is valid"),
+        "the destination publishes the checkpoint only through root-last activation"
+    );
+    assert_eq!(
+        destination
+            .read_head(&destination_key)
+            .expect("destination reads"),
+        HeadRead::Present(restored.head().clone())
+    );
+    assert_eq!(
+        restored.replay_completeness(),
+        ReplayCompleteness::VerifiableIfArtifactsSupplied,
+        "the attestation-only export names its replay limit rather than claiming a full archive"
+    );
+    assert!(
+        restored
+            .missing_artifact_classes()
+            .contains(&"object closure bodies"),
+        "the receipt names a concrete external artifact class"
+    );
+    assert!(
+        !restored.routing_published(),
+        "restore has no destination-routing path before full verification"
+    );
+}
+
+#[test]
+fn malformed_export_bytes_refuse_before_destination_authority_exists() {
+    let source = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x55));
+    let source_key = HeadKey::new(b"chronicle/attested-export-malformed-source".to_vec())
+        .expect("bounded source key");
+    initialize_repository(&source, &source_key, &head()).expect("source head initializes");
+    let source_head = match source.read_head(&source_key).expect("source head reads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("initialized source head is present"),
+    };
+    let frozen = freeze_capsule(&source, &CryptoBodyIdentity, &source_head, None, closure())
+        .expect("source boundary freezes");
+    let export = export_frozen_capsule(
+        &source,
+        &CryptoBodyIdentity,
+        &source_head,
+        &frozen,
+        digest(0x56),
+        digest(0x57),
+    )
+    .expect("source export has verified staged bytes");
+    let mut malformed_head = export.authority_head_bytes().to_vec();
+    malformed_head[0] ^= 0xff;
+    let malformed = AttestedBackupExport::new(
+        export.bundle().clone(),
+        export.capsule_bytes().to_vec(),
+        malformed_head,
+    );
+
+    let destination = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x58));
+    let destination_key = HeadKey::new(b"chronicle/attested-export-malformed-destination".to_vec())
+        .expect("bounded destination key");
+    assert!(matches!(
+        restore_attested_backup(
+            &destination,
+            &destination_key,
+            &CryptoBodyIdentity,
+            &malformed,
+        ),
+        Err(RestoreExecutionRefusal::Inspection(_))
+    ));
+    assert_eq!(
+        destination
+            .read_head(&destination_key)
+            .expect("destination reads"),
+        HeadRead::Absent,
+        "untrusted bytes cannot initialize authority before their verification completes"
+    );
+}
+
+#[test]
+fn overclaimed_export_profile_refuses_before_destination_authority_exists() {
+    let source = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x59));
+    let source_key = HeadKey::new(b"chronicle/attested-export-profile-source".to_vec())
+        .expect("bounded source key");
+    initialize_repository(&source, &source_key, &head()).expect("source head initializes");
+    let source_head = match source.read_head(&source_key).expect("source head reads") {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("initialized source head is present"),
+    };
+    let frozen = freeze_capsule(&source, &CryptoBodyIdentity, &source_head, None, closure())
+        .expect("source boundary freezes");
+    let export = export_frozen_capsule(
+        &source,
+        &CryptoBodyIdentity,
+        &source_head,
+        &frozen,
+        digest(0x5a),
+        digest(0x5b),
+    )
+    .expect("source export has verified staged bytes");
+    let mut overclaimed_bundle = export.bundle().clone();
+    overclaimed_bundle.exported_profile = BackupProfile::FullClosure;
+    let overclaimed = AttestedBackupExport::new(
+        overclaimed_bundle,
+        export.capsule_bytes().to_vec(),
+        export.authority_head_bytes().to_vec(),
+    );
+
+    let destination = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x5c));
+    let destination_key = HeadKey::new(b"chronicle/attested-export-profile-destination".to_vec())
+        .expect("bounded destination key");
+    assert!(matches!(
+        restore_attested_backup(
+            &destination,
+            &destination_key,
+            &CryptoBodyIdentity,
+            &overclaimed,
+        ),
+        Err(RestoreExecutionRefusal::UnsupportedExportProfile(
+            BackupProfile::FullClosure
+        ))
+    ));
+    assert_eq!(
+        destination
+            .read_head(&destination_key)
+            .expect("destination reads"),
+        HeadRead::Absent,
+        "a declared full-closure archive cannot be substituted for attestation-only bytes"
     );
 }
