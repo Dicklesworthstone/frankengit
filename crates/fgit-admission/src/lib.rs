@@ -3333,7 +3333,7 @@ mod tests {
         body.generation = body_generation;
         let authenticated = AuthenticatedHead::new(
             HeadReadReceipt::new(
-                context.head_key.clone(),
+                context.head_key,
                 AuthorityVersionToken::from_opaque_bytes(
                     [0xA5; fgit_authority::VERSION_TOKEN_BYTES],
                 ),
@@ -3458,17 +3458,16 @@ mod tests {
 
     #[test]
     fn cas_loser_resolves_and_retries_the_same_sealed_request() {
-        // After installing the plan, this admission path performs two seal
-        // puts; two exact-outcome probes; then a head read plus one receipt
-        // authentication shared by the publication basis and projection.
-        // The atomic publisher now also reads the authenticated decision
-        // stream to mint its duplicate-absence witness before it reaches the
-        // CAS. The post-stamp outcome fold then reads the exact carried stream,
-        // so the CAS is operation 12. Keeping that transcript explicit
-        // makes a changed
-        // authority call graph fail this planted-race test instead of silently
-        // skipping it.
-        const PUBLISH_CAS_OPERATION: OpIndex = OpIndex::from_raw(12);
+        // Transcript since f09d bound carried-forward roots to the
+        // authenticated basis: [1] seal-body put_if_absent, [2] head read,
+        // [3] outcome-index read, [4] basis head read, [5] receipt
+        // authentication, [6] projection head read, [7..8] staged batch and
+        // ref frames, [9] post-staging basis re-read -- so the publication
+        // CAS is operation 10, with the post-stamp outcome fold reading the
+        // exact carried stream afterwards.  Keeping that transcript explicit
+        // makes a changed authority call graph fail this planted-race test
+        // instead of silently skipping it.
+        const PUBLISH_CAS_OPERATION: OpIndex = OpIndex::from_raw(10);
         let context = context();
         let store = store_with_genesis(&context);
         let projection = FixtureProjection::default();
@@ -3609,13 +3608,17 @@ mod tests {
 
     #[test]
     fn atomic_staging_fault_leaves_every_command_undecided_then_retries() {
-        // The first seven operations bind the seal and probe its outcome; the
-        // next two authenticate the authoritative basis and projection.  The
-        // first `put_if_absent` in `publish_decisions` therefore stages the
-        // decision batch at operation nine.  A lost request there is
-        // deliberately before the publication CAS: the body may not be a
-        // decision merely because it was prepared for publication.
-        const STAGE_BATCH_OPERATION: OpIndex = OpIndex::from_raw(9);
+        // Transcript since f09d bound carried-forward roots to the
+        // authenticated basis: [1] seal-body put_if_absent, [2] head read,
+        // [3] outcome-index read, [4] basis head read, [5] receipt
+        // authentication, [6] projection head read.  The first `put_if_absent`
+        // in `publish_decisions` therefore stages the decision batch at
+        // operation seven, with the second staged frame at eight, the
+        // post-staging basis re-read at nine, and the publication CAS at ten.
+        // A lost request at seven is deliberately before the publication CAS:
+        // the body may not be a decision merely because it was prepared for
+        // publication.
+        const STAGE_BATCH_OPERATION: OpIndex = OpIndex::from_raw(7);
 
         let context = context();
         let store = store_with_genesis(&context);
@@ -3627,7 +3630,6 @@ mod tests {
         let lowered = lower_input(&context, &receive_input(&completion))
             .expect("atomic request lowers before the injected store failure");
         let tx_id = derive_tx_id(&context, &lowered[0]).expect("transaction id derives");
-
         store.install_fault_plan(FaultPlan::explicit(vec![
             FaultDirective::new(STAGE_BATCH_OPERATION, FaultKind::LoseRequest)
                 .only_for(AuthorityOpKind::PutIfAbsent),
