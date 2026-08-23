@@ -176,7 +176,7 @@ fn midx_v1_sorts_packs_deduplicates_oids_and_receipts_exact_bytes() {
     assert_eq!(&bytes[pnam_toc..pnam_toc + 4], b"PNAM");
     let pnam_offset = usize::try_from(read_u64(bytes, pnam_toc + 4))
         .expect("fixture offset fits the host address space");
-    let expected_names = format!("pack-{}.idx\0pack-{}.idx\0", oid(0x10), oid(0x20),);
+    let expected_names = format!("pack-{}.idx\0pack-{}.idx\0", oid(0x10), oid(0x20));
     assert!(bytes[pnam_offset..].starts_with(expected_names.as_bytes()));
     assert_eq!(
         &bytes[bytes.len() - SHA1_BYTES..],

@@ -250,7 +250,10 @@ fn zip_members(bytes: &[u8]) -> Vec<ZipMember> {
         let crc32 = le_u32(&bytes[cursor + 14..cursor + 18]);
         let size = usize::try_from(le_u32(&bytes[cursor + 18..cursor + 22]))
             .expect("fixture size fits usize");
-        assert_eq!(le_u32(&bytes[cursor + 22..cursor + 26]), size as u32);
+        assert_eq!(
+            le_u32(&bytes[cursor + 22..cursor + 26]),
+            u32::try_from(size).expect("fixture size fits ZIP32")
+        );
         let name_len = usize::from(le_u16(&bytes[cursor + 26..cursor + 28]));
         let extra_len = usize::from(le_u16(&bytes[cursor + 28..cursor + 30]));
         assert_eq!(extra_len, 0);
@@ -288,15 +291,21 @@ fn zip_members(bytes: &[u8]) -> Vec<ZipMember> {
     }
     let central_size = cursor - central_start;
     assert_eq!(le_u32(&bytes[cursor..cursor + 4]), 0x0605_4b50);
-    assert_eq!(le_u16(&bytes[cursor + 8..cursor + 10]), out.len() as u16);
-    assert_eq!(le_u16(&bytes[cursor + 10..cursor + 12]), out.len() as u16);
+    assert_eq!(
+        le_u16(&bytes[cursor + 8..cursor + 10]),
+        u16::try_from(out.len()).expect("fixture member count fits ZIP16")
+    );
+    assert_eq!(
+        le_u16(&bytes[cursor + 10..cursor + 12]),
+        u16::try_from(out.len()).expect("fixture member count fits ZIP16")
+    );
     assert_eq!(
         le_u32(&bytes[cursor + 12..cursor + 16]),
-        central_size as u32
+        u32::try_from(central_size).expect("fixture central size fits ZIP32")
     );
     assert_eq!(
         le_u32(&bytes[cursor + 16..cursor + 20]),
-        central_start as u32
+        u32::try_from(central_start).expect("fixture central offset fits ZIP32")
     );
     assert_eq!(le_u16(&bytes[cursor + 20..cursor + 22]), 0);
     assert_eq!(cursor + 22, bytes.len());
@@ -499,9 +508,9 @@ fn stored_zip_is_byte_stable_and_represents_symlinks_as_data() {
         "directory suffixes, paths, and order are fixed by the profile"
     );
     assert_eq!(rendered[3].body, b"../../outside-the-workspace");
-    assert_eq!(rendered[3].external_attributes >> 16, 0o120777);
+    assert_eq!(rendered[3].external_attributes >> 16, 0o120_777);
     assert_eq!(rendered[4].body, b"#!/bin/sh\necho archive\n");
-    assert_eq!(rendered[4].external_attributes >> 16, 0o100755);
+    assert_eq!(rendered[4].external_attributes >> 16, 0o100_755);
 }
 
 #[test]

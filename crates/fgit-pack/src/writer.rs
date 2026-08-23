@@ -596,11 +596,12 @@ pub struct PackWriteReceipt {
     pub compression: Vec<DeflateReceipt>,
 }
 
-/// One promoted pack artifact bound to the exact plan and receipt that wrote
-/// it.  Its fields are intentionally private: a downstream caller cannot pair
-/// an arbitrary plan with an unrelated checksum and present the combination as
-/// a writer-produced artifact.  Derived materializers that depend on pack
-/// order, such as a bitmap, consume this value rather than loose coordinates.
+/// One promoted pack artifact bound to the exact plan and receipt that wrote it.
+///
+/// Its fields are intentionally private: a downstream caller cannot pair an
+/// arbitrary plan with an unrelated checksum and present the combination as a
+/// writer-produced artifact. Derived materializers that depend on pack order,
+/// such as a bitmap, consume this value rather than loose coordinates.
 #[derive(Debug)]
 pub struct MaterializedPack {
     plan: PackPlan,

@@ -200,29 +200,29 @@ pub struct MidxV1 {
 /// a current authority read.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MidxLocation {
-    pack_index: u32,
-    pack_name: Vec<u8>,
-    pack_offset: u64,
+    index: u32,
+    name: Vec<u8>,
+    offset: u64,
 }
 
 impl MidxLocation {
     /// Zero-based index into the MIDX's canonical `PNAM` pack order.
     #[must_use]
     pub const fn pack_index(&self) -> u32 {
-        self.pack_index
+        self.index
     }
 
     /// Exact NUL-free `PNAM` pack name bytes selected by the MIDX record.
     #[must_use]
     pub fn pack_name(&self) -> &[u8] {
-        &self.pack_name
+        &self.name
     }
 
     /// Candidate entry offset in the selected pack.  The caller must validate
     /// the native pack and object at this offset before using it.
     #[must_use]
     pub const fn pack_offset(&self) -> u64 {
-        self.pack_offset
+        self.offset
     }
 }
 
@@ -503,9 +503,9 @@ impl MidxV1 {
                     }
                     let pack_name = layout.pack_name(&self.bytes, pack_index, deadline)?;
                     return Ok(Some(MidxLocation {
-                        pack_index,
-                        pack_name,
-                        pack_offset,
+                        index: pack_index,
+                        name: pack_name,
+                        offset: pack_offset,
                     }));
                 }
             }

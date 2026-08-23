@@ -214,13 +214,13 @@ impl<'input> QuarantinedBundleV2<'input> {
 
     /// Exact header bytes through the blank pack delimiter.
     #[must_use]
-    pub fn header_bytes(&self) -> &'input [u8] {
+    pub const fn header_bytes(&self) -> &'input [u8] {
         self.header_bytes
     }
 
     /// Raw native pack bytes, still requiring object quarantine and admission.
     #[must_use]
-    pub fn pack_bytes(&self) -> &'input [u8] {
+    pub const fn pack_bytes(&self) -> &'input [u8] {
         self.pack_bytes
     }
 
@@ -638,13 +638,13 @@ fn inspect_header(
             });
         }
         let reference = parse_reference_record(record, line)?;
-        if let Some(previous) = references.last().map(BundleReference::name) {
-            if previous >= reference.name() {
-                return Err(BundleV2Refusal::NonCanonicalReferenceOrder {
-                    previous: previous.clone(),
-                    next: reference.name().clone(),
-                });
-            }
+        if let Some(previous) = references.last().map(BundleReference::name)
+            && previous >= reference.name()
+        {
+            return Err(BundleV2Refusal::NonCanonicalReferenceOrder {
+                previous: previous.clone(),
+                next: reference.name().clone(),
+            });
         }
         references.push(reference);
         cursor = next;
@@ -671,7 +671,7 @@ fn parse_sha1_hex(input: &[u8]) -> Option<[u8; BUNDLE_V2_OBJECT_ID_BYTES]> {
         return None;
     }
     let mut output = [0_u8; BUNDLE_V2_OBJECT_ID_BYTES];
-    for (index, chunk) in input.chunks_exact(2).enumerate() {
+    for (index, chunk) in input.as_chunks::<2>().0.iter().enumerate() {
         let high = hex_nibble(chunk[0])?;
         let low = hex_nibble(chunk[1])?;
         output[index] = (high << 4) | low;

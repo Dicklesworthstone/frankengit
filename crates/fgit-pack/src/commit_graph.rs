@@ -1297,7 +1297,16 @@ fn encode(
                 | u32::try_from(commit.commit_time >> 32)
                     .map_err(|_| CommitGraphRefusal::SizeOverflow)?,
         );
-        append_u32(&mut output, commit.commit_time as u32);
+        let timestamp_bytes = commit.commit_time.to_be_bytes();
+        append_u32(
+            &mut output,
+            u32::from_be_bytes([
+                timestamp_bytes[4],
+                timestamp_bytes[5],
+                timestamp_bytes[6],
+                timestamp_bytes[7],
+            ]),
+        );
     }
     for edge in edges {
         checkpoint(deadline).map_err(CommitGraphRefusal::Pack)?;
@@ -1348,7 +1357,7 @@ fn read_u64(input: &[u8], offset: usize) -> Option<u64> {
         .map(u64::from_be_bytes)
 }
 
-fn format_code(format: ObjectFormat) -> u8 {
+const fn format_code(format: ObjectFormat) -> u8 {
     match format {
         ObjectFormat::Sha1 => 1,
         ObjectFormat::Sha256 => 2,

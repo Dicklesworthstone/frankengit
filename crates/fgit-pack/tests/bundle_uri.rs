@@ -195,8 +195,10 @@ fn bundle_uri_v1_refuses_config_injection_duplicate_mirror_and_output_boundary()
     let complete =
         BundleUriListV1::write(source(commit), &only, BundleUriLimits::default(), &mut live)
             .expect("single complete-bundle mirror is permitted");
-    let mut limits = BundleUriLimits::default();
-    limits.max_output_bytes = complete.bytes().len() - 1;
+    let limits = BundleUriLimits {
+        max_output_bytes: complete.bytes().len() - 1,
+        ..BundleUriLimits::default()
+    };
     let mut bounded_live = || true;
     assert!(matches!(
         BundleUriListV1::write(source(commit), &only, limits, &mut bounded_live),
@@ -269,8 +271,10 @@ fn bundle_uri_v1_quarantine_reader_refuses_noncanonical_or_oversized_input() {
         ),
         Err(BundleUriRefusal::InvalidUri { .. })
     ));
-    let mut limits = BundleUriReadLimits::default();
-    limits.max_input_bytes = noncanonical.len() - 1;
+    let limits = BundleUriReadLimits {
+        max_input_bytes: noncanonical.len() - 1,
+        ..BundleUriReadLimits::default()
+    };
     let mut bounded_live = || true;
     assert!(matches!(
         QuarantinedBundleUriListV1::parse(noncanonical.as_bytes(), limits, &mut bounded_live),

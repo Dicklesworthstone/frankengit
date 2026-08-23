@@ -666,12 +666,12 @@ fn reachability_words(
             .ok_or(PackBitmapRefusal::SizeOverflow)?
             .object();
         for reference in object.references() {
-            let referenced_position = positions.get(reference).copied().ok_or(
+            let referenced_position = positions.get(reference).copied().ok_or_else(|| {
                 PackBitmapRefusal::ReferenceOutsidePack {
                     object: object.id(),
                     reference: *reference,
-                },
-            )?;
+                }
+            })?;
             *steps = steps
                 .checked_add(1)
                 .ok_or(PackBitmapRefusal::SizeOverflow)?;

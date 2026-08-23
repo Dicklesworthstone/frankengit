@@ -24,7 +24,7 @@ const BITMAP_HEADER_BYTES: usize = 32;
 #[derive(Clone)]
 struct Object {
     id: ObjectId,
-    object_type: ObjectType,
+    kind: ObjectType,
     body: Vec<u8>,
     references: Vec<ObjectId>,
     recency: u64,
@@ -42,7 +42,7 @@ impl CanonicalObjectSource for Source {
             .ok_or(PackWriteError::MissingCanonicalObject(*id))?;
         Ok(CanonicalPackObject::new(
             object.id,
-            object.object_type,
+            object.kind,
             object.body.clone(),
             object.references.clone(),
             object.recency,
@@ -85,7 +85,7 @@ fn commit(tree: ObjectId, parents: &[ObjectId], time: u64, recency: u64) -> Obje
     );
     Object {
         id: native(ObjectType::Commit, &body),
-        object_type: ObjectType::Commit,
+        kind: ObjectType::Commit,
         body,
         references: parents.iter().copied().chain([tree]).collect(),
         recency,
@@ -96,7 +96,7 @@ fn source_with_two_commits() -> (Source, ObjectId, ObjectId) {
     let blob_body = b"bitmap payload\n".to_vec();
     let blob = Object {
         id: native(ObjectType::Blob, &blob_body),
-        object_type: ObjectType::Blob,
+        kind: ObjectType::Blob,
         body: blob_body,
         references: Vec::new(),
         recency: 1,
@@ -105,7 +105,7 @@ fn source_with_two_commits() -> (Source, ObjectId, ObjectId) {
     tree_body.extend_from_slice(blob.id.as_bytes());
     let tree = Object {
         id: native(ObjectType::Tree, &tree_body),
-        object_type: ObjectType::Tree,
+        kind: ObjectType::Tree,
         body: tree_body,
         references: vec![blob.id],
         recency: 2,
@@ -158,7 +158,7 @@ fn read_u64(input: &[u8], offset: usize) -> u64 {
     )
 }
 
-fn ewah_len(object_count: usize) -> usize {
+const fn ewah_len(object_count: usize) -> usize {
     20 + 8 * object_count.div_ceil(64)
 }
 
@@ -221,7 +221,10 @@ fn bitmap_v1_binds_real_pack_order_and_encodes_full_commit_closure() {
     assert_eq!(&bitmap.bytes()[..4], b"BITM");
     assert_eq!(read_u16(bitmap.bytes(), 4), 1);
     assert_eq!(read_u16(bitmap.bytes(), 6), 1, "FULL_DAG is mandatory");
-    assert_eq!(read_u32(bitmap.bytes(), 8), object_count as u32);
+    assert_eq!(
+        read_u32(bitmap.bytes(), 8),
+        u32::try_from(object_count).expect("fixture object count fits u32")
+    );
     assert_eq!(
         &bitmap.bytes()[12..32],
         materialized.receipt().checksum.as_bytes(),
@@ -275,7 +278,10 @@ fn bitmap_v1_binds_real_pack_order_and_encodes_full_commit_closure() {
         .collect::<Vec<_>>();
     for (row, (position, _)) in commit_positions.iter().enumerate() {
         let offset = entries + row * (6 + ewah);
-        assert_eq!(read_u32(bitmap.bytes(), offset), *position as u32);
+        assert_eq!(
+            read_u32(bitmap.bytes(), offset),
+            u32::try_from(*position).expect("fixture pack position fits u32")
+        );
         assert_eq!(bitmap.bytes()[offset + 4], 0, "no XOR dependency");
         assert_eq!(bitmap.bytes()[offset + 5], 1, "entry is reusable");
         let bits = ewah_literal(bitmap.bytes(), offset + 6, object_count);
@@ -338,8 +344,10 @@ fn bitmap_output_order_is_deterministic_and_output_bound_refuses_before_emit() {
     assert_eq!(first.bytes(), second.bytes());
     assert_eq!(first.receipt(), second.receipt());
 
-    let mut limits = PackBitmapLimits::default();
-    limits.max_output_bytes = first.bytes().len() - 1;
+    let limits = PackBitmapLimits {
+        max_output_bytes: first.bytes().len() - 1,
+        ..PackBitmapLimits::default()
+    };
     let mut bounded_live = || true;
     assert!(matches!(
         PackBitmapV1::write(bitmap_source(tip), &first_pack, limits, &mut bounded_live),

@@ -95,7 +95,9 @@ fn chunk_offsets(input: &[u8]) -> BTreeMap<[u8; 4], usize> {
 
 fn oid_position(oid_lookup: &[u8], id: ObjectId) -> usize {
     oid_lookup
-        .chunks_exact(SHA1_BYTES)
+        .as_chunks::<SHA1_BYTES>()
+        .0
+        .iter()
         .position(|candidate| candidate == id.as_bytes())
         .expect("fixture commit identity occurs in its OID lookup chunk")
 }
@@ -138,15 +140,17 @@ fn commit_graph_v1_encodes_closed_native_commit_history_and_extra_edges() {
     );
 
     let chunks = chunk_offsets(graph.bytes());
-    let fanout = chunks[&*b"OIDF"];
-    let oidl = chunks[&*b"OIDL"];
-    let cdat = chunks[&*b"CDAT"];
-    let edge = chunks[&*b"EDGE"];
+    let fanout = chunks[b"OIDF"];
+    let oidl = chunks[b"OIDL"];
+    let cdat = chunks[b"CDAT"];
+    let edge = chunks[b"EDGE"];
     assert_eq!(read_u32(graph.bytes(), fanout + 255 * 4), 5);
     let oid_lookup = &graph.bytes()[oidl..cdat];
     assert!(
         oid_lookup
-            .chunks_exact(SHA1_BYTES)
+            .as_chunks::<SHA1_BYTES>()
+            .0
+            .iter()
             .collect::<Vec<_>>()
             .windows(2)
             .all(|pair| pair[0] < pair[1]),
@@ -226,7 +230,7 @@ fn commit_graph_order_is_deterministic_and_receipt_is_source_bound() {
     let root = commit(tree, &[], 10);
     let tip = commit(tree, &[*root.commit_oid()], 20);
     let inputs = [root.clone(), tip.clone()];
-    let reversed = [tip.clone(), root.clone()];
+    let reversed = [tip.clone(), root];
     let mut first_live = || true;
     let first = CommitGraphV1::write(
         source(*tip.commit_oid()),
@@ -291,13 +295,15 @@ fn commit_graph_enforces_output_bound_before_emitting_bytes() {
     let mut live = || true;
     let complete = CommitGraphV1::write(
         source(*root.commit_oid()),
-        &[root.clone()],
+        std::slice::from_ref(&root),
         &CommitGraphLimits::default(),
         &mut live,
     )
     .expect("one strict root commit materializes");
-    let mut limits = CommitGraphLimits::default();
-    limits.max_output_bytes = complete.bytes().len() - 1;
+    let limits = CommitGraphLimits {
+        max_output_bytes: complete.bytes().len() - 1,
+        ..CommitGraphLimits::default()
+    };
     let mut bounded_live = || true;
     assert!(matches!(
         CommitGraphV1::write(

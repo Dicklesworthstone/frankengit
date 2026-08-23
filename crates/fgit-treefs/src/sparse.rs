@@ -46,7 +46,7 @@ impl Default for SparseLimits {
 /// The deterministic sparse-materialization profile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SparseProfile {
-    /// Canonically ordered TreeFS entries with files and symlinks represented
+    /// Canonically ordered `TreeFS` entries with files and symlinks represented
     /// as verified byte bodies and no host filesystem effect.
     ManifestV1,
 }
@@ -174,9 +174,9 @@ impl<A: GitHashAlgorithm> SparseEntry<A> {
 pub enum SparseEntryKind {
     /// A generated parent directory.  No object body is retained.
     Directory,
-    /// A regular file with a closed TreeFS file-mode set and verified body.
+    /// A regular file with a closed `TreeFS` file-mode set and verified body.
     File {
-        /// The only file modes the TreeFS host adapter may create.
+        /// The only file modes the `TreeFS` host adapter may create.
         mode: FileMode,
         /// Checked blob body.
         body: Vec<u8>,
@@ -268,8 +268,8 @@ impl<A: GitHashAlgorithm> SparseManifest<A> {
         let receipt = SparseReceipt {
             repository_id: base.repository_id(),
             source_rcr_id: base.base_rcr_id(),
-            source_commit_oid: base.base_commit_oid().clone(),
-            source_tree_oid: base.base_tree_oid().clone(),
+            source_commit_oid: *base.base_commit_oid(),
+            source_tree_oid: *base.base_tree_oid(),
             profile: SparseProfile::ManifestV1,
             completeness: SparseCompleteness::CapabilityVisibleTreeV1,
             verification: SparseVerification::SourceObjectIdentitiesVerifiedV1,
@@ -299,7 +299,7 @@ pub enum SparseRefusal {
     Base(BaseError),
     /// A source object could not be read or did not match its requested OID.
     Source(ObjectSourceError),
-    /// The TreeFS capability refused a read, symlink, or budget charge.
+    /// The `TreeFS` capability refused a read, symlink, or budget charge.
     Capability(CapabilityRefusal),
     /// The source tree produced the same canonical path more than once.
     DuplicatePath {
@@ -335,7 +335,7 @@ pub enum SparseRefusal {
         /// Gitlink path.
         path: TreePath,
     },
-    /// A file mode lies outside the closed set a TreeFS host adapter creates.
+    /// A file mode lies outside the closed set a `TreeFS` host adapter creates.
     UnsupportedFileMode {
         /// File path.
         path: TreePath,

@@ -1,4 +1,4 @@
-//! Bounded, deterministic USTAR materialization from an authenticated TreeFS base.
+//! Bounded, deterministic USTAR materialization from an authenticated `TreeFS` base.
 //!
 //! This is a derived-output adapter, never an authority surface.  It reads only
 //! objects selected by a [`TreeCapability`], rechecks every payload identity
@@ -74,7 +74,7 @@ pub enum ArchiveProfile {
 
 /// The member-selection rule represented by an archive receipt.
 ///
-/// Materialization never widens a TreeFS capability.  This explicit class
+/// Materialization never widens a `TreeFS` capability. This explicit class
 /// distinguishes a capability-scoped archive from a hypothetical complete
 /// repository export of the same source tree.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -304,8 +304,8 @@ impl<A: GitHashAlgorithm> UstarArchive<A> {
         let receipt = ArchiveReceipt {
             repository_id: base.repository_id(),
             source_rcr_id: base.base_rcr_id(),
-            source_commit_oid: base.base_commit_oid().clone(),
-            source_tree_oid: base.base_tree_oid().clone(),
+            source_commit_oid: *base.base_commit_oid(),
+            source_tree_oid: *base.base_tree_oid(),
             profile: ArchiveProfile::UstarV1,
             completeness: ArchiveCompleteness::CapabilityVisibleTreeV1,
             verification: ArchiveVerification::SourceObjectIdentitiesVerifiedV1,
@@ -413,8 +413,8 @@ impl<A: GitHashAlgorithm> ZipArchive<A> {
         let receipt = ArchiveReceipt {
             repository_id: base.repository_id(),
             source_rcr_id: base.base_rcr_id(),
-            source_commit_oid: base.base_commit_oid().clone(),
-            source_tree_oid: base.base_tree_oid().clone(),
+            source_commit_oid: *base.base_commit_oid(),
+            source_tree_oid: *base.base_tree_oid(),
             profile: ArchiveProfile::ZipStoreV1,
             completeness: ArchiveCompleteness::CapabilityVisibleTreeV1,
             verification: ArchiveVerification::SourceObjectIdentitiesVerifiedV1,
@@ -485,11 +485,7 @@ fn validate_zip_member_name(path: &TreePath, kind: ZipEntryKind) -> Result<(), A
     if std::str::from_utf8(path.as_bytes()).is_err() {
         return Err(ArchiveRefusal::ZipPathNotUtf8 { path: path.clone() });
     }
-    let directory_suffix = if kind == ZipEntryKind::Directory {
-        1
-    } else {
-        0
-    };
+    let directory_suffix = usize::from(kind == ZipEntryKind::Directory);
     let length = path
         .as_bytes()
         .len()
@@ -499,7 +495,7 @@ fn validate_zip_member_name(path: &TreePath, kind: ZipEntryKind) -> Result<(), A
     Ok(())
 }
 
-fn zip_entry_kind<A: GitHashAlgorithm>(entry: &PlannedEntry<A>) -> ZipEntryKind {
+const fn zip_entry_kind<A: GitHashAlgorithm>(entry: &PlannedEntry<A>) -> ZipEntryKind {
     match entry {
         PlannedEntry::Directory => ZipEntryKind::Directory,
         PlannedEntry::File { .. } => ZipEntryKind::File,
@@ -646,7 +642,9 @@ fn zip_external_attributes(kind: ZipEntryKind, mode: u64) -> u32 {
         ZipEntryKind::Symlink => 0o120_000 | mode,
     };
     let dos_attributes = u32::from(kind == ZipEntryKind::Directory) << 4;
-    ((unix_mode as u32) << 16) | dos_attributes
+    let unix_mode = unix_mode.to_be_bytes();
+    let unix_mode = u32::from_be_bytes([unix_mode[4], unix_mode[5], unix_mode[6], unix_mode[7]]);
+    (unix_mode << 16) | dos_attributes
 }
 
 /// Why an archive materialization was refused.
@@ -964,7 +962,7 @@ fn append_record(
 ) -> Result<(), ArchiveRefusal> {
     let mut header = header_for(path, kind.typeflag(), mode, body.len())?;
     finalize_checksum(&mut header);
-    append_header_and_body(bytes, header, body, max_output_bytes)
+    append_header_and_body(bytes, &header, body, max_output_bytes)
 }
 
 fn append_record_with_link(
@@ -977,7 +975,7 @@ fn append_record_with_link(
     let mut header = header_for(path, b'2', mode, 0)?;
     header[157..157 + target.len()].copy_from_slice(target);
     finalize_checksum(&mut header);
-    append_header_and_body(bytes, header, &[], max_output_bytes)
+    append_header_and_body(bytes, &header, &[], max_output_bytes)
 }
 
 fn preflight_ustar_paths<'a>(
@@ -998,10 +996,12 @@ fn header_for(
 ) -> Result<[u8; TAR_BLOCK_BYTES], ArchiveRefusal> {
     let mut header = [0_u8; TAR_BLOCK_BYTES];
     write_ustar_path(&mut header, path)?;
-    write_octal_field(&mut header[100..108], mode).ok_or(ArchiveRefusal::HeaderFieldOverflow {
-        path: path.clone(),
-        field: "mode",
-        value: mode,
+    write_octal_field(&mut header[100..108], mode).ok_or_else(|| {
+        ArchiveRefusal::HeaderFieldOverflow {
+            path: path.clone(),
+            field: "mode",
+            value: mode,
+        }
     })?;
     if write_octal_field(&mut header[108..116], 0).is_none() {
         return Err(ArchiveRefusal::HeaderFieldOverflow {
@@ -1018,13 +1018,13 @@ fn header_for(
         });
     }
     let body_len = u64::try_from(body_len).map_err(|_| ArchiveRefusal::OutputSizeOverflow)?;
-    write_octal_field(&mut header[124..136], body_len).ok_or(
+    write_octal_field(&mut header[124..136], body_len).ok_or_else(|| {
         ArchiveRefusal::HeaderFieldOverflow {
             path: path.clone(),
             field: "size",
             value: body_len,
-        },
-    )?;
+        }
+    })?;
     if write_octal_field(&mut header[136..148], 0).is_none() {
         return Err(ArchiveRefusal::HeaderFieldOverflow {
             path: path.clone(),
@@ -1073,7 +1073,7 @@ fn write_ustar_path(
 
 fn append_header_and_body(
     bytes: &mut Vec<u8>,
-    header: [u8; TAR_BLOCK_BYTES],
+    header: &[u8; TAR_BLOCK_BYTES],
     body: &[u8],
     max_output_bytes: usize,
 ) -> Result<(), ArchiveRefusal> {
@@ -1083,7 +1083,7 @@ fn append_header_and_body(
         .and_then(|value| value.checked_add(padding))
         .ok_or(ArchiveRefusal::OutputSizeOverflow)?;
     reserve_append_capacity(bytes, record_bytes, max_output_bytes)?;
-    bytes.extend_from_slice(&header);
+    bytes.extend_from_slice(header);
     bytes.extend_from_slice(body);
     bytes.resize(bytes.len() + padding, 0);
     Ok(())
