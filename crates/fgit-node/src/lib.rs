@@ -1566,7 +1566,7 @@ pub struct DurableAsyncAdmissionProjection<'materializer> {
 impl<'materializer> DurableAsyncAdmissionProjection<'materializer> {
     /// Connects the durable frame materializer to one node-owned admission context.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         materializer: &'materializer DurableAdmissionMaterializer,
         context: AdmissionContext,
     ) -> Self {
