@@ -15,10 +15,10 @@ use fgit_crypto::{
 };
 use fgit_graph::{
     ArticulationBridgeReport, BipartiteMatching, BuilderProfileId, CriticalPath,
-    DeterministicGraph, ExactGraphGeneration, GenerationAuthority, GenerationAuthorityError,
-    GraphAuthorityClass, GraphAuthorityClassRefusal, GraphDecision, GraphEdge, GraphGenerationBody,
+    ExactGraphGeneration, GenerationAuthority, GenerationAuthorityError, GraphAuthorityClass,
+    GraphAuthorityClassRefusal, GraphBuilder, GraphDecision, GraphEdge, GraphGenerationBody,
     GraphGenerationId, GraphLimits, GraphNodeId, GraphQuery, GraphRefusal, GraphResult,
-    GraphSourceStamp, GraphViewId, GraphViewPolicy, MinimumCut, Reachability,
+    GraphSnapshot, GraphSourceStamp, GraphViewId, GraphViewPolicy, MinimumCut, Reachability,
     StronglyConnectedComponents, TopologicalOrder,
 };
 use fgit_types::{CodecVersion, Digest, RepositoryCommitId, SchemaFamily, SchemaId};
@@ -136,13 +136,28 @@ fn authority_class_is_canonical_and_exact_call_sites_refuse_non_exact_generation
     );
 }
 
-fn query(generation_id: GraphGenerationId, policy: GraphViewPolicy) -> GraphQuery {
-    GraphQuery::new(
-        generation_id,
-        policy,
-        digest(b"fg031b-resource-receipt"),
-        100_000,
-    )
+fn graph_snapshot(
+    body: GraphGenerationBody,
+    directed: bool,
+    nodes: &[GraphNodeId],
+    edges: &[GraphEdge],
+) -> GraphSnapshot {
+    GraphBuilder::new(body, LIMITS)
+        .build(directed, nodes, edges)
+        .expect("campaign rows and generation body are admissible")
+}
+
+fn snapshot(
+    label: &[u8],
+    directed: bool,
+    nodes: &[GraphNodeId],
+    edges: &[GraphEdge],
+) -> GraphSnapshot {
+    graph_snapshot(generation_body(label, None), directed, nodes, edges)
+}
+
+fn query(snapshot: &GraphSnapshot, policy: GraphViewPolicy) -> GraphQuery {
+    snapshot.query(policy, digest(b"fg031b-resource-receipt"), 100_000)
 }
 
 const fn next_seed(state: &mut u64) -> u64 {
@@ -216,60 +231,55 @@ struct CampaignObservation {
 }
 
 fn campaign_observation(seed: u64) -> CampaignObservation {
-    let generation_id = generation_body(b"determinism", None)
-        .generation_id()
-        .expect("campaign generation identity is registered");
-    let query = query(generation_id, GraphViewPolicy::exact_all());
-
     let (dag_nodes, dag_edges) = dag_rows();
-    let dag = DeterministicGraph::from_canonical_parts(
+    let dag = snapshot(
+        b"determinism-dag",
         true,
         &shuffled(&dag_nodes, seed),
         &shuffled(&dag_edges, seed.wrapping_add(1)),
-        LIMITS,
-    )
-    .expect("seeded DAG rows remain admissible");
+    );
+    let dag_query = query(&dag, GraphViewPolicy::exact_all());
     let (cyclic_nodes, cyclic_edges) = cyclic_rows();
-    let cyclic = DeterministicGraph::from_canonical_parts(
+    let cyclic = snapshot(
+        b"determinism-cyclic",
         true,
         &shuffled(&cyclic_nodes, seed.wrapping_add(2)),
         &shuffled(&cyclic_edges, seed.wrapping_add(3)),
-        LIMITS,
-    )
-    .expect("seeded cyclic rows remain admissible");
+    );
+    let cyclic_query = query(&cyclic, GraphViewPolicy::exact_all());
     let (undirected_nodes, undirected_edges) = undirected_rows();
-    let undirected = DeterministicGraph::from_canonical_parts(
+    let undirected = snapshot(
+        b"determinism-undirected",
         false,
         &shuffled(&undirected_nodes, seed.wrapping_add(4)),
         &shuffled(&undirected_edges, seed.wrapping_add(5)),
-        LIMITS,
-    )
-    .expect("seeded undirected rows remain admissible");
+    );
+    let undirected_query = query(&undirected, GraphViewPolicy::exact_all());
 
     CampaignObservation {
         reachability: dag
-            .reachability(&query, node(1))
+            .reachability(&dag_query, node(1))
             .expect("exact reachability is allowed"),
         dominators: dag
-            .dominators(&query, &[node(1)])
+            .dominators(&dag_query, &[node(1)])
             .expect("exact dominators are allowed"),
         topological: dag
-            .topological_order(&query)
+            .topological_order(&dag_query)
             .expect("DAG topological order is allowed"),
         critical: dag
-            .critical_path(&query)
+            .critical_path(&dag_query)
             .expect("DAG critical path is allowed"),
         matching: dag
-            .bipartite_matching(&query, &[node(1), node(2)], &[node(3), node(4)])
+            .bipartite_matching(&dag_query, &[node(1), node(2)], &[node(3), node(4)])
             .expect("bipartite matching is allowed"),
         components: cyclic
-            .strongly_connected_components(&query)
+            .strongly_connected_components(&cyclic_query)
             .expect("exact SCCs are allowed"),
         articulation: undirected
-            .articulation_bridges(&query)
+            .articulation_bridges(&undirected_query)
             .expect("undirected articulation analysis is allowed"),
         minimum_cut: undirected
-            .minimum_cut(&query)
+            .minimum_cut(&undirected_query)
             .expect("undirected minimum cut is allowed"),
     }
 }
@@ -390,15 +400,14 @@ impl IncrementalMaterialization {
         }
     }
 
-    fn snapshot(&self) -> DeterministicGraph {
+    fn snapshot(&self, label: &[u8]) -> GraphSnapshot {
         let nodes: Vec<_> = self.nodes.iter().copied().collect();
         let edges: Vec<_> = self.edges.iter().copied().collect();
-        DeterministicGraph::from_canonical_parts(true, &nodes, &edges, LIMITS)
-            .expect("incremental ledger keeps canonical rows admissible")
+        snapshot(label, true, &nodes, &edges)
     }
 }
 
-fn full_rebuild(history: &[Mutation]) -> DeterministicGraph {
+fn full_rebuild(history: &[Mutation], label: &[u8]) -> GraphSnapshot {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
     for mutation in history {
@@ -408,8 +417,7 @@ fn full_rebuild(history: &[Mutation]) -> DeterministicGraph {
             Mutation::Node(_) | Mutation::Edge(_) => {}
         }
     }
-    DeterministicGraph::from_canonical_parts(true, &nodes, &edges, LIMITS)
-        .expect("full rebuild history keeps canonical rows admissible")
+    snapshot(label, true, &nodes, &edges)
 }
 
 #[test]
@@ -449,15 +457,13 @@ fn incremental_prefixes_match_full_rebuild_and_scalar_oracles() {
         Mutation::Edge(GraphEdge::new(node(2), node(4), 1)),
         Mutation::Edge(GraphEdge::new(node(3), node(4), 1)),
     ];
-    let generation_id = generation_body(b"mutation-ledger", None)
-        .generation_id()
-        .expect("campaign generation identity is registered");
-    let query = query(generation_id, GraphViewPolicy::exact_all());
     let mut incremental = IncrementalMaterialization::default();
     for (index, mutation) in mutations.iter().copied().enumerate() {
         incremental.apply(mutation);
-        let maintained = incremental.snapshot();
-        let rebuilt = full_rebuild(&mutations[..=index]);
+        let label = format!("mutation-ledger-{}", index + 1);
+        let maintained = incremental.snapshot(label.as_bytes());
+        let rebuilt = full_rebuild(&mutations[..=index], label.as_bytes());
+        let query = query(&maintained, GraphViewPolicy::exact_all());
         assert_eq!(
             maintained,
             rebuilt,
@@ -489,11 +495,11 @@ fn incremental_prefixes_match_full_rebuild_and_scalar_oracles() {
     }
 
     let (nodes, edges) = cyclic_rows();
-    let cyclic = DeterministicGraph::from_canonical_parts(true, &nodes, &edges, LIMITS)
-        .expect("cyclic scalar corpus is admissible");
+    let cyclic = snapshot(b"mutation-ledger-cyclic", true, &nodes, &edges);
+    let cyclic_query = query(&cyclic, GraphViewPolicy::exact_all());
     assert_eq!(
         cyclic
-            .strongly_connected_components(&query)
+            .strongly_connected_components(&cyclic_query)
             .expect("SCC is permitted")
             .value
             .components,
@@ -505,38 +511,57 @@ fn incremental_prefixes_match_full_rebuild_and_scalar_oracles() {
 #[test]
 fn authority_policy_refusal_and_generation_labels_never_grant_or_hide_staleness() {
     let (nodes, edges) = dag_rows();
-    let graph = DeterministicGraph::from_canonical_parts(true, &nodes, &edges, LIMITS)
-        .expect("authority-safety corpus is admissible");
-    let old_id = generation_body(b"old", None)
-        .generation_id()
-        .expect("old generation identity is registered");
-    let new_id = generation_body(b"new", Some(old_id))
-        .generation_id()
-        .expect("new generation identity is registered");
-    let permitted = graph
-        .reachability(
-            &query(old_id, GraphViewPolicy::new([GraphDecision::Reachability])),
-            node(1),
-        )
+    let old = snapshot(b"old", true, &nodes, &edges);
+    let old_id = old.generation_id();
+    let old_query = query(&old, GraphViewPolicy::new([GraphDecision::Reachability]));
+    let permitted = old
+        .reachability(&old_query, node(1))
         .expect("the explicitly permitted decision proceeds");
     assert_eq!(permitted.witness.graph_generation_ids, vec![old_id]);
+    assert_eq!(
+        permitted.witness.authority_class,
+        GraphAuthorityClass::Exact
+    );
     assert!(matches!(
-        graph.minimum_cut(&query(
-            old_id,
-            GraphViewPolicy::new([GraphDecision::Reachability]),
-        )),
+        old.minimum_cut(&old_query),
         Err(GraphRefusal::DecisionForbidden {
             decision: GraphDecision::MinimumCut
         })
     ));
-    let labeled_new = graph
-        .reachability(&query(new_id, GraphViewPolicy::exact_all()), node(1))
-        .expect("new generation query is permitted");
-    assert_eq!(labeled_new.witness.graph_generation_ids, vec![new_id]);
-    assert_ne!(
-        permitted.witness.graph_generation_ids, labeled_new.witness.graph_generation_ids,
-        "a derived result must label the generation it actually observed"
+
+    let new_body = generation_body(b"new", Some(old_id));
+    let new = graph_snapshot(new_body, true, &nodes, &edges);
+    let new_id = new.generation_id();
+    let new_query = query(&new, GraphViewPolicy::exact_all());
+    assert!(matches!(
+        old.reachability(&new_query, node(1)),
+        Err(GraphRefusal::GenerationMismatch { expected, observed }) if *expected == old_id && *observed == new_id
+    ));
+    assert!(matches!(
+        new.reachability(&old_query, node(1)),
+        Err(GraphRefusal::GenerationMismatch { expected, observed }) if *expected == new_id && *observed == old_id
+    ));
+
+    let statistical = graph_snapshot(
+        generation_body_with_class(b"statistical", GraphAuthorityClass::Statistical, None),
+        true,
+        &nodes,
+        &edges,
     );
+    let statistical_query = query(&statistical, GraphViewPolicy::exact_all());
+    let statistical_result = statistical
+        .reachability(&statistical_query, node(1))
+        .expect("advisory traversal may still run under its declared class");
+    assert_eq!(
+        statistical_result.witness.authority_class,
+        GraphAuthorityClass::Statistical
+    );
+    assert!(matches!(
+        statistical.require_exact(),
+        Err(GraphAuthorityClassRefusal::ExactRequired {
+            observed: GraphAuthorityClass::Statistical
+        })
+    ));
 
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(313));
     let authority = GenerationAuthority::new(

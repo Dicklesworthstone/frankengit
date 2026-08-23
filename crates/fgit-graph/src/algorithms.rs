@@ -7,7 +7,8 @@ use fgit_crypto::{IdentityDomain, internal_algorithm_id, internal_digest_value};
 use fgit_types::{Digest, SchemaFamily, SchemaId};
 
 use crate::generation::{
-    GenerationAuthorityError, GraphGenerationBody, GraphGenerationId, GraphSourceStamp,
+    ExactGraphGeneration, GenerationAuthorityError, GraphAuthorityClass,
+    GraphAuthorityClassRefusal, GraphGenerationBody, GraphGenerationId, GraphSourceStamp,
 };
 
 const WITNESS_SCHEMA: SchemaId = SchemaId::new(SchemaFamily::from_static("graph-witness"), 1, 0);
@@ -193,22 +194,28 @@ impl GraphViewPolicy {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphQuery {
     generation_id: GraphGenerationId,
+    authority_class: GraphAuthorityClass,
     policy: GraphViewPolicy,
     resource_receipt_root: Digest,
     operation_limit: u64,
 }
 
 impl GraphQuery {
-    /// Pins a query to exactly one authenticated graph generation.
+    /// Pins a query to exactly one graph snapshot generation.
+    ///
+    /// Only [`GraphSnapshot::query`] may construct a query. This prevents a
+    /// caller from relabeling a result from one snapshot as another generation.
     #[must_use]
-    pub const fn new(
+    pub(crate) const fn new(
         generation_id: GraphGenerationId,
+        authority_class: GraphAuthorityClass,
         policy: GraphViewPolicy,
         resource_receipt_root: Digest,
         operation_limit: u64,
     ) -> Self {
         Self {
             generation_id,
+            authority_class,
             policy,
             resource_receipt_root,
             operation_limit,
@@ -220,12 +227,18 @@ impl GraphQuery {
     pub const fn generation_id(&self) -> GraphGenerationId {
         self.generation_id
     }
+
+    /// The non-promotable authority class of the observed generation.
+    #[must_use]
+    pub const fn authority_class(&self) -> GraphAuthorityClass {
+        self.authority_class
+    }
 }
 
 /// A witnessed graph result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphResult<T> {
-    /// Exact result under the declared profile.
+    /// Deterministic result under the declared graph authority class.
     pub value: T,
     /// Recomputable decision and complexity facts.
     pub witness: GraphDecisionWitness,
@@ -236,6 +249,11 @@ pub struct GraphResult<T> {
 pub struct GraphDecisionWitness {
     /// Exactly one generation in this initial single-view slice.
     pub graph_generation_ids: Vec<GraphGenerationId>,
+    /// Authority class of the observed generation.
+    ///
+    /// An exact algorithm preserves this class; it never elevates a
+    /// deterministic-derived or statistical graph to an authority source.
+    pub authority_class: GraphAuthorityClass,
     /// The closed implementation profile.
     pub algorithm: GraphAlgorithm,
     /// Observed vertex count.
@@ -259,6 +277,20 @@ pub struct GraphDecisionWitness {
 /// Why graph input or a requested exact computation was refused.
 #[derive(Debug)]
 pub enum GraphRefusal {
+    /// A query issued by one snapshot was presented to another snapshot.
+    GenerationMismatch {
+        /// Generation materialized by the graph snapshot receiving the query.
+        expected: Box<GraphGenerationId>,
+        /// Generation named by the query.
+        observed: Box<GraphGenerationId>,
+    },
+    /// A query's class does not match the snapshot that issued its generation.
+    AuthorityClassMismatch {
+        /// Class carried by the receiving graph snapshot.
+        expected: GraphAuthorityClass,
+        /// Class carried by the query.
+        observed: GraphAuthorityClass,
+    },
     /// A bound would be exceeded before this core allocates graph or result state.
     ResourceLimit {
         /// The bounded resource.
@@ -443,7 +475,7 @@ impl DeterministicGraph {
     }
 
     /// Computes the deterministic reachable closure from `start`.
-    pub fn reachability(
+    pub(crate) fn reachability(
         &self,
         query: &GraphQuery,
         start: GraphNodeId,
@@ -479,7 +511,7 @@ impl DeterministicGraph {
     }
 
     /// Computes SCCs with an iterative two-pass traversal, never recursive DFS.
-    pub fn strongly_connected_components(
+    pub(crate) fn strongly_connected_components(
         &self,
         query: &GraphQuery,
     ) -> Result<GraphResult<StronglyConnectedComponents>, GraphRefusal> {
@@ -571,7 +603,7 @@ impl DeterministicGraph {
     }
 
     /// Computes exact dominator sets by a deterministic fixed point.
-    pub fn dominators(
+    pub(crate) fn dominators(
         &self,
         query: &GraphQuery,
         roots: &[GraphNodeId],
@@ -649,7 +681,7 @@ impl DeterministicGraph {
     }
 
     /// Computes articulation vertices and bridge edges without recursion.
-    pub fn articulation_bridges(
+    pub(crate) fn articulation_bridges(
         &self,
         query: &GraphQuery,
     ) -> Result<GraphResult<ArticulationBridgeReport>, GraphRefusal> {
@@ -693,7 +725,10 @@ impl DeterministicGraph {
     }
 
     /// Computes an exact global minimum cut with deterministic Stoer-Wagner phases.
-    pub fn minimum_cut(&self, query: &GraphQuery) -> Result<GraphResult<MinimumCut>, GraphRefusal> {
+    pub(crate) fn minimum_cut(
+        &self,
+        query: &GraphQuery,
+    ) -> Result<GraphResult<MinimumCut>, GraphRefusal> {
         query.policy.require(GraphDecision::MinimumCut)?;
         if self.directed {
             return Err(GraphRefusal::UndirectedGraphRequired {
@@ -796,7 +831,7 @@ impl DeterministicGraph {
     }
 
     /// Computes a deterministic maximum-cardinality bipartite matching.
-    pub fn bipartite_matching(
+    pub(crate) fn bipartite_matching(
         &self,
         query: &GraphQuery,
         left: &[GraphNodeId],
@@ -871,7 +906,7 @@ impl DeterministicGraph {
     }
 
     /// Computes a stable topological order for a directed acyclic graph.
-    pub fn topological_order(
+    pub(crate) fn topological_order(
         &self,
         query: &GraphQuery,
     ) -> Result<GraphResult<TopologicalOrder>, GraphRefusal> {
@@ -893,7 +928,7 @@ impl DeterministicGraph {
     }
 
     /// Computes a stable maximum-duration critical path for a directed acyclic graph.
-    pub fn critical_path(
+    pub(crate) fn critical_path(
         &self,
         query: &GraphQuery,
     ) -> Result<GraphResult<CriticalPath>, GraphRefusal> {
@@ -1110,6 +1145,7 @@ impl GraphBuilder {
         let graph = DeterministicGraph::from_canonical_parts(directed, nodes, edges, self.limits)?;
         Ok(GraphSnapshot {
             generation_id,
+            generation: self.generation.clone(),
             graph,
         })
     }
@@ -1119,6 +1155,7 @@ impl GraphBuilder {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphSnapshot {
     generation_id: GraphGenerationId,
+    generation: GraphGenerationBody,
     graph: DeterministicGraph,
 }
 
@@ -1127,6 +1164,22 @@ impl GraphSnapshot {
     #[must_use]
     pub const fn generation_id(&self) -> GraphGenerationId {
         self.generation_id
+    }
+
+    /// The complete immutable generation body this snapshot materialized.
+    #[must_use]
+    pub const fn generation(&self) -> &GraphGenerationBody {
+        &self.generation
+    }
+
+    /// Produces an exact-only proof for an exact-sensitive consumer.
+    ///
+    /// Graph execution itself remains advisory or derived unless a downstream
+    /// consumer requires this proof; a score or traversal cannot manufacture one.
+    pub const fn require_exact(
+        &self,
+    ) -> Result<ExactGraphGeneration<'_>, GraphAuthorityClassRefusal> {
+        self.generation.require_exact()
     }
 
     /// The deterministic graph core.
@@ -1145,10 +1198,101 @@ impl GraphSnapshot {
     ) -> GraphQuery {
         GraphQuery::new(
             self.generation_id,
+            self.generation.authority_class(),
             policy,
             resource_receipt_root,
             operation_limit,
         )
+    }
+
+    /// Computes the deterministic reachable closure from `start`.
+    pub fn reachability(
+        &self,
+        query: &GraphQuery,
+        start: GraphNodeId,
+    ) -> Result<GraphResult<Reachability>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.reachability(query, start)
+    }
+
+    /// Computes deterministic strongly-connected components.
+    pub fn strongly_connected_components(
+        &self,
+        query: &GraphQuery,
+    ) -> Result<GraphResult<StronglyConnectedComponents>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.strongly_connected_components(query)
+    }
+
+    /// Computes exact dominator sets by a deterministic fixed point.
+    pub fn dominators(
+        &self,
+        query: &GraphQuery,
+        roots: &[GraphNodeId],
+    ) -> Result<GraphResult<BTreeMap<GraphNodeId, Vec<GraphNodeId>>>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.dominators(query, roots)
+    }
+
+    /// Computes deterministic articulation vertices and bridge edges.
+    pub fn articulation_bridges(
+        &self,
+        query: &GraphQuery,
+    ) -> Result<GraphResult<ArticulationBridgeReport>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.articulation_bridges(query)
+    }
+
+    /// Computes an exact global minimum cut with deterministic tie-breaking.
+    pub fn minimum_cut(&self, query: &GraphQuery) -> Result<GraphResult<MinimumCut>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.minimum_cut(query)
+    }
+
+    /// Computes a deterministic maximum-cardinality bipartite matching.
+    pub fn bipartite_matching(
+        &self,
+        query: &GraphQuery,
+        left: &[GraphNodeId],
+        right: &[GraphNodeId],
+    ) -> Result<GraphResult<BipartiteMatching>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.bipartite_matching(query, left, right)
+    }
+
+    /// Computes a stable topological order for a directed acyclic graph.
+    pub fn topological_order(
+        &self,
+        query: &GraphQuery,
+    ) -> Result<GraphResult<TopologicalOrder>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.topological_order(query)
+    }
+
+    /// Computes a stable maximum-duration critical path for a directed acyclic graph.
+    pub fn critical_path(
+        &self,
+        query: &GraphQuery,
+    ) -> Result<GraphResult<CriticalPath>, GraphRefusal> {
+        self.require_query(query)?;
+        self.graph.critical_path(query)
+    }
+
+    fn require_query(&self, query: &GraphQuery) -> Result<(), GraphRefusal> {
+        if query.generation_id != self.generation_id {
+            return Err(GraphRefusal::GenerationMismatch {
+                expected: Box::new(self.generation_id),
+                observed: Box::new(query.generation_id),
+            });
+        }
+        let expected = self.generation.authority_class();
+        if query.authority_class != expected {
+            return Err(GraphRefusal::AuthorityClassMismatch {
+                expected,
+                observed: query.authority_class,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -1299,6 +1443,7 @@ impl<'a> WitnessBuilder<'a> {
     fn finish(self, result_bytes: &[u8]) -> Result<GraphDecisionWitness, GraphRefusal> {
         Ok(GraphDecisionWitness {
             graph_generation_ids: vec![self.query.generation_id],
+            authority_class: self.query.authority_class,
             algorithm: self.algorithm,
             vertices: self.vertices,
             edges: self.edges,
@@ -1507,8 +1652,8 @@ mod tests {
     use fgit_types::{CodecVersion, Digest, GenerationId, SchemaFamily, SchemaId};
 
     use super::{
-        DeterministicGraph, GraphAlgorithm, GraphDecision, GraphEdge, GraphLimits, GraphNodeId,
-        GraphQuery, GraphRefusal, GraphViewPolicy,
+        DeterministicGraph, GraphAlgorithm, GraphAuthorityClass, GraphDecision, GraphEdge,
+        GraphLimits, GraphNodeId, GraphQuery, GraphRefusal, GraphViewPolicy,
     };
 
     fn node(value: u64) -> GraphNodeId {
@@ -1533,6 +1678,7 @@ mod tests {
         );
         GraphQuery::new(
             GenerationId::from_internal_object_id(identity).expect("identity domain is generation"),
+            GraphAuthorityClass::Exact,
             policy,
             digest(b"resource-receipt"),
             100_000,
