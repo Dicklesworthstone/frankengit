@@ -221,8 +221,6 @@ pub enum WireError {
     WantNotAdvertised { oid: AnyGitOid },
     /// A v2 `want` was neither advertised nor permitted by the repository closure.
     WantNotReachable { oid: AnyGitOid },
-    /// A request repeated a `want`, `have`, or shallow identity.
-    DuplicateObjectId { field: &'static str, oid: AnyGitOid },
     /// A bounded request collection has reached its limit.
     TooManyObjectIds { field: &'static str, limit: usize },
     /// A request attempted `have` or `done` before any `want`.
@@ -339,9 +337,6 @@ impl Display for WireError {
             }
             Self::WantNotAdvertised { oid } => write!(formatter, "want {oid:?} was not advertised"),
             Self::WantNotReachable { oid } => write!(formatter, "want {oid:?} is not reachable"),
-            Self::DuplicateObjectId { field, oid } => {
-                write!(formatter, "duplicate {field} object ID {oid:?}")
-            }
             Self::TooManyObjectIds { field, limit } => {
                 write!(formatter, "too many {field} IDs; limit {limit}")
             }
@@ -1985,7 +1980,7 @@ impl LegacyUploadPack {
         if let Some(rest) = line.strip_prefix(b"shallow ") {
             self.require_capability(b"shallow")?;
             let oid = parse_object_id(rest, repository.object_format())?;
-            push_unique_oid("shallow", oid, &mut self.shallows, self.limits.max_shallows)?;
+            push_deduplicated_oid("shallow", oid, &mut self.shallows, self.limits.max_shallows)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"deepen ") {
@@ -2014,7 +2009,7 @@ impl LegacyUploadPack {
             let oid = repository
                 .resolve_ref(&name)
                 .ok_or(WireError::UnknownDeepenNotRef { name })?;
-            push_unique_oid(
+            push_deduplicated_oid(
                 "deepen-not",
                 oid,
                 &mut self.deepen_not,
@@ -2070,7 +2065,7 @@ impl LegacyUploadPack {
             self.accept_request_capabilities(&requested)?;
             self.saw_want_capabilities = true;
         }
-        push_unique_oid("want", oid, &mut self.wants, self.limits.max_wants)?;
+        push_deduplicated_oid("want", oid, &mut self.wants, self.limits.max_wants)?;
         Ok(Transition::empty())
     }
 
@@ -2102,7 +2097,7 @@ impl LegacyUploadPack {
         let line = request_line(line)?;
         if let Some(rest) = line.strip_prefix(b"have ") {
             let oid = parse_object_id(rest, repository.object_format())?;
-            push_unique_oid("have", oid, &mut self.haves, self.limits.max_haves)?;
+            push_deduplicated_oid("have", oid, &mut self.haves, self.limits.max_haves)?;
             if repository.is_common(oid) {
                 self.last_common = Some(oid);
                 return Ok(self.common_ack_transition(oid));
@@ -2218,14 +2213,25 @@ fn line_packet(line: impl Into<Vec<u8>>) -> Packet {
     Packet::Data(line.into())
 }
 
-fn push_unique_oid(
+/// Adds one object id to a request-side collection as a SET member.
+///
+/// A repeated `want`, `have`, or shallow identity is idempotent rather than
+/// fatal: upstream `git upload-pack` treats these collections as sets and
+/// accepts repeated lines (verified differentially against pinned
+/// git-2.54.0, which answers a duplicate-want request with NAK and a pack).
+/// Real clients rely on this -- a branch and a lightweight tag sharing one
+/// tip make `git clone` emit the same want once per advertised ref.
+///
+/// The bound still counts DISTINCT identities only; a repeat neither grows
+/// the collection nor consumes budget.
+fn push_deduplicated_oid(
     field: &'static str,
     oid: AnyGitOid,
     target: &mut Vec<AnyGitOid>,
     limit: usize,
 ) -> Result<(), WireError> {
     if target.contains(&oid) {
-        return Err(WireError::DuplicateObjectId { field, oid });
+        return Ok(());
     }
     if target.len() == limit {
         return Err(WireError::TooManyObjectIds { field, limit });
@@ -2242,7 +2248,6 @@ enum V2Command {
     LsRefs,
     Fetch,
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum V2State {
     AwaitCommand,
@@ -2478,7 +2483,7 @@ impl V2UploadPack {
             if !repository.contains_want(oid) {
                 return Err(WireError::WantNotReachable { oid });
             }
-            push_unique_oid("want", oid, &mut self.wants, self.limits.max_wants)?;
+            push_deduplicated_oid("want", oid, &mut self.wants, self.limits.max_wants)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"have ") {
@@ -2486,13 +2491,13 @@ impl V2UploadPack {
                 return Err(WireError::MissingWant);
             }
             let oid = parse_object_id(rest, repository.object_format())?;
-            push_unique_oid("have", oid, &mut self.haves, self.limits.max_haves)?;
+            push_deduplicated_oid("have", oid, &mut self.haves, self.limits.max_haves)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"shallow ") {
             self.require_fetch_feature(b"shallow")?;
             let oid = parse_object_id(rest, repository.object_format())?;
-            push_unique_oid("shallow", oid, &mut self.shallows, self.limits.max_shallows)?;
+            push_deduplicated_oid("shallow", oid, &mut self.shallows, self.limits.max_shallows)?;
             return Ok(Transition::empty());
         }
         if let Some(rest) = line.strip_prefix(b"deepen ") {
@@ -2521,7 +2526,7 @@ impl V2UploadPack {
             let oid = repository
                 .resolve_ref(&name)
                 .ok_or(WireError::UnknownDeepenNotRef { name })?;
-            push_unique_oid(
+            push_deduplicated_oid(
                 "deepen-not",
                 oid,
                 &mut self.deepen_not,

@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
 //! Object-id parsing and v2 command dispatch (`frankengit-k7dz`).
 //!
-//! Four `WireError` variants were named by no test anywhere, measured with an
+//! Three `WireError` variants were named by no test anywhere, measured with an
 //! enum-qualified search because other crates carry same-spelled variants and a
-//! bare-name grep is noisy here: `DuplicateObjectId`, `InvalidObjectId`,
-//! `PackSourceRefused`, `UnsupportedCommand`.
+//! bare-name grep is noisy here: `InvalidObjectId`,
+//! `PackSourceRefused`, `UnsupportedCommand`. A fourth, `DuplicateObjectId`,
+//! was removed outright on 2026-08-23: its refusal contradicted upstream
+//! upload-pack semantics (see the addendum at the bottom of this header).
 //!
 //! Reading the construction sites turned up three findings that are worth more
 //! than the coverage that prompted the file.
@@ -81,13 +83,33 @@
 //! test — `a_duplicate_at_exactly_the_limit_reports_the_duplicate_not_the_ceiling`
 //! — with the other 175 across 20 binaries blind to it.
 //!
+//! # Addendum 2026-08-23: `DuplicateObjectId` removed; repeats are idempotent
+//!
+//! The M2 ordering test above pinned a refusal that real clients hit on
+//! ordinary repositories: when a branch and a lightweight tag share one tip,
+//! `git clone` emits that tip as a want once per advertised ref, and this
+//! machine hung up on the repeat. Pinned git-2.54.0 was fed the identical
+//! duplicate-want transcript via `git upload-pack --stateless-rpc` and
+//! answered NAK plus a pack -- upstream treats wants/haves/shallows as sets.
+//!
+//! Consequences, all applied in the same change:
+//!
+//! - `push_unique_oid` became `push_deduplicated_oid`: a repeated identity
+//!   returns without storing or consuming ceiling budget;
+//! - the `DuplicateObjectId` variant is deleted from `WireError` (no
+//!   remaining constructor; dead refusal vocabulary is dishonest);
+//! - M2's probe is replaced by a discriminating pair: under `max_wants: 1`
+//!   a repeated want is ACCEPTED (a machine storing duplicates would trip
+//!   the ceiling) while a distinct second want still refuses.
+//!
 //! # Non-claims
 //!
-//! This covers four variants and the findings above. It does not verify the v2
-//! command state machine as a whole, and it does not resolve whether
-//! `UnsupportedCommand` should be split — that is `r2an`'s question and this
-//! file only adds an instance to it. Nothing here modifies
-//! `crates/fgit-wire/src/**`.
+//! This covers the remaining variants and the findings above. It does not
+//! verify the v2 command state machine as a whole, and it does not resolve
+//! whether `UnsupportedCommand` should be split — that is `r2an`'s question
+//! and this file only adds an instance to it. The idempotence probes run the
+//! v2 fetch path only; the legacy V0/V1 machine shares the same helper but is
+//! covered here only indirectly through it.
 
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, Packet, UploadPackRepository,
@@ -300,63 +322,41 @@ fn an_object_id_that_clears_the_charset_guard_but_is_not_hex_is_refused() {
         "letters g through z pass the charset guard and must be caught by from_hex"
     );
 }
-
-// ---------------------------------------------------------------------------
-// DuplicateObjectId, and its ordering against the limit
-// ---------------------------------------------------------------------------
-
-/// The same object id offered twice is refused, naming the field and the id.
+/// Upstream `git upload-pack` treats wants/haves/shallows as sets: a repeated
+/// identity is ignored, not refused. This is differential evidence, not a
+/// style choice -- pinned git-2.54.0 answers a duplicate-want request with
+/// NAK and a pack, and real clients emit duplicate wants whenever a branch
+/// and a lightweight tag share one tip (each advertised ref contributes its
+/// own `want` line).
+///
+/// The probe is discriminating because of the ceiling: under `max_wants: 1`,
+/// a machine that STORED the second occurrence would fail with
+/// `TooManyObjectIds`, so acceptance here proves exactly one copy was kept.
 #[test]
-fn the_same_object_id_offered_twice_is_refused() {
+fn a_repeated_want_is_idempotent_and_stays_within_the_ceiling() {
+    let one_want = WireLimits {
+        max_wants: 1,
+        ..limits()
+    };
     let want = format!("want {TIP}");
-    let error = fetch_refusal(
-        &[want.as_bytes(), want.as_bytes()],
-        limits(),
-        "a repeated want",
-    );
-    assert_eq!(
-        error,
-        WireError::DuplicateObjectId {
-            field: "want",
-            oid: oid(TIP),
-        },
-        "the refusal names which field repeated and which id"
-    );
+    fetch(&[want.as_bytes(), want.as_bytes(), b"done"], one_want)
+        .expect("a repeated want must be deduplicated, not stored twice");
 }
 
-/// **Ordering.** The duplicate check runs before the limit check, so a repeat
-/// offered when the set is already full reports the duplicate rather than the
-/// ceiling.
-///
-/// Both halves are needed: the pair below shows the order, where either alone
-/// would be satisfied by an arbitrary one.
+/// The ceiling itself is still real: a DISTINCT identity beyond it refuses.
+/// Paired with the test above, this shows the acceptance of a repeat is
+/// deduplication and not a broken limit.
 #[test]
-fn a_duplicate_at_exactly_the_limit_reports_the_duplicate_not_the_ceiling() {
+fn a_distinct_want_beyond_the_ceiling_still_refuses() {
     let one_want = WireLimits {
         max_wants: 1,
         ..limits()
     };
     let first = format!("want {TIP}");
     let second = format!("want {OTHER}");
-
-    // A repeat while the set is already at its ceiling: duplicate wins.
     assert_eq!(
         fetch_refusal(
-            &[first.as_bytes(), first.as_bytes()],
-            one_want.clone(),
-            "a repeat at the ceiling"
-        ),
-        WireError::DuplicateObjectId {
-            field: "want",
-            oid: oid(TIP),
-        }
-    );
-
-    // A DISTINCT id at the same ceiling reports the ceiling, so the test above
-    // is about order and not about the ceiling being unreachable.
-    assert_eq!(
-        fetch_refusal(
-            &[first.as_bytes(), second.as_bytes()],
+            &[first.as_bytes(), second.as_bytes(), b"done"],
             one_want,
             "a second distinct want at the ceiling"
         ),
