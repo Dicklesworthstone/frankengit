@@ -1,6 +1,6 @@
 # ADR-0016: Proof Toolchain Selection Is Evidence-Gated, and Model/Code Equivalence Is a Failing Local Lane
 
-- **Status:** **proposed** — no proof assistant, mechanized model, proof claim, or proof-equivalence lane is accepted or implemented by this ADR. Acceptance is reserved to a GoldLotus ruling on `frankengit-fg041a-proof-toolchain-cww`.
+- **Status:** **accepted (2026-08-23 owner ruling)** — `leanprover/lean4:v4.32.0` is admitted only as the pinned, sandboxed, non-production checker for the FG-041 ordered-residue proof lane. The selected model proof is not a proof of Rust implementation equivalence; that bridge remains an explicit later gate.
 - **Date:** 2026-08-21
 - **Decision owners:** FrankenGit architecture and verification
 - **Scope:** FG-041's ordered residue only: seals, terminal outcomes, batch normal form, authority-head replacement, and root-last publication. This ADR does not broaden the proof target to Git parsing, storage implementations, authorization policy, performance, or the hosted service.
@@ -23,9 +23,9 @@ The value of doing that is lost if either of two drift paths remains open:
 1. the assistant model differs from `fgit-reference`; or
 2. implementation histories differ from the model whose theorem was checked.
 
-This ADR supplies a selection procedure and the required bridge. It does not
-select an assistant in advance of reproducible candidate evidence, and it does
-not convert the current Lab campaign into a proof claim.
+This ADR supplies a selection procedure and the required bridge. The owner
+ruling recorded above selects the first contained checker under that procedure;
+it does not convert the current Lab campaign into a proof claim.
 
 ## Settled boundaries
 
@@ -48,11 +48,11 @@ golden and then satisfy the bridge lane. That follows the reference-model
 acceptance in `docs/INITIAL_ISSUE_BACKLOG.md` FG-003 and the local-evidence
 doctrine in `VERIFY_SPEC.md` §§1 and 24.
 
-## Decision (proposed)
+## Decision (accepted)
 
 ### 1. Select a tool by disqualifying gates before scored comparison
 
-No assistant or embedding is selected by name in this ADR. A candidate report
+The accepted checker is Lean 4.32.0. Any replacement assistant or embedding
 MUST identify the exact source revision, release/checker identity, license,
 host targets, all package/build dependencies, proof kernel or trusted base,
 axioms/unsafe escape hatches, and the command that replays the result locally.
@@ -95,6 +95,25 @@ No weighted score can override a failed disqualifying gate. The accepting
 ruling names the selected tool, exact version, runner, checker command,
 trusted base, and the evidence manifest. A later version change re-runs the
 same decision procedure; it is not a cosmetic tool update.
+
+### Accepted FG-041 checker record
+
+| Field | Accepted value |
+|---|---|
+| Assistant/checker | Lean 4.32.0, `leanprover/lean4:v4.32.0` |
+| Source identity | Lean release commit `8c9756b28d64dab099da31a4c09229a9e6a2ef35` |
+| Local command | `bash proofs/fg041/check.sh` |
+| Identity manifest | `proofs/fg041/toolchain.json` |
+| Trusted base | Lean kernel plus bundled `Init` and `Std` only |
+| Containment | External verification process only; no Cargo dependency, production link, runtime path, network installation, or ambient fallback |
+| Negative control | The pinned checker must reject `proofs/fg041/FalseVariant.lean` for its false equality, not merely fail for an unrelated setup error |
+
+Lean was chosen because the exact release is already locally installed and can
+be invoked through the pinned `elan` selector without installation or network
+access. Coq and Isabelle remain recorded alternatives, not implied failures or
+inferior proof systems: no equally pinned, locally replayable candidate bundle
+for either is accepted by this decision. `DEP-221` and `NEG-028` record the
+dependency boundary and the refusal of ambient/unpinned tooling.
 
 ### 2. Compare the right alternatives honestly
 
@@ -224,7 +243,8 @@ derived-evidence boundary in §29.
 
 ## Evidence required before acceptance
 
-GoldLotus may accept this ADR only after reviewing a proposal bundle that
+Any successor or replacement checker may be accepted only after reviewing a
+proposal bundle that
 contains:
 
 1. a candidate comparison with every disqualifying gate, all alternatives,
@@ -257,9 +277,8 @@ tool, and no historical canonical record is reinterpreted.
 
 ## Dependency, target, and unsafe consequences
 
-No new dependency is admitted by this ADR. A selected assistant is a
-verification-only tool subject to the tooling review in the dependency
-constitution. Any generated Rust source remains first-party source: it must
+`DEP-221` admits the selected assistant as a verification-only external tool;
+it is not a Cargo dependency. Any generated Rust source remains first-party source: it must
 obey `#![forbid(unsafe_code)]`, use no alternate runtime, and have reproducible
 tracked inputs. A proof tool that needs ambient network access, a local unsafe
 exception, native production linkage, or an opaque unpinned bootstrap is not
@@ -267,10 +286,11 @@ admissible for the required lane.
 
 ## Non-claims
 
-- This ADR does not select Lean, Coq, Isabelle, F*, Why3, a Rust-adjacent
-  verifier, or a model checker.
-- It does not claim a machine-checked theorem, a generated bridge, a
-  differential bridge, or a local `proof-equivalence` lane exists today.
+- This ADR selects only the pinned Lean checker described above. It does not
+  select Coq, Isabelle, F*, Why3, a Rust-adjacent verifier, or a model checker.
+- The FG-041b Lean artifact provides machine-checked theorems over its named
+  model. This ADR does not claim a generated bridge, differential bridge, or
+  proof of Rust implementation equivalence exists today.
 - It does not call a bounded Lab/DPOR/lincheck result a proof, an invariant, or
   an unbounded liveness result.
 - It does not make proof/model output canonical authority, authorization,

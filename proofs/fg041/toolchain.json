@@ -1,0 +1,15 @@
+{
+  "schema": "fgit-proof-toolchain-v1",
+  "lane": "fg041-ordered-residue",
+  "assistant": "Lean",
+  "toolchain": "leanprover/lean4:v4.32.0",
+  "lean_version": "4.32.0",
+  "lean_commit": "8c9756b28d64dab099da31a4c09229a9e6a2ef35",
+  "checker_command": "elan run leanprover/lean4:v4.32.0 lean proofs/fg041/OrderedResidue.lean",
+  "trusted_base": "Lean 4 kernel, bundled Init, and bundled Std only",
+  "containment": "verification-only external tool; never linked into a first-party production crate or runtime path",
+  "offline_requirement": "the exact toolchain must already appear in elan toolchain list; this lane never installs or downloads it",
+  "artifact": "proofs/fg041/OrderedResidue.lean",
+  "assumption_manifest": "proofs/fg041/ASSUMPTIONS.md",
+  "negative_checker_control": "proofs/fg041/FalseVariant.lean must be rejected by the pinned checker"
+}
