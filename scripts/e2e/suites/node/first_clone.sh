@@ -203,10 +203,13 @@ fi
 fge_spawn first-clone-server \
   "${FG_BINARY}" serve "${STORAGE_ROOT}" "${TENANT_ID}" "${REPOSITORY_ID}" "${listen_endpoint}"
 SERVER_PID="${FGE_LAST_PID}"
+listener_ready=no
 if wait_for_listener "${listen_port}" "${SERVER_PID}"; then
-  fge_pass FG-028B-CLONE-011 'the live fgit-node listens only on the chosen loopback endpoint'
-else
-  fge_fail FG-028B-CLONE-011 'the live fgit-node did not establish its bounded loopback listener'
+  listener_ready=yes
+fi
+fge_assert_eq FG-028B-CLONE-011 yes "${listener_ready}" \
+  'the live fgit-node listens only on the chosen loopback endpoint'
+if [[ "${listener_ready}" != yes ]]; then
   fge_reap first-clone-server TERM || true
   exit 0
 fi
@@ -268,10 +271,13 @@ fge_phase action
 fge_spawn interrupted-clone-server \
   "${FG_BINARY}" serve "${STORAGE_ROOT}" "${TENANT_ID}" "${REPOSITORY_ID}" "${listen_endpoint}"
 SERVER_PID="${FGE_LAST_PID}"
+interruption_listener_ready=no
 if wait_for_listener "${listen_port}" "${SERVER_PID}"; then
-  fge_pass FG-028B-CLONE-023 'the second live node listener is available for the interruption drill'
-else
-  fge_fail FG-028B-CLONE-023 'the interruption drill could not establish the second loopback listener'
+  interruption_listener_ready=yes
+fi
+fge_assert_eq FG-028B-CLONE-023 yes "${interruption_listener_ready}" \
+  'the second live node listener is available for the interruption drill'
+if [[ "${interruption_listener_ready}" != yes ]]; then
   fge_reap interrupted-clone-server TERM || true
   exit 0
 fi
@@ -280,10 +286,13 @@ fge_spawn interrupted-clone-client \
   "${ORACLE}" clone-loopback "${ORACLE_PIN}" "${ORACLE_RUN}" interrupted \
   "${listen_endpoint}" "${REPOSITORY_PATH}" interrupted-clone
 INTERRUPTED_CLIENT_PID="${FGE_LAST_PID}"
+clone_connection_ready=no
 if wait_for_clone_connection "${listen_port}" "${INTERRUPTED_CLIENT_PID}"; then
-  fge_pass FG-028B-CLONE-024 'the pinned client has an active clone connection before server termination'
-else
-  fge_fail FG-028B-CLONE-024 'the interruption drill never observed an active clone connection'
+  clone_connection_ready=yes
+fi
+fge_assert_eq FG-028B-CLONE-024 yes "${clone_connection_ready}" \
+  'the pinned client has an active clone connection before server termination'
+if [[ "${clone_connection_ready}" != yes ]]; then
   fge_reap interrupted-clone-client TERM || true
   fge_reap interrupted-clone-server TERM || true
   exit 0
@@ -293,22 +302,25 @@ server_kill_exit=0
 fge_reap interrupted-clone-server TERM || server_kill_exit=$?
 fge_assert_ne FG-028B-CLONE-025 0 "${server_kill_exit}" \
   'terminating the live server mid-clone yields a non-successful server outcome'
+interrupted_client_completed=no
+interrupted_client_exit=0
 if wait_for_exit "${INTERRUPTED_CLIENT_PID}"; then
-  interrupted_client_exit=0
   fge_reap interrupted-clone-client TERM || interrupted_client_exit=$?
-  fge_assert_ne FG-028B-CLONE-026 0 "${interrupted_client_exit}" \
-    'the pinned Git client receives a typed non-success outcome after server termination'
+  interrupted_client_completed=yes
 else
-  fge_fail FG-028B-CLONE-026 'the interrupted pinned-Git client did not exit within the bounded reap window'
   fge_reap interrupted-clone-client TERM || true
 fi
+fge_assert_eq FG-028B-CLONE-026 yes "${interrupted_client_completed}" \
+  'the interrupted pinned-Git client exits within the bounded reap window'
+fge_assert_ne FG-028B-CLONE-027 0 "${interrupted_client_exit}" \
+  'the pinned Git client receives a typed non-success outcome after server termination'
 
 node_doctor_exit=0
 fge_run first-clone-post-interruption-doctor \
   fg_command doctor "${STORAGE_ROOT}" "${TENANT_ID}" "${REPOSITORY_ID}" || node_doctor_exit=$?
-fge_assert_exit FG-028B-CLONE-027 0 "${node_doctor_exit}" \
+fge_assert_exit FG-028B-CLONE-028 0 "${node_doctor_exit}" \
   'the interrupted read-only clone leaves the authenticated authority head usable and unchanged'
-fge_assert_file FG-028B-CLONE-028 "${ORACLE_RUN}/transcripts/interrupted/receipt.tsv" \
+fge_assert_file FG-028B-CLONE-029 "${ORACLE_RUN}/transcripts/interrupted/receipt.tsv" \
   'the interrupted clone retains a pinned-client transcript receipt for diagnosis'
 
 fge_artifact "${ORACLE_RUN}/transcripts/clone/receipt.tsv" first-clone-pinned-client-receipt
