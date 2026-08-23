@@ -136,6 +136,15 @@ RA_MANIFEST=''
 # requested discovery root, and relative to the repository for the default one;
 # see ra_script_id.
 RA_DIR_EXPLICIT=0
+# Process-group lifecycle for suite execution. With setsid(1) available the
+# script runs as its own session+group leader, so survivors of an untracked
+# background child can be swept by group after the script exits - otherwise
+# they hold the tee FIFO write ends open and a fully green run hangs forever.
+RA_SETSID=0
+if command -v setsid >/dev/null 2>&1; then
+  RA_SETSID=1
+fi
+
 declare -a RA_EXPLICIT=()
 declare -A RA_EXPLICIT_SEEN=()
 
@@ -754,6 +763,7 @@ ra_run_one() {
   local tee_o=$!
 
   local rc=0 timed_out=false
+  local child=
   local -a cmd=()
   if [ "$secs" -gt 0 ] && [ "$FGE_TIMEOUT_IMPL" = coreutils ]; then
     cmd=(timeout -k 5 "$secs" "$script")
@@ -764,10 +774,15 @@ ra_run_one() {
   if [ "$secs" -gt 0 ] && [ "$FGE_TIMEOUT_IMPL" != coreutils ]; then
     local sentinel="$rundir/.timed_out"
     rm -f "$sentinel"
-    (
-      FGE_RUN_DIR=$rundir FGE_ATTEMPT=$attempt "${cmd[@]}" >"$fifo_o" 2>"$fifo_e"
-    ) &
-    local child=$!
+    if [ "$RA_SETSID" -eq 1 ]; then
+      FGE_RUN_DIR=$rundir FGE_ATTEMPT=$attempt setsid "${cmd[@]}" >"$fifo_o" 2>"$fifo_e" &
+      child=$!
+    else
+      (
+        FGE_RUN_DIR=$rundir FGE_ATTEMPT=$attempt "${cmd[@]}" >"$fifo_o" 2>"$fifo_e"
+      ) &
+      child=$!
+    fi
     (
       left=$((secs * 10))
       while [ "$left" -gt 0 ] && kill -0 "$child" 2>/dev/null; do
@@ -776,9 +791,18 @@ ra_run_one() {
       done
       if kill -0 "$child" 2>/dev/null; then
         : >"$sentinel"
-        kill -TERM "$child" 2>/dev/null || true
-        sleep 2
-        kill -KILL "$child" 2>/dev/null || true
+        # Under setsid the child IS its own group leader, so expiry signals
+        # every descendant - a PID-only kill would leave them holding the
+        # FIFO write ends and hang the tees below forever.
+        if [ "$RA_SETSID" -eq 1 ]; then
+          kill -TERM -- -"$child" 2>/dev/null || true
+          sleep 2
+          kill -KILL -- -"$child" 2>/dev/null || true
+        else
+          kill -TERM "$child" 2>/dev/null || true
+          sleep 2
+          kill -KILL "$child" 2>/dev/null || true
+        fi
       fi
     ) &
     local wd=$!
@@ -787,8 +811,21 @@ ra_run_one() {
     wait "$wd" 2>/dev/null || true
     [ -e "$sentinel" ] && timed_out=true
   else
-    FGE_RUN_DIR=$rundir FGE_ATTEMPT=$attempt "${cmd[@]}" >"$fifo_o" 2>"$fifo_e" || rc=$?
+    if [ "$RA_SETSID" -eq 1 ]; then
+      FGE_RUN_DIR=$rundir FGE_ATTEMPT=$attempt setsid "${cmd[@]}" >"$fifo_o" 2>"$fifo_e" || rc=$?
+    else
+      FGE_RUN_DIR=$rundir FGE_ATTEMPT=$attempt "${cmd[@]}" >"$fifo_o" 2>"$fifo_e" || rc=$?
+    fi
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then timed_out=true; fi
+  fi
+
+  # Sweep the script's process group before waiting on the tees: an
+  # untracked background child inherits the FIFO write ends, and a tee
+  # blocked on a writer that never closes hangs a green run forever.
+  if [ "$RA_SETSID" -eq 1 ] && kill -0 -- -"$child" 2>/dev/null; then
+    kill -TERM -- -"$child" 2>/dev/null || true
+    sleep 0.2
+    kill -KILL -- -"$child" 2>/dev/null || true
   fi
 
   wait "$tee_e" 2>/dev/null || true
