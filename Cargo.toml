@@ -62,6 +62,7 @@ fgit-raptorq = { path = "crates/fgit-raptorq" }
 fgit-repair = { path = "crates/fgit-repair" }
 fgit-reference = { path = "crates/fgit-reference" }
 fgit-resource = { path = "crates/fgit-resource" }
+fgit-runner = { path = "crates/fgit-runner" }
 fgit-runtime = { path = "crates/fgit-runtime" }
 fgit-statistics = { path = "crates/fgit-statistics" }
 fgit-txn = { path = "crates/fgit-txn" }

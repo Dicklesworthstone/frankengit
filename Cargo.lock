@@ -868,6 +868,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-runner"
+version = "0.0.1"
+dependencies = [
+ "fgit-claim",
+ "fgit-codec",
+ "fgit-crypto",
+ "fgit-evidence",
+ "fgit-resource",
+]
+
+[[package]]
 name = "fgit-runtime"
 version = "0.0.1"
 dependencies = [

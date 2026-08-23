@@ -1,0 +1,18 @@
+[package]
+name = "fgit-runner"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+description = "Typed CI runner containment control plane"
+
+[dependencies]
+fgit-claim.workspace = true
+fgit-codec.workspace = true
+fgit-crypto.workspace = true
+fgit-evidence.workspace = true
+fgit-resource.workspace = true
+
+[lints]
+workspace = true
