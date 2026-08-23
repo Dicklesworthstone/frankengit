@@ -756,6 +756,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-graph"
+version = "0.0.1"
+dependencies = [
+ "fgit-authority",
+ "fgit-codec",
+ "fgit-crypto",
+ "fgit-types",
+]
+
+[[package]]
 name = "fgit-lab"
 version = "0.0.1"
 dependencies = [

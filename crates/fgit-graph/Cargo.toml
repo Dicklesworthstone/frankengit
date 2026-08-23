@@ -1,0 +1,17 @@
+[package]
+name = "fgit-graph"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+description = "Immutable graph generations and deterministic exact graph algorithms"
+
+[dependencies]
+fgit-authority.workspace = true
+fgit-codec.workspace = true
+fgit-crypto.workspace = true
+fgit-types.workspace = true
+
+[lints]
+workspace = true
