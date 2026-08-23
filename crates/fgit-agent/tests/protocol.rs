@@ -2,8 +2,9 @@
 //! Real authority and context-packet boundary tests for FG-030.
 
 use fgit_agent::{
-    AuthorityReadReceipt, ClassSet, ContextControl, ContextPacket, ContextSource, LogicalTime,
-    MAX_CONTEXT_SOURCE_BYTES, ProtocolRefusal, RetrievalChannel, WorkspaceBinding,
+    AuthorityReadReceipt, ClassSet, ContextControl, ContextPacket, ContextSource, IntentRun,
+    LogicalTime, MAX_CONTEXT_SOURCE_BYTES, ProtocolRefusal, RetrievalChannel, RunId,
+    WorkspaceBinding,
 };
 use fgit_authority::{
     AuthorityStore, HeadInit, HeadKey, MemoryAuthorityStore, StoreInstanceId,
@@ -11,6 +12,7 @@ use fgit_authority::{
 };
 use fgit_codec::RepositoryAuthorityHeadBody;
 use fgit_crypto::{GitOidSha1, IdentityDomain, Sha1};
+use fgit_resource::{ResourceVector, algebra::Grade};
 use fgit_treefs::{EpochSet, Overlay, OverlayRoot, WorkspaceId, WorkspaceSnapshotBody};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, HeadGeneration, PolicyEpoch,
@@ -101,6 +103,25 @@ fn authority_receipt_comes_from_a_real_authenticated_head_and_keeps_all_base_fie
         Some(RepositorySequence::FIRST)
     );
     assert_eq!(receipt.latest_repository_commit_id(), Some(rcr_id()));
+}
+
+#[test]
+fn authenticated_intent_run_retains_the_complete_authority_receipt() {
+    let receipt = authority_receipt();
+    let run = IntentRun::new_authenticated(
+        RunId::new(90),
+        receipt.clone(),
+        ClassSet::from_classes(&[fgit_agent::OperationClass::ReadCanonicalObject]),
+        ResourceVector::single(Grade::Bytes, 1),
+        LogicalTime::new(99),
+    )
+    .expect("a nonempty authenticated run opens");
+
+    assert_eq!(run.authority_read_receipt(), Some(&receipt));
+    assert_eq!(
+        run.base_authority().authority_head_generation,
+        receipt.authority_head_generation().get()
+    );
 }
 
 #[test]

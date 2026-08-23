@@ -13,6 +13,7 @@ use fgit_resource::ResourceVector;
 
 use crate::capability::LogicalTime;
 use crate::classes::ClassSet;
+use crate::protocol::AuthorityReadReceipt;
 
 /// Opaque run identity (`AGENT_PROTOCOL.md` §5.2).
 ///
@@ -80,6 +81,7 @@ pub struct AuthorityBasisRef {
 pub struct IntentRun {
     run_id: RunId,
     base_authority: AuthorityBasisRef,
+    authority_read_receipt: Option<AuthorityReadReceipt>,
     allowed_operation_classes: ClassSet,
     resource_budget: ResourceVector,
     expiry: LogicalTime,
@@ -105,10 +107,58 @@ impl IntentRun {
         Ok(Self {
             run_id,
             base_authority,
+            authority_read_receipt: None,
             allowed_operation_classes,
             resource_budget,
             expiry,
         })
+    }
+
+    /// Opens a run from a complete, store-authenticated §4.1 authority receipt.
+    ///
+    /// The legacy four-field [`AuthorityBasisRef`] remains available for the
+    /// original minimal compatibility slice. New protocol work must use this
+    /// constructor: it derives that legacy reference from the full receipt and
+    /// retains the receipt itself, so a caller cannot independently pair a
+    /// chosen generation with another head or verifier profile.
+    ///
+    /// # Errors
+    ///
+    /// [`RunRefused::EmptyScope`] when the run authorizes no operation class.
+    pub fn new_authenticated(
+        run_id: RunId,
+        authority_read_receipt: AuthorityReadReceipt,
+        allowed_operation_classes: ClassSet,
+        resource_budget: ResourceVector,
+        expiry: LogicalTime,
+    ) -> Result<Self, RunRefused> {
+        let repository_id = u128::from_be_bytes(*authority_read_receipt.repository_id().as_bytes());
+        let authority_head_id = authority_read_receipt.authority_head_id();
+        let digest = authority_head_id
+            .as_internal_object_id()
+            .digest()
+            .as_bytes();
+        let authority_head_digest: [u8; 32] =
+            digest
+                .try_into()
+                .map_err(|_| RunRefused::AuthorityHeadDigestLength {
+                    observed: digest.len(),
+                })?;
+        let base_authority = AuthorityBasisRef {
+            repository_id,
+            authority_head_generation: authority_read_receipt.authority_head_generation().get(),
+            authority_head_digest,
+            verified_at: authority_read_receipt.verified_at_logical_time(),
+        };
+        let mut run = Self::new(
+            run_id,
+            base_authority,
+            allowed_operation_classes,
+            resource_budget,
+            expiry,
+        )?;
+        run.authority_read_receipt = Some(authority_read_receipt);
+        Ok(run)
     }
 
     /// The run identity.
@@ -121,6 +171,18 @@ impl IntentRun {
     #[must_use]
     pub const fn base_authority(&self) -> AuthorityBasisRef {
         self.base_authority
+    }
+
+    /// The complete authenticated authority receipt for a run opened through
+    /// [`Self::new_authenticated`].
+    ///
+    /// `None` identifies the legacy four-field construction path. Callers that
+    /// create a workspace, context packet, or publication request must refuse
+    /// that path instead of treating its identifying reference as a full
+    /// authority receipt.
+    #[must_use]
+    pub const fn authority_read_receipt(&self) -> Option<&AuthorityReadReceipt> {
+        self.authority_read_receipt.as_ref()
     }
 
     /// The operation classes this run may perform at all.
@@ -153,6 +215,12 @@ impl IntentRun {
 pub enum RunRefused {
     /// The run would authorize no operation class.
     EmptyScope,
+    /// The legacy compatibility reference cannot represent the authenticated
+    /// head identity's digest width.
+    AuthorityHeadDigestLength {
+        /// Digest width observed on the authenticated head identity.
+        observed: usize,
+    },
 }
 
 impl fmt::Display for RunRefused {
@@ -161,6 +229,10 @@ impl fmt::Display for RunRefused {
             Self::EmptyScope => {
                 formatter.write_str("an intent run must allow at least one operation class")
             }
+            Self::AuthorityHeadDigestLength { observed } => write!(
+                formatter,
+                "authenticated authority-head digest has {observed} bytes; legacy basis requires 32"
+            ),
         }
     }
 }
