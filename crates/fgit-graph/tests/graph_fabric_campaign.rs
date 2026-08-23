@@ -86,7 +86,7 @@ fn generation_body(label: &[u8], predecessor: Option<GraphGenerationId>) -> Grap
     generation_body_with_class(label, GraphAuthorityClass::Exact, predecessor)
 }
 
-fn accepts_exact_generation(_: ExactGraphGeneration<'_>) {}
+const fn accepts_exact_generation(_: ExactGraphGeneration<'_>) {}
 
 #[test]
 fn authority_class_is_canonical_and_exact_call_sites_refuse_non_exact_generations() {
