@@ -3125,8 +3125,9 @@ where
     let deadline = GitDaemonSessionDeadline::new(session_timeout);
     let mut reader = DeadlineTcpStream::new(&mut stream, deadline);
     let mut writer = DeadlineTcpStream::new(&mut response_stream, deadline);
-    let request =
-        read_git_daemon_request(&mut reader, &limits).map_err(GitDaemonServeError::Transport)?;
+    let request = read_git_daemon_request(&mut reader, &limits)
+        .map_err(classify_session_deadline)
+        .map_err(GitDaemonServeError::Transport)?;
     let receipt = serve_git_daemon_upload_pack_after_greeting(
         &mut reader,
         &mut writer,
