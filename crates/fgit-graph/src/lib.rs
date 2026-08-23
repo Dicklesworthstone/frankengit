@@ -10,6 +10,7 @@
 
 mod algorithms;
 mod generation;
+mod temporal;
 
 pub use crate::algorithms::{
     AdvisoryRank, ArticulationBridgeReport, BetweennessCentrality, BipartiteMatching,
@@ -24,4 +25,11 @@ pub use crate::generation::{
     BuilderProfileId, ExactGraphGeneration, GenerationActivation, GenerationAuthority,
     GenerationAuthorityError, GraphAuthorityClass, GraphAuthorityClassRefusal, GraphGenerationBody,
     GraphGenerationId, GraphSchemaId, GraphSourceStamp, GraphViewId,
+};
+pub use crate::temporal::{
+    BranchAgentOverlay, CrossTimeJoinPolicy, CrossTimeJoinReceipt, CrossTimeJoinRequest,
+    ModelEpoch, TemporalCrossTimeJoin, TemporalEdge, TemporalGraphCatalog, TemporalGraphGeneration,
+    TemporalGraphLimits, TemporalGraphRefusal, TemporalGraphView, TemporalNode,
+    TemporalOverlayRowKind, TemporalPosition, TemporalProjection, TemporalQueryMode,
+    TemporalQueryResult, TemporalRowKind, TemporalValidity,
 };
