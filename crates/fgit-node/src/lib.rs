@@ -45,14 +45,16 @@ use fgit_authority::{
     ImmutableRead, KeyError, OutcomeLookup, PutOutcome, StoreInstanceId,
     initialize_repository_async, outcome_index_root, read_authority_head_body_async,
     read_decision_batch_body_async, read_repository_incarnation_configuration_async,
-    resolve_outcome_async, stage_repository_incarnation_configuration_async,
+    record_creation_attempt_async, resolve_outcome_async,
+    stage_repository_incarnation_configuration_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
 use fgit_chronicle::{
     PublicationBasis, PublicationVerdict, VerifiedPublication, publish_async, verify_pair,
 };
 use fgit_codec::schema::{
-    RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryIncarnationConfigurationBody,
+    CreationAttemptBody, RepositoryAuthorityHeadBody, RepositoryCommitRecord,
+    RepositoryIncarnationConfigurationBody,
 };
 use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, body_id, decode_body, encode_body,
@@ -2383,6 +2385,13 @@ pub enum NodeRefusal {
         /// The incarnation the authenticated authority head currently selects.
         observed: RepositoryIncarnationId,
     },
+    /// A creation attempt also carried an untrusted resolution input.
+    ///
+    /// Creation must mint or recover its canonical incarnation before it can
+    /// resolve any caller-provided location, token, cache, or transport
+    /// target. Accepting both on one path would let a stale reference select a
+    /// namespace before the creation attempt establishes its authority.
+    CreationWithResolutionInput,
     /// The operator-selected storage root cannot name the embedded database.
     StoragePathEncoding,
     /// The derived authority-head key was outside the bounded key vocabulary.
@@ -2441,6 +2450,9 @@ impl Display for NodeRefusal {
             Self::RepositoryIncarnationMismatch { expected, observed } => write!(
                 formatter,
                 "caller addressed repository incarnation {expected}, but the authenticated head selects {observed}"
+            ),
+            Self::CreationWithResolutionInput => formatter.write_str(
+                "repository creation cannot also resolve a caller-provided incarnation input",
             ),
             Self::StoragePathEncoding => formatter.write_str(
                 "node storage root cannot be represented as a UTF-8 embedded authority path",
@@ -2502,6 +2514,7 @@ impl Error for NodeRefusal {
             | Self::RepositoryMismatch
             | Self::ObjectFormatMismatch { .. }
             | Self::RepositoryIncarnationMismatch { .. }
+            | Self::CreationWithResolutionInput
             | Self::HeadInitializationConflict
             | Self::StoragePathEncoding
             | Self::ObjectTooLarge { .. }
@@ -3858,6 +3871,54 @@ fn emit_pack_payload(
     Ok(())
 }
 
+/// A stale-bearing repository-resolution input presented to a node open.
+///
+/// The variants remain distinct at the public boundary even though they all
+/// carry an authenticated incarnation comparison. A token, cache, location,
+/// and transport target are independently hostile inputs; accepting one
+/// because another caller happened to carry the current incarnation would
+/// leave an unguarded resolution path after delete/recreate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositoryResolutionInput {
+    /// A direct programmatic node-open expectation.
+    DirectOpen(RepositoryIncarnationId),
+    /// An externally carried capability or access token.
+    CapabilityToken(RepositoryIncarnationId),
+    /// A derived cache record.
+    CacheEntry(RepositoryIncarnationId),
+    /// An immutable-object placement or location record.
+    ObjectLocation(RepositoryIncarnationId),
+    /// A transport request target.
+    TransportTarget(RepositoryIncarnationId),
+}
+
+impl RepositoryResolutionInput {
+    /// The exact incarnation named by this untrusted input.
+    #[must_use]
+    pub const fn repository_incarnation_id(self) -> RepositoryIncarnationId {
+        match self {
+            Self::DirectOpen(id)
+            | Self::CapabilityToken(id)
+            | Self::CacheEntry(id)
+            | Self::ObjectLocation(id)
+            | Self::TransportTarget(id) => id,
+        }
+    }
+}
+
+/// A caller-supplied creation key kept out of diagnostic output.
+///
+/// The canonical creation body commits only to this key's digest. Raw key
+/// bytes remain transient and must not leak if an operator logs `NodeConfig`.
+#[derive(Clone)]
+struct CreationIdempotencyKeyInput(Vec<u8>);
+
+impl fmt::Debug for CreationIdempotencyKeyInput {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CreationIdempotencyKeyInput(<redacted>)")
+    }
+}
+
 /// Explicit inputs for initializing one embedded node.
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
@@ -3865,7 +3926,8 @@ pub struct NodeConfig {
     tenant_id: TenantId,
     repository_id: RepositoryId,
     creation_repository_incarnation_id: RepositoryIncarnationId,
-    expected_repository_incarnation_id: Option<RepositoryIncarnationId>,
+    creation_idempotency_key: Option<CreationIdempotencyKeyInput>,
+    resolution_input: Option<RepositoryResolutionInput>,
     git_daemon_repository_path: GitDaemonRepositoryPath,
     store_instance: StoreInstanceId,
     worker_threads: usize,
@@ -3905,7 +3967,8 @@ impl NodeConfig {
             tenant_id,
             repository_id,
             creation_repository_incarnation_id: mint_repository_incarnation_id(),
-            expected_repository_incarnation_id: None,
+            creation_idempotency_key: None,
+            resolution_input: None,
             git_daemon_repository_path: default_git_daemon_repository_path(repository_id),
             store_instance: StoreInstanceId::from_raw(1),
             serving_cell: ServingCell::Unidentified,
@@ -3938,6 +4001,19 @@ impl NodeConfig {
         self
     }
 
+    /// Supplies the explicit caller key required for lost-response creation
+    /// recovery.
+    ///
+    /// The key is neither derived from repository identity nor generated at
+    /// retry time. The immutable creation-attempt body records its digest;
+    /// retries reuse the first writer's stored incarnation after fixed-field
+    /// validation.
+    #[must_use]
+    pub fn with_creation_idempotency_key(mut self, key: impl Into<Vec<u8>>) -> Self {
+        self.creation_idempotency_key = Some(CreationIdempotencyKeyInput(key.into()));
+        self
+    }
+
     /// Binds this operation to one caller-observed repository incarnation.
     ///
     /// A location record, capability, or cache that carries an incarnation
@@ -3949,8 +4025,20 @@ impl NodeConfig {
         mut self,
         repository_incarnation_id: RepositoryIncarnationId,
     ) -> Self {
-        self.creation_repository_incarnation_id = repository_incarnation_id;
-        self.expected_repository_incarnation_id = Some(repository_incarnation_id);
+        self.resolution_input = Some(RepositoryResolutionInput::DirectOpen(
+            repository_incarnation_id,
+        ));
+        self
+    }
+
+    /// Binds an open to one stale-bearing resolution input.
+    ///
+    /// [`OneNode::open_existing`] authenticates the current configuration and
+    /// refuses before exposing an object namespace when this input names a
+    /// superseded incarnation.
+    #[must_use]
+    pub const fn with_resolution_input(mut self, input: RepositoryResolutionInput) -> Self {
+        self.resolution_input = Some(input);
         self
     }
 
@@ -4081,9 +4169,66 @@ impl OneNode {
     /// such as [`Self::read_authority_head`] remain async over the runtime-owned
     /// database context.
     pub fn init(config: NodeConfig) -> Result<(Self, NodeInitialization), NodeRefusal> {
+        if config.resolution_input.is_some() {
+            return Err(NodeRefusal::CreationWithResolutionInput);
+        }
+        let creation_attempt = config
+            .creation_idempotency_key
+            .as_ref()
+            .map(
+                |input| -> Result<(IdempotencyKey, CreationAttemptBody), NodeRefusal> {
+                    let key = IdempotencyKey::new(input.0.clone())
+                        .map_err(fgit_authority::OutcomeFailure::from)
+                        .map_err(NodeRefusal::from)?;
+                    let idempotency_key_digest = key.digest();
+                    Ok((
+                        key,
+                        CreationAttemptBody {
+                            tenant_id: config.tenant_id,
+                            repository_id: config.repository_id,
+                            root_layout: RootLayoutVersion::LegacyWholeBody,
+                            object_format: config.object_format.unwrap_or(GitHashAlgorithm::Sha1),
+                            idempotency_key_digest,
+                            repository_incarnation_id: config.creation_repository_incarnation_id,
+                        },
+                    ))
+                },
+            )
+            .transpose()?;
         let repository_id = config.repository_id;
-        let node = Self::open_components(config)?;
+        let mut node = Self::open_components(config)?;
         let initialization_cx = node.authority_context();
+        if let Some((key, requested)) = creation_attempt {
+            let creation = node.runtime.block_on(record_creation_attempt_async(
+                &node.authority,
+                &initialization_cx,
+                &key,
+                &requested,
+            ));
+            let stored = match creation {
+                Ok(outcome) => outcome.body().repository_incarnation_id,
+                Err(error) => {
+                    let initialization = NodeRefusal::from(error);
+                    return match node.shutdown() {
+                        Ok(()) => Err(initialization),
+                        Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
+                            initialization: Box::new(initialization),
+                            cleanup: Box::new(cleanup),
+                        }),
+                    };
+                }
+            };
+            if let Err(rebind) = node.rebind_object_fabric(stored) {
+                return match node.shutdown() {
+                    Ok(()) => Err(rebind),
+                    Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
+                        initialization: Box::new(rebind),
+                        cleanup: Box::new(cleanup),
+                    }),
+                };
+            }
+            node.repository_incarnation_id = stored;
+        }
         let configuration = RepositoryIncarnationConfigurationBody {
             root_layout: RootLayoutVersion::LegacyWholeBody,
             object_format: node.object_format,
@@ -4194,7 +4339,9 @@ impl OneNode {
     /// receipt against the store's issuance record.
     pub fn open_existing(config: NodeConfig) -> Result<Self, NodeRefusal> {
         let supplied_object_format = config.object_format;
-        let expected_repository_incarnation_id = config.expected_repository_incarnation_id;
+        let expected_repository_incarnation_id = config
+            .resolution_input
+            .map(RepositoryResolutionInput::repository_incarnation_id);
         let mut node = Self::open_components(config)?;
         let configuration_cx = node.authority_context();
         let opened = node.runtime().block_on(async {
@@ -6641,13 +6788,12 @@ mod tests {
     #[test]
     fn open_existing_accepts_the_current_incarnation_and_refuses_a_stale_twin() {
         let scratch = ScratchDirectory::new();
-        let current = RepositoryIncarnationId::from_bytes([0x59; 16]);
         let stale = RepositoryIncarnationId::from_bytes([0x5A; 16]);
-        let config =
-            test_config(scratch.path().to_path_buf()).with_expected_repository_incarnation(current);
+        let config = test_config(scratch.path().to_path_buf());
 
         let (created, _) = OneNode::init(config.clone())
             .expect("a creation stages the current incarnation configuration");
+        let current = created.repository_incarnation_id();
         assert_eq!(created.repository_incarnation_id(), current);
         assert_ne!(
             object_namespace(created.repository_id(), current),
