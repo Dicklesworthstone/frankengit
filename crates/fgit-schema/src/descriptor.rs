@@ -129,11 +129,19 @@ impl FieldType {
         match self {
             Self::Scalar(width) => Some(width.byte_len()),
             Self::OpaqueId => Some(16),
-            Self::Digest | Self::DerivedId { .. } | Self::SchemaId | Self::Text { .. } => None,
             Self::CodePoint { .. } => Some(2),
-            // A structure's width is its referenced descriptor's, and a
-            // union's depends on the variant, so neither is fixed here.
-            Self::Structure { .. } | Self::Union { .. } => None,
+            // Two different reasons for the same answer, merged because no
+            // caller branches on which one applies. Digest/DerivedId/SchemaId/
+            // Text are length-prefixed, so the width depends on the value.
+            // Structure and Union are not: a structure's width is its
+            // referenced descriptor's, and a union's depends on the variant.
+            // Either way a fixed-size reader may not assume it can skip them.
+            Self::Digest
+            | Self::DerivedId { .. }
+            | Self::SchemaId
+            | Self::Text { .. }
+            | Self::Structure { .. }
+            | Self::Union { .. } => None,
         }
     }
 

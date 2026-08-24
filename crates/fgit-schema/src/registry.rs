@@ -617,30 +617,28 @@ pub fn check_references_resolve_in(
 
     for (owner, fields) in groups {
         for field in fields {
-            match field.ty {
+            // Resolve first, refuse once. Each arm answers only "does this
+            // name resolve, and in which registry", so the two resolution
+            // rules stay adjacent and there is a single refusal site.
+            let unresolved = match field.ty {
+                // A structure reference may name a nested structure OR a
+                // canonical body: `committed_rcrs` names the `rcr` body.
                 FieldType::Structure { name } => {
-                    // A structure reference may name a nested structure OR a
-                    // canonical body: `committed_rcrs` names the `rcr` body.
-                    let resolves = structures.iter().any(|entry| entry.name == name)
-                        || described.iter().any(|entry| entry.family == name);
-                    if !resolves {
-                        return Err(SchemaRefusal::ReferenceUnresolved {
-                            owner: owner.into(),
-                            name: name.into(),
-                            container: "structure",
-                        });
-                    }
+                    (!structures.iter().any(|entry| entry.name == name)
+                        && !described.iter().any(|entry| entry.family == name))
+                    .then_some(("structure", name))
                 }
                 FieldType::Union { name } => {
-                    if !unions.iter().any(|entry| entry.name == name) {
-                        return Err(SchemaRefusal::ReferenceUnresolved {
-                            owner: owner.into(),
-                            name: name.into(),
-                            container: "union",
-                        });
-                    }
+                    (!unions.iter().any(|entry| entry.name == name)).then_some(("union", name))
                 }
-                _ => {}
+                _ => None,
+            };
+            if let Some((container, name)) = unresolved {
+                return Err(SchemaRefusal::ReferenceUnresolved {
+                    owner: owner.into(),
+                    name: name.into(),
+                    container,
+                });
             }
         }
     }
