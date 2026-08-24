@@ -70,6 +70,16 @@ impl<'node> ProductionReceiveQuarantineHandoff<'node> {
         self.validated.as_ref()
     }
 
+    /// Transfers the one validated proof to the asynchronous durable-admission
+    /// phase after the synchronous handoff completed.
+    ///
+    /// A successful implementation of [`ReceiveQuarantineHandoff`] must have
+    /// retained this proof.  Preserve a typed core refusal instead of exposing
+    /// an unchecked optional value at the sync-to-async boundary.
+    pub(crate) fn into_validated_receive(self) -> Result<ValidatedReceive, ReceiveError> {
+        self.validated.ok_or(ReceiveError::HandoffProofMissing)
+    }
+
     fn validate(
         &mut self,
         request: &ReceiveRequest,
@@ -795,6 +805,7 @@ mod tests {
             ReceiveError::Wire(fgit_wire::WireError::InvalidLimit { field: "wire" }),
             ReceiveError::Pack(PackError::MissingDeltaBase),
             ReceiveError::AuthoritativeRefusal(RefusalCode::ObjectClosureIncomplete),
+            ReceiveError::HandoffProofMissing,
             ReceiveError::InvalidLimit { field: "receive" },
             ReceiveError::UnsupportedCapability {
                 capability: b"atomic".to_vec(),

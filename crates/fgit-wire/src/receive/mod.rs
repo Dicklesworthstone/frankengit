@@ -1562,6 +1562,13 @@ pub enum ReceiveError {
     /// This preserves the exact typed refusal rather than recoding it as a
     /// wire-framing failure after the quarantine has crossed its boundary.
     AuthoritativeRefusal(RefusalCode),
+    /// A handoff reported success but did not retain the proof its consumer
+    /// requires for the durable-admission phase.
+    ///
+    /// This is a handoff-contract violation, not an authoritative validation
+    /// refusal: callers must not manufacture a [`RefusalCode`] or panic after
+    /// the structural receive machine has completed.
+    HandoffProofMissing,
     /// Receive-specific bounds are inconsistent.
     InvalidLimit { field: &'static str },
     /// A requested capability has no receive-pack implementation.
@@ -1640,6 +1647,9 @@ impl Display for ReceiveError {
             Self::Pack(error) => Display::fmt(error, formatter),
             Self::AuthoritativeRefusal(code) => {
                 write!(formatter, "authoritative receive handoff refused: {code:?}")
+            }
+            Self::HandoffProofMissing => {
+                formatter.write_str("successful receive handoff retained no validated proof")
             }
             Self::InvalidLimit { field } => write!(formatter, "invalid receive limit {field}"),
             Self::UnsupportedCapability { capability } => {
