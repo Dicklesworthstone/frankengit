@@ -7,12 +7,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use fgit_authority::StoreInstanceId;
 use fgit_benchmark::{
     BenchmarkPlan, BenchmarkRefusal, BenchmarkRunner, BenchmarkWorkload, EnvironmentFingerprint,
     MIN_SAMPLES_PER_VARIANT, OptimizationAdmission, OracleReceipt, StorageClasses, SystemMetrics,
     WorkloadDescriptor,
+    authority::{AuthorityPublicationConfig, AuthorityPublicationWorkload},
     transport::{CacheState, Operation, ServerKind, TransportConfig, TransportWorkload},
 };
+use fgit_types::TenantId;
 
 fn main() {
     if let Err(error) = run() {
@@ -74,8 +77,53 @@ fn run() -> Result<(), BenchmarkRefusal> {
             }
             Ok(())
         }
+        Some("authority-baseline") => {
+            let output = parse_output(arguments)?;
+            let root = workspace_root()?;
+            let samples = transport_samples()?;
+            let batched = authority_batch_size()?;
+            let store_root = PathBuf::from(required_var("FG_BENCH_AUTHORITY_STORE_ROOT")?);
+            let plan = authority_plan(&root, batched, samples)?;
+            let runner = BenchmarkRunner::new(plan)?;
+            // The differential is BATCHING, not two implementations. Nothing
+            // upstream publishes a decision batch under a compare-and-exchange,
+            // so there is no second system to compare against; what the scope
+            // line is really asking is what batching buys, and this project can
+            // answer that against itself.
+            let mut baseline =
+                AuthorityPublicationWorkload::open(authority_config(&store_root, "baseline", 1))
+                    .map_err(|detail| BenchmarkRefusal::Io {
+                        operation: "open the single-decision authority store",
+                        detail,
+                    })?;
+            let mut candidate = AuthorityPublicationWorkload::open(authority_config(
+                &store_root,
+                "candidate",
+                batched,
+            ))
+            .map_err(|detail| BenchmarkRefusal::Io {
+                operation: "open the batched authority store",
+                detail,
+            })?;
+            let artifact = runner.run(&mut baseline, &mut candidate)?;
+            let written = artifact.write_to(&output)?;
+            println!("artifact={}", written.evidence_path.display());
+            println!("replay={}", written.replay_path.display());
+            println!("samples_per_variant={samples}");
+            println!("decisions_per_cas_baseline=1");
+            println!("decisions_per_cas_candidate={batched}");
+            if samples < 100 {
+                println!(
+                    "p99_caveat=nearest-rank p99 over {samples} samples is the observed maximum, not a 99th-percentile estimate"
+                );
+            }
+            if let Some(ledger) = written.negative_evidence_path {
+                println!("negative_evidence={}", ledger.display());
+            }
+            Ok(())
+        }
         _ => Err(BenchmarkRefusal::MissingRequiredField(
-            "command: self-test --out <directory> | transport-baseline --out <directory>",
+            "command: self-test | transport-baseline | authority-baseline, each --out <directory>",
         )),
     }
 }
@@ -138,6 +186,122 @@ fn transport_config_from_environment() -> Result<TransportConfig, BenchmarkRefus
                 field: "FG_BENCH_LOGICAL_BYTES",
                 detail: "must be the corpus's reachable byte count".to_owned(),
             })?,
+    })
+}
+
+/// Decisions the candidate arm packs into one compare-and-exchange.
+fn authority_batch_size() -> Result<usize, BenchmarkRefusal> {
+    match env::var("FG_BENCH_AUTHORITY_DECISIONS") {
+        Ok(value) => {
+            let parsed: usize = value.parse().map_err(|_| BenchmarkRefusal::InvalidMetric {
+                field: "FG_BENCH_AUTHORITY_DECISIONS",
+                detail: "must be a decision count".to_owned(),
+            })?;
+            if parsed < 2 {
+                // A candidate of one IS the baseline, so the run would compare
+                // an arm against itself and report it as a batching result.
+                return Err(BenchmarkRefusal::InvalidMetric {
+                    field: "FG_BENCH_AUTHORITY_DECISIONS",
+                    detail: "must be at least 2: the baseline arm is one decision per CAS"
+                        .to_owned(),
+                });
+            }
+            Ok(parsed)
+        }
+        Err(_) => Ok(8),
+    }
+}
+
+fn authority_config(
+    store_root: &Path,
+    arm: &str,
+    decisions_per_batch: usize,
+) -> AuthorityPublicationConfig {
+    let mut store_path = store_root.to_path_buf();
+    store_path.push(format!("{arm}.sqlite3"));
+    AuthorityPublicationConfig {
+        store_path,
+        decisions_per_batch,
+        // Fixed rather than configurable: the tenant scopes the outcome index,
+        // and differing tenants would put the arms in different index
+        // namespaces -- a difference the artifact would not show.
+        tenant_id: TenantId::from_bytes([0x11; 16]),
+        instance_id: StoreInstanceId::from_raw(1),
+    }
+}
+
+fn authority_plan(
+    root: &Path,
+    batched: usize,
+    samples: usize,
+) -> Result<BenchmarkPlan, BenchmarkRefusal> {
+    Ok(BenchmarkPlan {
+        fingerprint: EnvironmentFingerprint::from_workspace(
+            root,
+            required_var("FG_BENCH_SOURCE_REVISION")?,
+            required_var("FG_BENCH_SOURCE_TREE")?,
+            cpu_model(),
+            env::var("TARGET").unwrap_or_else(|_| std::env::consts::ARCH.to_owned()),
+            env::var("PROFILE").unwrap_or_else(|_| "release".to_owned()),
+        )?,
+        workload: WorkloadDescriptor {
+            dataset: format!(
+                "synthetic decision batches: {batched} terminal decisions per publication, \
+                 against one per publication on an identical store"
+            ),
+            workload: format!(
+                "authority publication through publish_decisions_async against a file-backed \
+                 FsqliteAuthorityStore. Baseline publishes 1 terminal decision per \
+                 compare-and-exchange, candidate publishes {batched}. Every round also \
+                 republishes from the token the round opened with, already replaced by the \
+                 first publication, so each sample carries one committing CAS and one losing \
+                 CAS. NOT steady-state publication throughput: this is a per-round measurement \
+                 on a store the run itself created. This arm reports no storage amplification: \
+                 an authority publication has no git object graph, so that ratio is null \
+                 rather than zero."
+            ),
+            thermal_state: "one store per arm, created by the run and never reused".to_owned(),
+            cache_state: "warm: each store is opened once and stays open across its samples"
+                .to_owned(),
+            commands: vec![
+                "cargo run --release -p fgit-benchmark -- authority-baseline --out <directory>"
+                    .to_owned(),
+            ],
+            environment_allowlist: BTreeMap::from([
+                (
+                    "FG_BENCH_AUTHORITY_DECISIONS".to_owned(),
+                    batched.to_string(),
+                ),
+                ("FG_BENCH_SAMPLES".to_owned(), samples.to_string()),
+            ]),
+        },
+        admission: OptimizationAdmission {
+            equivalence_obligation:
+                "every measured round must publish exactly the decisions its batch carried and \
+                 must lose exactly one compare-and-exchange to the deliberately stale \
+                 republication; a round that published a different count, or replayed an \
+                 existing transaction instead of publishing, is a failed sample rather than a \
+                 fast one"
+                    .to_owned(),
+            oracle_name: "published-count equals batch size, with one losing CAS per round"
+                .to_owned(),
+            replay_command:
+                "cargo run --release -p fgit-benchmark -- authority-baseline --out <directory> \
+                 (FG_BENCH_AUTHORITY_STORE_ROOT, FG_BENCH_AUTHORITY_DECISIONS, FG_BENCH_SAMPLES)"
+                    .to_owned(),
+            rollback_artifact:
+                "delete the generated evidence directory and the store root; the experiment \
+                 mutates no repository state outside stores it created"
+                    .to_owned(),
+            hypothesis:
+                "ANCHOR, NOT A SPEEDUP CLAIM. Both arms are the same code path at different \
+                 batch sizes, so speedup_admissible reads as: packing more decisions into one \
+                 compare-and-exchange beat the one-decision arm by more than this host A/A \
+                 noise. That is a statement about batching economics rather than about an \
+                 optimization, and a false value is an honest outcome."
+                    .to_owned(),
+        },
+        samples_per_variant: samples,
     })
 }
 
