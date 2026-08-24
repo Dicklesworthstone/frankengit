@@ -30,7 +30,7 @@ fge_context lab_schedule_harness crates/fgit-lab/tests/dpor_authority.rs
 fge_context mixed_generation_corpus crates/fgit-admission/tests/pinned_snapshot_toctou.rs
 fge_context admission_cas_composition covered_by:crates/fgit-admission/tests/forge_merge_races.rs
 fge_context outbox_redelivery deferred_by:frankengit-asa3
-fge_context projection_rebuild deferred_by:frankengit-fg093b
+fge_context projection_rebuild deferred_by:frankengit-fg093b-projection-implementation-b9vp
 fge_context non_claim 'This lane proves one controlled merge-admission race, a post-effect merge-CAS crash/recovery, and final canonical ref states. It does not claim forge-position advancement, outbox redelivery, or projection rebuild.'
 
 fge_phase setup
