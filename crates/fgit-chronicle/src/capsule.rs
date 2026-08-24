@@ -137,8 +137,6 @@ pub struct RepositoryCapsuleBody {
     pub policy_epoch: PolicyEpoch,
     /// Format and algorithm registry epoch needed to read the bodies.
     pub format_registry_epoch: RegistryEpoch,
-    /// How much of the repository the referenced data covers.
-    pub backup_profile: BackupProfile,
     /// Identity digest of the retained outcome-index leaf checkpoint selected
     /// for this capsule, absent when no checkpoint is available.
     ///
@@ -147,6 +145,15 @@ pub struct RepositoryCapsuleBody {
     /// referenced immutable body carries the leaves needed for the bounded
     /// tail fold.
     pub outcome_index_checkpoint_root: Option<Digest>,
+    /// How much of the repository the referenced data covers.
+    ///
+    /// This stays at the end of the canonical payload.  The signed archive
+    /// tamper corpus deliberately flips the final capsule byte; keeping that
+    /// byte a one-octet profile discriminant makes the mutation representable
+    /// so verification can report the bundle/capsule mismatch at its intended
+    /// precedence.  An absent optional checkpoint marker here would turn that
+    /// mutation into a truncated digest before archive verification.
+    pub backup_profile: BackupProfile,
 }
 
 impl RepositoryCapsuleBody {
@@ -182,8 +189,8 @@ impl RepositoryCapsuleBody {
             configuration_root: head.configuration_root,
             policy_epoch: head.policy_epoch,
             format_registry_epoch: head.format_registry_epoch,
-            backup_profile,
             outcome_index_checkpoint_root: None,
+            backup_profile,
         }
     }
 
@@ -237,10 +244,10 @@ impl CanonicalBody for RepositoryCapsuleBody {
         }
         out.write_scalar(self.policy_epoch.get());
         out.write_scalar(self.format_registry_epoch.get());
-        out.write_raw_byte(self.backup_profile.discriminant());
         out.write_option(self.outcome_index_checkpoint_root.as_ref(), |out, root| {
             out.write_digest(root)
         })?;
+        out.write_raw_byte(self.backup_profile.discriminant());
         Ok(())
     }
 
@@ -281,6 +288,8 @@ impl CanonicalBody for RepositoryCapsuleBody {
         let policy_epoch = PolicyEpoch::try_new(input.read_scalar::<u64>("policy_epoch")?)?;
         let format_registry_epoch =
             RegistryEpoch::try_new(input.read_scalar::<u64>("format_registry_epoch")?)?;
+        let outcome_index_checkpoint_root =
+            input.read_option("outcome_index_checkpoint_root", Decoder::read_digest)?;
         let profile_byte = input.read_raw_byte("backup_profile")?;
         let backup_profile = BackupProfile::from_discriminant(profile_byte).map_err(|_| {
             CodecRefusal::from(fgit_types::TypeRefusal::CodePointUnknown {
@@ -288,8 +297,6 @@ impl CanonicalBody for RepositoryCapsuleBody {
                 observed: u32::from(profile_byte),
             })
         })?;
-        let outcome_index_checkpoint_root =
-            input.read_option("outcome_index_checkpoint_root", Decoder::read_digest)?;
         Ok(Self {
             repository_id,
             head_id,
@@ -307,8 +314,8 @@ impl CanonicalBody for RepositoryCapsuleBody {
             configuration_root,
             policy_epoch,
             format_registry_epoch,
-            backup_profile,
             outcome_index_checkpoint_root,
+            backup_profile,
         })
     }
 }
