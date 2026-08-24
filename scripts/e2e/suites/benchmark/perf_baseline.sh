@@ -478,7 +478,7 @@ fi
 # batching buys, and this project can answer that against itself.
 # ---------------------------------------------------------------------------
 
-fge_phase authority
+fge_phase action
 
 authority_dir=$(fge_tempdir perf-baseline-authority)
 authority_store=$(fge_tempdir perf-baseline-authority-store)
@@ -495,6 +495,8 @@ fge_run perf-baseline-authority-experiment \
     cargo run -q --release -p fgit-benchmark -- authority-baseline --out "$authority_dir" \
   || true
 AUTHORITY_EXIT=$FGE_LAST_EXIT
+
+fge_phase assert
 
 AUTHORITY_ARTIFACT="$authority_dir/benchmark.ndjson"
 
