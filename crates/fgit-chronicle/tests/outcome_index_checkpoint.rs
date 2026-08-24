@@ -319,23 +319,19 @@ fn checkpoint_collector_refuses_same_tail_with_a_different_sequence() {
 }
 
 #[test]
-fn checkpoint_collector_refuses_a_tail_outside_the_head_ancestry() {
+fn checkpoint_collector_refuses_when_no_batch_precedes_the_checkpoint() {
     let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x6464));
     let key = head_key();
-    let (publication, first_receipt) = publish_first_refusal(&store, &key);
-    let carried = collect_cumulative_outcomes(&store, &key).expect("first decision collects");
-    let decisions = carried
-        .checkpoint_decisions_against(first_receipt.token())
-        .expect("first decisions remain token-bound");
+    initialize_repository(&store, &key, &genesis()).expect("genesis initializes");
     let unreachable_tail = derived!(RepositoryDecisionBatchId, 0x65);
 
     assert!(matches!(
         collect_cumulative_outcomes_from_checkpoint(
             &store,
             &key,
-            &decisions,
+            &[],
             Some(unreachable_tail),
-            publication.head().latest_decision_sequence,
+            None,
         ),
         Err(OutcomeFailure::CheckpointPositionMismatch)
     ));
