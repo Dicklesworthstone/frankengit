@@ -1761,4 +1761,17 @@ fn a_head_from_a_newer_build_is_refused_by_version_and_the_cell_does_not_fall_ba
         "the newer-format head must survive an older cell that cannot read it"
     );
     assert_eq!(after.generation(), generation(2));
+
+    // LINEARIZABILITY, because the acceptance line says every scenario and this
+    // one was recording a history without ever checking it. A version refusal
+    // is not exempt from the head history having a sequential explanation: the
+    // interesting risk here is precisely that a refusal path leaves the head in
+    // a state no ordering of these operations could produce.
+    let report =
+        checker().check_authority(&AuthorityReferenceSpec::new(instance), &recorder.history());
+    expect_linearizable(&report);
+    assert!(
+        report.completed_operations != 0,
+        "an empty history linearizes trivially, so the check above must have seen work"
+    );
 }
