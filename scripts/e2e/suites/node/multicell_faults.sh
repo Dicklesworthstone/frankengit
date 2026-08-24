@@ -64,7 +64,8 @@ CAMPAIGN=(cargo test -p fgit-authority --test fault_campaign -- --nocapture --te
 SCENARIOS=(
   an_isolated_cell_cannot_label_a_drifted_answer_as_current
   an_isolated_cell_that_reconnects_observes_no_lost_write
-  an_older_cell_cannot_roll_back_a_head_written_in_a_newer_format
+  an_older_cell_holding_a_superseded_token_cannot_replace_the_head
+  a_head_from_a_newer_build_is_refused_by_version_and_the_cell_does_not_fall_back
   a_crash_during_a_head_transition_never_leaves_a_half_published_head
   the_head_history_is_a_pure_function_of_its_operations_not_of_the_clock
 )
@@ -156,12 +157,19 @@ fge_assert_exit FG-036B-E2E-002 0 "$RC_B" \
 # default). A truncated haystack turns a present scenario into a silent false
 # negative; the neighbouring FG-004c suite documents the same trap.
 #
-# The loop consumes ids 003..007, one per scenario, so the fixed assertions below
-# start at 008. Growing SCENARIOS without moving them is how two different checks
-# end up sharing an acceptance id -- which is exactly what happened when this list
-# went from three entries to five: the run reported "assertions=9 passed=10",
-# nine distinct ids for ten records, and the duplicate masked which check failed.
-idx=3
+# Scenario ids are allocated from 100 UP, and the fixed assertions below keep
+# their low ids. That is deliberate: this loop used to start at 003 and run into
+# the fixed 008, so every time SCENARIOS grew, two different checks silently
+# shared an acceptance id. It happened once already -- the list went from three
+# entries to five and the run reported "assertions=9 passed=10", nine distinct
+# ids for ten records, with the duplicate masking which check failed. Separating
+# the ranges removes the collision instead of postponing it by one more entry,
+# so SCENARIOS can now grow without renumbering anything.
+#
+# 003..007 are deliberately left vacant: they were the old scenario range, and
+# reusing them would make archived run logs read as though a different check had
+# passed under that id.
+idx=100
 for scenario in "${SCENARIOS[@]}"; do
   id=$(printf 'FG-036B-E2E-%03d' "$idx")
   fge_assert_cmd "$id" "cell-level scenario ran: $scenario" \

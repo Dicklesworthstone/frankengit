@@ -11,6 +11,7 @@ use std::sync::{Arc, Barrier, Mutex, PoisonError, mpsc};
 
 use core::time::Duration;
 
+use fgit_authority::HeadBodyRefusal;
 use fgit_authority::history::{
     ClientId as HistoryClientId, HistoryEvent, LogicalTime, OperationId,
 };
@@ -25,9 +26,12 @@ use fgit_authority::{
     HeadKey, HeadRead, HeadReadReceipt, ImmutableKey, ImmutableRead, MemoryAuthorityStore, OpIndex,
     PutOutcome, StoreInstanceId, resolve_ambiguous_cas,
 };
+use fgit_codec::wire::{CanonicalBody, encode_body};
+use fgit_codec::{CodecRefusal, Decoder, Encoder, RepositoryAuthorityHeadBody};
 use fgit_types::cell::{
     CellRefusal, CellState, ReadLabel, ReadMode, StalenessBound, StalenessObservation, admits_read,
 };
+use fgit_types::label::{DomainTag, SchemaFamily};
 
 const DEFAULT_SEED: u64 = 0xF004_C001_5EED_0001;
 
@@ -1185,10 +1189,19 @@ const NEWER_FORMAT_BODY: &[u8] = b"\x00\x02newer-format-payload-the-old-cell-can
 const OLDER_FORMAT_BODY: &[u8] = b"\x00\x01older-format-payload";
 
 #[test]
-fn an_older_cell_cannot_roll_back_a_head_written_in_a_newer_format() {
-    // The plan-space revision on this bead, and the scenario a rolling upgrade
-    // actually produces: two cells running different builds against one
-    // authority, with the newer one publishing first.
+fn an_older_cell_holding_a_superseded_token_cannot_replace_the_head() {
+    // The scenario a rolling upgrade produces: two cells running different
+    // builds against one authority, with the newer one publishing first.
+    //
+    // NAMED FOR ITS MECHANISM, which is token supersession. The bodies below
+    // are opaque blobs that nothing decodes -- their \x00\x02 / \x00\x01
+    // prefixes only LOOK like version stamps -- so what stops the rollback here
+    // is the CAS predecessor check, and this test would read identically if both
+    // bodies were the same bytes. That is worth having, but it is not a
+    // statement about formats, and the name used to say it was.
+    // `a_head_from_a_newer_build_is_refused_by_version_and_the_cell_does_not_fall_back`
+    // is the one that decodes genuinely versioned bytes through the production
+    // reader.
     //
     // The guarantee is NOT that the old cell understands the new bytes -- it
     // cannot, and it is not asked to. It is that not understanding them gives it
@@ -1571,11 +1584,28 @@ fn the_cell_level_flow_is_linearizable_under_seeded_plans_and_replays_identicall
             }
 
             // Whatever the seed did to the reads, the published state stands.
-            let settled = read_receipt(&recorder.execute(
-                &store,
-                7,
-                AuthorityOp::ReadHead { key: key.clone() },
-            ));
+            //
+            // RETRIED, because the settled read is itself inside the fault
+            // plan's blast radius. This assumed a definite answer and got one
+            // under the default seed; under the e2e suite's seed the settled
+            // read was itself faulted and came back Ambiguous(NoResponse),
+            // which is a genuine outcome and not a failure. §5.2 is explicit
+            // that an ambiguous result proves nothing either way, so the only
+            // correct client response -- and the only sound thing for an
+            // assertion to do -- is revalidate rather than treat it as an
+            // answer. The plan places finitely many faults, so a bounded retry
+            // terminates.
+            let mut settled = None;
+            for attempt in 7..7 + 32_u64 {
+                if let AuthorityResponse::ReadHead(HeadRead::Present(receipt)) =
+                    recorder.execute(&store, attempt, AuthorityOp::ReadHead { key: key.clone() })
+                {
+                    settled = Some(receipt);
+                    break;
+                }
+            }
+            let settled =
+                settled.expect("a bounded retry must eventually get a definite read back");
             assert_eq!(
                 (settled.generation(), settled.body().to_vec()),
                 published,
@@ -1737,4 +1767,173 @@ fn a_process_pause_around_a_cas_changes_no_outcome() {
         );
         expect_linearizable(&report);
     }
+}
+
+/// The head body a NEWER build publishes: every field this build knows, plus
+/// one it does not, stamped at the next schema minor.
+///
+/// This exists because the version skew in
+/// `an_older_cell_cannot_roll_back_a_head_written_in_a_newer_format` was
+/// decorative. That test's `NEWER_FORMAT_BODY` is a hand-written ASCII blob
+/// whose `\x00\x02` prefix merely LOOKS like a version stamp; nothing decodes
+/// it, so the refusal it observes is a CAS token mismatch and would be
+/// identical if both bodies were the same bytes. It is a sound CAS test wearing
+/// version-skew clothing, and its name promised a guarantee its mechanism never
+/// exercised.
+struct NewerMinorHead(RepositoryAuthorityHeadBody);
+
+impl CanonicalBody for NewerMinorHead {
+    const DOMAIN: DomainTag = RepositoryAuthorityHeadBody::DOMAIN;
+    const SCHEMA_FAMILY: SchemaFamily = RepositoryAuthorityHeadBody::SCHEMA_FAMILY;
+    const SCHEMA_MAJOR: u16 = RepositoryAuthorityHeadBody::SCHEMA_MAJOR;
+    // The ONLY difference from a body this build writes. Everything else --
+    // domain, family, major, and every known field below -- is held identical,
+    // so a refusal can be attributed to the minor and to nothing else.
+    const SCHEMA_MINOR: u16 = RepositoryAuthorityHeadBody::SCHEMA_MINOR + 1;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        self.0.write_payload(out)?;
+        // The field the older build has no name for.
+        out.write_scalar(0xFFFF_u16);
+        Ok(())
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let inner = RepositoryAuthorityHeadBody::read_payload(input)?;
+        let _unknown: u16 = input.read_scalar("unknown_future_field")?;
+        Ok(Self(inner))
+    }
+}
+
+/// A head body at the generation given, in the schema minor this build writes.
+fn current_minor_head_bytes(at: HeadGeneration) -> Vec<u8> {
+    let mut body = fgit_codec::harness::genesis_head();
+    body.generation = at;
+    encode_body(&body).expect("a current-minor head body encodes")
+}
+
+/// The same head, at the same generation, one schema minor ahead.
+fn newer_minor_head_bytes(at: HeadGeneration) -> Vec<u8> {
+    let mut body = fgit_codec::harness::genesis_head();
+    body.generation = at;
+    encode_body(&NewerMinorHead(body)).expect("a newer-minor head body encodes")
+}
+
+#[test]
+fn a_head_from_a_newer_build_is_refused_by_version_and_the_cell_does_not_fall_back() {
+    // The mixed-version half of `frankengit-fg036b`, exercised through the real
+    // production reader rather than narrated with opaque blobs.
+    //
+    // Two cells run different builds against one authority during a rolling
+    // upgrade. The newer one publishes first. The older one must (a) fail to
+    // read the body, (b) fail SPECIFICALLY on the version rather than
+    // misreading it as some other fault, and (c) not use that failure as a
+    // reason to reinstate the head it can read. (c) is the §5.5 requirement --
+    // "never silently roll back to an older valid root" -- and it is the half a
+    // refusal-only test skips.
+    let instance = StoreInstanceId::from_raw(0xF036_B009);
+    let store = MemoryAuthorityStore::new(instance);
+    let key = head_key("mixed-version-decoded");
+    let mut recorder = HistoryRecorder::default();
+    let root = initialize(&mut recorder, &store, &key);
+
+    // The older cell authenticates while the head is still one it can read, so
+    // it holds a legitimately obtained token. Nothing here depends on it being
+    // malicious or confused; it is correct code on stale information.
+    let old_cells_view =
+        read_receipt(&recorder.execute(&store, 1, AuthorityOp::ReadHead { key: key.clone() }));
+
+    // The newer cell publishes a genuinely encoded body one schema minor ahead.
+    let newer = newer_minor_head_bytes(generation(2));
+    let published = committed_receipt(&recorder.execute(
+        &store,
+        2,
+        AuthorityOp::CompareExchangeHead {
+            key: key.clone(),
+            expected: root.token(),
+            new_generation: generation(2),
+            new_body: newer.clone(),
+        },
+    ));
+
+    // (a) and (b). The old cell authenticates the receipt -- authentication is
+    // about provenance and still succeeds -- and then decodes, which is where
+    // the skew lands.
+    let authenticated = AuthenticatedHead::new(published, instance);
+    let refusal = authenticated
+        .body()
+        .expect_err("a head one schema minor ahead must not decode");
+    let HeadBodyRefusal::Codec(CodecRefusal::SchemaMinorUnsupported {
+        observed,
+        supported,
+        ..
+    }) = refusal
+    else {
+        panic!("expected a schema-minor refusal, got {refusal:?}");
+    };
+    assert_eq!(
+        (observed, supported),
+        (
+            RepositoryAuthorityHeadBody::SCHEMA_MINOR + 1,
+            RepositoryAuthorityHeadBody::SCHEMA_MINOR
+        ),
+        "the refusal must name the minor it saw and the one this build implements"
+    );
+
+    // THE PERMITTED TWIN, at the exact boundary. The same head, same
+    // generation, same fields, differing ONLY in the schema minor, decodes and
+    // agrees with the receipt. Without this the test above is satisfied by a
+    // reader that refuses every head.
+    let twin_store = MemoryAuthorityStore::new(instance);
+    let twin_key = head_key("mixed-version-twin");
+    let mut twin_recorder = HistoryRecorder::default();
+    let twin_root = initialize(&mut twin_recorder, &twin_store, &twin_key);
+    let twin = committed_receipt(&twin_recorder.execute(
+        &twin_store,
+        2,
+        AuthorityOp::CompareExchangeHead {
+            key: twin_key.clone(),
+            expected: twin_root.token(),
+            new_generation: generation(2),
+            new_body: current_minor_head_bytes(generation(2)),
+        },
+    ));
+    let readable = AuthenticatedHead::new(twin, instance)
+        .body()
+        .expect("the same head at this build's minor decodes");
+    assert_eq!(
+        readable.generation,
+        generation(2),
+        "and it agrees with the generation the receipt authenticated"
+    );
+
+    // (c) NO FALL-BACK. Not understanding the head gives the old cell no route
+    // to replace it: its token was superseded by the newer cell's publish.
+    let attempted = recorder.execute(
+        &store,
+        1,
+        AuthorityOp::CompareExchangeHead {
+            key: key.clone(),
+            expected: old_cells_view.token(),
+            new_generation: generation(2),
+            new_body: current_minor_head_bytes(generation(2)),
+        },
+    );
+    assert_eq!(
+        attempted,
+        AuthorityResponse::CompareExchangeHead(CasOutcome::PredecessorMismatch),
+        "a cell that cannot read the head must not be able to replace it either"
+    );
+
+    // The unreadable-but-authoritative body is still there, byte for byte. An
+    // implementation that treated an undecodable head as absent, or that
+    // reinstated the last body it understood, fails exactly here.
+    let after =
+        read_receipt(&recorder.execute(&store, 3, AuthorityOp::ReadHead { key: key.clone() }));
+    assert_eq!(
+        after.body(),
+        newer.as_slice(),
+        "the newer-format head must survive an older cell that cannot read it"
+    );
+    assert_eq!(after.generation(), generation(2));
 }
