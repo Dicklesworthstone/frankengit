@@ -36,7 +36,7 @@ use fgit_admission::{
     CommitMaterialization, PermittedObjectClosure, RefusalMaterialization, SourceImportOrigin,
     SourceImportReceipt, SourceRefUpdate, ValidatedClosure, ValidatedReceive,
     ValidatedSourceImport, admit_validated_receive_async, admit_validated_source_import_async,
-    canonical_ref_state_root, permitted_object_closure_root, prepare_canonical_commit,
+    permitted_object_closure_root, prepare_canonical_commit, ref_state_root,
     validate_source_import,
 };
 use fgit_authority::{
@@ -669,6 +669,7 @@ struct MaterializedAdmissionState {
     selected_closure: AuthoritySelectedClosure,
     policy_epoch: PolicyEpoch,
     configuration_root: Digest,
+    root_layout: RootLayoutVersion,
     /// The hide policy this repository's configuration named, already built.
     ///
     /// Resolved once when the basis was materialized rather than on every
@@ -737,6 +738,7 @@ pub struct MaterializedAdmission {
     basis: PublicationBasis,
     snapshot: AdmissionSnapshot,
     selected_closure: AuthoritySelectedClosure,
+    root_layout: RootLayoutVersion,
 }
 
 impl MaterializedAdmission {
@@ -762,6 +764,12 @@ impl MaterializedAdmission {
     #[must_use]
     pub const fn selected_closure(&self) -> &AuthoritySelectedClosure {
         &self.selected_closure
+    }
+
+    /// The authenticated configuration's ref-root layout for this snapshot.
+    #[must_use]
+    pub const fn root_layout(&self) -> RootLayoutVersion {
+        self.root_layout
     }
 }
 
@@ -1387,7 +1395,33 @@ impl DurableAdmissionMaterializer {
     where
         Authority: AsyncAuthorityStore + ?Sized,
     {
-        let root = canonical_ref_state_root(&state)
+        self.stage_ref_state_for_layout_in(
+            authority,
+            cx,
+            repository_id,
+            RootLayoutVersion::LegacyWholeBody,
+            state,
+        )
+        .await
+    }
+
+    /// Stages one immutable ref-state frame under the root selected by the
+    /// repository configuration that will publish it.
+    ///
+    /// The bytes are always the complete canonical state frame; only the
+    /// authority-facing root/key changes under the Merkle layout.
+    pub(crate) async fn stage_ref_state_for_layout_in<Authority>(
+        &self,
+        authority: &Authority,
+        cx: &Authority::Context,
+        repository_id: RepositoryId,
+        root_layout: RootLayoutVersion,
+        state: CanonicalRefState,
+    ) -> Result<Digest, AdmissionMaterializationRefusal>
+    where
+        Authority: AsyncAuthorityStore + ?Sized,
+    {
+        let root = ref_state_root(root_layout, &state)
             .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?;
         let frame = encode_body(&state).map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
         let key = admission_immutable_key(ADMISSION_REF_STATE_KEY_PREFIX, repository_id, root)
@@ -1547,6 +1581,56 @@ impl DurableAdmissionMaterializer {
             let cache_grant = CacheGrant::reserve(cache_binding, cache_budget)
                 .map_err(AdmissionMaterializationRefusal::CacheGrant)?;
             ensure_materializer_catch_up_live(is_cancelled)?;
+            // Both the layout used to authenticate `ref_root` and the hide
+            // policy come from the configuration the authenticated head
+            // selected.  Decode it before looking up the ref frame: a Merkle
+            // root is a different immutable key from the legacy whole-body
+            // root over the same bytes.
+            let (root_layout, hidden_refs) =
+                match fgit_authority::read_repository_configuration_async(
+                    authority,
+                    cx,
+                    &body.configuration_root,
+                )
+                .await
+                {
+                    Ok(configuration) => {
+                        let mut policy = RefVisibility::new();
+                        for rule in &configuration.hidden_ref_rules {
+                            policy
+                                .push_rule(rule, &WireLimits::default())
+                                .map_err(|_| {
+                                    AdmissionMaterializationRefusal::CanonicalRoot(
+                                        RefusalCode::EvidenceInvalid,
+                                    )
+                                })?;
+                        }
+                        (configuration.root_layout, policy)
+                    }
+                    // Schema-major two has no hide policy by design, but it
+                    // does carry the root layout. Only this exact older
+                    // configuration reader refusal selects that decode path;
+                    // every other configuration failure remains a refusal.
+                    Err(fgit_authority::OutcomeFailure::Codec(
+                        fgit_codec::CodecRefusal::SchemaMajorUnsupported { observed: 2, .. },
+                    )) => {
+                        let configuration = read_repository_incarnation_configuration_async(
+                            authority,
+                            cx,
+                            &body.configuration_root,
+                        )
+                        .await
+                        .map_err(|error| {
+                            AdmissionMaterializationRefusal::DecisionHistory(Box::new(error))
+                        })?;
+                        (configuration.root_layout, RefVisibility::new())
+                    }
+                    Err(error) => {
+                        return Err(AdmissionMaterializationRefusal::DecisionHistory(Box::new(
+                            error,
+                        )));
+                    }
+                };
             let key = admission_immutable_key(
                 ADMISSION_REF_STATE_KEY_PREFIX,
                 repository_id,
@@ -1566,7 +1650,7 @@ impl DurableAdmissionMaterializer {
             let ref_state =
                 decode_body::<CanonicalRefState>(&frame, fgit_codec::DecodeLimits::DEFAULT)
                     .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
-            if canonical_ref_state_root(&ref_state)
+            if ref_state_root(root_layout, &ref_state)
                 .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
                 != body.ref_root
             {
@@ -1609,53 +1693,6 @@ impl DurableAdmissionMaterializer {
                 closure,
                 source: selection_source,
             };
-            // The repository's own hide policy, read from the configuration the
-            // authenticated head selects. A rule that will not parse refuses the
-            // materialization rather than being skipped: skipping would serve
-            // refs the repository means to hide, which is the failure this slice
-            // exists to prevent. EvidenceInvalid and never RefNameInvalid -- the
-            // latter reaches a pushing client as "invalid ref name" and would
-            // blame it for a defect in stored configuration.
-            let hidden_refs = match fgit_authority::read_repository_configuration_async(
-                authority,
-                cx,
-                &body.configuration_root,
-            )
-            .await
-            {
-                Ok(configuration) => {
-                    let mut policy = RefVisibility::new();
-                    for rule in &configuration.hidden_ref_rules {
-                        policy
-                            .push_rule(rule, &WireLimits::default())
-                            .map_err(|_| {
-                                AdmissionMaterializationRefusal::CanonicalRoot(
-                                    RefusalCode::EvidenceInvalid,
-                                )
-                            })?;
-                    }
-                    policy
-                }
-                // A head selecting the incarnation-aware configuration carries no
-                // hide rules: schema major 2 is policy-free by design (fg059), so
-                // such a repository hides nothing. That is a KNOWN LIMITATION
-                // recorded on frankengit-jkbo, not an oversight, and it is why
-                // this arm is as narrow as it is -- only the exact major-2 case
-                // is read as "no policy" and every other failure still refuses.
-                //
-                // The migration hazard is worth naming: moving a repository from
-                // the major-1 body to the incarnation body silently drops its
-                // hide rules. Closing that needs a policy field on the major-2
-                // body, which is its owner's call and is not this slice.
-                Err(fgit_authority::OutcomeFailure::Codec(
-                    fgit_codec::CodecRefusal::SchemaMajorUnsupported { observed: 2, .. },
-                )) => RefVisibility::new(),
-                Err(error) => {
-                    return Err(AdmissionMaterializationRefusal::DecisionHistory(Box::new(
-                        error,
-                    )));
-                }
-            };
             let snapshot = AdmissionSnapshot {
                 refs: ref_state.refs().clone(),
                 head_target: ref_state.head_target().cloned(),
@@ -1673,6 +1710,7 @@ impl DurableAdmissionMaterializer {
                 basis: basis.clone(),
                 snapshot,
                 selected_closure: selected_closure.clone(),
+                root_layout,
             };
             let state = MaterializedAdmissionState {
                 authenticated: authenticated.clone(),
@@ -1682,6 +1720,7 @@ impl DurableAdmissionMaterializer {
                 selected_closure,
                 policy_epoch: body.policy_epoch,
                 configuration_root: body.configuration_root,
+                root_layout,
                 hidden_refs,
             };
             Ok((materialized, state))
@@ -1732,7 +1771,8 @@ impl DurableAdmissionMaterializer {
             || materialized.basis.body().repository_id != authenticated_body.repository_id
             || materialized.policy_epoch != authenticated_body.policy_epoch
             || materialized.configuration_root != authenticated_body.configuration_root
-            || canonical_ref_state_root(&materialized.ref_state)? != authenticated_body.ref_root
+            || ref_state_root(materialized.root_layout, &materialized.ref_state)?
+                != authenticated_body.ref_root
             || permitted_object_closure_root(&materialized.selected_closure.closure)?
                 != materialized.selected_closure.root
             || CachePermit::require_matching(Some(&materialized.cache_permit), cache_binding)
@@ -1868,6 +1908,7 @@ impl AdmissionSnapshotProjection for DurableAdmissionMaterializer {
 struct AsyncMaterializedBasis {
     basis: PublicationBasis,
     ref_state: CanonicalRefState,
+    root_layout: RootLayoutVersion,
 }
 
 /// Asynchronous durable projection for an embedded `Fsqlite` authority node.
@@ -1934,6 +1975,7 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
             let prepared = AsyncMaterializedBasis {
                 basis: basis.clone(),
                 ref_state: CanonicalRefState::new(materialized.snapshot().refs.clone()),
+                root_layout: materialized.root_layout(),
             };
             *self.prepared.lock().map_err(|_| {
                 AsyncProjectionFailure::Unavailable(RefusalCode::InternalInvariantBreach)
@@ -1996,15 +2038,17 @@ impl AsyncAdmissionProjection<FsqliteAuthorityStore> for DurableAsyncAdmissionPr
                 fold,
                 closure,
                 prepared_basis.ref_state,
+                prepared_basis.root_layout,
                 evidence,
             )
             .map_err(AsyncProjectionFailure::Refuse)?;
             let ref_root = self
                 .materializer
-                .stage_ref_state_in(
+                .stage_ref_state_for_layout_in(
                     authority,
                     cx,
                     self.context.repository_id,
+                    prepared_basis.root_layout,
                     prepared.next_ref_state().clone(),
                 )
                 .await
@@ -4338,26 +4382,28 @@ impl OneNode {
                     };
                 }
             };
-        let ref_root = match node
-            .runtime
-            .block_on(node.admission_materializer.stage_ref_state_in(
-                &node.authority,
-                &initialization_cx,
-                repository_id,
-                CanonicalRefState::default(),
-            )) {
-            Ok(root) => root,
-            Err(staging) => {
-                let initialization = NodeRefusal::from(staging);
-                return match node.shutdown() {
-                    Ok(()) => Err(initialization),
-                    Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
-                        initialization: Box::new(initialization),
-                        cleanup: Box::new(cleanup),
-                    }),
-                };
-            }
-        };
+        let ref_root =
+            match node
+                .runtime
+                .block_on(node.admission_materializer.stage_ref_state_for_layout_in(
+                    &node.authority,
+                    &initialization_cx,
+                    repository_id,
+                    root_layout,
+                    CanonicalRefState::default(),
+                )) {
+                Ok(root) => root,
+                Err(staging) => {
+                    let initialization = NodeRefusal::from(staging);
+                    return match node.shutdown() {
+                        Ok(()) => Err(initialization),
+                        Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
+                            initialization: Box::new(initialization),
+                            cleanup: Box::new(cleanup),
+                        }),
+                    };
+                }
+            };
         if let Err(staging) = node.runtime.block_on(
             node.admission_materializer
                 .stage_permitted_object_closure_in(

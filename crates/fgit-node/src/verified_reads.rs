@@ -626,10 +626,11 @@ mod tests {
             .expect("the selected incarnation configuration stages");
         let ref_root = node
             .runtime()
-            .block_on(node.admission_materializer.stage_ref_state_in(
+            .block_on(node.admission_materializer.stage_ref_state_for_layout_in(
                 &node.authority,
                 request.authority(),
                 node.repository_id(),
+                RootLayoutVersion::RefStateMerkleV1,
                 CanonicalRefState::default(),
             ))
             .expect("the empty canonical ref state stages");
@@ -666,10 +667,11 @@ mod tests {
         let refs = BTreeMap::from([(name.clone(), stored.identity())]);
         let ref_root = node
             .runtime()
-            .block_on(node.admission_materializer.stage_ref_state_in(
+            .block_on(node.admission_materializer.stage_ref_state_for_layout_in(
                 &node.authority,
                 request.authority(),
                 node.repository_id(),
+                RootLayoutVersion::RefStateMerkleV1,
                 CanonicalRefState::new(refs),
             ))
             .expect("the successor ref state stages before publication");

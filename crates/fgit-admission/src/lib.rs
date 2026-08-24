@@ -35,7 +35,7 @@ use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, Decoder, Encoder, RefusalRecordBody,
     RepositoryAuthorityHeadBody, RepositoryCommitRecord, body_id, encode_body,
 };
-use fgit_crypto::IdentityDomain;
+use fgit_crypto::{IdentityDomain, ref_state_merkle_root};
 use fgit_pack::{Deadline, QuarantinedPack};
 use fgit_reference::effect::{FoldBasis, FoldOutcome, RefEffect};
 use fgit_reference::intent::{
@@ -44,6 +44,7 @@ use fgit_reference::intent::{
 };
 use fgit_reference::refs::ExpectedRefState;
 use fgit_txn::{IntentEvaluator, TransactionFoldReport};
+use fgit_types::layout::RootLayoutVersion;
 use fgit_types::{
     AsciiSlug, DecisionOutcome, Digest, DomainTag, PrincipalId, PrincipalSnapshotId, RefName,
     RefusalCode, RefusalRecordId, RepositoryId, RepositorySequence, SchemaFamily, TenantId,
@@ -995,6 +996,31 @@ pub fn canonical_ref_state_root(state: &CanonicalRefState) -> Result<Digest, Ref
     canonical_body_root(state)
 }
 
+/// Computes the ref-state commitment selected by an authenticated repository
+/// configuration.
+///
+/// The legacy layout commits to the complete canonical state body.  The
+/// Merkle layout commits only to the sorted ref entries, exactly as the
+/// verified-read proof codec does.  `CanonicalRefState` holds refs in a
+/// `BTreeMap`, so the duplicate-name refusal of the Merkle constructor is an
+/// internal-invariant breach rather than a client-selectable outcome.
+pub fn ref_state_root(
+    layout: RootLayoutVersion,
+    state: &CanonicalRefState,
+) -> Result<Digest, RefusalCode> {
+    match layout {
+        RootLayoutVersion::LegacyWholeBody => canonical_ref_state_root(state),
+        RootLayoutVersion::RefStateMerkleV1 => {
+            let entries = state
+                .refs()
+                .iter()
+                .map(|(name, oid)| (name.clone(), *oid))
+                .collect::<Vec<_>>();
+            ref_state_merkle_root(&entries).map_err(|_| RefusalCode::InternalInvariantBreach)
+        }
+    }
+}
+
 /// Computes the domain-pinned commitment recorded as an RCR object closure.
 pub fn permitted_object_closure_root(
     closure: &PermittedObjectClosure,
@@ -1097,6 +1123,7 @@ pub fn prepare_canonical_commit(
     fold: &TransactionFoldReport,
     closure: &ValidatedClosure,
     current: CanonicalRefState,
+    root_layout: RootLayoutVersion,
     evidence: CommitEvidence,
 ) -> Result<PreparedCanonicalCommit, RefusalCode> {
     let effects = fold
@@ -1107,7 +1134,7 @@ pub fn prepare_canonical_commit(
     }
 
     let next_ref_state = current.apply(&effects.refs)?;
-    let ref_root = canonical_ref_state_root(&next_ref_state)?;
+    let ref_root = ref_state_root(root_layout, &next_ref_state)?;
     let object_closure = PermittedObjectClosure::new(closure.objects.clone());
     let object_closure_root = permitted_object_closure_root(&object_closure)?;
     if object_closure_root != closure.object_closure_root {
@@ -1339,8 +1366,16 @@ where
             .evidence
             .commit_evidence(basis, request, fold)
             .map_err(ProjectionFailure::Refuse)?;
-        let prepared = prepare_canonical_commit(basis, request, fold, closure, current, evidence)
-            .map_err(ProjectionFailure::Refuse)?;
+        let prepared = prepare_canonical_commit(
+            basis,
+            request,
+            fold,
+            closure,
+            current,
+            RootLayoutVersion::LegacyWholeBody,
+            evidence,
+        )
+        .map_err(ProjectionFailure::Refuse)?;
         let ref_root = canonical_ref_state_root(prepared.next_ref_state())
             .map_err(ProjectionFailure::Refuse)?;
         self.store
