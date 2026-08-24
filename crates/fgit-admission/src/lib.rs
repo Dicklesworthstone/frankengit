@@ -2912,6 +2912,91 @@ mod hidden_ref_disclosure_tests {
         );
     }
 
+    /// Builds the snapshot's policy the way production will: from the ordered
+    /// rule list stored in the head-selected configuration body, rather than
+    /// from a rule handed straight to the test.
+    ///
+    /// The list is round-tripped through the codec on the way, so this cannot
+    /// pass on a rule list that would not survive being stored. The stored form
+    /// is what production reads.
+    fn guard_snapshot_from_stored_configuration(rules: &[&[u8]]) -> crate::AdmissionSnapshot {
+        let configuration = fgit_codec::RepositoryConfigurationBody {
+            root_layout: fgit_types::layout::RootLayoutVersion::RefStateMerkleV1,
+            object_format: fgit_types::GitHashAlgorithm::Sha1,
+            hidden_ref_rules: rules.iter().map(|rule| rule.to_vec()).collect(),
+        };
+        let encoded =
+            fgit_codec::encode_body(&configuration).expect("the fixed configuration encodes");
+        let stored = fgit_codec::decode_body::<fgit_codec::RepositoryConfigurationBody>(
+            &encoded,
+            fgit_codec::DecodeLimits::DEFAULT,
+        )
+        .expect("the stored configuration decodes");
+
+        let mut snapshot = crate::AdmissionSnapshot::default();
+        for rule in &stored.hidden_ref_rules {
+            snapshot
+                .hidden_refs
+                .push_rule(rule, &fgit_wire::WireLimits::default())
+                .expect("a stored rule that will not parse must not be silently skipped");
+        }
+        snapshot
+    }
+
+    #[test]
+    fn a_rule_list_stored_in_the_configuration_body_drives_the_guard() {
+        // THE SEAM. Until now nothing connected the two halves of this work: the
+        // codec tests prove a rule list encodes and decodes, and the tests above
+        // prove the guard refuses given a policy built by hand. Neither shows
+        // that a policy sourced from the STORED configuration reaches the guard
+        // at all, which is the only thing that makes the feature real.
+        let prepared = crate::prepare_publication_from_snapshot(
+            &guard_context(),
+            &guard_lowered(b"refs/internal/secret"),
+            &guard_closure(),
+            guard_tx_id(),
+            guard_snapshot_from_stored_configuration(&[b"refs/internal", b"!refs/internal/public"]),
+        )
+        .expect("the guard produces a decision rather than an error");
+
+        assert!(
+            matches!(
+                prepared,
+                crate::PublicationPreparation::Refuse(RefusalCode::HiddenRefUnauthorized)
+            ),
+            "a target hidden by the stored configuration must be refused"
+        );
+    }
+
+    #[test]
+    fn the_negation_stored_after_the_hide_rule_still_re_exposes_at_the_guard() {
+        // Permitted twin, and the order proof in one. The stored list is the
+        // SAME as above; only the target changes to the name the trailing
+        // negation re-exposes. `hides` is last-match-wins, so if stored order
+        // were lost anywhere along the chain -- a canonical-set encoding that
+        // sorted the rules, a reversed loop, a set-valued field -- the negation
+        // would stop winning and this would refuse.
+        //
+        // It is also the non-degeneracy control for the test above: without it,
+        // that assertion is satisfied by a guard that refuses every push.
+        let prepared = crate::prepare_publication_from_snapshot(
+            &guard_context(),
+            &guard_lowered(b"refs/internal/public"),
+            &guard_closure(),
+            guard_tx_id(),
+            guard_snapshot_from_stored_configuration(&[b"refs/internal", b"!refs/internal/public"]),
+        )
+        .expect("the guard produces a decision rather than an error");
+
+        assert!(
+            !matches!(
+                prepared,
+                crate::PublicationPreparation::Refuse(RefusalCode::HiddenRefUnauthorized)
+            ),
+            "a name the stored negation re-exposes must not be refused as hidden"
+        );
+    }
+
     #[test]
     fn a_command_naming_a_hidden_ref_is_refused_by_the_decision_function() {
         // Acceptance line 2, observed rather than composed. The five tests above
