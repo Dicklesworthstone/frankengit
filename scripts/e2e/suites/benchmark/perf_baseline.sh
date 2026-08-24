@@ -357,6 +357,36 @@ fi
 TEMPLATE="$work/empty-template"
 mkdir -p "$TEMPLATE"
 
+# ---------------------------------------------------------------------------
+# THE TYPED NON-CLAIMS ARE EMITTED HERE, BEFORE THE EXPERIMENT, ON PURPOSE.
+#
+# They used to sit ~150 lines below, after the assertions. Both are top-level
+# and unconditional, and two readers (CobaltForest and me) certified from that
+# structure that they "execute on every run". They do not. This script runs
+# under `set -euo pipefail`, so any abort at or before the experiment ends it
+# and every statement after that point is skipped. ChartreuseHorizon measured
+# it on a failing run: unsupported_ids was empty, FG-028C-E2E-019 appeared zero
+# times.
+#
+# That is backwards from what these markers are for. They are the only thing
+# telling a reader that two of the three operations the scope names went
+# UNMEASURED rather than measured-and-passed, and they vanished in exactly the
+# run where a reader needs them most.
+#
+# Both state properties of the REVISION, not of the run -- push has no daemon
+# lane, and fetch is not on the sanctioned oracle lane -- so neither depends on
+# whether the experiment below succeeds. Emitting them first makes them
+# unconditional in fact rather than only in indentation. Do not move them back
+# after the experiment. See frankengit-nb98.
+# ---------------------------------------------------------------------------
+
+fge_phase assert
+fge_unsupported FG-028C-E2E-019 \
+  'push throughput is unmeasurable as a transport at this revision: the daemon refuses every service that is not git-upload-pack (GitDaemonTransportRefusal::UnsupportedService) and no receive-pack serve function exists. The gate is the absent daemon lane, tracked by frankengit-fg019; it is NOT frankengit-n6kg, whose production QuarantineValidator landed at 053176c while push stayed exactly as unmeasurable.'
+fge_unsupported FG-028C-E2E-020 \
+  'fetch is not measured through the sanctioned oracle lane, which implements clone-loopback only'
+fge_phase action
+
 fge_run perf-baseline-experiment \
   env \
     RCH_CARGO_WRAPPER_BYPASS=1 \
@@ -531,13 +561,3 @@ if [ -f "$authority_dir/negative-evidence.ndjson" ]; then
   fge_artifact "$authority_dir/negative-evidence.ndjson" perf-baseline-authority-negative-evidence
 fi
 
-# PUSH IS NOT MEASURED, AND THE REASON IS RECORDED RATHER THAN OMITTED.
-# The scope names clone/fetch/push. At this revision the git daemon accepts
-# only git-upload-pack (crates/fgit-node/src/lib.rs, the service gate), the
-# authenticated loopback receive path has zero binary callers, and `fg` exposes
-# no push subcommand. An in-process library call is not the same operation as
-# `git push` and reporting them side by side would be proof-class inflation.
-fge_unsupported FG-028C-E2E-019 \
-  'push throughput is unmeasurable as a transport at this revision: the daemon refuses every service that is not git-upload-pack (GitDaemonTransportRefusal::UnsupportedService) and no receive-pack serve function exists. The gate is the absent daemon lane, tracked by frankengit-fg019; it is NOT frankengit-n6kg, whose production QuarantineValidator landed at 053176c while push stayed exactly as unmeasurable.'
-fge_unsupported FG-028C-E2E-020 \
-  'fetch is not measured through the sanctioned oracle lane, which implements clone-loopback only'
