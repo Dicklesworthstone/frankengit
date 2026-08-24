@@ -339,7 +339,7 @@ fn normalize_authority_response(
         AuthorityResponse::AuthenticateHeadReceipt(authenticated) => {
             AuthorityResponse::AuthenticateHeadReceipt(AuthenticatedHead::new(
                 normalize_receipt(authenticated.receipt(), replacements, next_token),
-                authenticated.authenticated_by(),
+                authenticated.verified_against(),
             ))
         }
         AuthorityResponse::Refused(refusal) => AuthorityResponse::Refused(*refusal),
@@ -626,7 +626,7 @@ fn write_authority_response(
         AuthorityResponse::AuthenticateHeadReceipt(authenticated) => {
             out.write_scalar(5_u8);
             write_receipt(out, authenticated.receipt())?;
-            out.write_scalar(authenticated.authenticated_by().raw());
+            out.write_scalar(authenticated.verified_against().raw());
             Ok(())
         }
         AuthorityResponse::Refused(refusal) => {

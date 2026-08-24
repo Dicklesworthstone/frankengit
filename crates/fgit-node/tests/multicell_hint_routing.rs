@@ -14,8 +14,8 @@
 //!
 //! # A finding: there is no per-cell identity at this layer yet
 //!
-//! `AuthenticatedHead` carries the receipt plus `authenticated_by`, and I first
-//! wrote these cases expecting `authenticated_by` to differ per cell. It does
+//! `AuthenticatedHead` carries the receipt plus a store id, and I first wrote
+//! these cases expecting it to differ per cell. It does
 //! not, and that turns out to be correct rather than a defect:
 //! `StoreInstanceId` names the **store**, not the reader.
 //! `FsqliteAuthorityStore::establish` records the proposed id only when it
@@ -101,7 +101,7 @@ fn authenticating_instance(node: &OneNode) -> StoreInstanceId {
     node.runtime()
         .block_on(node.authenticate_authority_head_in(&node.request_context()))
         .expect("a cell can authenticate the head it shares")
-        .authenticated_by()
+        .verified_against()
 }
 
 #[test]

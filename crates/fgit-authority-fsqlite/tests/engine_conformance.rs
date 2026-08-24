@@ -673,7 +673,7 @@ fn a_stale_but_genuine_token_loses_the_exchange_without_being_refused() {
         .authenticate_head_receipt(&first)
         .expect("a superseded receipt still authenticates: authenticity is not currency");
     assert_eq!(authenticated.receipt(), &first);
-    assert_eq!(authenticated.authenticated_by(), store.instance_id());
+    assert_eq!(authenticated.verified_against(), store.instance_id());
 
     // The losing exchange changed nothing.
     assert_eq!(

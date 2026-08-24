@@ -40,7 +40,7 @@ fn a_genuine_receipt_authenticates() {
         .expect("a receipt the store issued must authenticate");
     assert_eq!(authenticated.receipt(), &receipt);
     assert_eq!(
-        authenticated.authenticated_by(),
+        authenticated.verified_against(),
         StoreInstanceId::from_raw(1)
     );
 }

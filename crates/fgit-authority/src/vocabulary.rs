@@ -309,16 +309,17 @@ impl HeadReadReceipt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticatedHead {
     receipt: HeadReadReceipt,
-    authenticated_by: StoreInstanceId,
+    verified_against: StoreInstanceId,
 }
 
 impl AuthenticatedHead {
-    /// Record that `authenticated_by` verified `receipt` against its issuance record.
+    /// Record that `receipt` was verified against `verified_against`'s issuance
+    /// record.
     #[must_use]
-    pub const fn new(receipt: HeadReadReceipt, authenticated_by: StoreInstanceId) -> Self {
+    pub const fn new(receipt: HeadReadReceipt, verified_against: StoreInstanceId) -> Self {
         Self {
             receipt,
-            authenticated_by,
+            verified_against,
         }
     }
 
@@ -328,10 +329,30 @@ impl AuthenticatedHead {
         &self.receipt
     }
 
-    /// The instance that performed the verification.
+    /// The STORE whose issuance record the receipt was verified against.
+    ///
+    /// This names the store, never the reader. It was called `authenticated_by`
+    /// and documented as "the instance that performed the verification", which
+    /// is a statement about the *reader* — and the value never was that. Both
+    /// production construction sites pass the store's own recorded id
+    /// (`fgit-authority-fsqlite/src/engine.rs`, `fgit-object-store/src/lib.rs`),
+    /// and `establish()` hands every opener of one store the same id, so N cells
+    /// sharing a backend all reported the same value.
+    ///
+    /// That is correct behaviour — a token issued by store X must stay
+    /// recognisable as X's — but under the old name it read as an answer to
+    /// "which cell served this?", and an operator auditing a multi-cell
+    /// deployment would have concluded that one cell served everything. A
+    /// missing identity sends a reader looking; a mislabelled one makes them
+    /// stop. Measured on three cells over one backend in
+    /// `fgit-node/tests/multicell_hint_routing.rs`, all reporting instance 1.
+    ///
+    /// Per-cell identity is a separate thing that does not exist yet
+    /// (`frankengit-1egm`). When it lands, `authenticated_by` is free to mean
+    /// what it says.
     #[must_use]
-    pub const fn authenticated_by(&self) -> StoreInstanceId {
-        self.authenticated_by
+    pub const fn verified_against(&self) -> StoreInstanceId {
+        self.verified_against
     }
 }
 
