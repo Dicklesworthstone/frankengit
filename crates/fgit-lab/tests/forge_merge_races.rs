@@ -227,7 +227,7 @@ fn attempt() -> MergeAttempt {
 }
 
 fn closure(merge_commit: &str) -> ValidatedClosure {
-    let objects: BTreeSet<GitOid> = [oid(merge_commit)].into_iter().collect();
+    let objects: BTreeSet<GitOid> = std::iter::once(oid(merge_commit)).collect();
     let permitted = PermittedObjectClosure::new(objects.clone());
     ValidatedClosure {
         object_closure_root: fgit_admission::permitted_object_closure_root(&permitted)
@@ -397,15 +397,15 @@ fn scheduled_merge_race_has_one_winner_and_no_half_merged_ref_state() {
     )
     .expect("a declared three-boundary race schedule");
 
-    let (candidate_a_context, store, production, commitments) = repository();
+    let (first_context, store, production, commitments) = repository();
     let attempt = attempt();
-    let candidate_a_package = package(FIRST_MERGE_OID);
-    let candidate_a_closure = closure(FIRST_MERGE_OID);
-    let candidate_b_package = package(RIVAL_MERGE_OID);
-    let candidate_b_closure = closure(RIVAL_MERGE_OID);
+    let first_package = package(FIRST_MERGE_OID);
+    let first_closure = closure(FIRST_MERGE_OID);
+    let rival_package = package(RIVAL_MERGE_OID);
+    let rival_closure = closure(RIVAL_MERGE_OID);
     let rival = Rival {
         context: context_for(b"lab-merge-b"),
-        sealed: sealed(&candidate_b_package, &attempt, &candidate_b_closure),
+        sealed: sealed(&rival_package, &attempt, &rival_closure),
     };
     let scheduled = ScheduledProjection {
         production,
@@ -419,8 +419,8 @@ fn scheduled_merge_race_has_one_winner_and_no_half_merged_ref_state() {
 
     let loser = admit_merge(
         store.as_ref(),
-        &candidate_a_context,
-        &sealed(&candidate_a_package, &attempt, &candidate_a_closure),
+        &first_context,
+        &sealed(&first_package, &attempt, &first_closure),
         AdmissionLimits::default(),
         &scheduled,
         &commitments,
@@ -453,7 +453,7 @@ fn scheduled_merge_race_has_one_winner_and_no_half_merged_ref_state() {
     }
 
     let HeadRead::Present(head) = store
-        .read_head(&candidate_a_context.head_key)
+        .read_head(&first_context.head_key)
         .expect("authority head remains readable")
     else {
         panic!("authority head cannot vanish during a merge race");
