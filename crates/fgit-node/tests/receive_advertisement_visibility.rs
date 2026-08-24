@@ -288,3 +288,108 @@ fn the_permitted_twin_a_visible_ref_with_a_foreign_format_still_refuses() {
         "the refusal must name the object-format mismatch it found, got {refusal}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The stored rule list, end to end into the advertisement
+// ---------------------------------------------------------------------------
+
+/// Builds the policy the way production will source it: from the ordered rule
+/// list stored in the head-selected configuration body, round-tripped through
+/// the codec so this cannot pass on a list that would not survive storage.
+fn hiding_from_stored_configuration(rules: &[&[u8]]) -> RefVisibility {
+    let configuration = fgit_codec::RepositoryConfigurationBody {
+        root_layout: fgit_types::layout::RootLayoutVersion::RefStateMerkleV1,
+        object_format: GitHashAlgorithm::Sha1,
+        hidden_ref_rules: rules.iter().map(|rule| rule.to_vec()).collect(),
+    };
+    let encoded = fgit_codec::encode_body(&configuration).expect("the fixed configuration encodes");
+    let stored = fgit_codec::decode_body::<fgit_codec::RepositoryConfigurationBody>(
+        &encoded,
+        fgit_codec::DecodeLimits::DEFAULT,
+    )
+    .expect("the stored configuration decodes");
+
+    let limits = WireLimits::default();
+    let mut visibility = RefVisibility::new();
+    for rule in &stored.hidden_ref_rules {
+        visibility
+            .push_rule(rule, &limits)
+            .expect("a stored rule that will not parse must not be silently skipped");
+    }
+    visibility
+}
+
+#[test]
+fn a_rule_list_stored_in_the_configuration_body_omits_its_refs_from_the_advertisement() {
+    // WHAT THIS PROVES: a policy sourced from the stored configuration, rather
+    // than hand-built in a test, drives the advertisement filter.
+    //
+    // WHAT IT DOES NOT PROVE, stated because the gap is real and easy to read
+    // past: that production DOES source it that way. It does not.
+    // `from_snapshot` still takes `visibility` as a caller argument, nothing in
+    // production populates `AdmissionSnapshot.hidden_refs`, and nothing reads it
+    // if it were populated. This test is the composition, not the wiring.
+    let snapshot = snapshot_with(&[
+        (b"refs/heads/main", '1'),
+        (b"refs/internal/public", '2'),
+        (b"refs/internal/secret", '3'),
+    ]);
+
+    let names = advertised(
+        &snapshot,
+        &hiding_from_stored_configuration(&[b"refs/internal", b"!refs/internal/public"]),
+        &WireLimits::default(),
+    );
+
+    assert_eq!(
+        names,
+        vec![
+            b"refs/heads/main".to_vec(),
+            b"refs/internal/public".to_vec(),
+        ],
+        "the stored list must hide the namespace and re-expose exactly the negated name"
+    );
+}
+
+#[test]
+fn the_stored_order_is_what_decides_the_advertisement() {
+    // The order proof, and the reason the two assertions above are not
+    // interchangeable. `hides` is last-match-wins, so the trailing negation only
+    // wins if stored order survives encode, decode, and the push_rule loop.
+    //
+    // Reversing the stored list must therefore change the answer: with the
+    // negation FIRST, the broad rule matches last and the whole namespace is
+    // hidden, including the name the negation names. If any step sorted the
+    // rules -- a canonical-set encoding, a set-valued field -- both orders would
+    // produce the same advertisement and this assertion would fail.
+    let snapshot = snapshot_with(&[(b"refs/heads/main", '1'), (b"refs/internal/public", '2')]);
+
+    let negation_last = advertised(
+        &snapshot,
+        &hiding_from_stored_configuration(&[b"refs/internal", b"!refs/internal/public"]),
+        &WireLimits::default(),
+    );
+    let negation_first = advertised(
+        &snapshot,
+        &hiding_from_stored_configuration(&[b"!refs/internal/public", b"refs/internal"]),
+        &WireLimits::default(),
+    );
+
+    assert_eq!(
+        negation_last,
+        vec![
+            b"refs/heads/main".to_vec(),
+            b"refs/internal/public".to_vec(),
+        ],
+        "with the negation stored last it wins and the ref stays visible"
+    );
+    assert_eq!(
+        negation_first,
+        vec![b"refs/heads/main".to_vec()],
+        "with the negation stored first the broad rule wins and the ref is hidden"
+    );
+    assert_ne!(
+        negation_last, negation_first,
+        "if these agree, stored order was lost somewhere in the chain"
+    );
+}
