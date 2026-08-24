@@ -77,6 +77,7 @@ fn decode_hex(text: &str) -> Vec<u8> {
 }
 
 fn write_loose_blob_repository(root: &Path) -> AnyGitOid {
+    fs::create_dir_all(root).expect("fixture source directory creates");
     fs::write(root.join("HEAD"), "ref: refs/heads/main\n").expect("fixture symbolic HEAD writes");
     let oid = AnyGitOid::from_hex(
         GitObjectFormat::Sha1,
