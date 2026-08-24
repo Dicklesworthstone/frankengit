@@ -16,8 +16,8 @@ use fgit_authority::history::{
     ClientId as HistoryClientId, HistoryEvent, LogicalTime, OperationId,
 };
 use fgit_authority::lincheck::{
-    AuthorityHistory, CheckLimits, CheckReport, CheckVerdict, LinearizabilityChecker,
-    SequentialSpec,
+    AuthorityHistory, AuthorityReferenceSpec, CheckLimits, CheckReport, CheckVerdict,
+    LinearizabilityChecker,
 };
 use fgit_authority::{
     AmbiguityReason, AuthenticatedHead, AuthorityFailure, AuthorityOp, AuthorityRefusal,
@@ -34,181 +34,6 @@ use fgit_types::cell::{
 use fgit_types::label::{DomainTag, SchemaFamily};
 
 const DEFAULT_SEED: u64 = 0xF004_C001_5EED_0001;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct IssuedVersion {
-    key: HeadKey,
-    generation: HeadGeneration,
-    body: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct AuthorityModelState {
-    immutable: BTreeMap<ImmutableKey, Vec<u8>>,
-    heads: BTreeMap<HeadKey, HeadReadReceipt>,
-    issued: BTreeMap<AuthorityVersionToken, IssuedVersion>,
-    next_issuance: u64,
-}
-
-impl AuthorityModelState {
-    fn mint_receipt(
-        &mut self,
-        key: HeadKey,
-        generation: HeadGeneration,
-        body: Vec<u8>,
-    ) -> HeadReadReceipt {
-        let mut bytes = [0_u8; 16];
-        bytes[..8].copy_from_slice(b"fgithist");
-        bytes[8..].copy_from_slice(&self.next_issuance.to_be_bytes());
-        self.next_issuance = self.next_issuance.saturating_add(1);
-        let token = AuthorityVersionToken::from_opaque_bytes(bytes);
-        self.issued.insert(
-            token,
-            IssuedVersion {
-                key: key.clone(),
-                generation,
-                body: body.clone(),
-            },
-        );
-        HeadReadReceipt::new(key, token, generation, body)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct AuthorityModel {
-    instance: StoreInstanceId,
-}
-
-impl AuthorityModel {
-    const fn new(instance: StoreInstanceId) -> Self {
-        Self { instance }
-    }
-}
-
-impl SequentialSpec for AuthorityModel {
-    type State = AuthorityModelState;
-    type Operation = AuthorityOp;
-    type Response = AuthorityResponse;
-
-    fn initial_state(&self) -> Self::State {
-        AuthorityModelState {
-            immutable: BTreeMap::new(),
-            heads: BTreeMap::new(),
-            issued: BTreeMap::new(),
-            next_issuance: 0,
-        }
-    }
-
-    fn apply(
-        &self,
-        state: &Self::State,
-        operation: &Self::Operation,
-    ) -> (Self::State, Self::Response) {
-        let mut next = state.clone();
-        match operation {
-            AuthorityOp::PutIfAbsent { key, body } => {
-                let response = match next.immutable.get(key) {
-                    Some(existing) if existing == body => {
-                        AuthorityResponse::PutIfAbsent(PutOutcome::IdenticalRetry)
-                    }
-                    Some(_) => AuthorityResponse::PutIfAbsent(PutOutcome::Conflict),
-                    None => {
-                        next.immutable.insert(key.clone(), body.clone());
-                        AuthorityResponse::PutIfAbsent(PutOutcome::Created)
-                    }
-                };
-                (next, response)
-            }
-            AuthorityOp::ReadImmutable { key } => {
-                let response = next.immutable.get(key).map_or_else(
-                    || AuthorityResponse::ReadImmutable(ImmutableRead::Absent),
-                    |body| AuthorityResponse::ReadImmutable(ImmutableRead::Present(body.clone())),
-                );
-                (next, response)
-            }
-            AuthorityOp::InitializeHead {
-                key,
-                generation,
-                body,
-            } => {
-                let response = match next.heads.get(key) {
-                    Some(existing)
-                        if existing.generation() == *generation && existing.body() == body =>
-                    {
-                        AuthorityResponse::InitializeHead(HeadInit::IdenticalRetry(
-                            existing.clone(),
-                        ))
-                    }
-                    Some(_) => AuthorityResponse::InitializeHead(HeadInit::Conflict),
-                    None => {
-                        let receipt = next.mint_receipt(key.clone(), *generation, body.clone());
-                        next.heads.insert(key.clone(), receipt.clone());
-                        AuthorityResponse::InitializeHead(HeadInit::Created(receipt))
-                    }
-                };
-                (next, response)
-            }
-            AuthorityOp::ReadHead { key } => {
-                let response = next.heads.get(key).map_or_else(
-                    || AuthorityResponse::ReadHead(HeadRead::Absent),
-                    |receipt| AuthorityResponse::ReadHead(HeadRead::Present(receipt.clone())),
-                );
-                (next, response)
-            }
-            AuthorityOp::CompareExchangeHead {
-                key,
-                expected,
-                new_generation,
-                new_body,
-            } => {
-                let response = match next.issued.get(expected) {
-                    None => AuthorityResponse::Refused(AuthorityRefusal::UnknownVersionToken),
-                    Some(issued) if issued.key != *key => {
-                        AuthorityResponse::Refused(AuthorityRefusal::TokenKeyMismatch)
-                    }
-                    Some(_) => match next.heads.get(key).cloned() {
-                        None => AuthorityResponse::Refused(AuthorityRefusal::HeadAbsent),
-                        Some(current) if current.token() != *expected => {
-                            AuthorityResponse::CompareExchangeHead(CasOutcome::PredecessorMismatch)
-                        }
-                        Some(current) if *new_generation <= current.generation() => {
-                            AuthorityResponse::Refused(AuthorityRefusal::NonMonotoneGeneration {
-                                current: current.generation(),
-                                proposed: *new_generation,
-                            })
-                        }
-                        Some(_) => {
-                            let receipt =
-                                next.mint_receipt(key.clone(), *new_generation, new_body.clone());
-                            next.heads.insert(key.clone(), receipt.clone());
-                            AuthorityResponse::CompareExchangeHead(CasOutcome::Committed(receipt))
-                        }
-                    },
-                };
-                (next, response)
-            }
-            AuthorityOp::AuthenticateHeadReceipt { receipt } => {
-                let response = match next.issued.get(&receipt.token()) {
-                    None => AuthorityResponse::Refused(AuthorityRefusal::UnknownVersionToken),
-                    Some(issued) if issued.key != *receipt.key() => {
-                        AuthorityResponse::Refused(AuthorityRefusal::TokenKeyMismatch)
-                    }
-                    Some(issued) if issued.generation != receipt.generation() => {
-                        AuthorityResponse::Refused(AuthorityRefusal::TokenGenerationMismatch)
-                    }
-                    Some(issued) if issued.body.as_slice() != receipt.body() => {
-                        AuthorityResponse::Refused(AuthorityRefusal::TokenBodyMismatch)
-                    }
-                    Some(_) => AuthorityResponse::AuthenticateHeadReceipt(AuthenticatedHead::new(
-                        receipt.clone(),
-                        self.instance,
-                    )),
-                };
-                (next, response)
-            }
-        }
-    }
-}
 
 #[derive(Clone, Debug, Default)]
 struct HistoryRecorder {
@@ -388,7 +213,7 @@ fn check_and_emit(
     seed: u64,
     plan: &FaultPlan,
     recorder: &HistoryRecorder,
-    model: AuthorityModel,
+    model: AuthorityReferenceSpec,
     note: &str,
 ) -> CheckReport {
     let history = recorder.history();
@@ -446,7 +271,7 @@ fn seeded_fault_matrix_records_replayable_linearizable_histories() {
             seed,
             &plan,
             &recorder,
-            AuthorityModel::new(instance),
+            AuthorityReferenceSpec::new(instance),
             "seeded plans target reads so duplicate delivery and ambiguity preserve a checkable client history",
         );
         expect_linearizable(&report);
@@ -492,7 +317,7 @@ fn lost_acknowledgement_after_cas_and_crash_point_preserve_pending_histories() {
         0xF004_C002,
         &plan,
         &recorder,
-        AuthorityModel::new(instance),
+        AuthorityReferenceSpec::new(instance),
         "lost CAS acknowledgement remains pending; the recorded exact-key resolution proves its effect",
     );
     expect_linearizable(&report);
@@ -530,7 +355,7 @@ fn lost_acknowledgement_after_cas_and_crash_point_preserve_pending_histories() {
         0xF004_C003,
         &crash_plan,
         &crash_recorder,
-        AuthorityModel::new(crash_instance),
+        AuthorityReferenceSpec::new(crash_instance),
         "post-effect crash on a read is a pending response, then restart restores availability",
     );
     expect_linearizable(&crash_report);
@@ -604,7 +429,7 @@ fn stale_token_and_malicious_receipt_attempts_are_linearized_or_refused() {
         0xF004_C004,
         &plan,
         &recorder,
-        AuthorityModel::new(instance),
+        AuthorityReferenceSpec::new(instance),
         "issued-but-stale tokens lose by predecessor mismatch; forged and tampered receipts are typed refusals",
     );
     expect_linearizable(&report);
@@ -671,7 +496,7 @@ fn overlapping_multi_client_cas_race_has_exactly_one_winner() {
         0xF004_C005,
         &plan,
         &recorder,
-        AuthorityModel::new(instance),
+        AuthorityReferenceSpec::new(instance),
         "two OS threads pass a barrier before racing their exact-predecessor CAS attempts",
     );
     expect_linearizable(&report);
@@ -820,7 +645,7 @@ fn seeded_double_success_bug_is_caught_by_the_same_checker() {
 
     let plan = FaultPlan::none();
     let history = recorder.history();
-    let report = checker().check_authority(&AuthorityModel::new(instance), &history);
+    let report = checker().check_authority(&AuthorityReferenceSpec::new(instance), &history);
     println!(
         "{}",
         evidence_ndjson(
@@ -893,7 +718,7 @@ fn lost_acknowledgement_resolution_exposes_the_seeded_double_success_bug() {
 
     let plan = FaultPlan::none();
     let history = recorder.history();
-    let report = checker().check_authority(&AuthorityModel::new(instance), &history);
+    let report = checker().check_authority(&AuthorityReferenceSpec::new(instance), &history);
     println!(
         "{}",
         evidence_ndjson(
@@ -953,7 +778,7 @@ fn immutable_fault_schedule_remains_linearizable_after_reordered_retries() {
         0xF004_C007,
         &plan,
         &recorder,
-        AuthorityModel::new(instance),
+        AuthorityReferenceSpec::new(instance),
         "reordered clients observe an immutable write once; duplicated reads cannot mutate it",
     );
     expect_linearizable(&report);
@@ -1093,7 +918,7 @@ fn an_isolated_cell_cannot_label_a_drifted_answer_as_current() {
         0xF036_B001,
         &plan,
         &recorder,
-        AuthorityModel::new(instance),
+        AuthorityReferenceSpec::new(instance),
         "an isolated cell's read is pending, never a stale head presented as current",
     );
     expect_linearizable(&report);
@@ -1176,7 +1001,7 @@ fn an_isolated_cell_that_reconnects_observes_no_lost_write() {
         0xF036_B002,
         &partition,
         &recorder,
-        AuthorityModel::new(instance),
+        AuthorityReferenceSpec::new(instance),
         "a cell rejoining after a real partition observes every acknowledged write and no rollback",
     );
     expect_linearizable(&report);
@@ -1299,7 +1124,7 @@ fn an_older_cell_holding_a_superseded_token_cannot_replace_the_head() {
         0xF036_B003,
         &FaultPlan::none(),
         &recorder,
-        AuthorityModel::new(instance),
+        AuthorityReferenceSpec::new(instance),
         "a rolling upgrade cannot roll back or tear a newer head; the loser revalidates and proceeds",
     );
     expect_linearizable(&report);
@@ -1412,7 +1237,7 @@ fn a_crash_during_a_head_transition_never_leaves_a_half_published_head() {
             0xF036_B004,
             &plan,
             &recorder,
-            AuthorityModel::new(instance),
+            AuthorityReferenceSpec::new(instance),
             "a crash mid-transition leaves a whole head; the pending caller resolves it by asking",
         );
         expect_linearizable(&report);
@@ -1451,7 +1276,7 @@ fn replay_fixed_sequence(instance_raw: u64, bodies: &[&[u8]]) -> Vec<(HeadGenera
         instance_raw,
         &FaultPlan::none(),
         &recorder,
-        AuthorityModel::new(instance),
+        AuthorityReferenceSpec::new(instance),
         "a fixed operation sequence, checked like every other history in this campaign",
     );
     expect_linearizable(&report);
@@ -1621,7 +1446,7 @@ fn the_cell_level_flow_is_linearizable_under_seeded_plans_and_replays_identicall
                 seed,
                 &plan,
                 &recorder,
-                AuthorityModel::new(instance),
+                AuthorityReferenceSpec::new(instance),
                 "seeded cell-level flow: isolated reader, publisher, returning reader",
             );
             expect_linearizable(&report);
@@ -1716,7 +1541,7 @@ fn a_process_pause_around_a_cas_changes_no_outcome() {
             0xF036_B030,
             &FaultPlan::none(),
             &recorder,
-            AuthorityModel::new(instance),
+            AuthorityReferenceSpec::new(instance),
             "unpaused control for the GC-pause comparison",
         );
         expect_linearizable(&report);
@@ -1762,7 +1587,7 @@ fn a_process_pause_around_a_cas_changes_no_outcome() {
             0xF036_B031,
             &plan,
             &recorder,
-            AuthorityModel::new(instance),
+            AuthorityReferenceSpec::new(instance),
             "a stop-the-world pause around a CAS: same outcome, still linearizable",
         );
         expect_linearizable(&report);
