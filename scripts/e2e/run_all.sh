@@ -56,7 +56,8 @@
 # -----------------------------------------------------------------------------
 # Exactly one disposition is recorded per script, first match wins:
 #
-#   not_executable        discovered but not an executable regular file
+#   not_executable        selected script path is missing, non-regular, or not
+#                         executable; detail identifies which condition
 #   missing_log           no NDJSON log was produced
 #   truncated_log         the log does not end with a newline, or the seq values
 #                         do not form exactly {1..N} -- a lost record
@@ -912,6 +913,13 @@ for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
 
   if [ ! -f "$f" ] || [ ! -x "$f" ]; then
     S_NOTRUN+=("$sid")
+    if [ ! -e "$f" ]; then
+      ra_not_executable_detail='path does not exist'
+    elif [ ! -f "$f" ]; then
+      ra_not_executable_detail='path exists but is not a regular file'
+    else
+      ra_not_executable_detail='path exists but is not executable'
+    fi
     FGE__J=''
     fge__jstr script "$f"
     FGE__J+=','
@@ -919,7 +927,7 @@ for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
     FGE__J+=','
     fge__jstr disposition not_executable
     FGE__J+=','
-    fge__jstr detail 'not an executable regular file'
+    fge__jstr detail "$ra_not_executable_detail"
     ra_emit suite_script "$FGE__J"
     continue
   fi

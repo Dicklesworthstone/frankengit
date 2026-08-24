@@ -40,22 +40,19 @@ CASE_OUT=''
 declare -a CASE_FAILED_IDS=()
 declare -a CASE_CROSS_DUP=()
 
-# run_case NAME TIMEOUT ATTEMPTS FIXTURE...
+# run_path_case NAME TIMEOUT ATTEMPTS SCRIPT...
 #
 # run_all's own stderr is captured to an artifact rather than discarded: it is
 # the subject under test here, and the file is registered as evidence below.
-run_case() {
+run_path_case() {
   local name=$1 secs=$2 attempts=$3
   shift 3
   CASE_OUT="$CASES/$name"
   mkdir -p "$CASE_OUT"
-  local -a fixtures=()
-  local f
-  for f in "$@"; do fixtures+=("$FIXTURES/$f"); done
 
   CASE_RC=0
   "$RUN_ALL" --out "$CASE_OUT/run" --timeout "$secs" --attempts "$attempts" \
-    "${fixtures[@]}" >"$CASE_OUT/stdout.log" 2>"$CASE_OUT/stderr.log" || CASE_RC=$?
+    "$@" >"$CASE_OUT/stdout.log" 2>"$CASE_OUT/stderr.log" || CASE_RC=$?
 
   CASE_RECEIPT="$CASE_OUT/run/receipt.ndjson"
   CASE_DISPOSITION=''
@@ -82,6 +79,16 @@ run_case() {
     fi
   fi
   return 0
+}
+
+# run_case NAME TIMEOUT ATTEMPTS FIXTURE...
+run_case() {
+  local name=$1 secs=$2 attempts=$3
+  shift 3
+  local -a fixtures=()
+  local f
+  for f in "$@"; do fixtures+=("$FIXTURES/$f"); done
+  run_path_case "$name" "$secs" "$attempts" "${fixtures[@]}"
 }
 
 # expect_case ID_PREFIX NAME EXPECTED_RC EXPECTED_DISPOSITION FIXTURE [TIMEOUT]
@@ -344,6 +351,60 @@ fge_assert_not_contains FG-000A-ST-LIST-NONSH "$list_out" 'notes.txt' \
   'discovery ignores non-.sh files'
 fge_assert_eq FG-000A-ST-DISCOVER-RC 0 "$disc_rc" \
   'a discovered healthy script passes through the discovery path'
+
+# ---------------------------------------------------------------------------
+# explicit SCRIPT arguments stay verbatim, but a missing path must not be
+# misdiagnosed as an executable-bit failure. A present, regular non-executable
+# control proves the two refusal details do not collapse back together.
+# ---------------------------------------------------------------------------
+fge_phase action
+explicit_probe_dir="$(fge_tempdir explicit-script-path)"
+explicit_nonexec="$explicit_probe_dir/non_executable.sh"
+cp "$FIXTURES/pos_control.sh" "$explicit_nonexec"
+chmod 0644 "$explicit_nonexec"
+
+# The target file exists under scripts/e2e/, but explicit SCRIPT arguments are
+# intentionally used verbatim from the repository root. Do not add implicit
+# prefixing here: this assertion pins the documented path semantics.
+run_path_case explicit-relative-missing 60 1 suites/treefs/path_security.sh
+explicit_missing_rc=$CASE_RC
+explicit_missing_disposition=$CASE_DISPOSITION
+explicit_missing_detail=$CASE_DETAIL
+
+run_path_case explicit-bare-missing 60 1 treefs/path_security.sh
+explicit_bare_missing_rc=$CASE_RC
+explicit_bare_missing_detail=$CASE_DETAIL
+
+run_path_case explicit-non-executable 60 1 "$explicit_nonexec"
+explicit_nonexec_rc=$CASE_RC
+explicit_nonexec_disposition=$CASE_DISPOSITION
+explicit_nonexec_detail=$CASE_DETAIL
+
+run_path_case explicit-absolute-control 60 1 "$FIXTURES/pos_control.sh"
+explicit_control_rc=$CASE_RC
+explicit_control_disposition=$CASE_DISPOSITION
+
+fge_phase assert
+fge_assert_eq FG-000A-ST-EXPLICIT-MISSING-RC 1 "$explicit_missing_rc" \
+  'a suites-relative explicit path remains verbatim and therefore is not found from the repository root'
+fge_assert_eq FG-000A-ST-EXPLICIT-MISSING-DISP not_executable "$explicit_missing_disposition" \
+  'a missing explicit path remains a not-run script disposition'
+fge_assert_eq FG-000A-ST-EXPLICIT-MISSING-DETAIL 'path does not exist' "$explicit_missing_detail" \
+  'a missing explicit path is diagnosed as missing, not as a mode-bit failure'
+fge_assert_eq FG-000A-ST-EXPLICIT-BARE-RC 1 "$explicit_bare_missing_rc" \
+  'a bare explicit path also remains verbatim and is not resolved below scripts/e2e'
+fge_assert_eq FG-000A-ST-EXPLICIT-BARE-DETAIL 'path does not exist' "$explicit_bare_missing_detail" \
+  'a bare explicit path gets the same missing-path diagnosis'
+fge_assert_eq FG-000A-ST-EXPLICIT-NONEXEC-RC 1 "$explicit_nonexec_rc" \
+  'a present regular explicit path without execute permission remains non-pass'
+fge_assert_eq FG-000A-ST-EXPLICIT-NONEXEC-DISP not_executable "$explicit_nonexec_disposition" \
+  'a present non-executable explicit path retains the not-run disposition'
+fge_assert_eq FG-000A-ST-EXPLICIT-NONEXEC-DETAIL 'path exists but is not executable' "$explicit_nonexec_detail" \
+  'a present regular path without execute permission is diagnosed distinctly'
+fge_assert_eq FG-000A-ST-EXPLICIT-CONTROL-RC 0 "$explicit_control_rc" \
+  'an absolute executable explicit path continues to run'
+fge_assert_eq FG-000A-ST-EXPLICIT-CONTROL-DISP ok "$explicit_control_disposition" \
+  'the executable explicit control remains an ordinary passing script'
 
 # ---------------------------------------------------------------------------
 # a scoped profile names every outside area in its receipt without turning a
