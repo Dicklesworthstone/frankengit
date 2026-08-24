@@ -13,9 +13,11 @@ use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use fgit_git_object::GitHashAlgorithm;
 use fgit_git_object::{
     AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, Sha1, Sha256, emit_loose_framed,
-    emit_object_body, native_object_oid, parse_loose_framed, parse_object_body,
+    emit_object_body, native_object_oid, parse_annotated_tag, parse_loose_framed,
+    parse_object_body,
 };
 
 const CORPUS_ENV: &str = "FGIT_OBJECT_DIFFERENTIAL_CORPUS";
@@ -190,6 +192,9 @@ fn algorithm_limits(corpus: &Path) -> Result<(&'static str, ParseLimits), Differ
 fn verify_special_headers(
     entry: &CorpusEntry,
     parsed: &ParsedObject,
+    source_bytes: &[u8],
+    algorithm: &str,
+    limits: &ParseLimits,
 ) -> Result<(), VerificationFailure> {
     if entry.label.ends_with("commit-headers") {
         let ParsedObject::Commit(commit) = parsed else {
@@ -225,6 +230,32 @@ fn verify_special_headers(
         if !tag.headers().iter().any(|header| header.name == b"gpgsig") {
             return Err(VerificationFailure {
                 kind: FindingKind::CorpusShapeMismatch,
+                actual_bytes: None,
+            });
+        }
+        let hash_algorithm = match algorithm {
+            "sha1" => GitHashAlgorithm::Sha1,
+            "sha256" => GitHashAlgorithm::Sha256,
+            _ => unreachable!("algorithm_limits admits only native domains"),
+        };
+        let typed = parse_annotated_tag(
+            source_bytes,
+            hash_algorithm,
+            AcceptanceProfile::GitCompatibleImport,
+            limits,
+        )
+        .map_err(|_| VerificationFailure {
+            kind: FindingKind::BodyParseRefusal,
+            actual_bytes: None,
+        })?;
+        if typed.as_bytes() != source_bytes
+            || typed.emit(limits).map_err(|_| VerificationFailure {
+                kind: FindingKind::BodyReemitMismatch,
+                actual_bytes: None,
+            })? != source_bytes
+        {
+            return Err(VerificationFailure {
+                kind: FindingKind::BodyReemitMismatch,
                 actual_bytes: None,
             });
         }
@@ -275,7 +306,7 @@ fn verify_entry(
         kind: FindingKind::BodyParseRefusal,
         actual_bytes: None,
     })?;
-    verify_special_headers(entry, &parsed_body)?;
+    verify_special_headers(entry, &parsed_body, &source_bytes, algorithm, limits)?;
     let reemitted_body =
         emit_object_body(&parsed_body, AcceptanceProfile::GitCompatibleImport, limits).map_err(
             |_| VerificationFailure {

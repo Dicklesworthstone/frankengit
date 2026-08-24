@@ -134,6 +134,16 @@ pub enum ObjectError {
     InvalidTagTargetType,
     /// A strict tag name was empty or contained a control byte.
     InvalidTagName,
+    /// The mandatory annotated-tag headers were not in Git's canonical prefix order.
+    StrictTagHeaderOrder,
+    /// A typed annotated-tag view was asked to decode using a hash domain that
+    /// disagrees with the parser's configured native-reference width.
+    TagReferenceAlgorithmMismatch {
+        /// The configured native reference width in bytes.
+        configured_width: usize,
+        /// The requested hash domain's digest width in bytes.
+        requested_width: usize,
+    },
     /// The streaming decoder reached an impossible partial internal state.
     DecoderStateInconsistent,
     /// A bounded allocation could not be reserved without risking a process abort.
@@ -210,6 +220,16 @@ impl Display for ObjectError {
             }
             Self::InvalidTagTargetType => formatter.write_str("invalid annotated-tag target type"),
             Self::InvalidTagName => formatter.write_str("invalid strict tag name"),
+            Self::StrictTagHeaderOrder => {
+                formatter.write_str("annotated-tag mandatory headers are out of canonical order")
+            }
+            Self::TagReferenceAlgorithmMismatch {
+                configured_width,
+                requested_width,
+            } => write!(
+                formatter,
+                "annotated-tag reference width {configured_width} disagrees with requested hash width {requested_width}"
+            ),
             Self::DecoderStateInconsistent => {
                 formatter.write_str("loose decoder state is inconsistent")
             }
@@ -785,6 +805,120 @@ pub struct Tag {
     has_message_separator: bool,
 }
 
+/// The native object type an annotated tag declares as its direct target.
+///
+/// This is intentionally distinct from [`ObjectType`]. A tag object itself is
+/// always encoded with `ObjectType::Tag`; this enum records the value of the
+/// tag body's required `type` header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub enum TagTargetType {
+    /// The tag names a blob.
+    Blob,
+    /// The tag names a tree.
+    Tree,
+    /// The tag names a commit.
+    Commit,
+    /// The tag names another annotated tag.
+    Tag,
+}
+
+impl TagTargetType {
+    fn parse(value: &[u8]) -> Result<Self, ObjectError> {
+        match value {
+            b"blob" => Ok(Self::Blob),
+            b"tree" => Ok(Self::Tree),
+            b"commit" => Ok(Self::Commit),
+            b"tag" => Ok(Self::Tag),
+            _ => Err(ObjectError::InvalidTagTargetType),
+        }
+    }
+}
+
+/// The typed direct target encoded in an annotated-tag body.
+///
+/// `GitOid` keeps SHA-1 and SHA-256 values in disjoint domains. A caller
+/// therefore cannot accidentally peel a SHA-1 tag through a SHA-256 object
+/// store merely because the hexadecimal spelling happened to look similar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct TagTarget {
+    /// The exact native identity from the `object` header.
+    pub oid: GitOid,
+    /// The declared native type of `oid`.
+    pub object_type: TagTargetType,
+}
+
+/// Signature material observed in an annotated-tag body.
+///
+/// This parser deliberately does not verify cryptography, resolve keys, or
+/// assign trust. A byte sequence that resembles an armored signature remains
+/// opaque and explicitly unverifiable until the crypto/key subsystem supplies
+/// an independent verification result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TagSignature<'a> {
+    /// No armored signature delimiter was observed in the message payload.
+    Absent,
+    /// Opaque bytes beginning at an armored-signature delimiter.
+    OpaqueUnverifiable(&'a [u8]),
+}
+
+/// A bounded, byte-preserving annotated-tag view with a typed direct target.
+///
+/// The contained [`Tag`] remains the source of truth for re-emission: semantic
+/// accessors never reconstruct, normalize, or otherwise alter its raw bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnnotatedTag {
+    tag: Tag,
+    target: TagTarget,
+}
+
+impl AnnotatedTag {
+    /// Returns the exact original tag body bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.tag.as_bytes()
+    }
+
+    /// Returns the ordered raw headers without sorting or normalization.
+    #[must_use]
+    pub fn headers(&self) -> &[HeaderField] {
+        self.tag.headers()
+    }
+
+    /// Returns the exact message suffix, including any signature bytes.
+    #[must_use]
+    pub fn message(&self) -> &[u8] {
+        self.tag.message()
+    }
+
+    /// Returns the direct target named by the mandatory headers.
+    #[must_use]
+    pub const fn target(&self) -> TagTarget {
+        self.target
+    }
+
+    /// Classifies only the *presence* of an armored signature candidate.
+    ///
+    /// The candidate is never a trust result. In particular, callers must not
+    /// treat `OpaqueUnverifiable` as a signed or authorized tag.
+    #[must_use]
+    pub fn signature(&self) -> TagSignature<'_> {
+        const ARMORED_SIGNATURE: &[u8] = b"-----BEGIN PGP SIGNATURE-----";
+        self.message()
+            .windows(ARMORED_SIGNATURE.len())
+            .position(|window| window == ARMORED_SIGNATURE)
+            .map_or(TagSignature::Absent, |offset| {
+                TagSignature::OpaqueUnverifiable(&self.message()[offset..])
+            })
+    }
+
+    /// Emits exactly the accepted original bytes after re-checking the body
+    /// allocation bound. No serializer or normalizer sits between parse and
+    /// emit, which is the byte-identity invariant for imported tags.
+    pub fn emit(&self, limits: &ParseLimits) -> Result<Vec<u8>, ObjectError> {
+        checked_body_copy(self.as_bytes(), limits)
+    }
+}
+
 impl Tag {
     /// Returns the exact original body bytes.
     #[must_use]
@@ -803,6 +937,53 @@ impl Tag {
     pub fn message(&self) -> &[u8] {
         &self.raw[self.message_start..]
     }
+}
+
+/// Parses a bounded annotated tag and exposes its mandatory target in the
+/// declared native hash domain.
+///
+/// This is intentionally a second, stricter view over [`parse_tag`]: generic
+/// import parsing may retain a historically tolerated tag body for quarantine
+/// evidence, while a caller that wants to peel or publish it needs one unique,
+/// typed target with the repository's declared SHA domain.
+pub fn parse_annotated_tag(
+    body: &[u8],
+    hash_algorithm: GitHashAlgorithm,
+    profile: AcceptanceProfile,
+    limits: &ParseLimits,
+) -> Result<AnnotatedTag, ObjectError> {
+    let requested_width = hash_algorithm.digest_len();
+    if limits.tree_reference_bytes != requested_width {
+        return Err(ObjectError::TagReferenceAlgorithmMismatch {
+            configured_width: limits.tree_reference_bytes,
+            requested_width,
+        });
+    }
+    let tag = parse_tag(body, profile, limits)?;
+    let mut object = None;
+    let mut object_type = None;
+    for header in tag.headers() {
+        match header.name.as_slice() {
+            b"object" if header.continuations.is_empty() && object.is_none() => {
+                let text = std::str::from_utf8(&header.value)
+                    .map_err(|_| ObjectError::MalformedObjectReference)?;
+                object = Some(
+                    GitOid::from_hex(hash_algorithm, text)
+                        .map_err(|_| ObjectError::MalformedObjectReference)?,
+                );
+            }
+            b"type" if header.continuations.is_empty() && object_type.is_none() => {
+                object_type = Some(TagTargetType::parse(&header.value)?);
+            }
+            b"object" | b"type" => return Err(ObjectError::MissingOrDuplicateTagHeader),
+            _ => {}
+        }
+    }
+    let target = TagTarget {
+        oid: object.ok_or(ObjectError::MissingOrDuplicateTagHeader)?,
+        object_type: object_type.ok_or(ObjectError::MissingOrDuplicateTagHeader)?,
+    };
+    Ok(AnnotatedTag { tag, target })
 }
 
 /// Parses a commit while retaining every accepted body byte for exact re-emission.
@@ -1089,6 +1270,27 @@ fn validate_strict_commit(
 }
 
 fn validate_strict_tag(headers: &[HeaderField], limits: &ParseLimits) -> Result<(), ObjectError> {
+    let Some(required) = headers.get(..4) else {
+        return Err(ObjectError::MissingOrDuplicateTagHeader);
+    };
+    if !matches!(
+        required,
+        [
+            HeaderField { name, continuations, .. },
+            HeaderField { name: type_name, continuations: type_continuations, .. },
+            HeaderField { name: tag_name, continuations: tag_continuations, .. },
+            HeaderField { name: tagger_name, continuations: tagger_continuations, .. },
+        ] if name == b"object"
+            && continuations.is_empty()
+            && type_name == b"type"
+            && type_continuations.is_empty()
+            && tag_name == b"tag"
+            && tag_continuations.is_empty()
+            && tagger_name == b"tagger"
+            && tagger_continuations.is_empty()
+    ) {
+        return Err(ObjectError::StrictTagHeaderOrder);
+    }
     let mut object_count = 0;
     let mut type_count = 0;
     let mut tag_count = 0;
