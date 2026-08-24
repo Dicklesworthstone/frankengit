@@ -387,6 +387,24 @@ where
     S: AuthorityStore + ?Sized,
     I: BodyIdentity + ?Sized,
 {
+    verify_outcome_index_checkpoint_chain_with_bound(
+        store,
+        identity,
+        root,
+        MAX_CHECKPOINT_PREDECESSORS,
+    )
+}
+
+fn verify_outcome_index_checkpoint_chain_with_bound<S, I>(
+    store: &S,
+    identity: &I,
+    root: Digest,
+    predecessor_limit: usize,
+) -> Result<OutcomeIndexCheckpointBody, OutcomeIndexCheckpointRefusal>
+where
+    S: AuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized,
+{
     let first = load_outcome_index_checkpoint(store, identity, root)?;
     let repository_id = first.repository_id;
     let mut current = first.clone();
@@ -394,7 +412,7 @@ where
     let mut links = 0_usize;
 
     while let Some(predecessor_root) = current.predecessor_checkpoint_root {
-        if links == MAX_CHECKPOINT_PREDECESSORS {
+        if links == predecessor_limit {
             return Err(OutcomeIndexCheckpointRefusal::PredecessorChainTooLong);
         }
         if !seen.insert(predecessor_root) {
@@ -424,6 +442,27 @@ where
     S: AsyncAuthorityStore + ?Sized,
     I: BodyIdentity + ?Sized + Sync,
 {
+    verify_outcome_index_checkpoint_chain_async_with_bound(
+        store,
+        cx,
+        identity,
+        root,
+        MAX_CHECKPOINT_PREDECESSORS,
+    )
+    .await
+}
+
+async fn verify_outcome_index_checkpoint_chain_async_with_bound<S, I>(
+    store: &S,
+    cx: &S::Context,
+    identity: &I,
+    root: Digest,
+    predecessor_limit: usize,
+) -> Result<OutcomeIndexCheckpointBody, OutcomeIndexCheckpointRefusal>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized + Sync,
+{
     let first = load_outcome_index_checkpoint_async(store, cx, identity, root).await?;
     let repository_id = first.repository_id;
     let mut current = first.clone();
@@ -431,7 +470,7 @@ where
     let mut links = 0_usize;
 
     while let Some(predecessor_root) = current.predecessor_checkpoint_root {
-        if links == MAX_CHECKPOINT_PREDECESSORS {
+        if links == predecessor_limit {
             return Err(OutcomeIndexCheckpointRefusal::PredecessorChainTooLong);
         }
         if !seen.insert(predecessor_root) {
@@ -462,6 +501,83 @@ fn checkpoint_position_advances(
         (Some(newer), Some(older)) => newer > older,
         (Some(_), None) => true,
         (None, _) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use fgit_authority::{MemoryAuthorityStore, StoreInstanceId};
+    use fgit_codec::CryptoBodyIdentity;
+    use fgit_types::{CANONICAL_CODEC_VERSION, DigestAlgorithmId, DigestBytes, OPAQUE_ID_LEN};
+
+    const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff2;
+
+    const fn repository() -> RepositoryId {
+        RepositoryId::from_bytes([0x72; OPAQUE_ID_LEN])
+    }
+
+    fn checkpoint_tail(position: u64) -> RepositoryDecisionBatchId {
+        let mut bytes = [0_u8; 32];
+        bytes[..8].copy_from_slice(&position.to_be_bytes());
+        bytes[31] = 0x72;
+        RepositoryDecisionBatchId::from_digest(
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("fixture algorithm is reserved"),
+            CANONICAL_CODEC_VERSION,
+            DigestBytes::try_new(&bytes).expect("fixture digest is 32 bytes"),
+        )
+    }
+
+    fn stage_chain(store: &MemoryAuthorityStore, predecessor_links: usize) -> Digest {
+        let mut predecessor = None;
+        for position in 1..=predecessor_links + 1 {
+            let position = u64::try_from(position).expect("fixture position fits in u64");
+            let checkpoint = OutcomeIndexCheckpointBody::new(
+                repository(),
+                Some(checkpoint_tail(position)),
+                Some(DecisionSequence::try_new(position).expect("fixture position is nonzero")),
+                predecessor,
+                Vec::new(),
+            )
+            .expect("empty retained leaf set is canonical evidence");
+            predecessor = Some(
+                stage_outcome_index_checkpoint(store, &CryptoBodyIdentity, &checkpoint)
+                    .expect("fixture checkpoint stages"),
+            );
+        }
+        predecessor.expect("a chain always has its newest checkpoint")
+    }
+
+    #[test]
+    fn checkpoint_chain_bound_accepts_n_and_refuses_n_plus_one() {
+        const TEST_BOUND: usize = 3;
+
+        let at_limit = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7201));
+        let at_limit_root = stage_chain(&at_limit, TEST_BOUND);
+        assert!(
+            verify_outcome_index_checkpoint_chain_with_bound(
+                &at_limit,
+                &CryptoBodyIdentity,
+                at_limit_root,
+                TEST_BOUND,
+            )
+            .is_ok(),
+            "exactly TEST_BOUND predecessor links remain accepted"
+        );
+
+        let over_limit = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x7202));
+        let over_limit_root = stage_chain(&over_limit, TEST_BOUND + 1);
+        assert!(matches!(
+            verify_outcome_index_checkpoint_chain_with_bound(
+                &over_limit,
+                &CryptoBodyIdentity,
+                over_limit_root,
+                TEST_BOUND,
+            ),
+            Err(OutcomeIndexCheckpointRefusal::PredecessorChainTooLong)
+        ));
     }
 }
 
