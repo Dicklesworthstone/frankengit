@@ -106,7 +106,7 @@ fn public_merkle_selection_reopens_and_serves_a_verified_ref_absence() {
     };
     assert!(matches!(
         envelope.exact_configuration(),
-        Some(VerifiedReadConfiguration::RepositoryIncarnationV2(_))
+        Some(VerifiedReadConfiguration::RepositoryIncarnationV2_1(_))
     ));
     assert_eq!(
         envelope
