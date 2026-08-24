@@ -391,22 +391,28 @@ fn an_unknown_event_kind_on_the_wire_is_refused_and_a_known_one_is_not() {
     };
     let bytes = encode_body(&event).expect("encodes");
 
-    // The kind is a u32 scalar, so four big-endian bytes. Locate it by
-    // re-encoding with a different known kind and diffing, rather than by
-    // assuming an offset.
-    let other = ForgeEvent {
-        payload: ForgeEventPayload::PullRequestHeadAdvanced {
-            source_tip: digest(0x31),
-        },
-        ..event
-    };
-    let other = encode_body(&other).expect("encodes");
+    // Locate the kind tag by diffing against a frame that differs ONLY in
+    // `version`, so both payloads are the same length.
+    //
+    // Diffing against a different KIND does not work, and this test caught
+    // that in its own first version: the frame carries a payload length
+    // prefix ahead of the payload, so two frames whose payloads differ in
+    // length first diverge at that prefix rather than at the tag. The locator
+    // found 21 -- the byte length of a PullRequestClosed payload, 8 + 8 + 4 + 1
+    // -- and pointed four bytes into the header. Holding the payload length
+    // fixed removes the prefix from the comparison entirely.
+    let mut sibling = event.clone();
+    sibling.version = AggregateVersion::try_new(2).expect("a nonzero version");
+    let sibling = encode_body(&sibling).expect("encodes");
     let divergence = bytes
         .iter()
-        .zip(other.iter())
+        .zip(sibling.iter())
         .position(|(left, right)| left != right)
-        .expect("the two frames differ at the kind tag");
-    let kind_offset = divergence - 3;
+        .expect("the two frames differ at the version");
+    // `version` is a big-endian u64, and 1 and 2 differ only in its last
+    // byte, so the field starts seven bytes earlier and the kind tag begins
+    // immediately after it.
+    let kind_offset = divergence + 1;
     assert_eq!(
         &bytes[kind_offset..kind_offset + 4],
         &4_u32.to_be_bytes(),
