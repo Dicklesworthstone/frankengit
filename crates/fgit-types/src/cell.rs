@@ -628,6 +628,15 @@ pub enum CellRefusal {
         /// What was measured.
         observed: StalenessObservation,
     },
+    /// The cell's current state does not admit taking work in at all.
+    ///
+    /// The write-side twin of [`Self::StateAdmitsNoSuchRead`]. Raised BEFORE
+    /// intake, so a cell that cannot stage never quarantines bytes it has no
+    /// business holding.
+    StateAdmitsNoStaging {
+        /// The state observed when the receive was attempted.
+        state: CellState,
+    },
     /// The cell's current state does not admit this kind of read.
     StateAdmitsNoSuchRead {
         /// The state the cell is in.
@@ -651,6 +660,9 @@ impl fmt::Display for CellRefusal {
                 bound.max_age(),
                 bound.max_generation_lag()
             ),
+            Self::StateAdmitsNoStaging { state } => {
+                write!(formatter, "a cell in {state} cannot take receive work in")
+            }
             Self::StateAdmitsNoSuchRead { state, mode } => {
                 write!(formatter, "a cell in {state} cannot serve a {mode:?} read")
             }
@@ -666,6 +678,29 @@ impl core::error::Error for CellRefusal {}
 ///
 /// [`CellRefusal::StateAdmitsNoSuchRead`] naming both, so a caller can report
 /// which half was wrong.
+/// Whether this cell may take receive work in at all.
+///
+/// The write-side twin of [`admits_read`], and deliberately a SEPARATE question
+/// from whether the result may be published. §22.6 gives a partitioned cell
+/// three responses, and staging-only is the one that says *accept and hold, but
+/// publish nothing*: quarantine and validation proceed so the work is not lost,
+/// while the §5.4 staged/visible split keeps it from ever becoming canonical.
+///
+/// A cell that fails this check must refuse before intake rather than after,
+/// because quarantining bytes a cell has no business holding is a cost with no
+/// corresponding benefit — nothing downstream can ever use them.
+///
+/// # Errors
+///
+/// [`CellRefusal::StateAdmitsNoStaging`] naming the observed state.
+pub const fn admits_staging_intake(state: CellState) -> Result<(), CellRefusal> {
+    if state.admits_staging() {
+        Ok(())
+    } else {
+        Err(CellRefusal::StateAdmitsNoStaging { state })
+    }
+}
+
 pub const fn admits_read(state: CellState, mode: ReadMode) -> Result<(), CellRefusal> {
     let admitted = match mode {
         ReadMode::Current => state.admits_current_read(),

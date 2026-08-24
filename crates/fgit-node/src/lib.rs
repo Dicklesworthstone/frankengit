@@ -3266,6 +3266,23 @@ pub enum NodeReceiveTransportRefusal {
     Unauthenticated,
     /// The authenticated request was refused by canonical admission.
     Admission(Box<AdmissionError>),
+    /// The cell's state does not admit taking receive work in at all.
+    ///
+    /// Raised BEFORE intake, so a cell that cannot stage never quarantines
+    /// bytes nothing downstream could use.
+    CellState(CellRefusal),
+    /// The work was quarantined and validated, and publication was refused
+    /// because the cell is staging-only.
+    ///
+    /// §22.6's middle isolation response, and deliberately NOT an error about
+    /// the work: the bytes are staged and intact. §5.4 keeps staged and visible
+    /// distinct, and this is the refusal that holds the line between them, so a
+    /// caller can retry publication once the cell is serving instead of
+    /// re-sending a pack that already arrived.
+    StagedWithoutPublication {
+        /// The state observed when publication was attempted.
+        state: CellState,
+    },
 }
 
 impl Display for NodeReceiveTransportRefusal {
@@ -3275,6 +3292,11 @@ impl Display for NodeReceiveTransportRefusal {
                 formatter.write_str("receive transport did not authenticate a principal")
             }
             Self::Admission(error) => Display::fmt(error, formatter),
+            Self::CellState(refusal) => Display::fmt(refusal, formatter),
+            Self::StagedWithoutPublication { state } => write!(
+                formatter,
+                "a cell in {state} staged the work and refused to publish it"
+            ),
         }
     }
 }
@@ -3282,7 +3304,14 @@ impl Display for NodeReceiveTransportRefusal {
 impl Error for NodeReceiveTransportRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Unauthenticated => None,
+            // These carry a cause that is a STATE, not an error: there is no
+            // underlying failure to chain to. `CellRefusal` does implement
+            // Error, but reporting it as the `source` of a staging refusal
+            // would suggest something went wrong beneath, when the cell simply
+            // is not in a state that admits the operation.
+            Self::Unauthenticated | Self::CellState(_) | Self::StagedWithoutPublication { .. } => {
+                None
+            }
             Self::Admission(error) => Some(error.as_ref()),
         }
     }
@@ -5460,6 +5489,21 @@ impl OneNode {
             return Err(NodeReceiveTransportRefusal::Unauthenticated);
         }
 
+        // INTAKE GATE: NOT WIRED YET, and deliberately so. The ruling asks for
+        // "isolated/read-only/refuse states: typed refusal before intake", and
+        // `admits_staging_intake` implements exactly that. Wiring it here
+        // refuses EVERY receive today, because a node from `OneNode::init`
+        // sits in Bootstrapping and nothing in the ordinary lifecycle
+        // transitions it — only an operator path (fgit-slo) does. Measured: it
+        // broke three existing receive tests with
+        // `CellState(StateAdmitsNoStaging { state: Bootstrapping })`.
+        //
+        // Bootstrapping is a STARTUP state, not one of §22.6's isolation
+        // responses, so whether it should admit intake is a question the
+        // ruling did not answer rather than one I should decide by picking the
+        // reading that compiles. Raised on the bead; the gate lands the moment
+        // it is settled.
+
         let expected_format = match self.object_format {
             GitHashAlgorithm::Sha1 => fgit_wire::GitObjectFormat::Sha1,
             GitHashAlgorithm::Sha256 => fgit_wire::GitObjectFormat::Sha256,
@@ -5488,6 +5532,18 @@ impl OneNode {
         let validated = handoff
             .into_validated_receive()
             .map_err(NodeReceiveTransportRefusal::from)?;
+
+        // PUBLICATION GATE. Quarantine and validation have both completed, so
+        // the work is staged and intact; what a staging-only cell may not do is
+        // make it canonical. Refusing HERE rather than at intake is the whole
+        // point of §22.6's middle response — the pack is not rejected, it is
+        // held — and §5.4's staged/visible split is what keeps "held" from
+        // silently becoming "published".
+        let state = self.cell_state();
+        if state == CellState::StagingOnly {
+            return Err(NodeReceiveTransportRefusal::StagedWithoutPublication { state });
+        }
+
         self.admit_basis_bound_loopback_receive_durable_in(
             request,
             session,

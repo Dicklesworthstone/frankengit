@@ -19,6 +19,7 @@ pub mod vocabulary;
 pub use cell::{
     CellReadiness, CellRefusal, CellState, CellTransition, CellTransitionCause, ReadLabel,
     ReadMode, ServingCell, StalenessBound, StalenessObservation, admits_read,
+    admits_staging_intake,
 };
 pub use error::TypeRefusal;
 pub use gossip::{GossipRefusal, GossipView};
