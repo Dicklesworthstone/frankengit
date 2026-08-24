@@ -98,8 +98,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use fgit_admission::{
     AdmissionContext, AdmissionEvidence, AdmissionLimits, AdmissionProjection, AdmissionSnapshot,
@@ -1271,27 +1270,39 @@ fn the_authority_mechanics_do_not_depend_on_which_adapter_drove_them() {
 /// `tests/*.rs` compiles to its own binary and `fgit-admission` publishes no
 /// test-support module. Forty lines of map is cheaper than asking the crate
 /// owner to widen a public surface for one consumer.
+///
+/// `Arc`/`Mutex` rather than `Rc`/`RefCell` so this double is `Send + Sync` and
+/// two sessions can be driven from real threads. That was the fixture limit
+/// audit 4530.1 identified: the race probe could only run its admissions back
+/// to back. The store beneath it was never the obstacle -- `MemoryAuthorityStore`
+/// already holds a `Mutex<State>` -- so nothing in production needed changing,
+/// which is why the orchestrator ruled this a test change.
 #[derive(Default)]
 struct CommitmentStore {
-    refs: RefCell<BTreeMap<Digest, CanonicalRefState>>,
-    closures: RefCell<BTreeMap<Digest, PermittedObjectClosure>>,
+    refs: Mutex<BTreeMap<Digest, CanonicalRefState>>,
+    closures: Mutex<BTreeMap<Digest, PermittedObjectClosure>>,
 }
 
 #[derive(Clone, Default)]
-struct StagingStore(Rc<CommitmentStore>);
+struct StagingStore(Arc<CommitmentStore>);
 
 impl CanonicalAdmissionStore for StagingStore {
     fn resolve_ref_state(&self, root: Digest) -> Result<CanonicalRefState, RefusalCode> {
         self.0
             .refs
-            .borrow()
+            .lock()
+            .expect("the staging mutex is never poisoned by these tests")
             .get(&root)
             .cloned()
             .ok_or(RefusalCode::EvidenceMissing)
     }
 
     fn stage_ref_state(&self, root: Digest, state: CanonicalRefState) -> Result<(), RefusalCode> {
-        self.0.refs.borrow_mut().insert(root, state);
+        self.0
+            .refs
+            .lock()
+            .expect("the staging mutex is never poisoned by these tests")
+            .insert(root, state);
         Ok(())
     }
 
@@ -1301,7 +1312,8 @@ impl CanonicalAdmissionStore for StagingStore {
     ) -> Result<PermittedObjectClosure, RefusalCode> {
         self.0
             .closures
-            .borrow()
+            .lock()
+            .expect("the staging mutex is never poisoned by these tests")
             .get(&root)
             .cloned()
             .ok_or(RefusalCode::EvidenceMissing)
@@ -1312,7 +1324,11 @@ impl CanonicalAdmissionStore for StagingStore {
         root: Digest,
         closure: PermittedObjectClosure,
     ) -> Result<(), RefusalCode> {
-        self.0.closures.borrow_mut().insert(root, closure);
+        self.0
+            .closures
+            .lock()
+            .expect("the staging mutex is never poisoned by these tests")
+            .insert(root, closure);
         Ok(())
     }
 }
@@ -1594,6 +1610,153 @@ fn two_sessions_deleting_one_ref_yield_exactly_one_commit_and_a_typed_loser() {
         RefusalCode::ExpectedOldRefMismatch,
         "the loser of a contended delete was refused {loser_code:?}, not for the \
          predecessor mismatch the winning delete created"
+    );
+}
+
+/// The same one-winner property under a GENUINELY CONCURRENT schedule.
+///
+/// This is the half of acceptance line 3 that audit 4530.1 correctly said was
+/// missing. The sequential probe above establishes exactly-one-winner for a
+/// deterministic ordering, where the first admission completes before the
+/// second begins; it says nothing about interleavings, which is where a
+/// compare-and-exchange discipline actually earns its keep.
+///
+/// # Why this could not be written before, and what changed
+///
+/// The obstacle was never production. `MemoryAuthorityStore` already holds a
+/// `Mutex<State>`. It was this file's own `StagingStore`, which wrapped an
+/// `Rc<CommitmentStore>` of `RefCell` maps and so was neither `Send` nor
+/// `Sync`. The orchestrator ruled that double a test artifact, and it is now
+/// `Arc`/`Mutex`. No production type needed a bound added, and none blocked
+/// this.
+///
+/// # What is asserted
+///
+/// Over many rounds, each with a fresh genesis: both sessions reach a terminal
+/// decision, exactly one commits, and the loser carries a terminal refusal.
+/// Repetition is the point -- a concurrency probe that runs one interleaving
+/// and passes has sampled one schedule and proven almost nothing, so the rounds
+/// are what turn this from an anecdote into evidence.
+///
+/// # Evidence that the schedule actually interleaves
+///
+/// A "concurrent" probe whose threads serialise proves nothing the sequential
+/// twin did not, so this was measured rather than assumed. Instrumenting the
+/// winner per round at `c79175e`+ on this machine: **first won 50, second won
+/// 14 of 64**. Both orderings occur, so the sessions genuinely contend.
+///
+/// That distribution is a MEASUREMENT, not an invariant, and is deliberately
+/// not asserted: a loaded machine could legitimately produce 64/0 and a test
+/// that failed for it would be flaky. The consequence is stated plainly instead
+/// -- if a future run were to serialise completely, this test would still pass
+/// while quietly degrading to the sequential case, and the interleaving claim
+/// would need re-measuring the same way.
+///
+/// The loser's refusal CODE is deliberately not pinned here, unlike the
+/// sequential twin. Under a real race the loser may lose its CAS and be refused
+/// for the predecessor mismatch, or lose and replan; fixing one code would be
+/// asserting one schedule. What must hold on every schedule is the arithmetic:
+/// one winner, one typed refusal, no unresolved seal.
+#[test]
+fn two_concurrent_sessions_deleting_one_ref_yield_exactly_one_commit() {
+    const ROUNDS: usize = 64;
+
+    let first_context = context(b"fg019c-concurrent-a");
+    let second_context = context(b"fg019c-concurrent-b");
+    let validated = delete_main();
+
+    let mut committed_per_round = Vec::with_capacity(ROUNDS);
+
+    for round in 0..ROUNDS {
+        let (store, projection) = head_bound_setup(&first_context);
+
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                admit_validated_receive(
+                    &store,
+                    &first_context,
+                    &validated,
+                    AdmissionLimits::default(),
+                    &projection,
+                )
+            });
+            let second = scope.spawn(|| {
+                admit_validated_receive(
+                    &store,
+                    &second_context,
+                    &validated,
+                    AdmissionLimits::default(),
+                    &projection,
+                )
+            });
+            (
+                first
+                    .join()
+                    .expect("the first session thread must not panic"),
+                second
+                    .join()
+                    .expect("the second session thread must not panic"),
+            )
+        });
+
+        let mut committed = 0_usize;
+        let mut refused = 0_usize;
+        let mut unresolved: Vec<String> = Vec::new();
+
+        for (label, result, session_context) in [
+            ("first", &first, &first_context),
+            ("second", &second, &second_context),
+        ] {
+            let Ok(result) = result else {
+                unresolved.push(format!("{label}: admission refused outright: {result:?}"));
+                continue;
+            };
+            let tx_id = result.session.tx_ids[0];
+            let resolved = resolve_outcome(
+                &store,
+                &session_context.head_key,
+                session_context.tenant_id,
+                session_context.repository_id,
+                tx_id,
+            )
+            .unwrap_or_else(|error| {
+                panic!("round {round} / {label}: {tx_id:?} must resolve, got {error}")
+            });
+            match resolved {
+                OutcomeLookup::Decided(terminal) => match terminal.outcome {
+                    DecisionOutcome::Committed { .. } => committed += 1,
+                    DecisionOutcome::Refused { .. } => refused += 1,
+                },
+                OutcomeLookup::Undecided => {
+                    unresolved.push(format!("{label}: undecided in the authenticated stream"));
+                }
+            }
+        }
+
+        assert!(
+            unresolved.is_empty(),
+            "round {round}: every session in a concurrent race must reach a terminal \
+             decision; unresolved={unresolved:?}"
+        );
+        assert_eq!(
+            committed, 1,
+            "round {round}: {committed} sessions committed a delete of the same ref from \
+             one lineage under a concurrent schedule; exactly-one-winner does not hold"
+        );
+        assert_eq!(
+            refused, 1,
+            "round {round}: the losing session must carry a terminal refusal, got \
+             {refused} refusals alongside {committed} commits"
+        );
+
+        committed_per_round.push(committed);
+    }
+
+    assert_eq!(
+        committed_per_round.len(),
+        ROUNDS,
+        "every round must have been evaluated, or the loop exited early and the \
+         repetition this test relies on did not happen"
     );
 }
 
