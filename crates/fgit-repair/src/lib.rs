@@ -29,6 +29,9 @@ use fgit_raptorq::{
 use fgit_resource::{BudgetGrant, Grade, ObligationLedger, ResourceError, ResourceVector};
 use fgit_types::{RepositoryAuthorityHeadId, SegmentManifestId};
 
+/// Canonical recovery-drill evidence bound to the existing S5 export attestation.
+pub mod recovery_report;
+
 /// Authenticated root-mark-grace-revalidate GC over immutable object fabric.
 pub mod gc;
 

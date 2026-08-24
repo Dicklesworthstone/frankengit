@@ -262,6 +262,20 @@ pub enum RaptorRefusal {
         maximum: usize,
     },
     AuthenticationRejected,
+    /// Every repair symbol the fixed profile provides was authenticated and
+    /// accepted, but the decoder still has fewer independent symbols than the
+    /// source block requires.  This is not a transient decoder failure: the
+    /// declared repair envelope has been exhausted for this scope.
+    UnrecoverableRegion {
+        /// The immutable microsegment whose repair envelope was exhausted.
+        scope: MicrosegmentScope,
+        /// Distinct authenticated symbols the decoder accepted.
+        symbols_available: usize,
+        /// Distinct symbols required by the source block.
+        symbols_required: u16,
+        /// Accepted repair symbols, bounded by this profile's repair budget.
+        repair_budget_consumed: usize,
+    },
     DecodeFailed,
     CandidateLengthMismatch,
     CandidateCommitmentMismatch,
@@ -320,6 +334,18 @@ impl fmt::Display for RaptorRefusal {
             Self::AuthenticationRejected => {
                 formatter.write_str("symbol authentication did not verify")
             }
+            Self::UnrecoverableRegion {
+                scope,
+                symbols_available,
+                symbols_required,
+                repair_budget_consumed,
+            } => write!(
+                formatter,
+                "microsegment region {:?} is unrecoverable: {symbols_available} symbols \
+                 available of {symbols_required} required after consuming \
+                 {repair_budget_consumed} repair symbols",
+                scope.segment_digest(),
+            ),
             Self::DecodeFailed => {
                 formatter.write_str("RaptorQ could not reconstruct the source bytes")
             }
@@ -431,6 +457,8 @@ pub fn reconstruct_microsegment(
             source_symbols,
         ))
         .map_err(|_| RaptorRefusal::DecodeFailed)?;
+    let mut symbols_available = 0_usize;
+    let mut repair_budget_consumed = 0_usize;
     for scoped in symbols {
         validate_symbol(expected, scoped, source_symbols)?;
         let result = decoder
@@ -444,9 +472,13 @@ pub fn reconstruct_microsegment(
                 return Err(RaptorRefusal::AuthenticationRejected);
             }
             SymbolAcceptResult::Rejected(_) => return Err(RaptorRefusal::DecodeFailed),
-            SymbolAcceptResult::Accepted { .. }
-            | SymbolAcceptResult::DecodingStarted { .. }
-            | SymbolAcceptResult::Duplicate => {}
+            SymbolAcceptResult::Accepted { .. } | SymbolAcceptResult::DecodingStarted { .. } => {
+                symbols_available = symbols_available.saturating_add(1);
+                if !scoped.symbol().kind().is_source() {
+                    repair_budget_consumed = repair_budget_consumed.saturating_add(1);
+                }
+            }
+            SymbolAcceptResult::Duplicate => {}
             // `microsegment_v1` declares exactly one source block.  Once the
             // decoder completes it, later repair symbols are redundant and
             // feeding them would correctly yield `BlockAlreadyDecoded`; that
@@ -455,9 +487,21 @@ pub fn reconstruct_microsegment(
             SymbolAcceptResult::BlockComplete { .. } => break,
         }
     }
-    let bytes = decoder
-        .into_data()
-        .map_err(|_| RaptorRefusal::DecodeFailed)?;
+    let bytes = match decoder.into_data() {
+        Ok(bytes) => bytes,
+        Err(_)
+            if repair_budget_consumed == MicrosegmentRaptorProfile::REPAIR_SYMBOLS
+                && symbols_available < usize::from(source_symbols) =>
+        {
+            return Err(RaptorRefusal::UnrecoverableRegion {
+                scope: expected.clone(),
+                symbols_available,
+                symbols_required: source_symbols,
+                repair_budget_consumed,
+            });
+        }
+        Err(_) => return Err(RaptorRefusal::DecodeFailed),
+    };
     // DEFENSIVE, NOT INPUT-REACHABLE -- same argument as the checkpoint chain.
     // `ObjectParams` above carries `expected.source_len()`, which is exactly
     // what this compares against, so only an engine breaking its own contract

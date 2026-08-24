@@ -6,6 +6,8 @@ publish = false
 
 [dependencies]
 asupersync.workspace = true
+fgit-chronicle.workspace = true
+fgit-codec.workspace = true
 fgit-object-fabric.workspace = true
 fgit-raptorq.workspace = true
 fgit-resource.workspace = true
