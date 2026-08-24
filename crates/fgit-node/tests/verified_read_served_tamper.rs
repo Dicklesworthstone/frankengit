@@ -31,6 +31,7 @@ use fgit_types::layout::RootLayoutVersion;
 use fgit_types::numeric::HeadGeneration;
 use fgit_types::refs::RefName;
 use fgit_types::{RepositoryId, TenantId};
+use fgit_verified_read::freshness::{FreshnessRefusal, FreshnessVerdict, HeadChainFloor};
 use fgit_verified_read::{
     PinnedAuthorityHead, ReadResponse, VerifiedMembership, VerifiedReadCapability,
     VerifiedReadEnvelope, VerifiedReadRefusal, verify_envelope,
@@ -163,6 +164,21 @@ fn a_server_produced_envelope_verifies_and_the_same_envelope_tampered_does_not()
         "the server's own honest answer must verify against a client pin"
     );
 
+    // A CLIENT IS BOTH CHECKS, NOT ONE. Review point on d89db78: nothing
+    // composed HeadChainFloor with verify_envelope, so the two halves of a
+    // verifying client were only ever exercised apart. The floor answers "is
+    // this the moment I should be looking at" (§5.5) and verify_envelope
+    // answers "is this proof valid against that moment"; a client that runs
+    // only the second accepts a replayed-but-genuine answer.
+    let mut floor = HeadChainFloor::anchored_to(served.head()).expect("the served head anchors");
+    assert_eq!(
+        floor
+            .accept(served.head())
+            .expect("re-offering the pinned head is permitted"),
+        FreshnessVerdict::Reaffirms,
+        "polling twice must be ordinary, or the floor breaks normal operation"
+    );
+
     // TAMPERED 1: the same answer re-pointed at a head the client did not pin
     // — the mirror replaying a genuine proof from a different moment. Refused
     // before any proof is examined, so it is named rather than merely an Err.
@@ -177,6 +193,24 @@ fn a_server_produced_envelope_verifies_and_the_same_envelope_tampered_does_not()
         verify_envelope(&pinned, &repinned),
         Err(VerifiedReadRefusal::PinnedHeadMismatch),
         "an answer about a head the client did not pin must be refused, and named as such"
+    );
+
+    // AND THE FLOOR CATCHES IT INDEPENDENTLY, which is the point of composing
+    // them. The forged head keeps the real generation and changes ref_root, so
+    // it is a second distinct head claiming one generation — a fork, not
+    // staleness. Asserted by name: an operator reading "stale" looks at
+    // caching, one reading "forked" looks at the authority.
+    assert_eq!(
+        floor.judge(repinned.head()),
+        Err(FreshnessRefusal::ForkedAtGeneration {
+            generation: served.head().generation
+        }),
+        "a rival head at the pinned generation must be refused as a fork"
+    );
+    assert_eq!(
+        floor.generation(),
+        served.head().generation,
+        "and a refused head must leave the floor exactly where it was"
     );
 
     // TAMPERED 2: the pinned head with its configuration stripped, so the
