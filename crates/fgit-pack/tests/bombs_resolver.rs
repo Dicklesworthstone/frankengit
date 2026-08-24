@@ -155,7 +155,9 @@ fn ref_cycle_and_thin_base_refusals_have_resolvable_near_neighbors() {
     ]);
     let mut cyclic = cyclic;
     let first_ref_offset = match &cyclic[0] {
-        PackObject::Base { offset, .. } | PackObject::Delta(DeltaObject { offset, .. }) => *offset,
+        PackObject::Base { offset, .. }
+        | PackObject::TypedBase { offset, .. }
+        | PackObject::Delta(DeltaObject { offset, .. }) => *offset,
     };
     if let PackObject::Delta(delta) = &mut cyclic[0] {
         delta.id = Some(first_id);
@@ -182,7 +184,7 @@ fn ref_cycle_and_thin_base_refusals_have_resolvable_near_neighbors() {
     if let PackObject::Delta(delta) = &mut base_backed[0] {
         delta.id = Some(permitted_first_id);
     }
-    if let PackObject::Base { id, .. } = &mut base_backed[1] {
+    if let PackObject::Base { id, .. } | PackObject::TypedBase { id, .. } = &mut base_backed[1] {
         *id = Some(permitted_second_id);
     }
     let limits = fixtures::limits();

@@ -273,6 +273,8 @@ pub enum PackError {
     },
     NativeObjectIdMismatch,
     DeltaObjectTypeUnavailable,
+    UntypedInPackBase,
+    UntypedExternalDeltaBase,
     TrailingPackData,
     AllocationFailed {
         requested: usize,

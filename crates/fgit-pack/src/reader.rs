@@ -51,9 +51,10 @@ impl QuarantinedPack {
         for entry in self.entries {
             let id = oid_at_offset(entry.offset);
             let object = match entry.delta_base {
-                None => PackObject::Base {
+                None => PackObject::TypedBase {
                     offset: entry.offset,
                     id,
+                    kind: entry.header.kind,
                     data: entry.inflated,
                 },
                 Some(ParsedDeltaBase::Ofs { base_offset, .. }) => PackObject::Delta(DeltaObject {

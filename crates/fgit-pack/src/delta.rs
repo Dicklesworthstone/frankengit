@@ -1,4 +1,8 @@
-use crate::{Deadline, ObjectId, PackError, PackLimits, checkpoint};
+use fgit_git_object::ObjectType;
+
+use crate::{
+    Deadline, EntryKind, ObjectId, PackError, PackLimits, checkpoint, object_type_from_base_entry,
+};
 
 /// A base reference carried by a delta entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,9 +28,23 @@ pub struct DeltaObject {
 /// must later prove equivalent to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackObject {
+    /// A legacy base input that carries bytes but no native object-type
+    /// commitment. It remains available to preserve the byte-only resolver
+    /// API, but cannot root a typed resolution.
     Base {
         offset: u64,
         id: Option<ObjectId>,
+        data: Vec<u8>,
+    },
+    /// A base input whose pack entry kind commits to its native object type.
+    ///
+    /// [`crate::QuarantinedPack::into_scalar_objects`] emits this variant for
+    /// every non-delta entry so typed resolution can carry the original pack
+    /// type through an arbitrary delta chain without guessing from bytes.
+    TypedBase {
+        offset: u64,
+        id: Option<ObjectId>,
+        kind: EntryKind,
         data: Vec<u8>,
     },
     Delta(DeltaObject),
@@ -35,13 +53,17 @@ pub enum PackObject {
 impl PackObject {
     const fn offset(&self) -> u64 {
         match self {
-            Self::Base { offset, .. } | Self::Delta(DeltaObject { offset, .. }) => *offset,
+            Self::Base { offset, .. }
+            | Self::TypedBase { offset, .. }
+            | Self::Delta(DeltaObject { offset, .. }) => *offset,
         }
     }
 
     const fn id(&self) -> Option<&ObjectId> {
         match self {
-            Self::Base { id, .. } | Self::Delta(DeltaObject { id, .. }) => id.as_ref(),
+            Self::Base { id, .. }
+            | Self::TypedBase { id, .. }
+            | Self::Delta(DeltaObject { id, .. }) => id.as_ref(),
         }
     }
 }
@@ -51,6 +73,16 @@ impl PackObject {
 /// are checked.
 pub trait ExternalBaseLookup {
     fn lookup(&self, id: &ObjectId) -> Option<&[u8]>;
+
+    /// Looks up a thin-pack base together with its already authenticated
+    /// native object type.
+    ///
+    /// The default preserves every existing byte-only lookup implementation.
+    /// A typed resolver treats that default as an explicit absence of type
+    /// provenance and refuses rather than inferring a type from delta bytes.
+    fn lookup_typed(&self, _id: &ObjectId) -> Option<(ObjectType, &[u8])> {
+        None
+    }
 }
 
 impl ExternalBaseLookup for () {
@@ -93,7 +125,9 @@ where
         for object in objects {
             checkpoint(deadline)?;
             match object {
-                PackObject::Base { data, .. } => limits.object_size(data.len())?,
+                PackObject::Base { data, .. } | PackObject::TypedBase { data, .. } => {
+                    limits.object_size(data.len())?
+                }
                 PackObject::Delta(delta) => limits.input(delta.program.len())?,
             }
         }
@@ -133,6 +167,40 @@ where
         self.resolve_object(object, 0, &mut stack, &mut accounting, deadline)
     }
 
+    /// Resolves one pack object by offset and returns the native object type
+    /// inherited from its authenticated base root.
+    pub fn resolve_offset_typed(
+        &self,
+        offset: u64,
+        deadline: &mut impl Deadline,
+    ) -> Result<(ObjectType, Vec<u8>), PackError> {
+        let mut accounting = Accounting::default();
+        let object = self
+            .find_by_offset(offset, &mut accounting, deadline)?
+            .ok_or(PackError::MissingDeltaBase)?;
+        let mut stack = Vec::new();
+        let resolved =
+            self.resolve_object_typed(object, 0, &mut stack, &mut accounting, deadline)?;
+        Ok((resolved.object_type, resolved.bytes))
+    }
+
+    /// Resolves one known native ID and returns the type inherited from its
+    /// authenticated base root.
+    pub fn resolve_id_typed(
+        &self,
+        id: &ObjectId,
+        deadline: &mut impl Deadline,
+    ) -> Result<(ObjectType, Vec<u8>), PackError> {
+        let mut accounting = Accounting::default();
+        let object = self
+            .find_by_id(id, &mut accounting, deadline)?
+            .ok_or(PackError::MissingDeltaBase)?;
+        let mut stack = Vec::new();
+        let resolved =
+            self.resolve_object_typed(object, 0, &mut stack, &mut accounting, deadline)?;
+        Ok((resolved.object_type, resolved.bytes))
+    }
+
     fn resolve_object(
         &self,
         object: &PackObject,
@@ -146,7 +214,7 @@ where
             return Err(PackError::DeltaCycle);
         }
         match object {
-            PackObject::Base { data, .. } => {
+            PackObject::Base { data, .. } | PackObject::TypedBase { data, .. } => {
                 self.limits.object_size(data.len())?;
                 accounting.add_expanded(data.len(), self.limits)?;
                 copy_bytes(data, deadline)
@@ -187,6 +255,68 @@ where
         }
     }
 
+    fn resolve_object_typed(
+        &self,
+        object: &PackObject,
+        depth: usize,
+        stack: &mut Vec<u64>,
+        accounting: &mut Accounting,
+        deadline: &mut impl Deadline,
+    ) -> Result<TypedResolution, PackError> {
+        checkpoint(deadline)?;
+        if stack.contains(&object.offset()) {
+            return Err(PackError::DeltaCycle);
+        }
+        match object {
+            PackObject::Base { .. } => Err(PackError::UntypedInPackBase),
+            PackObject::TypedBase { kind, data, .. } => {
+                let object_type = object_type_from_base_entry(*kind)?;
+                self.limits.object_size(data.len())?;
+                accounting.add_expanded(data.len(), self.limits)?;
+                Ok(TypedResolution {
+                    object_type,
+                    bytes: copy_bytes(data, deadline)?,
+                })
+            }
+            PackObject::Delta(delta) => {
+                self.validate_fanout(&delta.base, accounting, deadline)?;
+                let next_depth = depth.checked_add(1).ok_or(PackError::IntegerOverflow {
+                    context: "delta depth",
+                })?;
+                if next_depth > self.limits.max_delta_depth {
+                    return Err(PackError::DeltaDepthLimit {
+                        depth: next_depth,
+                        limit: self.limits.max_delta_depth,
+                    });
+                }
+                stack
+                    .try_reserve(1)
+                    .map_err(|_| PackError::AllocationFailed { requested: 1 })?;
+                stack.push(delta.offset);
+                let base_result =
+                    self.resolve_base_typed(&delta.base, next_depth, stack, accounting, deadline);
+                let result = match base_result {
+                    Ok(base) => {
+                        let object_type = base.object_type;
+                        let bytes = apply_delta_with_accounting(
+                            &base.bytes,
+                            &delta.program,
+                            self.limits,
+                            accounting,
+                            deadline,
+                        )?;
+                        accounting.add_expanded(bytes.len(), self.limits)?;
+                        Ok(TypedResolution { object_type, bytes })
+                    }
+                    Err(error) => Err(error),
+                };
+                let popped = stack.pop();
+                debug_assert_eq!(popped, Some(delta.offset));
+                result
+            }
+        }
+    }
+
     fn resolve_base(
         &self,
         base: &DeltaBase,
@@ -214,6 +344,40 @@ where
                     self.limits.object_size(external.len())?;
                     accounting.add_expanded(external.len(), self.limits)?;
                     copy_bytes(external, deadline)
+                }
+            }
+        }
+    }
+
+    fn resolve_base_typed(
+        &self,
+        base: &DeltaBase,
+        depth: usize,
+        stack: &mut Vec<u64>,
+        accounting: &mut Accounting,
+        deadline: &mut impl Deadline,
+    ) -> Result<TypedResolution, PackError> {
+        match base {
+            DeltaBase::Ofs(offset) => {
+                let object = self
+                    .find_by_offset(*offset, accounting, deadline)?
+                    .ok_or(PackError::MissingDeltaBase)?;
+                self.resolve_object_typed(object, depth, stack, accounting, deadline)
+            }
+            DeltaBase::Ref(id) => {
+                if let Some(object) = self.find_by_id(id, accounting, deadline)? {
+                    self.resolve_object_typed(object, depth, stack, accounting, deadline)
+                } else if let Some((object_type, external)) = self.external_bases.lookup_typed(id) {
+                    self.limits.object_size(external.len())?;
+                    accounting.add_expanded(external.len(), self.limits)?;
+                    Ok(TypedResolution {
+                        object_type,
+                        bytes: copy_bytes(external, deadline)?,
+                    })
+                } else if self.external_bases.lookup(id).is_some() {
+                    Err(PackError::UntypedExternalDeltaBase)
+                } else {
+                    Err(PackError::MissingDeltaBase)
                 }
             }
         }
@@ -285,6 +449,11 @@ where
     }
 }
 
+struct TypedResolution {
+    object_type: ObjectType,
+    bytes: Vec<u8>,
+}
+
 /// A bounded cache over the scalar resolver.
 ///
 /// It preserves the scalar resolver's logical expansion/work charging, so a
@@ -299,6 +468,7 @@ pub struct CachedResolver<'objects, 'lookup, L> {
 struct CacheEntry {
     offset: u64,
     bytes: Vec<u8>,
+    object_type: Option<ObjectType>,
     logical_expanded: usize,
     logical_work: usize,
 }
@@ -339,6 +509,46 @@ where
         self.resolve_object(&object, 0, &mut stack, &mut accounting, deadline)
     }
 
+    /// Resolves one offset with the type inherited from its authenticated base
+    /// root. Typed cache entries carry that root type alongside their bytes;
+    /// byte-only cache entries are deliberately recomputed rather than being
+    /// promoted into type authority.
+    pub fn resolve_offset_typed(
+        &mut self,
+        offset: u64,
+        deadline: &mut impl Deadline,
+    ) -> Result<(ObjectType, Vec<u8>), PackError> {
+        let mut accounting = Accounting::default();
+        let object = self
+            .scalar
+            .find_by_offset(offset, &mut accounting, deadline)?
+            .ok_or(PackError::MissingDeltaBase)?;
+        let object = clone_pack_object(object, deadline)?;
+        let mut stack = Vec::new();
+        let resolved =
+            self.resolve_object_typed(&object, 0, &mut stack, &mut accounting, deadline)?;
+        Ok((resolved.object_type, resolved.bytes))
+    }
+
+    /// Resolves one native ID with the type inherited from its authenticated
+    /// base root.
+    pub fn resolve_id_typed(
+        &mut self,
+        id: &ObjectId,
+        deadline: &mut impl Deadline,
+    ) -> Result<(ObjectType, Vec<u8>), PackError> {
+        let mut accounting = Accounting::default();
+        let object = self
+            .scalar
+            .find_by_id(id, &mut accounting, deadline)?
+            .ok_or(PackError::MissingDeltaBase)?;
+        let object = clone_pack_object(object, deadline)?;
+        let mut stack = Vec::new();
+        let resolved =
+            self.resolve_object_typed(&object, 0, &mut stack, &mut accounting, deadline)?;
+        Ok((resolved.object_type, resolved.bytes))
+    }
+
     fn resolve_object(
         &mut self,
         object: &PackObject,
@@ -359,7 +569,7 @@ where
             return Err(PackError::DeltaCycle);
         }
         let result = match object {
-            PackObject::Base { data, .. } => {
+            PackObject::Base { data, .. } | PackObject::TypedBase { data, .. } => {
                 self.scalar.limits.object_size(data.len())?;
                 accounting.add_expanded(data.len(), self.scalar.limits)?;
                 copy_bytes(data, deadline)
@@ -415,11 +625,110 @@ where
         self.cache(
             object.offset(),
             &result,
+            None,
             logical_expanded,
             logical_work,
             deadline,
         )?;
         Ok(result)
+    }
+
+    fn resolve_object_typed(
+        &mut self,
+        object: &PackObject,
+        depth: usize,
+        stack: &mut Vec<u64>,
+        accounting: &mut Accounting,
+        deadline: &mut impl Deadline,
+    ) -> Result<TypedResolution, PackError> {
+        checkpoint(deadline)?;
+        if let Some(cached) = self.cached(object.offset()) {
+            if let Some(object_type) = cached.object_type {
+                accounting.add_expanded(cached.logical_expanded, self.scalar.limits)?;
+                accounting.add_work(cached.logical_work, self.scalar.limits)?;
+                return Ok(TypedResolution {
+                    object_type,
+                    bytes: copy_bytes(&cached.bytes, deadline)?,
+                });
+            }
+        }
+        let expanded_before = accounting.expanded;
+        let work_before = accounting.work;
+        if stack.contains(&object.offset()) {
+            return Err(PackError::DeltaCycle);
+        }
+        let resolved = match object {
+            PackObject::Base { .. } => return Err(PackError::UntypedInPackBase),
+            PackObject::TypedBase { kind, data, .. } => {
+                let object_type = object_type_from_base_entry(*kind)?;
+                self.scalar.limits.object_size(data.len())?;
+                accounting.add_expanded(data.len(), self.scalar.limits)?;
+                TypedResolution {
+                    object_type,
+                    bytes: copy_bytes(data, deadline)?,
+                }
+            }
+            PackObject::Delta(delta) => {
+                self.scalar
+                    .validate_fanout(&delta.base, accounting, deadline)?;
+                let next_depth = depth.checked_add(1).ok_or(PackError::IntegerOverflow {
+                    context: "delta depth",
+                })?;
+                if next_depth > self.scalar.limits.max_delta_depth {
+                    return Err(PackError::DeltaDepthLimit {
+                        depth: next_depth,
+                        limit: self.scalar.limits.max_delta_depth,
+                    });
+                }
+                stack
+                    .try_reserve(1)
+                    .map_err(|_| PackError::AllocationFailed { requested: 1 })?;
+                stack.push(delta.offset);
+                let base =
+                    self.resolve_base_typed(&delta.base, next_depth, stack, accounting, deadline);
+                let resolved = match base {
+                    Ok(base) => {
+                        let object_type = base.object_type;
+                        let bytes = apply_delta_with_accounting(
+                            &base.bytes,
+                            &delta.program,
+                            self.scalar.limits,
+                            accounting,
+                            deadline,
+                        )?;
+                        accounting.add_expanded(bytes.len(), self.scalar.limits)?;
+                        Ok(TypedResolution { object_type, bytes })
+                    }
+                    Err(error) => Err(error),
+                };
+                let popped = stack.pop();
+                debug_assert_eq!(popped, Some(delta.offset));
+                resolved?
+            }
+        };
+        let logical_expanded =
+            accounting
+                .expanded
+                .checked_sub(expanded_before)
+                .ok_or(PackError::IntegerOverflow {
+                    context: "cached typed delta expanded accounting",
+                })?;
+        let logical_work =
+            accounting
+                .work
+                .checked_sub(work_before)
+                .ok_or(PackError::IntegerOverflow {
+                    context: "cached typed delta work accounting",
+                })?;
+        self.cache(
+            object.offset(),
+            &resolved.bytes,
+            Some(resolved.object_type),
+            logical_expanded,
+            logical_work,
+            deadline,
+        )?;
+        Ok(resolved)
     }
 
     fn resolve_base(
@@ -458,6 +767,45 @@ where
         }
     }
 
+    fn resolve_base_typed(
+        &mut self,
+        base: &DeltaBase,
+        depth: usize,
+        stack: &mut Vec<u64>,
+        accounting: &mut Accounting,
+        deadline: &mut impl Deadline,
+    ) -> Result<TypedResolution, PackError> {
+        match base {
+            DeltaBase::Ofs(offset) => {
+                let object = self
+                    .scalar
+                    .find_by_offset(*offset, accounting, deadline)?
+                    .ok_or(PackError::MissingDeltaBase)?;
+                let object = clone_pack_object(object, deadline)?;
+                self.resolve_object_typed(&object, depth, stack, accounting, deadline)
+            }
+            DeltaBase::Ref(id) => {
+                if let Some(object) = self.scalar.find_by_id(id, accounting, deadline)? {
+                    let object = clone_pack_object(object, deadline)?;
+                    self.resolve_object_typed(&object, depth, stack, accounting, deadline)
+                } else if let Some((object_type, external)) =
+                    self.scalar.external_bases.lookup_typed(id)
+                {
+                    self.scalar.limits.object_size(external.len())?;
+                    accounting.add_expanded(external.len(), self.scalar.limits)?;
+                    Ok(TypedResolution {
+                        object_type,
+                        bytes: copy_bytes(external, deadline)?,
+                    })
+                } else if self.scalar.external_bases.lookup(id).is_some() {
+                    Err(PackError::UntypedExternalDeltaBase)
+                } else {
+                    Err(PackError::MissingDeltaBase)
+                }
+            }
+        }
+    }
+
     fn cached(&self, offset: u64) -> Option<&CacheEntry> {
         self.entries
             .binary_search_by_key(&offset, |entry| entry.offset)
@@ -469,6 +817,7 @@ where
         &mut self,
         offset: u64,
         bytes: &[u8],
+        object_type: Option<ObjectType>,
         logical_expanded: usize,
         logical_work: usize,
         deadline: &mut impl Deadline,
@@ -487,7 +836,12 @@ where
             .entries
             .binary_search_by_key(&offset, |entry| entry.offset)
         {
-            Ok(_) => return Ok(()),
+            Ok(index) => {
+                if self.entries[index].object_type.is_none() {
+                    self.entries[index].object_type = object_type;
+                }
+                return Ok(());
+            }
             Err(index) => index,
         };
         self.entries
@@ -499,6 +853,7 @@ where
             CacheEntry {
                 offset,
                 bytes: copy,
+                object_type,
                 logical_expanded,
                 logical_work,
             },
@@ -516,6 +871,17 @@ fn clone_pack_object(
         PackObject::Base { offset, id, data } => Ok(PackObject::Base {
             offset: *offset,
             id: *id,
+            data: copy_bytes(data, deadline)?,
+        }),
+        PackObject::TypedBase {
+            offset,
+            id,
+            kind,
+            data,
+        } => Ok(PackObject::TypedBase {
+            offset: *offset,
+            id: *id,
+            kind: *kind,
             data: copy_bytes(data, deadline)?,
         }),
         PackObject::Delta(delta) => Ok(PackObject::Delta(DeltaObject {
