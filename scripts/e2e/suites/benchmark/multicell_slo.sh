@@ -109,6 +109,44 @@ fge_assert_eq FG-036C-E2E-009 0 "$MISSING_FLOOR" \
 fge_pass FG-036C-E2E-010 \
   'no per-read-mode latency ordering is asserted: the mode spread is inside the A/A floor'
 
+# ---------------------------------------------------------------- saturation
+fge_phase action
+# The capacity question is separate from the latency question: a saturation
+# point is where adding concurrency stops adding throughput, which no
+# single-threaded sample can show.
+SAT_ARTIFACT="$artifact_dir/saturation.ndjson"
+fge_run slo-saturation env RCH_CARGO_WRAPPER_BYPASS=1 \
+  cargo run -q --release -p fgit-slo -- saturation >"$SAT_ARTIFACT" || true
+SAT_EXIT=$FGE_LAST_EXIT
+
+fge_phase assert
+fge_assert_exit FG-036C-E2E-011 0 "$SAT_EXIT" 'the saturation sweep completes'
+
+SAT_ROWS=$(grep -c '"record":"saturation_point"' "$SAT_ARTIFACT" || true)
+fge_assert_cmd FG-036C-E2E-012 \
+  'the sweep measured several concurrency levels, so the checks below are not vacuous' \
+  test "$SAT_ROWS" -ge 5
+
+# EXACT PROPERTY: every offered read must have been served. A shortfall means
+# some reader hit a cell that refused, and the rate is then a rate for FEWER
+# cells than the record claims. This exact defect shipped once -- only the
+# first cell had been walked to a serving state, so a three-cell sweep measured
+# one cell and reported saturation at concurrency 2 instead of 8.
+SHORTFALL=$(grep -c '"all_offered_reads_served":false' "$SAT_ARTIFACT" || true)
+fge_assert_eq FG-036C-E2E-013 0 "$SHORTFALL" \
+  'every offered read was served, so each rate is a rate for all the cells claimed'
+
+# The repeat floor must be present on every level, for the same reason the A/A
+# floor is required on latency rows: without it a reader compares rates
+# directly and reads noise as a capacity curve.
+SAT_NO_FLOOR=$(grep '"record":"saturation_point"' "$SAT_ARTIFACT" | grep -cv '"repeat_floor_ops"' || true)
+fge_assert_eq FG-036C-E2E-014 0 "$SAT_NO_FLOOR" \
+  'every concurrency level carries the repeat spread its gain is judged against'
+
+fge_assert_cmd FG-036C-E2E-015 \
+  'the sweep reports where the curve flattened, or says it never did' \
+  grep -q '"record":"saturation_summary"' "$SAT_ARTIFACT"
+
 fge_phase teardown
 # Register the evidence for the harness to collect. There is no explicit
 # finaliser to call: lib.sh installs an EXIT trap that emits the summary line
@@ -116,3 +154,4 @@ fge_phase teardown
 # the suite would have died on the last line with every assertion already
 # passed -- a failure that looks like a harness bug rather than my error.
 fge_artifact "$ARTIFACT" fg036c-multicell-slo-evidence
+fge_artifact "$SAT_ARTIFACT" fg036c-saturation-evidence

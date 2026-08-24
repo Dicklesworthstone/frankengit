@@ -439,6 +439,7 @@ artifact no longer matches its exact digest.
 | CLM-003 | CLAIM-002 | verified | fg041-lean-theorem:ref_and_forge_visibility_is_atomic | machine-checked-within-the-contained-lean-model-under-three-named-boundary-assumptions-only |
 | CLM-004 | CLAIM-002 | verified | fg041-lean-theorems:accepted_publish_is_continuous,head_chain_is_continuous_and_monotone,interrupted_publication_is_anti_rollback | machine-checked-within-the-contained-lean-model-under-three-named-boundary-assumptions-only |
 | CLM-005 | CLAIM-002 | verified | fg041-lean-theorems:unsealed_decision_is_not_fabricated,crash_retry_does_not_lose_or_fabricate_decision | machine-checked-within-the-contained-lean-model-under-three-named-boundary-assumptions-only |
+| CLM-006 | CLAIM-006 | implemented | fg036c-multicell-read-admission-storage-and-capacity-benchmark | reproducible-benchmark-over-one-named-single-host-configuration-only-with-exact-counts-for-storage-and-admission-and-noise-floor-gated-timings |
 <!-- franken-claims-status:end -->
 
 The initial local commands are:
