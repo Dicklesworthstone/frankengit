@@ -2306,6 +2306,99 @@ fn the_two_collector_surfaces_agree_that_an_absent_head_is_an_empty_index() {
     );
 }
 
+// The checkpoint collector is an independently written asynchronous traversal,
+// so the sync refusal matrix above does not exercise these branches.  Each
+// case names one guard: the payload-less position refusal alone cannot show
+// which of its two failure sites was reached.
+
+#[test]
+fn async_checkpoint_collector_refuses_same_tail_with_a_different_sequence() {
+    let (store, head) = published_repository();
+    let view = AsyncView(store);
+
+    assert!(matches!(
+        poll_ready(
+            fgit_authority::collect_cumulative_outcomes_from_checkpoint_async(
+                &view,
+                &(),
+                &head_slot(),
+                &[],
+                head.decision_tail_id,
+                None,
+            )
+        ),
+        Err(OutcomeFailure::CheckpointPositionMismatch)
+    ));
+}
+
+#[test]
+fn async_checkpoint_collector_refuses_when_no_batch_precedes_the_checkpoint() {
+    let store = store();
+    let genesis = genesis_head();
+    initialize_repository(&store, &head_slot(), &genesis).expect("genesis initializes");
+    let unreachable_tail = batch_id_of(&batch(&genesis, 1, vec![committed(tx(0xE1), 1, 0x61)]));
+    let view = AsyncView(store);
+
+    assert!(matches!(
+        poll_ready(
+            fgit_authority::collect_cumulative_outcomes_from_checkpoint_async(
+                &view,
+                &(),
+                &head_slot(),
+                &[],
+                Some(unreachable_tail),
+                None,
+            )
+        ),
+        Err(OutcomeFailure::CheckpointPositionMismatch)
+    ));
+}
+
+#[test]
+fn async_checkpoint_collector_refuses_a_tail_outside_the_head_ancestry() {
+    let (store, head) = published_repository();
+    let unreachable_tail = batch_id_of(&batch(
+        &genesis_head(),
+        3,
+        vec![committed(tx(0xE2), 3, 0x62)],
+    ));
+    let view = AsyncView(store);
+
+    assert!(matches!(
+        poll_ready(
+            fgit_authority::collect_cumulative_outcomes_from_checkpoint_async(
+                &view,
+                &(),
+                &head_slot(),
+                &[],
+                Some(unreachable_tail),
+                head.latest_decision_sequence,
+            )
+        ),
+        Err(OutcomeFailure::CheckpointPositionMismatch)
+    ));
+}
+
+#[test]
+fn async_checkpoint_collector_refuses_position_matched_wrong_leaves() {
+    let (store, head) = published_repository();
+    let view = AsyncView(store);
+
+    assert!(matches!(
+        poll_ready(
+            fgit_authority::collect_cumulative_outcomes_from_checkpoint_async(
+                &view,
+                &(),
+                &head_slot(),
+                &[],
+                head.decision_tail_id,
+                head.latest_decision_sequence,
+            )
+        ),
+        Err(OutcomeFailure::CheckpointRootMismatch)
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // frankengit-w95j: the replay bound.
 //
