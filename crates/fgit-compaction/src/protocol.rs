@@ -391,10 +391,10 @@ impl DurableCompaction {
         }
         retention
             .revalidate_root(proposal)
-            .map_err(RetentionRefusal::Registry)?;
+            .map_err(RetentionRefusal::RetentionBasisRejected)?;
         retention
             .permits_placement_deletion(source)
-            .map_err(RetentionRefusal::Registry)?;
+            .map_err(|refusal| RetentionRefusal::SourceDeletionDenied { source, refusal })?;
         Ok(SourceDeletionPermit {
             source,
             generation: self.generation(),
@@ -539,8 +539,13 @@ pub enum RetentionRefusal {
     SourceNotInTotality,
     /// The retention proposal names a head other than the compacted successor.
     AuthorityHeadMismatch,
-    /// The authority-owned retention registry refused the current basis.
-    Registry(StoreRefusal),
+    /// The authority-owned retention registry rejected the proposed basis.
+    RetentionBasisRejected(StoreRefusal),
+    /// The authenticated registry retained this specific source object.
+    SourceDeletionDenied {
+        source: GitOid,
+        refusal: StoreRefusal,
+    },
 }
 
 impl fmt::Display for RetentionRefusal {
@@ -551,8 +556,17 @@ impl fmt::Display for RetentionRefusal {
             }
             Self::AuthorityHeadMismatch => formatter
                 .write_str("retention proposal is not bound to the compaction successor head"),
-            Self::Registry(refusal) => {
-                write!(formatter, "authenticated retention refused: {refusal}")
+            Self::RetentionBasisRejected(refusal) => {
+                write!(
+                    formatter,
+                    "authenticated retention basis rejected: {refusal}"
+                )
+            }
+            Self::SourceDeletionDenied { source, refusal } => {
+                write!(
+                    formatter,
+                    "authenticated retention denied deletion of source {source:?}: {refusal}"
+                )
             }
         }
     }

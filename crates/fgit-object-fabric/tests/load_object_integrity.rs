@@ -48,16 +48,16 @@
 //!
 //! # `reference.rs` is not the same guard, so one corpus cannot drive both
 //!
-//! The bead asks whether the second backend's `StoredObjectMismatch` is the
+//! The bead asks whether the second backend's stored-object refusal is the
 //! same guard. It is not, and the asymmetry is worth recording: `reference.rs`
 //! raises it on the **write** path when an object already exists under the
 //! requested identity with different content (`existing != &object`), while
 //! `local.rs` raises it on the **read** path when what is on disk reconstructs
-//! to a different identity than the caller asked for. One variant, two
-//! unrelated meanings — a caller matching on `StoredObjectMismatch` cannot tell
-//! a write-time collision from a read-time corruption. This file pins the
-//! read-path guard only, and says so rather than claiming backend coverage it
-//! does not have.
+//! to a different identity than the caller asked for. These are now distinct
+//! structural refusals: `StoredObjectIdentityCollision` on the write path and
+//! `StoredObjectReconstructionMismatch` on the read path. This file pins the
+//! read-path corruption guard; `reference.rs` owns the corresponding in-crate
+//! write-collision probe.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -269,8 +269,12 @@ fn a_substituted_object_is_refused_by_the_identity_commitment() {
     );
 
     let outcome = store_a.read_whole(identity_a);
-    assert!(
-        matches!(outcome, Err(StoreRefusal::StoredObjectMismatch)),
+    assert_eq!(
+        outcome,
+        Err(StoreRefusal::StoredObjectReconstructionMismatch {
+            requested: identity_a,
+            reconstructed: identity_b,
+        }),
         "a well-formed object that is not the requested one must be refused by \
          the identity commitment, got {outcome:?}"
     );

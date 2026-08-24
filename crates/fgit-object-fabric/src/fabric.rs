@@ -86,7 +86,14 @@ pub enum StoreRefusal {
         maximum: u64,
     },
     MalformedStoredObject,
-    StoredObjectMismatch,
+    /// An immutable write found different bytes already bound to its key.
+    StoredObjectIdentityCollision,
+    /// A stored object reconstructed successfully, but not as the identity
+    /// named by the caller.
+    StoredObjectReconstructionMismatch {
+        requested: GitOid,
+        reconstructed: GitOid,
+    },
     InvalidStreamingBudget,
     StreamingBudgetExceeded {
         offered: u64,
@@ -180,8 +187,17 @@ impl fmt::Display for StoreRefusal {
             Self::MalformedStoredObject => {
                 formatter.write_str("stored local object body is malformed")
             }
-            Self::StoredObjectMismatch => {
-                formatter.write_str("stored immutable body disagrees with its exact key")
+            Self::StoredObjectIdentityCollision => {
+                formatter.write_str("immutable write found different bytes under its exact key")
+            }
+            Self::StoredObjectReconstructionMismatch {
+                requested,
+                reconstructed,
+            } => {
+                write!(
+                    formatter,
+                    "stored object reconstructed as {reconstructed:?}, not requested {requested:?}"
+                )
             }
             Self::InvalidStreamingBudget => formatter
                 .write_str("verified stream budget must have positive byte and chunk bounds"),

@@ -326,8 +326,12 @@ impl LocalFilesystemFabric {
             return Err(StoreRefusal::NamespaceMismatch);
         }
         let object = VerifiedObject::new(envelope, bytes[payload_start..].to_vec())?;
-        if object.identity() != identity {
-            return Err(StoreRefusal::StoredObjectMismatch);
+        let reconstructed = object.identity();
+        if reconstructed != identity {
+            return Err(StoreRefusal::StoredObjectReconstructionMismatch {
+                requested: identity,
+                reconstructed,
+            });
         }
         Ok(object)
     }
@@ -444,7 +448,7 @@ impl LocalFilesystemFabric {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let stored = self.load_object(object.identity())?;
                 if stored != *object {
-                    return Err(StoreRefusal::StoredObjectMismatch);
+                    return Err(StoreRefusal::StoredObjectIdentityCollision);
                 }
                 Ok(ImmutableWrite::AlreadyPresent)
             }
@@ -492,7 +496,7 @@ impl LocalFilesystemFabric {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let existing = self.read_bounded(final_path)?;
                 if existing != body {
-                    return Err(StoreRefusal::StoredObjectMismatch);
+                    return Err(StoreRefusal::StoredObjectIdentityCollision);
                 }
                 Ok(ImmutableWrite::AlreadyPresent)
             }
@@ -562,7 +566,7 @@ impl ImmutableObjectFabric for LocalFilesystemFabric {
             Ok(existing) => {
                 let _released = budget.release();
                 if existing != object {
-                    return Err(StoreRefusal::StoredObjectMismatch);
+                    return Err(StoreRefusal::StoredObjectIdentityCollision);
                 }
                 return Ok(PutIfAbsent::AlreadyPresent {
                     placement,

@@ -205,7 +205,7 @@ impl ImmutableObjectFabric for ReferenceMemoryFabric {
             if let Some(existing) = state.objects.get(&object.identity()) {
                 let _released = budget.release();
                 if existing != &object {
-                    return Err(StoreRefusal::StoredObjectMismatch);
+                    return Err(StoreRefusal::StoredObjectIdentityCollision);
                 }
                 return Ok(PutIfAbsent::AlreadyPresent {
                     placement: self.placement.clone(),
@@ -246,7 +246,7 @@ impl ImmutableObjectFabric for ReferenceMemoryFabric {
                 &ResourceVector::ZERO,
             )?;
             if existing != &object {
-                return Err(StoreRefusal::StoredObjectMismatch);
+                return Err(StoreRefusal::StoredObjectIdentityCollision);
             }
             return Ok(PutIfAbsent::AlreadyPresent {
                 placement: self.placement.clone(),
@@ -659,6 +659,26 @@ mod tests {
                 .delete_if_unretained(&AllowRetention, object.identity())
                 .expect("double delete must be idempotent"),
             DeletionReceipt::AlreadyAbsent
+        );
+        assert_quiescent(ledger);
+    }
+
+    #[test]
+    fn different_bytes_under_an_existing_object_key_are_an_identity_collision() {
+        let fabric = fabric(None);
+        let requested = object(b"requested payload");
+        let substituted = object(b"substituted payload");
+        assert_ne!(requested.identity(), substituted.identity());
+        fabric
+            .state()
+            .expect("reference state must be available")
+            .objects
+            .insert(requested.identity(), substituted);
+
+        let ledger = ledger();
+        assert_eq!(
+            fabric.put_if_absent(requested.clone(), admission(&ledger, &requested)),
+            Err(StoreRefusal::StoredObjectIdentityCollision),
         );
         assert_quiescent(ledger);
     }

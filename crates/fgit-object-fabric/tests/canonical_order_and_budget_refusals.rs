@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 //! Canonical-order and streaming-budget refusals (`frankengit-k6ml`).
 //!
-//! `StoreRefusal` has 45 constructed variants and most are exercised only by
+//! `StoreRefusal` has 46 constructed variants and most are exercised only by
 //! the crate's inline `cfg(test)` module. Measured per variant with a
 //! both-trees grep — the crate has no suite-like module in `src/`, so a
 //! `tests/` scan is sound here (checked, after `fgit-authority`'s
@@ -43,7 +43,7 @@
 //!
 //! # Non-claims
 //!
-//! Four of 45 `StoreRefusal` variants, newly named from `tests/`. The other 41
+//! Four of 46 `StoreRefusal` variants, newly named from `tests/`. The other 42
 //! are overwhelmingly in-src-only rather than absent, and this file does not
 //! make the enum "covered". `InvalidPlacementKind` is addressed at the end with
 //! whatever the investigation actually found. LEAD count, not a

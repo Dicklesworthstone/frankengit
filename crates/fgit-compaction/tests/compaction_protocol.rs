@@ -1013,9 +1013,8 @@ fn a_retention_proposal_for_another_head_is_refused() {
 /// before the registry is consulted at all. The REGISTRY is the thing that
 /// disagrees, so `revalidate_root` refuses.
 ///
-/// The inner `StoreRefusal` is asserted, not just the outer variant, and that
-/// is forced rather than stylistic: `Registry(..)` wraps BOTH registry calls
-/// (protocol.rs:387 and :390), so the outer variant cannot say which refused.
+/// The outer variant identifies a rejected retention basis; the inner refusal
+/// supplies the registry's exact reason.
 #[test]
 fn a_retention_basis_the_registry_no_longer_recognises_is_refused() {
     let (durable, retention_root, successor) = durable_generation(b"fg079/pkea-basis", 0x93);
@@ -1030,11 +1029,10 @@ fn a_retention_basis_the_registry_no_longer_recognises_is_refused() {
     );
     assert_eq!(
         refusal,
-        Err(RetentionRefusal::Registry(
+        Err(RetentionRefusal::RetentionBasisRejected(
             StoreRefusal::RetentionRevalidationFailed
         )),
-        "a stale basis must be distinguishable from a retained object, and only \
-         the inner refusal carries that distinction",
+        "a stale basis must be structurally distinguishable from a retained object",
     );
 }
 
@@ -1044,9 +1042,8 @@ fn a_retention_basis_the_registry_no_longer_recognises_is_refused() {
 /// successor, and the registry's head matches so `revalidate_root` succeeds.
 /// The only remaining difference is `permits: false`.
 ///
-/// Together with the test above, this is the pair that shows `Registry(..)`
-/// covers two genuinely different operator situations — a stale basis versus a
-/// retained object — which the outer variant alone cannot report.
+/// Together with the test above, this is the structural pair for the two
+/// different operator situations: stale basis versus retained source object.
 #[test]
 fn an_object_the_registry_retains_is_refused_even_on_a_current_basis() {
     let (durable, retention_root, successor) = durable_generation(b"fg079/pkea-retained", 0x94);
@@ -1061,7 +1058,10 @@ fn an_object_the_registry_retains_is_refused_even_on_a_current_basis() {
     );
     assert_eq!(
         refusal,
-        Err(RetentionRefusal::Registry(StoreRefusal::DeletionRetained)),
+        Err(RetentionRefusal::SourceDeletionDenied {
+            source: object(),
+            refusal: StoreRefusal::DeletionRetained,
+        }),
     );
 }
 
