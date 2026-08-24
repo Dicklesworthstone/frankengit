@@ -141,6 +141,20 @@ impl PackWriteProfile {
         max_delta_depth: 8,
         compression: DeflateProfile::FAST_STORED,
     };
+
+    /// Deterministic fixed-Huffman pack emission with bounded match search.
+    ///
+    /// This is a separate profile rather than a silent revision of
+    /// [`Self::STORED_V1`]: pack receipts retain the exact compressor policy,
+    /// and the stored profile remains the auditable baseline for callers that
+    /// deliberately select it.  The fixed-Huffman profile is not a claim of
+    /// byte-for-byte equivalence with upstream Git's adaptive pack heuristics.
+    pub const COMPRESSED_V1: Self = Self {
+        id: "git-pack-compressed-v1",
+        delta_window: 32,
+        max_delta_depth: 8,
+        compression: DeflateProfile::DEFAULT,
+    };
 }
 
 /// A selected OFS-delta relation in a deterministic plan.
@@ -1440,6 +1454,48 @@ mod tests {
         assert_eq!(parsed.entries()[0].inflated, b"");
         assert_eq!(receipt.profile.delta_window, 32);
         assert_eq!(receipt.profile.max_delta_depth, 8);
+    }
+
+    #[test]
+    fn compressed_profile_reduces_a_repetitive_pack_without_changing_objects() {
+        let body = vec![b'x'; 96 * 1024];
+        let blob = object(ObjectType::Blob, &body, 1, 7);
+        let source = FixtureSource::with(vec![blob.clone()]);
+        let roots = [blob.id()];
+        let stored = PackPlanner::new(ObjectFormat::Sha1, PackWriteProfile::STORED_V1, limits())
+            .plan_selected(&source, &roots, &mut always)
+            .expect("stored profile plans the canonical blob");
+        let compressed = PackPlanner::new(
+            ObjectFormat::Sha1,
+            PackWriteProfile::COMPRESSED_V1,
+            limits(),
+        )
+        .plan_selected(&source, &roots, &mut always)
+        .expect("compressed profile plans the same canonical blob");
+
+        let (stored_bytes, stored_receipt) = PackWriter::new(limits())
+            .write(&stored, &mut always)
+            .expect("stored profile writes");
+        let (compressed_bytes, compressed_receipt) = PackWriter::new(limits())
+            .write(&compressed, &mut always)
+            .expect("compressed profile writes");
+
+        assert_eq!(stored_receipt.object_count, compressed_receipt.object_count);
+        assert_eq!(compressed_receipt.profile, PackWriteProfile::COMPRESSED_V1);
+        assert!(
+            compressed_bytes.len() < stored_bytes.len(),
+            "the compressing profile must improve the repetitive corpus"
+        );
+        let parsed = read_verified_pack(
+            &compressed_bytes,
+            ObjectFormat::Sha1,
+            &limits(),
+            &mut always,
+            &NativeChecksumVerifier,
+        )
+        .expect("compressed pack remains a valid native pack");
+        assert_eq!(parsed.entries().len(), 1);
+        assert_eq!(parsed.entries()[0].inflated, body);
     }
 
     #[test]
