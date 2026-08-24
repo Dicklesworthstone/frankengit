@@ -250,6 +250,7 @@ impl PublicationPlan {
             basis: self.basis,
             batch,
             head,
+            expected_head_token,
         })
     }
 
@@ -327,6 +328,7 @@ pub struct VerifiedPublication {
     basis: PublicationBasis,
     batch: RepositoryDecisionBatchBody,
     head: RepositoryAuthorityHeadBody,
+    expected_head_token: AuthorityVersionToken,
 }
 
 impl VerifiedPublication {
@@ -334,6 +336,21 @@ impl VerifiedPublication {
     #[must_use]
     pub const fn basis(&self) -> &PublicationBasis {
         &self.basis
+    }
+
+    /// The predecessor head token this publication was sealed against.
+    ///
+    /// [`seal`](PublicationPlan::seal) already folds this token into the
+    /// stamped head, so the evidence is bound to it whether or not anyone can
+    /// read it back. Carrying the value closes the gap that binding left open:
+    /// a publisher previously had to supply the token a second time alongside
+    /// the publication, which made it possible to PAIR verified evidence with
+    /// some other token. That pairing was refused downstream rather than
+    /// accepted, but it was representable, and an unrepresentable mistake is
+    /// worth more than a rejected one.
+    #[must_use]
+    pub const fn expected_head_token(&self) -> AuthorityVersionToken {
+        self.expected_head_token
     }
 
     /// The decision batch to stage.
