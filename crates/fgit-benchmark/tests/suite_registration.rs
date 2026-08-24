@@ -17,9 +17,9 @@
 //!
 //! WHAT THIS DOES NOT CATCH, measured rather than assumed: loss of the
 //! executable bit. Discovery is `find "$root" -type f -name '*.sh'`
-//! (run_all.sh:254) with no permission predicate, and a scratch tree
+//! (`run_all.sh:254`) with no permission predicate, and a scratch tree
 //! containing a chmod -x script listed it just the same. The header comment
-//! on run_all.sh describes an executable convention that discovery does not
+//! on `run_all.sh` describes an executable convention that discovery does not
 //! enforce, so do not read this test as guarding it.
 
 use std::path::{Path, PathBuf};

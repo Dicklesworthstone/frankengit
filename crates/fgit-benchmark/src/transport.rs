@@ -57,7 +57,7 @@ const LISTEN_POLL: Duration = Duration::from_millis(2);
 
 /// Interval between `/proc` samples of a live server during a clone.
 ///
-/// Short relative to the 10ms USER_HZ quantization of the CPU counters, so the
+/// Short relative to the 10ms `USER_HZ` quantization of the CPU counters, so the
 /// sampling interval is never the dominant error term in a reported CPU figure.
 const PROBE_POLL: Duration = Duration::from_millis(1);
 
@@ -259,11 +259,14 @@ impl TransportWorkload {
 
     /// The remote path each server exports.
     fn remote_path(&self) -> String {
+        // Both servers want the same string, for different reasons: fg's daemon
+        // grammar expects the `.git`-suffixed repository path, and
+        // `git daemon --base-path` resolves that same name under its base path.
+        // They agree today; a change to either grammar splits this arm again.
         match self.kind {
-            // fg's daemon grammar expects `/<repository>.git`.
-            ServerKind::FgitNode => format!("/{}.git", self.config.repository),
-            // `git daemon --base-path` resolves `/<name>` under the base path.
-            ServerKind::UpstreamGitDaemon => format!("/{}.git", self.config.repository),
+            ServerKind::FgitNode | ServerKind::UpstreamGitDaemon => {
+                format!("/{}.git", self.config.repository)
+            }
         }
     }
 
@@ -348,10 +351,13 @@ fn wait_until_listening(port: u16, mut child: Child) -> Result<Child, Child> {
     let deadline = Instant::now() + LISTEN_TIMEOUT;
     while Instant::now() < deadline {
         match child.try_wait() {
-            // Exited before binding: this port is unusable.
-            Ok(Some(_)) => return Err(child),
+            // Exited before binding, or the liveness check itself failed.
+            // Different facts, same verdict: the port will not come up, and a
+            // caller that cannot even ask is no better placed than one told the
+            // child is gone.
+            Ok(Some(_)) | Err(_) => return Err(child),
+            // Alive but not yet listening: keep polling until the deadline.
             Ok(None) => {}
-            Err(_) => return Err(child),
         }
         if port_is_listening(port) {
             return Ok(child);
@@ -529,20 +535,23 @@ fn server_cpu_ns(pid: u32) -> Option<u64> {
     // at `utime stime = 0 0`. `fg serve` is single-process, so its work lands
     // in utime+stime and its child fields are zero. Summing all four is the only
     // formula correct for both arms.
-    let utime: u64 = fields.get(11)?.parse().ok()?;
-    let stime: u64 = fields.get(12)?.parse().ok()?;
-    let cutime: u64 = fields.get(13)?.parse().ok()?;
-    let cstime: u64 = fields.get(14)?.parse().ok()?;
+    // Fields 11-14 of the stat line: utime, stime, cutime, cstime. The last two
+    // are spelled out rather than carrying their procfs names, which differ by
+    // one character and read as typos of each other at a glance.
+    let self_user: u64 = fields.get(11)?.parse().ok()?;
+    let self_system: u64 = fields.get(12)?.parse().ok()?;
+    let children_user: u64 = fields.get(13)?.parse().ok()?;
+    let children_system: u64 = fields.get(14)?.parse().ok()?;
     // USER_HZ is 100 on every Linux target this project builds for, so the
     // resolution is 10ms and a clone faster than that reads as 0 jiffies. The
     // value is expressed in nanoseconds so the artifact carries one unit
     // throughout; the quantization is recorded in the workload description
     // rather than hidden behind the finer-looking unit.
     Some(
-        utime
-            .saturating_add(stime)
-            .saturating_add(cutime)
-            .saturating_add(cstime)
+        self_user
+            .saturating_add(self_system)
+            .saturating_add(children_user)
+            .saturating_add(children_system)
             .saturating_mul(10_000_000),
     )
 }
