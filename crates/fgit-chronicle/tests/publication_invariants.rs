@@ -510,6 +510,31 @@ fn a_head_that_does_not_advance_the_generation_is_refused() {
 }
 
 #[test]
+fn a_head_that_skips_a_generation_is_refused_and_the_exact_successor_twin_is_not() {
+    let (basis, batch, mut head) = well_formed_pair();
+    let expected = basis.successor_generation().expect("generation advances");
+    let skipped = expected.next().expect("the fixture has room to skip once");
+
+    head.generation = skipped;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Err(ChronicleRefusal::GenerationNotContiguous {
+            expected,
+            observed: skipped,
+        }),
+        "a total verifier must reject a forward skip even though it is monotone"
+    );
+
+    // Near-identical permitted case: restore the one exact field to N + 1.
+    head.generation = expected;
+    assert_eq!(
+        verify_pair(&CryptoBodyIdentity, &basis, &batch, &head),
+        Ok(()),
+        "the refusal is specific to the skipped generation"
+    );
+}
+
+#[test]
 fn a_head_that_names_the_wrong_tail_position_is_refused() {
     let (basis, batch, mut head) = well_formed_pair();
     head.latest_decision_sequence =

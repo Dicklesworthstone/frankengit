@@ -271,6 +271,13 @@ fn verify_successor(
             successor: head.generation,
         });
     }
+    let expected_generation = basis.successor_generation()?;
+    if head.generation != expected_generation {
+        return Err(ChronicleRefusal::GenerationNotContiguous {
+            expected: expected_generation,
+            observed: head.generation,
+        });
+    }
     if head.predecessor_head_id != Some(basis.id()) {
         return Err(ChronicleRefusal::SuccessorPredecessorNotBound);
     }

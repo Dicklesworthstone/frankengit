@@ -114,6 +114,13 @@ pub enum ChronicleRefusal {
         /// The generation the successor claims.
         successor: HeadGeneration,
     },
+    /// The successor head advances past the one exact next generation.
+    GenerationNotContiguous {
+        /// The only generation a direct successor may carry.
+        expected: HeadGeneration,
+        /// The generation the successor claims.
+        observed: HeadGeneration,
+    },
     /// The successor head does not name the batch it publishes.
     DecisionTailNotBound,
     /// The successor head names a batch other than the one it publishes.
@@ -289,6 +296,12 @@ impl fmt::Display for ChronicleRefusal {
                 "successor generation {} does not strictly advance {}",
                 successor.get(),
                 predecessor.get()
+            ),
+            Self::GenerationNotContiguous { expected, observed } => write!(
+                f,
+                "successor generation {} skips the required next generation {}",
+                observed.get(),
+                expected.get()
             ),
             Self::DecisionTailNotBound => {
                 f.write_str("the successor head does not name the batch it publishes")
