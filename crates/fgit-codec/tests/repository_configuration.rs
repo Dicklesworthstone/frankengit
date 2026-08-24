@@ -161,6 +161,107 @@ fn unknown_persisted_object_format_is_refused_while_a_known_twin_decodes() {
     ));
 }
 
+/// The predecessor frame, schema 1.1 with a four-byte payload and no rule list.
+/// Kept deliberately: the fail-closed property is about what happens to THIS.
+const PREDECESSOR_MINOR_ONE_GOLDEN: &[u8] = b"FGC1\
+    \x00\x01\x00\x00\
+    \x00\x00\x00\x26frankengit/repository-configuration/v1\
+    \x00\x00\x00\x18repository-configuration\
+    \x00\x01\x00\x01\
+    \x00\x00\x00\x04\x00\x01\x00\x02";
+
+#[test]
+fn a_predecessor_minor_is_refused_rather_than_read_without_its_rule_list() {
+    // THE FAIL-CLOSED PROPERTY, and the reason the field is behind a version
+    // bump rather than a tolerated trailing field.
+    //
+    // The direction that matters is not an old body read by a new build -- that
+    // body genuinely has no rules, so "hides nothing" is the correct answer for
+    // it. The dangerous direction is the reverse: a body that DOES carry hide
+    // rules, read by a build that does not know the field, would ignore them and
+    // serve refs the repository considers hidden. `decode_body` requires an
+    // exact minor, which is what makes that impossible in both directions.
+    //
+    // Asserting the exact refusal rather than is_err(): several guards could
+    // reject this frame, and only the minor check is the one carrying the
+    // property.
+    let refusal = decode_body::<RepositoryConfigurationBody>(
+        PREDECESSOR_MINOR_ONE_GOLDEN,
+        DecodeLimits::DEFAULT,
+    )
+    .expect_err("a body at the predecessor minor must not decode as minor 2");
+
+    // MEASURED, not assumed, and not what I first expected. `decode_body` runs
+    // `read_payload` inside `decode_body_preserving` BEFORE it compares minors,
+    // so a predecessor frame dies on the absent mandatory field rather than on
+    // the version. Still fail-closed -- it refuses instead of defaulting to "no
+    // rules" -- but the guard that fires is the payload bound, so that is what
+    // this asserts. Claiming the minor check here would be describing a code
+    // path that does not run.
+    assert!(
+        matches!(
+            refusal,
+            CodecRefusal::InputTruncated {
+                field: "hidden_ref_rules",
+                ..
+            }
+        ),
+        "a predecessor frame must refuse on the absent rule list, got {refusal:?}"
+    );
+}
+
+/// A successor frame: schema 1.3, carrying the minor-2 payload plus two bytes
+/// this build does not know how to interpret.
+const SUCCESSOR_MINOR_THREE_GOLDEN: &[u8] = b"FGC1\
+    \x00\x01\x00\x00\
+    \x00\x00\x00\x26frankengit/repository-configuration/v1\
+    \x00\x00\x00\x18repository-configuration\
+    \x00\x01\x00\x03\
+    \x00\x00\x00\x0a\x00\x01\x00\x02\x00\x00\x00\x00\xff\xff";
+
+#[test]
+fn a_successor_minor_is_refused_by_the_version_and_not_read_partially() {
+    // THIS is the direction that matters for disclosure, and the one the exact
+    // minor check actually covers. A body written by a newer build may carry
+    // rules -- or anything else -- in bytes this build cannot interpret. Reading
+    // it as far as this build understands would mean honouring only part of the
+    // repository's policy while believing it had honoured all of it. The minor
+    // check refuses the whole body instead.
+    let refusal = decode_body::<RepositoryConfigurationBody>(
+        SUCCESSOR_MINOR_THREE_GOLDEN,
+        DecodeLimits::DEFAULT,
+    )
+    .expect_err("a body at a later minor must not be decoded partially");
+
+    assert!(
+        matches!(
+            refusal,
+            CodecRefusal::SchemaMinorUnsupported {
+                observed: 3,
+                supported: 2,
+                ..
+            }
+        ),
+        "the minor boundary must be what refuses a successor, got {refusal:?}"
+    );
+}
+
+#[test]
+fn the_permitted_twin_the_current_minor_decodes_from_the_same_frame_shape() {
+    // Without this the test above is satisfied by a decoder that refuses every
+    // frame. Same domain, same family, same major, same construction -- only the
+    // minor and the payload differ, so the refusal above is attributable to the
+    // version and nothing else.
+    assert_eq!(
+        decode_body::<RepositoryConfigurationBody>(
+            SHA256_CONFIGURATION_GOLDEN,
+            DecodeLimits::DEFAULT
+        )
+        .expect("the current minor decodes from the same frame shape"),
+        sha256_configuration()
+    );
+}
+
 #[test]
 fn default_configuration_keeps_the_legacy_sha1_profile_explicit() {
     assert_eq!(
