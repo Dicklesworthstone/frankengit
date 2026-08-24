@@ -2163,27 +2163,44 @@ impl CanonicalObjectSource for VerifiedFabricPackSource<'_> {
 
 fn selected_pack_ids(
     closure: &PermittedObjectClosure,
+    client_haves: &[GitOid],
     limits: &PackLimits,
 ) -> Result<Vec<GitOid>, PackWriteError> {
-    let count = u32::try_from(closure.objects().len()).map_err(|_| {
-        PackWriteError::Pack(PackError::EntryCountLimit {
-            actual: u32::MAX,
-            limit: limits.max_entries,
-        })
-    })?;
-    if count > limits.max_entries {
-        return Err(PackError::EntryCountLimit {
-            actual: count,
-            limit: limits.max_entries,
-        }
-        .into());
-    }
-    let mut ids = Vec::new();
-    ids.try_reserve_exact(closure.objects().len())
+    // `PackRequest` has already bounded and de-duplicated `have` lines at
+    // the wire boundary.  Copy and sort them here so selected-closure
+    // planning does not trust map order or use an unbounded allocation path.
+    // A client have can only remove an already authority-permitted object; it
+    // cannot add disclosure or alter the authenticated closure retained in
+    // the pack receipt.
+    let mut haves = Vec::new();
+    haves
+        .try_reserve_exact(client_haves.len())
         .map_err(|_| PackError::AllocationFailed {
-            requested: closure.objects().len(),
+            requested: client_haves.len(),
         })?;
-    ids.extend(closure.objects().iter().copied());
+    haves.extend_from_slice(client_haves);
+    haves.sort_unstable();
+    haves.dedup();
+
+    let maximum = usize::try_from(limits.max_entries).unwrap_or(usize::MAX);
+    let mut ids = Vec::new();
+    ids.try_reserve_exact(closure.objects().len().min(maximum))
+        .map_err(|_| PackError::AllocationFailed {
+            requested: closure.objects().len().min(maximum),
+        })?;
+    for &id in closure.objects() {
+        if haves.binary_search(&id).is_ok() {
+            continue;
+        }
+        if ids.len() == maximum {
+            return Err(PackError::EntryCountLimit {
+                actual: u32::try_from(ids.len().saturating_add(1)).unwrap_or(u32::MAX),
+                limit: limits.max_entries,
+            }
+            .into());
+        }
+        ids.push(id);
+    }
     Ok(ids)
 }
 
@@ -4581,7 +4598,7 @@ impl OneNode {
             .map_err(NodePackMaterializationRefusal::from)?;
         let pack_context = request.authority().create_child();
         let mut is_live = || pack_context.checkpoint().is_ok();
-        self.materialize_selected_pack(&materialized, &mut is_live)
+        self.materialize_selected_pack(&materialized, &[], &mut is_live)
     }
 
     /// Materializes an authority-selected pack with a fresh request context.
@@ -4595,6 +4612,7 @@ impl OneNode {
     fn materialize_selected_pack(
         &self,
         materialized: &MaterializedAdmission,
+        client_haves: &[GitOid],
         is_live: &mut impl FnMut() -> bool,
     ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
         let limits = PackLimits::default();
@@ -4603,11 +4621,15 @@ impl OneNode {
             fabric: &self.fabric,
             maximum_object_bytes: limits.max_object_bytes.min(configured_limit),
         };
-        let ids = selected_pack_ids(materialized.selected_closure().closure(), &limits)
-            .map_err(NodePackMaterializationRefusal::from)?;
+        let ids = selected_pack_ids(
+            materialized.selected_closure().closure(),
+            client_haves,
+            &limits,
+        )
+        .map_err(NodePackMaterializationRefusal::from)?;
         let planner = PackPlanner::new(
             self.object_format,
-            PackWriteProfile::STORED_V1,
+            PackWriteProfile::COMPRESSED_V1,
             limits.clone(),
         );
         let plan = planner
@@ -4753,7 +4775,7 @@ impl OneNode {
             capabilities,
             limits,
             Some(deadline),
-            |_request, _pack_request| {
+            |_request, pack_request| {
                 let pack_context = request.authority().create_child();
                 let pack_deadline_expired = AtomicBool::new(false);
                 let mut is_live = || {
@@ -4763,7 +4785,11 @@ impl OneNode {
                     }
                     pack_context.checkpoint().is_ok()
                 };
-                let pack = self.materialize_selected_pack(&materialized, &mut is_live);
+                let pack = self.materialize_selected_pack(
+                    &materialized,
+                    &pack_request.haves,
+                    &mut is_live,
+                );
                 if pack_deadline_expired.load(Ordering::Relaxed) || deadline.expired() {
                     Err(GitDaemonServeError::Transport(
                         GitDaemonTransportRefusal::SessionDeadlineExceeded {
@@ -6910,6 +6936,12 @@ mod tests {
                 b"authority selected blob".to_vec(),
             )
             .expect("fixture blob enters verified fabric");
+        let client_have = node
+            .put_git_object(
+                fgit_git_object::ObjectType::Blob,
+                b"client already has this authority-selected blob".to_vec(),
+            )
+            .expect("fixture client-have blob enters verified fabric");
 
         let mut refs = BTreeMap::new();
         refs.insert(
@@ -6926,7 +6958,10 @@ mod tests {
                 ref_state,
             ))
             .expect("future RCR ref state stages before head publication");
-        let closure = PermittedObjectClosure::new(BTreeSet::from([stored.identity()]));
+        let closure = PermittedObjectClosure::new(BTreeSet::from([
+            stored.identity(),
+            client_have.identity(),
+        ]));
         let closure_root = node
             .runtime()
             .block_on(
@@ -7102,6 +7137,7 @@ mod tests {
                 &[
                     Packet::Data(format!("want {}\n", stored.identity()).into_bytes()),
                     Packet::Flush,
+                    Packet::Data(format!("have {}\n", client_have.identity()).into_bytes()),
                     Packet::Data(b"done\n".to_vec()),
                 ],
                 &WireLimits::default(),
@@ -7128,6 +7164,29 @@ mod tests {
                 .windows(b"PACK".len())
                 .any(|window| window == b"PACK"),
             "non-empty refs are advertised only with an emitted authority-selected pack"
+        );
+        let pack_offset = response
+            .windows(b"PACK".len())
+            .position(|window| window == b"PACK")
+            .expect("the completed session contains one raw pack");
+        let mut deadline = || true;
+        let pack = fgit_pack::read_verified_pack(
+            &response[pack_offset..],
+            GitHashAlgorithm::Sha1,
+            &fgit_pack::PackLimits::default(),
+            &mut deadline,
+            &fgit_pack::NativeChecksumVerifier,
+        )
+        .expect("the daemon's compressed pack has a valid native checksum");
+        assert_eq!(
+            pack.entries().len(),
+            1,
+            "an exact client have removes its object from the authority-selected pack"
+        );
+        assert_eq!(
+            pack.entries()[0].inflated,
+            b"authority selected blob",
+            "the permitted twin not named as a client have remains in the emitted pack"
         );
     }
 
