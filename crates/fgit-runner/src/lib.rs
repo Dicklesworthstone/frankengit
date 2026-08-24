@@ -1556,7 +1556,7 @@ pub struct ReuseKey {
 }
 
 impl ReuseKey {
-    fn new(trust_domain: TrustDomain, capsule_id: CapsuleId, step_id: RunnerText) -> Self {
+    const fn new(trust_domain: TrustDomain, capsule_id: CapsuleId, step_id: RunnerText) -> Self {
         Self {
             trust_domain,
             capsule_id,
@@ -1625,7 +1625,7 @@ pub struct SpotCheckSchedule {
 
 impl SpotCheckSchedule {
     /// Creates a sample schedule with `numerator / denominator` selection.
-    pub fn new(
+    pub const fn new(
         numerator: u16,
         denominator: u16,
         selection_seed: Commitment,
@@ -1789,7 +1789,7 @@ pub enum ReuseMiss {
         /// Class that must be reverified before any later reuse.
         class: ReuseClass,
         /// Immutable evidence for the sampled mismatch.
-        evidence: ReuseNegativeEvidence,
+        evidence: Box<ReuseNegativeEvidence>,
     },
 }
 
@@ -1797,9 +1797,9 @@ pub enum ReuseMiss {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReuseDecision {
     /// A real execution is required before producing output.
-    Execute(ReuseMiss),
+    Execute(Box<ReuseMiss>),
     /// The exact stored output may be reused, with original provenance named.
-    Reuse(ReuseReceipt),
+    Reuse(Box<ReuseReceipt>),
 }
 
 /// Immutable negative evidence emitted by a failed reuse spot check.
@@ -1857,7 +1857,7 @@ pub enum SpotCheckResult {
     /// Independent execution produced the exact same ordered artifact bytes.
     Matched,
     /// Independent execution disagreed and automatically quarantined the class.
-    Mismatch(ReuseNegativeEvidence),
+    Mismatch(Box<ReuseNegativeEvidence>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1938,28 +1938,28 @@ impl OutputStore {
         policy: &ReusePolicy,
     ) -> ReuseDecision {
         if step.determinism() == DeterminismDeclaration::DeclaredNondeterministic {
-            return ReuseDecision::Execute(ReuseMiss::NondeterministicDeclaration);
+            return ReuseDecision::Execute(Box::new(ReuseMiss::NondeterministicDeclaration));
         }
         if !policy.permits(step) {
-            return ReuseDecision::Execute(ReuseMiss::PolicyDenied);
+            return ReuseDecision::Execute(Box::new(ReuseMiss::PolicyDenied));
         }
         let key = ReuseKey::new(trust_domain, capsule.id(), step.step_id().clone());
         let class = ReuseClass::from_key(&key);
         if let Some(evidence) = self.quarantined_classes.get(&class) {
-            return ReuseDecision::Execute(ReuseMiss::ClassQuarantined {
+            return ReuseDecision::Execute(Box::new(ReuseMiss::ClassQuarantined {
                 class,
-                evidence: evidence.clone(),
-            });
+                evidence: Box::new(evidence.clone()),
+            }));
         }
         let Some(output) = self.entries.get(&key) else {
-            return ReuseDecision::Execute(ReuseMiss::ExactOutputAbsent { key });
+            return ReuseDecision::Execute(Box::new(ReuseMiss::ExactOutputAbsent { key }));
         };
-        ReuseDecision::Reuse(ReuseReceipt {
+        ReuseDecision::Reuse(Box::new(ReuseReceipt {
             spot_check_scheduled: policy.spot_checks().selects(&key),
             key,
             artifacts: output.artifacts.clone(),
             original_execution: output.original_execution.clone(),
-        })
+        }))
     }
 
     /// Compares the scheduled independent reexecution with the reused bytes.
@@ -2000,7 +2000,7 @@ impl OutputStore {
         };
         self.quarantined_classes
             .insert(negative.class.clone(), negative.clone());
-        Ok(SpotCheckResult::Mismatch(negative))
+        Ok(SpotCheckResult::Mismatch(Box::new(negative)))
     }
 }
 

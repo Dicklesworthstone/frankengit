@@ -187,10 +187,11 @@ fn a_single_environment_near_miss_never_hits_the_cache() {
         )
         .expect("recorded output");
 
-    let ReuseDecision::Execute(ReuseMiss::ExactOutputAbsent { key }) =
-        store.decide(domain, &near_miss, &step, &policy)
-    else {
+    let ReuseDecision::Execute(miss) = store.decide(domain, &near_miss, &step, &policy) else {
         panic!("changing one admitted environment binding must miss");
+    };
+    let ReuseMiss::ExactOutputAbsent { key } = *miss else {
+        panic!("near-miss must have no exact output");
     };
     assert_eq!(key.capsule_id(), near_miss.id());
     assert_ne!(recorded_input.id(), near_miss.id());
@@ -218,11 +219,12 @@ fn trust_domains_and_nondeterministic_declarations_never_reuse_outputs() {
 
     assert!(matches!(
         store.decide(untrusted, &input, &deterministic, &policy),
-        ReuseDecision::Execute(ReuseMiss::ExactOutputAbsent { .. })
+        ReuseDecision::Execute(miss) if matches!(*miss, ReuseMiss::ExactOutputAbsent { .. })
     ));
     assert!(matches!(
         store.decide(trusted, &input, &nondeterministic_step(), &policy),
-        ReuseDecision::Execute(ReuseMiss::NondeterministicDeclaration)
+        ReuseDecision::Execute(miss)
+            if matches!(*miss, ReuseMiss::NondeterministicDeclaration)
     ));
 }
 
@@ -279,6 +281,6 @@ fn sampled_byte_mismatch_emits_evidence_and_quarantines_the_reuse_class() {
 
     assert!(matches!(
         store.decide(domain, &input, &step, &policy),
-        ReuseDecision::Execute(ReuseMiss::ClassQuarantined { .. })
+        ReuseDecision::Execute(miss) if matches!(*miss, ReuseMiss::ClassQuarantined { .. })
     ));
 }
