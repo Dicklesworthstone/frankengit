@@ -108,8 +108,9 @@ use fgit_admission::{
     AdmissionSnapshotProjection, CanonicalAdmissionProjection, CanonicalAdmissionStore,
     CanonicalRefState, CommitEvidence, CommitMaterialization, PermittedObjectClosure,
     ProjectionFailure, QuarantineValidator, RefusalMaterialization, ValidatedClosure,
-    ValidatedReceive, admit_validated_receive, canonical_ref_state_root,
-    permitted_object_closure_root, validate_receive,
+    ValidatedReceive, admit_basis_bound_validated_receive, admit_validated_receive,
+    canonical_ref_state_root, permitted_object_closure_root, validate_receive,
+    validate_receive_at_basis,
 };
 use fgit_authority::{
     AuthenticatedHead, AuthorityStore, DuplicateDelivery, FaultDirective, FaultKind, FaultPosition,
@@ -1668,8 +1669,6 @@ fn two_concurrent_sessions_deleting_one_ref_yield_exactly_one_commit() {
     let second_context = context(b"fg019c-concurrent-b");
     let validated = delete_main();
 
-    let mut committed_per_round = Vec::with_capacity(ROUNDS);
-
     for round in 0..ROUNDS {
         let (store, projection) = head_bound_setup(&first_context);
 
@@ -1751,16 +1750,14 @@ fn two_concurrent_sessions_deleting_one_ref_yield_exactly_one_commit() {
             "round {round}: the losing session must carry a terminal refusal, got \
              {refused} refusals alongside {committed} commits"
         );
-
-        committed_per_round.push(committed);
     }
 
-    assert_eq!(
-        committed_per_round.len(),
-        ROUNDS,
-        "every round must have been evaluated, or the loop exited early and the \
-         repetition this test relies on did not happen"
-    );
+    // Audit 4658.1 was right that the old form here was tautological: it pushed
+    // `committed`, which the loop body had already asserted equals 1, then
+    // checked the vector's LENGTH -- so it re-checked an asserted constant and
+    // could only have caught an early `break` that the asserting body makes
+    // impossible anyway. Removed rather than dressed up; the per-round
+    // assertions are the evidence.
 }
 
 /// The rival session a scheduled race admits inline.
@@ -1946,6 +1943,115 @@ fn a_scheduled_push_race_forces_the_stale_cas_window_and_still_yields_one_winner
         ),
         "A lost the scheduled race and must carry a terminal refusal, got {:?}",
         a.commands[0].terminal.outcome
+    );
+
+    // Every declared boundary ran. Audit 4658.1 asked for this and the precedent
+    // asserts it: without exhaustion a schedule that fired only its first gate
+    // would leave the later boundaries unexercised while every assertion above
+    // still passed.
+    assert!(
+        scheduled.cursor.borrow().is_exhausted(),
+        "the declared three-boundary schedule was not exhausted, so at least one \
+         race boundary never ran"
+    );
+}
+
+/// The PRODUCTION basis-bound loser status, which is not the one the other
+/// probes in this file observe.
+///
+/// # Why this exists
+///
+/// Audit 4658.2 caught a gap I would not have found: every other race probe
+/// here drives [`admit_validated_receive`], and production receive-pack does
+/// not. The raw path binds its validation to the exact authority basis that
+/// authorized it (`validate_receive_at_basis`) and admits through
+/// [`admit_basis_bound_validated_receive`], and when the head has moved under
+/// that binding the refusal is `AuthorityReceiptStale` -- a DIFFERENT code from
+/// the `ExpectedOldRefMismatch` the non-basis-bound entrypoint produces for the
+/// same physical situation.
+///
+/// So "the loser carries the right status" was being asserted against a path
+/// production does not take. This pins it on the path production does.
+///
+/// # Why no schedule is needed
+///
+/// Staleness here is created by CONSTRUCTION rather than by timing: session A's
+/// receive is bound to basis A, session B then commits and moves the head, and
+/// only then is A admitted. There is no window to hit and nothing to interleave,
+/// so a deterministic sequence is the honest instrument -- the lab-gated probe
+/// above is what covers the timing-dependent window.
+#[test]
+fn a_basis_bound_loser_is_refused_authority_receipt_stale_not_expected_old_ref_mismatch() {
+    let a_context = context(b"fg019c-basisbound-a");
+    let b_context = context(b"fg019c-basisbound-b");
+    let (store, projection) = head_bound_setup(&a_context);
+
+    // Bind session A's receive to the CURRENT basis, before B moves the head.
+    let basis_a = basis_for(&authenticated_head_body(&store, &a_context.head_key));
+    let request = delete_main_request();
+    let receipt = QuarantineReceipt {
+        object_format: GitObjectFormat::Sha1,
+        object_count: 0,
+        pack_bytes: 0,
+        delete_only: true,
+    };
+    let bound_a = validate_receive_at_basis(
+        &request,
+        None,
+        &receipt,
+        &basis_a,
+        &DeleteOnlyValidator,
+        &mut live_deadline(),
+    )
+    .expect("a delete-only receive binds to its authenticated basis");
+
+    // B commits and moves the head out from under A's binding.
+    let b = admit_validated_receive(
+        &store,
+        &b_context,
+        &delete_main(),
+        AdmissionLimits::default(),
+        &projection,
+    )
+    .expect("session B reaches a terminal decision");
+    assert!(
+        matches!(
+            b.commands[0].terminal.outcome,
+            DecisionOutcome::Committed { .. }
+        ),
+        "this probe needs B to WIN so that A's binding is genuinely stale; got {:?}",
+        b.commands[0].terminal.outcome
+    );
+
+    // A now admits against a basis the head has moved past.
+    let a = admit_basis_bound_validated_receive(
+        &store,
+        &a_context,
+        &bound_a,
+        AdmissionLimits::default(),
+        &projection,
+    )
+    .expect("the stale basis-bound session reaches a terminal decision");
+
+    assert!(
+        matches!(
+            a.commands[0].terminal.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::AuthorityReceiptStale,
+                ..
+            }
+        ),
+        "the production basis-bound path must refuse a stale binding as \
+         AuthorityReceiptStale rather than by ref-predecessor comparison; got {:?}",
+        a.commands[0].terminal.outcome
+    );
+
+    // One command, one status, so the per-loser status is reported and not
+    // merely derivable.
+    assert_eq!(
+        a.command_statuses().len(),
+        1,
+        "one command must yield exactly one reported status"
     );
 }
 

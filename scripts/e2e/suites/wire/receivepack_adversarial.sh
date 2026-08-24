@@ -49,8 +49,8 @@ readonly ADMISSION_PROBES=4
 # it was written to catch. Counted two independent ways at 1dcdf43: this lane
 # own grep over the target output, and the test attributes in the source.
 # Both said 14; now 16 -- the concurrent thread race and the scheduled
-# stale-CAS race, both added for acceptance line 3.
-readonly RACE_PROBES=16
+# stale-CAS race, plus the production basis-bound loser-status probe.
+readonly RACE_PROBES=17
 readonly PROPAGATION_PROBES=3
 
 main() {
