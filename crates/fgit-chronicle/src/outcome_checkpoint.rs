@@ -7,6 +7,7 @@
 //! capsule that names its digest remains the root-last publication point.
 
 use core::fmt;
+use std::collections::BTreeSet;
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityStore, CumulativeOutcomes,
@@ -389,14 +390,14 @@ where
     let first = load_outcome_index_checkpoint(store, identity, root)?;
     let repository_id = first.repository_id;
     let mut current = first.clone();
-    let mut seen = vec![root];
+    let mut seen = BTreeSet::from([root]);
     let mut links = 0_usize;
 
     while let Some(predecessor_root) = current.predecessor_checkpoint_root {
         if links == MAX_CHECKPOINT_PREDECESSORS {
             return Err(OutcomeIndexCheckpointRefusal::PredecessorChainTooLong);
         }
-        if seen.contains(&predecessor_root) {
+        if !seen.insert(predecessor_root) {
             return Err(OutcomeIndexCheckpointRefusal::PredecessorCycle);
         }
         let predecessor = load_outcome_index_checkpoint(store, identity, predecessor_root)?;
@@ -406,7 +407,6 @@ where
         if !checkpoint_position_advances(&current, &predecessor) {
             return Err(OutcomeIndexCheckpointRefusal::PredecessorPositionMismatch);
         }
-        seen.push(predecessor_root);
         current = predecessor;
         links += 1;
     }
@@ -427,14 +427,14 @@ where
     let first = load_outcome_index_checkpoint_async(store, cx, identity, root).await?;
     let repository_id = first.repository_id;
     let mut current = first.clone();
-    let mut seen = vec![root];
+    let mut seen = BTreeSet::from([root]);
     let mut links = 0_usize;
 
     while let Some(predecessor_root) = current.predecessor_checkpoint_root {
         if links == MAX_CHECKPOINT_PREDECESSORS {
             return Err(OutcomeIndexCheckpointRefusal::PredecessorChainTooLong);
         }
-        if seen.contains(&predecessor_root) {
+        if !seen.insert(predecessor_root) {
             return Err(OutcomeIndexCheckpointRefusal::PredecessorCycle);
         }
         let predecessor =
@@ -445,7 +445,6 @@ where
         if !checkpoint_position_advances(&current, &predecessor) {
             return Err(OutcomeIndexCheckpointRefusal::PredecessorPositionMismatch);
         }
-        seen.push(predecessor_root);
         current = predecessor;
         links += 1;
     }
