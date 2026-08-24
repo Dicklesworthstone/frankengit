@@ -273,10 +273,7 @@ impl VerifiedReadEnvelope {
         configuration: Option<RepositoryConfigurationBody>,
         answer: VerifiedReadAnswer,
     ) -> Self {
-        let configuration = match configuration {
-            Some(configuration) => Some(VerifiedReadConfiguration::RepositoryV1(configuration)),
-            None => None,
-        };
+        let configuration = configuration.map(VerifiedReadConfiguration::RepositoryV1);
         Self::new_with_exact_configuration(head, configuration, answer)
     }
 
