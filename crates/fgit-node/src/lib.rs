@@ -917,8 +917,8 @@ enum PackContextCheckpoint {
 /// native cause before a caller can inspect it. The node-owned native context
 /// is therefore the authoritative checkpoint whenever it is attached. A
 /// pre-existing local cancellation remains first, and detached contexts retain
-/// the ordinary FrankenSQLite checkpoint fallback. Node authority contexts do
-/// not install FrankenSQLite's optional e-process oracle; adding one requires
+/// the ordinary `FrankenSQLite` checkpoint fallback. Node authority contexts do
+/// not install `FrankenSQLite`'s optional e-process oracle; adding one requires
 /// an oracle-only probe rather than routing back through this lossy bridge.
 fn checkpoint_pack_context(context: &FsqliteCx) -> PackContextCheckpoint {
     if context.is_cancel_requested() {
@@ -5148,14 +5148,13 @@ impl OneNode {
             };
             self.materialize_selected_pack(&materialized, &[], &mut is_live)
         };
-        match exhaustion {
-            Some(dimension) => Err(NodePackMaterializationRefusal::BudgetClassExhausted {
+        exhaustion.map_or(pack, |dimension| {
+            Err(NodePackMaterializationRefusal::BudgetClassExhausted {
                 class,
                 dimension,
                 operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
-            }),
-            None => pack,
-        }
+            })
+        })
     }
 
     /// Materializes an authority-selected pack with a fresh request context.
