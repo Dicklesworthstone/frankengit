@@ -32,7 +32,8 @@ use fgit_admission::{
     initialize_canonical_repository,
 };
 use fgit_authority::{
-    AuthorityStore, HeadKey, HeadRead, IdempotencyKey, MemoryAuthorityStore, StoreInstanceId,
+    AuthorityOpKind, AuthorityStore, FaultDirective, FaultKind, FaultPlan, FaultableAuthorityStore,
+    HeadKey, HeadRead, IdempotencyKey, MemoryAuthorityStore, StoreInstanceId,
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_codec::RepositoryAuthorityHeadBody;
@@ -482,5 +483,97 @@ fn a_merge_whose_workspace_advanced_is_refused_and_the_same_one_at_its_epoch_is_
         })
         .expect("original ref root"),
         "a refused merge must leave the ref state exactly as it found it"
+    );
+}
+
+/// A lost response at the head CAS leaves no half-merged state.
+///
+/// This is the crash-matrix shape for a merge: the compare-and-exchange is
+/// attempted and the caller never learns what happened. §5.2 is explicit that a
+/// client's cancellation or disconnect never proves non-commit, so the property
+/// under test is not "the merge did not happen" — it is that the repository is
+/// in ONE of two consistent states and never between them, and that the same
+/// sealed merge retried resolves to the SAME decision rather than merging twice.
+///
+/// The fault is addressed by operation KIND rather than by absolute index.
+/// Aiming a crash drill by index at whichever operation happens to be third
+/// gives a drill that passes while testing something else entirely.
+#[test]
+fn a_lost_response_at_the_cas_leaves_no_half_merged_state() {
+    let (context, store, projection, commitments) = repository();
+    let package = package(FIRST_MERGE_OID);
+    let attempt = attempt();
+    let closure = closure(FIRST_MERGE_OID);
+
+    store.install_fault_plan(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
+        0,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::LoseResponse,
+    )]));
+    let ambiguous = admit_merge(
+        store.as_ref(),
+        &context,
+        &sealed(&package, &attempt, &closure),
+        AdmissionLimits::default(),
+        &projection,
+        &commitments,
+    );
+
+    // The fault must actually have fired. A crash drill whose injection never
+    // reached the operation it named would pass trivially -- the merge would
+    // simply commit, the retry would resolve through the idempotency probe, and
+    // every assertion below would hold while testing nothing at all.
+    let injected = store.fault_log();
+    assert!(
+        !injected.records().is_empty(),
+        "the lost-response fault never fired, so this drill exercised no crash"
+    );
+
+    // The head is either where genesis left it or exactly one generation on.
+    // Anything else is a half-published merge.
+    store.install_fault_plan(FaultPlan::none());
+    let HeadRead::Present(head) = store.read_head(&context.head_key).expect("head reads") else {
+        panic!("the repository head must still exist after an ambiguous response");
+    };
+    let after_crash = head.generation();
+    assert!(
+        after_crash == HeadGeneration::FIRST
+            || after_crash
+                == HeadGeneration::FIRST
+                    .next()
+                    .expect("a successor generation"),
+        "an ambiguous CAS left the head at neither its old nor its next generation: {after_crash:?}"
+    );
+
+    // The retry is the same sealed merge: same session key, so the same TxId.
+    // Whatever the first attempt did, this must agree with it rather than
+    // publish a second merge.
+    let retried = admit_merge(
+        store.as_ref(),
+        &context,
+        &sealed(&package, &attempt, &closure),
+        AdmissionLimits::default(),
+        &projection,
+        &commitments,
+    )
+    .expect("the retry of a sealed merge reaches a terminal decision");
+
+    if let Ok(first) = ambiguous {
+        assert_eq!(
+            first, retried,
+            "a retry after a lost response must resolve to the decision already made, \
+             not make a new one"
+        );
+    }
+
+    let HeadRead::Present(head) = store.read_head(&context.head_key).expect("head reads") else {
+        panic!("the repository head must exist after the retry");
+    };
+    assert_eq!(
+        head.generation(),
+        HeadGeneration::FIRST
+            .next()
+            .expect("a successor generation"),
+        "the merge published exactly once across the crash and the retry"
     );
 }
