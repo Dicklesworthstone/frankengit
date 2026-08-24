@@ -35,19 +35,19 @@ REPOID=22222222222222222222222222222222
 
 fge_phase action
 
-# Locate or assemble the node binary. Building is preferred; a prebuilt binary
-# is accepted so the cell stays runnable while cargo is contended elsewhere.
-FG_BIN=${FG_BIN:-}
-if [ -z "$FG_BIN" ]; then
-  ALT="${CARGO_TARGET_DIR:-$REPO_ROOT/target}/debug/fg"
-  CAND="$REPO_ROOT/target/debug/fg"
-  if command -v cargo >/dev/null 2>&1; then
-    RCH_CARGO_WRAPPER_BYPASS=1 cargo build -q -p fgit-cli >&2 || true
-  fi
-  [ -x "$ALT" ] && FG_BIN=$ALT
-  [ -z "$FG_BIN" ] && [ -x "$CAND" ] && FG_BIN=$CAND
-fi
-fge_assert_cmd FG-058-SHA256-001 'an fg node binary is available' test -n "$FG_BIN"
+# This lane must execute a binary assembled from this checkout, not a binary
+# another revision left in a shared target directory. A private target root
+# prevents Cargo from reusing that artifact, and deliberately ignores FG_BIN:
+# an externally supplied binary has no revision binding this test can prove.
+BUILD_TARGET=$(fge_tempdir sha256-repo-roundtrip-binary)
+BUILD_RC=0
+fge_run sha256-repo-roundtrip-build-fg \
+  env RCH_CARGO_WRAPPER_BYPASS=1 CARGO_TARGET_DIR="$BUILD_TARGET" \
+  cargo build --locked -p fgit-cli \
+  || BUILD_RC=$?
+fge_assert_eq FG-058-SHA256-001 0 "$BUILD_RC" \
+  'fg builds from this checkout into the lane-private target directory'
+FG_BIN="$BUILD_TARGET/debug/fg"
 fge_assert_cmd FG-058-SHA256-002 'the node binary is executable' test -x "$FG_BIN"
 
 WORK=$(fge_tempdir sha256-repo-roundtrip-work)
