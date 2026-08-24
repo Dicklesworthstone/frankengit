@@ -174,6 +174,11 @@ else
   cp "$PRF_REPO/proofs/fg041/ASSUMPTIONS.md" "$PRF_REPO/proofs/fg041/FalseVariant.lean" \
      "$PRF_REPO/proofs/fg041/OrderedResidue.lean" "$PRF_REPO/proofs/fg041/check.sh" \
      "$PRF_REPO/proofs/fg041/toolchain.json" "$prf_sb/proofs/fg041/"
+  # CLM-004 binds the bridge artifacts too, so the baseline needs them or it
+  # would fail for an unavailable artifact rather than for anything the drill did.
+  mkdir -p "$prf_sb/proofs/fg041/generated"
+  cp "$PRF_REPO/proofs/fg041/Refinement.lean" "$prf_sb/proofs/fg041/"
+  cp "$PRF_REPO/proofs/fg041/generated/Vectors.lean" "$prf_sb/proofs/fg041/generated/"
   # CLM-001 binds sources outside proofs/, and an unavailable artifact demotes
   # exactly like a changed one. Without these the baseline would fail for a
   # reason that has nothing to do with the drill, and the drill would be
@@ -240,8 +245,43 @@ else
     'is weaker than claim class' \
     'the demotion explains the rank comparison rather than failing opaquely'
 
+  # Restore the registry before the next axis. An earlier version did not, and
+  # the drifted-trace axis below inherited this axis's weakened CLM-002 row --
+  # so its scoping assertion failed for a reason that had nothing to do with a
+  # drifted trace. A probe that does not restore is not a probe of the next
+  # thing; it is a probe of the sum of everything before it.
+  cp "$PRF_REPO/registries/claims.tsv" "$prf_sb/registries/"
+
   # The checkout itself never moved. This is the assertion that keeps the drill
   # runnable in a shared worktree.
+
+  # Axis three: a DRIFTED TRACE. CLM-004 is the one row that took refinement
+  # evidence, so it binds proofs/fg041/generated/Vectors.lean. Regenerating the
+  # golden corpus without re-verifying the refinement must therefore demote it,
+  # automatically and without a reviewer.
+  #
+  # The second assertion is the one that earns this axis. CLM-002, CLM-003 and
+  # CLM-005 do NOT bind the vectors, because this corpus does not exercise their
+  # theorems -- no history decides the same target twice, the batches carry no
+  # ref or forge effect vectors, and nothing crashes or retries. If a drifted
+  # trace demoted them too, the refinement class would have been spread across
+  # rows it does not cover, which is the inflation FG-041c refused. Scoping is
+  # the claim here, so scoping is what is checked.
+  cp "$PRF_REPO/proofs/fg041/generated/Vectors.lean" "$prf_sb/proofs/fg041/generated/"
+  printf '\n-- fg041d drill: a drifted trace\n' \
+    >>"$prf_sb/proofs/fg041/generated/Vectors.lean"
+  prf_drift_exit=0
+  prf_drift_out=$(prf_check_sandbox) || prf_drift_exit=$?
+  printf '%s\n' "$prf_drift_out" >"$(fge_artifact_path fg041-registry-drift-drill.log)"
+  fge_field registry_drift_drill_exit "$prf_drift_exit"
+  fge_assert_ne fg041-demotes-on-drifted-trace 0 "$prf_drift_exit" \
+    'a drifted trace must demote the claim that rests on it'
+  fge_assert_contains fg041-drift-demotes-the-refinement-row "$prf_drift_out" 'CLM-004' \
+    'the row that took refinement evidence is the one that loses its binding'
+  fge_assert_not_contains fg041-drift-spares-the-uncovered-rows "$prf_drift_out" 'CLM-002' \
+    'a row whose theorems this corpus never exercises must not cite it, so a drift cannot demote it'
+  cp "$PRF_REPO/proofs/fg041/generated/Vectors.lean" "$prf_sb/proofs/fg041/generated/"
+
   # Digest the exact file the drill mutates in its sandbox, not the directory
   # it lives in. TWO earlier versions of this assertion were scoped wider than
   # the property: the first named registries/claims.tsv and failed while the
