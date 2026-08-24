@@ -5,6 +5,7 @@
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -13,6 +14,8 @@ use fgit_node::{NodeConfig, NodeRefusal, OneNode};
 use fgit_types::{GitHashAlgorithm, RepositoryId, TenantId};
 
 static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+const ABRUPT_INITIALIZER_ROOT_ENV: &str = "FGIT_ABRUPT_INITIALIZER_ROOT";
 
 struct ScratchDirectory(PathBuf);
 
@@ -163,4 +166,49 @@ fn explicit_caller_object_format_mismatch_is_refused() {
             supplied: GitHashAlgorithm::Sha1,
         })
     ));
+}
+
+/// This is invoked as a child test by
+/// [`sha256_repository_reopens_after_abrupt_initializer_process_exit`]. The
+/// process exit deliberately bypasses [`OneNode::shutdown`], so the parent
+/// proves that reopening consumes the configuration staged before an orderly
+/// node teardown could make the result look durable.
+#[test]
+fn abrupt_initializer_process_exits_without_node_shutdown() {
+    let Ok(root) = std::env::var(ABRUPT_INITIALIZER_ROOT_ENV) else {
+        return;
+    };
+
+    let _node =
+        OneNode::init(config(PathBuf::from(root)).with_object_format(GitHashAlgorithm::Sha256))
+            .expect("the child persists the SHA-256 canonical configuration before it exits");
+    std::process::exit(0);
+}
+
+#[test]
+fn sha256_repository_reopens_after_abrupt_initializer_process_exit() {
+    let scratch = ScratchDirectory::new();
+    let status = Command::new(std::env::current_exe().expect("test binary path resolves"))
+        .args([
+            "--exact",
+            "abrupt_initializer_process_exits_without_node_shutdown",
+            "--nocapture",
+        ])
+        .env(ABRUPT_INITIALIZER_ROOT_ENV, &scratch.0)
+        .status()
+        .expect("the abrupt initializer child starts");
+    assert!(
+        status.success(),
+        "the child initializes successfully before intentionally exiting without shutdown"
+    );
+
+    let reopened = OneNode::open_existing(config(scratch.0.clone()))
+        .expect("a fresh process default must resolve persisted SHA-256 state");
+    let advertisement = advertise_once(reopened);
+    assert!(
+        advertisement
+            .windows(b"object-format=sha256".len())
+            .any(|window| window == b"object-format=sha256"),
+        "the abrupt-process reopen retains the persisted SHA-256 object domain"
+    );
 }

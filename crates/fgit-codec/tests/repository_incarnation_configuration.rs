@@ -16,11 +16,12 @@ use fgit_codec::{
     RepositoryIncarnationConfigurationBody, canonical_body_bytes, decode_body, encode_body,
     read_frame_header,
 };
+use fgit_types::error::TypeRefusal;
 use fgit_types::identity::RepositoryIncarnationId;
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::native::GitHashAlgorithm;
 
-fn incarnation_configuration() -> RepositoryIncarnationConfigurationBody {
+const fn incarnation_configuration() -> RepositoryIncarnationConfigurationBody {
     RepositoryIncarnationConfigurationBody {
         root_layout: RootLayoutVersion::RefStateMerkleV1,
         object_format: GitHashAlgorithm::Sha256,
@@ -89,6 +90,37 @@ fn v2_incarnation_configuration_round_trips_its_exact_identity_binding() {
         expected,
         "the selected configuration retains the minted incarnation bytes"
     );
+}
+
+#[test]
+fn unknown_v2_object_format_is_refused_while_the_known_twin_decodes() {
+    assert_eq!(
+        decode_body::<RepositoryIncarnationConfigurationBody>(
+            INCARNATION_CONFIGURATION_GOLDEN,
+            DecodeLimits::DEFAULT
+        )
+        .expect("the known SHA-256 v2 code point decodes"),
+        incarnation_configuration(),
+        "the permitted v2 twin proves this test is about the object-format code point"
+    );
+
+    let mut unknown = INCARNATION_CONFIGURATION_GOLDEN.to_vec();
+    let length = unknown.len();
+    // The v2 payload is the final twenty bytes: root-layout, object-format,
+    // then the fixed-width incarnation. Mutating the second scalar reaches the
+    // exact current object-format field rather than either frame metadata or
+    // the incarnation binding.
+    unknown[length - 18..length - 16].copy_from_slice(&u16::MAX.to_be_bytes());
+    let refusal =
+        decode_body::<RepositoryIncarnationConfigurationBody>(&unknown, DecodeLimits::DEFAULT)
+            .expect_err("an unknown v2 object-format code point must not become SHA-1");
+    assert!(matches!(
+        refusal,
+        CodecRefusal::Type(TypeRefusal::CodePointUnknown {
+            field: "GitHashAlgorithm",
+            observed: 65_535,
+        })
+    ));
 }
 
 #[test]

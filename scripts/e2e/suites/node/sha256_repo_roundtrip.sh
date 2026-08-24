@@ -17,20 +17,11 @@
 #       token on stderr. A repository's object format is permanent, so the
 #       thing that must never happen is a quiet fall back to SHA-1.
 #
-# WHAT IS NOT ASSERTED YET, deliberately and not by narrowing:
-#   The clone/fetch differential against the pinned Git oracle
-#   (`oracle.sh clone-loopback`) is acceptance line 4 of the bead and is
-#   BLOCKED, not skipped here to make a green. A repository's object format is
-#   not persisted anywhere -- `NodeConfig.object_format` is config-only, so
-#   `fg serve` reopens any repository with the SHA-1 default and would
-#   advertise `object-format=sha1` for a SHA-256 repository. Serving one
-#   correctly is a precondition for the differential. Tracked as
-#   frankengit-lozg; the reasoning is recorded in
-#   docs/D3_SHA256_REPOSITORY_DECISION.md.
-#
-#   The differential body belongs in THIS file once lozg lands. It is left out
-#   rather than stubbed because `fge_unsupported` is a terminal non-pass in
-#   this harness, so a placeholder assertion would ship a permanently red cell.
+#   The served SHA-256 assertion below is intentionally narrower than a
+#   clone/fetch differential: it proves the assembled `fg serve` command
+#   reopens the separately initialized repository and advertises its stored
+#   object domain. Object transfer conformance remains owned by the loopback
+#   oracle lane; this cell does not claim it.
 set -euo pipefail
 E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPO_ROOT="$(cd "$E2E_ROOT/../../.." && pwd)"
@@ -88,5 +79,37 @@ BOGUS_RC=0
 fge_assert_cmd FG-058-SHA256-007 'an unrecognised object format exits nonzero' test "$BOGUS_RC" -ne 0
 fge_assert_cmd FG-058-SHA256-008 'the refusal names the rejected token' grep -q 'sha512' "$WORK/bogus.out"
 fge_assert_cmd FG-058-SHA256-009 'the refused init created no repository' test ! -d "$WORK/bogus"
+
+# The exact open-path acceptance: this is not OneNode called in-process. The
+# real assembled `fg serve` process reopens the SHA-256 repository produced by
+# the earlier process, then a real Git client observes its advertised object
+# format. `fg serve` is one-shot, so a live child also proves the chosen port
+# was actually bound rather than merely syntactically acceptable.
+PORT_BASE=$((20000 + ($$ % 20000)))
+SHA256_SERVE_PORT=''
+SHA256_SERVE_NAME=''
+for offset in 0 4 8 12 16 20 24 28; do
+  candidate=$((PORT_BASE + offset))
+  name="sha256-serve-$candidate"
+  fge_spawn "$name" bash -c 'exec "$1" serve "$2" "$3" "$4" "127.0.0.1:$5" >"$6" 2>&1' \
+    _ "$FG_BIN" "$WORK/sha256" "$TENANT" "$REPOID" "$candidate" "$WORK/$name.out"
+  sleep 1
+  if kill -0 "$FGE_LAST_PID" 2>/dev/null; then
+    SHA256_SERVE_PORT=$candidate
+    SHA256_SERVE_NAME=$name
+    break
+  fi
+done
+fge_assert_cmd FG-058-SHA256-010 'a separate fg serve process is listening for the SHA-256 repository' \
+  test -n "$SHA256_SERVE_PORT"
+
+SHA256_SERVE_RC=0
+GIT_TERMINAL_PROMPT=0 GIT_TRACE_PACKET=1 git -c protocol.version=1 ls-remote \
+  "git://127.0.0.1:$SHA256_SERVE_PORT/$REPOID.git" >"$WORK/sha256-ls-remote.out" 2>"$WORK/sha256-packet-trace.out" \
+  || SHA256_SERVE_RC=$?
+[ -z "$SHA256_SERVE_NAME" ] || fge_reap "$SHA256_SERVE_NAME"
+fge_assert_eq FG-058-SHA256-011 0 "$SHA256_SERVE_RC" 'git reaches the separate-process SHA-256 serve endpoint'
+fge_assert_cmd FG-058-SHA256-012 'the served protocol advertises SHA-256 from canonical repository state' \
+  grep -q 'object-format=sha256' "$WORK/sha256-packet-trace.out"
 
 fge_phase assert
