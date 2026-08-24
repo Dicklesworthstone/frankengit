@@ -55,11 +55,34 @@ lanes use the pinned, sandboxed upstream oracle only — never a production path
 | 2 | Mixed-format objects/packs are refused, typed | every raise site asserted, each with a permitted twin: `fgit-atp-git` (2), `fgit-admission`, `fgit-authority`, `fgit-pack` (5, closed by `05421c9`, `8133809`, `7e28acd`, `f174ec9`) | **done** |
 | 3 | init / hash round-trip natively in SHA-256 | `fgit-node/tests/sha256_format_matrix.rs`, 5 tests, observed passing at `72edf46` | done (`b14c901`) |
 | 4 | a pinned upstream Git clones a served SHA-256 repository, receiving the exact tip and a pack | `oracle.sh clone-loopback` with `git-2.54.0` in `scripts/e2e/suites/node/sha256_repo_roundtrip.sh`, 26 assertions | **done** (`20c2742`) |
-| 5 | push round-trips | **blocked** — object-bearing push needs a production quarantine validator (`frankengit-production-quarantine-validator-n6kg`) | pending, gated |
+| 5 | push round-trips | **blocked on two gates, not one** — a production quarantine validator (`frankengit-production-quarantine-validator-n6kg`) *and* something that actually serves `git-receive-pack` over the wire (`frankengit-hh37`) | pending, gated |
 
 Line 5 is recorded as pending rather than narrowed away. The bead stays open
 until it lands; closing it earlier would be scope-narrowing while claiming
 success, which §16.3 forbids.
+
+**Correction, recorded rather than silently edited: line 5 names two gates
+because an earlier revision named only one.** That revision recorded the
+quarantine validator as the sole obstacle, which would have become actively
+misleading the moment the validator landed — line 5 would have *looked*
+deliverable while remaining impossible. Measured at HEAD `d89db78`:
+
+- the validator gate is substantively satisfied. `fgit-node`'s production
+  receive path is wired through `ProductionReceiveQuarantineHandoff`, and the
+  eleven tests covering it pass (`--lib quarantine_validator` 8/8,
+  `--test production_receive_handoff` 3/3). Only the bead's status lags.
+- the serving gate is not, and is the deeper one. `fgit-wire` implements
+  `git-receive-pack`, and nothing serves it: `fg serve` answers upload-pack
+  only, and the sole node receive entry point is
+  `receive_loopback_pack_durable_in` — an in-process loopback, not a wire
+  push. `hh37` records this, and is itself sequenced behind `fg042a`, because
+  serving a push requires an authority-issued principal rather than a
+  hard-coded or request-derived one.
+
+So line 5 is not one landing away from delivery, and no amount of work inside
+this decision's scope moves it. The distinction matters for planning: a
+loopback receive that validates and durably admits a pack is real, and it is
+still not a round-trip with a pinned upstream Git on the other end.
 
 **Every "pass" or "verified" recorded against these lines must name the commit
 SHA it was observed at** (§16.2). Unbound claims are unsupported.
