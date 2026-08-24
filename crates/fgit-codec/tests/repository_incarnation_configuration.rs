@@ -4,10 +4,17 @@
 //! Schema major 2 is a deliberately separate body from the older
 //! configuration. A resolver that requires an incarnation must never decode a
 //! v1 body as though it carried one.
+//!
+//! The frame below is written directly from the frame and payload
+//! specification, not produced by the encoder under test. That matters: a
+//! round-trip through `encode_body` and back cannot see a SYMMETRIC defect,
+//! because a field mis-encoded and mis-decoded the same way still compares
+//! equal. Only an independently written vector pins the bytes.
 
 use fgit_codec::{
-    CanonicalBody, DecodeLimits, RepositoryConfigurationBody,
-    RepositoryIncarnationConfigurationBody, decode_body, encode_body,
+    CanonicalBody, CodecRefusal, DecodeLimits, RepositoryConfigurationBody,
+    RepositoryIncarnationConfigurationBody, canonical_body_bytes, decode_body, encode_body,
+    read_frame_header,
 };
 use fgit_types::identity::RepositoryIncarnationId;
 use fgit_types::layout::RootLayoutVersion;
@@ -19,6 +26,51 @@ fn incarnation_configuration() -> RepositoryIncarnationConfigurationBody {
         object_format: GitHashAlgorithm::Sha256,
         repository_incarnation_id: RepositoryIncarnationId::from_bytes([0xA5; 16]),
     }
+}
+
+/// The v2 body at schema 2.0: two big-endian `u16` code points, `root_layout`
+/// then `object_format`, followed by the sixteen raw incarnation bytes with no
+/// length prefix of their own.
+const INCARNATION_CONFIGURATION_GOLDEN: &[u8] = b"FGC1\
+    \x00\x01\x00\x00\
+    \x00\x00\x00\x26frankengit/repository-configuration/v1\
+    \x00\x00\x00\x18repository-configuration\
+    \x00\x02\x00\x00\
+    \x00\x00\x00\x14\x00\x01\x00\x02\
+    \xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5";
+
+#[test]
+fn schema_two_zero_incarnation_configuration_matches_the_independent_golden() {
+    let expected = incarnation_configuration();
+    let (header, _) = read_frame_header(INCARNATION_CONFIGURATION_GOLDEN, DecodeLimits::DEFAULT)
+        .expect("the independently written incarnation frame is structurally valid");
+    assert_eq!(
+        header.schema,
+        RepositoryIncarnationConfigurationBody::schema_id()
+    );
+    assert_eq!(header.schema.major(), 2);
+    assert_eq!(header.schema.minor(), 0);
+    assert_eq!(
+        canonical_body_bytes(&expected).expect("the fixed incarnation body encodes"),
+        [
+            0, 1, 0, 2, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5,
+            0xA5, 0xA5, 0xA5, 0xA5,
+        ],
+        "the payload is root-layout, object-format, then the raw incarnation bytes"
+    );
+    assert_eq!(
+        decode_body::<RepositoryIncarnationConfigurationBody>(
+            INCARNATION_CONFIGURATION_GOLDEN,
+            DecodeLimits::DEFAULT
+        )
+        .expect("the golden must decode"),
+        expected
+    );
+    assert_eq!(
+        encode_body(&expected).expect("the fixed incarnation body re-encodes"),
+        INCARNATION_CONFIGURATION_GOLDEN,
+        "the encoder must reproduce the independently written schema-2.0 frame"
+    );
 }
 
 #[test]
@@ -48,9 +100,22 @@ fn v1_configuration_cannot_be_decoded_as_an_incarnation_configuration() {
     };
     let encoded = encode_body(&legacy).expect("the predecessor body encodes");
 
-    assert!(
+    // is_err() alone would pass for the wrong reason: a v1 body now differs from
+    // a v2 body in payload shape AND schema minor as well as major, so several
+    // guards could fire. The property under test is specifically that the MAJOR
+    // boundary refuses, so the refusal is named.
+    let refusal =
         decode_body::<RepositoryIncarnationConfigurationBody>(&encoded, DecodeLimits::DEFAULT)
-            .is_err(),
-        "a configuration without an incarnation binding must not impersonate v2"
+            .expect_err("a configuration without an incarnation binding must not impersonate v2");
+    assert!(
+        matches!(
+            refusal,
+            CodecRefusal::SchemaMajorUnsupported {
+                observed: 1,
+                supported: 2,
+                ..
+            }
+        ),
+        "the major boundary must be what refuses, got {refusal:?}"
     );
 }
