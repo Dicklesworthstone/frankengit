@@ -962,7 +962,7 @@ pub enum ScrubRefusal {
     /// A runtime checkpoint rejected without an attached cancellation reason.
     RuntimeCheckpointRejected,
     /// A `RaptorQ` repair refusal was retained in the health evidence.
-    Raptor(RaptorRefusal),
+    Raptor(Box<RaptorRefusal>),
     /// Resource algebra refused a pre-work or budget operation.
     Resource(ResourceError),
 }

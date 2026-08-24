@@ -34,12 +34,17 @@ impl RpoRtoSample {
     /// Records one completed drill observation.  Durations may be zero: a
     /// zero is a measured result, not an omitted value.
     #[must_use]
-    pub const fn new(drill_sequence: u64, seed: u64, rpo_millis: u64, rto_millis: u64) -> Self {
+    pub const fn new(
+        drill: u64,
+        replay_seed: u64,
+        recovery_point_millis: u64,
+        recovery_time_millis: u64,
+    ) -> Self {
         Self {
-            drill_sequence,
-            seed,
-            rpo_millis,
-            rto_millis,
+            drill_sequence: drill,
+            seed: replay_seed,
+            rpo_millis: recovery_point_millis,
+            rto_millis: recovery_time_millis,
         }
     }
 
