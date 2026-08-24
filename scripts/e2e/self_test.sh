@@ -188,6 +188,42 @@ fge_assert_ndjson FG-000A-ST-RECEIPT-NDJSON "$CASE_RECEIPT" \
 fge_assert_eq FG-000A-ST-RECEIPT-STATUS pass "$CASE_SUITE_STATUS" \
   'a clean suite reports status pass'
 
+# fge__esc's backslash doubling must come before every later substitution that
+# introduces a backslash. A reordering can still yield valid JSON but decode to
+# the wrong bytes, so test both JSON validity and the byte-exact round trip.
+# Every pair of the five affected byte classes appears in both input orders.
+assert_esc_pair_round_trip() {
+  local id=$1 first_name=$2 first=$3 second_name=$4 second=$5
+  local original escaped decoded json_valid=false
+  original="pair:${first}|${second}:end"
+  fge__esc "$original"
+  escaped=$FGE__E
+  if fge_json_validate_line "{\"value\":\"$escaped\"}"; then
+    json_valid=true
+  fi
+  fge_assert_eq "${id}-JSON" true "$json_valid" \
+    "fge__esc emits valid JSON for ${first_name} before ${second_name}"
+  if decoded=$(fge_json_unquote "\"$escaped\""); then
+    fge_assert_eq "${id}-ROUNDTRIP" "$original" "$decoded" \
+      "fge__esc preserves ${first_name} before ${second_name} exactly"
+  else
+    fge_fail "${id}-ROUNDTRIP" \
+      "fge_json_unquote rejected fge__esc output for ${first_name} before ${second_name}"
+  fi
+}
+
+declare -a ESC_PAIR_NAMES=(backslash quote newline tab control)
+declare -a ESC_PAIR_BYTES=($'\\' '"' $'\n' $'\t' $'\001')
+for esc_first in "${!ESC_PAIR_NAMES[@]}"; do
+  for esc_second in "${!ESC_PAIR_NAMES[@]}"; do
+    [ "$esc_first" -eq "$esc_second" ] && continue
+    assert_esc_pair_round_trip \
+      "FG-000A-ST-ESC-${ESC_PAIR_NAMES[$esc_first]^^}-${ESC_PAIR_NAMES[$esc_second]^^}" \
+      "${ESC_PAIR_NAMES[$esc_first]}" "${ESC_PAIR_BYTES[$esc_first]}" \
+      "${ESC_PAIR_NAMES[$esc_second]}" "${ESC_PAIR_BYTES[$esc_second]}"
+  done
+done
+
 # ---------------------------------------------------------------------------
 # planted negatives, one disposition each
 # ---------------------------------------------------------------------------

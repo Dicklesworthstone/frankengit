@@ -445,6 +445,9 @@ declare -a FGE_JSON_ARRAY=()
 # fge__esc TEXT -> FGE__E
 fge__esc() {
   local s=${1-}
+  # This must precede every substitution below that introduces a backslash:
+  # quote, named control escapes, and the control-byte \uXXXX loop. Their
+  # relative order is otherwise not load-bearing.
   s=${s//\\/\\\\}
   s=${s//\"/\\\"}
   s=${s//$'\n'/\\n}
