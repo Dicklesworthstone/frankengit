@@ -122,6 +122,16 @@ pub enum LooseGitImportRefusal {
     /// A symbolic source ref would require an additional ref-resolution
     /// policy, so it is refused rather than guessed.
     SymbolicRefUnsupported(Box<PathBuf>),
+    /// The source repository did not carry the required `HEAD` symbolic-ref
+    /// file. Import must not manufacture a default branch target.
+    HeadMissing(Box<PathBuf>),
+    /// The source `HEAD` was direct rather than symbolic.
+    HeadNotSymbolic(Box<PathBuf>),
+    /// The source `HEAD` symbolic-ref line was ambiguous or malformed.
+    HeadContents(Box<PathBuf>),
+    /// The source `HEAD` symbolic ref named a namespace other than
+    /// `refs/heads/*`.
+    HeadTargetNotBranch(Box<PathBuf>),
     /// A direct ref file did not contain exactly one native object identity.
     RefContents(Box<PathBuf>),
     /// A packed-refs file did not contain its closed direct-ref grammar.
@@ -219,6 +229,26 @@ impl Display for LooseGitImportRefusal {
                     path.display()
                 )
             }
+            Self::HeadMissing(path) => write!(
+                formatter,
+                "loose import requires symbolic HEAD at {}",
+                path.display()
+            ),
+            Self::HeadNotSymbolic(path) => write!(
+                formatter,
+                "loose import requires HEAD at {} to be symbolic",
+                path.display()
+            ),
+            Self::HeadContents(path) => write!(
+                formatter,
+                "source HEAD {} does not contain one symbolic-ref target",
+                path.display()
+            ),
+            Self::HeadTargetNotBranch(path) => write!(
+                formatter,
+                "source HEAD {} targets a non-branch ref",
+                path.display()
+            ),
             Self::RefContents(path) => {
                 write!(
                     formatter,
@@ -296,6 +326,10 @@ impl Error for LooseGitImportRefusal {
             | Self::PackedObjectsUnsupported(_)
             | Self::ObjectAlternatesUnsupported(_)
             | Self::SymbolicRefUnsupported(_)
+            | Self::HeadMissing(_)
+            | Self::HeadNotSymbolic(_)
+            | Self::HeadContents(_)
+            | Self::HeadTargetNotBranch(_)
             | Self::RefContents(_)
             | Self::PackedRefContents(_)
             | Self::ObjectMissing(_)
@@ -346,6 +380,7 @@ impl OneNode {
         let git_directory = resolve_git_directory(source)?;
         reject_unsupported_object_sources(&git_directory)?;
         let refs = read_direct_refs(&git_directory, self.object_format, max_refs)?;
+        let head_target = read_head_target(&git_directory)?;
         let mut pending = refs.values().copied().collect::<BTreeSet<_>>();
         let mut closure = BTreeSet::new();
         let mut total_object_bytes = 0_u64;
@@ -401,7 +436,8 @@ impl OneNode {
         }
 
         Ok(StagedLooseGitImport {
-            refs: CanonicalRefState::new(refs),
+            refs: CanonicalRefState::new_with_head_target(refs, head_target)
+                .map_err(|_| LooseGitImportRefusal::HeadTargetNotBranch(Box::new(git_directory)))?,
             object_count: closure.len(),
             closure: PermittedObjectClosure::new(closure),
             total_object_bytes,
@@ -510,6 +546,45 @@ fn read_direct_refs(
         return Err(LooseGitImportRefusal::RefLimitExceeded { limit: max_refs });
     }
     Ok(refs)
+}
+
+fn read_head_target(git_directory: &Path) -> Result<RefName, LooseGitImportRefusal> {
+    let head = git_directory.join("HEAD");
+    let metadata = match fs::symlink_metadata(&head) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(LooseGitImportRefusal::HeadMissing(Box::new(head)));
+        }
+        Err(error) => return Err(io_refusal("inspect HEAD", head, error)),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(LooseGitImportRefusal::SymbolicLink(Box::new(head)));
+    }
+    if !metadata.is_file() {
+        return Err(LooseGitImportRefusal::PathKind {
+            expected: "HEAD file",
+            path: Box::new(head),
+        });
+    }
+
+    let bytes = fs::read(&head).map_err(|error| io_refusal("read HEAD", head.clone(), error))?;
+    let Some(rest) = bytes.strip_prefix(b"ref: ") else {
+        return Err(LooseGitImportRefusal::HeadNotSymbolic(Box::new(head)));
+    };
+    let Some(target) = rest.strip_suffix(b"\n") else {
+        return Err(LooseGitImportRefusal::HeadContents(Box::new(head)));
+    };
+    if target.is_empty() || target.contains(&b'\n') || target.contains(&b'\r') {
+        return Err(LooseGitImportRefusal::HeadContents(Box::new(head)));
+    }
+    let target = RefName::try_new(target).map_err(|source| LooseGitImportRefusal::RefName {
+        path: Box::new(head.clone()),
+        source: Box::new(source),
+    })?;
+    if !target.as_bytes().starts_with(b"refs/heads/") {
+        return Err(LooseGitImportRefusal::HeadTargetNotBranch(Box::new(head)));
+    }
+    Ok(target)
 }
 
 fn read_packed_refs(
@@ -923,6 +998,7 @@ mod tests {
     }
 
     fn write_loose_blob_repository(root: &Path) -> GitOid {
+        write_branch_head(root);
         let oid = GitOid::from_hex(
             GitHashAlgorithm::Sha1,
             "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0",
@@ -943,6 +1019,11 @@ mod tests {
             .expect("ref directory creates");
         fs::write(ref_path, format!("{oid}\n")).expect("fixture ref writes");
         oid
+    }
+
+    fn write_branch_head(root: &Path) {
+        fs::write(root.join("HEAD"), "ref: refs/heads/main\n")
+            .expect("symbolic branch HEAD writes");
     }
 
     fn write_loose_object(root: &Path, kind: GitObjectKind, body: &[u8]) -> GitOid {
@@ -1021,9 +1102,65 @@ mod tests {
     }
 
     #[test]
+    fn loose_import_captures_a_symbolic_branch_head_in_canonical_state() {
+        let scratch = ScratchDirectory::new();
+        let source = scratch.0.join("source.git");
+        fs::create_dir_all(&source).expect("source directory creates");
+        let _ = write_loose_blob_repository(&source);
+        let node = node(scratch.0.join("node"));
+
+        let staged = node
+            .stage_loose_git_import(&source)
+            .expect("a symbolic branch HEAD is admitted with the source refs");
+        assert_eq!(
+            staged.refs().head_target(),
+            Some(&fgit_types::RefName::try_new(b"refs/heads/main").expect("fixed ref parses"))
+        );
+        node.shutdown().expect("node drains");
+    }
+
+    #[test]
+    fn loose_import_refuses_missing_direct_and_non_branch_heads() {
+        for (name, contents, expected) in [
+            ("missing", None, "missing"),
+            (
+                "direct",
+                Some("b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0\n"),
+                "direct",
+            ),
+            ("tag", Some("ref: refs/tags/v1\n"), "non-branch"),
+        ] {
+            let scratch = ScratchDirectory::new();
+            let source = scratch.0.join(name);
+            fs::create_dir_all(&source).expect("source directory creates");
+            fs::create_dir_all(source.join("objects")).expect("object directory creates");
+            if let Some(contents) = contents {
+                fs::write(source.join("HEAD"), contents).expect("HEAD fixture writes");
+            }
+            let node = node(scratch.0.join("node"));
+
+            let refusal = node
+                .stage_loose_git_import(&source)
+                .expect_err("invalid HEAD must refuse before import staging");
+            assert!(
+                matches!(
+                    (expected, refusal),
+                    ("missing", LooseGitImportRefusal::HeadMissing(_))
+                        | ("direct", LooseGitImportRefusal::HeadNotSymbolic(_))
+                        | ("non-branch", LooseGitImportRefusal::HeadTargetNotBranch(_))
+                ),
+                "{expected} HEAD form must retain its typed refusal"
+            );
+            node.shutdown().expect("node drains");
+        }
+    }
+
+    #[test]
     fn loose_import_refuses_a_ref_that_names_an_unstaged_object() {
         let scratch = ScratchDirectory::new();
         let source = scratch.0.join("source.git");
+        fs::create_dir_all(&source).expect("source directory creates");
+        write_branch_head(&source);
         let ref_path = source.join("refs/heads/main");
         fs::create_dir_all(ref_path.parent().expect("ref parent exists"))
             .expect("ref directory creates");
@@ -1348,6 +1485,8 @@ mod tests {
     fn loose_import_refuses_a_reachable_file_that_is_not_a_zlib_loose_object() {
         let scratch = ScratchDirectory::new();
         let source = scratch.0.join("source.git");
+        fs::create_dir_all(&source).expect("source directory creates");
+        write_branch_head(&source);
         let oid = "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0";
         let ref_path = source.join("refs/heads/main");
         let object_path = source.join("objects/b6/fc4c620b67d95f953a5c1c1230aaab5db5a1b0");
@@ -1370,6 +1509,8 @@ mod tests {
     fn loose_import_refuses_a_compressed_object_before_reading_it_over_the_bound() {
         let scratch = ScratchDirectory::new();
         let source = scratch.0.join("source.git");
+        fs::create_dir_all(&source).expect("source directory creates");
+        write_branch_head(&source);
         let oid = "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0";
         let ref_path = source.join("refs/heads/main");
         let object_path = source.join("objects/b6/fc4c620b67d95f953a5c1c1230aaab5db5a1b0");
@@ -1399,6 +1540,7 @@ mod tests {
         let scratch = ScratchDirectory::new();
         let source = scratch.0.join("source.git");
         fs::create_dir_all(&source).expect("source directory creates");
+        write_branch_head(&source);
         let tree = decode_hex(include_str!(
             "../../fgit-git-object/tests/corpus/malformed/tree-truncated-reference.hex"
         ));
@@ -1421,6 +1563,7 @@ mod tests {
         let scratch = ScratchDirectory::new();
         let source = scratch.0.join("source.git");
         fs::create_dir_all(&source).expect("source directory creates");
+        write_branch_head(&source);
         let oid = write_loose_object(
             &source,
             GitObjectKind::Commit,
@@ -1444,6 +1587,7 @@ mod tests {
         let scratch = ScratchDirectory::new();
         let source = scratch.0.join("source.git");
         fs::create_dir_all(&source).expect("source directory creates");
+        write_branch_head(&source);
         let oid = write_loose_object(
             &source,
             GitObjectKind::Tag,
