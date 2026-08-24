@@ -113,11 +113,6 @@ pub enum ForgeRefusal {
         /// Which body.
         body: &'static str,
     },
-    /// An event arrived naming a kind this build does not implement.
-    UnknownEventKind {
-        /// The tag observed on the wire.
-        observed: u32,
-    },
 }
 
 /// The tips a staleness refusal compares.
@@ -186,9 +181,6 @@ impl fmt::Display for ForgeRefusal {
             }
             Self::IdentityUnavailable { body } => {
                 write!(formatter, "{body} has no identity in this build")
-            }
-            Self::UnknownEventKind { observed } => {
-                write!(formatter, "unknown forge event kind {observed}")
             }
         }
     }

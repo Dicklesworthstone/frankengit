@@ -4,11 +4,13 @@
 //! the tests show where the boundary is rather than only that a wall exists.
 
 use fgit_codec::CryptoBodyIdentity;
+use fgit_codec::attest::BodyIdentity;
 use fgit_codec::schema::RepositoryCommitRecord;
 use fgit_codec::wire::CanonicalBody;
 use fgit_codec::{CodecRefusal, DecodeLimits, decode_body, encode_body};
-use fgit_diff::{TreeEntry, TreeMergeOptions};
+use fgit_diff::{TreeEntry, TreeMergeError, TreeMergeOptions};
 use fgit_forge::event::ForgeEventBatch;
+use fgit_forge::event::event_id;
 use fgit_forge::merge::RecordFrame;
 use fgit_forge::{
     AggregateHead, AggregateVersion, ExpectedVersion, ForgeEvent, ForgeEventPayload, ForgeRefusal,
@@ -16,9 +18,11 @@ use fgit_forge::{
     StaleTips, merge_pull_request_tree,
 };
 use fgit_treefs::WorkspaceEpoch;
+use fgit_types::numeric::CodecVersion;
 use fgit_types::{
-    CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, OPAQUE_ID_LEN, PolicyEpoch,
-    PrincipalSnapshotId, RepositoryId, RepositorySequence, TxId,
+    CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, DomainTag, InternalObjectId,
+    OPAQUE_ID_LEN, PolicyEpoch, PrincipalSnapshotId, RepositoryId, RepositorySequence, SchemaId,
+    TxId,
 };
 
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
@@ -538,4 +542,147 @@ fn a_ref_that_moved_is_reported_before_a_workspace_that_also_moved() {
         }),
         "the fixed order is source, target, workspace"
     );
+}
+
+// --------------------------------------------- the refusal arms nothing reached
+
+/// A `BodyIdentity` that refuses whatever it is handed.
+///
+/// Both identity-side refusal arms are unreachable through the real
+/// `CryptoBodyIdentity`, and correctly so: this crate's domains are pinned in
+/// the crypto registry, so a body built here always has an identity. That makes
+/// the arms look dead when they are not — they exist for callers supplying
+/// their own identity, and for the day a domain is retired. A stub is the only
+/// honest way to reach them, and it reaches them through the real public
+/// signature rather than by calling anything private.
+struct RefusingIdentity(CodecRefusal);
+
+impl BodyIdentity for RefusingIdentity {
+    fn identify(
+        &self,
+        _domain: DomainTag,
+        _schema: SchemaId,
+        _codec_version: CodecVersion,
+        _canonical_body: &[u8],
+    ) -> Result<InternalObjectId, CodecRefusal> {
+        Err(self.0.clone())
+    }
+}
+
+fn unregistered() -> CodecRefusal {
+    CodecRefusal::identity_domain_unregistered(ForgeEvent::DOMAIN)
+}
+
+/// An unregistered domain is reported as a missing identity, not as a codec
+/// problem, and the two are not interchangeable.
+///
+/// The distinction matters to a caller: `IdentityUnavailable` says this build
+/// cannot name the body at all, which is a configuration or registry fault,
+/// while `BodyUnrepresentable` says the bytes themselves were the problem.
+/// Collapsing them would send an operator to the wrong place.
+#[test]
+fn an_event_whose_domain_has_no_identity_is_refused_distinctly_from_bad_bytes() {
+    let event = merge_event();
+
+    assert_eq!(
+        event_id(&RefusingIdentity(unregistered()), &event),
+        Err(ForgeRefusal::IdentityUnavailable { body: "ForgeEvent" })
+    );
+
+    // Near-identical case, different cause: the identity fails for a reason
+    // that is not an unregistered domain, so it surfaces as the codec refusal
+    // it actually was rather than being relabelled.
+    let other = CodecRefusal::VariantUnknown {
+        field: "kind",
+        observed: 77,
+        offset: 3,
+    };
+    assert_eq!(
+        event_id(&RefusingIdentity(other.clone()), &event),
+        Err(ForgeRefusal::BodyUnrepresentable {
+            cause: Box::new(other)
+        })
+    );
+
+    // Permitted twin: the real identity, which resolves both domains.
+    assert!(event_id(&CryptoBodyIdentity, &event).is_ok());
+}
+
+/// The same two arms on the package side, which names the body that failed.
+///
+/// `roots` derives two identities, so the refusal has to say which one failed
+/// or a caller cannot tell a bad ref intent from a bad event batch.
+#[test]
+fn a_package_root_refusal_names_the_body_that_failed() {
+    let package = package();
+
+    assert_eq!(
+        package.roots(&RefusingIdentity(unregistered())),
+        Err(ForgeRefusal::IdentityUnavailable { body: "RefIntent" }),
+        "the ref intent is derived first, so it is the one that reports"
+    );
+
+    assert!(package.roots(&CryptoBodyIdentity).is_ok());
+}
+
+/// The version counter refuses exhaustion instead of wrapping.
+///
+/// A wrap here would be silent history corruption: version 1 would follow
+/// `u64::MAX`, and an aggregate whose stream restarted at 1 would accept writes
+/// that expected the beginning of time.
+#[test]
+fn a_saturated_aggregate_version_refuses_to_advance_and_one_below_it_does_not() {
+    let last = AggregateVersion::try_new(u64::MAX).expect("u64::MAX is nonzero");
+    assert_eq!(
+        last.next(),
+        Err(ForgeRefusal::VersionExhausted { observed: last })
+    );
+
+    // Permitted twin at the exact boundary: one position short still advances,
+    // and lands on the value that has no successor.
+    let penultimate = AggregateVersion::try_new(u64::MAX - 1).expect("nonzero");
+    assert_eq!(penultimate.next(), Ok(last));
+
+    // And the same boundary reached through the admission path, so the refusal
+    // is not confined to the counter in isolation.
+    let head = AggregateHead::at(pull_request(), last);
+    assert_eq!(
+        head.admit(ExpectedVersion::Exactly(last)),
+        Err(ForgeRefusal::VersionExhausted { observed: last })
+    );
+}
+
+/// A merge engine refusal is carried through, not converted into a conflict.
+///
+/// The difference is load-bearing: `MergeConflicted` means the merge ran and
+/// the sides disagree, which a human resolves. `MergeRefused` means the merge
+/// never ran, which a human cannot resolve by choosing a side. Reporting the
+/// second as the first would send someone to resolve conflicts that do not
+/// exist.
+#[test]
+fn a_merge_the_engine_declines_is_refused_as_declined_rather_than_as_conflicted() {
+    // Git tree order is a precondition of the engine, not something it repairs.
+    let unsorted = [entry(b"b", 0x01), entry(b"a", 0x02)];
+    assert_eq!(
+        merge_pull_request_tree(
+            unsorted,
+            [entry(b"a", 0x02)],
+            [entry(b"a", 0x02)],
+            TreeMergeOptions::default(),
+        ),
+        Err(ForgeRefusal::MergeRefused {
+            cause: TreeMergeError::UnsortedOrDuplicatePath
+        })
+    );
+
+    // Permitted twin: the same entries in order merge cleanly.
+    let sorted = [entry(b"a", 0x02), entry(b"b", 0x01)];
+    let merged = merge_pull_request_tree(
+        sorted.clone(),
+        sorted.clone(),
+        sorted,
+        TreeMergeOptions::default(),
+    )
+    .expect("sorted entries merge");
+    assert_eq!(merged.entries.len(), 2);
 }
