@@ -102,7 +102,7 @@ impl AuthorityReferenceSpec {
     /// as an `InitializeHead` operation would; later reads reuse that token
     /// and only a committed replacement mints a successor.
     #[must_use]
-    pub fn with_initial_head(
+    pub const fn with_initial_head(
         instance: StoreInstanceId,
         key: HeadKey,
         generation: HeadGeneration,
