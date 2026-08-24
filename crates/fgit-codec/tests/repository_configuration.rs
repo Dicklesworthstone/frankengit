@@ -22,7 +22,7 @@ const SHA256_CONFIGURATION_GOLDEN: &[u8] = b"FGC1\
     \x00\x01\x00\x02\
     \x00\x00\x00\x08\x00\x01\x00\x02\x00\x00\x00\x00";
 
-fn sha256_configuration() -> RepositoryConfigurationBody {
+const fn sha256_configuration() -> RepositoryConfigurationBody {
     RepositoryConfigurationBody {
         root_layout: RootLayoutVersion::RefStateMerkleV1,
         object_format: GitHashAlgorithm::Sha256,
