@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
+pub mod cell;
 pub mod error;
 pub mod hash;
 pub mod identity;
@@ -12,6 +13,10 @@ pub mod probability;
 pub mod refs;
 pub mod vocabulary;
 
+pub use cell::{
+    CellReadiness, CellRefusal, CellState, CellTransition, CellTransitionCause, ReadLabel,
+    ReadMode, StalenessBound, StalenessObservation, admits_read,
+};
 pub use error::TypeRefusal;
 pub use hash::{Digest, DigestAlgorithmId, DigestBytes, MAX_DIGEST_LEN, MIN_DIGEST_LEN};
 pub use identity::{
