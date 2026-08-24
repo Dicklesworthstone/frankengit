@@ -787,7 +787,10 @@ mod tests {
         CryptoBodyIdentity, RepositoryIncarnationConfigurationBody, decode_body,
         harness::{commit_record, digest_of},
     };
-    use fgit_crypto::object_closure_merkle_root;
+    use fgit_crypto::{
+        MerkleProof, ObjectClosureNeighbour, ObjectClosureNonMembershipProof,
+        object_closure_merkle_root,
+    };
     use fgit_git_object::ObjectType;
     use fgit_types::cell::{CellState, CellTransitionCause, ReadLabel};
     use fgit_types::identity::RepositoryIncarnationId;
@@ -795,13 +798,16 @@ mod tests {
     use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1};
     use fgit_types::{RefName, RepositoryId, TenantId};
     use fgit_verified_read::{
-        PinnedAuthorityHead, ReadResponse, UnprovenReadAnswer, VerifiedMembership,
-        VerifiedReadEnvelope, VerifiedReadRefusal, verify_envelope,
+        ObjectDisclosurePolicy, PinnedAuthorityHead, ReadResponse, UnprovenReadAnswer,
+        VerifiedMembership, VerifiedReadEnvelope, VerifiedReadRefusal, verify_envelope,
     };
     use fgit_wire::WireLimits;
     use fgit_wire::visibility::RefVisibility;
 
-    use super::{OneNode, VerifiedReadCapability, VerifiedReadQuery, VerifiedReadServingRefusal};
+    use super::{
+        DisclosureScope, OneNode, VerifiedReadCapability, VerifiedReadQuery,
+        VerifiedReadServingRefusal, authorize_disclosed_neighbours,
+    };
     use crate::{
         NodeConfig, PublicationBasis, authority_head_id, genesis_head,
         initialize_embedded_repository,
@@ -1259,5 +1265,107 @@ mod tests {
         ));
 
         node.shutdown().expect("clean shutdown");
+    }
+    /// A neighbour is a second object identity, and it needs its own permission.
+    ///
+    /// `authorize_object_absence` gates the object that was *asked about*. An
+    /// ordered absence proof then serialises the objects bracketing the gap, so
+    /// without this guard a caller authorized for one object learns up to two
+    /// others by asking about a gap beside them.
+    ///
+    /// The policy here is the production [`DisclosureScope`], not a stand-in:
+    /// an object is disclosable unless every ref pointing at it is hidden. The
+    /// first two assertions establish that the policy actually discriminates
+    /// between these two objects, because a guard tested against a policy that
+    /// permits everything would pass while checking nothing.
+    #[test]
+    fn absence_proof_neighbours_are_authorized_before_they_are_disclosed() {
+        fn oid(seed: u8) -> GitOid {
+            GitOid::Sha1(GitOidSha1::from_bytes([seed; GitOidSha1::LEN]))
+        }
+        fn name(text: &str) -> RefName {
+            RefName::try_new(text.as_bytes()).expect("an admissible ref name")
+        }
+        fn neighbour(seed: u8, index: usize) -> Box<ObjectClosureNeighbour> {
+            Box::new(ObjectClosureNeighbour::new(
+                oid(seed),
+                MerkleProof::new(index, 2, Vec::new()),
+            ))
+        }
+
+        let open = oid(0x20);
+        let closed = oid(0x30);
+        let mut refs = BTreeMap::new();
+        refs.insert(name("refs/heads/open"), open);
+        refs.insert(name("refs/secret/closed"), closed);
+
+        let mut snapshot = RefVisibility::new();
+        snapshot
+            .push_rule(b"refs/secret/closed", &WireLimits::default())
+            .expect("an exact name is a valid hide rule");
+        let current = RefVisibility::new();
+        let scope = DisclosureScope {
+            snapshot: &snapshot,
+            current: &current,
+            snapshot_refs: &refs,
+        };
+
+        // The policy discriminates. Without this the rest proves nothing.
+        assert!(
+            scope.permits_object_disclosure(&open),
+            "an object reachable by a visible ref is disclosable"
+        );
+        assert!(
+            !scope.permits_object_disclosure(&closed),
+            "an object reachable only by a hidden ref is not"
+        );
+
+        let denied = |proof: &ObjectClosureNonMembershipProof| {
+            matches!(
+                authorize_disclosed_neighbours(&scope, proof),
+                Err(VerifiedReadServingRefusal::VerifiedRead(refusal))
+                    if matches!(*refusal, VerifiedReadRefusal::ObjectNotFoundOrUnauthorized)
+            )
+        };
+
+        // Every arm that carries a neighbour, so no position is left unguarded.
+        assert!(
+            denied(&ObjectClosureNonMembershipProof::BeforeFirst {
+                first: neighbour(0x30, 0),
+            }),
+            "a hidden first neighbour must not be disclosed"
+        );
+        assert!(
+            denied(&ObjectClosureNonMembershipProof::AfterLast {
+                last: neighbour(0x30, 1),
+            }),
+            "a hidden last neighbour must not be disclosed"
+        );
+        assert!(
+            denied(&ObjectClosureNonMembershipProof::Between {
+                predecessor: neighbour(0x20, 0),
+                successor: neighbour(0x30, 1),
+            }),
+            "one authorized neighbour does not license the other"
+        );
+
+        // The permitted twins. A guard that refused everything would satisfy
+        // every assertion above and still be wrong.
+        assert!(
+            authorize_disclosed_neighbours(
+                &scope,
+                &ObjectClosureNonMembershipProof::Between {
+                    predecessor: neighbour(0x20, 0),
+                    successor: neighbour(0x20, 1),
+                }
+            )
+            .is_ok(),
+            "an absence bracketed by disclosable objects is still servable"
+        );
+        assert!(
+            authorize_disclosed_neighbours(&scope, &ObjectClosureNonMembershipProof::EmptyClosure)
+                .is_ok(),
+            "an empty closure names no object but the one queried"
+        );
     }
 }
