@@ -269,6 +269,28 @@ pub enum FreshnessRefusal {
         generation: HeadGeneration,
     },
     /// A head body with no canonical identity cannot anchor or extend a chain.
+    ///
+    /// # Defensive, and not reachable from a constructible head today
+    ///
+    /// This has no test, deliberately rather than by oversight. It fires only
+    /// when `authority_head_identity` fails, which requires the body to fail
+    /// canonical encoding — and every field of `RepositoryAuthorityHeadBody` is
+    /// a bounded, constructor-validated type. Measured: the struct has zero
+    /// `Vec` or `String` fields; it is sixteen typed ids, digests, generations
+    /// and epochs, each of which refuses out-of-range input at construction.
+    /// So a head body that EXISTS encodes, and I could not build a case that
+    /// reaches this arm.
+    ///
+    /// Keeping the variant is still right: the identity call returns a
+    /// `Result`, and inventing an identity or unwrapping would turn a
+    /// should-never-happen into a wrong answer about which head a client is
+    /// pinned to. Failing closed on an impossible state costs one arm.
+    ///
+    /// **The trigger to re-read this:** if `RepositoryAuthorityHeadBody` ever
+    /// gains an unbounded field — a ref name, a rule list, any `Vec<u8>` — this
+    /// stops being unreachable and needs a real case. The note is here so that
+    /// change arrives with its consequence attached rather than leaving a
+    /// silently untested refusal behind.
     HeadIdentityUnavailable,
 }
 
