@@ -379,15 +379,14 @@ mkdir -p "$TEMPLATE"
 # times.
 #
 # That is backwards from what these markers are for. They are the only thing
-# telling a reader that two of the three operations the scope names went
-# UNMEASURED rather than measured-and-passed, and they vanished in exactly the
-# run where a reader needs them most.
+# telling a reader that an operation the scope names went UNMEASURED rather
+# than measured-and-passed, and they vanished in exactly the run where a
+# reader needs them most.
 #
-# Both state properties of the REVISION, not of the run -- push has no daemon
-# lane, and fetch is not on the sanctioned oracle lane -- so neither depends on
-# whether the experiment below succeeds. Emitting them first makes them
-# unconditional in fact rather than only in indentation. Do not move them back
-# after the experiment. See frankengit-nb98.
+# Push is always unavailable on this daemon lane. Fetch is unmeasured only in
+# an explicit clone diagnostic: the default matched lane below measures it
+# against its sibling clone artifact. Emit the applicable non-claims before
+# either experiment so a later failure cannot hide them. See frankengit-nb98.
 # ---------------------------------------------------------------------------
 
 fge_phase assert
