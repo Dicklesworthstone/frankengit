@@ -444,12 +444,34 @@ fn proof_generation_is_deterministic_so_a_server_may_cache_one_per_head_and_name
         assert_eq!(again_proof.leaf_count(), first_proof.leaf_count());
     }
 
-    // And it must DEPEND on the name, or "cache per name" would be caching one
-    // value for the whole repository.
+    // KEY SUFFICIENCY, which determinism alone does not give. Recomputation
+    // being stable says a cache CAN be populated; it says nothing about whether
+    // the key distinguishes entries. A cache keyed by (head, name) is only
+    // sound if two different names cannot produce the same cached value, so
+    // that is asserted over the WHOLE proof rather than over its index alone —
+    // an index check would pass for two proofs that shared a path.
     let (_, other) = ref_state_membership_proof(&entries, &name(8)).expect("a proof");
     assert_ne!(
         other.index(),
         first_proof.index(),
         "two different refs must not share a cache entry"
     );
+
+    // And the exhaustive form of the same property: across a spread of names,
+    // no two distinct refs may share an index. Star-shaped comparison against
+    // one pivot would leave every non-pivot pair unchecked, which is how two
+    // colliding values hide behind a green suite.
+    let mut seen: Vec<(usize, RefName)> = Vec::new();
+    for candidate in [0_usize, 1, 7, 8, 31, 32, 63] {
+        let (_, proof) = ref_state_membership_proof(&entries, &name(candidate)).expect("a proof");
+        for (index, earlier) in &seen {
+            assert_ne!(
+                *index,
+                proof.index(),
+                "{earlier:?} and {:?} share a position, so a (head, name) cache key collides",
+                name(candidate)
+            );
+        }
+        seen.push((proof.index(), name(candidate)));
+    }
 }
