@@ -48,7 +48,7 @@ impl From<ReceiveError> for NodeReceiveTransportRefusal {
 /// stores no raw pack bytes, and retains the private `ValidatedReceive` proof
 /// for the node's asynchronous durable-admission surface to consume later.
 #[derive(Debug)]
-pub(crate) struct ProductionReceiveQuarantineHandoff<'node> {
+pub struct ProductionReceiveQuarantineHandoff<'node> {
     validator: ProductionQuarantineValidator<'node>,
     validated: Option<ValidatedReceive>,
 }
@@ -57,7 +57,7 @@ impl<'node> ProductionReceiveQuarantineHandoff<'node> {
     /// Binds this one handoff to the validator reconstructed from one
     /// authenticated materialization.
     #[must_use]
-    pub(crate) fn new(validator: ProductionQuarantineValidator<'node>) -> Self {
+    pub(crate) const fn new(validator: ProductionQuarantineValidator<'node>) -> Self {
         Self {
             validator,
             validated: None,
@@ -335,7 +335,6 @@ impl<'node> ProductionQuarantineValidator<'node> {
     /// after native verification maps that offset to its actual OID, it is a
     /// required uploaded closure edge.
     fn in_pack_delta_bases(
-        &self,
         pack: &QuarantinedPack,
         ids_at_offset: &BTreeMap<u64, GitOid>,
         deadline: &mut impl Deadline,
@@ -558,7 +557,7 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
                 return Err(RefusalCode::PackFramingInvalid);
             }
         }
-        let in_pack_delta_bases = self.in_pack_delta_bases(pack, &ids_at_offset, deadline)?;
+        let in_pack_delta_bases = Self::in_pack_delta_bases(pack, &ids_at_offset, deadline)?;
         let closure =
             self.reachable_uploaded_closure(request, &verified, &in_pack_delta_bases, deadline)?;
         // This second phase keeps a later malformed delta from leaving earlier
