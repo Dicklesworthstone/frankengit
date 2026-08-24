@@ -34,11 +34,22 @@ fge_init verified-reads-tamper
 CRATE=fgit-verified-read
 
 # target : expected case count
+# Counts are MEASURED against the source, not guessed. They went stale once: a
+# repair at 87e76ba took tamper_campaign 5 -> 6 and proof_cost 5 -> 7 and deleted
+# a case this suite named, and I re-ran `cargo test --all-targets` but not this
+# suite, so I shipped it red. The count assertion did its job; I just did not
+# look. Changing a case count in those files means changing this list.
 TARGETS=(
-  "tamper_campaign:5"
+  "tamper_campaign:6"
   "head_chain_freshness:7"
-  "proof_cost:5"
+  "proof_cost:7"
 )
+
+# The corpus's declared tamper-class count, asserted separately from the
+# test-function count above. Ten classes live inside ONE function, so a function
+# count cannot see a class being removed; the Rust denominator guard emits this
+# marker and the assertion below reads it.
+EXPECTED_TAMPER_CLASSES=10
 
 # The cases whose absence would hollow out this bead, asserted individually.
 LOAD_BEARING=(
@@ -48,7 +59,9 @@ LOAD_BEARING=(
   a_replayed_older_head_is_refused_even_though_it_is_perfectly_valid
   two_heads_claiming_one_generation_are_a_fork_and_not_staleness
   a_forged_head_at_a_higher_generation_is_caught_by_continuity
-  a_membership_proof_carries_exactly_ceil_log2_siblings
+  the_corpus_covers_every_declared_tamper_class_exactly_once
+  every_leaf_at_every_size_carries_exactly_the_length_its_position_requires
+  a_promoted_tail_really_does_shorten_a_path_so_the_model_is_not_decorative
 )
 
 fge_phase setup
@@ -84,14 +97,15 @@ for entry in "${TARGETS[@]}"; do
   fge_assert_exit "$id" 0 "${EXIT_OF[$target]}" "the $target target passes"
   idx=$((idx + 1))
 
-  # Count reported cases from the full captured file, not FGE_LAST_STDOUT, which
-  # lib.sh truncates at FGE_MAX_CAPTURE. A truncated haystack undercounts.
-  # [a-z0-9_] and not [a-z_]: case names contain digits (ceil_log2), and the
-  # narrower class silently undercounted by one. The count assertion caught that
-  # in its own counter, which is the argument for counting rather than only
-  # listing names -- a name list would have reported every case present while
-  # the total was wrong.
-  actual=$(grep -c '^test [a-z0-9_]* \.\.\. ok$' "$out" || true)
+  # Read the harness's OWN summary line rather than reconstructing the count by
+  # matching per-case lines. Two reasons, both learned the hard way here:
+  #   - a case name containing a digit escaped a [a-z_] class and undercounted;
+  #   - once a case PRINTS anything, --nocapture puts that output on the same
+  #     line as "test <name> ... ", so a `... ok$` anchor stops matching it. My
+  #     own class-count marker broke my own counter exactly that way.
+  # "test result: ok. N passed" is the harness's authoritative total and is
+  # immune to both.
+  actual=$(grep -oE '^test result: ok\. [0-9]+ passed' "$out" | grep -oE '[0-9]+' | head -1)
   id=$(printf 'FG-037B-E2E-%03d' "$idx")
   fge_assert_eq "$id" "$expected" "$actual" \
     "$target reports exactly $expected passing cases, so a deleted case fails here"
@@ -113,3 +127,11 @@ for case_name in "${LOAD_BEARING[@]}"; do
   fge_assert_eq "$id" yes "$found" "load-bearing case present: $case_name"
   idx=$((idx + 1))
 done
+
+# The tamper-class count, read from the marker the denominator guard prints. This
+# is the assertion that fails when a class is deleted from `corpus()` -- which the
+# per-target function counts above cannot see.
+classes=$(grep -oE 'fg037b\.tamper_classes=[0-9]+' "${OUT_OF[tamper_campaign]}" | tail -1 | cut -d= -f2)
+id=$(printf 'FG-037B-E2E-%03d' "$idx")
+fge_assert_eq "$id" "$EXPECTED_TAMPER_CLASSES" "${classes:-missing}" \
+  'the corpus declares exactly the expected number of tamper classes'

@@ -458,6 +458,12 @@ fn the_corpus_covers_every_declared_tamper_class_exactly_once() {
         TamperClass::ALL.len(),
         "the corpus must build exactly one case per declared class"
     );
+
+    // Emitted so the e2e can assert the TAMPER-CLASS count rather than the
+    // test-function count. Counting functions cannot see a class being deleted
+    // from `corpus()` -- the review's point -- because ten classes live inside
+    // one function. This marker is the denominator made visible one layer up.
+    println!("fg037b.tamper_classes={}", TamperClass::ALL.len());
 }
 
 #[test]
