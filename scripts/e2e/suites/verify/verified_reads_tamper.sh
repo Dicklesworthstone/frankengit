@@ -31,23 +31,29 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 fge_init verified-reads-tamper
 
-CRATE=fgit-verified-read
-
-# target : expected case count
+# crate : target : expected case count
+#
+# The crate is per-entry rather than global because the strongest evidence on
+# this bead does not live in fgit-verified-read at all: the production-path
+# test drives OneNode, so it is an fgit-node target. Leaving it out would have
+# meant the suite claiming to cover fg037b was blind to the only case that
+# reads through a real serving path.
 # Counts are MEASURED against the source, not guessed. They went stale once: a
 # repair at 87e76ba took tamper_campaign 5 -> 6 and proof_cost 5 -> 7 and deleted
 # a case this suite named, and I re-ran `cargo test --all-targets` but not this
 # suite, so I shipped it red. The count assertion did its job; I just did not
 # look. Changing a case count in those files means changing this list.
 TARGETS=(
-  "tamper_campaign:8"
-  "head_chain_freshness:7"
-  "proof_cost:9"
+  "fgit-verified-read:tamper_campaign:8"
+  "fgit-verified-read:head_chain_freshness:7"
+  "fgit-verified-read:proof_cost:9"
+  "fgit-node:verified_read_served_tamper:2"
 )
 
 # The corpus's declared tamper-class count, asserted separately from the
-# test-function count above. Ten classes live inside ONE function, so a function
-# count cannot see a class being removed; the Rust denominator guard emits this
+# test-function count above. Every class lives inside ONE function, so a
+# function count cannot see a class being removed; the Rust denominator guard
+# emits this
 # marker and the assertion below reads it.
 EXPECTED_TAMPER_CLASSES=13
 
@@ -62,6 +68,8 @@ LOAD_BEARING=(
   the_corpus_covers_every_declared_tamper_class_exactly_once
   an_outcome_envelope_is_checked_against_the_outcome_index_root_not_whichever_root_verifies
   a_v1_configuration_cannot_stand_in_for_the_incarnation_body_the_head_selected
+  a_server_produced_envelope_verifies_and_the_same_envelope_tampered_does_not
+  an_unproven_client_is_still_served_by_a_proof_capable_node
   every_leaf_at_every_size_carries_exactly_the_length_its_position_requires
   a_promoted_tail_really_does_shorten_a_path_so_the_model_is_not_decorative
   generation_reads_the_whole_state_while_verification_reads_only_the_path
@@ -80,9 +88,11 @@ fge_phase action
 declare -A EXIT_OF
 declare -A OUT_OF
 for entry in "${TARGETS[@]}"; do
-  target=${entry%%:*}
+  crate=${entry%%:*}
+  rest=${entry#*:}
+  target=${rest%%:*}
   fge_capture "run-$target" env RCH_CARGO_WRAPPER_BYPASS=1 \
-    cargo test -p "$CRATE" --test "$target" -- --nocapture --test-threads=1 || true
+    cargo test -p "$crate" --test "$target" -- --nocapture --test-threads=1 || true
   EXIT_OF[$target]=$FGE_LAST_EXIT
   OUT_OF[$target]=$FGE_LAST_STDOUT_FILE
   fge_artifact "$FGE_LAST_STDOUT_FILE"
@@ -92,7 +102,8 @@ fge_phase assert
 
 idx=1
 for entry in "${TARGETS[@]}"; do
-  target=${entry%%:*}
+  rest=${entry#*:}
+  target=${rest%%:*}
   expected=${entry##*:}
   out=${OUT_OF[$target]}
 
@@ -121,7 +132,8 @@ for case_name in "${LOAD_BEARING[@]}"; do
   id=$(printf 'FG-037B-E2E-%03d' "$idx")
   found=no
   for entry in "${TARGETS[@]}"; do
-    target=${entry%%:*}
+    rest=${entry#*:}
+    target=${rest%%:*}
     if grep -qF "$case_name" "${OUT_OF[$target]}"; then
       found=yes
       break
