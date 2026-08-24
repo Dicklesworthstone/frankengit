@@ -100,6 +100,14 @@ pub struct ProjectedTrace {
     pub name: String,
     /// Steps in order, stuttering included so indices stay honest.
     pub steps: Vec<ProjectedStep>,
+    /// The concrete head generation the Lean model's generation 0 corresponds to.
+    ///
+    /// This is the abstraction function's one numeric offset, and it is carried
+    /// rather than folded into the numbers so the emitted vectors keep the
+    /// reference model's own generations and stay traceable to it. The Lean
+    /// checker applies it explicitly, which puts the abstraction where a reader
+    /// of the proof will look for it.
+    pub genesis_generation: u64,
     /// Abstract index to concrete transaction identity, for traceability.
     ///
     /// Lean's `TxId` is a `Nat` and the model only ever compares it for
@@ -127,6 +135,21 @@ pub enum ProjectionRefusal {
     AlreadyTerminalWithoutDecision {
         /// Step that reported it.
         concrete_index: usize,
+    },
+    /// A step recorded a head generation below the genesis origin.
+    ///
+    /// The offset between the concrete generations and the Lean model's
+    /// zero-based one is a constant of the reference model, not an observation,
+    /// so it is guarded rather than assumed: a history that started elsewhere
+    /// would otherwise be exported with a silently wrong abstraction function
+    /// and check green against the wrong states.
+    GenerationBelowGenesis {
+        /// Step that recorded it.
+        concrete_index: usize,
+        /// What it recorded.
+        observed: u64,
+        /// The origin every generation must be at or above.
+        genesis: u64,
     },
 }
 
@@ -286,9 +309,20 @@ pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, Projec
         });
     }
 
+    let genesis_generation = fgit_types::HeadGeneration::FIRST.get();
+    for step in &steps {
+        if step.generation_after < genesis_generation {
+            return Err(ProjectionRefusal::GenerationBelowGenesis {
+                concrete_index: step.concrete_index,
+                observed: step.generation_after,
+                genesis: genesis_generation,
+            });
+        }
+    }
     Ok(ProjectedTrace {
         name: name.to_owned(),
         steps,
+        genesis_generation,
         transactions: order,
     })
 }

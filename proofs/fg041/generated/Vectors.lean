@@ -34,6 +34,10 @@ structure Step where
 /-- One projected history. -/
 structure Trace where
   name : String
+  /-- The concrete head generation that `OrderedResidue.initial.generation = 0`
+  corresponds to. The checker subtracts this from every generation-valued field,
+  which is the whole numeric content of the abstraction function. -/
+  genesisGeneration : Nat
   steps : List Step
   deriving Repr
 
@@ -43,6 +47,7 @@ structure Trace where
 -/
 def trace_cas_loss_retry : Trace :=
   { name := "cas_loss_retry"
+  , genesisGeneration := 1
   , steps :=
     [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
     , { concreteIndex := 1, ops := [], generationAfter := 1 }
@@ -64,6 +69,7 @@ def trace_cas_loss_retry : Trace :=
 -/
 def trace_genesis : Trace :=
   { name := "genesis"
+  , genesisGeneration := 1
   , steps :=
     [
     ]
@@ -74,6 +80,7 @@ def trace_genesis : Trace :=
 -/
 def trace_idempotent_duplicate : Trace :=
   { name := "idempotent_duplicate"
+  , genesisGeneration := 1
   , steps :=
     [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
     , { concreteIndex := 1, ops := [Op.sealRequest 0], generationAfter := 1 }
@@ -91,6 +98,7 @@ def trace_idempotent_duplicate : Trace :=
 -/
 def trace_multi_decision_batch : Trace :=
   { name := "multi_decision_batch"
+  , genesisGeneration := 1
   , steps :=
     [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
     , { concreteIndex := 1, ops := [Op.sealRequest 1], generationAfter := 1 }
@@ -107,6 +115,7 @@ def trace_multi_decision_batch : Trace :=
 -/
 def trace_refusal_only : Trace :=
   { name := "refusal_only"
+  , genesisGeneration := 1
   , steps :=
     [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
     , { concreteIndex := 1, ops := [], generationAfter := 1 }
@@ -120,6 +129,7 @@ def trace_refusal_only : Trace :=
 -/
 def trace_simple_commit : Trace :=
   { name := "simple_commit"
+  , genesisGeneration := 1
   , steps :=
     [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
     , { concreteIndex := 1, ops := [], generationAfter := 1 }

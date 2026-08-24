@@ -75,6 +75,10 @@ structure Step where
 /-- One projected history. -/
 structure Trace where
   name : String
+  /-- The concrete head generation that `OrderedResidue.initial.generation = 0`
+  corresponds to. The checker subtracts this from every generation-valued field,
+  which is the whole numeric content of the abstraction function. -/
+  genesisGeneration : Nat
   steps : List Step
   deriving Repr
 ",
@@ -91,9 +95,10 @@ structure Trace where
         }
         let _ = write!(
             out,
-            "-/\ndef {} : Trace :=\n  {{ name := \"{}\"\n  , steps :=\n    [",
+            "-/\ndef {} : Trace :=\n  {{ name := \"{}\"\n  , genesisGeneration := {}\n  , steps :=\n    [",
             lean_ident(&trace.name),
-            trace.name
+            trace.name,
+            trace.genesis_generation
         );
         let mut first = true;
         for step in &trace.steps {

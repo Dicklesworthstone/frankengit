@@ -49,6 +49,7 @@ fge_init fg041-proof-lane
 fge_context bead frankengit-fg041c-proof-refinement-wuy
 fge_context scope 'proofs/fg041/check.sh proofs/fg041/OrderedResidue.lean proofs/fg041/FalseVariant.lean'
 
+PRF_TOOLCHAIN=leanprover/lean4:v4.32.0
 PRF_CHECK="$PRF_REPO/proofs/fg041/check.sh"
 PRF_MAIN="$PRF_REPO/proofs/fg041/OrderedResidue.lean"
 PRF_CONTROL="$PRF_REPO/proofs/fg041/FalseVariant.lean"
@@ -163,6 +164,7 @@ if ! command -v cargo >/dev/null 2>&1; then
   fge_skip fg041-registry-demotion 'cargo is unavailable; the registry checker cannot be exercised here'
 else
   fge_field registry_checker_available 1
+  prf_model_before=$(fge_digest_file "$PRF_REPO/proofs/fg041/OrderedResidue.lean")
   prf_sb=$(fge_tempdir fg041-registry-drill)
   mkdir -p "$prf_sb/registries" "$prf_sb/proofs/fg041" \
            "$prf_sb/crates/fgit-claim/src" "$prf_sb/tools/registry-check/src"
@@ -240,17 +242,69 @@ else
 
   # The checkout itself never moved. This is the assertion that keeps the drill
   # runnable in a shared worktree.
-  # Scoped to proofs/fg041 ALONE, deliberately. An earlier version also named
-  # registries/claims.tsv and failed -- correctly -- while the commit that
-  # introduces these very rows was still in flight. That assertion conflated
-  # "the drill damaged nothing" with "nobody is editing the registry", which
-  # would fail this lane for any agent's unrelated registry work. The drill's
-  # blast radius is the proof artifacts it copies and mutates; that is what is
-  # asserted.
-  prf_tree_dirt=$(cd "$PRF_REPO" && git status --porcelain -- proofs/fg041 | wc -l | tr -d ' ')
-  fge_field proof_tree_dirty_paths "$prf_tree_dirt"
-  fge_assert_eq fg041-drill-left-the-checkout-clean 0 "$prf_tree_dirt" \
-    'the drill mutates only its sandbox; the shared worktree is never touched'
+  # Digest the exact file the drill mutates in its sandbox, not the directory
+  # it lives in. TWO earlier versions of this assertion were scoped wider than
+  # the property: the first named registries/claims.tsv and failed while the
+  # commit introducing those rows was in flight; the second watched all of
+  # proofs/fg041 and failed the moment this bead added Refinement.lean beside
+  # it. Both conflated "the drill damaged nothing" with "nobody is editing
+  # nearby". A digest of the mutated artifact is the property itself, and it is
+  # immune to anyone's unrelated work.
+  prf_model_after=$(fge_digest_file "$PRF_REPO/proofs/fg041/OrderedResidue.lean")
+  fge_field proof_artifact_digest "$prf_model_after"
+  fge_assert_eq fg041-drill-left-the-checkout-clean "$prf_model_before" "$prf_model_after" \
+    'the drill mutates only its sandbox copy; the checked-in proof artifact is byte-identical'
+fi
+
+# -----------------------------------------------------------------------------
+fge_phase assert
+fge_step trace-refinement-bridge
+# -----------------------------------------------------------------------------
+# FG-041d step (2): every exported reference-model history is a run of the Lean
+# model. This is what turns the FG-041 theorems from statements about a model
+# into statements connected to the code. fg041c measured that no such link
+# existed; this is the link.
+#
+# The build produces oleans, because check.sh compiles ONE file and there is no
+# lake project, so `import OrderedResidue` has nothing to resolve against
+# otherwise. It all happens in a sandbox directory: the checkout is never
+# written to, which is what keeps this runnable in a sixteen-pane worktree.
+#
+# Discharged with kernel `decide`, NOT native_decide. toolchain.json pins the
+# trusted base to the Lean kernel plus bundled Init and Std, and native_decide
+# would widen it to include the Lean compiler -- a proof-class change wearing a
+# tactic's clothes.
+if ! command -v elan >/dev/null 2>&1; then
+  fge_skip fg041-trace-refinement 'elan is unavailable; the pinned Lean toolchain cannot be exercised here'
+else
+  prf_bridge=$(fge_tempdir fg041-refinement)
+  cp "$PRF_REPO/proofs/fg041/OrderedResidue.lean" "$prf_bridge/"
+  cp "$PRF_REPO/proofs/fg041/generated/Vectors.lean" "$prf_bridge/"
+  cp "$PRF_REPO/proofs/fg041/Refinement.lean" "$prf_bridge/"
+  prf_refinement_log=$(fge_artifact_path fg041-refinement.log)
+
+  prf_ref_exit=0
+  (
+    cd "$prf_bridge" || exit 2
+    elan run "$PRF_TOOLCHAIN" lean -o OrderedResidue.olean OrderedResidue.lean || exit 1
+    LEAN_PATH=. elan run "$PRF_TOOLCHAIN" lean -o Vectors.olean Vectors.lean || exit 1
+    LEAN_PATH=. elan run "$PRF_TOOLCHAIN" lean Refinement.lean || exit 1
+  ) >"$prf_refinement_log" 2>&1 || prf_ref_exit=$?
+  fge_field refinement_exit "$prf_ref_exit"
+  fge_assert_eq fg041-trace-refinement 0 "$prf_ref_exit" \
+    'every exported reference-model history is a run of the Lean model'
+
+  # The committed vectors must still be what the corpus renders. A refinement
+  # theorem is about the vectors it was checked against, so a stale artifact
+  # would prove something true about a corpus that no longer exists.
+  prf_gate_log=$(fge_artifact_path fg041-vectors-gate.log)
+  prf_gate_exit=0
+  ( cd "$PRF_REPO" && RCH_CARGO_WRAPPER_BYPASS=1 \
+      cargo run -q -p fgit-proof-bridge --bin fgit-proof-bridge-gen -- check ) \
+    >"$prf_gate_log" 2>&1 || prf_gate_exit=$?
+  fge_field vectors_gate_exit "$prf_gate_exit"
+  fge_assert_eq fg041-vectors-are-current 0 "$prf_gate_exit" \
+    'the committed Lean vectors match what the golden corpus renders today'
 fi
 
 fge_phase teardown
