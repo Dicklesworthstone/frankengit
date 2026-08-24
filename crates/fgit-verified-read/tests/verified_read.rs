@@ -43,7 +43,7 @@ fn name(value: &[u8]) -> RefName {
     RefName::try_new(value).expect("fixture ref name is valid")
 }
 
-fn oid(byte: u8) -> GitOid {
+const fn oid(byte: u8) -> GitOid {
     GitOid::Sha1(GitOidSha1::from_bytes([byte; GitOidSha1::LEN]))
 }
 
@@ -243,7 +243,7 @@ fn denied_absence_queries_are_indistinguishable_and_never_reach_lookup() {
 fn authorized_absence_verifies_across_v1_positions_and_membership_remains_permitted() {
     let main = name(b"refs/heads/main");
     let tag = name(b"refs/tags/v1");
-    let entries = vec![(main.clone(), oid(0x11)), (tag, oid(0x22))];
+    let entries = vec![(main, oid(0x11)), (tag, oid(0x22))];
     for (label, state, query) in [
         ("empty", Vec::new(), name(b"refs/heads/missing")),
         ("before-first", entries.clone(), name(b"refs/heads/aaa")),
@@ -327,16 +327,28 @@ fn unproven_mode_stays_available_and_forge_positions_remain_refused() {
         VerifiedReadResponseMode::EnvelopeV1
     );
     let expected_absent = name(b"refs/heads/missing");
-    let unproven = ReadResponse::Unproven(UnprovenReadAnswer::Ref {
+    let unproven = ReadResponse::Unproven(Box::new(UnprovenReadAnswer::Ref {
         name: expected_absent.clone(),
         oid: None,
-    });
+    }));
+    let ReadResponse::Unproven(answer) = unproven else {
+        panic!("fixture negotiated the unproven representation");
+    };
+    assert_eq!(
+        answer.as_ref(),
+        &UnprovenReadAnswer::Ref {
+            name: expected_absent,
+            oid: None,
+        }
+    );
+    let unproven_outcome = ReadResponse::Unproven(Box::new(UnprovenReadAnswer::Outcome {
+        tx_id: tx(0xA1),
+        outcome: Some(Box::new(committed(1, 0x55))),
+    }));
     assert!(matches!(
-        unproven,
-        ReadResponse::Unproven(UnprovenReadAnswer::Ref {
-            name,
-            oid: None
-        }) if name == expected_absent
+        unproven_outcome,
+        ReadResponse::Unproven(answer)
+            if matches!(answer.as_ref(), UnprovenReadAnswer::Outcome { outcome: Some(_), .. })
     ));
     assert_eq!(
         refuse_forge_position_proof(),

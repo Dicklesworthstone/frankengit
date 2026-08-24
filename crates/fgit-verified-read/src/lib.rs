@@ -112,7 +112,7 @@ pub enum UnprovenReadAnswer {
         /// Transaction queried by the client.
         tx_id: TxId,
         /// Terminal outcome, when one was found.
-        outcome: Option<TerminalOutcome>,
+        outcome: Option<Box<TerminalOutcome>>,
     },
 }
 
@@ -121,7 +121,7 @@ pub enum UnprovenReadAnswer {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReadResponse {
     /// An ordinary response selected for a client without proof support.
-    Unproven(UnprovenReadAnswer),
+    Unproven(Box<UnprovenReadAnswer>),
     /// A response carrying a versioned proof envelope.
     Verified(Box<VerifiedReadEnvelope>),
 }
