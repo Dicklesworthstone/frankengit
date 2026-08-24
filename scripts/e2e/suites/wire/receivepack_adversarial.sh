@@ -141,13 +141,13 @@ main() {
   # a deleted concurrency probe from a renamed one, and these three cover
   # different schedules, so losing any ONE of them silently narrows what the
   # lane proves while the total still matches.
-  fge_assert_contains 'FG-019C-E2E-025' "${race_out}" \
+  fge_assert_contains 'FG-019C-E2E-030' "${race_out}" \
     'two_concurrent_sessions_deleting_one_ref_yield_exactly_one_commit' \
     'the real-thread concurrent race is present in the run'
-  fge_assert_contains 'FG-019C-E2E-026' "${race_out}" \
+  fge_assert_contains 'FG-019C-E2E-031' "${race_out}" \
     'a_scheduled_push_race_forces_the_stale_cas_window_and_still_yields_one_winner' \
     'the fgit-lab scheduled stale-CAS race is present in the run'
-  fge_assert_contains 'FG-019C-E2E-027' "${race_out}" \
+  fge_assert_contains 'FG-019C-E2E-032' "${race_out}" \
     'a_basis_bound_loser_is_refused_authority_receipt_stale_not_expected_old_ref_mismatch' \
     'the production basis-bound loser-status probe is present in the run'
   fge_assert_contains 'FG-019C-E2E-024' "${race_out}" \

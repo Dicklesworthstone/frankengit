@@ -2292,8 +2292,13 @@ fn quarantined_empty_pack() -> fgit_pack::QuarantinedPack {
     .expect("an empty pack is structurally valid and crosses quarantine parsing")
 }
 
-/// A validator that declares one uploaded object, so a non-delete command's
-/// target is inside the closure and containment does not refuse first.
+/// A validator that DECLARES a closure covering the target, so containment does
+/// not refuse before ref visibility is consulted.
+///
+/// It ignores the pack and the receipt. That is the point -- it isolates the
+/// ordering question -- and it is also exactly why nothing downstream of it may
+/// be described as object-bearing evidence: a permissive validator can name an
+/// object the pack does not contain.
 struct DeclaredClosureValidator(GitOid);
 
 impl QuarantineValidator for DeclaredClosureValidator {
@@ -2314,8 +2319,21 @@ impl QuarantineValidator for DeclaredClosureValidator {
     }
 }
 
-/// One object-bearing create of `target_ref`, validated and ready to admit.
-fn object_bearing_receive(target_ref: &[u8], new_oid: &str) -> ValidatedReceive {
+/// One NON-DELETE create of `target_ref`, validated and ready to admit.
+///
+/// # What this fixture is and is not
+///
+/// It is a non-delete command that gets *past* the pack-presence and
+/// closure-containment gates, so admission reaches ref-visibility policy. It is
+/// NOT an object-bearing push: the pack carries zero entries and the validator
+/// DECLARES a closure covering the target rather than deriving one from those
+/// bytes. Nothing here proves an object was transferred, staged, or retained.
+///
+/// That limit is deliberate and structural. Deriving a closure from real pack
+/// contents is what `ProductionQuarantineValidator` does, and it lives in
+/// `fgit-node`; this crate can only supply a double. Real object-bearing
+/// evidence therefore belongs in a `fgit-node` test, not here.
+fn non_delete_receive_with_declared_closure(target_ref: &[u8], new_oid: &str) -> ValidatedReceive {
     let mut line = format!("{ZERO} {new_oid} {}", String::from_utf8_lossy(target_ref)).into_bytes();
     line.push(0);
     line.extend_from_slice(b"report-status atomic");
@@ -2331,9 +2349,12 @@ fn object_bearing_receive(target_ref: &[u8], new_oid: &str) -> ValidatedReceive 
     let request = (**request).clone();
 
     let pack = quarantined_empty_pack();
+    // The receipt tells the truth about the pack. An earlier version of this
+    // fixture claimed `object_count: 1` beside a zero-entry pack, which is a
+    // fixture asserting something the bytes do not support.
     let receipt = QuarantineReceipt {
         object_format: GitObjectFormat::Sha1,
-        object_count: 1,
+        object_count: 0,
         pack_bytes: 32,
         delete_only: false,
     };
@@ -2347,24 +2368,34 @@ fn object_bearing_receive(target_ref: &[u8], new_oid: &str) -> ValidatedReceive 
     .expect("an object-bearing receive whose closure covers its target validates")
 }
 
-/// An OBJECT-BEARING push to a hidden ref is refused as hidden, not by an
-/// earlier gate.
+/// Ref visibility is consulted AFTER the gates a non-delete command crosses, and
+/// still refuses.
 ///
-/// # Why this is not covered by the delete-only probes
+/// # The claim, narrowed after audit 4702
 ///
-/// Audit 4658.3 was right that every hidden-ref probe here is a delete-only,
-/// zero-object request. `hides_any_target` reads only `command.name`, so by
-/// SOURCE the guard looks command-kind independent -- but reading the guard is
-/// not watching it fire. An object-bearing request travels a longer road first:
-/// `validate_receive` demands a pack, then closure containment, and either could
-/// refuse before ref visibility is ever consulted. Both of those answer
-/// `ObjectClosureIncomplete`, which is a different code, so "refused" alone
-/// would not distinguish them.
+/// This was first written as an "object-bearing push" probe. It is not one, and
+/// BlackOx was right to say so: the pack has zero entries and the validator
+/// declares a covering closure instead of deriving one, so no object is
+/// transferred and the permitted twin would happily commit a ref aimed at an
+/// object absent from the pack. Calling that object-bearing evidence would be a
+/// fixture presented as live proof.
 ///
-/// This drives the object-bearing road all the way and pins that the refusal is
-/// still `HiddenRefUnauthorized`.
+/// What it does establish is ORDERING, which is still worth having and was still
+/// unproven: a non-delete command travels a longer road than a delete --
+/// `validate_receive` demands a pack, then closure containment runs -- and
+/// EITHER can refuse before ref visibility is consulted. Both answer
+/// `ObjectClosureIncomplete`. So a permissive validator could have let a hidden
+/// target through, or an earlier gate could have masked the visibility check
+/// entirely, and every other hidden-ref probe here is delete-only and skips that
+/// road. This pins that visibility still decides, with the exact code.
+///
+/// NOT established here, and left open on acceptance line 1: that a real
+/// uploaded object behind such a refusal is excluded from retention, disclosure
+/// or canonical fabric. That needs production closure validation
+/// (`fgit-node`'s `ProductionQuarantineValidator`) plus the owner's policy
+/// ruling on comment 4617.
 #[test]
-fn an_object_bearing_push_to_a_hidden_ref_is_still_refused_as_hidden() {
+fn ref_visibility_is_checked_after_the_pack_and_closure_gates_a_non_delete_crosses() {
     let context = context(b"fg019c-hidden-objects");
     let store = store_with_genesis(&context);
     let projection =
@@ -2373,7 +2404,7 @@ fn an_object_bearing_push_to_a_hidden_ref_is_still_refused_as_hidden() {
     let result = admit_validated_receive(
         &store,
         &context,
-        &object_bearing_receive(b"refs/internal/secret", MAIN_OID),
+        &non_delete_receive_with_declared_closure(b"refs/internal/secret", MAIN_OID),
         AdmissionLimits::default(),
         &projection,
     )
@@ -2393,14 +2424,19 @@ fn an_object_bearing_push_to_a_hidden_ref_is_still_refused_as_hidden() {
     );
 }
 
-/// The permitted twin for the object-bearing case: same shape, visible target,
-/// and it must COMMIT.
+/// The permitted twin: same shape, visible target, and it must NOT be refused as
+/// hidden.
 ///
 /// Without this the test above passes equally against an admission path that
-/// refuses every object-bearing push for some unrelated reason, which is the
-/// whole failure mode a twin exists to exclude.
+/// refuses every non-delete command for some unrelated reason, which is the
+/// failure mode a twin exists to exclude.
+///
+/// It deliberately asserts "not refused as hidden" rather than "commits". This
+/// fixture's closure is declared rather than derived, so a commit here would
+/// publish a ref pointing at an object no pack carried -- an outcome this test
+/// should not be in the business of blessing.
 #[test]
-fn the_permitted_twin_an_object_bearing_push_to_a_visible_ref_commits() {
+fn the_permitted_twin_a_non_delete_to_a_visible_ref_is_not_refused_as_hidden() {
     let context = context(b"fg019c-visible-objects");
     let store = store_with_genesis(&context);
     let projection =
@@ -2409,7 +2445,7 @@ fn the_permitted_twin_an_object_bearing_push_to_a_visible_ref_commits() {
     let result = admit_validated_receive(
         &store,
         &context,
-        &object_bearing_receive(b"refs/heads/feature", MAIN_OID),
+        &non_delete_receive_with_declared_closure(b"refs/heads/feature", MAIN_OID),
         AdmissionLimits::default(),
         &projection,
     )
@@ -2417,9 +2453,15 @@ fn the_permitted_twin_an_object_bearing_push_to_a_visible_ref_commits() {
 
     let outcome = &result.commands[0].terminal.outcome;
     assert!(
-        matches!(outcome, DecisionOutcome::Committed { .. }),
-        "an object-bearing push to a ref the policy does not hide must COMMIT, got \
-         {outcome:?}"
+        !matches!(
+            outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::HiddenRefUnauthorized,
+                ..
+            }
+        ),
+        "a non-delete command aimed at a ref the policy does not hide must not be \
+         refused as hidden, got {outcome:?}"
     );
 }
 
