@@ -1002,6 +1002,12 @@ mod tests {
         }
     }
 
+    fn assert_same_receipt_semantics(modeled: &HeadReadReceipt, stored: &HeadReadReceipt) {
+        assert_eq!(modeled.key(), stored.key());
+        assert_eq!(modeled.generation(), stored.generation());
+        assert_eq!(modeled.body(), stored.body());
+    }
+
     #[test]
     fn reference_spec_and_store_preserve_overlapping_cas_guard_order() {
         let instance = StoreInstanceId::from_raw(73);
@@ -1034,54 +1040,90 @@ mod tests {
         };
         let (initialized_state, modeled_initialize) = specification.apply(&initial, &initialize);
         let stored_initialize = store.execute(&initialize);
-        assert_eq!(modeled_initialize, stored_initialize);
-        let first = initialized_receipt(modeled_initialize);
+        let modeled_first = initialized_receipt(modeled_initialize);
+        let stored_first = initialized_receipt(stored_initialize);
+        assert_same_receipt_semantics(&modeled_first, &stored_first);
 
+        // The checker-local token is a normalized representative, while the
+        // store token is opaque. Each backend therefore receives its own
+        // issued token below; only receipt semantics and refusal ordering are
+        // compared across the two executions.
         // The issued token is valid, but belongs to another key. This also
         // targets an absent head and proposes a non-advancing generation; key
         // mismatch must still win before either later guard.
-        let wrong_key = AuthorityOp::CompareExchangeHead {
-            key: other,
-            expected: first.token(),
+        let modeled_wrong_key = AuthorityOp::CompareExchangeHead {
+            key: other.clone(),
+            expected: modeled_first.token(),
             new_generation: HeadGeneration::FIRST,
             new_body: b"wrong-key".to_vec(),
         };
-        let (_, modeled_wrong_key) = specification.apply(&initialized_state, &wrong_key);
-        let stored_wrong_key = store.execute(&wrong_key);
-        assert_eq!(modeled_wrong_key, stored_wrong_key);
+        let stored_wrong_key = AuthorityOp::CompareExchangeHead {
+            key: other,
+            expected: stored_first.token(),
+            new_generation: HeadGeneration::FIRST,
+            new_body: b"wrong-key".to_vec(),
+        };
+        let (_, modeled_wrong_key_response) =
+            specification.apply(&initialized_state, &modeled_wrong_key);
+        let stored_wrong_key_response = store.execute(&stored_wrong_key);
         assert_eq!(
-            modeled_wrong_key,
+            modeled_wrong_key_response,
+            AuthorityResponse::Refused(AuthorityRefusal::TokenKeyMismatch)
+        );
+        assert_eq!(
+            stored_wrong_key_response,
             AuthorityResponse::Refused(AuthorityRefusal::TokenKeyMismatch)
         );
 
-        let advance = AuthorityOp::CompareExchangeHead {
+        let modeled_advance = AuthorityOp::CompareExchangeHead {
             key: primary.clone(),
-            expected: first.token(),
-            new_generation: first
+            expected: modeled_first.token(),
+            new_generation: modeled_first
                 .generation()
                 .next()
                 .expect("the genesis generation has a successor"),
             new_body: b"advanced".to_vec(),
         };
-        let (advanced_state, modeled_advance) = specification.apply(&initialized_state, &advance);
-        let stored_advance = store.execute(&advance);
-        assert_eq!(modeled_advance, stored_advance);
-        let _second = committed_receipt(modeled_advance);
+        let stored_advance = AuthorityOp::CompareExchangeHead {
+            key: primary.clone(),
+            expected: stored_first.token(),
+            new_generation: stored_first
+                .generation()
+                .next()
+                .expect("the genesis generation has a successor"),
+            new_body: b"advanced".to_vec(),
+        };
+        let (advanced_state, modeled_advance_response) =
+            specification.apply(&initialized_state, &modeled_advance);
+        let stored_advance_response = store.execute(&stored_advance);
+        let modeled_second = committed_receipt(modeled_advance_response);
+        let stored_second = committed_receipt(stored_advance_response);
+        assert_same_receipt_semantics(&modeled_second, &stored_second);
 
         // The first token is known and key-correct, but stale. It also offers
         // a non-monotone generation, so predecessor mismatch must win before
         // the monotonicity guard.
-        let stale_and_non_monotone = AuthorityOp::CompareExchangeHead {
-            key: primary,
-            expected: first.token(),
+        let modeled_stale_and_non_monotone = AuthorityOp::CompareExchangeHead {
+            key: primary.clone(),
+            expected: modeled_first.token(),
             new_generation: HeadGeneration::FIRST,
             new_body: b"stale".to_vec(),
         };
-        let (_, modeled_stale) = specification.apply(&advanced_state, &stale_and_non_monotone);
-        let stored_stale = store.execute(&stale_and_non_monotone);
-        assert_eq!(modeled_stale, stored_stale);
+        let stored_stale_and_non_monotone = AuthorityOp::CompareExchangeHead {
+            key: primary,
+            expected: stored_first.token(),
+            new_generation: HeadGeneration::FIRST,
+            new_body: b"stale".to_vec(),
+        };
+        let (_, modeled_stale) =
+            specification.apply(&advanced_state, &modeled_stale_and_non_monotone);
+        let stored_stale = store.execute(&stored_stale_and_non_monotone);
         assert_eq!(
             modeled_stale,
+            AuthorityResponse::CompareExchangeHead(CasOutcome::PredecessorMismatch)
+        );
+        assert_eq!(
+            stored_stale,
             AuthorityResponse::CompareExchangeHead(CasOutcome::PredecessorMismatch)
         );
     }
