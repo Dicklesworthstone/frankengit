@@ -24,38 +24,39 @@ capture_test() {
 }
 
 main() {
-  local abuse_exit=0 gc_exit=0
-  local abuse_out='' gc_out=''
+  local crypto_exit=0 lab_exit=0 gc_exit=0
+  local crypto_out='' lab_out='' gc_out=''
 
   fge_phase setup
-  fge_context crate fgit-crypto
+  fge_context crate 'fgit-crypto (purpose refusal) + fgit-lab (scheduled lifecycle drills)'
   fge_context lab_schedule 'explicit reader-before/after-rotation, writer, revoker interleavings'
   fge_context deletion_integration 'typed crypto erasure receipt alongside fg033b authenticated GC epoch'
   fge_context non_claim 'This proves key-registry refusal and authenticated object-GC evidence. It does not claim physical deletion of root-secret copies retained outside the key registry.'
   fge_assert_file FG-057B-E2E-001 "$KA_REPO/crates/fgit-crypto/tests/key_abuse.rs" \
-    'the defensive key-abuse conformance drill is checked in'
-  fge_assert_file FG-057B-E2E-002 "$KA_REPO/crates/fgit-repair/tests/gc_epoch.rs" \
-    'fg033b authenticated GC-epoch evidence is checked in'
+    'the pure cross-purpose refusal drill is checked in'
+  fge_assert_file FG-057B-E2E-002 "$KA_REPO/crates/fgit-lab/tests/crypto_key_abuse.rs" \
+    'the L2 scheduled key-lifecycle drills are checked in'
 
   fge_phase action
-  capture_test crypto-key-abuse abuse_out \
-    -p fgit-crypto --test key_abuse || abuse_exit=$?
+  capture_test crypto-cross-purpose crypto_out \
+    -p fgit-crypto --test key_abuse || crypto_exit=$?
+  capture_test lab-crypto-key-abuse lab_out \
+    -p fgit-lab --test crypto_key_abuse || lab_exit=$?
   capture_test fg033b-authenticated-gc-epoch gc_out \
     -p fgit-repair --test gc_epoch \
     logical_tombstone_is_distinct_from_physical_deletion -- --exact || gc_exit=$?
 
   fge_phase assert
-  fge_assert_exit FG-057B-E2E-010 0 "$abuse_exit" \
-    'serialized cross-purpose material, scheduled rotation, and terminal erasure all refuse safely'
-  fge_assert_contains FG-057B-E2E-011 "$abuse_out" \
+  fge_assert_exit FG-057B-E2E-010 0 "$crypto_exit" \
+    'serialized cross-purpose material refuses safely without a lab dependency'
+  fge_assert_contains FG-057B-E2E-011 "$crypto_out" \
     'serialized_cross_purpose_material_is_refused_with_a_same_purpose_twin ... ok' \
     'a serialized capsule key cannot acquire tenant-encryption purpose'
-  fge_assert_contains FG-057B-E2E-012 "$abuse_out" \
-    'rotation_window_interleavings_are_receipted_and_never_fall_back ... ok' \
-    'each replayable lab ordering preserves old reads, new writes, and revocation'
-  fge_assert_contains FG-057B-E2E-013 "$abuse_out" \
-    'erasure_is_terminal_receipted_and_refuses_every_authorized_read_path ... ok' \
-    'an erased key state is permanent and typed rather than unknown'
+  fge_assert_exit FG-057B-E2E-012 0 "$lab_exit" \
+    'the L2 lab consumer runs the scheduled lifecycle drills'
+  fge_assert_contains FG-057B-E2E-013 "$lab_out" \
+    'test result: ok. 2 passed; 0 failed;' \
+    'the rotation-window and erasure drills both remain in the dedicated lab target'
   fge_assert_exit FG-057B-E2E-020 0 "$gc_exit" \
     'fg033b retains a root-proof-carrying logical deletion state before physical deletion'
   fge_assert_contains FG-057B-E2E-021 "$gc_out" \

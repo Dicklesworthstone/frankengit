@@ -13,12 +13,13 @@ fgit-authority.workspace = true
 fgit-resource.workspace = true
 fgit-runtime.workspace = true
 
-# Integration tests instantiate the real typed reservation/receipt payloads,
-# whose fields are fgit-types identifiers. An integration test cannot import a
-# transitive dependency, so the edge has to be declared -- but only for tests:
-# fgit-lab's own src does not use fgit-types, and a regular dependency would
-# put it in the PRODUCTION graph for no reason.
+# Integration tests consume the L1 crypto lifecycle surface and instantiate
+# real typed reservation/receipt payloads whose fields are fgit-types
+# identifiers. An integration test cannot import transitive dependencies, so
+# both edges are test-only: fgit-lab's own src uses neither, and regular
+# dependencies would put them in the PRODUCTION graph for no reason.
 [dev-dependencies]
+fgit-crypto.workspace = true
 fgit-types.workspace = true
 
 [lints]
