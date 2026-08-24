@@ -48,6 +48,18 @@ fn source(commit: ObjectId) -> MidxSource {
 /// identities; `IdxV2::parse` retains the same structural, not admission,
 /// classification which MIDX receipts state explicitly.
 fn index(entries: &[(ObjectId, u64)], pack_checksum: ObjectId) -> IdxV2 {
+    index_in_format(ObjectFormat::Sha1, entries, pack_checksum)
+}
+
+/// The same fixture builder over an explicit object format, so a pack index in
+/// a hash domain other than the MIDX's can be constructed. Only the trailing
+/// idx checksum width and the parsed format depend on it; every record field is
+/// already written at the identity's own width.
+fn index_in_format(
+    format: ObjectFormat,
+    entries: &[(ObjectId, u64)],
+    pack_checksum: ObjectId,
+) -> IdxV2 {
     assert!(
         entries.windows(2).all(|pair| pair[0].0 < pair[1].0),
         "fixture records must satisfy the real idx ordering rule"
@@ -91,15 +103,10 @@ fn index(entries: &[(ObjectId, u64)], pack_checksum: ObjectId) -> IdxV2 {
         output.extend_from_slice(&offset.to_be_bytes());
     }
     output.extend_from_slice(pack_checksum.as_bytes());
-    output.extend_from_slice(&[0x77; SHA1_BYTES]);
+    output.extend(std::iter::repeat_n(0x77_u8, pack_checksum.as_bytes().len()));
     let mut live = || true;
-    IdxV2::parse(
-        &output,
-        ObjectFormat::Sha1,
-        &PackLimits::default(),
-        &mut live,
-    )
-    .expect("fixture is structurally valid idx v2")
+    IdxV2::parse(&output, format, &PackLimits::default(), &mut live)
+        .expect("fixture is structurally valid idx v2")
 }
 
 fn read_u32(input: &[u8], offset: usize) -> u32 {
@@ -355,5 +362,61 @@ fn a_lookup_identity_in_another_hash_domain_is_refused_naming_the_subject() {
                 && *observed == ObjectFormat::Sha256
         ),
         "the refusal must name the lookup subject and both formats, got {refusal:?}"
+    );
+}
+
+/// A pack index in a different hash domain than the MIDX is refused on the
+/// write path, naming which subject was rejected (`frankengit-fg058`, D3).
+///
+/// This is the sibling of the lookup-path test above and the reason the
+/// `subject` pin matters: both raise `MidxRefusal::ObjectFormatMismatch` with
+/// the same `expected`/`observed` pair, so only the subject separates "a pack
+/// index was in the wrong domain" from "the identity being looked up was".
+#[test]
+fn a_pack_index_in_another_hash_domain_is_refused_naming_the_subject() {
+    let source_commit = oid(0x01);
+
+    // Permitted twin: an index in the MIDX's own format is accepted, so the
+    // refusal below cannot be explained by the writer rejecting every index.
+    let native = index(&[(source_commit, 40), (oid(0x02), 60)], oid(0x20));
+    let mut native_live = || true;
+    assert!(
+        MidxV1::write(
+            source(source_commit),
+            &[native],
+            MidxLimits::default(),
+            &mut native_live,
+        )
+        .is_ok(),
+        "a pack index in the MIDX's own object format must be accepted"
+    );
+
+    let foreign_oid = |byte: u8| ObjectId::from(GitOidSha256::from_bytes([byte; 32]));
+    let foreign = index_in_format(
+        ObjectFormat::Sha256,
+        &[(foreign_oid(0x02), 40), (foreign_oid(0x03), 60)],
+        foreign_oid(0x20),
+    );
+    let mut foreign_live = || true;
+    let refusal = MidxV1::write(
+        source(source_commit),
+        &[foreign],
+        MidxLimits::default(),
+        &mut foreign_live,
+    )
+    .expect_err("a pack index from another hash domain cannot join this MIDX");
+
+    assert!(
+        matches!(
+            &refusal,
+            MidxRefusal::ObjectFormatMismatch {
+                subject,
+                expected,
+                observed,
+            } if *subject == "pack index"
+                && *expected == ObjectFormat::Sha1
+                && *observed == ObjectFormat::Sha256
+        ),
+        "the refusal must name the pack-index subject and both formats, got {refusal:?}"
     );
 }
