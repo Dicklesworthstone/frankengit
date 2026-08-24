@@ -407,7 +407,7 @@ impl FilesystemAssetInventory {
 
     /// Assets observed in canonical relative-path order.
     #[must_use]
-    pub fn assets(&self) -> &BTreeMap<String, [u8; 32]> {
+    pub const fn assets(&self) -> &BTreeMap<String, [u8; 32]> {
         &self.assets
     }
 
@@ -598,7 +598,7 @@ impl AttemptJournal {
     /// Returns true when the journal can be reopened and contains no manifest
     /// root. Cancellation leaves this true so receipts are available for resume.
     #[must_use]
-    pub fn is_resumable(&self) -> bool {
+    pub const fn is_resumable(&self) -> bool {
         self.state.manifest_prepared.is_none()
     }
 
@@ -1155,7 +1155,7 @@ fn take_journal_text(tail: &mut &[u8]) -> Result<String, AttemptRunnerRefusal> {
     Ok(text)
 }
 
-fn require_empty(tail: &[u8]) -> Result<(), AttemptRunnerRefusal> {
+const fn require_empty(tail: &[u8]) -> Result<(), AttemptRunnerRefusal> {
     if tail.is_empty() {
         Ok(())
     } else {
