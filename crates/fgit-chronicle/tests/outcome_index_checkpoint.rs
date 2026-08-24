@@ -7,16 +7,18 @@ use fgit_authority::{
     publish_decisions,
 };
 use fgit_chronicle::{
-    BackupProfile, CapsuleClosure, LiveCapsuleRefusal, OutcomeIndexCheckpointBody,
-    PublicationBasis, PublicationPlan, ResultingRoots, activate_frozen_capsule,
+    BackupProfile, CapsuleClosure, LiveCapsuleRefusal, MAX_CHECKPOINT_PREDECESSORS,
+    OutcomeIndexCheckpointBody, OutcomeIndexCheckpointRefusal, PublicationBasis, PublicationPlan,
+    ResultingRoots, activate_frozen_capsule,
     collect_cumulative_outcomes_from_authenticated_capsule_checkpoint,
-    freeze_capsule_with_outcome_index_checkpoint,
+    freeze_capsule_with_outcome_index_checkpoint, stage_outcome_index_checkpoint,
+    verify_outcome_index_checkpoint_chain,
 };
 use fgit_codec::{CryptoBodyIdentity, DecodeLimits, RepositoryAuthorityHeadBody, decode_body};
 use fgit_types::{
-    CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, HeadGeneration, OPAQUE_ID_LEN,
-    PolicyEpoch, RefusalCode, RefusalRecordId, RegistryEpoch, RepositoryDecisionBatchId,
-    RepositoryId, TenantId, TxId,
+    CANONICAL_CODEC_VERSION, DecisionSequence, Digest, DigestAlgorithmId, DigestBytes,
+    HeadGeneration, OPAQUE_ID_LEN, PolicyEpoch, RefusalCode, RefusalRecordId, RegistryEpoch,
+    RepositoryDecisionBatchId, RepositoryId, TenantId, TxId,
 };
 
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
@@ -150,6 +152,38 @@ fn root_of(decisions: &[fgit_codec::RepositoryDecision]) -> Digest {
             .collect::<Vec<_>>(),
     )
     .expect("terminal decisions form an outcome-index root")
+}
+
+fn checkpoint_tail(position: u64) -> RepositoryDecisionBatchId {
+    let mut bytes = [0_u8; 32];
+    bytes[..8].copy_from_slice(&position.to_be_bytes());
+    bytes[31] = 0x71;
+    RepositoryDecisionBatchId::from_digest(
+        DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            .expect("fixture algorithm is reserved"),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&bytes).expect("fixture digest is 32 bytes"),
+    )
+}
+
+fn stage_checkpoint_chain(store: &MemoryAuthorityStore, predecessor_links: usize) -> Digest {
+    let mut predecessor = None;
+    for position in 1..=predecessor_links + 1 {
+        let position = u64::try_from(position).expect("fixture position fits in u64");
+        let checkpoint = OutcomeIndexCheckpointBody::new(
+            repository(),
+            Some(checkpoint_tail(position)),
+            Some(DecisionSequence::try_new(position).expect("fixture position is nonzero")),
+            predecessor,
+            Vec::new(),
+        )
+        .expect("empty retained leaf set is canonical evidence");
+        predecessor = Some(
+            stage_outcome_index_checkpoint(store, &CryptoBodyIdentity, &checkpoint)
+                .expect("fixture checkpoint stages"),
+        );
+    }
+    predecessor.expect("a chain always has its newest checkpoint")
 }
 
 #[test]
@@ -375,5 +409,23 @@ fn checkpoint_collector_refuses_position_matched_wrong_leaves() {
             publication.head().latest_decision_sequence,
         ),
         Err(OutcomeFailure::CheckpointRootMismatch)
+    ));
+}
+
+#[test]
+fn checkpoint_predecessor_chain_accepts_its_bound_and_refuses_one_more_link() {
+    let at_limit = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x6767));
+    let at_limit_root = stage_checkpoint_chain(&at_limit, MAX_CHECKPOINT_PREDECESSORS);
+    assert!(
+        verify_outcome_index_checkpoint_chain(&at_limit, &CryptoBodyIdentity, at_limit_root)
+            .is_ok(),
+        "exactly MAX_CHECKPOINT_PREDECESSORS predecessor links remain accepted"
+    );
+
+    let over_limit = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x6868));
+    let over_limit_root = stage_checkpoint_chain(&over_limit, MAX_CHECKPOINT_PREDECESSORS + 1);
+    assert!(matches!(
+        verify_outcome_index_checkpoint_chain(&over_limit, &CryptoBodyIdentity, over_limit_root),
+        Err(OutcomeIndexCheckpointRefusal::PredecessorChainTooLong)
     ));
 }
