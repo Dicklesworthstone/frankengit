@@ -310,12 +310,16 @@ struct ScheduledProjection<'schedule, 'rival> {
 }
 
 impl ScheduledProjection<'_, '_> {
-    fn step(&self, expected: &str) {
+    fn step(&self, expected_actor: &str) {
         let mut cursor = self.cursor.borrow_mut();
         let actual = cursor
             .next_step()
             .expect("the lab schedule declares every race boundary");
-        assert_eq!(actual.as_str(), expected, "lab schedule drifted");
+        assert_eq!(
+            actual.as_str(),
+            expected_actor,
+            "lab schedule drifted at a merge-admission boundary"
+        );
     }
 
     fn schedule_exhausted(&self) -> bool {
@@ -338,11 +342,11 @@ impl AdmissionSnapshotProjection for ScheduledProjection<'_, '_> {
     ) -> Result<AdmissionSnapshot, RefusalCode> {
         let first_snapshot = !self.raced.replace(true);
         if first_snapshot {
-            self.step("merge-a/snapshot");
+            self.step("merge-a");
         }
         let snapshot = self.production.snapshot(basis, authenticated)?;
         if first_snapshot {
-            self.step("merge-b/admit");
+            self.step("merge-b");
             let terminal = admit_merge(
                 self.store.as_ref(),
                 &self.rival.context,
@@ -353,7 +357,7 @@ impl AdmissionSnapshotProjection for ScheduledProjection<'_, '_> {
             )
             .expect("scheduled rival reaches one terminal decision");
             self.rival_terminal.borrow_mut().replace(terminal);
-            self.step("merge-a/publish");
+            self.step("merge-a");
         }
         Ok(snapshot)
     }
