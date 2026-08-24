@@ -28,6 +28,8 @@ use std::{
 
 use fgit_crypto::sha256_digest;
 
+pub mod transport;
+
 /// Pinned schema name for a benchmark evidence artifact.
 pub const ARTIFACT_SCHEMA: &str = "frankengit.benchmark.evidence.v1";
 /// Pinned schema version for [`ARTIFACT_SCHEMA`].

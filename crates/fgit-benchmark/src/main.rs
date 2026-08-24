@@ -11,6 +11,7 @@ use fgit_benchmark::{
     BenchmarkPlan, BenchmarkRefusal, BenchmarkRunner, BenchmarkWorkload, EnvironmentFingerprint,
     MIN_SAMPLES_PER_VARIANT, OptimizationAdmission, OracleReceipt, StorageClasses, SystemMetrics,
     WorkloadDescriptor,
+    transport::{ServerKind, TransportConfig, TransportWorkload},
 };
 
 fn main() {
@@ -42,10 +43,191 @@ fn run() -> Result<(), BenchmarkRefusal> {
             }
             Ok(())
         }
+        Some("transport-baseline") => {
+            let output = parse_output(arguments)?;
+            let root = workspace_root()?;
+            let config = transport_config_from_environment()?;
+            let samples = transport_samples()?;
+            let plan = transport_plan(&root, &config, samples)?;
+            let runner = BenchmarkRunner::new(plan)?;
+            // Baseline is upstream, candidate is this project. The runner reuses
+            // the baseline subject for the A/A pass, so the noise floor is
+            // measured on the same arm rather than assumed.
+            let mut baseline =
+                TransportWorkload::new(config.clone(), ServerKind::UpstreamGitDaemon);
+            let mut candidate = TransportWorkload::new(config, ServerKind::FgitNode);
+            let artifact = runner.run(&mut baseline, &mut candidate)?;
+            let written = artifact.write_to(&output)?;
+            println!("artifact={}", written.evidence_path.display());
+            println!("replay={}", written.replay_path.display());
+            println!("samples_per_variant={samples}");
+            // Nearest-rank p99 over n samples is the maximum whenever n < 100.
+            // Printing the caveat next to the number keeps a reader from taking
+            // "p99" as a hundred-sample tail estimate.
+            if samples < 100 {
+                println!(
+                    "p99_caveat=nearest-rank p99 over {samples} samples is the observed maximum, not a 99th-percentile estimate"
+                );
+            }
+            if let Some(ledger) = written.negative_evidence_path {
+                println!("negative_evidence={}", ledger.display());
+            }
+            Ok(())
+        }
         _ => Err(BenchmarkRefusal::MissingRequiredField(
-            "command: self-test --out <directory>",
+            "command: self-test --out <directory> | transport-baseline --out <directory>",
         )),
     }
+}
+
+/// Reads the transport experiment's inputs from the environment.
+///
+/// Every path is required and explicit. Nothing falls back to a `PATH` lookup:
+/// an ambient `git` would make the differential unpinned, and a defaulted `fg`
+/// could measure a stale binary from an earlier build.
+fn transport_config_from_environment() -> Result<TransportConfig, BenchmarkRefusal> {
+    Ok(TransportConfig {
+        fg_binary: required_path("FG_BENCH_FG_BINARY")?,
+        git_binary: required_path("FG_BENCH_GIT_BINARY")?,
+        git_exec_path: required_path("FG_BENCH_GIT_EXEC_PATH")?,
+        empty_template_dir: required_path("FG_BENCH_TEMPLATE_DIR")?,
+        storage_root: required_path("FG_BENCH_STORAGE_ROOT")?,
+        upstream_base_path: required_path("FG_BENCH_UPSTREAM_BASE_PATH")?,
+        tenant: required_var("FG_BENCH_TENANT")?,
+        repository: required_var("FG_BENCH_REPOSITORY")?,
+        work_root: required_path("FG_BENCH_WORK_ROOT")?,
+        port_base: required_var("FG_BENCH_PORT_BASE")?.parse().map_err(|_| {
+            BenchmarkRefusal::InvalidMetric {
+                field: "FG_BENCH_PORT_BASE",
+                detail: "must be a u16 port number".to_owned(),
+            }
+        })?,
+        expected_head: required_var("FG_BENCH_EXPECTED_HEAD")?,
+        expected_commits: required_var("FG_BENCH_EXPECTED_COMMITS")?
+            .parse()
+            .map_err(|_| BenchmarkRefusal::InvalidMetric {
+                field: "FG_BENCH_EXPECTED_COMMITS",
+                detail: "must be a commit count".to_owned(),
+            })?,
+    })
+}
+
+fn transport_samples() -> Result<usize, BenchmarkRefusal> {
+    let samples = match env::var("FG_BENCH_SAMPLES") {
+        Ok(value) => value.parse().map_err(|_| BenchmarkRefusal::InvalidMetric {
+            field: "FG_BENCH_SAMPLES",
+            detail: "must be a sample count".to_owned(),
+        })?,
+        Err(_) => MIN_SAMPLES_PER_VARIANT,
+    };
+    if samples < MIN_SAMPLES_PER_VARIANT {
+        return Err(BenchmarkRefusal::InsufficientSamples {
+            configured: samples,
+            minimum: MIN_SAMPLES_PER_VARIANT,
+        });
+    }
+    Ok(samples)
+}
+
+fn required_var(name: &'static str) -> Result<String, BenchmarkRefusal> {
+    env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(BenchmarkRefusal::MissingRequiredField(name))
+}
+
+fn required_path(name: &'static str) -> Result<PathBuf, BenchmarkRefusal> {
+    required_var(name).map(PathBuf::from)
+}
+
+fn transport_plan(
+    root: &Path,
+    config: &TransportConfig,
+    samples: usize,
+) -> Result<BenchmarkPlan, BenchmarkRefusal> {
+    let candidate = TransportWorkload::new(config.clone(), ServerKind::FgitNode);
+    Ok(BenchmarkPlan {
+        fingerprint: EnvironmentFingerprint::from_workspace(
+            root,
+            required_var("FG_BENCH_SOURCE_REVISION")?,
+            required_var("FG_BENCH_SOURCE_TREE")?,
+            cpu_model(),
+            env::var("TARGET").unwrap_or_else(|_| std::env::consts::ARCH.to_owned()),
+            env::var("PROFILE").unwrap_or_else(|_| "release".to_owned()),
+        )?,
+        workload: WorkloadDescriptor {
+            dataset: required_var("FG_BENCH_DATASET")?,
+            workload: candidate.workload_line(),
+            thermal_state: required_var("FG_BENCH_THERMAL_STATE")?,
+            cache_state:
+                "one cold server process per sample; the page cache is shared and deliberately not \
+                 dropped, so both arms see the same warm filesystem"
+                    .to_owned(),
+            commands: vec![
+                "fg init <storage> <tenant> <repository>".to_owned(),
+                "fg import <storage> <tenant> <repository> <principal> <key> <source>".to_owned(),
+                "git clone --bare <source> <upstream-base>/<repository>.git".to_owned(),
+                "cargo run --release -p fgit-benchmark -- transport-baseline --out <directory>"
+                    .to_owned(),
+            ],
+            environment_allowlist: transport_allowlist(config, samples),
+        },
+        admission: OptimizationAdmission {
+            equivalence_obligation:
+                "every measured clone must resolve HEAD to the corpus tip and carry the corpus \
+                 commit count; a well-formed clone of a different history is a failed sample, \
+                 not a fast one"
+                    .to_owned(),
+            oracle_name: "clone-tip-and-commit-count equality against the pinned corpus".to_owned(),
+            replay_command:
+                "scripts/e2e/suites/benchmark/perf_baseline.sh (sets every FG_BENCH_* input)"
+                    .to_owned(),
+            rollback_artifact:
+                "delete the generated evidence directory; the experiment mutates no repository \
+                 state outside its own scratch tree"
+                    .to_owned(),
+            hypothesis:
+                "ANCHOR, NOT A SPEEDUP CLAIM: this run records where fgit-node stands against \
+                 upstream git daemon on one corpus and one host. Baseline is upstream, candidate \
+                 is fgit-node, so `speedup_admissible` reads as 'fgit-node beat upstream p95 by \
+                 more than this host's A/A noise'. A false value is the expected and honest \
+                 outcome for a pre-optimization anchor."
+                    .to_owned(),
+        },
+        samples_per_variant: samples,
+    })
+}
+
+fn transport_allowlist(config: &TransportConfig, samples: usize) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "FG_BENCH_FG_BINARY".to_owned(),
+            config.fg_binary.display().to_string(),
+        ),
+        (
+            "FG_BENCH_GIT_BINARY".to_owned(),
+            config.git_binary.display().to_string(),
+        ),
+        (
+            "FG_BENCH_GIT_EXEC_PATH".to_owned(),
+            config.git_exec_path.display().to_string(),
+        ),
+        ("FG_BENCH_TENANT".to_owned(), config.tenant.clone()),
+        ("FG_BENCH_REPOSITORY".to_owned(), config.repository.clone()),
+        (
+            "FG_BENCH_EXPECTED_HEAD".to_owned(),
+            config.expected_head.clone(),
+        ),
+        (
+            "FG_BENCH_EXPECTED_COMMITS".to_owned(),
+            config.expected_commits.to_string(),
+        ),
+        ("FG_BENCH_SAMPLES".to_owned(), samples.to_string()),
+        (
+            "FG_BENCH_PORT_BASE".to_owned(),
+            config.port_base.to_string(),
+        ),
+    ])
 }
 
 fn parse_output(mut arguments: impl Iterator<Item = String>) -> Result<PathBuf, BenchmarkRefusal> {
