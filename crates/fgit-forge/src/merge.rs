@@ -1,0 +1,305 @@
+//! The atomic merge path: compute under supervision, refuse when stale, and
+//! reduce the whole effect to one commit record.
+
+use fgit_codec::attest::{BodyIdentity, body_id};
+use fgit_codec::schema::RepositoryCommitRecord;
+use fgit_codec::wire::CanonicalBody;
+use fgit_codec::{CodecRefusal, Decoder, Encoder};
+use fgit_diff::{TreeEntry, TreeMergeEntry, TreeMergeOptions, merge_trees};
+use fgit_treefs::WorkspaceEpoch;
+use fgit_types::{
+    Digest, DomainTag, PolicyEpoch, PrincipalSnapshotId, RepositoryCommitId, RepositoryId,
+    RepositorySequence, SchemaFamily, TxId,
+};
+
+use crate::aggregate::PullRequestNumber;
+use crate::event::{ForgeEvent, ForgeEventBatch};
+use crate::{ForgeRefusal, MergeSide, StaleTips};
+
+/// A conditional ref movement.
+///
+/// The expected tip is part of the intent rather than a separate check so the
+/// condition travels with the effect. An intent that carried only the new tip
+/// would be a last-writer-wins ref write wearing a transaction's clothes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefIntent {
+    /// Full reference name.
+    pub name: Vec<u8>,
+    /// Tip this movement is conditional on.
+    pub expected_tip: Digest,
+    /// Tip the reference takes if the condition holds.
+    pub new_tip: Digest,
+}
+
+impl CanonicalBody for RefIntent {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/admission-ref-delta/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("admission-ref-delta");
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        out.write_bytes("name", &self.name)?;
+        out.write_digest(&self.expected_tip)?;
+        out.write_digest(&self.new_tip)
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        Ok(Self {
+            name: input.read_bytes("name")?.to_vec(),
+            expected_tip: input.read_digest()?,
+            new_tip: input.read_digest()?,
+        })
+    }
+}
+
+/// A merge computation pinned to the state it was computed against.
+///
+/// The workspace epoch is carried because the merge is supervised: the result
+/// is only meaningful as a statement about one workspace at one epoch, and a
+/// result that cannot name where it was produced cannot be audited later.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MergeAttempt {
+    /// The aggregate being merged.
+    pub pull_request: PullRequestNumber,
+    /// Branch being merged from.
+    pub source_ref: Vec<u8>,
+    /// Branch being merged into.
+    pub target_ref: Vec<u8>,
+    /// Source tip the merge was computed against.
+    pub source_tip: Digest,
+    /// Target tip the merge was computed against.
+    pub target_tip: Digest,
+    /// Merge base used for the three-way computation.
+    pub base_tip: Digest,
+    /// Workspace epoch the computation ran in.
+    pub workspace_epoch: WorkspaceEpoch,
+}
+
+/// The tips actually observed when the effect is about to be admitted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservedTips {
+    /// Source tip right now.
+    pub source_tip: Digest,
+    /// Target tip right now.
+    pub target_tip: Digest,
+}
+
+impl MergeAttempt {
+    /// Refuses when either ref has moved since the merge was computed.
+    ///
+    /// Both sides are checked, and the source is checked first only so the
+    /// refusal is deterministic when both have moved. A moved source means the
+    /// merge produced a tree for content nobody asked to merge; a moved target
+    /// means it produced a tree against a base that is no longer the target's
+    /// state. Neither is repairable by retrying the admission with the same
+    /// result, which is why this is a refusal and not a conflict.
+    ///
+    /// # Errors
+    ///
+    /// [`ForgeRefusal::MergeStale`] naming which side moved.
+    pub fn check_fresh(&self, observed: &ObservedTips) -> Result<(), ForgeRefusal> {
+        if observed.source_tip != self.source_tip {
+            return Err(ForgeRefusal::MergeStale {
+                reference: MergeSide::Source,
+                tips: Box::new(StaleTips {
+                    computed_against: self.source_tip,
+                    observed: observed.source_tip,
+                }),
+            });
+        }
+        if observed.target_tip != self.target_tip {
+            return Err(ForgeRefusal::MergeStale {
+                reference: MergeSide::Target,
+                tips: Box::new(StaleTips {
+                    computed_against: self.target_tip,
+                    observed: observed.target_tip,
+                }),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// A fully clean merged tree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MergedTree {
+    /// The merged entries, in Git tree order.
+    pub entries: Vec<TreeEntry<Digest>>,
+}
+
+/// Runs the three-way tree merge and admits only a fully clean result.
+///
+/// `fgit-diff` returns clean entries and conflicts together, as proposals with
+/// no authority side effect. This is where that proposal becomes a decision:
+/// any conflict at all is a typed refusal, because a partially merged tree has
+/// no meaning as a commit. Resolving conflicts is a separate act by a principal
+/// who can be held to it, not something the merge path may do on their behalf.
+///
+/// # Errors
+///
+/// [`ForgeRefusal::MergeConflicted`] when any path conflicts, and
+/// [`ForgeRefusal::MergeRefused`] when the engine declines outright.
+pub fn merge_pull_request_tree<Base, Ours, Theirs>(
+    base: Base,
+    ours: Ours,
+    theirs: Theirs,
+    options: TreeMergeOptions,
+) -> Result<MergedTree, ForgeRefusal>
+where
+    Base: IntoIterator<Item = TreeEntry<Digest>>,
+    Ours: IntoIterator<Item = TreeEntry<Digest>>,
+    Theirs: IntoIterator<Item = TreeEntry<Digest>>,
+{
+    let merged = merge_trees(base, ours, theirs, options)
+        .map_err(|cause| ForgeRefusal::MergeRefused { cause })?;
+    let conflicts = merged
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry, TreeMergeEntry::Conflict(_)))
+        .count();
+    if conflicts > 0 {
+        return Err(ForgeRefusal::MergeConflicted { paths: conflicts });
+    }
+    let entries = merged
+        .entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            TreeMergeEntry::Clean(clean) => Some(clean),
+            TreeMergeEntry::Conflict(_) => None,
+        })
+        .collect();
+    Ok(MergedTree { entries })
+}
+
+/// The three things a merge produces, which are admitted together or not at all.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MergeEffectPackage {
+    /// Objects the merge created, as a closure the admission must already hold.
+    pub objects: Vec<Digest>,
+    /// The conditional movement of the target ref.
+    pub ref_intent: RefIntent,
+    /// The event recording that the merge happened.
+    pub event: ForgeEvent,
+}
+
+/// The two roots this crate is responsible for producing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectRoots {
+    /// Identity of the ref delta.
+    pub ref_delta_root: Digest,
+    /// Identity of the batch of forge events.
+    pub forge_event_batch_root: Digest,
+}
+
+/// Everything about a commit record that is admission's to decide, not this
+/// crate's.
+///
+/// Passing these in rather than inventing them is the layer boundary made
+/// concrete: an L2 crate that minted a repository sequence or a policy epoch
+/// would be deciding something only the authority may decide.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordFrame {
+    /// Which repository.
+    pub repository_id: RepositoryId,
+    /// Position in committed order.
+    pub repository_sequence: RepositorySequence,
+    /// Predecessor record, absent for the first.
+    pub parent_rcr_id: Option<RepositoryCommitId>,
+    /// The sealed transaction this record commits.
+    pub tx_id: TxId,
+    /// Principal snapshot the decision was evaluated under.
+    pub principal_snapshot_id: PrincipalSnapshotId,
+    /// Digest of the canonical request.
+    pub canonical_request_digest: Digest,
+    /// Ref state after the movement.
+    pub resulting_ref_root: Digest,
+    /// Closure over the objects the decision needs.
+    pub object_closure_root: Digest,
+    /// Forge position after the batch.
+    pub resulting_forge_position_root: Digest,
+    /// Policy epoch in force.
+    pub policy_epoch: PolicyEpoch,
+    /// Evidence of the policy evaluation.
+    pub policy_decision_root: Digest,
+    /// Evidence of the invariant checks.
+    pub invariant_evidence_root: Digest,
+    /// External-effect obligations created.
+    pub outbox_effect_root: Digest,
+    /// Retention changes created.
+    pub retention_delta_root: Digest,
+}
+
+fn root_of<B, I>(identity: &I, body: &B, name: &'static str) -> Result<Digest, ForgeRefusal>
+where
+    B: CanonicalBody,
+    I: BodyIdentity + ?Sized,
+{
+    let object = body_id(identity, body).map_err(|cause| match cause {
+        CodecRefusal::IdentityDomainUnregistered { .. } => {
+            ForgeRefusal::IdentityUnavailable { body: name }
+        }
+        cause => ForgeRefusal::BodyUnrepresentable {
+            cause: Box::new(cause),
+        },
+    })?;
+    Ok(Digest::new(object.algorithm(), *object.digest()))
+}
+
+impl MergeEffectPackage {
+    /// Derives both roots from the package's own bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`ForgeRefusal::BodyUnrepresentable`] or
+    /// [`ForgeRefusal::IdentityUnavailable`].
+    pub fn roots<I>(&self, identity: &I) -> Result<EffectRoots, ForgeRefusal>
+    where
+        I: BodyIdentity + ?Sized,
+    {
+        let batch = ForgeEventBatch::of_one(self.event.clone());
+        Ok(EffectRoots {
+            ref_delta_root: root_of(identity, &self.ref_intent, "RefIntent")?,
+            forge_event_batch_root: root_of(identity, &batch, "ForgeEventBatch")?,
+        })
+    }
+
+    /// Reduces the package to ONE commit record carrying both roots.
+    ///
+    /// This is the acceptance condition in code rather than in prose: the ref
+    /// delta and the forge event land on the same record, so there is no
+    /// admissible history in which the ref moved and the event did not, or the
+    /// reverse. A caller cannot split them, because there is no second record
+    /// to put either one on.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`MergeEffectPackage::roots`] refuses.
+    pub fn seal_into_record<I>(
+        &self,
+        identity: &I,
+        frame: RecordFrame,
+    ) -> Result<RepositoryCommitRecord, ForgeRefusal>
+    where
+        I: BodyIdentity + ?Sized,
+    {
+        let roots = self.roots(identity)?;
+        Ok(RepositoryCommitRecord {
+            repository_id: frame.repository_id,
+            repository_sequence: frame.repository_sequence,
+            parent_rcr_id: frame.parent_rcr_id,
+            tx_id: frame.tx_id,
+            principal_snapshot_id: frame.principal_snapshot_id,
+            canonical_request_digest: frame.canonical_request_digest,
+            ref_delta_root: roots.ref_delta_root,
+            resulting_ref_root: frame.resulting_ref_root,
+            object_closure_root: frame.object_closure_root,
+            forge_event_batch_root: roots.forge_event_batch_root,
+            resulting_forge_position_root: frame.resulting_forge_position_root,
+            policy_epoch: frame.policy_epoch,
+            policy_decision_root: frame.policy_decision_root,
+            invariant_evidence_root: frame.invariant_evidence_root,
+            outbox_effect_root: frame.outbox_effect_root,
+            retention_delta_root: frame.retention_delta_root,
+        })
+    }
+}

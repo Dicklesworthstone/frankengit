@@ -774,6 +774,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-forge"
+version = "0.0.1"
+dependencies = [
+ "fgit-codec",
+ "fgit-diff",
+ "fgit-treefs",
+ "fgit-types",
+]
+
+[[package]]
 name = "fgit-git-object"
 version = "0.1.0"
 dependencies = [

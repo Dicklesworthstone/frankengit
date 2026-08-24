@@ -28,6 +28,7 @@ fgit-doc	L3	L0,L1,L2	document-intelligence	active
 # crypto-identified (L1) and codec-framed (L2) bodies, so this crate is L2.
 fgit-evidence	L2	L0,L1,L2	claims-evidence	active
 fgit-exchange	L2	L0,L1,L2	claims-evidence	active
+fgit-forge	L2	L0,L1,L2	forge	active
 fgit-git-object	L1	L0,L1	git-core	active
 fgit-graph	L2	L0,L1,L2	graph-intelligence	active
 fgit-lab	L2	L0,L1,L2	concurrency	active

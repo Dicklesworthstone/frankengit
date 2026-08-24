@@ -1,0 +1,16 @@
+[package]
+name = "fgit-forge"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+fgit-codec.workspace = true
+fgit-diff.workspace = true
+fgit-treefs.workspace = true
+fgit-types.workspace = true
