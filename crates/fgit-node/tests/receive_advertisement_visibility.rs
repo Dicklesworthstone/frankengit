@@ -393,3 +393,120 @@ fn the_stored_order_is_what_decides_the_advertisement() {
         "if these agree, stored order was lost somewhere in the chain"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The effective policy is the union of the caller's and the snapshot's
+// ---------------------------------------------------------------------------
+
+/// A snapshot whose own authority-derived policy hides `snapshot_rules`.
+fn snapshot_hiding_its_own(names: &[(&[u8], char)], snapshot_rules: &[&[u8]]) -> AdmissionSnapshot {
+    let mut snapshot = snapshot_with(names);
+    snapshot.hidden_refs = hiding(snapshot_rules);
+    snapshot
+}
+
+#[test]
+fn the_effective_policy_is_the_union_of_the_caller_and_the_snapshot() {
+    // The two policies hide DIFFERENT refs on purpose. If they hid the same one,
+    // this would pass against an implementation that consulted only one of them,
+    // and would prove nothing at all. Each hidden ref is therefore evidence for
+    // exactly one policy being read.
+    let snapshot = snapshot_hiding_its_own(
+        &[
+            (b"refs/heads/main", '1'),
+            (b"refs/caller-hidden/x", '2'),
+            (b"refs/snapshot-hidden/y", '3'),
+        ],
+        &[b"refs/snapshot-hidden"],
+    );
+
+    let names = advertised(
+        &snapshot,
+        &hiding(&[b"refs/caller-hidden"]),
+        &WireLimits::default(),
+    );
+
+    assert_eq!(
+        names,
+        vec![b"refs/heads/main".to_vec()],
+        "a ref hidden by EITHER policy must be absent: caller-hidden proves the \
+         caller's policy is read, snapshot-hidden proves the snapshot's is"
+    );
+}
+
+#[test]
+fn the_bound_is_measured_against_the_union_and_not_one_half_of_it() {
+    // The count site specifically, which is the one the `max_advertised_refs`
+    // bound is checked against. Three refs, one hidden by each policy, a limit
+    // of one. Under the union the visible set is exactly one and this is
+    // admissible.
+    //
+    // An implementation that unioned the build loop but counted with only one
+    // policy would see two visible and refuse with TooManyAdvertisedRefs -- a
+    // repository refused over refs it would never have sent. That is why this
+    // test exists separately from the one above: the omission test passes even
+    // when the count and the loop disagree.
+    let snapshot = snapshot_hiding_its_own(
+        &[
+            (b"refs/heads/main", '1'),
+            (b"refs/caller-hidden/x", '2'),
+            (b"refs/snapshot-hidden/y", '3'),
+        ],
+        &[b"refs/snapshot-hidden"],
+    );
+    let limits = WireLimits {
+        max_advertised_refs: 1,
+        ..WireLimits::default()
+    };
+
+    let names = advertised(&snapshot, &hiding(&[b"refs/caller-hidden"]), &limits);
+
+    assert_eq!(
+        names,
+        vec![b"refs/heads/main".to_vec()],
+        "the bound must be measured over the union, not over either half"
+    );
+}
+
+#[test]
+fn the_permitted_twin_two_empty_policies_still_advertise_everything() {
+    // Without this, both assertions above are satisfied by an implementation
+    // that hides everything, which would be far more broken and far less
+    // obvious.
+    let snapshot =
+        snapshot_hiding_its_own(&[(b"refs/heads/main", '1'), (b"refs/other/z", '2')], &[]);
+
+    let names = advertised(&snapshot, &RefVisibility::new(), &WireLimits::default());
+
+    assert_eq!(
+        names,
+        vec![b"refs/heads/main".to_vec(), b"refs/other/z".to_vec()],
+        "a union of two empty policies hides nothing"
+    );
+}
+
+#[test]
+fn a_snapshot_negation_cannot_re_expose_what_the_caller_hides() {
+    // The trap the union predicate exists to avoid, made observable. If the two
+    // policies were MERGED into one ordered rule list rather than combined by
+    // disjunction, this snapshot rule -- a trailing negation -- would be
+    // last-match-wins over the caller's rule and would RE-EXPOSE the ref the
+    // caller deliberately hid. That is the one direction disclosure must never
+    // move, and merging rule lists is the obvious implementation that does it.
+    let snapshot = snapshot_hiding_its_own(
+        &[(b"refs/heads/main", '1'), (b"refs/caller-hidden/x", '2')],
+        &[b"!refs/caller-hidden"],
+    );
+
+    let names = advertised(
+        &snapshot,
+        &hiding(&[b"refs/caller-hidden"]),
+        &WireLimits::default(),
+    );
+
+    assert_eq!(
+        names,
+        vec![b"refs/heads/main".to_vec()],
+        "a negation in one policy must never re-expose what the other hides"
+    );
+}

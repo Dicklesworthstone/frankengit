@@ -90,7 +90,7 @@ use fgit_types::{
 };
 use fgit_wire::receive::{ReceiveCancellation, ReceiveError, ReceivePack};
 use fgit_wire::stale_disclosure::{LabelledAdvertisement, advertise_under_read_label_served_by};
-use fgit_wire::visibility::{RefVisibility, filter_advertised_refs};
+use fgit_wire::visibility::RefVisibility;
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, PackPayloadSource, PackRequest,
     Packet, PktLineDecoder, UploadPackRepository, UploadPackVersion, V1Advertisement, V2UploadPack,
@@ -403,10 +403,27 @@ impl AdmissionReceivePackAdvertisement {
         object_format: GitHashAlgorithm,
         limits: &WireLimits,
     ) -> Result<Self, AdmissionUploadPackRefusal> {
+        // The effective policy is the UNION of the caller's current view and the
+        // authority-derived one the snapshot carries: a ref is hidden when
+        // EITHER hides it. Computed once and used at every site below, so the
+        // count and the build loop cannot disagree. If the bound were measured
+        // over a different set than the one advertised, a repository would
+        // either be refused over refs it would never send, or send more refs
+        // than it counted.
+        //
+        // A union PREDICATE, not a merged rule list. Concatenating the two rule
+        // lists would be wrong in a way that is easy to miss: `hides` is
+        // last-match-wins and a rule may begin with `!`, so a trailing negation
+        // from one policy would re-expose a name the other deliberately hid.
+        // That expands disclosure, the one direction this must never move.
+        // Taking the disjunction of the two answers is monotone -- the visible
+        // set can only shrink -- which is why this needs no ruling about the
+        // snapshot's policy possibly being staler than the caller's.
+        let hides = |name: &[u8]| visibility.hides(name) || snapshot.hidden_refs.hides(name);
         let visible_count = snapshot
             .refs
             .keys()
-            .filter(|name| !visibility.hides(name.as_bytes()))
+            .filter(|name| !hides(name.as_bytes()))
             .count();
         if visible_count > limits.max_advertised_refs {
             return Err(AdmissionUploadPackRefusal::Wire(
@@ -417,7 +434,7 @@ impl AdmissionReceivePackAdvertisement {
         }
         let mut visible = Vec::with_capacity(visible_count);
         for (name, oid) in &snapshot.refs {
-            if visibility.hides(name.as_bytes()) {
+            if hides(name.as_bytes()) {
                 continue;
             }
             if oid.algorithm() != object_format {
@@ -431,9 +448,16 @@ impl AdmissionReceivePackAdvertisement {
                     .map_err(AdmissionUploadPackRefusal::Wire)?,
             );
         }
+        // No third filtering pass. `filter_advertised_refs` re-applied the
+        // caller's policy alone, which after the union above is a strict subset
+        // of what is already excluded, so every surviving ref passed it by
+        // construction and it was dead. Removing it is better than leaving it:
+        // it takes a `&RefVisibility` and cannot be handed the union without
+        // changing fgit-wire's signature, so it is exactly the site where the
+        // three would silently drift apart later.
         Ok(Self {
             object_format,
-            refs: filter_advertised_refs(&visible, visibility),
+            refs: visible,
         })
     }
 
