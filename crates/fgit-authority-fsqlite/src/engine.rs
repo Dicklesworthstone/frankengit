@@ -929,9 +929,23 @@ impl FsqliteAuthorityStore {
             .publish_atomically(cx, key, expected, new_generation, new_body, outcomes)
             .await
         {
-            Ok(outcome) => {
+            Ok(outcome @ CasOutcome::Committed(_)) => {
                 self.commit(cx).await?;
                 Ok(outcome)
+            }
+            Ok(CasOutcome::PredecessorMismatch) => {
+                // `publish_atomically` stages outcome rows before attempting
+                // the exact-predecessor exchange. A publisher can lose after
+                // its duplicate scan but before that exchange, so committing
+                // this ordinary CAS outcome would make the losing rows visible
+                // without their head. An awaited rollback is part of proving
+                // the contract's "nothing written" result; if cleanup fails,
+                // propagate that failure instead of claiming a no-effect loss.
+                self.connection
+                    .rollback_transaction(cx)
+                    .await
+                    .map_err(|error| EngineError::from(&error))?;
+                Ok(CasOutcome::PredecessorMismatch)
             }
             Err(cause) => Err(self.rollback_after(cx, cause).await),
         }

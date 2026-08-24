@@ -1244,7 +1244,8 @@ fn an_abandoned_store_releases_its_descriptors_too() {
 // fixtures cannot encode a domain/algorithm pairing the registry forbids.
 
 use fgit_authority::{
-    authority_head_identity, decision_batch_identity, outcome_key, publish_decisions_async,
+    DuplicateScan, authority_head_identity, decision_batch_identity, outcome_key,
+    publish_decisions_async, scan_for_existing_decisions_async,
 };
 use fgit_codec::RepositoryDecision;
 use fgit_codec::{
@@ -1455,6 +1456,115 @@ fn a_kill_around_the_atomic_publication_leaves_head_and_outcomes_agreeing() {
             "an acknowledged publication must not be absent after reopen"
         );
     }
+}
+
+#[test]
+fn a_post_scan_cas_loser_publishes_neither_head_nor_outcome_rows() {
+    // Near-identical permitted twin: the test immediately above publishes the
+    // same refusal batch with the current token and observes both its successor
+    // head and outcome entry. This case changes only one fact: a contender wins
+    // after the authenticated duplicate scan and before the atomic primitive.
+    let scratch = Scratch::new("atomic-publish-stale-token");
+    let node = node();
+    let key = head_key();
+
+    let genesis = genesis_head_body();
+    let genesis_bytes = encode_body(&genesis).expect("the genesis head encodes");
+    let store = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+    store.init_head(&key, HeadGeneration::FIRST, &genesis_bytes);
+    let expected = store.token(&key);
+
+    // Obtain the real, unforgeable witness through the production authenticated
+    // stream walk. The two transaction ids also become the exact outcome slots
+    // whose absence the losing publication must preserve.
+    let tx_ids = [tx_of(0xd1), tx_of(0xd2)];
+    let witness = match node
+        .block_on(scan_for_existing_decisions_async(
+            &store.store,
+            &store.cx,
+            &key,
+            &tx_ids,
+        ))
+        .expect("the duplicate scan completes")
+    {
+        DuplicateScan::Absent(witness) => witness,
+        DuplicateScan::Found { decided, .. } => {
+            panic!("genesis cannot already decide the planted transactions: {decided:?}")
+        }
+    };
+    assert_eq!(
+        witness.bound_to(),
+        expected,
+        "the scan witness must bind the token the losing publication presents"
+    );
+
+    // This is the only interleaving: a genuine contender replaces the exact
+    // predecessor after the scan. Authority bodies are opaque to this storage
+    // layer, so byte equality is the relevant contract here.
+    const WINNER_BODY: &[u8] = b"interleaving-winner-head";
+    let winner = match store
+        .exchange(&key, expected, generation(2), WINNER_BODY)
+        .expect("the planted contender reaches the store")
+    {
+        CasOutcome::Committed(receipt) => receipt,
+        CasOutcome::PredecessorMismatch => panic!("the planted contender must win"),
+    };
+
+    let batch = batch_for(&genesis);
+    let losing_head = successor_of(&genesis, batch_body_id(&batch));
+    let losing_head_bytes = encode_body(&losing_head).expect("the losing head encodes");
+    let first_key = outcome_key(tenant_id(), repository_id(), tx_ids[0]).expect("a key derives");
+    let second_key = outcome_key(tenant_id(), repository_id(), tx_ids[1]).expect("a key derives");
+    let proposed = vec![
+        (first_key.clone(), b"losing-outcome-one".to_vec()),
+        (second_key.clone(), b"losing-outcome-two".to_vec()),
+    ];
+
+    let lost = node
+        .block_on(store.store.publish_head_with_outcomes(
+            &store.cx,
+            &key,
+            expected,
+            losing_head.generation,
+            &losing_head_bytes,
+            &proposed,
+            &witness,
+        ))
+        .expect("a genuine stale token is a lost race, not a refusal");
+    assert_eq!(lost, CasOutcome::PredecessorMismatch);
+
+    assert_eq!(
+        store.read_head(&key).expect("the winning head reads"),
+        HeadRead::Present(winner.clone()),
+        "the loser must not alter the winning token, generation, or body"
+    );
+    for proposed_key in [&first_key, &second_key] {
+        assert_eq!(
+            store
+                .read_body(proposed_key)
+                .expect("the outcome slot reads"),
+            ImmutableRead::Absent,
+            "a CAS loser must roll back every proposed outcome row"
+        );
+    }
+
+    store.close().expect("the first connection closes cleanly");
+    let reopened = Crashable::open(&node, scratch.as_str(), StoreInstanceId::from_raw(1));
+    assert_eq!(
+        reopened.read_head(&key).expect("the winning head reopens"),
+        HeadRead::Present(winner),
+        "reopen must preserve the exact winner rather than the losing candidate"
+    );
+    for proposed_key in [&first_key, &second_key] {
+        assert_eq!(
+            reopened
+                .read_body(proposed_key)
+                .expect("the outcome slot reopens"),
+            ImmutableRead::Absent,
+            "the losing outcome row must remain absent after reopen"
+        );
+    }
+    reopened.close().expect("the reopened store closes cleanly");
 }
 
 fn commit_id_of(byte: u8) -> RepositoryCommitId {
