@@ -119,7 +119,17 @@ if command -v python3 >/dev/null 2>&1; then
   fge_run 'json is well formed' python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$SC_GENERATED/$SC_JSON" || true
   fge_assert_exit FG-048A-E2E-040 0 "$FGE_LAST_EXIT" 'the JSON Schema artifact parses'
 
-  fge_run 'python artifact compiles' python3 -m py_compile "$SC_GENERATED/$SC_PY" || true
+  # NOT `python3 -m py_compile`: writing the bytecode IS what py_compile does,
+  # so it drops a __pycache__ beside the source -- and $SC_GENERATED is in the
+  # repository. PYTHONDONTWRITEBYTECODE does not stop it either, because that
+  # only suppresses IMPLICIT import caching. Compiling in memory validates the
+  # same thing and writes nothing. It also covers the import below, which the
+  # env var does suppress. A suite that dirties the tree on every run hands
+  # sixteen panes an untracked directory and a §13 violation; this was caught by
+  # running it twice, not by reading it.
+  export PYTHONDONTWRITEBYTECODE=1
+  fge_run 'python artifact compiles' \
+    python3 -c "import sys; p=sys.argv[1]; compile(open(p).read(), p, 'exec')" "$SC_GENERATED/$SC_PY" || true
   fge_assert_exit FG-048A-E2E-041 0 "$FGE_LAST_EXIT" 'the Python artifact compiles'
 
   # Importing it exercises the dataclass definitions, which py_compile does
