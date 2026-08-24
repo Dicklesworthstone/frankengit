@@ -48,3 +48,7 @@ redirect
 
 # bv (beads viewer) lock file
 .bv.lock
+*-fsqlite-ns-gate
+*-fsqlite-ns-use
+*.vacuum-wal-cert*
+*.fsqlite-migration-state

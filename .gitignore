@@ -26,3 +26,5 @@ evidence/
 # beads compliance audit (self-tracked)
 
 beads_compliance_audit/
+# br doctor per-run artifacts
+.doctor/
