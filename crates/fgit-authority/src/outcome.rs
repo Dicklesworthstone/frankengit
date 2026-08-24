@@ -31,7 +31,8 @@ use crate::vocabulary::AuthenticatedHead;
 use fgit_codec::wire::encode_body;
 use fgit_codec::{
     CodecRefusal, DecodeLimits, Decoder, Encoder, RepositoryAuthorityHeadBody,
-    RepositoryConfigurationBody, RepositoryDecision, RepositoryDecisionBatchBody, decode_body,
+    RepositoryConfigurationBody, RepositoryDecision, RepositoryDecisionBatchBody,
+    RepositoryIncarnationConfigurationBody, decode_body,
 };
 use fgit_crypto::{
     IdentityDomain, MerkleProof, MerkleRefusal, RefStateNonMembershipProof, merkle_leaf,
@@ -983,6 +984,34 @@ where
     Ok(Digest::new(identity.algorithm(), *identity.digest()))
 }
 
+/// Stage an incarnation-aware repository configuration body and return the
+/// root an authority head selects it by.
+///
+/// This uses the existing configuration slot but a schema-major-2 body. It is
+/// intentionally distinct from [`stage_repository_configuration`]: a caller
+/// selecting a v1 configuration cannot accidentally satisfy a resolver that
+/// requires the minted incarnation binding.
+///
+/// # Errors
+///
+/// Whatever the store or the canonical encoder refuses.
+pub fn stage_repository_incarnation_configuration<S>(
+    store: &S,
+    configuration: &RepositoryIncarnationConfigurationBody,
+) -> Result<Digest, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let key = body_key(IdentityDomain::RepositoryConfiguration, configuration)?;
+    store.put_if_absent(&key, &encode_body(configuration)?)?;
+    let identity = canonical_body_id(
+        IdentityDomain::RepositoryConfiguration,
+        CANONICAL_CODEC_VERSION,
+        configuration,
+    )?;
+    Ok(Digest::new(identity.algorithm(), *identity.digest()))
+}
+
 /// The layout a head selects, for **verification**.
 ///
 /// A `configuration_root` absent from the store yields
@@ -1067,6 +1096,34 @@ where
     Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?)
 }
 
+/// Reads the exact incarnation-aware configuration selected by an authority
+/// head.
+///
+/// This is a strict resolver, deliberately matching
+/// [`root_layout_for_proof`] rather than the verification resolver. An absent
+/// root, a selected v1 body, or malformed v2 bytes is a refusal: none may be
+/// interpreted as a legacy configuration because each lacks the binding that
+/// keeps a stale repository incarnation from resolving as current.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::ConfigurationUnresolvable`] when no body is stored at the
+/// selected root, and [`OutcomeFailure::Codec`] when a present body is not the
+/// exact v2 incarnation-aware schema.
+pub fn read_repository_incarnation_configuration<S>(
+    store: &S,
+    configuration_root: &Digest,
+) -> Result<RepositoryIncarnationConfigurationBody, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let key = configuration_key(configuration_root)?;
+    let ImmutableRead::Present(bytes) = store.read_immutable(&key)? else {
+        return Err(OutcomeFailure::ConfigurationUnresolvable);
+    };
+    Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?)
+}
+
 // --- the production surface for the carrier (frankengit-m01t) -----------------
 //
 // FsqliteAuthorityStore implements AsyncAuthorityStore only, so without these a
@@ -1091,6 +1148,34 @@ pub async fn stage_repository_configuration_async<S>(
     store: &S,
     cx: &S::Context,
     configuration: &RepositoryConfigurationBody,
+) -> Result<Digest, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = body_key(IdentityDomain::RepositoryConfiguration, configuration)?;
+    store
+        .put_if_absent(cx, &key, &encode_body(configuration)?)
+        .await?;
+    let identity = canonical_body_id(
+        IdentityDomain::RepositoryConfiguration,
+        CANONICAL_CODEC_VERSION,
+        configuration,
+    )?;
+    Ok(Digest::new(identity.algorithm(), *identity.digest()))
+}
+
+/// Stage an incarnation-aware repository configuration body on the production
+/// surface.
+///
+/// The asynchronous twin of [`stage_repository_incarnation_configuration`].
+///
+/// # Errors
+///
+/// Whatever the store or the canonical encoder refuses.
+pub async fn stage_repository_incarnation_configuration_async<S>(
+    store: &S,
+    cx: &S::Context,
+    configuration: &RepositoryIncarnationConfigurationBody,
 ) -> Result<Digest, OutcomeFailure>
 where
     S: AsyncAuthorityStore + ?Sized,
@@ -1174,6 +1259,33 @@ pub async fn read_repository_configuration_async<S>(
     cx: &S::Context,
     configuration_root: &Digest,
 ) -> Result<RepositoryConfigurationBody, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = configuration_key(configuration_root)?;
+    let ImmutableRead::Present(bytes) = store.read_immutable(cx, &key).await? else {
+        return Err(OutcomeFailure::ConfigurationUnresolvable);
+    };
+    Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?)
+}
+
+/// Reads the exact incarnation-aware configuration selected by an authority
+/// head on the production surface.
+///
+/// The asynchronous twin of [`read_repository_incarnation_configuration`]. It
+/// retains that resolver's no-fallback rule for absent, v1, and malformed
+/// bodies.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::ConfigurationUnresolvable`] when no body is stored at the
+/// selected root, and [`OutcomeFailure::Codec`] when a present body is not the
+/// exact v2 incarnation-aware schema.
+pub async fn read_repository_incarnation_configuration_async<S>(
+    store: &S,
+    cx: &S::Context,
+    configuration_root: &Digest,
+) -> Result<RepositoryIncarnationConfigurationBody, OutcomeFailure>
 where
     S: AsyncAuthorityStore + ?Sized,
 {

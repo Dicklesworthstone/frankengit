@@ -24,7 +24,8 @@
 use fgit_types::hash::Digest;
 use fgit_types::identity::{
     PrincipalSnapshotId, RefusalRecordId, RepositoryAuthorityHeadId, RepositoryCapsuleId,
-    RepositoryCommitId, RepositoryDecisionBatchId, TransactionSealId, TxId,
+    RepositoryCommitId, RepositoryDecisionBatchId, RepositoryIncarnationId, TransactionSealId,
+    TxId,
 };
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::numeric::{
@@ -685,6 +686,59 @@ impl CanonicalBody for RepositoryConfigurationBody {
         Ok(Self {
             root_layout,
             object_format,
+        })
+    }
+}
+
+/// The repository configuration selected by a head for an incarnation-aware
+/// repository.
+///
+/// This is deliberately schema-major 2 rather than a minor revision of
+/// [`RepositoryConfigurationBody`]. A node that needs an incarnation must
+/// refuse a head selecting the older body; accepting it as a partially known
+/// configuration would make a pre-incarnation namespace look current. The
+/// body still occupies the existing `configuration_root` slot and preserves
+/// its registered identity domain, because the selected *kind* remains a
+/// repository configuration while the exact schema makes its interpretation
+/// unambiguous.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RepositoryIncarnationConfigurationBody {
+    /// How this repository's authenticated roots are laid out.
+    pub root_layout: RootLayoutVersion,
+    /// The permanent native Git object identity domain for this repository.
+    pub object_format: GitHashAlgorithm,
+    /// The minted incarnation this configuration binds the repository to.
+    ///
+    /// A delete/recreate operation must select a fresh value, so a stored
+    /// location or caller configuration carrying the prior value cannot open
+    /// the recreated repository.
+    pub repository_incarnation_id: RepositoryIncarnationId,
+}
+
+impl CanonicalBody for RepositoryIncarnationConfigurationBody {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/repository-configuration/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("repository-configuration");
+    const SCHEMA_MAJOR: u16 = 2;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        out.write_scalar(self.root_layout.code_point());
+        out.write_scalar(self.object_format.code_point());
+        out.write_opaque_id(self.repository_incarnation_id.as_bytes());
+        Ok(())
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let root_layout =
+            RootLayoutVersion::from_code_point(input.read_scalar::<u16>("root_layout")?)?;
+        let object_format =
+            GitHashAlgorithm::from_code_point(input.read_scalar::<u16>("object_format")?)?;
+        Ok(Self {
+            root_layout,
+            object_format,
+            repository_incarnation_id: RepositoryIncarnationId::from_bytes(
+                input.read_opaque_id("repository_incarnation_id")?,
+            ),
         })
     }
 }

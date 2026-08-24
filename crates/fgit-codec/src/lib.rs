@@ -22,7 +22,7 @@ pub use reader::Decoder;
 pub use schema::{
     MAX_REFUSAL_DETAIL_LEN, RefusalRecordBody, RepositoryAuthorityHeadBody, RepositoryCommitRecord,
     RepositoryConfigurationBody, RepositoryDecision, RepositoryDecisionBatchBody,
-    TransactionSealBody,
+    RepositoryIncarnationConfigurationBody, TransactionSealBody,
 };
 pub use wire::{
     CODEC_MAJOR, CODEC_MINOR, CODEC_VERSION, CanonicalBody, DecodedBody, FRAME_MAGIC, FrameHeader,
