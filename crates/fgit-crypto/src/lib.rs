@@ -106,6 +106,7 @@ mod hashing;
 mod keys;
 mod lifecycle;
 mod mac;
+mod merkle;
 mod native;
 mod registry;
 mod schemes;
@@ -144,6 +145,12 @@ pub use lifecycle::{
     RECEIPT_SCHEMA_FAMILY, Recoverability,
 };
 pub use mac::{HmacSha256, TAG_BYTES, hmac_sha256, verify_mac};
+pub use merkle::{
+    MerkleProof, MerkleRefusal, empty_merkle_root, merkle_leaf, merkle_proof, merkle_root,
+    merkle_root_from_proof, ref_state_leaf, ref_state_membership_proof, ref_state_merkle_root,
+    ref_state_schema, verify_merkle_proof, verify_ref_state_membership,
+    verify_ref_state_membership_under,
+};
 pub use native::{
     GitHashAlgorithm, GitHashError, GitObjectHasher, GitObjectKind, GitOid, NativeObjectIdentity,
     Sha1, Sha256, git_object_id, parse_git_oid,

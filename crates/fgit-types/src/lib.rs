@@ -5,6 +5,7 @@ pub mod error;
 pub mod hash;
 pub mod identity;
 pub mod label;
+pub mod layout;
 pub mod native;
 pub mod numeric;
 pub mod probability;
@@ -22,6 +23,7 @@ pub use identity::{
     TransactionSealId, TxId,
 };
 pub use label::{AsciiSlug, DomainTag, MAX_LABEL_LEN, SchemaFamily, SchemaId};
+pub use layout::RootLayoutVersion;
 pub use native::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256};
 pub use numeric::{
     ByteCount, CanonicalScalar, CodecVersion, DecisionSequence, HeadGeneration, PolicyEpoch,

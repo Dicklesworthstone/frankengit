@@ -33,7 +33,10 @@ use fgit_codec::{
     CodecRefusal, DecodeLimits, Decoder, Encoder, RepositoryAuthorityHeadBody,
     RepositoryDecisionBatchBody, decode_body,
 };
-use fgit_crypto::{IdentityDomain, internal_digest_over_parts};
+use fgit_crypto::{
+    IdentityDomain, MerkleProof, MerkleRefusal, merkle_leaf, merkle_proof, merkle_root,
+    verify_merkle_proof,
+};
 use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::{
@@ -197,6 +200,18 @@ pub enum OutcomeFailure {
     Seal(Box<SealFailure>),
     /// A canonical body could not be encoded or decoded.
     Codec(CodecRefusal),
+    /// A membership proof was requested for a decision the index does not hold.
+    ///
+    /// Refused rather than answered with an empty proof: an empty proof
+    /// verifies vacuously, and a caller that accepted one would conclude
+    /// membership from nothing.
+    ///
+    /// Boxed to keep [`OutcomeFailure`] inside `MAX_ERROR_BYTES`: a `TxId`
+    /// carries a full internal object identity and is wider than the whole
+    /// error budget on its own.
+    OutcomeNotIndexed(Box<TxId>),
+    /// The shared Merkle core refused to build or walk the tree.
+    MerkleShape(Box<MerkleRefusal>),
 }
 
 /// The identity a read asked for beside the identity the bytes actually carry.
@@ -262,6 +277,12 @@ impl core::fmt::Display for OutcomeFailure {
             ),
             Self::Seal(failure) => write!(f, "{failure}"),
             Self::Codec(refusal) => write!(f, "canonical encoding refused: {refusal}"),
+            Self::OutcomeNotIndexed(tx_id) => write!(
+                f,
+                "the outcome index does not hold that decision for {tx_id}, so no membership \
+                 proof exists"
+            ),
+            Self::MerkleShape(refusal) => write!(f, "outcome-index tree refused: {refusal}"),
         }
     }
 }
@@ -863,46 +884,110 @@ const fn outcome_index_schema() -> fgit_types::label::SchemaId {
 /// agreement, so wiring this in as a publication precondition is a cross-crate
 /// decision rather than one this crate may take alone. The check is
 /// deliberately absent rather than unilaterally imposed.
-pub fn outcome_index_root(entries: &[(TxId, TerminalOutcome)]) -> Result<Digest, OutcomeFailure> {
-    let schema = outcome_index_schema();
-    let mut level: Vec<DigestBytes> = Vec::with_capacity(entries.len());
+/// One outcome-index leaf.
+///
+/// The preimage is a fixed-width transaction digest followed by the canonical
+/// outcome encoding, so it needs no length delimiter: nothing variable-length
+/// precedes anything else. [`fgit_crypto::ref_state_leaf`] is the case where
+/// that is not true and a prefix is required.
+fn outcome_leaf(tx_id: TxId, outcome: &TerminalOutcome) -> Result<DigestBytes, OutcomeFailure> {
+    let encoded = encode_outcome(outcome)?;
+    Ok(merkle_leaf(
+        outcome_index_schema(),
+        &[tx_id.as_internal_object_id().digest().as_bytes(), &encoded],
+    ))
+}
+
+/// Outcome leaves in the order the root commits to: sorted by leaf digest.
+///
+/// Sorting by DIGEST rather than by transaction identity is the rule this root
+/// has always used, and it is why [`outcome_index_root`] commits to a multiset
+/// rather than to an ordered list. It is also why the shared Merkle core takes
+/// leaves already ordered: the ref state sorts by name instead, and a core that
+/// imposed either rule would force one of them to hash something it does not
+/// publish.
+fn ordered_outcome_leaves(
+    entries: &[(TxId, TerminalOutcome)],
+) -> Result<Vec<DigestBytes>, OutcomeFailure> {
+    let mut leaves = Vec::with_capacity(entries.len());
     for (tx_id, outcome) in entries {
-        let encoded = encode_outcome(outcome)?;
-        level.push(internal_digest_over_parts(
-            IdentityDomain::MerkleLeaf,
-            schema,
-            &[tx_id.as_internal_object_id().digest().as_bytes(), &encoded],
-        ));
+        leaves.push(outcome_leaf(*tx_id, outcome)?);
     }
-    level.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    leaves.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    Ok(leaves)
+}
 
-    let Some(mut root) = level.first().copied() else {
-        return Ok(Digest::new(
-            IdentityDomain::MerkleNode.algorithm().id(),
-            internal_digest_over_parts(IdentityDomain::MerkleNode, schema, &[]),
-        ));
-    };
+/// A membership proof that one terminal decision is in the outcome index.
+///
+/// # What this is for
+///
+/// FG-037 verified reads need to hand a client one decision plus a proof,
+/// rather than the whole index. The proof is against the exact root
+/// [`outcome_index_root`] publishes — the same leaves, the same order, the same
+/// tree — because both go through one construction rather than two.
+///
+/// # Why this lives here and not beside the ref-state verifier
+///
+/// The leaf preimage is the canonical outcome encoding, which is this crate's.
+/// A verifier for it therefore cannot be dependency-free the way
+/// [`fgit_crypto::verify_ref_state_membership`] is, and pretending otherwise
+/// would move an encoder into a crate that has no business owning one. That
+/// asymmetry is a property of the two leaf shapes, not an oversight.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::Codec`] when an outcome does not encode, and
+/// [`OutcomeFailure::OutcomeNotIndexed`] when `tx_id` with that exact outcome
+/// is absent — absence is refused rather than answered with an empty proof,
+/// which would verify vacuously.
+pub fn outcome_index_proof(
+    entries: &[(TxId, TerminalOutcome)],
+    tx_id: TxId,
+    outcome: &TerminalOutcome,
+) -> Result<MerkleProof, OutcomeFailure> {
+    let target = outcome_leaf(tx_id, outcome)?;
+    let leaves = ordered_outcome_leaves(entries)?;
+    let index = leaves
+        .iter()
+        .position(|leaf| leaf.as_bytes() == target.as_bytes())
+        .ok_or_else(|| OutcomeFailure::OutcomeNotIndexed(Box::new(tx_id)))?;
+    merkle_proof(outcome_index_schema(), &leaves, index)
+        .map_err(|refusal| OutcomeFailure::MerkleShape(Box::new(refusal)))
+}
 
-    while level.len() > 1 {
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        let (pairs, remainder) = level.as_chunks::<2>();
-        for [left, right] in pairs {
-            next.push(internal_digest_over_parts(
-                IdentityDomain::MerkleNode,
-                schema,
-                &[left.as_bytes(), right.as_bytes()],
-            ));
-        }
-        if let Some(odd) = remainder.first() {
-            next.push(*odd);
-        }
-        level = next;
-        root = level.first().copied().unwrap_or(root);
+/// Whether `proof` shows this decision is committed to by `root`.
+///
+/// Establishes membership in the tree with that root, and nothing about
+/// whether `root` is the repository's current `outcome_index_root`. That is an
+/// authenticated head read the caller must already hold; treating this as a
+/// substitute accepts a stale-but-internally-valid proof.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::Codec`] when the outcome does not encode. A proof that
+/// simply fails to verify returns `Ok(false)` — that is an answer, not a fault.
+pub fn verify_outcome_index_membership(
+    root: &Digest,
+    tx_id: TxId,
+    outcome: &TerminalOutcome,
+    proof: &MerkleProof,
+) -> Result<bool, OutcomeFailure> {
+    if root.algorithm() != IdentityDomain::MerkleNode.algorithm().id() {
+        return Ok(false);
     }
+    let leaf = outcome_leaf(tx_id, outcome)?;
+    Ok(verify_merkle_proof(
+        outcome_index_schema(),
+        root.bytes(),
+        &leaf,
+        proof,
+    ))
+}
 
+pub fn outcome_index_root(entries: &[(TxId, TerminalOutcome)]) -> Result<Digest, OutcomeFailure> {
     Ok(Digest::new(
         IdentityDomain::MerkleNode.algorithm().id(),
-        root,
+        merkle_root(outcome_index_schema(), &ordered_outcome_leaves(entries)?),
     ))
 }
 

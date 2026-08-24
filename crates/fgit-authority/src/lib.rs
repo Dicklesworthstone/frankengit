@@ -115,12 +115,12 @@ pub use crate::outcome::{
     PublishedBatch, TerminalOutcome, authority_head_identity, collect_cumulative_outcomes,
     collect_cumulative_outcomes_async, decision_batch_identity, fold_outcome_index,
     indexed_outcome, indexed_outcome_async, initialize_repository, initialize_repository_async,
-    interpret_indexed_outcome, next_batch_to_replay, outcome_index_root, outcome_key,
-    publish_decisions, publish_decisions_async, read_authority_head_body,
+    interpret_indexed_outcome, next_batch_to_replay, outcome_index_proof, outcome_index_root,
+    outcome_key, publish_decisions, publish_decisions_async, read_authority_head_body,
     read_authority_head_body_async, read_decision_batch_body, read_decision_batch_body_async,
     reconcile_outcome, replay_outcome, replay_outcome_async, resolve_outcome,
     resolve_outcome_async, scan_batch_for, scan_for_existing_decisions,
-    scan_for_existing_decisions_async,
+    scan_for_existing_decisions_async, verify_outcome_index_membership,
 };
 pub use crate::reference::{MemoryAuthorityStore, MemoryStoreConfig};
 pub use crate::request::{
