@@ -59,7 +59,7 @@ impl<'node> ProductionReceiveQuarantineHandoff<'node> {
     /// Binds this one handoff to the validator reconstructed from one
     /// authenticated materialization.
     #[must_use]
-    pub(crate) fn new(
+    pub(crate) const fn new(
         validator: ProductionQuarantineValidator<'node>,
         validation_basis: PublicationBasis,
     ) -> Self {
@@ -167,6 +167,8 @@ struct VerifiedObject {
     parsed: ParsedObject,
 }
 
+type VerifiedPackObjects = (BTreeMap<GitOid, VerifiedObject>, BTreeMap<u64, GitOid>);
+
 impl<'node> ProductionQuarantineValidator<'node> {
     /// Binds pack validation to one exact authority-selected object closure.
     #[must_use]
@@ -197,7 +199,7 @@ impl<'node> ProductionQuarantineValidator<'node> {
     /// Loads an authority-selected external base when one is actually named by
     /// the selected closure.
     ///
-    /// A REF_DELTA name is not, by itself, evidence that its base is external:
+    /// A `REF_DELTA` name is not, by itself, evidence that its base is external:
     /// a later bounded pack-local identity pass may prove that the same name
     /// belongs to an uploaded entry.  Returning `None` for an unselected name
     /// lets that pass establish the pack-local edge without consulting merely
@@ -298,12 +300,12 @@ impl<'node> ProductionQuarantineValidator<'node> {
     }
 
     /// Reconstructs and verifies every pack-local object identity before a
-    /// REF_DELTA is classified as external.
+    /// `REF_DELTA` is classified as external.
     ///
     /// The pack format carries a REF base identity but no trusted offset index.
     /// Direct and OFS-rooted entries establish identities first; each bounded
     /// pass adds only identities reconstructed through the typed resolver. A
-    /// subsequent pass may therefore resolve a REF_DELTA whose base was just
+    /// subsequent pass may therefore resolve a `REF_DELTA` whose base was just
     /// proven pack-local. The number of passes is capped by the existing delta
     /// depth bound plus the direct-entry pass, and one `ResolutionBudget`
     /// charges the entire discovery operation.
@@ -312,7 +314,7 @@ impl<'node> ProductionQuarantineValidator<'node> {
         pack: &QuarantinedPack,
         bases: &ExternalBases,
         deadline: &mut impl Deadline,
-    ) -> Result<(BTreeMap<GitOid, VerifiedObject>, BTreeMap<u64, GitOid>), RefusalCode> {
+    ) -> Result<VerifiedPackObjects, RefusalCode> {
         let mut objects = pack
             .clone()
             .into_scalar_objects(|_| None)
@@ -323,9 +325,9 @@ impl<'node> ProductionQuarantineValidator<'node> {
 
         for _ in 0..=self.pack_limits.max_delta_depth {
             checkpoint(deadline)?;
-            let mut resolved = Vec::new();
+            let mut newly_resolved = Vec::new();
             {
-                let mut resolver =
+                let mut pack_resolver =
                     CachedResolver::new(&objects, bases, &self.pack_limits, deadline)
                         .map_err(map_pack_error)?;
                 for entry in pack.entries() {
@@ -333,12 +335,14 @@ impl<'node> ProductionQuarantineValidator<'node> {
                     if ids_at_offset.contains_key(&entry.offset) {
                         continue;
                     }
-                    match resolver.resolve_offset_typed_with_budget(
+                    match pack_resolver.resolve_offset_typed_with_budget(
                         entry.offset,
                         &mut budget,
                         deadline,
                     ) {
-                        Ok((object_type, body)) => resolved.push((entry.offset, object_type, body)),
+                        Ok((object_type, body)) => {
+                            newly_resolved.push((entry.offset, object_type, body));
+                        }
                         // The base may be a pack-local entry whose native ID
                         // is established in this or a later bounded pass.
                         Err(PackError::MissingDeltaBase) => {}
@@ -347,10 +351,10 @@ impl<'node> ProductionQuarantineValidator<'node> {
                 }
             }
 
-            if resolved.is_empty() {
+            if newly_resolved.is_empty() {
                 break;
             }
-            for (offset, object_type, body) in resolved {
+            for (offset, object_type, body) in newly_resolved {
                 let (id, object) = self.verify_resolved_object(object_type, body)?;
                 if verified.insert(id, object).is_some()
                     || ids_at_offset.insert(offset, id).is_some()
@@ -629,7 +633,7 @@ const fn pack_object_offset(object: &PackObject) -> u64 {
     }
 }
 
-fn set_pack_object_id(object: &mut PackObject, id: GitOid) {
+const fn set_pack_object_id(object: &mut PackObject, id: GitOid) {
     match object {
         PackObject::Base { id: slot, .. } | PackObject::TypedBase { id: slot, .. } => {
             *slot = Some(id);
