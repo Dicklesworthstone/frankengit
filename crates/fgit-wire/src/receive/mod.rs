@@ -21,9 +21,9 @@ use std::{
 };
 
 use fgit_pack::{
-    NativeChecksumVerifier, PackError, PackLimits, QuarantinedPack, read_verified_pack,
+    Deadline, NativeChecksumVerifier, PackError, PackLimits, QuarantinedPack, read_verified_pack,
 };
-use fgit_types::RefName;
+use fgit_types::{RefName, RefusalCode};
 
 use crate::{
     AdvertisedRef, AnyGitOid, Capabilities, Capability, GitObjectFormat, Packet, PktLineDecoder,
@@ -333,6 +333,24 @@ pub trait ReceiveQuarantineHandoff {
         pack: Option<&QuarantinedPack>,
         receipt: &QuarantineReceipt,
     ) -> Result<(), ReceiveError>;
+
+    /// Receives the structural quarantine with the transport's live deadline.
+    ///
+    /// This default preserves the original structural-only handoff contract
+    /// for existing consumers. A handoff which reconstructs or stages native
+    /// objects overrides it and checkpoints `deadline` through that bounded
+    /// work, so transport cancellation covers both structural parsing and the
+    /// authoritative validation it immediately precedes.
+    fn handoff_with_deadline(
+        &mut self,
+        request: &ReceiveRequest,
+        pack: Option<&QuarantinedPack>,
+        receipt: &QuarantineReceipt,
+        deadline: &mut dyn Deadline,
+    ) -> Result<(), ReceiveError> {
+        let _ = deadline;
+        self.handoff(request, pack, receipt)
+    }
 }
 
 /// Cooperative cancellation boundary for the synchronous receive core.
@@ -751,15 +769,15 @@ impl ReceivePack {
                 state: ReceivePhase::Ready,
             });
         }
+        let mut deadline = PackDeadline { cancellation };
         if request.deletes_only() {
-            handoff.handoff(&request, None, &receipt)?;
+            handoff.handoff_with_deadline(&request, None, &receipt, &mut deadline)?;
             self.phase = ReceivePhase::Complete;
             return Ok(ReceiveCompletion {
                 request,
                 quarantine: receipt,
             });
         }
-        let mut deadline = PackDeadline { cancellation };
         let pack = read_verified_pack(
             &raw_pack,
             self.context.object_format,
@@ -772,7 +790,7 @@ impl ReceivePack {
             object_count: pack.header.object_count,
             ..receipt
         };
-        handoff.handoff(&request, Some(&pack), &receipt)?;
+        handoff.handoff_with_deadline(&request, Some(&pack), &receipt, &mut deadline)?;
         self.phase = ReceivePhase::Complete;
         Ok(ReceiveCompletion {
             request,
@@ -1539,6 +1557,11 @@ pub enum ReceiveError {
     Wire(WireError),
     /// Bounded pack-reader refusal before quarantine handoff.
     Pack(PackError),
+    /// An authoritative handoff refused the structurally valid receive.
+    ///
+    /// This preserves the exact typed refusal rather than recoding it as a
+    /// wire-framing failure after the quarantine has crossed its boundary.
+    AuthoritativeRefusal(RefusalCode),
     /// Receive-specific bounds are inconsistent.
     InvalidLimit { field: &'static str },
     /// A requested capability has no receive-pack implementation.
@@ -1615,6 +1638,9 @@ impl Display for ReceiveError {
         match self {
             Self::Wire(error) => Display::fmt(error, formatter),
             Self::Pack(error) => Display::fmt(error, formatter),
+            Self::AuthoritativeRefusal(code) => {
+                write!(formatter, "authoritative receive handoff refused: {code:?}")
+            }
             Self::InvalidLimit { field } => write!(formatter, "invalid receive limit {field}"),
             Self::UnsupportedCapability { capability } => {
                 write!(formatter, "unsupported receive capability {capability:?}")
