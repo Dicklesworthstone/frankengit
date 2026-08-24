@@ -33,12 +33,16 @@
 # `.sh`, and ordered by an LC_ALL=C sort of repo-relative paths so aggregation
 # is deterministic across hosts.
 #
-# ANYTHING OUTSIDE `suites/` IS NOT DISCOVERED AND RUNS NOWHERE.
+# ANYTHING OUTSIDE `suites/` IS NOT DISCOVERED AND RUNS NOWHERE, except a
+# root-level script named by this runner as an explicit stable entry point.
 # This is the failure mode worth knowing about, because it is silent: a script
 # at the `scripts/e2e/` root is never found by this runner, and unless some
 # other file invokes it by name it simply never executes. Its assertions still
 # read as coverage on a bead record. One such script currently exists in the
 # tree with 30 assertions, zero invokers, and a bead that has already closed.
+# `build_reuse_campaign.sh` is intentionally the one explicit entry point: its
+# FG-040b contract names that root path, and the addition below makes its
+# invocation reviewable instead of silently treating it as discovered coverage.
 #
 # Note that wiring this runner into `scripts/verify.sh` (FG-091) does NOT
 # rescue such a script: that wires the RUNNER into the lane, and the runner
@@ -132,6 +136,7 @@ fge__detect_digest_tool || {
 
 RA_REPO_ROOT=$(fge__repo_root "$RA_DIR")
 RA_SUITE_DIR="$RA_DIR/suites"
+RA_BUILD_REUSE_CAMPAIGN="$RA_DIR/build_reuse_campaign.sh"
 RA_OUT=''
 RA_TIMEOUT=900
 RA_ATTEMPTS=1
@@ -320,6 +325,12 @@ else
     [ -n "$f" ] || continue
     RA_SCRIPTS+=("$f")
   done < <(ra_discover "$RA_SUITE_DIR")
+  if [ ! -f "$RA_BUILD_REUSE_CAMPAIGN" ] || [ ! -x "$RA_BUILD_REUSE_CAMPAIGN" ]; then
+    printf 'run_all: required explicit campaign is missing or not executable: %s\n' \
+      "$RA_BUILD_REUSE_CAMPAIGN" >&2
+    exit 2
+  fi
+  RA_SCRIPTS+=("$RA_BUILD_REUSE_CAMPAIGN")
 fi
 
 for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do

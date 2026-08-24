@@ -1662,9 +1662,19 @@ impl SpotCheckSchedule {
     }
 }
 
+/// Verification lane that determines whether derived output may participate.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum VerificationLane {
+    /// Incremental checks may reuse only policy-permitted deterministic output.
+    Incremental,
+    /// Release verification always runs target-native work and never reuses output.
+    ReleaseVerification,
+}
+
 /// Policy input for cache reuse.  It is consulted on both insert and lookup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReusePolicy {
+    verification_lane: VerificationLane,
     permitted_steps: BTreeSet<RunnerText>,
     spot_checks: SpotCheckSchedule,
 }
@@ -1682,13 +1692,34 @@ impl ReusePolicy {
             }
         }
         Ok(Self {
+            verification_lane: VerificationLane::Incremental,
             permitted_steps: canonical,
             spot_checks,
         })
     }
 
+    /// Creates the release-verification policy.
+    ///
+    /// This lane deliberately has no reusable steps: release evidence requires
+    /// fresh target-native execution instead of a derived cache observation.
+    #[must_use]
+    pub const fn release_verification(spot_checks: SpotCheckSchedule) -> Self {
+        Self {
+            verification_lane: VerificationLane::ReleaseVerification,
+            permitted_steps: BTreeSet::new(),
+            spot_checks,
+        }
+    }
+
+    /// Verification lane that owns this policy decision.
+    #[must_use]
+    pub const fn verification_lane(&self) -> VerificationLane {
+        self.verification_lane
+    }
+
     fn permits(&self, step: &LoweredWorkflowStep) -> bool {
-        self.permitted_steps.contains(step.step_id())
+        self.verification_lane == VerificationLane::Incremental
+            && self.permitted_steps.contains(step.step_id())
     }
 
     /// Deterministic schedule used for selected reuse receipts.
