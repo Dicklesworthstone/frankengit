@@ -28,11 +28,12 @@
 #   - it asserts the theorem set the registry will cite is actually present in
 #     the artifact, so a theorem being renamed or deleted cannot silently
 #     orphan a claim that names it.
-#   - it does NOT check the claims registry. That needs
-#     `cargo run -p fgit-registry-check`, and the claims-registry promotion
-#     half of FG-041c is not landed yet -- see the bead. Asserting registry
-#     consistency here before the rows exist would be a check that passes
-#     because there is nothing to check.
+#   - it DOES now check the claims registry, which the original version of this
+#     header correctly said it did not: the rows did not exist yet, and
+#     asserting consistency before them would have been a check that passed
+#     because there was nothing to check. FG-041c lines 1-2 landed CLM-002..005,
+#     so the demotion drill below has something real to break. It runs against a
+#     sandbox root, never the checkout.
 #   - it does NOT establish that the Rust implementation refines the Lean
 #     model. `proofs/fg041/README.md` says so in its own non-claims section and
 #     this lane does not quietly upgrade it.
@@ -129,6 +130,127 @@ else
     fge_assert_eq fg041-proof-check 0 "$prf_exit" \
       "the FG-041 Lean lane proves every theorem and rejects the planted false variant"
   fi
+fi
+
+# -----------------------------------------------------------------------------
+fge_phase assert
+fge_step claims-registry-demotion-drill
+# -----------------------------------------------------------------------------
+# The half this lane's header said was not landed yet. FG-041c lines 1-2 landed
+# CLM-002..CLM-005, four CLAIM-002 rows citing the exact theorems, each bound to
+# the five proof artifacts by SHA-256. This is the drill that proves the binding
+# is load-bearing rather than decorative: break it and the claim must stop
+# presenting as verified, automatically, with no reviewer in the loop.
+#
+# THE DRILL RUNS IN A SANDBOX ROOT, NEVER IN THE CHECKOUT. `fgit-registry-check`
+# takes `--root`, so the mutation happens to a copy. That matters more here than
+# usual: sixteen panes share this worktree, so a transient edit to
+# proofs/fg041/OrderedResidue.lean would be in every one of their compilers and
+# every one of their `git status` outputs for as long as it sat there. A drill
+# that has to damage the shared tree to prove a point is a drill nobody can run
+# twice. The last assertion below checks the checkout is untouched, so this
+# property is enforced rather than asserted in a comment.
+#
+# TWO AXES, because they fail for different reasons and a lane that probed one
+# would report green while the other rotted:
+#   digest   -- an artifact changed under a row that still claims it
+#   rank     -- a row claiming proof strength on weaker evidence
+# The rank axis is the one the checker CAN catch mechanically. It cannot catch a
+# row whose evidence is misdescribed at the right rank; that judgement stays
+# human, and the bead comment records it.
+if ! command -v cargo >/dev/null 2>&1; then
+  fge_field registry_checker_available 0
+  fge_skip fg041-registry-demotion 'cargo is unavailable; the registry checker cannot be exercised here'
+else
+  fge_field registry_checker_available 1
+  prf_sb=$(fge_tempdir fg041-registry-drill)
+  mkdir -p "$prf_sb/registries" "$prf_sb/proofs/fg041" \
+           "$prf_sb/crates/fgit-claim/src" "$prf_sb/tools/registry-check/src"
+  cp "$PRF_REPO/registries/claims.tsv" "$PRF_REPO/registries/claim_classes.tsv" \
+     "$PRF_REPO/registries/invariants.tsv" "$prf_sb/registries/"
+  cp "$PRF_REPO/README.md" "$prf_sb/"
+  cp "$PRF_REPO/proofs/fg041/ASSUMPTIONS.md" "$PRF_REPO/proofs/fg041/FalseVariant.lean" \
+     "$PRF_REPO/proofs/fg041/OrderedResidue.lean" "$PRF_REPO/proofs/fg041/check.sh" \
+     "$PRF_REPO/proofs/fg041/toolchain.json" "$prf_sb/proofs/fg041/"
+  # CLM-001 binds sources outside proofs/, and an unavailable artifact demotes
+  # exactly like a changed one. Without these the baseline would fail for a
+  # reason that has nothing to do with the drill, and the drill would be
+  # measuring its own sandbox rather than the claim binding.
+  cp "$PRF_REPO/crates/fgit-claim/src/lib.rs" "$prf_sb/crates/fgit-claim/src/"
+  cp "$PRF_REPO/tools/registry-check/src/claims.rs" \
+     "$PRF_REPO/tools/registry-check/src/main.rs" "$prf_sb/tools/registry-check/src/"
+
+  prf_check_sandbox() {
+    ( cd "$PRF_REPO" && RCH_CARGO_WRAPPER_BYPASS=1 \
+        cargo run -q -p fgit-registry-check -- --root "$prf_sb" claims ) 2>&1
+  }
+
+  # Baseline. A drill whose starting state already fails proves nothing about
+  # the mutation, so this is the presence case for the two assertions below.
+  prf_base_exit=0
+  prf_base_out=$(prf_check_sandbox) || prf_base_exit=$?
+  printf '%s\n' "$prf_base_out" >"$FGE_ARTIFACT_DIR/fg041-registry-baseline.log"
+  fge_field registry_baseline_exit "$prf_base_exit"
+  fge_assert_eq fg041-registry-baseline-verified 0 "$prf_base_exit" \
+    'the unmutated sandbox verifies, so a later failure is caused by the mutation'
+
+  # Axis one: break the bridge. One appended comment changes the artifact's
+  # digest without changing a single theorem, which is the point -- the binding
+  # is to the bytes, not to whether the proof still happens to be true.
+  printf '\n-- fg041c demotion drill: transient sandbox mutation\n' \
+    >>"$prf_sb/proofs/fg041/OrderedResidue.lean"
+  prf_digest_exit=0
+  prf_digest_out=$(prf_check_sandbox) || prf_digest_exit=$?
+  printf '%s\n' "$prf_digest_out" >"$FGE_ARTIFACT_DIR/fg041-registry-digest-drill.log"
+  fge_field registry_digest_drill_exit "$prf_digest_exit"
+  fge_assert_ne fg041-demotes-on-changed-artifact 0 "$prf_digest_exit" \
+    'a changed proof artifact must fail the registry check, not be waved through'
+  fge_assert_contains fg041-demotion-names-the-claim "$prf_digest_out" 'CLM-002' \
+    'the demotion names the claim that lost its binding'
+  # The checker wraps the path in backticks, so the needle is the reason alone
+  # and the path is asserted separately. A single needle spanning both would
+  # couple this assertion to the checker's quoting style, which is not what it
+  # is about.
+  fge_assert_contains fg041-demotion-names-the-artifact "$prf_digest_out" \
+    'proofs/fg041/OrderedResidue.lean' \
+    'the demotion names the artifact that changed'
+  fge_assert_contains fg041-demotion-names-the-reason "$prf_digest_out" \
+    'digest changed' \
+    'the demotion gives the reason, not just a failure'
+  # CLM-001 binds different artifacts and must be untouched. Without this the
+  # drill would pass on a checker that demoted everything on any change.
+  fge_assert_not_contains fg041-demotion-is-scoped "$prf_digest_out" 'CLM-001' \
+    'only claims bound to the changed artifact demote'
+
+  # Restore the bridge, then axis two: the same rows, honest artifacts, but one
+  # row claiming proof strength on bounded-model evidence.
+  cp "$PRF_REPO/proofs/fg041/OrderedResidue.lean" "$prf_sb/proofs/fg041/"
+  awk -F'\t' 'BEGIN{OFS="\t"} $1=="CLM-002"{$6="CLAIM-003"} {print}' \
+    "$prf_sb/registries/claims.tsv" >"$prf_sb/registries/claims.rank.tsv"
+  mv "$prf_sb/registries/claims.rank.tsv" "$prf_sb/registries/claims.tsv"
+  prf_rank_exit=0
+  prf_rank_out=$(prf_check_sandbox) || prf_rank_exit=$?
+  printf '%s\n' "$prf_rank_out" >"$FGE_ARTIFACT_DIR/fg041-registry-rank-drill.log"
+  fge_field registry_rank_drill_exit "$prf_rank_exit"
+  fge_assert_ne fg041-demotes-on-weak-evidence 0 "$prf_rank_exit" \
+    'a proof-rank claim on weaker evidence must not present as verified'
+  fge_assert_contains fg041-weak-evidence-names-the-ranks "$prf_rank_out" \
+    'is weaker than claim class' \
+    'the demotion explains the rank comparison rather than failing opaquely'
+
+  # The checkout itself never moved. This is the assertion that keeps the drill
+  # runnable in a shared worktree.
+  # Scoped to proofs/fg041 ALONE, deliberately. An earlier version also named
+  # registries/claims.tsv and failed -- correctly -- while the commit that
+  # introduces these very rows was still in flight. That assertion conflated
+  # "the drill damaged nothing" with "nobody is editing the registry", which
+  # would fail this lane for any agent's unrelated registry work. The drill's
+  # blast radius is the proof artifacts it copies and mutates; that is what is
+  # asserted.
+  prf_tree_dirt=$(cd "$PRF_REPO" && git status --porcelain -- proofs/fg041 | wc -l | tr -d ' ')
+  fge_field proof_tree_dirty_paths "$prf_tree_dirt"
+  fge_assert_eq fg041-drill-left-the-checkout-clean 0 "$prf_tree_dirt" \
+    'the drill mutates only its sandbox; the shared worktree is never touched'
 fi
 
 fge_phase teardown
