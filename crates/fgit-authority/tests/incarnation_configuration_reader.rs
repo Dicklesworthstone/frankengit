@@ -7,12 +7,13 @@
 
 use fgit_authority::{
     AuthorityStore, MemoryAuthorityStore, OutcomeFailure, RepositoryIncarnationConfiguration,
-    StoreInstanceId, body_key, canonical_body_id, read_repository_incarnation_configuration,
-    stage_repository_incarnation_configuration,
+    RepositoryIncarnationConfigurationEvidence, StoreInstanceId, body_key, canonical_body_id,
+    read_repository_incarnation_configuration, read_repository_incarnation_configuration_evidence,
+    stage_latest_repository_incarnation_configuration, stage_repository_incarnation_configuration,
 };
 use fgit_codec::{
     CanonicalBody, CodecRefusal, Decoder, Encoder, RepositoryIncarnationConfigurationBody,
-    encode_body,
+    RepositoryIncarnationConfigurationBodyV2_1, encode_body,
 };
 use fgit_crypto::IdentityDomain;
 use fgit_types::CANONICAL_CODEC_VERSION;
@@ -32,6 +33,15 @@ const fn known_configuration() -> RepositoryIncarnationConfigurationBody {
         root_layout: RootLayoutVersion::RefStateMerkleV1,
         object_format: GitHashAlgorithm::Sha256,
         repository_incarnation_id: RepositoryIncarnationId::from_bytes([0x60; 16]),
+    }
+}
+
+const fn current_configuration() -> RepositoryIncarnationConfigurationBodyV2_1 {
+    RepositoryIncarnationConfigurationBodyV2_1 {
+        root_layout: RootLayoutVersion::RefStateMerkleV1,
+        object_format: GitHashAlgorithm::Sha256,
+        repository_incarnation_id: RepositoryIncarnationId::from_bytes([0x61; 16]),
+        policy_root: None,
     }
 }
 
@@ -165,4 +175,35 @@ fn production_reader_refuses_an_unknown_v2_minor_without_a_legacy_fallback() {
             }
         ))
     ));
+}
+
+#[test]
+fn exact_evidence_reader_preserves_the_selected_v2_minor() {
+    let backing = store();
+    let historical = known_configuration();
+    let historical_root = stage_repository_incarnation_configuration(&backing, &historical)
+        .expect("the byte-stable v2.0 configuration stages");
+    assert_eq!(
+        read_repository_incarnation_configuration_evidence(&backing, &historical_root)
+            .expect("the exact evidence reader retains v2.0"),
+        RepositoryIncarnationConfigurationEvidence::V2_0(historical),
+        "v2.0 evidence remains distinguishable from a later no-policy body"
+    );
+
+    let current = current_configuration();
+    let current_root = stage_latest_repository_incarnation_configuration(&backing, &current)
+        .expect("the current v2.1 configuration stages");
+    let evidence = read_repository_incarnation_configuration_evidence(&backing, &current_root)
+        .expect("the exact evidence reader retains v2.1");
+    assert_eq!(
+        evidence,
+        RepositoryIncarnationConfigurationEvidence::V2_1(current),
+        "v2.1 evidence preserves its exact canonical schema"
+    );
+    assert_eq!(
+        evidence.normalized(),
+        read_repository_incarnation_configuration(&backing, &current_root)
+            .expect("the normalized reader remains the policy-resolution surface"),
+        "the exact and normalized readers agree on permanent configuration facts"
+    );
 }
