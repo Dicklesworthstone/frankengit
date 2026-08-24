@@ -10,9 +10,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_admission::{
-    AdmissionError, PermittedObjectClosure, QuarantineValidator, ValidatedClosure,
-    ValidatedReceive, permitted_object_closure_root, validate_receive,
+    AdmissionError, BasisBoundValidatedReceive, PermittedObjectClosure, QuarantineValidator,
+    ValidatedClosure, permitted_object_closure_root, validate_receive_at_basis,
 };
+use fgit_chronicle::PublicationBasis;
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject};
 use fgit_pack::{
     CachedResolver, Deadline, ExternalBaseLookup, ObjectId, PackError, PackLimits, PackObject,
@@ -50,16 +51,21 @@ impl From<ReceiveError> for NodeReceiveTransportRefusal {
 #[derive(Debug)]
 pub struct ProductionReceiveQuarantineHandoff<'node> {
     validator: ProductionQuarantineValidator<'node>,
-    validated: Option<ValidatedReceive>,
+    validation_basis: PublicationBasis,
+    validated: Option<BasisBoundValidatedReceive>,
 }
 
 impl<'node> ProductionReceiveQuarantineHandoff<'node> {
     /// Binds this one handoff to the validator reconstructed from one
     /// authenticated materialization.
     #[must_use]
-    pub(crate) const fn new(validator: ProductionQuarantineValidator<'node>) -> Self {
+    pub(crate) fn new(
+        validator: ProductionQuarantineValidator<'node>,
+        validation_basis: PublicationBasis,
+    ) -> Self {
         Self {
             validator,
+            validation_basis,
             validated: None,
         }
     }
@@ -70,7 +76,7 @@ impl<'node> ProductionReceiveQuarantineHandoff<'node> {
     /// A successful implementation of [`ReceiveQuarantineHandoff`] must have
     /// retained this proof.  Preserve a typed core refusal instead of exposing
     /// an unchecked optional value at the sync-to-async boundary.
-    pub(crate) fn into_validated_receive(self) -> Result<ValidatedReceive, ReceiveError> {
+    pub(crate) fn into_validated_receive(self) -> Result<BasisBoundValidatedReceive, ReceiveError> {
         self.validated.ok_or(ReceiveError::HandoffProofMissing)
     }
 
@@ -86,8 +92,15 @@ impl<'node> ProductionReceiveQuarantineHandoff<'node> {
                 state: fgit_wire::receive::ReceivePhase::Complete,
             });
         }
-        let validated = validate_receive(request, pack, receipt, &self.validator, deadline)
-            .map_err(ReceiveError::AuthoritativeRefusal)?;
+        let validated = validate_receive_at_basis(
+            request,
+            pack,
+            receipt,
+            &self.validation_basis,
+            &self.validator,
+            deadline,
+        )
+        .map_err(ReceiveError::AuthoritativeRefusal)?;
         self.validated = Some(validated);
         Ok(())
     }
@@ -1142,7 +1155,10 @@ mod tests {
                 ParseLimits::default(),
             )
             .expect("the same authenticated materialization supplies a handoff validator");
-        let mut handoff = ProductionReceiveQuarantineHandoff::new(handoff_validator);
+        let mut handoff = ProductionReceiveQuarantineHandoff::new(
+            handoff_validator,
+            materialized.basis().clone(),
+        );
         let mut transport_live = || true;
         handoff
             .handoff_with_deadline(&request, Some(&pack), &quarantine, &mut transport_live)

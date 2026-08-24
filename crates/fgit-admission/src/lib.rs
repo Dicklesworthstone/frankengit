@@ -47,8 +47,8 @@ use fgit_txn::{IntentEvaluator, TransactionFoldReport};
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::{
     AsciiSlug, DecisionOutcome, Digest, DomainTag, PrincipalId, PrincipalSnapshotId, RefName,
-    RefusalCode, RefusalRecordId, RepositoryId, RepositorySequence, SchemaFamily, TenantId,
-    TransactionSealId, TxId,
+    RefusalCode, RefusalRecordId, RepositoryAuthorityHeadId, RepositoryId, RepositorySequence,
+    SchemaFamily, TenantId, TransactionSealId, TxId,
 };
 use fgit_wire::receive::{
     QuarantineReceipt, ReceiveCommandStatus, ReceiveError, ReceiveRequest, UnpackStatus,
@@ -176,6 +176,37 @@ impl ValidatedReceive {
     }
 }
 
+/// A receive validation proof bound to the exact authority basis that selected
+/// every external object the validator was permitted to use.
+///
+/// This is deliberately distinct from [`ValidatedReceive`]. The latter is the
+/// generic output of a pack-aware validator; only a caller that held the
+/// authenticated [`PublicationBasis`] while validating can construct this
+/// stronger input through [`validate_receive_at_basis`]. Admission compares
+/// the retained head identity on every initial plan and CAS replan, so a
+/// closure authorized at one basis cannot publish after another basis replaces
+/// it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BasisBoundValidatedReceive {
+    validated: ValidatedReceive,
+    validation_basis: RepositoryAuthorityHeadId,
+}
+
+impl BasisBoundValidatedReceive {
+    /// The command request whose semantics were validated.
+    #[must_use]
+    pub const fn request(&self) -> &ReceiveRequest {
+        self.validated.request()
+    }
+
+    /// The authenticated predecessor head that selected the validator's
+    /// external-object authority.
+    #[must_use]
+    pub const fn validation_basis(&self) -> RepositoryAuthorityHeadId {
+        self.validation_basis
+    }
+}
+
 /// Validates closure and object availability for a quarantined pack.
 ///
 /// Non-delete commands without that pack are refused before a seal exists;
@@ -209,6 +240,30 @@ where
         request: request.clone(),
         receipt: receipt.clone(),
         closure,
+    })
+}
+
+/// Validates a receive and binds its proof to the exact authority basis that
+/// selected the validator's external-object authority.
+///
+/// The validation implementation remains responsible for proving that its
+/// selected external closure came from `basis`. This helper retains the
+/// resulting authenticated head identity with the private receive proof so the
+/// admission driver can reject a stale plan before evaluating or publishing it.
+pub fn validate_receive_at_basis<Validator>(
+    request: &ReceiveRequest,
+    pack: Option<&QuarantinedPack>,
+    receipt: &QuarantineReceipt,
+    basis: &PublicationBasis,
+    validator: &Validator,
+    deadline: &mut impl Deadline,
+) -> Result<BasisBoundValidatedReceive, RefusalCode>
+where
+    Validator: QuarantineValidator + ?Sized,
+{
+    Ok(BasisBoundValidatedReceive {
+        validated: validate_receive(request, pack, receipt, validator, deadline)?,
+        validation_basis: basis.id(),
     })
 }
 
@@ -390,6 +445,11 @@ struct AdmissionInput<'a> {
     /// says which provenance made the claim.
     delete_only_label: &'static str,
     closure: &'a ValidatedClosure,
+    /// The authenticated predecessor head that authorized the receive
+    /// validator's external bases. Source imports and legacy generic receive
+    /// validation have no such witness; production raw receive uses the bound
+    /// input below and must match this on every CAS plan.
+    validation_basis: Option<RepositoryAuthorityHeadId>,
 }
 
 /// View a validated receive-pack session as an admission input.
@@ -413,7 +473,15 @@ fn receive_input(validated: &ValidatedReceive) -> AdmissionInput<'_> {
         declared_delete_only: validated.receipt.delete_only,
         delete_only_label: "quarantine delete-only receipt",
         closure: &validated.closure,
+        validation_basis: None,
     }
+}
+
+/// View a basis-bound production receive as an admission input.
+fn basis_bound_receive_input(validated: &BasisBoundValidatedReceive) -> AdmissionInput<'_> {
+    let mut input = receive_input(&validated.validated);
+    input.validation_basis = Some(validated.validation_basis);
+    input
 }
 
 /// View a validated source import as an admission input.
@@ -444,6 +512,7 @@ fn source_import_input(validated: &ValidatedSourceImport) -> AdmissionInput<'_> 
         declared_delete_only: validated.receipt.delete_only,
         delete_only_label: "source-import delete-only receipt",
         closure: &validated.closure,
+        validation_basis: None,
     }
 }
 
@@ -1712,6 +1781,33 @@ where
     )
 }
 
+/// Admits a production receive whose validator proof is bound to one exact
+/// authority basis.
+///
+/// Unlike [`admit_validated_receive`], every attempted publication basis must
+/// match the basis retained by validation. A CAS replan therefore produces the
+/// typed stale-authority refusal instead of reusing an external-base closure
+/// authorized under the predecessor head.
+pub fn admit_basis_bound_validated_receive<S, Projection>(
+    store: &S,
+    context: &AdmissionContext,
+    validated: &BasisBoundValidatedReceive,
+    limits: AdmissionLimits,
+    projection: &Projection,
+) -> Result<AdmissionResult, AdmissionError>
+where
+    S: AuthorityStore + ?Sized,
+    Projection: AdmissionProjection + ?Sized,
+{
+    admit_input(
+        store,
+        context,
+        &basis_bound_receive_input(validated),
+        limits,
+        projection,
+    )
+}
+
 /// Admit one already-planned session against the authority.
 ///
 /// The single blocking driver. Both public entrypoints reach the authority
@@ -1735,6 +1831,7 @@ where
             store,
             context,
             input.closure,
+            input.validation_basis,
             &plan.lowered[0],
             projection,
             limits,
@@ -1746,6 +1843,7 @@ where
                 store,
                 context,
                 input.closure,
+                input.validation_basis,
                 request,
                 projection,
                 limits,
@@ -1849,11 +1947,17 @@ fn prepare_publication<Projection>(
     authenticated: &AuthenticatedHead,
     lowered: &LoweredRequest,
     closure: &ValidatedClosure,
+    validation_basis: Option<RepositoryAuthorityHeadId>,
     tx_id: TxId,
 ) -> Result<PublicationPreparation, AdmissionError>
 where
     Projection: AdmissionSnapshotProjection + ?Sized,
 {
+    if validation_basis.is_some_and(|id| id != basis.id()) {
+        return Ok(PublicationPreparation::Refuse(
+            RefusalCode::AuthorityReceiptStale,
+        ));
+    }
     let snapshot = match projection.snapshot(basis, authenticated) {
         Ok(snapshot) => snapshot,
         Err(code) => return Ok(PublicationPreparation::Refuse(code)),
@@ -1919,12 +2023,18 @@ async fn prepare_publication_async<S, Projection>(
     authenticated: &AuthenticatedHead,
     lowered: &LoweredRequest,
     closure: &ValidatedClosure,
+    validation_basis: Option<RepositoryAuthorityHeadId>,
     tx_id: TxId,
 ) -> Result<PublicationPreparation, AdmissionError>
 where
     S: AsyncAuthorityStore + ?Sized,
     Projection: AsyncAdmissionProjection<S> + ?Sized,
 {
+    if validation_basis.is_some_and(|id| id != basis.id()) {
+        return Ok(PublicationPreparation::Refuse(
+            RefusalCode::AuthorityReceiptStale,
+        ));
+    }
     let snapshot = match projection
         .snapshot_async(authority, cx, basis, authenticated)
         .await
@@ -1987,6 +2097,7 @@ fn plan_publication<Projection>(
     authenticated: &AuthenticatedHead,
     lowered: &LoweredRequest,
     closure: &ValidatedClosure,
+    validation_basis: Option<RepositoryAuthorityHeadId>,
     tx_id: TxId,
 ) -> Result<PlannedPublication, AdmissionError>
 where
@@ -1999,6 +2110,7 @@ where
         authenticated,
         lowered,
         closure,
+        validation_basis,
         tx_id,
     )?;
     Ok(match preparation {
@@ -2408,6 +2520,7 @@ fn admit_one<S, Projection>(
     store: &S,
     context: &AdmissionContext,
     closure: &ValidatedClosure,
+    validation_basis: Option<RepositoryAuthorityHeadId>,
     lowered: &LoweredRequest,
     projection: &Projection,
     limits: AdmissionLimits,
@@ -2461,6 +2574,7 @@ where
             &authenticated,
             lowered,
             closure,
+            validation_basis,
             tx_id,
         )? {
             PlannedPublication::Refuse(code) => publish_refusal(
@@ -3175,6 +3289,35 @@ where
     .await
 }
 
+/// Asynchronously admits a production receive whose validation proof is bound
+/// to one authority basis.
+///
+/// This is the exact asynchronous sibling of
+/// [`admit_basis_bound_validated_receive`]: every retry rereads the basis and
+/// refuses before projection work if it differs from the validation witness.
+pub async fn admit_basis_bound_validated_receive_async<S, Projection>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    validated: &BasisBoundValidatedReceive,
+    limits: AdmissionLimits,
+    projection: &Projection,
+) -> Result<AdmissionResult, AdmissionError>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    Projection: AsyncAdmissionProjection<S> + ?Sized,
+{
+    admit_input_async(
+        store,
+        cx,
+        context,
+        &basis_bound_receive_input(validated),
+        limits,
+        projection,
+    )
+    .await
+}
+
 /// Admit one already-planned session against the authority, asynchronously.
 ///
 /// The single asynchronous driver, and the sibling of [`admit_input`].
@@ -3198,6 +3341,7 @@ where
                 cx,
                 context,
                 input.closure,
+                input.validation_basis,
                 &plan.lowered[0],
                 projection,
                 limits,
@@ -3213,6 +3357,7 @@ where
                     cx,
                     context,
                     input.closure,
+                    input.validation_basis,
                     request,
                     projection,
                     limits,
@@ -3238,6 +3383,7 @@ async fn admit_one_async<S, Projection>(
     cx: &S::Context,
     context: &AdmissionContext,
     closure: &ValidatedClosure,
+    validation_basis: Option<RepositoryAuthorityHeadId>,
     lowered: &LoweredRequest,
     projection: &Projection,
     limits: AdmissionLimits,
@@ -3302,6 +3448,7 @@ where
             &authenticated,
             lowered,
             closure,
+            validation_basis,
             tx_id,
         )
         .await?;

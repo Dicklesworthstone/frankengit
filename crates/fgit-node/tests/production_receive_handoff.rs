@@ -8,7 +8,9 @@ use fgit_authority::IdempotencyKey;
 use fgit_crypto::{GitObjectKind, git_object_id, sha1_digest};
 use fgit_git_object::ParseLimits;
 use fgit_node::{LoopbackReceiveSession, NodeConfig, NodeReceiveTransportRefusal, OneNode};
-use fgit_types::{DecisionOutcome, GitHashAlgorithm, PrincipalId, RepositoryId, TenantId};
+use fgit_types::{
+    DecisionOutcome, GitHashAlgorithm, PrincipalId, RefName, RefusalCode, RepositoryId, TenantId,
+};
 use fgit_wire::receive::{ReceiveContext, ReceiveError, ReceiveLimits, SignedPushProfile};
 use fgit_wire::{Capabilities, GitObjectFormat, Packet, WireLimits, encode_packets};
 
@@ -114,11 +116,34 @@ fn one_blob_pack(body: &[u8]) -> Vec<u8> {
     pack
 }
 
+fn thin_ref_delta_pack(base: fgit_types::GitOid, base_body: &[u8], target_body: &[u8]) -> Vec<u8> {
+    let suffix = target_body
+        .strip_prefix(base_body)
+        .expect("fixture target extends its authority-selected base");
+    assert_eq!(suffix.len(), 1, "fixture has one literal delta suffix");
+    let base_length = u8::try_from(base_body.len()).expect("small bounded fixture");
+    let target_length = u8::try_from(target_body.len()).expect("small bounded fixture");
+    let mut program = vec![base_length, target_length, 0x91, 0, base_length];
+    program.push(u8::try_from(suffix.len()).expect("one-byte literal fixture"));
+    program.extend_from_slice(suffix);
+
+    let mut pack = b"PACK\0\0\0\x02\0\0\0\x01".to_vec();
+    pack.push(0x70 | u8::try_from(program.len()).expect("small delta program"));
+    pack.extend_from_slice(base.as_bytes());
+    pack.extend_from_slice(&zlib_stored(&program));
+    let trailer = sha1_digest(&pack);
+    pack.extend_from_slice(&trailer);
+    pack
+}
+
 fn authenticated_session() -> LoopbackReceiveSession {
+    authenticated_session_with_key(b"production-receive-handoff-retry-key")
+}
+
+fn authenticated_session_with_key(key: &[u8]) -> LoopbackReceiveSession {
     LoopbackReceiveSession::authenticated(
         PrincipalId::from_bytes([0x73; 16]),
-        IdempotencyKey::new(b"production-receive-handoff-retry-key".to_vec())
-            .expect("bounded retry key constructs"),
+        IdempotencyKey::new(key.to_vec()).expect("bounded retry key constructs"),
     )
 }
 
@@ -245,6 +270,114 @@ fn raw_receive_cancellation_prevents_quarantine_handoff_and_publication() {
         .runtime()
         .block_on(node.materialize_admission_in(&after_request))
         .expect("cancelled receive leaves the empty head materializable");
+    assert!(after.snapshot().refs.is_empty());
+    node.shutdown().expect("node closes cleanly");
+}
+
+#[test]
+fn stale_validation_basis_refuses_thin_base_after_successor_omits_it() {
+    let scratch = ScratchDirectory::new();
+    let node = node(scratch.path().join("node"));
+    let base_body = b"basis-selected blob\n";
+    let base_id = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, base_body);
+    let target_body = b"basis-selected blob\n!";
+    let target_id = git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, target_body);
+    let mut live = || true;
+
+    let genesis_request = node.request_context();
+    let genesis = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&genesis_request))
+        .expect("empty genesis state materializes");
+    let create_command =
+        format!("{} {base_id} refs/heads/base\0report-status", zero_oid()).into_bytes();
+    let create = node
+        .runtime()
+        .block_on(node.receive_loopback_pack_durable_in(
+            &node.request_context(),
+            &authenticated_session_with_key(b"basis-stale-create"),
+            &genesis,
+            receive_context(),
+            &packet_line(create_command, &one_blob_pack(base_body)),
+            ParseLimits::default(),
+            AdmissionLimits::default(),
+            &mut live,
+        ))
+        .expect("base object receives under the genesis basis");
+    assert!(matches!(
+        create.commands[0].terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
+
+    let selected_a_request = node.request_context();
+    let selected_a = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&selected_a_request))
+        .expect("basis A materializes after the base publication");
+    let base_ref = RefName::try_new(b"refs/heads/base").expect("fixed branch ref is valid");
+    assert_eq!(selected_a.snapshot().refs.get(&base_ref), Some(&base_id));
+
+    let delete_command = format!(
+        "{base_id} {} refs/heads/base\0report-status delete-refs",
+        zero_oid()
+    )
+    .into_bytes();
+    let delete = node
+        .runtime()
+        .block_on(node.receive_loopback_pack_durable_in(
+            &node.request_context(),
+            &authenticated_session_with_key(b"basis-stale-delete"),
+            &selected_a,
+            receive_context(),
+            &packet_line(delete_command, &[]),
+            ParseLimits::default(),
+            AdmissionLimits::default(),
+            &mut live,
+        ))
+        .expect("basis B removes the base ref");
+    assert!(matches!(
+        delete.commands[0].terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    ));
+
+    let selected_b_request = node.request_context();
+    let selected_b = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&selected_b_request))
+        .expect("successor basis B materializes after deletion");
+    assert!(selected_b.snapshot().refs.is_empty());
+
+    let stale_command =
+        format!("{} {target_id} refs/heads/stale\0report-status", zero_oid()).into_bytes();
+    let stale = node
+        .runtime()
+        .block_on(node.receive_loopback_pack_durable_in(
+            &node.request_context(),
+            &authenticated_session_with_key(b"basis-stale-thin"),
+            &selected_a,
+            receive_context(),
+            &packet_line(
+                stale_command,
+                &thin_ref_delta_pack(base_id, base_body, target_body),
+            ),
+            ParseLimits::default(),
+            AdmissionLimits::default(),
+            &mut live,
+        ))
+        .expect("stale validation reaches the basis-bound admission refusal");
+    assert!(matches!(
+        stale.commands[0].terminal.outcome,
+        DecisionOutcome::Refused {
+            code: RefusalCode::AuthorityReceiptStale,
+            ..
+        }
+    ));
+
+    let after_request = node.request_context();
+    let after = node
+        .runtime()
+        .block_on(node.materialize_admission_in(&after_request))
+        .expect("basis-stale refusal leaves successor materializable");
     assert!(after.snapshot().refs.is_empty());
     node.shutdown().expect("node closes cleanly");
 }

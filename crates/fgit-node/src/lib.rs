@@ -33,10 +33,11 @@ use fgit_admission::evidence::{
 use fgit_admission::{
     AdmissionContext, AdmissionError, AdmissionEvidence, AdmissionLimits, AdmissionResult,
     AdmissionSnapshot, AdmissionSnapshotProjection, AsyncAdmissionProjection,
-    AsyncProjectionFailure, CanonicalAdmissionStore, CanonicalRefState, CommitEvidence,
-    CommitMaterialization, PermittedObjectClosure, RefusalMaterialization, SourceImportOrigin,
-    SourceImportReceipt, SourceRefUpdate, ValidatedClosure, ValidatedReceive,
-    ValidatedSourceImport, admit_validated_receive_async, admit_validated_source_import_async,
+    AsyncProjectionFailure, BasisBoundValidatedReceive, CanonicalAdmissionStore, CanonicalRefState,
+    CommitEvidence, CommitMaterialization, PermittedObjectClosure, RefusalMaterialization,
+    SourceImportOrigin, SourceImportReceipt, SourceRefUpdate, ValidatedClosure, ValidatedReceive,
+    ValidatedSourceImport, admit_basis_bound_validated_receive_async,
+    admit_validated_receive_async, admit_validated_source_import_async,
     permitted_object_closure_root, prepare_canonical_commit, ref_state_root,
     validate_source_import,
 };
@@ -5065,6 +5066,32 @@ impl OneNode {
         .await
     }
 
+    /// Admits a receive whose quarantine proof is bound to the exact
+    /// publication basis that authorized its external delta bases.
+    ///
+    /// The shared admission driver compares this witness every time it selects
+    /// a basis, including after a lost CAS. A stale validated closure therefore
+    /// becomes a typed terminal refusal instead of being published under a
+    /// successor head.
+    pub async fn admit_basis_bound_validated_receive_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        context: &AdmissionContext,
+        validated: &BasisBoundValidatedReceive,
+        limits: AdmissionLimits,
+    ) -> Result<AdmissionResult, AdmissionError> {
+        let projection = self.durable_admission_projection(context)?;
+        admit_basis_bound_validated_receive_async(
+            &self.authority,
+            request.authority(),
+            context,
+            validated,
+            limits,
+            &projection,
+        )
+        .await
+    }
+
     /// Admits a verified receive through the authenticated loopback transport.
     ///
     /// This composition boundary forms its [`AdmissionContext`] only from the
@@ -5095,6 +5122,37 @@ impl OneNode {
             object_format: self.object_format,
         };
         self.admit_validated_receive_durable_in(request, &context, validated, limits)
+            .await
+            .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
+    }
+
+    /// Admits a basis-bound receive through the authenticated loopback
+    /// transport.
+    ///
+    /// This is the required durable continuation for raw production receives:
+    /// its external-base proof may only authorize publication under the exact
+    /// authority head that selected it. The generic loopback method above is
+    /// retained for already-validated callers that do not depend on an
+    /// authority-selected external closure.
+    pub async fn admit_basis_bound_loopback_receive_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        validated: &BasisBoundValidatedReceive,
+        limits: AdmissionLimits,
+    ) -> Result<AdmissionResult, NodeReceiveTransportRefusal> {
+        let authenticated = session
+            .authenticated_session()
+            .ok_or(NodeReceiveTransportRefusal::Unauthenticated)?;
+        let context = AdmissionContext {
+            head_key: self.head_key.clone(),
+            tenant_id: self.tenant_id,
+            repository_id: self.repository_id,
+            principal_id: authenticated.principal_id(),
+            idempotency_key: authenticated.client_idempotency_key().clone(),
+            object_format: self.object_format,
+        };
+        self.admit_basis_bound_validated_receive_durable_in(request, &context, validated, limits)
             .await
             .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
     }
@@ -5153,15 +5211,21 @@ impl OneNode {
         receive
             .push_bytes(input)
             .map_err(NodeReceiveTransportRefusal::from)?;
-        let mut handoff = ProductionReceiveQuarantineHandoff::new(validator);
+        let mut handoff =
+            ProductionReceiveQuarantineHandoff::new(validator, materialized.basis().clone());
         receive
             .finish_with_handoff(&mut handoff, cancellation)
             .map_err(NodeReceiveTransportRefusal::from)?;
         let validated = handoff
             .into_validated_receive()
             .map_err(NodeReceiveTransportRefusal::from)?;
-        self.admit_loopback_receive_durable_in(request, session, &validated, admission_limits)
-            .await
+        self.admit_basis_bound_loopback_receive_durable_in(
+            request,
+            session,
+            &validated,
+            admission_limits,
+        )
+        .await
     }
 
     /// Admits one verified source import through the same durable projection
