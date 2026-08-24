@@ -3513,7 +3513,7 @@ where
 /// The asynchronous sibling of [`read_basis`]. The basis is derived by the
 /// shared [`basis_from_authenticated`], so both surfaces bind the same identity
 /// to the same authenticated bytes.
-async fn read_basis_async<S>(
+pub(crate) async fn read_basis_async<S>(
     store: &S,
     cx: &S::Context,
     head_key: &HeadKey,
@@ -3549,7 +3549,7 @@ where
               runtime context; diverging the two signatures would make the \
               pair harder to compare than the extra parameter costs"
 )]
-async fn publish_commit_async<S>(
+pub(crate) async fn publish_commit_async<S>(
     store: &S,
     cx: &S::Context,
     context: &AdmissionContext,
@@ -3588,7 +3588,7 @@ where
               runtime context; diverging the two signatures would make the \
               pair harder to compare than the extra parameter costs"
 )]
-async fn publish_refusal_async<S, Projection>(
+pub(crate) async fn publish_refusal_async<S, Projection>(
     store: &S,
     cx: &S::Context,
     context: &AdmissionContext,

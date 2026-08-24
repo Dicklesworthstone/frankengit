@@ -40,7 +40,7 @@ use fgit_types::{GitOid, RefName, RefusalCode, TxId};
 
 use crate::{
     AdmissionContext, AdmissionError, AdmissionLimits, AdmissionProjection, AdmissionSnapshot,
-    AuthorityStore, CommitEvidence, ValidatedClosure,
+    AuthorityStore, CommitEvidence, ProjectionFailure, ValidatedClosure,
 };
 
 /// One merge, sealed by its author and ready for authority.
@@ -203,10 +203,29 @@ pub(crate) enum MergePlan {
     Refuse(RefusalCode),
 }
 
-/// Decides one attempt against one basis.
+/// Decides one attempt against one already-read snapshot.
 ///
-/// Shared by both drivers so the blocking and asynchronous surfaces cannot
-/// diverge about when a merge is admissible.
+/// This is the whole merge decision, and it is deliberately a pure function of
+/// the snapshot: it is what the blocking and asynchronous drivers share. The
+/// two differ only in how they obtain the snapshot and publish the result, and
+/// a second copy of this logic is the thing that would let them drift about
+/// when a merge is admissible.
+pub(crate) fn decide_from_snapshot(
+    sealed: &SealedMerge<'_>,
+    snapshot: AdmissionSnapshot,
+) -> MergePlan {
+    if let Err(staleness) = check_against_snapshot(sealed, &snapshot) {
+        return MergePlan::Refuse(staleness.refusal_code());
+    }
+    let Ok(name) = RefName::try_new(&sealed.package.ref_intent.name) else {
+        return MergePlan::Refuse(RefusalCode::PublicationPolicyRefused);
+    };
+    let mut refs = snapshot.refs;
+    refs.insert(name, sealed.package.ref_intent.new_tip);
+    MergePlan::Commit(Box::new(crate::CanonicalRefState::new(refs)))
+}
+
+/// Decides one attempt against one basis, reading the snapshot synchronously.
 pub(crate) fn plan_attempt<Projection>(
     sealed: &SealedMerge<'_>,
     basis: &fgit_chronicle::PublicationBasis,
@@ -219,19 +238,10 @@ where
     // A projection that refuses is not a fault: it is an evaluated terminal
     // decision for this exact basis, so it becomes a refusal to publish rather
     // than an error to propagate.
-    let snapshot = match projection.snapshot(basis, authenticated) {
-        Ok(snapshot) => snapshot,
-        Err(code) => return MergePlan::Refuse(code),
-    };
-    if let Err(staleness) = check_against_snapshot(sealed, &snapshot) {
-        return MergePlan::Refuse(staleness.refusal_code());
+    match projection.snapshot(basis, authenticated) {
+        Ok(snapshot) => decide_from_snapshot(sealed, snapshot),
+        Err(code) => MergePlan::Refuse(code),
     }
-    let Ok(name) = RefName::try_new(&sealed.package.ref_intent.name) else {
-        return MergePlan::Refuse(RefusalCode::PublicationPolicyRefused);
-    };
-    let mut refs = snapshot.refs;
-    refs.insert(name, sealed.package.ref_intent.new_tip);
-    MergePlan::Commit(Box::new(crate::CanonicalRefState::new(refs)))
 }
 
 /// Guards the cumulative outcome set against the head it was collected from.
@@ -330,6 +340,173 @@ where
                     materialization,
                     &cumulative,
                 )?
+            }
+        };
+        if let Some(terminal) = terminal {
+            return Ok(terminal);
+        }
+    }
+    Err(AdmissionError::CasReplanLimitExceeded {
+        limit: limits.max_cas_replans,
+    })
+}
+
+/// Admit one sealed merge against the authority, asynchronously.
+///
+/// The asynchronous twin of [`admit_merge`], and deliberately a twin rather than
+/// a reimplementation: both drivers call [`decide_from_snapshot`] for the whole
+/// merge decision and [`materialize`] for the record, so the two cannot drift
+/// about when a merge is admissible or what it publishes. What differs is only
+/// how the snapshot is obtained and how the result is published — which is the
+/// same split `admit_validated_receive` and `admit_validated_receive_async`
+/// already use for receive-pack.
+///
+/// # Staging is synchronous, and that is a real constraint rather than an
+/// oversight
+///
+/// `commitments` is the same [`crate::CanonicalAdmissionStore`] the blocking
+/// driver takes, because no asynchronous twin of that surface exists in this
+/// workspace. An async caller therefore stages the resulting bodies through a
+/// blocking interface. Inventing an async staging trait to make the signature
+/// look symmetrical would be building a surface nothing implements.
+///
+/// # Errors
+///
+/// [`AdmissionError`] for faults. A stale merge is not a fault: it returns a
+/// terminal decision carrying [`RefusalCode::TargetRefMoved`] or
+/// [`RefusalCode::EvidenceStale`].
+pub async fn admit_merge_async<S, Projection, Commitments>(
+    store: &S,
+    cx: &S::Context,
+    context: &AdmissionContext,
+    sealed: &SealedMerge<'_>,
+    limits: AdmissionLimits,
+    projection: &Projection,
+    commitments: &Commitments,
+) -> Result<fgit_authority::TerminalOutcome, AdmissionError>
+where
+    S: fgit_authority::AsyncAuthorityStore + ?Sized,
+    Projection: crate::AsyncAdmissionProjection<S> + ?Sized,
+    // Sync, because the staging surface is held across an await. The receive
+    // pair needs no such bound only because AsyncAdmissionProjection already
+    // requires Sync; the commitments store is this driver's extra parameter and
+    // carries its own obligation.
+    Commitments: crate::CanonicalAdmissionStore + Sync + ?Sized,
+{
+    let attempt = seal_attempt_for(context, sealed)?;
+    let admission = fgit_authority::seal_request_async(store, cx, &attempt).await?;
+    let tx_id = admission.tx_id();
+    if let fgit_authority::OutcomeLookup::Decided(terminal) = fgit_authority::resolve_outcome_async(
+        store,
+        cx,
+        &context.head_key,
+        context.tenant_id,
+        context.repository_id,
+        tx_id,
+    )
+    .await?
+    {
+        return Ok(terminal);
+    }
+
+    for replan in 0..limits.max_cas_replans {
+        if replan != 0
+            && let fgit_authority::OutcomeLookup::Decided(terminal) =
+                fgit_authority::resolve_outcome_async(
+                    store,
+                    cx,
+                    &context.head_key,
+                    context.tenant_id,
+                    context.repository_id,
+                    tx_id,
+                )
+                .await?
+        {
+            return Ok(terminal);
+        }
+        let (basis, receipt, authenticated) =
+            crate::read_basis_async(store, cx, &context.head_key).await?;
+        let cumulative =
+            fgit_authority::collect_cumulative_outcomes_async(store, cx, &context.head_key).await?;
+        if !outcomes_match_basis(&cumulative, &receipt) {
+            continue;
+        }
+        // The async projection distinguishes two failures and they are NOT
+        // interchangeable. Refuse is an evaluated terminal decision for this
+        // basis and is published as one. Unavailable means material could not
+        // be resolved after sealing but BEFORE any head CAS, so this exact
+        // transaction must stay undecided and retryable -- publishing a refusal
+        // there would make a transient outage a permanent canonical decision.
+        // The blocking driver never faces this because its snapshot returns a
+        // bare RefusalCode; flattening the two here is the mistake a careless
+        // twin makes.
+        let snapshot = match projection
+            .snapshot_async(store, cx, &basis, &authenticated)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(ProjectionFailure::Unavailable(code)) => {
+                return Err(AdmissionError::AsyncProjectionUnavailable(code));
+            }
+            Err(ProjectionFailure::Refuse(code)) => {
+                if let Some(terminal) = crate::publish_refusal_async(
+                    store,
+                    cx,
+                    context,
+                    &basis,
+                    receipt.token(),
+                    admission.seal_id(),
+                    tx_id,
+                    code,
+                    projection,
+                    &cumulative,
+                )
+                .await?
+                {
+                    return Ok(terminal);
+                }
+                continue;
+            }
+        };
+        let terminal = match decide_from_snapshot(sealed, snapshot) {
+            MergePlan::Refuse(code) => {
+                crate::publish_refusal_async(
+                    store,
+                    cx,
+                    context,
+                    &basis,
+                    receipt.token(),
+                    admission.seal_id(),
+                    tx_id,
+                    code,
+                    projection,
+                    &cumulative,
+                )
+                .await?
+            }
+            MergePlan::Commit(next_state) => {
+                let materialization = materialize(
+                    context,
+                    sealed,
+                    tx_id,
+                    &attempt,
+                    &basis,
+                    &next_state,
+                    commitments,
+                )?;
+                crate::publish_commit_async(
+                    store,
+                    cx,
+                    context,
+                    &basis,
+                    receipt.token(),
+                    tx_id,
+                    &attempt.request,
+                    sealed.closure,
+                    materialization,
+                    &cumulative,
+                )
+                .await?
             }
         };
         if let Some(terminal) = terminal {
