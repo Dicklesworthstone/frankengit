@@ -321,22 +321,32 @@ declare -a RA_ALL_DISCOVERED=()
 declare -a RA_SCRIPTS=()
 if [ "${#RA_EXPLICIT[@]}" -gt 0 ]; then
   RA_SCRIPTS=("${RA_EXPLICIT[@]}")
+  for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
+    RA_ALL_DISCOVERED+=("$(ra_script_id "$f")")
+  done
 else
   while IFS= read -r -d '' f; do
     [ -n "$f" ] || continue
     RA_SCRIPTS+=("$f")
+    RA_ALL_DISCOVERED+=("$(ra_script_id "$f")")
   done < <(ra_discover "$RA_SUITE_DIR")
-  if [ ! -f "$RA_BUILD_REUSE_CAMPAIGN" ] || [ ! -x "$RA_BUILD_REUSE_CAMPAIGN" ]; then
-    printf 'run_all: required explicit campaign is missing or not executable: %s\n' \
-      "$RA_BUILD_REUSE_CAMPAIGN" >&2
-    exit 2
+  # The root campaign supplements a real suite corpus; it must not turn an
+  # empty discovery root into a vacuous successful run.
+  if [ "${#RA_ALL_DISCOVERED[@]}" -eq 0 ]; then
+    printf 'run_all: discovery found zero suite scripts under %s\n' "$RA_SUITE_DIR" >&2
+    exit 1
   fi
-  RA_SCRIPTS+=("$RA_BUILD_REUSE_CAMPAIGN")
+  # The named root campaign is part of the default corpus only. A caller's
+  # --dir is an isolated discovery probe and must not acquire unrelated work.
+  if [ "$RA_DIR_EXPLICIT" -eq 0 ]; then
+    if [ ! -f "$RA_BUILD_REUSE_CAMPAIGN" ] || [ ! -x "$RA_BUILD_REUSE_CAMPAIGN" ]; then
+      printf 'run_all: required explicit campaign is missing or not executable: %s\n' \
+        "$RA_BUILD_REUSE_CAMPAIGN" >&2
+      exit 2
+    fi
+    RA_SCRIPTS+=("$RA_BUILD_REUSE_CAMPAIGN")
+  fi
 fi
-
-for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
-  RA_ALL_DISCOVERED+=("$(ra_script_id "$f")")
-done
 
 # ---------------------------------------------------------------------------
 # FG-091: load the profile manifest and enforce STRUCTURE before running.
