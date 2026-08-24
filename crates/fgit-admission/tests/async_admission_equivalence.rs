@@ -1002,3 +1002,234 @@ fn the_admission_surface_never_blocks_on_a_future() {
          real source proves nothing"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Merge equivalence (frankengit-asa3)
+// ---------------------------------------------------------------------------
+
+/// A repository whose `main` holds the tip the merge was computed against.
+///
+/// Returns the staging store as well as the projection: the merge drivers stage
+/// their resulting bodies through it explicitly, where the receive path stages
+/// inside `materialize_commit`.
+fn merge_setup(
+    context: &AdmissionContext,
+) -> (
+    MemoryAuthorityStore,
+    CanonicalAdmissionProjection<StagingStore, StubEvidence>,
+    StagingStore,
+) {
+    let staging = StagingStore::default();
+    let mut refs = BTreeMap::new();
+    refs.insert(
+        RefName::try_new(MAIN_REF).expect("fixture ref name"),
+        oid(MAIN_OID),
+    );
+    // The SOURCE ref must exist too. Staging only the target left the source
+    // absent, which reads as a moved tip and refused the fresh case -- and the
+    // equivalence test still passed, because both surfaces refused identically.
+    // That is exactly what the corpus-distinctness drill below exists to catch:
+    // an agreement test comparing two refusals agrees about nothing.
+    refs.insert(
+        RefName::try_new(b"refs/heads/feature").expect("fixture ref name"),
+        oid(SOURCE_TIP_OID),
+    );
+    let state = CanonicalRefState::new(refs);
+    let ref_root =
+        canonical_ref_state_root(&state).expect("genesis ref state has a canonical root");
+    staging
+        .stage_ref_state(ref_root, state)
+        .expect("genesis ref state stages");
+    let body = RepositoryAuthorityHeadBody {
+        ref_root,
+        ..genesis(context)
+    };
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(41));
+    initialize_repository(&store, &context.head_key, &body).expect("genesis head initializes");
+    (
+        store,
+        CanonicalAdmissionProjection::new(staging.clone(), StubEvidence),
+        staging,
+    )
+}
+
+/// The evidence the merge drivers carry.
+///
+/// Built here rather than taken from `StubEvidence` because the merge path does
+/// not call `materialize_commit`: it supplies its own evidence with the sealed
+/// package, which is what lets it publish a forge event the receive-pack
+/// preparer would refuse.
+fn merge_evidence() -> CommitEvidence {
+    CommitEvidence {
+        principal_snapshot_id: principal_snapshot(),
+        forge_event_batch_root: digest(8),
+        policy_decision_root: digest(9),
+        invariant_evidence_root: digest(10),
+        outbox_effect_root: digest(11),
+        retention_delta_root: digest(12),
+    }
+}
+
+const MERGE_COMMIT_OID: &str = "4444444444444444444444444444444444444444";
+const SOURCE_TIP_OID: &str = "3333333333333333333333333333333333333333";
+const MERGE_BASE_OID: &str = "1111111111111111111111111111111111111111";
+
+fn merge_package() -> fgit_forge::MergeEffectPackage {
+    fgit_forge::MergeEffectPackage {
+        objects: vec![oid(MERGE_COMMIT_OID)],
+        ref_intent: fgit_forge::RefIntent {
+            name: MAIN_REF.to_vec(),
+            expected_tip: oid(MAIN_OID),
+            new_tip: oid(MERGE_COMMIT_OID),
+        },
+        event: fgit_forge::event::ForgeEvent {
+            aggregate: fgit_forge::PullRequestNumber::try_new(41)
+                .expect("a nonzero pull request number")
+                .into(),
+            version: fgit_forge::AggregateVersion::FIRST,
+            payload: fgit_forge::ForgeEventPayload::MergeCommitted {
+                merge_commit: digest(0x51),
+                target_ref: MAIN_REF.to_vec(),
+                target_tip_before: digest(0x40),
+                target_tip_after: digest(0x51),
+            },
+        },
+    }
+}
+
+fn merge_attempt(workspace_epoch: u64) -> fgit_forge::MergeAttempt {
+    fgit_forge::MergeAttempt {
+        pull_request: fgit_forge::PullRequestNumber::try_new(41)
+            .expect("a nonzero pull request number"),
+        source_ref: b"refs/heads/feature".to_vec(),
+        target_ref: MAIN_REF.to_vec(),
+        source_tip: oid(SOURCE_TIP_OID),
+        target_tip: oid(MAIN_OID),
+        base_tip: oid(MERGE_BASE_OID),
+        workspace_epoch: fgit_forge::WorkspaceEpoch::from_u64(workspace_epoch),
+    }
+}
+
+fn merge_closure() -> ValidatedClosure {
+    let mut objects = BTreeSet::new();
+    objects.insert(oid(MERGE_COMMIT_OID));
+    let permitted = PermittedObjectClosure::new(objects.clone());
+    ValidatedClosure {
+        object_closure_root: permitted_object_closure_root(&permitted).expect("closure root"),
+        objects,
+    }
+}
+
+/// Reduce a merge admission to a comparable answer.
+fn merge_label(result: &Result<fgit_authority::TerminalOutcome, AdmissionError>) -> String {
+    match result {
+        Ok(terminal) => match terminal.outcome {
+            DecisionOutcome::Committed { .. } => "committed".to_owned(),
+            DecisionOutcome::Refused { code, .. } => format!("refused:{code:?}"),
+        },
+        Err(error) => format!("error:{error:?}"),
+    }
+}
+
+/// The corpus: a fresh merge, and one whose workspace advanced under it.
+///
+/// Two cases rather than one because a single committing case would agree
+/// across surfaces for the least interesting reason. The refusal case is where
+/// the two drivers could plausibly diverge, since it is the one that runs the
+/// staleness decision and publishes through a different helper.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MergeCase {
+    Fresh,
+    WorkspaceAdvanced,
+}
+
+fn blocking_merge_answer(session: &[u8], case: MergeCase) -> String {
+    let context = context(session);
+    let (store, projection, staging) = merge_setup(&context);
+    let package = merge_package();
+    let attempt = merge_attempt(9);
+    let closure = merge_closure();
+    let sealed = fgit_admission::merge::SealedMerge {
+        package: &package,
+        attempt: &attempt,
+        closure: &closure,
+        evidence: merge_evidence(),
+        workspace_epoch_now: fgit_forge::WorkspaceEpoch::from_u64(match case {
+            MergeCase::Fresh => 9,
+            MergeCase::WorkspaceAdvanced => 10,
+        }),
+    };
+    merge_label(&fgit_admission::merge::admit_merge(
+        &store,
+        &context,
+        &sealed,
+        AdmissionLimits::default(),
+        &projection,
+        &staging,
+    ))
+}
+
+fn asynchronous_merge_answer(session: &[u8], case: MergeCase) -> String {
+    let context = context(session);
+    let (store, projection, staging) = merge_setup(&context);
+    let package = merge_package();
+    let attempt = merge_attempt(9);
+    let closure = merge_closure();
+    let sealed = fgit_admission::merge::SealedMerge {
+        package: &package,
+        attempt: &attempt,
+        closure: &closure,
+        evidence: merge_evidence(),
+        workspace_epoch_now: fgit_forge::WorkspaceEpoch::from_u64(match case {
+            MergeCase::Fresh => 9,
+            MergeCase::WorkspaceAdvanced => 10,
+        }),
+    };
+    let view = AsyncView(store);
+    merge_label(&poll_ready(fgit_admission::merge::admit_merge_async(
+        &view,
+        &(),
+        &context,
+        &sealed,
+        AdmissionLimits::default(),
+        &projection,
+        &staging,
+    )))
+}
+
+/// Both merge surfaces reach the same answer on every case in the corpus.
+///
+/// The claim this supports is the one `fgit-node`'s composition rests on: a
+/// caller driving the asynchronous merge surface receives what the blocking one
+/// would have decided. The two share `decide_from_snapshot` and `materialize`,
+/// so what this actually exercises is the part they do NOT share — obtaining a
+/// snapshot and publishing a result.
+#[test]
+fn the_two_merge_surfaces_agree_on_every_case() {
+    for (index, case) in [MergeCase::Fresh, MergeCase::WorkspaceAdvanced]
+        .into_iter()
+        .enumerate()
+    {
+        let session = format!("asa3-merge-equivalence-{index}");
+        let blocking = blocking_merge_answer(session.as_bytes(), case);
+        let asynchronous = asynchronous_merge_answer(session.as_bytes(), case);
+        assert_eq!(
+            blocking, asynchronous,
+            "the merge surfaces disagreed on {case:?}"
+        );
+    }
+}
+
+/// The corpus distinguishes its cases.
+///
+/// Without this the agreement test above would pass just as happily on two
+/// surfaces that answered everything identically because every case collapsed
+/// to one answer.
+#[test]
+fn the_merge_corpus_does_not_collapse_to_one_answer() {
+    let fresh = blocking_merge_answer(b"asa3-merge-distinct-0", MergeCase::Fresh);
+    let stale = blocking_merge_answer(b"asa3-merge-distinct-1", MergeCase::WorkspaceAdvanced);
+    assert_eq!(fresh, "committed");
+    assert_eq!(stale, "refused:EvidenceStale");
+    assert_ne!(fresh, stale);
+}
