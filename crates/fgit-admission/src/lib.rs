@@ -1301,6 +1301,20 @@ where
             forge_positions: BTreeMap::new(),
             retention: BTreeSet::new(),
             outbox: BTreeMap::new(),
+            // Empty because this projection CANNOT reach a hide policy, not
+            // because the repository has none. `CanonicalAdmissionStore` exposes
+            // ref state and object closures and no way to resolve an arbitrary
+            // immutable body, so the configuration the authenticated head selects
+            // is out of reach from here -- `PublicationBasis::body()` yields
+            // `configuration_root` as a Digest with nothing to resolve it
+            // against. The node's `DurableAdmissionMaterializer` populates this
+            // properly because it has authority-store access at materialization.
+            //
+            // Said explicitly because an unexplained `RefVisibility::new()` reads
+            // as "this repository hides nothing", and a reader who believes that
+            // will not go looking for the missing capability. Closing it needs a
+            // resolve method on the store trait, which is a seven-implementor
+            // change and an open question on `frankengit-jkbo`.
             hidden_refs: RefVisibility::new(),
         })
     }
