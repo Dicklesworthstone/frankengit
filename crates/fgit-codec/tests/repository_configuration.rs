@@ -57,6 +57,80 @@ fn schema_minor_one_sha256_configuration_matches_the_independent_golden() {
     );
 }
 
+/// The same configuration carrying two ordered rules, at schema 1.2. Payload is
+/// `root_layout`, `object_format`, a `u32` rule count of two, then each rule as
+/// a `u32` length followed by its raw bytes.
+const RULED_CONFIGURATION_GOLDEN: &[u8] = b"FGC1\
+    \x00\x01\x00\x00\
+    \x00\x00\x00\x26frankengit/repository-configuration/v1\
+    \x00\x00\x00\x18repository-configuration\
+    \x00\x01\x00\x02\
+    \x00\x00\x00\x32\x00\x01\x00\x02\x00\x00\x00\x02\
+    \x00\x00\x00\x0drefs/internal\
+    \x00\x00\x00\x15!refs/internal/public";
+
+fn ruled_configuration() -> RepositoryConfigurationBody {
+    RepositoryConfigurationBody {
+        root_layout: RootLayoutVersion::RefStateMerkleV1,
+        object_format: GitHashAlgorithm::Sha256,
+        hidden_ref_rules: vec![b"refs/internal".to_vec(), b"!refs/internal/public".to_vec()],
+    }
+}
+
+#[test]
+fn a_non_empty_rule_list_matches_the_independent_golden() {
+    // The empty-list golden above cannot see a defect in the per-rule framing:
+    // a rule count of zero never exercises `write_bytes`/`read_bytes` at all.
+    // This vector is the one that pins the sequence encoding.
+    let expected = ruled_configuration();
+    assert_eq!(
+        canonical_body_bytes(&expected).expect("the two-rule configuration encodes"),
+        [
+            0, 1, 0, 2, 0, 0, 0, 2, 0, 0, 0, 13, b'r', b'e', b'f', b's', b'/', b'i', b'n', b't',
+            b'e', b'r', b'n', b'a', b'l', 0, 0, 0, 21, b'!', b'r', b'e', b'f', b's', b'/', b'i',
+            b'n', b't', b'e', b'r', b'n', b'a', b'l', b'/', b'p', b'u', b'b', b'l', b'i', b'c',
+        ],
+        "the payload is the two code points, a count of two, then each length-prefixed rule"
+    );
+    assert_eq!(
+        encode_body(&expected).expect("the two-rule configuration re-encodes"),
+        RULED_CONFIGURATION_GOLDEN,
+        "the encoder must reproduce the independently written two-rule frame"
+    );
+    assert_eq!(
+        decode_body::<RepositoryConfigurationBody>(
+            RULED_CONFIGURATION_GOLDEN,
+            DecodeLimits::DEFAULT
+        )
+        .expect("the two-rule golden must decode"),
+        expected
+    );
+}
+
+#[test]
+fn the_stored_rule_order_survives_a_round_trip_in_the_order_written() {
+    // Order is semantic: `hides` is last-match-wins, so a negation must stay
+    // AFTER the rule it re-exposes. A canonical-set encoding would sort these
+    // and silently invert the outcome, because `!` is 0x21 and sorts before the
+    // `r` of `refs/internal`. This is the assertion that catches that.
+    let decoded = decode_body::<RepositoryConfigurationBody>(
+        RULED_CONFIGURATION_GOLDEN,
+        DecodeLimits::DEFAULT,
+    )
+    .expect("the two-rule golden decodes");
+
+    assert_eq!(
+        decoded.hidden_ref_rules,
+        vec![b"refs/internal".to_vec(), b"!refs/internal/public".to_vec()],
+        "the broad rule must still precede its negation after a round trip"
+    );
+    assert!(
+        decoded.hidden_ref_rules[0] > decoded.hidden_ref_rules[1],
+        "the stored order is deliberately NOT sorted order, so a set encoding \
+         would be observable here"
+    );
+}
+
 #[test]
 fn unknown_persisted_object_format_is_refused_while_a_known_twin_decodes() {
     let known = decode_body::<RepositoryConfigurationBody>(
