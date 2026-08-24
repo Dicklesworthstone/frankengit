@@ -32,8 +32,9 @@ use fgit_admission::{
     initialize_canonical_repository,
 };
 use fgit_authority::{
-    AuthorityOpKind, AuthorityStore, FaultDirective, FaultKind, FaultPlan, FaultableAuthorityStore,
-    HeadKey, HeadRead, IdempotencyKey, MemoryAuthorityStore, StoreInstanceId,
+    AuthorityOpKind, AuthorityStore, FaultDirective, FaultKind, FaultPlan, FaultPosition,
+    FaultableAuthorityStore, HeadKey, HeadRead, IdempotencyKey, MemoryAuthorityStore,
+    OutcomeLookup, StoreInstanceId,
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_codec::RepositoryAuthorityHeadBody;
@@ -646,5 +647,168 @@ fn a_lost_response_at_the_cas_leaves_no_half_merged_state() {
             .next()
             .expect("a successor generation"),
         "the merge published exactly once across the crash and the retry"
+    );
+}
+
+/// The window between preparing a merge and attempting its head CAS.
+///
+/// # Why this is not the lost-response drill above
+///
+/// `LoseResponse` on the CAS means the conditional replacement DID happen and
+/// the answer was lost, so the caller is left ambiguous about a decision that
+/// exists. This drill is the other side of the same boundary: the endpoint dies
+/// at [`FaultPosition::BeforeEffect`], so the CAS never applies and no decision
+/// is ever made. `NORMATIVE_PROTOCOL_CONTRACTS.md` section 5.3 governs it
+/// directly -- "infrastructure interruption before publication leaves the sealed
+/// transaction undecided and retryable" -- and section 5.2 adds that a client
+/// cancellation or disconnect never proves non-commit.
+///
+/// The distinction has teeth: an implementation that treated a pre-CAS crash as
+/// a refusal would publish a terminal decision for a merge nothing ever decided,
+/// and a sealed transaction would have gained a decision without a conditional
+/// replacement ever succeeding. Reported as untested by `BlackOx` on this bead.
+#[test]
+fn a_crash_after_preparing_a_merge_and_before_its_cas_leaves_it_undecided_and_retryable() {
+    let (context, store, projection, commitments) = repository();
+    let package = package(FIRST_MERGE_OID);
+    let attempt = attempt();
+    let closure = closure(FIRST_MERGE_OID);
+
+    // The TxId this merge seals to, derived before the crash so the assertions
+    // below can ask about the transaction rather than about whatever the
+    // interrupted call happened to return.
+    let seal_attempt =
+        fgit_admission::merge::seal_attempt_for(&context, &sealed(&package, &attempt, &closure))
+            .expect("a coherent merge seals");
+    let tx_id = fgit_authority::derive_tx_id(&fgit_authority::TxIdPreimage {
+        tenant_id: seal_attempt.tenant_id,
+        repository_id: seal_attempt.repository_id,
+        authenticated_principal_id: seal_attempt.authenticated_principal_id,
+        idempotency_key: seal_attempt.idempotency_key.clone(),
+        canonical_request_digest: fgit_authority::canonical_request_digest(&seal_attempt.request)
+            .expect("the request has a canonical digest"),
+    })
+    .expect("the merge derives a transaction identity");
+
+    store.install_fault_plan(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
+        0,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::Crash {
+            position: FaultPosition::BeforeEffect,
+        },
+    )]));
+    let interrupted = admit_merge(
+        store.as_ref(),
+        &context,
+        &sealed(&package, &attempt, &closure),
+        AdmissionLimits::default(),
+        &projection,
+        &commitments,
+    );
+
+    // The injection must have fired, or the merge simply committed and every
+    // assertion below would hold while exercising no crash at all.
+    assert!(
+        !store.fault_log().records().is_empty(),
+        "the pre-CAS crash never fired, so this drill exercised no crash"
+    );
+    assert!(
+        interrupted.is_err(),
+        "a crash before the CAS is a fault, not a terminal decision: {interrupted:?}"
+    );
+
+    // THE CAS EFFECT NEVER REACHED THE STORE. This is the assertion that makes
+    // the drill about the pre-CAS window specifically rather than about crashes
+    // in general: the effect log is ground truth a caller cannot see, so it can
+    // distinguish "the replacement did not happen" from "the caller was not told
+    // whether it happened", which is precisely what separates this drill from
+    // the lost-response one above.
+    assert!(
+        store
+            .effect_log()
+            .records()
+            .iter()
+            .all(|record| record.op_kind != AuthorityOpKind::CompareExchangeHead),
+        "a crash at BeforeEffect must leave no conditional replacement in the effect log"
+    );
+
+    // The endpoint is dead, so it answers nothing until it comes back up.
+    assert!(
+        store.is_crashed(),
+        "a crash directive must leave the endpoint down"
+    );
+    store.restart();
+    store.install_fault_plan(FaultPlan::none());
+
+    // NOTHING WAS PUBLISHED. The head is exactly where genesis left it -- not one
+    // generation on, unlike the lost-response case where either is admissible.
+    let HeadRead::Present(head) = store.read_head(&context.head_key).expect("head reads") else {
+        panic!("the repository head must survive a crashed attempt");
+    };
+    assert_eq!(
+        head.generation(),
+        HeadGeneration::FIRST,
+        "a crash before the CAS must leave the head untouched"
+    );
+
+    // AND THE TRANSACTION IS UNDECIDED, which is the section 5.3 property and the
+    // one a refusal-on-crash implementation would break. Undecided is an answer,
+    // not an error.
+    let lookup = fgit_authority::resolve_outcome(
+        store.as_ref(),
+        &context.head_key,
+        context.tenant_id,
+        context.repository_id,
+        tx_id,
+    )
+    .expect("the outcome of a sealed transaction is resolvable");
+    assert!(
+        matches!(lookup, OutcomeLookup::Undecided),
+        "an interrupted merge must be undecided and retryable, got {lookup:?}"
+    );
+
+    // THE PERMITTED TWIN: the endpoint restarts and the same sealed merge is
+    // retried. It must now commit -- the crash cost it nothing but the attempt.
+    let retried = admit_merge(
+        store.as_ref(),
+        &context,
+        &sealed(&package, &attempt, &closure),
+        AdmissionLimits::default(),
+        &projection,
+        &commitments,
+    )
+    .expect("the retry of an undecided merge reaches a terminal decision");
+    match retried.outcome {
+        DecisionOutcome::Committed { .. } => {}
+        refused @ DecisionOutcome::Refused { .. } => {
+            panic!("a retried merge whose basis never moved must commit, got {refused:?}")
+        }
+    }
+
+    let HeadRead::Present(head) = store.read_head(&context.head_key).expect("head reads") else {
+        panic!("the repository head must exist after the retry");
+    };
+    assert_eq!(
+        head.generation(),
+        HeadGeneration::FIRST
+            .next()
+            .expect("a successor generation"),
+        "the retried merge published exactly once"
+    );
+
+    // THE PRESENCE CASE FOR THE ABSENCE ASSERTION ABOVE. "No conditional
+    // replacement in the effect log" is only evidence if that log records one
+    // when it happens -- otherwise it would read as true on a store that logs
+    // nothing, and the crash half of this drill would prove nothing at all.
+    // `install_fault_plan` resets the logs, so this covers the retry alone: the
+    // same store, the same assertion, the opposite answer.
+    assert!(
+        store
+            .effect_log()
+            .records()
+            .iter()
+            .any(|record| record.op_kind == AuthorityOpKind::CompareExchangeHead),
+        "the effect log must record a conditional replacement when one happens, \
+         or its absence above would be evidence of nothing"
     );
 }
