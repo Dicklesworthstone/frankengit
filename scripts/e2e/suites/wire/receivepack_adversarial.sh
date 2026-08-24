@@ -48,8 +48,9 @@ readonly ADMISSION_PROBES=4
 # exists for; it still fails if the corpus ever SHRINKS, which is the direction
 # it was written to catch. Counted two independent ways at 1dcdf43: this lane
 # own grep over the target output, and the test attributes in the source.
-# Both said 14; now 15 with the concurrent race probe added for line 3.
-readonly RACE_PROBES=15
+# Both said 14; now 16 -- the concurrent thread race and the scheduled
+# stale-CAS race, both added for acceptance line 3.
+readonly RACE_PROBES=16
 readonly PROPAGATION_PROBES=3
 
 main() {

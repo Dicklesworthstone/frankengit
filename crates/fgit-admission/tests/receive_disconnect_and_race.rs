@@ -96,9 +96,12 @@
 //!   `RefusalCode::HiddenRefUnauthorized` (0x0206) is defined in `fgit-types`
 //!   and classified in `fgit-reference` but produced by nothing in the tree.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
 use std::sync::{Arc, Mutex};
+
+use fgit_lab::{LabSchedule, StepCursor, StepId};
 
 use fgit_admission::{
     AdmissionContext, AdmissionEvidence, AdmissionLimits, AdmissionProjection, AdmissionSnapshot,
@@ -1757,6 +1760,192 @@ fn two_concurrent_sessions_deleting_one_ref_yield_exactly_one_commit() {
         ROUNDS,
         "every round must have been evaluated, or the loop exited early and the \
          repetition this test relies on did not happen"
+    );
+}
+
+/// The rival session a scheduled race admits inline.
+struct ScheduledRival<'a> {
+    context: &'a AdmissionContext,
+    validated: &'a ValidatedReceive,
+}
+
+/// A schedule gate wrapped around the head-bound production projection.
+///
+/// Session A has already read its authenticated basis when `snapshot` runs. The
+/// first gate lets A obtain that snapshot; the second runs session B's ENTIRE
+/// admission inline; the third releases A to issue its CAS against a token that
+/// is now provably stale. On A's replan no gate runs, so the production
+/// projection observes B's published ref state and the real staleness check
+/// decides A's terminal.
+///
+/// Single-threaded on purpose. The point is not concurrency -- the thread probe
+/// above supplies that -- it is DETERMINISM about which window was exercised.
+struct ScheduledPushProjection<'schedule, 'rival> {
+    production: &'rival CanonicalAdmissionProjection<StagingStore, StubEvidence>,
+    cursor: RefCell<StepCursor<'schedule>>,
+    raced: Cell<bool>,
+    store: &'rival MemoryAuthorityStore,
+    rival: ScheduledRival<'rival>,
+    rival_committed: Cell<bool>,
+}
+
+impl ScheduledPushProjection<'_, '_> {
+    fn step(&self, expected_actor: &str) {
+        let mut cursor = self.cursor.borrow_mut();
+        let actual = cursor
+            .next_step()
+            .expect("the lab schedule declares every race boundary");
+        assert_eq!(
+            actual.as_str(),
+            expected_actor,
+            "the scheduled race reached a boundary out of declared order"
+        );
+    }
+}
+
+impl AdmissionSnapshotProjection for ScheduledPushProjection<'_, '_> {
+    fn snapshot(
+        &self,
+        basis: &PublicationBasis,
+        authenticated: &AuthenticatedHead,
+    ) -> Result<AdmissionSnapshot, RefusalCode> {
+        let first_snapshot = !self.raced.replace(true);
+        if first_snapshot {
+            self.step("push-a");
+        }
+        let snapshot = self.production.snapshot(basis, authenticated)?;
+        if first_snapshot {
+            self.step("push-b");
+            let rival = admit_validated_receive(
+                self.store,
+                self.rival.context,
+                self.rival.validated,
+                AdmissionLimits::default(),
+                self.production,
+            )
+            .expect("the scheduled rival reaches one terminal decision");
+            let committed = matches!(
+                rival.commands[0].terminal.outcome,
+                DecisionOutcome::Committed { .. }
+            );
+            self.rival_committed.set(committed);
+            self.step("push-a");
+        }
+        Ok(snapshot)
+    }
+}
+
+impl AdmissionProjection for ScheduledPushProjection<'_, '_> {
+    fn materialize_commit(
+        &self,
+        basis: &PublicationBasis,
+        request: &TransactionRequest,
+        fold: &fgit_txn::TransactionFoldReport,
+        closure: &ValidatedClosure,
+    ) -> Result<fgit_admission::CommitMaterialization, ProjectionFailure> {
+        self.production
+            .materialize_commit(basis, request, fold, closure)
+    }
+
+    fn materialize_refusal(
+        &self,
+        basis: &PublicationBasis,
+        tx_id: TxId,
+        code: RefusalCode,
+    ) -> Result<RefusalMaterialization, RefusalCode> {
+        self.production.materialize_refusal(basis, tx_id, code)
+    }
+}
+
+/// The stale-CAS window, forced rather than waited for.
+///
+/// # Why this exists alongside the thread probe
+///
+/// The concurrent probe above samples interleavings and measures that both
+/// orderings occur (first 50, second 14 of 64). What sampling CANNOT promise is
+/// that the one dangerous window was ever entered: session A reading its
+/// snapshot, session B committing underneath it, and A then issuing a CAS
+/// against a token that is already stale. A scheduler is free never to produce
+/// that ordering, and the probe would still pass and still report contention.
+///
+/// This forces it by construction. B's entire admission runs INSIDE A's first
+/// `snapshot`, so A's token is stale by the time it reaches the CAS -- not
+/// probably, but on every run. Deterministic and reproducible, which is what
+/// `fgit-lab` is for and what the orchestrator's ruling named.
+///
+/// Together the two probes cover both halves: the thread probe shows real
+/// concurrent contention across many schedules; this one shows the worst
+/// schedule is survived.
+#[test]
+fn a_scheduled_push_race_forces_the_stale_cas_window_and_still_yields_one_winner() {
+    let schedule = LabSchedule::explicit(
+        vec![StepId::new("push-a"), StepId::new("push-b")],
+        vec![
+            StepId::new("push-a"),
+            StepId::new("push-b"),
+            StepId::new("push-a"),
+        ],
+    )
+    .expect("a declared three-boundary race schedule");
+
+    let a_context = context(b"fg019c-scheduled-a");
+    let b_context = context(b"fg019c-scheduled-b");
+    let validated = delete_main();
+    let (store, production) = head_bound_setup(&a_context);
+
+    let scheduled = ScheduledPushProjection {
+        production: &production,
+        cursor: RefCell::new(schedule.cursor()),
+        raced: Cell::new(false),
+        store: &store,
+        rival: ScheduledRival {
+            context: &b_context,
+            validated: &validated,
+        },
+        rival_committed: Cell::new(false),
+    };
+
+    let a_result = admit_validated_receive(
+        &store,
+        &a_context,
+        &validated,
+        AdmissionLimits::default(),
+        &scheduled,
+    );
+
+    // The window was actually entered. Without this the test could pass having
+    // never run the rival at all, which is the same "fired nowhere" failure the
+    // duplicated-CAS probe had.
+    assert!(
+        scheduled.raced.get(),
+        "session A never took a snapshot, so the scheduled window was never entered"
+    );
+    assert!(
+        scheduled.rival_committed.get(),
+        "the rival did not commit inside A's snapshot, so A's token was never made \
+         stale and this probe did not exercise the window it exists for"
+    );
+
+    let a = a_result.expect("session A reaches a terminal decision");
+    let a_committed = matches!(
+        a.commands[0].terminal.outcome,
+        DecisionOutcome::Committed { .. }
+    );
+
+    // Exactly one winner across the two sessions, with B having won by
+    // construction, so A must not also commit the same delete.
+    assert!(
+        !a_committed,
+        "both sessions committed a delete of the same ref from one lineage: the rival \
+         committed inside A's snapshot and A committed against its stale token"
+    );
+    assert!(
+        matches!(
+            a.commands[0].terminal.outcome,
+            DecisionOutcome::Refused { .. }
+        ),
+        "A lost the scheduled race and must carry a terminal refusal, got {:?}",
+        a.commands[0].terminal.outcome
     );
 }
 
