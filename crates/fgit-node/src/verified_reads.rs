@@ -18,8 +18,9 @@ use fgit_authority::{
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_crypto::{
-    object_closure_membership_proof, object_closure_non_membership_proof,
-    ref_state_membership_proof, ref_state_non_membership_proof,
+    ObjectClosureNonMembershipProof, object_closure_membership_proof,
+    object_closure_non_membership_proof, ref_state_membership_proof,
+    ref_state_non_membership_proof,
 };
 use fgit_types::cell::{CellRefusal, ReadLabel, ReadMode, ServingCell, admits_read};
 use fgit_types::layout::RootLayoutVersion;
@@ -676,6 +677,7 @@ impl OneNode {
                                 VerifiedReadRefusal::ObjectLayout(Box::new(refusal)),
                             ))
                         })?;
+                    authorize_disclosed_neighbours(scope, &proof)?;
                     Ok(ReadResponse::Verified(Box::new(
                         VerifiedReadEnvelope::new_with_exact_configuration(
                             head,
@@ -712,6 +714,61 @@ const fn ensure_object_proof_layout(
     } else {
         Err(VerifiedReadServingRefusal::ObjectLayoutUnavailable { layout })
     }
+}
+
+/// Every object identity an ordered absence proof would put on the wire.
+///
+/// The match is exhaustive with no wildcard so that a new proof variant fails
+/// to compile here, beside the authorization it has to pass, rather than
+/// silently disclosing a neighbour this function never learned about.
+fn disclosed_absence_neighbours(proof: &ObjectClosureNonMembershipProof) -> Vec<GitOid> {
+    match proof {
+        // An empty closure names no object but the one that was queried.
+        ObjectClosureNonMembershipProof::EmptyClosure => Vec::new(),
+        ObjectClosureNonMembershipProof::BeforeFirst { first } => vec![*first.oid()],
+        ObjectClosureNonMembershipProof::AfterLast { last } => vec![*last.oid()],
+        ObjectClosureNonMembershipProof::Between {
+            predecessor,
+            successor,
+        } => vec![*predecessor.oid(), *successor.oid()],
+    }
+}
+
+/// Authorizes the bracketing objects an absence proof discloses.
+///
+/// [`authorize_object_absence`] authorizes the object that was *asked about*.
+/// An ordered non-membership proof additionally serialises the neighbours that
+/// bracket the gap, and those identities were never offered to the disclosure
+/// policy — so a caller authorized for one object could learn two others by
+/// asking about a gap beside them. AGENTS.md §8 puts the authorization filter
+/// before disclosure of neighbours specifically, so they are authorized here,
+/// before the answer is constructed rather than after it is sent.
+///
+/// # Why the refusal is the not-found one
+///
+/// A denied neighbour yields exactly
+/// [`VerifiedReadRefusal::ObjectNotFoundOrUnauthorized`], the same refusal an
+/// unauthorized query receives. A distinct code would itself be the leak: it
+/// would tell a caller that the gap it asked about is bracketed by objects it
+/// may not see, which is most of what the neighbour identities would have told
+/// it. Refusing is also the only honest option — the proof cannot be served
+/// without its neighbours, and serving a partial one would be a verification
+/// nobody can complete.
+fn authorize_disclosed_neighbours<P>(
+    policy: &P,
+    proof: &ObjectClosureNonMembershipProof,
+) -> Result<(), VerifiedReadServingRefusal>
+where
+    P: ObjectDisclosurePolicy + ?Sized,
+{
+    for neighbour in disclosed_absence_neighbours(proof) {
+        if !policy.permits_object_disclosure(&neighbour) {
+            return Err(VerifiedReadServingRefusal::VerifiedRead(Box::new(
+                VerifiedReadRefusal::ObjectNotFoundOrUnauthorized,
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
