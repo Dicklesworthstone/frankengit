@@ -464,6 +464,71 @@ if [ -f "$artifact_dir/negative-evidence.ndjson" ]; then
   fge_artifact "$artifact_dir/negative-evidence.ndjson" perf-baseline-negative-evidence
 fi
 
+# ---------------------------------------------------------------------------
+# THE AUTHORITY ARM: decisions per compare-and-exchange.
+#
+# The scope line names decisions-per-CAS alongside the transport metrics, and
+# it is a different subject rather than a column on the clone numbers: a clone
+# is read-only and commits no decision, so an authority ratio taken from it
+# would be a number with no measurement behind it.
+#
+# The differential here is BATCHING, not two implementations. Nothing upstream
+# publishes a decision batch under a compare-and-exchange, so there is no second
+# system to compare against; what the scope line is really asking is what
+# batching buys, and this project can answer that against itself.
+# ---------------------------------------------------------------------------
+
+fge_phase authority
+
+authority_dir=$(fge_tempdir perf-baseline-authority)
+authority_store=$(fge_tempdir perf-baseline-authority-store)
+fge_context authority_artifact_directory "$authority_dir"
+
+fge_run perf-baseline-authority-experiment \
+  env \
+    RCH_CARGO_WRAPPER_BYPASS=1 \
+    FG_BENCH_AUTHORITY_STORE_ROOT="$authority_store" \
+    FG_BENCH_AUTHORITY_DECISIONS="${FG_BENCH_AUTHORITY_DECISIONS:-8}" \
+    FG_BENCH_SAMPLES="$SAMPLES" \
+    FG_BENCH_SOURCE_REVISION="$SOURCE_REVISION" \
+    FG_BENCH_SOURCE_TREE="$SOURCE_TREE" \
+    cargo run -q --release -p fgit-benchmark -- authority-baseline --out "$authority_dir" \
+  || true
+AUTHORITY_EXIT=$FGE_LAST_EXIT
+
+AUTHORITY_ARTIFACT="$authority_dir/benchmark.ndjson"
+
+fge_assert_exit FG-028C-E2E-022 0 "$AUTHORITY_EXIT" \
+  'the authority publication experiment completes with every oracle satisfied'
+fge_assert_file FG-028C-E2E-023 "$AUTHORITY_ARTIFACT" \
+  'the authority arm writes its anchor artifact'
+
+# The substantive one. An arm that reported the same ratio for both batch sizes
+# would have measured nothing while still writing a well-formed artifact, and
+# every assertion above would still pass. Requiring MORE THAN ONE distinct
+# decisions-per-CAS value is what makes this arm falsifiable.
+fge_assert_cmd FG-028C-E2E-024 \
+  'the authority arm reports more than one distinct decisions-per-CAS value, so the ratio tracks the batch' \
+  "$PYTHON_BIN" -c 'import json,sys
+values={json.loads(line)["metrics"]["decisions_per_cas_ppm"] for line in open(sys.argv[1]) if json.loads(line).get("kind")=="sample"}
+sys.exit(0 if len(values)>1 else 1)' "$AUTHORITY_ARTIFACT"
+
+# An authority publication has no git object graph, so the amplification ratio
+# does not describe it. Null is the honest rendering; a zero would read as a
+# measured no-amplification result.
+fge_assert_cmd FG-028C-E2E-025 \
+  'the authority arm reports no storage amplification rather than a fabricated zero' \
+  "$PYTHON_BIN" -c 'import json,sys
+rows=[json.loads(line) for line in open(sys.argv[1])]
+samples=[r for r in rows if r.get("kind")=="sample"]
+sys.exit(0 if samples and all(r["metrics"]["storage"]["amplification_ppm"] is None for r in samples) else 1)' "$AUTHORITY_ARTIFACT"
+
+fge_artifact "$AUTHORITY_ARTIFACT" perf-baseline-authority-anchor
+fge_artifact "$authority_dir/replay-and-rollback.txt" perf-baseline-authority-replay
+if [ -f "$authority_dir/negative-evidence.ndjson" ]; then
+  fge_artifact "$authority_dir/negative-evidence.ndjson" perf-baseline-authority-negative-evidence
+fi
+
 # PUSH IS NOT MEASURED, AND THE REASON IS RECORDED RATHER THAN OMITTED.
 # The scope names clone/fetch/push. At this revision the git daemon accepts
 # only git-upload-pack (crates/fgit-node/src/lib.rs, the service gate), the
@@ -471,6 +536,6 @@ fi
 # no push subcommand. An in-process library call is not the same operation as
 # `git push` and reporting them side by side would be proof-class inflation.
 fge_unsupported FG-028C-E2E-019 \
-  'push throughput is unmeasurable as a transport at this revision: the daemon serves only git-upload-pack and the receive path has no binary caller (see frankengit-n6kg)'
+  'push throughput is unmeasurable as a transport at this revision: the daemon refuses every service that is not git-upload-pack (GitDaemonTransportRefusal::UnsupportedService) and no receive-pack serve function exists. The gate is the absent daemon lane, tracked by frankengit-fg019; it is NOT frankengit-n6kg, whose production QuarantineValidator landed at 053176c while push stayed exactly as unmeasurable.'
 fge_unsupported FG-028C-E2E-020 \
   'fetch is not measured through the sanctioned oracle lane, which implements clone-loopback only'
