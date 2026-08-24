@@ -653,20 +653,53 @@ fn manifest_over_one_record() -> SegmentManifest {
 #[test]
 fn a_manifest_body_of_exactly_the_ceiling_is_admitted_and_one_byte_under_is_refused() {
     let manifest = manifest_over_one_record();
-    let body_len = u64::try_from(
-        manifest
-            .encode()
-            .expect("the fixture manifest must encode")
-            .len(),
-    )
-    .expect("an encoded manifest length fits u64");
+    let encoded = manifest.encode().expect("the fixture manifest must encode");
+    let body_len = u64::try_from(encoded.len()).expect("an encoded manifest length fits u64");
+    let expected_identity = manifest
+        .identity()
+        .expect("the fixture manifest must have an identity");
 
     // Exactly the ceiling: admitted. This is the half a `>=` would break.
     let tight_root = temp_root("manifest-tight");
     let tight = fabric(tight_root, NAMESPACE, body_len);
-    tight
+    let returned = tight
         .write_manifest(&manifest)
         .expect("a manifest body of exactly the ceiling must be admitted");
+
+    // ADMISSION IS NOT AN EFFECT.
+    //
+    // `.expect()` on its own asserts only "did not refuse", and a
+    // `write_manifest` that computed an identity and stored nothing would
+    // satisfy it — so the exact-ceiling arm would pass against a no-op. That
+    // gap is what returned this bead to rework, and these three assertions are
+    // the discriminator:
+    //
+    // 1. the returned id is the manifest's own content-derived identity, not an
+    //    arbitrary handle;
+    // 2. the body is really retrievable under that id;
+    // 3. what comes back is canonically identical, byte for byte.
+    //
+    // The read-back deliberately goes through `tight`, the same store whose
+    // ceiling equals the body length exactly, so it also drives `:348`
+    // (`read_bounded`) at its inclusive boundary on the manifest path.
+    assert_eq!(
+        returned, expected_identity,
+        "write_manifest must return the manifest's content-derived identity"
+    );
+    let read_back = tight
+        .read_manifest(returned)
+        .expect("the manifest admitted at exactly the ceiling must read back");
+    assert_eq!(
+        read_back, manifest,
+        "the stored manifest must round-trip to the one that was written"
+    );
+    assert_eq!(
+        read_back
+            .encode()
+            .expect("the read-back manifest must encode"),
+        encoded,
+        "the round-trip must be canonical byte-for-byte, not merely equal-ish"
+    );
 
     // One byte under: refused, and naming the encoded length it measured, which
     // is what fixes the guard's quantity to the body rather than to something
