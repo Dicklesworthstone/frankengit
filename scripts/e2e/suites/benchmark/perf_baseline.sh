@@ -38,6 +38,30 @@
 # The A/A floor itself varies by an order of magnitude with host load -- 187ms
 # on one cold run, 1418ms on a warm one -- which is why it is measured every run
 # instead of being assumed once.
+#
+# ---------------- THE ANCHOR NUMBERS ARE BOUND TO A REVISION ----------------
+#
+# The candidate figures above were measured at binary SHA 8aff66d, which
+# PREDATES the frankengit-x7ja fixes:
+#
+#   e72612a  x7ja: add compressed pack profile
+#   efa569a  x7ja: negotiate compact incremental packs
+#
+# Those two exist BECAUSE of this harness -- it measured a clone sending
+# 39,788,709 bytes against upstream's 639,823, and a fetch sending 39,790,922,
+# within 2 KB of a full clone of the same corpus.
+#
+# So on any build after x7ja, expect candidate egress to fall SHARPLY. That is
+# the fix landing, not a broken harness and not an anomaly. The rule two
+# paragraphs up -- "compare egress directly; any change at all is a real
+# change" -- is still right about egress being exact, but a reader applying it
+# across the x7ja boundary would read a repair as a regression, or conclude the
+# measurement broke.
+#
+# When someone re-measures on a post-x7ja build, the honest move is to record a
+# NEW anchor and say which revision each set belongs to, rather than editing
+# these numbers: the old pair is the evidence that motivated the fix, and it
+# stops being reproducible the moment the fix lands.
 # ============================================================================
 set -euo pipefail
 
