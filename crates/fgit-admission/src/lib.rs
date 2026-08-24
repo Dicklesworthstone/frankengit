@@ -2770,6 +2770,128 @@ mod hidden_ref_disclosure_tests {
         );
     }
 
+    fn guard_context() -> crate::AdmissionContext {
+        crate::AdmissionContext {
+            head_key: fgit_authority::HeadKey::new(b"fg/head/eeb8-hidden".to_vec())
+                .expect("a fixed valid head key"),
+            tenant_id: fgit_types::TenantId::from_bytes([1; 16]),
+            repository_id: fgit_types::RepositoryId::from_bytes([2; 16]),
+            principal_id: fgit_types::PrincipalId::from_bytes([3; 16]),
+            idempotency_key: fgit_authority::IdempotencyKey::new(b"eeb8-session".to_vec())
+                .expect("a bounded retry key"),
+            object_format: fgit_types::GitHashAlgorithm::Sha1,
+        }
+    }
+
+    fn guard_oid(nibble: char) -> fgit_wire::AnyGitOid {
+        fgit_types::GitOid::from_hex(
+            fgit_types::GitHashAlgorithm::Sha1,
+            &core::iter::repeat_n(nibble, 40).collect::<String>(),
+        )
+        .expect("a fixed SHA-1 object id")
+    }
+
+    /// One atomic create naming `name`, lowered exactly as production lowers it.
+    fn guard_lowered(name: &[u8]) -> crate::LoweredRequest {
+        let command = crate::lower_ref_update(guard_oid('0'), guard_oid('1'), name)
+            .expect("a fixed valid ref update lowers");
+        crate::LoweredRequest {
+            semantic: fgit_authority::SemanticRequest::build(
+                fgit_authority::RECEIVE_ADMISSION_SCHEMA,
+                fgit_types::GitHashAlgorithm::Sha1,
+                true,
+                vec![command],
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("a single-command request canonicalizes"),
+            idempotency_key: guard_context().idempotency_key,
+        }
+    }
+
+    fn guard_snapshot_hiding(rule: &[u8]) -> crate::AdmissionSnapshot {
+        let mut snapshot = crate::AdmissionSnapshot::default();
+        snapshot
+            .hidden_refs
+            .push_rule(rule, &fgit_wire::WireLimits::default())
+            .expect("a fixed valid hide rule");
+        snapshot
+    }
+
+    fn guard_tx_id() -> fgit_types::TxId {
+        fgit_types::TxId::from_digest(
+            fgit_types::DigestAlgorithmId::try_new(super::FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("the reserved fixture algorithm slot"),
+            fgit_types::CANONICAL_CODEC_VERSION,
+            fgit_types::DigestBytes::try_new(&[9; 32]).expect("a 32-byte fixture body"),
+        )
+    }
+
+    fn guard_closure() -> crate::ValidatedClosure {
+        crate::ValidatedClosure {
+            object_closure_root: fgit_types::Digest::new(
+                fgit_types::DigestAlgorithmId::try_new(super::FIXTURE_ALGORITHM_CODE_POINT)
+                    .expect("the reserved fixture algorithm slot"),
+                fgit_types::DigestBytes::try_new(&[7; 32]).expect("a 32-byte fixture body"),
+            ),
+            objects: core::iter::once(
+                fgit_types::GitOid::from_hex(
+                    fgit_types::GitHashAlgorithm::Sha1,
+                    &core::iter::repeat_n('1', 40).collect::<String>(),
+                )
+                .expect("a fixed SHA-1 object id"),
+            )
+            .collect(),
+        }
+    }
+
+    #[test]
+    fn a_command_naming_a_hidden_ref_is_refused_by_the_decision_function() {
+        // Acceptance line 2, observed rather than composed. The five tests above
+        // check refusal_message and the policy predicate in isolation; this one
+        // drives prepare_publication_from_snapshot, which is what production
+        // reaches from both the blocking and asynchronous surfaces.
+        let prepared = crate::prepare_publication_from_snapshot(
+            &guard_context(),
+            &guard_lowered(b"refs/internal/secret"),
+            &guard_closure(),
+            guard_tx_id(),
+            guard_snapshot_hiding(b"refs/internal"),
+        )
+        .expect("the guard produces a decision rather than an error");
+
+        assert!(
+            matches!(
+                prepared,
+                crate::PublicationPreparation::Refuse(RefusalCode::HiddenRefUnauthorized)
+            ),
+            "a hidden target must be refused with the internal code"
+        );
+    }
+
+    #[test]
+    fn the_permitted_twin_a_visible_ref_is_not_refused_as_hidden() {
+        // Without this, the test above is satisfied by a guard that refuses
+        // every command. The visible ref may still be refused by the fold for
+        // ordinary reasons; what must never happen is HiddenRefUnauthorized.
+        let prepared = crate::prepare_publication_from_snapshot(
+            &guard_context(),
+            &guard_lowered(b"refs/heads/main"),
+            &guard_closure(),
+            guard_tx_id(),
+            guard_snapshot_hiding(b"refs/internal"),
+        )
+        .expect("the guard produces a decision rather than an error");
+
+        assert!(
+            !matches!(
+                prepared,
+                crate::PublicationPreparation::Refuse(RefusalCode::HiddenRefUnauthorized)
+            ),
+            "a ref the principal may see must never be refused as hidden"
+        );
+    }
+
     const _: fn() = || {
         // hides_any_target is exercised end-to-end by the admission suites; this
         // keeps its signature honest if the semantic shape changes.
@@ -3477,7 +3599,7 @@ mod tests {
 
     fn digest(seed: u8) -> Digest {
         Digest::new(
-            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            DigestAlgorithmId::try_new(super::FIXTURE_ALGORITHM_CODE_POINT)
                 .expect("nonzero corpus fixture algorithm slot"),
             DigestBytes::try_new(&[seed; 32]).expect("32-byte corpus fixture body"),
         )
@@ -3485,7 +3607,7 @@ mod tests {
 
     fn principal_snapshot() -> PrincipalSnapshotId {
         PrincipalSnapshotId::from_digest(
-            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+            DigestAlgorithmId::try_new(super::FIXTURE_ALGORITHM_CODE_POINT)
                 .expect("nonzero corpus fixture algorithm slot"),
             fgit_types::CANONICAL_CODEC_VERSION,
             DigestBytes::try_new(&[15; 32]).expect("32-byte corpus fixture body"),
