@@ -49,8 +49,8 @@ fn the_gate_passes_on_the_committed_tree() {
     let checked = gate::check(&generated_dir()).expect("the committed artifacts are current");
     assert_eq!(checked, emit::artifacts().len());
     assert_eq!(
-        checked, 3,
-        "three artifacts: JSON Schema, TypeScript, Python"
+        checked, 4,
+        "four artifacts: JSON Schema, TypeScript, Python, and the workflow construct registry"
     );
 }
 

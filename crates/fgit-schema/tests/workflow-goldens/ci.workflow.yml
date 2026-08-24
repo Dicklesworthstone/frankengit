@@ -1,0 +1,20 @@
+# A workflow using every construct the subset accepts.
+# Its lowering is committed beside it as ci.graph; `fgit-workflow check`
+# refuses if the two disagree.
+name: ci
+on:
+  - push
+  - pull_request
+jobs:
+  lint:
+    runs-on: linux
+    needs: build
+    steps:
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+  build:
+    runs-on: linux
+    steps:
+      - name: compile
+        run: cargo check --workspace
+      - run: cargo test --workspace

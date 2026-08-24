@@ -471,6 +471,54 @@ pub fn python() -> String {
     lines.join("\n") + "\n"
 }
 
+/// The workflow construct registry as a JSON document.
+///
+/// ADR-0008 D12 requires a measured per-construct table rather than a blanket
+/// compatibility claim, and requires it to be readable by something other than
+/// a human scrolling source. Emitting it here puts it under the same staleness
+/// gate as everything else: a construct whose status changes without the
+/// artifact changing is a failed fast lane, not a stale doc.
+#[must_use]
+pub fn workflow_registry() -> String {
+    use crate::workflow::registry::{CONSTRUCTS, tally};
+
+    let mut lines = vec![
+        "{".to_owned(),
+        "  \"$schema\": \"https://json-schema.org/draft/2020-12/schema\",".to_owned(),
+        "  \"$id\": \"https://frankengit.invalid/schemas/workflow-constructs.json\",".to_owned(),
+        "  \"title\": \"FrankenGit workflow construct registry\",".to_owned(),
+        format!(
+            "  \"description\": {},",
+            json_string(
+                "Per-construct status for the GitHub-Actions subset. ADR-0008 D12: a measured registry, not a blanket compatibility claim. A construct marked unsupported or ambiguous is REFUSED at validation, never ignored."
+            )
+        ),
+    ];
+    for (status, count) in tally() {
+        lines.push(format!("  \"count_{}\": {count},", status.as_str()));
+    }
+    lines.push("  \"constructs\": [".to_owned());
+    for (index, entry) in CONSTRUCTS.iter().enumerate() {
+        let comma = if index + 1 == CONSTRUCTS.len() {
+            ""
+        } else {
+            ","
+        };
+        lines.push("    {".to_owned());
+        lines.push(format!("      \"key\": {},", json_string(entry.key)));
+        lines.push(format!(
+            "      \"status\": {},",
+            json_string(entry.status.as_str())
+        ));
+        lines.push(format!("      \"refuses\": {},", entry.status.refuses()));
+        lines.push(format!("      \"reason\": {}", json_string(entry.reason)));
+        lines.push(format!("    }}{comma}"));
+    }
+    lines.push("  ]".to_owned());
+    lines.push("}".to_owned());
+    lines.join("\n") + "\n"
+}
+
 /// One generated artifact: its file name and its bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Artifact {
@@ -495,6 +543,10 @@ pub fn artifacts() -> Vec<Artifact> {
         Artifact {
             name: "canonical_bodies.py",
             contents: python(),
+        },
+        Artifact {
+            name: "workflow-constructs.json",
+            contents: workflow_registry(),
         },
     ]
 }

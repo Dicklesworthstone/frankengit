@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frankengit.invalid/schemas/workflow-constructs.json",
+  "title": "FrankenGit workflow construct registry",
+  "description": "Per-construct status for the GitHub-Actions subset. ADR-0008 D12: a measured registry, not a blanket compatibility claim. A construct marked unsupported or ambiguous is REFUSED at validation, never ignored.",
+  "count_accepted": 12,
+  "count_normalized": 2,
+  "count_unsupported": 22,
+  "count_ambiguous": 2,
+  "constructs": [
+    {
+      "key": "job.container",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "selects an execution image, which is an isolation decision AGENTS.md 9 puts outside workflow YAML"
+    },
+    {
+      "key": "job.continue-on-error",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "turns a failed job into a passing one, which is gate self-weakening expressed as configuration"
+    },
+    {
+      "key": "job.environment",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "names a deployment target with its own protection rules; the rules, not the name, are the authority"
+    },
+    {
+      "key": "job.if",
+      "status": "ambiguous",
+      "refuses": true,
+      "reason": "expression truthiness has several context-dependent coercions; refusing beats guessing which one a reader meant"
+    },
+    {
+      "key": "job.needs",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "accepted as a scalar or a sequence of job identifiers; unknown names and cycles are refused"
+    },
+    {
+      "key": "job.outputs",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "output values come from expressions, and expressions are not evaluated by this lowering"
+    },
+    {
+      "key": "job.permissions",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "grants capability from YAML; AGENTS.md 9 says text may not widen capabilities"
+    },
+    {
+      "key": "job.runs-on",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "a single runner label, as a plain scalar"
+    },
+    {
+      "key": "job.services",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "starts side-car containers, which is the same isolation decision as job.container"
+    },
+    {
+      "key": "job.steps",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "a sequence of steps, in source order, which is execution order"
+    },
+    {
+      "key": "job.strategy",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "matrix expansion multiplies jobs, and the expansion order and identifier derivation need their own bead"
+    },
+    {
+      "key": "job.timeout-minutes",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "a budget belongs to the effect broker's reservation, not to a YAML field the runner may ignore"
+    },
+    {
+      "key": "step.if",
+      "status": "ambiguous",
+      "refuses": true,
+      "reason": "same expression semantics as job.if"
+    },
+    {
+      "key": "step.name",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "a display label; it carries no meaning for execution"
+    },
+    {
+      "key": "step.run",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "the command line, preserved verbatim; the lowering does not interpret shell syntax"
+    },
+    {
+      "key": "step.uses",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "runs a third-party action, which is correctness logic living in YAML rather than in a repository-owned command (AGENTS.md 12)"
+    },
+    {
+      "key": "step.with",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "only meaningful as arguments to step.uses, which is refused"
+    },
+    {
+      "key": "workflow.concurrency",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "a concurrency group cancels in-flight runs, and cancellation semantics are request-drain-finalize rather than a YAML string"
+    },
+    {
+      "key": "workflow.env",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "workflow-level environment leaks into every step invisibly; the subset requires a step to state what it needs"
+    },
+    {
+      "key": "workflow.jobs",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "a mapping of job identifier to job; identifiers must be unique"
+    },
+    {
+      "key": "workflow.name",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "a plain scalar display name"
+    },
+    {
+      "key": "workflow.on",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "accepted as a scalar or a sequence of trigger names, normalized to a sorted deduplicated list"
+    },
+    {
+      "key": "workflow.secrets",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "a secret reference in YAML is a capability grant; AGENTS.md 9 keeps that out of untrusted text"
+    },
+    {
+      "key": "yaml.alias",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "an alias lets one node be reached twice, so a bounded node count cannot bound the expanded document"
+    },
+    {
+      "key": "yaml.anchor",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "an anchor only exists to be aliased, and aliases are refused"
+    },
+    {
+      "key": "yaml.block-mapping",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "the only mapping form in the subset; entries keep source order"
+    },
+    {
+      "key": "yaml.block-scalar",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "the folding and chomping indicators have several spellings with subtly different results, so accepting them would mean accepting an ambiguity"
+    },
+    {
+      "key": "yaml.block-sequence",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "the only sequence form in the subset; items keep source order"
+    },
+    {
+      "key": "yaml.comment",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "discarded after scanning; it cannot carry meaning, so dropping it is not a silent drop of content"
+    },
+    {
+      "key": "yaml.document-marker",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "a workflow is one document; --- and ... would make the file's meaning depend on which document a reader picked"
+    },
+    {
+      "key": "yaml.double-quoted",
+      "status": "normalized",
+      "refuses": false,
+      "reason": "accepted with backslash escapes resolved, so a quoted and an equivalent plain scalar lower to the same bytes"
+    },
+    {
+      "key": "yaml.flow-mapping",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "flow style admits nesting without indentation, which defeats the depth limit the scanner relies on"
+    },
+    {
+      "key": "yaml.flow-sequence",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "same as flow mappings: depth without indentation"
+    },
+    {
+      "key": "yaml.merge-key",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "<< depends on aliases, and it makes a key's value depend on a node declared elsewhere"
+    },
+    {
+      "key": "yaml.plain-scalar",
+      "status": "accepted",
+      "refuses": false,
+      "reason": "trailing whitespace is stripped; no type inference is performed, so 'on' stays the string \"on\""
+    },
+    {
+      "key": "yaml.single-quoted",
+      "status": "normalized",
+      "refuses": false,
+      "reason": "accepted with '' resolved to a single quote, the only escape the form has"
+    },
+    {
+      "key": "yaml.tab-indent",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "YAML forbids tabs in indentation, and accepting them would make depth depend on a renderer's tab width"
+    },
+    {
+      "key": "yaml.tag",
+      "status": "unsupported",
+      "refuses": true,
+      "reason": "an explicit tag selects a type resolver, and the subset performs no type resolution at all"
+    }
+  ]
+}

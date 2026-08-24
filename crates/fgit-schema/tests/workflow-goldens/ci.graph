@@ -1,0 +1,10 @@
+fgit-workflow/v1
+name	ci
+trigger	pull_request
+trigger	push
+job	build	linux
+step	build	0	compile	cargo check --workspace
+step	build	1		cargo test --workspace
+job	lint	linux
+need	lint	build
+step	lint	0	clippy	cargo clippy --all-targets -- -D warnings
