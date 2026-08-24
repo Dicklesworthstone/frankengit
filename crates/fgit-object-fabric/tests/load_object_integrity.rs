@@ -490,8 +490,8 @@ fn a_zero_object_ceiling_is_refused_at_construction() {
 ///
 /// Two sites are exercised at once because they bound the same quantity:
 /// `:392` bounds the write (`8 + envelope + payload`) and `:348` bounds the
-/// read (the file's length on disk), and the writer emits magic(4) +
-/// envelope_len(4) + envelope + payload, so the two coincide.
+/// read (the file's length on disk), and the writer emits `magic(4)` +
+/// `envelope_len(4)` + envelope + payload, so the two coincide.
 ///
 /// The ceiling is MEASURED, never re-derived. A test that hard-codes the
 /// encoded size stops testing the boundary the day the envelope grows a field,
@@ -543,8 +543,8 @@ fn an_object_of_exactly_the_ceiling_is_admitted_on_the_write_and_read_paths() {
 /// Without this, the write half of the twin above is potentially VACUOUS. That
 /// drill sets the ceiling to a length measured off disk and requires the write
 /// to be admitted -- but nothing showed that `:392` compares that same number.
-/// `:392` bounds `8 + envelope + payload`, while the on-disk file is magic(4) +
-/// envelope_len(4) + envelope + payload. Those coincide by reading the encoder,
+/// `:392` bounds `8 + envelope + payload`, while the on-disk file is `magic(4)` +
+/// `envelope_len(4)` + envelope + payload. Those coincide by reading the encoder,
 /// which is not a measurement. Were the guard's quantity anything larger, the
 /// ceiling would sit clear of its boundary and the write would be admitted for
 /// the wrong reason -- passing even if `:392` were written `>=`.
