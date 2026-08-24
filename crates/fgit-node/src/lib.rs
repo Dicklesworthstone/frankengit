@@ -71,11 +71,16 @@ use fgit_resource::{
 };
 use fgit_runtime::{BudgetClass, NodeRuntime, RuntimeProfile, RuntimeRefusal};
 use fgit_txn::TransactionFoldReport;
+use fgit_types::cell::{
+    CellReadiness, CellRefusal, CellState, CellTransition, CellTransitionCause, ReadLabel,
+    admits_read,
+};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256,
     HeadGeneration, PolicyEpoch, PrincipalId, RefusalCode, RegistryEpoch,
     RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, TenantId, TxId,
 };
+use fgit_wire::stale_disclosure::{LabelledAdvertisement, advertise_under_read_label};
 use fgit_wire::visibility::{RefVisibility, filter_advertised_refs};
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, PackPayloadSource, PackRequest,
@@ -3810,6 +3815,14 @@ impl DoctorReport {
 /// for receive admission has not yet been published as a production surface.
 #[derive(Debug)]
 pub struct OneNode {
+    /// What this cell may currently serve, with the audit of how it got there.
+    ///
+    /// Held by value rather than behind a lock on purpose. Every mutator takes
+    /// `&mut self`, so a capability change cannot race a read in flight -- which
+    /// is the property you want from a transition that decides what the cell is
+    /// allowed to answer. It also keeps the audit out of lock-poisoning
+    /// semantics, where the honest recovery is unclear.
+    readiness: CellReadiness,
     authority: FsqliteAuthorityStore,
     admission_materializer: DurableAdmissionMaterializer,
     head_key: HeadKey,
@@ -3966,6 +3979,7 @@ impl OneNode {
             ))
             .map_err(authority_engine_refusal)?;
         Ok(Self {
+            readiness: CellReadiness::bootstrapping(),
             runtime,
             authority,
             admission_materializer: DurableAdmissionMaterializer::new(admission_cache_scope),
@@ -3980,6 +3994,81 @@ impl OneNode {
             segment_limits: config.segment_limits,
             git_daemon_session_timeout: config.git_daemon_session_timeout,
         })
+    }
+
+    /// What this cell may currently serve.
+    #[must_use]
+    pub const fn cell_state(&self) -> CellState {
+        self.readiness.state()
+    }
+
+    /// Every readiness transition this cell has made, oldest first.
+    #[must_use]
+    pub fn readiness_audit(&self) -> &[CellTransition] {
+        self.readiness.audit()
+    }
+
+    /// Move this cell to `next`, recording why in the same call.
+    ///
+    /// Takes `&mut self` so a capability change cannot overlap a read: plan
+    /// §37.3 requires transitions to be audited AND to enforce capability
+    /// changes, and a transition that could land mid-read would enforce a
+    /// capability the in-flight answer did not respect.
+    ///
+    /// # Errors
+    ///
+    /// [`CellRefusal::IllegalTransition`] when the edge is not admitted.
+    pub fn transition_cell_state(
+        &mut self,
+        next: CellState,
+        cause: CellTransitionCause,
+        at_generation: HeadGeneration,
+    ) -> Result<&CellTransition, CellRefusal> {
+        self.readiness.transition_to(next, cause, at_generation)
+    }
+
+    /// Serve a ref advertisement carrying the read mode it was served under.
+    ///
+    /// Two rules meet here, and both are the point of the method:
+    ///
+    /// * the cell's state decides whether this mode may be served at all, so a
+    ///   cell in [`CellState::DegradedRead`] refuses a
+    ///   [`fgit_types::cell::ReadMode::Current`] answer rather than producing a
+    ///   fresh-looking one it cannot back;
+    /// * disclosure is narrowed by the policy passed here, which must be the
+    ///   CURRENT one. Plan §22.5: a stale projection never expands disclosure.
+    ///   Routing through [`advertise_under_read_label`] rather than filtering
+    ///   inline makes that one choke point instead of a rule each caller has to
+    ///   remember.
+    ///
+    /// # Errors
+    ///
+    /// [`LabelledReadRefusal::State`] when the cell's state admits no such read,
+    /// and the materialization or advertisement refusals otherwise.
+    pub async fn labelled_advertisement_in(
+        &self,
+        request: &NodeRequestContext,
+        visibility: &RefVisibility,
+        limits: &WireLimits,
+        label: ReadLabel,
+    ) -> Result<LabelledAdvertisement, LabelledReadRefusal> {
+        admits_read(self.cell_state(), label.mode()).map_err(LabelledReadRefusal::State)?;
+        let materialized = self
+            .materialize_admission_in(request)
+            .await
+            .map_err(|refusal| LabelledReadRefusal::View(Box::new(refusal.into())))?;
+        let advertisement = AdmissionReceivePackAdvertisement::from_snapshot(
+            materialized.snapshot(),
+            visibility,
+            self.object_format,
+            limits,
+        )
+        .map_err(|refusal| LabelledReadRefusal::Advertisement(Box::new(refusal)))?;
+        Ok(advertise_under_read_label(
+            advertisement.advertised_refs(),
+            visibility,
+            label,
+        ))
     }
 
     /// Returns the runtime responsible for request contexts and lifecycle.
@@ -4776,6 +4865,39 @@ fn close_after_existing_open_failure(node: OneNode, opening: NodeRefusal) -> Nod
         },
     }
 }
+
+/// Why a labelled read could not be served.
+///
+/// Separate from [`NodeRefusal`] because the first variant is not a node fault
+/// at all: a cell refusing a mode its state does not admit is behaving
+/// correctly, and folding that into the same enum as storage and runtime
+/// failures would make "the cell is draining" indistinguishable from "the disk
+/// is gone" at every call site that matches on it.
+#[derive(Debug)]
+pub enum LabelledReadRefusal {
+    /// The cell's readiness state admits no read in the requested mode.
+    State(CellRefusal),
+    /// The admission view could not be materialized.
+    View(Box<NodeAdmissionViewRefusal>),
+    /// The advertisement could not be built from the snapshot.
+    Advertisement(Box<AdmissionUploadPackRefusal>),
+}
+
+impl Display for LabelledReadRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::State(refusal) => write!(formatter, "the cell cannot serve this read: {refusal}"),
+            Self::View(refusal) => {
+                write!(formatter, "the admission view is unavailable: {refusal}")
+            }
+            Self::Advertisement(refusal) => {
+                write!(formatter, "the advertisement could not be built: {refusal}")
+            }
+        }
+    }
+}
+
+impl Error for LabelledReadRefusal {}
 
 /// Observable immutable-placement outcome; neither case is an authority publication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
