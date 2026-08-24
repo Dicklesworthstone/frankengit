@@ -114,6 +114,7 @@ pub use crate::outcome::{
     MAX_REPLAY_BATCHES, OUTCOME_KEY_PREFIX, OutcomeFailure, OutcomeLookup, PublicationOutcome,
     PublishedBatch, TerminalOutcome, authority_head_identity, collect_cumulative_outcomes,
     collect_cumulative_outcomes_async, decision_batch_identity, fold_outcome_index,
+    head_selected_ref_state_absence_proof, head_selected_ref_state_absence_proof_async,
     indexed_outcome, indexed_outcome_async, initialize_repository, initialize_repository_async,
     interpret_indexed_outcome, next_batch_to_replay, outcome_index_proof, outcome_index_root,
     outcome_key, publish_decisions, publish_decisions_async, read_authority_head_body,

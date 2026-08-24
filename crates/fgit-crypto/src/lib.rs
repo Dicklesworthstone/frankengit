@@ -146,10 +146,12 @@ pub use lifecycle::{
 };
 pub use mac::{HmacSha256, TAG_BYTES, hmac_sha256, verify_mac};
 pub use merkle::{
-    MerkleProof, MerkleRefusal, empty_merkle_root, merkle_leaf, merkle_proof, merkle_root,
-    merkle_root_from_proof, ref_state_leaf, ref_state_membership_proof, ref_state_merkle_root,
+    MerkleProof, MerkleRefusal, RefStateNeighbour, RefStateNonMembershipProof, empty_merkle_root,
+    merkle_leaf, merkle_proof, merkle_root, merkle_root_from_proof, ref_name_order, ref_state_leaf,
+    ref_state_membership_proof, ref_state_merkle_root, ref_state_non_membership_proof,
     ref_state_schema, verify_merkle_proof, verify_ref_state_membership,
-    verify_ref_state_membership_under,
+    verify_ref_state_membership_under, verify_ref_state_non_membership,
+    verify_ref_state_non_membership_under,
 };
 pub use native::{
     GitHashAlgorithm, GitHashError, GitObjectHasher, GitObjectKind, GitOid, NativeObjectIdentity,

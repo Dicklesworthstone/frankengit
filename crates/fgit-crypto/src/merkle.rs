@@ -35,6 +35,8 @@
 //! is the *current* authority root — that is the caller's authenticated read,
 //! and conflating the two is how a stale-but-valid proof gets accepted.
 
+use core::cmp::Ordering;
+
 use crate::body_identity::internal_digest_over_parts;
 use crate::registry::IdentityDomain;
 use fgit_types::hash::{Digest, DigestBytes};
@@ -63,6 +65,13 @@ pub enum MerkleRefusal {
     DuplicateRefName,
     /// The named ref is not present in the entries offered.
     RefNotPresent,
+    /// A non-membership proof was requested for a ref the state contains.
+    ///
+    /// Absence and presence are different questions with different proofs, and
+    /// answering this one with a membership proof would let a caller that asked
+    /// "is it absent?" receive something that verifies, just not as an answer to
+    /// what was asked.
+    RefIsPresent,
     /// This layout version admits no membership proof for the ref state.
     ///
     /// [`RootLayoutVersion::LegacyWholeBody`] commits to the whole canonical
@@ -88,6 +97,9 @@ impl core::fmt::Display for MerkleRefusal {
                 f.write_str("two entries carry the same ref name; a ref state is a map")
             }
             Self::RefNotPresent => f.write_str("the named ref is not in the offered entries"),
+            Self::RefIsPresent => {
+                f.write_str("the named ref is present, so it has no non-membership proof")
+            }
             Self::LayoutAdmitsNoProof { version } => write!(
                 f,
                 "root layout version {} commits to the whole body, so no ref-state membership \
@@ -115,6 +127,23 @@ pub struct MerkleProof {
 }
 
 impl MerkleProof {
+    /// Rebuild a proof from parts, as a decoder must.
+    ///
+    /// A proof arrives over the wire as numbers and digests, so a verifier that
+    /// could only consume proofs built in-process by [`merkle_proof`] would not
+    /// be an independent verifier at all — it would be one half of a single
+    /// process checking its own work. Nothing here is trusted: `index`,
+    /// `leaf_count` and `siblings` are claims, and verification is what decides
+    /// whether they reproduce the root.
+    #[must_use]
+    pub const fn new(index: usize, leaf_count: usize, siblings: Vec<DigestBytes>) -> Self {
+        Self {
+            index,
+            leaf_count,
+            siblings,
+        }
+    }
+
     /// Position of the proven leaf in the ordered leaf slice.
     #[must_use]
     pub const fn index(&self) -> usize {
@@ -336,14 +365,7 @@ pub fn ref_state_leaf(name: &RefName, oid: &GitOid) -> DigestBytes {
 fn ordered_ref_state_leaves(
     entries: &[(RefName, GitOid)],
 ) -> Result<Vec<DigestBytes>, MerkleRefusal> {
-    let mut ordered: Vec<&(RefName, GitOid)> = entries.iter().collect();
-    ordered.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
-    if ordered
-        .windows(2)
-        .any(|pair| pair[0].0.as_bytes() == pair[1].0.as_bytes())
-    {
-        return Err(MerkleRefusal::DuplicateRefName);
-    }
+    let ordered = sorted_ref_state_entries(entries)?;
     Ok(ordered
         .into_iter()
         .map(|(name, oid)| ref_state_leaf(name, oid))
@@ -376,14 +398,7 @@ pub fn ref_state_membership_proof(
     entries: &[(RefName, GitOid)],
     name: &RefName,
 ) -> Result<(GitOid, MerkleProof), MerkleRefusal> {
-    let mut ordered: Vec<&(RefName, GitOid)> = entries.iter().collect();
-    ordered.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
-    if ordered
-        .windows(2)
-        .any(|pair| pair[0].0.as_bytes() == pair[1].0.as_bytes())
-    {
-        return Err(MerkleRefusal::DuplicateRefName);
-    }
+    let ordered = sorted_ref_state_entries(entries)?;
     let index = ordered
         .iter()
         .position(|(candidate, _)| candidate.as_bytes() == name.as_bytes())
@@ -454,4 +469,256 @@ pub fn verify_ref_state_membership_under(
         return Err(MerkleRefusal::LayoutAdmitsNoProof { version });
     }
     Ok(verify_ref_state_membership(root, name, oid, proof))
+}
+
+// --- ordered non-membership (frankengit-56i4) ---------------------------------
+
+/// The one closed sort order for ref-state leaves.
+///
+/// # Why this is a function and not `RefName`'s derived `Ord`
+///
+/// They agree today, and only by accident: `RefName` holds a single `Vec<u8>`,
+/// so its derived ordering is the byte ordering the tree is built with. Add a
+/// second field to `RefName` and the derived ordering silently becomes
+/// something else while the tree keeps sorting by bytes. A non-membership proof
+/// is a claim that *nothing sorts between* two leaves, so builder and verifier
+/// disagreeing about "sorts" is not a cosmetic bug: it is a proof of absence
+/// for a ref that is present. One function, used by both, makes that
+/// unrepresentable.
+#[must_use]
+pub fn ref_name_order(left: &RefName, right: &RefName) -> Ordering {
+    left.as_bytes().cmp(right.as_bytes())
+}
+
+/// Sort entries into the closed order and reject a non-map.
+fn sorted_ref_state_entries(
+    entries: &[(RefName, GitOid)],
+) -> Result<Vec<&(RefName, GitOid)>, MerkleRefusal> {
+    let mut ordered: Vec<&(RefName, GitOid)> = entries.iter().collect();
+    ordered.sort_by(|left, right| ref_name_order(&left.0, &right.0));
+    if ordered
+        .windows(2)
+        .any(|pair| ref_name_order(&pair[0].0, &pair[1].0) == Ordering::Equal)
+    {
+        return Err(MerkleRefusal::DuplicateRefName);
+    }
+    Ok(ordered)
+}
+
+/// One existing leaf, named, with the path that proves it is in the tree.
+///
+/// The name is carried because that is the whole gap this type closes: a bare
+/// [`MerkleProof`] commits to a position and a digest, and a verifier holding
+/// only that cannot tell which *name* sits at the position, so it cannot decide
+/// whether the queried name would have sorted before or after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefStateNeighbour {
+    name: RefName,
+    oid: GitOid,
+    proof: MerkleProof,
+}
+
+impl RefStateNeighbour {
+    /// Rebuild a neighbour from parts, as a decoder must.
+    ///
+    /// Same reason as [`MerkleProof::new`]: the consumer of a non-membership
+    /// proof receives one, it does not generate one.
+    #[must_use]
+    pub const fn new(name: RefName, oid: GitOid, proof: MerkleProof) -> Self {
+        Self { name, oid, proof }
+    }
+
+    /// The neighbour's ref name.
+    #[must_use]
+    pub const fn name(&self) -> &RefName {
+        &self.name
+    }
+
+    /// The identity that name holds.
+    #[must_use]
+    pub const fn oid(&self) -> &GitOid {
+        &self.oid
+    }
+
+    /// The membership path proving this neighbour is in the tree.
+    #[must_use]
+    pub const fn proof(&self) -> &MerkleProof {
+        &self.proof
+    }
+}
+
+/// Evidence that a ref name is **absent** from a v1 ref state.
+///
+/// Absence is proved by exhibiting the leaves that would have surrounded the
+/// name, so the four variants are the four places a name can fail to be: in an
+/// empty state, before everything, between two adjacent leaves, or after
+/// everything. The edges are separate variants rather than an `Option` pair
+/// because "there is no predecessor" is a structural fact the verifier must
+/// check differently — at the edges it checks a position against the tree's
+/// bounds, and in the middle it checks two positions against each other.
+///
+/// # Typed non-claim: this is sound only for a tree whose leaves are sorted
+///
+/// A membership proof needs no assumption about how the tree was built: the
+/// path either reproduces the root or it does not. Non-membership is different.
+/// It concludes "nothing sorts between these two adjacent leaves", and that
+/// follows **only** if the leaves were placed in sorted order. A root alone
+/// cannot testify to its own sortedness, and this verifier does not attempt to
+/// establish it.
+///
+/// In this system that assumption is discharged upstream rather than ignored:
+/// every ref-state root is produced by [`ref_state_merkle_root`], which sorts
+/// through [`ref_name_order`] and refuses duplicates, and the root is named by
+/// an authenticated head. So the trust already required for the root to mean
+/// anything is the same trust this relies on. What a caller must **not** do is
+/// hand this verifier a root of unknown provenance and read a `true` as proof
+/// of absence — against an adversarially built tree it is not one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefStateNonMembershipProof {
+    /// The ref state holds no refs at all.
+    EmptyState,
+    /// The queried name sorts before the first leaf.
+    BeforeFirst {
+        /// The leaf at index 0.
+        first: Box<RefStateNeighbour>,
+    },
+    /// The queried name sorts strictly between two adjacent leaves.
+    Between {
+        /// The leaf at index `i`.
+        predecessor: Box<RefStateNeighbour>,
+        /// The leaf at index `i + 1`.
+        successor: Box<RefStateNeighbour>,
+    },
+    /// The queried name sorts after the last leaf.
+    AfterLast {
+        /// The leaf at index `leaf_count - 1`.
+        last: Box<RefStateNeighbour>,
+    },
+}
+
+/// Build the proof that `name` is absent from `entries`.
+///
+/// # Errors
+///
+/// [`MerkleRefusal::DuplicateRefName`] when the entries are not a map, and
+/// [`MerkleRefusal::RefIsPresent`] when the name is there — presence is a real
+/// answer to a different question, not a failure to build this one.
+pub fn ref_state_non_membership_proof(
+    entries: &[(RefName, GitOid)],
+    name: &RefName,
+) -> Result<RefStateNonMembershipProof, MerkleRefusal> {
+    let ordered = sorted_ref_state_entries(entries)?;
+    if ordered.is_empty() {
+        return Ok(RefStateNonMembershipProof::EmptyState);
+    }
+
+    // `partition_point` gives the number of leaves that sort strictly before
+    // the query, which is the insertion index. Deriving both the edge cases and
+    // the neighbour pair from that one number keeps them from disagreeing.
+    let insertion =
+        ordered.partition_point(|(candidate, _)| ref_name_order(candidate, name) == Ordering::Less);
+    if let Some((candidate, _)) = ordered.get(insertion)
+        && ref_name_order(candidate, name) == Ordering::Equal
+    {
+        return Err(MerkleRefusal::RefIsPresent);
+    }
+
+    let leaves: Vec<DigestBytes> = ordered
+        .iter()
+        .map(|(candidate, oid)| ref_state_leaf(candidate, oid))
+        .collect();
+    let neighbour = |index: usize| -> Result<Box<RefStateNeighbour>, MerkleRefusal> {
+        let (candidate, oid) = ordered[index];
+        Ok(Box::new(RefStateNeighbour {
+            name: candidate.clone(),
+            oid: *oid,
+            proof: merkle_proof(ref_state_schema(), &leaves, index)?,
+        }))
+    };
+
+    if insertion == 0 {
+        return Ok(RefStateNonMembershipProof::BeforeFirst {
+            first: neighbour(0)?,
+        });
+    }
+    if insertion == ordered.len() {
+        return Ok(RefStateNonMembershipProof::AfterLast {
+            last: neighbour(ordered.len() - 1)?,
+        });
+    }
+    Ok(RefStateNonMembershipProof::Between {
+        predecessor: neighbour(insertion - 1)?,
+        successor: neighbour(insertion)?,
+    })
+}
+
+/// The independent verifier: does `root` commit to a state **without** `name`?
+///
+/// Like [`verify_ref_state_membership`], this reaches nothing outside
+/// `fgit-types` and this crate, and it establishes nothing about whether `root`
+/// is current. Read the non-claim on [`RefStateNonMembershipProof`] before
+/// relying on a `true` from this function: it is sound for a sorted tree, which
+/// is a property of how the root was built and not something the root proves.
+#[must_use]
+pub fn verify_ref_state_non_membership(
+    root: &Digest,
+    name: &RefName,
+    proof: &RefStateNonMembershipProof,
+) -> bool {
+    if root.algorithm() != IdentityDomain::MerkleNode.algorithm().id() {
+        return false;
+    }
+    let holds = |neighbour: &RefStateNeighbour| {
+        verify_ref_state_membership(root, &neighbour.name, &neighbour.oid, &neighbour.proof)
+    };
+    match proof {
+        RefStateNonMembershipProof::EmptyState => {
+            *root.bytes() == empty_merkle_root(ref_state_schema())
+        }
+        RefStateNonMembershipProof::BeforeFirst { first } => {
+            // Index 0 *is* the first position, so nothing can sort before it
+            // without displacing this leaf — and the path binds this leaf to
+            // that position under this root.
+            first.proof.index() == 0
+                && ref_name_order(name, &first.name) == Ordering::Less
+                && holds(first)
+        }
+        RefStateNonMembershipProof::AfterLast { last } => {
+            // `leaf_count` is bound into the fold shape, so claiming the last
+            // position cannot be done by inventing a larger tree.
+            last.proof.index() + 1 == last.proof.leaf_count()
+                && ref_name_order(&last.name, name) == Ordering::Less
+                && holds(last)
+        }
+        RefStateNonMembershipProof::Between {
+            predecessor,
+            successor,
+        } => {
+            predecessor.proof.leaf_count() == successor.proof.leaf_count()
+                && successor.proof.index() == predecessor.proof.index() + 1
+                && ref_name_order(&predecessor.name, name) == Ordering::Less
+                && ref_name_order(name, &successor.name) == Ordering::Less
+                && holds(predecessor)
+                && holds(successor)
+        }
+    }
+}
+
+/// Verify a ref-state non-membership proof under an explicitly named layout.
+///
+/// # Errors
+///
+/// [`MerkleRefusal::LayoutAdmitsNoProof`] when the version admits no ref-state
+/// proof. Under [`RootLayoutVersion::LegacyWholeBody`] there is no tree, so
+/// there is no ordering to appeal to and absence cannot be shown this way.
+pub fn verify_ref_state_non_membership_under(
+    version: RootLayoutVersion,
+    root: &Digest,
+    name: &RefName,
+    proof: &RefStateNonMembershipProof,
+) -> Result<bool, MerkleRefusal> {
+    if !version.admits_ref_state_membership_proof() {
+        return Err(MerkleRefusal::LayoutAdmitsNoProof { version });
+    }
+    Ok(verify_ref_state_non_membership(root, name, proof))
 }

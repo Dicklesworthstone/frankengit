@@ -35,6 +35,7 @@ use fgit_authority::{
     HeadReadReceipt, IdempotencyKey, ImmutableKey, ImmutableRead, MemoryAuthorityStore,
     OutcomeFailure, ProposedNew, PutOutcome, PutResolution, RefCommand, RequestRejection,
     SealAdmission, SealAttempt, SealFailure, SemanticRequest, StoreInstanceId, admission_key,
+    head_selected_ref_state_absence_proof, head_selected_ref_state_absence_proof_async,
     read_admission, read_admission_async, read_seal_async, record_admission,
     record_admission_async, resolve_ambiguous_cas, resolve_ambiguous_cas_async,
     resolve_ambiguous_put, resolve_ambiguous_put_async, root_layout_for_proof_async,
@@ -848,4 +849,57 @@ fn the_asymmetry_holds_on_the_production_surface_too() {
         poll_ready(root_layout_for_proof_async(&resolvable, &(), &root)).expect("resolves"),
         RootLayoutVersion::RefStateMerkleV1
     );
+}
+
+#[test]
+fn both_surfaces_emit_the_same_absence_proof_and_refuse_together() {
+    // frankengit-56i4. A serving node runs on `AsyncAuthorityStore`, so an
+    // absence proof that only the synchronous surface could emit would be a
+    // proof no production reader could obtain.
+    let entries = vec![
+        (
+            fgit_types::refs::RefName::try_new(b"refs/heads/main").expect("a name"),
+            GitOid::Sha1(GitOidSha1::from_bytes([0x11; GitOidSha1::LEN])),
+        ),
+        (
+            fgit_types::refs::RefName::try_new(b"refs/tags/v1").expect("a name"),
+            GitOid::Sha1(GitOidSha1::from_bytes([0x33; GitOidSha1::LEN])),
+        ),
+    ];
+    let absent = fgit_types::refs::RefName::try_new(b"refs/heads/other").expect("a name");
+
+    for layout in RootLayoutVersion::ALL {
+        let sync_store = store();
+        let root =
+            stage_repository_configuration(&sync_store, &configuration(*layout)).expect("stages");
+        let sync = head_selected_ref_state_absence_proof(&sync_store, &root, &entries, &absent);
+
+        let backing = store();
+        let async_root =
+            stage_repository_configuration(&backing, &configuration(*layout)).expect("stages");
+        let view = AsyncView(backing);
+        let asynchronous = poll_ready(head_selected_ref_state_absence_proof_async(
+            &view,
+            &(),
+            &async_root,
+            &entries,
+            &absent,
+        ));
+
+        match (sync, asynchronous) {
+            (Ok(left), Ok(right)) => assert_eq!(
+                left, right,
+                "{layout:?}: the surfaces must emit the same proof, not merely both succeed"
+            ),
+            (Err(left), Err(right)) => assert_eq!(
+                format!("{left:?}"),
+                format!("{right:?}"),
+                "{layout:?}: the surfaces must refuse for the same reason"
+            ),
+            (left, right) => panic!(
+                "{layout:?}: the surfaces disagreed about whether a proof exists: \
+                 sync={left:?} async={right:?}"
+            ),
+        }
+    }
 }

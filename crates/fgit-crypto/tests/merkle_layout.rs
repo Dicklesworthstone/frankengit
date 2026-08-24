@@ -14,10 +14,11 @@
 //! was derived from, and the honest one is asserted to verify in the same test.
 
 use fgit_crypto::{
-    MerkleRefusal, empty_merkle_root, merkle_leaf, merkle_proof, merkle_root,
-    merkle_root_from_proof, ref_state_leaf, ref_state_membership_proof, ref_state_merkle_root,
-    ref_state_schema, verify_merkle_proof, verify_ref_state_membership,
-    verify_ref_state_membership_under,
+    MerkleRefusal, RefStateNeighbour, RefStateNonMembershipProof, empty_merkle_root, merkle_leaf,
+    merkle_proof, merkle_root, merkle_root_from_proof, ref_state_leaf, ref_state_membership_proof,
+    ref_state_merkle_root, ref_state_non_membership_proof, ref_state_schema, verify_merkle_proof,
+    verify_ref_state_membership, verify_ref_state_membership_under,
+    verify_ref_state_non_membership, verify_ref_state_non_membership_under,
 };
 use fgit_types::hash::DigestBytes;
 use fgit_types::label::{SchemaFamily, SchemaId};
@@ -635,5 +636,384 @@ fn the_ref_root_is_a_pure_function_of_the_ref_set() {
         ref_state_merkle_root(&shuffled).expect("a root"),
         first,
         "a changed identity must change the root"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ordered non-membership (frankengit-56i4)
+// ---------------------------------------------------------------------------
+
+/// A state with deliberate gaps on both sides and in the middle.
+fn gapped_state() -> Vec<(RefName, GitOid)> {
+    vec![
+        (name("refs/heads/beta"), oid(0x11)),
+        (name("refs/heads/delta"), oid(0x22)),
+        (name("refs/tags/v2"), oid(0x33)),
+    ]
+}
+
+/// Move a neighbour out of a proof so a test can rebuild a tampered one.
+fn parts(neighbour: &RefStateNeighbour) -> (RefName, GitOid, fgit_crypto::MerkleProof) {
+    (
+        neighbour.name().clone(),
+        *neighbour.oid(),
+        neighbour.proof().clone(),
+    )
+}
+
+#[test]
+fn a_name_between_two_refs_is_proved_absent_by_its_neighbours() {
+    let entries = gapped_state();
+    let root = ref_state_merkle_root(&entries).expect("a root");
+    let absent = name("refs/heads/charlie");
+
+    let proof = ref_state_non_membership_proof(&entries, &absent).expect("a proof");
+    let RefStateNonMembershipProof::Between {
+        ref predecessor,
+        ref successor,
+    } = proof
+    else {
+        panic!("a name inside the range must be proved by a neighbour pair, got {proof:?}");
+    };
+    assert_eq!(predecessor.name(), &name("refs/heads/beta"));
+    assert_eq!(successor.name(), &name("refs/heads/delta"));
+    assert_eq!(
+        successor.proof().index(),
+        predecessor.proof().index() + 1,
+        "the two leaves must be adjacent, or nothing rules out a leaf between them"
+    );
+    assert!(verify_ref_state_non_membership(&root, &absent, &proof));
+}
+
+#[test]
+fn the_edges_are_proved_by_the_first_and_last_leaf() {
+    let entries = gapped_state();
+    let root = ref_state_merkle_root(&entries).expect("a root");
+
+    let before = name("refs/heads/alpha");
+    let left = ref_state_non_membership_proof(&entries, &before).expect("a proof");
+    let RefStateNonMembershipProof::BeforeFirst { ref first } = left else {
+        panic!("a name below the range must take the left edge, got {left:?}");
+    };
+    assert_eq!(first.proof().index(), 0, "the left edge is index 0");
+    assert!(verify_ref_state_non_membership(&root, &before, &left));
+
+    let after = name("refs/tags/v9");
+    let right = ref_state_non_membership_proof(&entries, &after).expect("a proof");
+    let RefStateNonMembershipProof::AfterLast { ref last } = right else {
+        panic!("a name above the range must take the right edge, got {right:?}");
+    };
+    assert_eq!(
+        last.proof().index() + 1,
+        last.proof().leaf_count(),
+        "the right edge is the final index"
+    );
+    assert!(verify_ref_state_non_membership(&root, &after, &right));
+
+    // The edges are not interchangeable: a left-edge proof must not answer a
+    // query that sits above the range, or the marker carries no information.
+    assert!(
+        !verify_ref_state_non_membership(&root, &after, &left),
+        "a left-edge proof must not verify a name above the last leaf"
+    );
+    assert!(
+        !verify_ref_state_non_membership(&root, &before, &right),
+        "a right-edge proof must not verify a name below the first leaf"
+    );
+}
+
+#[test]
+fn an_empty_state_proves_every_name_absent_and_nothing_else_does() {
+    let root = ref_state_merkle_root(&[]).expect("an empty root");
+    let proof = ref_state_non_membership_proof(&[], &name("refs/heads/main")).expect("a proof");
+    assert_eq!(proof, RefStateNonMembershipProof::EmptyState);
+    assert!(verify_ref_state_non_membership(
+        &root,
+        &name("refs/heads/main"),
+        &proof
+    ));
+    assert!(verify_ref_state_non_membership(
+        &root,
+        &name("refs/tags/anything"),
+        &proof
+    ));
+
+    // The permitted twin's opposite: the empty marker must not verify against a
+    // root that actually holds refs, or "the state is empty" would be a free
+    // answer for any state at all.
+    let populated = ref_state_merkle_root(&gapped_state()).expect("a root");
+    assert!(
+        !verify_ref_state_non_membership(&populated, &name("refs/heads/main"), &proof),
+        "the empty marker must not verify against a populated root"
+    );
+}
+
+#[test]
+fn a_present_ref_is_refused_rather_than_given_a_proof_of_its_own_absence() {
+    let entries = gapped_state();
+    let refusal = ref_state_non_membership_proof(&entries, &name("refs/heads/delta"))
+        .expect_err("a present ref has no non-membership proof");
+    assert!(matches!(refusal, MerkleRefusal::RefIsPresent));
+
+    // The permitted twin at the exact boundary: the neighbours of that same
+    // present ref are absent and do prove.
+    for near in ["refs/heads/delt", "refs/heads/delta0"] {
+        assert!(
+            ref_state_non_membership_proof(&entries, &name(near)).is_ok(),
+            "{near} is absent and must still prove"
+        );
+    }
+}
+
+#[test]
+fn swapping_the_two_neighbours_refuses() {
+    let entries = gapped_state();
+    let root = ref_state_merkle_root(&entries).expect("a root");
+    let absent = name("refs/heads/charlie");
+    let proof = ref_state_non_membership_proof(&entries, &absent).expect("a proof");
+    let RefStateNonMembershipProof::Between {
+        predecessor,
+        successor,
+    } = proof
+    else {
+        panic!("expected a neighbour pair");
+    };
+
+    // Both halves are genuine and both verify individually. Only their ORDER is
+    // wrong, which is exactly the forgery a verifier that checked memberships
+    // but not ordering would accept.
+    let swapped = RefStateNonMembershipProof::Between {
+        predecessor: successor,
+        successor: predecessor,
+    };
+    assert!(
+        !verify_ref_state_non_membership(&root, &absent, &swapped),
+        "reversed neighbours must refuse even though both memberships hold"
+    );
+}
+
+#[test]
+fn shifting_an_index_by_one_refuses() {
+    let entries = gapped_state();
+    let root = ref_state_merkle_root(&entries).expect("a root");
+    let absent = name("refs/heads/charlie");
+    let proof = ref_state_non_membership_proof(&entries, &absent).expect("a proof");
+    let RefStateNonMembershipProof::Between {
+        predecessor,
+        successor,
+    } = proof
+    else {
+        panic!("expected a neighbour pair");
+    };
+    let (pred_name, pred_oid, pred_proof) = parts(&predecessor);
+
+    // Same leaf, same root, a position it does not occupy. This one is caught
+    // by the adjacency arithmetic rather than by the leaf binding: moving the
+    // predecessor to i+1 puts both halves at the same index, so the pair stops
+    // being consecutive. The leaf binding is what catches
+    // `replacing_a_neighbour_name_refuses` and the hiding attack below.
+    let leaves: Vec<DigestBytes> = {
+        let mut sorted = entries;
+        sorted.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+        sorted
+            .iter()
+            .map(|(candidate, id)| ref_state_leaf(candidate, id))
+            .collect()
+    };
+    let shifted_path = merkle_proof(ref_state_schema(), &leaves, pred_proof.index() + 1)
+        .expect("a proof at the next index");
+    let shifted = RefStateNonMembershipProof::Between {
+        predecessor: Box::new(RefStateNeighbour::new(pred_name, pred_oid, shifted_path)),
+        successor,
+    };
+    assert!(
+        !verify_ref_state_non_membership(&root, &absent, &shifted),
+        "a leaf presented at the wrong index must refuse"
+    );
+}
+
+#[test]
+fn replacing_a_neighbour_name_refuses() {
+    let entries = gapped_state();
+    let root = ref_state_merkle_root(&entries).expect("a root");
+    let absent = name("refs/heads/charlie");
+    let proof = ref_state_non_membership_proof(&entries, &absent).expect("a proof");
+    let RefStateNonMembershipProof::Between {
+        predecessor,
+        successor,
+    } = proof
+    else {
+        panic!("expected a neighbour pair");
+    };
+    let (_, pred_oid, pred_path) = parts(&predecessor);
+
+    // A name that still brackets the query correctly, so the ordering checks
+    // all pass and only the leaf digest disagrees. Widening the gap is the
+    // useful forgery: it would let one proof answer for names that really are
+    // present.
+    let widened = RefStateNonMembershipProof::Between {
+        predecessor: Box::new(RefStateNeighbour::new(
+            name("refs/heads/aaaa"),
+            pred_oid,
+            pred_path,
+        )),
+        successor,
+    };
+    assert!(
+        !verify_ref_state_non_membership(&root, &absent, &widened),
+        "a substituted neighbour name must refuse"
+    );
+}
+
+#[test]
+fn a_proof_from_a_different_state_does_not_verify() {
+    let entries = gapped_state();
+    let absent = name("refs/heads/charlie");
+    let proof = ref_state_non_membership_proof(&entries, &absent).expect("a proof");
+
+    let mut other = entries;
+    other.push((name("refs/heads/charlie"), oid(0x44)));
+    let other_root = ref_state_merkle_root(&other).expect("a root");
+
+    assert!(
+        !verify_ref_state_non_membership(&other_root, &absent, &proof),
+        "a state that DOES hold the name must not accept a proof of its absence"
+    );
+}
+
+#[test]
+fn the_legacy_layout_admits_no_non_membership_proof_and_v1_does() {
+    let entries = gapped_state();
+    let root = ref_state_merkle_root(&entries).expect("a root");
+    let absent = name("refs/heads/charlie");
+    let proof = ref_state_non_membership_proof(&entries, &absent).expect("a proof");
+
+    let refusal = verify_ref_state_non_membership_under(
+        RootLayoutVersion::LegacyWholeBody,
+        &root,
+        &absent,
+        &proof,
+    )
+    .expect_err("v0 has no tree, so no ordering to appeal to");
+    assert!(matches!(
+        refusal,
+        MerkleRefusal::LayoutAdmitsNoProof {
+            version: RootLayoutVersion::LegacyWholeBody
+        }
+    ));
+
+    assert!(
+        verify_ref_state_non_membership_under(
+            RootLayoutVersion::RefStateMerkleV1,
+            &root,
+            &absent,
+            &proof
+        )
+        .expect("v1 admits the proof"),
+        "the permitted twin: the same proof under v1 must verify"
+    );
+}
+
+#[test]
+fn a_single_leaf_state_has_both_edges_and_no_middle() {
+    let entries = vec![(name("refs/heads/only"), oid(0x55))];
+    let root = ref_state_merkle_root(&entries).expect("a root");
+
+    for (query, expect_left) in [("refs/heads/a", true), ("refs/heads/z", false)] {
+        let query = name(query);
+        let proof = ref_state_non_membership_proof(&entries, &query).expect("a proof");
+        let is_left = matches!(proof, RefStateNonMembershipProof::BeforeFirst { .. });
+        assert_eq!(
+            is_left, expect_left,
+            "a one-leaf state must pick the edge the query falls on"
+        );
+        assert!(verify_ref_state_non_membership(&root, &query, &proof));
+    }
+}
+
+#[test]
+fn hiding_a_present_ref_by_claiming_its_neighbours_are_adjacent_refuses() {
+    // The attack this whole proof shape exists to stop.
+    //
+    // A serving cell that wants to deny `refs/heads/delta` exists cannot invent
+    // leaves — every leaf it offers must verify against the head's root. What it
+    // CAN try is to offer two leaves that really are in the tree and assert they
+    // sit next to each other, so that the ref standing between them appears to
+    // have nowhere to be. Both forgeries below are built entirely from genuine
+    // material; nothing is fabricated.
+    let entries = gapped_state();
+    let root = ref_state_merkle_root(&entries).expect("a root");
+    let hidden = name("refs/heads/delta");
+    assert!(
+        entries.iter().any(|(candidate, _)| candidate == &hidden),
+        "the point of this test is that the name IS present"
+    );
+
+    let leaves: Vec<DigestBytes> = {
+        let mut sorted = entries.clone();
+        sorted.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+        sorted
+            .iter()
+            .map(|(candidate, id)| ref_state_leaf(candidate, id))
+            .collect()
+    };
+    let path = |index: usize| merkle_proof(ref_state_schema(), &leaves, index).expect("a path");
+
+    // Forgery 1: the true positions of the two real neighbours, 0 and 2. Both
+    // memberships verify. Adjacency is what refuses.
+    let honest_positions = RefStateNonMembershipProof::Between {
+        predecessor: Box::new(RefStateNeighbour::new(
+            name("refs/heads/beta"),
+            oid(0x11),
+            path(0),
+        )),
+        successor: Box::new(RefStateNeighbour::new(
+            name("refs/tags/v2"),
+            oid(0x33),
+            path(2),
+        )),
+    };
+    assert!(
+        verify_ref_state_membership(&root, &name("refs/heads/beta"), &oid(0x11), &path(0)),
+        "the material is genuine: this half really is in the tree"
+    );
+    assert!(
+        verify_ref_state_membership(&root, &name("refs/tags/v2"), &oid(0x33), &path(2)),
+        "and so is this half"
+    );
+    assert!(
+        !verify_ref_state_non_membership(&root, &hidden, &honest_positions),
+        "two real but non-adjacent leaves must not prove the ref between them is absent"
+    );
+
+    // Forgery 2: the same two leaves moved to consecutive indices 1 and 2 to
+    // satisfy adjacency. Now the leaf binding refuses, because index 1 holds
+    // `delta` and no path can make it hold `beta`.
+    let forced_adjacency = RefStateNonMembershipProof::Between {
+        predecessor: Box::new(RefStateNeighbour::new(
+            name("refs/heads/beta"),
+            oid(0x11),
+            path(1),
+        )),
+        successor: Box::new(RefStateNeighbour::new(
+            name("refs/tags/v2"),
+            oid(0x33),
+            path(2),
+        )),
+    };
+    assert!(
+        !verify_ref_state_non_membership(&root, &hidden, &forced_adjacency),
+        "claiming a leaf sits at a position it does not occupy must refuse"
+    );
+
+    // The permitted twin, so neither refusal is satisfied by a verifier that
+    // refuses everything. It cannot reuse the beta/v2 pair — `delta` is what
+    // sits there, which is the entire premise — so it is a genuine absence
+    // elsewhere in the same state, proved with the neighbours the builder picks.
+    let genuinely_absent = name("refs/heads/echo");
+    let honest = ref_state_non_membership_proof(&entries, &genuinely_absent).expect("a proof");
+    assert!(
+        verify_ref_state_non_membership(&root, &genuinely_absent, &honest),
+        "a real absence between the same leaves must still verify"
     );
 }

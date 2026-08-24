@@ -34,8 +34,8 @@ use fgit_codec::{
     RepositoryConfigurationBody, RepositoryDecisionBatchBody, decode_body,
 };
 use fgit_crypto::{
-    IdentityDomain, MerkleProof, MerkleRefusal, merkle_leaf, merkle_proof, merkle_root,
-    verify_merkle_proof,
+    IdentityDomain, MerkleProof, MerkleRefusal, RefStateNonMembershipProof, merkle_leaf,
+    merkle_proof, merkle_root, ref_state_non_membership_proof, verify_merkle_proof,
 };
 use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::error::TypeRefusal;
@@ -45,7 +45,9 @@ use fgit_types::identity::{
     RepositoryDecisionBatchId, RepositoryId, TenantId, TxId,
 };
 use fgit_types::layout::RootLayoutVersion;
+use fgit_types::native::GitOid;
 use fgit_types::numeric::DecisionSequence;
+use fgit_types::refs::RefName;
 use fgit_types::vocabulary::{DecisionOutcome, RefusalCode};
 use std::collections::BTreeMap;
 
@@ -1240,6 +1242,74 @@ pub fn outcome_index_proof(
         .position(|leaf| leaf.as_bytes() == target.as_bytes())
         .ok_or_else(|| OutcomeFailure::OutcomeNotIndexed(Box::new(tx_id)))?;
     merkle_proof(outcome_index_schema(), &leaves, index)
+        .map_err(|refusal| OutcomeFailure::MerkleShape(Box::new(refusal)))
+}
+
+/// Generate a ref-state absence proof under the layout the head selects.
+///
+/// # Why generation is head-aware when verification is not
+///
+/// [`fgit_crypto::verify_ref_state_non_membership`] deliberately reaches
+/// nothing: a client checks a proof against a root it already trusts. Emitting
+/// one is the opposite situation. The layout version is a fact about the head,
+/// and a repository still on [`RootLayoutVersion::LegacyWholeBody`] has no tree
+/// to take neighbours from, so emitting a proof there would be inventing a
+/// shape the published root does not have. This is the same asymmetry
+/// [`root_layout_for_proof`] already encodes, applied to the second proof kind.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::ConfigurationUnresolvable`] when the head's configuration
+/// cannot be read, and [`OutcomeFailure::MerkleShape`] carrying
+/// [`MerkleRefusal::LayoutAdmitsNoProof`] under a layout with no tree or
+/// [`MerkleRefusal::RefIsPresent`] when the ref is in fact there.
+pub fn head_selected_ref_state_absence_proof<S>(
+    store: &S,
+    configuration_root: &Digest,
+    entries: &[(RefName, GitOid)],
+    name: &RefName,
+) -> Result<RefStateNonMembershipProof, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let version = root_layout_for_proof(store, configuration_root)?;
+    absence_proof_under(version, entries, name)
+}
+
+/// The production twin of [`head_selected_ref_state_absence_proof`].
+///
+/// `FsqliteAuthorityStore` implements [`AsyncAuthorityStore`] only, so without
+/// this a serving node could not emit an absence proof at all.
+///
+/// # Errors
+///
+/// The same refusals as [`head_selected_ref_state_absence_proof`].
+pub async fn head_selected_ref_state_absence_proof_async<S>(
+    store: &S,
+    cx: &S::Context,
+    configuration_root: &Digest,
+    entries: &[(RefName, GitOid)],
+    name: &RefName,
+) -> Result<RefStateNonMembershipProof, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let version = root_layout_for_proof_async(store, cx, configuration_root).await?;
+    absence_proof_under(version, entries, name)
+}
+
+/// The shared decision both surfaces delegate to.
+fn absence_proof_under(
+    version: RootLayoutVersion,
+    entries: &[(RefName, GitOid)],
+    name: &RefName,
+) -> Result<RefStateNonMembershipProof, OutcomeFailure> {
+    if !version.admits_ref_state_membership_proof() {
+        return Err(OutcomeFailure::MerkleShape(Box::new(
+            MerkleRefusal::LayoutAdmitsNoProof { version },
+        )));
+    }
+    ref_state_non_membership_proof(entries, name)
         .map_err(|refusal| OutcomeFailure::MerkleShape(Box::new(refusal)))
 }
 
