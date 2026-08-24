@@ -232,35 +232,70 @@ fn a_pack_requiring_request_without_a_pack_is_refused_and_the_delete_twin_is_adm
 /// containing every non-zero `new`, or admission refuses. Without it, an
 /// object-store bug reporting an incomplete closure would be admitted on the
 /// strength of having returned `Ok`.
+/// A structurally valid, empty SHA-1 pack, already through quarantine parsing.
+///
+/// Required rather than convenient. `validate_receive` checks pack PRESENCE
+/// before it calls the validator at all:
+///
+/// ```text
+/// if request.requires_pack() && pack.is_none() { return Err(ObjectClosureIncomplete) }
+/// let closure = validator.validate(..)?;          // unreachable with pack: None
+/// if ..!closure.objects.contains(&command.new).. { return Err(ObjectClosureIncomplete) }
+/// ```
+///
+/// Both guards answer with the same code, so a probe that passes `None` for a
+/// non-delete request cannot tell them apart -- and never reaches the second.
+fn quarantined_empty_pack() -> fgit_pack::QuarantinedPack {
+    let mut bytes = b"PACK\0\0\0\x02\0\0\0\0".to_vec();
+    let checksum = fgit_crypto::sha1_digest(&bytes);
+    bytes.extend_from_slice(checksum.as_slice());
+    fgit_pack::read_verified_pack(
+        &bytes,
+        fgit_pack::ObjectFormat::Sha1,
+        &fgit_pack::PackLimits::default(),
+        &mut live_deadline(),
+        &fgit_pack::NativeChecksumVerifier,
+    )
+    .expect("an empty pack is structurally valid and crosses quarantine parsing")
+}
+
 #[test]
 fn a_closure_missing_the_commands_target_object_is_refused() {
     let create = request_for(&[command(ZERO, NEW, "refs/heads/main", Some("report-status"))]);
     let pack_receipt = receipt(false);
 
-    // Forbidden: the validator says Ok but its closure does not contain NEW.
+    // A pack is supplied to BOTH arms. Audit 4530.5 was right that the earlier
+    // form passed `None` to both, so `requires_pack()` short-circuited at the
+    // presence guard and the validator was never called -- the containment
+    // check this test is named for was never executed, and deleting it would
+    // have left the test green.
+    let pack = quarantined_empty_pack();
+
+    // FORBIDDEN: the validator returns Ok, but its closure omits NEW.
     let empty = StubValidator::containing(&[]);
-    let refusal = validate_receive(&create, None, &pack_receipt, &empty, &mut live_deadline())
-        .expect_err("a closure omitting the target object must be refused");
+    let refusal = validate_receive(
+        &create,
+        Some(&pack),
+        &pack_receipt,
+        &empty,
+        &mut live_deadline(),
+    )
+    .expect_err("a closure omitting the target object must be refused");
     assert_eq!(refusal, RefusalCode::ObjectClosureIncomplete);
 
-    // Permitted twin: the same request, same validator shape, closure that does
-    // contain it. Still refused here only because no pack was supplied, which
-    // is the *other* gate — so this asserts the two refusals are distinct
-    // rather than one catch-all.
+    // PERMITTED TWIN, and now genuinely permitted rather than refused by the
+    // other gate: same request, same validator shape, same pack, closure that
+    // DOES contain the target. This must succeed, which is what makes the
+    // refusal above attributable to containment.
     let covering = StubValidator::containing(&[oid(NEW)]);
-    let still_refused = validate_receive(
+    validate_receive(
         &create,
-        None,
+        Some(&pack),
         &pack_receipt,
         &covering,
         &mut live_deadline(),
     )
-    .expect_err("no pack was supplied, so the pack gate still applies");
-    assert_eq!(
-        still_refused,
-        RefusalCode::ObjectClosureIncomplete,
-        "both gates report ObjectClosureIncomplete; that is the documented code"
-    );
+    .expect("a closure containing the command's target object must pass containment");
 }
 
 /// A validator's own refusal is propagated unchanged rather than reclassified.
