@@ -84,6 +84,36 @@ impl TamperClass {
         Self::ConfigurationRemoved,
         Self::StaleHeadReplay,
     ];
+
+    /// Ties `ALL` to the enum, which the array alone does not do.
+    ///
+    /// `ALL` is hand-written. DELETING a variant breaks the build, because the
+    /// array names it. ADDING one did not: the array stayed length 10, the
+    /// coverage assertion below still passed, and the new class was never
+    /// exercised. Measured before this existed -- an eleventh variant compiled
+    /// with nothing but a dead-code warning, and
+    /// `the_corpus_covers_every_declared_tamper_class_exactly_once` stayed
+    /// green. A denominator that cannot see the numerator grow is not a
+    /// denominator.
+    ///
+    /// This match has no wildcard arm, so adding a variant makes it
+    /// non-exhaustive and the build stops HERE, next to `ALL` and the corpus,
+    /// which is the one place that says what the new variant still owes:
+    /// an entry in `ALL` and a case in `corpus()`.
+    const fn is_declared(self) {
+        match self {
+            Self::RefName
+            | Self::RefIdentity
+            | Self::ProofSibling
+            | Self::ProofIndex
+            | Self::ProofLeafCount
+            | Self::HeadRefRoot
+            | Self::HeadConfigurationRoot
+            | Self::ConfigurationSubstituted
+            | Self::ConfigurationRemoved
+            | Self::StaleHeadReplay => (),
+        }
+    }
 }
 
 /// How the combined client rejected a tampered answer.
@@ -446,6 +476,12 @@ fn the_corpus_covers_every_declared_tamper_class_exactly_once() {
         present.len(),
         "a class appears twice in the corpus, which would double-count it in the rate"
     );
+    // Compile-time half: every declared class is named in the wildcard-free
+    // match, so a variant cannot be added without the build stopping there.
+    for class in TamperClass::ALL {
+        class.is_declared();
+    }
+
     let mut declared = TamperClass::ALL.to_vec();
     declared.sort_unstable();
     assert_eq!(
