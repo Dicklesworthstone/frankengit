@@ -315,6 +315,23 @@ fn per_answer_cost_is_independent_of_how_many_refs_the_repository_holds() {
 /// Bytes a client must receive and process to check one membership answer:
 /// the pinned root, the claimed leaf, and the path. Nothing else is in
 /// `verify_ref_state_membership`'s signature, so nothing else can be needed.
+///
+/// # These are PAYLOAD bytes, and that is a lower bound, not the wire cost
+///
+/// This sums the component lengths. It is not the canonical encoded size,
+/// because there is no canonical encoded size to measure: `MerkleProof` has no
+/// `CanonicalBody` impl and no wire form anywhere in the workspace, and neither
+/// does `VerifiedReadEnvelope` — checked with a control, since fgit-codec's
+/// schema module alone carries eight `CanonicalBody` impls, so the sweep does
+/// find them where they exist.
+///
+/// So what is asserted below is a **lower bound** on what a client receives. A
+/// canonical framing adds per-field overhead on top, and that overhead is
+/// itself bounded and independent of the ref set, so the logarithmic growth
+/// this file measures survives the framing rather than being an artefact of
+/// ignoring it. Stated because a byte count that silently means something
+/// narrower than "what the client receives" is the kind of number that gets
+/// quoted as though it were the wire cost.
 fn client_input_bytes(root: &Digest, name: &RefName, oid: &GitOid, proof: &MerkleProof) -> usize {
     root.bytes().as_bytes().len()
         + name.as_bytes().len()
