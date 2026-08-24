@@ -12,6 +12,12 @@ export interface Digest {
   bytes: string;
 }
 
+/** A native Git object identity. `bytes` is lowercase hex. */
+export interface GitOid {
+  algorithm: number;
+  bytes: string;
+}
+
 /** A schema identifier. */
 export interface SchemaId {
   family: string;
@@ -38,6 +44,46 @@ export interface RepositoryDecision {
   outcome: DecisionOutcome;
 }
 
+/** One native Merkle path, in the wire order consumed by the shared verifier. */
+export interface VerifiedReadMerkleProofPayload {
+  /** Zero-based ordered-leaf position the path proves. */
+  index: string;
+  /** Exact number of leaves in the committed tree. */
+  leaf_count: string;
+  /** Bottom-up sibling digest bodies, without an algorithm tag because the enclosing proof layout selects it. */
+  siblings: string[];
+}
+
+/** One ordered ref-state neighbour and its membership path. */
+export interface RefStateNeighbour {
+  /** Validated raw ref-name bytes, length-prefixed on the wire. */
+  name: string;
+  /** Native object identity carried by the neighbour leaf. */
+  oid: GitOid;
+  /** Membership path proving this exact neighbour under the pinned ref root. */
+  proof: VerifiedReadMerkleProofPayload;
+}
+
+/** Version-one repository configuration body carried inline by a verified read. */
+export interface RepositoryConfigurationV1 {
+  /** Authenticated root layout needed to interpret the head roots. */
+  root_layout: number;
+  /** Permanent native Git object identity algorithm. */
+  object_format: number;
+  /** Ordered raw visibility-rule bytes; the last matching rule wins. */
+  hidden_ref_rules: string[];
+}
+
+/** Version-two repository configuration carrying the minted incarnation identity. */
+export interface RepositoryIncarnationConfigurationV2 {
+  /** Authenticated root layout needed to interpret the head roots. */
+  root_layout: number;
+  /** Permanent native Git object identity algorithm. */
+  object_format: number;
+  /** Minted incarnation preventing a delete/recreate location alias. */
+  repository_incarnation_id: string;
+}
+
 /** The terminal outcome of one decision: committed, or refused with a reason. */
 export type DecisionOutcome =
   | DecisionOutcomeCommitted
@@ -59,6 +105,104 @@ export interface DecisionOutcomeRefused {
   code: number;
   /** The refusal record carrying the evidence. */
   refusal_record_id: DerivedId;
+}
+
+/** A version-tagged configuration body, inlined only when the answer needs one. */
+export type VerifiedReadConfiguration =
+  | VerifiedReadConfigurationRepositoryV1
+  | VerifiedReadConfigurationRepositoryIncarnationV2;
+
+/** RepositoryConfigurationBody schema v1.2. */
+export interface VerifiedReadConfigurationRepositoryV1 {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 1;
+  /** Exact V1 configuration payload, without a nested canonical frame. */
+  body: RepositoryConfigurationV1;
+}
+
+/** RepositoryIncarnationConfigurationBody schema v2.0. */
+export interface VerifiedReadConfigurationRepositoryIncarnationV2 {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 2;
+  /** Exact V2 configuration payload, without a nested canonical frame. */
+  body: RepositoryIncarnationConfigurationV2;
+}
+
+/** An absence proof selected by the requested name's ordered position. */
+export type RefStateNonMembershipProof =
+  | RefStateNonMembershipProofEmptyState
+  | RefStateNonMembershipProofBeforeFirst
+  | RefStateNonMembershipProofBetween
+  | RefStateNonMembershipProofAfterLast;
+
+/** The committed ref-state tree has no leaves. */
+export interface RefStateNonMembershipProofEmptyState {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 0;
+}
+
+/** The requested name orders strictly before the authenticated first leaf. */
+export interface RefStateNonMembershipProofBeforeFirst {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 1;
+  /** The authenticated first neighbour. */
+  first: RefStateNeighbour;
+}
+
+/** The requested name orders strictly between two adjacent authenticated leaves. */
+export interface RefStateNonMembershipProofBetween {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 2;
+  /** The authenticated predecessor neighbour. */
+  predecessor: RefStateNeighbour;
+  /** The authenticated successor neighbour. */
+  successor: RefStateNeighbour;
+}
+
+/** The requested name orders strictly after the authenticated last leaf. */
+export interface RefStateNonMembershipProofAfterLast {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 3;
+  /** The authenticated last neighbour. */
+  last: RefStateNeighbour;
+}
+
+/** One proof answer; unknown tags cannot be skipped and must refuse. */
+export type VerifiedReadAnswer =
+  | VerifiedReadAnswerRefMembership
+  | VerifiedReadAnswerOutcomeMembership
+  | VerifiedReadAnswerAuthorizedRefAbsence;
+
+/** One named ref and a path proving its membership in the pinned ref root. */
+export interface VerifiedReadAnswerRefMembership {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 1;
+  /** Validated claimed ref-name bytes. */
+  name: string;
+  /** Claimed native object identity. */
+  oid: GitOid;
+  /** Membership path for the named ref leaf. */
+  proof: VerifiedReadMerkleProofPayload;
+}
+
+/** One terminal decision and a path proving its outcome-index membership. */
+export interface VerifiedReadAnswerOutcomeMembership {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 2;
+  /** Canonical terminal decision selected by the transaction identity. */
+  decision: RepositoryDecision;
+  /** Membership path for the canonical outcome leaf. */
+  proof: VerifiedReadMerkleProofPayload;
+}
+
+/** A disclosure-authorized requested name and ordered non-membership witness. */
+export interface VerifiedReadAnswerAuthorizedRefAbsence {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 3;
+  /** Validated requested ref-name bytes; authorization happened before lookup. */
+  name: string;
+  /** Ordered absence witness under the pinned ref root. */
+  proof: RefStateNonMembershipProof;
 }
 
 /**
@@ -219,4 +363,44 @@ export interface TxnSealV1 {
   canonical_request_digest: Digest;
   /** Schema of the request that was canonicalized. */
   request_schema: SchemaId;
+}
+
+/**
+ * A canonical transport body for the native Merkle proof verifier.
+ *
+ * schema verified-read-merkle-proof v1.0, domain frankengit/verified-read-merkle-proof/v1
+ */
+export interface VerifiedReadMerkleProofV1 {
+  /** Zero-based ordered-leaf position the path proves. */
+  index: string;
+  /** Exact number of leaves in the committed tree. */
+  leaf_count: string;
+  /** Bottom-up sibling digest bodies, without an algorithm tag because the enclosing proof layout selects it. */
+  siblings: string[];
+}
+
+/**
+ * A canonical ordered ref-state non-membership witness for the shared Merkle verifier.
+ *
+ * schema verified-read-ref-non-membership-proof v1.0, domain frankengit/verified-read-ref-non-membership-proof/v1
+ */
+export interface VerifiedReadRefNonMembershipProofV1 {
+  /** The empty, boundary, or between-neighbours absence shape. */
+  proof: RefStateNonMembershipProof;
+}
+
+/**
+ * A relayed answer whose proof verifies only against the client's independently pinned authority head.
+ *
+ * schema verified-read-envelope v1.0, domain frankengit/verified-read-envelope/v1
+ */
+export interface VerifiedReadEnvelopeV1 {
+  /** Verified-read envelope grammar version; V1 is the only accepted value in this build. */
+  version: number;
+  /** Carried authority head, compared byte-for-byte to the client pin. */
+  head: AuthorityHeadV1;
+  /** Exact optional configuration body required to interpret the selected root layout. */
+  configuration?: VerifiedReadConfiguration;
+  /** The ref, outcome, or authorization-gated absence claim and its witness. */
+  answer: VerifiedReadAnswer;
 }

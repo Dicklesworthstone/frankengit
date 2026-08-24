@@ -13,6 +13,15 @@
         "bytes": { "type": "string", "pattern": "^[0-9a-f]{32,128}$" }
       }
     },
+    "GitOid": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "bytes"],
+      "properties": {
+        "algorithm": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "bytes": { "type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$" }
+      }
+    },
     "SchemaId": {
       "type": "object",
       "additionalProperties": false,
@@ -53,6 +62,103 @@
         "outcome": { "$ref": "#/$defs/DecisionOutcome" }
       }
     },
+    "VerifiedReadMerkleProofPayload": {
+      "description": "One native Merkle path, in the wire order consumed by the shared verifier.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "leaf_count"],
+      "properties": {
+        "index": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "leaf_count": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "siblings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]*$",
+            "minLength": 32,
+            "maxLength": 128
+          }
+        }
+      }
+    },
+    "RefStateNeighbour": {
+      "description": "One ordered ref-state neighbour and its membership path.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "oid", "proof"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[0-9a-f]*$",
+          "minLength": 2,
+          "maxLength": 2048
+        },
+        "oid": { "$ref": "#/$defs/GitOid" },
+        "proof": { "$ref": "#/$defs/VerifiedReadMerkleProofPayload" }
+      }
+    },
+    "RepositoryConfigurationV1": {
+      "description": "Version-one repository configuration body carried inline by a verified read.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_layout", "object_format"],
+      "properties": {
+        "root_layout": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed RootLayoutVersion vocabulary"
+        },
+        "object_format": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed GitHashAlgorithm vocabulary"
+        },
+        "hidden_ref_rules": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]*$",
+            "minLength": 0,
+            "maxLength": 2048
+          }
+        }
+      }
+    },
+    "RepositoryIncarnationConfigurationV2": {
+      "description": "Version-two repository configuration carrying the minted incarnation identity.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_layout", "object_format", "repository_incarnation_id"],
+      "properties": {
+        "root_layout": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed RootLayoutVersion vocabulary"
+        },
+        "object_format": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed GitHashAlgorithm vocabulary"
+        },
+        "repository_incarnation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "16 raw bytes, lowercase hex"
+        }
+      }
+    },
     "DecisionOutcome": {
       "description": "The terminal outcome of one decision: committed, or refused with a reason.",
       "oneOf": [
@@ -88,6 +194,134 @@
               "allOf": [{ "$ref": "#/$defs/DerivedId" }],
               "description": "domain-bound derived identity: frankengit/refusal-record/v1"
             }
+          }
+        }
+      ]
+    },
+    "VerifiedReadConfiguration": {
+      "description": "A version-tagged configuration body, inlined only when the answer needs one.",
+      "oneOf": [
+        {
+          "description": "RepositoryConfigurationBody schema v1.2.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "body"],
+          "properties": {
+            "variant": { "const": "RepositoryV1" },
+            "discriminant": { "const": 1 },
+            "body": { "$ref": "#/$defs/RepositoryConfigurationV1" }
+          }
+        },
+        {
+          "description": "RepositoryIncarnationConfigurationBody schema v2.0.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "body"],
+          "properties": {
+            "variant": { "const": "RepositoryIncarnationV2" },
+            "discriminant": { "const": 2 },
+            "body": { "$ref": "#/$defs/RepositoryIncarnationConfigurationV2" }
+          }
+        }
+      ]
+    },
+    "RefStateNonMembershipProof": {
+      "description": "An absence proof selected by the requested name's ordered position.",
+      "oneOf": [
+        {
+          "description": "The committed ref-state tree has no leaves.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant"],
+          "properties": {
+            "variant": { "const": "EmptyState" },
+            "discriminant": { "const": 0 }
+          }
+        },
+        {
+          "description": "The requested name orders strictly before the authenticated first leaf.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "first"],
+          "properties": {
+            "variant": { "const": "BeforeFirst" },
+            "discriminant": { "const": 1 },
+            "first": { "$ref": "#/$defs/RefStateNeighbour" }
+          }
+        },
+        {
+          "description": "The requested name orders strictly between two adjacent authenticated leaves.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "predecessor", "successor"],
+          "properties": {
+            "variant": { "const": "Between" },
+            "discriminant": { "const": 2 },
+            "predecessor": { "$ref": "#/$defs/RefStateNeighbour" },
+            "successor": { "$ref": "#/$defs/RefStateNeighbour" }
+          }
+        },
+        {
+          "description": "The requested name orders strictly after the authenticated last leaf.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "last"],
+          "properties": {
+            "variant": { "const": "AfterLast" },
+            "discriminant": { "const": 3 },
+            "last": { "$ref": "#/$defs/RefStateNeighbour" }
+          }
+        }
+      ]
+    },
+    "VerifiedReadAnswer": {
+      "description": "One proof answer; unknown tags cannot be skipped and must refuse.",
+      "oneOf": [
+        {
+          "description": "One named ref and a path proving its membership in the pinned ref root.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "name", "oid", "proof"],
+          "properties": {
+            "variant": { "const": "RefMembership" },
+            "discriminant": { "const": 1 },
+            "name": {
+              "type": "string",
+              "pattern": "^[0-9a-f]*$",
+              "minLength": 2,
+              "maxLength": 2048
+            },
+            "oid": { "$ref": "#/$defs/GitOid" },
+            "proof": { "$ref": "#/$defs/VerifiedReadMerkleProofPayload" }
+          }
+        },
+        {
+          "description": "One terminal decision and a path proving its outcome-index membership.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "decision", "proof"],
+          "properties": {
+            "variant": { "const": "OutcomeMembership" },
+            "discriminant": { "const": 2 },
+            "decision": { "$ref": "#/$defs/RepositoryDecision" },
+            "proof": { "$ref": "#/$defs/VerifiedReadMerkleProofPayload" }
+          }
+        },
+        {
+          "description": "A disclosure-authorized requested name and ordered non-membership witness.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "name", "proof"],
+          "properties": {
+            "variant": { "const": "AuthorizedRefAbsence" },
+            "discriminant": { "const": 3 },
+            "name": {
+              "type": "string",
+              "pattern": "^[0-9a-f]*$",
+              "minLength": 2,
+              "maxLength": 2048
+            },
+            "proof": { "$ref": "#/$defs/RefStateNonMembershipProof" }
           }
         }
       ]
@@ -316,6 +550,61 @@
         "idempotency_key_digest": { "$ref": "#/$defs/Digest" },
         "canonical_request_digest": { "$ref": "#/$defs/Digest" },
         "request_schema": { "$ref": "#/$defs/SchemaId" }
+      }
+    },
+    "VerifiedReadMerkleProofV1": {
+      "description": "A canonical transport body for the native Merkle proof verifier.",
+      "x-schema": { "family": "verified-read-merkle-proof", "major": 1, "minor": 0, "domain": "frankengit/verified-read-merkle-proof/v1" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "leaf_count"],
+      "properties": {
+        "index": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "leaf_count": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "siblings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]*$",
+            "minLength": 32,
+            "maxLength": 128
+          }
+        }
+      }
+    },
+    "VerifiedReadRefNonMembershipProofV1": {
+      "description": "A canonical ordered ref-state non-membership witness for the shared Merkle verifier.",
+      "x-schema": { "family": "verified-read-ref-non-membership-proof", "major": 1, "minor": 0, "domain": "frankengit/verified-read-ref-non-membership-proof/v1" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proof"],
+      "properties": {
+        "proof": { "$ref": "#/$defs/RefStateNonMembershipProof" }
+      }
+    },
+    "VerifiedReadEnvelopeV1": {
+      "description": "A relayed answer whose proof verifies only against the client's independently pinned authority head.",
+      "x-schema": { "family": "verified-read-envelope", "major": 1, "minor": 0, "domain": "frankengit/verified-read-envelope/v1" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "head", "answer"],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "head": { "$ref": "#/properties/AuthorityHeadV1" },
+        "configuration": { "$ref": "#/$defs/VerifiedReadConfiguration" },
+        "answer": { "$ref": "#/$defs/VerifiedReadAnswer" }
       }
     }
   }

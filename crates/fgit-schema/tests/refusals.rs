@@ -151,6 +151,15 @@ fn the_descriptor_vocabulary_reports_widths_honestly() {
     assert_eq!(FieldType::Digest.fixed_byte_len(), None);
     assert_eq!(FieldType::SchemaId.fixed_byte_len(), None);
     assert_eq!(FieldType::Text { max_len: 4096 }.fixed_byte_len(), None);
+    assert_eq!(
+        FieldType::Bytes {
+            min_len: 1,
+            max_len: 1024
+        }
+        .fixed_byte_len(),
+        None
+    );
+    assert_eq!(FieldType::GitOid.fixed_byte_len(), None);
 
     for schema in registry::DESCRIBED {
         assert!(

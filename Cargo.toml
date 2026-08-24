@@ -48,6 +48,7 @@ fgit-chronicle = { path = "crates/fgit-chronicle" }
 fgit-claim = { path = "crates/fgit-claim" }
 fgit-compaction = { path = "crates/fgit-compaction" }
 fgit-codec = { path = "crates/fgit-codec" }
+fgit-codec-verify = { path = "crates/fgit-codec-verify" }
 fgit-crypto = { path = "crates/fgit-crypto" }
 fgit-deflate = { path = "crates/fgit-deflate" }
 fgit-diff = { path = "crates/fgit-diff" }

@@ -20,6 +20,14 @@ class Digest:
 
 
 @dataclass(frozen=True, slots=True)
+class GitOid:
+    """A native Git object identity. bytes_hex is lowercase hex."""
+
+    algorithm: int
+    bytes_hex: str
+
+
+@dataclass(frozen=True, slots=True)
 class SchemaId:
     """A schema identifier."""
 
@@ -52,6 +60,54 @@ class RepositoryDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedReadMerkleProofPayload:
+    """One native Merkle path, in the wire order consumed by the shared verifier."""
+
+    # Zero-based ordered-leaf position the path proves.
+    index: int
+    # Exact number of leaves in the committed tree.
+    leaf_count: int
+    # Bottom-up sibling digest bodies, without an algorithm tag because the enclosing proof layout selects it.
+    siblings: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RefStateNeighbour:
+    """One ordered ref-state neighbour and its membership path."""
+
+    # Validated raw ref-name bytes, length-prefixed on the wire.
+    name: str
+    # Native object identity carried by the neighbour leaf.
+    oid: GitOid
+    # Membership path proving this exact neighbour under the pinned ref root.
+    proof: VerifiedReadMerkleProofPayload
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryConfigurationV1:
+    """Version-one repository configuration body carried inline by a verified read."""
+
+    # Authenticated root layout needed to interpret the head roots.
+    root_layout: int
+    # Permanent native Git object identity algorithm.
+    object_format: int
+    # Ordered raw visibility-rule bytes; the last matching rule wins.
+    hidden_ref_rules: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryIncarnationConfigurationV2:
+    """Version-two repository configuration carrying the minted incarnation identity."""
+
+    # Authenticated root layout needed to interpret the head roots.
+    root_layout: int
+    # Permanent native Git object identity algorithm.
+    object_format: int
+    # Minted incarnation preventing a delete/recreate location alias.
+    repository_incarnation_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class DecisionOutcomeCommitted:
     """The decision committed, naming the record it produced."""
 
@@ -75,6 +131,116 @@ class DecisionOutcomeRefused:
 
 # The terminal outcome of one decision: committed, or refused with a reason.
 DecisionOutcome = DecisionOutcomeCommitted | DecisionOutcomeRefused
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadConfigurationRepositoryV1:
+    """RepositoryConfigurationBody schema v1.2."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 1
+    # Exact V1 configuration payload, without a nested canonical frame.
+    body: RepositoryConfigurationV1
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadConfigurationRepositoryIncarnationV2:
+    """RepositoryIncarnationConfigurationBody schema v2.0."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 2
+    # Exact V2 configuration payload, without a nested canonical frame.
+    body: RepositoryIncarnationConfigurationV2
+
+
+# A version-tagged configuration body, inlined only when the answer needs one.
+VerifiedReadConfiguration = VerifiedReadConfigurationRepositoryV1 | VerifiedReadConfigurationRepositoryIncarnationV2
+
+
+@dataclass(frozen=True, slots=True)
+class RefStateNonMembershipProofEmptyState:
+    """The committed ref-state tree has no leaves."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RefStateNonMembershipProofBeforeFirst:
+    """The requested name orders strictly before the authenticated first leaf."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 1
+    # The authenticated first neighbour.
+    first: RefStateNeighbour
+
+
+@dataclass(frozen=True, slots=True)
+class RefStateNonMembershipProofBetween:
+    """The requested name orders strictly between two adjacent authenticated leaves."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 2
+    # The authenticated predecessor neighbour.
+    predecessor: RefStateNeighbour
+    # The authenticated successor neighbour.
+    successor: RefStateNeighbour
+
+
+@dataclass(frozen=True, slots=True)
+class RefStateNonMembershipProofAfterLast:
+    """The requested name orders strictly after the authenticated last leaf."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 3
+    # The authenticated last neighbour.
+    last: RefStateNeighbour
+
+
+# An absence proof selected by the requested name's ordered position.
+RefStateNonMembershipProof = RefStateNonMembershipProofEmptyState | RefStateNonMembershipProofBeforeFirst | RefStateNonMembershipProofBetween | RefStateNonMembershipProofAfterLast
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadAnswerRefMembership:
+    """One named ref and a path proving its membership in the pinned ref root."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 1
+    # Validated claimed ref-name bytes.
+    name: str
+    # Claimed native object identity.
+    oid: GitOid
+    # Membership path for the named ref leaf.
+    proof: VerifiedReadMerkleProofPayload
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadAnswerOutcomeMembership:
+    """One terminal decision and a path proving its outcome-index membership."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 2
+    # Canonical terminal decision selected by the transaction identity.
+    decision: RepositoryDecision
+    # Membership path for the canonical outcome leaf.
+    proof: VerifiedReadMerkleProofPayload
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadAnswerAuthorizedRefAbsence:
+    """A disclosure-authorized requested name and ordered non-membership witness."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 3
+    # Validated requested ref-name bytes; authorization happened before lookup.
+    name: str
+    # Ordered absence witness under the pinned ref root.
+    proof: RefStateNonMembershipProof
+
+
+# One proof answer; unknown tags cannot be skipped and must refuse.
+VerifiedReadAnswer = VerifiedReadAnswerRefMembership | VerifiedReadAnswerOutcomeMembership | VerifiedReadAnswerAuthorizedRefAbsence
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +408,49 @@ class TxnSealV1:
     request_schema: SchemaId
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedReadMerkleProofV1:
+    """A canonical transport body for the native Merkle proof verifier.
+
+    schema verified-read-merkle-proof v1.0, domain frankengit/verified-read-merkle-proof/v1
+    """
+
+    # Zero-based ordered-leaf position the path proves.
+    index: int
+    # Exact number of leaves in the committed tree.
+    leaf_count: int
+    # Bottom-up sibling digest bodies, without an algorithm tag because the enclosing proof layout selects it.
+    siblings: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadRefNonMembershipProofV1:
+    """A canonical ordered ref-state non-membership witness for the shared Merkle verifier.
+
+    schema verified-read-ref-non-membership-proof v1.0, domain frankengit/verified-read-ref-non-membership-proof/v1
+    """
+
+    # The empty, boundary, or between-neighbours absence shape.
+    proof: RefStateNonMembershipProof
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReadEnvelopeV1:
+    """A relayed answer whose proof verifies only against the client's independently pinned authority head.
+
+    schema verified-read-envelope v1.0, domain frankengit/verified-read-envelope/v1
+    """
+
+    # Verified-read envelope grammar version; V1 is the only accepted value in this build.
+    version: int
+    # Carried authority head, compared byte-for-byte to the client pin.
+    head: AuthorityHeadV1
+    # The ref, outcome, or authorization-gated absence claim and its witness.
+    answer: VerifiedReadAnswer
+    # Exact optional configuration body required to interpret the selected root layout.
+    configuration: VerifiedReadConfiguration | None = None
+
+
 # Wire order per schema. The dataclasses above group required fields
 # before optional ones because Python requires it; the canonical
 # encoding does not, and THIS is the order the bytes are in.
@@ -251,4 +460,7 @@ WIRE_ORDER: dict[str, tuple[str, ...]] = {
     "RefusalRecordV1": ("tx_id", "seal_id", "decision_sequence", "code", "policy_epoch", "detail", "evidence_root",),
     "RcrV1": ("repository_id", "repository_sequence", "parent_rcr_id", "tx_id", "principal_snapshot_id", "canonical_request_digest", "ref_delta_root", "resulting_ref_root", "object_closure_root", "forge_event_batch_root", "resulting_forge_position_root", "policy_epoch", "policy_decision_root", "invariant_evidence_root", "outbox_effect_root", "retention_delta_root",),
     "TxnSealV1": ("tx_id", "tenant_id", "repository_id", "authenticated_principal_id", "idempotency_key_digest", "canonical_request_digest", "request_schema",),
+    "VerifiedReadMerkleProofV1": ("index", "leaf_count", "siblings",),
+    "VerifiedReadRefNonMembershipProofV1": ("proof",),
+    "VerifiedReadEnvelopeV1": ("version", "head", "configuration", "answer",),
 }

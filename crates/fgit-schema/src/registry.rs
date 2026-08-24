@@ -1,10 +1,9 @@
 //! The described canonical bodies.
 //!
-//! Four of `fgit-codec`'s five canonical bodies are described here. The fifth,
-//! `decision-batch`, is a **typed refusal** rather than an omission: it carries
-//! sequences of nested structures and a payload-carrying tagged union, and the
-//! descriptor format is deliberately non-recursive. Refusing it by name means
-//! the gap is something a reader can act on instead of rediscover.
+//! The registry describes the core codec bodies plus the canonical
+//! `fgit-verified-read` transport bodies. Nested proof and answer shapes are
+//! rows of the same flat descriptor language: references preserve one field
+//! definition without creating a second encoder or verifier.
 //!
 //! Every constant here is checked against the real type by
 //! `tests/conformance.rs`. A descriptor is a claim about `fgit-codec`, and an
@@ -35,6 +34,11 @@ const REFUSAL_DOMAIN: &str = "frankengit/refusal-record/v1";
 
 /// Upper bound the canonical encoder enforces on refusal detail text.
 const REFUSAL_DETAIL_MAX: u32 = 4096;
+/// `DigestBytes` is a bounded body, not an algorithm-tagged [`FieldType::Digest`].
+const DIGEST_BYTES_MIN: u32 = 16;
+const DIGEST_BYTES_MAX: u32 = 64;
+/// Native ref names are validated bytes and are bounded by `fgit-types`.
+const REF_NAME_MAX: u32 = 1024;
 
 /// A monotone counter field. Every counter in the vocabulary is a `u64`.
 const fn counter(name: &'static str, doc: &'static str) -> FieldDescriptor {
@@ -100,6 +104,30 @@ const fn many(name: &'static str, structure: &'static str, doc: &'static str) ->
     }
 }
 
+/// One required inlined reference to a named structure.
+const fn structure(
+    name: &'static str,
+    structure: &'static str,
+    doc: &'static str,
+) -> FieldDescriptor {
+    FieldDescriptor {
+        name,
+        ty: FieldType::Structure { name: structure },
+        cardinality: Cardinality::Required,
+        doc,
+    }
+}
+
+/// A counted repetition of any non-recursive wire value.
+const fn sequence(name: &'static str, ty: FieldType, doc: &'static str) -> FieldDescriptor {
+    FieldDescriptor {
+        name,
+        ty,
+        cardinality: Cardinality::Sequence,
+        doc,
+    }
+}
+
 /// A required 16-byte assigned identity.
 const fn opaque(name: &'static str, doc: &'static str) -> FieldDescriptor {
     FieldDescriptor {
@@ -109,6 +137,49 @@ const fn opaque(name: &'static str, doc: &'static str) -> FieldDescriptor {
         doc,
     }
 }
+
+/// A required validated raw byte shell.
+const fn bytes(
+    name: &'static str,
+    min_len: u32,
+    max_len: u32,
+    doc: &'static str,
+) -> FieldDescriptor {
+    FieldDescriptor {
+        name,
+        ty: FieldType::Bytes { min_len, max_len },
+        cardinality: Cardinality::Required,
+        doc,
+    }
+}
+
+/// A required native Git object identity.
+const fn git_oid(name: &'static str, doc: &'static str) -> FieldDescriptor {
+    FieldDescriptor {
+        name,
+        ty: FieldType::GitOid,
+        cardinality: Cardinality::Required,
+        doc,
+    }
+}
+
+/// The exact unframed field order shared by a proof body and every witness
+/// that inlines a Merkle path.
+const MERKLE_PROOF_FIELDS: &[FieldDescriptor] = &[
+    counter("index", "Zero-based ordered-leaf position the path proves."),
+    counter(
+        "leaf_count",
+        "Exact number of leaves in the committed tree.",
+    ),
+    sequence(
+        "siblings",
+        FieldType::Bytes {
+            min_len: DIGEST_BYTES_MIN,
+            max_len: DIGEST_BYTES_MAX,
+        },
+        "Bottom-up sibling digest bodies, without an algorithm tag because the enclosing proof layout selects it.",
+    ),
+];
 
 /// `frankengit/txn-seal/v1` — the sealed request.
 pub static TXN_SEAL: SchemaDescriptor = SchemaDescriptor {
@@ -327,6 +398,71 @@ pub static REFUSAL_RECORD: SchemaDescriptor = SchemaDescriptor {
     ],
 };
 
+/// `frankengit/verified-read-merkle-proof/v1` — a framed native Merkle path.
+pub static VERIFIED_READ_MERKLE_PROOF: SchemaDescriptor = SchemaDescriptor {
+    family: "verified-read-merkle-proof",
+    major: 1,
+    minor: 0,
+    domain: "frankengit/verified-read-merkle-proof/v1",
+    doc: "A canonical transport body for the native Merkle proof verifier.",
+    fields: MERKLE_PROOF_FIELDS,
+};
+
+/// `frankengit/verified-read-ref-non-membership-proof/v1` — an ordered absence witness.
+pub static VERIFIED_READ_REF_NON_MEMBERSHIP_PROOF: SchemaDescriptor = SchemaDescriptor {
+    family: "verified-read-ref-non-membership-proof",
+    major: 1,
+    minor: 0,
+    domain: "frankengit/verified-read-ref-non-membership-proof/v1",
+    doc: "A canonical ordered ref-state non-membership witness for the shared Merkle verifier.",
+    fields: &[FieldDescriptor {
+        name: "proof",
+        ty: FieldType::Union {
+            name: "ref-state-non-membership-proof",
+        },
+        cardinality: Cardinality::Required,
+        doc: "The empty, boundary, or between-neighbours absence shape.",
+    }],
+};
+
+/// `frankengit/verified-read-envelope/v1` — one relayed, client-verifiable answer.
+pub static VERIFIED_READ_ENVELOPE: SchemaDescriptor = SchemaDescriptor {
+    family: "verified-read-envelope",
+    major: 1,
+    minor: 0,
+    domain: "frankengit/verified-read-envelope/v1",
+    doc: "A relayed answer whose proof verifies only against the client's independently pinned authority head.",
+    fields: &[
+        FieldDescriptor {
+            name: "version",
+            ty: FieldType::Scalar(ScalarWidth::U16),
+            cardinality: Cardinality::Required,
+            doc: "Verified-read envelope grammar version; V1 is the only accepted value in this build.",
+        },
+        structure(
+            "head",
+            "authority-head",
+            "Carried authority head, compared byte-for-byte to the client pin.",
+        ),
+        FieldDescriptor {
+            name: "configuration",
+            ty: FieldType::Union {
+                name: "verified-read-configuration",
+            },
+            cardinality: Cardinality::Optional,
+            doc: "Exact optional configuration body required to interpret the selected root layout.",
+        },
+        FieldDescriptor {
+            name: "answer",
+            ty: FieldType::Union {
+                name: "verified-read-answer",
+            },
+            cardinality: Cardinality::Required,
+            doc: "The ref, outcome, or authorization-gated absence claim and its witness.",
+        },
+    ],
+};
+
 // ------------------------------------------------- nested structures + unions
 
 /// `DecisionOutcome` — one raw discriminant byte, then the variant's fields.
@@ -392,11 +528,251 @@ pub static REPOSITORY_DECISION: StructureDescriptor = StructureDescriptor {
     ],
 };
 
+/// The inlined payload of a native Merkle proof.
+pub static MERKLE_PROOF_PAYLOAD: StructureDescriptor = StructureDescriptor {
+    name: "verified-read-merkle-proof-payload",
+    doc: "One native Merkle path, in the wire order consumed by the shared verifier.",
+    fields: MERKLE_PROOF_FIELDS,
+};
+
+/// One authenticated ordered neighbour used by a ref absence witness.
+pub static REF_STATE_NEIGHBOUR: StructureDescriptor = StructureDescriptor {
+    name: "ref-state-neighbour",
+    doc: "One ordered ref-state neighbour and its membership path.",
+    fields: &[
+        bytes(
+            "name",
+            1,
+            REF_NAME_MAX,
+            "Validated raw ref-name bytes, length-prefixed on the wire.",
+        ),
+        git_oid(
+            "oid",
+            "Native object identity carried by the neighbour leaf.",
+        ),
+        structure(
+            "proof",
+            "verified-read-merkle-proof-payload",
+            "Membership path proving this exact neighbour under the pinned ref root.",
+        ),
+    ],
+};
+
+/// The legacy configuration body when a V1 repository configuration is carried.
+pub static REPOSITORY_CONFIGURATION_V1: StructureDescriptor = StructureDescriptor {
+    name: "repository-configuration-v1",
+    doc: "Version-one repository configuration body carried inline by a verified read.",
+    fields: &[
+        FieldDescriptor {
+            name: "root_layout",
+            ty: FieldType::CodePoint {
+                vocabulary: "RootLayoutVersion",
+            },
+            cardinality: Cardinality::Required,
+            doc: "Authenticated root layout needed to interpret the head roots.",
+        },
+        FieldDescriptor {
+            name: "object_format",
+            ty: FieldType::CodePoint {
+                vocabulary: "GitHashAlgorithm",
+            },
+            cardinality: Cardinality::Required,
+            doc: "Permanent native Git object identity algorithm.",
+        },
+        sequence(
+            "hidden_ref_rules",
+            FieldType::Bytes {
+                min_len: 0,
+                max_len: REF_NAME_MAX,
+            },
+            "Ordered raw visibility-rule bytes; the last matching rule wins.",
+        ),
+    ],
+};
+
+/// The incarnation-bound configuration body when a V2 configuration is carried.
+pub static REPOSITORY_INCARNATION_CONFIGURATION_V2: StructureDescriptor = StructureDescriptor {
+    name: "repository-incarnation-configuration-v2",
+    doc: "Version-two repository configuration carrying the minted incarnation identity.",
+    fields: &[
+        FieldDescriptor {
+            name: "root_layout",
+            ty: FieldType::CodePoint {
+                vocabulary: "RootLayoutVersion",
+            },
+            cardinality: Cardinality::Required,
+            doc: "Authenticated root layout needed to interpret the head roots.",
+        },
+        FieldDescriptor {
+            name: "object_format",
+            ty: FieldType::CodePoint {
+                vocabulary: "GitHashAlgorithm",
+            },
+            cardinality: Cardinality::Required,
+            doc: "Permanent native Git object identity algorithm.",
+        },
+        opaque(
+            "repository_incarnation_id",
+            "Minted incarnation preventing a delete/recreate location alias.",
+        ),
+    ],
+};
+
+/// The exact versioned configuration carrier in a verified-read envelope.
+pub static VERIFIED_READ_CONFIGURATION: UnionDescriptor = UnionDescriptor {
+    name: "verified-read-configuration",
+    doc: "A version-tagged configuration body, inlined only when the answer needs one.",
+    variants: &[
+        UnionVariant {
+            name: "RepositoryV1",
+            discriminant: 1,
+            doc: "RepositoryConfigurationBody schema v1.2.",
+            fields: &[structure(
+                "body",
+                "repository-configuration-v1",
+                "Exact V1 configuration payload, without a nested canonical frame.",
+            )],
+        },
+        UnionVariant {
+            name: "RepositoryIncarnationV2",
+            discriminant: 2,
+            doc: "RepositoryIncarnationConfigurationBody schema v2.0.",
+            fields: &[structure(
+                "body",
+                "repository-incarnation-configuration-v2",
+                "Exact V2 configuration payload, without a nested canonical frame.",
+            )],
+        },
+    ],
+};
+
+/// The four ordered-neighbour shapes the non-membership verifier accepts.
+pub static REF_STATE_NON_MEMBERSHIP_PROOF: UnionDescriptor = UnionDescriptor {
+    name: "ref-state-non-membership-proof",
+    doc: "An absence proof selected by the requested name's ordered position.",
+    variants: &[
+        UnionVariant {
+            name: "EmptyState",
+            discriminant: 0,
+            doc: "The committed ref-state tree has no leaves.",
+            fields: &[],
+        },
+        UnionVariant {
+            name: "BeforeFirst",
+            discriminant: 1,
+            doc: "The requested name orders strictly before the authenticated first leaf.",
+            fields: &[structure(
+                "first",
+                "ref-state-neighbour",
+                "The authenticated first neighbour.",
+            )],
+        },
+        UnionVariant {
+            name: "Between",
+            discriminant: 2,
+            doc: "The requested name orders strictly between two adjacent authenticated leaves.",
+            fields: &[
+                structure(
+                    "predecessor",
+                    "ref-state-neighbour",
+                    "The authenticated predecessor neighbour.",
+                ),
+                structure(
+                    "successor",
+                    "ref-state-neighbour",
+                    "The authenticated successor neighbour.",
+                ),
+            ],
+        },
+        UnionVariant {
+            name: "AfterLast",
+            discriminant: 3,
+            doc: "The requested name orders strictly after the authenticated last leaf.",
+            fields: &[structure(
+                "last",
+                "ref-state-neighbour",
+                "The authenticated last neighbour.",
+            )],
+        },
+    ],
+};
+
+/// The claimed proof answer in a verified-read envelope.
+pub static VERIFIED_READ_ANSWER: UnionDescriptor = UnionDescriptor {
+    name: "verified-read-answer",
+    doc: "One proof answer; unknown tags cannot be skipped and must refuse.",
+    variants: &[
+        UnionVariant {
+            name: "RefMembership",
+            discriminant: 1,
+            doc: "One named ref and a path proving its membership in the pinned ref root.",
+            fields: &[
+                bytes("name", 1, REF_NAME_MAX, "Validated claimed ref-name bytes."),
+                git_oid("oid", "Claimed native object identity."),
+                structure(
+                    "proof",
+                    "verified-read-merkle-proof-payload",
+                    "Membership path for the named ref leaf.",
+                ),
+            ],
+        },
+        UnionVariant {
+            name: "OutcomeMembership",
+            discriminant: 2,
+            doc: "One terminal decision and a path proving its outcome-index membership.",
+            fields: &[
+                structure(
+                    "decision",
+                    "repository-decision",
+                    "Canonical terminal decision selected by the transaction identity.",
+                ),
+                structure(
+                    "proof",
+                    "verified-read-merkle-proof-payload",
+                    "Membership path for the canonical outcome leaf.",
+                ),
+            ],
+        },
+        UnionVariant {
+            name: "AuthorizedRefAbsence",
+            discriminant: 3,
+            doc: "A disclosure-authorized requested name and ordered non-membership witness.",
+            fields: &[
+                bytes(
+                    "name",
+                    1,
+                    REF_NAME_MAX,
+                    "Validated requested ref-name bytes; authorization happened before lookup.",
+                ),
+                FieldDescriptor {
+                    name: "proof",
+                    ty: FieldType::Union {
+                        name: "ref-state-non-membership-proof",
+                    },
+                    cardinality: Cardinality::Required,
+                    doc: "Ordered absence witness under the pinned ref root.",
+                },
+            ],
+        },
+    ],
+};
+
 /// Every nested structure, by name.
-pub static STRUCTURES: &[&StructureDescriptor] = &[&REPOSITORY_DECISION];
+pub static STRUCTURES: &[&StructureDescriptor] = &[
+    &REPOSITORY_DECISION,
+    &MERKLE_PROOF_PAYLOAD,
+    &REF_STATE_NEIGHBOUR,
+    &REPOSITORY_CONFIGURATION_V1,
+    &REPOSITORY_INCARNATION_CONFIGURATION_V2,
+];
 
 /// Every union, by name.
-pub static UNIONS: &[&UnionDescriptor] = &[&DECISION_OUTCOME];
+pub static UNIONS: &[&UnionDescriptor] = &[
+    &DECISION_OUTCOME,
+    &VERIFIED_READ_CONFIGURATION,
+    &REF_STATE_NON_MEMBERSHIP_PROOF,
+    &VERIFIED_READ_ANSWER,
+];
 
 /// The fields a `Structure` reference resolves to.
 ///
@@ -495,6 +871,9 @@ pub static DESCRIBED: &[&SchemaDescriptor] = &[
     &REFUSAL_RECORD,
     &REPOSITORY_COMMIT_RECORD,
     &TXN_SEAL,
+    &VERIFIED_READ_MERKLE_PROOF,
+    &VERIFIED_READ_REF_NON_MEMBERSHIP_PROOF,
+    &VERIFIED_READ_ENVELOPE,
 ];
 
 /// A canonical body that exists and is deliberately not described.
@@ -517,12 +896,12 @@ pub struct UndescribedBody {
 /// such a body as "unregistered".
 pub static UNDESCRIBED: &[UndescribedBody] = &[];
 
-// Every canonical body `fgit-codec` encodes is now described. The table above
-// is deliberately kept rather than deleted: the NEXT body the codec adds is
-// undescribable until someone describes it, and an empty table with a live
-// refusal path is what makes that a typed refusal instead of a panic. The
-// refusal is still reachable and still tested -- see
-// `tests/workflow.rs`'s sibling in `tests/refusals.rs`.
+// Every body currently admitted to this generated client-schema registry is
+// described. The table above is deliberately kept rather than deleted: the
+// NEXT unsupported body must be registered as a typed refusal rather than
+// accidentally becoming an undocumented omission. The refusal is still
+// reachable and tested -- see `tests/workflow.rs`'s sibling in
+// `tests/refusals.rs`.
 
 /// The descriptor for a schema family.
 ///

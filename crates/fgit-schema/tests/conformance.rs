@@ -13,9 +13,21 @@
 //! left over. Both are failures with the offending field named.
 
 use fgit_codec::harness as support;
-use fgit_codec::{CanonicalBody, Encoder};
+use fgit_codec::{
+    CanonicalBody, Encoder, RepositoryConfigurationBody, RepositoryIncarnationConfigurationBody,
+};
+use fgit_crypto::{MerkleProof, RefStateNeighbour, RefStateNonMembershipProof};
 use fgit_schema::descriptor::{Cardinality, FieldDescriptor, FieldType, SchemaDescriptor};
 use fgit_schema::registry;
+use fgit_types::identity::RepositoryIncarnationId;
+use fgit_types::layout::RootLayoutVersion;
+use fgit_types::native::GitHashAlgorithm;
+use fgit_types::native::{GitOid, GitOidSha1};
+use fgit_types::refs::RefName;
+use fgit_verified_read::{
+    MerkleProofBody, RefDisclosurePolicy, RefStateNonMembershipProofBody, VerifiedReadAnswer,
+    VerifiedReadEnvelope, authorize_ref_absence,
+};
 
 /// Consumes the bytes one field's VALUE occupies, returning the new offset.
 ///
@@ -62,6 +74,27 @@ fn consume(ty: FieldType, payload: &[u8], mut at: usize, field: &str) -> usize {
         FieldType::Text { .. } => {
             let (len, next) = prefix(payload, at, field);
             next + len
+        }
+        FieldType::Bytes { min_len, max_len } => {
+            let (len, next) = prefix(payload, at, field);
+            assert!(
+                len >= min_len as usize && len <= max_len as usize,
+                "{field}: {len}-byte value lies outside descriptor bounds {min_len}..={max_len}"
+            );
+            next + len
+        }
+        FieldType::GitOid => {
+            assert!(
+                at + 2 <= payload.len(),
+                "{field}: payload ends inside the Git hash algorithm code point"
+            );
+            let code_point =
+                u16::from_be_bytes(payload[at..at + 2].try_into().expect("two-byte code point"));
+            let algorithm =
+                GitHashAlgorithm::from_code_point(code_point).unwrap_or_else(|refusal| {
+                    panic!("{field}: invalid Git object algorithm: {refusal}")
+                });
+            at + 2 + algorithm.digest_len()
         }
         // A referenced structure is inlined: its fields, in order, no framing.
         FieldType::Structure { name } => {
@@ -335,7 +368,11 @@ fn decision_batch_no_longer_refuses_and_the_refusal_path_is_still_reachable() {
     // The whole point of the bead: this used to be a ShapeUnsupported refusal.
     let found = registry::descriptor_for("decision-batch").expect("now described");
     assert_eq!(found.family, "decision-batch");
-    assert_eq!(registry::DESCRIBED.len(), 5, "all five canonical bodies");
+    assert_eq!(
+        registry::DESCRIBED.len(),
+        8,
+        "five core bodies plus the three verified-read wire bodies"
+    );
 
     // The refusal path must stay REACHABLE even with the table empty, or the
     // next undescribable body would panic instead of refusing.
@@ -374,4 +411,134 @@ fn the_union_is_well_formed_and_covers_the_encoder_discriminants() {
     assert!(union.variant(0).is_none());
     assert!(union.variant(3).is_none());
     assert!(registry::union_for("no-such-union").is_none());
+}
+
+struct PermitAll;
+
+impl RefDisclosurePolicy for PermitAll {
+    fn permits_ref_disclosure(&self, _name: &RefName) -> bool {
+        true
+    }
+}
+
+fn wire_name(value: &[u8]) -> RefName {
+    RefName::try_new(value).expect("wire fixture ref name is valid")
+}
+
+const fn wire_oid(byte: u8) -> GitOid {
+    GitOid::Sha1(GitOidSha1::from_bytes([byte; GitOidSha1::LEN]))
+}
+
+fn wire_proof() -> MerkleProof {
+    MerkleProof::new(0, 1, Vec::new())
+}
+
+fn wire_configuration_v1() -> RepositoryConfigurationBody {
+    RepositoryConfigurationBody {
+        root_layout: RootLayoutVersion::RefStateMerkleV1,
+        object_format: GitHashAlgorithm::Sha1,
+        hidden_ref_rules: vec![b"refs/hidden/*".to_vec()],
+    }
+}
+
+const fn wire_configuration_v2() -> RepositoryIncarnationConfigurationBody {
+    RepositoryIncarnationConfigurationBody {
+        root_layout: RootLayoutVersion::RefStateMerkleV1,
+        object_format: GitHashAlgorithm::Sha1,
+        repository_incarnation_id: RepositoryIncarnationId::from_bytes([0x42; 16]),
+    }
+}
+
+#[test]
+fn verified_read_proof_descriptors_account_for_the_native_wire_bodies() {
+    assert_identity::<MerkleProofBody>(&registry::VERIFIED_READ_MERKLE_PROOF);
+    assert_describes(
+        &registry::VERIFIED_READ_MERKLE_PROOF,
+        &payload_of(&MerkleProofBody::new(wire_proof())),
+    );
+
+    assert_identity::<RefStateNonMembershipProofBody>(
+        &registry::VERIFIED_READ_REF_NON_MEMBERSHIP_PROOF,
+    );
+    let between = RefStateNonMembershipProof::Between {
+        predecessor: Box::new(RefStateNeighbour::new(
+            wire_name(b"refs/heads/aaa"),
+            wire_oid(0x11),
+            wire_proof(),
+        )),
+        successor: Box::new(RefStateNeighbour::new(
+            wire_name(b"refs/heads/zzz"),
+            wire_oid(0x22),
+            wire_proof(),
+        )),
+    };
+    assert_describes(
+        &registry::VERIFIED_READ_REF_NON_MEMBERSHIP_PROOF,
+        &payload_of(&RefStateNonMembershipProofBody::new(between)),
+    );
+    assert_describes(
+        &registry::VERIFIED_READ_REF_NON_MEMBERSHIP_PROOF,
+        &payload_of(&RefStateNonMembershipProofBody::new(
+            RefStateNonMembershipProof::EmptyState,
+        )),
+    );
+}
+
+#[test]
+fn verified_read_envelope_descriptor_accounts_for_every_answer_and_configuration_shape() {
+    assert_identity::<VerifiedReadEnvelope>(&registry::VERIFIED_READ_ENVELOPE);
+    let head = support::genesis_head();
+
+    let membership = VerifiedReadEnvelope::new(
+        head.clone(),
+        Some(wire_configuration_v1()),
+        VerifiedReadAnswer::RefMembership {
+            name: wire_name(b"refs/heads/main"),
+            oid: wire_oid(0x31),
+            proof: Box::new(wire_proof()),
+        },
+    );
+    assert_describes(&registry::VERIFIED_READ_ENVELOPE, &payload_of(&membership));
+
+    let decision = support::decision_batch()
+        .decisions
+        .into_iter()
+        .next()
+        .expect("support decision batch has one decision");
+    let outcome = VerifiedReadEnvelope::new(
+        head.clone(),
+        None,
+        VerifiedReadAnswer::OutcomeMembership {
+            tx_id: decision.tx_id,
+            outcome: Box::new(fgit_authority::TerminalOutcome {
+                decision_sequence: decision.decision_sequence,
+                outcome: decision.outcome,
+            }),
+            proof: Box::new(wire_proof()),
+        },
+    );
+    assert_describes(&registry::VERIFIED_READ_ENVELOPE, &payload_of(&outcome));
+
+    let query = wire_name(b"refs/heads/middle");
+    let absence = authorize_ref_absence(&PermitAll, query.clone(), |_| false)
+        .expect("the fixture permits name disclosure before lookup");
+    let absence = VerifiedReadEnvelope::new_with_exact_configuration(
+        head,
+        Some(
+            fgit_verified_read::VerifiedReadConfiguration::RepositoryIncarnationV2(
+                wire_configuration_v2(),
+            ),
+        ),
+        VerifiedReadAnswer::AuthorizedRefAbsence {
+            absence,
+            proof: Box::new(RefStateNonMembershipProof::BeforeFirst {
+                first: Box::new(RefStateNeighbour::new(
+                    wire_name(b"refs/heads/zzz"),
+                    wire_oid(0x44),
+                    wire_proof(),
+                )),
+            }),
+        },
+    );
+    assert_describes(&registry::VERIFIED_READ_ENVELOPE, &payload_of(&absence));
 }

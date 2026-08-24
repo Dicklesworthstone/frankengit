@@ -14,7 +14,12 @@ publish = false
 fgit-types.workspace = true
 
 [dev-dependencies]
+fgit-authority.workspace = true
 fgit-codec.workspace = true
+fgit-crypto.workspace = true
+# Descriptor conformance only; the schema crate's production graph stays
+# independent of the verified-read wire-body owner.
+fgit-verified-read.workspace = true
 
 [lints]
 workspace = true

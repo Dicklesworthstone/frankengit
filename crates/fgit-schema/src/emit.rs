@@ -169,6 +169,15 @@ fn json_type_lines(ty: FieldType, pad: &str) -> Vec<String> {
             format!("{inner}\"maxLength\": {max_len}"),
             format!("{pad}}}"),
         ],
+        FieldType::Bytes { min_len, max_len } => vec![
+            "{".to_owned(),
+            format!("{inner}\"type\": \"string\","),
+            format!("{inner}\"pattern\": \"^[0-9a-f]*$\","),
+            format!("{inner}\"minLength\": {},", min_len.saturating_mul(2)),
+            format!("{inner}\"maxLength\": {}", max_len.saturating_mul(2)),
+            format!("{pad}}}"),
+        ],
+        FieldType::GitOid => vec!["{ \"$ref\": \"#/$defs/GitOid\" }".to_owned()],
         FieldType::CodePoint { vocabulary } => vec![
             "{".to_owned(),
             format!("{inner}\"type\": \"integer\","),
@@ -333,6 +342,17 @@ fn json_defs_lines() -> Vec<String> {
             .to_owned(),
         "      }".to_owned(),
         "    },".to_owned(),
+        "    \"GitOid\": {".to_owned(),
+        "      \"type\": \"object\",".to_owned(),
+        "      \"additionalProperties\": false,".to_owned(),
+        "      \"required\": [\"algorithm\", \"bytes\"],".to_owned(),
+        "      \"properties\": {".to_owned(),
+        "        \"algorithm\": { \"type\": \"integer\", \"minimum\": 1, \"maximum\": 2 },"
+            .to_owned(),
+        "        \"bytes\": { \"type\": \"string\", \"pattern\": \"^([0-9a-f]{40}|[0-9a-f]{64})$\" }"
+            .to_owned(),
+        "      }".to_owned(),
+        "    },".to_owned(),
         "    \"SchemaId\": {".to_owned(),
         "      \"type\": \"object\",".to_owned(),
         "      \"additionalProperties\": false,".to_owned(),
@@ -446,8 +466,9 @@ const fn ts_type(ty: FieldType) -> &'static str {
             }
         }
         FieldType::CodePoint { .. } => "number",
-        FieldType::OpaqueId | FieldType::Text { .. } => "string",
+        FieldType::OpaqueId | FieldType::Text { .. } | FieldType::Bytes { .. } => "string",
         FieldType::Digest => "Digest",
+        FieldType::GitOid => "GitOid",
         FieldType::DerivedId { .. } => "DerivedId",
         FieldType::SchemaId => "SchemaId",
         // References carry a name, so they need an allocation the caller owns.
@@ -547,6 +568,12 @@ pub fn typescript() -> String {
     lines.push("  bytes: string;".to_owned());
     lines.push("}".to_owned());
     lines.push(String::new());
+    lines.push("/** A native Git object identity. `bytes` is lowercase hex. */".to_owned());
+    lines.push("export interface GitOid {".to_owned());
+    lines.push("  algorithm: number;".to_owned());
+    lines.push("  bytes: string;".to_owned());
+    lines.push("}".to_owned());
+    lines.push(String::new());
     lines.push("/** A schema identifier. */".to_owned());
     lines.push("export interface SchemaId {".to_owned());
     lines.push("  family: string;".to_owned());
@@ -588,8 +615,9 @@ const fn py_type(ty: FieldType) -> &'static str {
     match ty {
         // Python integers are arbitrary precision, so a u64 stays an int.
         FieldType::Scalar(_) | FieldType::CodePoint { .. } => "int",
-        FieldType::OpaqueId | FieldType::Text { .. } => "str",
+        FieldType::OpaqueId | FieldType::Text { .. } | FieldType::Bytes { .. } => "str",
         FieldType::Digest => "Digest",
+        FieldType::GitOid => "GitOid",
         FieldType::DerivedId { .. } => "DerivedId",
         FieldType::SchemaId => "SchemaId",
         // References carry a name, so they need an allocation the caller owns.
@@ -711,6 +739,15 @@ pub fn python() -> String {
     lines.extend(py_dataclass(
         "Digest",
         "An algorithm-tagged digest. bytes_hex is lowercase hex.",
+    ));
+    lines.push("    algorithm: int".to_owned());
+    lines.push("    bytes_hex: str".to_owned());
+    lines.push(String::new());
+    lines.push(String::new());
+
+    lines.extend(py_dataclass(
+        "GitOid",
+        "A native Git object identity. bytes_hex is lowercase hex.",
     ));
     lines.push("    algorithm: int".to_owned());
     lines.push("    bytes_hex: str".to_owned());

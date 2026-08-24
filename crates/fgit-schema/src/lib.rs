@@ -4,8 +4,9 @@
 //!
 //! # What this crate is
 //!
-//! `fgit-codec` owns the canonical bodies and their encoding. This crate
-//! **describes** four of them in a small, flat, non-recursive format
+//! `fgit-codec` owns the core canonical bodies and their encoding. This crate
+//! **describes** those bodies plus the independently framed verified-read
+//! transport bodies in a small, flat, non-recursive format
 //! ([`descriptor`]), keeps those descriptions honest against the real Rust
 //! types (`tests/conformance.rs`), and generates the artifacts a non-Rust
 //! client needs: JSON Schema, `TypeScript`, and Python ([`emit`]).
@@ -27,11 +28,10 @@
 //! bead's scope. The payload half — JSON Schema — is generated here and is what
 //! an `OpenAPI` document would reference.
 //!
-//! **It does not describe `decision-batch`.** That body carries sequences of
-//! nested structures and a payload-carrying tagged union; the format is
-//! non-recursive by design. [`registry::descriptor_for`] refuses it by name
-//! with the exact missing construct, so the gap is actionable rather than
-//! invisible.
+//! **It does not own a second codec.** The verified-read rows describe
+//! `fgit-verified-read`'s canonical wrappers and are conformance-checked
+//! against their real payloads. The schema generator emits client-facing
+//! shapes, never a duplicate encoder or verifier.
 //!
 //! # No proc macro, no build script
 //!

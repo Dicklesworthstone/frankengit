@@ -301,6 +301,7 @@ fn refusal_name(refusal: &VerifiedReadRefusal) -> String {
         VerifiedReadRefusal::PinnedHeadMismatch => "PinnedHeadMismatch",
         VerifiedReadRefusal::ConfigurationIdentityUnavailable => "ConfigurationIdentityUnavailable",
         VerifiedReadRefusal::ConfigurationRootMismatch => "ConfigurationRootMismatch",
+        VerifiedReadRefusal::WireDecode(_) => "WireDecode",
         VerifiedReadRefusal::RefLayout(_) => "RefLayout",
         VerifiedReadRefusal::ProofRejected => "ProofRejected",
         VerifiedReadRefusal::Outcome(_) => "Outcome",

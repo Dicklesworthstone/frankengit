@@ -12,5 +12,8 @@ fgit-codec.workspace = true
 fgit-crypto.workspace = true
 fgit-types.workspace = true
 
+[dev-dependencies]
+fgit-codec-verify.workspace = true
+
 [lints]
 workspace = true

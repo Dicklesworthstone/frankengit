@@ -91,6 +91,19 @@ pub enum FieldType {
         /// Maximum length in bytes, as the canonical encoder enforces it.
         max_len: u32,
     },
+    /// A length-prefixed opaque byte string with exact wire bounds.
+    ///
+    /// This is distinct from [`Self::Text`]: Git ref names and Merkle digest
+    /// bodies are validated bytes, not an assertion that they are UTF-8.
+    Bytes {
+        /// Smallest permitted byte length.
+        min_len: u32,
+        /// Largest permitted byte length.
+        max_len: u32,
+    },
+    /// A native Git object identity: an algorithm code point followed by that
+    /// algorithm's fixed-width raw object ID.
+    GitOid,
     /// A closed code-point enumeration owned by a named vocabulary.
     CodePoint {
         /// The vocabulary that owns the closed set of code points.
@@ -132,7 +145,8 @@ impl FieldType {
             Self::CodePoint { .. } => Some(2),
             // Two different reasons for the same answer, merged because no
             // caller branches on which one applies. Digest/DerivedId/SchemaId/
-            // Text are length-prefixed, so the width depends on the value.
+            // Text/Bytes are length-prefixed, and a Git object ID's width
+            // depends on its algorithm, so the width depends on the value.
             // Structure and Union are not: a structure's width is its
             // referenced descriptor's, and a union's depends on the variant.
             // Either way a fixed-size reader may not assume it can skip them.
@@ -140,6 +154,8 @@ impl FieldType {
             | Self::DerivedId { .. }
             | Self::SchemaId
             | Self::Text { .. }
+            | Self::Bytes { .. }
+            | Self::GitOid
             | Self::Structure { .. }
             | Self::Union { .. } => None,
         }
@@ -155,6 +171,8 @@ impl FieldType {
             Self::DerivedId { .. } => "derived-id",
             Self::SchemaId => "schema-id",
             Self::Text { .. } => "text",
+            Self::Bytes { .. } => "bytes",
+            Self::GitOid => "git-oid",
             Self::CodePoint { .. } => "code-point",
             Self::Structure { .. } => "structure",
             Self::Union { .. } => "union",
@@ -173,6 +191,10 @@ impl FieldType {
             }
             Self::SchemaId => "length-prefixed family, then u16 major and u16 minor",
             Self::Text { .. } => "u32 length prefix, then that many UTF-8 bytes",
+            Self::Bytes { .. } => "u32 length prefix, then that many validated raw bytes",
+            Self::GitOid => {
+                "u16 Git hash algorithm code point, then that algorithm's fixed-width raw object ID"
+            }
             Self::CodePoint { .. } => "u16 code point drawn from a closed vocabulary",
             Self::Structure { .. } => "the referenced descriptor's fields, inline and in order",
             Self::Union { .. } => "one raw discriminant byte, then that variant's fields",

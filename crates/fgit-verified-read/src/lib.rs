@@ -29,22 +29,172 @@ pub mod freshness;
 
 use fgit_authority::{OutcomeFailure, TerminalOutcome, verify_outcome_index_membership};
 use fgit_codec::{
-    CryptoBodyIdentity, RepositoryAuthorityHeadBody, RepositoryConfigurationBody,
-    RepositoryIncarnationConfigurationBody, body_id,
+    CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits, Decoder, Encoder,
+    RepositoryAuthorityHeadBody, RepositoryConfigurationBody, RepositoryDecision,
+    RepositoryIncarnationConfigurationBody, body_id, decode_body, encode_body,
 };
 use fgit_crypto::{
-    MerkleProof, MerkleRefusal, RefStateNonMembershipProof, verify_ref_state_membership_under,
-    verify_ref_state_non_membership_under,
+    MerkleProof, MerkleRefusal, RefStateNeighbour, RefStateNonMembershipProof,
+    verify_ref_state_membership_under, verify_ref_state_non_membership_under,
 };
 use fgit_types::identity::TxId;
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::native::GitOid;
 use fgit_types::refs::RefName;
+use fgit_types::{DomainTag, SchemaFamily};
 
 /// The sole proof-envelope wire version this build understands.
 pub use freshness::{FreshnessRefusal, FreshnessVerdict, HeadChainFloor};
 
 pub const VERIFIED_READ_ENVELOPE_V1: u16 = 1;
+
+/// A canonical, independently frameable Merkle membership proof.
+///
+/// `MerkleProof` is owned by `fgit-crypto` while [`CanonicalBody`] is owned by
+/// `fgit-codec`; Rust's coherence rules deliberately prevent this crate from
+/// implementing the foreign trait for the foreign proof type.  This body is
+/// the explicit protocol boundary instead: it owns no new proof semantics and
+/// converts losslessly to the native verifier input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerkleProofBody {
+    proof: MerkleProof,
+}
+
+impl MerkleProofBody {
+    /// Wraps a native proof for canonical transport encoding.
+    #[must_use]
+    pub const fn new(proof: MerkleProof) -> Self {
+        Self { proof }
+    }
+
+    /// Borrows the native proof consumed by the verifier.
+    #[must_use]
+    pub const fn proof(&self) -> &MerkleProof {
+        &self.proof
+    }
+
+    /// Returns the native proof after transport decoding.
+    #[must_use]
+    pub fn into_proof(self) -> MerkleProof {
+        self.proof
+    }
+}
+
+/// A canonical, independently frameable ordered ref-state absence proof.
+///
+/// Like [`MerkleProofBody`], this is a wire owner rather than a second proof
+/// implementation.  Its decoded value is exactly the
+/// [`RefStateNonMembershipProof`] consumed by the shared Merkle verifier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefStateNonMembershipProofBody {
+    proof: RefStateNonMembershipProof,
+}
+
+impl RefStateNonMembershipProofBody {
+    /// Wraps a native absence proof for canonical transport encoding.
+    #[must_use]
+    pub const fn new(proof: RefStateNonMembershipProof) -> Self {
+        Self { proof }
+    }
+
+    /// Borrows the native proof consumed by the verifier.
+    #[must_use]
+    pub const fn proof(&self) -> &RefStateNonMembershipProof {
+        &self.proof
+    }
+
+    /// Returns the native proof after transport decoding.
+    #[must_use]
+    pub fn into_proof(self) -> RefStateNonMembershipProof {
+        self.proof
+    }
+}
+
+impl CanonicalBody for MerkleProofBody {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/verified-read-merkle-proof/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("verified-read-merkle-proof");
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        write_merkle_proof_payload(out, &self.proof)
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        read_merkle_proof_payload(input).map(Self::new)
+    }
+}
+
+impl CanonicalBody for RefStateNonMembershipProofBody {
+    const DOMAIN: DomainTag =
+        DomainTag::from_static("frankengit/verified-read-ref-non-membership-proof/v1");
+    const SCHEMA_FAMILY: SchemaFamily =
+        SchemaFamily::from_static("verified-read-ref-non-membership-proof");
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        write_non_membership_proof_payload(out, &self.proof)
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        read_non_membership_proof_payload(input).map(Self::new)
+    }
+}
+
+/// Encodes a native Merkle proof as its canonical transport frame.
+///
+/// # Errors
+///
+/// Returns [`VerifiedReadRefusal::WireDecode`] when the proof cannot be
+/// represented by the canonical codec on this platform.
+pub fn encode_merkle_proof(proof: &MerkleProof) -> Result<Vec<u8>, VerifiedReadRefusal> {
+    encode_body(&MerkleProofBody::new(proof.clone()))
+        .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
+}
+
+/// Decodes a canonical Merkle-proof transport frame into the native verifier input.
+///
+/// # Errors
+///
+/// Returns [`VerifiedReadRefusal::WireDecode`] for a malformed, non-canonical,
+/// or wrong-body frame.
+pub fn decode_merkle_proof(
+    bytes: &[u8],
+    limits: DecodeLimits,
+) -> Result<MerkleProof, VerifiedReadRefusal> {
+    decode_body::<MerkleProofBody>(bytes, limits)
+        .map(MerkleProofBody::into_proof)
+        .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
+}
+
+/// Encodes an ordered ref-state absence proof as its canonical transport frame.
+///
+/// # Errors
+///
+/// Returns [`VerifiedReadRefusal::WireDecode`] when the proof cannot be
+/// represented by the canonical codec on this platform.
+pub fn encode_ref_state_non_membership_proof(
+    proof: &RefStateNonMembershipProof,
+) -> Result<Vec<u8>, VerifiedReadRefusal> {
+    encode_body(&RefStateNonMembershipProofBody::new(proof.clone()))
+        .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
+}
+
+/// Decodes an ordered ref-state absence proof into the native verifier input.
+///
+/// # Errors
+///
+/// Returns [`VerifiedReadRefusal::WireDecode`] for a malformed, non-canonical,
+/// or wrong-body frame.
+pub fn decode_ref_state_non_membership_proof(
+    bytes: &[u8],
+    limits: DecodeLimits,
+) -> Result<RefStateNonMembershipProof, VerifiedReadRefusal> {
+    decode_body::<RefStateNonMembershipProofBody>(bytes, limits)
+        .map(RefStateNonMembershipProofBody::into_proof)
+        .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
+}
 
 /// A client's offered verified-read capability.
 ///
@@ -374,6 +524,285 @@ impl VerifiedReadEnvelope {
     }
 }
 
+impl CanonicalBody for VerifiedReadEnvelope {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/verified-read-envelope/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("verified-read-envelope");
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        if self.version != VERIFIED_READ_ENVELOPE_V1 {
+            return Err(CodecRefusal::VariantUnknown {
+                field: "VerifiedReadEnvelope.version",
+                observed: u32::from(self.version),
+                offset: out.len().try_into().unwrap_or(u64::MAX),
+            });
+        }
+        out.write_scalar(self.version);
+        self.head.write_payload(out)?;
+        write_configuration(out, self.configuration.as_ref())?;
+        write_answer(out, &self.answer)
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let version = input.read_scalar::<u16>("verified_read_envelope.version")?;
+        let head = RepositoryAuthorityHeadBody::read_payload(input)?;
+        let configuration = read_configuration(input)?;
+        let answer = read_answer(input)?;
+        Ok(Self {
+            version,
+            head,
+            configuration,
+            answer,
+        })
+    }
+}
+
+/// Encodes one version-one verified-read envelope for an untrusted relay.
+///
+/// The returned bytes are self-describing canonical codec bytes.  They do not
+/// grant the relay authority: a client still verifies the decoded envelope
+/// against its independently pinned head with [`verify_envelope`].
+///
+/// # Errors
+///
+/// Returns [`VerifiedReadRefusal::WireDecode`] if a field cannot be represented
+/// by the canonical codec.
+pub fn encode_verified_read_envelope(
+    envelope: &VerifiedReadEnvelope,
+) -> Result<Vec<u8>, VerifiedReadRefusal> {
+    encode_body(envelope).map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
+}
+
+/// Decodes one relayed envelope without trusting the relay's chosen head.
+///
+/// Decoding checks canonical framing and field syntax.  It does not establish
+/// membership or currentness; callers must pass the result to
+/// [`verify_envelope`] with their independently authenticated
+/// [`PinnedAuthorityHead`].
+///
+/// # Errors
+///
+/// Returns [`VerifiedReadRefusal::UnsupportedEnvelopeVersion`] for a wire
+/// version this verifier does not understand, and
+/// [`VerifiedReadRefusal::WireDecode`] for hostile or malformed codec bytes.
+pub fn decode_verified_read_envelope(
+    bytes: &[u8],
+    limits: DecodeLimits,
+) -> Result<VerifiedReadEnvelope, VerifiedReadRefusal> {
+    let envelope = decode_body::<VerifiedReadEnvelope>(bytes, limits)
+        .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))?;
+    if envelope.version != VERIFIED_READ_ENVELOPE_V1 {
+        return Err(VerifiedReadRefusal::UnsupportedEnvelopeVersion {
+            observed: envelope.version,
+        });
+    }
+    Ok(envelope)
+}
+
+fn write_merkle_proof_payload(out: &mut Encoder, proof: &MerkleProof) -> Result<(), CodecRefusal> {
+    out.write_scalar(usize_to_u64("merkle_proof.index", proof.index())?);
+    out.write_scalar(usize_to_u64("merkle_proof.leaf_count", proof.leaf_count())?);
+    out.write_sequence("merkle_proof.siblings", proof.siblings(), |out, sibling| {
+        out.write_digest_bytes(sibling)
+    })
+}
+
+fn read_merkle_proof_payload(input: &mut Decoder<'_>) -> Result<MerkleProof, CodecRefusal> {
+    let index = u64_to_usize(
+        "merkle_proof.index",
+        input.read_scalar::<u64>("merkle_proof.index")?,
+    )?;
+    let leaf_count = u64_to_usize(
+        "merkle_proof.leaf_count",
+        input.read_scalar::<u64>("merkle_proof.leaf_count")?,
+    )?;
+    let siblings = input.read_sequence("merkle_proof.siblings", Decoder::read_digest_bytes)?;
+    Ok(MerkleProof::new(index, leaf_count, siblings))
+}
+
+fn write_ref_state_neighbour(
+    out: &mut Encoder,
+    neighbour: &RefStateNeighbour,
+) -> Result<(), CodecRefusal> {
+    out.write_ref_name(neighbour.name())?;
+    out.write_git_oid(neighbour.oid());
+    write_merkle_proof_payload(out, neighbour.proof())
+}
+
+fn read_ref_state_neighbour(input: &mut Decoder<'_>) -> Result<RefStateNeighbour, CodecRefusal> {
+    let name = input.read_ref_name()?;
+    let oid = input.read_git_oid()?;
+    let proof = read_merkle_proof_payload(input)?;
+    Ok(RefStateNeighbour::new(name, oid, proof))
+}
+
+fn write_non_membership_proof_payload(
+    out: &mut Encoder,
+    proof: &RefStateNonMembershipProof,
+) -> Result<(), CodecRefusal> {
+    match proof {
+        RefStateNonMembershipProof::EmptyState => out.write_raw_byte(0),
+        RefStateNonMembershipProof::BeforeFirst { first } => {
+            out.write_raw_byte(1);
+            write_ref_state_neighbour(out, first)?;
+        }
+        RefStateNonMembershipProof::Between {
+            predecessor,
+            successor,
+        } => {
+            out.write_raw_byte(2);
+            write_ref_state_neighbour(out, predecessor)?;
+            write_ref_state_neighbour(out, successor)?;
+        }
+        RefStateNonMembershipProof::AfterLast { last } => {
+            out.write_raw_byte(3);
+            write_ref_state_neighbour(out, last)?;
+        }
+    }
+    Ok(())
+}
+
+fn read_non_membership_proof_payload(
+    input: &mut Decoder<'_>,
+) -> Result<RefStateNonMembershipProof, CodecRefusal> {
+    let offset = input.offset();
+    match input.read_raw_byte("ref_state_non_membership_proof.variant")? {
+        0 => Ok(RefStateNonMembershipProof::EmptyState),
+        1 => Ok(RefStateNonMembershipProof::BeforeFirst {
+            first: Box::new(read_ref_state_neighbour(input)?),
+        }),
+        2 => Ok(RefStateNonMembershipProof::Between {
+            predecessor: Box::new(read_ref_state_neighbour(input)?),
+            successor: Box::new(read_ref_state_neighbour(input)?),
+        }),
+        3 => Ok(RefStateNonMembershipProof::AfterLast {
+            last: Box::new(read_ref_state_neighbour(input)?),
+        }),
+        observed => Err(CodecRefusal::VariantUnknown {
+            field: "RefStateNonMembershipProof",
+            observed: u32::from(observed),
+            offset,
+        }),
+    }
+}
+
+fn write_configuration(
+    out: &mut Encoder,
+    configuration: Option<&VerifiedReadConfiguration>,
+) -> Result<(), CodecRefusal> {
+    out.write_option(configuration, |out, configuration| match configuration {
+        VerifiedReadConfiguration::RepositoryV1(configuration) => {
+            out.write_raw_byte(1);
+            configuration.write_payload(out)
+        }
+        VerifiedReadConfiguration::RepositoryIncarnationV2(configuration) => {
+            out.write_raw_byte(2);
+            configuration.write_payload(out)
+        }
+    })
+}
+
+fn read_configuration(
+    input: &mut Decoder<'_>,
+) -> Result<Option<VerifiedReadConfiguration>, CodecRefusal> {
+    input.read_option("verified_read_envelope.configuration", |input| {
+        let offset = input.offset();
+        match input.read_raw_byte("verified_read_envelope.configuration.variant")? {
+            1 => RepositoryConfigurationBody::read_payload(input)
+                .map(VerifiedReadConfiguration::RepositoryV1),
+            2 => RepositoryIncarnationConfigurationBody::read_payload(input)
+                .map(VerifiedReadConfiguration::RepositoryIncarnationV2),
+            observed => Err(CodecRefusal::VariantUnknown {
+                field: "VerifiedReadConfiguration",
+                observed: u32::from(observed),
+                offset,
+            }),
+        }
+    })
+}
+
+fn write_answer(out: &mut Encoder, answer: &VerifiedReadAnswer) -> Result<(), CodecRefusal> {
+    match answer {
+        VerifiedReadAnswer::RefMembership { name, oid, proof } => {
+            out.write_raw_byte(1);
+            out.write_ref_name(name)?;
+            out.write_git_oid(oid);
+            write_merkle_proof_payload(out, proof)
+        }
+        VerifiedReadAnswer::OutcomeMembership {
+            tx_id,
+            outcome,
+            proof,
+        } => {
+            out.write_raw_byte(2);
+            RepositoryDecision::write_canonical(
+                out,
+                &RepositoryDecision {
+                    tx_id: *tx_id,
+                    decision_sequence: outcome.decision_sequence,
+                    outcome: outcome.outcome,
+                },
+            )?;
+            write_merkle_proof_payload(out, proof)
+        }
+        VerifiedReadAnswer::AuthorizedRefAbsence { absence, proof } => {
+            out.write_raw_byte(3);
+            out.write_ref_name(absence.name())?;
+            write_non_membership_proof_payload(out, proof)
+        }
+    }
+}
+
+fn read_answer(input: &mut Decoder<'_>) -> Result<VerifiedReadAnswer, CodecRefusal> {
+    let offset = input.offset();
+    match input.read_raw_byte("verified_read_envelope.answer.variant")? {
+        1 => Ok(VerifiedReadAnswer::RefMembership {
+            name: input.read_ref_name()?,
+            oid: input.read_git_oid()?,
+            proof: Box::new(read_merkle_proof_payload(input)?),
+        }),
+        2 => {
+            let decision = RepositoryDecision::read_canonical(input)?;
+            Ok(VerifiedReadAnswer::OutcomeMembership {
+                tx_id: decision.tx_id,
+                outcome: Box::new(TerminalOutcome {
+                    decision_sequence: decision.decision_sequence,
+                    outcome: decision.outcome,
+                }),
+                proof: Box::new(read_merkle_proof_payload(input)?),
+            })
+        }
+        3 => Ok(VerifiedReadAnswer::AuthorizedRefAbsence {
+            absence: AuthorizedRefAbsence {
+                name: input.read_ref_name()?,
+            },
+            proof: Box::new(read_non_membership_proof_payload(input)?),
+        }),
+        observed => Err(CodecRefusal::VariantUnknown {
+            field: "VerifiedReadAnswer",
+            observed: u32::from(observed),
+            offset,
+        }),
+    }
+}
+
+fn usize_to_u64(field: &'static str, value: usize) -> Result<u64, CodecRefusal> {
+    u64::try_from(value).map_err(|_| CodecRefusal::ValueUnrepresentable {
+        field,
+        observed: u64::MAX,
+        limit: u64::MAX,
+    })
+}
+
+fn u64_to_usize(field: &'static str, value: u64) -> Result<usize, CodecRefusal> {
+    usize::try_from(value).map_err(|_| CodecRefusal::ValueUnrepresentable {
+        field,
+        observed: value,
+        limit: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+    })
+}
+
 /// Successful membership verification under one exact pinned root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VerifiedMembership {
@@ -402,6 +831,9 @@ pub enum VerifiedReadRefusal {
     /// The configuration body does not identify to the pinned head's
     /// `configuration_root`.
     ConfigurationRootMismatch,
+    /// The canonical wire body was truncated, non-canonical, or otherwise
+    /// refused before a proof could be considered.
+    WireDecode(Box<CodecRefusal>),
     /// The selected layout does not admit a ref-state membership proof.
     RefLayout(Box<MerkleRefusal>),
     /// The Merkle path did not verify against the pinned root.
@@ -434,6 +866,7 @@ impl fmt::Display for VerifiedReadRefusal {
             Self::ConfigurationRootMismatch => formatter.write_str(
                 "the carried configuration body does not match the pinned head configuration root",
             ),
+            Self::WireDecode(refusal) => write!(formatter, "verified-read wire decode refused: {refusal}"),
             Self::RefLayout(refusal) => write!(formatter, "ref proof layout refused: {refusal}"),
             Self::ProofRejected => {
                 formatter.write_str("the claimed Merkle path does not verify against the pinned root")
