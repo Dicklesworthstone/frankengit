@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_admission::{
     AdmissionError, PermittedObjectClosure, QuarantineValidator, ValidatedClosure,
-    permitted_object_closure_root,
+    ValidatedReceive, permitted_object_closure_root, validate_receive,
 };
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject};
 use fgit_pack::{
@@ -19,7 +19,9 @@ use fgit_pack::{
     QuarantinedPack, ResolutionBudget, verify_native_object,
 };
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, RefusalCode};
-use fgit_wire::receive::{QuarantineReceipt, ReceiveError, ReceiveRequest};
+use fgit_wire::receive::{
+    QuarantineReceipt, ReceiveError, ReceiveQuarantineHandoff, ReceiveRequest,
+};
 
 use crate::{
     AuthoritySelectedClosure, MaterializedAdmission, NodeReceiveTransportRefusal, NodeRefusal,
@@ -35,6 +37,93 @@ use crate::{
 impl From<ReceiveError> for NodeReceiveTransportRefusal {
     fn from(error: ReceiveError) -> Self {
         Self::Admission(Box::new(AdmissionError::from(error)))
+    }
+}
+
+/// Synchronous production handoff from structural pack quarantine to one
+/// validated receive.
+///
+/// This object owns only the deterministic verification half of receive-pack.
+/// It runs while the quarantine and its transport deadline are still live,
+/// stores no raw pack bytes, and retains the private `ValidatedReceive` proof
+/// for the node's asynchronous durable-admission surface to consume later.
+#[derive(Debug)]
+pub(crate) struct ProductionReceiveQuarantineHandoff<'node> {
+    validator: ProductionQuarantineValidator<'node>,
+    validated: Option<ValidatedReceive>,
+}
+
+impl<'node> ProductionReceiveQuarantineHandoff<'node> {
+    /// Binds this one handoff to the validator reconstructed from one
+    /// authenticated materialization.
+    #[must_use]
+    pub(crate) fn new(validator: ProductionQuarantineValidator<'node>) -> Self {
+        Self {
+            validator,
+            validated: None,
+        }
+    }
+
+    /// Returns the validated receive retained after a successful handoff.
+    #[must_use]
+    pub(crate) const fn validated_receive(&self) -> Option<&ValidatedReceive> {
+        self.validated.as_ref()
+    }
+
+    fn validate(
+        &mut self,
+        request: &ReceiveRequest,
+        pack: Option<&QuarantinedPack>,
+        receipt: &QuarantineReceipt,
+        deadline: &mut impl Deadline,
+    ) -> Result<(), ReceiveError> {
+        if self.validated.is_some() {
+            return Err(ReceiveError::TerminalState {
+                state: fgit_wire::receive::ReceivePhase::Complete,
+            });
+        }
+        let validated = validate_receive(request, pack, receipt, &self.validator, deadline)
+            .map_err(ReceiveError::AuthoritativeRefusal)?;
+        self.validated = Some(validated);
+        Ok(())
+    }
+}
+
+impl ReceiveQuarantineHandoff for ProductionReceiveQuarantineHandoff<'_> {
+    fn handoff(
+        &mut self,
+        request: &ReceiveRequest,
+        pack: Option<&QuarantinedPack>,
+        receipt: &QuarantineReceipt,
+    ) -> Result<(), ReceiveError> {
+        // This legacy structural method has no cancellation owner. The raw
+        // receive path uses handoff_with_deadline below; direct deterministic
+        // verification remains bounded by the validator's resource limits.
+        let mut continuing = || true;
+        self.validate(request, pack, receipt, &mut continuing)
+    }
+
+    fn handoff_with_deadline(
+        &mut self,
+        request: &ReceiveRequest,
+        pack: Option<&QuarantinedPack>,
+        receipt: &QuarantineReceipt,
+        deadline: &mut dyn Deadline,
+    ) -> Result<(), ReceiveError> {
+        let mut forwarded = ForwardedDeadline { deadline };
+        self.validate(request, pack, receipt, &mut forwarded)
+    }
+}
+
+/// Sized adapter for the generic admission and pack APIs while preserving the
+/// transport-owned dynamic deadline identity.
+struct ForwardedDeadline<'deadline> {
+    deadline: &'deadline mut dyn Deadline,
+}
+
+impl Deadline for ForwardedDeadline<'_> {
+    fn checkpoint(&mut self) -> bool {
+        self.deadline.checkpoint()
     }
 }
 
@@ -863,6 +952,26 @@ mod tests {
             ),
             Err(RefusalCode::ObjectClosureIncomplete),
             "a command cannot name an OID other than the validator's exact closure"
+        );
+
+        let handoff_validator = node
+            .production_quarantine_validator(
+                &materialized,
+                PackLimits::default(),
+                ParseLimits::default(),
+            )
+            .expect("the same authenticated materialization supplies a handoff validator");
+        let mut handoff = ProductionReceiveQuarantineHandoff::new(handoff_validator);
+        let mut transport_live = || true;
+        handoff
+            .handoff_with_deadline(&request, Some(&pack), &quarantine, &mut transport_live)
+            .expect("the synchronous production handoff retains a validated receive");
+        assert_eq!(
+            handoff
+                .validated_receive()
+                .expect("successful handoff retains only its validated receive")
+                .request(),
+            &request
         );
         node.shutdown().expect("node shuts down after test");
     }
