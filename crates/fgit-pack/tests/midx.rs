@@ -14,7 +14,8 @@ use fgit_pack::{
     PackLimits,
 };
 use fgit_types::{
-    CodecVersion, DigestAlgorithmId, DigestBytes, GitOidSha1, RepositoryCommitId, RepositoryId,
+    CodecVersion, DigestAlgorithmId, DigestBytes, GitOidSha1, GitOidSha256, RepositoryCommitId,
+    RepositoryId,
 };
 
 const SHA1_BYTES: usize = 20;
@@ -301,5 +302,58 @@ fn midx_v1_emits_large_offsets_and_refuses_missing_source_and_bound_twins() {
         )
         .is_ok(),
         "the one-byte-larger output-bound twin proceeds"
+    );
+}
+
+/// A lookup identity in a different hash domain than the MIDX is refused,
+/// naming which subject was rejected (`frankengit-fg058`, decision D3).
+///
+/// `MidxRefusal::ObjectFormatMismatch` is raised from two places in this crate
+/// -- the write path checks each pack index, and this lookup path checks the
+/// queried identity -- and the two are distinguished only by the `subject` they
+/// carry. Asserting the bare variant would not establish which one refused, so
+/// the subject is pinned.
+#[test]
+fn a_lookup_identity_in_another_hash_domain_is_refused_naming_the_subject() {
+    let source_commit = oid(0x01);
+    let records = index(&[(source_commit, 40), (oid(0x02), 60)], oid(0x20));
+    let mut live = || true;
+    let midx = MidxV1::write(
+        source(source_commit),
+        &[records],
+        MidxLimits::default(),
+        &mut live,
+    )
+    .expect("a single-index MIDX over sorted native records materializes");
+
+    // Permitted twin: a lookup in the MIDX's own format resolves rather than
+    // refusing. Without it, this test would pass against a locate() that
+    // refused every identity, and could not tell that apart from a format
+    // guard doing its job.
+    let mut native_live = || true;
+    assert!(
+        midx.locate(&source_commit, &mut native_live).is_ok(),
+        "a lookup in the MIDX's own object format must not be refused"
+    );
+
+    // The refusal: same query shape, identity minted in the other domain.
+    let foreign = ObjectId::from(GitOidSha256::from_bytes([0x01; 32]));
+    let mut foreign_live = || true;
+    let refusal = midx
+        .locate(&foreign, &mut foreign_live)
+        .expect_err("a lookup identity from another hash domain cannot be located here");
+
+    assert!(
+        matches!(
+            &refusal,
+            MidxRefusal::ObjectFormatMismatch {
+                subject,
+                expected,
+                observed,
+            } if *subject == "lookup object"
+                && *expected == ObjectFormat::Sha1
+                && *observed == ObjectFormat::Sha256
+        ),
+        "the refusal must name the lookup subject and both formats, got {refusal:?}"
     );
 }
