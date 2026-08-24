@@ -75,28 +75,37 @@ pub struct MergeAttempt {
     pub workspace_epoch: WorkspaceEpoch,
 }
 
-/// The tips actually observed when the effect is about to be admitted.
+/// The state actually observed when the effect is about to be admitted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservedTips {
     /// Source tip right now.
     pub source_tip: Digest,
     /// Target tip right now.
     pub target_tip: Digest,
+    /// Workspace epoch right now.
+    pub workspace_epoch: WorkspaceEpoch,
 }
 
 impl MergeAttempt {
-    /// Refuses when either ref has moved since the merge was computed.
+    /// Refuses when anything the merge was computed against has moved.
     ///
-    /// Both sides are checked, and the source is checked first only so the
-    /// refusal is deterministic when both have moved. A moved source means the
-    /// merge produced a tree for content nobody asked to merge; a moved target
-    /// means it produced a tree against a base that is no longer the target's
-    /// state. Neither is repairable by retrying the admission with the same
-    /// result, which is why this is a refusal and not a conflict.
+    /// Three axes, checked in a fixed order so the refusal is deterministic
+    /// when more than one has moved: source ref, target ref, then the
+    /// workspace the computation ran in. A moved source means the merge
+    /// produced a tree for content nobody asked to merge; a moved target means
+    /// it produced a tree against a base that is no longer the target's state;
+    /// a moved workspace means the tree was computed over content the
+    /// workspace no longer holds. None is repairable by retrying the admission
+    /// with the same result, which is why each is a refusal and not a conflict.
+    ///
+    /// The workspace axis is what makes the epoch a binding rather than a
+    /// label. Recorded and never read, it would be a decorative dependency:
+    /// deleting the field would break no test and change no decision.
     ///
     /// # Errors
     ///
-    /// [`ForgeRefusal::MergeStale`] naming which side moved.
+    /// [`ForgeRefusal::MergeStale`] naming which ref moved, or
+    /// [`ForgeRefusal::WorkspaceMoved`] when the workspace advanced.
     pub fn check_fresh(&self, observed: &ObservedTips) -> Result<(), ForgeRefusal> {
         if observed.source_tip != self.source_tip {
             return Err(ForgeRefusal::MergeStale {
@@ -114,6 +123,12 @@ impl MergeAttempt {
                     computed_against: self.target_tip,
                     observed: observed.target_tip,
                 }),
+            });
+        }
+        if observed.workspace_epoch != self.workspace_epoch {
+            return Err(ForgeRefusal::WorkspaceMoved {
+                computed_in: self.workspace_epoch,
+                observed: observed.workspace_epoch,
             });
         }
         Ok(())

@@ -81,6 +81,18 @@ pub enum ForgeRefusal {
         /// variant on its success path too.
         tips: Box<StaleTips>,
     },
+    /// The workspace advanced after the merge was computed in it.
+    ///
+    /// Supervision means the result is a statement about one workspace at one
+    /// epoch. If the workspace has moved on, the tree was computed over content
+    /// that is no longer what the workspace holds, and admitting it would
+    /// publish a merge nobody can reproduce from the state it names.
+    WorkspaceMoved {
+        /// Epoch the merge was computed in.
+        computed_in: WorkspaceEpoch,
+        /// Epoch observed at admission time.
+        observed: WorkspaceEpoch,
+    },
     /// The three-way merge produced conflicts, so there is no tree to commit.
     MergeConflicted {
         /// How many paths conflicted.
@@ -156,6 +168,15 @@ impl fmt::Display for ForgeRefusal {
                 "{reference} ref moved from {:?} to {:?} after the merge was computed",
                 tips.computed_against, tips.observed
             ),
+            Self::WorkspaceMoved {
+                computed_in,
+                observed,
+            } => write!(
+                formatter,
+                "workspace advanced from epoch {} to {} after the merge was computed in it",
+                computed_in.get(),
+                observed.get()
+            ),
             Self::MergeConflicted { paths } => {
                 write!(formatter, "three-way merge left {paths} conflicted paths")
             }
@@ -177,4 +198,5 @@ impl core::error::Error for ForgeRefusal {}
 
 use fgit_codec::CodecRefusal;
 use fgit_diff::TreeMergeError;
+use fgit_treefs::WorkspaceEpoch;
 use fgit_types::Digest;

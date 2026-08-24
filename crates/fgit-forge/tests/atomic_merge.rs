@@ -268,6 +268,7 @@ fn a_merge_whose_source_or_target_moved_is_refused_naming_the_side_that_moved() 
         attempt.check_fresh(&ObservedTips {
             source_tip: digest(0x31),
             target_tip: digest(0x40),
+            workspace_epoch: WorkspaceEpoch::from_u64(9),
         }),
         Err(ForgeRefusal::MergeStale {
             reference: MergeSide::Source,
@@ -284,6 +285,7 @@ fn a_merge_whose_source_or_target_moved_is_refused_naming_the_side_that_moved() 
         attempt.check_fresh(&ObservedTips {
             source_tip: digest(0x30),
             target_tip: digest(0x41),
+            workspace_epoch: WorkspaceEpoch::from_u64(9),
         }),
         Err(ForgeRefusal::MergeStale {
             reference: MergeSide::Target,
@@ -299,6 +301,7 @@ fn a_merge_whose_source_or_target_moved_is_refused_naming_the_side_that_moved() 
         attempt.check_fresh(&ObservedTips {
             source_tip: digest(0x30),
             target_tip: digest(0x40),
+            workspace_epoch: WorkspaceEpoch::from_u64(9),
         }),
         Ok(())
     );
@@ -469,5 +472,64 @@ fn the_event_declares_its_registered_domain_and_schema() {
     assert_eq!(
         ForgeEventBatch::DOMAIN.as_str(),
         "frankengit/forge-event-batch/v1"
+    );
+}
+
+/// The workspace epoch is a binding, not a label.
+///
+/// Before this test existed the field was written by every caller and read by
+/// nobody: deleting it would have broken no assertion and changed no decision,
+/// which is the definition of a decorative dependency. The refusal below is
+/// what makes `fgit-treefs` load-bearing here rather than merely imported.
+#[test]
+fn a_merge_computed_in_a_workspace_that_has_since_advanced_is_refused() {
+    let attempt = attempt();
+
+    // Forbidden: both refs are exactly where the merge left them, so the two
+    // tip axes pass and only the workspace has moved. That isolation is the
+    // point -- a test that also moved a tip would pass on a build that ignored
+    // the epoch entirely.
+    assert_eq!(
+        attempt.check_fresh(&ObservedTips {
+            source_tip: digest(0x30),
+            target_tip: digest(0x40),
+            workspace_epoch: WorkspaceEpoch::from_u64(10),
+        }),
+        Err(ForgeRefusal::WorkspaceMoved {
+            computed_in: WorkspaceEpoch::from_u64(9),
+            observed: WorkspaceEpoch::from_u64(10),
+        }),
+        "a tree computed over content the workspace no longer holds cannot be admitted"
+    );
+
+    // Permitted twin: the same call at the epoch the merge was computed in.
+    assert_eq!(
+        attempt.check_fresh(&ObservedTips {
+            source_tip: digest(0x30),
+            target_tip: digest(0x40),
+            workspace_epoch: WorkspaceEpoch::from_u64(9),
+        }),
+        Ok(())
+    );
+}
+
+/// When more than one axis has moved the refusal is deterministic.
+#[test]
+fn a_ref_that_moved_is_reported_before_a_workspace_that_also_moved() {
+    let attempt = attempt();
+    assert_eq!(
+        attempt.check_fresh(&ObservedTips {
+            source_tip: digest(0x31),
+            target_tip: digest(0x40),
+            workspace_epoch: WorkspaceEpoch::from_u64(10),
+        }),
+        Err(ForgeRefusal::MergeStale {
+            reference: MergeSide::Source,
+            tips: Box::new(StaleTips {
+                computed_against: digest(0x30),
+                observed: digest(0x31),
+            }),
+        }),
+        "the fixed order is source, target, workspace"
     );
 }
