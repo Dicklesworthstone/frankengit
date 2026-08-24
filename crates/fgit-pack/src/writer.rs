@@ -1458,7 +1458,20 @@ mod tests {
 
     #[test]
     fn compressed_profile_reduces_a_repetitive_pack_without_changing_objects() {
-        let body = vec![b'x'; 8 * 1024];
+        let mut state = 0x7d41_a9c3_u32;
+        let mut seed = Vec::new();
+        seed.try_reserve_exact(2 * 1024)
+            .expect("fixed test seed allocation fits");
+        for _ in 0..2 * 1024 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed.push((state >> 24) as u8);
+        }
+        let mut body = Vec::new();
+        body.try_reserve_exact(8 * 1024)
+            .expect("fixed test body allocation fits");
+        for _ in 0..4 {
+            body.extend_from_slice(&seed);
+        }
         let blob = object(ObjectType::Blob, &body, 1, 7);
         let source = FixtureSource::with(vec![blob.clone()]);
         let roots = [blob.id()];
