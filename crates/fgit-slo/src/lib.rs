@@ -257,13 +257,19 @@ pub fn throughput_block(
 ///
 /// Integer arithmetic on purpose: a float here would invite a printed rate with
 /// more precision than the measurement supports.
+///
+/// Both conversions are checked rather than cast. The widening is
+/// `u128::from`, which cannot lose anything; the narrowing is `try_from` with
+/// an explicit saturation, because a truncating `as` would wrap an
+/// impossibly-large rate into a small plausible-looking one -- and a wrong rate
+/// that looks reasonable is worse here than an obviously pegged one.
 #[must_use]
-pub const fn ops_per_second(served: u64, elapsed_ns: u128) -> u64 {
+pub fn ops_per_second(served: u64, elapsed_ns: u128) -> u64 {
     if elapsed_ns == 0 {
         return 0;
     }
-    let rate = (served as u128).saturating_mul(1_000_000_000) / elapsed_ns;
-    rate as u64
+    let rate = u128::from(served).saturating_mul(1_000_000_000) / elapsed_ns;
+    u64::try_from(rate).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

@@ -257,7 +257,7 @@ fn measure_cell_count(count: u64, root: &Path, samples: u32) -> Result<(), Strin
 fn sweep_saturation(root: &Path, cells_wanted: u64, samples: u32) -> Result<(), String> {
     let scratch = root.join("saturation");
     std::fs::create_dir_all(&scratch).map_err(|error| format!("scratch root: {error}"))?;
-    let (mut first, companions) = open_cells(&scratch, cells_wanted)?;
+    let (first, companions) = open_cells(&scratch, cells_wanted)?;
 
     let mut cells = vec![first];
     cells.extend(companions);
@@ -295,22 +295,24 @@ fn sweep_saturation(root: &Path, cells_wanted: u64, samples: u32) -> Result<(), 
             saturated_at = Some(concurrency);
         }
 
+        // Computed once and checked, rather than cast twice at two call sites
+        // that could drift apart.
+        let offered = u64::try_from(concurrency)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::from(samples));
         emit(&[
             ("record", quoted("saturation_point")),
             ("cells", cells.len().to_string()),
             ("concurrency", concurrency.to_string()),
             ("reads_per_reader", samples.to_string()),
-            (
-                "offered",
-                (concurrency as u64 * u64::from(samples)).to_string(),
-            ),
+            ("offered", offered.to_string()),
             ("served_a", served_a.to_string()),
             ("served_b", served_b.to_string()),
             // A shortfall here means some reader hit a cell that refused, which
             // makes the rate a rate for FEWER cells than the record claims.
             (
                 "all_offered_reads_served",
-                (served_a == concurrency as u64 * u64::from(samples)).to_string(),
+                (served_a == offered).to_string(),
             ),
             ("ops_per_second_a", rate_a.to_string()),
             ("ops_per_second_b", rate_b.to_string()),
