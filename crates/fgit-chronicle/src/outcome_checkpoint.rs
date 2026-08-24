@@ -9,10 +9,11 @@
 use core::fmt;
 
 use fgit_authority::{
-    AsyncAuthorityStore, AuthorityFailure, AuthorityStore, CumulativeOutcomes, HeadKey, HeadRead,
-    ImmutableRead, OutcomeFailure, PutOutcome, body_key_for_id, canonical_outcome_index_decisions,
-    collect_cumulative_outcomes, collect_cumulative_outcomes_async,
-    collect_cumulative_outcomes_from_checkpoint, collect_cumulative_outcomes_from_checkpoint_async,
+    AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityStore, CumulativeOutcomes,
+    HeadKey, HeadRead, ImmutableRead, OutcomeFailure, PutOutcome, body_key_for_id,
+    canonical_outcome_index_decisions, collect_cumulative_outcomes,
+    collect_cumulative_outcomes_async, collect_cumulative_outcomes_from_checkpoint,
+    collect_cumulative_outcomes_from_checkpoint_async,
 };
 use fgit_codec::attest::{BodyIdentity, body_id};
 use fgit_codec::{
@@ -538,6 +539,40 @@ where
     };
     let head: fgit_codec::RepositoryAuthorityHeadBody =
         decode_body(receipt.body(), DecodeLimits::DEFAULT)?;
+    collect_cumulative_outcomes_from_checkpoint_hint(store, identity, head_key, &head)
+}
+
+/// Collects outcome-index leaves using a head that the caller already
+/// authenticated for its publication basis.
+///
+/// Admission reads and authenticates one exact basis before it resolves the
+/// cumulative index. Reusing that head for the optional capsule hint avoids a
+/// speculative extra `read_head` while the baseline collector retains its own
+/// read, preserving the recovery transcript and its version binding.
+pub fn collect_cumulative_outcomes_from_authenticated_capsule_checkpoint<S, I>(
+    store: &S,
+    identity: &I,
+    head_key: &HeadKey,
+    authenticated_head: &AuthenticatedHead,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized,
+{
+    let head = authenticated_head.body()?;
+    collect_cumulative_outcomes_from_checkpoint_hint(store, identity, head_key, &head)
+}
+
+fn collect_cumulative_outcomes_from_checkpoint_hint<S, I>(
+    store: &S,
+    identity: &I,
+    head_key: &HeadKey,
+    head: &fgit_codec::RepositoryAuthorityHeadBody,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized,
+{
     let Some(capsule_id) = head.last_checkpoint_id else {
         return collect_cumulative_outcomes(store, head_key);
     };
@@ -590,6 +625,39 @@ where
     };
     let head: fgit_codec::RepositoryAuthorityHeadBody =
         decode_body(receipt.body(), DecodeLimits::DEFAULT)?;
+    collect_cumulative_outcomes_from_checkpoint_hint_async(store, cx, identity, head_key, &head)
+        .await
+}
+
+/// Asynchronous sibling of
+/// [`collect_cumulative_outcomes_from_authenticated_capsule_checkpoint`].
+pub async fn collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async<S, I>(
+    store: &S,
+    cx: &S::Context,
+    identity: &I,
+    head_key: &HeadKey,
+    authenticated_head: &AuthenticatedHead,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized + Sync,
+{
+    let head = authenticated_head.body()?;
+    collect_cumulative_outcomes_from_checkpoint_hint_async(store, cx, identity, head_key, &head)
+        .await
+}
+
+async fn collect_cumulative_outcomes_from_checkpoint_hint_async<S, I>(
+    store: &S,
+    cx: &S::Context,
+    identity: &I,
+    head_key: &HeadKey,
+    head: &fgit_codec::RepositoryAuthorityHeadBody,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized + Sync,
+{
     let Some(capsule_id) = head.last_checkpoint_id else {
         return collect_cumulative_outcomes_async(store, cx, head_key).await;
     };

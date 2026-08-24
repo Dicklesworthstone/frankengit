@@ -91,6 +91,8 @@ pub use live::{
 pub use origin::{PublicationBasis, ResultingRoots};
 pub use outcome_checkpoint::{
     MAX_CHECKPOINT_PREDECESSORS, OutcomeIndexCheckpointBody, OutcomeIndexCheckpointRefusal,
+    collect_cumulative_outcomes_from_authenticated_capsule_checkpoint,
+    collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async,
     collect_cumulative_outcomes_from_capsule_checkpoint,
     collect_cumulative_outcomes_from_capsule_checkpoint_async, load_outcome_index_checkpoint,
     load_outcome_index_checkpoint_async, outcome_index_checkpoint_root,

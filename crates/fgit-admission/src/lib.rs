@@ -28,8 +28,8 @@ use fgit_authority::{
 };
 use fgit_chronicle::{
     PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots,
-    collect_cumulative_outcomes_from_capsule_checkpoint,
-    collect_cumulative_outcomes_from_capsule_checkpoint_async, publish,
+    collect_cumulative_outcomes_from_authenticated_capsule_checkpoint,
+    collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async, publish,
 };
 use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, Decoder, Encoder, RefusalRecordBody,
@@ -2366,11 +2366,13 @@ where
             return Ok(terminal);
         }
         let (basis, receipt, authenticated) = read_basis(store, &context.head_key)?;
-        let cumulative_outcomes = collect_cumulative_outcomes_from_capsule_checkpoint(
-            store,
-            &CryptoBodyIdentity,
-            &context.head_key,
-        )?;
+        let cumulative_outcomes =
+            collect_cumulative_outcomes_from_authenticated_capsule_checkpoint(
+                store,
+                &CryptoBodyIdentity,
+                &context.head_key,
+                &authenticated,
+            )?;
         if cumulative_outcomes.observed() != receipt.token() {
             continue;
         }
@@ -3116,13 +3118,15 @@ where
         }
         let (basis, receipt, authenticated) =
             read_basis_async(store, cx, &context.head_key).await?;
-        let cumulative_outcomes = collect_cumulative_outcomes_from_capsule_checkpoint_async(
-            store,
-            cx,
-            &CryptoBodyIdentity,
-            &context.head_key,
-        )
-        .await?;
+        let cumulative_outcomes =
+            collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async(
+                store,
+                cx,
+                &CryptoBodyIdentity,
+                &context.head_key,
+                &authenticated,
+            )
+            .await?;
         if cumulative_outcomes.observed() != receipt.token() {
             continue;
         }

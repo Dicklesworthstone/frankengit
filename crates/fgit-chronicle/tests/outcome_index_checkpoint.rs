@@ -8,7 +8,7 @@ use fgit_authority::{
 use fgit_chronicle::{
     BackupProfile, CapsuleClosure, LiveCapsuleRefusal, OutcomeIndexCheckpointBody,
     PublicationBasis, PublicationPlan, ResultingRoots, activate_frozen_capsule,
-    collect_cumulative_outcomes_from_capsule_checkpoint,
+    collect_cumulative_outcomes_from_authenticated_capsule_checkpoint,
     freeze_capsule_with_outcome_index_checkpoint,
 };
 use fgit_codec::{CryptoBodyIdentity, DecodeLimits, RepositoryAuthorityHeadBody, decode_body};
@@ -183,9 +183,16 @@ fn capsule_bound_checkpoint_replays_only_the_tail_and_preserves_the_root() {
     let activated = activate_frozen_capsule(&store, &first_receipt, &frozen)
         .expect("the capsule pointer advances only after staging");
 
-    let checkpointed =
-        collect_cumulative_outcomes_from_capsule_checkpoint(&store, &CryptoBodyIdentity, &key)
-            .expect("a capsule-bound checkpoint is usable evidence");
+    let authenticated = store
+        .authenticate_head_receipt(activated.head())
+        .expect("activated head receipt authenticates");
+    let checkpointed = collect_cumulative_outcomes_from_authenticated_capsule_checkpoint(
+        &store,
+        &CryptoBodyIdentity,
+        &key,
+        &authenticated,
+    )
+    .expect("a capsule-bound checkpoint is usable evidence");
     assert_eq!(
         checkpointed
             .checkpoint_decisions_against(activated.head().token())
@@ -234,9 +241,16 @@ fn capsule_bound_checkpoint_replays_only_the_tail_and_preserves_the_root() {
         HeadRead::Present(receipt) => receipt,
         HeadRead::Absent => panic!("published tail head is present"),
     };
-    let folded_tail =
-        collect_cumulative_outcomes_from_capsule_checkpoint(&store, &CryptoBodyIdentity, &key)
-            .expect("checkpoint leaves plus the new tail collect");
+    let authenticated_tail = store
+        .authenticate_head_receipt(&tail_receipt)
+        .expect("tail head receipt authenticates");
+    let folded_tail = collect_cumulative_outcomes_from_authenticated_capsule_checkpoint(
+        &store,
+        &CryptoBodyIdentity,
+        &key,
+        &authenticated_tail,
+    )
+    .expect("checkpoint leaves plus the new tail collect");
     let folded_decisions = folded_tail
         .checkpoint_decisions_against(tail_receipt.token())
         .expect("folded checkpoint-plus-tail decisions remain token-bound");
