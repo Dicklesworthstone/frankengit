@@ -129,7 +129,7 @@ where
                     limits.object_size(data.len())?
                 }
                 PackObject::Delta(delta) => limits.input(delta.program.len())?,
-            }
+            };
         }
         Ok(Self {
             objects,
@@ -642,15 +642,15 @@ where
         deadline: &mut impl Deadline,
     ) -> Result<TypedResolution, PackError> {
         checkpoint(deadline)?;
-        if let Some(cached) = self.cached(object.offset()) {
-            if let Some(object_type) = cached.object_type {
-                accounting.add_expanded(cached.logical_expanded, self.scalar.limits)?;
-                accounting.add_work(cached.logical_work, self.scalar.limits)?;
-                return Ok(TypedResolution {
-                    object_type,
-                    bytes: copy_bytes(&cached.bytes, deadline)?,
-                });
-            }
+        if let Some(cached) = self.cached(object.offset())
+            && let Some(object_type) = cached.object_type
+        {
+            accounting.add_expanded(cached.logical_expanded, self.scalar.limits)?;
+            accounting.add_work(cached.logical_work, self.scalar.limits)?;
+            return Ok(TypedResolution {
+                object_type,
+                bytes: copy_bytes(&cached.bytes, deadline)?,
+            });
         }
         let expanded_before = accounting.expanded;
         let work_before = accounting.work;
