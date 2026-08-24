@@ -66,10 +66,17 @@
 //! * **This is a bounded-model result, not an invariant.** It ranges over the
 //!   fault directives in [`directives`], crossed with every operation position
 //!   a clean admission reaches. It does not quantify over all schedules.
-//! * **Acceptance line 3 is NOT discharged here.** Exactly-one-winner over ref
-//!   state needs a head-bound projection. What these probes cover is the
-//!   narrower decide-once property: one sealed transaction acquires at most one
-//!   terminal decision under a duplicated CAS or a lost response.
+//! * **Acceptance line 3 is NOT discharged here, and the REASON changed.** It
+//!   used to be that exactly-one-winner over ref state needed a head-bound
+//!   projection. That projection now exists and is used:
+//!   [`two_sessions_deleting_one_ref_yield_exactly_one_commit_and_a_typed_loser`]
+//!   drives `CanonicalAdmissionProjection` and asserts exactly one commit plus a
+//!   typed `ExpectedOldRefMismatch` loser. What is still missing is a
+//!   CONCURRENT schedule: those two admissions run back to back, so the result
+//!   holds for a deterministic ordering and says nothing about interleavings.
+//!   That is a fixture limit rather than an unwritten test -- `StagingStore`
+//!   holds an `Rc`, so the projection is not `Send`. Stated precisely because
+//!   the old wording would send a reader to build a slice that already exists.
 //! * **No adapter here is the production projection**, so no ref-policy
 //!   question — whether a losing push is refused `ExpectedOldRefMismatch` or
 //!   permitted — is answered.
@@ -1102,8 +1109,9 @@ fn a_duplicated_head_cas_does_not_decide_one_push_twice() {
 /// What is left is what never depended on the adapter: two sessions with
 /// different idempotency keys are different transactions, and each one's
 /// reported outcome is the one the authenticated decision stream holds for its
-/// own `TxId`. Ref contention is not tested here and needs a head-bound
-/// projection.
+/// own `TxId`. Ref contention is not tested here -- it is tested by
+/// [`two_sessions_deleting_one_ref_yield_exactly_one_commit_and_a_typed_loser`],
+/// against the head-bound projection this test's adapter deliberately is not.
 #[test]
 fn two_sessions_seal_distinct_transactions_each_answered_from_its_own_decision() {
     let first_context = context(b"fg019c-session-a");
@@ -1160,10 +1168,13 @@ fn two_sessions_seal_distinct_transactions_each_answered_from_its_own_decision()
 
     // Each session reports exactly one status, and it is derived from that
     // session's own authenticated terminal decision. WHICH status it is depends
-    // on ref policy owned by the absent head-bound projection, so it is not
-    // asserted; that one command yields one status derived from a decision at
-    // all is a property of `command_statuses`, which deliberately has no route
-    // from a pack receipt.
+    // on ref policy, which THIS test's unbound adapter does not model -- the
+    // head-bound projection that does is exercised by
+    // `two_sessions_deleting_one_ref_yield_exactly_one_commit_and_a_typed_loser`
+    // instead. ("absent" was the old wording here and is no longer true.) That
+    // one command yields one status derived from a decision at all is a
+    // property of `command_statuses`, which deliberately has no route from a
+    // pack receipt.
     assert_eq!(first.command_statuses().len(), 1, "one command, one status");
     assert_eq!(
         second.command_statuses().len(),
