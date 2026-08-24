@@ -109,6 +109,7 @@ mod mac;
 mod merkle;
 mod native;
 mod registry;
+mod rendezvous;
 mod schemes;
 mod screened;
 mod signing;
@@ -162,6 +163,7 @@ pub use registry::{
     DigestAlgorithm, DomainRow, IdentityDomain, InternalDigestAlgorithm, NonIdentityTag,
     RESERVED_NON_IDENTITY_TAGS, RowStatus,
 };
+pub use rendezvous::{combiner_order, placement_score, preferred_combiner};
 pub use schemes::{
     AEAD_SCHEME_REGISTRY, AeadSchemeRow, ED25519_CODE_POINT, SIGNATURE_SCHEME_REGISTRY,
     SIGNATURE_SCHEME_RESERVED_CODE_POINTS, SignatureSchemeError, SignatureSchemeRow,
