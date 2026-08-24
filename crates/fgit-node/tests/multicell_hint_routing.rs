@@ -40,11 +40,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_authority::StoreInstanceId;
 use fgit_crypto::preferred_combiner;
+use fgit_git_object::ObjectType;
 use fgit_node::{NodeConfig, OneNode};
 use fgit_types::gossip::GossipView;
 use fgit_types::numeric::HeadGeneration;
 use fgit_types::routing::PlacementCandidate;
-use fgit_types::{RepositoryId, TenantId};
+use fgit_types::{GitOid, RepositoryId, TenantId};
 
 static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -257,6 +258,167 @@ fn a_lying_peer_cannot_change_what_a_cell_serves() {
     let _ = verified;
 
     for node in [first, second] {
+        node.shutdown().expect("a cell closes to quiescence");
+    }
+}
+
+/// The read workload: object bodies placed by one cell and read from the others.
+const WORKLOAD: [&[u8]; 4] = [
+    b"fg036a multicell body one\n",
+    b"fg036a multicell body two\n",
+    b"fg036a multicell body three\n",
+    b"",
+];
+
+#[test]
+fn every_cell_reads_the_same_bytes_from_the_shared_fabric() {
+    // The other half of the deployment shape: one authority backend AND one
+    // object fabric. A cell that placed nothing must still serve what a peer
+    // placed, byte for byte, or "shared fabric" is not what the storage root is.
+    let scratch = ScratchDirectory::new();
+    let (writer, _initialization) =
+        OneNode::init(config(scratch.0.clone(), 1)).expect("the writing cell initializes");
+    let reader_one = OneNode::open_existing(config(scratch.0.clone(), 2)).expect("a second cell");
+    let reader_two = OneNode::open_existing(config(scratch.0.clone(), 3)).expect("a third cell");
+
+    let placed: Vec<GitOid> = WORKLOAD
+        .iter()
+        .map(|body| {
+            writer
+                .put_git_object(ObjectType::Blob, body.to_vec())
+                .expect("the writing cell places the object")
+                .identity()
+        })
+        .collect();
+
+    for (identity, expected) in placed.iter().zip(WORKLOAD) {
+        let from_writer = writer
+            .read_git_object(*identity)
+            .expect("the writer reads back");
+        assert_eq!(from_writer.payload(), expected);
+
+        for (label, reader) in [("second", &reader_one), ("third", &reader_two)] {
+            let read = reader
+                .read_git_object(*identity)
+                .unwrap_or_else(|refusal| panic!("the {label} cell must see it: {refusal:?}"));
+            assert_eq!(
+                read.payload(),
+                expected,
+                "the {label} cell read different bytes for {identity:?}"
+            );
+            assert_eq!(
+                read.identity(),
+                *identity,
+                "and the identity it verifies must be the one that was asked for"
+            );
+        }
+    }
+
+    for node in [writer, reader_one, reader_two] {
+        node.shutdown().expect("a cell closes to quiescence");
+    }
+}
+
+#[test]
+fn routing_and_gossip_do_not_change_which_bytes_come_back() {
+    // The differential proper, at the node boundary and over a real read
+    // workload: no hints, accurate location hints, and poisoned ones. What a
+    // client ends up holding must be identical in all three.
+    let scratch = ScratchDirectory::new();
+    let (writer, _initialization) =
+        OneNode::init(config(scratch.0.clone(), 1)).expect("the writing cell initializes");
+    let second = OneNode::open_existing(config(scratch.0.clone(), 2)).expect("a second cell");
+    let third = OneNode::open_existing(config(scratch.0.clone(), 3)).expect("a third cell");
+    let cells = [
+        (CELL_IDS[0], &writer),
+        (CELL_IDS[1], &second),
+        (CELL_IDS[2], &third),
+    ];
+
+    let placed: Vec<GitOid> = WORKLOAD
+        .iter()
+        .map(|body| {
+            writer
+                .put_git_object(ObjectType::Blob, body.to_vec())
+                .expect("placed")
+                .identity()
+        })
+        .collect();
+
+    // Arm 1: no hints. Always ask the first cell.
+    let without: Vec<Vec<u8>> = placed
+        .iter()
+        .map(|identity| {
+            writer
+                .read_git_object(*identity)
+                .expect("read")
+                .payload()
+                .to_vec()
+        })
+        .collect();
+
+    // Arm 2: routing hints. Ask whichever cell the placement function prefers
+    // for that object identity.
+    let with_routing: Vec<Vec<u8>> = placed
+        .iter()
+        .map(|identity| {
+            let key = format!("{identity}");
+            let preferred = *preferred_combiner(&CELL_IDS, key.as_bytes()).expect("a preference");
+            let node = cells
+                .iter()
+                .find(|(id, _)| *id == preferred)
+                .map(|(_, node)| *node)
+                .expect("the preferred cell is one of ours");
+            node.read_git_object(*identity)
+                .expect("read")
+                .payload()
+                .to_vec()
+        })
+        .collect();
+
+    // Arm 3: a poisoned location hint sends every read to the cell that placed
+    // nothing itself. Since the fabric is shared, that is still correct -- and
+    // the point is that being wrong about WHERE cannot be wrong about WHAT.
+    let mut gossip: GossipView<&'static str, &'static str> = GossipView::with_capacity(4);
+    gossip.observe("everything", "cell-3").expect("fits");
+    let lied_to = *gossip
+        .claim_of(&"everything")
+        .expect("present")
+        .verified_by(|candidate| {
+            if CELL_IDS.iter().any(|cell| cell.0 == **candidate) {
+                Ok(())
+            } else {
+                Err("no such cell")
+            }
+        })
+        .expect("the named cell exists");
+    let with_poison: Vec<Vec<u8>> = placed
+        .iter()
+        .map(|identity| {
+            let node = cells
+                .iter()
+                .find(|(id, _)| id.0 == lied_to)
+                .map(|(_, node)| *node)
+                .expect("the gossiped cell");
+            node.read_git_object(*identity)
+                .expect("read")
+                .payload()
+                .to_vec()
+        })
+        .collect();
+
+    assert_eq!(without, with_routing, "routing must not change the bytes");
+    assert_eq!(without, with_poison, "nor must a misleading location");
+    assert_eq!(
+        without,
+        WORKLOAD
+            .iter()
+            .map(|body| body.to_vec())
+            .collect::<Vec<_>>(),
+        "and all three arms must return what was actually placed"
+    );
+
+    for node in [writer, second, third] {
         node.shutdown().expect("a cell closes to quiescence");
     }
 }
