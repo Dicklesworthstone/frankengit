@@ -65,6 +65,7 @@ pub mod capsule;
 mod evidence;
 pub mod live;
 pub mod origin;
+pub mod outcome_checkpoint;
 pub mod publish;
 pub mod recovery;
 pub mod refusal;
@@ -83,9 +84,19 @@ pub use live::{
     CapsuleInspectionRefusal, FrozenCapsule, LiveCapsuleRefusal, ReplayCompleteness,
     RestoreExecutionRefusal, RestoredAuthorityBoundary, activate_frozen_capsule,
     activate_frozen_capsule_async, export_frozen_capsule, freeze_capsule, freeze_capsule_async,
+    freeze_capsule_with_outcome_index_checkpoint,
+    freeze_capsule_with_outcome_index_checkpoint_async,
     inspect_capsule_against_authority_head_bytes, inspect_capsule_bytes, restore_attested_backup,
 };
 pub use origin::{PublicationBasis, ResultingRoots};
+pub use outcome_checkpoint::{
+    MAX_CHECKPOINT_PREDECESSORS, OutcomeIndexCheckpointBody, OutcomeIndexCheckpointRefusal,
+    collect_cumulative_outcomes_from_capsule_checkpoint,
+    collect_cumulative_outcomes_from_capsule_checkpoint_async, load_outcome_index_checkpoint,
+    load_outcome_index_checkpoint_async, outcome_index_checkpoint_root,
+    stage_outcome_index_checkpoint, stage_outcome_index_checkpoint_async,
+    verify_outcome_index_checkpoint_chain, verify_outcome_index_checkpoint_chain_async,
+};
 pub use publish::{
     CanonicalBatchReceipt, LostCandidate, PublicationVerdict, publish, publish_async,
 };

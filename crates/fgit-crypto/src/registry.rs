@@ -498,6 +498,8 @@ pub enum IdentityDomain {
     /// other body class would let an attacker change the interpretation of
     /// every root at once.
     RepositoryConfiguration,
+    /// One retained leaf-set checkpoint for the cumulative outcome index.
+    OutcomeIndexCheckpoint,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -783,6 +785,12 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/repository-configuration/v1",
         None,
     ),
+    owned_row(
+        45,
+        IdentityDomain::OutcomeIndexCheckpoint,
+        "frankengit/outcome-index-checkpoint/v1",
+        Some("DUR-018"),
+    ),
 ];
 
 const fn pinned_row(
@@ -1014,6 +1022,7 @@ impl IdentityDomain {
         Self::RetentionDelta,
         Self::AdmissionRefusalEvidence,
         Self::RepositoryConfiguration,
+        Self::OutcomeIndexCheckpoint,
     ];
 
     /// Compile-time completeness guard for [`IdentityDomain::ALL`].
@@ -1079,7 +1088,8 @@ impl IdentityDomain {
             | Self::OutboxEffectBatch
             | Self::RetentionDelta
             | Self::AdmissionRefusalEvidence
-            | Self::RepositoryConfiguration => (),
+            | Self::RepositoryConfiguration
+            | Self::OutcomeIndexCheckpoint => (),
         }
     }
 

@@ -31,7 +31,7 @@ use crate::vocabulary::AuthenticatedHead;
 use fgit_codec::wire::encode_body;
 use fgit_codec::{
     CodecRefusal, DecodeLimits, Decoder, Encoder, RepositoryAuthorityHeadBody,
-    RepositoryConfigurationBody, RepositoryDecisionBatchBody, decode_body,
+    RepositoryConfigurationBody, RepositoryDecision, RepositoryDecisionBatchBody, decode_body,
 };
 use fgit_crypto::{
     IdentityDomain, MerkleProof, MerkleRefusal, RefStateNonMembershipProof, merkle_leaf,
@@ -117,6 +117,16 @@ pub enum OutcomeFailure {
         /// The bound.
         limit: usize,
     },
+    /// A retained checkpoint does not name a complete decision-log position.
+    ///
+    /// The checkpoint is evidence for one exact tail. Reaching a head with the
+    /// same batch identity but a different decision sequence, or reaching
+    /// genesis before the named tail, would otherwise make a partial leaf set
+    /// look complete.
+    CheckpointPositionMismatch,
+    /// A checkpoint leaf set does not reproduce the authenticated root at the
+    /// position it claims to summarize.
+    CheckpointRootMismatch,
     /// The bytes stored under a body's own identity key are a different body.
     ///
     /// A body key is derived from the body's canonical identity, so the store
@@ -261,6 +271,12 @@ impl core::fmt::Display for OutcomeFailure {
             Self::ReplayBoundExceeded { limit } => {
                 write!(f, "decision-stream replay exceeded {limit} batches")
             }
+            Self::CheckpointPositionMismatch => f.write_str(
+                "the retained outcome-index checkpoint does not name a reachable exact decision position",
+            ),
+            Self::CheckpointRootMismatch => f.write_str(
+                "the retained outcome-index checkpoint leaves do not reproduce the authenticated outcome root",
+            ),
             Self::BodyIdentityMismatch { link, identities } => write!(
                 f,
                 "the {link} stored under {} decodes to {} instead",
@@ -559,7 +575,13 @@ fn head_body_of(receipt: &HeadReadReceipt) -> Result<RepositoryAuthorityHeadBody
 /// this function spelled `b"fg/body/v1/"` out while [`BODY_KEY_PREFIX`] sat
 /// exported two modules over, so the two derivations were already free to
 /// drift. They cannot now.
-fn body_key_for_id(id: &InternalObjectId) -> Result<ImmutableKey, SealFailure> {
+/// Derives the immutable-store key for an already domain-checked body identity.
+///
+/// Readers know an identity before they have the body bytes needed by
+/// [`body_key`]. Keeping that derivation here ensures immutable reads use the
+/// same namespace as body staging rather than rebuilding `BODY_KEY_PREFIX` in
+/// each consumer.
+pub fn body_key_for_id(id: &InternalObjectId) -> Result<ImmutableKey, SealFailure> {
     let mut bytes = Vec::with_capacity(BODY_KEY_PREFIX.len() + 80);
     bytes.extend_from_slice(BODY_KEY_PREFIX);
     bytes.extend_from_slice(id.domain().as_bytes());
@@ -1195,6 +1217,46 @@ fn ordered_outcome_leaves(
     Ok(leaves)
 }
 
+/// Canonicalizes retained terminal decisions into the exact order committed by
+/// [`outcome_index_root`].
+///
+/// The outcome-index tree sorts **leaf digests**, not transaction identities.
+/// A checkpoint must preserve that order in its own canonical body so two
+/// producers cannot serialize the same set into different checkpoint bodies.
+/// This conversion lives here because this crate owns both the terminal-outcome
+/// encoding and the leaf preimage; asking Chronicle to repeat either would
+/// create a second commitment definition.
+///
+/// Duplicate transaction identities are refused before sorting, just as
+/// [`fold_outcome_index`] does. A retained leaf set with a duplicate would make
+/// the index commit to a history in which one sealed transaction decided twice.
+pub fn canonical_outcome_index_decisions(
+    decisions: &[RepositoryDecision],
+) -> Result<Vec<RepositoryDecision>, OutcomeFailure> {
+    let mut seen: BTreeMap<TxId, TerminalOutcome> = BTreeMap::new();
+    let mut ordered = Vec::with_capacity(decisions.len());
+
+    for decision in decisions {
+        let terminal = TerminalOutcome {
+            decision_sequence: decision.decision_sequence,
+            outcome: decision.outcome,
+        };
+        if let Some(existing) = seen.insert(decision.tx_id, terminal) {
+            return Err(OutcomeFailure::DuplicateTerminalDecision {
+                duplicate: Box::new(DuplicateDecision {
+                    tx_id: decision.tx_id,
+                    existing,
+                    offered: terminal,
+                }),
+            });
+        }
+        ordered.push((outcome_leaf(decision.tx_id, &terminal)?, decision.clone()));
+    }
+
+    ordered.sort_unstable_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
+    Ok(ordered.into_iter().map(|(_, decision)| decision).collect())
+}
+
 /// A membership proof that one terminal decision is in the outcome index.
 ///
 /// # What this is for
@@ -1485,6 +1547,169 @@ where
     })
 }
 
+/// Collect a cumulative outcome-index leaf set from an authenticated retained
+/// checkpoint and the strictly newer decision tail.
+///
+/// `checkpoint_decisions` are canonical checkpoint contents verified by the
+/// chronicle layer against a capsule-bound checkpoint body. Authority still
+/// re-canonicalizes them here: a caller cannot use this API to replace the
+/// outcome-index ordering rule with an insertion order. The named checkpoint
+/// position must be reached exactly while walking the authenticated head's
+/// predecessor chain; otherwise the result is a typed refusal, never a short
+/// prefix.
+///
+/// [`MAX_REPLAY_BATCHES`] applies only to the tail after the checkpoint. A
+/// missing or undecodable checkpoint is deliberately not represented here;
+/// Chronicle selects the existing from-genesis collector in that case.
+pub fn collect_cumulative_outcomes_from_checkpoint<S>(
+    store: &S,
+    head_key: &HeadKey,
+    checkpoint_decisions: &[RepositoryDecision],
+    checkpoint_tail_id: Option<RepositoryDecisionBatchId>,
+    checkpoint_latest_decision_sequence: Option<DecisionSequence>,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let HeadRead::Present(receipt) = store.read_head(head_key)? else {
+        return Ok(CumulativeOutcomes {
+            observed: AuthorityVersionToken::from_opaque_bytes(
+                [0_u8; crate::tokens::VERSION_TOKEN_BYTES],
+            ),
+            entries: Vec::new(),
+        });
+    };
+    let observed = receipt.token();
+    let mut head: RepositoryAuthorityHeadBody = head_body_of(&receipt)?;
+    let mut walked = 0_usize;
+    let canonical = canonical_outcome_index_decisions(checkpoint_decisions)?;
+    let mut collected: Vec<(TxId, TerminalOutcome)> = canonical
+        .into_iter()
+        .map(|decision| {
+            (
+                decision.tx_id,
+                TerminalOutcome {
+                    decision_sequence: decision.decision_sequence,
+                    outcome: decision.outcome,
+                },
+            )
+        })
+        .collect();
+    let mut tail: Vec<(TxId, TerminalOutcome)> = Vec::new();
+
+    loop {
+        if head.decision_tail_id == checkpoint_tail_id {
+            if head.latest_decision_sequence != checkpoint_latest_decision_sequence {
+                return Err(OutcomeFailure::CheckpointPositionMismatch);
+            }
+            if outcome_index_root(&collected)? != head.outcome_index_root {
+                return Err(OutcomeFailure::CheckpointRootMismatch);
+            }
+            collected.extend(tail);
+            break;
+        }
+
+        let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? else {
+            return Err(OutcomeFailure::CheckpointPositionMismatch);
+        };
+        let batch = read_decision_batch_body(store, batch_id)?;
+        for decision in &batch.decisions {
+            tail.push((
+                decision.tx_id,
+                TerminalOutcome {
+                    decision_sequence: decision.decision_sequence,
+                    outcome: decision.outcome,
+                },
+            ));
+        }
+        let Some(previous) = read_predecessor(store, batch.predecessor_head_id)? else {
+            return Err(OutcomeFailure::CheckpointPositionMismatch);
+        };
+        head = previous;
+    }
+
+    Ok(CumulativeOutcomes {
+        observed,
+        entries: collected,
+    })
+}
+
+/// Asynchronous twin of [`collect_cumulative_outcomes_from_checkpoint`].
+pub async fn collect_cumulative_outcomes_from_checkpoint_async<S>(
+    store: &S,
+    cx: &S::Context,
+    head_key: &HeadKey,
+    checkpoint_decisions: &[RepositoryDecision],
+    checkpoint_tail_id: Option<RepositoryDecisionBatchId>,
+    checkpoint_latest_decision_sequence: Option<DecisionSequence>,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let HeadRead::Present(receipt) = store.read_head(cx, head_key).await? else {
+        return Ok(CumulativeOutcomes {
+            observed: AuthorityVersionToken::from_opaque_bytes(
+                [0_u8; crate::tokens::VERSION_TOKEN_BYTES],
+            ),
+            entries: Vec::new(),
+        });
+    };
+    let observed = receipt.token();
+    let mut head: RepositoryAuthorityHeadBody = head_body_of(&receipt)?;
+    let mut walked = 0_usize;
+    let canonical = canonical_outcome_index_decisions(checkpoint_decisions)?;
+    let mut collected: Vec<(TxId, TerminalOutcome)> = canonical
+        .into_iter()
+        .map(|decision| {
+            (
+                decision.tx_id,
+                TerminalOutcome {
+                    decision_sequence: decision.decision_sequence,
+                    outcome: decision.outcome,
+                },
+            )
+        })
+        .collect();
+    let mut tail: Vec<(TxId, TerminalOutcome)> = Vec::new();
+
+    loop {
+        if head.decision_tail_id == checkpoint_tail_id {
+            if head.latest_decision_sequence != checkpoint_latest_decision_sequence {
+                return Err(OutcomeFailure::CheckpointPositionMismatch);
+            }
+            if outcome_index_root(&collected)? != head.outcome_index_root {
+                return Err(OutcomeFailure::CheckpointRootMismatch);
+            }
+            collected.extend(tail);
+            break;
+        }
+
+        let Some(batch_id) = next_batch_to_replay(&head, &mut walked)? else {
+            return Err(OutcomeFailure::CheckpointPositionMismatch);
+        };
+        let batch = read_decision_batch_body_async(store, cx, batch_id).await?;
+        for decision in &batch.decisions {
+            tail.push((
+                decision.tx_id,
+                TerminalOutcome {
+                    decision_sequence: decision.decision_sequence,
+                    outcome: decision.outcome,
+                },
+            ));
+        }
+        let Some(previous) = read_predecessor_async(store, cx, batch.predecessor_head_id).await?
+        else {
+            return Err(OutcomeFailure::CheckpointPositionMismatch);
+        };
+        head = previous;
+    }
+
+    Ok(CumulativeOutcomes {
+        observed,
+        entries: collected,
+    })
+}
+
 /// A cumulative leaf set, inseparable from the head it was collected against.
 ///
 /// # Why the binding is part of the type
@@ -1588,6 +1813,34 @@ impl CumulativeOutcomes {
             .iter()
             .find(|(candidate, _)| *candidate == tx_id)
             .map(|(_, outcome)| *outcome)
+    }
+
+    /// Materializes this exact head-bound set as canonical decision records for
+    /// an immutable outcome-index checkpoint.
+    ///
+    /// The expected token is required before entries leave the authority
+    /// boundary. A checkpoint writer therefore cannot turn a leaf set from a
+    /// CAS-losing head into durable evidence for the head it now observes.
+    pub fn checkpoint_decisions_against(
+        &self,
+        expected: AuthorityVersionToken,
+    ) -> Result<Vec<RepositoryDecision>, OutcomeFailure> {
+        if self.observed != expected {
+            return Err(OutcomeFailure::CumulativeIndexStale {
+                observed: self.observed,
+                expected,
+            });
+        }
+        let decisions: Vec<RepositoryDecision> = self
+            .entries
+            .iter()
+            .map(|(tx_id, terminal)| RepositoryDecision {
+                tx_id: *tx_id,
+                decision_sequence: terminal.decision_sequence,
+                outcome: terminal.outcome,
+            })
+            .collect();
+        canonical_outcome_index_decisions(&decisions)
     }
 
     /// Fold a batch's stamped outcomes onto this set, for a named head.

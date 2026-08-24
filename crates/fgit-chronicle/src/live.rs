@@ -10,7 +10,8 @@ use core::fmt;
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthorityFailure, AuthorityStore, CasOutcome, HeadInit, HeadKey, HeadRead,
-    HeadReadReceipt, ImmutableRead, PutOutcome, authority_head_identity, body_key,
+    HeadReadReceipt, ImmutableRead, OutcomeFailure, PutOutcome, authority_head_identity, body_key,
+    collect_cumulative_outcomes_from_checkpoint, collect_cumulative_outcomes_from_checkpoint_async,
     initialize_repository,
 };
 use fgit_codec::attest::BodyIdentity;
@@ -22,7 +23,10 @@ use fgit_types::{Digest, RepositoryCapsuleId};
 
 use crate::{
     BackupExportBundleBody, BackupProfile, CapsuleDefect, CapsulePointer, ChronicleRefusal,
-    RepositoryCapsuleBody, RestoreClassification, RestoreOutcome, capsule_identity,
+    OutcomeIndexCheckpointBody, OutcomeIndexCheckpointRefusal, RepositoryCapsuleBody,
+    RestoreClassification, RestoreOutcome, capsule_identity, stage_outcome_index_checkpoint,
+    stage_outcome_index_checkpoint_async, verify_outcome_index_checkpoint_chain,
+    verify_outcome_index_checkpoint_chain_async,
 };
 
 /// Inputs naming immutable closure material that the object-fabric owner has
@@ -398,6 +402,14 @@ pub enum LiveCapsuleRefusal {
     Capsule(ChronicleRefusal),
     /// The capsule could not be encoded canonically.
     CapsuleEncoding(CodecRefusal),
+    /// Retained outcome-index checkpoint staging or chain verification refused.
+    OutcomeIndexCheckpoint(Box<OutcomeIndexCheckpointRefusal>),
+    /// The retained checkpoint belongs to a different repository than the
+    /// capsule's authenticated authority head.
+    OutcomeIndexCheckpointRepositoryMismatch,
+    /// The retained checkpoint did not reproduce the authority root at its
+    /// exact named position.
+    OutcomeIndexCheckpointPosition(Box<OutcomeFailure>),
     /// The authority backend refused or left staging ambiguous.
     CapsuleStage(AuthorityFailure),
     /// The canonical capsule slot was already occupied by different bytes.
@@ -441,6 +453,16 @@ impl fmt::Display for LiveCapsuleRefusal {
             ),
             Self::Capsule(error) => write!(formatter, "capsule construction refused: {error}"),
             Self::CapsuleEncoding(error) => write!(formatter, "capsule encoding refused: {error}"),
+            Self::OutcomeIndexCheckpoint(error) => {
+                write!(formatter, "outcome-index checkpoint refused: {error}")
+            }
+            Self::OutcomeIndexCheckpointRepositoryMismatch => formatter.write_str(
+                "outcome-index checkpoint belongs to a different repository than the frozen head",
+            ),
+            Self::OutcomeIndexCheckpointPosition(error) => write!(
+                formatter,
+                "outcome-index checkpoint did not verify at its authority position: {error}"
+            ),
             Self::CapsuleStage(error) => {
                 write!(formatter, "capsule staging did not complete: {error}")
             }
@@ -987,6 +1009,73 @@ where
     S: AuthorityStore + ?Sized,
     I: BodyIdentity + ?Sized,
 {
+    freeze_capsule_with_checkpoint_root(store, identity, receipt, current_pointer, closure, None)
+}
+
+/// Freeze a capsule that root-last binds a staged retained outcome-index
+/// checkpoint.
+///
+/// The checkpoint is staged and read back before its digest is placed in the
+/// capsule. Its predecessor chain and its exact authority position are checked
+/// before the ordinary capsule path rereads the head, so a concurrent movement
+/// can leave only unreachable immutable evidence.
+pub fn freeze_capsule_with_outcome_index_checkpoint<S, I>(
+    store: &S,
+    identity: &I,
+    receipt: &HeadReadReceipt,
+    current_pointer: Option<&CapsulePointer>,
+    closure: CapsuleClosure,
+    checkpoint: &OutcomeIndexCheckpointBody,
+) -> Result<FrozenCapsule, LiveCapsuleRefusal>
+where
+    S: AuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized,
+{
+    store
+        .authenticate_head_receipt(receipt)
+        .map_err(LiveCapsuleRefusal::HeadUnauthenticated)?;
+    let head: RepositoryAuthorityHeadBody = decode_body(receipt.body(), DecodeLimits::DEFAULT)
+        .map_err(LiveCapsuleRefusal::HeadDecode)?;
+    if head.generation != receipt.generation() {
+        return Err(LiveCapsuleRefusal::HeadGenerationMismatch);
+    }
+    if checkpoint.repository_id != head.repository_id {
+        return Err(LiveCapsuleRefusal::OutcomeIndexCheckpointRepositoryMismatch);
+    }
+    let checkpoint_root = stage_outcome_index_checkpoint(store, identity, checkpoint)
+        .map_err(|error| LiveCapsuleRefusal::OutcomeIndexCheckpoint(Box::new(error)))?;
+    verify_outcome_index_checkpoint_chain(store, identity, checkpoint_root)
+        .map_err(|error| LiveCapsuleRefusal::OutcomeIndexCheckpoint(Box::new(error)))?;
+    collect_cumulative_outcomes_from_checkpoint(
+        store,
+        receipt.key(),
+        checkpoint.decisions(),
+        checkpoint.decision_tail_id,
+        checkpoint.latest_decision_sequence,
+    )
+    .map_err(|error| LiveCapsuleRefusal::OutcomeIndexCheckpointPosition(Box::new(error)))?;
+    freeze_capsule_with_checkpoint_root(
+        store,
+        identity,
+        receipt,
+        current_pointer,
+        closure,
+        Some(checkpoint_root),
+    )
+}
+
+fn freeze_capsule_with_checkpoint_root<S, I>(
+    store: &S,
+    identity: &I,
+    receipt: &HeadReadReceipt,
+    current_pointer: Option<&CapsulePointer>,
+    closure: CapsuleClosure,
+    outcome_index_checkpoint_root: Option<Digest>,
+) -> Result<FrozenCapsule, LiveCapsuleRefusal>
+where
+    S: AuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized,
+{
     store
         .authenticate_head_receipt(receipt)
         .map_err(LiveCapsuleRefusal::HeadUnauthenticated)?;
@@ -1004,7 +1093,8 @@ where
         closure.object_closure_root,
         closure.segment_manifest_root,
         closure.backup_profile,
-    );
+    )
+    .with_outcome_index_checkpoint_root(outcome_index_checkpoint_root);
     let capsule_id = capsule_identity(identity, &capsule).map_err(LiveCapsuleRefusal::Capsule)?;
     let bytes = encode_body(&capsule).map_err(LiveCapsuleRefusal::CapsuleEncoding)?;
     let key = body_key(IdentityDomain::RepositoryCapsule, &capsule)
@@ -1057,6 +1147,85 @@ where
     S: AsyncAuthorityStore + ?Sized,
     I: BodyIdentity + ?Sized + Sync,
 {
+    freeze_capsule_with_checkpoint_root_async(
+        store,
+        cx,
+        identity,
+        receipt,
+        current_pointer,
+        closure,
+        None,
+    )
+    .await
+}
+
+/// Asynchronous twin of [`freeze_capsule_with_outcome_index_checkpoint`].
+pub async fn freeze_capsule_with_outcome_index_checkpoint_async<S, I>(
+    store: &S,
+    cx: &S::Context,
+    identity: &I,
+    receipt: &HeadReadReceipt,
+    current_pointer: Option<&CapsulePointer>,
+    closure: CapsuleClosure,
+    checkpoint: &OutcomeIndexCheckpointBody,
+) -> Result<FrozenCapsule, LiveCapsuleRefusal>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized + Sync,
+{
+    store
+        .authenticate_head_receipt(cx, receipt)
+        .await
+        .map_err(LiveCapsuleRefusal::HeadUnauthenticated)?;
+    let head: RepositoryAuthorityHeadBody = decode_body(receipt.body(), DecodeLimits::DEFAULT)
+        .map_err(LiveCapsuleRefusal::HeadDecode)?;
+    if head.generation != receipt.generation() {
+        return Err(LiveCapsuleRefusal::HeadGenerationMismatch);
+    }
+    if checkpoint.repository_id != head.repository_id {
+        return Err(LiveCapsuleRefusal::OutcomeIndexCheckpointRepositoryMismatch);
+    }
+    let checkpoint_root = stage_outcome_index_checkpoint_async(store, cx, identity, checkpoint)
+        .await
+        .map_err(|error| LiveCapsuleRefusal::OutcomeIndexCheckpoint(Box::new(error)))?;
+    verify_outcome_index_checkpoint_chain_async(store, cx, identity, checkpoint_root)
+        .await
+        .map_err(|error| LiveCapsuleRefusal::OutcomeIndexCheckpoint(Box::new(error)))?;
+    collect_cumulative_outcomes_from_checkpoint_async(
+        store,
+        cx,
+        receipt.key(),
+        checkpoint.decisions(),
+        checkpoint.decision_tail_id,
+        checkpoint.latest_decision_sequence,
+    )
+    .await
+    .map_err(|error| LiveCapsuleRefusal::OutcomeIndexCheckpointPosition(Box::new(error)))?;
+    freeze_capsule_with_checkpoint_root_async(
+        store,
+        cx,
+        identity,
+        receipt,
+        current_pointer,
+        closure,
+        Some(checkpoint_root),
+    )
+    .await
+}
+
+async fn freeze_capsule_with_checkpoint_root_async<S, I>(
+    store: &S,
+    cx: &S::Context,
+    identity: &I,
+    receipt: &HeadReadReceipt,
+    current_pointer: Option<&CapsulePointer>,
+    closure: CapsuleClosure,
+    outcome_index_checkpoint_root: Option<Digest>,
+) -> Result<FrozenCapsule, LiveCapsuleRefusal>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized + Sync,
+{
     store
         .authenticate_head_receipt(cx, receipt)
         .await
@@ -1075,7 +1244,8 @@ where
         closure.object_closure_root,
         closure.segment_manifest_root,
         closure.backup_profile,
-    );
+    )
+    .with_outcome_index_checkpoint_root(outcome_index_checkpoint_root);
     let capsule_id = capsule_identity(identity, &capsule).map_err(LiveCapsuleRefusal::Capsule)?;
     let bytes = encode_body(&capsule).map_err(LiveCapsuleRefusal::CapsuleEncoding)?;
     let key = body_key(IdentityDomain::RepositoryCapsule, &capsule)

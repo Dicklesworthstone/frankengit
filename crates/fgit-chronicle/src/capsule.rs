@@ -139,6 +139,14 @@ pub struct RepositoryCapsuleBody {
     pub format_registry_epoch: RegistryEpoch,
     /// How much of the repository the referenced data covers.
     pub backup_profile: BackupProfile,
+    /// Identity digest of the retained outcome-index leaf checkpoint selected
+    /// for this capsule, absent when no checkpoint is available.
+    ///
+    /// This is deliberately **not** `outcome_index_root`: the root alone
+    /// cannot be extended under the digest-sorted outcome commitment. The
+    /// referenced immutable body carries the leaves needed for the bounded
+    /// tail fold.
+    pub outcome_index_checkpoint_root: Option<Digest>,
 }
 
 impl RepositoryCapsuleBody {
@@ -175,7 +183,18 @@ impl RepositoryCapsuleBody {
             policy_epoch: head.policy_epoch,
             format_registry_epoch: head.format_registry_epoch,
             backup_profile,
+            outcome_index_checkpoint_root: None,
         }
+    }
+
+    /// Binds a previously staged, verified retained outcome-index checkpoint.
+    #[must_use]
+    pub const fn with_outcome_index_checkpoint_root(
+        mut self,
+        outcome_index_checkpoint_root: Option<Digest>,
+    ) -> Self {
+        self.outcome_index_checkpoint_root = outcome_index_checkpoint_root;
+        self
     }
 }
 
@@ -183,7 +202,7 @@ impl CanonicalBody for RepositoryCapsuleBody {
     const DOMAIN: DomainTag = DomainTag::from_static("frankengit/repository-capsule/v1");
     const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("repository-capsule");
     const SCHEMA_MAJOR: u16 = 1;
-    const SCHEMA_MINOR: u16 = 0;
+    const SCHEMA_MINOR: u16 = 1;
 
     fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         out.write_opaque_id(self.repository_id.as_bytes());
@@ -219,6 +238,9 @@ impl CanonicalBody for RepositoryCapsuleBody {
         out.write_scalar(self.policy_epoch.get());
         out.write_scalar(self.format_registry_epoch.get());
         out.write_raw_byte(self.backup_profile.discriminant());
+        out.write_option(self.outcome_index_checkpoint_root.as_ref(), |out, root| {
+            out.write_digest(root)
+        })?;
         Ok(())
     }
 
@@ -266,6 +288,8 @@ impl CanonicalBody for RepositoryCapsuleBody {
                 observed: u32::from(profile_byte),
             })
         })?;
+        let outcome_index_checkpoint_root =
+            input.read_option("outcome_index_checkpoint_root", Decoder::read_digest)?;
         Ok(Self {
             repository_id,
             head_id,
@@ -284,6 +308,7 @@ impl CanonicalBody for RepositoryCapsuleBody {
             policy_epoch,
             format_registry_epoch,
             backup_profile,
+            outcome_index_checkpoint_root,
         })
     }
 }

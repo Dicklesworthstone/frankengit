@@ -347,7 +347,7 @@ fn expected_frame_header() -> Vec<u8> {
     header.extend_from_slice(&u32::try_from(family.len()).expect("fits").to_be_bytes());
     header.extend_from_slice(family);
     header.extend_from_slice(&1_u16.to_be_bytes()); // schema_major
-    header.extend_from_slice(&0_u16.to_be_bytes()); // schema_minor
+    header.extend_from_slice(&1_u16.to_be_bytes()); // schema_minor: checkpoint-root binding
     header
 }
 

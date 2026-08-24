@@ -225,6 +225,21 @@ pub struct RepositoryDecision {
 }
 
 impl RepositoryDecision {
+    /// Writes this terminal decision in the one canonical form shared by
+    /// decision batches and retained outcome-index checkpoints.
+    ///
+    /// A checkpoint stores the same terminal facts as a decision batch. Keeping
+    /// this encoder here prevents a second `DecisionOutcome` byte layout from
+    /// drifting into the chronicle layer.
+    pub fn write_canonical(out: &mut Encoder, value: &Self) -> Result<(), CodecRefusal> {
+        Self::write(out, value)
+    }
+
+    /// Reads one terminal decision written by [`Self::write_canonical`].
+    pub fn read_canonical(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        Self::read(input)
+    }
+
     fn write(out: &mut Encoder, value: &Self) -> Result<(), CodecRefusal> {
         out.write_internal_object_id(value.tx_id.as_internal_object_id())?;
         out.write_scalar(value.decision_sequence.get());

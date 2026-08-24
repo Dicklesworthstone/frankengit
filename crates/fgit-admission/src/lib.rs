@@ -24,11 +24,12 @@ use std::future::Future;
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityStore, CumulativeOutcomes,
     HeadKey, HeadRead, IdempotencyKey, OutcomeFailure, OutcomeLookup, RECEIVE_ADMISSION_SCHEMA,
-    SealAttempt, SealFailure, collect_cumulative_outcomes, collect_cumulative_outcomes_async,
-    initialize_repository, seal_request,
+    SealAttempt, SealFailure, initialize_repository, seal_request,
 };
 use fgit_chronicle::{
-    PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots, publish,
+    PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots,
+    collect_cumulative_outcomes_from_capsule_checkpoint,
+    collect_cumulative_outcomes_from_capsule_checkpoint_async, publish,
 };
 use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, Decoder, Encoder, RefusalRecordBody,
@@ -2362,7 +2363,11 @@ where
             return Ok(terminal);
         }
         let (basis, receipt, authenticated) = read_basis(store, &context.head_key)?;
-        let cumulative_outcomes = collect_cumulative_outcomes(store, &context.head_key)?;
+        let cumulative_outcomes = collect_cumulative_outcomes_from_capsule_checkpoint(
+            store,
+            &CryptoBodyIdentity,
+            &context.head_key,
+        )?;
         if cumulative_outcomes.observed() != receipt.token() {
             continue;
         }
@@ -3108,8 +3113,13 @@ where
         }
         let (basis, receipt, authenticated) =
             read_basis_async(store, cx, &context.head_key).await?;
-        let cumulative_outcomes =
-            collect_cumulative_outcomes_async(store, cx, &context.head_key).await?;
+        let cumulative_outcomes = collect_cumulative_outcomes_from_capsule_checkpoint_async(
+            store,
+            cx,
+            &CryptoBodyIdentity,
+            &context.head_key,
+        )
+        .await?;
         if cumulative_outcomes.observed() != receipt.token() {
             continue;
         }

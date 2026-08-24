@@ -112,8 +112,10 @@ pub use crate::keys::{HeadKey, ImmutableKey, KeyError, MAX_KEY_BYTES};
 pub use crate::outcome::{
     CumulativeOutcomes, DuplicateDecision, DuplicateScan, HeadBodyRefusal, IdentityDisagreement,
     MAX_REPLAY_BATCHES, OUTCOME_KEY_PREFIX, OutcomeFailure, OutcomeLookup, PublicationOutcome,
-    PublishedBatch, TerminalOutcome, authority_head_identity, collect_cumulative_outcomes,
-    collect_cumulative_outcomes_async, decision_batch_identity, fold_outcome_index,
+    PublishedBatch, TerminalOutcome, authority_head_identity, body_key_for_id,
+    canonical_outcome_index_decisions, collect_cumulative_outcomes,
+    collect_cumulative_outcomes_async, collect_cumulative_outcomes_from_checkpoint,
+    collect_cumulative_outcomes_from_checkpoint_async, decision_batch_identity, fold_outcome_index,
     head_selected_ref_state_absence_proof, head_selected_ref_state_absence_proof_async,
     indexed_outcome, indexed_outcome_async, initialize_repository, initialize_repository_async,
     interpret_indexed_outcome, next_batch_to_replay, outcome_index_proof, outcome_index_root,
