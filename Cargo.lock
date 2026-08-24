@@ -675,7 +675,13 @@ dependencies = [
 name = "fgit-benchmark"
 version = "0.0.1"
 dependencies = [
+ "fgit-authority",
+ "fgit-authority-fsqlite",
+ "fgit-codec",
  "fgit-crypto",
+ "fgit-runtime",
+ "fgit-types",
+ "fsqlite-types",
 ]
 
 [[package]]

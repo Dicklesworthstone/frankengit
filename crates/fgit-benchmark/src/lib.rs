@@ -28,6 +28,7 @@ use std::{
 
 use fgit_crypto::sha256_digest;
 
+pub mod authority;
 pub mod transport;
 
 /// Pinned schema name for a benchmark evidence artifact.

@@ -7,7 +7,13 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+fgit-authority.workspace = true
+fgit-authority-fsqlite.workspace = true
+fgit-codec.workspace = true
 fgit-crypto.workspace = true
+fgit-runtime.workspace = true
+fgit-types.workspace = true
+fsqlite-types = { version = "0.3.7", default-features = false, features = ["native"] }
 
 [lints]
 workspace = true
