@@ -68,6 +68,13 @@ git -C "$SRC" config user.name 'FG-028B fixture'
 for i in 1 2 3; do
   mkdir -p "$SRC/dir$i"
   seq 1 $((i * 64)) > "$SRC/dir$i/file$i.txt"
+  # The final revision carries the ~2 MiB, line-oriented object shape that
+  # previously exposed a size-correlated serve/clone failure.  This is not a
+  # synthetic pack-writer unit corpus: the ordinary Git client below must
+  # receive, index, fsck, and check out this exact object from a live node.
+  if [ "$i" -eq 3 ]; then
+    seq 1 300000 > "$SRC/dir$i/large-transport.txt"
+  fi
   printf 'rev %s\n' "$i" > "$SRC/root.txt"
   git -C "$SRC" add -A
   git -C "$SRC" commit -qm "commit $i"
