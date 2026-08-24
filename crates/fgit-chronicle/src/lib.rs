@@ -64,6 +64,7 @@ pub mod audit;
 pub mod capsule;
 mod evidence;
 pub mod live;
+pub mod migration;
 pub mod origin;
 pub mod outcome_checkpoint;
 pub mod publish;
@@ -87,6 +88,10 @@ pub use live::{
     freeze_capsule_with_outcome_index_checkpoint,
     freeze_capsule_with_outcome_index_checkpoint_async,
     inspect_capsule_against_authority_head_bytes, inspect_capsule_bytes, restore_attested_backup,
+};
+pub use migration::{
+    ActivatedMigrationTarget, FrozenMigrationSource, MigrationSourceRefusal,
+    MigrationTargetRefusal, activate_migration_target, freeze_migration_source,
 };
 pub use origin::{PublicationBasis, ResultingRoots};
 pub use outcome_checkpoint::{
