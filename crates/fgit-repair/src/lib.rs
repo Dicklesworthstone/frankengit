@@ -32,6 +32,9 @@ use fgit_types::{RepositoryAuthorityHeadId, SegmentManifestId};
 /// Canonical recovery-drill evidence bound to the existing S5 export attestation.
 pub mod recovery_report;
 
+/// Incarnation-bound repository deletion disclosure states.
+pub mod repository_deletion;
+
 /// Authenticated root-mark-grace-revalidate GC over immutable object fabric.
 pub mod gc;
 
