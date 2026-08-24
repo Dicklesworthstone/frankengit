@@ -288,6 +288,35 @@ ra_script_id() {
   printf '%s' "$id"
 }
 
+# A manifest profile owns a top-level suite directory, not a lossy prefix of
+# the published suite id.  The id is intentionally flattened for receipts and
+# manifest identity, so deriving an area from its final hyphen treats either a
+# nested directory or a hyphenated filename as a new, unowned area.  Keep the
+# two facts separate: ids identify scripts, while this path-derived value
+# decides which profile must account for a discovered script.
+ra_suite_area() {
+  local p=$1 rel='' top=''
+  case $p in
+    "$RA_SUITE_DIR"/*) rel=${p#"$RA_SUITE_DIR"/} ;;
+    "$RA_REPO_ROOT"/scripts/e2e/suites/*)
+      rel=${p#"$RA_REPO_ROOT"/scripts/e2e/suites/}
+      ;;
+    *)
+      printf 'outside-suites'
+      return
+      ;;
+  esac
+  top=${rel%%/*}
+  if [ "$top" = "$rel" ]; then
+    # A script directly under suites/ belongs to no named suite area.  Keeping
+    # it distinct makes a profile fail closed instead of lending it an area.
+    printf 'suites'
+    return
+  fi
+  top=${top//[^A-Za-z0-9._-]/-}
+  printf 'suites-%s' "$top"
+}
+
 # Set membership without a subshell or a pipe, so `set -o pipefail` cannot turn
 # a lookup into a spurious failure the way it did in the orphan gate.
 ra_in_set() {
@@ -317,18 +346,21 @@ fi
 # a receipt quietly agreeing with whatever the profile chose, which is the one
 # thing it must not do.
 declare -a RA_ALL_DISCOVERED=()
+declare -a RA_ALL_DISCOVERED_AREAS=()
 
 declare -a RA_SCRIPTS=()
 if [ "${#RA_EXPLICIT[@]}" -gt 0 ]; then
   RA_SCRIPTS=("${RA_EXPLICIT[@]}")
   for f in "${RA_SCRIPTS[@]+"${RA_SCRIPTS[@]}"}"; do
     RA_ALL_DISCOVERED+=("$(ra_script_id "$f")")
+    RA_ALL_DISCOVERED_AREAS+=("$(ra_suite_area "$f")")
   done
 else
   while IFS= read -r -d '' f; do
     [ -n "$f" ] || continue
     RA_SCRIPTS+=("$f")
     RA_ALL_DISCOVERED+=("$(ra_script_id "$f")")
+    RA_ALL_DISCOVERED_AREAS+=("$(ra_suite_area "$f")")
   done < <(ra_discover "$RA_SUITE_DIR")
   # The root campaign supplements a real suite corpus; it must not turn an
   # empty discovery root into a vacuous successful run.
@@ -357,6 +389,7 @@ fi
 # before spending a full corpus run to arrive at the same answer.
 # ---------------------------------------------------------------------------
 declare -a S_MANIFEST_REQUIRED=()
+declare -a S_MANIFEST_REQUIRED_AREAS=()
 declare -a S_MANIFEST_TERM=()
 declare -a S_MANIFEST_WRONGTERM=()
 declare -a S_MANIFEST_OPTIONAL=()
@@ -433,6 +466,7 @@ if [ -n "$RA_PROFILE" ]; then
       continue
     fi
     S_MANIFEST_REQUIRED+=("$m_id")
+    S_MANIFEST_REQUIRED_AREAS+=("$(ra_suite_area "$RA_REPO_ROOT/$m_path")")
   done <"$RA_MANIFEST"
 
   # A manifest declaring nothing required would make every profile pass.
@@ -443,8 +477,7 @@ if [ -n "$RA_PROFILE" ]; then
 
 
   declare -a RA_PROFILE_AREAS=()
-  for m_id in "${S_MANIFEST_REQUIRED[@]}"; do
-    area=${m_id%-*}
+  for area in "${S_MANIFEST_REQUIRED_AREAS[@]}"; do
     ra_in_set "$area" "${RA_PROFILE_AREAS[@]+"${RA_PROFILE_AREAS[@]}"}" ||
       RA_PROFILE_AREAS+=("$area")
   done
@@ -460,8 +493,9 @@ if [ -n "$RA_PROFILE" ]; then
   # updated to approve it. The omitted areas are nevertheless evidence: record
   # them separately so a release-facing profile cannot look corpus-complete
   # merely because its set equality covers only its own rows.
-  for d_id in "${RA_ALL_DISCOVERED[@]+"${RA_ALL_DISCOVERED[@]}"}"; do
-    d_area=${d_id%-*}
+  for ra_discovered_index in "${!RA_ALL_DISCOVERED[@]}"; do
+    d_id=${RA_ALL_DISCOVERED[ra_discovered_index]}
+    d_area=${RA_ALL_DISCOVERED_AREAS[ra_discovered_index]}
     if ! ra_in_set "$d_area" "${RA_PROFILE_AREAS[@]+"${RA_PROFILE_AREAS[@]}"}"; then
       ra_in_set "$d_area" "${S_MANIFEST_UNCOVERED_AREAS[@]+"${S_MANIFEST_UNCOVERED_AREAS[@]}"}" ||
         S_MANIFEST_UNCOVERED_AREAS+=("$d_area")

@@ -452,9 +452,11 @@ profile_declared_dir="$HERE/suites/profile_coverage_declared"
 profile_declared_script="$profile_declared_dir/declared.sh"
 profile_probe_dir="$HERE/suites/profile_coverage_probe"
 profile_probe_script="$profile_probe_dir/undeclared.sh"
+profile_nested_dir="$profile_declared_dir/nested"
+profile_nested_script="$profile_nested_dir/undeclared.sh"
 profile_root=$(fge_tempdir profile-coverage)
 profile_probe_ready=false
-if [ -e "$profile_manifest" ] || [ -e "$profile_declared_dir" ] || [ -e "$profile_probe_dir" ]; then
+if [ -e "$profile_manifest" ] || [ -e "$profile_declared_dir" ] || [ -e "$profile_probe_dir" ] || [ -e "$profile_nested_dir" ]; then
   fge_fail FG-000A-ST-PROFILE-PRECONDITION \
     'profile-coverage probe paths already exist; refusing to overwrite them'
 else
@@ -466,6 +468,8 @@ else
   fge_cleanup_register rm -f -- "$profile_probe_script"
   fge_cleanup_register rmdir -- "$profile_declared_dir"
   fge_cleanup_register rm -f -- "$profile_declared_script"
+  fge_cleanup_register rmdir -- "$profile_nested_dir"
+  fge_cleanup_register rm -f -- "$profile_nested_script"
   mkdir -p "$profile_declared_dir" "$profile_probe_dir"
   cp "$FIXTURES/pos_control.sh" "$profile_declared_script"
   cp "$FIXTURES/pos_control.sh" "$profile_probe_script"
@@ -499,6 +503,23 @@ if [ "$profile_probe_ready" = true ]; then
   fi
 fi
 
+# The same profile must refuse a newly discovered nested script under its
+# declared area. Its flattened id contains an extra hyphen, but its ownership
+# comes from the top-level path component, so it cannot escape into the
+# informational uncovered-area bucket.
+profile_nested_rc=1
+profile_nested_stderr=''
+if [ "$profile_probe_ready" = true ]; then
+  mkdir -p "$profile_nested_dir"
+  cp "$FIXTURES/pos_control.sh" "$profile_nested_script"
+  chmod +x "$profile_nested_script"
+  profile_nested_rc=0
+  "$RUN_ALL" --profile profile-coverage-probe \
+    --out "$profile_root/nested" --timeout 60 \
+    >"$profile_root/nested-stdout.log" 2>"$profile_root/nested-stderr.log" || profile_nested_rc=$?
+  profile_nested_stderr=$(<"$profile_root/nested-stderr.log")
+fi
+
 fge_phase assert
 fge_assert_eq FG-000A-ST-PROFILE-SCOPED-RC 0 "$profile_rc" \
   'an area-scoped profile still runs and passes its declared surface'
@@ -509,6 +530,11 @@ fge_assert_eq FG-000A-ST-PROFILE-SCOPED-UNREGISTERED 0 "${#profile_unregistered[
 fge_assert_contains FG-000A-ST-PROFILE-UNCOVERED-NAME \
   "${profile_uncovered_areas[*]}" suites-profile_coverage_probe \
   'the receipt names the planted undeclared area rather than hiding it by scope'
+fge_assert_eq FG-000A-ST-PROFILE-NESTED-RC 1 "$profile_nested_rc" \
+  'a nested suite under a profile-owned directory makes the exact-set gate fail'
+fge_assert_contains FG-000A-ST-PROFILE-NESTED-UNREGISTERED "$profile_nested_stderr" \
+  'unregistered:[suites-profile_coverage_declared-nested-undeclared]' \
+  'the nested suite is attributed to the declared area and cannot escape as uncovered'
 
 # ---------------------------------------------------------------------------
 # evidence retention
