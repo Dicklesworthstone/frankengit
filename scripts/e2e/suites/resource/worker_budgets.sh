@@ -154,7 +154,7 @@ main() {
     'a_batch_capped_fleet_still_merges_deterministically' \
     'the cap opens no hole in the determinism contract'
 
-  fge_phase report
+  fge_phase teardown
 }
 
 fge_init fg089-worker-budgets
