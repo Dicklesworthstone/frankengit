@@ -253,16 +253,18 @@ pub(crate) fn outcomes_match_basis(
 /// [`AdmissionError`] for faults. A stale merge is not a fault: it returns a
 /// terminal decision carrying [`RefusalCode::TargetRefMoved`] or
 /// [`RefusalCode::EvidenceStale`].
-pub fn admit_merge<S, Projection>(
+pub fn admit_merge<S, Projection, Commitments>(
     store: &S,
     context: &AdmissionContext,
     sealed: &SealedMerge<'_>,
     limits: AdmissionLimits,
     projection: &Projection,
+    commitments: &Commitments,
 ) -> Result<fgit_authority::TerminalOutcome, AdmissionError>
 where
     S: AuthorityStore + ?Sized,
     Projection: AdmissionProjection + ?Sized,
+    Commitments: crate::CanonicalAdmissionStore + ?Sized,
 {
     let attempt = seal_attempt_for(context, sealed)?;
     let admission = fgit_authority::seal_request(store, &attempt)?;
@@ -308,8 +310,15 @@ where
                 &cumulative,
             )?,
             MergePlan::Commit(next_state) => {
-                let materialization =
-                    materialize(context, sealed, tx_id, &attempt, &basis, &next_state)?;
+                let materialization = materialize(
+                    context,
+                    sealed,
+                    tx_id,
+                    &attempt,
+                    &basis,
+                    &next_state,
+                    commitments,
+                )?;
                 crate::publish_commit(
                     store,
                     context,
@@ -350,9 +359,25 @@ fn materialize(
     attempt: &SealAttempt,
     basis: &fgit_chronicle::PublicationBasis,
     next_state: &crate::CanonicalRefState,
+    commitments: &(impl crate::CanonicalAdmissionStore + ?Sized),
 ) -> Result<crate::CommitMaterialization, AdmissionError> {
     let ref_root = crate::canonical_ref_state_root(next_state)
         .map_err(|_| AdmissionError::MaterializationMismatch("merge resulting ref root"))?;
+
+    // Stage the immutable bodies this decision results in, exactly as
+    // CanonicalAdmissionProjection::materialize_commit does for receive-pack.
+    // Publishing a head whose ref_root names a state nothing staged leaves the
+    // NEXT reader unable to resolve it -- which is not a theoretical worry: the
+    // race drill caught it, as the loser being refused EvidenceMissing instead
+    // of TargetRefMoved. A merge that moves a ref owes the same staging as any
+    // other commit; building its own materialization does not exempt it.
+    let closure = crate::PermittedObjectClosure::new(sealed.closure.objects.clone());
+    commitments
+        .stage_ref_state(ref_root, next_state.clone())
+        .map_err(|_| AdmissionError::MaterializationMismatch("merge ref state staging"))?;
+    commitments
+        .stage_permitted_object_closure(sealed.closure.object_closure_root, closure)
+        .map_err(|_| AdmissionError::MaterializationMismatch("merge closure staging"))?;
 
     let roots = fgit_chronicle::ResultingRoots {
         ref_root,
