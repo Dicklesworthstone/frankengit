@@ -362,3 +362,111 @@ fn quarantined_bundle_inspection_refuses_noncanonical_headers_corruption_and_bou
         "the one-byte-larger input-bound twin proceeds"
     );
 }
+
+/// The third `BundleV2Limits` bound, which had neither half of the pair (mwbo).
+///
+/// `max_header_bytes` and `max_output_bytes` are each bracketed from both sides
+/// in this file -- a refusal one byte under and a twin at the exact value, in
+/// tests whose names end in "twins". `max_references` had neither: no test
+/// overrode the field, and `ReferenceLimitExceeded` appeared nowhere outside
+/// `src/`. So the bound that stands between a caller and an unbounded reference
+/// vector was the one bound nothing asserted.
+///
+/// BOTH GUARDS ARE DRIVEN, because they are different code reached differently:
+///
+/// * `canonical_references` (`bundle.rs:561`) compares `offered.len() > limit`
+///   on an already-materialised slice, on the WRITE path;
+/// * the reference parse loop (`bundle.rs:634`) compares
+///   `references.len() >= limit` before pushing, on the DECODE path.
+///
+/// Those two operators are equivalent rather than an off-by-one -- the loop
+/// tests before pushing, so holding `limit` already means the next push would
+/// reach `limit + 1`, and it reports `len() + 1` accordingly. But equivalent is
+/// not the same as jointly covered: a twin on one path says nothing about the
+/// other, so each is asserted where it lives.
+#[test]
+fn bundle_v2_brackets_the_reference_limit_on_both_the_write_and_decode_paths() {
+    let (objects, commit) = source_with_commit_and_tree();
+    let plan = plan(&objects, &[commit]);
+    let writer = PackWriter::new(PackLimits::default());
+
+    // Strictly ascending names: `canonical_references` refuses
+    // `NonCanonicalReferenceOrder`, so the ordering is what makes this fixture
+    // valid rather than an incidental detail.
+    let references = [
+        named_reference(commit, b"refs/heads/a"),
+        named_reference(commit, b"refs/heads/b"),
+        named_reference(commit, b"refs/heads/c"),
+    ];
+    let count = references.len();
+
+    // --- write path, bundle.rs:561 ------------------------------------------
+    // Exactly the limit is admitted. This is the half a `>=` would break.
+    let mut exact_live = || true;
+    let exact = BundleV2::write_full(
+        source(commit),
+        &references,
+        &plan,
+        &writer,
+        &mut exact_live,
+        BundleV2Limits {
+            max_references: count,
+            ..BundleV2Limits::default()
+        },
+    )
+    .expect("exactly max_references references must be admitted on the write path");
+
+    // One under: refused, naming both sides of the comparison, which is what
+    // pins the guard to the count rather than to some larger quantity.
+    let mut tight_live = || true;
+    assert_eq!(
+        BundleV2::write_full(
+            source(commit),
+            &references,
+            &plan,
+            &writer,
+            &mut tight_live,
+            BundleV2Limits {
+                max_references: count - 1,
+                ..BundleV2Limits::default()
+            },
+        ),
+        Err(BundleV2Refusal::ReferenceLimitExceeded {
+            observed: count,
+            limit: count - 1,
+        })
+    );
+
+    // --- decode path, bundle.rs:634 -----------------------------------------
+    // Asserted on the decoded references, not on `is_ok()`: a parse that
+    // silently dropped one would still be `Ok` and would prove nothing.
+    let inspection = BundleV2::inspect_quarantined_full_sha1(
+        exact.bytes(),
+        BundleV2Limits {
+            max_references: count,
+            ..BundleV2Limits::default()
+        },
+        &PackLimits::default(),
+    )
+    .expect("exactly max_references references must be admitted on the decode path");
+    assert_eq!(
+        inspection.references(),
+        &references,
+        "the exact-limit bundle must decode back to every reference it carried"
+    );
+
+    assert_eq!(
+        BundleV2::inspect_quarantined_full_sha1(
+            exact.bytes(),
+            BundleV2Limits {
+                max_references: count - 1,
+                ..BundleV2Limits::default()
+            },
+            &PackLimits::default(),
+        ),
+        Err(BundleV2Refusal::ReferenceLimitExceeded {
+            observed: count,
+            limit: count - 1,
+        })
+    );
+}
