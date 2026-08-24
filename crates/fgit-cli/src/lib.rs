@@ -27,6 +27,12 @@ static NEXT_EXPORT_TEMPORARY: AtomicU64 = AtomicU64::new(1);
 pub enum CliRefusal {
     /// The command line did not identify a supported command.
     Usage,
+    /// The command line named an object format this build does not support.
+    ///
+    /// Selecting a format is explicit precisely so an unrecognised token cannot
+    /// quietly fall back to SHA-1: a repository's object format is permanent,
+    /// and a silent default would mint the wrong one irreversibly.
+    UnsupportedObjectFormat(String),
     /// The supplied tenant identity was not canonical lowercase hex.
     Tenant(fgit_types::TypeRefusal),
     /// The supplied repository identity was not canonical lowercase hex.
@@ -136,7 +142,11 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex>; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory>; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path>; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address>",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256]; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory>; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path>; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address>",
+            ),
+            Self::UnsupportedObjectFormat(token) => write!(
+                formatter,
+                "unsupported object format `{token}`: expected `sha1` or `sha256`"
             ),
             Self::Tenant(error)
             | Self::Repository(error)
@@ -235,6 +245,7 @@ impl Error for CliRefusal {
             Self::ServeCleanup { serving, .. } => Some(serving),
             Self::ExportCleanup { export, .. } => Some(export.as_ref()),
             Self::Usage
+            | Self::UnsupportedObjectFormat(_)
             | Self::ExportDestination
             | Self::ExportDestinationExists(_)
             | Self::ImportRefused(_) => None,
@@ -281,11 +292,10 @@ pub enum CliOutcome {
 pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
     match arguments {
         [command, storage_root, tenant, repository] if command == "init" => {
-            let (node, initialization) =
-                OneNode::init(node_config(storage_root, tenant, repository)?)
-                    .map_err(CliRefusal::Node)?;
-            node.shutdown().map_err(CliRefusal::Node)?;
-            Ok(CliOutcome::Initialized(initialization))
+            run_init(storage_root, tenant, repository, GitHashAlgorithm::Sha1)
+        }
+        [command, storage_root, tenant, repository, format] if command == "init" => {
+            run_init(storage_root, tenant, repository, object_format(format)?)
         }
         [
             command,
@@ -318,10 +328,53 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             run_export(storage_root, tenant, repository, PathBuf::from(destination))
         }
         [command, storage_root, tenant, repository, listen_address] if command == "serve" => {
+            run_serve(
+                storage_root,
+                tenant,
+                repository,
+                listen_address,
+                GitHashAlgorithm::Sha1,
+            )
+        }
+        _ => Err(CliRefusal::Usage),
+    }
+}
+
+/// Creates one repository in the explicitly selected object format.
+fn run_init(
+    storage_root: &str,
+    tenant: &str,
+    repository: &str,
+    format: GitHashAlgorithm,
+) -> Result<CliOutcome, CliRefusal> {
+    let (node, initialization) =
+        OneNode::init(node_config(storage_root, tenant, repository, format)?)
+            .map_err(CliRefusal::Node)?;
+    node.shutdown().map_err(CliRefusal::Node)?;
+    Ok(CliOutcome::Initialized(initialization))
+}
+
+/// Serves one bounded git-daemon session.
+///
+/// Opens with SHA-1 because the node does not persist a repository's object
+/// format yet. A SHA-256 repository is therefore served incorrectly until that
+/// lands; see `docs/D3_SHA256_REPOSITORY_DECISION.md`. Deliberately NOT solved
+/// by a command-line format argument: the format belongs in the repository, and
+/// the persisted `RepositoryConfigurationBody` is where it will be read from.
+fn run_serve(
+    storage_root: &str,
+    tenant: &str,
+    repository: &str,
+    listen_address: &str,
+    format: GitHashAlgorithm,
+) -> Result<CliOutcome, CliRefusal> {
+    {
+        {
             let listener = TcpListener::bind(listen_address).map_err(CliRefusal::Listener)?;
             let listen_address = listener.local_addr().map_err(CliRefusal::Listener)?;
-            let node = OneNode::open_existing(node_config(storage_root, tenant, repository)?)
-                .map_err(CliRefusal::Node)?;
+            let node =
+                OneNode::open_existing(node_config(storage_root, tenant, repository, format)?)
+                    .map_err(CliRefusal::Node)?;
             let serving = node.serve_git_daemon_once(&listener);
             let cleanup = node.shutdown();
             match (serving, cleanup) {
@@ -337,7 +390,6 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 }),
             }
         }
-        _ => Err(CliRefusal::Usage),
     }
 }
 
@@ -349,8 +401,13 @@ fn run_import(
     idempotency_key: &[u8],
     source: &Path,
 ) -> Result<CliOutcome, CliRefusal> {
-    let node = OneNode::open_existing(node_config(storage_root, tenant, repository)?)
-        .map_err(CliRefusal::Node)?;
+    let node = OneNode::open_existing(node_config(
+        storage_root,
+        tenant,
+        repository,
+        GitHashAlgorithm::Sha1,
+    )?)
+    .map_err(CliRefusal::Node)?;
     let request = node.request_context();
     let imported = node
         .runtime()
@@ -405,8 +462,13 @@ fn run_export(
     repository: &str,
     destination: PathBuf,
 ) -> Result<CliOutcome, CliRefusal> {
-    let node = OneNode::open_existing(node_config(storage_root, tenant, repository)?)
-        .map_err(CliRefusal::Node)?;
+    let node = OneNode::open_existing(node_config(
+        storage_root,
+        tenant,
+        repository,
+        GitHashAlgorithm::Sha1,
+    )?)
+    .map_err(CliRefusal::Node)?;
     let exported = node
         .runtime()
         .block_on(node.authority_selected_pack_payload())
@@ -546,8 +608,13 @@ fn run_doctor(
     repository: &str,
     sampled_object: Option<GitOid>,
 ) -> Result<CliOutcome, CliRefusal> {
-    let node = OneNode::open_existing(node_config(storage_root, tenant, repository)?)
-        .map_err(CliRefusal::Node)?;
+    let node = OneNode::open_existing(node_config(
+        storage_root,
+        tenant,
+        repository,
+        GitHashAlgorithm::Sha1,
+    )?)
+    .map_err(CliRefusal::Node)?;
     let inspection = node.runtime().block_on(node.doctor(sampled_object));
     let cleanup = node.shutdown();
     match (inspection, cleanup) {
@@ -565,14 +632,26 @@ fn node_config(
     storage_root: &str,
     tenant: &str,
     repository: &str,
+    object_format: GitHashAlgorithm,
 ) -> Result<NodeConfig, CliRefusal> {
     let tenant_id = TenantId::from_hex(tenant).map_err(CliRefusal::Tenant)?;
     let repository_id = RepositoryId::from_hex(repository).map_err(CliRefusal::Repository)?;
-    Ok(NodeConfig::new(
-        PathBuf::from(storage_root),
-        tenant_id,
-        repository_id,
-    ))
+    Ok(
+        NodeConfig::new(PathBuf::from(storage_root), tenant_id, repository_id)
+            .with_object_format(object_format),
+    )
+}
+
+/// Parses the explicit object-format token accepted by `fg init`.
+///
+/// Only Git's two defined repository formats are accepted, and anything else is
+/// a typed refusal rather than a default.
+fn object_format(token: &str) -> Result<GitHashAlgorithm, CliRefusal> {
+    match token {
+        "sha1" => Ok(GitHashAlgorithm::Sha1),
+        "sha256" => Ok(GitHashAlgorithm::Sha256),
+        other => Err(CliRefusal::UnsupportedObjectFormat(other.to_owned())),
+    }
 }
 
 #[cfg(test)]
@@ -660,6 +739,73 @@ mod tests {
     #[test]
     fn serve_requires_a_complete_bounded_listener_configuration() {
         assert!(matches!(run(&["serve".to_owned()]), Err(CliRefusal::Usage)));
+    }
+
+    /// `fg init` accepts Git's two defined repository formats explicitly.
+    ///
+    /// What this can and cannot assert: the *outcome* is observable, the
+    /// resulting repository's format is not. Nothing persists a repository's
+    /// object format yet (`NodeConfig::with_object_format` is config-only), so
+    /// no API reads it back. That gap is recorded in
+    /// `docs/D3_SHA256_REPOSITORY_DECISION.md`; when the format lands in the
+    /// persisted `RepositoryConfigurationBody`, this test should assert the
+    /// read-back value rather than merely a successful init.
+    #[test]
+    fn init_accepts_both_defined_object_formats_explicitly() {
+        for format in ["sha1", "sha256"] {
+            let scratch = ScratchDirectory::new();
+            let command = vec![
+                "init".to_owned(),
+                scratch.0.to_string_lossy().into_owned(),
+                "11111111111111111111111111111111".to_owned(),
+                "22222222222222222222222222222222".to_owned(),
+                format.to_owned(),
+            ];
+            assert!(
+                matches!(run(&command), Ok(CliOutcome::Initialized(_))),
+                "fg init must accept the explicit `{format}` repository format"
+            );
+        }
+    }
+
+    /// The load-bearing case. An object format is permanent for the life of a
+    /// repository, so an unrecognised token must REFUSE and name itself rather
+    /// than quietly minting a SHA-1 repository the caller never asked for.
+    ///
+    /// A test asserting only "init fails" would pass against a refusal for any
+    /// reason at all, so this pins the variant and its payload.
+    #[test]
+    fn init_refuses_an_unrecognised_object_format_instead_of_defaulting() {
+        let scratch = ScratchDirectory::new();
+        let command = vec![
+            "init".to_owned(),
+            scratch.0.to_string_lossy().into_owned(),
+            "11111111111111111111111111111111".to_owned(),
+            "22222222222222222222222222222222".to_owned(),
+            "sha512".to_owned(),
+        ];
+
+        let refusal = run(&command).expect_err("an unknown object format cannot initialize");
+        assert!(
+            matches!(&refusal, CliRefusal::UnsupportedObjectFormat(token) if token == "sha512"),
+            "the refusal must name the rejected token, got {refusal:?}"
+        );
+    }
+
+    /// The permitted twin of the refusal above, and the backward-compatibility
+    /// guard: the pre-existing four-argument form keeps working untouched.
+    /// Without this, a change that broke every `fg init` invocation would still
+    /// satisfy the refusal test.
+    #[test]
+    fn init_without_an_object_format_still_succeeds() {
+        let scratch = ScratchDirectory::new();
+        let command = vec![
+            "init".to_owned(),
+            scratch.0.to_string_lossy().into_owned(),
+            "11111111111111111111111111111111".to_owned(),
+            "22222222222222222222222222222222".to_owned(),
+        ];
+        assert!(matches!(run(&command), Ok(CliOutcome::Initialized(_))));
     }
 
     #[test]
