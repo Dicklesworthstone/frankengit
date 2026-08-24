@@ -123,6 +123,13 @@ pub struct TransportConfig {
     pub expected_head: String,
     /// Number of commits the clone must contain.
     pub expected_commits: u64,
+    /// Logical reachable Git bytes in the corpus: the sum of every reachable
+    /// object's uncompressed size.
+    ///
+    /// §39.2 names this as the only admissible amplification denominator, and
+    /// it must come from the CORPUS rather than from the clone. Derived from
+    /// the clone it is a tautology -- see the note at its use site.
+    pub logical_reachable_bytes: u64,
 }
 
 /// The result of one clone, handed to the oracle before the clock stops.
@@ -637,12 +644,21 @@ impl BenchmarkWorkload for TransportWorkload {
         })?;
 
         let egress_bytes = pack_bytes(&destination);
-        let logical_reachable_git_bytes = directory_bytes(&destination.join(".git"));
-        if logical_reachable_git_bytes == 0 {
-            return Err(
-                "clone produced no .git bytes to use as an amplification denominator".to_owned(),
-            );
+        let git_directory_bytes = directory_bytes(&destination.join(".git"));
+        if git_directory_bytes == 0 {
+            return Err("clone produced no .git bytes at all".to_owned());
         }
+        // The denominator is the CORPUS's logical reachable size, supplied by
+        // the caller, not the clone's own .git size.
+        //
+        // Deriving it from the clone was a tautology: with
+        // canonical = pack bytes and retained_derived = .git - pack, the
+        // numerator equals the denominator by construction and every sample in
+        // both arms reported exactly 1000000 ppm. A metric that cannot come out
+        // any other way is not a measurement, and reporting it as one would have
+        // buried the finding it exists to surface -- on this corpus the two arms
+        // differ by 62x in transferred bytes.
+        let logical_reachable_git_bytes = self.config.logical_reachable_bytes;
 
         let metrics = SystemMetrics {
             // Filled by the runner once the oracle has also run.
@@ -667,7 +683,9 @@ impl BenchmarkWorkload for TransportWorkload {
                 canonical_bytes: egress_bytes,
                 repair_bytes: 0,
                 replica_bytes: 0,
-                retained_derived_bytes: logical_reachable_git_bytes.saturating_sub(egress_bytes),
+                // Everything the clone keeps on disk beyond the pack itself:
+                // index, refs, config, and any checkout.
+                retained_derived_bytes: git_directory_bytes.saturating_sub(egress_bytes),
                 logical_reachable_git_bytes,
             },
         };
@@ -924,6 +942,7 @@ mod tests {
             port_base: 30_000,
             expected_head: "0".repeat(40),
             expected_commits: 3,
+            logical_reachable_bytes: 1_000_000,
         }
     }
 }

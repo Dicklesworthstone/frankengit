@@ -144,24 +144,68 @@ fge_phase action
 
 # One corpus, materialized once, served by both arms. Deterministic content so
 # a rerun on another host measures the same bytes.
+#
+# THE SHAPE IS DELIBERATE: FEW OBJECTS, MANY BYTES. The two constraints on this
+# corpus pull in different directions and were measured separately:
+#
+#   fg import must succeed        -> cost scales with OBJECT COUNT. A 25-commit
+#                                    600-file corpus (~15,000 loose objects) is
+#                                    refused: "authority store: ambiguous:
+#                                    cancelled after transmission".
+#   pack CPU must be measurable   -> cost scales with BYTES. USER_HZ is 100, so
+#                                    anything under 10ms of server CPU reports
+#                                    as 0 jiffies, and a 2KB corpus reported
+#                                    cpu_ns = 0 for every sample in both arms.
+#
+# Because they are different axes, a handful of commits over a few very large
+# files clears both where many small files cleared neither. Measured:
+#
+#   6 commits x 3 files x 200k lines   24 loose  import ok   server cpu  330ms
+#   8 commits x 4 files x 300k lines   36 loose  import ok   server cpu  810ms
+#  10 commits x 6 files x 400k lines   52 loose  import ok   server cpu 1640ms
+#
+# The middle row is used: two orders of magnitude above the CPU floor, and well
+# inside what import accepts.
 SRC="$work/src"
 export GIT_EXEC_PATH="$GIT_EXEC"
 "$GIT_BIN" init -q -b main "$SRC"
 "$GIT_BIN" -C "$SRC" config user.email perf-baseline@invalid.example
 "$GIT_BIN" -C "$SRC" config user.name 'FG-028c corpus'
 "$GIT_BIN" -C "$SRC" config commit.gpgsign false
-for i in 1 2 3 4 5 6 7 8; do
-  mkdir -p "$SRC/dir$i"
-  seq 1 $((i * 256)) > "$SRC/dir$i/file$i.txt"
-  printf 'rev %s\n' "$i" > "$SRC/root.txt"
+# gc.auto alone is NOT enough: modern git runs maintenance.auto independently,
+# and a packed corpus is refused by fg import ("loose import refuses packed
+# objects ... use the pack quarantine import path").
+"$GIT_BIN" -C "$SRC" config gc.auto 0
+"$GIT_BIN" -C "$SRC" config maintenance.auto false
+CORPUS_COMMITS=${FG_BENCH_CORPUS_COMMITS:-8}
+CORPUS_FILES=${FG_BENCH_CORPUS_FILES:-4}
+CORPUS_LINES=${FG_BENCH_CORPUS_LINES:-300000}
+for i in $(seq 1 "$CORPUS_COMMITS"); do
+  for f in $(seq 1 "$CORPUS_FILES"); do
+    seq $((i * f)) $((i * f + CORPUS_LINES)) > "$SRC/big$f.txt"
+  done
   "$GIT_BIN" -C "$SRC" add -A
   GIT_AUTHOR_DATE="@$((1700000000 + i)) +0000" \
   GIT_COMMITTER_DATE="@$((1700000000 + i)) +0000" \
     "$GIT_BIN" -C "$SRC" commit -qm "commit $i"
 done
+fge_context corpus_shape "${CORPUS_COMMITS}c x ${CORPUS_FILES}f x ${CORPUS_LINES}l"
+fge_context corpus_loose_objects "$(find "$SRC/.git/objects" -type f -not -path '*/pack/*' | wc -l)"
 
 EXPECTED_HEAD=$("$GIT_BIN" -C "$SRC" rev-parse HEAD)
 EXPECTED_COMMITS=$("$GIT_BIN" -C "$SRC" rev-list --count HEAD)
+# §39.2's amplification denominator: the sum of every reachable object's
+# UNCOMPRESSED size, taken from the corpus. Deriving it from the clone instead
+# makes the ratio a tautology -- an earlier run reported exactly 1000000 ppm for
+# all fifteen samples in both arms, which is what a metric that cannot come out
+# any other way looks like.
+LOGICAL_BYTES=$(
+  "$GIT_BIN" -C "$SRC" rev-list --objects HEAD |
+    cut -d' ' -f1 |
+    "$GIT_BIN" -C "$SRC" cat-file --batch-check='%(objectsize)' |
+    awk '{ total += $1 } END { print total + 0 }'
+)
+fge_context logical_reachable_bytes "$LOGICAL_BYTES"
 fge_context expected_head "$EXPECTED_HEAD"
 fge_context expected_commits "$EXPECTED_COMMITS"
 
@@ -207,8 +251,9 @@ fge_run perf-baseline-experiment \
     FG_BENCH_PORT_BASE="$(( 21000 + ($$ % 20000) ))" \
     FG_BENCH_EXPECTED_HEAD="$EXPECTED_HEAD" \
     FG_BENCH_EXPECTED_COMMITS="$EXPECTED_COMMITS" \
+    FG_BENCH_LOGICAL_BYTES="$LOGICAL_BYTES" \
     FG_BENCH_SAMPLES="$SAMPLES" \
-    FG_BENCH_DATASET="fg028c-synthetic-8-commit-corpus head=$EXPECTED_HEAD" \
+    FG_BENCH_DATASET="fg028c-corpus ${CORPUS_COMMITS}cx${CORPUS_FILES}fx${CORPUS_LINES}l logical=${LOGICAL_BYTES}B head=$EXPECTED_HEAD" \
     FG_BENCH_THERMAL_STATE="warm-host-cold-server-per-sample" \
     FG_BENCH_SOURCE_REVISION="$SOURCE_REVISION" \
     FG_BENCH_SOURCE_TREE="$SOURCE_TREE" \

@@ -29,6 +29,7 @@ fn config() -> TransportConfig {
         port_base: 40_000,
         expected_head: "a".repeat(40),
         expected_commits: 8,
+        logical_reachable_bytes: 1_000_000,
     }
 }
 

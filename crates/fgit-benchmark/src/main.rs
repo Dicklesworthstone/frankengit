@@ -109,6 +109,12 @@ fn transport_config_from_environment() -> Result<TransportConfig, BenchmarkRefus
                 field: "FG_BENCH_EXPECTED_COMMITS",
                 detail: "must be a commit count".to_owned(),
             })?,
+        logical_reachable_bytes: required_var("FG_BENCH_LOGICAL_BYTES")?
+            .parse()
+            .map_err(|_| BenchmarkRefusal::InvalidMetric {
+                field: "FG_BENCH_LOGICAL_BYTES",
+                detail: "must be the corpus's reachable byte count".to_owned(),
+            })?,
     })
 }
 
