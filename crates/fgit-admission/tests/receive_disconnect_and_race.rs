@@ -992,62 +992,96 @@ fn a_decision_that_landed_during_a_lost_response_is_not_decided_twice() {
 fn a_duplicated_head_cas_does_not_decide_one_push_twice() {
     let context = context(b"fg019c-duplicate-cas");
     let validated = delete_main();
-    let mut raced = 0_usize;
+    let mut fired_on_cas = 0_usize;
     let mut compared = 0_usize;
+    let mut never_fired_on_a_cas = Vec::new();
 
     for member in adapters() {
         let tx_id = session_tx_id(&context, &validated, &member);
-        let span = clean_operation_span(&context, &validated, &member);
+        let store = store_with_genesis(&context);
 
-        for position in 0..span {
-            let store = store_with_genesis(&context);
-            store.install_fault_plan(fgit_authority::FaultPlan::explicit(vec![
-                FaultDirective::new(
-                    OpIndex::from_raw(position),
-                    FaultKind::DuplicateRequest {
-                        deliver: DuplicateDelivery::Second,
-                    },
-                ),
-            ]));
+        // TARGETED at the head CAS by KIND, not by absolute position. Audit
+        // 4530.6 was right that sweeping `0..span` with an unfiltered directive
+        // duplicates requests at whatever operation happens to sit at each
+        // index -- reads and put-if-absents included -- so `compared > 0` was
+        // satisfiable without a single CAS ever being duplicated, in the test
+        // named for duplicating one.
+        //
+        // `OpCounting`'s own documentation names this failure: absolute
+        // addressing "becomes the wrong one when a test means 'the operation
+        // that transitions the head' rather than 'operation 2'", and warns that
+        // the campaign then "truthfully reports a publication it expected to
+        // interrupt and did not, which reads as an assertion problem and is a
+        // targeting problem". `nth_of_kind` is the primitive that exists for it.
+        store.install_fault_plan(fgit_authority::FaultPlan::explicit(vec![
+            FaultDirective::nth_of_kind(
+                0,
+                fgit_authority::AuthorityOpKind::CompareExchangeHead,
+                FaultKind::DuplicateRequest {
+                    deliver: DuplicateDelivery::Second,
+                },
+            ),
+        ]));
 
-            let result = admit_validated_receive(
-                &store,
-                &context,
-                &validated,
-                AdmissionLimits::default(),
-                &member,
-            );
-            store.restart();
+        let result = admit_validated_receive(
+            &store,
+            &context,
+            &validated,
+            AdmissionLimits::default(),
+            &member,
+        );
 
-            // Whatever the caller saw, the authenticated stream must hold at
-            // most one terminal decision for this identity, and resolution must
-            // be able to answer.
-            let resolved = resolve_outcome(
-                &store,
-                &context.head_key,
-                context.tenant_id,
-                context.repository_id,
-                tx_id,
-            );
-            assert!(
-                resolved.is_ok(),
-                "{} / duplicate CAS at op {position}: {tx_id:?} became unresolvable",
+        // Ground truth, read BEFORE `restart()` clears nothing but is the point
+        // at which the log is unambiguous: the duplicate must have fired
+        // against a `CompareExchangeHead`. Without this the directive could
+        // fire nowhere and every assertion below would still pass.
+        let log = store.fault_log();
+        let on_cas = log
+            .records()
+            .iter()
+            .filter(|record| record.op_kind == fgit_authority::AuthorityOpKind::CompareExchangeHead)
+            .count();
+        if on_cas == 0 {
+            never_fired_on_a_cas.push(member.label);
+        }
+        fired_on_cas += on_cas;
+
+        store.restart();
+
+        // Whatever the caller saw, the authenticated stream must hold at most
+        // one terminal decision for this identity, and resolution must answer.
+        let resolved = resolve_outcome(
+            &store,
+            &context.head_key,
+            context.tenant_id,
+            context.repository_id,
+            tx_id,
+        );
+        assert!(
+            resolved.is_ok(),
+            "{} / duplicated head CAS: {tx_id:?} became unresolvable",
+            member.label
+        );
+
+        if let (Ok(result), Ok(OutcomeLookup::Decided(terminal))) = (&result, &resolved) {
+            compared += 1;
+            assert_eq!(
+                result.commands[0].terminal, *terminal,
+                "{} / duplicated head CAS: the caller was told a decision the stream does not hold",
                 member.label
             );
-
-            if let (Ok(result), Ok(OutcomeLookup::Decided(terminal))) = (&result, &resolved) {
-                compared += 1;
-                assert_eq!(
-                    result.commands[0].terminal, *terminal,
-                    "{} / duplicate CAS at op {position}: the caller was told a decision the stream does not hold",
-                    member.label
-                );
-            }
-            raced += 1;
         }
     }
 
-    assert!(raced >= 20, "only {raced} duplicate-CAS cells ran");
+    assert!(
+        never_fired_on_a_cas.is_empty(),
+        "the duplicate never fired against a head CAS for {never_fired_on_a_cas:?}, so those \
+         cells proved nothing about duplicating the operation this test is named for"
+    );
+    assert!(
+        fired_on_cas > 0,
+        "no duplicate fired against any head CAS, so this probe never exercised its subject"
+    );
     assert!(
         compared > 0,
         "the caller and the stream were never both answered, so nothing was ever compared"
