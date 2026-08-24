@@ -320,7 +320,7 @@ fn copy_bytes(bytes: &[u8], deadline: &mut impl Deadline) -> Result<Vec<u8>, Ref
     Ok(copied)
 }
 
-fn map_pack_error(error: PackError) -> RefusalCode {
+const fn map_pack_error(error: PackError) -> RefusalCode {
     match error {
         PackError::DeadlineExceeded => RefusalCode::CancellationInProgress,
         PackError::InputLimit { .. }
@@ -509,6 +509,7 @@ mod tests {
         let base_length = u8::try_from(base_body.len()).expect("small bounded fixture");
         let target_length = u8::try_from(target_body.len()).expect("small bounded fixture");
         let mut program = vec![base_length, target_length, 0x91, 0, base_length];
+        program.push(u8::try_from(suffix.len()).expect("one-byte literal fixture"));
         program.extend_from_slice(suffix);
         let mut pack = b"PACK\0\0\0\x02\0\0\0\x01".to_vec();
         pack.push(0x70 | u8::try_from(program.len()).expect("small delta program"));
