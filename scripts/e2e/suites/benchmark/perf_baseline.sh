@@ -84,10 +84,11 @@ SAMPLES=${FG_BENCH_SAMPLES:-5}
 # not a label: the served corpus is evicted with posix_fadvise before every
 # sample. Run the cell twice, once per state, to get both.
 CACHE_STATE=${FG_BENCH_CACHE_STATE:-warm}
-# clone or fetch. Both are measured identically, one arm per server; a fetch run
-# consumes a pre-created stale clone per sample so materializing it stays
-# outside the timed interval.
-OPERATION=${FG_BENCH_OPERATION:-clone}
+# The default matches clone and stale-fetch measurements against the same
+# source revision and corpus.  Explicit clone/fetch runs remain useful for
+# diagnosis, but cannot establish the fetch-versus-clone acceptance inequality
+# on their own.
+OPERATION=${FG_BENCH_OPERATION:-matched}
 # How far behind the stale clones start, in commits, for a fetch run.
 STALE_BEHIND=${FG_BENCH_STALE_BEHIND:-3}
 PYTHON_BIN=${FG_BENCH_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}
@@ -108,6 +109,15 @@ fge_context artifact_directory "$artifact_dir"
 fge_context samples_per_variant "$SAMPLES"
 fge_context cache_state "$CACHE_STATE"
 fge_context operation "$OPERATION"
+
+case "$OPERATION" in
+  clone|fetch|matched) ;;
+  *)
+    fge_unsupported FG-028C-E2E-026 \
+      'operation must be clone, fetch, or matched; no unrecognized operation is measured'
+    exit 0
+    ;;
+esac
 
 fge_assert_file FG-028C-E2E-001 "$PB_REPO/crates/fgit-benchmark/src/transport.rs" \
   'the transport workload module is present'
@@ -309,7 +319,7 @@ LOGICAL_FOR_RUN="$LOGICAL_BYTES"
 # nothing on every sample after the first and report as very fast. The runner
 # reuses the baseline subject for the A/A pass, so that arm consumes 2*SAMPLES
 # indices while the candidate arm consumes SAMPLES.
-if [ "$OPERATION" = fetch ]; then
+if [ "$OPERATION" = fetch ] || [ "$OPERATION" = matched ]; then
   STALE_AT=$("$GIT_BIN" -C "$SRC" rev-parse "HEAD~$STALE_BEHIND")
   fge_context stale_base "$STALE_AT"
   fge_context stale_behind_commits "$STALE_BEHIND"
@@ -383,49 +393,81 @@ mkdir -p "$TEMPLATE"
 fge_phase assert
 fge_unsupported FG-028C-E2E-019 \
   'push throughput is unmeasurable as a transport at this revision: the daemon refuses every service that is not git-upload-pack (GitDaemonTransportRefusal::UnsupportedService) and no receive-pack serve function exists. The gate is the absent daemon lane, tracked by frankengit-fg019; it is NOT frankengit-n6kg, whose production QuarantineValidator landed at 053176c while push stayed exactly as unmeasurable.'
-fge_unsupported FG-028C-E2E-020 \
-  'fetch is not measured through the sanctioned oracle lane, which implements clone-loopback only'
+if [ "$OPERATION" = clone ]; then
+  fge_unsupported FG-028C-E2E-020 \
+    'fetch is not measured in an explicit clone-only diagnostic run; use the matched lane for the clone-versus-fetch egress gate'
+fi
 fge_phase action
 
-fge_run perf-baseline-experiment \
-  env \
-    RCH_CARGO_WRAPPER_BYPASS=1 \
-    FG_BENCH_FG_BINARY="$FG_BIN" \
-    FG_BENCH_GIT_BINARY="$GIT_BIN" \
-    FG_BENCH_GIT_EXEC_PATH="$GIT_EXEC" \
-    FG_BENCH_TEMPLATE_DIR="$TEMPLATE" \
-    FG_BENCH_STORAGE_ROOT="$STORAGE" \
-    FG_BENCH_UPSTREAM_BASE_PATH="$UPSTREAM_BASE" \
-    FG_BENCH_TENANT="$TENANT" \
-    FG_BENCH_REPOSITORY="$REPOID" \
-    FG_BENCH_WORK_ROOT="$CLONES" \
-    FG_BENCH_PORT_BASE="$(( 21000 + ($$ % 20000) ))" \
-    FG_BENCH_EXPECTED_HEAD="$EXPECTED_HEAD" \
-    FG_BENCH_EXPECTED_COMMITS="$EXPECTED_COMMITS" \
-    FG_BENCH_LOGICAL_BYTES="$LOGICAL_FOR_RUN" \
-    FG_BENCH_SAMPLES="$SAMPLES" \
-    FG_BENCH_DATASET="fg028c-corpus ${CORPUS_COMMITS}cx${CORPUS_FILES}fx${CORPUS_LINES}l logical=${LOGICAL_BYTES}B head=$EXPECTED_HEAD" \
-    FG_BENCH_OPERATION="$OPERATION" \
-    FG_BENCH_STALE_ROOT="$STALE" \
-    FG_BENCH_FETCH_REFSPEC="$FETCH_REFSPEC" \
-    FG_BENCH_CACHE_STATE="$CACHE_STATE" \
-    FG_BENCH_PYTHON="$PYTHON_BIN" \
-    FG_BENCH_SOURCE_REVISION="$SOURCE_REVISION" \
-    FG_BENCH_SOURCE_TREE="$SOURCE_TREE" \
-    cargo run -q --release -p fgit-benchmark -- transport-baseline --out "$artifact_dir" \
-  || true
-EXPERIMENT_EXIT=$FGE_LAST_EXIT
+run_transport_operation() {
+  local operation=$1 output=$2 port_base=$3
+  local logical_bytes=$LOGICAL_FOR_RUN
+  if [ "$operation" = clone ]; then
+    logical_bytes=$LOGICAL_BYTES
+  fi
+  fge_run "perf-baseline-${operation}-experiment" \
+    env \
+      RCH_CARGO_WRAPPER_BYPASS=1 \
+      FG_BENCH_FG_BINARY="$FG_BIN" \
+      FG_BENCH_GIT_BINARY="$GIT_BIN" \
+      FG_BENCH_GIT_EXEC_PATH="$GIT_EXEC" \
+      FG_BENCH_TEMPLATE_DIR="$TEMPLATE" \
+      FG_BENCH_STORAGE_ROOT="$STORAGE" \
+      FG_BENCH_UPSTREAM_BASE_PATH="$UPSTREAM_BASE" \
+      FG_BENCH_TENANT="$TENANT" \
+      FG_BENCH_REPOSITORY="$REPOID" \
+      FG_BENCH_WORK_ROOT="$CLONES" \
+      FG_BENCH_PORT_BASE="$port_base" \
+      FG_BENCH_EXPECTED_HEAD="$EXPECTED_HEAD" \
+      FG_BENCH_EXPECTED_COMMITS="$EXPECTED_COMMITS" \
+      FG_BENCH_LOGICAL_BYTES="$logical_bytes" \
+      FG_BENCH_SAMPLES="$SAMPLES" \
+      FG_BENCH_DATASET="fg028c-corpus ${CORPUS_COMMITS}cx${CORPUS_FILES}fx${CORPUS_LINES}l logical=${LOGICAL_BYTES}B head=$EXPECTED_HEAD" \
+      FG_BENCH_OPERATION="$operation" \
+      FG_BENCH_STALE_ROOT="$STALE" \
+      FG_BENCH_FETCH_REFSPEC="$FETCH_REFSPEC" \
+      FG_BENCH_CACHE_STATE="$CACHE_STATE" \
+      FG_BENCH_PYTHON="$PYTHON_BIN" \
+      FG_BENCH_SOURCE_REVISION="$SOURCE_REVISION" \
+      FG_BENCH_SOURCE_TREE="$SOURCE_TREE" \
+      cargo run -q --release -p fgit-benchmark -- transport-baseline --out "$output" \
+    || true
+  FGE_TRANSPORT_EXIT=$FGE_LAST_EXIT
+}
+
+PORT_BASE=$(( 21000 + ($$ % 20000) ))
+CLONE_ARTIFACT_DIR="$artifact_dir"
+FETCH_ARTIFACT_DIR=
+if [ "$OPERATION" = matched ]; then
+  CLONE_ARTIFACT_DIR="$artifact_dir/clone"
+  FETCH_ARTIFACT_DIR="$artifact_dir/fetch"
+  run_transport_operation clone "$CLONE_ARTIFACT_DIR" "$PORT_BASE"
+  CLONE_EXPERIMENT_EXIT=$FGE_TRANSPORT_EXIT
+  run_transport_operation fetch "$FETCH_ARTIFACT_DIR" "$(( PORT_BASE + 1000 ))"
+  FETCH_EXPERIMENT_EXIT=$FGE_TRANSPORT_EXIT
+else
+  run_transport_operation "$OPERATION" "$CLONE_ARTIFACT_DIR" "$PORT_BASE"
+  CLONE_EXPERIMENT_EXIT=$FGE_TRANSPORT_EXIT
+  FETCH_EXPERIMENT_EXIT=
+fi
 
 fge_phase assert
 
-ARTIFACT="$artifact_dir/benchmark.ndjson"
+ARTIFACT="$CLONE_ARTIFACT_DIR/benchmark.ndjson"
+FETCH_ARTIFACT="$FETCH_ARTIFACT_DIR/benchmark.ndjson"
 
-fge_assert_exit FG-028C-E2E-007 0 "$EXPERIMENT_EXIT" \
+fge_assert_exit FG-028C-E2E-007 0 "$CLONE_EXPERIMENT_EXIT" \
   'the baseline/candidate/A-A experiment completes with every oracle satisfied'
 fge_assert_file FG-028C-E2E-008 "$ARTIFACT" \
   'the anchor artifact is written'
-fge_assert_file FG-028C-E2E-009 "$artifact_dir/replay-and-rollback.txt" \
+fge_assert_file FG-028C-E2E-009 "$CLONE_ARTIFACT_DIR/replay-and-rollback.txt" \
   'the anchor artifact carries its reproduction command'
+if [ "$OPERATION" = matched ]; then
+  fge_assert_exit FG-028C-E2E-027 0 "$FETCH_EXPERIMENT_EXIT" \
+    'the matched stale-fetch baseline/candidate/A-A experiment completes with every oracle satisfied'
+  fge_assert_file FG-028C-E2E-028 "$FETCH_ARTIFACT" \
+    'the matched stale-fetch artifact is written'
+fi
 
 # Acceptance line 2: the differential must actually be present. An artifact
 # with only one server in it would satisfy nothing while still parsing.
@@ -470,28 +512,51 @@ for pair in \
 done
 
 # x7ja's transfer claims are numeric gates, not merely a promise that the
-# artifact will contain metric-shaped fields.  A full clone must retain less
-# than one uncompressed reachable corpus on every candidate sample.  For a
-# stale fetch, the same candidate must add less than half the full corpus's
-# uncompressed reachable bytes.  The latter is deliberately relative to the
-# complete corpus (rather than the stale delta denominator): it is the
-# discriminator for the reported failure mode where fetching a few commits
-# was within 2 KB of cloning the whole repository.
-if [ "$OPERATION" = clone ]; then
+# artifact will contain metric-shaped fields. A full clone must retain less
+# than one uncompressed reachable corpus on every candidate sample.
+if [ "$OPERATION" != fetch ]; then
   fge_assert_cmd FG-028C-E2E-015 \
     'every fgit-node clone sample stays below 1.00x logical reachable bytes' \
     "$PYTHON_BIN" -c 'import json,sys
 rows=[json.loads(line) for line in open(sys.argv[1])]
 samples=[row for row in rows if row.get("kind")=="sample" and row.get("variant")=="candidate"]
 sys.exit(0 if samples and all(sample["metrics"]["storage"]["amplification_ppm"] < 1_000_000 for sample in samples) else 1)' "$ARTIFACT"
-else
-  fge_assert_cmd FG-028C-E2E-026 \
-    'every fgit-node stale fetch adds less than half the full corpus logical bytes' \
+fi
+
+# A stale fetch earns its claim only when it is paired with a clone of this
+# exact source revision and deterministic corpus. The comparison deliberately
+# uses worst-case fetch against best-case clone, so one regressing sample cannot
+# be hidden by an average. A standalone fetch remains diagnostic evidence, not
+# proof of the fetch-versus-clone acceptance line.
+if [ "$OPERATION" = matched ]; then
+  fge_assert_cmd FG-028C-E2E-029 \
+    'matched clone and fetch artifacts bind the same revision and corpus fingerprint' \
     "$PYTHON_BIN" -c 'import json,sys
-rows=[json.loads(line) for line in open(sys.argv[1])]
-full_logical_bytes=int(sys.argv[2])
-samples=[row for row in rows if row.get("kind")=="sample" and row.get("variant")=="candidate"]
-sys.exit(0 if samples and all(sample["metrics"]["egress_bytes"] * 2 < full_logical_bytes for sample in samples) else 1)' "$ARTIFACT" "$LOGICAL_BYTES"
+def begin(path):
+    rows=[json.loads(line) for line in open(path)]
+    matches=[row for row in rows if row.get("kind")=="begin"]
+    if len(matches) != 1:
+        raise SystemExit(1)
+    return matches[0]
+clone,fetch=begin(sys.argv[1]),begin(sys.argv[2])
+keys=[
+    ("fingerprint","source_revision"),
+    ("fingerprint","source_tree"),
+    ("workload","dataset"),
+]
+raise SystemExit(0 if all(clone[group][field] == fetch[group][field] for group,field in keys) else 1)' "$ARTIFACT" "$FETCH_ARTIFACT"
+  fge_assert_cmd FG-028C-E2E-030 \
+    'every matched stale-fetch candidate adds fewer bytes than every matched clone candidate' \
+    "$PYTHON_BIN" -c 'import json,sys
+def candidates(path):
+    rows=[json.loads(line) for line in open(path)]
+    return [row["metrics"]["egress_bytes"] for row in rows if row.get("kind")=="sample" and row.get("variant")=="candidate"]
+clone,fetch=candidates(sys.argv[1]),candidates(sys.argv[2])
+expected=int(sys.argv[3])
+raise SystemExit(0 if len(clone)==expected and len(fetch)==expected and max(fetch) < min(clone) else 1)' "$ARTIFACT" "$FETCH_ARTIFACT" "$SAMPLES"
+elif [ "$OPERATION" = fetch ]; then
+  fge_unsupported FG-028C-E2E-031 \
+    'a standalone stale-fetch artifact has no matched clone comparator; use the default matched lane for the egress inequality'
 fi
 
 # The measured CPU must be a real reading, not a defaulted zero. A zero would
@@ -513,10 +578,23 @@ fge_assert_cmd FG-028C-E2E-018 \
   'the artifact records an explicit admissibility verdict rather than omitting it' \
   grep -qE '"speedup_admissible":(true|false)' "$ARTIFACT"
 
-fge_artifact "$ARTIFACT" perf-baseline-anchor
-fge_artifact "$artifact_dir/replay-and-rollback.txt" perf-baseline-replay
-if [ -f "$artifact_dir/negative-evidence.ndjson" ]; then
-  fge_artifact "$artifact_dir/negative-evidence.ndjson" perf-baseline-negative-evidence
+if [ "$OPERATION" = matched ]; then
+  fge_artifact "$ARTIFACT" perf-baseline-clone-anchor
+  fge_artifact "$CLONE_ARTIFACT_DIR/replay-and-rollback.txt" perf-baseline-clone-replay
+  fge_artifact "$FETCH_ARTIFACT" perf-baseline-fetch-anchor
+  fge_artifact "$FETCH_ARTIFACT_DIR/replay-and-rollback.txt" perf-baseline-fetch-replay
+  if [ -f "$CLONE_ARTIFACT_DIR/negative-evidence.ndjson" ]; then
+    fge_artifact "$CLONE_ARTIFACT_DIR/negative-evidence.ndjson" perf-baseline-clone-negative-evidence
+  fi
+  if [ -f "$FETCH_ARTIFACT_DIR/negative-evidence.ndjson" ]; then
+    fge_artifact "$FETCH_ARTIFACT_DIR/negative-evidence.ndjson" perf-baseline-fetch-negative-evidence
+  fi
+else
+  fge_artifact "$ARTIFACT" perf-baseline-anchor
+  fge_artifact "$CLONE_ARTIFACT_DIR/replay-and-rollback.txt" perf-baseline-replay
+  if [ -f "$CLONE_ARTIFACT_DIR/negative-evidence.ndjson" ]; then
+    fge_artifact "$CLONE_ARTIFACT_DIR/negative-evidence.ndjson" perf-baseline-negative-evidence
+  fi
 fi
 
 # ---------------------------------------------------------------------------
