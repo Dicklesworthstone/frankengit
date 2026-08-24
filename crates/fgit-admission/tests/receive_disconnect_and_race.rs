@@ -2272,6 +2272,157 @@ fn the_permitted_twin_a_push_to_a_visible_ref_commits() {
     );
 }
 
+/// A structurally valid, empty SHA-1 pack that has crossed quarantine parsing.
+///
+/// Needed because `validate_receive` refuses any non-delete command with no
+/// pack, so an OBJECT-BEARING probe cannot reach the hidden-ref policy without
+/// one. The pack carries no entries: what is under test is which refusal the
+/// admission path reaches, not pack contents.
+fn quarantined_empty_pack() -> fgit_pack::QuarantinedPack {
+    let mut bytes = b"PACK\0\0\0\x02\0\0\0\0".to_vec();
+    let checksum = fgit_crypto::sha1_digest(&bytes);
+    bytes.extend_from_slice(checksum.as_slice());
+    fgit_pack::read_verified_pack(
+        &bytes,
+        fgit_pack::ObjectFormat::Sha1,
+        &fgit_pack::PackLimits::default(),
+        &mut live_deadline(),
+        &fgit_pack::NativeChecksumVerifier,
+    )
+    .expect("an empty pack is structurally valid and crosses quarantine parsing")
+}
+
+/// A validator that declares one uploaded object, so a non-delete command's
+/// target is inside the closure and containment does not refuse first.
+struct DeclaredClosureValidator(GitOid);
+
+impl QuarantineValidator for DeclaredClosureValidator {
+    fn validate(
+        &self,
+        _request: &ReceiveRequest,
+        _pack: Option<&fgit_pack::QuarantinedPack>,
+        _receipt: &QuarantineReceipt,
+        _deadline: &mut impl fgit_pack::Deadline,
+    ) -> Result<ValidatedClosure, RefusalCode> {
+        let objects = BTreeSet::from([self.0]);
+        Ok(ValidatedClosure {
+            object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(
+                objects.clone(),
+            ))?,
+            objects,
+        })
+    }
+}
+
+/// One object-bearing create of `target_ref`, validated and ready to admit.
+fn object_bearing_receive(target_ref: &[u8], new_oid: &str) -> ValidatedReceive {
+    let mut line = format!("{ZERO} {new_oid} {}", String::from_utf8_lossy(target_ref)).into_bytes();
+    line.push(0);
+    line.extend_from_slice(b"report-status atomic");
+
+    let mut machine = ReceivePack::new(wire_context()).expect("machine");
+    machine
+        .push_packet(Packet::Data(line))
+        .expect("create command must parse");
+    let transition = machine.push_packet(Packet::Flush).expect("command flush");
+    let Some(ReceiveEvent::RequestReady(request)) = transition.events.first() else {
+        panic!("the command flush must expose a parsed request");
+    };
+    let request = (**request).clone();
+
+    let pack = quarantined_empty_pack();
+    let receipt = QuarantineReceipt {
+        object_format: GitObjectFormat::Sha1,
+        object_count: 1,
+        pack_bytes: 32,
+        delete_only: false,
+    };
+    validate_receive(
+        &request,
+        Some(&pack),
+        &receipt,
+        &DeclaredClosureValidator(oid(new_oid)),
+        &mut live_deadline(),
+    )
+    .expect("an object-bearing receive whose closure covers its target validates")
+}
+
+/// An OBJECT-BEARING push to a hidden ref is refused as hidden, not by an
+/// earlier gate.
+///
+/// # Why this is not covered by the delete-only probes
+///
+/// Audit 4658.3 was right that every hidden-ref probe here is a delete-only,
+/// zero-object request. `hides_any_target` reads only `command.name`, so by
+/// SOURCE the guard looks command-kind independent -- but reading the guard is
+/// not watching it fire. An object-bearing request travels a longer road first:
+/// `validate_receive` demands a pack, then closure containment, and either could
+/// refuse before ref visibility is ever consulted. Both of those answer
+/// `ObjectClosureIncomplete`, which is a different code, so "refused" alone
+/// would not distinguish them.
+///
+/// This drives the object-bearing road all the way and pins that the refusal is
+/// still `HiddenRefUnauthorized`.
+#[test]
+fn an_object_bearing_push_to_a_hidden_ref_is_still_refused_as_hidden() {
+    let context = context(b"fg019c-hidden-objects");
+    let store = store_with_genesis(&context);
+    let projection =
+        UnboundAdapter::with_main("hidden-objects", 0x51).hiding(b"refs/internal/secret");
+
+    let result = admit_validated_receive(
+        &store,
+        &context,
+        &object_bearing_receive(b"refs/internal/secret", MAIN_OID),
+        AdmissionLimits::default(),
+        &projection,
+    )
+    .expect("an object-bearing push to a hidden ref reaches a terminal decision");
+
+    let outcome = &result.commands[0].terminal.outcome;
+    assert!(
+        matches!(
+            outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::HiddenRefUnauthorized,
+                ..
+            }
+        ),
+        "an object-bearing push to a hidden ref must be refused as hidden rather than \
+         by the pack or closure gates it crosses first, got {outcome:?}"
+    );
+}
+
+/// The permitted twin for the object-bearing case: same shape, visible target,
+/// and it must COMMIT.
+///
+/// Without this the test above passes equally against an admission path that
+/// refuses every object-bearing push for some unrelated reason, which is the
+/// whole failure mode a twin exists to exclude.
+#[test]
+fn the_permitted_twin_an_object_bearing_push_to_a_visible_ref_commits() {
+    let context = context(b"fg019c-visible-objects");
+    let store = store_with_genesis(&context);
+    let projection =
+        UnboundAdapter::with_main("visible-objects", 0x52).hiding(b"refs/internal/secret");
+
+    let result = admit_validated_receive(
+        &store,
+        &context,
+        &object_bearing_receive(b"refs/heads/feature", MAIN_OID),
+        AdmissionLimits::default(),
+        &projection,
+    )
+    .expect("an object-bearing push to a visible ref reaches a terminal decision");
+
+    let outcome = &result.commands[0].terminal.outcome;
+    assert!(
+        matches!(outcome, DecisionOutcome::Committed { .. }),
+        "an object-bearing push to a ref the policy does not hide must COMMIT, got \
+         {outcome:?}"
+    );
+}
+
 /// A hide rule that matches by PREFIX refuses a push beneath it.
 ///
 /// The rule here never names the pushed ref exactly, so this separates "the
