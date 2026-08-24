@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![feature(random)]
 
 //! One-process `FrankenGit` node assembly.
 //!
@@ -43,15 +44,15 @@ use fgit_authority::{
     AuthorityVersionToken, HeadInit, HeadKey, HeadRead, IdempotencyKey, ImmutableKey,
     ImmutableRead, KeyError, OutcomeLookup, PutOutcome, StoreInstanceId,
     initialize_repository_async, outcome_index_root, read_authority_head_body_async,
-    read_decision_batch_body_async, read_repository_configuration_async, resolve_outcome_async,
-    stage_repository_configuration_async,
+    read_decision_batch_body_async, read_repository_incarnation_configuration_async,
+    resolve_outcome_async, stage_repository_incarnation_configuration_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
 use fgit_chronicle::{
     PublicationBasis, PublicationVerdict, VerifiedPublication, publish_async, verify_pair,
 };
 use fgit_codec::schema::{
-    RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryConfigurationBody,
+    RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryIncarnationConfigurationBody,
 };
 use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, body_id, decode_body, encode_body,
@@ -82,7 +83,8 @@ use fgit_types::layout::RootLayoutVersion;
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256,
     HeadGeneration, PolicyEpoch, PrincipalId, RefusalCode, RegistryEpoch,
-    RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, TenantId, TxId,
+    RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, RepositoryIncarnationId, TenantId,
+    TxId,
 };
 use fgit_wire::stale_disclosure::{LabelledAdvertisement, advertise_under_read_label};
 use fgit_wire::visibility::{RefVisibility, filter_advertised_refs};
@@ -2225,6 +2227,13 @@ pub enum NodeRefusal {
         /// The incompatible explicit expectation supplied to this node open.
         supplied: GitHashAlgorithm,
     },
+    /// A caller addressed a superseded repository incarnation.
+    RepositoryIncarnationMismatch {
+        /// The incarnation named by the caller's stale location or token.
+        expected: RepositoryIncarnationId,
+        /// The incarnation the authenticated authority head currently selects.
+        observed: RepositoryIncarnationId,
+    },
     /// The operator-selected storage root cannot name the embedded database.
     StoragePathEncoding,
     /// The derived authority-head key was outside the bounded key vocabulary.
@@ -2279,6 +2288,10 @@ impl Display for NodeRefusal {
             Self::ObjectFormatMismatch { stored, supplied } => write!(
                 formatter,
                 "caller requested {supplied} objects but authenticated repository configuration requires {stored}"
+            ),
+            Self::RepositoryIncarnationMismatch { expected, observed } => write!(
+                formatter,
+                "caller addressed repository incarnation {expected}, but the authenticated head selects {observed}"
             ),
             Self::StoragePathEncoding => formatter.write_str(
                 "node storage root cannot be represented as a UTF-8 embedded authority path",
@@ -2339,6 +2352,7 @@ impl Error for NodeRefusal {
             | Self::AuthorityHeadAbsent
             | Self::RepositoryMismatch
             | Self::ObjectFormatMismatch { .. }
+            | Self::RepositoryIncarnationMismatch { .. }
             | Self::HeadInitializationConflict
             | Self::StoragePathEncoding
             | Self::ObjectTooLarge { .. }
@@ -3701,6 +3715,8 @@ pub struct NodeConfig {
     storage_root: PathBuf,
     tenant_id: TenantId,
     repository_id: RepositoryId,
+    creation_repository_incarnation_id: RepositoryIncarnationId,
+    expected_repository_incarnation_id: Option<RepositoryIncarnationId>,
     git_daemon_repository_path: GitDaemonRepositoryPath,
     store_instance: StoreInstanceId,
     worker_threads: usize,
@@ -3728,6 +3744,8 @@ impl NodeConfig {
             storage_root,
             tenant_id,
             repository_id,
+            creation_repository_incarnation_id: mint_repository_incarnation_id(),
+            expected_repository_incarnation_id: None,
             git_daemon_repository_path: default_git_daemon_repository_path(repository_id),
             store_instance: StoreInstanceId::from_raw(1),
             worker_threads: 1,
@@ -3756,6 +3774,22 @@ impl NodeConfig {
     #[must_use]
     pub const fn with_object_format(mut self, object_format: GitHashAlgorithm) -> Self {
         self.object_format = Some(object_format);
+        self
+    }
+
+    /// Binds this operation to one caller-observed repository incarnation.
+    ///
+    /// A location record, capability, or cache that carries an incarnation
+    /// must use this builder before opening a repository. The node compares it
+    /// to the v2 body selected by the authenticated authority head before any
+    /// object operation can proceed.
+    #[must_use]
+    pub const fn with_expected_repository_incarnation(
+        mut self,
+        repository_incarnation_id: RepositoryIncarnationId,
+    ) -> Self {
+        self.creation_repository_incarnation_id = repository_incarnation_id;
+        self.expected_repository_incarnation_id = Some(repository_incarnation_id);
         self
     }
 
@@ -3857,6 +3891,8 @@ pub struct OneNode {
     git_daemon_repository_path: GitDaemonRepositoryPath,
     tenant_id: TenantId,
     repository_id: RepositoryId,
+    repository_incarnation_id: RepositoryIncarnationId,
+    storage_root: PathBuf,
     namespace: Vec<u8>,
     object_format: GitHashAlgorithm,
     max_object_bytes: u64,
@@ -3875,27 +3911,31 @@ impl OneNode {
         let repository_id = config.repository_id;
         let node = Self::open_components(config)?;
         let initialization_cx = node.authority_context();
-        let configuration = RepositoryConfigurationBody {
+        let configuration = RepositoryIncarnationConfigurationBody {
             root_layout: RootLayoutVersion::LegacyWholeBody,
             object_format: node.object_format,
+            repository_incarnation_id: node.repository_incarnation_id,
         };
-        let configuration_root = match node.runtime.block_on(stage_repository_configuration_async(
-            &node.authority,
-            &initialization_cx,
-            &configuration,
-        )) {
-            Ok(root) => root,
-            Err(staging) => {
-                let initialization = NodeRefusal::from(staging);
-                return match node.shutdown() {
-                    Ok(()) => Err(initialization),
-                    Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
-                        initialization: Box::new(initialization),
-                        cleanup: Box::new(cleanup),
-                    }),
-                };
-            }
-        };
+        let configuration_root =
+            match node
+                .runtime
+                .block_on(stage_repository_incarnation_configuration_async(
+                    &node.authority,
+                    &initialization_cx,
+                    &configuration,
+                )) {
+                Ok(root) => root,
+                Err(staging) => {
+                    let initialization = NodeRefusal::from(staging);
+                    return match node.shutdown() {
+                        Ok(()) => Err(initialization),
+                        Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
+                            initialization: Box::new(initialization),
+                            cleanup: Box::new(cleanup),
+                        }),
+                    };
+                }
+            };
         let ref_root = match node
             .runtime
             .block_on(node.admission_materializer.stage_ref_state_in(
@@ -3981,6 +4021,7 @@ impl OneNode {
     /// receipt against the store's issuance record.
     pub fn open_existing(config: NodeConfig) -> Result<Self, NodeRefusal> {
         let supplied_object_format = config.object_format;
+        let expected_repository_incarnation_id = config.expected_repository_incarnation_id;
         let mut node = Self::open_components(config)?;
         let configuration_cx = node.authority_context();
         let opened = node.runtime().block_on(async {
@@ -3988,7 +4029,7 @@ impl OneNode {
             let head = authenticated
                 .body()
                 .map_err(fgit_authority::OutcomeFailure::from)?;
-            let configuration = read_repository_configuration_async(
+            let configuration = read_repository_incarnation_configuration_async(
                 &node.authority,
                 &configuration_cx,
                 &head.configuration_root,
@@ -4002,11 +4043,26 @@ impl OneNode {
                     supplied,
                 });
             }
-            Ok(configuration.object_format)
+            if let Some(expected) = expected_repository_incarnation_id
+                && expected != configuration.repository_incarnation_id
+            {
+                return Err(NodeRefusal::RepositoryIncarnationMismatch {
+                    expected,
+                    observed: configuration.repository_incarnation_id,
+                });
+            }
+            Ok((
+                configuration.object_format,
+                configuration.repository_incarnation_id,
+            ))
         });
         match opened {
-            Ok(object_format) => {
+            Ok((object_format, repository_incarnation_id)) => {
+                if let Err(rebind) = node.rebind_object_fabric(repository_incarnation_id) {
+                    return Err(close_after_existing_open_failure(node, rebind));
+                }
                 node.object_format = object_format;
+                node.repository_incarnation_id = repository_incarnation_id;
                 Ok(node)
             }
             Err(opening) => Err(close_after_existing_open_failure(node, opening)),
@@ -4025,20 +4081,16 @@ impl OneNode {
             .build()
             .map_err(NodeRefusal::from)?;
         let authority_path = authority_database_path(&config.storage_root)?;
-        let namespace = object_namespace(config.repository_id);
-        let failure_domain = fgit_resource::OpaqueHandle::new(b"node-local-filesystem")
-            .map_err(NodeRefusal::from)?;
-        let encryption_dependency =
-            fgit_resource::OpaqueHandle::new(b"node-local-key").map_err(NodeRefusal::from)?;
-        let fabric = LocalFilesystemFabric::open(LocalFilesystemConfig::new(
-            config.storage_root,
+        let namespace = object_namespace(
+            config.repository_id,
+            config.creation_repository_incarnation_id,
+        );
+        let fabric = open_local_fabric(
+            config.storage_root.clone(),
             namespace.clone(),
-            failure_domain,
-            encryption_dependency,
             config.max_object_bytes,
             config.segment_limits.clone(),
-        ))
-        .map_err(NodeRefusal::from)?;
+        )?;
 
         let head_key = head_key(config.repository_id)?;
         let admission_cache_scope = admission_cache_scope().map_err(NodeRefusal::from)?;
@@ -4061,6 +4113,8 @@ impl OneNode {
             git_daemon_repository_path: config.git_daemon_repository_path,
             tenant_id: config.tenant_id,
             repository_id: config.repository_id,
+            repository_incarnation_id: config.creation_repository_incarnation_id,
+            storage_root: config.storage_root,
             namespace,
             object_format: config.object_format.unwrap_or(GitHashAlgorithm::Sha1),
             max_object_bytes: config.max_object_bytes,
@@ -4160,6 +4214,13 @@ impl OneNode {
     #[must_use]
     pub const fn repository_id(&self) -> RepositoryId {
         self.repository_id
+    }
+
+    /// Returns the exact incarnation selected by the authenticated
+    /// configuration body.
+    #[must_use]
+    pub const fn repository_incarnation_id(&self) -> RepositoryIncarnationId {
+        self.repository_incarnation_id
     }
 
     /// Returns the one canonical git-daemon lookup path this node serves.
@@ -4862,6 +4923,33 @@ impl OneNode {
         authority_context_for(&self.runtime)
     }
 
+    /// Switches from the unopened candidate namespace to the one the
+    /// authenticated configuration selects.
+    ///
+    /// `open_existing` has not exposed the preliminary fabric to a caller: it
+    /// authenticates the head and checks any caller-supplied expectation before
+    /// reaching this point. Reopening the local fabric here therefore prevents
+    /// an unlabelled open from resolving objects in a stale or random creation
+    /// namespace.
+    fn rebind_object_fabric(
+        &mut self,
+        repository_incarnation_id: RepositoryIncarnationId,
+    ) -> Result<(), NodeRefusal> {
+        let namespace = object_namespace(self.repository_id, repository_incarnation_id);
+        if self.namespace == namespace {
+            return Ok(());
+        }
+        let fabric = open_local_fabric(
+            self.storage_root.clone(),
+            namespace.clone(),
+            self.max_object_bytes,
+            self.segment_limits.clone(),
+        )?;
+        self.fabric = fabric;
+        self.namespace = namespace;
+        Ok(())
+    }
+
     /// Validates and immutably places one native Git object through object fabric.
     pub fn put_git_object(
         &self,
@@ -5039,11 +5127,43 @@ fn initialize_embedded_repository(
         .map_err(NodeRefusal::from)
 }
 
-fn object_namespace(repository_id: RepositoryId) -> Vec<u8> {
-    let mut namespace =
-        Vec::with_capacity(FABRIC_NAMESPACE_PREFIX.len() + repository_id.as_bytes().len());
+fn mint_repository_incarnation_id() -> RepositoryIncarnationId {
+    RepositoryIncarnationId::from_bytes(std::random::random::<u128>(..).to_be_bytes())
+}
+
+fn open_local_fabric(
+    storage_root: PathBuf,
+    namespace: Vec<u8>,
+    max_object_bytes: u64,
+    segment_limits: SegmentLimits,
+) -> Result<LocalFilesystemFabric, NodeRefusal> {
+    let failure_domain =
+        fgit_resource::OpaqueHandle::new(b"node-local-filesystem").map_err(NodeRefusal::from)?;
+    let encryption_dependency =
+        fgit_resource::OpaqueHandle::new(b"node-local-key").map_err(NodeRefusal::from)?;
+    LocalFilesystemFabric::open(LocalFilesystemConfig::new(
+        storage_root,
+        namespace,
+        failure_domain,
+        encryption_dependency,
+        max_object_bytes,
+        segment_limits,
+    ))
+    .map_err(NodeRefusal::from)
+}
+
+fn object_namespace(
+    repository_id: RepositoryId,
+    repository_incarnation_id: RepositoryIncarnationId,
+) -> Vec<u8> {
+    let mut namespace = Vec::with_capacity(
+        FABRIC_NAMESPACE_PREFIX.len()
+            + repository_id.as_bytes().len()
+            + repository_incarnation_id.as_bytes().len(),
+    );
     namespace.extend_from_slice(FABRIC_NAMESPACE_PREFIX);
     namespace.extend_from_slice(repository_id.as_bytes());
+    namespace.extend_from_slice(repository_incarnation_id.as_bytes());
     namespace
 }
 
@@ -5172,7 +5292,7 @@ mod tests {
     use fgit_types::{
         CANONICAL_CODEC_VERSION, DecisionOutcome, Digest, DigestBytes, GitHashAlgorithm, GitOid,
         InternalObjectId, PrincipalId, RefName, RefusalCode, RepositoryAuthorityHeadId,
-        RepositoryId, SchemaFamily, SchemaId, TenantId, TxId,
+        RepositoryId, RepositoryIncarnationId, SchemaFamily, SchemaId, TenantId, TxId,
     };
     use fgit_wire::receive::{QuarantineReceipt, ReceiveCommand, ReceiveRequest};
     use fgit_wire::{
@@ -6148,6 +6268,41 @@ mod tests {
             .expect("reopened head reads");
         assert_eq!(second_head, first_head);
         second.shutdown().expect("reopened node closes cleanly");
+    }
+
+    #[test]
+    fn open_existing_accepts_the_current_incarnation_and_refuses_a_stale_twin() {
+        let scratch = ScratchDirectory::new();
+        let current = RepositoryIncarnationId::from_bytes([0x59; 16]);
+        let stale = RepositoryIncarnationId::from_bytes([0x5A; 16]);
+        let config =
+            test_config(scratch.path().to_path_buf()).with_expected_repository_incarnation(current);
+
+        let (created, _) = OneNode::init(config.clone())
+            .expect("a creation stages the current incarnation configuration");
+        assert_eq!(created.repository_incarnation_id(), current);
+        assert_ne!(
+            object_namespace(created.repository_id(), current),
+            object_namespace(created.repository_id(), stale),
+            "object location records are scoped by both repository and incarnation"
+        );
+        created.shutdown().expect("creator node closes cleanly");
+
+        let permitted =
+            OneNode::open_existing(config.clone()).expect("the matching current incarnation opens");
+        assert_eq!(permitted.repository_incarnation_id(), current);
+        permitted.shutdown().expect("permitted node closes cleanly");
+
+        assert!(
+            matches!(
+                OneNode::open_existing(config.with_expected_repository_incarnation(stale)),
+                Err(NodeRefusal::RepositoryIncarnationMismatch {
+                    expected,
+                    observed,
+                }) if expected == stale && observed == current
+            ),
+            "a stale location must fail before the node can serve its object namespace"
+        );
     }
 
     #[test]
