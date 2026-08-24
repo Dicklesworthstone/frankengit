@@ -848,6 +848,7 @@ dependencies = [
  "fgit-runtime",
  "fgit-txn",
  "fgit-types",
+ "fgit-verified-read",
  "fgit-wire",
  "fsqlite-types",
 ]

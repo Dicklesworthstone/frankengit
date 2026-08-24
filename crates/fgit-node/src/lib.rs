@@ -98,10 +98,12 @@ use fsqlite_types::cx::Cx as FsqliteCx;
 
 mod loose_import;
 mod quarantine_validator;
+mod verified_reads;
 
 pub use loose_import::{LooseGitImportRefusal, StagedLooseGitImport};
 pub use quarantine_validator::ProductionQuarantineValidator;
 use quarantine_validator::ProductionReceiveQuarantineHandoff;
+pub use verified_reads::{ServedVerifiedRead, VerifiedReadQuery, VerifiedReadServingRefusal};
 
 const OBJECT_CODEC_NAMESPACE: &[u8] = b"git-object-body/v1";
 const HEAD_KEY_PREFIX: &[u8] = b"frankengit/node/head/";
