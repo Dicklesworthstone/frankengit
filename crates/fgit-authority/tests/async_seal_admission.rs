@@ -33,15 +33,20 @@ use fgit_authority::{
     AuthorityFailure, AuthorityLimits, AuthorityStore, AuthorityVersionToken, CasOutcome,
     CasResolution, DuplicateAbsenceWitness, ExpectedOld, HeadInit, HeadKey, HeadRead,
     HeadReadReceipt, IdempotencyKey, ImmutableKey, ImmutableRead, MemoryAuthorityStore,
-    ProposedNew, PutOutcome, PutResolution, RefCommand, RequestRejection, SealAdmission,
-    SealAttempt, SealFailure, SemanticRequest, StoreInstanceId, admission_key, read_admission,
-    read_admission_async, read_seal_async, record_admission, record_admission_async,
-    resolve_ambiguous_cas, resolve_ambiguous_cas_async, resolve_ambiguous_put,
-    resolve_ambiguous_put_async, seal_request, seal_request_async,
+    OutcomeFailure, ProposedNew, PutOutcome, PutResolution, RefCommand, RequestRejection,
+    SealAdmission, SealAttempt, SealFailure, SemanticRequest, StoreInstanceId, admission_key,
+    read_admission, read_admission_async, read_seal_async, record_admission,
+    record_admission_async, resolve_ambiguous_cas, resolve_ambiguous_cas_async,
+    resolve_ambiguous_put, resolve_ambiguous_put_async, root_layout_for_proof_async,
+    root_layout_for_verification, root_layout_for_verification_async, seal_request,
+    seal_request_async, stage_repository_configuration, stage_repository_configuration_async,
 };
+use fgit_codec::RepositoryConfigurationBody;
 use fgit_codec::wire::encode_body;
+use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::{PrincipalId, RepositoryId, TenantId, TransactionSealId};
 use fgit_types::label::{AsciiSlug, SchemaFamily, SchemaId};
+use fgit_types::layout::RootLayoutVersion;
 use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1};
 use fgit_types::numeric::{HeadGeneration, PolicyEpoch};
 use fgit_types::refs::RefName;
@@ -718,5 +723,129 @@ fn a_conflicting_put_hands_back_the_bytes_that_are_actually_there() {
     assert_eq!(
         found, b"somebody else",
         "the resolution must carry the bytes the slot actually holds"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The head-selected root layout, on the production surface (frankengit-m01t)
+// ---------------------------------------------------------------------------
+//
+// `ls44` published the carrier — a head selects its root layout through the
+// existing `configuration_root` — over `AuthorityStore` only. Every other
+// AuthorityStore function in that module has an async twin, and
+// `FsqliteAuthorityStore` implements `AsyncAuthorityStore` only, so without
+// these a production node could not resolve its own layout and a verified read
+// could not learn whether a membership proof is admissible at all.
+//
+// These cases live here rather than beside the sync ones because this is where
+// the crate's only `AsyncAuthorityStore` fixture is. A second delegating view
+// would be free to drift from the first, which is the defect class the shared
+// decision core exists to prevent.
+
+const fn configuration(layout: RootLayoutVersion) -> RepositoryConfigurationBody {
+    // Every field is named rather than defaulted. These cases assert equality of
+    // canonical digests, and a digest test that lets a field arrive implicitly
+    // silently changes what is being hashed the next time the body grows one.
+    // Naming them makes that a compile error instead, which is the failure mode
+    // a canonical-bytes test wants.
+    RepositoryConfigurationBody {
+        root_layout: layout,
+        object_format: GitHashAlgorithm::Sha1,
+    }
+}
+
+#[test]
+fn both_surfaces_stage_a_configuration_to_the_same_root() {
+    // If the two staged to different digests, a head published by one surface
+    // would name a configuration the other could not find — and would then be
+    // read as legacy v0, silently losing the layout it meant to select.
+    for layout in RootLayoutVersion::ALL {
+        let sync_store = store();
+        let sync_root = stage_repository_configuration(&sync_store, &configuration(*layout))
+            .expect("the sync surface stages");
+
+        let view = AsyncView(store());
+        let async_root = poll_ready(stage_repository_configuration_async(
+            &view,
+            &(),
+            &configuration(*layout),
+        ))
+        .expect("the async surface stages");
+
+        assert_eq!(
+            sync_root, async_root,
+            "{layout:?}: the surfaces must agree on the root a head selects the configuration by"
+        );
+    }
+}
+
+#[test]
+fn both_surfaces_resolve_the_layout_a_head_selects() {
+    for layout in RootLayoutVersion::ALL {
+        let sync_store = store();
+        let root =
+            stage_repository_configuration(&sync_store, &configuration(*layout)).expect("stages");
+        let sync = root_layout_for_verification(&sync_store, &root).expect("resolves");
+
+        let backing = store();
+        let async_root =
+            stage_repository_configuration(&backing, &configuration(*layout)).expect("stages");
+        let view = AsyncView(backing);
+        let asynchronous = poll_ready(root_layout_for_verification_async(&view, &(), &async_root))
+            .expect("resolves");
+
+        assert_eq!(sync, asynchronous, "{layout:?}: the surfaces disagree");
+        assert_eq!(
+            sync, *layout,
+            "and the answer must be the layout that was staged"
+        );
+    }
+}
+
+#[test]
+fn the_asymmetry_holds_on_the_production_surface_too() {
+    // The rule that matters most: an unresolvable configuration_root is v0 for
+    // VERIFICATION and a typed refusal for PROOF GENERATION. A production node
+    // that silently assumed v0 on the proof path would emit a path through a
+    // tree that does not exist, and the caller would verify it vacuously.
+    let view = AsyncView(store());
+    let unresolvable = Digest::new(
+        fgit_crypto::IdentityDomain::RefTransaction.algorithm().id(),
+        DigestBytes::try_new(&[0xEE; 32]).expect("a bounded digest"),
+    );
+
+    assert_eq!(
+        poll_ready(root_layout_for_verification_async(
+            &view,
+            &(),
+            &unresolvable
+        ))
+        .expect("verification resolves"),
+        RootLayoutVersion::LegacyWholeBody,
+        "an older head must still verify on the production surface, not be refused"
+    );
+
+    assert!(
+        matches!(
+            poll_ready(root_layout_for_proof_async(&view, &(), &unresolvable)),
+            Err(OutcomeFailure::ConfigurationUnresolvable)
+        ),
+        "proof generation must refuse on the production surface exactly as it does on the \
+         verification surface"
+    );
+
+    // The permitted twin: once the configuration IS resolvable, the proof path
+    // stops refusing. Without this the assertion above is satisfied by an async
+    // resolver that refuses every configuration.
+    let backing = store();
+    let root = stage_repository_configuration(
+        &backing,
+        &configuration(RootLayoutVersion::RefStateMerkleV1),
+    )
+    .expect("stages");
+    let resolvable = AsyncView(backing);
+    assert_eq!(
+        poll_ready(root_layout_for_proof_async(&resolvable, &(), &root)).expect("resolves"),
+        RootLayoutVersion::RefStateMerkleV1
     );
 }

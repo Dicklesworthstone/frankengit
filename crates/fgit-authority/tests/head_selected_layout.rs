@@ -38,6 +38,7 @@ use fgit_crypto::{
     MerkleRefusal, ref_state_membership_proof, ref_state_merkle_root,
     verify_ref_state_membership_under,
 };
+use fgit_types::error::TypeRefusal;
 use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::RepositoryId;
 use fgit_types::label::{DomainTag, SchemaFamily};
@@ -331,6 +332,105 @@ fn a_layout_version_this_build_does_not_know_is_refused_even_when_verifying() {
     assert_eq!(
         root_layout_for_verification(&backing, &known).expect("resolves"),
         RootLayoutVersion::RefStateMerkleV1
+    );
+}
+
+/// A configuration body naming a layout this build knows and an object format
+/// it does not.
+///
+/// Distinct from [`FutureConfiguration`], which is already unreadable at its
+/// FIRST field: any predicate that refuses on "unknown layout" catches that one
+/// for free. This body is readable right up to its last field, which is the
+/// only shape that separates a predicate matching the refusal CLASS from one
+/// matching a single field name.
+struct FutureObjectFormat;
+
+impl CanonicalBody for FutureObjectFormat {
+    const DOMAIN: DomainTag = RepositoryConfigurationBody::DOMAIN;
+    const SCHEMA_FAMILY: SchemaFamily = RepositoryConfigurationBody::SCHEMA_FAMILY;
+    const SCHEMA_MAJOR: u16 = RepositoryConfigurationBody::SCHEMA_MAJOR;
+    const SCHEMA_MINOR: u16 = RepositoryConfigurationBody::SCHEMA_MINOR;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        out.write_scalar(RootLayoutVersion::RefStateMerkleV1.code_point());
+        out.write_scalar(9999_u16);
+        Ok(())
+    }
+
+    fn read_payload(_input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        Ok(Self)
+    }
+}
+
+#[test]
+fn an_object_format_this_build_cannot_read_is_refused_rather_than_read_as_v0() {
+    // The worst available answer, and the one this build gave before the
+    // verification router matched the refusal class instead of one field name.
+    //
+    // This head SELECTED RefStateMerkleV1. Its layout field is not in doubt and
+    // is perfectly readable. Only the object format is newer than us. Reporting
+    // v0 here does not merely lose information — it contradicts a choice the
+    // head states in bytes we successfully decoded, and a verifier that
+    // believes it will check membership against a tree the publisher never
+    // built.
+    let backing = store();
+    let future = FutureObjectFormat;
+    let key = fgit_authority::body_key(
+        fgit_crypto::IdentityDomain::RepositoryConfiguration,
+        &future,
+    )
+    .expect("a derivable key");
+    backing
+        .put_if_absent(&key, &encode_body(&future).expect("encodes"))
+        .expect("the store accepts the write");
+
+    let identity = fgit_authority::canonical_body_id(
+        fgit_crypto::IdentityDomain::RepositoryConfiguration,
+        fgit_types::CANONICAL_CODEC_VERSION,
+        &future,
+    )
+    .expect("a derivable identity");
+    let configuration_root = Digest::new(identity.algorithm(), *identity.digest());
+
+    let failure = root_layout_for_verification(&backing, &configuration_root)
+        .expect_err("an unreadable object format must not be reported as legacy v0");
+    let OutcomeFailure::Codec(CodecRefusal::Type(TypeRefusal::CodePointUnknown {
+        field,
+        observed,
+    })) = failure
+    else {
+        panic!("a head newer than us must refuse as an unknown code point, got {failure:?}");
+    };
+
+    // Pinning the field name is what makes this case discriminating rather than
+    // merely passing. The predicate this test guards used to match the literal
+    // field "RootLayoutVersion"; this refusal names a different field, so the
+    // old predicate returned false for it and the resolver fell through to the
+    // legacy branch. Asserting the name here keeps that visible in the artifact
+    // instead of resting on a claim about code that is no longer present.
+    assert_eq!(
+        field, "GitHashAlgorithm",
+        "this case only exercises the widening if the refusal comes from a field \
+         other than the layout version"
+    );
+    assert_eq!(observed, 9999, "and from the code point this body wrote");
+
+    // The permitted twin, differing in exactly one code point: the same layout,
+    // the same key shape, an object format this build DOES know. Without it the
+    // refusal above is equally satisfied by a resolver that refuses every
+    // configuration body, which would break every legacy head instead.
+    let known = stage_repository_configuration(
+        &backing,
+        &RepositoryConfigurationBody {
+            root_layout: RootLayoutVersion::RefStateMerkleV1,
+            object_format: GitHashAlgorithm::Sha256,
+        },
+    )
+    .expect("stages");
+    assert_eq!(
+        root_layout_for_verification(&backing, &known).expect("resolves"),
+        RootLayoutVersion::RefStateMerkleV1,
+        "a known object format must still resolve the layout the head selected"
     );
 }
 

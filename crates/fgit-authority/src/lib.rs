@@ -119,9 +119,10 @@ pub use crate::outcome::{
     outcome_key, publish_decisions, publish_decisions_async, read_authority_head_body,
     read_authority_head_body_async, read_decision_batch_body, read_decision_batch_body_async,
     reconcile_outcome, replay_outcome, replay_outcome_async, resolve_outcome,
-    resolve_outcome_async, root_layout_for_proof, root_layout_for_verification, scan_batch_for,
+    resolve_outcome_async, root_layout_for_proof, root_layout_for_proof_async,
+    root_layout_for_verification, root_layout_for_verification_async, scan_batch_for,
     scan_for_existing_decisions, scan_for_existing_decisions_async, stage_repository_configuration,
-    verify_outcome_index_membership,
+    stage_repository_configuration_async, verify_outcome_index_membership,
 };
 pub use crate::reference::{MemoryAuthorityStore, MemoryStoreConfig};
 pub use crate::request::{

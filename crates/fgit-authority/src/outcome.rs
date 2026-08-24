@@ -1021,38 +1021,155 @@ where
 /// Shared reading of a stored configuration body for the verification path.
 ///
 /// Split out so the two surfaces cannot drift on the one rule that is easy to
-/// get wrong: undecodable BYTES fall back to legacy, an unknown VERSION does
-/// not.
+/// get wrong: undecodable BYTES fall back to legacy, an unreadable CODE POINT
+/// inside a genuine configuration body does not.
 fn interpret_configuration_for_verification(
     bytes: &[u8],
 ) -> Result<RootLayoutVersion, OutcomeFailure> {
     match decode_body::<RepositoryConfigurationBody>(bytes, DecodeLimits::DEFAULT) {
         Ok(configuration) => Ok(configuration.root_layout),
-        Err(refusal) if refusal_is_unknown_layout(&refusal) => Err(OutcomeFailure::Codec(refusal)),
+        Err(refusal) if refusal_is_unreadable_vocabulary(&refusal) => {
+            Err(OutcomeFailure::Codec(refusal))
+        }
         Err(_) => Ok(RootLayoutVersion::LegacyWholeBody),
     }
 }
 
-/// Whether a decode refusal came from an unrecognised layout code point.
+/// Whether a decode refusal names a vocabulary member this build cannot read.
 ///
 /// The distinction this makes is the whole point of the split above: bytes that
 /// are not a configuration body at all mean "this head predates the
-/// vocabulary", while bytes that ARE one and name a version we cannot read mean
-/// "this head is newer than us". The first is legacy; the second must refuse.
+/// vocabulary", while bytes that ARE one and name a code point we cannot read
+/// mean "this head is newer than us". The first is legacy; the second refuses.
+///
+/// # Why this matches the refusal CLASS and not one field name
+///
+/// This predicate originally named `RootLayoutVersion` specifically. That was
+/// correct only while the configuration body held exactly one code-point field,
+/// and it stopped being correct the moment `object_format` joined it in
+/// 89cba3b: a head that selected a layout this build knows but named an object
+/// format it does not would refuse inside the decoder, fail this predicate, and
+/// fall through to the legacy branch — reported as v0 despite having
+/// explicitly selected v1. The rule was never about a particular field. It is
+/// about whether the head is newer than the reader, so it is written that way
+/// now and does not need revisiting the next time the body grows a field.
+///
+/// Widening is sound because the frame is already established by the time a
+/// `CodePointUnknown` can exist. `read_frame_header` turns foreign bytes away
+/// as `MagicUnrecognized`, `CodecMajorUnsupported`, or a domain/schema-family
+/// mismatch, and only `RepositoryConfigurationBody::read_payload` runs after
+/// it. Unrelated bytes therefore cannot reach this predicate carrying an
+/// unknown code point, so matching the class cannot start refusing the legacy
+/// heads the fallback exists to serve.
 ///
 /// Matched structurally on the typed refusal rather than on its rendered text.
 /// A string match would silently start defaulting newer heads to legacy the
 /// first time anyone reworded a `Display` impl — a failure that no test of the
 /// refusal path would catch, because the path would still be taken, just to the
 /// wrong destination.
-fn refusal_is_unknown_layout(refusal: &CodecRefusal) -> bool {
+// `const` is available here only because the widening removed the field-name
+// comparison: matching a `&'static str` is not const-stable, matching the
+// variant alone is.
+const fn refusal_is_unreadable_vocabulary(refusal: &CodecRefusal) -> bool {
     matches!(
         refusal,
-        CodecRefusal::Type(TypeRefusal::CodePointUnknown {
-            field: "RootLayoutVersion",
-            ..
-        })
+        CodecRefusal::Type(TypeRefusal::CodePointUnknown { .. })
     )
+}
+
+// --- the production surface for the carrier (frankengit-m01t) -----------------
+//
+// FsqliteAuthorityStore implements AsyncAuthorityStore only, so without these a
+// production node cannot resolve its own root layout — and a verified read
+// cannot know whether a membership proof is admissible at all.
+//
+// Every rule below is the same rule the synchronous surface applies, because
+// neither surface owns it: `configuration_key` and
+// `interpret_configuration_for_verification` are the shared core, and these
+// functions differ from their twins only in the await. In particular the
+// v0-for-verification / refuse-for-proof asymmetry cannot drift between the
+// two, which matters more here than usual — a node that silently assumed v0
+// would emit a proof through a tree that does not exist.
+
+/// Stage a repository configuration body, on the production surface.
+///
+/// The asynchronous twin of [`stage_repository_configuration`].
+///
+/// # Errors
+///
+/// Whatever the store or the canonical encoder refuses.
+pub async fn stage_repository_configuration_async<S>(
+    store: &S,
+    cx: &S::Context,
+    configuration: &RepositoryConfigurationBody,
+) -> Result<Digest, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = body_key(IdentityDomain::RepositoryConfiguration, configuration)?;
+    store
+        .put_if_absent(cx, &key, &encode_body(configuration)?)
+        .await?;
+    let identity = canonical_body_id(
+        IdentityDomain::RepositoryConfiguration,
+        CANONICAL_CODEC_VERSION,
+        configuration,
+    )?;
+    Ok(Digest::new(identity.algorithm(), *identity.digest()))
+}
+
+/// The layout a head selects, for verification, on the production surface.
+///
+/// The asynchronous twin of [`root_layout_for_verification`], including its
+/// default: an absent or undecodable configuration body yields
+/// [`RootLayoutVersion::LegacyWholeBody`], while a body that decodes into a
+/// version this build does not know is still refused.
+///
+/// # Errors
+///
+/// Whatever the store refuses, and [`OutcomeFailure::Codec`] for an unknown
+/// layout version.
+pub async fn root_layout_for_verification_async<S>(
+    store: &S,
+    cx: &S::Context,
+    configuration_root: &Digest,
+) -> Result<RootLayoutVersion, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = configuration_key(configuration_root)?;
+    match store.read_immutable(cx, &key).await? {
+        ImmutableRead::Absent => Ok(RootLayoutVersion::LegacyWholeBody),
+        ImmutableRead::Present(bytes) => interpret_configuration_for_verification(&bytes),
+    }
+}
+
+/// The layout a head selects, for proof generation, on the production surface.
+///
+/// The asynchronous twin of [`root_layout_for_proof`], including its refusal:
+/// an unresolvable configuration is a typed failure here rather than an assumed
+/// v0, because a proof under a layout with no tree is a path through nothing.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::ConfigurationUnresolvable`] when the root names no stored
+/// body or the stored bytes do not decode, and [`OutcomeFailure::Codec`] for an
+/// unknown layout version.
+pub async fn root_layout_for_proof_async<S>(
+    store: &S,
+    cx: &S::Context,
+    configuration_root: &Digest,
+) -> Result<RootLayoutVersion, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = configuration_key(configuration_root)?;
+    let ImmutableRead::Present(bytes) = store.read_immutable(cx, &key).await? else {
+        return Err(OutcomeFailure::ConfigurationUnresolvable);
+    };
+    let configuration: RepositoryConfigurationBody = decode_body(&bytes, DecodeLimits::DEFAULT)
+        .map_err(|_| OutcomeFailure::ConfigurationUnresolvable)?;
+    Ok(configuration.root_layout)
 }
 
 /// One outcome-index leaf.
