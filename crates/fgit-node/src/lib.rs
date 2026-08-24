@@ -6793,8 +6793,10 @@ mod tests {
             checkpoints: Cell::new(0),
             reference_reads: Cell::new(0),
         };
-        let mut limits = fgit_pack::PackLimits::default();
-        limits.max_entries = 4;
+        let limits = fgit_pack::PackLimits {
+            max_entries: 4,
+            ..fgit_pack::PackLimits::default()
+        };
         assert_eq!(
             super::reachable_within_permitted_closure_bounded(
                 &source,
