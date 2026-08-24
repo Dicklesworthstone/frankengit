@@ -37,11 +37,11 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn pull_request() -> PullRequestNumber {
+const fn pull_request() -> PullRequestNumber {
     PullRequestNumber::try_new(7).expect("nonzero")
 }
 
-fn version() -> AggregateVersion {
+const fn version() -> AggregateVersion {
     AggregateVersion::try_new(3).expect("nonzero")
 }
 
@@ -227,7 +227,7 @@ fn an_unknown_aggregate_kind_is_refused_and_a_known_one_is_not() {
         .zip(organisation_bytes.iter())
         .position(|(left, right)| left != right)
         .expect("the frames differ at the kind tag");
-    let mut tampered = team_bytes.clone();
+    let mut tampered = team_bytes;
     tampered[divergence] = 0x5a;
     let refusal = decode_body::<ForgeEvent>(&tampered, DecodeLimits::DEFAULT)
         .expect_err("an unknown aggregate kind is refused");

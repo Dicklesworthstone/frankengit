@@ -57,6 +57,9 @@ use fgit_wire::visibility::RefVisibility;
 use fgit_wire::{AnyGitOid, GitObjectFormat, Packet};
 
 pub mod evidence;
+/// Admitting a sealed merge; see the module for what it does and does not
+/// re-check.
+pub mod merge;
 
 /// Bounds enforced before creating per-command work or retrying a stale plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2412,7 +2415,7 @@ where
     })
 }
 
-fn read_basis<S>(
+pub(crate) fn read_basis<S>(
     store: &S,
     head_key: &HeadKey,
 ) -> Result<
@@ -2487,7 +2490,7 @@ fn model_request(
     })
 }
 
-fn publish_commit<S>(
+pub(crate) fn publish_commit<S>(
     store: &S,
     context: &AdmissionContext,
     basis: &PublicationBasis,
@@ -2598,7 +2601,7 @@ fn validate_commit_materialization(
     Ok(())
 }
 
-fn publish_refusal<S, Projection>(
+pub(crate) fn publish_refusal<S, Projection>(
     store: &S,
     context: &AdmissionContext,
     basis: &PublicationBasis,

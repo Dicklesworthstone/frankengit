@@ -41,6 +41,11 @@ pub use aggregate::{
     PullRequestNumber, TeamNumber,
 };
 pub use event::{ForgeEvent, ForgeEventBatch, ForgeEventPayload, event_id};
+/// Re-exported because it is part of this crate's public surface: a
+/// `MergeAttempt` is pinned to the workspace epoch it was computed in, so every
+/// caller that builds or checks one needs the type. Re-exporting keeps them from
+/// taking a dependency on `fgit-treefs` to name a field of ours.
+pub use fgit_treefs::WorkspaceEpoch;
 pub use merge::{
     EffectRoots, MergeAttempt, MergeEffectPackage, MergedTree, ObservedTips, RefIntent,
     merge_pull_request_tree,
@@ -194,5 +199,4 @@ impl core::error::Error for ForgeRefusal {}
 
 use fgit_codec::CodecRefusal;
 use fgit_diff::TreeMergeError;
-use fgit_treefs::WorkspaceEpoch;
 use fgit_types::GitOid;

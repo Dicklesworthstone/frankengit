@@ -42,7 +42,7 @@ fn digest(tag: u8) -> Digest {
 /// entry name Git objects, while the roots on a commit record are internal
 /// digests. `fgit-types` offers no conversion between them, which is the type
 /// system enforcing the same domain split section 6 states in prose.
-fn oid(tag: u8) -> GitOid {
+const fn oid(tag: u8) -> GitOid {
     GitOid::Sha256(GitOidSha256::from_bytes([tag; GitOidSha256::LEN]))
 }
 
