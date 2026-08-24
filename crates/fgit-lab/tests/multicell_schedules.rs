@@ -50,7 +50,8 @@ use fgit_authority::{
     HeadInit, HeadKey, HeadRead, MemoryAuthorityStore, OpIndex, StoreInstanceId,
 };
 use fgit_authority::{AuthorityRefusal, HeadReadReceipt, PutOutcome};
-use fgit_lab::{AuthorityCampaign, HazardScript, LabSchedule, StepId};
+use fgit_lab::journal::TraceEvent;
+use fgit_lab::{AuthorityCampaign, HazardScript, LabSchedule, LabTime, StepId, VirtualClock};
 
 use std::collections::BTreeMap;
 
@@ -655,5 +656,133 @@ fn the_partition_is_what_changes_the_outcome_not_the_schedule() {
     assert!(
         !store.fault_log().is_empty(),
         "and it must be recorded in the fault log"
+    );
+}
+
+/// Run one schedule at a chosen virtual-clock rate, returning the instants the
+/// run passed through and the head it ended on.
+///
+/// `with_ticks_per_op` is the injection point: logical time in the lab advances
+/// because a step advanced it, never because a wall clock moved, so changing
+/// the rate genuinely changes every instant in the run without changing the
+/// operations.
+fn run_at_tick_rate(
+    schedule: &LabSchedule,
+    ticks_per_op: u64,
+    instance: u64,
+) -> (Vec<LabTime>, Option<HeadReadReceipt>) {
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(instance));
+    store
+        .initialize_head(&head_key(), HeadGeneration::FIRST, b"root")
+        .expect("seeding the head succeeds");
+
+    let claimed = Rc::new(RefCell::new(0_usize));
+    let history = Rc::new(RefCell::new(CampaignHistory::default()));
+    let mut cells: Vec<Box<dyn AuthorityClient>> = vec![
+        Box::new(CellClient::new(
+            "published-by-a",
+            Rc::clone(&claimed),
+            0,
+            Rc::clone(&history),
+        )),
+        Box::new(CellClient::new(
+            "published-by-b",
+            Rc::clone(&claimed),
+            1,
+            Rc::clone(&history),
+        )),
+    ];
+
+    let outcome = AuthorityCampaign::new(StoreInstanceId::from_raw(instance))
+        .with_ticks_per_op(ticks_per_op)
+        .run_on(&store, &mut cells, schedule, &HazardScript::none());
+
+    let instants = outcome
+        .trace()
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            TraceEvent::Stepped { at, .. } => Some(*at),
+            TraceEvent::ClockAdvanced { to, .. } => Some(*to),
+            _ => None,
+        })
+        .collect();
+
+    let head = match store.read_head(&head_key()).expect("final read succeeds") {
+        HeadRead::Present(receipt) => Some(receipt),
+        HeadRead::Absent => None,
+    };
+    (instants, head)
+}
+
+#[test]
+fn skewing_the_virtual_clock_moves_every_instant_and_nothing_the_authority_decides() {
+    // "Clock skew and rollback must not matter -- clocks are not authority."
+    //
+    // The existing fault_campaign case states this as a regression guard and is
+    // explicit that it skews NOTHING, because the authority store has no clock
+    // to skew. This one does the injection the acceptance line actually asks
+    // for: the lab's VirtualClock is the run's only source of time, and
+    // `with_ticks_per_op` changes how far it advances per operation, so the two
+    // runs below pass through genuinely different instants while issuing an
+    // identical sequence of operations.
+    for (name, schedule) in schedules() {
+        let (slow_instants, slow_head) = run_at_tick_rate(&schedule, 1, 0xF036_B020);
+        let (fast_instants, fast_head) = run_at_tick_rate(&schedule, 997, 0xF036_B020);
+
+        // THE TWIN FIRST. If the two runs passed through the same instants, the
+        // agreement below would be the agreement of two identical runs and
+        // would measure nothing at all. This is what makes the clock a variable
+        // rather than a decoration.
+        assert_ne!(
+            slow_instants, fast_instants,
+            "{name}: the two runs must actually differ in virtual time, or nothing was skewed"
+        );
+        assert!(
+            !slow_instants.is_empty(),
+            "{name}: the run recorded no instants, so there is nothing to compare"
+        );
+
+        // AND NOW WHAT MUST NOT MOVE. Not merely the generation: the whole
+        // receipt, TOKEN INCLUDED. A token seeded from an instant -- the most
+        // plausible way a clock creeps into authority -- would differ here
+        // while every generation and body still matched.
+        assert_eq!(
+            slow_head, fast_head,
+            "{name}: the head, including its version token, must not depend on the clock"
+        );
+    }
+}
+
+#[test]
+fn the_lab_clock_refuses_to_run_backwards_rather_than_silently_accepting_it() {
+    // The rollback half of the same acceptance line. A regressing clock in a
+    // replayed trace is a real defect, and swallowing it would hide the
+    // divergence it is about to cause, so the refusal is the behaviour worth
+    // pinning.
+    let mut clock = VirtualClock::starting_at(LabTime::from_ticks(100));
+    assert_eq!(clock.now(), LabTime::from_ticks(100));
+
+    let refused = clock.advance_to(LabTime::from_ticks(99));
+    assert!(
+        refused.is_err(),
+        "moving the clock backwards must be refused, not ignored"
+    );
+    assert_eq!(
+        clock.now(),
+        LabTime::from_ticks(100),
+        "and a refused move must leave the clock exactly where it was"
+    );
+
+    // The permitted twin at the exact boundary: the SAME instant is not a
+    // regression and must be accepted, or a replay that re-observes its current
+    // instant would be reported as a rollback.
+    assert!(
+        clock.advance_to(LabTime::from_ticks(100)).is_ok(),
+        "advancing to the current instant is not a rollback"
+    );
+    assert!(
+        clock.advance_to(LabTime::from_ticks(101)).is_ok(),
+        "and forward movement still works after a refusal"
     );
 }
