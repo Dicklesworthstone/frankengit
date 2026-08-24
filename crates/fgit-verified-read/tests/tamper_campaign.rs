@@ -33,13 +33,14 @@
 use std::collections::BTreeMap;
 
 use fgit_authority::{TerminalOutcome, outcome_index_proof, outcome_index_root};
+use fgit_codec::RepositoryIncarnationConfigurationBody;
 use fgit_codec::{
     CryptoBodyIdentity, RepositoryAuthorityHeadBody, RepositoryConfigurationBody, body_id,
 };
 use fgit_crypto::{IdentityDomain, MerkleProof, ref_state_membership_proof, ref_state_merkle_root};
 use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::hash::{Digest, DigestBytes};
-use fgit_types::identity::{RepositoryAuthorityHeadId, RepositoryId};
+use fgit_types::identity::{RepositoryAuthorityHeadId, RepositoryId, RepositoryIncarnationId};
 use fgit_types::identity::{RepositoryCommitId, TxId};
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1};
@@ -49,8 +50,8 @@ use fgit_types::refs::RefName;
 use fgit_types::vocabulary::DecisionOutcome;
 use fgit_verified_read::freshness::HeadChainFloor;
 use fgit_verified_read::{
-    PinnedAuthorityHead, VerifiedMembership, VerifiedReadAnswer, VerifiedReadEnvelope,
-    VerifiedReadRefusal, verify_envelope,
+    PinnedAuthorityHead, VerifiedMembership, VerifiedReadAnswer, VerifiedReadConfiguration,
+    VerifiedReadEnvelope, VerifiedReadRefusal, verify_envelope,
 };
 
 /// What a tampering mirror altered.
@@ -364,6 +365,25 @@ fn honest_outcome() -> HonestOutcome {
         outcome,
         proof,
     }
+}
+
+/// The incarnation-bound configuration a real node publishes.
+///
+/// `OneNode`'s genesis writes a `RepositoryIncarnationConfigurationBody`, so
+/// this -- not `RepositoryConfigurationBody` -- is the variant a served
+/// envelope actually carries in production. The corpus covered only the v1
+/// body until this was added.
+const fn incarnation_configuration() -> RepositoryIncarnationConfigurationBody {
+    RepositoryIncarnationConfigurationBody {
+        root_layout: RootLayoutVersion::RefStateMerkleV1,
+        object_format: GitHashAlgorithm::Sha1,
+        repository_incarnation_id: RepositoryIncarnationId::from_bytes([0x7A; 16]),
+    }
+}
+
+fn incarnation_configuration_root(body: &RepositoryIncarnationConfigurationBody) -> Digest {
+    let identity = body_id(&CryptoBodyIdentity, body).expect("an incarnation body identifies");
+    Digest::new(identity.algorithm(), *identity.digest())
 }
 
 /// Every tampered envelope, paired with the class it represents.
@@ -821,5 +841,74 @@ fn an_outcome_envelope_is_checked_against_the_outcome_index_root_not_whichever_r
         verify_envelope(&pinned, &mirrored),
         Err(VerifiedReadRefusal::ProofRejected),
         "and an outcome proof presented as a ref answer must be refused"
+    );
+}
+
+#[test]
+fn a_v1_configuration_cannot_stand_in_for_the_incarnation_body_the_head_selected() {
+    // The variant a real node actually serves, which the corpus above never
+    // reaches. `OneNode`'s genesis publishes a
+    // `RepositoryIncarnationConfigurationBody`, so a production envelope
+    // carries `RepositoryIncarnationV2`; every case in the corpus carries
+    // `RepositoryV1`, because `VerifiedReadEnvelope::new` wraps it that way.
+    //
+    // NOT IN THE CORPUS, deliberately. A head whose `configuration_root` names
+    // a different body is a different head, so the freshness floor answers
+    // first: measured, the corpus version came back detected by Freshness with
+    // the verifier never consulted, which made it an unlabelled duplicate of
+    // `HeadConfigurationRoot` rather than a new class. Giving it its own pinned
+    // head is what lets the configuration check be the thing that answers.
+    let incarnation = incarnation_configuration();
+    let pinned_head = head(
+        2,
+        None,
+        honest().head.ref_root,
+        incarnation_configuration_root(&incarnation),
+    );
+    let pinned = PinnedAuthorityHead::new(pinned_head.clone());
+    let base = honest();
+
+    // THE SEPARATION THIS RESTS ON, asserted rather than assumed. The two
+    // configuration bodies share a DOMAIN ("frankengit/repository-configuration/v1")
+    // AND a SCHEMA_FAMILY ("repository-configuration"); only SCHEMA_MAJOR
+    // differs, 1 against 2. So nothing but the schema major reaching the digest
+    // keeps a v1 body from standing in for a v2 one, and every other
+    // configuration case in this file substitutes one v1 body for another,
+    // which cannot test that.
+    let v1_identity = body_id(&CryptoBodyIdentity, &base.configuration).expect("v1 identifies");
+    let v2_identity = body_id(&CryptoBodyIdentity, &incarnation).expect("v2 identifies");
+    assert_ne!(
+        (v1_identity.algorithm(), v1_identity.digest()),
+        (v2_identity.algorithm(), v2_identity.digest()),
+        "the two configuration schemas share a domain and family, so if the major did not \
+         reach the digest a v1 body could impersonate the incarnation the head bound"
+    );
+
+    // PERMITTED: the exact incarnation body the head selected.
+    let genuine = VerifiedReadEnvelope::new_with_exact_configuration(
+        pinned_head.clone(),
+        Some(VerifiedReadConfiguration::RepositoryIncarnationV2(
+            incarnation,
+        )),
+        membership(base.queried.clone(), base.oid, base.proof.clone()),
+    );
+    assert_eq!(
+        verify_envelope(&pinned, &genuine),
+        Ok(VerifiedMembership::Ref),
+        "the incarnation-bound answer must verify, or the refusal below proves only that \
+         this head rejects everything"
+    );
+
+    // REFUSED: a v1 body in its place, carrying the same root layout so the
+    // substitution is otherwise invisible.
+    let swapped = VerifiedReadEnvelope::new(
+        pinned_head,
+        Some(base.configuration.clone()),
+        membership(base.queried.clone(), base.oid, base.proof),
+    );
+    assert_eq!(
+        verify_envelope(&pinned, &swapped),
+        Err(VerifiedReadRefusal::ConfigurationRootMismatch),
+        "a v1 configuration must not satisfy a head that bound an incarnation"
     );
 }

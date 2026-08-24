@@ -40,7 +40,7 @@ CRATE=fgit-verified-read
 # suite, so I shipped it red. The count assertion did its job; I just did not
 # look. Changing a case count in those files means changing this list.
 TARGETS=(
-  "tamper_campaign:7"
+  "tamper_campaign:8"
   "head_chain_freshness:7"
   "proof_cost:9"
 )
@@ -61,6 +61,7 @@ LOAD_BEARING=(
   a_forged_head_at_a_higher_generation_is_caught_by_continuity
   the_corpus_covers_every_declared_tamper_class_exactly_once
   an_outcome_envelope_is_checked_against_the_outcome_index_root_not_whichever_root_verifies
+  a_v1_configuration_cannot_stand_in_for_the_incarnation_body_the_head_selected
   every_leaf_at_every_size_carries_exactly_the_length_its_position_requires
   a_promoted_tail_really_does_shorten_a_path_so_the_model_is_not_decorative
   generation_reads_the_whole_state_while_verification_reads_only_the_path
