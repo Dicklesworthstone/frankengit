@@ -12,6 +12,7 @@
 //! node lifecycle transitions. Authority operations themselves remain async:
 //! no synchronous request-path adapter is introduced around the async engine.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -2406,10 +2407,31 @@ struct VerifiedFabricPackSource<'a> {
     fabric: &'a LocalFilesystemFabric,
     object_format: GitHashAlgorithm,
     maximum_object_bytes: usize,
+    /// Object-fabric reads remain database work even when their selected-pack
+    /// encoding is charged to the transfer class.
+    database_context: &'a FsqliteCx,
+    database_exhaustion: &'a Cell<Option<Exhaustion>>,
 }
 
 impl VerifiedFabricPackSource<'_> {
+    /// Checks the authority/database budget immediately before one durable
+    /// object-fabric read and retains its exact native exhaustion dimension.
+    fn database_read_is_live(&self) -> bool {
+        match checkpoint_pack_context(self.database_context) {
+            PackContextCheckpoint::Live => true,
+            PackContextCheckpoint::Stopped { budget_exhaustion } => {
+                if let Some(dimension) = budget_exhaustion {
+                    self.database_exhaustion.set(Some(dimension));
+                }
+                false
+            }
+        }
+    }
+
     fn read_object(&self, id: &GitOid) -> Result<(ObjectType, Vec<u8>), PackWriteError> {
+        if !self.database_read_is_live() {
+            return Err(PackError::DeadlineExceeded.into());
+        }
         let verified = self
             .fabric
             .read_whole(*id)
@@ -3100,8 +3122,15 @@ pub struct GitDaemonRequest {
 pub struct GitDaemonSessionTimeout(Duration);
 
 impl GitDaemonSessionTimeout {
-    /// Conservative bounded profile for the embedded one-session daemon.
-    pub const DEFAULT: Self = Self(Duration::from_secs(30));
+    /// Bounded default profile for one complete embedded transfer.
+    ///
+    /// The selected-pack encoder is charged to the finite Transfer class. The
+    /// daemon's outer session envelope must not expire first while that same
+    /// maximum-size transfer is being materialized, because a v0/v1 raw-pack
+    /// client cannot distinguish a deadline EOF from a corrupt pack. Explicit
+    /// deployments can still select a narrower profile through
+    /// [`NodeConfig::with_git_daemon_session_timeout`].
+    pub const DEFAULT: Self = Self(Duration::from_secs(300));
 
     /// Constructs a non-zero session budget.
     pub const fn try_new(timeout: Duration) -> Result<Self, GitDaemonSessionTimeoutRefusal> {
@@ -5250,9 +5279,9 @@ impl OneNode {
             .await
             .map_err(NodePackMaterializationRefusal::from)?;
         let pack_context = self.pack_materialization_context();
-        let class = SELECTED_PACK_BUDGET_CLASS;
+        let database_exhaustion = Cell::new(None);
         let mut stopped = false;
-        let mut exhaustion = None;
+        let mut transfer_exhaustion = None;
         let pack = {
             let mut is_live = || {
                 if stopped {
@@ -5262,16 +5291,29 @@ impl OneNode {
                     PackContextCheckpoint::Live => true,
                     PackContextCheckpoint::Stopped { budget_exhaustion } => {
                         stopped = true;
-                        exhaustion = budget_exhaustion;
+                        transfer_exhaustion = budget_exhaustion;
                         false
                     }
                 }
             };
-            self.materialize_selected_pack(&materialized, &[], &mut is_live)
+            self.materialize_selected_pack(
+                &materialized,
+                &[],
+                request.authority(),
+                &database_exhaustion,
+                &mut is_live,
+            )
         };
-        exhaustion.map_or(pack, |dimension| {
+        if let Some(dimension) = database_exhaustion.get() {
+            return Err(NodePackMaterializationRefusal::BudgetClassExhausted {
+                class: BudgetClass::Database,
+                dimension,
+                operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
+            });
+        }
+        transfer_exhaustion.map_or(pack, |dimension| {
             Err(NodePackMaterializationRefusal::BudgetClassExhausted {
-                class,
+                class: SELECTED_PACK_BUDGET_CLASS,
                 dimension,
                 operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
             })
@@ -5290,6 +5332,8 @@ impl OneNode {
         &self,
         materialized: &MaterializedAdmission,
         client_haves: &[GitOid],
+        database_context: &FsqliteCx,
+        database_exhaustion: &Cell<Option<Exhaustion>>,
         is_live: &mut impl FnMut() -> bool,
     ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
         let limits = PackLimits::default();
@@ -5298,6 +5342,8 @@ impl OneNode {
             fabric: &self.fabric,
             object_format: self.object_format,
             maximum_object_bytes: limits.max_object_bytes.min(configured_limit),
+            database_context,
+            database_exhaustion,
         };
         let ids = selected_pack_ids(
             &source,
@@ -5457,10 +5503,10 @@ impl OneNode {
             Some(deadline),
             |_request, pack_request| {
                 let pack_context = self.pack_materialization_context();
-                let class = SELECTED_PACK_BUDGET_CLASS;
+                let database_exhaustion = Cell::new(None);
                 let mut stopped = false;
                 let mut session_deadline_expired = false;
-                let mut exhaustion = None;
+                let mut transfer_exhaustion = None;
                 let pack = {
                     let mut is_live = || {
                         if stopped {
@@ -5475,12 +5521,18 @@ impl OneNode {
                             PackContextCheckpoint::Live => true,
                             PackContextCheckpoint::Stopped { budget_exhaustion } => {
                                 stopped = true;
-                                exhaustion = budget_exhaustion;
+                                transfer_exhaustion = budget_exhaustion;
                                 false
                             }
                         }
                     };
-                    self.materialize_selected_pack(&materialized, &pack_request.haves, &mut is_live)
+                    self.materialize_selected_pack(
+                        &materialized,
+                        &pack_request.haves,
+                        request.authority(),
+                        &database_exhaustion,
+                        &mut is_live,
+                    )
                 };
                 if session_deadline_expired {
                     Err(GitDaemonServeError::Transport(
@@ -5488,10 +5540,18 @@ impl OneNode {
                             operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
                         },
                     ))
-                } else if let Some(dimension) = exhaustion {
+                } else if let Some(dimension) = database_exhaustion.get() {
                     Err(GitDaemonServeError::Pack(
                         NodePackMaterializationRefusal::BudgetClassExhausted {
-                            class,
+                            class: BudgetClass::Database,
+                            dimension,
+                            operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
+                        },
+                    ))
+                } else if let Some(dimension) = transfer_exhaustion {
+                    Err(GitDaemonServeError::Pack(
+                        NodePackMaterializationRefusal::BudgetClassExhausted {
+                            class: SELECTED_PACK_BUDGET_CLASS,
                             dimension,
                             operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
                         },
