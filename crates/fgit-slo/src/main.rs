@@ -18,8 +18,11 @@ use std::time::Instant;
 
 use fgit_authority::StoreInstanceId;
 use fgit_node::{NodeConfig, OneNode};
-use fgit_slo::{STATES, labels, legal_path, median_of, sample_block, tree_footprint};
-use fgit_types::cell::{CellState, CellTransitionCause, admits_read};
+use fgit_slo::{
+    STATES, labels, legal_path, median_of, ops_per_second, sample_block, throughput_block,
+    tree_footprint,
+};
+use fgit_types::cell::{CellState, CellTransitionCause, ReadLabel, admits_read};
 use fgit_types::numeric::HeadGeneration;
 use fgit_types::{RepositoryId, TenantId};
 use fgit_wire::WireLimits;
@@ -28,8 +31,10 @@ use fgit_wire::visibility::RefVisibility;
 fn usage() -> ExitCode {
     eprintln!("usage: fgit-slo multicell");
     eprintln!();
-    eprintln!("  multicell   measure read modes, state admission and storage");
-    eprintln!("              across cell counts; NDJSON on stdout");
+    eprintln!("  multicell    measure read modes, state admission and storage");
+    eprintln!("               across cell counts; NDJSON on stdout");
+    eprintln!("  saturation   sweep offered concurrency against aggregate");
+    eprintln!("               throughput to find where the curve flattens");
     eprintln!();
     eprintln!("exit 0 measured, 1 measurement failed, 2 usage");
     ExitCode::from(2)
@@ -242,6 +247,103 @@ fn measure_cell_count(count: u64, root: &Path, samples: u32) -> Result<(), Strin
     Ok(())
 }
 
+/// Sweeps offered concurrency against aggregate throughput to find where the
+/// curve flattens.
+///
+/// Each level is measured TWICE so the flattening is judged against a floor
+/// measured at that level, not asserted by eye. The saturation point reported
+/// is the first level whose gain over the previous level fails to clear its own
+/// repeat spread — which is a measurement, not a model fitted after the fact.
+fn sweep_saturation(root: &Path, cells_wanted: u64, samples: u32) -> Result<(), String> {
+    let scratch = root.join("saturation");
+    std::fs::create_dir_all(&scratch).map_err(|error| format!("scratch root: {error}"))?;
+    let (mut first, companions) = open_cells(&scratch, cells_wanted)?;
+
+    let mut cells = vec![first];
+    cells.extend(companions);
+
+    // EVERY cell must be walked to a state that admits reads, not just the
+    // first. Bootstrapping admits nothing, so a companion left there serves
+    // zero and the sweep silently measures ONE cell with N readers while
+    // reporting N cells. That defect was visible only in the served counts:
+    // three cells at concurrency 2 served 40 reads where 80 were offered.
+    for cell in &mut cells {
+        for hop in legal_path(cell.cell_state(), CellState::Serving).unwrap_or_default() {
+            cell.transition_cell_state(hop, CellTransitionCause::Operator, HeadGeneration::FIRST)
+                .map_err(|error| format!("walk to Serving: {error:?}"))?;
+        }
+    }
+    let limits = WireLimits::default();
+    let visibility = RefVisibility::new();
+    let label = ReadLabel::snapshot();
+
+    let mut previous_rate = 0_u64;
+    let mut saturated_at: Option<usize> = None;
+    for concurrency in [1_usize, 2, 4, 8, 16] {
+        let (served_a, elapsed_a) =
+            throughput_block(&cells, &visibility, &limits, label, concurrency, samples);
+        let (served_b, elapsed_b) =
+            throughput_block(&cells, &visibility, &limits, label, concurrency, samples);
+        let rate_a = ops_per_second(served_a, elapsed_a);
+        let rate_b = ops_per_second(served_b, elapsed_b);
+        // The repeat spread at THIS level is the floor the gain must clear.
+        let floor = rate_a.abs_diff(rate_b);
+        let best = rate_a.max(rate_b);
+        let gain = best.saturating_sub(previous_rate);
+        let cleared = gain > floor;
+        if !cleared && saturated_at.is_none() && concurrency > 1 {
+            saturated_at = Some(concurrency);
+        }
+
+        emit(&[
+            ("record", quoted("saturation_point")),
+            ("cells", cells.len().to_string()),
+            ("concurrency", concurrency.to_string()),
+            ("reads_per_reader", samples.to_string()),
+            (
+                "offered",
+                (concurrency as u64 * u64::from(samples)).to_string(),
+            ),
+            ("served_a", served_a.to_string()),
+            ("served_b", served_b.to_string()),
+            // A shortfall here means some reader hit a cell that refused, which
+            // makes the rate a rate for FEWER cells than the record claims.
+            (
+                "all_offered_reads_served",
+                (served_a == concurrency as u64 * u64::from(samples)).to_string(),
+            ),
+            ("ops_per_second_a", rate_a.to_string()),
+            ("ops_per_second_b", rate_b.to_string()),
+            ("repeat_floor_ops", floor.to_string()),
+            ("gain_over_previous_ops", gain.to_string()),
+            ("gain_clears_floor", cleared.to_string()),
+        ]);
+        previous_rate = best;
+    }
+
+    emit(&[
+        ("record", quoted("saturation_summary")),
+        ("cells", cells.len().to_string()),
+        (
+            "saturated_at_concurrency",
+            saturated_at.map_or_else(|| quoted("not_reached"), |c| c.to_string()),
+        ),
+        (
+            "note",
+            quoted(
+                "the first level whose throughput gain did not clear its own repeat spread; \
+                 not_reached means throughput was still rising at the highest level swept",
+            ),
+        ),
+    ]);
+
+    for node in cells {
+        node.shutdown()
+            .map_err(|error| format!("shutdown: {error:?}"))?;
+    }
+    Ok(())
+}
+
 /// Reports the transition graph, then measures each deployment size.
 fn measure() -> Result<(), String> {
     let root = std::env::temp_dir().join(format!("fgit-slo-{}", std::process::id()));
@@ -273,15 +375,33 @@ fn measure() -> Result<(), String> {
     Ok(())
 }
 
+/// Runs the saturation sweep under its own scratch root.
+fn saturation() -> Result<(), String> {
+    let root = std::env::temp_dir().join(format!("fgit-slo-sat-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let samples: u32 = std::env::var("FG_SLO_SAMPLES")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(7);
+    let outcome = sweep_saturation(&root, 3, samples);
+    let _ = std::fs::remove_dir_all(&root);
+    outcome
+}
+
 fn main() -> ExitCode {
     let mut arguments = std::env::args().skip(1);
     let Some(mode) = arguments.next() else {
         return usage();
     };
-    if arguments.next().is_some() || mode != "multicell" {
+    if arguments.next().is_some() {
         return usage();
     }
-    match measure() {
+    let outcome = match mode.as_str() {
+        "multicell" => measure(),
+        "saturation" => saturation(),
+        _ => return usage(),
+    };
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(reason) => {
             eprintln!("fgit-slo: measurement failed: {reason}");

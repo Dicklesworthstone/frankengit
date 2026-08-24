@@ -202,9 +202,92 @@ pub const fn clears_floor(gap_ns: u128, aa_floor_ns: u128) -> bool {
     gap_ns > aa_floor_ns
 }
 
+/// Aggregate throughput of `concurrency` readers issuing `per_reader` reads.
+///
+/// Returns `(served, elapsed_nanos)`. Readers are spread across the supplied
+/// cells round-robin, so a sweep at N cells exercises N cells rather than
+/// hammering one and calling it a deployment.
+///
+/// # Why this exists separately from [`sample_block`]
+///
+/// A saturation point is where adding concurrency stops adding throughput. That
+/// is invisible to a single-threaded latency sample no matter how many times it
+/// is repeated: per-call latency and aggregate throughput are different
+/// quantities, and reporting the first as a capacity model is proof-class
+/// inflation.
+#[must_use]
+pub fn throughput_block(
+    cells: &[OneNode],
+    visibility: &RefVisibility,
+    limits: &WireLimits,
+    label: ReadLabel,
+    concurrency: usize,
+    per_reader: u32,
+) -> (u64, u128) {
+    let started = Instant::now();
+    let served = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for index in 0..concurrency {
+            let cell = &cells[index % cells.len()];
+            handles.push(scope.spawn(move || {
+                let mut ok = 0_u64;
+                for _ in 0..per_reader {
+                    let outcome = cell.runtime().block_on(cell.labelled_advertisement_in(
+                        &cell.request_context(),
+                        visibility,
+                        limits,
+                        label,
+                    ));
+                    if outcome.is_ok() {
+                        ok += 1;
+                    }
+                }
+                ok
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or(0))
+            .sum::<u64>()
+    });
+    (served, started.elapsed().as_nanos())
+}
+
+/// Operations per second, or `0` when nothing was served or no time passed.
+///
+/// Integer arithmetic on purpose: a float here would invite a printed rate with
+/// more precision than the measurement supports.
+#[must_use]
+pub const fn ops_per_second(served: u64, elapsed_ns: u128) -> u64 {
+    if elapsed_ns == 0 {
+        return 0;
+    }
+    let rate = (served as u128).saturating_mul(1_000_000_000) / elapsed_ns;
+    rate as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rate_is_zero_when_nothing_was_served_or_no_time_passed() {
+        assert_eq!(ops_per_second(0, 1_000_000_000), 0);
+        // A zero elapsed time must not divide by zero, and must not report an
+        // infinite rate either.
+        assert_eq!(ops_per_second(10, 0), 0);
+        assert_eq!(ops_per_second(5, 1_000_000_000), 5);
+        // Sub-second windows scale up rather than truncating to zero.
+        assert_eq!(ops_per_second(1, 500_000_000), 2);
+    }
+
+    #[test]
+    fn a_rate_does_not_overflow_on_a_large_count() {
+        // The multiply is done in u128 precisely so a large served count in a
+        // short window cannot wrap into a small, plausible-looking rate.
+        let rate = ops_per_second(u64::MAX, 1_000_000_000);
+        assert_eq!(rate, u64::MAX);
+    }
 
     #[test]
     fn every_state_is_reachable_from_bootstrapping_by_a_legal_path() {
