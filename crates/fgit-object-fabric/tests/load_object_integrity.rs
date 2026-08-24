@@ -64,8 +64,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use fgit_object_fabric::fabric::{
-    ImmutableObjectFabric, ManifestLimits, PlacementAdmission, PlacementBackend, PlacementReceipt,
-    PutIfAbsent, SegmentManifest, StoreRefusal, VerifiedObject,
+    AuthenticatedRetentionRegistry, ImmutableObjectFabric, ManifestLimits, PlacementAdmission,
+    PlacementBackend, PlacementReceipt, PutIfAbsent, RetentionRootProposal, SegmentManifest,
+    StoreRefusal, VerifiedObject,
 };
 use fgit_object_fabric::local::{LocalFilesystemConfig, LocalFilesystemFabric};
 use fgit_object_fabric::{
@@ -75,7 +76,10 @@ use fgit_object_fabric::{
 use fgit_resource::algebra::{Grade, ResourceVector};
 use fgit_resource::custody::{LeakDisposition, ObligationLedger};
 use fgit_resource::{OpaqueHandle, RegionId};
-use fgit_types::GitOid;
+use fgit_types::{
+    CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, GitOid,
+    RepositoryAuthorityHeadId,
+};
 
 const NAMESPACE: &[u8] = b"uw4e-primary";
 const OTHER_NAMESPACE: &[u8] = b"uw4e-secondary";
@@ -716,6 +720,183 @@ fn a_manifest_body_of_exactly_the_ceiling_is_admitted_and_one_byte_under_is_refu
         ),
         "the immutable-body guard must refuse one byte under and report the \
          encoded manifest length as offered; got {outcome:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// :466 second entry point -- publish_retention_root (1522)
+// ---------------------------------------------------------------------------
+
+/// A registry that permits everything, so the CEILING is the only thing that can
+/// refuse.
+///
+/// Deliberately permissive for the same reason `fabric_bounds.rs` keeps a
+/// `roomy()` limit set around the bound it is testing: a fixture component that
+/// might itself refuse would make every refusal below ambiguous between "the
+/// ceiling fired" and "my double fired".
+struct PermissiveRetentionRegistry;
+
+impl AuthenticatedRetentionRegistry for PermissiveRetentionRegistry {
+    fn revalidate_root(&self, _proposal: &RetentionRootProposal) -> Result<(), StoreRefusal> {
+        Ok(())
+    }
+
+    fn permits_placement_deletion(&self, _object: GitOid) -> Result<(), StoreRefusal> {
+        Ok(())
+    }
+}
+
+/// Code point 2, not 1: `fgit-crypto`'s registry records 1 as sha1 with usage
+/// `GitIdentityOnly` -- never an internal body identity -- while 2 is the
+/// 32-byte slot these fixtures actually carry. Copied from
+/// `fgit-types/tests/identity.rs`, which documents the same choice.
+fn fixture_algorithm() -> DigestAlgorithmId {
+    DigestAlgorithmId::try_new(2).expect("code point 2 is a valid digest slot")
+}
+
+fn fixture_digest_bytes(fill: u8) -> DigestBytes {
+    DigestBytes::try_new(&[fill; 32]).expect("32 bytes is inside 16..=64")
+}
+
+fn retention_proposal() -> RetentionRootProposal {
+    let head = RepositoryAuthorityHeadId::from_digest(
+        fixture_algorithm(),
+        CANONICAL_CODEC_VERSION,
+        fixture_digest_bytes(0x11),
+    );
+    RetentionRootProposal::new(
+        head,
+        Digest::new(fixture_algorithm(), fixture_digest_bytes(0x22)),
+        Vec::new(),
+    )
+    .expect("an empty manifest list is trivially canonically ordered")
+}
+
+/// Regular files beneath one of the retention directories, sorted.
+///
+/// WALKED, NOT RECONSTRUCTED. `retention_body_path` and `retention_root_path`
+/// are private and `RetentionRootProposal::canonical_bytes` is `pub(crate)`, so
+/// the encoded body length is not obtainable from `tests/` any other way. This
+/// mirrors `object_files` above and its reasoning: a probe that hard-codes a
+/// private path shape breaks the day the layout changes while still claiming to
+/// test the guard.
+fn retention_files(root: &Path, leaf: &str) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(&root.join("retention").join(leaf), &mut found);
+    found.sort();
+    found
+}
+
+/// THE OTHER WAY INTO `:466`, WHICH NOTHING REACHED.
+///
+/// `write_immutable_bytes` has two public callers. `write_manifest` is covered
+/// by the drill above; `publish_retention_root` was covered in neither
+/// direction. A mutation at `:466` being killed by the manifest drill says
+/// nothing about this path -- it is different code, reached through a different
+/// trait method, and it performs TWO bounded writes rather than one:
+///
+/// ```text
+/// :724  the retention BODY     (proposal.canonical_bytes())
+/// :730  the retention POINTER  (retention_pointer(root))
+/// ```
+///
+/// So the drill has to establish WHICH write is on the boundary, or a later
+/// reader could mistake pointer coverage for body coverage. It asserts the
+/// pointer is strictly smaller, which makes the body the binding write at a
+/// ceiling equal to the body length.
+///
+/// THE EFFECT IS ASSERTED, NOT ADMISSION. An earlier version of the manifest
+/// drill called its publish and only `.expect()`ed it, which a publish that
+/// wrote nothing would satisfy; that is what returned this family to rework
+/// once already. Here the published bytes are read back off disk and compared.
+#[test]
+fn a_retention_body_of_exactly_the_ceiling_is_admitted_and_one_byte_under_is_refused() {
+    let registry = PermissiveRetentionRegistry;
+    let proposal = retention_proposal();
+
+    // Measure the published body under a ceiling that cannot be the constraint.
+    let measure_root = temp_root("retention-measure");
+    let generous = fabric(measure_root.clone(), NAMESPACE, 1 << 20);
+    let _state = generous
+        .publish_retention_root(&registry, &proposal)
+        .expect("a generous ceiling must admit the retention publication");
+
+    let measured = retention_files(&measure_root, "bodies");
+    assert_eq!(
+        measured.len(),
+        1,
+        "the fixture assumes exactly one retention body; found {measured:?}"
+    );
+    let body_bytes = fs::read(&measured[0]).expect("the measured retention body must be readable");
+    let body_len = u64::try_from(body_bytes.len()).expect("a retention body length fits u64");
+
+    // Which of the two writes is on the boundary: the pointer must be strictly
+    // smaller, so a ceiling of `body_len` binds the BODY write.
+    let pointers = retention_files(&measure_root, "roots");
+    assert_eq!(
+        pointers.len(),
+        1,
+        "the fixture assumes exactly one retention pointer; found {pointers:?}"
+    );
+    let pointer_len = fs::metadata(&pointers[0])
+        .expect("the retention pointer must exist")
+        .len();
+    assert!(
+        pointer_len < body_len,
+        "the pointer must be strictly smaller than the body, otherwise a ceiling \
+         of the body length would bind the pointer write instead and this drill \
+         would be probing the wrong one: pointer {pointer_len}, body {body_len}"
+    );
+
+    // Exactly the ceiling: admitted, and the published bytes really landed.
+    let tight_root = temp_root("retention-tight");
+    let tight = fabric(tight_root.clone(), NAMESPACE, body_len);
+    let _tight_state = tight
+        .publish_retention_root(&registry, &proposal)
+        .expect("a retention body of exactly the ceiling must be admitted");
+    let published = retention_files(&tight_root, "bodies");
+    assert_eq!(
+        published.len(),
+        1,
+        "the exact-ceiling publication must leave exactly one body; found {published:?}"
+    );
+    assert_eq!(
+        fs::read(&published[0]).expect("the published retention body must be readable"),
+        body_bytes,
+        "the published body must be byte-identical to the measured one"
+    );
+    assert_eq!(
+        retention_files(&tight_root, "roots").len(),
+        1,
+        "the pointer write must also have completed at the exact ceiling"
+    );
+
+    // One byte under: refused, naming the body length it measured.
+    let under_root = temp_root("retention-under");
+    let under = fabric(under_root, NAMESPACE, body_len - 1);
+    let outcome = under.publish_retention_root(&registry, &proposal);
+
+    assert!(
+        matches!(
+            outcome,
+            Err(StoreRefusal::StoredObjectTooLarge { offered, maximum })
+                if offered == body_len && maximum == body_len - 1
+        ),
+        "the retention body write must refuse one byte under and report the \
+         encoded body length as offered; got {outcome:?}"
     );
 }
 
