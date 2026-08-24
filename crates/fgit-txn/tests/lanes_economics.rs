@@ -432,13 +432,18 @@ fn combining_raises_decisions_per_cas_above_the_aa_noise_floor() {
     let candidate_ratio = artifact.candidate[0]
         .metrics
         .decisions_per_cas_parts_per_million();
+    // `Some(..)` because the ratio is now optional: a workload that issues no
+    // compare-and-exchange reports None rather than a fabricated denominator.
+    // Both lanes here do publish, so both must carry a value, and requiring
+    // `Some` keeps this assertion able to fail if one ever stopped.
     assert_eq!(
-        baseline_ratio, 1_000_000,
+        baseline_ratio,
+        Some(1_000_000),
         "direct publication must spend exactly one CAS per decision"
     );
     assert_eq!(
         candidate_ratio,
-        1_000_000 * u64::try_from(BATCH).expect("batch fits u64"),
+        Some(1_000_000 * u64::try_from(BATCH).expect("batch fits u64")),
         "combining {BATCH} decisions must commit them under one CAS"
     );
 
