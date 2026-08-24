@@ -283,6 +283,78 @@ impl CanonicalBody for FutureConfiguration {
     }
 }
 
+/// The exact configuration-body shape written by schema minor zero, before
+/// the object-format field was added.
+///
+/// Its selected layout is deliberately v1. A reader that treats the strict
+/// schema-minor refusal as an absent configuration would report legacy v0 and
+/// verify a different layout from the one the authenticated head selected.
+struct PreviousMinorConfiguration;
+
+impl CanonicalBody for PreviousMinorConfiguration {
+    const DOMAIN: DomainTag = RepositoryConfigurationBody::DOMAIN;
+    const SCHEMA_FAMILY: SchemaFamily = RepositoryConfigurationBody::SCHEMA_FAMILY;
+    const SCHEMA_MAJOR: u16 = RepositoryConfigurationBody::SCHEMA_MAJOR;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        out.write_scalar(RootLayoutVersion::RefStateMerkleV1.code_point());
+        Ok(())
+    }
+
+    fn read_payload(_input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        Ok(Self)
+    }
+}
+
+#[test]
+fn a_previous_configuration_schema_minor_is_refused_not_reinterpreted_as_legacy() {
+    let backing = store();
+    let previous = PreviousMinorConfiguration;
+    let key = fgit_authority::body_key(
+        fgit_crypto::IdentityDomain::RepositoryConfiguration,
+        &previous,
+    )
+    .expect("a previous-minor configuration has the same canonical key domain");
+    backing
+        .put_if_absent(
+            &key,
+            &encode_body(&previous).expect("previous-minor body encodes"),
+        )
+        .expect("the immutable store accepts a genuine previous-minor frame");
+    let identity = fgit_authority::canonical_body_id(
+        fgit_crypto::IdentityDomain::RepositoryConfiguration,
+        fgit_types::CANONICAL_CODEC_VERSION,
+        &previous,
+    )
+    .expect("previous-minor body has a canonical identity");
+    let configuration_root = Digest::new(identity.algorithm(), *identity.digest());
+
+    assert!(
+        matches!(
+            root_layout_for_verification(&backing, &configuration_root),
+            Err(OutcomeFailure::Codec(_))
+        ),
+        "a strict schema-minor mismatch must refuse rather than claim the selected v1 layout is legacy v0"
+    );
+
+    // Permitted twin: the same root-layout code point in the current schema
+    // resolves, proving this is a version-skew refusal rather than a resolver
+    // that rejects every v1 layout.
+    let current = stage_repository_configuration(
+        &backing,
+        &RepositoryConfigurationBody {
+            root_layout: RootLayoutVersion::RefStateMerkleV1,
+            object_format: GitHashAlgorithm::Sha256,
+        },
+    )
+    .expect("current schema configuration stages");
+    assert_eq!(
+        root_layout_for_verification(&backing, &current).expect("current schema resolves"),
+        RootLayoutVersion::RefStateMerkleV1
+    );
+}
+
 #[test]
 fn a_layout_version_this_build_does_not_know_is_refused_even_when_verifying() {
     // The distinction that makes the v0 default safe rather than sloppy.

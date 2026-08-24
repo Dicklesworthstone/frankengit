@@ -38,7 +38,6 @@ use fgit_crypto::{
     merkle_proof, merkle_root, ref_state_non_membership_proof, verify_merkle_proof,
 };
 use fgit_types::CANONICAL_CODEC_VERSION;
-use fgit_types::error::TypeRefusal;
 use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::{
     InternalObjectId, RefusalRecordId, RepositoryAuthorityHeadId, RepositoryCommitId,
@@ -964,10 +963,11 @@ where
 
 /// The layout a head selects, for **verification**.
 ///
-/// A `configuration_root` that is absent from the store, or present and
-/// undecodable, yields [`RootLayoutVersion::LegacyWholeBody`] — because that is
-/// the layout such a head is actually carrying, and refusing it would break
-/// heads that predate this vocabulary and are not wrong.
+/// A `configuration_root` absent from the store yields
+/// [`RootLayoutVersion::LegacyWholeBody`], because a head that predates this
+/// vocabulary carries that layout. A *present* body must decode under this
+/// exact configuration schema; treating a version-skewed body as absent would
+/// silently replace the layout its authenticated head selected.
 ///
 /// Note what is NOT defaulted: a body that decodes but names a layout version
 /// this build does not know is a **refusal**, not a fall back to v0. An unknown
@@ -988,7 +988,11 @@ where
     let key = configuration_key(configuration_root)?;
     match store.read_immutable(&key)? {
         ImmutableRead::Absent => Ok(RootLayoutVersion::LegacyWholeBody),
-        ImmutableRead::Present(bytes) => interpret_configuration_for_verification(&bytes),
+        ImmutableRead::Present(bytes) => Ok(decode_body::<RepositoryConfigurationBody>(
+            &bytes,
+            DecodeLimits::DEFAULT,
+        )?
+        .root_layout),
     }
 }
 
@@ -1002,8 +1006,8 @@ where
 /// # Errors
 ///
 /// [`OutcomeFailure::ConfigurationUnresolvable`] when the root names no stored
-/// body or the stored bytes do not decode, and [`OutcomeFailure::Codec`] for an
-/// unknown layout version.
+/// body, and [`OutcomeFailure::Codec`] when a present body cannot decode under
+/// this build's exact schema.
 pub fn root_layout_for_proof<S>(
     store: &S,
     configuration_root: &Digest,
@@ -1011,72 +1015,34 @@ pub fn root_layout_for_proof<S>(
 where
     S: AuthorityStore + ?Sized,
 {
+    Ok(read_repository_configuration(store, configuration_root)?.root_layout)
+}
+
+/// Reads the exact canonical repository configuration named by an authority
+/// head.
+///
+/// Unlike [`root_layout_for_verification`], this is a complete configuration
+/// read: absence, a previous schema minor without the required object-format
+/// field, and malformed bytes are all refusals. In particular it never turns
+/// an old or unreadable object-format declaration into SHA-1.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::ConfigurationUnresolvable`] when no body is stored at the
+/// selected root, and [`OutcomeFailure::Codec`] when the present body cannot be
+/// decoded by this build's exact schema.
+pub fn read_repository_configuration<S>(
+    store: &S,
+    configuration_root: &Digest,
+) -> Result<RepositoryConfigurationBody, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
     let key = configuration_key(configuration_root)?;
     let ImmutableRead::Present(bytes) = store.read_immutable(&key)? else {
         return Err(OutcomeFailure::ConfigurationUnresolvable);
     };
-    let configuration: RepositoryConfigurationBody = decode_body(&bytes, DecodeLimits::DEFAULT)
-        .map_err(|_| OutcomeFailure::ConfigurationUnresolvable)?;
-    Ok(configuration.root_layout)
-}
-
-/// Shared reading of a stored configuration body for the verification path.
-///
-/// Split out so the two surfaces cannot drift on the one rule that is easy to
-/// get wrong: undecodable BYTES fall back to legacy, an unreadable CODE POINT
-/// inside a genuine configuration body does not.
-fn interpret_configuration_for_verification(
-    bytes: &[u8],
-) -> Result<RootLayoutVersion, OutcomeFailure> {
-    match decode_body::<RepositoryConfigurationBody>(bytes, DecodeLimits::DEFAULT) {
-        Ok(configuration) => Ok(configuration.root_layout),
-        Err(refusal) if refusal_is_unreadable_vocabulary(&refusal) => {
-            Err(OutcomeFailure::Codec(refusal))
-        }
-        Err(_) => Ok(RootLayoutVersion::LegacyWholeBody),
-    }
-}
-
-/// Whether a decode refusal names a vocabulary member this build cannot read.
-///
-/// The distinction this makes is the whole point of the split above: bytes that
-/// are not a configuration body at all mean "this head predates the
-/// vocabulary", while bytes that ARE one and name a code point we cannot read
-/// mean "this head is newer than us". The first is legacy; the second refuses.
-///
-/// # Why this matches the refusal CLASS and not one field name
-///
-/// This predicate originally named `RootLayoutVersion` specifically. That was
-/// correct only while the configuration body held exactly one code-point field,
-/// and it stopped being correct the moment `object_format` joined it in
-/// 89cba3b: a head that selected a layout this build knows but named an object
-/// format it does not would refuse inside the decoder, fail this predicate, and
-/// fall through to the legacy branch — reported as v0 despite having
-/// explicitly selected v1. The rule was never about a particular field. It is
-/// about whether the head is newer than the reader, so it is written that way
-/// now and does not need revisiting the next time the body grows a field.
-///
-/// Widening is sound because the frame is already established by the time a
-/// `CodePointUnknown` can exist. `read_frame_header` turns foreign bytes away
-/// as `MagicUnrecognized`, `CodecMajorUnsupported`, or a domain/schema-family
-/// mismatch, and only `RepositoryConfigurationBody::read_payload` runs after
-/// it. Unrelated bytes therefore cannot reach this predicate carrying an
-/// unknown code point, so matching the class cannot start refusing the legacy
-/// heads the fallback exists to serve.
-///
-/// Matched structurally on the typed refusal rather than on its rendered text.
-/// A string match would silently start defaulting newer heads to legacy the
-/// first time anyone reworded a `Display` impl — a failure that no test of the
-/// refusal path would catch, because the path would still be taken, just to the
-/// wrong destination.
-// `const` is available here only because the widening removed the field-name
-// comparison: matching a `&'static str` is not const-stable, matching the
-// variant alone is.
-const fn refusal_is_unreadable_vocabulary(refusal: &CodecRefusal) -> bool {
-    matches!(
-        refusal,
-        CodecRefusal::Type(TypeRefusal::CodePointUnknown { .. })
-    )
+    Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?)
 }
 
 // --- the production surface for the carrier (frankengit-m01t) -----------------
@@ -1086,12 +1052,11 @@ const fn refusal_is_unreadable_vocabulary(refusal: &CodecRefusal) -> bool {
 // cannot know whether a membership proof is admissible at all.
 //
 // Every rule below is the same rule the synchronous surface applies, because
-// neither surface owns it: `configuration_key` and
-// `interpret_configuration_for_verification` are the shared core, and these
-// functions differ from their twins only in the await. In particular the
-// v0-for-verification / refuse-for-proof asymmetry cannot drift between the
-// two, which matters more here than usual — a node that silently assumed v0
-// would emit a proof through a tree that does not exist.
+// neither surface owns it: `configuration_key` defines the selected immutable
+// slot, and the typed codec owns its exact schema. In particular the
+// v0-for-verification / refuse-for-complete-read asymmetry cannot drift between
+// the two, which matters more here than usual — a node that silently assumed
+// v0 or SHA-1 would operate in the wrong repository domain.
 
 /// Stage a repository configuration body, on the production surface.
 ///
@@ -1122,10 +1087,9 @@ where
 
 /// The layout a head selects, for verification, on the production surface.
 ///
-/// The asynchronous twin of [`root_layout_for_verification`], including its
-/// default: an absent or undecodable configuration body yields
-/// [`RootLayoutVersion::LegacyWholeBody`], while a body that decodes into a
-/// version this build does not know is still refused.
+/// The asynchronous twin of [`root_layout_for_verification`]. An absent root
+/// is legacy for verification; every present body must decode under the exact
+/// current schema.
 ///
 /// # Errors
 ///
@@ -1142,7 +1106,11 @@ where
     let key = configuration_key(configuration_root)?;
     match store.read_immutable(cx, &key).await? {
         ImmutableRead::Absent => Ok(RootLayoutVersion::LegacyWholeBody),
-        ImmutableRead::Present(bytes) => interpret_configuration_for_verification(&bytes),
+        ImmutableRead::Present(bytes) => Ok(decode_body::<RepositoryConfigurationBody>(
+            &bytes,
+            DecodeLimits::DEFAULT,
+        )?
+        .root_layout),
     }
 }
 
@@ -1155,8 +1123,8 @@ where
 /// # Errors
 ///
 /// [`OutcomeFailure::ConfigurationUnresolvable`] when the root names no stored
-/// body or the stored bytes do not decode, and [`OutcomeFailure::Codec`] for an
-/// unknown layout version.
+/// body, and [`OutcomeFailure::Codec`] when a present body cannot decode under
+/// this build's exact schema.
 pub async fn root_layout_for_proof_async<S>(
     store: &S,
     cx: &S::Context,
@@ -1165,13 +1133,33 @@ pub async fn root_layout_for_proof_async<S>(
 where
     S: AsyncAuthorityStore + ?Sized,
 {
+    Ok(
+        read_repository_configuration_async(store, cx, configuration_root)
+            .await?
+            .root_layout,
+    )
+}
+
+/// The production twin of [`read_repository_configuration`].
+///
+/// # Errors
+///
+/// [`OutcomeFailure::ConfigurationUnresolvable`] when no body is stored at the
+/// selected root, and [`OutcomeFailure::Codec`] when the present body cannot be
+/// decoded by this build's exact schema.
+pub async fn read_repository_configuration_async<S>(
+    store: &S,
+    cx: &S::Context,
+    configuration_root: &Digest,
+) -> Result<RepositoryConfigurationBody, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
     let key = configuration_key(configuration_root)?;
     let ImmutableRead::Present(bytes) = store.read_immutable(cx, &key).await? else {
         return Err(OutcomeFailure::ConfigurationUnresolvable);
     };
-    let configuration: RepositoryConfigurationBody = decode_body(&bytes, DecodeLimits::DEFAULT)
-        .map_err(|_| OutcomeFailure::ConfigurationUnresolvable)?;
-    Ok(configuration.root_layout)
+    Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?)
 }
 
 /// One outcome-index leaf.
