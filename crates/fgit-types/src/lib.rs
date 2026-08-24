@@ -12,6 +12,7 @@ pub mod native;
 pub mod numeric;
 pub mod probability;
 pub mod refs;
+pub mod routing;
 pub mod vocabulary;
 
 pub use cell::{
@@ -38,6 +39,7 @@ pub use numeric::{
 };
 pub use probability::{PARTS_PER_MILLION, Probability};
 pub use refs::{MAX_REF_NAME_LEN, RefName};
+pub use routing::{PlacementCandidate, PlacementScore, placement_order, preferred_candidate};
 pub use vocabulary::{
     DecisionOutcome, MismatchPolicy, PublicationEpoch, RefusalCode, RequestRejectionCode,
 };
