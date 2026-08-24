@@ -139,6 +139,141 @@ fn tip_of(snapshot: &AdmissionSnapshot, name: &[u8]) -> GitOid {
         .unwrap_or(GitOid::Sha256(fgit_types::GitOidSha256::ZERO))
 }
 
+/// The namespace the merge's requested forge transition is scoped under.
+///
+/// `SemanticRequest` has no forge-intent vector -- it carries ref commands,
+/// push options and scoped entries -- so the scoped-entry namespace is the
+/// vocabulary a forge transition travels in. That is what the namespace field
+/// is for: "which subsystem owns the meaning of this entry".
+const FORGE_NAMESPACE: fgit_types::AsciiSlug = fgit_types::AsciiSlug::from_static("forge");
+
+/// The identity of the ref delta the merge requests.
+const MERGE_REF_DELTA_KEY: fgit_types::AsciiSlug =
+    fgit_types::AsciiSlug::from_static("merge.ref-delta-root");
+
+/// The identity of the event batch the merge requests.
+const MERGE_EVENT_BATCH_KEY: fgit_types::AsciiSlug =
+    fgit_types::AsciiSlug::from_static("merge.event-batch-root");
+
+/// The workspace epoch the merge was computed in.
+const MERGE_WORKSPACE_EPOCH_KEY: fgit_types::AsciiSlug =
+    fgit_types::AsciiSlug::from_static("merge.workspace-epoch");
+
+/// Refuses a sealed merge whose own parts describe different merges.
+///
+/// The three inputs are three views of one merge, and nothing until now made
+/// them agree. That mattered concretely rather than theoretically: the staleness
+/// check re-reads the tips named by the ATTEMPT, while the ref state and the
+/// record are built from the PACKAGE. A caller supplying an attempt for one ref
+/// and a package for another had one ref validated and a different one moved.
+///
+/// Binding the package into the request digest (see
+/// [`forge_transition_entries`]) fixes a related but different problem: it stops
+/// two different merges sharing one `TxId`. It cannot make an incoherent merge
+/// coherent, because a request that is internally contradictory is still
+/// contradictory once it has its own identity. So both exist, and this one runs
+/// first.
+///
+/// # Errors
+///
+/// [`AdmissionError::MergeIncoherent`] naming the part that disagreed.
+fn check_parts_describe_one_merge(sealed: &SealedMerge<'_>) -> Result<(), AdmissionError> {
+    if sealed.attempt.target_ref != sealed.package.ref_intent.name {
+        return Err(AdmissionError::MergeIncoherent {
+            field: "target ref",
+        });
+    }
+    if sealed.attempt.target_tip != sealed.package.ref_intent.expected_tip {
+        return Err(AdmissionError::MergeIncoherent {
+            field: "expected target tip",
+        });
+    }
+    // Every object the merge says it created must be one admission already
+    // validated, because what gets STAGED is the closure, not the package's
+    // list. A package naming an object outside the closure would publish a ref
+    // pointing at bytes no reader can resolve.
+    //
+    // Containment rather than equality, and the package's own doc is the reason:
+    // its objects are "a closure the admission must already hold". A validated
+    // closure is permitted to hold more than this one merge created -- it is
+    // whatever the quarantine admitted -- so requiring equality would refuse
+    // correct merges.
+    if !sealed
+        .package
+        .objects
+        .iter()
+        .all(|oid| sealed.closure.objects.contains(oid))
+    {
+        return Err(AdmissionError::MergeIncoherent {
+            field: "created objects outside the validated closure",
+        });
+    }
+    Ok(())
+}
+
+/// The requested forge transition, as scoped entries that reach the digest.
+///
+/// `NORMATIVE_PROTOCOL_CONTRACTS.md` section 3.3 requires the canonical request
+/// digest to bind "requested forge transitions" alongside the ref fields. It did
+/// not: the seal was built from the `RefCommand` alone, so a merge moving a ref
+/// to some tip and a *different* merge moving the same ref to the same tip with
+/// another event derived the same `TxId` -- and the second would resolve to the
+/// first's terminal decision and never run. One ref movement, two meanings, one
+/// identity, which is what section 5.2 forbids.
+///
+/// The values are the package's OWN roots, computed by `fgit-forge` from the
+/// package's own bytes. Admission does not restate what the merge author sealed
+/// and does not invent a formula for it: it names the two roots the owning crate
+/// already derives.
+///
+/// # What is bound, and what is deliberately not
+///
+/// The workspace epoch is bound because it is a client-visible semantic field
+/// the caller asserts, so varying it must vary the identity.
+///
+/// The validated closure's `object_closure_root` is NOT bound, and that is
+/// section 3.3's own instruction rather than an omission: the derived
+/// object-closure manifest is listed among the EXCLUDED fields, because
+/// "the validated closure belongs to prepared evidence, not logical request
+/// identity". The objects are instead tied to the request by
+/// [`check_parts_describe_one_merge`], which is a coherence rule rather than an
+/// identity field.
+///
+/// # Errors
+///
+/// [`AdmissionError`] when the package has no canonical bytes, or when an entry
+/// exceeds the request's own bound.
+fn forge_transition_entries(
+    sealed: &SealedMerge<'_>,
+) -> Result<Vec<fgit_authority::ScopedEntry>, AdmissionError> {
+    let roots = sealed
+        .package
+        .roots(&fgit_codec::CryptoBodyIdentity)
+        .map_err(|_| AdmissionError::MaterializationMismatch("merge package roots"))?;
+    Ok(vec![
+        fgit_authority::ScopedEntry::new(
+            FORGE_NAMESPACE,
+            MERGE_REF_DELTA_KEY,
+            roots.ref_delta_root.bytes().as_bytes(),
+        )?,
+        fgit_authority::ScopedEntry::new(
+            FORGE_NAMESPACE,
+            MERGE_EVENT_BATCH_KEY,
+            roots.forge_event_batch_root.bytes().as_bytes(),
+        )?,
+        fgit_authority::ScopedEntry::new(
+            FORGE_NAMESPACE,
+            MERGE_WORKSPACE_EPOCH_KEY,
+            sealed
+                .attempt
+                .workspace_epoch
+                .get()
+                .to_be_bytes()
+                .as_slice(),
+        )?,
+    ])
+}
+
 /// Builds the sealing attempt for a merge.
 ///
 /// A merge's target-ref movement is an ordinary [`fgit_authority::RefCommand`]
@@ -155,6 +290,7 @@ pub fn seal_attempt_for(
     context: &AdmissionContext,
     sealed: &SealedMerge<'_>,
 ) -> Result<SealAttempt, AdmissionError> {
+    check_parts_describe_one_merge(sealed)?;
     let name = RefName::try_new(&sealed.package.ref_intent.name)
         .map_err(|_| AdmissionError::MaterializationMismatch("merge ref name"))?;
     let command = fgit_authority::RefCommand {
@@ -179,7 +315,7 @@ pub fn seal_attempt_for(
         true,
         vec![command],
         Vec::new(),
-        Vec::new(),
+        forge_transition_entries(sealed)?,
     )?;
     Ok(SealAttempt {
         tenant_id: context.tenant_id,

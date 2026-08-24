@@ -1633,6 +1633,22 @@ pub enum AdmissionError {
     },
     /// A materializer gave a commit record inconsistent with the sealed request.
     MaterializationMismatch(&'static str),
+    /// A sealed merge's own parts do not describe one merge.
+    ///
+    /// Distinct from [`Self::MaterializationMismatch`], which reports that a
+    /// materialization disagreed with the record built from it. This one is
+    /// earlier and about the caller's own inputs: the attempt, the effect
+    /// package, and the validated closure are three views of a single merge,
+    /// and admission refuses before sealing when they disagree.
+    ///
+    /// It is a pre-seal rejection under `NORMATIVE_PROTOCOL_CONTRACTS.md`
+    /// section 5.1 rather than a published refusal, and deliberately so: with
+    /// no coherent request there is no canonical request digest, so there is
+    /// no `TxId` under which a refusal could be published.
+    MergeIncoherent {
+        /// Which part disagreed.
+        field: &'static str,
+    },
     /// A terminal decision published but its `TxId` could not be resolved.
     PublishedOutcomeMissing,
     /// A pre-CAS duplicate verdict omitted the terminal outcome for this request.
@@ -1692,6 +1708,9 @@ impl Display for AdmissionError {
                 formatter,
                 "admission projection was unavailable for sealed transaction {tx_id:?} before publication: {code:?}"
             ),
+            Self::MergeIncoherent { field } => {
+                write!(formatter, "sealed merge parts disagree about {field}")
+            }
             Self::MaterializationMismatch(field) => {
                 write!(formatter, "materializer supplied inconsistent {field}")
             }
