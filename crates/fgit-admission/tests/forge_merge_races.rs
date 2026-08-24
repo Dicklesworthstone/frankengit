@@ -1,14 +1,15 @@
 //! A controlled merge-admission race against the real authority path.
 //!
-//! This is deliberately a consumer of `fgit-admission`'s public merge API,
-//! `MemoryAuthorityStore`, and `CanonicalAdmissionProjection`.  The schedule
-//! controls the real boundary between candidate A's authenticated snapshot and
-//! its head CAS; it is not a test-local merge state machine.
+//! This drives `fgit-admission`'s public merge API, `MemoryAuthorityStore`,
+//! and `CanonicalAdmissionProjection` from the product layer. The L2 lab is a
+//! downward test-only dependency that controls the real boundary between
+//! candidate A's authenticated snapshot and its head CAS; it is not a
+//! test-local merge state machine.
 //!
 //! The campaign establishes one race schedule only.  It does not claim forge
-//! position advancement, outbox redelivery, crash recovery, or projection
-//! rebuild: the current admission route explicitly carries those roots forward
-//! pending their owning production paths.
+//! position advancement, outbox redelivery, or projection rebuild: the current
+//! admission route explicitly carries those roots forward pending their owning
+//! production paths.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};

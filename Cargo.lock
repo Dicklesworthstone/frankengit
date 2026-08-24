@@ -612,6 +612,7 @@ dependencies = [
  "fgit-codec",
  "fgit-crypto",
  "fgit-forge",
+ "fgit-lab",
  "fgit-pack",
  "fgit-reference",
  "fgit-txn",

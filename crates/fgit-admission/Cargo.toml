@@ -16,5 +16,8 @@ fgit-txn.workspace = true
 fgit-types.workspace = true
 fgit-wire.workspace = true
 
+[dev-dependencies]
+fgit-lab.workspace = true
+
 [lints]
 workspace = true

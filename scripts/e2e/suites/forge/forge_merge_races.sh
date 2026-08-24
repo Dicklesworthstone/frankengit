@@ -24,19 +24,19 @@ E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 fge_init fg029b-forge-merge-races
 fge_context bead frankengit-fg029b-forge-evidence-bkk
 fge_context evidence_class E1
-fge_context composed_merge_race crates/fgit-lab/tests/forge_merge_races.rs
-fge_context merge_crash_recovery crates/fgit-lab/tests/forge_merge_races.rs
+fge_context composed_merge_race crates/fgit-admission/tests/forge_merge_races.rs
+fge_context merge_crash_recovery crates/fgit-admission/tests/forge_merge_races.rs
 fge_context lab_schedule_harness crates/fgit-lab/tests/dpor_authority.rs
 fge_context mixed_generation_corpus crates/fgit-admission/tests/pinned_snapshot_toctou.rs
-fge_context admission_cas_composition covered_by:crates/fgit-lab/tests/forge_merge_races.rs
+fge_context admission_cas_composition covered_by:crates/fgit-admission/tests/forge_merge_races.rs
 fge_context outbox_redelivery deferred_by:frankengit-asa3
 fge_context projection_rebuild deferred_by:frankengit-fg093b
 fge_context non_claim 'This lane proves one controlled merge-admission race, a post-effect merge-CAS crash/recovery, and final canonical ref states. It does not claim forge-position advancement, outbox redelivery, or projection rebuild.'
 
 fge_phase setup
 fge_assert_file FG-029B-E2E-001 \
-  "$E2E_ROOT/../../crates/fgit-lab/tests/forge_merge_races.rs" \
-  'the composed merge-race lab target is present'
+  "$E2E_ROOT/../../crates/fgit-admission/tests/forge_merge_races.rs" \
+  'the composed merge-race admission target is present'
 fge_assert_file FG-029B-E2E-002 \
   "$E2E_ROOT/../../crates/fgit-lab/tests/dpor_authority.rs" \
   'the deterministic authority-CAS schedule harness is present'
@@ -47,7 +47,7 @@ fge_assert_file FG-029B-E2E-003 \
 fge_phase action
 fge_capture forge-composed-merge-race \
   env RCH_CARGO_WRAPPER_BYPASS=1 \
-  cargo test --locked -p fgit-lab --test forge_merge_races -- --nocapture || true
+  cargo test --locked -p fgit-admission --test forge_merge_races -- --nocapture || true
 merge_exit=$FGE_LAST_EXIT
 merge_output=$(<"$FGE_LAST_STDOUT_FILE")
 
