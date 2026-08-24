@@ -600,7 +600,7 @@ mod tests {
         )
     }
 
-    /// Initializes an actual OneNode authority store with the V2 incarnation
+    /// Initializes an actual `OneNode` authority store with the V2 incarnation
     /// configuration that commits to the V1 ref Merkle layout.  `OneNode::init`
     /// intentionally retains the legacy default for ordinary compatibility
     /// nodes, so this is a real opt-in repository fixture rather than a test
@@ -806,7 +806,7 @@ mod tests {
                 &RefVisibility::new(),
                 ReadLabel::current(),
                 VerifiedReadCapability::EnvelopeV1,
-                VerifiedReadQuery::Ref(missing.clone()),
+                VerifiedReadQuery::Ref(missing),
             ))
             .expect("a visible absent ref has an authorized non-membership proof");
         let ReadResponse::Verified(absence_envelope) = absence.response() else {
