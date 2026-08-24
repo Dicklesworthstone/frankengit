@@ -7,8 +7,12 @@
 
 use core::time::Duration;
 
-use fgit_types::cell::{ReadLabel, ReadMode, StalenessBound, StalenessObservation};
-use fgit_wire::stale_disclosure::advertise_under_read_label;
+use fgit_types::cell::{ReadLabel, ReadMode, ServingCell, StalenessBound, StalenessObservation};
+use fgit_types::hint::{Hint, HintSource};
+use fgit_types::identity::CellId;
+use fgit_wire::stale_disclosure::{
+    advertise_under_read_label, advertise_under_read_label_served_by,
+};
 use fgit_wire::visibility::RefVisibility;
 use fgit_wire::{AdvertisedRef, AnyGitOid, GitObjectFormat, WireLimits};
 
@@ -152,4 +156,105 @@ fn narrowing_never_adds_and_preserves_order() {
             "{disclosed} was advertised but is not a member of the served set, in order"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Which cell answered. `frankengit-1egm`.
+//
+// The bead: in a multi-cell deployment nothing in a served answer said which
+// cell produced it. These cases pin that the provenance travels with the
+// advertisement, that its absence is a recorded fact rather than a gap, and --
+// the property that keeps it honest -- that naming a cell changes nothing
+// about what is disclosed.
+
+#[test]
+fn an_advertisement_records_the_cell_that_served_it() {
+    let cell = Hint::new(CellId::from_bytes([0x0c; 16]), HintSource::LocalProjection);
+    let labelled = advertise_under_read_label_served_by(
+        &served(),
+        &current_policy(),
+        ReadLabel::current(),
+        ServingCell::identified(cell),
+    );
+    assert_eq!(
+        labelled.served_by().claimed().map(|hint| *hint.peek()),
+        Some(CellId::from_bytes([0x0c; 16]))
+    );
+    assert!(labelled.served_by().is_identified());
+}
+
+#[test]
+fn an_unnamed_cell_is_a_recorded_fact_not_a_gap() {
+    // The permitted twin of the case above, and the reason ServingCell is an
+    // enum rather than Option: a reader can tell "this deployment does not name
+    // its cells" from "someone dropped it on the way".
+    let labelled = advertise_under_read_label(&served(), &current_policy(), ReadLabel::current());
+    assert_eq!(labelled.served_by(), ServingCell::Unidentified);
+    assert!(labelled.served_by().claimed().is_none());
+    assert!(!labelled.served_by().is_identified());
+}
+
+#[test]
+fn naming_the_cell_changes_nothing_about_what_is_disclosed() {
+    // The property that matters most here. Provenance is not authorization: if
+    // attaching an identity could widen or narrow the ref set, a cell could
+    // name itself into a disclosure. Same inputs, same policy, same label --
+    // only the cell differs -- and the refs must be identical.
+    let anonymous = advertise_under_read_label(&served(), &current_policy(), bounded_stale_label());
+    let named = advertise_under_read_label_served_by(
+        &served(),
+        &current_policy(),
+        bounded_stale_label(),
+        ServingCell::identified(Hint::new(
+            CellId::from_bytes([0xff; 16]),
+            HintSource::Gossip,
+        )),
+    );
+
+    assert_eq!(names(anonymous.refs()), names(named.refs()));
+    assert_eq!(anonymous.label(), named.label());
+    assert!(
+        !names(named.refs())
+            .iter()
+            .any(|name| name.starts_with("refs/secret")),
+        "a named cell must not see the withdrawn ref reappear"
+    );
+    // And the twin, so the equality above is not vacuous on an empty set: the
+    // narrowing really did happen and really did keep the permitted ref.
+    assert_eq!(names(named.refs()), vec!["refs/heads/main".to_owned()]);
+}
+
+#[test]
+fn two_cells_serving_the_same_head_are_distinguishable_in_the_answer() {
+    // The deployment case the bead is about, at the wire boundary: two cells,
+    // one authority, identical bytes -- and now telling them apart is possible.
+    let first = advertise_under_read_label_served_by(
+        &served(),
+        &current_policy(),
+        ReadLabel::current(),
+        ServingCell::identified(Hint::new(
+            CellId::from_bytes([0x01; 16]),
+            HintSource::LocalProjection,
+        )),
+    );
+    let second = advertise_under_read_label_served_by(
+        &served(),
+        &current_policy(),
+        ReadLabel::current(),
+        ServingCell::identified(Hint::new(
+            CellId::from_bytes([0x02; 16]),
+            HintSource::LocalProjection,
+        )),
+    );
+
+    assert_eq!(
+        names(first.refs()),
+        names(second.refs()),
+        "one authority, so the answers agree"
+    );
+    assert_ne!(
+        first.served_by(),
+        second.served_by(),
+        "and the provenance does not, which is the whole point of 1egm"
+    );
 }

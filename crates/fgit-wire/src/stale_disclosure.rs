@@ -28,7 +28,7 @@
 //! Current reads pass through unchanged in effect, which costs nothing and
 //! means no caller has to decide whether the gate applies.
 
-use fgit_types::cell::ReadLabel;
+use fgit_types::cell::{ReadLabel, ServingCell};
 
 use crate::AdvertisedRef;
 use crate::visibility::{RefVisibility, filter_advertised_refs};
@@ -43,6 +43,7 @@ use crate::visibility::{RefVisibility, filter_advertised_refs};
 pub struct LabelledAdvertisement {
     refs: Vec<AdvertisedRef>,
     label: ReadLabel,
+    served_by: ServingCell,
 }
 
 impl LabelledAdvertisement {
@@ -58,6 +59,22 @@ impl LabelledAdvertisement {
         self.label
     }
 
+    /// Which cell produced this answer, or the explicit fact that none named
+    /// itself.
+    ///
+    /// `frankengit-1egm`. Travels with the label for the same reason the label
+    /// travels with the refs: a caller holding the parts separately has nothing
+    /// to attach provenance to, and "which cell served this?" becomes something
+    /// the transport is trusted to remember.
+    ///
+    /// This names who answered. It authorizes nothing — the identity inside is
+    /// a [`fgit_types::hint::Hint`], so reaching the bare `CellId` requires
+    /// saying what verified it.
+    #[must_use]
+    pub const fn served_by(&self) -> ServingCell {
+        self.served_by
+    }
+
     /// Take the refs, keeping the label's constraint visible at the call site.
     #[must_use]
     pub fn into_parts(self) -> (Vec<AdvertisedRef>, ReadLabel) {
@@ -65,21 +82,54 @@ impl LabelledAdvertisement {
     }
 }
 
-/// Narrow a served ref set to what the **current** policy permits, and label it.
+/// Narrow a served ref set to what the **current** policy permits, and label
+/// it, without naming a serving cell.
 ///
-/// `served` is whatever the cell verified — at the current head for
-/// [`fgit_types::cell::ReadMode::Current`], at an older one otherwise.
-/// `current_visibility` must be the policy in force **now**; passing the policy
-/// that was in force at the served head is the defect this module exists to
-/// prevent, and is why no parameter accepts one.
+/// Equivalent to [`advertise_under_read_label_served_by`] with
+/// [`ServingCell::Unidentified`]. Kept at its original signature deliberately:
+/// adding a required parameter would have been a behaviour change for every
+/// caller, and `fgit-node`'s call site was under an active edit by another
+/// agent when this landed. An advertisement built here genuinely has no cell
+/// identity, so it records that as a fact rather than as a `None` a later
+/// reader could mistake for one that went missing.
 #[must_use]
 pub fn advertise_under_read_label(
     served: &[AdvertisedRef],
     current_visibility: &RefVisibility,
     label: ReadLabel,
 ) -> LabelledAdvertisement {
+    advertise_under_read_label_served_by(
+        served,
+        current_visibility,
+        label,
+        ServingCell::Unidentified,
+    )
+}
+
+/// Narrow a served ref set to what the **current** policy permits, label it,
+/// and record which cell answered.
+///
+/// `served` is whatever the cell verified — at the current head for
+/// [`fgit_types::cell::ReadMode::Current`], at an older one otherwise.
+/// `current_visibility` must be the policy in force **now**; passing the policy
+/// that was in force at the served head is the defect this module exists to
+/// prevent, and is why no parameter accepts one.
+///
+/// `served_by` is provenance, not authorization: it says who produced this
+/// answer so an operator auditing a multi-cell deployment can find the cell
+/// that drifted. Nothing in this function consults it, and the identity inside
+/// [`ServingCell::Identified`] is a hint precisely so that a serving path
+/// cannot start treating a cell's claim about itself as a permission.
+#[must_use]
+pub fn advertise_under_read_label_served_by(
+    served: &[AdvertisedRef],
+    current_visibility: &RefVisibility,
+    label: ReadLabel,
+    served_by: ServingCell,
+) -> LabelledAdvertisement {
     LabelledAdvertisement {
         refs: filter_advertised_refs(served, current_visibility),
         label,
+        served_by,
     }
 }

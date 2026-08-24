@@ -25,6 +25,8 @@ use core::fmt;
 use core::time::Duration;
 
 use crate::error::TypeRefusal;
+use crate::hint::Hint;
+use crate::identity::CellId;
 use crate::numeric::HeadGeneration;
 
 /// What a cell is currently able to serve.
@@ -539,6 +541,73 @@ impl ReadLabel {
     #[must_use]
     pub const fn observed(&self) -> Option<StalenessObservation> {
         self.observed
+    }
+}
+
+/// Which cell produced an answer, or the explicit fact that nothing named one.
+///
+/// `frankengit-1egm`. In a deployment where several cells share one authority
+/// backend, nothing in an authenticated read said which cell served it. The
+/// field that appeared to — `AuthenticatedHead`'s former `authenticated_by` —
+/// carried the *store's* identity, which `establish()` hands identically to
+/// every cell on that backend, so three cells all reported one.
+///
+/// # Why this is an enum and not `Option<Hint<CellId>>`
+///
+/// `None` is an absence with no name. A reader cannot tell "this deployment
+/// does not identify its cells" from "someone forgot to set it" from "this
+/// call site had nothing to pass", and a caller that needs an answer will
+/// invent one rather than propagate a bare `None`. [`Self::Unidentified`] says
+/// which of those it is, so an audit that finds one records a fact instead of
+/// a gap.
+///
+/// # Why the identified case is a hint
+///
+/// A cell's statement about its own name is a *claim*. §5.1 puts claims,
+/// routing preferences and gossip on the same footing: they may guide work and
+/// may never decide it. So the identity travels as [`Hint<CellId>`], whose only
+/// route to an owned value is a check — and nothing in a serving path should
+/// need one. **This names who answered. It authorizes nothing.** A cell that
+/// could name itself into a privilege would be a cell that could name itself
+/// into someone else's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServingCell {
+    /// The serving cell named itself. The name is a claim, not a credential.
+    Identified(Hint<CellId>),
+    /// No cell identity was attached, and that is recorded rather than absent.
+    ///
+    /// Reached by a deployment that does not name its cells, and by every
+    /// advertisement built through the constructor that predates cell identity.
+    /// A `Bootstrapping` cell never reaches here because it serves nothing at
+    /// all — see [`CellState::admits_current_read`] and friends.
+    Unidentified,
+}
+
+impl ServingCell {
+    /// Name the cell that produced this answer.
+    #[must_use]
+    pub const fn identified(cell: Hint<CellId>) -> Self {
+        Self::Identified(cell)
+    }
+
+    /// The claimed identity, if one was attached.
+    ///
+    /// Returns the hint rather than a `CellId`, so a caller that wants the bare
+    /// identity has to go through [`Hint::verified_by`] and say what verified
+    /// it. Peeking is free and is what logging, tracing and an operator's
+    /// "which cell was that?" actually need.
+    #[must_use]
+    pub const fn claimed(&self) -> Option<&Hint<CellId>> {
+        match self {
+            Self::Identified(cell) => Some(cell),
+            Self::Unidentified => None,
+        }
+    }
+
+    /// Whether any cell named itself.
+    #[must_use]
+    pub const fn is_identified(&self) -> bool {
+        matches!(self, Self::Identified(_))
     }
 }
 
