@@ -212,6 +212,34 @@ fn inventory_refusals_each_have_a_permitted_twin() {
     FilesystemAssetInventory::collect(&permitted).expect("exact listed set is permitted");
 }
 
+#[test]
+fn duplicate_asset_name_is_refused_and_distinct_names_are_permitted() {
+    let root = TempRoot::new("asset-name-collision");
+    let stage = root.path().join("stage");
+    fs::create_dir(&stage).expect("stage directory");
+
+    let collision = target(
+        "linux",
+        &stage,
+        &[("fg", b"release binary"), ("fg", b"different bytes")],
+    );
+    assert!(matches!(
+        FilesystemAssetInventory::collect(&collision),
+        Err(AttemptRunnerRefusal::DuplicateTargetAsset { ref target, ref path })
+            if target == "linux" && path == "fg"
+    ));
+
+    let permitted = target(
+        "linux",
+        &stage,
+        &[("fg", b"release binary"), ("fg.sha256", b"digest")],
+    );
+    write_asset(&stage, "fg", b"release binary");
+    write_asset(&stage, "fg.sha256", b"digest");
+    FilesystemAssetInventory::collect(&permitted)
+        .expect("distinct listed asset names must remain permitted");
+}
+
 #[cfg(unix)]
 #[test]
 fn symlinked_asset_is_refused_and_regular_twin_is_permitted() {
@@ -260,6 +288,10 @@ fn resume_reuses_only_a_byte_verified_inventory_identity() {
     ));
 
     write_asset(&stage, "fg", b"substituted bytes");
+    assert!(matches!(
+        FilesystemAssetInventory::collect(&journal.matrix().targets()[0]),
+        Err(AttemptRunnerRefusal::AssetDigestMismatch { ref path, .. }) if path == "fg"
+    ));
     assert!(
         matches!(
             journal.resume_target("linux"),
