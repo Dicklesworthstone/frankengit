@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frankengit.invalid/schemas/canonical-bodies.json",
+  "title": "FrankenGit canonical bodies",
+  "description": "GENERATED FILE - DO NOT EDIT.  Produced by `cargo run -p fgit-schema --bin fgit-schema-gen -- generate`. The generator is a repository-owned command: no build script, no proc macro, no network. `... -- check` refuses if this file differs from what the current descriptors produce, so an edit here fails the fast lane instead of drifting.",
+  "$defs": {
+    "Digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "bytes"],
+      "properties": {
+        "algorithm": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "bytes": { "type": "string", "pattern": "^[0-9a-f]{32,128}$" }
+      }
+    },
+    "SchemaId": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "major", "minor"],
+      "properties": {
+        "family": { "type": "string" },
+        "major": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "minor": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    },
+    "DerivedId": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "domain", "codec_major", "codec_minor", "digest"],
+      "properties": {
+        "algorithm": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "domain": { "type": "string" },
+        "codec_major": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "codec_minor": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{32,128}$" }
+      }
+    }
+  },
+  "properties": {
+    "AuthorityHeadV1": {
+      "description": "The one value whose conditional replacement publishes repository state.",
+      "x-schema": { "family": "authority-head", "major": 1, "minor": 0, "domain": "frankengit/authority-head/v1" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_id", "generation", "ref_root", "forge_position_root", "outcome_index_root", "retention_root", "outbox_root", "configuration_root", "policy_epoch", "format_registry_epoch"],
+      "properties": {
+        "repository_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "16 raw bytes, lowercase hex"
+        },
+        "generation": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "predecessor_head_id": {
+          "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+          "description": "domain-bound derived identity: frankengit/authority-head/v1"
+        },
+        "decision_tail_id": {
+          "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+          "description": "domain-bound derived identity: frankengit/decision-batch/v1"
+        },
+        "latest_decision_sequence": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "latest_committed_rcr_id": {
+          "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+          "description": "domain-bound derived identity: frankengit/rcr/v1"
+        },
+        "latest_repository_sequence": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "ref_root": { "$ref": "#/$defs/Digest" },
+        "forge_position_root": { "$ref": "#/$defs/Digest" },
+        "outcome_index_root": { "$ref": "#/$defs/Digest" },
+        "retention_root": { "$ref": "#/$defs/Digest" },
+        "outbox_root": { "$ref": "#/$defs/Digest" },
+        "configuration_root": { "$ref": "#/$defs/Digest" },
+        "policy_epoch": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "format_registry_epoch": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "last_checkpoint_id": {
+          "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+          "description": "domain-bound derived identity: frankengit/repository-capsule/v1"
+        }
+      }
+    },
+    "RefusalRecordV1": {
+      "description": "The terminal record of one refused transaction, with the evidence behind it.",
+      "x-schema": { "family": "refusal-record", "major": 1, "minor": 0, "domain": "frankengit/refusal-record/v1" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tx_id", "seal_id", "decision_sequence", "code", "policy_epoch", "detail", "evidence_root"],
+      "properties": {
+        "tx_id": {
+          "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+          "description": "domain-bound derived identity: frankengit/ref-txn/v2"
+        },
+        "seal_id": {
+          "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+          "description": "domain-bound derived identity: frankengit/txn-seal/v1"
+        },
+        "decision_sequence": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "code": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed RefusalCode vocabulary"
+        },
+        "policy_epoch": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "evidence_root": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "RcrV1": {
+      "description": "The canonical source and forge mutation record for one committed logical transaction.",
+      "x-schema": { "family": "rcr", "major": 1, "minor": 0, "domain": "frankengit/rcr/v1" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_id", "repository_sequence", "tx_id", "principal_snapshot_id", "canonical_request_digest", "ref_delta_root", "resulting_ref_root", "object_closure_root", "forge_event_batch_root", "resulting_forge_position_root", "policy_epoch", "policy_decision_root", "invariant_evidence_root", "outbox_effect_root", "retention_delta_root"],
+      "properties": {
+        "repository_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "16 raw bytes, lowercase hex"
+        },
+        "repository_sequence": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "parent_rcr_id": {
+          "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+          "description": "domain-bound derived identity: frankengit/rcr/v1"
+        },
+        "tx_id": {
+          "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+          "description": "domain-bound derived identity: frankengit/ref-txn/v2"
+        },
+        "principal_snapshot_id": {
+          "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+          "description": "domain-bound derived identity: frankengit/principal-snapshot/v1"
+        },
+        "canonical_request_digest": { "$ref": "#/$defs/Digest" },
+        "ref_delta_root": { "$ref": "#/$defs/Digest" },
+        "resulting_ref_root": { "$ref": "#/$defs/Digest" },
+        "object_closure_root": { "$ref": "#/$defs/Digest" },
+        "forge_event_batch_root": { "$ref": "#/$defs/Digest" },
+        "resulting_forge_position_root": { "$ref": "#/$defs/Digest" },
+        "policy_epoch": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "policy_decision_root": { "$ref": "#/$defs/Digest" },
+        "invariant_evidence_root": { "$ref": "#/$defs/Digest" },
+        "outbox_effect_root": { "$ref": "#/$defs/Digest" },
+        "retention_delta_root": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "TxnSealV1": {
+      "description": "The sealed, immutable statement of one logical mutation request.",
+      "x-schema": { "family": "txn-seal", "major": 1, "minor": 0, "domain": "frankengit/txn-seal/v1" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tx_id", "tenant_id", "repository_id", "authenticated_principal_id", "idempotency_key_digest", "canonical_request_digest", "request_schema"],
+      "properties": {
+        "tx_id": {
+          "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+          "description": "domain-bound derived identity: frankengit/ref-txn/v2"
+        },
+        "tenant_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "16 raw bytes, lowercase hex"
+        },
+        "repository_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "16 raw bytes, lowercase hex"
+        },
+        "authenticated_principal_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "16 raw bytes, lowercase hex"
+        },
+        "idempotency_key_digest": { "$ref": "#/$defs/Digest" },
+        "canonical_request_digest": { "$ref": "#/$defs/Digest" },
+        "request_schema": { "$ref": "#/$defs/SchemaId" }
+      }
+    }
+  }
+}

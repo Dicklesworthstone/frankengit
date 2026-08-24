@@ -1,0 +1,20 @@
+[package]
+name = "fgit-schema"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+# `fgit-types` supplies the vocabulary the descriptors are written in.
+# `fgit-codec` is a DEV dependency only: the crate describes its canonical
+# bodies but does not link them, and `tests/conformance.rs` is what compares a
+# descriptor against the real type it claims to describe.
+[dependencies]
+fgit-types.workspace = true
+
+[dev-dependencies]
+fgit-codec.workspace = true
+
+[lints]
+workspace = true

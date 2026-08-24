@@ -72,6 +72,11 @@ run_fast() {
   cargo fmt --all -- --check
   echo_step "Checking workspace"
   cargo check --workspace --all-targets --locked
+  # FG-048a: the generated schema artifacts are committed, and this is
+  # what keeps that safe. `check` never writes, so a verify run cannot
+  # repair the drift it is supposed to report.
+  echo_step "Checking the generated schema artifacts are current"
+  cargo run -q -p fgit-schema --bin fgit-schema-gen -- check
   echo_step "Running workspace tests"
   # --no-fail-fast is mandatory: without it, cargo stops after the first test
   # binary that fails and never runs the rest, so a single red test (e.g. an
