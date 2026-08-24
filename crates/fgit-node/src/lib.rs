@@ -60,7 +60,9 @@ use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, body_id, decode_body, encode_body,
 };
 use fgit_crypto::{GitObjectKind, IdentityDomain, git_object_id, git_payload_commitment};
-use fgit_git_object::ObjectType;
+use fgit_git_object::{
+    AcceptanceProfile, ObjectError, ObjectType, ParseLimits, ParsedObject, parse_object_body,
+};
 use fgit_object_fabric::fabric::{
     ImmutableObjectFabric, PlacementAdmission, PutIfAbsent, StoreRefusal, VerifiedObject,
 };
@@ -126,6 +128,7 @@ const ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX: &[u8] =
 const ADMISSION_RETENTION_DELTA_KEY_PREFIX: &[u8] = b"frankengit/admission/retention-delta/v1/";
 const ADMISSION_CACHE_SCOPE: &[u8] = b"node/admission-cache/v1";
 const AUTHORITY_CONTEXT_BUDGET_CLASS: BudgetClass = BudgetClass::Database;
+const SELECTED_PACK_BUDGET_CLASS: BudgetClass = BudgetClass::Transfer;
 const SELECTED_PACK_MATERIALIZATION_OPERATION: &str = "materialize selected git pack";
 const DEFAULT_MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 const AUTHORITY_DATABASE_FILE: &str = "authority.fsqlite";
@@ -2401,11 +2404,12 @@ where
 
 struct VerifiedFabricPackSource<'a> {
     fabric: &'a LocalFilesystemFabric,
+    object_format: GitHashAlgorithm,
     maximum_object_bytes: usize,
 }
 
-impl CanonicalObjectSource for VerifiedFabricPackSource<'_> {
-    fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
+impl VerifiedFabricPackSource<'_> {
+    fn read_object(&self, id: &GitOid) -> Result<(ObjectType, Vec<u8>), PackWriteError> {
         let verified = self
             .fabric
             .read_whole(*id)
@@ -2431,6 +2435,111 @@ impl CanonicalObjectSource for VerifiedFabricPackSource<'_> {
                 requested: payload.len(),
             })?;
         body.extend_from_slice(payload);
+        Ok((object_type, body))
+    }
+
+    fn object_references(&self, id: &GitOid) -> Result<Vec<GitOid>, PackWriteError> {
+        let (object_type, body) = self.read_object(id)?;
+        let parsed = parse_object_body(
+            object_type,
+            &body,
+            AcceptanceProfile::GitCompatibleImport,
+            &self.parse_limits(),
+        )
+        .map_err(PackError::ObjectParse)?;
+        match parsed {
+            ParsedObject::Blob(_) => Ok(Vec::new()),
+            ParsedObject::Tree(entries) => {
+                let mut references = Vec::new();
+                references.try_reserve_exact(entries.len()).map_err(|_| {
+                    PackError::AllocationFailed {
+                        requested: entries.len(),
+                    }
+                })?;
+                for entry in entries {
+                    if entry.mode != b"160000" {
+                        references.push(self.native_reference_from_bytes(&entry.object_id)?);
+                    }
+                }
+                Ok(references)
+            }
+            ParsedObject::Commit(commit) => {
+                let tree = commit.tree_reference().ok_or_else(|| {
+                    PackWriteError::from(PackError::ObjectParse(
+                        ObjectError::MissingOrDuplicateCommitTree,
+                    ))
+                })?;
+                let parent_count = commit.parent_references().count();
+                let mut references = Vec::new();
+                references
+                    .try_reserve_exact(parent_count.saturating_add(1))
+                    .map_err(|_| PackError::AllocationFailed {
+                        requested: parent_count.saturating_add(1),
+                    })?;
+                references.push(self.native_reference_from_hex(tree)?);
+                for parent in commit.parent_references() {
+                    references.push(self.native_reference_from_hex(parent)?);
+                }
+                Ok(references)
+            }
+            ParsedObject::Tag(tag) => {
+                let mut targets = tag
+                    .headers()
+                    .iter()
+                    .filter(|header| header.name == b"object")
+                    .map(|header| header.value.as_slice());
+                let target = targets.next().ok_or_else(|| {
+                    PackWriteError::from(PackError::ObjectParse(
+                        ObjectError::MissingOrDuplicateTagHeader,
+                    ))
+                })?;
+                if targets.next().is_some() {
+                    return Err(
+                        PackError::ObjectParse(ObjectError::MissingOrDuplicateTagHeader).into(),
+                    );
+                }
+                Ok(vec![self.native_reference_from_hex(target)?])
+            }
+        }
+    }
+
+    fn parse_limits(&self) -> ParseLimits {
+        ParseLimits {
+            max_object_bytes: self.maximum_object_bytes,
+            tree_reference_bytes: match self.object_format {
+                GitHashAlgorithm::Sha1 => GitOidSha1::LEN,
+                GitHashAlgorithm::Sha256 => GitOidSha256::LEN,
+            },
+            ..ParseLimits::default()
+        }
+    }
+
+    fn native_reference_from_hex(&self, value: &[u8]) -> Result<GitOid, PackWriteError> {
+        let value = std::str::from_utf8(value)
+            .map_err(|_| PackError::ObjectParse(ObjectError::MalformedObjectReference))?;
+        GitOid::from_hex(self.object_format, value)
+            .map_err(|_| PackError::ObjectParse(ObjectError::MalformedObjectReference).into())
+    }
+
+    fn native_reference_from_bytes(&self, value: &[u8]) -> Result<GitOid, PackWriteError> {
+        match self.object_format {
+            GitHashAlgorithm::Sha1 => value
+                .try_into()
+                .map(GitOidSha1::from_bytes)
+                .map(GitOid::from)
+                .map_err(|_| PackError::ObjectParse(ObjectError::MalformedObjectReference).into()),
+            GitHashAlgorithm::Sha256 => value
+                .try_into()
+                .map(GitOidSha256::from_bytes)
+                .map(GitOid::from)
+                .map_err(|_| PackError::ObjectParse(ObjectError::MalformedObjectReference).into()),
+        }
+    }
+}
+
+impl CanonicalObjectSource for VerifiedFabricPackSource<'_> {
+    fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
+        let (object_type, body) = self.read_object(id)?;
         Ok(CanonicalPackObject::new(
             *id,
             object_type,
@@ -2443,6 +2552,7 @@ impl CanonicalObjectSource for VerifiedFabricPackSource<'_> {
 }
 
 fn selected_pack_ids(
+    source: &VerifiedFabricPackSource<'_>,
     closure: &PermittedObjectClosure,
     client_haves: &[GitOid],
     limits: &PackLimits,
@@ -2452,16 +2562,27 @@ fn selected_pack_ids(
     // planning does not trust map order or use an unbounded allocation path.
     // A client have can only remove an already authority-permitted object; it
     // cannot add disclosure or alter the authenticated closure retained in
-    // the pack receipt.
-    let mut haves = Vec::new();
-    haves
+    // the pack receipt. Closure edges are parsed from verified object bodies,
+    // then intersected with that same authenticated closure.
+    let mut frontier = Vec::new();
+    frontier
         .try_reserve_exact(client_haves.len())
         .map_err(|_| PackError::AllocationFailed {
             requested: client_haves.len(),
         })?;
-    haves.extend_from_slice(client_haves);
-    haves.sort_unstable();
-    haves.dedup();
+    let mut excluded = BTreeSet::new();
+    for &id in client_haves {
+        if closure.objects().contains(&id) && excluded.insert(id) {
+            frontier.push(id);
+        }
+    }
+    while let Some(id) = frontier.pop() {
+        for reference in source.object_references(&id)? {
+            if closure.objects().contains(&reference) && excluded.insert(reference) {
+                frontier.push(reference);
+            }
+        }
+    }
 
     let maximum = usize::try_from(limits.max_entries).unwrap_or(usize::MAX);
     let mut ids = Vec::new();
@@ -2470,7 +2591,7 @@ fn selected_pack_ids(
             requested: closure.objects().len().min(maximum),
         })?;
     for &id in closure.objects() {
-        if haves.binary_search(&id).is_ok() {
+        if excluded.contains(&id) {
             continue;
         }
         if ids.len() == maximum {
@@ -4284,16 +4405,11 @@ pub struct DoctorReport {
 /// canonical admission projection. It does not itself materialize refs.
 pub struct NodeRequestContext {
     authority: FsqliteCx,
-    authority_budget_class: BudgetClass,
 }
 
 impl NodeRequestContext {
     const fn authority(&self) -> &FsqliteCx {
         &self.authority
-    }
-
-    const fn authority_budget_class(&self) -> BudgetClass {
-        self.authority_budget_class
     }
 }
 
@@ -4762,8 +4878,13 @@ impl OneNode {
     pub fn request_context(&self) -> NodeRequestContext {
         NodeRequestContext {
             authority: self.authority_context(),
-            authority_budget_class: AUTHORITY_CONTEXT_BUDGET_CLASS,
         }
+    }
+
+    fn pack_materialization_context(&self) -> FsqliteCx {
+        let context = FsqliteCx::new();
+        context.set_native_cx(self.runtime.request_cx(SELECTED_PACK_BUDGET_CLASS));
+        context
     }
 
     /// Reads the current authority-selected head in `request`.
@@ -5128,8 +5249,8 @@ impl OneNode {
             .materialize_admission_in(request)
             .await
             .map_err(NodePackMaterializationRefusal::from)?;
-        let pack_context = request.authority().create_child();
-        let class = request.authority_budget_class();
+        let pack_context = self.pack_materialization_context();
+        let class = SELECTED_PACK_BUDGET_CLASS;
         let mut stopped = false;
         let mut exhaustion = None;
         let pack = {
@@ -5175,9 +5296,11 @@ impl OneNode {
         let configured_limit = usize::try_from(self.max_object_bytes).unwrap_or(usize::MAX);
         let source = VerifiedFabricPackSource {
             fabric: &self.fabric,
+            object_format: self.object_format,
             maximum_object_bytes: limits.max_object_bytes.min(configured_limit),
         };
         let ids = selected_pack_ids(
+            &source,
             materialized.selected_closure().closure(),
             client_haves,
             &limits,
@@ -5333,8 +5456,8 @@ impl OneNode {
             limits,
             Some(deadline),
             |_request, pack_request| {
-                let pack_context = request.authority().create_child();
-                let class = request.authority_budget_class();
+                let pack_context = self.pack_materialization_context();
+                let class = SELECTED_PACK_BUDGET_CLASS;
                 let mut stopped = false;
                 let mut session_deadline_expired = false;
                 let mut exhaustion = None;
@@ -6030,6 +6153,30 @@ mod tests {
 
         drop(context);
         assert!(runtime.join_root(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn selected_pack_materialization_uses_the_transfer_budget_class() {
+        let scratch = ScratchDirectory::new();
+        let budgets = BudgetPolicy::finite_defaults()
+            .with_class_limits(
+                BudgetClass::Transfer,
+                ClassLimits::finite(Duration::ZERO, 1_000, 1_000),
+            )
+            .expect("an already-empty transfer deadline remains a valid bounded policy");
+        let (node, _) =
+            OneNode::init(test_config(scratch.path().to_path_buf()).with_runtime_budgets(budgets))
+                .expect("database-backed node initialization does not consume the transfer budget");
+
+        let pack_context = node.pack_materialization_context();
+        assert!(matches!(
+            checkpoint_pack_context(&pack_context),
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: Some(Exhaustion::Deadline)
+            }
+        ));
+        drop(pack_context);
+        node.shutdown().expect("node closes cleanly");
     }
 
     #[test]
@@ -7661,7 +7808,7 @@ mod tests {
     }
 
     #[test]
-    fn refusal_tail_replays_to_the_committed_rcr_closure_and_materializes_a_pack() {
+    fn refusal_tail_replays_and_daemon_subtracts_client_common_commit_closure() {
         let scratch = ScratchDirectory::new();
         let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
             .expect("node initializes empty canonical state");
