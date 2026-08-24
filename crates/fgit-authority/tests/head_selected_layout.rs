@@ -42,7 +42,7 @@ use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::RepositoryId;
 use fgit_types::label::{DomainTag, SchemaFamily};
 use fgit_types::layout::RootLayoutVersion;
-use fgit_types::native::{GitOid, GitOidSha1};
+use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1};
 use fgit_types::numeric::{HeadGeneration, PolicyEpoch, RegistryEpoch};
 use fgit_types::refs::RefName;
 
@@ -107,6 +107,7 @@ fn a_head_selecting_v1_verifies_ref_state_membership() {
         &backing,
         &RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::RefStateMerkleV1,
+            object_format: GitHashAlgorithm::Sha1,
         },
     )
     .expect("the configuration body stages");
@@ -143,6 +144,7 @@ fn a_head_selecting_v0_refuses_proof_generation() {
         &backing,
         &RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::LegacyWholeBody,
+            object_format: GitHashAlgorithm::Sha1,
         },
     )
     .expect("the configuration body stages");
@@ -213,6 +215,7 @@ fn advancing_the_layout_changes_only_the_configuration_root() {
         &backing,
         &RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::LegacyWholeBody,
+            object_format: GitHashAlgorithm::Sha1,
         },
     )
     .expect("stages");
@@ -220,6 +223,7 @@ fn advancing_the_layout_changes_only_the_configuration_root() {
         &backing,
         &RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::RefStateMerkleV1,
+            object_format: GitHashAlgorithm::Sha1,
         },
     )
     .expect("stages");
@@ -320,6 +324,7 @@ fn a_layout_version_this_build_does_not_know_is_refused_even_when_verifying() {
         &backing,
         &RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::RefStateMerkleV1,
+            object_format: GitHashAlgorithm::Sha1,
         },
     )
     .expect("stages");
@@ -334,6 +339,7 @@ fn a_configuration_body_round_trips_through_its_canonical_encoding() {
     for version in RootLayoutVersion::ALL {
         let body = RepositoryConfigurationBody {
             root_layout: *version,
+            object_format: GitHashAlgorithm::Sha1,
         };
         let bytes = encode_body(&body).expect("encodes");
         let decoded: RepositoryConfigurationBody =

@@ -31,8 +31,8 @@ use fgit_types::numeric::{
     DecisionSequence, HeadGeneration, PolicyEpoch, RegistryEpoch, RepositorySequence,
 };
 use fgit_types::{
-    DecisionOutcome, DomainTag, PrincipalId, RefusalCode, RepositoryId, SchemaFamily, SchemaId,
-    TenantId,
+    DecisionOutcome, DomainTag, GitHashAlgorithm, PrincipalId, RefusalCode, RepositoryId,
+    SchemaFamily, SchemaId, TenantId,
 };
 
 use crate::error::CodecRefusal;
@@ -614,11 +614,11 @@ impl CanonicalBody for RefusalRecordBody {
 ///
 /// # This is the canonical home for future repository configuration
 ///
-/// Deliberately minimal in this slice: one field, because inventing
-/// configuration content nobody asked for is how a schema acquires fields with
-/// no producer. `fgit-reference`'s `GenesisConfiguration` and
-/// `ConfigurationRequest` are expected to migrate onto this body later, by
-/// their owners rather than here.
+/// Deliberately narrow: each field is a permanent repository fact with a
+/// producer and a consumer. `root_layout` describes authenticated-root
+/// interpretation; `object_format` selects the native Git identity domain.
+/// `fgit-reference`'s `GenesisConfiguration` and `ConfigurationRequest` are
+/// expected to migrate onto this body later, by their owners rather than here.
 ///
 /// # Unknown versions fail closed
 ///
@@ -627,26 +627,49 @@ impl CanonicalBody for RefusalRecordBody {
 /// which refuses a code point this build does not know rather than falling back
 /// to a default. Reading a newer layout as the legacy one would produce a
 /// confident wrong answer about what the repository contains.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RepositoryConfigurationBody {
     /// How this repository's authenticated roots are laid out.
     pub root_layout: RootLayoutVersion,
+    /// The permanent native Git object identity domain for this repository.
+    ///
+    /// This is deliberately stored beside the root layout rather than supplied
+    /// by a node configuration at reopen time. Interpreting SHA-256 objects as
+    /// SHA-1 after a restart is a repository-identity error, not a local
+    /// deployment preference. An unrecognised code point is refused by
+    /// [`GitHashAlgorithm::from_code_point`] rather than defaulting.
+    pub object_format: GitHashAlgorithm,
+}
+
+impl Default for RepositoryConfigurationBody {
+    fn default() -> Self {
+        Self {
+            root_layout: RootLayoutVersion::LegacyWholeBody,
+            object_format: GitHashAlgorithm::Sha1,
+        }
+    }
 }
 
 impl CanonicalBody for RepositoryConfigurationBody {
     const DOMAIN: DomainTag = DomainTag::from_static("frankengit/repository-configuration/v1");
     const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("repository-configuration");
     const SCHEMA_MAJOR: u16 = 1;
-    const SCHEMA_MINOR: u16 = 0;
+    const SCHEMA_MINOR: u16 = 1;
 
     fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         out.write_scalar(self.root_layout.code_point());
+        out.write_scalar(self.object_format.code_point());
         Ok(())
     }
 
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
         let root_layout =
             RootLayoutVersion::from_code_point(input.read_scalar::<u16>("root_layout")?)?;
-        Ok(Self { root_layout })
+        let object_format =
+            GitHashAlgorithm::from_code_point(input.read_scalar::<u16>("object_format")?)?;
+        Ok(Self {
+            root_layout,
+            object_format,
+        })
     }
 }
