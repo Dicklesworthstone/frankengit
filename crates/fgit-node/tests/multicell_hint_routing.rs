@@ -42,7 +42,10 @@ use fgit_authority::StoreInstanceId;
 use fgit_crypto::preferred_combiner;
 use fgit_git_object::ObjectType;
 use fgit_node::{NodeConfig, OneNode};
+use fgit_types::cell::ServingCell;
 use fgit_types::gossip::GossipView;
+use fgit_types::hint::{Hint, HintSource};
+use fgit_types::identity::CellId;
 use fgit_types::numeric::HeadGeneration;
 use fgit_types::routing::PlacementCandidate;
 use fgit_types::{GitOid, RepositoryId, TenantId};
@@ -68,6 +71,12 @@ impl Drop for ScratchDirectory {
 }
 
 /// One repository, one storage root, one cell identity per instance.
+///
+/// `with_store_instance` and `with_serving_cell` both take a per-cell value and
+/// they are NOT the same thing, which is the whole of `frankengit-1egm`: the
+/// store instance is a proposal the backend records once and then hands back
+/// identically to every opener, while the serving cell is what this process
+/// calls itself. The tests below assert exactly that divergence.
 fn config(root: PathBuf, instance: u64) -> NodeConfig {
     NodeConfig::new(
         root,
@@ -75,18 +84,34 @@ fn config(root: PathBuf, instance: u64) -> NodeConfig {
         RepositoryId::from_bytes([0x22; 16]),
     )
     .with_store_instance(StoreInstanceId::from_raw(instance))
+    .with_serving_cell(ServingCell::identified(Hint::new(
+        CellId::from_bytes([u8::try_from(instance).unwrap_or(u8::MAX); 16]),
+        HintSource::LocalProjection,
+    )))
 }
 
+/// A routing placement key, NOT a cell identity.
+///
+/// This started life as `CellId` because no real one existed. One does now
+/// (`fgit_types::identity::CellId`, `frankengit-1egm`), and leaving two
+/// different things called `CellId` in one file is precisely the trap this bead
+/// is about: a name that promises an identity and delivers something else.
+/// Renamed so the placement key cannot be mistaken for the identity a served
+/// answer carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CellId(&'static str);
+struct RoutingCell(&'static str);
 
-impl PlacementCandidate for CellId {
+impl PlacementCandidate for RoutingCell {
     fn placement_key(&self) -> &[u8] {
         self.0.as_bytes()
     }
 }
 
-const CELL_IDS: [CellId; 3] = [CellId("cell-1"), CellId("cell-2"), CellId("cell-3")];
+const ROUTING_CELLS: [RoutingCell; 3] = [
+    RoutingCell("cell-1"),
+    RoutingCell("cell-2"),
+    RoutingCell("cell-3"),
+];
 
 /// What a client ends up holding: the authenticated head's exact bytes.
 fn authenticated_body(node: &OneNode) -> Vec<u8> {
@@ -147,6 +172,28 @@ fn cells_sharing_one_backend_authenticate_byte_identical_heads() {
         "StoreInstanceId names the store, so every cell sharing it reports the same one"
     );
 
+    // And the resolution of frankengit-1egm, asserted right beside the fact
+    // that motivated it. The three cells were configured with three serving
+    // identities; unlike the store id, those do NOT collapse to one. This is
+    // the pair that makes the distinction observable: same store, three cells,
+    // and now an answer can say which one produced it.
+    let serving = [
+        first.serving_cell(),
+        second.serving_cell(),
+        third.serving_cell(),
+    ];
+    let named: Vec<CellId> = serving
+        .iter()
+        .filter_map(|cell| cell.claimed().map(|hint| *hint.peek()))
+        .collect();
+    assert_eq!(named.len(), 3, "every cell named itself");
+    assert_ne!(named[0], named[1]);
+    assert_ne!(named[1], named[2]);
+    assert_ne!(
+        named[0], named[2],
+        "three cells, three distinct identities -- pairwise, not against a single pivot"
+    );
+
     for node in [first, second, third] {
         node.shutdown().expect("a cell closes to quiescence");
     }
@@ -160,9 +207,9 @@ fn which_cell_routing_prefers_never_changes_the_answer() {
     let second = OneNode::open_existing(config(scratch.0.clone(), 2)).expect("a second cell");
     let third = OneNode::open_existing(config(scratch.0.clone(), 3)).expect("a third cell");
     let cells = [
-        (CELL_IDS[0], &first),
-        (CELL_IDS[1], &second),
-        (CELL_IDS[2], &third),
+        (ROUTING_CELLS[0], &first),
+        (ROUTING_CELLS[1], &second),
+        (ROUTING_CELLS[2], &third),
     ];
 
     let expected = authenticated_body(&first);
@@ -177,7 +224,7 @@ fn which_cell_routing_prefers_never_changes_the_answer() {
         b"refs/heads/release".as_slice(),
         b"refs/notes/commits".as_slice(),
     ] {
-        let preferred = *preferred_combiner(&CELL_IDS, key).expect("a preferred cell");
+        let preferred = *preferred_combiner(&ROUTING_CELLS, key).expect("a preferred cell");
         selected.push(preferred);
         let node = cells
             .iter()
@@ -330,9 +377,9 @@ fn routing_and_gossip_do_not_change_which_bytes_come_back() {
     let second = OneNode::open_existing(config(scratch.0.clone(), 2)).expect("a second cell");
     let third = OneNode::open_existing(config(scratch.0.clone(), 3)).expect("a third cell");
     let cells = [
-        (CELL_IDS[0], &writer),
-        (CELL_IDS[1], &second),
-        (CELL_IDS[2], &third),
+        (ROUTING_CELLS[0], &writer),
+        (ROUTING_CELLS[1], &second),
+        (ROUTING_CELLS[2], &third),
     ];
 
     let placed: Vec<GitOid> = WORKLOAD
@@ -363,7 +410,8 @@ fn routing_and_gossip_do_not_change_which_bytes_come_back() {
         .iter()
         .map(|identity| {
             let key = format!("{identity}");
-            let preferred = *preferred_combiner(&CELL_IDS, key.as_bytes()).expect("a preference");
+            let preferred =
+                *preferred_combiner(&ROUTING_CELLS, key.as_bytes()).expect("a preference");
             let node = cells
                 .iter()
                 .find(|(id, _)| *id == preferred)
@@ -385,7 +433,7 @@ fn routing_and_gossip_do_not_change_which_bytes_come_back() {
         .claim_of(&"everything")
         .expect("present")
         .verified_by(|candidate| {
-            if CELL_IDS.iter().any(|cell| cell.0 == **candidate) {
+            if ROUTING_CELLS.iter().any(|cell| cell.0 == **candidate) {
                 Ok(())
             } else {
                 Err("no such cell")

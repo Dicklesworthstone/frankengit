@@ -77,7 +77,7 @@ use fgit_runtime::{BudgetClass, NodeRuntime, RuntimeProfile, RuntimeRefusal};
 use fgit_txn::TransactionFoldReport;
 use fgit_types::cell::{
     CellReadiness, CellRefusal, CellState, CellTransition, CellTransitionCause, ReadLabel,
-    admits_read,
+    ServingCell, admits_read,
 };
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::{
@@ -86,7 +86,7 @@ use fgit_types::{
     RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, RepositoryIncarnationId, TenantId,
     TxId,
 };
-use fgit_wire::stale_disclosure::{LabelledAdvertisement, advertise_under_read_label};
+use fgit_wire::stale_disclosure::{LabelledAdvertisement, advertise_under_read_label_served_by};
 use fgit_wire::visibility::{RefVisibility, filter_advertised_refs};
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, PackPayloadSource, PackRequest,
@@ -3728,6 +3728,17 @@ pub struct NodeConfig {
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
+    /// Which cell this process is, for answers it serves.
+    ///
+    /// `frankengit-1egm`. Unset by default and typed as such: a deployment that
+    /// does not name its cells is a real configuration, not a mistake, and
+    /// `ServingCell::Unidentified` says so where a `None` would not.
+    ///
+    /// Deliberately NOT `store_instance`. That names the authority STORE, and
+    /// `establish()` hands every cell sharing one backend the same value --
+    /// which is exactly why an authenticated read could not say which cell
+    /// served it.
+    serving_cell: ServingCell,
 }
 
 impl NodeConfig {
@@ -3748,6 +3759,7 @@ impl NodeConfig {
             expected_repository_incarnation_id: None,
             git_daemon_repository_path: default_git_daemon_repository_path(repository_id),
             store_instance: StoreInstanceId::from_raw(1),
+            serving_cell: ServingCell::Unidentified,
             worker_threads: 1,
             object_format: None,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
@@ -3802,6 +3814,16 @@ impl NodeConfig {
 
     /// Selects the absolute resource budget for one accepted git-daemon session.
     #[must_use]
+    /// Name the cell this process is.
+    ///
+    /// The identity is carried as a hint because a cell's claim about its own
+    /// name is a claim (§5.1). It labels answers so an operator can find the
+    /// cell that drifted; it grants nothing.
+    pub const fn with_serving_cell(mut self, serving_cell: ServingCell) -> Self {
+        self.serving_cell = serving_cell;
+        self
+    }
+
     pub const fn with_git_daemon_session_timeout(
         mut self,
         session_timeout: GitDaemonSessionTimeout,
@@ -3898,6 +3920,8 @@ pub struct OneNode {
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
+    /// Which cell this process is, stamped onto answers it serves.
+    serving_cell: ServingCell,
     runtime: NodeRuntime,
 }
 
@@ -4120,7 +4144,18 @@ impl OneNode {
             max_object_bytes: config.max_object_bytes,
             segment_limits: config.segment_limits,
             git_daemon_session_timeout: config.git_daemon_session_timeout,
+            serving_cell: config.serving_cell,
         })
+    }
+
+    /// Which cell this process is, as stamped onto answers it serves.
+    ///
+    /// `frankengit-1egm`. Distinct from the store instance: every cell sharing
+    /// one authority backend reports the same store id, which is why an
+    /// authenticated read could not say which cell produced it.
+    #[must_use]
+    pub const fn serving_cell(&self) -> ServingCell {
+        self.serving_cell
     }
 
     /// What this cell may currently serve.
@@ -4191,10 +4226,11 @@ impl OneNode {
             limits,
         )
         .map_err(|refusal| LabelledReadRefusal::Advertisement(Box::new(refusal)))?;
-        Ok(advertise_under_read_label(
+        Ok(advertise_under_read_label_served_by(
             advertisement.advertised_refs(),
             visibility,
             label,
+            self.serving_cell,
         ))
     }
 
