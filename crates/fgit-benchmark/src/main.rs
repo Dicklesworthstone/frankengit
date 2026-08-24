@@ -11,7 +11,7 @@ use fgit_benchmark::{
     BenchmarkPlan, BenchmarkRefusal, BenchmarkRunner, BenchmarkWorkload, EnvironmentFingerprint,
     MIN_SAMPLES_PER_VARIANT, OptimizationAdmission, OracleReceipt, StorageClasses, SystemMetrics,
     WorkloadDescriptor,
-    transport::{ServerKind, TransportConfig, TransportWorkload},
+    transport::{CacheState, ServerKind, TransportConfig, TransportWorkload},
 };
 
 fn main() {
@@ -109,6 +109,17 @@ fn transport_config_from_environment() -> Result<TransportConfig, BenchmarkRefus
                 field: "FG_BENCH_EXPECTED_COMMITS",
                 detail: "must be a commit count".to_owned(),
             })?,
+        cache_state: match required_var("FG_BENCH_CACHE_STATE")?.as_str() {
+            "warm" => CacheState::Warm,
+            "cold" => CacheState::ColdPageCache,
+            _ => {
+                return Err(BenchmarkRefusal::InvalidMetric {
+                    field: "FG_BENCH_CACHE_STATE",
+                    detail: "must be exactly \"warm\" or \"cold\"".to_owned(),
+                });
+            }
+        },
+        python_binary: required_path("FG_BENCH_PYTHON")?,
         logical_reachable_bytes: required_var("FG_BENCH_LOGICAL_BYTES")?
             .parse()
             .map_err(|_| BenchmarkRefusal::InvalidMetric {
@@ -164,11 +175,20 @@ fn transport_plan(
         workload: WorkloadDescriptor {
             dataset: required_var("FG_BENCH_DATASET")?,
             workload: candidate.workload_line(),
-            thermal_state: required_var("FG_BENCH_THERMAL_STATE")?,
-            cache_state:
-                "one cold server process per sample; the page cache is shared and deliberately not \
-                 dropped, so both arms see the same warm filesystem"
+            thermal_state: format!(
+                "{}; one cold server process per sample",
+                config.cache_state.as_str()
+            ),
+            cache_state: match config.cache_state {
+                CacheState::Warm => "warm: the corpus is left page-cached between samples, so \
+                     both arms see the same warm filesystem"
                     .to_owned(),
+                CacheState::ColdPageCache => "cold: the served corpus is evicted with \
+                     posix_fadvise(POSIX_FADV_DONTNEED) before EVERY sample and before the \
+                     server starts; a sample that evicts nothing is refused rather than \
+                     reported as cold"
+                    .to_owned(),
+            },
             commands: vec![
                 "fg init <storage> <tenant> <repository>".to_owned(),
                 "fg import <storage> <tenant> <repository> <principal> <key> <source>".to_owned(),

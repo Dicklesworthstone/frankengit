@@ -61,6 +61,46 @@ const LISTEN_POLL: Duration = Duration::from_millis(2);
 /// sampling interval is never the dominant error term in a reported CPU figure.
 const PROBE_POLL: Duration = Duration::from_millis(1);
 
+/// Page-cache state the corpus is in when a sample starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheState {
+    /// The corpus is left in whatever state the previous sample left it.
+    Warm,
+    /// The corpus is evicted from the page cache before every sample.
+    ///
+    /// Achieved with `posix_fadvise(POSIX_FADV_DONTNEED)`, which needs no
+    /// privilege. Three cheaper routes were checked first and rejected on
+    /// evidence, not on taste:
+    ///
+    /// - `/proc/sys/vm/drop_caches` needs root; this pane has `CapEff: 0`.
+    /// - `dd oflag=nocache` is accepted by this host's coreutils BUT fails with
+    ///   "Permission denied" on mode-444 files, and git pack files are exactly
+    ///   mode 444 -- it would have failed on the only files that matter while
+    ///   succeeding on the rest, so a `cold` label built on it would have been
+    ///   theatre.
+    /// - Calling `posix_fadvise` from Rust needs FFI, which §3.1 forbids.
+    ///
+    /// So eviction shells out to `python3`, which exposes `os.posix_fadvise` in
+    /// its standard library and can open a 444 file read-only. Three existing
+    /// e2e suites already depend on `python3`.
+    ///
+    /// Eviction was verified to actually work before anything was built on it:
+    /// a 512 MiB file read in 47ms and 49ms warm, 215ms immediately after
+    /// eviction, and 47ms again on the next read.
+    ColdPageCache,
+}
+
+impl CacheState {
+    /// Stable tag written into the artifact.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Warm => "warm-page-cache",
+            Self::ColdPageCache => "cold-page-cache-evicted-per-sample",
+        }
+    }
+}
+
 /// Which server serves a sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerKind {
@@ -123,6 +163,10 @@ pub struct TransportConfig {
     pub expected_head: String,
     /// Number of commits the clone must contain.
     pub expected_commits: u64,
+    /// Whether the corpus is evicted from the page cache before every sample.
+    pub cache_state: CacheState,
+    /// Interpreter used for page-cache eviction; unused when warm.
+    pub python_binary: PathBuf,
     /// Logical reachable Git bytes in the corpus: the sum of every reachable
     /// object's uncompressed size.
     ///
@@ -522,6 +566,60 @@ impl TransportConfig {
     }
 }
 
+/// Evicts every file under `root` from the page cache.
+///
+/// Returns the number of files evicted. Zero is an error to the caller: a cold
+/// sample that evicted nothing is a warm sample wearing a cold label, which is
+/// the exact failure this whole path exists to avoid.
+fn evict_page_cache(python: &Path, root: &Path) -> Result<u64, String> {
+    const PROGRAM: &str = "\
+import os, sys
+root = sys.argv[1]
+n = 0
+for base, _dirs, files in os.walk(root):
+    for name in files:
+        path = os.path.join(base, name)
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            n += 1
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+print(n)
+";
+    let output = Command::new(python)
+        .arg("-c")
+        .arg(PROGRAM)
+        .arg(root)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("run page-cache eviction: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "page-cache eviction exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let evicted: u64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .map_err(|error| format!("parse eviction count: {error}"))?;
+    if evicted == 0 {
+        return Err(format!(
+            "page-cache eviction touched no files under {}; a cold sample that \
+             evicted nothing is a warm sample with a cold label",
+            root.display()
+        ));
+    }
+    Ok(evicted)
+}
+
 impl BenchmarkWorkload for TransportWorkload {
     type Output = CloneOutput;
 
@@ -537,6 +635,17 @@ impl BenchmarkWorkload for TransportWorkload {
                 "clone destination already exists, refusing to reuse it: {}",
                 destination.display()
             ));
+        }
+
+        // Evict BEFORE the server starts, so the server's own first reads are
+        // cold too. Evicting after would leave whatever the server touched at
+        // startup already resident.
+        if self.config.cache_state == CacheState::ColdPageCache {
+            let corpus = match self.kind {
+                ServerKind::FgitNode => &self.config.storage_root,
+                ServerKind::UpstreamGitDaemon => &self.config.upstream_base_path,
+            };
+            evict_page_cache(&self.config.python_binary, corpus)?;
         }
 
         let (mut server, port) = self.spawn_server()?;
@@ -942,6 +1051,8 @@ mod tests {
             port_base: 30_000,
             expected_head: "0".repeat(40),
             expected_commits: 3,
+            cache_state: CacheState::Warm,
+            python_binary: PathBuf::from("/nonexistent/python3"),
             logical_reachable_bytes: 1_000_000,
         }
     }

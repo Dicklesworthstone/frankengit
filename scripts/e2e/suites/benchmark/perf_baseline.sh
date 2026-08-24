@@ -32,6 +32,11 @@ fge_context claim_class one_node_transport_baseline_anchor
 # letting "p99" imply a hundred-sample tail estimate. Raise FG_BENCH_SAMPLES
 # for a real tail run; the 20-minute grant bound is the ceiling.
 SAMPLES=${FG_BENCH_SAMPLES:-5}
+# The scope asks for COLD AND WARM states. Cold is a real page-cache eviction,
+# not a label: the served corpus is evicted with posix_fadvise before every
+# sample. Run the cell twice, once per state, to get both.
+CACHE_STATE=${FG_BENCH_CACHE_STATE:-warm}
+PYTHON_BIN=${FG_BENCH_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}
 # Tenant, repository and principal are 32-character identifiers; fg refuses
 # anything else ("TenantId: length 13 outside [32, 32]"), which is how the first
 # run of this script failed.
@@ -47,6 +52,7 @@ artifact_dir=$(fge_tempdir perf-baseline-artifact)
 work=$(fge_tempdir perf-baseline-work)
 fge_context artifact_directory "$artifact_dir"
 fge_context samples_per_variant "$SAMPLES"
+fge_context cache_state "$CACHE_STATE"
 
 fge_assert_file FG-028C-E2E-001 "$PB_REPO/crates/fgit-benchmark/src/transport.rs" \
   'the transport workload module is present'
@@ -124,6 +130,14 @@ if [ -z "$FG_BIN" ] || [ ! -x "$FG_BIN" ]; then
 fi
 fge_pass FG-028C-E2E-004 'an fg binary is available to serve the candidate arm'
 fge_context fg_binary "$FG_BIN"
+
+# A cold run without a working interpreter would silently become a warm run
+# wearing a cold label. Refuse instead; 3.1 forbids a silent fallback.
+if [ "$CACHE_STATE" = cold ] && ! "$PYTHON_BIN" -c 'import os; os.posix_fadvise' >/dev/null 2>&1; then
+  fge_unsupported FG-028C-E2E-021 \
+    'cold state requested but no interpreter with posix_fadvise is available, so the page cache cannot be evicted'
+  exit 0
+fi
 
 # The artifact's source_revision must name the revision the MEASURED BINARY was
 # built from, not whatever HEAD happens to be when the script runs. Sixteen
@@ -254,7 +268,8 @@ fge_run perf-baseline-experiment \
     FG_BENCH_LOGICAL_BYTES="$LOGICAL_BYTES" \
     FG_BENCH_SAMPLES="$SAMPLES" \
     FG_BENCH_DATASET="fg028c-corpus ${CORPUS_COMMITS}cx${CORPUS_FILES}fx${CORPUS_LINES}l logical=${LOGICAL_BYTES}B head=$EXPECTED_HEAD" \
-    FG_BENCH_THERMAL_STATE="warm-host-cold-server-per-sample" \
+    FG_BENCH_CACHE_STATE="$CACHE_STATE" \
+    FG_BENCH_PYTHON="$PYTHON_BIN" \
     FG_BENCH_SOURCE_REVISION="$SOURCE_REVISION" \
     FG_BENCH_SOURCE_TREE="$SOURCE_TREE" \
     cargo run -q --release -p fgit-benchmark -- transport-baseline --out "$artifact_dir" \
