@@ -1960,10 +1960,17 @@ fn a_scheduled_push_race_forces_the_stale_cas_window_and_still_yields_one_winner
          predecessor-mismatch refusal, got {:?}",
         a.commands[0].terminal.outcome
     );
+    // The EXACT reported status, not merely one of them. Audit 4707 was right
+    // that `len() == 1` is satisfied by `Ok` and by any wrong message, so a
+    // mutation that reported success to the client would have passed. This is
+    // the byte the client actually sees.
     assert_eq!(
-        a.command_statuses().len(),
-        1,
-        "one command must yield exactly one reported status"
+        a.command_statuses(),
+        vec![fgit_wire::receive::ReceiveCommandStatus::Rejected {
+            message: b"stale info".to_vec()
+        }],
+        "the generic entrypoint's stale loser must report the predecessor-mismatch \
+         bytes to the client"
     );
 
     // Every declared boundary ran. Audit 4658.1 asked for this and the precedent
@@ -1979,6 +1986,124 @@ fn a_scheduled_push_race_forces_the_stale_cas_window_and_still_yields_one_winner
     // The schedule itself is witnessed, not just consumed. Exhaustion alone
     // cannot tell a three-boundary schedule from a shorter one that also ran to
     // its end, so the canonical bytes pin WHICH schedule was declared.
+    assert_eq!(
+        schedule.canonical_line(),
+        SCHEDULED_RACE_CANONICAL_LINE,
+        "the declared race schedule changed; the recorded canonical bytes are the \
+         witness for which interleaving this evidence is about"
+    );
+}
+
+/// The production basis-bound path driven through the SCHEDULED race, so A holds
+/// its binding across B's commit instead of being handed a stale one.
+///
+/// # Why the sequential basis-bound probe was not enough
+///
+/// Audit 4707 was right about the difference. In
+/// [`a_basis_bound_loser_is_refused_authority_receipt_stale_not_expected_old_ref_mismatch`]
+/// session B finishes entirely before A begins admission, so A is simply handed
+/// a witness that is already stale -- that proves first-plan stale-witness
+/// refusal, which is a real property but not a race. Here A ENTERS admission
+/// first, holds its basis-bound witness across the gate, and B's whole admission
+/// runs inside A's snapshot. A then continues with a binding that went stale
+/// underneath it.
+///
+/// The generic scheduled race covers the same window for
+/// `admit_validated_receive`; this one covers it for the entrypoint production
+/// receive-pack actually uses, and the two answer with DIFFERENT codes.
+#[test]
+fn a_scheduled_race_through_the_basis_bound_entrypoint_refuses_the_stale_witness() {
+    let schedule = LabSchedule::explicit(
+        vec![StepId::new("push-a"), StepId::new("push-b")],
+        vec![
+            StepId::new("push-a"),
+            StepId::new("push-b"),
+            StepId::new("push-a"),
+        ],
+    )
+    .expect("a declared three-boundary race schedule");
+
+    let a_context = context(b"fg019c-bb-sched-a");
+    let b_context = context(b"fg019c-bb-sched-b");
+    let validated = delete_main();
+    let (store, production) = head_bound_setup(&a_context);
+
+    // A binds BEFORE the race, then carries that binding through the gate.
+    let basis_a = basis_for(&authenticated_head_body(&store, &a_context.head_key));
+    let request = delete_main_request();
+    let receipt = QuarantineReceipt {
+        object_format: GitObjectFormat::Sha1,
+        object_count: 0,
+        pack_bytes: 0,
+        delete_only: true,
+    };
+    let bound_a = validate_receive_at_basis(
+        &request,
+        None,
+        &receipt,
+        &basis_a,
+        &DeleteOnlyValidator,
+        &mut live_deadline(),
+    )
+    .expect("a delete-only receive binds to its authenticated basis");
+
+    let scheduled = ScheduledPushProjection {
+        production: &production,
+        cursor: RefCell::new(schedule.cursor()),
+        raced: Cell::new(false),
+        store: &store,
+        rival: ScheduledRival {
+            context: &b_context,
+            validated: &validated,
+        },
+        rival_committed: Cell::new(false),
+    };
+
+    let a = admit_basis_bound_validated_receive(
+        &store,
+        &a_context,
+        &bound_a,
+        AdmissionLimits::default(),
+        &scheduled,
+    )
+    .expect("the basis-bound session reaches a terminal decision");
+
+    // The window was entered and B won inside it, or this proves nothing.
+    assert!(
+        scheduled.raced.get(),
+        "session A never took a snapshot, so the scheduled window was never entered"
+    );
+    assert!(
+        scheduled.rival_committed.get(),
+        "the rival did not commit inside A's snapshot, so A's binding never went \
+         stale underneath it"
+    );
+
+    assert!(
+        matches!(
+            a.commands[0].terminal.outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::AuthorityReceiptStale,
+                ..
+            }
+        ),
+        "the production basis-bound path must refuse a binding that went stale \
+         DURING the race as AuthorityReceiptStale, got {:?}",
+        a.commands[0].terminal.outcome
+    );
+    assert_eq!(
+        a.command_statuses(),
+        vec![fgit_wire::receive::ReceiveCommandStatus::Rejected {
+            message: b"admission refused".to_vec()
+        }],
+        "the raced basis-bound loser must report its own bytes to the client"
+    );
+
+    assert!(
+        scheduled.cursor.borrow().is_exhausted(),
+        "the declared three-boundary schedule was not exhausted, so at least one \
+         race boundary never ran"
+    );
     assert_eq!(
         schedule.canonical_line(),
         SCHEDULED_RACE_CANONICAL_LINE,
@@ -2079,10 +2204,16 @@ fn a_basis_bound_loser_is_refused_authority_receipt_stale_not_expected_old_ref_m
 
     // One command, one status, so the per-loser status is reported and not
     // merely derivable.
+    // The EXACT reported status. Note it differs from the generic entrypoint's
+    // loser bytes: AuthorityReceiptStale is not one of the codes that share the
+    // deliberately generic "stale info" message, so the two paths are
+    // distinguishable on the wire as well as in the refusal code.
     assert_eq!(
-        a.command_statuses().len(),
-        1,
-        "one command must yield exactly one reported status"
+        a.command_statuses(),
+        vec![fgit_wire::receive::ReceiveCommandStatus::Rejected {
+            message: b"admission refused".to_vec()
+        }],
+        "the basis-bound stale-witness loser must report its own bytes to the client"
     );
 }
 

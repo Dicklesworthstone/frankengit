@@ -51,7 +51,7 @@ readonly ADMISSION_PROBES=4
 # Both said 14; now 16 -- the concurrent thread race and the scheduled
 # stale-CAS race, the production basis-bound loser-status probe, and the
 # object-bearing hidden-ref refusal with its permitted twin.
-readonly RACE_PROBES=19
+readonly RACE_PROBES=20
 readonly PROPAGATION_PROBES=3
 
 main() {
@@ -150,6 +150,9 @@ main() {
   fge_assert_contains 'FG-019C-E2E-032' "${race_out}" \
     'a_basis_bound_loser_is_refused_authority_receipt_stale_not_expected_old_ref_mismatch' \
     'the production basis-bound loser-status probe is present in the run'
+  fge_assert_contains 'FG-019C-E2E-033' "${race_out}" \
+    'a_scheduled_race_through_the_basis_bound_entrypoint_refuses_the_stale_witness' \
+    'the basis-bound scheduled race is present in the run'
   fge_assert_contains 'FG-019C-E2E-024' "${race_out}" \
     'a_transaction_that_cannot_be_resolved_is_classified_stuck' \
     'the presence case proving the forbidden state is detectable is present in the run'
