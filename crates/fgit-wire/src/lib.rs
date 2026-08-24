@@ -1350,6 +1350,13 @@ pub trait UploadPackRepository {
     fn symref_target(&self, _name: &[u8]) -> Option<&[u8]> {
         None
     }
+    /// Canonical symbolic `HEAD` target when the repository is unborn.
+    ///
+    /// Protocol v0/v1 cannot represent an unborn `HEAD`; protocol v2 emits
+    /// this only when the client requested the `unborn` ls-refs attribute.
+    fn unborn_symref_target(&self) -> Option<&[u8]> {
+        None
+    }
     /// Canonical peeled target for an annotated-tag ref, if one exists.
     fn peeled(&self, _oid: AnyGitOid) -> Option<AnyGitOid> {
         None
@@ -2599,13 +2606,39 @@ impl V2UploadPack {
         )?;
         let mut output = Vec::new();
         let mut used_bytes = 0_usize;
+        if self.ls_refs.contains(LsRefsOptions::UNBORN)
+            && self.ref_matches_prefixes(b"HEAD")
+            && let Some(target) = repository.unborn_symref_target()
+        {
+            parse_ref_name(target, &self.limits)?;
+            let mut line = Vec::new();
+            line.try_reserve(
+                b"unborn HEAD symref-target:"
+                    .len()
+                    .saturating_add(target.len())
+                    .saturating_add(1),
+            )
+            .map_err(|_| WireError::AllocationFailure)?;
+            line.extend_from_slice(b"unborn HEAD symref-target:");
+            line.extend_from_slice(target);
+            line.push(b'\n');
+            if line.len() + 4 > self.limits.max_packet_bytes {
+                return Err(WireError::PacketTooLarge {
+                    declared: line.len() + 4,
+                    limit: self.limits.max_packet_bytes,
+                });
+            }
+            let encoded_bytes = line.len() + 4;
+            add_output_packet(
+                &mut output,
+                Packet::Data(line),
+                encoded_bytes,
+                &mut used_bytes,
+                &self.limits,
+            )?;
+        }
         for reference in repository.advertised_refs() {
-            if !self.ref_prefixes.is_empty()
-                && !self
-                    .ref_prefixes
-                    .iter()
-                    .any(|prefix| reference.name.starts_with(prefix))
-            {
+            if !self.ref_matches_prefixes(&reference.name) {
                 continue;
             }
             let mut line = oid_hex(reference.oid).into_bytes();
@@ -2672,6 +2705,14 @@ impl V2UploadPack {
             output,
             events: vec![event],
         })
+    }
+
+    fn ref_matches_prefixes(&self, name: &[u8]) -> bool {
+        self.ref_prefixes.is_empty()
+            || self
+                .ref_prefixes
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
     }
 
     fn require_fetch_feature(&self, feature: &[u8]) -> Result<(), WireError> {

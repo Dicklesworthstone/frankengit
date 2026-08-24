@@ -512,6 +512,13 @@ where
 pub struct AdmissionSnapshot {
     /// Ref state at the authenticated basis.
     pub refs: BTreeMap<RefName, fgit_types::GitOid>,
+    /// Canonical symbolic `HEAD` target at the authenticated basis.
+    ///
+    /// This remains separate from `refs`: `HEAD` is a symbolic ref, while the
+    /// map contains direct refs only.  Keeping the target in the immutable
+    /// snapshot lets transport advertise it without selecting a node-local
+    /// default branch.
+    pub head_target: Option<RefName>,
     /// Forge stream positions at that same basis.
     pub forge_positions: BTreeMap<
         fgit_reference::intent::ForgeStreamId,
@@ -1290,6 +1297,7 @@ where
         let state = self.resolve_ref_state(authenticated_body.ref_root)?;
         Ok(AdmissionSnapshot {
             refs: state.refs,
+            head_target: state.head_target,
             forge_positions: BTreeMap::new(),
             retention: BTreeSet::new(),
             outbox: BTreeMap::new(),
@@ -3415,6 +3423,7 @@ mod tests {
         ) -> Result<AdmissionSnapshot, RefusalCode> {
             Ok(AdmissionSnapshot {
                 refs: self.refs.clone(),
+                head_target: None,
                 forge_positions: self.forge_positions.clone(),
                 retention: self.retention.clone(),
                 outbox: self.outbox.clone(),
@@ -3803,6 +3812,37 @@ mod tests {
         let decoded: CanonicalRefState =
             decode_body(&frame, fgit_codec::DecodeLimits::DEFAULT).expect("state decodes");
         assert_eq!(decoded, with_head);
+    }
+
+    #[test]
+    fn canonical_projection_carries_the_authority_bound_head_target() {
+        let context = context();
+        let main = RefName::try_new(b"refs/heads/main").expect("main is a valid branch ref");
+        let state = CanonicalRefState::new_with_head_target(
+            BTreeMap::from([(main.clone(), oid(35))]),
+            main.clone(),
+        )
+        .expect("a populated branch HEAD is canonical");
+        let ref_root = canonical_ref_state_root(&state).expect("canonical state has a root");
+        let staging = FailOnceCanonicalStore::default();
+        staging
+            .stage_ref_state(ref_root, state)
+            .expect("HEAD-bearing state stages");
+
+        let mut head = genesis(&context);
+        head.ref_root = ref_root;
+        let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(79));
+        initialize_repository(&store, &context.head_key, &head)
+            .expect("HEAD-bearing canonical genesis initializes");
+        let projection = CanonicalAdmissionProjection::new(staging, CanonicalFixtureEvidence);
+        let (basis, _receipt, authenticated) =
+            read_basis(&store, &context.head_key).expect("head reads at one authenticated basis");
+
+        let snapshot = projection
+            .snapshot(&basis, &authenticated)
+            .expect("canonical projection accepts its authenticated basis");
+        assert_eq!(snapshot.head_target.as_ref(), Some(&main));
+        assert_eq!(snapshot.refs.get(&main), Some(&oid(35)));
     }
 
     #[test]
