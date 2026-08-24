@@ -6,10 +6,10 @@
 //! turn an altered creation request into an accepted retry.
 
 use fgit_codec::{
-    CanonicalBody, CreationAttemptBody, DecodeLimits, canonical_body_bytes, decode_body,
-    encode_body, read_frame_header,
+    CanonicalBody, CreationAttemptBody, CryptoBodyIdentity, DecodeLimits, body_id,
+    canonical_body_bytes, decode_body, encode_body, read_frame_header,
 };
-use fgit_crypto::DigestAlgorithm;
+use fgit_crypto::{DigestAlgorithm, IdentityDomain};
 use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::{RepositoryId, RepositoryIncarnationId, TenantId};
 use fgit_types::layout::RootLayoutVersion;
@@ -54,6 +54,13 @@ fn creation_attempt_matches_the_independent_schema_one_golden() {
     assert_eq!(header.schema, CreationAttemptBody::schema_id());
     assert_eq!(header.schema.major(), 1);
     assert_eq!(header.schema.minor(), 0);
+    assert_eq!(
+        body_id(&CryptoBodyIdentity, &expected)
+            .expect("the creation body domain is registered for canonical identity")
+            .domain(),
+        IdentityDomain::RepositoryCreationAttempt.domain_tag(),
+        "the independently pinned body resolves through its dedicated identity-domain row"
+    );
     assert_eq!(
         decode_body::<CreationAttemptBody>(CREATION_ATTEMPT_GOLDEN, DecodeLimits::DEFAULT)
             .expect("the independently written golden decodes"),
