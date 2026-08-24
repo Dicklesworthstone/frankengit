@@ -883,6 +883,21 @@ impl PackPayloadSource for AuthoritySelectedPackPayload {
 pub enum NodePackMaterializationRefusal {
     /// The exact-head admission materialization was unavailable or invalid.
     Admission(Box<AdmissionMaterializationRefusal>),
+    /// A wire-validated `want` was not in the authority-selected object
+    /// closure. The object fabric is deliberately not consulted for this
+    /// refusal: storage existence cannot widen an authenticated disclosure
+    /// set.
+    RequestedWantOutsideClosure(GitOid),
+    /// A wire-validated `want` named an object-ID domain different from this
+    /// repository's configured object format. This is refused before an
+    /// object-fabric read even if malformed canonical state happened to
+    /// retain that ID in the permitted set.
+    RequestedWantObjectFormatMismatch {
+        /// Repository object-ID domain selected by canonical configuration.
+        expected: GitHashAlgorithm,
+        /// Object-ID domain carried by the client want.
+        observed: GitHashAlgorithm,
+    },
     /// One named runtime work class exhausted a finite dimension.
     BudgetClassExhausted {
         /// The runtime work class whose inherited budget stopped the pack.
@@ -900,6 +915,14 @@ impl Display for NodePackMaterializationRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Admission(error) => Display::fmt(error, formatter),
+            Self::RequestedWantOutsideClosure(id) => write!(
+                formatter,
+                "requested want {id} is absent from the authenticated object closure"
+            ),
+            Self::RequestedWantObjectFormatMismatch { expected, observed } => write!(
+                formatter,
+                "requested want object format {observed:?} differs from repository format {expected:?}"
+            ),
             Self::BudgetClassExhausted {
                 class,
                 dimension,
@@ -918,7 +941,9 @@ impl Error for NodePackMaterializationRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Admission(error) => Some(error.as_ref()),
-            Self::BudgetClassExhausted { .. } => None,
+            Self::RequestedWantOutsideClosure(_)
+            | Self::RequestedWantObjectFormatMismatch { .. }
+            | Self::BudgetClassExhausted { .. } => None,
             Self::Pack(error) => Some(error.as_ref()),
         }
     }
@@ -2441,9 +2466,22 @@ struct VerifiedFabricPackSource<'a> {
     /// encoding is charged to the transfer class.
     database_context: &'a FsqliteCx,
     database_exhaustion: &'a Cell<Option<Exhaustion>>,
+    /// The git-daemon session deadline remains an outer liveness boundary over
+    /// database reads and transfer-side pack planning. The callback is absent
+    /// only for direct in-process materialization, which has no daemon
+    /// session to expire.
+    session_is_live: Option<&'a dyn Fn() -> bool>,
 }
 
 impl VerifiedFabricPackSource<'_> {
+    fn session_checkpoint(&self) -> Result<(), PackWriteError> {
+        if self.session_is_live.is_none_or(|is_live| is_live()) {
+            Ok(())
+        } else {
+            Err(PackError::DeadlineExceeded.into())
+        }
+    }
+
     /// Checks the authority/database budget immediately before one durable
     /// object-fabric read and retains its exact native exhaustion dimension.
     fn database_read_is_live(&self) -> bool {
@@ -2459,13 +2497,20 @@ impl VerifiedFabricPackSource<'_> {
     }
 
     fn read_object(&self, id: &GitOid) -> Result<(ObjectType, Vec<u8>), PackWriteError> {
+        // Preserve the outer-session → Database → synchronous fabric read →
+        // outer-session → Database ordering. In particular, retain the fabric
+        // result until both post-read probes ran, so an expiry cannot be
+        // overwritten by a later missing-object or parse refusal.
+        self.session_checkpoint()?;
         if !self.database_read_is_live() {
             return Err(PackError::DeadlineExceeded.into());
         }
-        let verified = self
-            .fabric
-            .read_whole(*id)
-            .map_err(|_| PackWriteError::MissingCanonicalObject(*id))?;
+        let read = self.fabric.read_whole(*id);
+        self.session_checkpoint()?;
+        if !self.database_read_is_live() {
+            return Err(PackError::DeadlineExceeded.into());
+        }
+        let verified = read.map_err(|_| PackWriteError::MissingCanonicalObject(*id))?;
         let object_type = match verified.object.envelope().object_kind() {
             ObjectKind::Commit => ObjectType::Commit,
             ObjectKind::Tree => ObjectType::Tree,
@@ -2492,13 +2537,15 @@ impl VerifiedFabricPackSource<'_> {
 
     fn object_references(&self, id: &GitOid) -> Result<Vec<GitOid>, PackWriteError> {
         let (object_type, body) = self.read_object(id)?;
+        self.session_checkpoint()?;
         let parsed = parse_object_body(
             object_type,
             &body,
             AcceptanceProfile::GitCompatibleImport,
             &self.parse_limits(),
-        )
-        .map_err(PackError::ObjectParse)?;
+        );
+        self.session_checkpoint()?;
+        let parsed = parsed.map_err(PackError::ObjectParse)?;
         match parsed {
             ParsedObject::Blob(_) => Ok(Vec::new()),
             ParsedObject::Tree(entries) => {
@@ -2509,7 +2556,7 @@ impl VerifiedFabricPackSource<'_> {
                     }
                 })?;
                 for entry in entries {
-                    if entry.mode != b"160000" {
+                    if !is_gitlink_tree_mode(&entry.mode) {
                         references.push(self.native_reference_from_bytes(&entry.object_id)?);
                     }
                 }
@@ -2589,6 +2636,17 @@ impl VerifiedFabricPackSource<'_> {
     }
 }
 
+/// Classifies a Git gitlink by its octal value rather than its exact spelling.
+/// Import-compatible parsing preserves a leading-zero tree mode such as
+/// `0160000`; it is still the foreign commit datum `160000`, never a local
+/// object-fabric traversal edge.
+fn is_gitlink_tree_mode(mode: &[u8]) -> bool {
+    mode.iter()
+        .skip_while(|byte| **byte == b'0')
+        .copied()
+        .eq(b"160000".iter().copied())
+}
+
 impl CanonicalObjectSource for VerifiedFabricPackSource<'_> {
     fn load(&self, id: &GitOid) -> Result<CanonicalPackObject, PackWriteError> {
         let (object_type, body) = self.read_object(id)?;
@@ -2603,55 +2661,237 @@ impl CanonicalObjectSource for VerifiedFabricPackSource<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ClosureTraversalLimits {
+    unique_nodes: usize,
+    inspected_edges: usize,
+    frontier: usize,
+}
+
+impl From<&PackLimits> for ClosureTraversalLimits {
+    fn from(limits: &PackLimits) -> Self {
+        // Each counter is independently checked below, even though this first
+        // vertical slice sources all three finite bounds from the existing
+        // selected-pack entry ceiling. It prevents an edge-rich or wide
+        // closure from borrowing the other dimensions' budget implicitly.
+        let maximum = usize::try_from(limits.max_entries).unwrap_or(usize::MAX);
+        Self {
+            unique_nodes: maximum,
+            inspected_edges: maximum,
+            frontier: maximum,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum UnpermittedRootPolicy {
+    RejectWant,
+    IgnoreHave,
+}
+
+/// The two operations a bounded authenticated-closure walk needs from its
+/// source. The concrete node implementation reads verified object fabric; the
+/// narrow trait keeps traversal accounting independently testable for cyclic
+/// and duplicate edge graphs that native Git object identities cannot form.
+trait PermittedClosureTraversalSource {
+    /// Native object-ID domain for every source read.
+    fn object_format(&self) -> GitHashAlgorithm;
+
+    fn selection_checkpoint(&self) -> Result<(), PackWriteError>;
+    fn references(&self, id: &GitOid) -> Result<Vec<GitOid>, PackWriteError>;
+}
+
+impl PermittedClosureTraversalSource for VerifiedFabricPackSource<'_> {
+    fn object_format(&self) -> GitHashAlgorithm {
+        self.object_format
+    }
+
+    fn selection_checkpoint(&self) -> Result<(), PackWriteError> {
+        self.session_checkpoint()
+    }
+
+    fn references(&self, id: &GitOid) -> Result<Vec<GitOid>, PackWriteError> {
+        self.object_references(id)
+    }
+}
+
+fn entry_limit_error(actual: usize, limits: &PackLimits) -> PackWriteError {
+    PackError::EntryCountLimit {
+        actual: u32::try_from(actual).unwrap_or(u32::MAX),
+        limit: limits.max_entries,
+    }
+    .into()
+}
+
+fn reachable_within_permitted_closure(
+    source: &impl PermittedClosureTraversalSource,
+    closure: &PermittedObjectClosure,
+    roots: &[GitOid],
+    policy: UnpermittedRootPolicy,
+    limits: &PackLimits,
+) -> Result<BTreeSet<GitOid>, NodePackMaterializationRefusal> {
+    reachable_within_permitted_closure_bounded(
+        source,
+        closure,
+        roots,
+        policy,
+        limits,
+        ClosureTraversalLimits::from(limits),
+    )
+}
+
+fn reachable_within_permitted_closure_bounded(
+    source: &impl PermittedClosureTraversalSource,
+    closure: &PermittedObjectClosure,
+    roots: &[GitOid],
+    policy: UnpermittedRootPolicy,
+    limits: &PackLimits,
+    traversal_limits: ClosureTraversalLimits,
+) -> Result<BTreeSet<GitOid>, NodePackMaterializationRefusal> {
+    let mut visited = BTreeSet::new();
+    let mut frontier = BTreeSet::new();
+
+    // Validate every want root before any fabric read. A stale advertisement
+    // or mixed-hash caller input must not turn the object fabric into a
+    // disclosure oracle. Haves are different: the wire retains raw haves even
+    // when they were not common, so an unpermitted have is ignored.
+    for &root in roots {
+        source
+            .selection_checkpoint()
+            .map_err(NodePackMaterializationRefusal::from)?;
+        if root.algorithm() != source.object_format() {
+            match policy {
+                UnpermittedRootPolicy::RejectWant => {
+                    return Err(
+                        NodePackMaterializationRefusal::RequestedWantObjectFormatMismatch {
+                            expected: source.object_format(),
+                            observed: root.algorithm(),
+                        },
+                    );
+                }
+                UnpermittedRootPolicy::IgnoreHave => continue,
+            }
+        }
+        if !closure.objects().contains(&root) {
+            match policy {
+                UnpermittedRootPolicy::RejectWant => {
+                    return Err(NodePackMaterializationRefusal::RequestedWantOutsideClosure(
+                        root,
+                    ));
+                }
+                UnpermittedRootPolicy::IgnoreHave => continue,
+            }
+        }
+        if visited.contains(&root) {
+            continue;
+        }
+        let next_nodes = visited.len().saturating_add(1);
+        if next_nodes > traversal_limits.unique_nodes {
+            return Err(entry_limit_error(next_nodes, limits).into());
+        }
+        let next_frontier = frontier.len().saturating_add(1);
+        if next_frontier > traversal_limits.frontier {
+            return Err(entry_limit_error(next_frontier, limits).into());
+        }
+        // Insert on enqueue: cycles and duplicate edges cannot grow either
+        // the frontier or the unique-node accounting after this point.
+        visited.insert(root);
+        frontier.insert(root);
+    }
+
+    let mut inspected_edges = 0_usize;
+    while let Some(id) = frontier.pop_first() {
+        source
+            .selection_checkpoint()
+            .map_err(NodePackMaterializationRefusal::from)?;
+        for reference in source
+            .references(&id)
+            .map_err(NodePackMaterializationRefusal::from)?
+        {
+            source
+                .selection_checkpoint()
+                .map_err(NodePackMaterializationRefusal::from)?;
+            inspected_edges = inspected_edges.checked_add(1).ok_or_else(|| {
+                NodePackMaterializationRefusal::from(PackWriteError::from(
+                    PackError::IntegerOverflow {
+                        context: "selected-pack inspected edges",
+                    },
+                ))
+            })?;
+            if inspected_edges > traversal_limits.inspected_edges {
+                return Err(entry_limit_error(inspected_edges, limits).into());
+            }
+            if !closure.objects().contains(&reference) || visited.contains(&reference) {
+                continue;
+            }
+            let next_nodes = visited.len().saturating_add(1);
+            if next_nodes > traversal_limits.unique_nodes {
+                return Err(entry_limit_error(next_nodes, limits).into());
+            }
+            let next_frontier = frontier.len().saturating_add(1);
+            if next_frontier > traversal_limits.frontier {
+                return Err(entry_limit_error(next_frontier, limits).into());
+            }
+            visited.insert(reference);
+            frontier.insert(reference);
+        }
+    }
+    Ok(visited)
+}
+
 fn selected_pack_ids(
     source: &VerifiedFabricPackSource<'_>,
     closure: &PermittedObjectClosure,
+    client_wants: Option<&[GitOid]>,
     client_haves: &[GitOid],
     limits: &PackLimits,
-) -> Result<Vec<GitOid>, PackWriteError> {
-    // `PackRequest` has already bounded and de-duplicated `have` lines at
-    // the wire boundary.  Copy and sort them here so selected-closure
-    // planning does not trust map order or use an unbounded allocation path.
-    // A client have can only remove an already authority-permitted object; it
-    // cannot add disclosure or alter the authenticated closure retained in
-    // the pack receipt. Closure edges are parsed from verified object bodies,
-    // then intersected with that same authenticated closure.
-    let mut frontier = Vec::new();
-    frontier
-        .try_reserve_exact(client_haves.len())
-        .map_err(|_| PackError::AllocationFailed {
-            requested: client_haves.len(),
-        })?;
-    let mut excluded = BTreeSet::new();
-    for &id in client_haves {
-        if closure.objects().contains(&id) && excluded.insert(id) {
-            frontier.push(id);
-        }
-    }
-    while let Some(id) = frontier.pop() {
-        for reference in source.object_references(&id)? {
-            if closure.objects().contains(&reference) && excluded.insert(reference) {
-                frontier.push(reference);
-            }
-        }
-    }
+) -> Result<Vec<GitOid>, NodePackMaterializationRefusal> {
+    // `None` is the explicit local authority-materialization mode. `Some`,
+    // including `Some(&[])`, is the wire mode: an empty client want set selects
+    // nothing and must never be mistaken for authority permission to copy P.
+    // Keep the direct mode as a borrow of P so it first checks the entry bound
+    // without allocating a duplicate full closure.
+    let included = match client_wants {
+        None => None,
+        Some(wants) => Some(reachable_within_permitted_closure(
+            source,
+            closure,
+            wants,
+            UnpermittedRootPolicy::RejectWant,
+            limits,
+        )?),
+    };
+    let excluded = reachable_within_permitted_closure(
+        source,
+        closure,
+        client_haves,
+        UnpermittedRootPolicy::IgnoreHave,
+        limits,
+    )?;
 
     let maximum = usize::try_from(limits.max_entries).unwrap_or(usize::MAX);
+    let included = included.as_ref().unwrap_or_else(|| closure.objects());
+    if included.len() > maximum {
+        return Err(entry_limit_error(included.len(), limits).into());
+    }
     let mut ids = Vec::new();
-    ids.try_reserve_exact(closure.objects().len().min(maximum))
-        .map_err(|_| PackError::AllocationFailed {
-            requested: closure.objects().len().min(maximum),
+    ids.try_reserve_exact(included.len().min(maximum))
+        .map_err(|_| {
+            PackWriteError::from(PackError::AllocationFailed {
+                requested: included.len().min(maximum),
+            })
         })?;
-    for &id in closure.objects() {
+    // A BTreeSet provides canonical object-ID order without walking every
+    // permitted object when a tiny wanted closure sits inside a huge P.
+    for &id in included {
+        source
+            .session_checkpoint()
+            .map_err(NodePackMaterializationRefusal::from)?;
         if excluded.contains(&id) {
             continue;
         }
         if ids.len() == maximum {
-            return Err(PackError::EntryCountLimit {
-                actual: u32::try_from(ids.len().saturating_add(1)).unwrap_or(u32::MAX),
-                limit: limits.max_entries,
-            }
-            .into());
+            return Err(entry_limit_error(ids.len().saturating_add(1), limits).into());
         }
         ids.push(id);
     }
@@ -5391,9 +5631,11 @@ impl OneNode {
             };
             self.materialize_selected_pack(
                 &materialized,
+                None,
                 &[],
                 request.authority(),
                 &database_exhaustion,
+                None,
                 &mut is_live,
             )
         };
@@ -5424,9 +5666,11 @@ impl OneNode {
     fn materialize_selected_pack(
         &self,
         materialized: &MaterializedAdmission,
+        client_wants: Option<&[GitOid]>,
         client_haves: &[GitOid],
         database_context: &FsqliteCx,
         database_exhaustion: &Cell<Option<Exhaustion>>,
+        session_is_live: Option<&dyn Fn() -> bool>,
         is_live: &mut impl FnMut() -> bool,
     ) -> Result<AuthoritySelectedPackPayload, NodePackMaterializationRefusal> {
         let limits = PackLimits::default();
@@ -5437,14 +5681,15 @@ impl OneNode {
             maximum_object_bytes: limits.max_object_bytes.min(configured_limit),
             database_context,
             database_exhaustion,
+            session_is_live,
         };
         let ids = selected_pack_ids(
             &source,
             materialized.selected_closure().closure(),
+            client_wants,
             client_haves,
             &limits,
-        )
-        .map_err(NodePackMaterializationRefusal::from)?;
+        )?;
         let planner = PackPlanner::new(
             self.object_format,
             PackWriteProfile::COMPRESSED_V1,
@@ -5598,16 +5843,23 @@ impl OneNode {
                 let pack_context = self.pack_materialization_context();
                 let database_exhaustion = Cell::new(None);
                 let mut stopped = false;
-                let mut session_deadline_expired = false;
+                let session_deadline_expired = Cell::new(false);
                 let mut transfer_exhaustion = None;
                 let pack = {
+                    let session_is_live = || {
+                        if deadline.expired() {
+                            session_deadline_expired.set(true);
+                            false
+                        } else {
+                            true
+                        }
+                    };
                     let mut is_live = || {
                         if stopped {
                             return false;
                         }
-                        if deadline.expired() {
+                        if !session_is_live() {
                             stopped = true;
-                            session_deadline_expired = true;
                             return false;
                         }
                         match checkpoint_pack_context(&pack_context) {
@@ -5621,13 +5873,19 @@ impl OneNode {
                     };
                     self.materialize_selected_pack(
                         &materialized,
+                        Some(&pack_request.wants),
                         &pack_request.haves,
                         request.authority(),
                         &database_exhaustion,
+                        Some(&session_is_live),
                         &mut is_live,
                     )
                 };
-                if session_deadline_expired {
+                // Re-probe after the full materialization result, before any
+                // Database/Transfer/raw-error classification. The source also
+                // probes around every fabric read, but this covers planner and
+                // writer work after the final source operation.
+                if deadline.expired() || session_deadline_expired.get() {
                     Err(GitDaemonServeError::Transport(
                         GitDaemonTransportRefusal::SessionDeadlineExceeded {
                             operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
@@ -6172,6 +6430,7 @@ fn admission_cache_resources() -> ResourceVector {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
     use std::convert::Infallible;
     use std::fs;
@@ -6215,8 +6474,9 @@ mod tests {
     use fgit_txn::TransactionFoldReport;
     use fgit_types::{
         CANONICAL_CODEC_VERSION, DecisionOutcome, Digest, DigestBytes, GitHashAlgorithm, GitOid,
-        InternalObjectId, PrincipalId, RefName, RefusalCode, RepositoryAuthorityHeadId,
-        RepositoryId, RepositoryIncarnationId, SchemaFamily, SchemaId, TenantId, TxId,
+        GitOidSha256, InternalObjectId, PrincipalId, RefName, RefusalCode,
+        RepositoryAuthorityHeadId, RepositoryId, RepositoryIncarnationId, SchemaFamily, SchemaId,
+        TenantId, TxId,
     };
     use fgit_wire::receive::{QuarantineReceipt, ReceiveCommand, ReceiveRequest};
     use fgit_wire::{
@@ -6273,6 +6533,473 @@ mod tests {
             TenantId::from_bytes([0x11; 16]),
             RepositoryId::from_bytes([0x22; 16]),
         )
+    }
+
+    fn select_pack_ids(
+        node: &OneNode,
+        closure: &PermittedObjectClosure,
+        wants: &[GitOid],
+        haves: &[GitOid],
+        session_is_live: Option<&dyn Fn() -> bool>,
+    ) -> Result<Vec<GitOid>, super::NodePackMaterializationRefusal> {
+        let limits = fgit_pack::PackLimits::default();
+        let database_context = FsqliteCx::new();
+        let database_exhaustion = Cell::new(None);
+        let source = super::VerifiedFabricPackSource {
+            fabric: &node.fabric,
+            object_format: node.object_format,
+            maximum_object_bytes: limits.max_object_bytes,
+            database_context: &database_context,
+            database_exhaustion: &database_exhaustion,
+            session_is_live,
+        };
+        super::selected_pack_ids(&source, closure, Some(wants), haves, &limits)
+    }
+
+    fn put_object(node: &OneNode, kind: fgit_git_object::ObjectType, body: Vec<u8>) -> GitOid {
+        node.put_git_object(kind, body)
+            .expect("fixture object enters the verified object fabric")
+            .identity()
+    }
+
+    fn put_tree(node: &OneNode, entries: &[(&[u8], &[u8], GitOid)]) -> GitOid {
+        let mut body = Vec::new();
+        for (mode, name, id) in entries {
+            body.extend_from_slice(mode);
+            body.push(b' ');
+            body.extend_from_slice(name);
+            body.push(0);
+            body.extend_from_slice(id.as_bytes());
+        }
+        put_object(node, fgit_git_object::ObjectType::Tree, body)
+    }
+
+    fn put_commit(node: &OneNode, tree: GitOid, parents: &[GitOid]) -> GitOid {
+        let mut body = format!("tree {tree}\n").into_bytes();
+        for parent in parents {
+            body.extend_from_slice(format!("parent {parent}\n").as_bytes());
+        }
+        body.extend_from_slice(
+            b"author A <a@example.com> 1 +0000\ncommitter C <c@example.com> 1 +0000\n\nmessage",
+        );
+        put_object(node, fgit_git_object::ObjectType::Commit, body)
+    }
+
+    fn put_tag(node: &OneNode, target: GitOid, target_type: &str, name: &str) -> GitOid {
+        put_object(
+            node,
+            fgit_git_object::ObjectType::Tag,
+            format!(
+                "object {target}\ntype {target_type}\ntag {name}\ntagger T <t@example.com> 1 +0000\n\nmessage"
+            )
+            .into_bytes(),
+        )
+    }
+
+    struct GraphTraversalSource {
+        edges: BTreeMap<GitOid, Vec<GitOid>>,
+        checkpoints: Cell<usize>,
+        reference_reads: Cell<usize>,
+    }
+
+    impl super::PermittedClosureTraversalSource for GraphTraversalSource {
+        fn object_format(&self) -> GitHashAlgorithm {
+            GitHashAlgorithm::Sha1
+        }
+
+        fn selection_checkpoint(&self) -> Result<(), fgit_pack::PackWriteError> {
+            self.checkpoints
+                .set(self.checkpoints.get().saturating_add(1));
+            Ok(())
+        }
+
+        fn references(&self, id: &GitOid) -> Result<Vec<GitOid>, fgit_pack::PackWriteError> {
+            self.reference_reads
+                .set(self.reference_reads.get().saturating_add(1));
+            Ok(self.edges.get(id).cloned().unwrap_or_default())
+        }
+    }
+
+    fn graph_oid(byte: u8) -> GitOid {
+        GitOid::from_hex(GitHashAlgorithm::Sha1, &format!("{byte:02x}").repeat(20))
+            .expect("fixed native sha-1 object identity parses")
+    }
+
+    #[test]
+    fn selected_pack_ids_root_at_wants_and_ignore_unpermitted_haves() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
+            .expect("node initializes an empty canonical state");
+        let a = put_object(
+            &node,
+            fgit_git_object::ObjectType::Blob,
+            b"disjoint A".to_vec(),
+        );
+        let b = put_object(
+            &node,
+            fgit_git_object::ObjectType::Blob,
+            b"disjoint B".to_vec(),
+        );
+        let absent = graph_oid(0x7f);
+        let mixed_hash =
+            GitOid::from_hex(GitHashAlgorithm::Sha256, &"11".repeat(GitOidSha256::LEN))
+                .expect("fixed sha-256 object identity parses");
+        // This deliberately malformed P discriminator proves that source
+        // object-format validation, not set membership alone, guards the
+        // fabric boundary.
+        let closure = PermittedObjectClosure::new(BTreeSet::from([a, b, mixed_hash]));
+
+        assert_eq!(
+            select_pack_ids(&node, &closure, &[a], &[], None)
+                .expect("a permitted direct blob want selects itself"),
+            vec![a],
+            "a disjoint want must not disclose unrelated permitted B"
+        );
+        assert_eq!(
+            select_pack_ids(&node, &closure, &[b, a], &[absent, mixed_hash], None)
+                .expect("unpermitted or incompatible raw haves are ignored rather than authority"),
+            BTreeSet::from([a, b]).into_iter().collect::<Vec<_>>(),
+            "multi-want union is canonical regardless of input order"
+        );
+        assert!(
+            select_pack_ids(&node, &closure, &[], &[], None)
+                .expect("an empty wire want set selects no authority objects")
+                .is_empty(),
+            "wire mode is explicit: an empty want set is never full-closure materialization"
+        );
+        assert!(matches!(
+            select_pack_ids(&node, &closure, &[a, absent], &[], None),
+            Err(super::NodePackMaterializationRefusal::RequestedWantOutsideClosure(id)) if id == absent
+        ));
+        assert!(matches!(
+            select_pack_ids(&node, &closure, &[mixed_hash], &[], None),
+            Err(
+                super::NodePackMaterializationRefusal::RequestedWantObjectFormatMismatch {
+                    expected: GitHashAlgorithm::Sha1,
+                    observed: GitHashAlgorithm::Sha256,
+                }
+            )
+        ));
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn selected_pack_ids_follow_native_edges_but_not_gitlinks() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
+            .expect("node initializes an empty canonical state");
+        let blob = put_object(
+            &node,
+            fgit_git_object::ObjectType::Blob,
+            b"tree child".to_vec(),
+        );
+        let gitlink_target = put_object(
+            &node,
+            fgit_git_object::ObjectType::Blob,
+            b"present only to prove gitlink non-traversal".to_vec(),
+        );
+        let tree = put_tree(
+            &node,
+            &[
+                (b"100644", b"file", blob),
+                (b"0160000", b"submodule", gitlink_target),
+            ],
+        );
+        let tag = put_tag(&node, blob, "blob", "inner");
+        let tag_chain = put_tag(&node, tag, "tag", "outer");
+        let closure = PermittedObjectClosure::new(BTreeSet::from([
+            blob,
+            gitlink_target,
+            tree,
+            tag,
+            tag_chain,
+        ]));
+
+        assert_eq!(
+            select_pack_ids(&node, &closure, &[blob], &[], None).expect("blob want selects itself"),
+            vec![blob]
+        );
+        assert_eq!(
+            select_pack_ids(&node, &closure, &[tree], &[], None)
+                .expect("tree want follows local tree children"),
+            BTreeSet::from([blob, tree]).into_iter().collect::<Vec<_>>(),
+            "semantic mode 0160000 is a gitlink datum, never a local traversal edge even when its target is in P"
+        );
+        assert_eq!(
+            select_pack_ids(&node, &closure, &[tag_chain], &[], None)
+                .expect("tag chains follow their authenticated targets"),
+            BTreeSet::from([blob, tag, tag_chain])
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn selected_pack_ids_recursively_subtract_common_commits() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
+            .expect("node initializes an empty canonical state");
+        let blob0 = put_object(
+            &node,
+            fgit_git_object::ObjectType::Blob,
+            b"C0 tree blob".to_vec(),
+        );
+        let tree0 = put_tree(&node, &[(b"100644", b"old", blob0)]);
+        let commit0 = put_commit(&node, tree0, &[]);
+        let blob1 = put_object(
+            &node,
+            fgit_git_object::ObjectType::Blob,
+            b"C1 tree blob".to_vec(),
+        );
+        let tree1 = put_tree(&node, &[(b"100644", b"new", blob1)]);
+        // Duplicate parent edges are valid import-shaped input. Insert-on-
+        // enqueue must process C0 only once before subtracting its closure.
+        let commit1 = put_commit(&node, tree1, &[commit0, commit0]);
+        let closure = PermittedObjectClosure::new(BTreeSet::from([
+            blob0, tree0, commit0, blob1, tree1, commit1,
+        ]));
+
+        assert_eq!(
+            select_pack_ids(&node, &closure, &[commit1], &[commit0], None)
+                .expect("the common ancestor recursively subtracts its tree and blob"),
+            BTreeSet::from([blob1, tree1, commit1])
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "a C1 -> C0 have must omit C0, its tree, and its blob while retaining C1's distinct tree"
+        );
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn authenticated_closure_walk_bounds_cycles_duplicates_and_session_precedence() {
+        let a = graph_oid(0x01);
+        let b = graph_oid(0x02);
+        let c = graph_oid(0x03);
+        let d = graph_oid(0x04);
+        let closure = PermittedObjectClosure::new(BTreeSet::from([a, b, c, d]));
+        let source = GraphTraversalSource {
+            edges: BTreeMap::from([
+                (a, vec![b, b, c]),
+                (b, vec![a, d]),
+                (c, Vec::new()),
+                (d, Vec::new()),
+            ]),
+            checkpoints: Cell::new(0),
+            reference_reads: Cell::new(0),
+        };
+        let mut limits = fgit_pack::PackLimits::default();
+        limits.max_entries = 4;
+        assert_eq!(
+            super::reachable_within_permitted_closure_bounded(
+                &source,
+                &closure,
+                &[a, a],
+                super::UnpermittedRootPolicy::RejectWant,
+                &limits,
+                super::ClosureTraversalLimits {
+                    unique_nodes: 4,
+                    inspected_edges: 5,
+                    frontier: 2,
+                },
+            )
+            .expect("cycles and duplicate edges settle through insert-on-enqueue"),
+            BTreeSet::from([a, b, c, d])
+        );
+        assert!(
+            source.checkpoints.get() > 0,
+            "selection probes liveness even before reads"
+        );
+
+        let absent = graph_oid(0x7f);
+        assert!(matches!(
+            super::reachable_within_permitted_closure(
+                &source,
+                &closure,
+                &[a, absent],
+                super::UnpermittedRootPolicy::RejectWant,
+                &limits,
+            ),
+            Err(super::NodePackMaterializationRefusal::RequestedWantOutsideClosure(id)) if id == absent
+        ));
+        assert_eq!(
+            source.reference_reads.get(),
+            4,
+            "the rejected root set performed no additional source read after the prior completed walk"
+        );
+
+        let rejected_before_read = GraphTraversalSource {
+            edges: BTreeMap::from([(a, vec![b])]),
+            checkpoints: Cell::new(0),
+            reference_reads: Cell::new(0),
+        };
+        assert!(matches!(
+            super::reachable_within_permitted_closure(
+                &rejected_before_read,
+                &closure,
+                &[absent],
+                super::UnpermittedRootPolicy::RejectWant,
+                &limits,
+            ),
+            Err(super::NodePackMaterializationRefusal::RequestedWantOutsideClosure(id)) if id == absent
+        ));
+        assert_eq!(
+            rejected_before_read.reference_reads.get(),
+            0,
+            "an unpermitted want is refused before any source or fabric read"
+        );
+
+        let mixed_hash = GitOid::from_hex(GitHashAlgorithm::Sha256, &"22".repeat(32))
+            .expect("fixed sha-256 object identity parses");
+        let incompatible_present = GraphTraversalSource {
+            edges: BTreeMap::from([(a, vec![b])]),
+            checkpoints: Cell::new(0),
+            reference_reads: Cell::new(0),
+        };
+        assert!(matches!(
+            super::reachable_within_permitted_closure(
+                &incompatible_present,
+                &PermittedObjectClosure::new(BTreeSet::from([a, mixed_hash])),
+                &[mixed_hash],
+                super::UnpermittedRootPolicy::RejectWant,
+                &limits,
+            ),
+            Err(
+                super::NodePackMaterializationRefusal::RequestedWantObjectFormatMismatch {
+                    expected: GitHashAlgorithm::Sha1,
+                    observed: GitHashAlgorithm::Sha256,
+                }
+            )
+        ));
+        assert_eq!(
+            incompatible_present.reference_reads.get(),
+            0,
+            "a source-incompatible want present in malformed P is still refused before a read"
+        );
+
+        let ignored_unpermitted_have = GraphTraversalSource {
+            edges: BTreeMap::from([(a, vec![b])]),
+            checkpoints: Cell::new(0),
+            reference_reads: Cell::new(0),
+        };
+        assert!(
+            super::reachable_within_permitted_closure(
+                &ignored_unpermitted_have,
+                &closure,
+                &[absent],
+                super::UnpermittedRootPolicy::IgnoreHave,
+                &limits,
+            )
+            .expect("an unpermitted raw have is ignored rather than traversed")
+            .is_empty()
+        );
+        assert_eq!(
+            ignored_unpermitted_have.reference_reads.get(),
+            0,
+            "an unpermitted have never becomes an authority-selected read root"
+        );
+
+        let mut large_permitted_set = closure.objects().clone();
+        for byte in 0x10..0x70 {
+            large_permitted_set.insert(graph_oid(byte));
+        }
+        let tiny_wanted_source = GraphTraversalSource {
+            edges: BTreeMap::from([(a, Vec::new())]),
+            checkpoints: Cell::new(0),
+            reference_reads: Cell::new(0),
+        };
+        assert_eq!(
+            super::reachable_within_permitted_closure(
+                &tiny_wanted_source,
+                &PermittedObjectClosure::new(large_permitted_set),
+                &[a],
+                super::UnpermittedRootPolicy::RejectWant,
+                &limits,
+            )
+            .expect("a tiny wanted closure remains bounded inside a large permitted set"),
+            BTreeSet::from([a])
+        );
+        assert_eq!(
+            tiny_wanted_source.reference_reads.get(),
+            1,
+            "irrelevant authority-permitted objects are never scanned for a tiny wanted closure"
+        );
+
+        for (limit, expected) in [
+            (
+                super::ClosureTraversalLimits {
+                    unique_nodes: 3,
+                    inspected_edges: 5,
+                    frontier: 2,
+                },
+                "unique-node N/N+1 bound",
+            ),
+            (
+                super::ClosureTraversalLimits {
+                    unique_nodes: 4,
+                    inspected_edges: 4,
+                    frontier: 2,
+                },
+                "inspected-edge N/N+1 bound",
+            ),
+            (
+                super::ClosureTraversalLimits {
+                    unique_nodes: 4,
+                    inspected_edges: 5,
+                    frontier: 1,
+                },
+                "frontier N/N+1 bound",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    super::reachable_within_permitted_closure_bounded(
+                        &source,
+                        &closure,
+                        &[a],
+                        super::UnpermittedRootPolicy::RejectWant,
+                        &limits,
+                        limit,
+                    ),
+                    Err(super::NodePackMaterializationRefusal::Pack(error))
+                        if matches!(error.as_ref(), fgit_pack::PackWriteError::Pack(fgit_pack::PackError::EntryCountLimit { .. }))
+                ),
+                "{expected} refuses at N+1 rather than borrowing another traversal dimension"
+            );
+        }
+
+        let node_scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(test_config(node_scratch.path().to_path_buf()))
+            .expect("node initializes an empty canonical state");
+        let object = put_object(
+            &node,
+            fgit_git_object::ObjectType::Blob,
+            b"session probe real fabric object".to_vec(),
+        );
+        let real_closure = PermittedObjectClosure::new(BTreeSet::from([object]));
+        let probes = Cell::new(0_usize);
+        let expires_after_read = || {
+            let next = probes.get().saturating_add(1);
+            probes.set(next);
+            next < 4
+        };
+        assert!(matches!(
+            select_pack_ids(
+                &node,
+                &real_closure,
+                &[object],
+                &[],
+                Some(&expires_after_read),
+            ),
+            Err(super::NodePackMaterializationRefusal::Pack(error))
+                if matches!(error.as_ref(), fgit_pack::PackWriteError::Pack(fgit_pack::PackError::DeadlineExceeded))
+        ));
+        assert_eq!(
+            select_pack_ids(&node, &real_closure, &[object], &[], Some(&|| true))
+                .expect("an always-live session remains permitted"),
+            vec![object]
+        );
+        node.shutdown().expect("node closes cleanly");
     }
 
     #[test]
