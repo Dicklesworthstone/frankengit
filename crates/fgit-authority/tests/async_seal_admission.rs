@@ -752,6 +752,7 @@ const fn configuration(layout: RootLayoutVersion) -> RepositoryConfigurationBody
     RepositoryConfigurationBody {
         root_layout: layout,
         object_format: GitHashAlgorithm::Sha1,
+        hidden_ref_rules: Vec::new(),
     }
 }
 

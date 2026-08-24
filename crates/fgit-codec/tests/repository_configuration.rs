@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Independent canonical vectors for repository-configuration schema minor 1.
+//! Independent canonical vectors for repository-configuration schema minor 2.
 //!
 //! The object-format field is a permanent repository identity decision. These
 //! vectors are written directly from the frame and payload specification; they
@@ -19,13 +19,14 @@ const SHA256_CONFIGURATION_GOLDEN: &[u8] = b"FGC1\
     \x00\x01\x00\x00\
     \x00\x00\x00\x26frankengit/repository-configuration/v1\
     \x00\x00\x00\x18repository-configuration\
-    \x00\x01\x00\x01\
-    \x00\x00\x00\x04\x00\x01\x00\x02";
+    \x00\x01\x00\x02\
+    \x00\x00\x00\x08\x00\x01\x00\x02\x00\x00\x00\x00";
 
 fn sha256_configuration() -> RepositoryConfigurationBody {
     RepositoryConfigurationBody {
         root_layout: RootLayoutVersion::RefStateMerkleV1,
         object_format: GitHashAlgorithm::Sha256,
+        hidden_ref_rules: Vec::new(),
     }
 }
 
@@ -35,11 +36,11 @@ fn schema_minor_one_sha256_configuration_matches_the_independent_golden() {
     let (header, _) = read_frame_header(SHA256_CONFIGURATION_GOLDEN, DecodeLimits::DEFAULT)
         .expect("the independently written configuration frame is structurally valid");
     assert_eq!(header.schema, RepositoryConfigurationBody::schema_id());
-    assert_eq!(header.schema.minor(), 1);
+    assert_eq!(header.schema.minor(), 2);
     assert_eq!(
         canonical_body_bytes(&expected).expect("the fixed configuration encodes"),
-        [0, 1, 0, 2],
-        "the payload is exactly root-layout followed by object-format"
+        [0, 1, 0, 2, 0, 0, 0, 0],
+        "the payload is root-layout, object-format, then an empty rule count"
     );
     assert_eq!(
         decode_body::<RepositoryConfigurationBody>(
@@ -52,7 +53,7 @@ fn schema_minor_one_sha256_configuration_matches_the_independent_golden() {
     assert_eq!(
         encode_body(&expected).expect("the fixed configuration encodes"),
         SHA256_CONFIGURATION_GOLDEN,
-        "the encoder must reproduce the independently written schema-1.1 frame"
+        "the encoder must reproduce the independently written schema-1.2 frame"
     );
 }
 
@@ -69,7 +70,12 @@ fn unknown_persisted_object_format_is_refused_while_a_known_twin_decodes() {
 
     let mut unknown = SHA256_CONFIGURATION_GOLDEN.to_vec();
     let length = unknown.len();
-    unknown[length - 2..].copy_from_slice(&u16::MAX.to_be_bytes());
+    // `object_format` is no longer the last two bytes: the payload now ends with
+    // the four-byte hidden-rule count. It sits at payload offset 2, and the
+    // payload is the final eight bytes of the frame. Targeting the tail blindly
+    // corrupted the rule count instead and turned this into a test about the
+    // count, which is not what it is for.
+    unknown[length - 6..length - 4].copy_from_slice(&u16::MAX.to_be_bytes());
     let refusal = decode_body::<RepositoryConfigurationBody>(&unknown, DecodeLimits::DEFAULT)
         .expect_err("an unallocated object-format code point must not become SHA-1");
     assert!(matches!(
@@ -88,6 +94,7 @@ fn default_configuration_keeps_the_legacy_sha1_profile_explicit() {
         RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::LegacyWholeBody,
             object_format: GitHashAlgorithm::Sha1,
+            hidden_ref_rules: Vec::new(),
         }
     );
 }

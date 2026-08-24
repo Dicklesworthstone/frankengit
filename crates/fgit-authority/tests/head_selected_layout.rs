@@ -109,6 +109,7 @@ fn a_head_selecting_v1_verifies_ref_state_membership() {
         &RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::RefStateMerkleV1,
             object_format: GitHashAlgorithm::Sha1,
+            hidden_ref_rules: Vec::new(),
         },
     )
     .expect("the configuration body stages");
@@ -146,6 +147,7 @@ fn a_head_selecting_v0_refuses_proof_generation() {
         &RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::LegacyWholeBody,
             object_format: GitHashAlgorithm::Sha1,
+            hidden_ref_rules: Vec::new(),
         },
     )
     .expect("the configuration body stages");
@@ -217,6 +219,7 @@ fn advancing_the_layout_changes_only_the_configuration_root() {
         &RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::LegacyWholeBody,
             object_format: GitHashAlgorithm::Sha1,
+            hidden_ref_rules: Vec::new(),
         },
     )
     .expect("stages");
@@ -225,6 +228,7 @@ fn advancing_the_layout_changes_only_the_configuration_root() {
         &RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::RefStateMerkleV1,
             object_format: GitHashAlgorithm::Sha1,
+            hidden_ref_rules: Vec::new(),
         },
     )
     .expect("stages");
@@ -346,6 +350,7 @@ fn a_previous_configuration_schema_minor_is_refused_not_reinterpreted_as_legacy(
         &RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::RefStateMerkleV1,
             object_format: GitHashAlgorithm::Sha256,
+            hidden_ref_rules: Vec::new(),
         },
     )
     .expect("current schema configuration stages");
@@ -398,6 +403,7 @@ fn a_layout_version_this_build_does_not_know_is_refused_even_when_verifying() {
         &RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::RefStateMerkleV1,
             object_format: GitHashAlgorithm::Sha1,
+            hidden_ref_rules: Vec::new(),
         },
     )
     .expect("stages");
@@ -496,6 +502,7 @@ fn an_object_format_this_build_cannot_read_is_refused_rather_than_read_as_v0() {
         &RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::RefStateMerkleV1,
             object_format: GitHashAlgorithm::Sha256,
+            hidden_ref_rules: Vec::new(),
         },
     )
     .expect("stages");
@@ -512,6 +519,7 @@ fn a_configuration_body_round_trips_through_its_canonical_encoding() {
         let body = RepositoryConfigurationBody {
             root_layout: *version,
             object_format: GitHashAlgorithm::Sha1,
+            hidden_ref_rules: Vec::new(),
         };
         let bytes = encode_body(&body).expect("encodes");
         let decoded: RepositoryConfigurationBody =

@@ -52,6 +52,7 @@ fn v1_configuration_is_not_a_legacy_fallback_for_incarnation_resolution() {
         &RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::RefStateMerkleV1,
             object_format: GitHashAlgorithm::Sha256,
+            hidden_ref_rules: Vec::new(),
         },
     )
     .expect("the predecessor configuration stages");

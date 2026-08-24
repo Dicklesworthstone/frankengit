@@ -44,6 +44,7 @@ fn v1_configuration_cannot_be_decoded_as_an_incarnation_configuration() {
     let legacy = RepositoryConfigurationBody {
         root_layout: RootLayoutVersion::RefStateMerkleV1,
         object_format: GitHashAlgorithm::Sha256,
+        hidden_ref_rules: Vec::new(),
     };
     let encoded = encode_body(&legacy).expect("the predecessor body encodes");
 

@@ -125,6 +125,7 @@ fn deploy() -> Deployment {
         &RepositoryConfigurationBody {
             root_layout: RootLayoutVersion::RefStateMerkleV1,
             object_format: GitHashAlgorithm::Sha1,
+            hidden_ref_rules: Vec::new(),
         },
     )
     .expect("the authority accepts the configuration");

@@ -73,6 +73,7 @@ fn v1_configuration() -> (RepositoryConfigurationBody, Digest) {
     let configuration = RepositoryConfigurationBody {
         root_layout: RootLayoutVersion::RefStateMerkleV1,
         object_format: GitHashAlgorithm::Sha1,
+        hidden_ref_rules: Vec::new(),
     };
     let identity = body_id(&CryptoBodyIdentity, &configuration)
         .expect("the canonical configuration has an identity");
@@ -127,7 +128,7 @@ fn a_ref_proof_cannot_be_rebound_to_a_different_object_or_head() {
     };
     let rebound = VerifiedReadEnvelope::new(
         envelope.head().clone(),
-        envelope.configuration().copied(),
+        envelope.configuration().cloned(),
         VerifiedReadAnswer::RefMembership {
             name,
             oid: oid(0x33),
@@ -163,7 +164,7 @@ fn a_ref_proof_requires_a_configuration_that_identifies_to_the_pinned_head() {
     let mismatched_pin = PinnedAuthorityHead::new(mismatched_head.clone());
     let mismatched_configuration = VerifiedReadEnvelope::new(
         mismatched_head,
-        envelope.configuration().copied(),
+        envelope.configuration().cloned(),
         envelope.answer().clone(),
     );
     assert_eq!(

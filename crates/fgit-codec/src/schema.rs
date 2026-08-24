@@ -643,7 +643,9 @@ impl CanonicalBody for RefusalRecordBody {
 /// which refuses a code point this build does not know rather than falling back
 /// to a default. Reading a newer layout as the legacy one would produce a
 /// confident wrong answer about what the repository contains.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// No `Copy`: the rule list is heap-allocated. Every consumer takes this by
+// reference or by owned return, so `Clone` is sufficient.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepositoryConfigurationBody {
     /// How this repository's authenticated roots are laid out.
     pub root_layout: RootLayoutVersion,
@@ -655,6 +657,21 @@ pub struct RepositoryConfigurationBody {
     /// deployment preference. An unrecognised code point is refused by
     /// [`GitHashAlgorithm::from_code_point`] rather than defaulting.
     pub object_format: GitHashAlgorithm,
+    /// Ordered hide rules for this repository; the last match wins.
+    ///
+    /// A leading `!` re-exposes a name an earlier rule hid, which is the
+    /// grammar `RefVisibility::push_rule` already parses. Stored as raw patterns
+    /// rather than a built policy because this crate depends only on
+    /// `fgit-crypto` and `fgit-types` and cannot name `fgit-wire`'s type; the
+    /// consumer builds one through `push_rule`, which validates every pattern
+    /// and bounds the count against `max_ref_prefixes`.
+    ///
+    /// Order is semantic, so this encodes as a sequence and never as a
+    /// canonical set: sorting the rules would silently change which one wins.
+    ///
+    /// Empty means the repository hides nothing, which is exactly what every
+    /// configuration published before this minor meant.
+    pub hidden_ref_rules: Vec<Vec<u8>>,
 }
 
 impl Default for RepositoryConfigurationBody {
@@ -662,6 +679,7 @@ impl Default for RepositoryConfigurationBody {
         Self {
             root_layout: RootLayoutVersion::LegacyWholeBody,
             object_format: GitHashAlgorithm::Sha1,
+            hidden_ref_rules: Vec::new(),
         }
     }
 }
@@ -670,11 +688,19 @@ impl CanonicalBody for RepositoryConfigurationBody {
     const DOMAIN: DomainTag = DomainTag::from_static("frankengit/repository-configuration/v1");
     const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("repository-configuration");
     const SCHEMA_MAJOR: u16 = 1;
-    const SCHEMA_MINOR: u16 = 1;
+    // Minor 2 adds `hidden_ref_rules`. `decode_body` requires an exact
+    // minor, so a build that predates this refuses a body carrying a policy
+    // rather than decoding it as minor 1 and serving refs the repository hides.
+    // That fail-closed direction is the whole reason this is a version bump and
+    // not a tolerated trailing field.
+    const SCHEMA_MINOR: u16 = 2;
 
     fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         out.write_scalar(self.root_layout.code_point());
         out.write_scalar(self.object_format.code_point());
+        out.write_sequence("hidden_ref_rules", &self.hidden_ref_rules, |out, rule| {
+            out.write_bytes("hidden_ref_rule", rule)
+        })?;
         Ok(())
     }
 
@@ -683,9 +709,13 @@ impl CanonicalBody for RepositoryConfigurationBody {
             RootLayoutVersion::from_code_point(input.read_scalar::<u16>("root_layout")?)?;
         let object_format =
             GitHashAlgorithm::from_code_point(input.read_scalar::<u16>("object_format")?)?;
+        let hidden_ref_rules = input.read_sequence("hidden_ref_rules", |input| {
+            input.read_bytes("hidden_ref_rule").map(<[u8]>::to_vec)
+        })?;
         Ok(Self {
             root_layout,
             object_format,
+            hidden_ref_rules,
         })
     }
 }
