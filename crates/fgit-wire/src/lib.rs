@@ -42,6 +42,7 @@ pub mod closure;
 /// Bounded SANS-I/O receive-pack parsing and structural pack quarantine.
 pub mod receive;
 /// Hidden-ref authorization policy and visibility-filtered repository views.
+pub mod stale_disclosure;
 pub mod visibility;
 
 /// The largest pkt-line frame permitted by Git's common protocol.
