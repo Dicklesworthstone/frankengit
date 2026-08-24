@@ -1707,3 +1707,113 @@ fn a_prefix_hide_rule_refuses_a_push_beneath_it() {
         "a push beneath a hidden prefix must be refused as HiddenRefUnauthorized, got {outcome:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The retention boundary on the PUSH path (frankengit-fg019c acceptance line 1,
+// second half: "zero unauthorized disclosure/RETENTION").
+//
+// The disclosure half is covered above. The retention half was asserted by
+// nothing: a repository-wide search for a test tying a refusal or a commit to
+// retention state returned no assertions at all. The only mentions were a
+// comment in `fgit-wire`'s adversarial target and two *fixtures* that return
+// `ConflictingSemanticEffects` -- fixtures producing a code, not tests checking
+// a guard fires.
+//
+// WHAT I DID NOT WRITE, AND WHY. The obvious target was the guard at
+// fgit-admission `prepare_canonical_commit`, which refuses when a fold carries
+// forge, retention, or outbox effects. Reading `model_request` first showed
+// that guard is UNREACHABLE from a push: receive-pack lowering maps
+// `semantic.ref_commands()` to `Intent::Ref(..)` and to nothing else, so a
+// push cannot express a retention intent and `effects.retention` is always
+// empty on this path. A test driving that guard directly would have passed
+// while proving nothing about push behaviour, and reporting it as push
+// coverage would have been the stronger claim the evidence did not support.
+//
+// So the property is structural, and this pins the structural consequence
+// end to end instead: a push moves refs and NOTHING else. If someone later
+// teaches receive-pack lowering to emit a forge, retention, or outbox intent,
+// the equalities below start failing.
+// ---------------------------------------------------------------------------
+
+/// Reads back the current authenticated head body.
+fn authenticated_head_body(
+    store: &MemoryAuthorityStore,
+    head_key: &HeadKey,
+) -> RepositoryAuthorityHeadBody {
+    let HeadRead::Present(receipt) = store
+        .read_head(head_key)
+        .expect("an initialized head reads back")
+    else {
+        panic!("head_bound_setup initializes a head, so it must be present");
+    };
+    store
+        .authenticate_head_receipt(&receipt)
+        .expect("a store authenticates a receipt it issued itself")
+        .body()
+        .expect("the authenticated receipt carries a decodable head body")
+}
+
+/// A committed push advances the ref root and leaves the retention, forge and
+/// outbox roots exactly as it found them.
+///
+/// The `assert_ne!` on the ref root is not decoration: it is the control that
+/// makes the three equalities mean something. A push that committed nothing --
+/// or a harness that could not commit at all -- would satisfy every equality
+/// below while proving the opposite of what this test claims. Ordering it
+/// first states that dependency rather than leaving it to be noticed.
+#[test]
+fn a_committed_push_moves_the_ref_root_and_leaves_retention_forge_and_outbox_untouched() {
+    let context = context(b"fg019c-retention-boundary");
+    let validated = delete_main();
+    let (store, projection) = head_bound_setup(&context);
+
+    let before = authenticated_head_body(&store, &context.head_key);
+
+    let result = admit_validated_receive(
+        &store,
+        &context,
+        &validated,
+        AdmissionLimits::default(),
+        &projection,
+    )
+    .expect("an uncontended delete against a resolvable genesis basis reaches a decision");
+
+    let tx_id = result.session.tx_ids[0];
+    let resolved = resolve_outcome(
+        &store,
+        &context.head_key,
+        context.tenant_id,
+        context.repository_id,
+        tx_id,
+    )
+    .unwrap_or_else(|error| panic!("{tx_id:?} must resolve, got {error}"));
+    let OutcomeLookup::Decided(terminal) = resolved else {
+        panic!("an uncontended delete left {tx_id:?} undecided: {resolved:?}");
+    };
+    assert!(
+        matches!(terminal.outcome, DecisionOutcome::Committed { .. }),
+        "this probe needs a COMMITTED push to be meaningful; got {:?}",
+        terminal.outcome
+    );
+
+    let after = authenticated_head_body(&store, &context.head_key);
+
+    assert_ne!(
+        after.ref_root, before.ref_root,
+        "the committed push did not move the ref root, so the three equalities below would \
+         hold for a push that did nothing and this test would assert nothing"
+    );
+    assert_eq!(
+        after.retention_root, before.retention_root,
+        "a push minted or removed a retention root; receive-pack lowering emits ref intents \
+         only, so retention state must cross a push untouched"
+    );
+    assert_eq!(
+        after.forge_position_root, before.forge_position_root,
+        "a push moved forge positions, which receive-pack lowering cannot express"
+    );
+    assert_eq!(
+        after.outbox_root, before.outbox_root,
+        "a push created an outbox obligation, which receive-pack lowering cannot express"
+    );
+}
