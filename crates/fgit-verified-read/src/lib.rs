@@ -31,7 +31,8 @@ use fgit_authority::{OutcomeFailure, TerminalOutcome, verify_outcome_index_membe
 use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, DecodeLimits, Decoder, Encoder,
     RepositoryAuthorityHeadBody, RepositoryConfigurationBody, RepositoryDecision,
-    RepositoryIncarnationConfigurationBody, body_id, decode_body, encode_body,
+    RepositoryIncarnationConfigurationBody, RepositoryIncarnationConfigurationBodyV2_1, body_id,
+    decode_body, encode_body,
 };
 use fgit_crypto::{
     MerkleProof, MerkleRefusal, ObjectClosureNeighbour, ObjectClosureNonMembershipProof,
@@ -553,8 +554,17 @@ pub enum VerifiedReadAnswer {
 pub enum VerifiedReadConfiguration {
     /// The original repository-configuration schema.
     RepositoryV1(RepositoryConfigurationBody),
-    /// The incarnation-bound repository-configuration schema.
+    /// The byte-stable incarnation-bound repository-configuration schema 2.0.
+    ///
+    /// This variant preserves its exact canonical body so verification can
+    /// recompute the head-selected `configuration_root`.
     RepositoryIncarnationV2(RepositoryIncarnationConfigurationBody),
+    /// The policy-root-aware incarnation-bound repository-configuration schema 2.1.
+    ///
+    /// A 2.1 body with no policy root has the same normalized policy facts as
+    /// a 2.0 body, but a different canonical identity.  Keeping the exact
+    /// minor here prevents either body from impersonating the other.
+    RepositoryIncarnationV2_1(RepositoryIncarnationConfigurationBodyV2_1),
 }
 
 impl VerifiedReadConfiguration {
@@ -564,6 +574,7 @@ impl VerifiedReadConfiguration {
         match self {
             Self::RepositoryV1(configuration) => configuration.root_layout,
             Self::RepositoryIncarnationV2(configuration) => configuration.root_layout,
+            Self::RepositoryIncarnationV2_1(configuration) => configuration.root_layout,
         }
     }
 }
@@ -673,7 +684,11 @@ impl VerifiedReadEnvelope {
     pub const fn configuration(&self) -> Option<&RepositoryConfigurationBody> {
         match self.configuration.as_ref() {
             Some(VerifiedReadConfiguration::RepositoryV1(configuration)) => Some(configuration),
-            Some(VerifiedReadConfiguration::RepositoryIncarnationV2(_)) | None => None,
+            Some(
+                VerifiedReadConfiguration::RepositoryIncarnationV2(_)
+                | VerifiedReadConfiguration::RepositoryIncarnationV2_1(_),
+            )
+            | None => None,
         }
     }
 
@@ -933,6 +948,10 @@ fn write_configuration(
             out.write_raw_byte(2);
             configuration.write_payload(out)
         }
+        VerifiedReadConfiguration::RepositoryIncarnationV2_1(configuration) => {
+            out.write_raw_byte(3);
+            configuration.write_payload(out)
+        }
     })
 }
 
@@ -946,6 +965,8 @@ fn read_configuration(
                 .map(VerifiedReadConfiguration::RepositoryV1),
             2 => RepositoryIncarnationConfigurationBody::read_payload(input)
                 .map(VerifiedReadConfiguration::RepositoryIncarnationV2),
+            3 => RepositoryIncarnationConfigurationBodyV2_1::read_payload(input)
+                .map(VerifiedReadConfiguration::RepositoryIncarnationV2_1),
             observed => Err(CodecRefusal::VariantUnknown {
                 field: "VerifiedReadConfiguration",
                 observed: u32::from(observed),
@@ -1281,6 +1302,9 @@ fn selected_ref_layout(
             body_id(&CryptoBodyIdentity, configuration)
         }
         VerifiedReadConfiguration::RepositoryIncarnationV2(configuration) => {
+            body_id(&CryptoBodyIdentity, configuration)
+        }
+        VerifiedReadConfiguration::RepositoryIncarnationV2_1(configuration) => {
             body_id(&CryptoBodyIdentity, configuration)
         }
     }
