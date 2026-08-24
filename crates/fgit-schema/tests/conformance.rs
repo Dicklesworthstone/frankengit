@@ -448,7 +448,7 @@ const fn wire_oid(byte: u8) -> GitOid {
     GitOid::Sha1(GitOidSha1::from_bytes([byte; GitOidSha1::LEN]))
 }
 
-fn wire_proof() -> MerkleProof {
+const fn wire_proof() -> MerkleProof {
     MerkleProof::new(0, 1, Vec::new())
 }
 
@@ -539,7 +539,7 @@ fn verified_read_envelope_descriptor_accounts_for_every_answer_and_configuration
     assert_describes(&registry::VERIFIED_READ_ENVELOPE, &payload_of(&outcome));
 
     let query = wire_name(b"refs/heads/middle");
-    let absence = authorize_ref_absence(&PermitAll, query.clone(), |_| false)
+    let absence = authorize_ref_absence(&PermitAll, query, |_| false)
         .expect("the fixture permits name disclosure before lookup");
     let absence = VerifiedReadEnvelope::new_with_exact_configuration(
         head,
