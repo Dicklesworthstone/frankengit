@@ -720,19 +720,46 @@ pub type AsyncProjectionFailure = ProjectionFailure;
 /// `ref_root`.
 ///
 /// The payload is a canonical map from validated ref names to native Git
-/// object identities.  [`Encoder::write_canonical_map`] sorts by each key's
+/// object identities plus the optional target of the repository's `HEAD`
+/// symbolic ref.  [`Encoder::write_canonical_map`] sorts by each key's
 /// encoded bytes and refuses duplicate keys; the explicit codec operation is
 /// the ordering rule, rather than an incidental property of `BTreeMap`.
+///
+/// `HEAD` itself is not a direct ref and therefore cannot appear in `refs`.
+/// Its target is nevertheless part of this body: an upload-pack advertisement
+/// derived from it is consequently bound to the same authority-selected
+/// `ref_root` as the direct refs it exposes.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CanonicalRefState {
     refs: BTreeMap<RefName, fgit_types::GitOid>,
+    head_target: Option<RefName>,
 }
 
 impl CanonicalRefState {
     /// Builds an immutable ref state from uniquely keyed validated refs.
     #[must_use]
     pub const fn new(refs: BTreeMap<RefName, fgit_types::GitOid>) -> Self {
-        Self { refs }
+        Self {
+            refs,
+            head_target: None,
+        }
+    }
+
+    /// Builds a ref state whose canonical `HEAD` symbolic ref targets a
+    /// branch namespace ref.
+    ///
+    /// The target may be absent from `refs` only for the empty repository's
+    /// unborn `HEAD`; a receive transition may not create that state by
+    /// deleting an existing target (see [`Self::apply`]).
+    pub fn new_with_head_target(
+        refs: BTreeMap<RefName, fgit_types::GitOid>,
+        head_target: RefName,
+    ) -> Result<Self, RefusalCode> {
+        validate_head_target(&head_target)?;
+        Ok(Self {
+            refs,
+            head_target: Some(head_target),
+        })
     }
 
     /// The resolved ref map.
@@ -741,7 +768,20 @@ impl CanonicalRefState {
         &self.refs
     }
 
-    fn apply(&self, effects: &BTreeMap<RefName, RefEffect>) -> Self {
+    /// The canonical `HEAD` symbolic-ref target, when this state has one.
+    #[must_use]
+    pub const fn head_target(&self) -> Option<&RefName> {
+        self.head_target.as_ref()
+    }
+
+    fn apply(&self, effects: &BTreeMap<RefName, RefEffect>) -> Result<Self, RefusalCode> {
+        if self
+            .head_target
+            .as_ref()
+            .is_some_and(|target| matches!(effects.get(target), Some(RefEffect::Delete)))
+        {
+            return Err(RefusalCode::ProtectedRefTransitionDenied);
+        }
         let mut refs = self.refs.clone();
         for (name, effect) in effects {
             match effect {
@@ -753,7 +793,18 @@ impl CanonicalRefState {
                 }
             }
         }
-        Self { refs }
+        Ok(Self {
+            refs,
+            head_target: self.head_target.clone(),
+        })
+    }
+}
+
+fn validate_head_target(target: &RefName) -> Result<(), RefusalCode> {
+    if target.as_bytes().starts_with(b"refs/heads/") {
+        Ok(())
+    } else {
+        Err(RefusalCode::RefNameInvalid)
     }
 }
 
@@ -761,7 +812,7 @@ impl CanonicalBody for CanonicalRefState {
     const DOMAIN: DomainTag = DomainTag::from_static("frankengit/ref-state/v1");
     const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("ref-state");
     const SCHEMA_MAJOR: u16 = 1;
-    const SCHEMA_MINOR: u16 = 0;
+    const SCHEMA_MINOR: u16 = 1;
 
     fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         let entries = self
@@ -777,7 +828,10 @@ impl CanonicalBody for CanonicalRefState {
                 encoder.write_git_oid(oid);
                 Ok(())
             },
-        )
+        )?;
+        out.write_option(self.head_target.as_ref(), |encoder, target| {
+            encoder.write_ref_name(target)
+        })
     }
 
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
@@ -789,7 +843,16 @@ impl CanonicalBody for CanonicalRefState {
             )?
             .into_iter()
             .collect();
-        Ok(Self { refs })
+        let head_target = input.read_option("ref-state.head_target", Decoder::read_ref_name)?;
+        if let Some(target) = &head_target {
+            validate_head_target(target).map_err(|_| {
+                fgit_types::TypeRefusal::RefNameStructureInvalid {
+                    reason: "head_target_not_branch_ref",
+                    offset: 0,
+                }
+            })?;
+        }
+        Ok(Self { refs, head_target })
     }
 }
 
@@ -1023,7 +1086,7 @@ pub fn prepare_canonical_commit(
         return Err(RefusalCode::ConflictingSemanticEffects);
     }
 
-    let next_ref_state = current.apply(&effects.refs);
+    let next_ref_state = current.apply(&effects.refs)?;
     let ref_root = canonical_ref_state_root(&next_ref_state)?;
     let object_closure = PermittedObjectClosure::new(closure.objects.clone());
     let object_closure_root = permitted_object_closure_root(&object_closure)?;
@@ -3008,8 +3071,10 @@ mod tests {
         FaultPlan, FaultableAuthorityStore, HeadKey, HeadReadReceipt, MemoryAuthorityStore,
         OpIndex, StoreInstanceId, initialize_repository, resolve_outcome,
     };
-    use fgit_codec::{RepositoryAuthorityHeadBody, RepositoryCommitRecord, decode_body};
-    use fgit_reference::effect::FoldOutcome;
+    use fgit_codec::{
+        RepositoryAuthorityHeadBody, RepositoryCommitRecord, decode_body, encode_body,
+    };
+    use fgit_reference::effect::{FoldOutcome, RefEffect};
     use fgit_types::{
         DigestAlgorithmId, DigestBytes, HeadGeneration, PolicyEpoch, PrincipalSnapshotId,
         RegistryEpoch, RepositorySequence,
@@ -3415,6 +3480,60 @@ mod tests {
         let projection =
             CanonicalAdmissionProjection::new(staging.clone(), CanonicalFixtureEvidence);
         (store, staging, projection)
+    }
+
+    #[test]
+    fn canonical_head_target_is_authority_bound_and_round_trips() {
+        let main = RefName::try_new(b"refs/heads/main").expect("main is a valid branch ref");
+        let topic = RefName::try_new(b"refs/heads/topic").expect("topic is a valid branch ref");
+        let refs = BTreeMap::from([(main.clone(), oid(31)), (topic, oid(32))]);
+        let without_head = CanonicalRefState::new(refs.clone());
+        let with_head = CanonicalRefState::new_with_head_target(refs, main.clone())
+            .expect("a branch target is a valid canonical HEAD");
+
+        assert_eq!(with_head.head_target(), Some(&main));
+        assert_ne!(
+            canonical_ref_state_root(&without_head).expect("state has a root"),
+            canonical_ref_state_root(&with_head).expect("state has a root"),
+            "the authority ref root must bind the advertised HEAD target"
+        );
+
+        let frame = encode_body(&with_head).expect("HEAD-bearing state encodes");
+        let decoded: CanonicalRefState =
+            decode_body(&frame, fgit_codec::DecodeLimits::DEFAULT).expect("state decodes");
+        assert_eq!(decoded, with_head);
+    }
+
+    #[test]
+    fn canonical_head_rejects_non_branch_targets_and_target_deletion() {
+        let tag = RefName::try_new(b"refs/tags/v1").expect("tag ref syntax is valid");
+        assert_eq!(
+            CanonicalRefState::new_with_head_target(BTreeMap::new(), tag),
+            Err(RefusalCode::RefNameInvalid),
+            "HEAD must not target a non-branch namespace"
+        );
+
+        let main = RefName::try_new(b"refs/heads/main").expect("main is a valid branch ref");
+        let topic = RefName::try_new(b"refs/heads/topic").expect("topic is a valid branch ref");
+        let state = CanonicalRefState::new_with_head_target(
+            BTreeMap::from([(main.clone(), oid(33)), (topic.clone(), oid(34))]),
+            main.clone(),
+        )
+        .expect("branch target is permitted");
+
+        let delete_head = BTreeMap::from([(main, RefEffect::Delete)]);
+        assert_eq!(
+            state.apply(&delete_head),
+            Err(RefusalCode::ProtectedRefTransitionDenied),
+            "receive-pack must refuse deletion of the branch HEAD names"
+        );
+
+        let delete_topic = BTreeMap::from([(topic.clone(), RefEffect::Delete)]);
+        let next = state
+            .apply(&delete_topic)
+            .expect("deleting a non-HEAD branch remains permitted");
+        assert_eq!(next.head_target(), state.head_target());
+        assert!(!next.refs().contains_key(&topic));
     }
 
     fn create(ref_name: &[u8], new: u8) -> ReceiveCommand {
