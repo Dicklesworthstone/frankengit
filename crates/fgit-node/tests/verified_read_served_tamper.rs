@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_authority::{AuthorityVersionToken, HeadRead, HeadReadReceipt};
+use fgit_codec::DecodeLimits;
 use fgit_crypto::MerkleRefusal;
 use fgit_node::{NodeConfig, OneNode, VerifiedReadQuery, VerifiedReadServingRefusal};
 use fgit_types::cell::{CellState, CellTransitionCause, ReadLabel};
@@ -34,7 +35,8 @@ use fgit_types::{RepositoryId, TenantId};
 use fgit_verified_read::freshness::{FreshnessRefusal, FreshnessVerdict, HeadChainFloor};
 use fgit_verified_read::{
     PinnedAuthorityHead, ReadResponse, VerifiedMembership, VerifiedReadCapability,
-    VerifiedReadEnvelope, VerifiedReadRefusal, verify_envelope,
+    VerifiedReadEnvelope, VerifiedReadRefusal, decode_verified_read_envelope,
+    encode_verified_read_envelope, verify_envelope,
 };
 use fgit_wire::visibility::RefVisibility;
 
@@ -339,4 +341,67 @@ fn a_fabricated_receipt_is_refused_by_authentication_before_anything_is_material
             ),
         ))
         .expect("the authentic receipt is served");
+}
+
+#[test]
+fn a_relayed_envelope_crosses_the_wire_and_the_client_runs_both_checks_on_the_decoded_form() {
+    // The last half of BlackOx's d89db78 item: "no serialized proxy/product-client
+    // boundary composes HeadChainFloor with verify_envelope."
+    //
+    // It was not constructible when reported — a verified read had no wire form
+    // anywhere in the workspace. `frankengit-ptoe` (bdd7752) added one, and its
+    // own wire.rs covers encode/decode, relay parsing and hostile bytes. What it
+    // does not cover is the FRESHNESS half: `grep HeadChainFloor` in that file
+    // returns zero. So the two client checks still met only on in-process
+    // values, never on bytes.
+    //
+    // This closes the chain end to end: real node -> production serve -> canonical
+    // encode -> independent decode -> floor AND verifier, on the decoded form.
+    let scratch = ScratchDirectory::new();
+    let node = serving_node(&scratch);
+
+    let response = serve(&node, VerifiedReadCapability::EnvelopeV1).expect("the node serves");
+    let ReadResponse::Verified(served) = response else {
+        panic!("a proof-capable node served an unproven response to an EnvelopeV1 client");
+    };
+
+    // THE WIRE HOP. From here on the client touches only bytes and what it
+    // decodes from them; the server-side object is dropped so nothing downstream
+    // can accidentally consult it.
+    let relay_bytes = encode_verified_read_envelope(&served).expect("the answer encodes");
+    let pinned = PinnedAuthorityHead::new(served.head().clone());
+    drop(served);
+
+    let decoded = decode_verified_read_envelope(&relay_bytes, DecodeLimits::DEFAULT)
+        .expect("a client decodes canonical relay bytes");
+
+    // BOTH CHECKS, on the decoded form. Freshness first: it answers "is this the
+    // moment I should be looking at", and a client that skips it accepts a
+    // replayed-but-genuine answer no proof check can reject.
+    let mut floor = HeadChainFloor::anchored_to(decoded.head()).expect("the decoded head anchors");
+    assert_eq!(
+        floor
+            .accept(decoded.head())
+            .expect("re-offering the decoded head is permitted"),
+        FreshnessVerdict::Reaffirms
+    );
+    assert_eq!(
+        verify_envelope(&pinned, &decoded),
+        Ok(VerifiedMembership::RefAbsence),
+        "an answer that crossed the wire must still verify against the client's own pin"
+    );
+
+    // AND THE FLOOR STILL DISCRIMINATES AFTER THE ROUND TRIP. A rival head at
+    // the same generation, rebuilt from the decoded value, is a fork rather than
+    // staleness — proving the freshness check survived encoding rather than
+    // being satisfied by whatever the wire happened to carry.
+    let mut rival_head = decoded.head().clone();
+    rival_head.ref_root = digest(0xC3);
+    assert_eq!(
+        floor.judge(&rival_head),
+        Err(FreshnessRefusal::ForkedAtGeneration {
+            generation: decoded.head().generation
+        }),
+        "a rival head at the pinned generation must be refused as a fork after decoding"
+    );
 }
