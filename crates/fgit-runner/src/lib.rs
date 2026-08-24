@@ -60,6 +60,8 @@ pub const MAX_LOG_BYTES: usize = 4 * 1024 * 1024;
 const CAPSULE_DOMAIN: &[u8] = b"frankengit/build-input-capsule/v1\0";
 const CACHE_DOMAIN: &[u8] = b"frankengit/runner-cache-key/v1\0";
 const COMMAND_DOMAIN: &[u8] = b"frankengit/build-command/v1\0";
+const REUSE_SPOT_CHECK_DOMAIN: &[u8] = b"frankengit/runner-reuse-spot-check/v1\0";
+const REUSE_ARTIFACTS_DOMAIN: &[u8] = b"frankengit/runner-reuse-artifacts/v1\0";
 
 /// A registered SHA-256 commitment used for runner inputs and outputs.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -1467,6 +1469,586 @@ impl CheckReceipt {
     }
 }
 
+/// A workflow author's explicit reproducibility declaration.
+///
+/// Reuse is permitted only for [`Self::DeclaredDeterministic`].  The runner
+/// never infers reproducibility from a successful execution or from a cache
+/// hit, because that would let an incidental observation become policy.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum DeterminismDeclaration {
+    /// The workflow contract declares byte-stable output for this step.
+    DeclaredDeterministic,
+    /// The workflow contract declares output nondeterministic.
+    DeclaredNondeterministic,
+}
+
+/// Workflow-level declaration before runner lowering.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct WorkflowStepDeclaration {
+    step_id: RunnerText,
+    determinism: DeterminismDeclaration,
+}
+
+impl WorkflowStepDeclaration {
+    /// Creates one declared workflow step.
+    #[must_use]
+    pub const fn new(step_id: RunnerText, determinism: DeterminismDeclaration) -> Self {
+        Self {
+            step_id,
+            determinism,
+        }
+    }
+
+    /// Lowers the declaration into the runner's exact reuse input.
+    #[must_use]
+    pub fn lower(self) -> LoweredWorkflowStep {
+        LoweredWorkflowStep {
+            step_id: self.step_id,
+            determinism: self.determinism,
+        }
+    }
+}
+
+/// Runner-owned immutable lowering of one workflow step declaration.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LoweredWorkflowStep {
+    step_id: RunnerText,
+    determinism: DeterminismDeclaration,
+}
+
+impl LoweredWorkflowStep {
+    /// Stable workflow step identifier included in every reuse key.
+    #[must_use]
+    pub const fn step_id(&self) -> &RunnerText {
+        &self.step_id
+    }
+
+    /// The workflow's explicit reproducibility declaration.
+    #[must_use]
+    pub const fn determinism(&self) -> DeterminismDeclaration {
+        self.determinism
+    }
+}
+
+/// Stable identity of the original execution that produced a cached output.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ExecutionRunId(RunnerText);
+
+impl ExecutionRunId {
+    /// Parses one canonical execution-run identity.
+    pub fn parse(value: &str) -> Result<Self, RunnerRefusal> {
+        RunnerText::parse("execution_run_id", value).map(Self)
+    }
+
+    /// Canonical run identity.
+    #[must_use]
+    pub const fn as_text(&self) -> &RunnerText {
+        &self.0
+    }
+}
+
+/// Exact cache lookup key: trust partition, full input capsule, and step.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ReuseKey {
+    trust_domain: TrustDomain,
+    capsule_id: CapsuleId,
+    step_id: RunnerText,
+}
+
+impl ReuseKey {
+    fn new(trust_domain: TrustDomain, capsule_id: CapsuleId, step_id: RunnerText) -> Self {
+        Self {
+            trust_domain,
+            capsule_id,
+            step_id,
+        }
+    }
+
+    /// Trust partition that scopes this derived entry.
+    #[must_use]
+    pub const fn trust_domain(&self) -> &TrustDomain {
+        &self.trust_domain
+    }
+
+    /// Exact build capsule required for a reuse hit.
+    #[must_use]
+    pub const fn capsule_id(&self) -> CapsuleId {
+        self.capsule_id
+    }
+
+    /// Exact lowered workflow step required for a reuse hit.
+    #[must_use]
+    pub const fn step_id(&self) -> &RunnerText {
+        &self.step_id
+    }
+}
+
+/// A trust-scoped workflow class quarantined after a failed spot check.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ReuseClass {
+    trust_domain: TrustDomain,
+    step_id: RunnerText,
+}
+
+impl ReuseClass {
+    fn from_key(key: &ReuseKey) -> Self {
+        Self {
+            trust_domain: key.trust_domain.clone(),
+            step_id: key.step_id.clone(),
+        }
+    }
+
+    /// Trust partition containing this workflow class.
+    #[must_use]
+    pub const fn trust_domain(&self) -> &TrustDomain {
+        &self.trust_domain
+    }
+
+    /// Workflow step whose outputs are quarantined from reuse.
+    #[must_use]
+    pub const fn step_id(&self) -> &RunnerText {
+        &self.step_id
+    }
+}
+
+/// Deterministic schedule for a pseudorandomly distributed spot-check sample.
+///
+/// The caller supplies a policy seed.  Selection is a deterministic hash of
+/// that seed and the exact reuse key, so a verifier can replay which entries
+/// were selected without treating cache state as authority.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SpotCheckSchedule {
+    numerator: u16,
+    denominator: u16,
+    selection_seed: Commitment,
+}
+
+impl SpotCheckSchedule {
+    /// Creates a sample schedule with `numerator / denominator` selection.
+    pub fn new(
+        numerator: u16,
+        denominator: u16,
+        selection_seed: Commitment,
+    ) -> Result<Self, ReuseRefusal> {
+        if denominator == 0 || numerator > denominator {
+            return Err(ReuseRefusal::InvalidSpotCheckSchedule);
+        }
+        Ok(Self {
+            numerator,
+            denominator,
+            selection_seed,
+        })
+    }
+
+    /// Whether this exact key is selected for reexecution.
+    #[must_use]
+    pub fn selects(&self, key: &ReuseKey) -> bool {
+        if self.numerator == 0 {
+            return false;
+        }
+        if self.numerator == self.denominator {
+            return true;
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(REUSE_SPOT_CHECK_DOMAIN);
+        write_digest(&mut bytes, self.selection_seed.digest());
+        write_text(&mut bytes, key.trust_domain.name().as_str());
+        write_digest(&mut bytes, key.capsule_id.commitment().digest());
+        write_text(&mut bytes, key.step_id.as_str());
+        let selection = Commitment::of_bytes(&bytes);
+        let mut prefix = [0_u8; 8];
+        prefix.copy_from_slice(&selection.digest().bytes().as_bytes()[..8]);
+        u64::from_be_bytes(prefix) % u64::from(self.denominator) < u64::from(self.numerator)
+    }
+}
+
+/// Policy input for cache reuse.  It is consulted on both insert and lookup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReusePolicy {
+    permitted_steps: BTreeSet<RunnerText>,
+    spot_checks: SpotCheckSchedule,
+}
+
+impl ReusePolicy {
+    /// Creates a policy that permits reuse only for the named lowered steps.
+    pub fn new(
+        permitted_steps: Vec<RunnerText>,
+        spot_checks: SpotCheckSchedule,
+    ) -> Result<Self, ReuseRefusal> {
+        let mut canonical = BTreeSet::new();
+        for step_id in permitted_steps {
+            if !canonical.insert(step_id) {
+                return Err(ReuseRefusal::DuplicatePolicyStep);
+            }
+        }
+        Ok(Self {
+            permitted_steps: canonical,
+            spot_checks,
+        })
+    }
+
+    fn permits(&self, step: &LoweredWorkflowStep) -> bool {
+        self.permitted_steps.contains(step.step_id())
+    }
+
+    /// Deterministic schedule used for selected reuse receipts.
+    #[must_use]
+    pub const fn spot_checks(&self) -> SpotCheckSchedule {
+        self.spot_checks
+    }
+}
+
+/// A reference to the immutable receipt produced by the original execution.
+///
+/// This is deliberately not a [`CheckReceipt`].  A cache reuse did not launch
+/// a process, reserve a slot, or observe reaping; consumers must retain that
+/// structural distinction rather than treating reuse as a fresh execution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionReceiptReference {
+    run_id: ExecutionRunId,
+    capsule_id: CapsuleId,
+    cache_namespace: CacheNamespace,
+    evidence: EvidenceRecord,
+}
+
+impl ExecutionReceiptReference {
+    /// Original execution identity.
+    #[must_use]
+    pub const fn run_id(&self) -> &ExecutionRunId {
+        &self.run_id
+    }
+
+    /// Capsule that the original receipt bound.
+    #[must_use]
+    pub const fn capsule_id(&self) -> CapsuleId {
+        self.capsule_id
+    }
+
+    /// Trust-scoped namespace that the original receipt bound.
+    #[must_use]
+    pub const fn cache_namespace(&self) -> CacheNamespace {
+        self.cache_namespace
+    }
+
+    /// Immutable provenance for the original execution receipt.
+    #[must_use]
+    pub const fn evidence(&self) -> &EvidenceRecord {
+        &self.evidence
+    }
+}
+
+/// A cache reuse observation, structurally distinct from an execution receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReuseReceipt {
+    key: ReuseKey,
+    artifacts: Vec<Commitment>,
+    original_execution: ExecutionReceiptReference,
+    spot_check_scheduled: bool,
+}
+
+impl ReuseReceipt {
+    /// Exact derived-cache key that was reused.
+    #[must_use]
+    pub const fn key(&self) -> &ReuseKey {
+        &self.key
+    }
+
+    /// Content-addressed artifacts retained in original output order.
+    #[must_use]
+    pub fn artifacts(&self) -> &[Commitment] {
+        &self.artifacts
+    }
+
+    /// Immutable reference to the original producing execution.
+    #[must_use]
+    pub const fn original_execution(&self) -> &ExecutionReceiptReference {
+        &self.original_execution
+    }
+
+    /// Whether this reuse must be independently reexecuted and compared.
+    #[must_use]
+    pub const fn spot_check_scheduled(&self) -> bool {
+        self.spot_check_scheduled
+    }
+}
+
+/// A typed reason that an exact cache lookup executes instead of reusing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReuseMiss {
+    /// This step is intentionally nondeterministic according to workflow lowering.
+    NondeterministicDeclaration,
+    /// Policy does not permit this step to reuse output.
+    PolicyDenied,
+    /// No entry exists for the exact trust-domain, capsule, and step key.
+    ExactOutputAbsent {
+        /// Exact key that did not resolve to a derived output.
+        key: ReuseKey,
+    },
+    /// A prior sampled mismatch quarantined the whole trust-scoped step class.
+    ClassQuarantined {
+        /// Class that must be reverified before any later reuse.
+        class: ReuseClass,
+        /// Immutable evidence for the sampled mismatch.
+        evidence: ReuseNegativeEvidence,
+    },
+}
+
+/// Result of the policy-constrained exact lookup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReuseDecision {
+    /// A real execution is required before producing output.
+    Execute(ReuseMiss),
+    /// The exact stored output may be reused, with original provenance named.
+    Reuse(ReuseReceipt),
+}
+
+/// Immutable negative evidence emitted by a failed reuse spot check.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReuseNegativeEvidence {
+    class: ReuseClass,
+    original_execution: ExecutionReceiptReference,
+    reexecution_run_id: ExecutionRunId,
+    expected_artifacts: Vec<Commitment>,
+    observed_artifacts: Vec<Commitment>,
+    evidence: EvidenceRecord,
+}
+
+impl ReuseNegativeEvidence {
+    /// Class removed from reuse eligibility by this observation.
+    #[must_use]
+    pub const fn class(&self) -> &ReuseClass {
+        &self.class
+    }
+
+    /// Original run whose output was selected for reuse.
+    #[must_use]
+    pub const fn original_execution(&self) -> &ExecutionReceiptReference {
+        &self.original_execution
+    }
+
+    /// Independently executed run that disagreed byte-for-byte.
+    #[must_use]
+    pub const fn reexecution_run_id(&self) -> &ExecutionRunId {
+        &self.reexecution_run_id
+    }
+
+    /// Original ordered artifact commitments.
+    #[must_use]
+    pub fn expected_artifacts(&self) -> &[Commitment] {
+        &self.expected_artifacts
+    }
+
+    /// Independently observed ordered artifact commitments.
+    #[must_use]
+    pub fn observed_artifacts(&self) -> &[Commitment] {
+        &self.observed_artifacts
+    }
+
+    /// Canonical negative-evidence record for the mismatch.
+    #[must_use]
+    pub const fn evidence(&self) -> &EvidenceRecord {
+        &self.evidence
+    }
+}
+
+/// Terminal result of a scheduled reuse spot check.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SpotCheckResult {
+    /// Independent execution produced the exact same ordered artifact bytes.
+    Matched,
+    /// Independent execution disagreed and automatically quarantined the class.
+    Mismatch(ReuseNegativeEvidence),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CachedOutput {
+    artifacts: Vec<Commitment>,
+    original_execution: ExecutionReceiptReference,
+}
+
+/// Discardable, derived cache of completed outputs.
+///
+/// This store has no authority or durability role.  It can be deleted and
+/// rebuilt from immutable execution receipts, and neither its presence nor a
+/// reuse decision publishes repository state.  The only accepted lookup is an
+/// exact `(trust domain, BuildInputCapsule id, lowered step)` match.
+#[derive(Default)]
+pub struct OutputStore {
+    entries: BTreeMap<ReuseKey, CachedOutput>,
+    quarantined_classes: BTreeMap<ReuseClass, ReuseNegativeEvidence>,
+}
+
+impl OutputStore {
+    /// Creates an empty derived output store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Stores successful output and the immutable receipt that originally made it.
+    ///
+    /// An existing exact key is never overwritten with a different producing
+    /// run.  That conflict is a refusal, not a race-dependent cache update.
+    pub fn record_execution(
+        &mut self,
+        trust_domain: TrustDomain,
+        capsule: &BuildInputCapsule,
+        step: &LoweredWorkflowStep,
+        policy: &ReusePolicy,
+        run_id: ExecutionRunId,
+        receipt: &CheckReceipt,
+    ) -> Result<(), ReuseRefusal> {
+        require_reusable_step(step, policy)?;
+        if receipt.outcome() != CheckOutcome::Succeeded {
+            return Err(ReuseRefusal::ExecutionDidNotSucceed);
+        }
+        if receipt.capsule_id() != capsule.id()
+            || receipt.cache_namespace() != CacheNamespace::for_capsule(&trust_domain, capsule)
+        {
+            return Err(ReuseRefusal::ReceiptBindingMismatch);
+        }
+        let key = ReuseKey::new(trust_domain, capsule.id(), step.step_id().clone());
+        let output = CachedOutput {
+            artifacts: receipt.artifacts().to_vec(),
+            original_execution: ExecutionReceiptReference {
+                run_id,
+                capsule_id: receipt.capsule_id(),
+                cache_namespace: receipt.cache_namespace(),
+                evidence: receipt.evidence().clone(),
+            },
+        };
+        if let Some(existing) = self.entries.get(&key) {
+            if existing != &output {
+                return Err(ReuseRefusal::ConflictingExactOutput);
+            }
+            return Ok(());
+        }
+        self.entries.insert(key, output);
+        Ok(())
+    }
+
+    /// Resolves a derived output only after declaration, policy, quarantine, and
+    /// exact-key checks all agree that reuse is allowed.
+    #[must_use]
+    pub fn decide(
+        &self,
+        trust_domain: TrustDomain,
+        capsule: &BuildInputCapsule,
+        step: &LoweredWorkflowStep,
+        policy: &ReusePolicy,
+    ) -> ReuseDecision {
+        if step.determinism() == DeterminismDeclaration::DeclaredNondeterministic {
+            return ReuseDecision::Execute(ReuseMiss::NondeterministicDeclaration);
+        }
+        if !policy.permits(step) {
+            return ReuseDecision::Execute(ReuseMiss::PolicyDenied);
+        }
+        let key = ReuseKey::new(trust_domain, capsule.id(), step.step_id().clone());
+        let class = ReuseClass::from_key(&key);
+        if let Some(evidence) = self.quarantined_classes.get(&class) {
+            return ReuseDecision::Execute(ReuseMiss::ClassQuarantined {
+                class,
+                evidence: evidence.clone(),
+            });
+        }
+        let Some(output) = self.entries.get(&key) else {
+            return ReuseDecision::Execute(ReuseMiss::ExactOutputAbsent { key });
+        };
+        ReuseDecision::Reuse(ReuseReceipt {
+            spot_check_scheduled: policy.spot_checks().selects(&key),
+            key,
+            artifacts: output.artifacts.clone(),
+            original_execution: output.original_execution.clone(),
+        })
+    }
+
+    /// Compares the scheduled independent reexecution with the reused bytes.
+    ///
+    /// A disagreement emits immutable evidence and quarantines the complete
+    /// trust-scoped step class before a later lookup can return another hit.
+    pub fn complete_spot_check(
+        &mut self,
+        reuse: &ReuseReceipt,
+        reexecution_run_id: ExecutionRunId,
+        capsule: &BuildInputCapsule,
+        reexecution: &CheckReceipt,
+    ) -> Result<SpotCheckResult, ReuseRefusal> {
+        if !reuse.spot_check_scheduled() {
+            return Err(ReuseRefusal::SpotCheckNotScheduled);
+        }
+        if reuse.original_execution.run_id() == &reexecution_run_id {
+            return Err(ReuseRefusal::ReexecutionUsesOriginalRun);
+        }
+        if reexecution.outcome() != CheckOutcome::Succeeded
+            || reexecution.capsule_id() != reuse.key.capsule_id()
+            || reexecution.capsule_id() != capsule.id()
+            || reexecution.cache_namespace()
+                != CacheNamespace::for_capsule(reuse.key.trust_domain(), capsule)
+        {
+            return Err(ReuseRefusal::ReceiptBindingMismatch);
+        }
+        if reuse.artifacts == reexecution.artifacts() {
+            return Ok(SpotCheckResult::Matched);
+        }
+        let negative = ReuseNegativeEvidence {
+            class: ReuseClass::from_key(&reuse.key),
+            original_execution: reuse.original_execution.clone(),
+            reexecution_run_id,
+            expected_artifacts: reuse.artifacts.clone(),
+            observed_artifacts: reexecution.artifacts().to_vec(),
+            evidence: reuse_negative_evidence(reuse, reexecution)?,
+        };
+        self.quarantined_classes
+            .insert(negative.class.clone(), negative.clone());
+        Ok(SpotCheckResult::Mismatch(negative))
+    }
+}
+
+/// Typed refusal for output reuse and sampled reexecution.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ReuseRefusal {
+    /// A sample fraction had zero denominator or exceeded one whole.
+    InvalidSpotCheckSchedule,
+    /// Policy named one workflow step more than once.
+    DuplicatePolicyStep,
+    /// A workflow declaration prohibits reuse.
+    NondeterministicStep,
+    /// Policy prohibits reuse for this declared deterministic step.
+    StepNotPermitted,
+    /// Only successful execution receipts may become cached outputs.
+    ExecutionDidNotSucceed,
+    /// Receipt capsule or cache namespace did not bind the expected identity.
+    ReceiptBindingMismatch,
+    /// A different original run attempted to replace an exact cached output.
+    ConflictingExactOutput,
+    /// A caller attempted to complete an unscheduled spot check.
+    SpotCheckNotScheduled,
+    /// A reexecution must use a distinct execution-run identity.
+    ReexecutionUsesOriginalRun,
+    /// Canonical negative evidence could not be constructed.
+    EvidenceConstruction,
+}
+
+impl fmt::Display for ReuseRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::InvalidSpotCheckSchedule => "invalid reuse spot-check schedule",
+            Self::DuplicatePolicyStep => "reuse policy contains a duplicate step",
+            Self::NondeterministicStep => "workflow declaration prohibits output reuse",
+            Self::StepNotPermitted => "reuse policy does not permit this step",
+            Self::ExecutionDidNotSucceed => "only successful execution receipts may be reused",
+            Self::ReceiptBindingMismatch => "receipt does not bind the exact reuse identity",
+            Self::ConflictingExactOutput => "exact reuse key already names another producing run",
+            Self::SpotCheckNotScheduled => "reuse receipt was not selected for a spot check",
+            Self::ReexecutionUsesOriginalRun => "spot check must use a distinct execution run",
+            Self::EvidenceConstruction => "reuse negative evidence construction refused",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for ReuseRefusal {}
+
 /// Typed refusal returned by runner planning, admission, or finalization.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RunnerRefusal {
@@ -1686,6 +2268,107 @@ fn has_duplicate_commitment(commitments: &[Commitment]) -> bool {
     commitments
         .iter()
         .any(|commitment| !seen.insert(*commitment))
+}
+
+fn require_reusable_step(
+    step: &LoweredWorkflowStep,
+    policy: &ReusePolicy,
+) -> Result<(), ReuseRefusal> {
+    if step.determinism() == DeterminismDeclaration::DeclaredNondeterministic {
+        return Err(ReuseRefusal::NondeterministicStep);
+    }
+    if !policy.permits(step) {
+        return Err(ReuseRefusal::StepNotPermitted);
+    }
+    Ok(())
+}
+
+fn artifact_sequence_commitment(artifacts: &[Commitment]) -> Commitment {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(REUSE_ARTIFACTS_DOMAIN);
+    write_count(&mut bytes, artifacts.len());
+    for artifact in artifacts {
+        write_digest(&mut bytes, artifact.digest());
+    }
+    Commitment::of_bytes(&bytes)
+}
+
+fn reuse_negative_evidence(
+    reuse: &ReuseReceipt,
+    reexecution: &CheckReceipt,
+) -> Result<EvidenceRecord, ReuseRefusal> {
+    let sources = canonical_evidence_text_set(
+        vec![
+            reuse_evidence_text("source_input", format!("capsule-{}", reuse.key.capsule_id))?,
+            reuse_evidence_text(
+                "source_input",
+                format!(
+                    "original-run-{}",
+                    reuse.original_execution.run_id().as_text()
+                ),
+            )?,
+            reuse_evidence_text(
+                "source_input",
+                format!("reexecution-evidence-{}", reexecution.evidence().id()),
+            )?,
+        ],
+        "source_input",
+    )
+    .map_err(|_| ReuseRefusal::EvidenceConstruction)?;
+    let assumptions = canonical_evidence_text_set(
+        vec![
+            reuse_evidence_text("assumption", "exact-key-required".to_owned())?,
+            reuse_evidence_text("assumption", "ordered-artifacts-compared".to_owned())?,
+        ],
+        "assumption",
+    )
+    .map_err(|_| ReuseRefusal::EvidenceConstruction)?;
+    let artifacts = canonical_evidence_artifact_set(vec![
+        EvidenceArtifact::new(
+            reuse_evidence_text("artifact_location", "expected-artifacts".to_owned())?,
+            artifact_sequence_commitment(reuse.artifacts()).digest(),
+        ),
+        EvidenceArtifact::new(
+            reuse_evidence_text("artifact_location", "observed-artifacts".to_owned())?,
+            artifact_sequence_commitment(reexecution.artifacts()).digest(),
+        ),
+    ])
+    .map_err(|_| ReuseRefusal::EvidenceConstruction)?;
+    let context = EvidenceContext::new(
+        sources,
+        reuse_evidence_text("implementation", "fgit-runner-reuse-v1".to_owned())?,
+        reuse_evidence_text("toolchain", "receipt-bound-toolchain".to_owned())?,
+        reuse_evidence_text("selection", "policy-scheduled-spot-check".to_owned())?,
+        reuse_evidence_text(
+            "window",
+            format!(
+                "trust-{}-step-{}",
+                reuse.key.trust_domain.name(),
+                reuse.key.step_id
+            ),
+        )?,
+        reuse_evidence_text("policy", "quarantine-on-byte-mismatch".to_owned())?,
+        assumptions,
+        reuse_evidence_text("verifier", "independent-runner-reexecution".to_owned())?,
+        artifacts,
+        reuse_evidence_text("fallback", "execute-without-reuse".to_owned())?,
+        ReplayCompleteness::Structural,
+        Some(reuse.original_execution.evidence().id()),
+    )
+    .map_err(|_| ReuseRefusal::EvidenceConstruction)?;
+    let body = EvidenceRecordBody::new(
+        reuse_evidence_text("claim_id", "runner-reuse-spot-check-mismatch".to_owned())?,
+        reuse_evidence_text("claim_scope", "trust-scoped-output-reuse-class".to_owned())?,
+        ClaimRank::Benchmark,
+        ClaimRank::Benchmark,
+        context,
+    )
+    .map_err(|_| ReuseRefusal::EvidenceConstruction)?;
+    EvidenceRecord::new(body).map_err(|_| ReuseRefusal::EvidenceConstruction)
+}
+
+fn reuse_evidence_text(field: &'static str, value: String) -> Result<EvidenceText, ReuseRefusal> {
+    EvidenceText::parse(field, &value).map_err(|_| ReuseRefusal::EvidenceConstruction)
 }
 
 fn receipt_evidence(
