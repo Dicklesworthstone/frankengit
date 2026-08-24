@@ -37,19 +37,19 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use fgit_authority::HeadReadReceipt;
 use fgit_authority::history::{
     ClientId as HistoryClientId, HistoryEvent, LogicalTime, OperationId,
 };
 use fgit_authority::lincheck::{
-    AuthorityHistory, CheckLimits, CheckReport, CheckVerdict, LinearizabilityChecker,
-    SequentialSpec,
+    AuthorityHistory, AuthorityReferenceSpec, CheckLimits, CheckReport, CheckVerdict,
+    LinearizabilityChecker,
 };
 use fgit_authority::{
     AuthorityClient, AuthorityOp, AuthorityResponse, AuthorityStore, AuthorityVersionToken,
     CasOutcome, FaultDirective, FaultKind, FaultPlan, FaultableAuthorityStore, HeadGeneration,
     HeadInit, HeadKey, HeadRead, MemoryAuthorityStore, OpIndex, StoreInstanceId,
 };
-use fgit_authority::{AuthorityRefusal, HeadReadReceipt, PutOutcome};
 use fgit_lab::journal::TraceEvent;
 use fgit_lab::{AuthorityCampaign, HazardScript, LabSchedule, LabTime, StepId, VirtualClock};
 
@@ -123,145 +123,6 @@ impl CampaignHistory {
 
     fn history(&self) -> AuthorityHistory {
         AuthorityHistory::new(self.events.clone()).expect("the campaign records a valid history")
-    }
-}
-
-/// The sequential specification the cell campaign is checked against.
-///
-/// Scoped to the two operations the cells actually issue. It is a SECOND model
-/// alongside the one in `fgit-authority`'s own `fault_campaign` tests, which is
-/// a duplication worth naming rather than hiding: two models of one vocabulary
-/// are free to drift, which is the shape `frankengit-0kqi` was filed for.
-/// Promoting a single reference spec into the library -- next to
-/// `suite.rs`, which exists for exactly this reason -- is the right fix, and is
-/// filed separately rather than smuggled into this bead.
-struct CellModel {
-    initial_generation: HeadGeneration,
-    initial_body: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct CellModelState {
-    /// The head as a whole receipt, not as separate fields.
-    ///
-    /// A version token names a head VERSION, not a read of one: the store hands
-    /// back the SAME token for repeated reads of an unchanged head and mints a
-    /// new one only when the head moves. Minting per read made two concurrent
-    /// reads of one head disagree with the store and reported a violation that
-    /// was purely an artefact of the model.
-    head: HeadReadReceipt,
-    /// Every token ever issued, and the key it was issued for.
-    ///
-    /// Needed because "this token is not one I minted" and "this token is stale"
-    /// are DIFFERENT answers from the store, and a model holding only the
-    /// current head cannot tell them apart.
-    issued: BTreeMap<AuthorityVersionToken, HeadKey>,
-    next_issuance: u64,
-}
-
-fn mint_token(next_issuance: &mut u64) -> AuthorityVersionToken {
-    let mut bytes = [0_u8; 16];
-    // MUST match `normalize_token`'s representative layout in fgit-authority's
-    // history module: the checker rewrites observed tokens to `b"fgithist"`
-    // plus a big-endian counter from 0, and compares the model's tokens against
-    // those rewritten ones. A different prefix makes every receipt unequal and
-    // the very first read reports NotLinearizable -- which is what it did.
-    bytes[..8].copy_from_slice(b"fgithist");
-    bytes[8..].copy_from_slice(&next_issuance.to_be_bytes());
-    *next_issuance = next_issuance.saturating_add(1);
-    AuthorityVersionToken::from_opaque_bytes(bytes)
-}
-
-impl SequentialSpec for CellModel {
-    type State = CellModelState;
-    type Operation = AuthorityOp;
-    type Response = AuthorityResponse;
-
-    fn initial_state(&self) -> Self::State {
-        // The head is seeded BEFORE the campaign, so the model does not start
-        // empty. Starting it empty would make every read disagree with the
-        // store and report a violation that is an artefact of the setup.
-        let mut next_issuance = 0_u64;
-        let token = mint_token(&mut next_issuance);
-        CellModelState {
-            head: HeadReadReceipt::new(
-                head_key(),
-                token,
-                self.initial_generation,
-                self.initial_body.clone(),
-            ),
-            issued: BTreeMap::from([(token, head_key())]),
-            next_issuance,
-        }
-    }
-
-    fn apply(
-        &self,
-        state: &Self::State,
-        operation: &Self::Operation,
-    ) -> (Self::State, Self::Response) {
-        let mut next = state.clone();
-        let response = match operation {
-            AuthorityOp::ReadHead { .. } => {
-                AuthorityResponse::ReadHead(HeadRead::Present(next.head.clone()))
-            }
-            AuthorityOp::CompareExchangeHead {
-                key,
-                expected,
-                new_generation,
-                new_body,
-            } => {
-                // 5.1: only a conditional replacement of the EXACT predecessor
-                // publishes, and that is decided against the CURRENT head's
-                // token. A token naming a superseded head must not win.
-                // The store's guards, IN ITS ORDER. Order is part of the
-                // contract: an unknown token is refused before the predecessor
-                // is compared, and monotonicity only AFTER the predecessor
-                // matches. A model that collapses them answers differently for
-                // any input that trips more than one.
-                match next.issued.get(expected) {
-                    None => AuthorityResponse::Refused(AuthorityRefusal::UnknownVersionToken),
-                    Some(issued_key) if issued_key != key => {
-                        AuthorityResponse::Refused(AuthorityRefusal::TokenKeyMismatch)
-                    }
-                    Some(_) if next.head.token() != *expected => {
-                        AuthorityResponse::CompareExchangeHead(CasOutcome::PredecessorMismatch)
-                    }
-                    Some(_) if *new_generation <= next.head.generation() => {
-                        // The serialised schedule reaches this and nothing else
-                        // does: cell B reads the head A just published and
-                        // re-proposes generation 2 against it. Its token IS
-                        // current, so this is not a predecessor mismatch -- it
-                        // is a non-advancing publish, which the store names
-                        // separately and refuses.
-                        AuthorityResponse::Refused(AuthorityRefusal::NonMonotoneGeneration {
-                            current: next.head.generation(),
-                            proposed: *new_generation,
-                        })
-                    }
-                    Some(_) => {
-                        let token = mint_token(&mut next.next_issuance);
-                        next.issued.insert(token, key.clone());
-                        next.head = HeadReadReceipt::new(
-                            key.clone(),
-                            token,
-                            *new_generation,
-                            new_body.clone(),
-                        );
-                        AuthorityResponse::CompareExchangeHead(CasOutcome::Committed(
-                            next.head.clone(),
-                        ))
-                    }
-                }
-            }
-            AuthorityOp::PutIfAbsent { .. } => AuthorityResponse::PutIfAbsent(PutOutcome::Conflict),
-            AuthorityOp::ReadImmutable { .. }
-            | AuthorityOp::InitializeHead { .. }
-            | AuthorityOp::AuthenticateHeadReceipt { .. } => {
-                unreachable!("the cell campaign issues only ReadHead and CompareExchangeHead")
-            }
-        };
-        (next, response)
     }
 }
 
@@ -459,10 +320,12 @@ fn run(
         HeadRead::Present(receipt) => receipt.generation().get(),
         HeadRead::Absent => panic!("the head vanished"),
     };
-    let model = CellModel {
-        initial_generation: HeadGeneration::FIRST,
-        initial_body: b"root".to_vec(),
-    };
+    let model = AuthorityReferenceSpec::with_initial_head(
+        StoreInstanceId::from_raw(instance),
+        head_key(),
+        HeadGeneration::FIRST,
+        b"root".to_vec(),
+    );
     let report = LinearizabilityChecker::new(CheckLimits {
         max_completed_operations: 16,
         max_search_nodes: 100_000,
