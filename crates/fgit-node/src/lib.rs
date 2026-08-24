@@ -41,15 +41,15 @@ use fgit_admission::{
 use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
     AuthorityVersionToken, HeadInit, HeadKey, HeadRead, IdempotencyKey, ImmutableKey,
-    ImmutableRead, KeyError, OutcomeLookup, PublicationOutcome, PutOutcome, StoreInstanceId,
-    initialize_repository_async, outcome_index_root, publish_decisions_async,
-    read_authority_head_body_async, read_decision_batch_body_async, resolve_outcome_async,
+    ImmutableRead, KeyError, OutcomeLookup, PutOutcome, StoreInstanceId,
+    initialize_repository_async, outcome_index_root, read_authority_head_body_async,
+    read_decision_batch_body_async, resolve_outcome_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
-use fgit_chronicle::{PublicationBasis, verify_pair};
-use fgit_codec::schema::{
-    RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryDecisionBatchBody,
+use fgit_chronicle::{
+    PublicationBasis, PublicationVerdict, VerifiedPublication, publish_async, verify_pair,
 };
+use fgit_codec::schema::{RepositoryAuthorityHeadBody, RepositoryCommitRecord};
 use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, body_id, decode_body, encode_body,
 };
@@ -85,8 +85,10 @@ use fgit_wire::{
 use fsqlite_types::cx::Cx as FsqliteCx;
 
 mod loose_import;
+mod quarantine_validator;
 
 pub use loose_import::{LooseGitImportRefusal, StagedLooseGitImport};
+pub use quarantine_validator::ProductionQuarantineValidator;
 
 const OBJECT_CODEC_NAMESPACE: &[u8] = b"git-object-body/v1";
 const HEAD_KEY_PREFIX: &[u8] = b"frankengit/node/head/";
@@ -1479,6 +1481,7 @@ impl DurableAdmissionMaterializer {
                 forge_positions: BTreeMap::new(),
                 retention: BTreeSet::new(),
                 outbox: BTreeMap::new(),
+                hidden_refs: RefVisibility::new(),
             };
             let cache_permit = cache_grant
                 .accept(cache_binding)
@@ -1570,6 +1573,7 @@ impl DurableAdmissionMaterializer {
             forge_positions: BTreeMap::new(),
             retention: BTreeSet::new(),
             outbox: BTreeMap::new(),
+            hidden_refs: RefVisibility::new(),
         })
     }
 
@@ -2236,6 +2240,8 @@ pub enum NodeRefusal {
     ResourceContainment,
     /// The node root did not quiesce within its bounded shutdown interval.
     RuntimeContainment,
+    /// A publication's basis did not bind the store-authenticated current head.
+    PublicationBasisUnbound,
     /// A fixed node identity handle failed its bounded representation.
     Identity(Box<fgit_resource::IdentityError>),
 }
@@ -2288,6 +2294,8 @@ impl Display for NodeRefusal {
             Self::RuntimeContainment => {
                 formatter.write_str("node runtime did not reach quiescence during shutdown")
             }
+            Self::PublicationBasisUnbound => formatter
+                .write_str("publication basis does not bind the store-authenticated current head"),
             Self::Identity(error) => Display::fmt(error, formatter),
         }
     }
@@ -2314,6 +2322,7 @@ impl Error for NodeRefusal {
             | Self::ObjectTooLarge { .. }
             | Self::ObjectLengthOverflow
             | Self::ResourceContainment
+            | Self::PublicationBasisUnbound
             | Self::RuntimeContainment => None,
         }
     }
@@ -4595,39 +4604,48 @@ impl OneNode {
         self.resolve_outcome_in(&request, transaction_id).await
     }
 
-    /// Publishes one already-materialized decision batch through this node's
+    /// Publishes one chronicle-verified decision batch through this node's
     /// durable production authority path.
     ///
-    /// `batch` and `successor` must come from the canonical transaction/ref
-    /// materializer. This boundary never synthesizes them from connection-local
-    /// state: the shared authority core verifies their binding, walks the
-    /// authenticated decision history, and atomically publishes the terminal
-    /// outcomes with the successor head. `expected` is the token from the
-    /// materializer's authenticated predecessor read. Materializations for a
-    /// different repository are refused before any immutable staging work.
+    /// The public boundary accepts only a [`VerifiedPublication`]: the
+    /// unforgeable evidence that the batch and successor head passed every
+    /// chronicle invariant against the basis they name. Before any immutable
+    /// staging work, this boundary re-authenticates the store's current head
+    /// receipt and requires the publication's basis to bind that head exactly,
+    /// with the caller's `expected` token agreeing with the authenticated
+    /// receipt; a publication assembled against any other predecessor is
+    /// refused here rather than after winning the conditional replacement.
+    /// Raw batch and head bodies remain publishable only through the
+    /// lower-layer authority surface reserved for fault injection.
     pub async fn publish_decisions_in(
         &self,
         request: &NodeRequestContext,
         expected: AuthorityVersionToken,
-        batch: &RepositoryDecisionBatchBody,
-        successor: &RepositoryAuthorityHeadBody,
-    ) -> Result<PublicationOutcome, NodeRefusal> {
-        if batch.repository_id != self.repository_id
-            || successor.repository_id != self.repository_id
+        publication: &VerifiedPublication,
+    ) -> Result<PublicationVerdict, NodeRefusal> {
+        if publication.batch().repository_id != self.repository_id
+            || publication.head().repository_id != self.repository_id
         {
             return Err(NodeRefusal::RepositoryMismatch);
         }
-        publish_decisions_async(
+        let authenticated = self.authenticate_authority_head_in(request).await?;
+        let receipt = authenticated.receipt();
+        let current_body: RepositoryAuthorityHeadBody =
+            decode_body(receipt.body(), fgit_codec::DecodeLimits::DEFAULT)
+                .map_err(|_| NodeRefusal::PublicationBasisUnbound)?;
+        if receipt.token() != expected || publication.basis().body() != &current_body {
+            return Err(NodeRefusal::PublicationBasisUnbound);
+        }
+        Ok(publish_async(
             &self.authority,
             request.authority(),
             &self.head_key,
             expected,
-            batch,
-            successor,
+            publication,
             self.tenant_id,
         )
         .await
-        .map_err(NodeRefusal::from)
+        .map_err(NodeRefusal::from)?)
     }
 
     /// Performs the currently published bounded doctor checks.
@@ -4940,14 +4958,13 @@ mod tests {
     };
     use fgit_authority::{
         AsyncAuthorityStore, HeadInit, HeadRead, ImmutableRead, OutcomeLookup,
-        collect_cumulative_outcomes_async, read_decision_batch_body_async,
+        collect_cumulative_outcomes_async, publish_decisions_async, read_decision_batch_body_async,
     };
     use fgit_chronicle::{
-        ChronicleRefusal, PublicationBasis, PublicationPlan, ResultingRoots, batch_identity,
+        ChronicleRefusal, PublicationBasis, PublicationPlan, PublicationVerdict, ResultingRoots,
+        batch_identity,
     };
-    use fgit_codec::harness::{
-        advanced_head, commit_record, decision_batch, digest_of, refusal_record_id, tx_id,
-    };
+    use fgit_codec::harness::{commit_record, digest_of, refusal_record_id, tx_id};
     use fgit_codec::{
         CanonicalBody, CryptoBodyIdentity, RepositoryAuthorityHeadBody, body_id, decode_body,
     };
@@ -6580,14 +6597,14 @@ mod tests {
                 .expect("committed batch carries the selected RCR"),
         )
         .expect("the final stamped RCR re-identifies");
-        node.runtime()
-            .block_on(node.publish_decisions_in(
-                &request,
-                genesis_read.token(),
-                committed.batch(),
-                committed.head(),
-            ))
+        let committed_verdict = node
+            .runtime()
+            .block_on(node.publish_decisions_in(&request, genesis_read.token(), &committed))
             .expect("committed RCR publishes through authority");
+        assert!(matches!(
+            committed_verdict,
+            PublicationVerdict::Published(_)
+        ));
 
         let HeadRead::Present(successor_read) = node
             .runtime()
@@ -6627,14 +6644,11 @@ mod tests {
                 successor_read.token(),
             )
             .expect("refusal-only successor preserves committed roots");
-        node.runtime()
-            .block_on(node.publish_decisions_in(
-                &request,
-                successor_read.token(),
-                refusal_pair.batch(),
-                refusal_pair.head(),
-            ))
+        let refusal_verdict = node
+            .runtime()
+            .block_on(node.publish_decisions_in(&request, successor_read.token(), &refusal_pair))
             .expect("refusal-only successor publishes through authority");
+        assert!(matches!(refusal_verdict, PublicationVerdict::Published(_)));
 
         let materialized = node
             .runtime()
@@ -6809,14 +6823,20 @@ mod tests {
             batch_identity(&CryptoBodyIdentity, &mismatched_batch)
                 .expect("the deliberately stale batch re-identifies"),
         );
+        // Fault-injection surface: the lower-layer authority path still accepts
+        // raw bodies exactly so tests can prove derived state catches what the
+        // public node boundary refuses to carry.
         node.runtime()
-            .block_on(node.publish_decisions_in(
-                &request,
+            .block_on(publish_decisions_async(
+                &node.authority,
+                request.authority(),
+                &node.head_key,
                 genesis_read.token(),
                 &mismatched_batch,
                 &mismatched_successor,
+                node.tenant_id,
             ))
-            .expect("schema-valid stale fixture publishes through authority");
+            .expect("schema-valid stale fixture publishes through fault injection");
 
         assert!(matches!(
             node.runtime()
@@ -6827,6 +6847,19 @@ mod tests {
                 )
             )
         ));
+
+        // The public boundary binds every publication to the authenticated
+        // current head: the otherwise-valid genesis publication is stale now
+        // that the injected successor occupies the head slot.
+        let stale = node.runtime().block_on(node.publish_decisions_in(
+            &request,
+            genesis_read.token(),
+            &committed,
+        ));
+        assert!(
+            matches!(stale, Err(NodeRefusal::PublicationBasisUnbound)),
+            "the public boundary must refuse publications whose basis no longer binds"
+        );
         node.shutdown().expect("node closes cleanly");
     }
 
@@ -7256,17 +7289,52 @@ mod tests {
             panic!("node initialization creates its authority head");
         };
 
-        let other_repository = RepositoryId::from_bytes([0x44; 16]);
-        let mut batch = decision_batch();
-        batch.repository_id = other_repository;
-        let mut successor = advanced_head();
-        successor.repository_id = other_repository;
+        let other_scratch = ScratchDirectory::new();
+        let mut other_config = test_config(other_scratch.path().to_path_buf());
+        // A genuinely different repository: identical deterministic ids would
+        // make both nodes the same repository and defeat the refusal under test.
+        other_config.tenant_id = TenantId::from_bytes([0x33; 16]);
+        other_config.repository_id = RepositoryId::from_bytes([0x44; 16]);
+        let (other_node, _) = OneNode::init(other_config)
+            .expect("second node opens with its own repository identity");
+        let other_request = other_node.request_context();
+        let HeadRead::Present(other_read) = other_node
+            .runtime()
+            .block_on(other_node.read_authority_head_in(&other_request))
+            .expect("second node genesis head reads")
+        else {
+            panic!("second node initialization creates its authority head");
+        };
+        let other_body: RepositoryAuthorityHeadBody =
+            decode_body(other_read.body(), fgit_codec::DecodeLimits::DEFAULT)
+                .expect("second node fixture head decodes");
+        let other_basis = PublicationBasis::new(
+            authority_head_id(&other_body).expect("second node head re-identifies"),
+            other_body,
+        );
+        let roots = ResultingRoots::carried_forward(&other_basis);
+        let mut plan = PublicationPlan::open(other_basis).expect("second node genesis opens");
+        plan.refuse(
+            distinct_tx_id(),
+            RefusalCode::ExpectedOldRefMismatch,
+            refusal_record_id(),
+        );
+        let outcomes = other_node
+            .runtime()
+            .block_on(collect_cumulative_outcomes_async(
+                &other_node.authority,
+                other_request.authority(),
+                &other_node.head_key,
+            ))
+            .expect("second node outcomes collect from its authority");
+        let publication = plan
+            .seal(&CryptoBodyIdentity, roots, &outcomes, other_read.token())
+            .expect("refusal-only publication seals for the second repository");
 
         let refusal = node.runtime().block_on(node.publish_decisions_in(
-            &request,
+            &node.request_context(),
             before_receipt.token(),
-            &batch,
-            &successor,
+            &publication,
         ));
         assert!(matches!(refusal, Err(NodeRefusal::RepositoryMismatch)));
 
