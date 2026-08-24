@@ -159,6 +159,16 @@
         }
       }
     },
+    "ObjectClosureNeighbour": {
+      "description": "An authenticated object-closure leaf adjacent to the absent identity.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["oid", "proof"],
+      "properties": {
+        "oid": { "$ref": "#/$defs/GitOid" },
+        "proof": { "$ref": "#/$defs/VerifiedReadMerkleProofPayload" }
+      }
+    },
     "DecisionOutcome": {
       "description": "The terminal outcome of one decision: committed, or refused with a reason.",
       "oneOf": [
@@ -322,6 +332,55 @@
               "maxLength": 2048
             },
             "proof": { "$ref": "#/$defs/RefStateNonMembershipProof" }
+          }
+        }
+      ]
+    },
+    "ObjectClosureNonMembershipProof": {
+      "description": "An absence proof selected by the requested object identity's ordered position.",
+      "oneOf": [
+        {
+          "description": "The committed object closure has no leaves.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant"],
+          "properties": {
+            "variant": { "const": "EmptyClosure" },
+            "discriminant": { "const": 0 }
+          }
+        },
+        {
+          "description": "The requested identity orders strictly before the authenticated first leaf.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "first"],
+          "properties": {
+            "variant": { "const": "BeforeFirst" },
+            "discriminant": { "const": 1 },
+            "first": { "$ref": "#/$defs/ObjectClosureNeighbour" }
+          }
+        },
+        {
+          "description": "The requested identity orders strictly between two adjacent leaves.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "predecessor", "successor"],
+          "properties": {
+            "variant": { "const": "Between" },
+            "discriminant": { "const": 2 },
+            "predecessor": { "$ref": "#/$defs/ObjectClosureNeighbour" },
+            "successor": { "$ref": "#/$defs/ObjectClosureNeighbour" }
+          }
+        },
+        {
+          "description": "The requested identity orders strictly after the authenticated last leaf.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "last"],
+          "properties": {
+            "variant": { "const": "AfterLast" },
+            "discriminant": { "const": 3 },
+            "last": { "$ref": "#/$defs/ObjectClosureNeighbour" }
           }
         }
       ]
@@ -590,6 +649,16 @@
         "proof": { "$ref": "#/$defs/RefStateNonMembershipProof" }
       }
     },
+    "VerifiedReadObjectNonMembershipProofV1": {
+      "description": "A canonical ordered object-closure non-membership witness for the shared Merkle verifier.",
+      "x-schema": { "family": "verified-read-object-non-membership-proof", "major": 1, "minor": 0, "domain": "frankengit/verified-read-object-non-membership-proof/v1" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proof"],
+      "properties": {
+        "proof": { "$ref": "#/$defs/ObjectClosureNonMembershipProof" }
+      }
+    },
     "VerifiedReadEnvelopeV1": {
       "description": "A relayed answer whose proof verifies only against the client's independently pinned authority head.",
       "x-schema": { "family": "verified-read-envelope", "major": 1, "minor": 0, "domain": "frankengit/verified-read-envelope/v1" },
@@ -605,6 +674,61 @@
         "head": { "$ref": "#/properties/AuthorityHeadV1" },
         "configuration": { "$ref": "#/$defs/VerifiedReadConfiguration" },
         "answer": { "$ref": "#/$defs/VerifiedReadAnswer" }
+      }
+    },
+    "RepositoryCreationAttemptV1": {
+      "description": "One attempt to create a repository, keyed so a retry is recognisable as the same attempt.",
+      "x-schema": { "family": "repository-creation-attempt", "major": 1, "minor": 0, "domain": "frankengit/repository-creation-attempt/v1" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tenant_id", "repository_id", "root_layout", "object_format", "idempotency_key_digest", "repository_incarnation_id"],
+      "properties": {
+        "tenant_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "16 raw bytes, lowercase hex"
+        },
+        "repository_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "16 raw bytes, lowercase hex"
+        },
+        "root_layout": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed RootLayoutVersion vocabulary"
+        },
+        "object_format": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed GitHashAlgorithm vocabulary"
+        },
+        "idempotency_key_digest": { "$ref": "#/$defs/Digest" },
+        "repository_incarnation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "16 raw bytes, lowercase hex"
+        }
+      }
+    },
+    "HiddenRefPolicyV1": {
+      "description": "The ordered raw visibility rules a repository applies to ref advertisement.",
+      "x-schema": { "family": "hidden-ref-policy", "major": 1, "minor": 0, "domain": "frankengit/hidden-ref-policy/v1" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]*$",
+            "minLength": 0,
+            "maxLength": 2048
+          }
+        }
       }
     }
   }

@@ -283,14 +283,27 @@ fn every_described_family_resolves_and_the_shape_refusal_is_still_drivable() {
     }
     // decision-batch used to be THE ShapeUnsupported case. It resolves now.
     assert!(registry::descriptor_for("decision-batch").is_ok());
+
+    // This used to assert `UNDESCRIBED.is_empty()` under a message claiming
+    // "every canonical body is described". Those are different statements, and
+    // `frankengit-ovv2` was filed because a body in NEITHER table satisfies the
+    // first while falsifying the second. Completeness now lives in
+    // `tests/coverage.rs`, which derives the covered set from the bodies
+    // themselves; this test keeps only what it can actually see.
+    //
+    // A consequence worth stating: with `UNDESCRIBED` populated, the
+    // ShapeUnsupported arm fires through the PUBLIC entry point again, so it no
+    // longer depends on a supplied table to be reachable.
+    let real = registry::descriptor_for("repository-configuration")
+        .expect_err("a registered-but-undescribable body refuses");
+    assert_eq!(real.kind(), "shape_unsupported");
     assert!(
-        registry::UNDESCRIBED.is_empty(),
-        "every canonical body is described, so the table is empty"
+        real.to_string().contains("schema MAJOR"),
+        "the refusal must name the construct that blocks it, not merely refuse"
     );
 
-    // Which means the refusal arm can no longer fire through the public entry
-    // point -- the unreachable-variant defect `oxlt` was filed about. Drive it
-    // with a supplied table instead of leaving it to rot.
+    // The supplied-table form is kept as well, because it is what proves the
+    // arm stays drivable even if `UNDESCRIBED` is emptied again.
     let synthetic = [registry::UndescribedBody {
         family: "some-future-body",
         construct: "a recursive field type, which this format still does not have",
@@ -368,10 +381,16 @@ fn decision_batch_no_longer_refuses_and_the_refusal_path_is_still_reachable() {
     // The whole point of the bead: this used to be a ShapeUnsupported refusal.
     let found = registry::descriptor_for("decision-batch").expect("now described");
     assert_eq!(found.family, "decision-batch");
-    assert_eq!(
-        registry::DESCRIBED.len(),
-        8,
-        "five core bodies plus the three verified-read wire bodies"
+    // NO HARDCODED COUNT. A literal here is what let the registry fall behind
+    // `fgit-codec` unnoticed: the number was updated whenever someone added a
+    // descriptor, and never when someone added a BODY. `tests/coverage.rs`
+    // asserts the set relationship against the bodies themselves instead, which
+    // is the property this line was gesturing at.
+    assert!(
+        registry::DESCRIBED
+            .iter()
+            .any(|entry| entry.family == "decision-batch"),
+        "the described set must actually contain the family resolved above"
     );
 
     // The refusal path must stay REACHABLE even with the table empty, or the

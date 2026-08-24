@@ -84,6 +84,14 @@ export interface RepositoryIncarnationConfigurationV2 {
   repository_incarnation_id: string;
 }
 
+/** An authenticated object-closure leaf adjacent to the absent identity. */
+export interface ObjectClosureNeighbour {
+  /** The authenticated neighbouring object identity. */
+  oid: GitOid;
+  /** The proof binding this neighbour to the committed closure root. */
+  proof: VerifiedReadMerkleProofPayload;
+}
+
 /** The terminal outcome of one decision: committed, or refused with a reason. */
 export type DecisionOutcome =
   | DecisionOutcomeCommitted
@@ -203,6 +211,45 @@ export interface VerifiedReadAnswerAuthorizedRefAbsence {
   name: string;
   /** Ordered absence witness under the pinned ref root. */
   proof: RefStateNonMembershipProof;
+}
+
+/** An absence proof selected by the requested object identity's ordered position. */
+export type ObjectClosureNonMembershipProof =
+  | ObjectClosureNonMembershipProofEmptyClosure
+  | ObjectClosureNonMembershipProofBeforeFirst
+  | ObjectClosureNonMembershipProofBetween
+  | ObjectClosureNonMembershipProofAfterLast;
+
+/** The committed object closure has no leaves. */
+export interface ObjectClosureNonMembershipProofEmptyClosure {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 0;
+}
+
+/** The requested identity orders strictly before the authenticated first leaf. */
+export interface ObjectClosureNonMembershipProofBeforeFirst {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 1;
+  /** The authenticated first neighbour. */
+  first: ObjectClosureNeighbour;
+}
+
+/** The requested identity orders strictly between two adjacent leaves. */
+export interface ObjectClosureNonMembershipProofBetween {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 2;
+  /** The authenticated predecessor neighbour. */
+  predecessor: ObjectClosureNeighbour;
+  /** The authenticated successor neighbour. */
+  successor: ObjectClosureNeighbour;
+}
+
+/** The requested identity orders strictly after the authenticated last leaf. */
+export interface ObjectClosureNonMembershipProofAfterLast {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 3;
+  /** The authenticated last neighbour. */
+  last: ObjectClosureNeighbour;
 }
 
 /**
@@ -390,6 +437,16 @@ export interface VerifiedReadRefNonMembershipProofV1 {
 }
 
 /**
+ * A canonical ordered object-closure non-membership witness for the shared Merkle verifier.
+ *
+ * schema verified-read-object-non-membership-proof v1.0, domain frankengit/verified-read-object-non-membership-proof/v1
+ */
+export interface VerifiedReadObjectNonMembershipProofV1 {
+  /** The empty, boundary, or between-neighbours absence shape. */
+  proof: ObjectClosureNonMembershipProof;
+}
+
+/**
  * A relayed answer whose proof verifies only against the client's independently pinned authority head.
  *
  * schema verified-read-envelope v1.0, domain frankengit/verified-read-envelope/v1
@@ -403,4 +460,34 @@ export interface VerifiedReadEnvelopeV1 {
   configuration?: VerifiedReadConfiguration;
   /** The ref, outcome, or authorization-gated absence claim and its witness. */
   answer: VerifiedReadAnswer;
+}
+
+/**
+ * One attempt to create a repository, keyed so a retry is recognisable as the same attempt.
+ *
+ * schema repository-creation-attempt v1.0, domain frankengit/repository-creation-attempt/v1
+ */
+export interface RepositoryCreationAttemptV1 {
+  /** Tenant the attempt is made under. */
+  tenant_id: string;
+  /** Repository the attempt would create. */
+  repository_id: string;
+  /** Storage root layout version selected at creation. */
+  root_layout: number;
+  /** Permanent native Git object identity algorithm. */
+  object_format: number;
+  /** Digest of the caller's idempotency key; a retry carrying it is the same attempt. */
+  idempotency_key_digest: Digest;
+  /** Incarnation this attempt would establish. */
+  repository_incarnation_id: string;
+}
+
+/**
+ * The ordered raw visibility rules a repository applies to ref advertisement.
+ *
+ * schema hidden-ref-policy v1.0, domain frankengit/hidden-ref-policy/v1
+ */
+export interface HiddenRefPolicyV1 {
+  /** Ordered raw visibility-rule bytes; the last matching rule wins. */
+  rules: string[];
 }

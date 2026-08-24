@@ -108,6 +108,16 @@ class RepositoryIncarnationConfigurationV2:
 
 
 @dataclass(frozen=True, slots=True)
+class ObjectClosureNeighbour:
+    """An authenticated object-closure leaf adjacent to the absent identity."""
+
+    # The authenticated neighbouring object identity.
+    oid: GitOid
+    # The proof binding this neighbour to the committed closure root.
+    proof: VerifiedReadMerkleProofPayload
+
+
+@dataclass(frozen=True, slots=True)
 class DecisionOutcomeCommitted:
     """The decision committed, naming the record it produced."""
 
@@ -241,6 +251,50 @@ class VerifiedReadAnswerAuthorizedRefAbsence:
 
 # One proof answer; unknown tags cannot be skipped and must refuse.
 VerifiedReadAnswer = VerifiedReadAnswerRefMembership | VerifiedReadAnswerOutcomeMembership | VerifiedReadAnswerAuthorizedRefAbsence
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectClosureNonMembershipProofEmptyClosure:
+    """The committed object closure has no leaves."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectClosureNonMembershipProofBeforeFirst:
+    """The requested identity orders strictly before the authenticated first leaf."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 1
+    # The authenticated first neighbour.
+    first: ObjectClosureNeighbour
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectClosureNonMembershipProofBetween:
+    """The requested identity orders strictly between two adjacent leaves."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 2
+    # The authenticated predecessor neighbour.
+    predecessor: ObjectClosureNeighbour
+    # The authenticated successor neighbour.
+    successor: ObjectClosureNeighbour
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectClosureNonMembershipProofAfterLast:
+    """The requested identity orders strictly after the authenticated last leaf."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 3
+    # The authenticated last neighbour.
+    last: ObjectClosureNeighbour
+
+
+# An absence proof selected by the requested object identity's ordered position.
+ObjectClosureNonMembershipProof = ObjectClosureNonMembershipProofEmptyClosure | ObjectClosureNonMembershipProofBeforeFirst | ObjectClosureNonMembershipProofBetween | ObjectClosureNonMembershipProofAfterLast
 
 
 @dataclass(frozen=True, slots=True)
@@ -435,6 +489,17 @@ class VerifiedReadRefNonMembershipProofV1:
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedReadObjectNonMembershipProofV1:
+    """A canonical ordered object-closure non-membership witness for the shared Merkle verifier.
+
+    schema verified-read-object-non-membership-proof v1.0, domain frankengit/verified-read-object-non-membership-proof/v1
+    """
+
+    # The empty, boundary, or between-neighbours absence shape.
+    proof: ObjectClosureNonMembershipProof
+
+
+@dataclass(frozen=True, slots=True)
 class VerifiedReadEnvelopeV1:
     """A relayed answer whose proof verifies only against the client's independently pinned authority head.
 
@@ -451,6 +516,38 @@ class VerifiedReadEnvelopeV1:
     configuration: VerifiedReadConfiguration | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class RepositoryCreationAttemptV1:
+    """One attempt to create a repository, keyed so a retry is recognisable as the same attempt.
+
+    schema repository-creation-attempt v1.0, domain frankengit/repository-creation-attempt/v1
+    """
+
+    # Tenant the attempt is made under.
+    tenant_id: str
+    # Repository the attempt would create.
+    repository_id: str
+    # Storage root layout version selected at creation.
+    root_layout: int
+    # Permanent native Git object identity algorithm.
+    object_format: int
+    # Digest of the caller's idempotency key; a retry carrying it is the same attempt.
+    idempotency_key_digest: Digest
+    # Incarnation this attempt would establish.
+    repository_incarnation_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class HiddenRefPolicyV1:
+    """The ordered raw visibility rules a repository applies to ref advertisement.
+
+    schema hidden-ref-policy v1.0, domain frankengit/hidden-ref-policy/v1
+    """
+
+    # Ordered raw visibility-rule bytes; the last matching rule wins.
+    rules: tuple[str, ...]
+
+
 # Wire order per schema. The dataclasses above group required fields
 # before optional ones because Python requires it; the canonical
 # encoding does not, and THIS is the order the bytes are in.
@@ -462,5 +559,8 @@ WIRE_ORDER: dict[str, tuple[str, ...]] = {
     "TxnSealV1": ("tx_id", "tenant_id", "repository_id", "authenticated_principal_id", "idempotency_key_digest", "canonical_request_digest", "request_schema",),
     "VerifiedReadMerkleProofV1": ("index", "leaf_count", "siblings",),
     "VerifiedReadRefNonMembershipProofV1": ("proof",),
+    "VerifiedReadObjectNonMembershipProofV1": ("proof",),
     "VerifiedReadEnvelopeV1": ("version", "head", "configuration", "answer",),
+    "RepositoryCreationAttemptV1": ("tenant_id", "repository_id", "root_layout", "object_format", "idempotency_key_digest", "repository_incarnation_id",),
+    "HiddenRefPolicyV1": ("rules",),
 }

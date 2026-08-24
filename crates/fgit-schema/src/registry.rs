@@ -764,6 +764,7 @@ pub static STRUCTURES: &[&StructureDescriptor] = &[
     &REF_STATE_NEIGHBOUR,
     &REPOSITORY_CONFIGURATION_V1,
     &REPOSITORY_INCARNATION_CONFIGURATION_V2,
+    &OBJECT_CLOSURE_NEIGHBOUR,
 ];
 
 /// Every union, by name.
@@ -772,6 +773,7 @@ pub static UNIONS: &[&UnionDescriptor] = &[
     &VERIFIED_READ_CONFIGURATION,
     &REF_STATE_NON_MEMBERSHIP_PROOF,
     &VERIFIED_READ_ANSWER,
+    &OBJECT_CLOSURE_NON_MEMBERSHIP_PROOF,
 ];
 
 /// The fields a `Structure` reference resolves to.
@@ -865,6 +867,164 @@ pub static DECISION_BATCH: SchemaDescriptor = SchemaDescriptor {
 ///
 /// Generation order is this slice's order, not a sort, so a reordering here is
 /// a visible diff in every generated artifact rather than a silent reshuffle.
+/// The authenticated neighbour either side of an absent object identity.
+///
+/// Mirrors `ref-state-neighbour`: an identity plus the Merkle proof that binds
+/// it to the committed root. `write_object_closure_neighbour` writes exactly
+/// these two, in this order.
+pub static OBJECT_CLOSURE_NEIGHBOUR: StructureDescriptor = StructureDescriptor {
+    name: "object-closure-neighbour",
+    doc: "An authenticated object-closure leaf adjacent to the absent identity.",
+    fields: &[
+        git_oid("oid", "The authenticated neighbouring object identity."),
+        structure(
+            "proof",
+            "verified-read-merkle-proof-payload",
+            "The proof binding this neighbour to the committed closure root.",
+        ),
+    ],
+};
+
+/// Absence in the object closure, selected by the requested identity's position.
+///
+/// Same four shapes and the same discriminants as
+/// [`REF_STATE_NON_MEMBERSHIP_PROOF`], over object identities rather than ref
+/// names. The parallel is in the encoder, not a convenience here.
+pub static OBJECT_CLOSURE_NON_MEMBERSHIP_PROOF: UnionDescriptor = UnionDescriptor {
+    name: "object-closure-non-membership-proof",
+    doc: "An absence proof selected by the requested object identity's ordered position.",
+    variants: &[
+        UnionVariant {
+            name: "EmptyClosure",
+            discriminant: 0,
+            doc: "The committed object closure has no leaves.",
+            fields: &[],
+        },
+        UnionVariant {
+            name: "BeforeFirst",
+            discriminant: 1,
+            doc: "The requested identity orders strictly before the authenticated first leaf.",
+            fields: &[structure(
+                "first",
+                "object-closure-neighbour",
+                "The authenticated first neighbour.",
+            )],
+        },
+        UnionVariant {
+            name: "Between",
+            discriminant: 2,
+            doc: "The requested identity orders strictly between two adjacent leaves.",
+            fields: &[
+                structure(
+                    "predecessor",
+                    "object-closure-neighbour",
+                    "The authenticated predecessor neighbour.",
+                ),
+                structure(
+                    "successor",
+                    "object-closure-neighbour",
+                    "The authenticated successor neighbour.",
+                ),
+            ],
+        },
+        UnionVariant {
+            name: "AfterLast",
+            discriminant: 3,
+            doc: "The requested identity orders strictly after the authenticated last leaf.",
+            fields: &[structure(
+                "last",
+                "object-closure-neighbour",
+                "The authenticated last neighbour.",
+            )],
+        },
+    ],
+};
+
+/// `frankengit/verified-read-object-non-membership-proof/v1`.
+pub static VERIFIED_READ_OBJECT_NON_MEMBERSHIP_PROOF: SchemaDescriptor = SchemaDescriptor {
+    family: "verified-read-object-non-membership-proof",
+    major: 1,
+    minor: 0,
+    domain: "frankengit/verified-read-object-non-membership-proof/v1",
+    doc: "A canonical ordered object-closure non-membership witness for the shared Merkle verifier.",
+    fields: &[FieldDescriptor {
+        name: "proof",
+        ty: FieldType::Union {
+            name: "object-closure-non-membership-proof",
+        },
+        cardinality: Cardinality::Required,
+        doc: "The empty, boundary, or between-neighbours absence shape.",
+    }],
+};
+
+/// `frankengit/repository-creation-attempt/v1` — one idempotent creation attempt.
+pub static REPOSITORY_CREATION_ATTEMPT: SchemaDescriptor = SchemaDescriptor {
+    family: "repository-creation-attempt",
+    major: 1,
+    minor: 0,
+    domain: "frankengit/repository-creation-attempt/v1",
+    doc: "One attempt to create a repository, keyed so a retry is recognisable as the same attempt.",
+    fields: &[
+        FieldDescriptor {
+            name: "tenant_id",
+            ty: FieldType::OpaqueId,
+            cardinality: Cardinality::Required,
+            doc: "Tenant the attempt is made under.",
+        },
+        FieldDescriptor {
+            name: "repository_id",
+            ty: FieldType::OpaqueId,
+            cardinality: Cardinality::Required,
+            doc: "Repository the attempt would create.",
+        },
+        FieldDescriptor {
+            name: "root_layout",
+            ty: FieldType::CodePoint {
+                vocabulary: "RootLayoutVersion",
+            },
+            cardinality: Cardinality::Required,
+            doc: "Storage root layout version selected at creation.",
+        },
+        FieldDescriptor {
+            name: "object_format",
+            ty: FieldType::CodePoint {
+                vocabulary: "GitHashAlgorithm",
+            },
+            cardinality: Cardinality::Required,
+            doc: "Permanent native Git object identity algorithm.",
+        },
+        FieldDescriptor {
+            name: "idempotency_key_digest",
+            ty: FieldType::Digest,
+            cardinality: Cardinality::Required,
+            doc: "Digest of the caller's idempotency key; a retry carrying it is the same attempt.",
+        },
+        FieldDescriptor {
+            name: "repository_incarnation_id",
+            ty: FieldType::OpaqueId,
+            cardinality: Cardinality::Required,
+            doc: "Incarnation this attempt would establish.",
+        },
+    ],
+};
+
+/// `frankengit/hidden-ref-policy/v1` — the shared hidden-ref rule list.
+pub static HIDDEN_REF_POLICY: SchemaDescriptor = SchemaDescriptor {
+    family: "hidden-ref-policy",
+    major: 1,
+    minor: 0,
+    domain: "frankengit/hidden-ref-policy/v1",
+    doc: "The ordered raw visibility rules a repository applies to ref advertisement.",
+    fields: &[sequence(
+        "rules",
+        FieldType::Bytes {
+            min_len: 0,
+            max_len: REF_NAME_MAX,
+        },
+        "Ordered raw visibility-rule bytes; the last matching rule wins.",
+    )],
+};
+
 pub static DESCRIBED: &[&SchemaDescriptor] = &[
     &AUTHORITY_HEAD,
     &DECISION_BATCH,
@@ -873,7 +1033,10 @@ pub static DESCRIBED: &[&SchemaDescriptor] = &[
     &TXN_SEAL,
     &VERIFIED_READ_MERKLE_PROOF,
     &VERIFIED_READ_REF_NON_MEMBERSHIP_PROOF,
+    &VERIFIED_READ_OBJECT_NON_MEMBERSHIP_PROOF,
     &VERIFIED_READ_ENVELOPE,
+    &REPOSITORY_CREATION_ATTEMPT,
+    &HIDDEN_REF_POLICY,
 ];
 
 /// A canonical body that exists and is deliberately not described.
@@ -894,7 +1057,30 @@ pub struct UndescribedBody {
 /// next undescribable body registers, and because an empty table plus a
 /// reachable arm is honest where a deleted arm would silently reclassify
 /// such a body as "unregistered".
-pub static UNDESCRIBED: &[UndescribedBody] = &[];
+pub static UNDESCRIBED: &[UndescribedBody] = &[
+    UndescribedBody {
+        family: "repository-configuration",
+        construct: "a family whose shape depends on the schema MAJOR: three distinct bodies \
+                    share this family and domain at majors 1, 2.0 and 2.1, while a descriptor \
+                    is keyed by family alone and `check_families_unique` forbids a second row \
+                    for the same family, so `descriptor_for` could only ever return one of the \
+                    three and would silently answer for the wrong one. The shapes themselves \
+                    are not the obstacle and are already modelled as the \
+                    `repository-configuration-v1` and `repository-incarnation-configuration-v2` \
+                    structures; what is missing is a way to key a descriptor by family AND major",
+    },
+    UndescribedBody {
+        family: "signed-envelope",
+        construct: "a canonical SET of detached signatures, plus an embedded complete frame of \
+                    another canonical body. The format has `Cardinality::Sequence`, whose \
+                    contract is a counted repetition in wire order, and a canonical set is not \
+                    that: its ordering and uniqueness are properties the encoding enforces \
+                    rather than data the writer chose, so describing it as a sequence would \
+                    assert something weaker than what is encoded. There is also no field type \
+                    meaning \"a complete encoded body of some other family appears inline here\", \
+                    which is what `body_frame` carries",
+    },
+];
 
 // Every body currently admitted to this generated client-schema registry is
 // described. The table above is deliberately kept rather than deleted: the
