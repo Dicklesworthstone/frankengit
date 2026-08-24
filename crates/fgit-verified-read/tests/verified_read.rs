@@ -4,7 +4,10 @@ use core::cell::Cell;
 
 use fgit_authority::{TerminalOutcome, outcome_index_proof, outcome_index_root};
 use fgit_codec::{CryptoBodyIdentity, RepositoryConfigurationBody, body_id, harness::genesis_head};
-use fgit_crypto::{IdentityDomain, ref_state_membership_proof, ref_state_merkle_root};
+use fgit_crypto::{
+    IdentityDomain, ref_state_membership_proof, ref_state_merkle_root,
+    ref_state_non_membership_proof,
+};
 use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::{RepositoryCommitId, TxId};
@@ -99,7 +102,7 @@ fn ref_fixture() -> (PinnedAuthorityHead, VerifiedReadEnvelope, RefName, GitOid)
         VerifiedReadAnswer::RefMembership {
             name: main.clone(),
             oid: bound_oid,
-            proof,
+            proof: Box::new(proof),
         },
     );
     (pinned, envelope, main, bound_oid)
@@ -197,8 +200,8 @@ fn an_outcome_envelope_verifies_against_the_pinned_outcome_index_root() {
         None,
         VerifiedReadAnswer::OutcomeMembership {
             tx_id: tx(0xA1),
-            outcome,
-            proof,
+            outcome: Box::new(outcome),
+            proof: Box::new(proof),
         },
     );
 
@@ -237,22 +240,84 @@ fn denied_absence_queries_are_indistinguishable_and_never_reach_lookup() {
 }
 
 #[test]
-fn authorized_absence_is_explicitly_unproven_and_unproven_mode_stays_available() {
-    let absence = authorize_ref_absence(&AllowAll, name(b"refs/heads/missing"), |_| false)
-        .expect("an authorized lookup may report absence");
-    let head = genesis_head();
+fn authorized_absence_verifies_across_v1_positions_and_membership_remains_permitted() {
+    let main = name(b"refs/heads/main");
+    let tag = name(b"refs/tags/v1");
+    let entries = vec![(main.clone(), oid(0x11)), (tag, oid(0x22))];
+    for (label, state, query) in [
+        ("empty", Vec::new(), name(b"refs/heads/missing")),
+        ("before-first", entries.clone(), name(b"refs/heads/aaa")),
+        ("between", entries.clone(), name(b"refs/heads/mid")),
+        ("after-last", entries, name(b"refs/zzzz")),
+    ] {
+        let root = ref_state_merkle_root(&state).expect("fixture state has a canonical root");
+        let proof = ref_state_non_membership_proof(&state, &query)
+            .expect("fixture query is genuinely absent");
+        let absence = authorize_ref_absence(&AllowAll, query, |_| false)
+            .expect("authorized absent ref may be proven");
+        let (configuration, configuration_root) = v1_configuration();
+        let mut head = genesis_head();
+        head.ref_root = root;
+        head.configuration_root = configuration_root;
+        let pinned = PinnedAuthorityHead::new(head.clone());
+        let envelope = VerifiedReadEnvelope::new(
+            head,
+            Some(configuration),
+            VerifiedReadAnswer::AuthorizedRefAbsence {
+                absence,
+                proof: Box::new(proof),
+            },
+        );
+        assert_eq!(
+            verify_envelope(&pinned, &envelope),
+            Ok(VerifiedMembership::RefAbsence),
+            "the {label} V1 position must verify under the exact pin"
+        );
+    }
+
+    let (pinned, membership, _, _) = ref_fixture();
+    assert_eq!(
+        verify_envelope(&pinned, &membership),
+        Ok(VerifiedMembership::Ref),
+        "proving authorized absence does not weaken the permitted membership twin"
+    );
+}
+
+#[test]
+fn authorized_absence_proof_refuses_a_name_outside_its_proven_interval() {
+    let entries = vec![
+        (name(b"refs/heads/main"), oid(0x11)),
+        (name(b"refs/tags/v1"), oid(0x22)),
+    ];
+    let query = name(b"refs/heads/mid");
+    let root = ref_state_merkle_root(&entries).expect("fixture state has a canonical root");
+    let proof = ref_state_non_membership_proof(&entries, &query)
+        .expect("fixture query is genuinely absent");
+    let (configuration, configuration_root) = v1_configuration();
+    let mut head = genesis_head();
+    head.ref_root = root;
+    head.configuration_root = configuration_root;
     let pinned = PinnedAuthorityHead::new(head.clone());
-    let envelope = VerifiedReadEnvelope::new(
+    let rebound_absence = authorize_ref_absence(&AllowAll, name(b"refs/heads/aaa"), |_| false)
+        .expect("the second fixture query is authorized and absent");
+    let rebound = VerifiedReadEnvelope::new(
         head,
-        None,
-        VerifiedReadAnswer::AuthorizedRefAbsence(absence.clone()),
+        Some(configuration),
+        VerifiedReadAnswer::AuthorizedRefAbsence {
+            absence: rebound_absence,
+            proof: Box::new(proof),
+        },
     );
 
     assert_eq!(
-        verify_envelope(&pinned, &envelope),
-        Err(VerifiedReadRefusal::RefAbsenceNotIndependentlyProven),
-        "no empty Merkle path may be upgraded into a false non-membership claim"
+        verify_envelope(&pinned, &rebound),
+        Err(VerifiedReadRefusal::ProofRejected),
+        "a between-neighbour proof must not prove a name before its first leaf"
     );
+}
+
+#[test]
+fn unproven_mode_stays_available_and_forge_positions_remain_refused() {
     assert_eq!(
         negotiate_response_mode(VerifiedReadCapability::Unproven),
         VerifiedReadResponseMode::Unproven
@@ -261,8 +326,9 @@ fn authorized_absence_is_explicitly_unproven_and_unproven_mode_stays_available()
         negotiate_response_mode(VerifiedReadCapability::EnvelopeV1),
         VerifiedReadResponseMode::EnvelopeV1
     );
+    let expected_absent = name(b"refs/heads/missing");
     let unproven = ReadResponse::Unproven(UnprovenReadAnswer::Ref {
-        name: absence.name().clone(),
+        name: expected_absent.clone(),
         oid: None,
     });
     assert!(matches!(
@@ -270,7 +336,7 @@ fn authorized_absence_is_explicitly_unproven_and_unproven_mode_stays_available()
         ReadResponse::Unproven(UnprovenReadAnswer::Ref {
             name,
             oid: None
-        }) if name == *absence.name()
+        }) if name == expected_absent
     ));
     assert_eq!(
         refuse_forge_position_proof(),

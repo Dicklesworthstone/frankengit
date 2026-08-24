@@ -13,13 +13,13 @@
 //! valid answer establishes membership under the *pinned* head, not that a
 //! server selected the head honestly or that it is current.
 //!
-//! # Typed non-claim: ref non-membership and forge positions
+//! # Typed non-claim: forge positions
 //!
-//! The current ref layout has membership proofs only. A path for a neighbouring
-//! leaf would not prove ordered absence because the current proof shape omits
-//! neighbour names. Therefore this crate performs the authorization gate
-//! before an absence lookup, but reports that an authorized absence is not
-//! independently proved. It does not manufacture an empty proof. Likewise,
+//! The V1 ref layout admits ordered non-membership proofs only after the
+//! disclosure boundary has authorized the lookup. The independent Merkle
+//! verifier's sorted-tree precondition is discharged by an authenticated V1
+//! ref root built through the canonical layout; an arbitrary opaque root is
+//! not enough. Likewise,
 //! `forge_position_root` has no published canonical Merkle layout yet, so
 //! forge-position proof generation is a typed refusal.
 
@@ -29,7 +29,10 @@ use fgit_authority::{OutcomeFailure, TerminalOutcome, verify_outcome_index_membe
 use fgit_codec::{
     CryptoBodyIdentity, RepositoryAuthorityHeadBody, RepositoryConfigurationBody, body_id,
 };
-use fgit_crypto::{MerkleProof, MerkleRefusal, verify_ref_state_membership_under};
+use fgit_crypto::{
+    MerkleProof, MerkleRefusal, RefStateNonMembershipProof, verify_ref_state_membership_under,
+    verify_ref_state_non_membership_under,
+};
 use fgit_types::identity::TxId;
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::native::GitOid;
@@ -120,7 +123,7 @@ pub enum ReadResponse {
     /// An ordinary response selected for a client without proof support.
     Unproven(UnprovenReadAnswer),
     /// A response carrying a versioned proof envelope.
-    Verified(VerifiedReadEnvelope),
+    Verified(Box<VerifiedReadEnvelope>),
 }
 
 /// An authorization policy at the read-serving boundary.
@@ -191,7 +194,7 @@ pub enum VerifiedReadAnswer {
         /// Native object identity claimed for `name`.
         oid: GitOid,
         /// Merkle path generated from the canonical ref-state layout.
-        proof: MerkleProof,
+        proof: Box<MerkleProof>,
     },
     /// A terminal outcome and the membership path under the pinned head's
     /// `outcome_index_root`.
@@ -199,12 +202,21 @@ pub enum VerifiedReadAnswer {
         /// Transaction identity claimed by the serving cell.
         tx_id: TxId,
         /// Terminal outcome claimed for `tx_id`.
-        outcome: TerminalOutcome,
+        outcome: Box<TerminalOutcome>,
         /// Merkle path generated from the canonical outcome-index layout.
-        proof: MerkleProof,
+        proof: Box<MerkleProof>,
     },
-    /// An authorization-gated absence, deliberately marked as unproven.
-    AuthorizedRefAbsence(AuthorizedRefAbsence),
+    /// An authorization-gated absence and its ordered V1 Merkle witness.
+    ///
+    /// The absence wrapper can only be obtained through
+    /// [`authorize_ref_absence`], which runs the disclosure policy before the
+    /// lookup. The proof still has to verify under the exact pinned ref root.
+    AuthorizedRefAbsence {
+        /// The name whose absence was authorized for disclosure.
+        absence: AuthorizedRefAbsence,
+        /// Ordered neighbour evidence for that absence.
+        proof: Box<RefStateNonMembershipProof>,
+    },
 }
 
 /// A versioned proof response tied to the head body the server claims to have
@@ -290,6 +302,9 @@ impl VerifiedReadEnvelope {
 pub enum VerifiedMembership {
     /// A ref membership proof verified against the pinned head's `ref_root`.
     Ref,
+    /// An authorization-gated ref non-membership proof verified against the
+    /// pinned head's `ref_root`.
+    RefAbsence,
     /// An outcome membership proof verified against the pinned head's
     /// `outcome_index_root`.
     Outcome,
@@ -311,11 +326,11 @@ pub enum VerifiedReadRefusal {
     /// `configuration_root`.
     ConfigurationRootMismatch,
     /// The selected layout does not admit a ref-state membership proof.
-    RefLayout(MerkleRefusal),
+    RefLayout(Box<MerkleRefusal>),
     /// The Merkle path did not verify against the pinned root.
     ProofRejected,
     /// Canonical outcome encoding or its verifier refused the answer.
-    Outcome(OutcomeFailure),
+    Outcome(Box<OutcomeFailure>),
     /// Disclosure was denied before consulting the requested ref's existence.
     ///
     /// This same public refusal intentionally covers a hidden ref and an
@@ -323,8 +338,6 @@ pub enum VerifiedReadRefusal {
     RefNotFoundOrUnauthorized,
     /// The caller was allowed to disclose the name, but the lookup found it.
     RefPresent,
-    /// The current layout provides no independently verifiable ref absence.
-    RefAbsenceNotIndependentlyProven,
     /// No canonical forge-position Merkle layout is published yet.
     ForgePositionProofUnavailable,
 }
@@ -351,9 +364,6 @@ impl fmt::Display for VerifiedReadRefusal {
             Self::Outcome(refusal) => write!(formatter, "outcome proof refused: {refusal}"),
             Self::RefNotFoundOrUnauthorized => formatter.write_str("ref not found"),
             Self::RefPresent => formatter.write_str("ref is present after authorized lookup"),
-            Self::RefAbsenceNotIndependentlyProven => formatter.write_str(
-                "the current ref layout has no independently verifiable non-membership proof",
-            ),
             Self::ForgePositionProofUnavailable => formatter.write_str(
                 "forge-position proof generation is unavailable until a canonical forge Merkle layout is published",
             ),
@@ -373,9 +383,9 @@ impl std::error::Error for VerifiedReadRefusal {}
 /// # Errors
 ///
 /// A typed refusal names a version, pin, configuration, layout, encoding, or
-/// proof failure. Authorized ref absence deliberately returns
-/// [`VerifiedReadRefusal::RefAbsenceNotIndependentlyProven`] rather than being
-/// misreported as a verified negative answer.
+/// proof failure. An authorized ref absence verifies only through the V1
+/// ordered non-membership shape; no missing-proof fallback is accepted as a
+/// verified negative answer.
 pub fn verify_envelope(
     pinned: &PinnedAuthorityHead,
     envelope: &VerifiedReadEnvelope,
@@ -394,7 +404,7 @@ pub fn verify_envelope(
             let layout = selected_ref_layout(pinned.body(), envelope.configuration())?;
             let verified =
                 verify_ref_state_membership_under(layout, &pinned.body.ref_root, name, oid, proof)
-                    .map_err(VerifiedReadRefusal::RefLayout)?;
+                    .map_err(|refusal| VerifiedReadRefusal::RefLayout(Box::new(refusal)))?;
             if verified {
                 Ok(VerifiedMembership::Ref)
             } else {
@@ -409,18 +419,30 @@ pub fn verify_envelope(
             let verified = verify_outcome_index_membership(
                 &pinned.body.outcome_index_root,
                 *tx_id,
-                outcome,
-                proof,
+                outcome.as_ref(),
+                proof.as_ref(),
             )
-            .map_err(VerifiedReadRefusal::Outcome)?;
+            .map_err(|refusal| VerifiedReadRefusal::Outcome(Box::new(refusal)))?;
             if verified {
                 Ok(VerifiedMembership::Outcome)
             } else {
                 Err(VerifiedReadRefusal::ProofRejected)
             }
         }
-        VerifiedReadAnswer::AuthorizedRefAbsence(_) => {
-            Err(VerifiedReadRefusal::RefAbsenceNotIndependentlyProven)
+        VerifiedReadAnswer::AuthorizedRefAbsence { absence, proof } => {
+            let layout = selected_ref_layout(pinned.body(), envelope.configuration())?;
+            let verified = verify_ref_state_non_membership_under(
+                layout,
+                &pinned.body.ref_root,
+                absence.name(),
+                proof.as_ref(),
+            )
+            .map_err(|refusal| VerifiedReadRefusal::RefLayout(Box::new(refusal)))?;
+            if verified {
+                Ok(VerifiedMembership::RefAbsence)
+            } else {
+                Err(VerifiedReadRefusal::ProofRejected)
+            }
         }
     }
 }
