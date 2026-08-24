@@ -1709,7 +1709,7 @@ fn a_push_targeting_a_hidden_ref_is_refused_as_hidden_ref_unauthorized() {
 /// push as `HiddenRefUnauthorized`, which is indistinguishable from a working
 /// guard by the refusal alone. Only the hide rule differs between the two.
 #[test]
-fn the_permitted_twin_a_push_to_a_visible_ref_is_not_refused_as_hidden() {
+fn the_permitted_twin_a_push_to_a_visible_ref_commits() {
     let context = context(b"fg019c-visible-target");
     let store = store_with_genesis(&context);
     let projection =
@@ -1724,16 +1724,17 @@ fn the_permitted_twin_a_push_to_a_visible_ref_is_not_refused_as_hidden() {
     )
     .expect("a visible target reaches a terminal decision");
 
+    // COMMITTED, not merely "not refused as hidden". Audit 4530.5 was right
+    // that the weaker form is nearly free: `!matches!(.., HiddenRefUnauthorized)`
+    // is satisfied by a refusal for ANY other reason, so a projection that
+    // refused every push would still pass and the twin would prove nothing
+    // about discrimination. The point of a permitted twin is that the visible
+    // ref gets all the way through.
     let outcome = &result.commands[0].terminal.outcome;
     assert!(
-        !matches!(
-            outcome,
-            DecisionOutcome::Refused {
-                code: RefusalCode::HiddenRefUnauthorized,
-                ..
-            }
-        ),
-        "a push to a ref the policy does not hide must not be refused as hidden, got {outcome:?}"
+        matches!(outcome, DecisionOutcome::Committed { .. }),
+        "a push to a ref the policy does not hide must COMMIT, not merely avoid \
+         the hidden-ref refusal; got {outcome:?}"
     );
 }
 

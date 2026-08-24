@@ -294,23 +294,28 @@ fn a_refusal_after_pack_bytes_were_buffered_still_leaves_nothing() {
     );
 
     // Now force a refusal by reusing the machine illegally.
-    let outcome = machine.push_packet(Packet::Data(b"unexpected".to_vec()));
-    if outcome.is_err() {
-        assert_eq!(
-            machine.quarantine_len(),
-            0,
-            "refused while holding {buffered} buffered bytes and kept {} of them",
-            machine.quarantine_len()
-        );
-    } else {
-        // If the machine did not refuse, it must not have silently dropped the
-        // buffered bytes either — that would be a different defect.
-        assert!(
-            machine.quarantine_len() >= buffered,
-            "bytes vanished without a refusal: had {buffered}, now {}",
-            machine.quarantine_len()
-        );
-    }
+    //
+    // REQUIRED, not conditional. Audit 4530.4 was right that the earlier form
+    // branched on whether the illegal packet errored and asserted the discard
+    // only in that arm, so a machine that ACCEPTED the packet also passed --
+    // and this is the file's load-bearing leak probe. Production makes the
+    // refusal unconditional: `push_packet_inner` answers any packet in
+    // `ReceivePhase::Pack` with `UnexpectedPacket`, so demanding it pins the
+    // promise rather than asserting a defect.
+    let error = machine
+        .push_packet(Packet::Data(b"unexpected".to_vec()))
+        .expect_err("a data packet during the pack phase must be refused, not accepted");
+    assert!(
+        matches!(error, ReceiveError::UnexpectedPacket { .. }),
+        "the refusal must name the unexpected packet rather than arrive by some \
+         other route, got {error:?}"
+    );
+    assert_eq!(
+        machine.quarantine_len(),
+        0,
+        "refused while holding {buffered} buffered bytes and kept {} of them",
+        machine.quarantine_len()
+    );
 }
 
 // ---------------------------------------------------------------------------
