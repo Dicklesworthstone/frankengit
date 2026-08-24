@@ -11,15 +11,26 @@
 //! how much a proof carries, and what a client may compute once per head
 //! instead of once per answer.
 //!
-//! # The relation was measured before it was asserted
+//! # The relation is PER-INDEX, and an earlier version of this file got it wrong
 //!
-//! `siblings.len() == ceil(log2(leaf_count))` is not a bound derived on paper
-//! and hoped for. It was measured across sizes 1..33 first, including every
-//! odd size where the fold's promote-the-last-element rule could have made it
-//! differ, and it held with equality at each one. Asserting equality rather
-//! than `<=` is deliberate: a `<=` bound stays green if proofs silently start
-//! carrying fewer siblings than they need, which is a soundness change wearing
-//! an efficiency costume.
+//! This module doc used to claim `siblings.len() == ceil(log2(leaf_count))`
+//! held with equality at every size 1..33. That was false, and it was my claim.
+//! Path lengths are **not uniform**: the fold promotes a final odd element
+//! unchanged rather than duplicating it, so a leaf on a promoted tail gains no
+//! sibling at that level. Measured: 3 leaves give `[2, 2, 1]`, and 17 leaves
+//! give five siblings for the first sixteen leaves and one for the last. The
+//! original claim survived only because it was checked by querying index 0,
+//! which is exactly the position that always attains the ceiling.
+//!
+//! What holds, and what [`siblings_for`] models, is per index: no path exceeds
+//! `ceil(log2(leaf_count))`, the leftmost leaf attains it, and a promoted tail
+//! is strictly shorter. The assertions below pin that model at every index of
+//! every size rather than sampling one.
+//!
+//! Pinning an exact length per index rather than a `<=` bound is deliberate for
+//! the original reason, which was sound even though the relation was not: a
+//! `<=` bound stays green if proofs silently start carrying FEWER siblings than
+//! they need, which is a soundness change wearing an efficiency costume.
 
 use fgit_codec::{CryptoBodyIdentity, RepositoryConfigurationBody, body_id};
 use fgit_crypto::{

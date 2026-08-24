@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_authority::{AuthorityVersionToken, HeadRead, HeadReadReceipt};
+use fgit_crypto::MerkleRefusal;
 use fgit_node::{NodeConfig, OneNode, VerifiedReadQuery, VerifiedReadServingRefusal};
 use fgit_types::cell::{CellState, CellTransitionCause, ReadLabel};
 use fgit_types::hash::{Digest, DigestBytes};
@@ -190,12 +191,18 @@ fn a_server_produced_envelope_verifies_and_the_same_envelope_tampered_does_not()
         None,
         served.answer().clone(),
     );
+    // Asserted to the exact refusal, not the family. `RefLayout(_)` would pass
+    // for any layout complaint; the specific one is that a head with no carried
+    // configuration reads as LegacyWholeBody, which admits no v1 proof at all.
     assert!(
         matches!(
             verify_envelope(&pinned, &stripped),
-            Err(VerifiedReadRefusal::RefLayout(_))
+            Err(VerifiedReadRefusal::RefLayout(ref refusal))
+                if matches!(**refusal, MerkleRefusal::LayoutAdmitsNoProof {
+                    version: RootLayoutVersion::LegacyWholeBody
+                })
         ),
-        "stripping the configuration must fail on the LAYOUT, not incidentally"
+        "stripping the configuration must fail as LayoutAdmitsNoProof(LegacyWholeBody)"
     );
 }
 
