@@ -276,6 +276,7 @@ impl<'node> ProductionQuarantineValidator<'node> {
         &self,
         request: &ReceiveRequest,
         verified: &BTreeMap<GitOid, VerifiedObject>,
+        in_pack_delta_bases: &BTreeMap<GitOid, BTreeSet<GitOid>>,
         deadline: &mut impl Deadline,
     ) -> Result<BTreeSet<GitOid>, RefusalCode> {
         let mut pending = BTreeSet::new();
@@ -299,6 +300,15 @@ impl<'node> ProductionQuarantineValidator<'node> {
             let object = verified
                 .get(&id)
                 .ok_or(RefusalCode::ObjectClosureIncomplete)?;
+            // A delta target is not reconstructable from its Git-object
+            // graph edges alone.  Its verified in-pack OFS_DELTA base is an
+            // additional exact closure edge: retain it even for blobs, which
+            // otherwise have no object references.  REF_DELTA bases remain
+            // external here because the resolver deliberately sources them
+            // only from the authenticated selected closure.
+            if let Some(bases) = in_pack_delta_bases.get(&id) {
+                pending.extend(bases.iter().copied());
+            }
             for child in self.object_references(&object.parsed, deadline)? {
                 checkpoint(deadline)?;
                 if verified.contains_key(&child) {
@@ -309,6 +319,43 @@ impl<'node> ProductionQuarantineValidator<'node> {
             }
         }
         Ok(closure)
+    }
+
+    /// Maps each reconstructed in-pack object to the verified pack-local
+    /// bases required to reconstruct it.
+    ///
+    /// Receive quarantine does not have a trusted OID index association, so
+    /// a `REF_DELTA` is resolved solely through [`ExternalBases`] and its
+    /// authority-selected external base must not be restaged.  An
+    /// `OFS_DELTA`, by contrast, commits directly to a prior pack offset;
+    /// after native verification maps that offset to its actual OID, it is a
+    /// required uploaded closure edge.
+    fn in_pack_delta_bases(
+        &self,
+        pack: &QuarantinedPack,
+        ids_at_offset: &BTreeMap<u64, GitOid>,
+        deadline: &mut impl Deadline,
+    ) -> Result<BTreeMap<GitOid, BTreeSet<GitOid>>, RefusalCode> {
+        let mut dependencies = BTreeMap::new();
+        for entry in pack.entries() {
+            checkpoint(deadline)?;
+            let Some(ParsedDeltaBase::Ofs { base_offset, .. }) = &entry.delta_base else {
+                continue;
+            };
+            let id = ids_at_offset
+                .get(&entry.offset)
+                .copied()
+                .ok_or(RefusalCode::PackFramingInvalid)?;
+            let base = ids_at_offset
+                .get(base_offset)
+                .copied()
+                .ok_or(RefusalCode::PackFramingInvalid)?;
+            dependencies
+                .entry(id)
+                .or_insert_with(BTreeSet::new)
+                .insert(base);
+        }
+        Ok(dependencies)
     }
 
     /// Extracts the direct native-object edges from one parser-verified object.
@@ -469,6 +516,7 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
         let mut resolver = CachedResolver::new(&objects, &bases, &self.pack_limits, deadline)
             .map_err(map_pack_error)?;
         let mut verified = BTreeMap::new();
+        let mut ids_at_offset = BTreeMap::new();
         let mut budget = ResolutionBudget::new();
         for entry in pack.entries() {
             checkpoint(deadline)?;
@@ -502,8 +550,13 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
             {
                 return Err(RefusalCode::PackFramingInvalid);
             }
+            if ids_at_offset.insert(entry.offset, id).is_some() {
+                return Err(RefusalCode::PackFramingInvalid);
+            }
         }
-        let closure = self.reachable_uploaded_closure(request, &verified, deadline)?;
+        let in_pack_delta_bases = self.in_pack_delta_bases(pack, &ids_at_offset, deadline)?;
+        let closure =
+            self.reachable_uploaded_closure(request, &verified, &in_pack_delta_bases, deadline)?;
         // This second phase keeps a later malformed delta from leaving earlier
         // reachable objects in fabric.  Immutable placement remains
         // non-authority, but only the fully validated exact closure may
