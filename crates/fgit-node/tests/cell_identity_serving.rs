@@ -24,8 +24,8 @@
 //! what it is willing to serve. Provenance is not authorization.
 //!
 //! Written as a new file rather than folded into the fg036a suites under
-//! GoldLotus's degraded-mode instruction: `fgit-node` serving belongs to
-//! BoldIbis, who is on fg036b.
+//! `GoldLotus`'s degraded-mode instruction: `fgit-node` serving belongs to
+//! `BoldIbis`, who is on fg036b.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,7 +59,7 @@ impl Drop for ScratchDirectory {
     }
 }
 
-fn cell(id: u8) -> ServingCell {
+const fn cell(id: u8) -> ServingCell {
     ServingCell::identified(Hint::new(
         CellId::from_bytes([id; 16]),
         HintSource::LocalProjection,

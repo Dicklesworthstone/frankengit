@@ -729,7 +729,7 @@ mod tests {
             .tx_id;
         let verdict = node
             .runtime()
-            .block_on(node.publish_decisions_in(&request, receipt.token(), &publication))
+            .block_on(node.publish_decisions_in(&request, &publication))
             .expect("the verified publication replaces the exact predecessor head");
         assert!(matches!(verdict, PublicationVerdict::Published(_)));
         (name, tx_id)

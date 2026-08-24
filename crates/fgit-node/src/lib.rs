@@ -42,13 +42,12 @@ use fgit_admission::{
     validate_source_import,
 };
 use fgit_authority::{
-    AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits,
-    AuthorityVersionToken, HeadInit, HeadKey, HeadRead, IdempotencyKey, ImmutableKey,
-    ImmutableRead, KeyError, OutcomeLookup, PutOutcome, StoreInstanceId,
-    initialize_repository_async, outcome_index_root, read_authority_head_body_async,
-    read_decision_batch_body_async, read_repository_incarnation_configuration_async,
-    record_creation_attempt_async, resolve_outcome_async,
-    stage_repository_incarnation_configuration_async,
+    AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, HeadInit, HeadKey,
+    HeadRead, IdempotencyKey, ImmutableKey, ImmutableRead, KeyError, OutcomeLookup, PutOutcome,
+    StoreInstanceId, initialize_repository_async, outcome_index_root,
+    read_authority_head_body_async, read_decision_batch_body_async,
+    read_repository_incarnation_configuration_async, record_creation_attempt_async,
+    resolve_outcome_async, stage_repository_incarnation_configuration_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
 use fgit_chronicle::{
@@ -4659,6 +4658,7 @@ impl NodeConfig {
         self
     }
 
+    #[must_use]
     pub const fn with_git_daemon_session_timeout(
         mut self,
         session_timeout: GitDaemonSessionTimeout,
@@ -6016,7 +6016,6 @@ impl OneNode {
     pub async fn publish_decisions_in(
         &self,
         request: &NodeRequestContext,
-        expected: AuthorityVersionToken,
         publication: &VerifiedPublication,
     ) -> Result<PublicationVerdict, NodeRefusal> {
         if publication.batch().repository_id != self.repository_id
@@ -6034,7 +6033,13 @@ impl OneNode {
         // verify_pair checks the batch against basis.id without recomputing it.
         let canonical_head_id =
             authority_head_id(&current_body).map_err(|_| NodeRefusal::PublicationBasisUnbound)?;
-        let bound = receipt.token() == expected
+        // The expected token comes from the publication rather than from the
+        // caller. `seal` already folded it into the stamped head, so this is
+        // the token this evidence is actually about; accepting one alongside
+        // let a caller pair verified evidence with a token it was never sealed
+        // against. That pairing was refused here rather than accepted, but it
+        // was representable, and it no longer is.
+        let bound = receipt.token() == publication.expected_head_token()
             && *publication.basis().body() == current_body
             && publication.basis().id() == canonical_head_id;
         if !bound {
@@ -6044,7 +6049,7 @@ impl OneNode {
             &self.authority,
             request.authority(),
             &self.head_key,
-            expected,
+            publication.expected_head_token(),
             publication,
             self.tenant_id,
         )
@@ -7287,7 +7292,7 @@ mod tests {
         )
         .expect("an empty repository may have an unborn symbolic HEAD");
 
-        assert!(repository.advertised_refs().is_empty());
+        assert_eq!(repository.advertised_refs(), []);
         assert_eq!(repository.symref_target(b"HEAD"), None);
         assert_eq!(
             repository.unborn_symref_target(),
@@ -8788,7 +8793,7 @@ mod tests {
         .expect("the final stamped RCR re-identifies");
         let committed_verdict = node
             .runtime()
-            .block_on(node.publish_decisions_in(&request, genesis_read.token(), &committed))
+            .block_on(node.publish_decisions_in(&request, &committed))
             .expect("committed RCR publishes through authority");
         assert!(matches!(
             committed_verdict,
@@ -8835,7 +8840,7 @@ mod tests {
             .expect("refusal-only successor preserves committed roots");
         let refusal_verdict = node
             .runtime()
-            .block_on(node.publish_decisions_in(&request, successor_read.token(), &refusal_pair))
+            .block_on(node.publish_decisions_in(&request, &refusal_pair))
             .expect("refusal-only successor publishes through authority");
         assert!(matches!(refusal_verdict, PublicationVerdict::Published(_)));
 
@@ -9064,11 +9069,9 @@ mod tests {
         // The public boundary binds every publication to the authenticated
         // current head: the otherwise-valid genesis publication is stale now
         // that the injected successor occupies the head slot.
-        let stale = node.runtime().block_on(node.publish_decisions_in(
-            &request,
-            genesis_read.token(),
-            &committed,
-        ));
+        let stale = node
+            .runtime()
+            .block_on(node.publish_decisions_in(&request, &committed));
         assert!(
             matches!(stale, Err(NodeRefusal::PublicationBasisUnbound)),
             "the public boundary must refuse publications whose basis no longer binds"
@@ -9132,11 +9135,9 @@ mod tests {
             .seal(&CryptoBodyIdentity, roots, &outcomes, genesis_read.token())
             .expect("seal trusts the basis id, which is exactly the hole");
 
-        let refused = node.runtime().block_on(node.publish_decisions_in(
-            &request,
-            genesis_read.token(),
-            &publication,
-        ));
+        let refused = node
+            .runtime()
+            .block_on(node.publish_decisions_in(&request, &publication));
         assert!(
             matches!(refused, Err(NodeRefusal::PublicationBasisUnbound)),
             "the boundary must re-identify the basis id against the authenticated head"
@@ -9620,11 +9621,9 @@ mod tests {
             .seal(&CryptoBodyIdentity, roots, &outcomes, other_read.token())
             .expect("refusal-only publication seals for the second repository");
 
-        let refusal = node.runtime().block_on(node.publish_decisions_in(
-            &node.request_context(),
-            before_receipt.token(),
-            &publication,
-        ));
+        let refusal = node
+            .runtime()
+            .block_on(node.publish_decisions_in(&node.request_context(), &publication));
         assert!(matches!(refusal, Err(NodeRefusal::RepositoryMismatch)));
 
         let after = node
