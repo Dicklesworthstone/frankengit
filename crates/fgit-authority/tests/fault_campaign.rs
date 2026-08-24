@@ -978,7 +978,7 @@ fn immutable_fault_schedule_remains_linearizable_after_reordered_retries() {
 /// Returns the generation gap between what the isolated cell still believes and
 /// what the authority actually holds, which is the quantity a bounded-stale
 /// label has to carry honestly.
-fn generation_lag(stale: &HeadReadReceipt, current: &HeadReadReceipt) -> u64 {
+const fn generation_lag(stale: &HeadReadReceipt, current: &HeadReadReceipt) -> u64 {
     current
         .generation()
         .get()
@@ -1280,4 +1280,191 @@ fn an_older_cell_cannot_roll_back_a_head_written_in_a_newer_format() {
         "a rolling upgrade cannot roll back or tear a newer head; the loser revalidates and proceeds",
     );
     expect_linearizable(&report);
+}
+
+#[test]
+fn a_crash_during_a_head_transition_never_leaves_a_half_published_head() {
+    // "A read never observes a half-published head", which the existing crash
+    // coverage does not reach: put_if_absent.rs and fault_determinism.rs crash
+    // IMMUTABLE puts, and the campaign's own crash case above crashes a ReadHead.
+    // Nothing crashed a head COMPARE-EXCHANGE, which is the transition that has
+    // two fields to tear -- generation and body -- and is the only place a torn
+    // head could come from.
+    //
+    // The property is not "the write survives" or "the write is lost". It is that
+    // exactly one of those happened: generation and body must move TOGETHER. A
+    // head carrying generation 2 with generation 1's body would verify against
+    // nothing and be undiagnosable from the outside.
+    let root_body = b"root".to_vec();
+    let next_body = b"transition-target".to_vec();
+
+    for position in [FaultPosition::BeforeEffect, FaultPosition::AfterEffect] {
+        let instance = StoreInstanceId::from_raw(0xF036_B004);
+        let store = MemoryAuthorityStore::new(instance);
+        let key = head_key("torn-head");
+        let mut recorder = HistoryRecorder::default();
+        let root = initialize(&mut recorder, &store, &key);
+        assert_eq!(root.body(), root_body.as_slice());
+
+        let plan = FaultPlan::explicit(vec![
+            FaultDirective::new(OpIndex::ZERO, FaultKind::Crash { position })
+                .only_for(fgit_authority::AuthorityOpKind::CompareExchangeHead),
+        ]);
+        store.install_fault_plan(plan.clone());
+
+        let interrupted = recorder.execute(
+            &store,
+            1,
+            AuthorityOp::CompareExchangeHead {
+                key: key.clone(),
+                expected: root.token(),
+                new_generation: generation(2),
+                new_body: next_body.clone(),
+            },
+        );
+        assert_eq!(
+            interrupted,
+            AuthorityResponse::Ambiguous(AmbiguityReason::NoResponse),
+            "{position:?}: a crashed transition tells the caller nothing, which is why \
+             the head's own consistency has to carry the guarantee"
+        );
+        assert!(store.is_crashed());
+        store.restart();
+
+        // The head after recovery must be one of exactly two whole values.
+        let recovered =
+            read_receipt(&recorder.execute(&store, 2, AuthorityOp::ReadHead { key: key.clone() }));
+        let observed = (recovered.generation(), recovered.body().to_vec());
+        let old_whole = (HeadGeneration::FIRST, root_body.clone());
+        let new_whole = (generation(2), next_body.clone());
+        assert!(
+            observed == old_whole || observed == new_whole,
+            "{position:?}: the head must be wholly old or wholly new, got generation {:?} \
+             with body {:?}",
+            recovered.generation(),
+            String::from_utf8_lossy(recovered.body())
+        );
+
+        // And the pairing is the point, so state the two torn shapes explicitly
+        // rather than relying on the disjunction above to have excluded them.
+        assert_ne!(
+            observed,
+            (generation(2), root_body.clone()),
+            "{position:?}: a new generation carrying the old body is a torn head"
+        );
+        assert_ne!(
+            observed,
+            (HeadGeneration::FIRST, next_body.clone()),
+            "{position:?}: the old generation carrying the new body is a torn head"
+        );
+
+        // The crash position decides WHICH whole value survived, and the caller
+        // can find out -- 5.2's rule that a disconnect never proves non-commit,
+        // so the ambiguity is resolved by asking rather than by assuming.
+        let resolution = resolve_ambiguous_cas(&store, &key, generation(2), &next_body);
+        match position {
+            FaultPosition::BeforeEffect => {
+                assert_eq!(
+                    observed, old_whole,
+                    "a crash before the effect must leave the predecessor intact"
+                );
+                assert!(
+                    matches!(resolution, Ok(fgit_authority::CasResolution::NotApplied(_))),
+                    "and resolution must report the transition did not take effect, got {resolution:?}"
+                );
+            }
+            FaultPosition::AfterEffect => {
+                assert_eq!(
+                    observed, new_whole,
+                    "a crash after the effect must leave the transition applied"
+                );
+                assert!(
+                    matches!(resolution, Ok(fgit_authority::CasResolution::Applied(_))),
+                    "and resolution must report it did, got {resolution:?}"
+                );
+            }
+        }
+
+        let report = check_and_emit(
+            0xF036_B004,
+            &plan,
+            &recorder,
+            AuthorityModel::new(instance),
+            "a crash mid-transition leaves a whole head; the pending caller resolves it by asking",
+        );
+        expect_linearizable(&report);
+    }
+}
+
+/// Run one fixed transition sequence on a fresh store and return what a reader
+/// would see, so two runs separated in wall-clock time can be compared.
+fn replay_fixed_sequence(instance_raw: u64, bodies: &[&[u8]]) -> Vec<(HeadGeneration, Vec<u8>)> {
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(instance_raw));
+    let key = head_key("clock-independence");
+    let mut recorder = HistoryRecorder::default();
+    let mut predecessor = initialize(&mut recorder, &store, &key);
+    let mut observed = vec![(predecessor.generation(), predecessor.body().to_vec())];
+    for (step, body) in bodies.iter().enumerate() {
+        let next = u64::try_from(step).unwrap_or_default().saturating_add(2);
+        predecessor = committed_receipt(&recorder.execute(
+            &store,
+            1,
+            AuthorityOp::CompareExchangeHead {
+                key: key.clone(),
+                expected: predecessor.token(),
+                new_generation: generation(next),
+                new_body: (*body).to_vec(),
+            },
+        ));
+        observed.push((predecessor.generation(), predecessor.body().to_vec()));
+    }
+    observed
+}
+
+#[test]
+fn the_head_history_is_a_pure_function_of_its_operations_not_of_the_clock() {
+    // "Clock skew and rollback must not matter -- clocks are not authority."
+    //
+    // WHAT THIS CAN AND CANNOT DETECT, stated because the distinction decides
+    // whether the test is worth having. HeadReadReceipt is {key, token,
+    // generation, body}: there is no time field, so under the reference store
+    // this assertion cannot fail today, and I am not claiming it proves the
+    // system ignores clocks -- nothing here skews a clock, because there is no
+    // clock to skew.
+    //
+    // What it IS: a regression guard with a specific, plausible target. If a
+    // later implementation seeds a version token from a timestamp, stamps a
+    // publication time into a head body, or orders transitions by arrival time
+    // rather than by predecessor token, two identical sequences separated in wall
+    // time stop agreeing and this fails. That is the change worth catching, and
+    // it is the kind that arrives looking harmless.
+    let bodies: [&[u8]; 3] = [b"one", b"two", b"three"];
+
+    let first = replay_fixed_sequence(0xF036_B005, &bodies);
+    // Separated in real wall-clock time, without sleeping: the two runs are at
+    // different instants because they are sequential, which is all a clock
+    // dependence would need to show itself.
+    let second = replay_fixed_sequence(0xF036_B006, &bodies);
+
+    assert_eq!(
+        first, second,
+        "the same operation sequence must produce the same head history regardless of when it ran"
+    );
+    assert_eq!(first.len(), 4, "one initial head plus three transitions");
+
+    // The twin, so the equality above is not the equality of two empty or
+    // constant things: a DIFFERENT sequence must produce a different history.
+    let divergent: [&[u8]; 3] = [b"one", b"two", b"different"];
+    let third = replay_fixed_sequence(0xF036_B007, &divergent);
+    assert_ne!(
+        first, third,
+        "a different operation sequence must produce a different history, or the \
+         comparison above is measuring nothing"
+    );
+    // And the divergence must be exactly where the inputs diverged, not earlier.
+    assert_eq!(
+        first[..3],
+        third[..3],
+        "the histories must agree up to the point the inputs differ"
+    );
 }

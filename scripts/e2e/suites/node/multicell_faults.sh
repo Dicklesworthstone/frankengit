@@ -48,15 +48,25 @@ fge_init multicell-faults
 SEED_A=${FG_AUTHORITY_FAULT_SEED:-0xF036B0000000A001}
 SEED_B=${FG_MULTICELL_ALT_SEED:-0xF036B0000000B002}
 
-CAMPAIGN=(cargo test -p fgit-authority --test fault_campaign -- --nocapture)
+# --test-threads=1 is load-bearing, not tidiness. With parallel cases and
+# --nocapture, concurrent println! output INTERLEAVES: a long evidence line can be
+# split by another case's output, and `grep '^{'` then silently drops the
+# fragment. That is not a content difference but it moves the digest, so the
+# seed-comparison assertions below would flake. Measured: one seed's slice came
+# back with 5 evidence lines and the other's with 4, from identical content.
+CAMPAIGN=(cargo test -p fgit-authority --test fault_campaign -- --nocapture --test-threads=1)
 
-# The three cell-level scenarios this bead added. Asserted by name because a
-# green total cannot distinguish "ran and passed" from "was renamed and silently
-# stopped running".
+# The five cell-level scenarios this bead added. Asserted by name because a green
+# total cannot distinguish "ran and passed" from "was renamed and silently stopped
+# running". Note the clock-independence case emits no campaign NDJSON (it runs no
+# linearizability check -- it compares two head histories directly), so it appears
+# in the by-name assertions but NOT in the evidence slice digested below.
 SCENARIOS=(
   an_isolated_cell_cannot_label_a_drifted_answer_as_current
   an_isolated_cell_that_reconnects_observes_no_lost_write
   an_older_cell_cannot_roll_back_a_head_written_in_a_newer_format
+  a_crash_during_a_head_transition_never_leaves_a_half_published_head
+  the_head_history_is_a_pure_function_of_its_operations_not_of_the_clock
 )
 
 fge_phase setup
@@ -64,11 +74,24 @@ fge_context suite node-multicell-faults
 fge_step seeds "campaign seeds: primary=$SEED_A alternate=$SEED_B"
 fge_note tooling "RCH_CARGO_WRAPPER_BYPASS=1 per AGENTS.md 16.2 so the rch offload wrapper is bypassed"
 
-# Every evidence line the campaign emitted, sorted. Pure bash + coreutils: no
+# Every evidence record the campaign emitted, sorted. Pure bash + coreutils: no
 # jq, no python, per the lib.sh tooling contract.
+#
+# EXTRACTED BY SCHEMA MARKER, NOT BY `^{`. Under --nocapture cargo writes
+# "test <name> ... " WITHOUT a trailing newline before running the case, so the
+# case's own println! lands on the SAME line and the JSON is prefixed. An
+# anchored `grep '^{'` therefore finds only the few records that happened to
+# start a line -- measured: 4 of them out of a 12-case run whose notes were all
+# present in the file. `grep -o` from the marker strips whatever precedes it.
+EVIDENCE_MARKER='{"schema":"fgit.authority.fault-campaign.v1"'
+
+evidence_records() {
+  grep -o "${EVIDENCE_MARKER}.*" "$1" || true
+}
+
 evidence_digest() {
   local src=$1 dest=$2
-  grep '^{' "$src" | LC_ALL=C sort | tee "$dest" >/dev/null || true
+  evidence_records "$src" | LC_ALL=C sort | tee "$dest" >/dev/null
   fge_digest_file "$dest"
 }
 
@@ -78,11 +101,19 @@ evidence_digest() {
 # working if the emitted record ever stops echoing function names.
 cell_scenario_digest() {
   local src=$1 dest=$2
-  grep '^{' "$src" \
-    | grep -E 'isolated cell|rejoining after a real partition|rolling upgrade' \
+  evidence_records "$src" \
+    | grep -E 'isolated cell|rejoining after a real partition|rolling upgrade|whole head' \
     | LC_ALL=C sort | tee "$dest" >/dev/null || true
   fge_digest_file "$dest"
 }
+
+# The cell-level scenarios emit exactly five records: one each for the isolation,
+# reconnect and rolling-upgrade cases, and two for the torn-head case, which runs
+# once per FaultPosition. Asserting the COUNT rather than non-emptiness is the
+# point: `test -s` passed happily on a single record while four were being
+# dropped by a broken extractor, and a digest comparison over one line agrees for
+# reasons that have nothing to do with the property.
+EXPECTED_CELL_RECORDS=5
 
 fge_phase action
 
@@ -124,6 +155,12 @@ fge_assert_exit FG-036B-E2E-002 0 "$RC_B" \
 # FGE_LAST_STDOUT, which lib.sh truncates at FGE_MAX_CAPTURE (4096 bytes by
 # default). A truncated haystack turns a present scenario into a silent false
 # negative; the neighbouring FG-004c suite documents the same trap.
+#
+# The loop consumes ids 003..007, one per scenario, so the fixed assertions below
+# start at 008. Growing SCENARIOS without moving them is how two different checks
+# end up sharing an acceptance id -- which is exactly what happened when this list
+# went from three entries to five: the run reported "assertions=9 passed=10",
+# nine distinct ids for ten records, and the duplicate masked which check failed.
 idx=3
 for scenario in "${SCENARIOS[@]}"; do
   id=$(printf 'FG-036B-E2E-%03d' "$idx")
@@ -133,18 +170,20 @@ for scenario in "${SCENARIOS[@]}"; do
 done
 
 # The cell-level scenarios consume no seed, so their evidence must not move.
-fge_assert_eq FG-036B-E2E-006 "$CELL_DIGEST_A" "$CELL_DIGEST_B" \
+fge_assert_eq FG-036B-E2E-008 "$CELL_DIGEST_A" "$CELL_DIGEST_B" \
   'the cell-level scenarios take no seed input, so two seeds must produce identical evidence'
 
 # The twin. If nothing in the stream varied with the seed, the assertion above
 # would hold trivially and measure nothing.
-fge_assert_ne FG-036B-E2E-007 "$DIGEST_A" "$DIGEST_B" \
+fge_assert_ne FG-036B-E2E-009 "$DIGEST_A" "$DIGEST_B" \
   "the seed does change the campaign's evidence, so the check above is not vacuous"
 
 # And the slice must be non-empty, or both digests above are the digest of an
 # empty file and agree for the worst possible reason.
-fge_assert_cmd FG-036B-E2E-008 'the cell-level evidence slice is non-empty' \
-  test -s "$CELLS_A"
+CELL_COUNT_A=$(wc -l <"$CELLS_A")
+CELL_COUNT_A=${CELL_COUNT_A// /}
+fge_assert_eq FG-036B-E2E-010 "$EXPECTED_CELL_RECORDS" "$CELL_COUNT_A" \
+  'every cell-level scenario emitted its evidence record, counted not assumed'
 
-fge_assert_ndjson FG-036B-E2E-009 "$RUN_A" \
+fge_assert_ndjson FG-036B-E2E-011 "$RUN_A" \
   'every evidence line the campaign emits is a valid JSON object'
