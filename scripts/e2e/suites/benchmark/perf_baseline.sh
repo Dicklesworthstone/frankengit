@@ -15,6 +15,30 @@
 # GRANT: GoldLotus 2026-08-24 permits, for fg028c only, one release build of
 # fgit-cli plus repeated measurement runs. This script honours the bound by
 # building exactly once and by capping the sample count.
+#
+# ================== HOW TO USE THIS AS A REGRESSION ANCHOR ==================
+#
+# Not every metric here is comparable across runs, and treating them alike would
+# manufacture regressions. Measured over four independent clone runs on this
+# host, five samples per variant:
+#
+#   egress      EXACT. One value per arm across all four runs, identical to the
+#               byte (baseline 639,823; candidate 39,788,709). Compare directly;
+#               any change at all is a real change.
+#   pack CPU    STABLE to about 5% (observed spread 4.1% and 4.6%). Compare with
+#               a band, not an equality.
+#   peak RSS    stable in the same way; same treatment as CPU.
+#   latency     NOT COMPARABLE ACROSS RUNS. Observed spread between runs of the
+#               same arm was 194% (baseline) and 142% (candidate) on this shared
+#               128-core host. A latency number from one run says nothing about
+#               another. Compare it ONLY within a single run, against that run's
+#               own A/A control: a candidate-baseline gap smaller than the
+#               measured aa_noise p95 is not a result.
+#
+# The A/A floor itself varies by an order of magnitude with host load -- 187ms
+# on one cold run, 1418ms on a warm one -- which is why it is measured every run
+# instead of being assumed once.
+# ============================================================================
 set -euo pipefail
 
 PB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
