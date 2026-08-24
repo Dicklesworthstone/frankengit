@@ -40,7 +40,7 @@ CRATE=fgit-verified-read
 # suite, so I shipped it red. The count assertion did its job; I just did not
 # look. Changing a case count in those files means changing this list.
 TARGETS=(
-  "tamper_campaign:6"
+  "tamper_campaign:7"
   "head_chain_freshness:7"
   "proof_cost:7"
 )
@@ -49,7 +49,7 @@ TARGETS=(
 # test-function count above. Ten classes live inside ONE function, so a function
 # count cannot see a class being removed; the Rust denominator guard emits this
 # marker and the assertion below reads it.
-EXPECTED_TAMPER_CLASSES=10
+EXPECTED_TAMPER_CLASSES=13
 
 # The cases whose absence would hollow out this bead, asserted individually.
 LOAD_BEARING=(
@@ -60,6 +60,7 @@ LOAD_BEARING=(
   two_heads_claiming_one_generation_are_a_fork_and_not_staleness
   a_forged_head_at_a_higher_generation_is_caught_by_continuity
   the_corpus_covers_every_declared_tamper_class_exactly_once
+  an_outcome_envelope_is_checked_against_the_outcome_index_root_not_whichever_root_verifies
   every_leaf_at_every_size_carries_exactly_the_length_its_position_requires
   a_promoted_tail_really_does_shorten_a_path_so_the_model_is_not_decorative
 )

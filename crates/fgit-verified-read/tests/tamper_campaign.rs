@@ -32,20 +32,25 @@
 
 use std::collections::BTreeMap;
 
+use fgit_authority::{TerminalOutcome, outcome_index_proof, outcome_index_root};
 use fgit_codec::{
     CryptoBodyIdentity, RepositoryAuthorityHeadBody, RepositoryConfigurationBody, body_id,
 };
-use fgit_crypto::{MerkleProof, ref_state_membership_proof, ref_state_merkle_root};
+use fgit_crypto::{IdentityDomain, MerkleProof, ref_state_membership_proof, ref_state_merkle_root};
+use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::{RepositoryAuthorityHeadId, RepositoryId};
+use fgit_types::identity::{RepositoryCommitId, TxId};
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1};
+use fgit_types::numeric::DecisionSequence;
 use fgit_types::numeric::{HeadGeneration, PolicyEpoch, RegistryEpoch};
 use fgit_types::refs::RefName;
+use fgit_types::vocabulary::DecisionOutcome;
 use fgit_verified_read::freshness::HeadChainFloor;
 use fgit_verified_read::{
-    PinnedAuthorityHead, VerifiedReadAnswer, VerifiedReadEnvelope, VerifiedReadRefusal,
-    verify_envelope,
+    PinnedAuthorityHead, VerifiedMembership, VerifiedReadAnswer, VerifiedReadEnvelope,
+    VerifiedReadRefusal, verify_envelope,
 };
 
 /// What a tampering mirror altered.
@@ -68,11 +73,22 @@ enum TamperClass {
     ConfigurationSubstituted,
     ConfigurationRemoved,
     StaleHeadReplay,
+    /// A transaction the outcome index does not hold, with a real proof.
+    OutcomeTxId,
+    /// The right transaction, a different terminal outcome.
+    OutcomeSubstituted,
+    /// An outcome answer pinned against the head's REF root instead of its
+    /// outcome-index root.
+    ///
+    /// The family's own risk, and the one a shared Merkle verifier cannot
+    /// catch: every proof-structure class above tests the same path code, so
+    /// none of them can see an answer being checked against the wrong root.
+    OutcomeRootConfusion,
 }
 
 impl TamperClass {
     /// Every class the corpus must exercise.
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 13] = [
         Self::RefName,
         Self::RefIdentity,
         Self::ProofSibling,
@@ -83,6 +99,9 @@ impl TamperClass {
         Self::ConfigurationSubstituted,
         Self::ConfigurationRemoved,
         Self::StaleHeadReplay,
+        Self::OutcomeTxId,
+        Self::OutcomeSubstituted,
+        Self::OutcomeRootConfusion,
     ];
 
     /// Ties `ALL` to the enum, which the array alone does not do.
@@ -111,7 +130,10 @@ impl TamperClass {
             | Self::HeadConfigurationRoot
             | Self::ConfigurationSubstituted
             | Self::ConfigurationRemoved
-            | Self::StaleHeadReplay => (),
+            | Self::StaleHeadReplay
+            | Self::OutcomeTxId
+            | Self::OutcomeSubstituted
+            | Self::OutcomeRootConfusion => (),
         }
     }
 }
@@ -217,6 +239,11 @@ struct Honest {
     proof: MerkleProof,
 }
 
+/// The single outcome index the pinned head commits to.
+fn outcome_index() -> Vec<(TxId, TerminalOutcome)> {
+    vec![(tx(0xA1), committed(1, 0x55))]
+}
+
 fn honest() -> Honest {
     let entries = ref_state();
     let root = ref_state_merkle_root(&entries).expect("a ref root");
@@ -224,8 +251,18 @@ fn honest() -> Honest {
     let queried = name("refs/heads/main");
     let (found, proof) =
         ref_state_membership_proof(&entries, &queried).expect("a membership proof");
+    let mut base = head(2, None, root, configuration_root(&configuration));
+    // The pinned head carries the REAL outcome-index root as well as the ref
+    // root. Without this, an outcome case has to move the head to publish its
+    // root -- and a moved head is refused by the FRESHNESS floor before the
+    // proof is ever examined. Measured when this fixture was first written:
+    // all three outcome classes came back detected, every one of them by
+    // Freshness, so the outcome proof path was never reached and the family
+    // would have been coverage in name only.
+    base.outcome_index_root =
+        outcome_index_root(&outcome_index()).expect("a terminal outcome has a canonical root");
     Honest {
-        head: head(2, None, root, configuration_root(&configuration)),
+        head: base,
         configuration,
         queried,
         oid: found,
@@ -277,10 +314,64 @@ fn refusal_name(refusal: &VerifiedReadRefusal) -> String {
     .to_owned()
 }
 
+/// A transaction identity for the outcome-index fixtures.
+fn tx(byte: u8) -> TxId {
+    TxId::from_digest(
+        IdentityDomain::RefTransaction.algorithm().id(),
+        CANONICAL_CODEC_VERSION,
+        DigestBytes::try_new(&[byte; 32]).expect("fixture digest is bounded"),
+    )
+}
+
+/// A committed terminal outcome.
+fn committed(sequence: u64, byte: u8) -> TerminalOutcome {
+    TerminalOutcome {
+        decision_sequence: DecisionSequence::try_new(sequence)
+            .expect("fixture sequence is positive"),
+        outcome: DecisionOutcome::Committed {
+            repository_commit_id: RepositoryCommitId::from_digest(
+                IdentityDomain::RepositoryCommitRecord.algorithm().id(),
+                CANONICAL_CODEC_VERSION,
+                DigestBytes::try_new(&[byte; 32]).expect("fixture digest is bounded"),
+            ),
+        },
+    }
+}
+
+/// The honest outcome-membership answer these cases tamper with.
+///
+/// A SECOND family in this corpus, and the reason it is worth having: every
+/// class above rides the ref path, so the whole corpus shared one root, one
+/// layout and one answer variant. A verifier that checked the right structure
+/// against the wrong root would have been detected by nothing here.
+struct HonestOutcome {
+    head: RepositoryAuthorityHeadBody,
+    tx_id: TxId,
+    outcome: TerminalOutcome,
+    proof: MerkleProof,
+}
+
+fn honest_outcome() -> HonestOutcome {
+    let entries = outcome_index();
+    let (tx_id, outcome) = entries[0];
+    let proof = outcome_index_proof(&entries, tx_id, &outcome)
+        .expect("the indexed terminal outcome has a membership proof");
+    // The UNMODIFIED pinned head: it already commits to this index, so
+    // freshness passes and whatever refuses below is the envelope verifier.
+    HonestOutcome {
+        head: honest().head,
+        tx_id,
+        outcome,
+        proof,
+    }
+}
+
 /// Every tampered envelope, paired with the class it represents.
 fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
     let base = honest();
     let good_proof = base.proof.clone();
+    // Kept for the cross-root case at the end, which needs a genuine REF proof.
+    let ref_proof_for_cross_root = base.proof.clone();
     let good_head = base.head.clone();
     let good_config = base.configuration.clone();
 
@@ -416,6 +507,78 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
             old_head,
             Some(good_config),
             membership(name("refs/heads/main"), old_oid, old_proof),
+        ),
+    ));
+
+    // --- the outcome-membership family ---------------------------------
+    //
+    // Everything above rides the REF path, so until here the corpus shared one
+    // root, one layout and one answer variant. These pin the second verified
+    // answer type, which is checked against `outcome_index_root` rather than
+    // `ref_root`.
+    let honest_outcome = honest_outcome();
+
+    // A transaction the index does not hold, carried by a real proof. The
+    // outcome analogue of RefName.
+    cases.push((
+        TamperClass::OutcomeTxId,
+        VerifiedReadEnvelope::new(
+            honest_outcome.head.clone(),
+            None,
+            VerifiedReadAnswer::OutcomeMembership {
+                tx_id: tx(0xB2),
+                outcome: Box::new(honest_outcome.outcome),
+                proof: Box::new(honest_outcome.proof.clone()),
+            },
+        ),
+    ));
+
+    // The right transaction, a different terminal outcome: the answer that
+    // matters most to a client, since it changes what it believes happened.
+    cases.push((
+        TamperClass::OutcomeSubstituted,
+        VerifiedReadEnvelope::new(
+            honest_outcome.head.clone(),
+            None,
+            VerifiedReadAnswer::OutcomeMembership {
+                tx_id: honest_outcome.tx_id,
+                outcome: Box::new(committed(2, 0x66)),
+                proof: Box::new(honest_outcome.proof.clone()),
+            },
+        ),
+    ));
+
+    // CROSS-ROOT CONFUSION, and the reason this family earns its place: a
+    // genuine REF proof presented as an OUTCOME answer.
+    //
+    // The head is UNTOUCHED, which is the whole design of this case. The
+    // obvious version -- swap the head's outcome-index root for its ref root --
+    // is a head change, so the freshness floor refuses it before the verifier
+    // runs; measured, it came back detected by Freshness and the proof path was
+    // never reached. Leaving the head alone makes freshness pass and forces the
+    // envelope verifier to be the thing that answers, which is the only way to
+    // learn whether it checks a proof against the root its ANSWER TYPE names
+    // rather than whichever root happens to verify.
+    //
+    // No proof-structure class above can see this: they all ride the ref path,
+    // so a verifier that checked every outcome answer against `ref_root` would
+    // satisfy the entire pre-existing corpus.
+    assert_ne!(
+        base.head.ref_root, base.head.outcome_index_root,
+        "the two roots must genuinely differ, or routing to the wrong one is undetectable"
+    );
+    cases.push((
+        TamperClass::OutcomeRootConfusion,
+        VerifiedReadEnvelope::new(
+            honest_outcome.head.clone(),
+            None,
+            VerifiedReadAnswer::OutcomeMembership {
+                tx_id: honest_outcome.tx_id,
+                outcome: Box::new(honest_outcome.outcome),
+                // A real ref-membership proof, valid under `ref_root`, offered
+                // where an outcome-index proof belongs.
+                proof: Box::new(ref_proof_for_cross_root),
+            },
         ),
     ));
 
@@ -589,4 +752,74 @@ fn envelope_verification_alone_accepts_the_replay_which_is_why_freshness_exists(
     // head does not match -- which is not the same protection: a client that
     // re-pins on what the mirror hands it has no mismatch to notice.
     assert!(verify_envelope(&pinned, &replay).is_err());
+}
+
+#[test]
+fn an_outcome_envelope_is_checked_against_the_outcome_index_root_not_whichever_root_verifies() {
+    // Stated on its own because it is the one property of the outcome family
+    // that no ref-path case can reach, and because "detected" is not the claim
+    // -- "detected by the verifier, on the right root" is.
+    //
+    // The head is IDENTICAL in both halves, deliberately. Move it and the
+    // freshness floor answers first: the obvious version of this case swapped
+    // the head's outcome-index root for its ref root, and came back detected by
+    // Freshness with the proof path never reached. Holding the head still is
+    // what forces the envelope verifier to be the thing that answers.
+    let base = honest();
+    let outcome = honest_outcome();
+    let pinned = PinnedAuthorityHead::new(base.head.clone());
+
+    assert_ne!(
+        base.head.ref_root, base.head.outcome_index_root,
+        "the two roots must differ, or routing to the wrong one could not be observed"
+    );
+
+    // PERMITTED: the genuine outcome answer under the pinned head.
+    let genuine = VerifiedReadEnvelope::new(
+        outcome.head.clone(),
+        None,
+        VerifiedReadAnswer::OutcomeMembership {
+            tx_id: outcome.tx_id,
+            outcome: Box::new(outcome.outcome),
+            proof: Box::new(outcome.proof),
+        },
+    );
+    assert_eq!(
+        verify_envelope(&pinned, &genuine),
+        Ok(VerifiedMembership::Outcome),
+        "the honest outcome answer must verify, or the refusal below proves only that \
+         the verifier rejects everything"
+    );
+
+    // REFUSED: a real ref-membership proof, valid under `ref_root`, offered
+    // where an outcome-index proof belongs. A verifier that tried each root
+    // until one matched would accept this.
+    let cross_root = VerifiedReadEnvelope::new(
+        base.head.clone(),
+        None,
+        VerifiedReadAnswer::OutcomeMembership {
+            tx_id: outcome.tx_id,
+            outcome: Box::new(outcome.outcome),
+            proof: Box::new(base.proof.clone()),
+        },
+    );
+    assert_eq!(
+        verify_envelope(&pinned, &cross_root),
+        Err(VerifiedReadRefusal::ProofRejected),
+        "a ref proof presented as an outcome answer must be refused"
+    );
+
+    // And the mirror, so this is a statement about ROUTING rather than about
+    // outcome answers being fussy: the genuine OUTCOME proof offered as a REF
+    // answer is refused too.
+    let mirrored = VerifiedReadEnvelope::new(
+        base.head.clone(),
+        Some(base.configuration.clone()),
+        membership(base.queried.clone(), base.oid, honest_outcome().proof),
+    );
+    assert_eq!(
+        verify_envelope(&pinned, &mirrored),
+        Err(VerifiedReadRefusal::ProofRejected),
+        "and an outcome proof presented as a ref answer must be refused"
+    );
 }
