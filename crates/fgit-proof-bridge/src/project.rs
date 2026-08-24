@@ -169,6 +169,12 @@ pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, Projec
     // transactions it just made terminal.
     let mut batches: BTreeMap<Vec<u8>, Vec<Vec<u8>>> = BTreeMap::new();
     let mut steps = Vec::with_capacity(trace.steps.len());
+    // A refusal consumes decision sequence but does NOT advance repository
+    // sequence (NORMATIVE_PROTOCOL_CONTRACTS.md line 285). That is the only
+    // thing a recorded trace carries which distinguishes a batch that committed
+    // from one that refused: DecisionBodyIdentity holds both a commit id and a
+    // refusal-record id without saying which one applies.
+    let mut repository_sequence: Option<u64> = None;
 
     let index_of = |tx: TxId, indices: &mut BTreeMap<TxId, u64>, order: &mut Vec<(u64, String)>| {
         if let Some(found) = indices.get(&tx) {
@@ -273,16 +279,40 @@ pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, Projec
                             .digest()
                             .as_bytes()
                             .to_vec();
-                        for capsule in batches.get(&key).cloned().unwrap_or_default() {
-                            let tx = *capsules
-                                .get(&capsule)
-                                .ok_or(ProjectionRefusal::UnknownCapsule { concrete_index })?;
-                            let target = index_of(tx, &mut indices, &mut order);
-                            decided.insert(target, AbstractOutcome::Committed);
-                            operations.push(AbstractOp::Decide {
-                                target,
-                                outcome: AbstractOutcome::Committed,
-                            });
+                        let staged = batches.get(&key).cloned().unwrap_or_default();
+                        let advanced = step
+                            .head
+                            .latest_repository_sequence
+                            .map(fgit_types::RepositorySequence::get);
+                        let committed_count = match (repository_sequence, advanced) {
+                            (Some(before), Some(after)) => after.saturating_sub(before),
+                            (None, Some(after)) => after,
+                            _ => 0,
+                        };
+                        // Attribute an outcome only where the trace determines
+                        // one. A batch that advanced the repository sequence by
+                        // exactly as many positions as it staged capsules
+                        // committed all of them; one that advanced it by none
+                        // refused all of them. Anything between is a mixed batch
+                        // whose per-capsule fate this recording does not state,
+                        // and guessing there would put a fabricated outcome into
+                        // a proof artifact.
+                        let outcome = if committed_count == 0 {
+                            Some(AbstractOutcome::Refused)
+                        } else if usize::try_from(committed_count) == Ok(staged.len()) {
+                            Some(AbstractOutcome::Committed)
+                        } else {
+                            None
+                        };
+                        if let Some(outcome) = outcome {
+                            for capsule in staged {
+                                let tx = *capsules
+                                    .get(&capsule)
+                                    .ok_or(ProjectionRefusal::UnknownCapsule { concrete_index })?;
+                                let target = index_of(tx, &mut indices, &mut order);
+                                decided.insert(target, outcome);
+                                operations.push(AbstractOp::Decide { target, outcome });
+                            }
                         }
                         None
                     }
@@ -301,6 +331,11 @@ pub fn project(name: &str, trace: &GoldenTrace) -> Result<ProjectedTrace, Projec
             }
             _ => None,
         };
+        repository_sequence = step
+            .head
+            .latest_repository_sequence
+            .map(fgit_types::RepositorySequence::get)
+            .or(repository_sequence);
         operations.extend(projected);
         steps.push(ProjectedStep {
             concrete_index,

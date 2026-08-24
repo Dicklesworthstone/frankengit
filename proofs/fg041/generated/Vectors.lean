@@ -106,7 +106,7 @@ def trace_multi_decision_batch : Trace :=
     , { concreteIndex := 3, ops := [], generationAfter := 1 }
     , { concreteIndex := 4, ops := [], generationAfter := 1 }
     , { concreteIndex := 5, ops := [], generationAfter := 1 }
-    , { concreteIndex := 6, ops := [Op.publish 1 2, Op.decide 0 true, Op.decide 1 true], generationAfter := 2 }
+    , { concreteIndex := 6, ops := [Op.publish 1 2], generationAfter := 2 }
     ]
   }
 
@@ -120,7 +120,7 @@ def trace_refusal_only : Trace :=
     [ { concreteIndex := 0, ops := [Op.sealRequest 0], generationAfter := 1 }
     , { concreteIndex := 1, ops := [], generationAfter := 1 }
     , { concreteIndex := 2, ops := [], generationAfter := 1 }
-    , { concreteIndex := 3, ops := [Op.publish 1 2, Op.decide 0 true], generationAfter := 2 }
+    , { concreteIndex := 3, ops := [Op.publish 1 2, Op.decide 0 false], generationAfter := 2 }
     ]
   }
 
