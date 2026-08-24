@@ -701,7 +701,10 @@ pub fn verify_ref_state_non_membership(
         RefStateNonMembershipProof::AfterLast { last } => {
             // `leaf_count` is bound into the fold shape, so claiming the last
             // position cannot be done by inventing a larger tree.
-            last.proof.index() + 1 == last.proof.leaf_count()
+            // The index is decoded, untrusted input. Checked arithmetic turns
+            // a saturated claim into a plain refusal instead of a debug-build
+            // panic or a release-build wraparound.
+            last.proof.index().checked_add(1) == Some(last.proof.leaf_count())
                 && ref_name_order(&last.name, name) == Ordering::Less
                 && holds(last)
         }
@@ -710,7 +713,9 @@ pub fn verify_ref_state_non_membership(
             successor,
         } => {
             predecessor.proof.leaf_count() == successor.proof.leaf_count()
-                && successor.proof.index() == predecessor.proof.index() + 1
+                // As above, adjacency is checked against a decoded index, not
+                // a value computed by this verifier.
+                && predecessor.proof.index().checked_add(1) == Some(successor.proof.index())
                 && ref_name_order(&predecessor.name, name) == Ordering::Less
                 && ref_name_order(name, &successor.name) == Ordering::Less
                 && holds(predecessor)
