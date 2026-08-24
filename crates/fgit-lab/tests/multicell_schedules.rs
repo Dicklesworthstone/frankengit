@@ -341,12 +341,22 @@ fn run(
     )
 }
 
-/// Assert the campaign's recorded history linearizes, and that the check was
-/// not vacuous.
+/// Assert the campaign's recorded history linearizes. THE VERDICT ONLY.
 ///
-/// The completed-operation count is the load-bearing second half. An empty
-/// history linearizes trivially, so without it a recorder that silently stopped
-/// recording would read as a clean pass in every arm.
+/// This deliberately does NOT check that the history was non-empty, because an
+/// empty history linearizes trivially and one arm legitimately produces one:
+/// see the total-partition arm, which asserts the complementary fact instead.
+/// For the non-vacuity half use [`expect_linearizable_over_real_work`], and
+/// call this bare version only where an empty history is the expected result.
+///
+/// The wording here used to describe the PAIR -- claiming the
+/// completed-operation count as "the load-bearing second half" -- left over
+/// from before the split. It sat on the half that does not make that
+/// assertion, so a reader checking whether the vacuity guard was present would
+/// land here, believe the bare call site was guarded, and stop looking. On a
+/// bead reopened for evidence claiming more than it proves, a helper whose doc
+/// claims an assertion it does not make is the same defect one level down.
+/// Caught in review of the commit that introduced the split.
 fn expect_linearizable(name: &str, report: &CheckReport) {
     assert!(
         matches!(&report.verdict, CheckVerdict::Linearizable { .. }),
