@@ -11,7 +11,13 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::history::{History, OperationId, RecordedOperation, normalize_authority_tokens};
-use crate::vocabulary::{AuthorityOp, AuthorityResponse};
+use crate::keys::{HeadKey, ImmutableKey};
+use crate::tokens::{AuthorityVersionToken, StoreInstanceId};
+use crate::vocabulary::{
+    AuthenticatedHead, AuthorityOp, AuthorityRefusal, AuthorityResponse, CasOutcome, HeadInit,
+    HeadRead, HeadReadReceipt, ImmutableRead, PutOutcome,
+};
+use fgit_types::HeadGeneration;
 
 /// Stable schema label for newline-delimited checker reports.
 pub const NDJSON_SCHEMA: &str = "fgit.authority.lincheck.v1";
@@ -63,6 +69,215 @@ pub trait AuthoritySequentialSpec:
 impl<Specification> AuthoritySequentialSpec for Specification where
     Specification: SequentialSpec<Operation = AuthorityOp, Response = AuthorityResponse>
 {
+}
+
+/// Reference sequential specification for the full authority vocabulary.
+///
+/// This is a checker-only model, not a durable authority backend. It gives
+/// every fault or schedule campaign one definition of immutable writes, head
+/// issuance, authenticated receipts, and the ordered conditional-head guards.
+/// In particular, its tokens use the representatives installed by
+/// [`normalize_authority_tokens`], so callers compare authority semantics
+/// rather than a backend's opaque token layout.
+#[derive(Clone, Debug)]
+pub struct AuthorityReferenceSpec {
+    instance: StoreInstanceId,
+    initial_head: Option<InitialHead>,
+}
+
+impl AuthorityReferenceSpec {
+    /// Starts from an authority store with no immutable bodies or head slots.
+    #[must_use]
+    pub const fn new(instance: StoreInstanceId) -> Self {
+        Self {
+            instance,
+            initial_head: None,
+        }
+    }
+
+    /// Starts from one head that existed before the recorded history.
+    ///
+    /// This constructor is for a schedule that records only operations after
+    /// setup. The seed receives the first normalized authority token, exactly
+    /// as an `InitializeHead` operation would; later reads reuse that token
+    /// and only a committed replacement mints a successor.
+    #[must_use]
+    pub fn with_initial_head(
+        instance: StoreInstanceId,
+        key: HeadKey,
+        generation: HeadGeneration,
+        body: Vec<u8>,
+    ) -> Self {
+        Self {
+            instance,
+            initial_head: Some(InitialHead {
+                key,
+                generation,
+                body,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct InitialHead {
+    key: HeadKey,
+    generation: HeadGeneration,
+    body: Vec<u8>,
+}
+
+/// State held by [`AuthorityReferenceSpec`] while the checker explores one
+/// candidate linearization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorityReferenceState {
+    immutable: BTreeMap<ImmutableKey, Vec<u8>>,
+    heads: BTreeMap<HeadKey, HeadReadReceipt>,
+    issued: BTreeMap<AuthorityVersionToken, IssuedVersion>,
+    next_issuance: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IssuedVersion {
+    key: HeadKey,
+    generation: HeadGeneration,
+    body: Vec<u8>,
+}
+
+impl AuthorityReferenceState {
+    fn mint_receipt(
+        &mut self,
+        key: HeadKey,
+        generation: HeadGeneration,
+        body: Vec<u8>,
+    ) -> HeadReadReceipt {
+        let mut bytes = [0_u8; 16];
+        bytes[..8].copy_from_slice(b"fgithist");
+        bytes[8..].copy_from_slice(&self.next_issuance.to_be_bytes());
+        self.next_issuance = self.next_issuance.saturating_add(1);
+        let token = AuthorityVersionToken::from_opaque_bytes(bytes);
+        self.issued.insert(
+            token,
+            IssuedVersion {
+                key: key.clone(),
+                generation,
+                body: body.clone(),
+            },
+        );
+        HeadReadReceipt::new(key, token, generation, body)
+    }
+}
+
+impl SequentialSpec for AuthorityReferenceSpec {
+    type State = AuthorityReferenceState;
+    type Operation = AuthorityOp;
+    type Response = AuthorityResponse;
+
+    fn initial_state(&self) -> Self::State {
+        let mut state = AuthorityReferenceState {
+            immutable: BTreeMap::new(),
+            heads: BTreeMap::new(),
+            issued: BTreeMap::new(),
+            next_issuance: 0,
+        };
+        if let Some(head) = &self.initial_head {
+            let receipt = state.mint_receipt(head.key.clone(), head.generation, head.body.clone());
+            state.heads.insert(head.key.clone(), receipt);
+        }
+        state
+    }
+
+    fn apply(
+        &self,
+        state: &Self::State,
+        operation: &Self::Operation,
+    ) -> (Self::State, Self::Response) {
+        let mut next = state.clone();
+        let response = match operation {
+            AuthorityOp::PutIfAbsent { key, body } => match next.immutable.get(key) {
+                Some(existing) if existing == body => {
+                    AuthorityResponse::PutIfAbsent(PutOutcome::IdenticalRetry)
+                }
+                Some(_) => AuthorityResponse::PutIfAbsent(PutOutcome::Conflict),
+                None => {
+                    next.immutable.insert(key.clone(), body.clone());
+                    AuthorityResponse::PutIfAbsent(PutOutcome::Created)
+                }
+            },
+            AuthorityOp::ReadImmutable { key } => next.immutable.get(key).map_or_else(
+                || AuthorityResponse::ReadImmutable(ImmutableRead::Absent),
+                |body| AuthorityResponse::ReadImmutable(ImmutableRead::Present(body.clone())),
+            ),
+            AuthorityOp::InitializeHead {
+                key,
+                generation,
+                body,
+            } => match next.heads.get(key) {
+                Some(existing)
+                    if existing.generation() == *generation && existing.body() == body =>
+                {
+                    AuthorityResponse::InitializeHead(HeadInit::IdenticalRetry(existing.clone()))
+                }
+                Some(_) => AuthorityResponse::InitializeHead(HeadInit::Conflict),
+                None => {
+                    let receipt = next.mint_receipt(key.clone(), *generation, body.clone());
+                    next.heads.insert(key.clone(), receipt.clone());
+                    AuthorityResponse::InitializeHead(HeadInit::Created(receipt))
+                }
+            },
+            AuthorityOp::ReadHead { key } => next.heads.get(key).map_or_else(
+                || AuthorityResponse::ReadHead(HeadRead::Absent),
+                |receipt| AuthorityResponse::ReadHead(HeadRead::Present(receipt.clone())),
+            ),
+            AuthorityOp::CompareExchangeHead {
+                key,
+                expected,
+                new_generation,
+                new_body,
+            } => match next.issued.get(expected) {
+                None => AuthorityResponse::Refused(AuthorityRefusal::UnknownVersionToken),
+                Some(issued) if issued.key != *key => {
+                    AuthorityResponse::Refused(AuthorityRefusal::TokenKeyMismatch)
+                }
+                Some(_) => match next.heads.get(key).cloned() {
+                    None => AuthorityResponse::Refused(AuthorityRefusal::HeadAbsent),
+                    Some(current) if current.token() != *expected => {
+                        AuthorityResponse::CompareExchangeHead(CasOutcome::PredecessorMismatch)
+                    }
+                    Some(current) if *new_generation <= current.generation() => {
+                        AuthorityResponse::Refused(AuthorityRefusal::NonMonotoneGeneration {
+                            current: current.generation(),
+                            proposed: *new_generation,
+                        })
+                    }
+                    Some(_) => {
+                        let receipt =
+                            next.mint_receipt(key.clone(), *new_generation, new_body.clone());
+                        next.heads.insert(key.clone(), receipt.clone());
+                        AuthorityResponse::CompareExchangeHead(CasOutcome::Committed(receipt))
+                    }
+                },
+            },
+            AuthorityOp::AuthenticateHeadReceipt { receipt } => {
+                match next.issued.get(&receipt.token()) {
+                    None => AuthorityResponse::Refused(AuthorityRefusal::UnknownVersionToken),
+                    Some(issued) if issued.key != *receipt.key() => {
+                        AuthorityResponse::Refused(AuthorityRefusal::TokenKeyMismatch)
+                    }
+                    Some(issued) if issued.generation != receipt.generation() => {
+                        AuthorityResponse::Refused(AuthorityRefusal::TokenGenerationMismatch)
+                    }
+                    Some(issued) if issued.body.as_slice() != receipt.body() => {
+                        AuthorityResponse::Refused(AuthorityRefusal::TokenBodyMismatch)
+                    }
+                    Some(_) => AuthorityResponse::AuthenticateHeadReceipt(AuthenticatedHead::new(
+                        receipt.clone(),
+                        self.instance,
+                    )),
+                }
+            }
+        };
+        (next, response)
+    }
 }
 
 /// Explicit resource bounds for one checker invocation.
@@ -761,4 +976,113 @@ fn format_operation_ids(operation_ids: &[OperationId]) -> String {
         .map(|operation_id| operation_id.0.to_string())
         .collect::<Vec<_>>()
         .join(",")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AuthorityStore, MemoryAuthorityStore};
+
+    fn head_key(label: &str) -> HeadKey {
+        HeadKey::new(format!("lincheck/{label}").into_bytes())
+            .expect("the fixed test head key is valid")
+    }
+
+    fn initialized_receipt(response: AuthorityResponse) -> HeadReadReceipt {
+        match response {
+            AuthorityResponse::InitializeHead(HeadInit::Created(receipt)) => receipt,
+            unexpected => panic!("expected created head receipt, got {unexpected:?}"),
+        }
+    }
+
+    fn committed_receipt(response: AuthorityResponse) -> HeadReadReceipt {
+        match response {
+            AuthorityResponse::CompareExchangeHead(CasOutcome::Committed(receipt)) => receipt,
+            unexpected => panic!("expected committed head receipt, got {unexpected:?}"),
+        }
+    }
+
+    #[test]
+    fn reference_spec_and_store_preserve_overlapping_cas_guard_order() {
+        let instance = StoreInstanceId::from_raw(73);
+        let store = MemoryAuthorityStore::new(instance);
+        let specification = AuthorityReferenceSpec::new(instance);
+        let initial = specification.initial_state();
+        let primary = head_key("primary");
+        let other = head_key("other");
+
+        // An unissued token also names an absent head. The unknown-token guard
+        // wins before the store considers the target slot.
+        let unknown = AuthorityOp::CompareExchangeHead {
+            key: primary.clone(),
+            expected: AuthorityVersionToken::from_opaque_bytes([0xA5; 16]),
+            new_generation: HeadGeneration::FIRST,
+            new_body: b"unknown".to_vec(),
+        };
+        let (_, modeled_unknown) = specification.apply(&initial, &unknown);
+        let stored_unknown = store.execute(&unknown);
+        assert_eq!(modeled_unknown, stored_unknown);
+        assert_eq!(
+            modeled_unknown,
+            AuthorityResponse::Refused(AuthorityRefusal::UnknownVersionToken)
+        );
+
+        let initialize = AuthorityOp::InitializeHead {
+            key: primary.clone(),
+            generation: HeadGeneration::FIRST,
+            body: b"genesis".to_vec(),
+        };
+        let (initialized_state, modeled_initialize) = specification.apply(&initial, &initialize);
+        let stored_initialize = store.execute(&initialize);
+        assert_eq!(modeled_initialize, stored_initialize);
+        let first = initialized_receipt(modeled_initialize);
+
+        // The issued token is valid, but belongs to another key. This also
+        // targets an absent head and proposes a non-advancing generation; key
+        // mismatch must still win before either later guard.
+        let wrong_key = AuthorityOp::CompareExchangeHead {
+            key: other,
+            expected: first.token(),
+            new_generation: HeadGeneration::FIRST,
+            new_body: b"wrong-key".to_vec(),
+        };
+        let (_, modeled_wrong_key) = specification.apply(&initialized_state, &wrong_key);
+        let stored_wrong_key = store.execute(&wrong_key);
+        assert_eq!(modeled_wrong_key, stored_wrong_key);
+        assert_eq!(
+            modeled_wrong_key,
+            AuthorityResponse::Refused(AuthorityRefusal::TokenKeyMismatch)
+        );
+
+        let advance = AuthorityOp::CompareExchangeHead {
+            key: primary.clone(),
+            expected: first.token(),
+            new_generation: first
+                .generation()
+                .next()
+                .expect("the genesis generation has a successor"),
+            new_body: b"advanced".to_vec(),
+        };
+        let (advanced_state, modeled_advance) = specification.apply(&initialized_state, &advance);
+        let stored_advance = store.execute(&advance);
+        assert_eq!(modeled_advance, stored_advance);
+        let _second = committed_receipt(modeled_advance);
+
+        // The first token is known and key-correct, but stale. It also offers
+        // a non-monotone generation, so predecessor mismatch must win before
+        // the monotonicity guard.
+        let stale_and_non_monotone = AuthorityOp::CompareExchangeHead {
+            key: primary,
+            expected: first.token(),
+            new_generation: HeadGeneration::FIRST,
+            new_body: b"stale".to_vec(),
+        };
+        let (_, modeled_stale) = specification.apply(&advanced_state, &stale_and_non_monotone);
+        let stored_stale = store.execute(&stale_and_non_monotone);
+        assert_eq!(modeled_stale, stored_stale);
+        assert_eq!(
+            modeled_stale,
+            AuthorityResponse::CompareExchangeHead(CasOutcome::PredecessorMismatch)
+        );
+    }
 }
