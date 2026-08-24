@@ -49,6 +49,13 @@ use fgit_verified_read::{
 };
 
 /// What a tampering mirror altered.
+///
+/// [`TamperClass::ALL`] is the corpus DENOMINATOR, and it exists because a
+/// detection rate over a shrinkable set is not a measurement. With the classes
+/// living only inside `corpus()`, deleting one would keep the rate at 100% and
+/// keep every test-function count unchanged -- the coverage would fall silently.
+/// `ALL` plus the coverage assertion below make a removed class a failure and an
+/// added variant without a case a failure too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum TamperClass {
     RefName,
@@ -61,6 +68,22 @@ enum TamperClass {
     ConfigurationSubstituted,
     ConfigurationRemoved,
     StaleHeadReplay,
+}
+
+impl TamperClass {
+    /// Every class the corpus must exercise.
+    const ALL: [Self; 10] = [
+        Self::RefName,
+        Self::RefIdentity,
+        Self::ProofSibling,
+        Self::ProofIndex,
+        Self::ProofLeafCount,
+        Self::HeadRefRoot,
+        Self::HeadConfigurationRoot,
+        Self::ConfigurationSubstituted,
+        Self::ConfigurationRemoved,
+        Self::StaleHeadReplay,
+    ];
 }
 
 /// How the combined client rejected a tampered answer.
@@ -404,6 +427,36 @@ fn an_unsupported_envelope_version_cannot_even_be_constructed() {
             membership(base.queried, base.oid, base.proof),
         )
         .is_ok()
+    );
+}
+
+#[test]
+fn the_corpus_covers_every_declared_tamper_class_exactly_once() {
+    // The denominator guard. Asserted BEFORE the rate, because a rate over an
+    // unpinned set says nothing: drop a class from `corpus()` and detection stays
+    // at 100% while coverage quietly falls. This is the assertion that fails
+    // instead.
+    let mut present: Vec<TamperClass> = corpus().into_iter().map(|(class, _)| class).collect();
+    let built = present.len();
+    present.sort_unstable();
+    present.dedup();
+
+    assert_eq!(
+        built,
+        present.len(),
+        "a class appears twice in the corpus, which would double-count it in the rate"
+    );
+    let mut declared = TamperClass::ALL.to_vec();
+    declared.sort_unstable();
+    assert_eq!(
+        present, declared,
+        "the corpus and the declared class list disagree; a class was added or removed \
+         without the other being updated"
+    );
+    assert_eq!(
+        built,
+        TamperClass::ALL.len(),
+        "the corpus must build exactly one case per declared class"
     );
 }
 

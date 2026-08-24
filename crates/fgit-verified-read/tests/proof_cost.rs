@@ -49,6 +49,9 @@ fn state(leaves: usize) -> Vec<(RefName, GitOid)> {
 }
 
 /// Smallest `k` with `2^k >= n`. Zero for a single leaf, which is its own root.
+///
+/// This is the UPPER BOUND on a path, not the length of every path -- see
+/// [`siblings_for`].
 fn ceil_log2(n: usize) -> usize {
     if n <= 1 {
         0
@@ -57,30 +60,114 @@ fn ceil_log2(n: usize) -> usize {
     }
 }
 
+/// Exactly how many siblings the path for `index` carries in a tree of
+/// `leaf_count` leaves.
+///
+/// # Why a model and not a single number
+///
+/// The fold promotes a final odd element unchanged rather than duplicating it,
+/// so a leaf sitting on a promoted tail gains NO sibling at that level. Path
+/// lengths are therefore not uniform: at 3 leaves they are `[2, 2, 1]`, and at
+/// 17 the last leaf carries ONE sibling where the leftmost carries five.
+///
+/// An earlier version of this file asserted `siblings == ceil_log2(leaf_count)`
+/// for every size and only ever queried the leftmost leaf, so it passed while
+/// being false in general. Weakening it to `<=` would have been the easy repair
+/// and the wrong one: a `<=` bound stays green if a proof starts carrying FEWER
+/// siblings than its position requires, which is a soundness change wearing an
+/// efficiency costume. So the model computes the exact expected length per
+/// index, which is both general and tight.
+const fn siblings_for(index: usize, leaf_count: usize) -> usize {
+    let mut siblings = 0;
+    let mut position = index;
+    let mut level = leaf_count;
+    while level > 1 {
+        let promoted = level % 2 == 1 && position == level - 1;
+        if !promoted {
+            siblings += 1;
+        }
+        position /= 2;
+        level = level.div_ceil(2);
+    }
+    siblings
+}
+
 /// The sizes under test, chosen to include every shape the fold treats
 /// differently: powers of two, one past a power of two, and odd counts where
 /// the last element is promoted rather than paired.
 const SIZES: [usize; 13] = [1, 2, 3, 4, 5, 7, 8, 9, 16, 17, 31, 32, 33];
 
 #[test]
-fn a_membership_proof_carries_exactly_ceil_log2_siblings() {
+fn every_leaf_at_every_size_carries_exactly_the_length_its_position_requires() {
+    // EVERY index, not just the leftmost. The leftmost path is the longest, so
+    // sampling only it cannot see the promoted-tail shortening at all -- which
+    // is exactly how the previous version of this assertion was false and green.
     for leaves in SIZES {
         let entries = state(leaves);
-        let (_, proof) =
-            ref_state_membership_proof(&entries, &name(0)).expect("a membership proof");
+        for index in 0..leaves {
+            let (_, proof) =
+                ref_state_membership_proof(&entries, &name(index)).expect("a membership proof");
+            assert_eq!(
+                proof.siblings().len(),
+                siblings_for(index, leaves),
+                "{leaves} leaves, index {index}: carried {} siblings, model says {}",
+                proof.siblings().len(),
+                siblings_for(index, leaves)
+            );
+            assert_eq!(proof.leaf_count(), leaves);
+        }
+    }
+}
+
+#[test]
+fn no_path_exceeds_the_logarithmic_bound_and_the_leftmost_attains_it() {
+    // The bound still holds over every path, and it is TIGHT: the leftmost leaf
+    // reaches it at every size. Without the second half, "<= ceil_log2" would be
+    // satisfied by proofs that were uniformly too short.
+    for leaves in SIZES {
+        let entries = state(leaves);
+        for index in 0..leaves {
+            let (_, proof) = ref_state_membership_proof(&entries, &name(index)).expect("a proof");
+            assert!(
+                proof.siblings().len() <= ceil_log2(leaves),
+                "{leaves} leaves, index {index}: path exceeded the log bound"
+            );
+        }
+        let (_, leftmost) = ref_state_membership_proof(&entries, &name(0)).expect("a proof");
         assert_eq!(
-            proof.siblings().len(),
+            leftmost.siblings().len(),
             ceil_log2(leaves),
-            "{leaves} leaves: proof carried {} siblings, expected exactly {}",
-            proof.siblings().len(),
-            ceil_log2(leaves)
-        );
-        assert_eq!(
-            proof.leaf_count(),
-            leaves,
-            "and the proof must declare the tree it was cut from"
+            "{leaves} leaves: the leftmost path must attain the bound, or it is not tight"
         );
     }
+}
+
+#[test]
+fn a_promoted_tail_really_does_shorten_a_path_so_the_model_is_not_decorative() {
+    // The case that makes siblings_for worth having rather than a restatement of
+    // ceil_log2. If no size shortened any path, the model and the bound would be
+    // the same function and the previous false assertion would have been true.
+    let mut shortened = Vec::new();
+    for leaves in SIZES {
+        let entries = state(leaves);
+        for index in 0..leaves {
+            let (_, proof) = ref_state_membership_proof(&entries, &name(index)).expect("a proof");
+            if proof.siblings().len() < ceil_log2(leaves) {
+                shortened.push((leaves, index, proof.siblings().len()));
+            }
+        }
+    }
+    assert!(
+        !shortened.is_empty(),
+        "no path was shorter than the bound at any size, so the promoted-tail model \
+         is untested and ceil_log2 alone would have sufficed"
+    );
+    // And specifically at 3 leaves the last leaf carries one sibling, which is
+    // the smallest shape exhibiting the effect.
+    assert!(
+        shortened.contains(&(3, 2, 1)),
+        "expected the 3-leaf promoted tail to carry exactly one sibling; got {shortened:?}"
+    );
 }
 
 #[test]
