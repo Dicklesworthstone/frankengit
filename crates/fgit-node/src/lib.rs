@@ -1581,11 +1581,34 @@ impl DurableAdmissionMaterializer {
             let cache_grant = CacheGrant::reserve(cache_binding, cache_budget)
                 .map_err(AdmissionMaterializationRefusal::CacheGrant)?;
             ensure_materializer_catch_up_live(is_cancelled)?;
-            // Both the layout used to authenticate `ref_root` and the hide
-            // policy come from the configuration the authenticated head
-            // selected.  Decode it before looking up the ref frame: a Merkle
-            // root is a different immutable key from the legacy whole-body
-            // root over the same bytes.
+            let key = admission_immutable_key(
+                ADMISSION_REF_STATE_KEY_PREFIX,
+                repository_id,
+                body.ref_root,
+            )
+            .map_err(AdmissionMaterializationRefusal::Key)?;
+            let ImmutableRead::Present(frame) = authority
+                .read_immutable(cx, &key)
+                .await
+                .map_err(AdmissionMaterializationRefusal::Authority)?
+            else {
+                return Err(AdmissionMaterializationRefusal::ImmutableAbsent(
+                    body.ref_root,
+                ));
+            };
+            ensure_materializer_catch_up_live(is_cancelled)?;
+            let ref_state =
+                decode_body::<CanonicalRefState>(&frame, fgit_codec::DecodeLimits::DEFAULT)
+                    .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
+            let (closure_root, selection_source) =
+                select_authority_closure_in(authority, cx, body.clone(), &ref_state, is_cancelled)
+                    .await?;
+            ensure_materializer_catch_up_live(is_cancelled)?;
+            // `body.ref_root` is already the immutable lookup key regardless
+            // of layout.  Keep the older structural guards above this
+            // configuration read: a missing ref frame, an unbound decision
+            // history, or a non-empty genesis has a more specific refusal
+            // than a configuration that cannot be resolved.
             let (root_layout, hidden_refs) =
                 match fgit_authority::read_repository_configuration_async(
                     authority,
@@ -1631,25 +1654,6 @@ impl DurableAdmissionMaterializer {
                         )));
                     }
                 };
-            let key = admission_immutable_key(
-                ADMISSION_REF_STATE_KEY_PREFIX,
-                repository_id,
-                body.ref_root,
-            )
-            .map_err(AdmissionMaterializationRefusal::Key)?;
-            let ImmutableRead::Present(frame) = authority
-                .read_immutable(cx, &key)
-                .await
-                .map_err(AdmissionMaterializationRefusal::Authority)?
-            else {
-                return Err(AdmissionMaterializationRefusal::ImmutableAbsent(
-                    body.ref_root,
-                ));
-            };
-            ensure_materializer_catch_up_live(is_cancelled)?;
-            let ref_state =
-                decode_body::<CanonicalRefState>(&frame, fgit_codec::DecodeLimits::DEFAULT)
-                    .map_err(AdmissionMaterializationRefusal::CanonicalFrame)?;
             if ref_state_root(root_layout, &ref_state)
                 .map_err(AdmissionMaterializationRefusal::CanonicalRoot)?
                 != body.ref_root
@@ -1658,10 +1662,6 @@ impl DurableAdmissionMaterializer {
                     RefusalCode::InternalInvariantBreach,
                 ));
             }
-            let (closure_root, selection_source) =
-                select_authority_closure_in(authority, cx, body.clone(), &ref_state, is_cancelled)
-                    .await?;
-            ensure_materializer_catch_up_live(is_cancelled)?;
             let closure_key =
                 admission_immutable_key(ADMISSION_CLOSURE_KEY_PREFIX, repository_id, closure_root)
                     .map_err(AdmissionMaterializationRefusal::Key)?;
