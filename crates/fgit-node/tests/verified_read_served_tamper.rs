@@ -22,6 +22,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fgit_authority::{AuthorityVersionToken, HeadRead, HeadReadReceipt};
 use fgit_node::{NodeConfig, OneNode, VerifiedReadQuery, VerifiedReadServingRefusal};
 use fgit_types::cell::{CellState, CellTransitionCause, ReadLabel};
 use fgit_types::hash::{Digest, DigestBytes};
@@ -212,4 +213,89 @@ fn an_unproven_client_is_still_served_by_a_proof_capable_node() {
         !matches!(response, ReadResponse::Verified(_)),
         "a client that asked for no proof must not be handed an envelope"
     );
+}
+
+#[test]
+fn a_fabricated_receipt_is_refused_by_authentication_before_anything_is_materialized() {
+    // `frankengit-fg036b` names this in its scope: "adversarial cells
+    // (replaying old heads, fabricating receipts — authenticated verification
+    // must reject)". `serve_snapshot_verified_read_in` is the production path
+    // that takes a caller-supplied receipt, and its doc promises it
+    // "authenticates the caller-supplied receipt before materializing it".
+    //
+    // That promise had no test. `authenticate_head_receipt` itself is well
+    // covered (55 hits across the suite), but `SnapshotAuthentication` — the
+    // refusal this serving path raises when that check fails — is produced by
+    // nothing in the tree. A well-tested primitive says nothing about whether
+    // a caller reached for it.
+    let scratch = ScratchDirectory::new();
+    let node = serving_node(&scratch);
+    let request = node.request_context();
+
+    let genuine = match node
+        .runtime()
+        .block_on(node.read_authority_head_in(&request))
+        .expect("the genesis head reads")
+    {
+        HeadRead::Present(receipt) => receipt,
+        HeadRead::Absent => panic!("a proof-capable genesis must have published a head"),
+    };
+
+    // The forgery: the real key, generation and body, with a token the store
+    // never issued. This is the shape that matters — a cell that saw a genuine
+    // answer and mints a token for it, rather than obviously malformed input
+    // that any parser would reject.
+    let forged = HeadReadReceipt::new(
+        genuine.key().clone(),
+        AuthorityVersionToken::from_opaque_bytes([0x5A; 16]),
+        genuine.generation(),
+        genuine.body().to_vec(),
+    );
+    assert_ne!(
+        forged.token(),
+        genuine.token(),
+        "the forgery must differ from the issued token, or this proves nothing"
+    );
+
+    let refusal = node
+        .runtime()
+        .block_on(node.serve_snapshot_verified_read_in(
+            &request,
+            &forged,
+            &RefVisibility::new(),
+            ReadLabel::snapshot(),
+            VerifiedReadCapability::EnvelopeV1,
+            VerifiedReadQuery::Ref(
+                RefName::try_new(b"refs/heads/never-created").expect("a valid ref name"),
+            ),
+        ))
+        .expect_err("a fabricated receipt must not be served");
+
+    // REFUSED ON AUTHENTICATION, by name. Asserting merely that it errored
+    // would pass if the forgery were caught later — during materialization, or
+    // by the proof failing to verify — and the whole point of the documented
+    // ordering is that nothing is materialized for an unauthenticated pin.
+    assert!(
+        matches!(
+            refusal,
+            VerifiedReadServingRefusal::SnapshotAuthentication(_)
+        ),
+        "a forged token must be refused by authentication, not downstream: {refusal:?}"
+    );
+
+    // THE PERMITTED TWIN. The genuine receipt is served, so the refusal above
+    // is attributable to the forgery and not to this path refusing everything
+    // — the snapshot mode, the cell state and the query are all identical.
+    node.runtime()
+        .block_on(node.serve_snapshot_verified_read_in(
+            &request,
+            &genuine,
+            &RefVisibility::new(),
+            ReadLabel::snapshot(),
+            VerifiedReadCapability::EnvelopeV1,
+            VerifiedReadQuery::Ref(
+                RefName::try_new(b"refs/heads/never-created").expect("a valid ref name"),
+            ),
+        ))
+        .expect("the authentic receipt is served");
 }

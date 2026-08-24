@@ -47,7 +47,7 @@ TARGETS=(
   "fgit-verified-read:tamper_campaign:8"
   "fgit-verified-read:head_chain_freshness:7"
   "fgit-verified-read:proof_cost:9"
-  "fgit-node:verified_read_served_tamper:2"
+  "fgit-node:verified_read_served_tamper:3"
 )
 
 # The corpus's declared tamper-class count, asserted separately from the
@@ -70,6 +70,7 @@ LOAD_BEARING=(
   a_v1_configuration_cannot_stand_in_for_the_incarnation_body_the_head_selected
   a_server_produced_envelope_verifies_and_the_same_envelope_tampered_does_not
   an_unproven_client_is_still_served_by_a_proof_capable_node
+  a_fabricated_receipt_is_refused_by_authentication_before_anything_is_materialized
   every_leaf_at_every_size_carries_exactly_the_length_its_position_requires
   a_promoted_tail_really_does_shorten_a_path_so_the_model_is_not_decorative
   generation_reads_the_whole_state_while_verification_reads_only_the_path
