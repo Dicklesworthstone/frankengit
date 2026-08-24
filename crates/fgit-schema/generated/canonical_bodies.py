@@ -118,6 +118,20 @@ class ObjectClosureNeighbour:
 
 
 @dataclass(frozen=True, slots=True)
+class RepositoryIncarnationConfigurationV21:
+    """Version-2.1 repository configuration carrying the incarnation identity and bound policy root."""
+
+    # Authenticated root layout needed to interpret the head roots.
+    root_layout: int
+    # Permanent native Git object identity algorithm.
+    object_format: int
+    # Minted incarnation preventing a delete/recreate location alias.
+    repository_incarnation_id: str
+    # Policy root bound to this incarnation, absent when none is published.
+    policy_root: Digest | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DecisionOutcomeCommitted:
     """The decision committed, naming the record it produced."""
 
@@ -163,8 +177,18 @@ class VerifiedReadConfigurationRepositoryIncarnationV2:
     body: RepositoryIncarnationConfigurationV2
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedReadConfigurationRepositoryIncarnationV2_1:
+    """RepositoryIncarnationConfigurationBodyV2_1 schema v2.1, carrying the policy root."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 3
+    # Exact V2.1 configuration payload, without a nested canonical frame.
+    body: RepositoryIncarnationConfigurationV21
+
+
 # A version-tagged configuration body, inlined only when the answer needs one.
-VerifiedReadConfiguration = VerifiedReadConfigurationRepositoryV1 | VerifiedReadConfigurationRepositoryIncarnationV2
+VerifiedReadConfiguration = VerifiedReadConfigurationRepositoryV1 | VerifiedReadConfigurationRepositoryIncarnationV2 | VerifiedReadConfigurationRepositoryIncarnationV2_1
 
 
 @dataclass(frozen=True, slots=True)

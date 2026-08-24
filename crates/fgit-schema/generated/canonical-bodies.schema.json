@@ -169,6 +169,32 @@
         "proof": { "$ref": "#/$defs/VerifiedReadMerkleProofPayload" }
       }
     },
+    "RepositoryIncarnationConfigurationV21": {
+      "description": "Version-2.1 repository configuration carrying the incarnation identity and bound policy root.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_layout", "object_format", "repository_incarnation_id"],
+      "properties": {
+        "root_layout": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed RootLayoutVersion vocabulary"
+        },
+        "object_format": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "code point from the closed GitHashAlgorithm vocabulary"
+        },
+        "repository_incarnation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "16 raw bytes, lowercase hex"
+        },
+        "policy_root": { "$ref": "#/$defs/Digest" }
+      }
+    },
     "DecisionOutcome": {
       "description": "The terminal outcome of one decision: committed, or refused with a reason.",
       "oneOf": [
@@ -231,6 +257,17 @@
             "variant": { "const": "RepositoryIncarnationV2" },
             "discriminant": { "const": 2 },
             "body": { "$ref": "#/$defs/RepositoryIncarnationConfigurationV2" }
+          }
+        },
+        {
+          "description": "RepositoryIncarnationConfigurationBodyV2_1 schema v2.1, carrying the policy root.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "body"],
+          "properties": {
+            "variant": { "const": "RepositoryIncarnationV2_1" },
+            "discriminant": { "const": 3 },
+            "body": { "$ref": "#/$defs/RepositoryIncarnationConfigurationV21" }
           }
         }
       ]

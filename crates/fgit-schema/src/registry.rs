@@ -619,6 +619,42 @@ pub static REPOSITORY_INCARNATION_CONFIGURATION_V2: StructureDescriptor = Struct
 };
 
 /// The exact versioned configuration carrier in a verified-read envelope.
+/// Version 2.1 configuration: version two plus the bound policy root.
+///
+/// `fg059` added `policy_root` as an OPTIONAL digest rather than a new required
+/// field, so a v2.0 reader's shape stays a strict prefix of this one. The
+/// descriptor says the same thing: identical leading fields, one optional tail.
+pub static REPOSITORY_INCARNATION_CONFIGURATION_V2_1: StructureDescriptor = StructureDescriptor {
+    name: "repository-incarnation-configuration-v2-1",
+    doc: "Version-2.1 repository configuration carrying the incarnation identity and bound policy root.",
+    fields: &[
+        FieldDescriptor {
+            name: "root_layout",
+            ty: FieldType::CodePoint {
+                vocabulary: "RootLayoutVersion",
+            },
+            cardinality: Cardinality::Required,
+            doc: "Authenticated root layout needed to interpret the head roots.",
+        },
+        FieldDescriptor {
+            name: "object_format",
+            ty: FieldType::CodePoint {
+                vocabulary: "GitHashAlgorithm",
+            },
+            cardinality: Cardinality::Required,
+            doc: "Permanent native Git object identity algorithm.",
+        },
+        opaque(
+            "repository_incarnation_id",
+            "Minted incarnation preventing a delete/recreate location alias.",
+        ),
+        root_opt(
+            "policy_root",
+            "Policy root bound to this incarnation, absent when none is published.",
+        ),
+    ],
+};
+
 pub static VERIFIED_READ_CONFIGURATION: UnionDescriptor = UnionDescriptor {
     name: "verified-read-configuration",
     doc: "A version-tagged configuration body, inlined only when the answer needs one.",
@@ -641,6 +677,16 @@ pub static VERIFIED_READ_CONFIGURATION: UnionDescriptor = UnionDescriptor {
                 "body",
                 "repository-incarnation-configuration-v2",
                 "Exact V2 configuration payload, without a nested canonical frame.",
+            )],
+        },
+        UnionVariant {
+            name: "RepositoryIncarnationV2_1",
+            discriminant: 3,
+            doc: "RepositoryIncarnationConfigurationBodyV2_1 schema v2.1, carrying the policy root.",
+            fields: &[structure(
+                "body",
+                "repository-incarnation-configuration-v2-1",
+                "Exact V2.1 configuration payload, without a nested canonical frame.",
             )],
         },
     ],
@@ -765,6 +811,7 @@ pub static STRUCTURES: &[&StructureDescriptor] = &[
     &REPOSITORY_CONFIGURATION_V1,
     &REPOSITORY_INCARNATION_CONFIGURATION_V2,
     &OBJECT_CLOSURE_NEIGHBOUR,
+    &REPOSITORY_INCARNATION_CONFIGURATION_V2_1,
 ];
 
 /// Every union, by name.

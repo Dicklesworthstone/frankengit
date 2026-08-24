@@ -92,6 +92,18 @@ export interface ObjectClosureNeighbour {
   proof: VerifiedReadMerkleProofPayload;
 }
 
+/** Version-2.1 repository configuration carrying the incarnation identity and bound policy root. */
+export interface RepositoryIncarnationConfigurationV21 {
+  /** Authenticated root layout needed to interpret the head roots. */
+  root_layout: number;
+  /** Permanent native Git object identity algorithm. */
+  object_format: number;
+  /** Minted incarnation preventing a delete/recreate location alias. */
+  repository_incarnation_id: string;
+  /** Policy root bound to this incarnation, absent when none is published. */
+  policy_root?: Digest;
+}
+
 /** The terminal outcome of one decision: committed, or refused with a reason. */
 export type DecisionOutcome =
   | DecisionOutcomeCommitted
@@ -118,7 +130,8 @@ export interface DecisionOutcomeRefused {
 /** A version-tagged configuration body, inlined only when the answer needs one. */
 export type VerifiedReadConfiguration =
   | VerifiedReadConfigurationRepositoryV1
-  | VerifiedReadConfigurationRepositoryIncarnationV2;
+  | VerifiedReadConfigurationRepositoryIncarnationV2
+  | VerifiedReadConfigurationRepositoryIncarnationV2_1;
 
 /** RepositoryConfigurationBody schema v1.2. */
 export interface VerifiedReadConfigurationRepositoryV1 {
@@ -134,6 +147,14 @@ export interface VerifiedReadConfigurationRepositoryIncarnationV2 {
   discriminant: 2;
   /** Exact V2 configuration payload, without a nested canonical frame. */
   body: RepositoryIncarnationConfigurationV2;
+}
+
+/** RepositoryIncarnationConfigurationBodyV2_1 schema v2.1, carrying the policy root. */
+export interface VerifiedReadConfigurationRepositoryIncarnationV2_1 {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 3;
+  /** Exact V2.1 configuration payload, without a nested canonical frame. */
+  body: RepositoryIncarnationConfigurationV21;
 }
 
 /** An absence proof selected by the requested name's ordered position. */
