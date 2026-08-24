@@ -45,9 +45,9 @@ use fgit_authority::{
     AsyncAuthorityStore, AuthenticatedHead, AuthorityFailure, AuthorityLimits, HeadInit, HeadKey,
     HeadRead, IdempotencyKey, ImmutableKey, ImmutableRead, KeyError, OutcomeLookup, PutOutcome,
     StoreInstanceId, initialize_repository_async, outcome_index_root,
-    read_authority_head_body_async, read_decision_batch_body_async,
+    read_authority_head_body_async, read_decision_batch_body_async, read_hidden_ref_policy_async,
     read_repository_incarnation_configuration_async, record_creation_attempt_async,
-    resolve_outcome_async, stage_repository_incarnation_configuration_async,
+    resolve_outcome_async, stage_latest_repository_incarnation_configuration_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
 use fgit_chronicle::{
@@ -55,7 +55,7 @@ use fgit_chronicle::{
 };
 use fgit_codec::schema::{
     CreationAttemptBody, RepositoryAuthorityHeadBody, RepositoryCommitRecord,
-    RepositoryIncarnationConfigurationBody,
+    RepositoryIncarnationConfigurationBodyV2_1,
 };
 use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, body_id, decode_body, encode_body,
@@ -1744,10 +1744,13 @@ impl DurableAdmissionMaterializer {
                         }
                         (configuration.root_layout, policy)
                     }
-                    // Schema-major two has no hide policy by design, but it
-                    // does carry the root layout. Only this exact older
-                    // configuration reader refusal selects that decode path;
-                    // every other configuration failure remains a refusal.
+                    // The incarnation configuration union owns the exact
+                    // 2.0/2.1 minor dispatch. Only the former major-one-reader
+                    // refusal selects this path; every other configuration
+                    // failure remains a refusal. A byte-stable 2.0 body
+                    // normalizes to no policy, while 2.1 supplies an immutable
+                    // policy root to resolve beside the authenticated
+                    // configuration root.
                     Err(fgit_authority::OutcomeFailure::Codec(
                         fgit_codec::CodecRefusal::SchemaMajorUnsupported { observed: 2, .. },
                     )) => {
@@ -1760,7 +1763,27 @@ impl DurableAdmissionMaterializer {
                         .map_err(|error| {
                             AdmissionMaterializationRefusal::DecisionHistory(Box::new(error))
                         })?;
-                        (configuration.root_layout, RefVisibility::new())
+                        let mut policy = RefVisibility::new();
+                        if let Some(policy_root) = configuration.policy_root {
+                            let policy_body =
+                                read_hidden_ref_policy_async(authority, cx, &policy_root)
+                                    .await
+                                    .map_err(|error| {
+                                        AdmissionMaterializationRefusal::DecisionHistory(Box::new(
+                                            error,
+                                        ))
+                                    })?;
+                            for rule in &policy_body.rules {
+                                policy
+                                    .push_rule(rule, &WireLimits::default())
+                                    .map_err(|_| {
+                                        AdmissionMaterializationRefusal::CanonicalRoot(
+                                            RefusalCode::EvidenceInvalid,
+                                        )
+                                    })?;
+                            }
+                        }
+                        (configuration.root_layout, policy)
                     }
                     Err(error) => {
                         return Err(AdmissionMaterializationRefusal::DecisionHistory(Box::new(
@@ -4857,15 +4880,16 @@ impl OneNode {
             }
             node.repository_incarnation_id = stored;
         }
-        let configuration = RepositoryIncarnationConfigurationBody {
+        let configuration = RepositoryIncarnationConfigurationBodyV2_1 {
             root_layout,
             object_format: node.object_format,
             repository_incarnation_id: node.repository_incarnation_id,
+            policy_root: None,
         };
         let configuration_root =
             match node
                 .runtime
-                .block_on(stage_repository_incarnation_configuration_async(
+                .block_on(stage_latest_repository_incarnation_configuration_async(
                     &node.authority,
                     &initialization_cx,
                     &configuration,

@@ -6,8 +6,8 @@
 //! its canonical selected root, rather than relying on a legacy-v1 mismatch.
 
 use fgit_authority::{
-    AuthorityStore, MemoryAuthorityStore, OutcomeFailure, StoreInstanceId, body_key,
-    canonical_body_id, read_repository_incarnation_configuration,
+    AuthorityStore, MemoryAuthorityStore, OutcomeFailure, RepositoryIncarnationConfiguration,
+    StoreInstanceId, body_key, canonical_body_id, read_repository_incarnation_configuration,
     stage_repository_incarnation_configuration,
 };
 use fgit_codec::{
@@ -62,6 +62,33 @@ impl CanonicalBody for UnknownV2ObjectFormatConfiguration {
     }
 }
 
+/// A framed schema-2.2 body is deliberately not a compatibility fallback. The
+/// production union implements exactly 2.0 and 2.1, so this encoder-only
+/// future minor must be refused before its payload can acquire a local meaning.
+struct FutureV2Configuration;
+
+impl CanonicalBody for FutureV2Configuration {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/repository-configuration/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("repository-configuration");
+    const SCHEMA_MAJOR: u16 = 2;
+    const SCHEMA_MINOR: u16 = 2;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        out.write_scalar(RootLayoutVersion::RefStateMerkleV1.code_point());
+        out.write_scalar(GitHashAlgorithm::Sha256.code_point());
+        out.write_opaque_id(&[0xE2; 16]);
+        out.write_option(None::<&fgit_types::hash::Digest>, Encoder::write_digest)
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let _ = input.read_scalar::<u16>("root_layout")?;
+        let _ = input.read_scalar::<u16>("object_format")?;
+        let _ = input.read_opaque_id("repository_incarnation_id")?;
+        let _ = input.read_option("policy_root", Decoder::read_digest)?;
+        Ok(Self)
+    }
+}
+
 #[test]
 fn production_reader_refuses_unknown_v2_object_format_with_a_known_twin() {
     let backing = store();
@@ -71,7 +98,12 @@ fn production_reader_refuses_unknown_v2_object_format_with_a_known_twin() {
     assert_eq!(
         read_repository_incarnation_configuration(&backing, &known_root)
             .expect("the known v2 configuration resolves through the production reader"),
-        known,
+        RepositoryIncarnationConfiguration {
+            root_layout: known.root_layout,
+            object_format: known.object_format,
+            repository_incarnation_id: known.repository_incarnation_id,
+            policy_root: None,
+        },
         "the permitted twin proves the selected-slot reader works for current v2 bodies"
     );
 
@@ -100,5 +132,37 @@ fn production_reader_refuses_unknown_v2_object_format_with_a_known_twin() {
                 observed: 65_535,
             }
         )))
+    ));
+}
+
+#[test]
+fn production_reader_refuses_an_unknown_v2_minor_without_a_legacy_fallback() {
+    let backing = store();
+    let future = FutureV2Configuration;
+    let key = body_key(IdentityDomain::RepositoryConfiguration, &future)
+        .expect("the future frame still occupies the configuration identity domain");
+    backing
+        .put_if_absent(
+            &key,
+            &encode_body(&future).expect("the encoder-only future frame encodes"),
+        )
+        .expect("the immutable future fixture stages");
+    let identity = canonical_body_id(
+        IdentityDomain::RepositoryConfiguration,
+        CANONICAL_CODEC_VERSION,
+        &future,
+    )
+    .expect("the selected root derives from the exact future body bytes");
+    let future_root = Digest::new(identity.algorithm(), *identity.digest());
+
+    assert!(matches!(
+        read_repository_incarnation_configuration(&backing, &future_root),
+        Err(OutcomeFailure::Codec(
+            CodecRefusal::SchemaMinorUnsupported {
+                observed: 2,
+                supported: 1,
+                ..
+            }
+        ))
     ));
 }

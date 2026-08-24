@@ -23,7 +23,7 @@ pub use schema::{
     CreationAttemptBody, HiddenRefPolicyBody, MAX_REFUSAL_DETAIL_LEN, RefusalRecordBody,
     RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryConfigurationBody,
     RepositoryDecision, RepositoryDecisionBatchBody, RepositoryIncarnationConfigurationBody,
-    TransactionSealBody,
+    RepositoryIncarnationConfigurationBodyV2_1, TransactionSealBody,
 };
 pub use wire::{
     CODEC_MAJOR, CODEC_MINOR, CODEC_VERSION, CanonicalBody, DecodedBody, FRAME_MAGIC, FrameHeader,

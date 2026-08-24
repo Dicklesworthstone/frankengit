@@ -915,3 +915,58 @@ impl CanonicalBody for RepositoryIncarnationConfigurationBody {
         })
     }
 }
+
+/// The current incarnation-aware repository configuration.
+///
+/// Schema 2.1 is deliberately a distinct body from
+/// [`RepositoryIncarnationConfigurationBody`].  The 2.0 payload remains
+/// byte-stable: it had no policy pointer, so readers must normalize it as an
+/// absent policy root rather than retroactively assigning a meaning to
+/// published bytes.  New configurations use this body; the authority reader
+/// selects the exact framed minor and returns one normalized projection to its
+/// consumers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RepositoryIncarnationConfigurationBodyV2_1 {
+    /// How this repository's authenticated roots are laid out.
+    pub root_layout: RootLayoutVersion,
+    /// The permanent native Git object identity domain for this repository.
+    pub object_format: GitHashAlgorithm,
+    /// The minted incarnation this configuration binds the repository to.
+    pub repository_incarnation_id: RepositoryIncarnationId,
+    /// The optional immutable hidden-ref policy selected by this configuration.
+    ///
+    /// The policy has its own identity domain and versioned body.  This carrier
+    /// stores only that authenticated object root, so later policy evolution
+    /// does not require another configuration-carrier revision.
+    pub policy_root: Option<Digest>,
+}
+
+impl CanonicalBody for RepositoryIncarnationConfigurationBodyV2_1 {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/repository-configuration/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("repository-configuration");
+    const SCHEMA_MAJOR: u16 = 2;
+    const SCHEMA_MINOR: u16 = 1;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        out.write_scalar(self.root_layout.code_point());
+        out.write_scalar(self.object_format.code_point());
+        out.write_opaque_id(self.repository_incarnation_id.as_bytes());
+        out.write_option(self.policy_root.as_ref(), Encoder::write_digest)
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let root_layout =
+            RootLayoutVersion::from_code_point(input.read_scalar::<u16>("root_layout")?)?;
+        let object_format =
+            GitHashAlgorithm::from_code_point(input.read_scalar::<u16>("object_format")?)?;
+        let repository_incarnation_id =
+            RepositoryIncarnationId::from_bytes(input.read_opaque_id("repository_incarnation_id")?);
+        let policy_root = input.read_option("policy_root", Decoder::read_digest)?;
+        Ok(Self {
+            root_layout,
+            object_format,
+            repository_incarnation_id,
+            policy_root,
+        })
+    }
+}

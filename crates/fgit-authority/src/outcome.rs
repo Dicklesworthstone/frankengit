@@ -30,9 +30,10 @@
 use crate::vocabulary::AuthenticatedHead;
 use fgit_codec::wire::encode_body;
 use fgit_codec::{
-    CodecRefusal, CreationAttemptBody, DecodeLimits, Decoder, Encoder, RepositoryAuthorityHeadBody,
-    RepositoryConfigurationBody, RepositoryDecision, RepositoryDecisionBatchBody,
-    RepositoryIncarnationConfigurationBody, decode_body,
+    CODEC_MINOR, CanonicalBody, CodecRefusal, CreationAttemptBody, DecodeLimits, Decoder, Encoder,
+    HiddenRefPolicyBody, RepositoryAuthorityHeadBody, RepositoryConfigurationBody,
+    RepositoryDecision, RepositoryDecisionBatchBody, RepositoryIncarnationConfigurationBody,
+    RepositoryIncarnationConfigurationBodyV2_1, decode_body, read_frame_header,
 };
 use fgit_crypto::{
     IdentityDomain, MerkleProof, MerkleRefusal, RefStateNonMembershipProof, merkle_leaf,
@@ -105,6 +106,25 @@ pub enum CreationAttemptOutcome {
     Created(CreationAttemptBody),
     /// A prior writer occupied the slot with the same fixed request fields.
     Recovered(CreationAttemptBody),
+}
+
+/// The incarnation configuration selected by an authenticated head.
+///
+/// This is a projection, not another canonical body: the reader recognizes
+/// the exact stored 2.0 or 2.1 body and normalizes its permanent facts here.
+/// A 2.0 body correctly has no policy-root field, while 2.1 carries the
+/// optional pointer.  Consumers therefore never need a schema-minor fallback
+/// of their own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepositoryIncarnationConfiguration {
+    /// How this repository's authenticated roots are laid out.
+    pub root_layout: RootLayoutVersion,
+    /// The permanent native Git object identity domain for this repository.
+    pub object_format: fgit_types::native::GitHashAlgorithm,
+    /// The minted incarnation this configuration binds the repository to.
+    pub repository_incarnation_id: fgit_types::identity::RepositoryIncarnationId,
+    /// The immutable hidden-ref policy selected by schema 2.1, if any.
+    pub policy_root: Option<Digest>,
 }
 
 impl CreationAttemptOutcome {
@@ -1126,6 +1146,114 @@ fn configuration_key(root: &Digest) -> Result<ImmutableKey, OutcomeFailure> {
     Ok(body_key_for_id(&identity)?)
 }
 
+/// The immutable slot a hidden-ref policy body occupies.
+fn hidden_ref_policy_key(root: &Digest) -> Result<ImmutableKey, OutcomeFailure> {
+    let identity = InternalObjectId::new(
+        root.algorithm(),
+        IdentityDomain::HiddenRefPolicy.domain_tag(),
+        CANONICAL_CODEC_VERSION,
+        *root.bytes(),
+    );
+    Ok(body_key_for_id(&identity)?)
+}
+
+/// Normalizes the exact supported incarnation-configuration minors.
+///
+/// A schema-2.0 body is byte-stable and therefore has an absent policy root;
+/// schema 2.1 explicitly carries the optional pointer.  Nothing else is a
+/// legacy fallback: the header identifies the exact minor before a typed body
+/// decoder accepts it, and an unknown minor is refused.
+fn decode_repository_incarnation_configuration(
+    bytes: &[u8],
+) -> Result<RepositoryIncarnationConfiguration, OutcomeFailure> {
+    let (header, _) = read_frame_header(bytes, DecodeLimits::DEFAULT)?;
+
+    // Let the typed body decoder preserve the existing precise refusal for a
+    // different domain, family, major, or codec minor.  Only a genuine v2
+    // schema-minor choice is dispatched by this union reader.
+    if header.codec_minor != CODEC_MINOR
+        || header.domain != RepositoryIncarnationConfigurationBodyV2_1::DOMAIN
+        || header.schema.family() != RepositoryIncarnationConfigurationBodyV2_1::SCHEMA_FAMILY
+        || header.schema.major() != RepositoryIncarnationConfigurationBodyV2_1::SCHEMA_MAJOR
+    {
+        let body: RepositoryIncarnationConfigurationBodyV2_1 =
+            decode_body(bytes, DecodeLimits::DEFAULT)?;
+        return Ok(RepositoryIncarnationConfiguration {
+            root_layout: body.root_layout,
+            object_format: body.object_format,
+            repository_incarnation_id: body.repository_incarnation_id,
+            policy_root: body.policy_root,
+        });
+    }
+
+    match header.schema.minor() {
+        RepositoryIncarnationConfigurationBody::SCHEMA_MINOR => {
+            let body: RepositoryIncarnationConfigurationBody =
+                decode_body(bytes, DecodeLimits::DEFAULT)?;
+            Ok(RepositoryIncarnationConfiguration {
+                root_layout: body.root_layout,
+                object_format: body.object_format,
+                repository_incarnation_id: body.repository_incarnation_id,
+                policy_root: None,
+            })
+        }
+        RepositoryIncarnationConfigurationBodyV2_1::SCHEMA_MINOR => {
+            let body: RepositoryIncarnationConfigurationBodyV2_1 =
+                decode_body(bytes, DecodeLimits::DEFAULT)?;
+            Ok(RepositoryIncarnationConfiguration {
+                root_layout: body.root_layout,
+                object_format: body.object_format,
+                repository_incarnation_id: body.repository_incarnation_id,
+                policy_root: body.policy_root,
+            })
+        }
+        observed => Err(CodecRefusal::schema_minor_unsupported(
+            RepositoryIncarnationConfigurationBodyV2_1::DOMAIN,
+            observed,
+            RepositoryIncarnationConfigurationBodyV2_1::SCHEMA_MINOR,
+        )
+        .into()),
+    }
+}
+
+/// Stage the shared hidden-ref policy body and return the root a configuration
+/// carrier names.
+///
+/// The policy remains an immutable body in its dedicated identity domain;
+/// storing only its root in a configuration keeps both carrier families on one
+/// policy vocabulary.
+pub fn stage_hidden_ref_policy<S>(
+    store: &S,
+    policy: &HiddenRefPolicyBody,
+) -> Result<Digest, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let key = body_key(IdentityDomain::HiddenRefPolicy, policy)?;
+    store.put_if_absent(&key, &encode_body(policy)?)?;
+    let identity = canonical_body_id(
+        IdentityDomain::HiddenRefPolicy,
+        CANONICAL_CODEC_VERSION,
+        policy,
+    )?;
+    Ok(Digest::new(identity.algorithm(), *identity.digest()))
+}
+
+/// Reads the exact hidden-ref policy named by a configuration carrier.
+pub fn read_hidden_ref_policy<S>(
+    store: &S,
+    policy_root: &Digest,
+) -> Result<HiddenRefPolicyBody, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let key = hidden_ref_policy_key(policy_root)?;
+    let ImmutableRead::Present(bytes) = store.read_immutable(&key)? else {
+        return Err(OutcomeFailure::ConfigurationUnresolvable);
+    };
+    Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?)
+}
+
 /// Stage a repository configuration body and return the root a head selects it by.
 ///
 /// The returned digest is what goes in `RepositoryAuthorityHeadBody::
@@ -1153,13 +1281,16 @@ where
     Ok(Digest::new(identity.algorithm(), *identity.digest()))
 }
 
-/// Stage an incarnation-aware repository configuration body and return the
-/// root an authority head selects it by.
+/// Stage an exact historical schema-2.0 incarnation configuration body and
+/// return the root an authority head selects it by.
 ///
-/// This uses the existing configuration slot but a schema-major-2 body. It is
-/// intentionally distinct from [`stage_repository_configuration`]: a caller
-/// selecting a v1 configuration cannot accidentally satisfy a resolver that
-/// requires the minted incarnation binding.
+/// This is retained for replay and explicit head migration: schema 2.0 remains
+/// byte-stable and normalizes as policy-root-absent. New creation uses
+/// [`stage_latest_repository_incarnation_configuration`]. Both use the
+/// existing configuration slot but remain intentionally distinct from
+/// [`stage_repository_configuration`], so a caller selecting a v1
+/// configuration cannot accidentally satisfy a resolver that requires the
+/// minted incarnation binding.
 ///
 /// # Errors
 ///
@@ -1167,6 +1298,29 @@ where
 pub fn stage_repository_incarnation_configuration<S>(
     store: &S,
     configuration: &RepositoryIncarnationConfigurationBody,
+) -> Result<Digest, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let key = body_key(IdentityDomain::RepositoryConfiguration, configuration)?;
+    store.put_if_absent(&key, &encode_body(configuration)?)?;
+    let identity = canonical_body_id(
+        IdentityDomain::RepositoryConfiguration,
+        CANONICAL_CODEC_VERSION,
+        configuration,
+    )?;
+    Ok(Digest::new(identity.algorithm(), *identity.digest()))
+}
+
+/// Stage the newest incarnation-aware repository configuration body.
+///
+/// New repository creation uses this 2.1 carrier.  The separately retained
+/// [`stage_repository_incarnation_configuration`] stages an exact historical
+/// 2.0 body for replay and explicit head migration tests; it never rewrites a
+/// stored body or causes a reader to reinterpret its bytes.
+pub fn stage_latest_repository_incarnation_configuration<S>(
+    store: &S,
+    configuration: &RepositoryIncarnationConfigurationBodyV2_1,
 ) -> Result<Digest, OutcomeFailure>
 where
     S: AuthorityStore + ?Sized,
@@ -1265,8 +1419,8 @@ where
     Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?)
 }
 
-/// Reads the exact incarnation-aware configuration selected by an authority
-/// head.
+/// Reads the exact supported incarnation-aware configuration selected by an
+/// authority head.
 ///
 /// This is a strict resolver, deliberately matching
 /// [`root_layout_for_proof`] rather than the verification resolver. An absent
@@ -1278,11 +1432,13 @@ where
 ///
 /// [`OutcomeFailure::ConfigurationUnresolvable`] when no body is stored at the
 /// selected root, and [`OutcomeFailure::Codec`] when a present body is not the
-/// exact v2 incarnation-aware schema.
+/// exact 2.0 or 2.1 incarnation-aware schema. A stored 2.0 body returns a
+/// policy-root-absent normalized projection; 2.1 returns its explicit pointer.
+/// Every other minor remains a typed refusal.
 pub fn read_repository_incarnation_configuration<S>(
     store: &S,
     configuration_root: &Digest,
-) -> Result<RepositoryIncarnationConfigurationBody, OutcomeFailure>
+) -> Result<RepositoryIncarnationConfiguration, OutcomeFailure>
 where
     S: AuthorityStore + ?Sized,
 {
@@ -1290,7 +1446,7 @@ where
     let ImmutableRead::Present(bytes) = store.read_immutable(&key)? else {
         return Err(OutcomeFailure::ConfigurationUnresolvable);
     };
-    Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?)
+    decode_repository_incarnation_configuration(&bytes)
 }
 
 // --- the production surface for the carrier (frankengit-m01t) -----------------
@@ -1333,10 +1489,50 @@ where
     Ok(Digest::new(identity.algorithm(), *identity.digest()))
 }
 
-/// Stage an incarnation-aware repository configuration body on the production
-/// surface.
+/// Stage the shared hidden-ref policy body on the production surface.
+///
+/// The asynchronous twin of [`stage_hidden_ref_policy`].
+pub async fn stage_hidden_ref_policy_async<S>(
+    store: &S,
+    cx: &S::Context,
+    policy: &HiddenRefPolicyBody,
+) -> Result<Digest, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = body_key(IdentityDomain::HiddenRefPolicy, policy)?;
+    store.put_if_absent(cx, &key, &encode_body(policy)?).await?;
+    let identity = canonical_body_id(
+        IdentityDomain::HiddenRefPolicy,
+        CANONICAL_CODEC_VERSION,
+        policy,
+    )?;
+    Ok(Digest::new(identity.algorithm(), *identity.digest()))
+}
+
+/// Reads the exact hidden-ref policy named by a configuration carrier on the
+/// production surface.
+pub async fn read_hidden_ref_policy_async<S>(
+    store: &S,
+    cx: &S::Context,
+    policy_root: &Digest,
+) -> Result<HiddenRefPolicyBody, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = hidden_ref_policy_key(policy_root)?;
+    let ImmutableRead::Present(bytes) = store.read_immutable(cx, &key).await? else {
+        return Err(OutcomeFailure::ConfigurationUnresolvable);
+    };
+    Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?)
+}
+
+/// Stage an exact historical schema-2.0 incarnation configuration body on the
+/// production surface.
 ///
 /// The asynchronous twin of [`stage_repository_incarnation_configuration`].
+/// New production creation uses
+/// [`stage_latest_repository_incarnation_configuration_async`] instead.
 ///
 /// # Errors
 ///
@@ -1345,6 +1541,31 @@ pub async fn stage_repository_incarnation_configuration_async<S>(
     store: &S,
     cx: &S::Context,
     configuration: &RepositoryIncarnationConfigurationBody,
+) -> Result<Digest, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    let key = body_key(IdentityDomain::RepositoryConfiguration, configuration)?;
+    store
+        .put_if_absent(cx, &key, &encode_body(configuration)?)
+        .await?;
+    let identity = canonical_body_id(
+        IdentityDomain::RepositoryConfiguration,
+        CANONICAL_CODEC_VERSION,
+        configuration,
+    )?;
+    Ok(Digest::new(identity.algorithm(), *identity.digest()))
+}
+
+/// Stage the newest incarnation-aware repository configuration body on the
+/// production surface.
+///
+/// The asynchronous twin of
+/// [`stage_latest_repository_incarnation_configuration`].
+pub async fn stage_latest_repository_incarnation_configuration_async<S>(
+    store: &S,
+    cx: &S::Context,
+    configuration: &RepositoryIncarnationConfigurationBodyV2_1,
 ) -> Result<Digest, OutcomeFailure>
 where
     S: AsyncAuthorityStore + ?Sized,
@@ -1438,8 +1659,8 @@ where
     Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?)
 }
 
-/// Reads the exact incarnation-aware configuration selected by an authority
-/// head on the production surface.
+/// Reads the exact supported incarnation-aware configuration selected by an
+/// authority head on the production surface.
 ///
 /// The asynchronous twin of [`read_repository_incarnation_configuration`]. It
 /// retains that resolver's no-fallback rule for absent, v1, and malformed
@@ -1449,12 +1670,13 @@ where
 ///
 /// [`OutcomeFailure::ConfigurationUnresolvable`] when no body is stored at the
 /// selected root, and [`OutcomeFailure::Codec`] when a present body is not the
-/// exact v2 incarnation-aware schema.
+/// exact 2.0 or 2.1 incarnation-aware schema. Other minors remain typed
+/// refusals rather than legacy fallbacks.
 pub async fn read_repository_incarnation_configuration_async<S>(
     store: &S,
     cx: &S::Context,
     configuration_root: &Digest,
-) -> Result<RepositoryIncarnationConfigurationBody, OutcomeFailure>
+) -> Result<RepositoryIncarnationConfiguration, OutcomeFailure>
 where
     S: AsyncAuthorityStore + ?Sized,
 {
@@ -1462,7 +1684,7 @@ where
     let ImmutableRead::Present(bytes) = store.read_immutable(cx, &key).await? else {
         return Err(OutcomeFailure::ConfigurationUnresolvable);
     };
-    Ok(decode_body(&bytes, DecodeLimits::DEFAULT)?)
+    decode_repository_incarnation_configuration(&bytes)
 }
 
 /// One outcome-index leaf.

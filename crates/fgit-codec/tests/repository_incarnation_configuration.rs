@@ -13,10 +13,12 @@
 
 use fgit_codec::{
     CanonicalBody, CodecRefusal, DecodeLimits, RepositoryConfigurationBody,
-    RepositoryIncarnationConfigurationBody, canonical_body_bytes, decode_body, encode_body,
-    read_frame_header,
+    RepositoryIncarnationConfigurationBody, RepositoryIncarnationConfigurationBodyV2_1,
+    canonical_body_bytes, decode_body, encode_body, read_frame_header,
 };
+use fgit_crypto::DigestAlgorithm;
 use fgit_types::error::TypeRefusal;
+use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::RepositoryIncarnationId;
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::native::GitHashAlgorithm;
@@ -26,6 +28,17 @@ const fn incarnation_configuration() -> RepositoryIncarnationConfigurationBody {
         root_layout: RootLayoutVersion::RefStateMerkleV1,
         object_format: GitHashAlgorithm::Sha256,
         repository_incarnation_id: RepositoryIncarnationId::from_bytes([0xA5; 16]),
+    }
+}
+
+fn incarnation_configuration_v2_1(
+    policy_root: Option<Digest>,
+) -> RepositoryIncarnationConfigurationBodyV2_1 {
+    RepositoryIncarnationConfigurationBodyV2_1 {
+        root_layout: RootLayoutVersion::RefStateMerkleV1,
+        object_format: GitHashAlgorithm::Sha256,
+        repository_incarnation_id: RepositoryIncarnationId::from_bytes([0xA5; 16]),
+        policy_root,
     }
 }
 
@@ -39,6 +52,18 @@ const INCARNATION_CONFIGURATION_GOLDEN: &[u8] = b"FGC1\
     \x00\x02\x00\x00\
     \x00\x00\x00\x14\x00\x01\x00\x02\
     \xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5";
+
+/// Schema 2.1 is the byte-stable 2.0 prefix followed by the explicit absent
+/// policy-root tag.  This vector is independently written so a symmetric
+/// encoder/decoder defect cannot turn a missing policy pointer into success.
+const INCARNATION_CONFIGURATION_V2_1_NO_POLICY_GOLDEN: &[u8] = b"FGC1\
+    \x00\x01\x00\x00\
+    \x00\x00\x00\x26frankengit/repository-configuration/v1\
+    \x00\x00\x00\x18repository-configuration\
+    \x00\x02\x00\x01\
+    \x00\x00\x00\x15\x00\x01\x00\x02\
+    \xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\xa5\
+    \x00";
 
 #[test]
 fn schema_two_zero_incarnation_configuration_matches_the_independent_golden() {
@@ -71,6 +96,66 @@ fn schema_two_zero_incarnation_configuration_matches_the_independent_golden() {
         encode_body(&expected).expect("the fixed incarnation body re-encodes"),
         INCARNATION_CONFIGURATION_GOLDEN,
         "the encoder must reproduce the independently written schema-2.0 frame"
+    );
+}
+
+#[test]
+fn schema_two_one_configuration_has_the_v2_prefix_and_explicit_absent_policy_root() {
+    let expected = incarnation_configuration_v2_1(None);
+    let (header, _) = read_frame_header(
+        INCARNATION_CONFIGURATION_V2_1_NO_POLICY_GOLDEN,
+        DecodeLimits::DEFAULT,
+    )
+    .expect("the independently written v2.1 frame is structurally valid");
+    assert_eq!(
+        header.schema,
+        RepositoryIncarnationConfigurationBodyV2_1::schema_id()
+    );
+    assert_eq!(header.schema.major(), 2);
+    assert_eq!(header.schema.minor(), 1);
+    assert_eq!(
+        canonical_body_bytes(&expected).expect("the v2.1 payload encodes"),
+        [
+            0, 1, 0, 2, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5,
+            0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0,
+        ],
+        "v2.1 appends exactly the explicit absent-policy tag to the v2.0 payload"
+    );
+    assert_eq!(
+        decode_body::<RepositoryIncarnationConfigurationBodyV2_1>(
+            INCARNATION_CONFIGURATION_V2_1_NO_POLICY_GOLDEN,
+            DecodeLimits::DEFAULT,
+        )
+        .expect("the v2.1 golden decodes"),
+        expected
+    );
+    assert_eq!(
+        encode_body(&expected).expect("the v2.1 body re-encodes"),
+        INCARNATION_CONFIGURATION_V2_1_NO_POLICY_GOLDEN,
+        "the v2.1 encoder reproduces the independently written frame"
+    );
+}
+
+#[test]
+fn schema_two_one_configuration_commits_to_a_present_policy_root() {
+    let policy_root = Digest::new(
+        DigestAlgorithm::Sha256.id(),
+        DigestBytes::try_new(&[0xC1; 32]).expect("the fixed SHA-256 digest has its width"),
+    );
+    let expected = incarnation_configuration_v2_1(Some(policy_root));
+    let encoded = encode_body(&expected).expect("the v2.1 policy-bearing body encodes");
+
+    assert_eq!(
+        decode_body::<RepositoryIncarnationConfigurationBodyV2_1>(&encoded, DecodeLimits::DEFAULT)
+            .expect("the exact v2.1 body decodes"),
+        expected,
+        "the policy root is part of the authenticated configuration identity"
+    );
+    assert_ne!(
+        encoded,
+        encode_body(&incarnation_configuration_v2_1(None))
+            .expect("the policy-absent v2.1 body encodes"),
+        "a policy-bearing configuration cannot alias the no-policy configuration"
     );
 }
 
