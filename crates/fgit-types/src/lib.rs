@@ -25,7 +25,7 @@ pub use gossip::{GossipRefusal, GossipView};
 pub use hash::{Digest, DigestAlgorithmId, DigestBytes, MAX_DIGEST_LEN, MIN_DIGEST_LEN};
 pub use hint::{Hint, HintSource};
 pub use identity::{
-    DERIVED_ID_DOMAINS, EvidenceRecordId, ForgeEventId, GenerationId, InternalObjectId,
+    CellId, DERIVED_ID_DOMAINS, EvidenceRecordId, ForgeEventId, GenerationId, InternalObjectId,
     MAX_OPAQUE_STORE_TOKEN_LEN, OPAQUE_ID_LEN, ObjectEnvelopeId, OpaqueStoreToken,
     PreparationProfileId, PreparedTxnCapsuleId, PrincipalId, PrincipalSnapshotId, RefusalRecordId,
     RepositoryAuthorityHeadId, RepositoryCapsuleId, RepositoryCommitId, RepositoryDecisionBatchId,

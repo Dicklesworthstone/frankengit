@@ -128,6 +128,11 @@ opaque_id!(
     RequestId,
     "Identity of one network attempt. Tracing only: a request identity carries no idempotency authority and never decides a retry."
 );
+opaque_id!(
+    CellId,
+    "Identity of one serving cell in a multi-cell deployment.",
+    "Assigned by the operator, never derived from a host, address, or process: a cell that is replaced keeps serving the same repository, and an identity that changed on redeploy would make the §37.3 readiness audit trail worthless. Distinct from `StoreInstanceId`, which names the authority STORE — every cell sharing one backend reports the same store id, which is why nothing in an authenticated read said which cell served it (`frankengit-1egm`). A cell's self-reported identity is a CLAIM, so §5.1 makes it a hint: carry it as `Hint<CellId>` anywhere the cell asserts its own name, and reserve a bare `CellId` for an identity the deployment attests."
+);
 
 /// The identity of one immutable internal body.
 ///

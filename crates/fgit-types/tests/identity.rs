@@ -5,10 +5,11 @@
 use std::collections::BTreeSet;
 
 use fgit_types::hash::{DigestAlgorithmId, DigestBytes};
+use fgit_types::hint::{Hint, HintSource};
 use fgit_types::identity::{
-    AdmissionReceiptId, DERIVED_ID_DOMAINS, DocumentAnchorId, InternalObjectId, OpaqueStoreToken,
-    PrincipalId, RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryDecisionBatchId,
-    RequestId, TenantId, TransactionSealId, TxId,
+    AdmissionReceiptId, CellId, DERIVED_ID_DOMAINS, DocumentAnchorId, InternalObjectId,
+    OpaqueStoreToken, PrincipalId, RepositoryAuthorityHeadId, RepositoryCommitId,
+    RepositoryDecisionBatchId, RequestId, TenantId, TransactionSealId, TxId,
 };
 use fgit_types::numeric::CodecVersion;
 use fgit_types::{CANONICAL_CODEC_VERSION, TypeRefusal};
@@ -258,4 +259,89 @@ fn the_derived_identity_family_covers_sixteen_domains() {
     // A count assertion so adding a domain-pinned id is a deliberate act that
     // shows up here rather than slipping in unnoticed.
     assert_eq!(DERIVED_ID_DOMAINS.len(), 16);
+}
+
+// ---------------------------------------------------------------------------
+// CellId. `frankengit-1egm`.
+//
+// The bead exists because nothing in an authenticated read said which cell
+// served it, and the field that looked like it did -- AuthenticatedHead's
+// former `authenticated_by` -- carried the STORE's identity, identical for
+// every cell sharing one backend. These cases pin the two properties that
+// distinction rests on: a cell identity is ASSIGNED rather than derived, and
+// two cells are two identities.
+
+#[test]
+fn a_cell_identity_is_assigned_not_derived() {
+    // The whole reason CellId is an opaque_id! and not a derived_id!. A derived
+    // identity is the digest of one immutable body; a cell is a process that
+    // gets replaced, and an identity that changed on redeploy would make the
+    // §37.3 readiness audit trail worthless.
+    //
+    // Constructing one from raw bytes with no digest, no algorithm and no
+    // domain tag is the observable form of "assigned": a derived id cannot be
+    // built this way, which the second half asserts.
+    let cell = CellId::from_bytes([0x5c; 16]);
+    assert_eq!(cell, CellId::from_bytes([0x5c; 16]));
+
+    // The permitted twin, from the other side of the split: a derived identity
+    // REQUIRES the digest machinery, so the two families cannot be confused by
+    // a caller reaching for the wrong constructor.
+    let derived = TxId::from_digest(algorithm(), CANONICAL_CODEC_VERSION, digest(0x5c));
+    assert_eq!(
+        derived.as_internal_object_id().domain(),
+        TxId::DOMAIN_TAG,
+        "a derived identity carries a domain tag; an assigned one has nothing to carry"
+    );
+}
+
+#[test]
+fn two_cells_are_two_identities() {
+    // The property the bead is about. StoreInstanceId fails this across cells
+    // sharing a backend -- three cells, three configured ids, all reporting
+    // one -- which is correct for a STORE id and is exactly why a separate
+    // cell identity had to exist.
+    let first = CellId::from_bytes([0x01; 16]);
+    let second = CellId::from_bytes([0x02; 16]);
+    assert_ne!(first, second);
+
+    // And the twin: the same cell named twice is one identity, so the
+    // assertion above is testing distinctness rather than merely testing that
+    // two constructor calls differ.
+    assert_eq!(first, CellId::from_bytes([0x01; 16]));
+}
+
+#[test]
+fn a_cell_identity_round_trips_through_its_canonical_hex() {
+    let cell = CellId::from_bytes([0xab; 16]);
+    // Display is the canonical hex rendering opaque_id! generates.
+    let text = cell.to_string();
+    assert_eq!(text.len(), 32, "16 bytes is 32 lowercase hex characters");
+    assert_eq!(CellId::from_hex(&text).expect("its own hex parses"), cell);
+
+    // Paired refusals, so the parser is shown to reject rather than merely to
+    // accept: wrong length, and a non-hex character at full length.
+    assert!(CellId::from_hex("abcd").is_err(), "16 characters is not 32");
+    assert!(
+        CellId::from_hex(&"g".repeat(32)).is_err(),
+        "'g' is not a hex digit"
+    );
+}
+
+#[test]
+fn a_cell_identity_can_be_carried_as_a_hint() {
+    // §5.1: a cell's self-reported name is a CLAIM, so it travels as a hint and
+    // an owned CellId comes only from passing a check. This pins that CellId
+    // actually composes with Hint rather than assuming it does.
+    let claimed = Hint::new(CellId::from_bytes([0x77; 16]), HintSource::Gossip);
+    assert_eq!(*claimed.peek(), CellId::from_bytes([0x77; 16]));
+
+    let refused: Result<CellId, &'static str> = claimed.verified_by(|_| Err("not attested"));
+    assert_eq!(refused, Err("not attested"));
+
+    // The permitted twin: a check that passes yields the owned identity. Without
+    // it the case above would pass against a Hint that could never be redeemed.
+    let attested = Hint::new(CellId::from_bytes([0x77; 16]), HintSource::Gossip);
+    let owned: Result<CellId, &'static str> = attested.verified_by(|_| Ok(()));
+    assert_eq!(owned, Ok(CellId::from_bytes([0x77; 16])));
 }
