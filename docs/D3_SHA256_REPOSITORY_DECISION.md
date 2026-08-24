@@ -52,8 +52,8 @@ lanes use the pinned, sandboxed upstream oracle only — never a production path
 | # | Claim | Evidence | Status |
 |---|---|---|---|
 | 1 | This decision is recorded | this document | done |
-| 2 | Mixed-format objects/packs are refused, typed, both directions | format-matrix tests, each paired with a permitted twin in the matching format | pending |
-| 3 | init / hash / pack round-trip natively in SHA-256 | library-level round-trips over `OneNode` configured for SHA-256 | pending |
+| 2 | Mixed-format objects/packs are refused, typed | already covered: `fgit-atp-git` (both raise sites, each naming the rejected identity), `fgit-admission`, `fgit-authority` | done, except 5 of 6 `fgit-pack` sites unasserted |
+| 3 | init / hash round-trip natively in SHA-256 | `fgit-node/tests/sha256_format_matrix.rs`, 5 tests, observed passing at `72edf46` | done (`b14c901`) |
 | 4 | clone / fetch match upstream Git byte-for-byte | `oracle.sh clone-loopback` against a pinned Git that supports SHA-256 repositories | **blocked** on `lozg` (format not persisted, so `serve` opens SHA-256 as SHA-1) |
 | 5 | push round-trips | **blocked** — object-bearing push needs a production quarantine validator (`frankengit-production-quarantine-validator-n6kg`) | pending, gated |
 
