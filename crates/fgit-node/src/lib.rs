@@ -82,7 +82,7 @@ use fgit_types::cell::{
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256,
-    HeadGeneration, PolicyEpoch, PrincipalId, RefusalCode, RegistryEpoch,
+    HeadGeneration, PolicyEpoch, PrincipalId, RefName, RefusalCode, RegistryEpoch,
     RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, RepositoryIncarnationId, TenantId,
     TxId,
 };
@@ -143,9 +143,13 @@ const GIT_DAEMON_CAPABILITIES: &[u8] = b"agent=frankengit-node";
 /// Anyone extending this node to protocol v2 must NOT carry the order across.
 /// The same oracle run shows v2 emitting `agent=` first and `object-format=`
 /// last, so the v0/v1 order is not a global Git convention.
-fn git_daemon_capabilities(object_format: GitHashAlgorithm) -> Vec<u8> {
+fn git_daemon_capabilities(object_format: GitHashAlgorithm, head_target: Option<&[u8]>) -> Vec<u8> {
     let mut tokens = b"object-format=".to_vec();
     tokens.extend_from_slice(object_format.as_str().as_bytes());
+    if let Some(target) = head_target {
+        tokens.extend_from_slice(b" symref=HEAD:");
+        tokens.extend_from_slice(target);
+    }
     tokens.push(b' ');
     tokens.extend_from_slice(GIT_DAEMON_CAPABILITIES);
     tokens
@@ -164,6 +168,7 @@ fn git_daemon_capabilities(object_format: GitHashAlgorithm) -> Vec<u8> {
 pub struct AdmissionUploadPackRepository {
     object_format: GitHashAlgorithm,
     refs: Vec<AdvertisedRef>,
+    head_target: Option<RefName>,
 }
 
 impl AdmissionUploadPackRepository {
@@ -176,14 +181,28 @@ impl AdmissionUploadPackRepository {
         object_format: GitHashAlgorithm,
         limits: &WireLimits,
     ) -> Result<Self, AdmissionUploadPackRefusal> {
-        if snapshot.refs.len() > limits.max_advertised_refs {
+        let head_target = snapshot.head_target.clone();
+        let head_oid = match head_target.as_ref() {
+            Some(target) => match snapshot.refs.get(target) {
+                Some(oid) => Some(*oid),
+                None if snapshot.refs.is_empty() => None,
+                None => {
+                    return Err(AdmissionUploadPackRefusal::HeadTargetNotAdvertised(
+                        target.clone(),
+                    ));
+                }
+            },
+            None => None,
+        };
+        let advertised_count = snapshot.refs.len() + usize::from(head_oid.is_some());
+        if advertised_count > limits.max_advertised_refs {
             return Err(AdmissionUploadPackRefusal::Wire(
                 WireError::TooManyAdvertisedRefs {
                     limit: limits.max_advertised_refs,
                 },
             ));
         }
-        let mut refs = Vec::with_capacity(snapshot.refs.len());
+        let mut refs = Vec::with_capacity(advertised_count);
         for (name, oid) in &snapshot.refs {
             if oid.algorithm() != object_format {
                 return Err(AdmissionUploadPackRefusal::ObjectFormatMismatch {
@@ -196,9 +215,17 @@ impl AdmissionUploadPackRepository {
                     .map_err(AdmissionUploadPackRefusal::Wire)?,
             );
         }
+        if let Some(oid) = head_oid {
+            refs.insert(
+                0,
+                AdvertisedRef::new(oid, b"HEAD", limits)
+                    .map_err(AdmissionUploadPackRefusal::Wire)?,
+            );
+        }
         Ok(Self {
             object_format,
             refs,
+            head_target,
         })
     }
 
@@ -242,6 +269,25 @@ impl UploadPackRepository for AdmissionUploadPackRepository {
     fn is_common(&self, oid: AnyGitOid) -> bool {
         self.contains_want(oid)
     }
+
+    fn symref_target(&self, name: &[u8]) -> Option<&[u8]> {
+        (name == b"HEAD"
+            && self
+                .refs
+                .first()
+                .is_some_and(|reference| reference.name == b"HEAD"))
+        .then_some(self.head_target.as_ref())
+        .flatten()
+        .map(RefName::as_bytes)
+    }
+
+    fn unborn_symref_target(&self) -> Option<&[u8]> {
+        self.refs
+            .is_empty()
+            .then_some(self.head_target.as_ref())
+            .flatten()
+            .map(RefName::as_bytes)
+    }
 }
 
 /// Refusal while deriving a transport view from canonical admission state.
@@ -256,6 +302,8 @@ pub enum AdmissionUploadPackRefusal {
         /// The format carried by the canonical ref target.
         observed: GitHashAlgorithm,
     },
+    /// A non-empty canonical snapshot names a `HEAD` target it does not expose.
+    HeadTargetNotAdvertised(RefName),
     /// The wire adapter refused the bounded advertisement representation.
     Wire(WireError),
 }
@@ -273,6 +321,11 @@ impl Display for AdmissionUploadPackRefusal {
                 formatter,
                 "canonical ref object format {observed:?} differs from node format {expected:?}"
             ),
+            Self::HeadTargetNotAdvertised(target) => write!(
+                formatter,
+                "canonical HEAD target {} is absent from a non-empty snapshot",
+                String::from_utf8_lossy(target.as_bytes())
+            ),
             Self::Wire(error) => Display::fmt(error, formatter),
         }
     }
@@ -282,7 +335,9 @@ impl Error for AdmissionUploadPackRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Wire(error) => Some(error),
-            Self::Projection(_) | Self::ObjectFormatMismatch { .. } => None,
+            Self::Projection(_)
+            | Self::ObjectFormatMismatch { .. }
+            | Self::HeadTargetNotAdvertised(_) => None,
         }
     }
 }
@@ -1489,6 +1544,7 @@ impl DurableAdmissionMaterializer {
             };
             let snapshot = AdmissionSnapshot {
                 refs: ref_state.refs().clone(),
+                head_target: ref_state.head_target().cloned(),
                 forge_positions: BTreeMap::new(),
                 retention: BTreeSet::new(),
                 outbox: BTreeMap::new(),
@@ -1572,15 +1628,16 @@ impl DurableAdmissionMaterializer {
             *guard = None;
             return Err(RefusalCode::AuthorityReceiptStale);
         }
-        let refs = guard
+        let ref_state = &guard
             .as_ref()
             .ok_or(RefusalCode::EvidenceMissing)?
-            .ref_state
-            .refs()
-            .clone();
+            .ref_state;
+        let refs = ref_state.refs().clone();
+        let head_target = ref_state.head_target().cloned();
         drop(guard);
         Ok(AdmissionSnapshot {
             refs,
+            head_target,
             forge_positions: BTreeMap::new(),
             retention: BTreeSet::new(),
             outbox: BTreeMap::new(),
@@ -4762,7 +4819,8 @@ impl OneNode {
             &limits,
         )
         .map_err(|error| NodeGitDaemonServeRefusal::from(NodeAdmissionViewRefusal::from(error)))?;
-        let advertised_capabilities = git_daemon_capabilities(self.object_format);
+        let advertised_capabilities =
+            git_daemon_capabilities(self.object_format, repository.symref_target(b"HEAD"));
         let capabilities = Capabilities::parse_v1(&advertised_capabilities, &limits)
             .map_err(GitDaemonTransportRefusal::Wire)
             .map_err(NodeGitDaemonServeRefusal::from)?;
@@ -4918,10 +4976,18 @@ impl OneNode {
         let current_body: RepositoryAuthorityHeadBody =
             decode_body(receipt.body(), fgit_codec::DecodeLimits::DEFAULT)
                 .map_err(|_| NodeRefusal::PublicationBasisUnbound)?;
-        if receipt.token() != expected || publication.basis().body() != &current_body {
+        // The basis id is re-identified from the authenticated body rather than
+        // trusted: PublicationBasis::new accepts any id/body pairing, and
+        // verify_pair checks the batch against basis.id without recomputing it.
+        let canonical_head_id =
+            authority_head_id(&current_body).map_err(|_| NodeRefusal::PublicationBasisUnbound)?;
+        let bound = receipt.token() == expected
+            && *publication.basis().body() == current_body
+            && publication.basis().id() == canonical_head_id;
+        if !bound {
             return Err(NodeRefusal::PublicationBasisUnbound);
         }
-        Ok(publish_async(
+        publish_async(
             &self.authority,
             request.authority(),
             &self.head_key,
@@ -4930,7 +4996,7 @@ impl OneNode {
             self.tenant_id,
         )
         .await
-        .map_err(NodeRefusal::from)?)
+        .map_err(NodeRefusal::from)
     }
 
     /// Performs the currently published bounded doctor checks.
@@ -5359,7 +5425,8 @@ mod tests {
     use fgit_wire::receive::{QuarantineReceipt, ReceiveCommand, ReceiveRequest};
     use fgit_wire::{
         AdvertisedRef, AnyGitOid, Capabilities, GitObjectFormat, ObjectType, PackPayloadSource,
-        Packet, UploadPackRepository, WireError, WireLimits, encode_packets,
+        Packet, UploadPackRepository, V2UploadPack, WireError, WireEvent, WireLimits,
+        encode_packets,
     };
 
     use super::{
@@ -5558,16 +5625,15 @@ mod tests {
         )
         .expect("fixed SHA-1 object id");
         let mut refs = BTreeMap::new();
-        refs.insert(
-            RefName::try_new(b"refs/heads/main").expect("fixed valid ref"),
-            main,
-        );
+        let main_ref = RefName::try_new(b"refs/heads/main").expect("fixed valid ref");
+        refs.insert(main_ref.clone(), main);
         refs.insert(
             RefName::try_new(b"refs/tags/v1.0").expect("fixed valid ref"),
             release,
         );
         let snapshot = AdmissionSnapshot {
             refs,
+            head_target: Some(main_ref),
             ..AdmissionSnapshot::default()
         };
 
@@ -5584,8 +5650,17 @@ mod tests {
                 .iter()
                 .map(|reference| reference.name.as_slice())
                 .collect::<Vec<_>>(),
-            vec![b"refs/heads/main".as_slice(), b"refs/tags/v1.0".as_slice()],
+            vec![
+                b"HEAD".as_slice(),
+                b"refs/heads/main".as_slice(),
+                b"refs/tags/v1.0".as_slice(),
+            ],
         );
+        assert_eq!(
+            repository.symref_target(b"HEAD"),
+            Some(b"refs/heads/main".as_slice())
+        );
+        assert_eq!(repository.unborn_symref_target(), None);
         assert!(repository.contains_want(main));
         assert!(repository.is_common(release));
         assert!(
@@ -5597,6 +5672,85 @@ mod tests {
                 .expect("fixed SHA-1 object id"),
             )
         );
+    }
+
+    #[test]
+    fn admission_snapshot_view_emits_unborn_head_only_for_a_v2_unborn_request() {
+        let default_branch =
+            RefName::try_new(b"refs/heads/main").expect("fixed valid default branch");
+        let snapshot = AdmissionSnapshot {
+            head_target: Some(default_branch),
+            ..AdmissionSnapshot::default()
+        };
+        let repository = AdmissionUploadPackRepository::from_snapshot(
+            &snapshot,
+            GitHashAlgorithm::Sha1,
+            &WireLimits::default(),
+        )
+        .expect("an empty repository may have an unborn symbolic HEAD");
+
+        assert!(repository.advertised_refs().is_empty());
+        assert_eq!(repository.symref_target(b"HEAD"), None);
+        assert_eq!(
+            repository.unborn_symref_target(),
+            Some(b"refs/heads/main".as_slice())
+        );
+
+        let capabilities =
+            Capabilities::parse_v1(b"ls-refs", &WireLimits::default()).expect("ls-refs exists");
+        let mut machine = V2UploadPack::new(capabilities, WireLimits::default())
+            .expect("v2 ls-refs machine constructs");
+        machine
+            .push_packet(&Packet::Data(b"command=ls-refs\n".to_vec()), &repository)
+            .expect("ls-refs command is accepted");
+        machine
+            .push_packet(&Packet::Delimiter, &repository)
+            .expect("ls-refs argument section opens");
+        machine
+            .push_packet(&Packet::Data(b"unborn\n".to_vec()), &repository)
+            .expect("client asks for unborn HEAD state");
+        let transition = machine
+            .push_packet(&Packet::Flush, &repository)
+            .expect("unborn ls-refs completes");
+
+        assert_eq!(
+            transition.output,
+            vec![
+                Packet::Data(b"unborn HEAD symref-target:refs/heads/main\n".to_vec()),
+                Packet::Flush,
+            ]
+        );
+        assert!(matches!(
+            transition.events.as_slice(),
+            [WireEvent::LsRefs { unborn: true, .. }]
+        ));
+    }
+
+    #[test]
+    fn admission_snapshot_view_refuses_a_dangling_head_for_a_nonempty_repository() {
+        let main = RefName::try_new(b"refs/heads/main").expect("fixed valid branch");
+        let topic = RefName::try_new(b"refs/heads/topic").expect("fixed valid branch");
+        let snapshot = AdmissionSnapshot {
+            refs: BTreeMap::from([(
+                topic,
+                GitOid::from_hex(
+                    GitHashAlgorithm::Sha1,
+                    "1111111111111111111111111111111111111111",
+                )
+                .expect("fixed SHA-1 object id"),
+            )]),
+            head_target: Some(main.clone()),
+            ..AdmissionSnapshot::default()
+        };
+
+        assert!(matches!(
+            AdmissionUploadPackRepository::from_snapshot(
+                &snapshot,
+                GitHashAlgorithm::Sha1,
+                &WireLimits::default(),
+            ),
+            Err(AdmissionUploadPackRefusal::HeadTargetNotAdvertised(target)) if target == main
+        ));
     }
 
     #[test]
@@ -5972,7 +6126,7 @@ mod tests {
         // SHA-1 carries its OWN object-format token, because pinned git-2.54.0
         // advertises one for every format. Measured, not assumed: the oracle
         // shows `object-format=sha1` on an empty --object-format=sha1 repository.
-        let sha1 = git_daemon_capabilities(GitHashAlgorithm::Sha1);
+        let sha1 = git_daemon_capabilities(GitHashAlgorithm::Sha1, None);
         assert_eq!(sha1.as_slice(), b"object-format=sha1 agent=frankengit-node");
         assert!(
             Capabilities::parse_v1(&sha1, &limits)
@@ -5984,7 +6138,7 @@ mod tests {
         // SHA-256 gains exactly one token, in Git's own spelling, and the bytes
         // are asserted through the parser the daemon actually feeds them to --
         // a string comparison alone would not prove they are wire-valid.
-        let sha256 = git_daemon_capabilities(GitHashAlgorithm::Sha256);
+        let sha256 = git_daemon_capabilities(GitHashAlgorithm::Sha256, None);
         assert_eq!(
             sha256.as_slice(),
             b"object-format=sha256 agent=frankengit-node"
@@ -5998,6 +6152,18 @@ mod tests {
         assert!(
             parsed.contains(b"agent"),
             "the object-format token must be added to the agent profile, not replace it",
+        );
+
+        let with_head = git_daemon_capabilities(GitHashAlgorithm::Sha1, Some(b"refs/heads/main"));
+        assert_eq!(
+            with_head.as_slice(),
+            b"object-format=sha1 symref=HEAD:refs/heads/main agent=frankengit-node"
+        );
+        assert!(
+            Capabilities::parse_v1(&with_head, &limits)
+                .expect("the symbolic HEAD capability stays wire-valid")
+                .contains(b"symref"),
+            "a resolved canonical HEAD must reach the v0/v1 capability record",
         );
     }
 
@@ -7309,6 +7475,74 @@ mod tests {
         assert!(
             matches!(stale, Err(NodeRefusal::PublicationBasisUnbound)),
             "the public boundary must refuse publications whose basis no longer binds"
+        );
+        node.shutdown().expect("node closes cleanly");
+    }
+
+    #[test]
+    fn publication_basis_id_is_reidentified_against_the_authenticated_head() {
+        let scratch = ScratchDirectory::new();
+        let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
+            .expect("node initializes empty canonical state");
+        let request = node.request_context();
+
+        let HeadRead::Present(genesis_read) = node
+            .runtime()
+            .block_on(node.read_authority_head_in(&request))
+            .expect("genesis head reads")
+        else {
+            panic!("node initialization publishes genesis");
+        };
+        let genesis_body: fgit_codec::RepositoryAuthorityHeadBody =
+            decode_body(genesis_read.body(), fgit_codec::DecodeLimits::DEFAULT)
+                .expect("authenticated fixture head decodes");
+
+        // Forge a basis that pairs the REAL current head body with an id that
+        // does not identify it. PublicationBasis::new accepts the pairing and
+        // seal/verify_pair trust the id field, so only the publication
+        // boundary's re-identification can catch the forgery.
+        let forged_id = RepositoryAuthorityHeadId::from_internal_object_id(InternalObjectId::new(
+            fgit_codec::harness::algorithm(),
+            RepositoryAuthorityHeadId::DOMAIN_TAG,
+            CANONICAL_CODEC_VERSION,
+            DigestBytes::try_new(&[0x7f; 32]).expect("fixed test digest has canonical length"),
+        ))
+        .expect("forged head id derives from its own internal object id");
+        assert_ne!(
+            forged_id,
+            authority_head_id(&genesis_body).expect("real genesis head identifies"),
+            "the forged id must differ from the canonical one"
+        );
+        let forged_basis = PublicationBasis::new(forged_id, genesis_body);
+
+        let roots = ResultingRoots::carried_forward(&forged_basis);
+
+        let mut plan = PublicationPlan::open(forged_basis).expect("forged basis opens a plan");
+        plan.refuse(
+            distinct_tx_id(),
+            RefusalCode::ExpectedOldRefMismatch,
+            refusal_record_id(),
+        );
+        let outcomes = node
+            .runtime()
+            .block_on(collect_cumulative_outcomes_async(
+                &node.authority,
+                request.authority(),
+                &node.head_key,
+            ))
+            .expect("outcomes collect from the authority");
+        let publication = plan
+            .seal(&CryptoBodyIdentity, roots, &outcomes, genesis_read.token())
+            .expect("seal trusts the basis id, which is exactly the hole");
+
+        let refused = node.runtime().block_on(node.publish_decisions_in(
+            &request,
+            genesis_read.token(),
+            &publication,
+        ));
+        assert!(
+            matches!(refused, Err(NodeRefusal::PublicationBasisUnbound)),
+            "the boundary must re-identify the basis id against the authenticated head"
         );
         node.shutdown().expect("node closes cleanly");
     }
