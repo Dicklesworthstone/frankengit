@@ -42,7 +42,7 @@ CRATE=fgit-verified-read
 TARGETS=(
   "tamper_campaign:7"
   "head_chain_freshness:7"
-  "proof_cost:7"
+  "proof_cost:9"
 )
 
 # The corpus's declared tamper-class count, asserted separately from the
@@ -63,6 +63,7 @@ LOAD_BEARING=(
   an_outcome_envelope_is_checked_against_the_outcome_index_root_not_whichever_root_verifies
   every_leaf_at_every_size_carries_exactly_the_length_its_position_requires
   a_promoted_tail_really_does_shorten_a_path_so_the_model_is_not_decorative
+  generation_reads_the_whole_state_while_verification_reads_only_the_path
 )
 
 fge_phase setup

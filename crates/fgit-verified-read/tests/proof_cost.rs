@@ -23,8 +23,10 @@
 
 use fgit_codec::{CryptoBodyIdentity, RepositoryConfigurationBody, body_id};
 use fgit_crypto::{
-    RefStateNonMembershipProof, ref_state_membership_proof, ref_state_non_membership_proof,
+    MerkleProof, RefStateNonMembershipProof, ref_state_membership_proof, ref_state_merkle_root,
+    ref_state_non_membership_proof, verify_ref_state_membership,
 };
+use fgit_types::hash::Digest;
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1};
 use fgit_types::refs::RefName;
@@ -296,5 +298,147 @@ fn per_answer_cost_is_independent_of_how_many_refs_the_repository_holds() {
         large.siblings().len(),
         ceil_log2(32),
         "and the larger proof is exactly the logarithmic size"
+    );
+}
+
+/// Bytes a client must receive and process to check one membership answer:
+/// the pinned root, the claimed leaf, and the path. Nothing else is in
+/// `verify_ref_state_membership`'s signature, so nothing else can be needed.
+fn client_input_bytes(root: &Digest, name: &RefName, oid: &GitOid, proof: &MerkleProof) -> usize {
+    root.bytes().as_bytes().len()
+        + name.as_bytes().len()
+        + oid.as_bytes().len()
+        + proof
+            .siblings()
+            .iter()
+            .map(|sibling| sibling.as_bytes().len())
+            .sum::<usize>()
+}
+
+#[test]
+fn generation_reads_the_whole_state_while_verification_reads_only_the_path() {
+    // THE ASYMMETRY, which is the entire economic argument for trustless
+    // serving and the half of "generation/verification cost" that the existing
+    // cases do not state. Verification cost was already pinned here -- the
+    // per-index path model, the logarithmic bound, and independence from the
+    // ref-set size. What was never characterised is what the SERVER pays.
+    //
+    // It is a structural fact before it is a measured one:
+    //   ref_state_membership_proof(&entries, &name)  -- takes the whole state
+    //   verify_ref_state_membership(root, name, oid, &proof)  -- takes no state
+    // The verifier cannot consult the ref set because the ref set is not in its
+    // signature. That makes size-independence an invariant of the API rather
+    // than a benchmark result, which is the stronger rung of the claim lattice.
+    let small_leaves = 8;
+    let large_leaves = 512;
+    let ratio = large_leaves / small_leaves;
+
+    let small_state = state(small_leaves);
+    let large_state = state(large_leaves);
+
+    let small_root = ref_state_merkle_root(&small_state).expect("a root");
+    let large_root = ref_state_merkle_root(&large_state).expect("a root");
+    let (small_oid, small_proof) =
+        ref_state_membership_proof(&small_state, &name(0)).expect("a proof");
+    let (large_oid, large_proof) =
+        ref_state_membership_proof(&large_state, &name(0)).expect("a proof");
+
+    let small_client = client_input_bytes(&small_root, &name(0), &small_oid, &small_proof);
+    let large_client = client_input_bytes(&large_root, &name(0), &large_oid, &large_proof);
+
+    // The server's input grew by the full ratio: it must read every entry to
+    // build either the root or the path.
+    assert_eq!(
+        large_state.len() / small_state.len(),
+        ratio,
+        "the state must actually have grown by the ratio, or the comparison is empty"
+    );
+
+    // The client's did not. Logarithmic growth means the ratio of client bytes
+    // is far below the ratio of state size; asserting "less than the ratio" is
+    // the weakest form of that and is what makes it robust to digest widths.
+    // EXACTLY, not loosely. The first version of this asserted
+    // `large_client < small_client * ratio`, which measured 356 against a bound
+    // of 10496 -- true, and vacuous. Every byte of growth in the client's input
+    // is a sibling digest, so the difference is pinned to the path-length model
+    // rather than to a ratio that any sublinear-ish curve would satisfy.
+    let extra_siblings = large_proof
+        .siblings()
+        .len()
+        .saturating_sub(small_proof.siblings().len());
+    let digest_width = large_root.bytes().as_bytes().len();
+    assert_eq!(
+        large_client - small_client,
+        extra_siblings * digest_width,
+        "the client's growth must be exactly the extra path, not merely sublinear"
+    );
+    assert_eq!(
+        extra_siblings,
+        ceil_log2(large_leaves) - ceil_log2(small_leaves),
+        "and the extra path is the difference of the logarithms"
+    );
+    // Measured: 164 -> 356 bytes for a 64x larger ref set. The ratio bound is
+    // kept as a second, independent statement of the same fact, tight enough
+    // that a linear implementation could not pass it.
+    assert!(
+        large_client < small_client * 3,
+        "a {ratio}x larger repository produced {large_client} client bytes against \
+         {small_client}; logarithmic growth should be far below 3x here"
+    );
+
+    // And the exact relation, since "sublinear" is satisfied by things that are
+    // still too expensive: the path length is the logarithm, so the only part
+    // of the client's input that grew is the sibling count.
+    assert_eq!(
+        large_proof.siblings().len(),
+        ceil_log2(large_leaves),
+        "the client's only size-dependent input is the path, and it is logarithmic"
+    );
+
+    // VERIFICATION WITHOUT THE STATE, demonstrated rather than argued. Both
+    // states are dropped before the check, so nothing the verifier does can
+    // depend on them.
+    drop(small_state);
+    drop(large_state);
+    assert!(
+        verify_ref_state_membership(&large_root, &name(0), &large_oid, &large_proof),
+        "a client holding only root, leaf and path must be able to verify"
+    );
+}
+
+#[test]
+fn proof_generation_is_deterministic_so_a_server_may_cache_one_per_head_and_name() {
+    // The serving-side twin of the configuration-cacheability case above, and
+    // the only honest thing to say about "cache behaviour" today: there is no
+    // cache in this crate, so what can be established is the PRECONDITION for
+    // one. A value that is not a pure function of (state, name) cannot be
+    // cached against a pinned head at all.
+    //
+    // Nothing here claims a server currently caches. Same discipline as the
+    // configuration case: assert the determinism, not an implementation that
+    // does not exist.
+    let entries = state(64);
+    let (first_oid, first_proof) = ref_state_membership_proof(&entries, &name(7)).expect("a proof");
+
+    for _ in 0..8 {
+        let (again_oid, again_proof) =
+            ref_state_membership_proof(&entries, &name(7)).expect("a proof");
+        assert_eq!(again_oid, first_oid, "recomputation changed the leaf");
+        assert_eq!(
+            again_proof.siblings(),
+            first_proof.siblings(),
+            "recomputation changed the path, so the proof is not cacheable"
+        );
+        assert_eq!(again_proof.index(), first_proof.index());
+        assert_eq!(again_proof.leaf_count(), first_proof.leaf_count());
+    }
+
+    // And it must DEPEND on the name, or "cache per name" would be caching one
+    // value for the whole repository.
+    let (_, other) = ref_state_membership_proof(&entries, &name(8)).expect("a proof");
+    assert_ne!(
+        other.index(),
+        first_proof.index(),
+        "two different refs must not share a cache entry"
     );
 }
