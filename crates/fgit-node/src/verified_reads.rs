@@ -29,7 +29,7 @@ use fgit_wire::visibility::RefVisibility;
 
 use super::{AdmissionMaterializationRefusal, MaterializedAdmission, NodeRequestContext, OneNode};
 
-/// One question that the OneNode verified-read serving path understands.
+/// One question that the [`OneNode`] verified-read serving path understands.
 ///
 /// Object and forge-position questions remain intentionally absent: neither
 /// has a published `VerifiedReadAnswer` proof layout.
@@ -878,7 +878,7 @@ mod tests {
         let snapshot = node
             .runtime()
             .block_on(node.serve_snapshot_verified_read_in(
-                &node.request_context(),
+                &request,
                 &receipt,
                 &RefVisibility::new(),
                 ReadLabel::snapshot(),
@@ -903,7 +903,7 @@ mod tests {
         let refusal = node
             .runtime()
             .block_on(node.serve_snapshot_verified_read_in(
-                &node.request_context(),
+                &request,
                 &receipt,
                 &now_hides_the_name,
                 ReadLabel::snapshot(),
