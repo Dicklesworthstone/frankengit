@@ -9,6 +9,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Barrier, Mutex, PoisonError, mpsc};
 
+use core::time::Duration;
+
 use fgit_authority::history::{
     ClientId as HistoryClientId, HistoryEvent, LogicalTime, OperationId,
 };
@@ -22,6 +24,9 @@ use fgit_authority::{
     FaultKind, FaultPlan, FaultPosition, FaultableAuthorityStore, HeadGeneration, HeadInit,
     HeadKey, HeadRead, HeadReadReceipt, ImmutableKey, ImmutableRead, MemoryAuthorityStore, OpIndex,
     PutOutcome, StoreInstanceId, resolve_ambiguous_cas,
+};
+use fgit_types::cell::{
+    CellRefusal, CellState, ReadLabel, ReadMode, StalenessBound, StalenessObservation, admits_read,
 };
 
 const DEFAULT_SEED: u64 = 0xF004_C001_5EED_0001;
@@ -946,6 +951,219 @@ fn immutable_fault_schedule_remains_linearizable_after_reordered_retries() {
         &recorder,
         AuthorityModel::new(instance),
         "reordered clients observe an immutable write once; duplicated reads cannot mutate it",
+    );
+    expect_linearizable(&report);
+}
+
+// ---------------------------------------------------------------------------
+// Distributed / cell-level faults (frankengit-fg036b)
+// ---------------------------------------------------------------------------
+//
+// The scenarios above are authority-shaped: one store, N clients, faults on the
+// operation stream. These are cell-shaped, and they exist because fg036a landed
+// typed read modes and readiness on the serving path, which gives a partition
+// somewhere to be observed.
+//
+// Deliberately NOT re-covered here, because the file already proves them and a
+// second copy would drift:
+//   * an asymmetric partition that loses only the response ->
+//     `lost_acknowledgement_after_cas_and_crash_point_preserve_pending_histories`
+//   * crash after effect, then restart -> the same test
+//   * an old token replayed, a fabricated receipt ->
+//     `stale_token_and_malicious_receipt_attempts_are_linearized_or_refused`
+//     and lincheck_authority_patterns' ABA and split-brain cases.
+
+/// A cell that cannot reach the authority holds whatever it last authenticated.
+///
+/// Returns the generation gap between what the isolated cell still believes and
+/// what the authority actually holds, which is the quantity a bounded-stale
+/// label has to carry honestly.
+fn generation_lag(stale: &HeadReadReceipt, current: &HeadReadReceipt) -> u64 {
+    current
+        .generation()
+        .get()
+        .saturating_sub(stale.generation().get())
+}
+
+#[test]
+fn an_isolated_cell_cannot_label_a_drifted_answer_as_current() {
+    // The scenario fg036a made observable. A cell is partitioned from the
+    // authority (its requests are lost, which is what isolation IS at this
+    // layer) while a reachable cell keeps publishing. The isolated cell still
+    // holds a receipt it authenticated legitimately -- it is not corrupt, it is
+    // OLD -- and the question is what it is allowed to say about it.
+    let instance = StoreInstanceId::from_raw(0xF036_B001);
+    let store = MemoryAuthorityStore::new(instance);
+    let key = head_key("isolated-cell");
+    let mut recorder = HistoryRecorder::default();
+    let root = initialize(&mut recorder, &store, &key);
+
+    // The isolated cell authenticates once, while it still can.
+    let held =
+        read_receipt(&recorder.execute(&store, 1, AuthorityOp::ReadHead { key: key.clone() }));
+    assert_eq!(held.generation(), HeadGeneration::FIRST);
+
+    // A reachable cell advances the head three times.
+    let mut predecessor = root;
+    for step in 2..=4_u64 {
+        predecessor = committed_receipt(&recorder.execute(
+            &store,
+            2,
+            AuthorityOp::CompareExchangeHead {
+                key: key.clone(),
+                expected: predecessor.token(),
+                new_generation: generation(step),
+                new_body: format!("published-{step}").into_bytes(),
+            },
+        ));
+    }
+    let current = predecessor;
+    assert_eq!(current.generation(), generation(4));
+
+    // Now the partition: every request from the isolated cell is lost. This is
+    // the symmetric case -- nothing reaches the authority, so the cell cannot
+    // refresh at all. It is distinct from the lost-RESPONSE case above, where
+    // the effect happens and only the acknowledgement is missing.
+    let plan = FaultPlan::explicit(vec![
+        FaultDirective::new(OpIndex::ZERO, FaultKind::LoseRequest)
+            .only_for(fgit_authority::AuthorityOpKind::ReadHead),
+    ]);
+    store.install_fault_plan(plan.clone());
+    let isolated = recorder.execute(&store, 1, AuthorityOp::ReadHead { key: key.clone() });
+    assert_eq!(
+        isolated,
+        AuthorityResponse::Ambiguous(AmbiguityReason::NoResponse),
+        "an isolated cell must not receive a head it did not reach the authority for"
+    );
+
+    // What the cell may now SAY. It is four generations behind, which no honest
+    // label can describe as current.
+    let lag = generation_lag(&held, &current);
+    assert_eq!(lag, 3, "the isolated cell is three generations behind");
+
+    // Inside its declared bound, bounded-stale is admissible and carries the
+    // measurement, so a client can see exactly how far behind the answer is.
+    let generous = StalenessBound::new(Duration::from_secs(600), 5);
+    let labelled = ReadLabel::bounded_stale(
+        generous,
+        StalenessObservation::new(Duration::from_secs(30), lag),
+    )
+    .expect("three generations is inside a bound of five");
+    assert!(
+        !labelled.mode().claims_currentness(),
+        "the whole point: a drifted answer must not claim to be current"
+    );
+    assert_eq!(
+        labelled.observed().expect("measured").generation_lag(),
+        lag,
+        "and the client must be told the real distance, not the bound"
+    );
+
+    // Past the bound it cannot even be labelled. A cell that has drifted
+    // further than it promised does not get to relabel the answer as something
+    // weaker and serve it anyway -- it has to refuse.
+    let tight = StalenessBound::new(Duration::from_secs(600), 2);
+    assert!(
+        matches!(
+            ReadLabel::bounded_stale(
+                tight,
+                StalenessObservation::new(Duration::from_secs(30), lag)
+            ),
+            Err(CellRefusal::StalenessExceedsBound { .. })
+        ),
+        "drifting past the promised bound must refuse, not downgrade silently"
+    );
+
+    // And a cell in the state a partition puts it in cannot serve a current
+    // read at all, independently of any bound.
+    assert!(
+        admits_read(CellState::DegradedRead, ReadMode::Current).is_err(),
+        "a degraded cell must not serve a current read"
+    );
+    assert!(
+        admits_read(CellState::DegradedRead, ReadMode::BoundedStale(generous)).is_ok(),
+        "but it must still serve within an explicit bound, or the mode is pointless"
+    );
+
+    let report = check_and_emit(
+        0xF036_B001,
+        &plan,
+        &recorder,
+        AuthorityModel::new(instance),
+        "an isolated cell's read is pending, never a stale head presented as current",
+    );
+    expect_linearizable(&report);
+}
+
+#[test]
+fn an_isolated_cell_that_reconnects_observes_no_lost_write() {
+    // Region loss and return. While a cell is genuinely cut off, the survivors
+    // keep publishing; when the partition heals it must observe EVERY committed
+    // write, never a rolled-back or torn view. Zero acknowledged-write loss is
+    // the acceptance line, and a reconnecting reader is where a loss shows first.
+    let instance = StoreInstanceId::from_raw(0xF036_B002);
+    let store = MemoryAuthorityStore::new(instance);
+    let key = head_key("region-loss");
+    let mut recorder = HistoryRecorder::default();
+    let root = initialize(&mut recorder, &store, &key);
+
+    // Cut client 1 off. Only its reads are lost; the survivor's CAS traffic is
+    // untouched, which is what an asymmetric region loss looks like from here.
+    let partition = FaultPlan::explicit(vec![
+        FaultDirective::new(OpIndex::ZERO, FaultKind::LoseRequest)
+            .only_for(fgit_authority::AuthorityOpKind::ReadHead),
+    ]);
+    store.install_fault_plan(partition.clone());
+    assert_eq!(
+        recorder.execute(&store, 1, AuthorityOp::ReadHead { key: key.clone() }),
+        AuthorityResponse::Ambiguous(AmbiguityReason::NoResponse),
+        "the cell must actually be isolated, or the rest of this test proves nothing"
+    );
+
+    let mut predecessor = root;
+    let mut acknowledged = Vec::new();
+    for step in 2..=6_u64 {
+        let body = format!("survivor-{step}").into_bytes();
+        predecessor = committed_receipt(&recorder.execute(
+            &store,
+            2,
+            AuthorityOp::CompareExchangeHead {
+                key: key.clone(),
+                expected: predecessor.token(),
+                new_generation: generation(step),
+                new_body: body.clone(),
+            },
+        ));
+        acknowledged.push((generation(step), body));
+    }
+    assert!(
+        !store.fault_log().is_empty(),
+        "the partition must have injected at least one fault"
+    );
+
+    // Heal, and only now can the cell read again.
+    store.install_fault_plan(FaultPlan::none());
+    let rejoined = read_receipt(&recorder.execute(&store, 1, AuthorityOp::ReadHead { key }));
+
+    let (last_generation, last_body) = acknowledged.last().expect("writes were acknowledged");
+    assert_eq!(
+        rejoined.generation(),
+        *last_generation,
+        "a returning cell must observe the newest acknowledged write, never an older head"
+    );
+    assert_eq!(rejoined.body(), last_body.as_slice());
+    assert_eq!(
+        rejoined.generation().get(),
+        6,
+        "every write acknowledged during the outage must survive it"
+    );
+
+    let report = check_and_emit(
+        0xF036_B002,
+        &partition,
+        &recorder,
+        AuthorityModel::new(instance),
+        "a cell rejoining after a real partition observes every acknowledged write and no rollback",
     );
     expect_linearizable(&report);
 }
