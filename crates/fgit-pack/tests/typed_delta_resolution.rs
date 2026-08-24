@@ -52,7 +52,7 @@ impl ExternalBaseLookup for ExternalBase {
     }
 }
 
-/// OFS_DELTA chains retain the type from each kind of in-pack base root.
+/// `OFS_DELTA` chains retain the type from each kind of in-pack base root.
 #[test]
 fn ofs_chains_inherit_each_in_pack_root_type() {
     let body = b"typed root";
@@ -109,7 +109,7 @@ fn ofs_chains_inherit_each_in_pack_root_type() {
     }
 }
 
-/// A REF_DELTA root outside the pack can supply its type through the additive
+/// A `REF_DELTA` root outside the pack can supply its type through the additive
 /// typed lookup method.
 #[test]
 fn ref_chain_inherits_type_from_typed_external_base() {

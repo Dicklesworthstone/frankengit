@@ -126,10 +126,10 @@ where
             checkpoint(deadline)?;
             match object {
                 PackObject::Base { data, .. } | PackObject::TypedBase { data, .. } => {
-                    limits.object_size(data.len())?
+                    limits.object_size(data.len())?;
                 }
                 PackObject::Delta(delta) => limits.input(delta.program.len())?,
-            };
+            }
         }
         Ok(Self {
             objects,
