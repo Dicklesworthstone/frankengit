@@ -1767,7 +1767,7 @@ mod tests {
         let bundle_origin = origin(&key, "trust:upstream-a");
         let bundle = EvidenceExchangeBundle::export(bundle_origin.clone(), vec![record()], &key)
             .expect("signed exchange bundle");
-        let forged_key = SecretKey::derive(
+        let forged_key = SecretKey::<Identity>::derive(
             &RootSecret::from_bytes([0x91; 32]),
             KeyEpoch::FIRST,
             KeyScope::OPERATOR,
