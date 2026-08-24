@@ -902,6 +902,62 @@ impl From<PackWriteError> for NodePackMaterializationRefusal {
     }
 }
 
+enum PackContextCheckpoint {
+    Live,
+    Stopped {
+        budget_exhaustion: Option<Exhaustion>,
+    },
+}
+
+/// Checks pack liveness without erasing the native runtime's budget cause.
+///
+/// `fsqlite-types` 0.3.7 deliberately folds all three native budget causes
+/// into its local `Timeout` reason. Its checkpoint then mirrors that generic
+/// reason back through `NativeCx::set_cancel_reason`, replacing the exact
+/// native cause before a caller can inspect it. The node-owned native context
+/// is therefore the authoritative checkpoint whenever it is attached. A
+/// pre-existing local cancellation remains first, and detached contexts retain
+/// the ordinary FrankenSQLite checkpoint fallback. Node authority contexts do
+/// not install FrankenSQLite's optional e-process oracle; adding one requires
+/// an oracle-only probe rather than routing back through this lossy bridge.
+fn checkpoint_pack_context(context: &FsqliteCx) -> PackContextCheckpoint {
+    if context.is_cancel_requested() {
+        // The already-published local flag keeps this checkpoint on
+        // FrankenSQLite's local acknowledgement path; it does not poll native.
+        let _ = context.checkpoint();
+        return PackContextCheckpoint::Stopped {
+            budget_exhaustion: None,
+        };
+    }
+
+    let Some(native) = context.attached_native_cx() else {
+        return if context.checkpoint().is_ok() {
+            PackContextCheckpoint::Live
+        } else {
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: None,
+            }
+        };
+    };
+    if native.checkpoint().is_ok() {
+        return PackContextCheckpoint::Live;
+    }
+
+    let budget_exhaustion = native.cancel_reason().and_then(|reason| {
+        [
+            Exhaustion::Deadline,
+            Exhaustion::PollQuota,
+            Exhaustion::CostQuota,
+        ]
+        .into_iter()
+        .find(|dimension| reason.kind == dimension.cancel_kind())
+    });
+    // Do not acknowledge this through `context.checkpoint()`: the native
+    // checkpoint already acknowledged cancellation, while the bridge would
+    // replace this exact reason with generic `Timeout` for every later probe.
+    PackContextCheckpoint::Stopped { budget_exhaustion }
+}
+
 /// Failure while staging or refreshing canonical admission state through the
 /// durable async authority surface.
 #[derive(Debug)]
@@ -5073,7 +5129,6 @@ impl OneNode {
             .await
             .map_err(NodePackMaterializationRefusal::from)?;
         let pack_context = request.authority().create_child();
-        let native_pack_context = pack_context.attached_native_cx();
         let class = request.authority_budget_class();
         let mut stopped = false;
         let mut exhaustion = None;
@@ -5082,21 +5137,14 @@ impl OneNode {
                 if stopped {
                     return false;
                 }
-                if pack_context.checkpoint().is_ok() {
-                    return true;
+                match checkpoint_pack_context(&pack_context) {
+                    PackContextCheckpoint::Live => true,
+                    PackContextCheckpoint::Stopped { budget_exhaustion } => {
+                        stopped = true;
+                        exhaustion = budget_exhaustion;
+                        false
+                    }
                 }
-                stopped = true;
-                exhaustion = native_pack_context.as_ref().and_then(|context| {
-                    let reason = context.cancel_reason()?;
-                    [
-                        Exhaustion::Deadline,
-                        Exhaustion::PollQuota,
-                        Exhaustion::CostQuota,
-                    ]
-                    .into_iter()
-                    .find(|dimension| reason.kind == dimension.cancel_kind())
-                });
-                false
             };
             self.materialize_selected_pack(&materialized, &[], &mut is_live)
         };
@@ -5287,7 +5335,6 @@ impl OneNode {
             Some(deadline),
             |_request, pack_request| {
                 let pack_context = request.authority().create_child();
-                let native_pack_context = pack_context.attached_native_cx();
                 let class = request.authority_budget_class();
                 let mut stopped = false;
                 let mut session_deadline_expired = false;
@@ -5302,21 +5349,14 @@ impl OneNode {
                             session_deadline_expired = true;
                             return false;
                         }
-                        if pack_context.checkpoint().is_ok() {
-                            return true;
+                        match checkpoint_pack_context(&pack_context) {
+                            PackContextCheckpoint::Live => true,
+                            PackContextCheckpoint::Stopped { budget_exhaustion } => {
+                                stopped = true;
+                                exhaustion = budget_exhaustion;
+                                false
+                            }
                         }
-                        stopped = true;
-                        exhaustion = native_pack_context.as_ref().and_then(|context| {
-                            let reason = context.cancel_reason()?;
-                            [
-                                Exhaustion::Deadline,
-                                Exhaustion::PollQuota,
-                                Exhaustion::CostQuota,
-                            ]
-                            .into_iter()
-                            .find(|dimension| reason.kind == dimension.cancel_kind())
-                        });
-                        false
                     };
                     self.materialize_selected_pack(&materialized, &pack_request.haves, &mut is_live)
                 };
@@ -5896,6 +5936,7 @@ mod tests {
     use fgit_reference::effect::{FoldOutcome, FoldReport, NetEffects};
     use fgit_reference::intent::TransactionRequest;
     use fgit_reference::intent::{DurabilityProfile, IdempotencyKey as ModelIdempotencyKey};
+    use fgit_runtime::ClassLimits;
     use fgit_txn::TransactionFoldReport;
     use fgit_types::{
         CANONICAL_CODEC_VERSION, DecisionOutcome, Digest, DigestBytes, GitHashAlgorithm, GitOid,
@@ -5915,12 +5956,13 @@ mod tests {
         ADMISSION_POLICY_DECISION_KEY_PREFIX, ADMISSION_PRINCIPAL_SNAPSHOT_KEY_PREFIX,
         ADMISSION_REFUSAL_EVIDENCE_KEY_PREFIX, ADMISSION_RETENTION_DELTA_KEY_PREFIX,
         AdmissionMaterializationRefusal, AdmissionUploadPackRefusal, AdmissionUploadPackRepository,
-        ClosureSelectionSource, GitDaemonServeError, GitDaemonSessionOutcome,
-        GitDaemonSessionTimeout, GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal,
-        NodeInitialization, NodeRefusal, NodeRequestContext, OneNode, admission_immutable_key,
-        authority_head_id, genesis_head, genesis_root, git_daemon_capabilities,
-        initialize_embedded_repository, object_namespace, parse_git_daemon_request,
-        serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
+        BudgetClass, BudgetPolicy, ClosureSelectionSource, Exhaustion, FsqliteCx,
+        GitDaemonServeError, GitDaemonSessionOutcome, GitDaemonSessionTimeout,
+        GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal, NodeInitialization,
+        NodeRefusal, NodeRequestContext, OneNode, PackContextCheckpoint, RuntimeProfile,
+        admission_immutable_key, authority_head_id, checkpoint_pack_context, genesis_head,
+        genesis_root, git_daemon_capabilities, initialize_embedded_repository, object_namespace,
+        parse_git_daemon_request, serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
     };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -5956,6 +5998,56 @@ mod tests {
             TenantId::from_bytes([0x11; 16]),
             RepositoryId::from_bytes([0x22; 16]),
         )
+    }
+
+    #[test]
+    fn pack_checkpoint_preserves_the_exact_native_deadline_across_repeated_probes() {
+        let budgets = BudgetPolicy::finite_defaults()
+            .with_class_limits(
+                BudgetClass::Database,
+                ClassLimits::finite(Duration::ZERO, 1_000, 1_000),
+            )
+            .expect("an already-empty finite deadline remains a valid bounded policy");
+        let runtime = RuntimeProfile::deterministic()
+            .with_budgets(budgets)
+            .build()
+            .expect("the deterministic runtime accepts the finite test policy");
+        let context = FsqliteCx::new();
+        context.set_native_cx(runtime.request_cx(BudgetClass::Database));
+
+        for _ in 0..2 {
+            assert!(matches!(
+                checkpoint_pack_context(&context),
+                PackContextCheckpoint::Stopped {
+                    budget_exhaustion: Some(Exhaustion::Deadline)
+                }
+            ));
+            let reason = context
+                .attached_native_cx()
+                .and_then(|native| native.cancel_reason())
+                .expect("the native checkpoint retains an attributed reason");
+            assert_eq!(reason.kind, Exhaustion::Deadline.cancel_kind());
+        }
+
+        drop(context);
+        assert!(runtime.join_root(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn detached_pack_checkpoint_honours_local_cancellation() {
+        let context = FsqliteCx::new();
+        assert!(matches!(
+            checkpoint_pack_context(&context),
+            PackContextCheckpoint::Live
+        ));
+
+        context.cancel();
+        assert!(matches!(
+            checkpoint_pack_context(&context),
+            PackContextCheckpoint::Stopped {
+                budget_exhaustion: None
+            }
+        ));
     }
 
     #[test]

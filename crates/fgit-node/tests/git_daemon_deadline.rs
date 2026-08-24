@@ -564,14 +564,17 @@ fn one_node_reports_database_budget_expiry_while_the_session_is_live() {
         Err(NodeGitDaemonServeRefusal::Pack(refusal)) => refusal,
         other => panic!("class exhaustion must be a node-owned pack refusal: {other:?}"),
     };
-    assert!(matches!(
-        *refusal,
-        NodePackMaterializationRefusal::BudgetClassExhausted {
-            class: BudgetClass::Database,
-            dimension: Exhaustion::Deadline,
-            operation: "materialize selected git pack",
-        }
-    ));
+    assert!(
+        matches!(
+            refusal.as_ref(),
+            NodePackMaterializationRefusal::BudgetClassExhausted {
+                class: BudgetClass::Database,
+                dimension: Exhaustion::Deadline,
+                operation: "materialize selected git pack",
+            }
+        ),
+        "the expired database budget must retain its exact native dimension: {refusal:?}"
+    );
     assert_eq!(response, b"0008NAK\n");
 }
 
