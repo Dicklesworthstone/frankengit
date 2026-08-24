@@ -2374,7 +2374,7 @@ fn non_delete_receive_with_declared_closure(target_ref: &[u8], new_oid: &str) ->
 /// # The claim, narrowed after audit 4702
 ///
 /// This was first written as an "object-bearing push" probe. It is not one, and
-/// BlackOx was right to say so: the pack has zero entries and the validator
+/// the audit was right to say so: the pack has zero entries and the validator
 /// declares a covering closure instead of deriving one, so no object is
 /// transferred and the permitted twin would happily commit a ref aimed at an
 /// object absent from the pack. Calling that object-bearing evidence would be a
