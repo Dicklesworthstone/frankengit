@@ -75,7 +75,9 @@ use fgit_resource::{
     CacheBinding, CacheGrant, CacheGrantRefusal, CachePermit, CacheScope, Grade, LeakDisposition,
     ObligationLedger, OpaqueHandle, RegionCloseOutcome, RegionId, ResourceError, ResourceVector,
 };
-use fgit_runtime::{BudgetClass, NodeRuntime, RuntimeProfile, RuntimeRefusal};
+use fgit_runtime::{
+    BudgetClass, BudgetPolicy, Exhaustion, NodeRuntime, RuntimeProfile, RuntimeRefusal,
+};
 use fgit_txn::TransactionFoldReport;
 use fgit_types::cell::{
     CellReadiness, CellRefusal, CellState, CellTransition, CellTransitionCause, ReadLabel,
@@ -123,6 +125,8 @@ const ADMISSION_OUTBOX_EFFECT_BATCH_KEY_PREFIX: &[u8] =
     b"frankengit/admission/outbox-effect-batch/v1/";
 const ADMISSION_RETENTION_DELTA_KEY_PREFIX: &[u8] = b"frankengit/admission/retention-delta/v1/";
 const ADMISSION_CACHE_SCOPE: &[u8] = b"node/admission-cache/v1";
+const AUTHORITY_CONTEXT_BUDGET_CLASS: BudgetClass = BudgetClass::Database;
+const SELECTED_PACK_MATERIALIZATION_OPERATION: &str = "materialize selected git pack";
 const DEFAULT_MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 const AUTHORITY_DATABASE_FILE: &str = "authority.fsqlite";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -837,6 +841,15 @@ impl PackPayloadSource for AuthoritySelectedPackPayload {
 pub enum NodePackMaterializationRefusal {
     /// The exact-head admission materialization was unavailable or invalid.
     Admission(Box<AdmissionMaterializationRefusal>),
+    /// One named runtime work class exhausted a finite dimension.
+    BudgetClassExhausted {
+        /// The runtime work class whose inherited budget stopped the pack.
+        class: BudgetClass,
+        /// The exact finite dimension observed on the native request context.
+        dimension: Exhaustion,
+        /// Stable operation name for machine- and human-readable evidence.
+        operation: &'static str,
+    },
     /// The bounded deterministic pack planner or writer refused the closure.
     Pack(Box<PackWriteError>),
 }
@@ -845,6 +858,15 @@ impl Display for NodePackMaterializationRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Admission(error) => Display::fmt(error, formatter),
+            Self::BudgetClassExhausted {
+                class,
+                dimension,
+                operation,
+            } => write!(
+                formatter,
+                "{operation} exhausted {} runtime budget ({dimension})",
+                class.code()
+            ),
             Self::Pack(error) => Display::fmt(error, formatter),
         }
     }
@@ -854,6 +876,7 @@ impl Error for NodePackMaterializationRefusal {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Admission(error) => Some(error.as_ref()),
+            Self::BudgetClassExhausted { .. } => None,
             Self::Pack(error) => Some(error.as_ref()),
         }
     }
@@ -3955,6 +3978,7 @@ pub struct NodeConfig {
     git_daemon_repository_path: GitDaemonRepositoryPath,
     store_instance: StoreInstanceId,
     worker_threads: usize,
+    runtime_budgets: BudgetPolicy,
     /// An explicit creation/open expectation. An unspecified value defers to
     /// the authenticated repository configuration when opening an existing
     /// repository, while initialization selects the conservative SHA-1
@@ -3997,6 +4021,7 @@ impl NodeConfig {
             store_instance: StoreInstanceId::from_raw(1),
             serving_cell: ServingCell::Unidentified,
             worker_threads: 1,
+            runtime_budgets: BudgetPolicy::finite_defaults(),
             object_format: None,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             segment_limits: SegmentLimits::default(),
@@ -4015,6 +4040,17 @@ impl NodeConfig {
     #[must_use]
     pub const fn with_worker_threads(mut self, worker_threads: usize) -> Self {
         self.worker_threads = worker_threads;
+        self
+    }
+
+    /// Replaces the finite budget policy for every node-owned runtime class.
+    ///
+    /// This applies to initialization, shutdown, database requests, daemon
+    /// pack work, and every other operation the runtime owns. Profile
+    /// validation still rejects an unbounded service class at node open.
+    #[must_use]
+    pub const fn with_runtime_budgets(mut self, runtime_budgets: BudgetPolicy) -> Self {
+        self.runtime_budgets = runtime_budgets;
         self
     }
 
@@ -4130,11 +4166,16 @@ pub struct DoctorReport {
 /// canonical admission projection. It does not itself materialize refs.
 pub struct NodeRequestContext {
     authority: FsqliteCx,
+    authority_budget_class: BudgetClass,
 }
 
 impl NodeRequestContext {
     const fn authority(&self) -> &FsqliteCx {
         &self.authority
+    }
+
+    const fn authority_budget_class(&self) -> BudgetClass {
+        self.authority_budget_class
     }
 }
 
@@ -4422,6 +4463,7 @@ impl OneNode {
         }
 
         let runtime = RuntimeProfile::production(config.worker_threads)
+            .with_budgets(config.runtime_budgets)
             .build()
             .map_err(NodeRefusal::from)?;
         let authority_path = authority_database_path(&config.storage_root)?;
@@ -4599,6 +4641,7 @@ impl OneNode {
     pub fn request_context(&self) -> NodeRequestContext {
         NodeRequestContext {
             authority: self.authority_context(),
+            authority_budget_class: AUTHORITY_CONTEXT_BUDGET_CLASS,
         }
     }
 
@@ -4965,8 +5008,41 @@ impl OneNode {
             .await
             .map_err(NodePackMaterializationRefusal::from)?;
         let pack_context = request.authority().create_child();
-        let mut is_live = || pack_context.checkpoint().is_ok();
-        self.materialize_selected_pack(&materialized, &[], &mut is_live)
+        let native_pack_context = pack_context.attached_native_cx();
+        let class = request.authority_budget_class();
+        let mut stopped = false;
+        let mut exhaustion = None;
+        let pack = {
+            let mut is_live = || {
+                if stopped {
+                    return false;
+                }
+                if pack_context.checkpoint().is_ok() {
+                    return true;
+                }
+                stopped = true;
+                exhaustion = native_pack_context.as_ref().and_then(|context| {
+                    let reason = context.cancel_reason()?;
+                    [
+                        Exhaustion::Deadline,
+                        Exhaustion::PollQuota,
+                        Exhaustion::CostQuota,
+                    ]
+                    .into_iter()
+                    .find(|dimension| reason.kind == dimension.cancel_kind())
+                });
+                false
+            };
+            self.materialize_selected_pack(&materialized, &[], &mut is_live)
+        };
+        match exhaustion {
+            Some(dimension) => Err(NodePackMaterializationRefusal::BudgetClassExhausted {
+                class,
+                dimension,
+                operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
+            }),
+            None => pack,
+        }
     }
 
     /// Materializes an authority-selected pack with a fresh request context.
@@ -5146,23 +5222,51 @@ impl OneNode {
             Some(deadline),
             |_request, pack_request| {
                 let pack_context = request.authority().create_child();
-                let pack_deadline_expired = AtomicBool::new(false);
-                let mut is_live = || {
-                    if deadline.expired() {
-                        pack_deadline_expired.store(true, Ordering::Relaxed);
-                        return false;
-                    }
-                    pack_context.checkpoint().is_ok()
+                let native_pack_context = pack_context.attached_native_cx();
+                let class = request.authority_budget_class();
+                let mut stopped = false;
+                let mut session_deadline_expired = false;
+                let mut exhaustion = None;
+                let pack = {
+                    let mut is_live = || {
+                        if stopped {
+                            return false;
+                        }
+                        if deadline.expired() {
+                            stopped = true;
+                            session_deadline_expired = true;
+                            return false;
+                        }
+                        if pack_context.checkpoint().is_ok() {
+                            return true;
+                        }
+                        stopped = true;
+                        exhaustion = native_pack_context.as_ref().and_then(|context| {
+                            let reason = context.cancel_reason()?;
+                            [
+                                Exhaustion::Deadline,
+                                Exhaustion::PollQuota,
+                                Exhaustion::CostQuota,
+                            ]
+                            .into_iter()
+                            .find(|dimension| reason.kind == dimension.cancel_kind())
+                        });
+                        false
+                    };
+                    self.materialize_selected_pack(&materialized, &pack_request.haves, &mut is_live)
                 };
-                let pack = self.materialize_selected_pack(
-                    &materialized,
-                    &pack_request.haves,
-                    &mut is_live,
-                );
-                if pack_deadline_expired.load(Ordering::Relaxed) || deadline.expired() {
+                if session_deadline_expired {
                     Err(GitDaemonServeError::Transport(
                         GitDaemonTransportRefusal::SessionDeadlineExceeded {
-                            operation: "materialize selected git pack",
+                            operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
+                        },
+                    ))
+                } else if let Some(dimension) = exhaustion {
+                    Err(GitDaemonServeError::Pack(
+                        NodePackMaterializationRefusal::BudgetClassExhausted {
+                            class,
+                            dimension,
+                            operation: SELECTED_PACK_MATERIALIZATION_OPERATION,
                         },
                     ))
                 } else {
@@ -5535,7 +5639,7 @@ fn authority_database_path(storage_root: &Path) -> Result<String, NodeRefusal> {
 
 fn authority_context_for(runtime: &NodeRuntime) -> FsqliteCx {
     let authority = FsqliteCx::new();
-    authority.set_native_cx(runtime.request_cx(BudgetClass::Database));
+    authority.set_native_cx(runtime.request_cx(AUTHORITY_CONTEXT_BUDGET_CLASS));
     authority
 }
 
