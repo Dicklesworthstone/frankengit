@@ -368,16 +368,46 @@ fn delete_main() -> ValidatedReceive {
 struct CommitmentStore {
     refs: Mutex<BTreeMap<Digest, CanonicalRefState>>,
     closures: Mutex<BTreeMap<Digest, PermittedObjectClosure>>,
+    forge_events: Mutex<BTreeMap<Digest, fgit_forge::ForgeEventBatch>>,
 }
 
 #[derive(Clone, Default)]
 struct StagingStore(Arc<CommitmentStore>);
+
+impl fgit_admission::merge::ForgeBodyStore for StagingStore {
+    fn stage_forge_event_batch(
+        &self,
+        root: Digest,
+        batch: fgit_forge::ForgeEventBatch,
+    ) -> Result<(), RefusalCode> {
+        self.0
+            .forge_events
+            .lock()
+            .map_err(|_| RefusalCode::InternalInvariantBreach)?
+            .insert(root, batch);
+        Ok(())
+    }
+
+    fn resolve_forge_event_batch(
+        &self,
+        root: Digest,
+    ) -> Result<fgit_forge::ForgeEventBatch, RefusalCode> {
+        self.0
+            .forge_events
+            .lock()
+            .map_err(|_| RefusalCode::InternalInvariantBreach)?
+            .get(&root)
+            .cloned()
+            .ok_or(RefusalCode::EvidenceMissing)
+    }
+}
 
 impl Default for CommitmentStore {
     fn default() -> Self {
         Self {
             refs: Mutex::new(BTreeMap::new()),
             closures: Mutex::new(BTreeMap::new()),
+            forge_events: Mutex::new(BTreeMap::new()),
         }
     }
 }

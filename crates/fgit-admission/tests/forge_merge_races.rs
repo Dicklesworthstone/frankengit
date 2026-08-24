@@ -15,7 +15,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use fgit_admission::merge::{SealedMerge, admit_merge};
+use fgit_admission::merge::{ForgeBodyStore, SealedMerge, admit_merge};
 use fgit_admission::{
     AdmissionContext, AdmissionEvidence, AdmissionLimits, AdmissionProjection, AdmissionSnapshot,
     AdmissionSnapshotProjection, CanonicalAdmissionProjection, CanonicalAdmissionStore,
@@ -30,7 +30,7 @@ use fgit_authority::{
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_forge::event::ForgeEvent;
+use fgit_forge::event::{ForgeEvent, ForgeEventBatch};
 use fgit_forge::{
     AggregateVersion, ForgeEventPayload, MergeAttempt, MergeEffectPackage, PullRequestNumber,
     RefIntent, WorkspaceEpoch,
@@ -113,6 +113,7 @@ fn genesis(context: &AdmissionContext, ref_root: Digest) -> RepositoryAuthorityH
 struct Commitments {
     refs: RefCell<BTreeMap<Digest, CanonicalRefState>>,
     closures: RefCell<BTreeMap<Digest, PermittedObjectClosure>>,
+    forge_events: RefCell<BTreeMap<Digest, ForgeEventBatch>>,
 }
 
 #[derive(Clone, Default)]
@@ -152,6 +153,30 @@ impl CanonicalAdmissionStore for Store {
     ) -> Result<(), RefusalCode> {
         self.0.closures.borrow_mut().insert(root, closure);
         Ok(())
+    }
+}
+
+// Added by RainyLotus (cc_8) under frankengit-asa3, 2026-08-24, so this suite
+// keeps compiling after admit_merge gained its ForgeBodyStore bound. The merge
+// path now stages the forge event body it commits a root to; a caller has to
+// offer somewhere to put it. Assertions in this file are untouched.
+impl ForgeBodyStore for Store {
+    fn stage_forge_event_batch(
+        &self,
+        root: Digest,
+        batch: ForgeEventBatch,
+    ) -> Result<(), RefusalCode> {
+        self.0.forge_events.borrow_mut().insert(root, batch);
+        Ok(())
+    }
+
+    fn resolve_forge_event_batch(&self, root: Digest) -> Result<ForgeEventBatch, RefusalCode> {
+        self.0
+            .forge_events
+            .borrow()
+            .get(&root)
+            .cloned()
+            .ok_or(RefusalCode::EvidenceMissing)
     }
 }
 

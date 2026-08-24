@@ -43,6 +43,56 @@ use crate::{
     AuthorityStore, CommitEvidence, ProjectionFailure, ValidatedClosure,
 };
 
+/// The forge event body a merge stages, re-exported for implementors.
+///
+/// [`ForgeBodyStore`] names this type in its signatures, so anything that
+/// implements the trait must be able to name it too. Re-exporting it here means
+/// a crate that admits merges does not have to take a direct `fgit-forge`
+/// dependency purely to spell one parameter.
+pub use fgit_forge::ForgeEventBatch;
+
+/// Where a merge's forge event body is staged so a later reader can resolve it.
+///
+/// # Why this is separate from `CanonicalAdmissionStore`
+///
+/// Only a merge stages a forge body. Receive-pack moves refs and nothing else,
+/// and its stores have no forge vocabulary to implement. Widening the shared
+/// admission store would put a method on every implementor that only one caller
+/// can ever use, so the capability is a second bound on the SAME `commitments`
+/// value instead: a store that admits merges implements both, and one that does
+/// not is unaffected.
+///
+/// # Why the body is staged at all
+///
+/// A committed merge record commits to `forge_event_batch_root`. Publishing a
+/// root whose bytes nothing staged leaves the next reader holding an identity it
+/// cannot resolve -- the same defect the race drill already caught on the ref
+/// side, where the CAS loser was refused `EvidenceMissing` instead of
+/// `TargetRefMoved` because the resulting ref state had never been staged. The
+/// forge half owed exactly the same staging and was not doing it.
+pub trait ForgeBodyStore {
+    /// Stages one forge event batch under its canonical root.
+    ///
+    /// # Errors
+    ///
+    /// [`RefusalCode`] when the body cannot be staged.
+    fn stage_forge_event_batch(
+        &self,
+        root: fgit_types::Digest,
+        batch: fgit_forge::ForgeEventBatch,
+    ) -> Result<(), RefusalCode>;
+
+    /// Resolves a staged forge event batch by its canonical root.
+    ///
+    /// # Errors
+    ///
+    /// [`RefusalCode`] when no body is staged under that root.
+    fn resolve_forge_event_batch(
+        &self,
+        root: fgit_types::Digest,
+    ) -> Result<fgit_forge::ForgeEventBatch, RefusalCode>;
+}
+
 /// One merge, sealed by its author and ready for authority.
 ///
 /// Borrowed rather than owned because every field is already held by the caller
@@ -410,7 +460,7 @@ pub fn admit_merge<S, Projection, Commitments>(
 where
     S: AuthorityStore + ?Sized,
     Projection: AdmissionProjection + ?Sized,
-    Commitments: crate::CanonicalAdmissionStore + ?Sized,
+    Commitments: crate::CanonicalAdmissionStore + ForgeBodyStore + ?Sized,
 {
     let attempt = seal_attempt_for(context, sealed)?;
     let admission = fgit_authority::seal_request(store, &attempt)?;
@@ -527,7 +577,7 @@ where
     // pair needs no such bound only because AsyncAdmissionProjection already
     // requires Sync; the commitments store is this driver's extra parameter and
     // carries its own obligation.
-    Commitments: crate::CanonicalAdmissionStore + Sync + ?Sized,
+    Commitments: crate::CanonicalAdmissionStore + ForgeBodyStore + Sync + ?Sized,
 {
     let attempt = seal_attempt_for(context, sealed)?;
     let admission = fgit_authority::seal_request_async(store, cx, &attempt).await?;
@@ -672,7 +722,7 @@ fn materialize(
     attempt: &SealAttempt,
     basis: &fgit_chronicle::PublicationBasis,
     next_state: &crate::CanonicalRefState,
-    commitments: &(impl crate::CanonicalAdmissionStore + ?Sized),
+    commitments: &(impl crate::CanonicalAdmissionStore + ForgeBodyStore + ?Sized),
 ) -> Result<crate::CommitMaterialization, AdmissionError> {
     let ref_root = crate::canonical_ref_state_root(next_state)
         .map_err(|_| AdmissionError::MaterializationMismatch("merge resulting ref root"))?;
@@ -691,6 +741,21 @@ fn materialize(
     commitments
         .stage_permitted_object_closure(sealed.closure.object_closure_root, closure)
         .map_err(|_| AdmissionError::MaterializationMismatch("merge closure staging"))?;
+
+    // The forge half of the same decision. The root is the package's own, so
+    // what is staged here is byte-identical to what `seal_into_record` commits
+    // the record to -- admission stages the author's body rather than a
+    // reconstruction of it.
+    let package_roots = sealed
+        .package
+        .roots(&fgit_codec::CryptoBodyIdentity)
+        .map_err(|_| AdmissionError::MaterializationMismatch("merge package roots"))?;
+    commitments
+        .stage_forge_event_batch(
+            package_roots.forge_event_batch_root,
+            fgit_forge::ForgeEventBatch::of_one(sealed.package.event.clone()),
+        )
+        .map_err(|_| AdmissionError::MaterializationMismatch("merge forge event staging"))?;
 
     let roots = fgit_chronicle::ResultingRoots {
         ref_root,

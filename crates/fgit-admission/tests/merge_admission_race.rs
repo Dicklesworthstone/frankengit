@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use fgit_admission::merge::{SealedMerge, admit_merge};
+use fgit_admission::merge::{ForgeBodyStore, SealedMerge, admit_merge};
 use fgit_admission::{
     AdmissionContext, AdmissionEvidence, AdmissionLimits, CanonicalAdmissionProjection,
     CanonicalAdmissionStore, CanonicalRefState, CommitEvidence, PermittedObjectClosure,
@@ -37,7 +37,7 @@ use fgit_authority::{
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_codec::RepositoryAuthorityHeadBody;
-use fgit_forge::event::ForgeEvent;
+use fgit_forge::event::{ForgeEvent, ForgeEventBatch};
 use fgit_forge::{
     AggregateVersion, ForgeEventPayload, MergeAttempt, MergeEffectPackage, PullRequestNumber,
     RefIntent, WorkspaceEpoch,
@@ -135,6 +135,7 @@ fn genesis(context: &AdmissionContext, ref_root: Digest) -> RepositoryAuthorityH
 struct Commitments {
     refs: RefCell<BTreeMap<Digest, CanonicalRefState>>,
     closures: RefCell<BTreeMap<Digest, PermittedObjectClosure>>,
+    forge_events: RefCell<BTreeMap<Digest, ForgeEventBatch>>,
 }
 
 #[derive(Clone, Default)]
@@ -174,6 +175,26 @@ impl CanonicalAdmissionStore for Store {
     ) -> Result<(), RefusalCode> {
         self.0.closures.borrow_mut().insert(root, closure);
         Ok(())
+    }
+}
+
+impl ForgeBodyStore for Store {
+    fn stage_forge_event_batch(
+        &self,
+        root: Digest,
+        batch: ForgeEventBatch,
+    ) -> Result<(), RefusalCode> {
+        self.0.forge_events.borrow_mut().insert(root, batch);
+        Ok(())
+    }
+
+    fn resolve_forge_event_batch(&self, root: Digest) -> Result<ForgeEventBatch, RefusalCode> {
+        self.0
+            .forge_events
+            .borrow()
+            .get(&root)
+            .cloned()
+            .ok_or(RefusalCode::EvidenceMissing)
     }
 }
 
@@ -359,6 +380,56 @@ fn a_single_merge_attempt_commits_and_its_record_carries_both_roots() {
     assert!(
         body.generation > HeadGeneration::FIRST,
         "a committed merge must advance the head generation"
+    );
+
+    // THE FORGE HALF, read back off the committed decision rather than assumed.
+    //
+    // CobaltForest's third finding on this bead was that the head-generation
+    // assertion above establishes the ref delta by EFFECT while the
+    // MergeCommitted event was asserted nowhere -- the drill closed on
+    // `Committed { .. }` and discarded the payload, and `MergeCommitted` appeared
+    // in this file only in the fixture that built it. That was accurate. So the
+    // event now has to survive the same round trip the ref delta does.
+    let tail = body
+        .decision_tail_id
+        .expect("a committed decision leaves a decision tail on the head");
+    let batch = fgit_authority::read_decision_batch_body(store.as_ref(), tail)
+        .expect("the decision batch the head points at is readable");
+    let [record] = batch.committed_rcrs.as_slice() else {
+        panic!(
+            "one merge commits one record, got {}",
+            batch.committed_rcrs.len()
+        )
+    };
+
+    // The record's root is the package's own canonical event-batch root, so the
+    // record commits to the author's bytes rather than to a reconstruction.
+    let expected = package
+        .roots(&fgit_codec::CryptoBodyIdentity)
+        .expect("the package has canonical roots");
+    assert_eq!(
+        record.forge_event_batch_root, expected.forge_event_batch_root,
+        "the committed record must commit to the package's own event batch"
+    );
+
+    // And the bytes under that root must actually be resolvable. Before the
+    // event body was staged this resolve returned EvidenceMissing: the record
+    // named an identity nothing had put anywhere, which is the same defect the
+    // race drill caught on the ref side.
+    let staged = commitments
+        .resolve_forge_event_batch(record.forge_event_batch_root)
+        .expect("the committed event batch resolves from what admission staged");
+    assert_eq!(
+        staged,
+        ForgeEventBatch::of_one(package.event.clone()),
+        "the staged batch must be the MergeCommitted event the author sealed"
+    );
+    assert!(
+        matches!(
+            package.event.payload,
+            ForgeEventPayload::MergeCommitted { .. }
+        ),
+        "and the drill is only meaningful if that event is a merge commit"
     );
 }
 

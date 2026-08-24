@@ -2026,6 +2026,34 @@ impl CanonicalAdmissionStore for DurableAdmissionMaterializer {
     }
 }
 
+/// # This surface is unavailable, exactly like its two siblings
+///
+/// Every SYNCHRONOUS staging method on this type refuses with
+/// [`RefusalCode::DurabilityProfileUnavailable`], and this one joins them
+/// rather than pretending to differ. Durable staging here is inherently
+/// asynchronous -- it writes an immutable frame through an
+/// [`AsyncAuthorityStore`] -- so there is no correct synchronous body to give
+/// it, and inventing one that wrote somewhere else would stage a merge's bodies
+/// where the node does not read them back from.
+///
+/// See [`Node::admit_merge_durable_in`] for what that currently costs.
+impl fgit_admission::merge::ForgeBodyStore for DurableAdmissionMaterializer {
+    fn stage_forge_event_batch(
+        &self,
+        _root: Digest,
+        _batch: fgit_admission::merge::ForgeEventBatch,
+    ) -> Result<(), RefusalCode> {
+        Err(RefusalCode::DurabilityProfileUnavailable)
+    }
+
+    fn resolve_forge_event_batch(
+        &self,
+        _root: Digest,
+    ) -> Result<fgit_admission::merge::ForgeEventBatch, RefusalCode> {
+        Err(RefusalCode::DurabilityProfileUnavailable)
+    }
+}
+
 impl AdmissionSnapshotProjection for DurableAdmissionMaterializer {
     fn snapshot(
         &self,
@@ -5399,13 +5427,35 @@ impl OneNode {
     ///
     /// # Why there is no `commitments` parameter
     ///
-    /// [`fgit_admission::merge::admit_merge_async`] takes the
-    /// [`CanonicalAdmissionStore`] its resulting bodies are staged into. The
-    /// node already owns one -- [`DurableAdmissionMaterializer`] implements that
-    /// trait -- so the composition supplies it rather than making every caller
-    /// find one. Leaking it into this signature would let a caller stage a
-    /// merge's bodies somewhere the node does not read them back from, which is
-    /// precisely the defect the race drill found in the blocking path.
+    /// [`fgit_admission::merge::admit_merge_async`] takes the store its
+    /// resulting bodies are staged into, and the node supplies its own rather
+    /// than making every caller find one. Leaking it into this signature would
+    /// let a caller stage a merge's bodies somewhere the node does not read them
+    /// back from, which is precisely the defect the race drill found in the
+    /// blocking path.
+    ///
+    /// # KNOWN DEFECT: this composition cannot yet commit a permitted merge
+    ///
+    /// The store it supplies is [`DurableAdmissionMaterializer`], and every
+    /// SYNCHRONOUS staging method on that type refuses with
+    /// [`RefusalCode::DurabilityProfileUnavailable`]. The merge driver stages
+    /// through exactly those methods, so a merge that is fresh, coherent and
+    /// admissible still fails with `MaterializationMismatch` BEFORE it reaches
+    /// the head CAS. A stale merge is unaffected, because it refuses earlier.
+    ///
+    /// The earlier version of this comment reasoned that the node "already owns
+    /// one -- `DurableAdmissionMaterializer` implements that trait". It does
+    /// implement it. Implementing a trait is not providing the capability, and
+    /// that gap is the whole defect: the type checker was satisfied by a set of
+    /// methods that unconditionally refuse. Reported by `BlackOx` on
+    /// `frankengit-asa3`, confirmed here.
+    ///
+    /// The fix is not another staging method. Durable staging is asynchronous
+    /// and authority-backed (`stage_ref_state_in` and its siblings), so a merge
+    /// has to reach it the way a receive does -- through the projection's
+    /// asynchronous materialization -- which in turn needs the admission fold to
+    /// accept a forge effect instead of refusing one. That work is tracked on
+    /// the bead; it is not a wiring change.
     ///
     /// # Errors
     ///
