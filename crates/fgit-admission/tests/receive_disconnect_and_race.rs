@@ -161,6 +161,7 @@ struct UnboundAdapter {
     /// When set, `materialize_commit` refuses, so a folded transaction still
     /// reaches a terminal *refusal* rather than a commit.
     commit_refusal: Option<RefusalCode>,
+    hidden_refs: fgit_wire::visibility::RefVisibility,
     seed: u8,
 }
 
@@ -173,6 +174,7 @@ impl UnboundAdapter {
             retention: RetentionSet::new(),
             outbox: OutboxMap::new(),
             commit_refusal: None,
+            hidden_refs: fgit_wire::visibility::RefVisibility::new(),
             seed,
         }
     }
@@ -191,6 +193,15 @@ impl UnboundAdapter {
         self.commit_refusal = Some(code);
         self
     }
+
+    /// Publishes a hide rule through the snapshot this projection returns, so
+    /// the admission path sees a non-empty visibility policy.
+    fn hiding(mut self, rule: &[u8]) -> Self {
+        self.hidden_refs
+            .push_rule(rule, &fgit_wire::WireLimits::default())
+            .expect("a fixture hide rule is valid");
+        self
+    }
 }
 
 impl AdmissionSnapshotProjection for UnboundAdapter {
@@ -204,6 +215,7 @@ impl AdmissionSnapshotProjection for UnboundAdapter {
             forge_positions: self.forge_positions.clone(),
             retention: self.retention.clone(),
             outbox: self.outbox.clone(),
+            hidden_refs: self.hidden_refs.clone(),
             ..AdmissionSnapshot::default()
         })
     }
@@ -1582,3 +1594,116 @@ fn basis_for(body: &RepositoryAuthorityHeadBody) -> PublicationBasis {
 // Non-production fixture identity: this reserved tag deliberately has no registered digest width.
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
 const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
+
+// ---------------------------------------------------------------------------
+// Hidden-ref refusals on the PUSH path (frankengit-fg019c acceptance line 1).
+//
+// `frankengit-eeb8` covers the advertisement side -- a hidden ref never
+// reaches a principal's push advertisement. What neither that work nor
+// anything else asserts is the push itself: `hides_any_target` at
+// fgit-admission refuses a ref command whose target is hidden, and until now
+// no test drove it. The refusal was raised by production code and observed by
+// nobody.
+// ---------------------------------------------------------------------------
+
+/// A push whose target is hidden from the principal is refused, and refused
+/// with the code that names the reason.
+///
+/// Asserting merely "refused" would pass against any of the dozen other
+/// refusal codes this path can produce, so the code itself is pinned.
+#[test]
+fn a_push_targeting_a_hidden_ref_is_refused_as_hidden_ref_unauthorized() {
+    let context = context(b"fg019c-hidden-target");
+    let store = store_with_genesis(&context);
+    let projection = UnboundAdapter::with_main("hidden-target", 0x40).hiding(MAIN_REF);
+
+    let result = admit_validated_receive(
+        &store,
+        &context,
+        &delete_main(),
+        AdmissionLimits::default(),
+        &projection,
+    )
+    .expect("a hidden target still reaches a terminal decision rather than failing open");
+
+    let outcome = &result.commands[0].terminal.outcome;
+    assert!(
+        matches!(
+            outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::HiddenRefUnauthorized,
+                ..
+            }
+        ),
+        "a push to a hidden ref must be refused as HiddenRefUnauthorized, got {outcome:?}"
+    );
+}
+
+/// The permitted twin: the identical request under a policy that hides a
+/// DIFFERENT ref must not be refused for the hidden-ref reason.
+///
+/// Without this the test above would pass against a build that refused every
+/// push as HiddenRefUnauthorized, which is indistinguishable from a working
+/// guard by the refusal alone. Only the hide rule differs between the two.
+#[test]
+fn the_permitted_twin_a_push_to_a_visible_ref_is_not_refused_as_hidden() {
+    let context = context(b"fg019c-visible-target");
+    let store = store_with_genesis(&context);
+    let projection =
+        UnboundAdapter::with_main("visible-target", 0x41).hiding(b"refs/internal/secret");
+
+    let result = admit_validated_receive(
+        &store,
+        &context,
+        &delete_main(),
+        AdmissionLimits::default(),
+        &projection,
+    )
+    .expect("a visible target reaches a terminal decision");
+
+    let outcome = &result.commands[0].terminal.outcome;
+    assert!(
+        !matches!(
+            outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::HiddenRefUnauthorized,
+                ..
+            }
+        ),
+        "a push to a ref the policy does not hide must not be refused as hidden, got {outcome:?}"
+    );
+}
+
+/// A hide rule that matches by PREFIX refuses a push beneath it.
+///
+/// The rule here never names the pushed ref exactly, so this separates "the
+/// policy is consulted as a prefix matcher" from "the policy happens to hold
+/// this exact name" -- the two are indistinguishable when the fixture rule and
+/// the pushed ref are the same string, as in the first test above.
+#[test]
+fn a_prefix_hide_rule_refuses_a_push_beneath_it() {
+    let context = context(b"fg019c-hidden-prefix");
+    let store = store_with_genesis(&context);
+    let projection = UnboundAdapter::with_main("hidden-prefix", 0x42).hiding(b"refs/heads");
+
+    let result = admit_validated_receive(
+        &store,
+        &context,
+        &delete_main(),
+        AdmissionLimits::default(),
+        &projection,
+    )
+    .expect("a prefix-hidden target still reaches a terminal decision");
+
+    let outcome = &result.commands[0].terminal.outcome;
+    assert!(
+        matches!(
+            outcome,
+            DecisionOutcome::Refused {
+                code: RefusalCode::HiddenRefUnauthorized,
+                ..
+            }
+        ),
+        "a push beneath a hidden prefix must be refused as HiddenRefUnauthorized, got {outcome:?}"
+    );
+}
