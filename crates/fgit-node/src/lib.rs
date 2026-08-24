@@ -6471,7 +6471,7 @@ mod tests {
     use fgit_codec::{
         CanonicalBody, CryptoBodyIdentity, RepositoryAuthorityHeadBody, body_id, decode_body,
     };
-    use fgit_object_fabric::fabric::StoreRefusal;
+    use fgit_object_fabric::fabric::{ImmutableObjectFabric, StoreRefusal};
     use fgit_reference::effect::{FoldOutcome, FoldReport, NetEffects};
     use fgit_reference::intent::TransactionRequest;
     use fgit_reference::intent::{DurabilityProfile, IdempotencyKey as ModelIdempotencyKey};
@@ -8698,23 +8698,25 @@ mod tests {
         let (node, _) = OneNode::init(test_config(scratch.path().to_path_buf()))
             .expect("node initializes empty canonical state");
         let request = node.request_context();
-        let stored = node
-            .put_git_object(
-                fgit_git_object::ObjectType::Blob,
-                b"authority selected blob".to_vec(),
-            )
-            .expect("fixture blob enters verified fabric");
-        let client_have = node
-            .put_git_object(
-                fgit_git_object::ObjectType::Blob,
-                b"client already has this authority-selected blob".to_vec(),
-            )
-            .expect("fixture client-have blob enters verified fabric");
+        let c0_blob = put_object(
+            &node,
+            fgit_git_object::ObjectType::Blob,
+            b"C0 common blob".to_vec(),
+        );
+        let c0_tree = put_tree(&node, &[(b"100644", b"common", c0_blob)]);
+        let client_have = put_commit(&node, c0_tree, &[]);
+        let wanted_blob = put_object(
+            &node,
+            fgit_git_object::ObjectType::Blob,
+            b"C1 wanted blob".to_vec(),
+        );
+        let wanted_tree = put_tree(&node, &[(b"100644", b"wanted", wanted_blob)]);
+        let stored = put_commit(&node, wanted_tree, &[client_have]);
 
         let mut refs = BTreeMap::new();
         refs.insert(
             RefName::try_new(b"refs/heads/main").expect("fixed ref name is valid"),
-            stored.identity(),
+            stored,
         );
         let ref_state = CanonicalRefState::new(refs);
         let ref_root = node
@@ -8727,8 +8729,12 @@ mod tests {
             ))
             .expect("future RCR ref state stages before head publication");
         let closure = PermittedObjectClosure::new(BTreeSet::from([
-            stored.identity(),
-            client_have.identity(),
+            c0_blob,
+            c0_tree,
+            client_have,
+            wanted_blob,
+            wanted_tree,
+            stored,
         ]));
         let closure_root = node
             .runtime()
@@ -8880,6 +8886,17 @@ mod tests {
         assert_eq!(first_chunk, b"PACK");
 
         let repository_path = node.git_daemon_repository_path().as_bytes().to_vec();
+        let expected_selected_payloads = [stored, wanted_tree, wanted_blob]
+            .into_iter()
+            .map(|id| {
+                node.fabric
+                    .read_whole(id)
+                    .expect("selected fixture object remains in the verified fabric")
+                    .object
+                    .payload()
+                    .to_vec()
+            })
+            .collect::<BTreeSet<_>>();
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
         let address = listener
             .local_addr()
@@ -8891,8 +8908,8 @@ mod tests {
         });
         let mut client = TcpStream::connect(address).expect("client connects to node listener");
         client
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("client read timeout configures");
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("bounded client read timeout configures");
         let greeting_payload = [
             b"git-upload-pack ".as_slice(),
             repository_path.as_slice(),
@@ -8903,9 +8920,9 @@ mod tests {
         client_request.extend(
             encode_packets(
                 &[
-                    Packet::Data(format!("want {}\n", stored.identity()).into_bytes()),
+                    Packet::Data(format!("want {stored}\n").into_bytes()),
                     Packet::Flush,
-                    Packet::Data(format!("have {}\n", client_have.identity()).into_bytes()),
+                    Packet::Data(format!("have {client_have}\n").into_bytes()),
                     Packet::Data(b"done\n".to_vec()),
                 ],
                 &WireLimits::default(),
@@ -8918,15 +8935,20 @@ mod tests {
             .shutdown(Shutdown::Write)
             .expect("client closes request half after done");
         let mut response = Vec::new();
-        client
-            .read_to_end(&mut response)
-            .expect("server completes authority-selected pack response");
+        let client_read = client.read_to_end(&mut response);
         let (pack_session_result, shutdown) = server.join().expect("node server thread joins");
-        shutdown.expect("node drains after authority-selected pack session");
-        assert!(matches!(
-            pack_session_result,
-            Ok(GitDaemonSessionOutcome::Pack(_))
-        ));
+        assert!(
+            client_read.is_ok(),
+            "client reads the daemon response; server result: {pack_session_result:?}; shutdown: {shutdown:?}; client result: {client_read:?}"
+        );
+        assert!(
+            matches!(pack_session_result, Ok(GitDaemonSessionOutcome::Pack(_))),
+            "daemon completes the pack session after client result {client_read:?}"
+        );
+        assert!(
+            shutdown.is_ok(),
+            "node drains after the daemon session; client result: {client_read:?}; shutdown: {shutdown:?}"
+        );
         assert!(
             response
                 .windows(b"PACK".len())
@@ -8948,13 +8970,16 @@ mod tests {
         .expect("the daemon's compressed pack has a valid native checksum");
         assert_eq!(
             pack.entries().len(),
-            1,
-            "an exact client have removes its object from the authority-selected pack"
+            3,
+            "the C0 have removes its commit, tree, and blob while retaining C1's commit, tree, and blob"
         );
         assert_eq!(
-            pack.entries()[0].inflated,
-            b"authority selected blob",
-            "the permitted twin not named as a client have remains in the emitted pack"
+            pack.entries()
+                .iter()
+                .map(|entry| entry.inflated.clone())
+                .collect::<BTreeSet<_>>(),
+            expected_selected_payloads,
+            "the real daemon passes the C1 want and C0 have into selected_pack_ids, emitting exactly C1-local closure objects"
         );
     }
 
