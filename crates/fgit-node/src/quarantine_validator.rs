@@ -991,6 +991,19 @@ mod tests {
                 NodeReceiveTransportRefusal::Unauthenticated => panic!(
                     "a receive-core refusal must not be confused with missing authentication"
                 ),
+                // The cell-state arms exist because this match is deliberately
+                // wildcard-free: a new refusal variant must be given a decision
+                // here rather than silently joining whatever a catch-all did.
+                // Both are unreachable from THIS conversion by construction --
+                // it is driven by a ReceiveError, and cell state is consulted
+                // elsewhere in the receive composition -- so the honest arm is a
+                // panic, not a tolerant one that would make the loop vacuous.
+                NodeReceiveTransportRefusal::CellState(refusal) => panic!(
+                    "a receive-core refusal must not be reported as a cell-state refusal, got {refusal:?}"
+                ),
+                NodeReceiveTransportRefusal::StagedWithoutPublication { state } => panic!(
+                    "a receive-core refusal must not be reported as a withheld publication, got {state:?}"
+                ),
             }
         }
     }

@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 //! §22.6's middle isolation response, end to end. `frankengit-fg036b`.
 //!
-//! GoldLotus's ruling on this bead: *"StagingOnly: quarantine + validation
+//! `GoldLotus`'s ruling on this bead: *"`StagingOnly`: quarantine + validation
 //! proceed but PUBLICATION refuses typed (staged, never visible — §5.4
 //! staged/visible split is the vocabulary)"*, plus a differential arm — *"a
-//! StagingOnly cell under the fault schedule accepts and stages but publishes
+//! `StagingOnly` cell under the fault schedule accepts and stages but publishes
 //! nothing, and the healed cell's publication carries the staged work or
 //! refuses it stale — assert which, do not leave it ambiguous."*
 //!
