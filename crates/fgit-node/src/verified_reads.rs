@@ -11,9 +11,10 @@ use core::fmt;
 
 use fgit_authority::{
     AsyncAuthorityStore, AuthorityFailure, HeadBodyRefusal, HeadReadReceipt, OutcomeFailure,
-    TerminalOutcome, authority_head_identity, next_batch_to_replay, outcome_index_proof,
-    outcome_index_root, read_authority_head_body_async, read_decision_batch_body_async,
-    read_repository_configuration_async, read_repository_incarnation_configuration_async,
+    RepositoryIncarnationConfigurationEvidence, TerminalOutcome, authority_head_identity,
+    next_batch_to_replay, outcome_index_proof, outcome_index_root, read_authority_head_body_async,
+    read_decision_batch_body_async, read_repository_configuration_async,
+    read_repository_incarnation_configuration_evidence_async,
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_crypto::{
@@ -121,6 +122,12 @@ pub enum VerifiedReadServingRefusal {
     RefLayoutUnavailable { layout: RootLayoutVersion },
     /// The selected configuration did not make object closure Merkle proofs available.
     ObjectLayoutUnavailable { layout: RootLayoutVersion },
+    /// The head's exact incarnation-configuration minor has no envelope variant
+    /// that can carry it without changing its canonical identity.
+    ConfigurationMinorUnrepresentable {
+        /// The schema minor that decoded but cannot be carried exactly.
+        minor: u16,
+    },
     /// A disclosure gate or proof constructor refused the request.
     VerifiedRead(Box<VerifiedReadRefusal>),
     /// The reconstructed terminal-outcome leaves did not reproduce the head's
@@ -167,6 +174,11 @@ impl fmt::Display for VerifiedReadServingRefusal {
             Self::ObjectLayoutUnavailable { layout } => write!(
                 formatter,
                 "the selected {layout:?} layout does not admit object closure membership proofs"
+            ),
+            Self::ConfigurationMinorUnrepresentable { minor } => write!(
+                formatter,
+                "the head's incarnation-configuration schema 2.{minor} decodes but no verified-read \
+                 envelope variant carries it exactly, so its canonical identity cannot be rebuilt"
             ),
             Self::VerifiedRead(refusal) => write!(formatter, "verified-read refused: {refusal}"),
             Self::OutcomeRootMismatch => formatter.write_str(
@@ -503,16 +515,30 @@ impl OneNode {
         request: &NodeRequestContext,
         configuration_root: &Digest,
     ) -> Result<VerifiedReadConfiguration, VerifiedReadServingRefusal> {
-        match read_repository_incarnation_configuration_async(
+        match read_repository_incarnation_configuration_evidence_async(
             &self.authority,
             request.authority(),
             configuration_root,
         )
         .await
         {
-            Ok(configuration) => Ok(VerifiedReadConfiguration::RepositoryIncarnationV2(
-                configuration,
-            )),
+            // The EXACT body, not the normalized projection. A verified read is
+            // checked against `head.configuration_root`, and that digest names
+            // one canonical body; handing the envelope a projection would let it
+            // recompute an identity the head never committed to.
+            Ok(RepositoryIncarnationConfigurationEvidence::V2_0(body)) => {
+                Ok(VerifiedReadConfiguration::RepositoryIncarnationV2(body))
+            }
+            // Schema 2.1 decodes here, but `VerifiedReadConfiguration` has no
+            // variant that carries it exactly. Narrowing it into the 2.0 variant
+            // would compile and would be wrong: 2.0 and 2.1-with-`policy_root:
+            // None` are different canonical bodies with different identities, so
+            // the envelope would recompute a root the head does not bind and the
+            // two minors would alias. Refusing is the typed answer until
+            // `fgit-verified-read` carries an exact 2.1 variant.
+            Ok(RepositoryIncarnationConfigurationEvidence::V2_1(_)) => {
+                Err(VerifiedReadServingRefusal::ConfigurationMinorUnrepresentable { minor: 1 })
+            }
             Err(OutcomeFailure::Codec(fgit_codec::CodecRefusal::SchemaMajorUnsupported {
                 observed: 1,
                 ..
