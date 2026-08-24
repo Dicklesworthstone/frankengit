@@ -322,6 +322,36 @@ widened from a different integer domain, or the parser is refactored to compute
 offsets before bounds-checking them. At that point overflow becomes expressible,
 the arm becomes reachable, and it needs a fixture rather than this row.
 
+### NEG-029 — read mode is not distinguishable by latency here (FG-036c)
+
+**Hypothesis.** The four read modes differ enough in served-read latency that a
+per-mode ordering is a reportable result.
+
+**Rejected**, at this sample size on this host. Mode-to-mode spread on one cell
+was 6–13 ms. The A/A noise floor, measured on the *same* configurations, was
+3.1–33.7 ms. A difference that does not clear the floor is not an effect.
+
+**Why this one is worth a row rather than a shrug.** The claim it rejects is
+attractive: *Offline is cheapest because it makes no currentness claim.* It has a
+mechanism, it matches intuition, and the medians appear to support it — Offline
+did measure fastest. An unguarded harness would have reported it, and a reader
+would have believed it. The A/A control is the only thing standing between that
+story and the artifact.
+
+The floor is measured **per configuration, every run**, because it moved by an
+order of magnitude *within* a single run on this shared host. Anything assuming
+one global noise figure manufactures effects. fg028c reached the same conclusion
+independently for its own latency family, which is corroboration rather than
+coincidence: two harnesses, one host, same instability.
+
+**What is reported instead.** Only quantities that are exact rather than timed —
+storage amplification (1.0×, byte-identical across 1, 3 and 5 cells),
+served-versus-refused per (state, mode), and the `fgit-types` versus `fgit-node`
+admission differential. Those carry no noise-floor caveat because they are
+counts.
+
+Recorded on bead `frankengit-fg036c-slo-economics-v6n`.
+
 ## 5. Integration with agents
 
 Context Packets for architecture/performance work include relevant negative-evidence rows. An agent proposing a known-rejected dependency or mechanism must cite and rebut the row. The system does not block creative reconsideration; it prevents amnesia.
