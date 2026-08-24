@@ -2845,6 +2845,55 @@ mod hidden_ref_disclosure_tests {
         }
     }
 
+    fn guard_refusal_record_id() -> fgit_types::RefusalRecordId {
+        fgit_types::RefusalRecordId::from_digest(
+            fgit_types::DigestAlgorithmId::try_new(super::FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("the reserved fixture algorithm slot"),
+            fgit_types::CANONICAL_CODEC_VERSION,
+            fgit_types::DigestBytes::try_new(&[5; 32]).expect("a 32-byte fixture body"),
+        )
+    }
+
+    fn guard_emitted(code: RefusalCode) -> fgit_wire::receive::ReceiveCommandStatus {
+        crate::status_from_terminal(fgit_types::DecisionOutcome::Refused {
+            code,
+            refusal_record_id: guard_refusal_record_id(),
+        })
+    }
+
+    #[test]
+    fn the_emitted_status_for_a_hidden_target_matches_an_unknown_one_byte_for_byte() {
+        // Acceptance lines 3 and 4 together, through the real emit path rather
+        // than by composing two facts about refusal_message. status_from_terminal
+        // is what turns a terminal decision into the bytes a client sees.
+        let hidden = guard_emitted(RefusalCode::HiddenRefUnauthorized);
+        let unknown = guard_emitted(RefusalCode::ExpectedOldRefMismatch);
+
+        assert_eq!(
+            hidden, unknown,
+            "the status a client receives must not distinguish a hidden ref from an unknown one"
+        );
+        assert!(
+            matches!(
+                &hidden,
+                fgit_wire::receive::ReceiveCommandStatus::Rejected { message }
+                    if message.as_slice() == b"stale info"
+            ),
+            "and it must be the ordinary stale-info rejection, not some third shape"
+        );
+    }
+
+    #[test]
+    fn the_emitted_comparison_is_not_vacuous() {
+        // Without this the equality above is satisfied by a status_from_terminal
+        // that returns one constant for every refusal.
+        assert_ne!(
+            guard_emitted(RefusalCode::ForceNotPermitted),
+            guard_emitted(RefusalCode::ExpectedOldRefMismatch),
+            "genuinely different refusals must still emit differently"
+        );
+    }
+
     #[test]
     fn a_command_naming_a_hidden_ref_is_refused_by_the_decision_function() {
         // Acceptance line 2, observed rather than composed. The five tests above
