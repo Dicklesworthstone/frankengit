@@ -603,7 +603,7 @@ where
         return collect_cumulative_outcomes_async(store, cx, head_key).await;
     };
     enum CheckpointCandidate {
-        Exact(OutcomeIndexCheckpointBody),
+        Exact(Box<OutcomeIndexCheckpointBody>),
         ForeignRepository,
         Unavailable,
     }
@@ -613,7 +613,7 @@ where
     let candidate =
         match verify_outcome_index_checkpoint_chain_async(store, cx, identity, root).await {
             Ok(checkpoint) if checkpoint.repository_id == head.repository_id => {
-                CheckpointCandidate::Exact(checkpoint)
+                CheckpointCandidate::Exact(Box::new(checkpoint))
             }
             Ok(_) => CheckpointCandidate::ForeignRepository,
             Err(OutcomeIndexCheckpointRefusal::Authority(error)) => return Err(error.into()),
