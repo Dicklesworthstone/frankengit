@@ -29,7 +29,8 @@ pub mod freshness;
 
 use fgit_authority::{OutcomeFailure, TerminalOutcome, verify_outcome_index_membership};
 use fgit_codec::{
-    CryptoBodyIdentity, RepositoryAuthorityHeadBody, RepositoryConfigurationBody, body_id,
+    CryptoBodyIdentity, RepositoryAuthorityHeadBody, RepositoryConfigurationBody,
+    RepositoryIncarnationConfigurationBody, body_id,
 };
 use fgit_crypto::{
     MerkleProof, MerkleRefusal, RefStateNonMembershipProof, verify_ref_state_membership_under,
@@ -223,6 +224,33 @@ pub enum VerifiedReadAnswer {
     },
 }
 
+/// The exact repository-configuration body selected by an authority head.
+///
+/// Envelope V1 describes the proof-envelope grammar, not the configuration
+/// schema.  Repository incarnation support selected schema-major 2 while
+/// retaining the same authority-head `configuration_root` slot; erasing that
+/// distinction and recreating a schema-major 1 body would change the canonical
+/// identity.  A verifier therefore keeps the selected body typed and computes
+/// its identity from its own canonical schema.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VerifiedReadConfiguration {
+    /// The original repository-configuration schema.
+    RepositoryV1(RepositoryConfigurationBody),
+    /// The incarnation-bound repository-configuration schema.
+    RepositoryIncarnationV2(RepositoryIncarnationConfigurationBody),
+}
+
+impl VerifiedReadConfiguration {
+    /// The root-layout interpretation committed by this exact configuration.
+    #[must_use]
+    pub const fn root_layout(&self) -> RootLayoutVersion {
+        match self {
+            Self::RepositoryV1(configuration) => configuration.root_layout,
+            Self::RepositoryIncarnationV2(configuration) => configuration.root_layout,
+        }
+    }
+}
+
 /// A versioned proof response tied to the head body the server claims to have
 /// used.
 ///
@@ -233,16 +261,37 @@ pub enum VerifiedReadAnswer {
 pub struct VerifiedReadEnvelope {
     version: u16,
     head: RepositoryAuthorityHeadBody,
-    configuration: Option<RepositoryConfigurationBody>,
+    configuration: Option<VerifiedReadConfiguration>,
     answer: VerifiedReadAnswer,
 }
 
 impl VerifiedReadEnvelope {
     /// Constructs a version-one envelope.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         head: RepositoryAuthorityHeadBody,
         configuration: Option<RepositoryConfigurationBody>,
+        answer: VerifiedReadAnswer,
+    ) -> Self {
+        let configuration = match configuration {
+            Some(configuration) => Some(VerifiedReadConfiguration::RepositoryV1(configuration)),
+            None => None,
+        };
+        Self::new_with_exact_configuration(head, configuration, answer)
+    }
+
+    /// Constructs a version-one envelope carrying the exact selected
+    /// configuration schema.
+    ///
+    /// This is the serving-side constructor for repositories whose authority
+    /// head selects an incarnation-bound configuration.  It deliberately takes
+    /// the body rather than a root supplied by the serving cell: verification
+    /// re-identifies this canonical body and requires that identity to equal
+    /// the pinned head's `configuration_root`.
+    #[must_use]
+    pub const fn new_with_exact_configuration(
+        head: RepositoryAuthorityHeadBody,
+        configuration: Option<VerifiedReadConfiguration>,
         answer: VerifiedReadAnswer,
     ) -> Self {
         Self {
@@ -263,6 +312,23 @@ impl VerifiedReadEnvelope {
         version: u16,
         head: RepositoryAuthorityHeadBody,
         configuration: Option<RepositoryConfigurationBody>,
+        answer: VerifiedReadAnswer,
+    ) -> Result<Self, VerifiedReadRefusal> {
+        let configuration = configuration.map(VerifiedReadConfiguration::RepositoryV1);
+        Self::from_versioned_parts_with_exact_configuration(version, head, configuration, answer)
+    }
+
+    /// Validates and constructs an envelope carrying the exact selected
+    /// configuration schema from a transport-decoded version.
+    ///
+    /// # Errors
+    ///
+    /// [`VerifiedReadRefusal::UnsupportedEnvelopeVersion`] when `version` is
+    /// unknown to this verifier.
+    pub fn from_versioned_parts_with_exact_configuration(
+        version: u16,
+        head: RepositoryAuthorityHeadBody,
+        configuration: Option<VerifiedReadConfiguration>,
         answer: VerifiedReadAnswer,
     ) -> Result<Self, VerifiedReadRefusal> {
         if version != VERIFIED_READ_ENVELOPE_V1 {
@@ -291,6 +357,16 @@ impl VerifiedReadEnvelope {
     /// The configuration body used to establish a non-legacy root layout.
     #[must_use]
     pub const fn configuration(&self) -> Option<&RepositoryConfigurationBody> {
+        match self.configuration.as_ref() {
+            Some(VerifiedReadConfiguration::RepositoryV1(configuration)) => Some(configuration),
+            Some(VerifiedReadConfiguration::RepositoryIncarnationV2(_)) | None => None,
+        }
+    }
+
+    /// The exact configuration body whose identity the verifier binds to the
+    /// pinned head when a ref proof needs a non-legacy layout.
+    #[must_use]
+    pub const fn exact_configuration(&self) -> Option<&VerifiedReadConfiguration> {
         self.configuration.as_ref()
     }
 
@@ -405,7 +481,7 @@ pub fn verify_envelope(
 
     match &envelope.answer {
         VerifiedReadAnswer::RefMembership { name, oid, proof } => {
-            let layout = selected_ref_layout(pinned.body(), envelope.configuration())?;
+            let layout = selected_ref_layout(pinned.body(), envelope.exact_configuration())?;
             let verified =
                 verify_ref_state_membership_under(layout, &pinned.body.ref_root, name, oid, proof)
                     .map_err(|refusal| VerifiedReadRefusal::RefLayout(Box::new(refusal)))?;
@@ -434,7 +510,7 @@ pub fn verify_envelope(
             }
         }
         VerifiedReadAnswer::AuthorizedRefAbsence { absence, proof } => {
-            let layout = selected_ref_layout(pinned.body(), envelope.configuration())?;
+            let layout = selected_ref_layout(pinned.body(), envelope.exact_configuration())?;
             let verified = verify_ref_state_non_membership_under(
                 layout,
                 &pinned.body.ref_root,
@@ -464,17 +540,24 @@ pub const fn refuse_forge_position_proof() -> Result<(), VerifiedReadRefusal> {
 
 fn selected_ref_layout(
     pinned: &RepositoryAuthorityHeadBody,
-    configuration: Option<&RepositoryConfigurationBody>,
+    configuration: Option<&VerifiedReadConfiguration>,
 ) -> Result<RootLayoutVersion, VerifiedReadRefusal> {
     let Some(configuration) = configuration else {
         return Ok(RootLayoutVersion::LegacyWholeBody);
     };
-    let identity = body_id(&CryptoBodyIdentity, configuration)
-        .map_err(|_| VerifiedReadRefusal::ConfigurationIdentityUnavailable)?;
+    let identity = match configuration {
+        VerifiedReadConfiguration::RepositoryV1(configuration) => {
+            body_id(&CryptoBodyIdentity, configuration)
+        }
+        VerifiedReadConfiguration::RepositoryIncarnationV2(configuration) => {
+            body_id(&CryptoBodyIdentity, configuration)
+        }
+    }
+    .map_err(|_| VerifiedReadRefusal::ConfigurationIdentityUnavailable)?;
     if identity.algorithm() != pinned.configuration_root.algorithm()
         || identity.digest() != pinned.configuration_root.bytes()
     {
         return Err(VerifiedReadRefusal::ConfigurationRootMismatch);
     }
-    Ok(configuration.root_layout)
+    Ok(configuration.root_layout())
 }
