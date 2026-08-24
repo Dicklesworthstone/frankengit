@@ -455,6 +455,19 @@ fn parent_pid_of(pid: u32) -> Option<u32> {
     after_comm.split_whitespace().nth(1)?.parse().ok()
 }
 
+/// Peak RSS of the leader alone, read from one file with no directory scan.
+///
+/// The cheap path, and it must be tried FIRST. `process_group_members` walks
+/// every entry in `/proc` -- over two thousand on this host -- and after the
+/// frankengit-x7ja fixes a `fg serve` clone completes in less time than that
+/// scan takes. The server, being one-shot, had already exited before the first
+/// reading landed, and the run refused with "could not read server peak RSS"
+/// while the clone it was serving exited 0. An instrument that cannot measure
+/// a server faster than itself reports the subject as broken.
+fn leader_peak_rss_bytes(pid: u32) -> Option<u64> {
+    server_peak_rss_bytes(pid)
+}
+
 fn process_tree_cpu_ns(pid: u32) -> Option<u64> {
     // A forking server's work is in a LIVE child for most of the clone, and it
     // only lands in the parent's cutime/cstime once the parent has reaped it.
@@ -483,6 +496,11 @@ fn process_tree_cpu_ns(pid: u32) -> Option<u64> {
 
 /// Peak resident set across every live member of the server's process group.
 fn group_peak_rss_bytes(pgid: u32) -> Option<u64> {
+    // One file first. Only pay for the /proc walk when the leader is already
+    // gone -- which is the forking-`git daemon` case the walk exists for.
+    if let Some(leader) = leader_peak_rss_bytes(pgid) {
+        return Some(leader);
+    }
     let members = process_group_members(pgid);
     let mut total = 0_u64;
     let mut observed = false;
@@ -782,8 +800,12 @@ impl BenchmarkWorkload for TransportWorkload {
         // way, so a post-hoc probe would have silently measured only the
         // baseline arm.
         let pid = server.id();
-        let mut cpu_ns = None;
-        let mut memory_bytes = None;
+        // One reading taken now, while the port is confirmed LISTEN and the
+        // server is therefore certainly alive. Without it a server that
+        // outruns the probe yields nothing at all, and the sample refuses.
+        // Max-retention below keeps the peak if later polls see more.
+        let mut cpu_ns = process_tree_cpu_ns(pid);
+        let mut memory_bytes = group_peak_rss_bytes(pid);
         let clone_status = loop {
             if let Some(sample) = process_tree_cpu_ns(pid) {
                 // Max, not last: a forked child's CPU disappears from the tree
