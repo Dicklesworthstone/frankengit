@@ -171,8 +171,8 @@ bytes_body!(
 );
 bytes_body!(
     ForgeEventBatch,
-    "frankengit/forge-event-batch/v1",
-    "forge-event-batch",
+    "frankengit/forge-event-evidence/v1",
+    "forge-event-evidence",
     "forge_event_batch.effects",
     effect_bytes
 );

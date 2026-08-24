@@ -47,3 +47,4 @@ id	domain_tag	algorithm	durable_object_row	derived_identity	status
 45	frankengit/repository-creation-attempt/v1	sha256	-	-	active
 46	frankengit/outcome-index-checkpoint/v1	sha256	DUR-018	-	active
 47	frankengit/hidden-ref-policy/v1	sha256	-	-	active
+48	frankengit/forge-event-evidence/v1	sha256	-	-	active

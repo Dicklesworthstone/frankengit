@@ -479,6 +479,11 @@ pub enum IdentityDomain {
     /// One immutable admission invariant-evidence body.
     AdmissionInvariantEvidence,
     /// One immutable batch of forge effects from an admitted decision.
+    ///
+    /// Owned by `fgit-forge`'s `ForgeEventBatch`, which is an ordered sequence
+    /// of canonical forge events. Admission's evidence body for the same
+    /// decision is [`Self::ForgeEventEvidence`]; the two were one domain until
+    /// `frankengit-asa3` separated them.
     ForgeEventBatch,
     /// One immutable batch of outbox effects from an admitted decision.
     OutboxEffectBatch,
@@ -516,6 +521,14 @@ pub enum IdentityDomain {
     /// body, so a repository's hide rules mean one thing regardless of which
     /// carrier its head selects.
     HiddenRefPolicy,
+    /// One immutable admission forge-event-evidence body.
+    ///
+    /// Distinct from [`Self::ForgeEventBatch`] because they are different
+    /// bodies: this is admission's opaque effect bytes for a decision, that is
+    /// the forge's canonical event sequence. Sharing one domain made their
+    /// identities computable in the same space, so a reader could not tell
+    /// which body an identity named.
+    ForgeEventEvidence,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -819,6 +832,16 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/hidden-ref-policy/v1",
         None,
     ),
+    // Last by construction: DOMAIN_REGISTRY asserts registry_id == index + 1
+    // (registry.rs:1012), so a new domain appends rather than slotting in
+    // beside its sibling. The relationship to ForgeEventBatch is documented on
+    // the variant instead.
+    owned_row(
+        48,
+        IdentityDomain::ForgeEventEvidence,
+        "frankengit/forge-event-evidence/v1",
+        None,
+    ),
 ];
 
 const fn pinned_row(
@@ -1053,6 +1076,7 @@ impl IdentityDomain {
         Self::RepositoryCreationAttempt,
         Self::OutcomeIndexCheckpoint,
         Self::HiddenRefPolicy,
+        Self::ForgeEventEvidence,
     ];
 
     /// Compile-time completeness guard for [`IdentityDomain::ALL`].
@@ -1115,6 +1139,7 @@ impl IdentityDomain {
             | Self::AdmissionPolicyDecision
             | Self::AdmissionInvariantEvidence
             | Self::ForgeEventBatch
+            | Self::ForgeEventEvidence
             | Self::OutboxEffectBatch
             | Self::RetentionDelta
             | Self::AdmissionRefusalEvidence
