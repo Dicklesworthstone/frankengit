@@ -11,3 +11,4 @@ workspace = true
 
 [dependencies]
 fgit-crypto.workspace = true
+fgit-types.workspace = true

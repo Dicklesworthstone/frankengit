@@ -3,9 +3,10 @@
 //! This module owns the state that the declaration-only FG-035a vocabulary
 //! intentionally did not: an append-only on-disk attempt journal, inventory of
 //! actual staged files, target-result records, verified reuse on resume, and a
-//! local root-last manifest. It does **not** publish a release. [`crate::publish`]
-//! remains the authority boundary and still returns its typed refusal until the
-//! complete native matrix and signing gates exist.
+//! local root-last manifest. It does **not** publish a distribution release.
+//! [`crate::publish`] remains the distribution-adapter boundary and returns a
+//! typed non-claim; the local root itself is signed with the existing
+//! package/release purpose before it is published last.
 //!
 //! Process execution is deliberately an injected [`TargetStep`]. A production
 //! caller must connect that trait to the bounded `fgit-runner` obligation; this
@@ -23,7 +24,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use crate::{Asset, AttemptIdentity, ReleaseManifest, ReleaseRefusal, hex};
+use crate::{Asset, AttemptIdentity, ReleaseManifest, ReleaseRefusal, SignedReleaseManifest, hex};
+use fgit_crypto::{PackageRelease, SecretKey, VerifyingKey};
 
 /// Bound one individual target name and a journal detail before allocating it.
 pub const MAX_TARGET_TEXT_BYTES: usize = 256;
@@ -44,7 +46,6 @@ const JOURNAL_HEADER: &[u8] = b"FGIT_RELEASE_ATTEMPT_JOURNAL_V1\n";
 const JOURNAL_ENTRY_DOMAIN: &[u8] = b"frankengit/release-attempt-journal-entry/v1\0";
 const MATRIX_DOMAIN: &[u8] = b"frankengit/release-target-matrix/v1\0";
 const INVENTORY_DOMAIN: &[u8] = b"frankengit/release-filesystem-inventory/v1\0";
-const MANIFEST_DOMAIN: &[u8] = b"frankengit/release-local-manifest/v1\0";
 const MAX_JOURNAL_EVENT_BYTES: usize = 4 * 1024;
 const JOURNAL_FRAME_PREFIX_BYTES: usize = 4 + 32 + 32;
 
@@ -440,7 +441,7 @@ pub enum ResumeDecision {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MatrixOutcome {
     /// Every target passed and the local root-last manifest was written.
-    Completed { manifest: ReleaseManifest },
+    Completed { manifest: SignedReleaseManifest },
     /// A target failed; its journal evidence was retained and no root was made.
     Failed { target: String },
     /// Cancellation stopped new target work and retained resumable evidence.
@@ -589,6 +590,29 @@ impl AttemptJournal {
         &self.manifest_path
     }
 
+    /// Reads and verifies the signed root against a caller-owned release key.
+    ///
+    /// The journal binds the root's bytes to the completed target matrix. This
+    /// additional check proves those bound bytes were signed by the configured
+    /// package/release key rather than merely carrying a self-declared key.
+    pub fn verify_signed_manifest(
+        &self,
+        trusted_release_key: &VerifyingKey,
+    ) -> Result<SignedReleaseManifest, AttemptRunnerRefusal> {
+        self.verify_existing_manifest()?;
+        let bytes = read_bounded(
+            &self.manifest_path,
+            MAX_JOURNAL_BYTES,
+            "read signed manifest root",
+        )?;
+        let signed = SignedReleaseManifest::from_canonical_bytes(&bytes)
+            .map_err(AttemptRunnerRefusal::Release)?;
+        signed
+            .verify(trusted_release_key)
+            .map_err(AttemptRunnerRefusal::Release)?;
+        Ok(signed)
+    }
+
     /// Target's terminal immutable journal record, if one exists.
     #[must_use]
     pub fn target_record(&self, target: &str) -> Option<&TargetRecord> {
@@ -638,6 +662,7 @@ impl AttemptJournal {
     pub fn run_matrix<E: TargetStep>(
         &mut self,
         executor: &mut E,
+        release_key: &SecretKey<PackageRelease>,
     ) -> Result<MatrixOutcome, AttemptRunnerRefusal> {
         if self.state.cancelled {
             return Ok(MatrixOutcome::Cancelled {
@@ -676,15 +701,25 @@ impl AttemptJournal {
                 }
             }
         }
-        self.emit_manifest()
+        self.emit_manifest(release_key)
             .map(|manifest| MatrixOutcome::Completed { manifest })
     }
 
-    /// Emits the local manifest only after every declared target passed.
-    pub fn emit_manifest(&mut self) -> Result<ReleaseManifest, AttemptRunnerRefusal> {
+    /// Signs and emits the local manifest only after every declared target
+    /// passed. The unsigned body is never persisted at the root path.
+    pub fn emit_manifest(
+        &mut self,
+        release_key: &SecretKey<PackageRelease>,
+    ) -> Result<SignedReleaseManifest, AttemptRunnerRefusal> {
         self.ensure_manifest_allowed()?;
         let manifest = self.build_manifest()?;
-        let body = manifest_body(&manifest);
+        let signed = manifest
+            .sign(release_key)
+            .map_err(AttemptRunnerRefusal::Release)?;
+        signed
+            .verify(&release_key.verifying_key())
+            .map_err(AttemptRunnerRefusal::Release)?;
+        let body = signed.canonical_bytes();
         let body_digest = fgit_crypto::sha256_digest(&body);
         if let Some(prepared) = self.state.manifest_prepared {
             if prepared != body_digest {
@@ -694,7 +729,7 @@ impl AttemptJournal {
             }
             if self.manifest_path.exists() {
                 self.verify_existing_manifest()?;
-                return Ok(manifest);
+                return Ok(signed);
             }
         } else {
             if self.manifest_path.exists() {
@@ -735,7 +770,7 @@ impl AttemptJournal {
                     error,
                 )
             })?;
-        Ok(manifest)
+        Ok(signed)
     }
 
     fn record_target_passed(&mut self, target: &TargetSpec) -> Result<(), AttemptRunnerRefusal> {
@@ -869,12 +904,6 @@ impl AttemptJournal {
         }
         if self.state.manifest_prepared.is_some() {
             self.ensure_manifest_allowed()?;
-            let expected = fgit_crypto::sha256_digest(&manifest_body(&self.build_manifest()?));
-            if self.state.manifest_prepared != Some(expected) {
-                return Err(AttemptRunnerRefusal::JournalCorrupt {
-                    reason: "journal manifest commitment does not match complete matrix",
-                });
-            }
         }
         Ok(())
     }
@@ -1305,19 +1334,6 @@ fn digest_regular_file(
         });
     }
     Ok(fgit_crypto::sha256_digest(&bytes))
-}
-
-fn manifest_body(manifest: &ReleaseManifest) -> Vec<u8> {
-    let mut body = MANIFEST_DOMAIN.to_vec();
-    body.extend_from_slice(manifest.attempt().to_hex().as_bytes());
-    body.push(b'\n');
-    for asset in manifest.assets() {
-        body.extend_from_slice(asset.path().as_bytes());
-        body.push(b'\0');
-        body.extend_from_slice(hex(&asset.digest()).as_bytes());
-        body.push(b'\n');
-    }
-    body
 }
 
 fn attempt_directory(

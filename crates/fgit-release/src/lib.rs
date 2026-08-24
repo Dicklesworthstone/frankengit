@@ -30,7 +30,7 @@
 //! dirty. Whoever assembles [`TreeSnapshot`] owns that truthfulness, and the
 //! e2e lane is where the declaration gets checked against a real checkout.
 //!
-//! # Publication is a typed refusal here, deliberately
+//! # Distribution publication is a typed refusal here, deliberately
 //!
 //! `ops/dsr/frankengit.yaml.example` states the operative constraint: *"`full`
 //! and `release` deliberately return exit 3 until real implementation
@@ -47,6 +47,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
 
+use fgit_crypto::{
+    DetachedSignature, IdentityDomain, KeyEpoch, KeyPurpose, PUBLIC_KEY_BYTES, PackageRelease,
+    SIGNATURE_BYTES, SecretKey, VerifyingKey,
+};
+use fgit_types::label::{SchemaFamily, SchemaId};
+
 mod attempt_runner;
 
 pub use attempt_runner::{
@@ -61,6 +67,17 @@ pub use attempt_runner::{
 /// a manifest, or promote `scripts/verify.sh release` beyond its required
 /// typed exit-3 refusal.
 pub const ATTEMPT_RUNNER_ENTRYPOINT: &str = "fgit-release-attempt";
+
+/// Schema of the unsigned release-manifest body covered by a release key.
+pub const RELEASE_MANIFEST_SCHEMA: SchemaId = SchemaId::new(
+    SchemaFamily::from_static("frankengit.release-manifest"),
+    1,
+    0,
+);
+
+const RELEASE_MANIFEST_DOMAIN: &[u8] = b"frankengit/release-local-manifest/v1\0";
+const SIGNED_RELEASE_MANIFEST_DOMAIN: &[u8] = b"frankengit/signed-release-manifest/v1\0";
+const MAX_SIGNED_MANIFEST_ASSETS: usize = 32_768;
 
 /// Hex, lowercase, for rendering digests inside identity preimages.
 fn hex(bytes: &[u8]) -> String {
@@ -125,6 +142,20 @@ pub enum ReleaseRefusal {
         /// The signed path with no declaration.
         path: String,
     },
+    /// The detached envelope was not made with the release-signing purpose.
+    ReleaseSignatureWrongPurpose {
+        /// The purpose the envelope declared.
+        observed: KeyPurpose,
+    },
+    /// The release signature did not verify against the independently supplied
+    /// release-purpose trust anchor and canonical manifest body.
+    ReleaseSignatureInvalid,
+    /// A persisted signed manifest did not use the exact canonical framing.
+    ManifestEncodingInvalid {
+        /// The structural condition that failed without exposing untrusted
+        /// body bytes in diagnostics.
+        reason: &'static str,
+    },
     /// A mirror is missing an asset the manifest declares.
     MirrorMissingAsset {
         /// The absent path.
@@ -178,6 +209,19 @@ impl fmt::Display for ReleaseRefusal {
                 f,
                 "the signature covers {path}, which the manifest never declared"
             ),
+            Self::ReleaseSignatureWrongPurpose { observed } => write!(
+                f,
+                "the release manifest names {observed} rather than the required package/release key purpose"
+            ),
+            Self::ReleaseSignatureInvalid => f.write_str(
+                "the release manifest signature does not verify against the configured release key",
+            ),
+            Self::ManifestEncodingInvalid { reason } => {
+                write!(
+                    f,
+                    "the signed release manifest is not canonically encoded: {reason}"
+                )
+            }
             Self::MirrorMissingAsset { path } => {
                 write!(f, "the mirror is missing declared asset {path}")
             }
@@ -560,6 +604,303 @@ impl ReleaseManifest {
         }
         Ok(())
     }
+
+    /// Returns the canonical unsigned body that a release-purpose key covers.
+    ///
+    /// This is deliberately public so an independent verifier can reconstruct
+    /// exactly the bytes named by [`SignedReleaseManifest`], rather than
+    /// trusting a producer-provided digest or presentation rendering.
+    #[must_use]
+    pub fn canonical_body(&self) -> Vec<u8> {
+        let asset_bytes = self
+            .assets
+            .iter()
+            .map(|asset| asset.path.len())
+            .sum::<usize>();
+        let mut body = Vec::with_capacity(
+            RELEASE_MANIFEST_DOMAIN.len()
+                + self.attempt.digest.len()
+                + self.attempt.tree_digest.len()
+                + std::mem::size_of::<u32>()
+                + asset_bytes
+                + self.assets.len() * (std::mem::size_of::<u32>() + 32),
+        );
+        body.extend_from_slice(RELEASE_MANIFEST_DOMAIN);
+        body.extend_from_slice(&self.attempt.digest);
+        body.extend_from_slice(&self.attempt.tree_digest);
+        body.extend_from_slice(
+            &u32::try_from(self.assets.len())
+                .expect("the release attempt matrix bounds its asset denominator")
+                .to_be_bytes(),
+        );
+        for asset in &self.assets {
+            body.extend_from_slice(
+                &u32::try_from(asset.path.len())
+                    .expect("a String length fits in the signed manifest wire width")
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(asset.path.as_bytes());
+            body.extend_from_slice(&asset.digest);
+        }
+        body
+    }
+
+    /// Signs this complete manifest body with the existing package/release
+    /// purpose. The type parameter makes signing with an identity, evidence,
+    /// or tenant-encryption key unrepresentable at the call site.
+    pub fn sign(
+        self,
+        key: &SecretKey<PackageRelease>,
+    ) -> Result<SignedReleaseManifest, ReleaseRefusal> {
+        self.validate()?;
+        let signature = key.sign(
+            IdentityDomain::ReleaseAsset,
+            RELEASE_MANIFEST_SCHEMA,
+            &self.canonical_body(),
+        );
+        Ok(SignedReleaseManifest {
+            manifest: self,
+            signature,
+        })
+    }
+}
+
+/// A complete release-manifest body and its detached release-purpose signature.
+///
+/// The body retains the exact asset denominator; the envelope provides
+/// authorship evidence over that body. Neither the envelope's declared public
+/// key nor its presence alone is trusted: callers use [`Self::verify`] with
+/// their independently configured release-purpose key before accepting it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedReleaseManifest {
+    manifest: ReleaseManifest,
+    signature: DetachedSignature,
+}
+
+impl SignedReleaseManifest {
+    /// Reassembles a persisted manifest body and its detached envelope.
+    ///
+    /// Parsing code may use this to represent untrusted bytes. Callers must
+    /// still invoke [`Self::verify`] with an independently trusted key before
+    /// treating the result as a release root.
+    #[must_use]
+    pub const fn from_parts(manifest: ReleaseManifest, signature: DetachedSignature) -> Self {
+        Self {
+            manifest,
+            signature,
+        }
+    }
+
+    /// Parses the canonical root bytes into a still-untrusted signed manifest.
+    ///
+    /// This only establishes bounded structural framing. The caller must use
+    /// [`Self::verify`] with its independently configured release-purpose key
+    /// before accepting the parsed root.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, ReleaseRefusal> {
+        let mut cursor = 0;
+        take_exact(
+            bytes,
+            &mut cursor,
+            SIGNED_RELEASE_MANIFEST_DOMAIN.len(),
+            "root domain",
+        )
+        .and_then(|domain| {
+            (domain == SIGNED_RELEASE_MANIFEST_DOMAIN)
+                .then_some(())
+                .ok_or(ReleaseRefusal::ManifestEncodingInvalid {
+                    reason: "root domain differs",
+                })
+        })?;
+        let body_length = usize::try_from(read_u32(bytes, &mut cursor, "body length")?)
+            .expect("u32 always fits usize on supported targets");
+        let body = take_exact(bytes, &mut cursor, body_length, "body")?;
+        let manifest = parse_manifest_body(body)?;
+        let scheme = read_u16(bytes, &mut cursor, "signature scheme")?;
+        let purpose = KeyPurpose::from_code_point(read_u16(bytes, &mut cursor, "key purpose")?)
+            .ok_or(ReleaseRefusal::ManifestEncodingInvalid {
+                reason: "key purpose is unallocated",
+            })?;
+        let epoch = KeyEpoch::new(read_u32(bytes, &mut cursor, "key epoch")?).ok_or(
+            ReleaseRefusal::ManifestEncodingInvalid {
+                reason: "key epoch is zero",
+            },
+        )?;
+        let key_commitment = copy_exact::<32>(bytes, &mut cursor, "key commitment")?;
+        let verifying_key = copy_exact::<PUBLIC_KEY_BYTES>(bytes, &mut cursor, "verifying key")?;
+        let signature = copy_exact::<SIGNATURE_BYTES>(bytes, &mut cursor, "signature bytes")?;
+        if cursor != bytes.len() {
+            return Err(ReleaseRefusal::ManifestEncodingInvalid {
+                reason: "trailing root bytes",
+            });
+        }
+        let signature = DetachedSignature::from_wire(
+            scheme,
+            purpose,
+            epoch,
+            key_commitment,
+            &verifying_key,
+            &signature,
+        )
+        .map_err(|_| ReleaseRefusal::ManifestEncodingInvalid {
+            reason: "detached envelope is invalid",
+        })?;
+        Ok(Self::from_parts(manifest, signature))
+    }
+
+    /// The complete unsigned asset contract covered by this signature.
+    #[must_use]
+    pub const fn manifest(&self) -> &ReleaseManifest {
+        &self.manifest
+    }
+
+    /// The detached signature envelope.
+    #[must_use]
+    pub const fn signature(&self) -> DetachedSignature {
+        self.signature
+    }
+
+    /// Verifies purpose, asset coverage, and the detached signature.
+    ///
+    /// The supplied key is a caller-owned trust decision. In particular, this
+    /// method never verifies against the key merely declared inside the
+    /// envelope.
+    pub fn verify(&self, trusted_release_key: &VerifyingKey) -> Result<(), ReleaseRefusal> {
+        self.manifest.validate()?;
+        if self.signature.purpose() != KeyPurpose::PackageRelease {
+            return Err(ReleaseRefusal::ReleaseSignatureWrongPurpose {
+                observed: self.signature.purpose(),
+            });
+        }
+        self.signature
+            .verify_with(
+                trusted_release_key,
+                IdentityDomain::ReleaseAsset,
+                RELEASE_MANIFEST_SCHEMA,
+                &self.manifest.canonical_body(),
+            )
+            .map_err(|_| ReleaseRefusal::ReleaseSignatureInvalid)
+    }
+
+    /// Canonical root bytes: an unsigned body followed by the complete
+    /// detached-envelope fields. The root is written only after every target
+    /// has passed and this value has been signature-verified.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let body = self.manifest.canonical_body();
+        let body_length = u32::try_from(body.len())
+            .expect("the release manifest body is bounded by its asset contracts");
+        let mut bytes = Vec::with_capacity(
+            SIGNED_RELEASE_MANIFEST_DOMAIN.len()
+                + std::mem::size_of::<u32>()
+                + body.len()
+                + std::mem::size_of::<u16>() * 2
+                + std::mem::size_of::<u32>()
+                + self.signature.key_commitment().len()
+                + self.signature.declared_verifying_key().as_bytes().len()
+                + self.signature.signature().len(),
+        );
+        bytes.extend_from_slice(SIGNED_RELEASE_MANIFEST_DOMAIN);
+        bytes.extend_from_slice(&body_length.to_be_bytes());
+        bytes.extend_from_slice(&body);
+        bytes.extend_from_slice(&self.signature.scheme().to_be_bytes());
+        bytes.extend_from_slice(&self.signature.purpose().code_point().to_be_bytes());
+        bytes.extend_from_slice(&self.signature.epoch().get().to_be_bytes());
+        bytes.extend_from_slice(self.signature.key_commitment());
+        bytes.extend_from_slice(self.signature.declared_verifying_key().as_bytes());
+        bytes.extend_from_slice(self.signature.signature());
+        bytes
+    }
+}
+
+fn parse_manifest_body(body: &[u8]) -> Result<ReleaseManifest, ReleaseRefusal> {
+    let mut cursor = 0;
+    take_exact(
+        body,
+        &mut cursor,
+        RELEASE_MANIFEST_DOMAIN.len(),
+        "manifest domain",
+    )
+    .and_then(|domain| {
+        (domain == RELEASE_MANIFEST_DOMAIN).then_some(()).ok_or(
+            ReleaseRefusal::ManifestEncodingInvalid {
+                reason: "manifest domain differs",
+            },
+        )
+    })?;
+    let digest = copy_exact::<32>(body, &mut cursor, "attempt digest")?;
+    let tree_digest = copy_exact::<32>(body, &mut cursor, "tree digest")?;
+    let asset_count = usize::try_from(read_u32(body, &mut cursor, "asset count")?)
+        .expect("u32 always fits usize on supported targets");
+    if asset_count > MAX_SIGNED_MANIFEST_ASSETS {
+        return Err(ReleaseRefusal::ManifestEncodingInvalid {
+            reason: "asset count exceeds release matrix bound",
+        });
+    }
+    let mut assets = Vec::with_capacity(asset_count);
+    for _ in 0..asset_count {
+        let path_length = usize::try_from(read_u32(body, &mut cursor, "asset path length")?)
+            .expect("u32 always fits usize on supported targets");
+        let path =
+            String::from_utf8(take_exact(body, &mut cursor, path_length, "asset path")?.to_vec())
+                .map_err(|_| ReleaseRefusal::ManifestEncodingInvalid {
+                reason: "asset path is not UTF-8",
+            })?;
+        let digest = copy_exact::<32>(body, &mut cursor, "asset digest")?;
+        assets.push(Asset::new(path, digest));
+    }
+    if cursor != body.len() {
+        return Err(ReleaseRefusal::ManifestEncodingInvalid {
+            reason: "trailing manifest body bytes",
+        });
+    }
+    let signed_paths = assets
+        .iter()
+        .map(|asset| asset.path.clone())
+        .collect::<BTreeSet<_>>();
+    ReleaseManifest::new(
+        AttemptIdentity {
+            digest,
+            tree_digest,
+        },
+        assets,
+        signed_paths,
+    )
+}
+
+fn read_u16(bytes: &[u8], cursor: &mut usize, field: &'static str) -> Result<u16, ReleaseRefusal> {
+    Ok(u16::from_be_bytes(copy_exact::<2>(bytes, cursor, field)?))
+}
+
+fn read_u32(bytes: &[u8], cursor: &mut usize, field: &'static str) -> Result<u32, ReleaseRefusal> {
+    Ok(u32::from_be_bytes(copy_exact::<4>(bytes, cursor, field)?))
+}
+
+fn copy_exact<const N: usize>(
+    bytes: &[u8],
+    cursor: &mut usize,
+    field: &'static str,
+) -> Result<[u8; N], ReleaseRefusal> {
+    let mut output = [0_u8; N];
+    output.copy_from_slice(take_exact(bytes, cursor, N, field)?);
+    Ok(output)
+}
+
+fn take_exact<'a>(
+    bytes: &'a [u8],
+    cursor: &mut usize,
+    length: usize,
+    field: &'static str,
+) -> Result<&'a [u8], ReleaseRefusal> {
+    let end = cursor
+        .checked_add(length)
+        .ok_or(ReleaseRefusal::ManifestEncodingInvalid {
+            reason: "field length overflows",
+        })?;
+    let field_bytes = bytes
+        .get(*cursor..end)
+        .ok_or(ReleaseRefusal::ManifestEncodingInvalid { reason: field })?;
+    *cursor = end;
+    Ok(field_bytes)
 }
 
 /// Compare what a mirror serves against what the manifest declared.

@@ -13,6 +13,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fgit_crypto::{KeyEpoch, KeyScope, PackageRelease, RootSecret, SecretKey};
 use fgit_release::{
     Asset, AttemptInputs, AttemptJournal, AttemptRunnerRefusal, EntryState,
     FilesystemAssetInventory, HostFingerprint, MatrixOutcome, ResumeDecision, SourceEntry,
@@ -48,6 +49,14 @@ impl Drop for TempRoot {
 
 fn digest(bytes: &[u8]) -> [u8; 32] {
     fgit_crypto::sha256_digest(bytes)
+}
+
+fn release_key() -> SecretKey<PackageRelease> {
+    SecretKey::derive(
+        &RootSecret::from_bytes([0x5a; 32]),
+        KeyEpoch::FIRST,
+        KeyScope::OPERATOR,
+    )
 }
 
 fn attempt(seed: u8) -> fgit_release::AttemptIdentity {
@@ -117,11 +126,14 @@ fn append_only_journal_recovers_the_completed_prefix_after_a_crash_tail() {
     .expect("matrix");
     let mut journal = AttemptJournal::create(root.path(), matrix.clone()).expect("create journal");
     let outcome = journal
-        .run_matrix(&mut ScriptedStep {
-            results: vec![TargetStepResult::Failed {
-                detail: "compiler failed".to_owned(),
-            }],
-        })
+        .run_matrix(
+            &mut ScriptedStep {
+                results: vec![TargetStepResult::Failed {
+                    detail: "compiler failed".to_owned(),
+                }],
+            },
+            &release_key(),
+        )
         .expect("failure is a journalled target outcome");
     assert!(matches!(outcome, MatrixOutcome::Failed { ref target } if target == "linux"));
     let complete_length = fs::metadata(journal.journal_path())
@@ -273,15 +285,21 @@ fn resume_reuses_only_a_byte_verified_inventory_identity() {
     .expect("matrix");
     let mut journal = AttemptJournal::create(root.path(), matrix).expect("journal");
     let outcome = journal
-        .run_matrix(&mut ScriptedStep {
-            results: vec![TargetStepResult::Passed],
-        })
+        .run_matrix(
+            &mut ScriptedStep {
+                results: vec![TargetStepResult::Passed],
+            },
+            &release_key(),
+        )
         .expect("verified target pass");
     assert!(matches!(outcome, MatrixOutcome::Completed { .. }));
     assert!(
         journal.manifest_path().is_file(),
         "the complete verified matrix must emit its local root-last manifest"
     );
+    journal
+        .verify_signed_manifest(&release_key().verifying_key())
+        .expect("the journal-bound root must verify against the release key");
     assert!(matches!(
         journal.resume_target("linux"),
         Ok(ResumeDecision::Reuse { .. })
@@ -320,9 +338,12 @@ fn cancellation_leaves_resumable_evidence_and_no_manifest_root() {
     .expect("matrix");
     let mut journal = AttemptJournal::create(root.path(), matrix.clone()).expect("journal");
     let outcome = journal
-        .run_matrix(&mut ScriptedStep {
-            results: vec![TargetStepResult::Passed, TargetStepResult::Cancelled],
-        })
+        .run_matrix(
+            &mut ScriptedStep {
+                results: vec![TargetStepResult::Passed, TargetStepResult::Cancelled],
+            },
+            &release_key(),
+        )
         .expect("cancellation is retained as a journal outcome");
     assert!(matches!(outcome, MatrixOutcome::Cancelled { ref target } if target == "macos"));
     assert!(
@@ -354,15 +375,18 @@ fn failed_target_provably_withholds_the_manifest_root() {
     .expect("matrix");
     let mut journal = AttemptJournal::create(root.path(), matrix).expect("journal");
     let outcome = journal
-        .run_matrix(&mut ScriptedStep {
-            results: vec![TargetStepResult::Failed {
-                detail: "test lane failed".to_owned(),
-            }],
-        })
+        .run_matrix(
+            &mut ScriptedStep {
+                results: vec![TargetStepResult::Failed {
+                    detail: "test lane failed".to_owned(),
+                }],
+            },
+            &release_key(),
+        )
         .expect("target failure should be retained, not erased");
     assert!(matches!(outcome, MatrixOutcome::Failed { ref target } if target == "linux"));
     assert!(matches!(
-        journal.emit_manifest(),
+        journal.emit_manifest(&release_key()),
         Err(AttemptRunnerRefusal::ManifestWithheld { ref target, state: "failed" }) if target == "linux"
     ));
     assert!(
@@ -383,7 +407,7 @@ fn unavailable_executor_is_a_typed_refusal_not_a_success_placeholder() {
     )
     .expect("matrix");
     let mut journal = AttemptJournal::create(root.path(), matrix).expect("journal");
-    let refusal = journal.run_matrix(&mut fgit_release::UnavailableTargetStep);
+    let refusal = journal.run_matrix(&mut fgit_release::UnavailableTargetStep, &release_key());
     assert!(matches!(
         refusal,
         Err(AttemptRunnerRefusal::TargetRunnerUnavailable { ref target, .. }) if target == "linux"

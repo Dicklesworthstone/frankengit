@@ -19,9 +19,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use fgit_crypto::{KeyEpoch, KeyPurpose, KeyScope, PackageRelease, RootSecret, SecretKey};
 use fgit_release::{
     Asset, AttemptInputs, EntryState, HostFingerprint, ReleaseManifest, ReleaseRefusal,
-    SourceEntry, ToolchainIdentity, TreeSnapshot, attempt_identity, publish, reconcile_mirror,
+    SignedReleaseManifest, SourceEntry, ToolchainIdentity, TreeSnapshot, attempt_identity, publish,
+    reconcile_mirror,
 };
 
 const fn digest(seed: u8) -> [u8; 32] {
@@ -76,6 +78,14 @@ fn both_signed() -> BTreeSet<String> {
         .into_iter()
         .map(str::to_owned)
         .collect()
+}
+
+fn release_key() -> SecretKey<PackageRelease> {
+    SecretKey::derive(
+        &RootSecret::from_bytes([0xa5; 32]),
+        KeyEpoch::FIRST,
+        KeyScope::OPERATOR,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +214,50 @@ fn a_signature_covering_every_declared_asset_validates() {
     manifest_with(both_signed())
         .validate()
         .expect("full coverage must validate");
+}
+
+#[test]
+fn a_signed_manifest_requires_the_existing_release_key_and_refuses_tampering() {
+    let key = release_key();
+    let manifest = manifest_with(both_signed());
+    let signed = manifest
+        .clone()
+        .sign(&key)
+        .expect("the complete asset denominator is signable");
+
+    assert_eq!(signed.signature().purpose(), KeyPurpose::PackageRelease);
+    signed
+        .verify(&key.verifying_key())
+        .expect("the typed package/release key signs the canonical body");
+    SignedReleaseManifest::from_canonical_bytes(&signed.canonical_bytes())
+        .expect("the signed root uses a bounded canonical representation")
+        .verify(&key.verifying_key())
+        .expect("a parsed root must remain independently verifiable");
+    let mut tampered_root = signed.canonical_bytes();
+    *tampered_root
+        .last_mut()
+        .expect("a detached signature has a nonempty canonical encoding") ^= 0x01;
+    let parsed_tampered_root = SignedReleaseManifest::from_canonical_bytes(&tampered_root)
+        .expect("altering a signature byte preserves structural framing");
+    assert!(matches!(
+        parsed_tampered_root.verify(&key.verifying_key()),
+        Err(ReleaseRefusal::ReleaseSignatureInvalid)
+    ));
+
+    let tampered_manifest = ReleaseManifest::new(
+        manifest.attempt().clone(),
+        vec![
+            Asset::new("fg-linux-amd64", digest(99)),
+            Asset::new("fg-linux-amd64.sha256", digest(11)),
+        ],
+        both_signed(),
+    )
+    .expect("the altered body remains structurally valid so signature verification is exercised");
+    let tampered = SignedReleaseManifest::from_parts(tampered_manifest, signed.signature());
+    assert!(matches!(
+        tampered.verify(&key.verifying_key()),
+        Err(ReleaseRefusal::ReleaseSignatureInvalid)
+    ));
 }
 
 #[test]
