@@ -52,7 +52,7 @@ lanes use the pinned, sandboxed upstream oracle only — never a production path
 | # | Claim | Evidence | Status |
 |---|---|---|---|
 | 1 | This decision is recorded | this document | done |
-| 2 | Mixed-format objects/packs are refused, typed | covered in `fgit-atp-git` (both raise sites, each naming the rejected identity), `fgit-admission`, `fgit-authority`, and `fgit-pack`'s commit-graph site (`05421c9`) | done, except 3 of 5 `fgit-pack` raise sites: `writer.rs:775`, `midx.rs:263`, `midx.rs:413` |
+| 2 | Mixed-format objects/packs are refused, typed | every raise site asserted, each with a permitted twin: `fgit-atp-git` (2), `fgit-admission`, `fgit-authority`, `fgit-pack` (5, closed by `05421c9`, `8133809`, `7e28acd`, `f174ec9`) | **done** |
 | 3 | init / hash round-trip natively in SHA-256 | `fgit-node/tests/sha256_format_matrix.rs`, 5 tests, observed passing at `72edf46` | done (`b14c901`) |
 | 4 | clone / fetch match upstream Git byte-for-byte | `oracle.sh clone-loopback` against a pinned Git that supports SHA-256 repositories | **blocked** on `lozg` (format not persisted, so `serve` opens SHA-256 as SHA-1) |
 | 5 | push round-trips | **blocked** — object-bearing push needs a production quarantine validator (`frankengit-production-quarantine-validator-n6kg`) | pending, gated |
