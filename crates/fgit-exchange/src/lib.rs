@@ -763,7 +763,7 @@ pub enum EquivocationDecision {
     /// The exact immutable record was already observed for this slot.
     Duplicate(ImportedEvidence),
     /// A different successor was observed; both signed observations are retained.
-    Conflict(EquivocationConflict),
+    Conflict(Box<EquivocationConflict>),
 }
 
 /// Bounded detector for foreign evidence records that equivocate on a predecessor.
@@ -816,7 +816,7 @@ impl EquivocationDetector {
                 .expect("observed equivocation slot remains present");
             let conflict = EquivocationConflict::new(first, imported, superseded);
             self.conflicts.insert(slot, conflict.clone());
-            return Ok(EquivocationDecision::Conflict(conflict));
+            return Ok(EquivocationDecision::Conflict(Box::new(conflict)));
         }
 
         if self.observed.len() + self.conflicts.len() >= MAX_EQUIVOCATION_SLOTS {
@@ -1969,7 +1969,7 @@ mod tests {
             detector
                 .conflict_for(&bundle_origin, predecessor.id())
                 .expect("detector retains conflict evidence pending durable append"),
-            conflict
+            conflict.as_ref()
         );
 
         let mut reverse_detector = EquivocationDetector::new();
