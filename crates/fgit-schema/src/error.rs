@@ -55,6 +55,22 @@ pub enum SchemaRefusal {
         /// The family claimed twice.
         family: Box<str>,
     },
+    /// A `Structure` or `Union` field names something the registry cannot
+    /// resolve.
+    ///
+    /// Every generated artifact renders such a field as a reference, so an
+    /// unresolvable name becomes a dangling type in `TypeScript`, a missing
+    /// class in Python and a `$ref` to nothing in JSON Schema. The staleness
+    /// gate cannot detect any of that: it compares bytes to bytes, and both
+    /// sides agree perfectly on a broken document.
+    ReferenceUnresolved {
+        /// The descriptor, structure or union whose field holds the reference.
+        owner: Box<str>,
+        /// The unresolvable name.
+        name: Box<str>,
+        /// Which registry was searched: `structure` or `union`.
+        container: &'static str,
+    },
 }
 
 impl SchemaRefusal {
@@ -67,6 +83,7 @@ impl SchemaRefusal {
             Self::ArtifactStale { .. } => "artifact_stale",
             Self::ArtifactMissing { .. } => "artifact_missing",
             Self::FamilyDuplicated { .. } => "family_duplicated",
+            Self::ReferenceUnresolved { .. } => "reference_unresolved",
         }
     }
 }
@@ -91,6 +108,14 @@ impl fmt::Display for SchemaRefusal {
             Self::FamilyDuplicated { family } => {
                 write!(formatter, "family {family} is registered more than once")
             }
+            Self::ReferenceUnresolved {
+                owner,
+                name,
+                container,
+            } => write!(
+                formatter,
+                "{owner} references the {container} {name}, which no registry resolves"
+            ),
         }
     }
 }

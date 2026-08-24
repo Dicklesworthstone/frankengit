@@ -40,6 +40,44 @@ class DerivedId:
 
 
 @dataclass(frozen=True, slots=True)
+class RepositoryDecision:
+    """One terminal decision within a batch, in the batch's own order."""
+
+    # Sealed transaction the decision belongs to.
+    tx_id: DerivedId
+    # Position in the terminal-decision order, refusals included.
+    decision_sequence: int
+    # The terminal outcome.
+    outcome: DecisionOutcome
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionOutcomeCommitted:
+    """The decision committed, naming the record it produced."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 1
+    # The Repository Commit Record this decision produced.
+    repository_commit_id: DerivedId
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionOutcomeRefused:
+    """The decision was refused, naming the reason and the evidence record."""
+
+    # The raw wire byte that selects this variant.
+    DISCRIMINANT = 2
+    # Terminal refusal reason, from the closed refusal vocabulary.
+    code: int
+    # The refusal record carrying the evidence.
+    refusal_record_id: DerivedId
+
+
+# The terminal outcome of one decision: committed, or refused with a reason.
+DecisionOutcome = DecisionOutcomeCommitted | DecisionOutcomeRefused
+
+
+@dataclass(frozen=True, slots=True)
 class AuthorityHeadV1:
     """The one value whose conditional replacement publishes repository state.
 
@@ -78,6 +116,43 @@ class AuthorityHeadV1:
     latest_repository_sequence: int | None = None
     # Most recent checkpoint capsule, when one exists.
     last_checkpoint_id: DerivedId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionBatchV1:
+    """The batch of terminal decisions published against one authority head.
+
+    schema decision-batch v1.1, domain frankengit/decision-batch/v1
+    """
+
+    # Repository the batch belongs to.
+    repository_id: str
+    # Head this batch was prepared against.
+    predecessor_head_id: DerivedId
+    # Generation of that head, which makes the basis check monotone.
+    predecessor_head_generation: int
+    # Decision-sequence position of the first decision in the batch.
+    first_decision_sequence: int
+    # Root over the resulting ref state.
+    resulting_ref_root: Digest
+    # Root over the resulting forge position.
+    resulting_forge_position_root: Digest
+    # Root over the rebuildable outcome index.
+    resulting_outcome_index_root: Digest
+    # Root over the resulting retention state.
+    resulting_retention_root: Digest
+    # Root over the resulting external-effect outbox.
+    resulting_outbox_root: Digest
+    # Policy epoch after the batch.
+    resulting_policy_epoch: int
+    # Merkle commitment over this batch's ordered decision evidence.
+    batch_evidence_root: Digest
+    # Terminal decisions, in deterministic batch order.
+    decisions: tuple[RepositoryDecision, ...]
+    # Commit records for the committed decisions, in repository order.
+    committed_rcrs: tuple[RcrV1, ...]
+    # Compaction generation bound by this publication, when it publishes one.
+    compaction_generation_link: Digest | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +247,7 @@ class TxnSealV1:
 # encoding does not, and THIS is the order the bytes are in.
 WIRE_ORDER: dict[str, tuple[str, ...]] = {
     "AuthorityHeadV1": ("repository_id", "generation", "predecessor_head_id", "decision_tail_id", "latest_decision_sequence", "latest_committed_rcr_id", "latest_repository_sequence", "ref_root", "forge_position_root", "outcome_index_root", "retention_root", "outbox_root", "configuration_root", "policy_epoch", "format_registry_epoch", "last_checkpoint_id",),
+    "DecisionBatchV1": ("repository_id", "predecessor_head_id", "predecessor_head_generation", "first_decision_sequence", "decisions", "committed_rcrs", "resulting_ref_root", "resulting_forge_position_root", "resulting_outcome_index_root", "resulting_retention_root", "resulting_outbox_root", "resulting_policy_epoch", "batch_evidence_root", "compaction_generation_link",),
     "RefusalRecordV1": ("tx_id", "seal_id", "decision_sequence", "code", "policy_epoch", "detail", "evidence_root",),
     "RcrV1": ("repository_id", "repository_sequence", "parent_rcr_id", "tx_id", "principal_snapshot_id", "canonical_request_digest", "ref_delta_root", "resulting_ref_root", "object_closure_root", "forge_event_batch_root", "resulting_forge_position_root", "policy_epoch", "policy_decision_root", "invariant_evidence_root", "outbox_effect_root", "retention_delta_root",),
     "TxnSealV1": ("tx_id", "tenant_id", "repository_id", "authenticated_principal_id", "idempotency_key_digest", "canonical_request_digest", "request_schema",),

@@ -22,8 +22,11 @@
 //! stay numeric. This is a correctness choice, not a style one: a client that
 //! receives `repository_sequence` as a `number` cannot round-trip it.
 
-use crate::descriptor::{Cardinality, FieldDescriptor, FieldType, ScalarWidth, SchemaDescriptor};
-use crate::registry::DESCRIBED;
+use crate::descriptor::{
+    Cardinality, FieldDescriptor, FieldType, ScalarWidth, SchemaDescriptor, StructureDescriptor,
+    UnionDescriptor,
+};
+use crate::registry::{DESCRIBED, STRUCTURES, UNIONS};
 
 /// Header stamped on every generated artifact.
 ///
@@ -55,6 +58,47 @@ fn type_name(schema: &SchemaDescriptor) -> String {
         }
     }
     out
+}
+
+/// The generated type name a `Structure` or `Union` reference resolves to.
+///
+/// A reference to a canonical body uses that body's VERSIONED name (`RcrV1`),
+/// because a v2 would generate a second type beside it and a reference has to
+/// say which one it means. A nested structure has no version, so it is just
+/// `PascalCase`.
+fn reference_type_name(name: &str) -> String {
+    if let Some(body) = DESCRIBED.iter().find(|entry| entry.family == name) {
+        return type_name(body);
+    }
+    let mut out = String::new();
+    let mut upper_next = true;
+    for character in name.chars() {
+        if character == '-' {
+            upper_next = true;
+        } else if upper_next {
+            out.extend(character.to_uppercase());
+            upper_next = false;
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
+/// Where a `Structure` or `Union` reference resolves inside the document.
+///
+/// The two kinds live in different containers, so a single hardcoded prefix is
+/// wrong for one of them: canonical bodies are emitted as top-level
+/// `properties`, while nested structures and unions are emitted into `$defs`. A
+/// `$ref` naming the wrong container points at nothing, and no amount of
+/// byte-level staleness checking can detect that.
+fn json_pointer(name: &str) -> String {
+    let rendered = reference_type_name(name);
+    if DESCRIBED.iter().any(|entry| entry.family == name) {
+        format!("#/properties/{rendered}")
+    } else {
+        format!("#/$defs/{rendered}")
+    }
 }
 
 /// Minimal JSON string escaping, sufficient for the ASCII docs and names here.
@@ -135,12 +179,148 @@ fn json_type_lines(ty: FieldType, pad: &str) -> Vec<String> {
             ),
             format!("{pad}}}"),
         ],
+        FieldType::Structure { name } | FieldType::Union { name } => {
+            vec![format!("{{ \"$ref\": \"{}\" }}", json_pointer(name))]
+        }
     }
+}
+
+/// The `type`/`required`/`properties` block shared by bodies and structures.
+///
+/// Extracted from `json_schema` verbatim so a nested structure is described
+/// exactly the way a top-level body is. If the two ever diverge, a consumer
+/// validating a nested object would apply different rules to the same bytes.
+fn json_object_lines(fields: &[FieldDescriptor]) -> Vec<String> {
+    let mut lines = vec![
+        "      \"type\": \"object\",".to_owned(),
+        "      \"additionalProperties\": false,".to_owned(),
+    ];
+    let required: Vec<String> = fields
+        .iter()
+        .filter(|field| field.cardinality == Cardinality::Required)
+        .map(|field| json_string(field.name))
+        .collect();
+    lines.push(format!("      \"required\": [{}],", required.join(", ")));
+    lines.push("      \"properties\": {".to_owned());
+    for (field_index, field) in fields.iter().enumerate() {
+        let field_last = field_index + 1 == fields.len();
+        let field_comma = if field_last { "" } else { "," };
+        let mut body = json_type_lines(field.ty, "        ");
+        if field.cardinality.is_sequence() {
+            // A counted repetition on the wire is an array in JSON Schema.
+            // The count prefix itself is not represented: it is framing,
+            // and a client reconstructs it from the array length.
+            let inner: Vec<String> = body.iter().map(|line| format!("  {line}")).collect();
+            let mut wrapped = vec!["{".to_owned(), "          \"type\": \"array\",".to_owned()];
+            wrapped.push(format!("          \"items\": {}", inner[0].trim_start()));
+            for line in &inner[1..] {
+                wrapped.push(line.clone());
+            }
+            wrapped.push("        }".to_owned());
+            body = wrapped;
+        }
+        let head = format!("        {}: {}", json_string(field.name), body[0]);
+        if body.len() == 1 {
+            lines.push(format!("{head}{field_comma}"));
+        } else {
+            lines.push(head);
+            for tail in &body[1..body.len() - 1] {
+                lines.push(tail.clone());
+            }
+            lines.push(format!("{}{field_comma}", body[body.len() - 1]));
+        }
+    }
+    lines.push("      }".to_owned());
+    lines
+}
+
+/// Shifts a rendered block right, for nesting a variant inside `oneOf`.
+fn shifted(lines: &[String], by: usize) -> Vec<String> {
+    let pad = " ".repeat(by);
+    lines.iter().map(|line| format!("{pad}{line}")).collect()
+}
+
+/// One `$defs` entry for a nested structure.
+fn json_structure_def(structure: &StructureDescriptor) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "    {}: {{",
+            json_string(&reference_type_name(structure.name))
+        ),
+        format!("      \"description\": {},", json_string(structure.doc)),
+    ];
+    lines.extend(json_object_lines(structure.fields));
+    lines.push("    }".to_owned());
+    lines
+}
+
+/// One `$defs` entry for a tagged union, as a `oneOf` over its variants.
+///
+/// The discriminant is emitted as a `const`, so the schema pins the exact wire
+/// byte rather than merely noting that a tag exists. A consumer that validates
+/// against this cannot accept a variant whose tag does not match its shape.
+fn json_union_def(union: &UnionDescriptor) -> Vec<String> {
+    let mut lines = vec![
+        format!("    {}: {{", json_string(&reference_type_name(union.name))),
+        format!("      \"description\": {},", json_string(union.doc)),
+        "      \"oneOf\": [".to_owned(),
+    ];
+    for (index, variant) in union.variants.iter().enumerate() {
+        let comma = if index + 1 == union.variants.len() {
+            ""
+        } else {
+            ","
+        };
+        let mut block = vec![
+            "    {".to_owned(),
+            format!("      \"description\": {},", json_string(variant.doc)),
+            "      \"type\": \"object\",".to_owned(),
+            "      \"additionalProperties\": false,".to_owned(),
+        ];
+        let mut required = vec![json_string("variant"), json_string("discriminant")];
+        required.extend(
+            variant
+                .fields
+                .iter()
+                .filter(|field| field.cardinality == Cardinality::Required)
+                .map(|field| json_string(field.name)),
+        );
+        block.push(format!("      \"required\": [{}],", required.join(", ")));
+        block.push("      \"properties\": {".to_owned());
+        block.push(format!(
+            "        \"variant\": {{ \"const\": {} }},",
+            json_string(variant.name)
+        ));
+        let tail_comma = if variant.fields.is_empty() { "" } else { "," };
+        block.push(format!(
+            "        \"discriminant\": {{ \"const\": {} }}{tail_comma}",
+            variant.discriminant
+        ));
+        if !variant.fields.is_empty() {
+            let rendered = json_object_lines(variant.fields);
+            // Skip the type/additionalProperties/required/properties header the
+            // helper emits and take only the property lines it produced.
+            let start = rendered
+                .iter()
+                .position(|line| line.trim() == "\"properties\": {")
+                .expect("the helper always emits a properties block")
+                + 1;
+            for line in &rendered[start..rendered.len() - 1] {
+                block.push(line.clone());
+            }
+        }
+        block.push("      }".to_owned());
+        block.push(format!("    }}{comma}"));
+        lines.extend(shifted(&block, 4));
+    }
+    lines.push("      ]".to_owned());
+    lines.push("    }".to_owned());
+    lines
 }
 
 /// The shared definitions every schema references.
 fn json_defs_lines() -> Vec<String> {
-    vec![
+    let mut shared = vec![
         "  \"$defs\": {".to_owned(),
         "    \"Digest\": {".to_owned(),
         "      \"type\": \"object\",".to_owned(),
@@ -182,8 +362,22 @@ fn json_defs_lines() -> Vec<String> {
             .to_owned(),
         "      }".to_owned(),
         "    }".to_owned(),
-        "  },".to_owned(),
-    ]
+    ];
+
+    // Nested structures and unions are DEFINED here, not merely referenced.
+    // A `$ref` to a name with no definition makes the document unusable, and
+    // the staleness gate cannot see that: it compares bytes to bytes.
+    let mut blocks: Vec<Vec<String>> = STRUCTURES.iter().copied().map(json_structure_def).collect();
+    blocks.extend(UNIONS.iter().copied().map(json_union_def));
+    for block in blocks {
+        // The previous entry now has a sibling, so it needs its comma.
+        let last = shared.len() - 1;
+        shared[last] = format!("{},", shared[last]);
+        shared.extend(block);
+    }
+
+    shared.push("  },".to_owned());
+    shared
 }
 
 /// The complete JSON Schema document.
@@ -216,32 +410,7 @@ pub fn json_schema() -> String {
             schema.minor,
             json_string(schema.domain)
         ));
-        lines.push("      \"type\": \"object\",".to_owned());
-        lines.push("      \"additionalProperties\": false,".to_owned());
-        let required: Vec<String> = schema
-            .fields
-            .iter()
-            .filter(|field| field.cardinality == Cardinality::Required)
-            .map(|field| json_string(field.name))
-            .collect();
-        lines.push(format!("      \"required\": [{}],", required.join(", ")));
-        lines.push("      \"properties\": {".to_owned());
-        for (field_index, field) in schema.fields.iter().enumerate() {
-            let field_last = field_index + 1 == schema.fields.len();
-            let field_comma = if field_last { "" } else { "," };
-            let body = json_type_lines(field.ty, "        ");
-            let head = format!("        {}: {}", json_string(field.name), body[0]);
-            if body.len() == 1 {
-                lines.push(format!("{head}{field_comma}"));
-            } else {
-                lines.push(head);
-                for tail in &body[1..body.len() - 1] {
-                    lines.push(tail.clone());
-                }
-                lines.push(format!("{}{field_comma}", body[body.len() - 1]));
-            }
-        }
-        lines.push("      }".to_owned());
+        lines.extend(json_object_lines(schema.fields));
         lines.push(format!("    }}{comma}"));
     }
     lines.push("  }".to_owned());
@@ -281,7 +450,81 @@ const fn ts_type(ty: FieldType) -> &'static str {
         FieldType::Digest => "Digest",
         FieldType::DerivedId { .. } => "DerivedId",
         FieldType::SchemaId => "SchemaId",
+        // References carry a name, so they need an allocation the caller owns.
+        FieldType::Structure { .. } | FieldType::Union { .. } => "",
     }
+}
+
+/// `TypeScript` type for one field, resolving references by name.
+fn ts_field_type(ty: FieldType) -> String {
+    match ty {
+        FieldType::Structure { name } | FieldType::Union { name } => reference_type_name(name),
+        other => ts_type(other).to_owned(),
+    }
+}
+
+/// The `TypeScript` field list for a structure or union variant.
+fn ts_fields(fields: &[FieldDescriptor]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for field in fields {
+        lines.push(format!("  /** {} */", field.doc));
+        let optional = if field.cardinality.is_optional() {
+            "?"
+        } else {
+            ""
+        };
+        let mut rendered = ts_field_type(field.ty);
+        if field.cardinality.is_sequence() {
+            rendered = format!("{rendered}[]");
+        }
+        lines.push(format!("  {}{optional}: {rendered};", field.name));
+    }
+    lines
+}
+
+/// Interfaces for the nested structures, and discriminated unions for the
+/// tagged ones.
+///
+/// These are DEFINITIONS. A field rendered as `decisions: RepositoryDecision[]`
+/// is a dangling reference until this runs, and a `.d.ts` with a dangling
+/// reference does not compile -- a failure the staleness gate cannot detect
+/// because the committed bytes and the generated bytes agree perfectly.
+fn ts_nested() -> Vec<String> {
+    let mut lines = Vec::new();
+    for structure in STRUCTURES {
+        lines.push(String::new());
+        lines.push(format!("/** {} */", structure.doc));
+        lines.push(format!(
+            "export interface {} {{",
+            reference_type_name(structure.name)
+        ));
+        lines.extend(ts_fields(structure.fields));
+        lines.push("}".to_owned());
+    }
+    for union in UNIONS {
+        let union_name = reference_type_name(union.name);
+        lines.push(String::new());
+        lines.push(format!("/** {} */", union.doc));
+        lines.push(format!("export type {union_name} ="));
+        for (index, variant) in union.variants.iter().enumerate() {
+            let terminator = if index + 1 == union.variants.len() {
+                ";"
+            } else {
+                ""
+            };
+            lines.push(format!("  | {union_name}{}{terminator}", variant.name));
+        }
+        for variant in union.variants {
+            lines.push(String::new());
+            lines.push(format!("/** {} */", variant.doc));
+            lines.push(format!("export interface {union_name}{} {{", variant.name));
+            lines.push("  /** The raw wire byte that selects this variant. */".to_owned());
+            lines.push(format!("  discriminant: {};", variant.discriminant));
+            lines.extend(ts_fields(variant.fields));
+            lines.push("}".to_owned());
+        }
+    }
+    lines
 }
 
 /// The complete `TypeScript` module.
@@ -319,6 +562,7 @@ pub fn typescript() -> String {
     lines.push("  codec_minor: number;".to_owned());
     lines.push("  digest: string;".to_owned());
     lines.push("}".to_owned());
+    lines.extend(ts_nested());
 
     for schema in DESCRIBED {
         lines.push(String::new());
@@ -331,19 +575,7 @@ pub fn typescript() -> String {
         ));
         lines.push(" */".to_owned());
         lines.push(format!("export interface {} {{", type_name(schema)));
-        for field in schema.fields {
-            lines.push(format!("  /** {} */", field.doc));
-            let optional = if field.cardinality.is_optional() {
-                "?"
-            } else {
-                ""
-            };
-            lines.push(format!(
-                "  {}{optional}: {};",
-                field.name,
-                ts_type(field.ty)
-            ));
-        }
+        lines.extend(ts_fields(schema.fields));
         lines.push("}".to_owned());
     }
     lines.join("\n") + "\n"
@@ -360,6 +592,16 @@ const fn py_type(ty: FieldType) -> &'static str {
         FieldType::Digest => "Digest",
         FieldType::DerivedId { .. } => "DerivedId",
         FieldType::SchemaId => "SchemaId",
+        // References carry a name, so they need an allocation the caller owns.
+        FieldType::Structure { .. } | FieldType::Union { .. } => "",
+    }
+}
+
+/// Python annotation for one field, resolving references by name.
+fn py_field_type(ty: FieldType) -> String {
+    match ty {
+        FieldType::Structure { name } | FieldType::Union { name } => reference_type_name(name),
+        other => py_type(other).to_owned(),
     }
 }
 
@@ -371,6 +613,79 @@ fn py_dataclass(name: &str, doc: &str) -> Vec<String> {
         format!("    \"\"\"{doc}\"\"\""),
         String::new(),
     ]
+}
+
+/// Python annotations for a structure or variant field list.
+fn py_fields(fields: &[FieldDescriptor]) -> Vec<String> {
+    let mut lines = Vec::new();
+    // Required before optional: a dataclass may not place a field without a
+    // default after one with a default.
+    for group in [
+        Cardinality::Required,
+        Cardinality::Sequence,
+        Cardinality::Optional,
+    ] {
+        for field in fields.iter().filter(|f| f.cardinality == group) {
+            lines.push(format!("    # {}", field.doc));
+            let mut annotation = py_field_type(field.ty);
+            if group.is_sequence() {
+                annotation = format!("tuple[{annotation}, ...]");
+            }
+            if group.is_optional() {
+                lines.push(format!("    {}: {annotation} | None = None", field.name));
+            } else {
+                lines.push(format!("    {}: {annotation}", field.name));
+            }
+        }
+    }
+    lines
+}
+
+/// Dataclasses for the nested structures and for each union variant, plus the
+/// union alias.
+///
+/// Emitted BEFORE the bodies: the alias `A | B` is evaluated at import time, so
+/// its members must already exist. The field annotations are lazy under
+/// `from __future__ import annotations`, but the alias is not.
+fn py_nested() -> Vec<String> {
+    let mut lines = Vec::new();
+    for structure in STRUCTURES {
+        lines.push(String::new());
+        lines.push(String::new());
+        lines.extend(py_dataclass(
+            &reference_type_name(structure.name),
+            structure.doc,
+        ));
+        lines.extend(py_fields(structure.fields));
+    }
+    for union in UNIONS {
+        let union_name = reference_type_name(union.name);
+        for variant in union.variants {
+            lines.push(String::new());
+            lines.push(String::new());
+            lines.extend(py_dataclass(
+                &format!("{union_name}{}", variant.name),
+                variant.doc,
+            ));
+            // A CONSTANT, not a field: an annotated attribute with a default
+            // becomes a dataclass field, and a defaulted field may not precede
+            // a non-default one. Unannotated, the dataclass machinery ignores
+            // it and it stays the per-variant class attribute it actually is.
+            lines.push("    # The raw wire byte that selects this variant.".to_owned());
+            lines.push(format!("    DISCRIMINANT = {}", variant.discriminant));
+            lines.extend(py_fields(variant.fields));
+        }
+        lines.push(String::new());
+        lines.push(String::new());
+        lines.push(format!("# {}", union.doc));
+        let members: Vec<String> = union
+            .variants
+            .iter()
+            .map(|variant| format!("{union_name}{}", variant.name))
+            .collect();
+        lines.push(format!("{union_name} = {}", members.join(" | ")));
+    }
+    lines
 }
 
 /// The complete Python module.
@@ -418,6 +733,7 @@ pub fn python() -> String {
     lines.push("    codec_major: int".to_owned());
     lines.push("    codec_minor: int".to_owned());
     lines.push("    digest: str".to_owned());
+    lines.extend(py_nested());
 
     for schema in DESCRIBED {
         lines.push(String::new());
@@ -436,17 +752,7 @@ pub fn python() -> String {
         // without a default after one with a default. Wire order is preserved
         // inside each group and recorded verbatim in WIRE_ORDER below, so the
         // encoding order is never lost.
-        for group in [Cardinality::Required, Cardinality::Optional] {
-            for field in schema.fields.iter().filter(|f| f.cardinality == group) {
-                lines.push(format!("    # {}", field.doc));
-                let annotation = py_type(field.ty);
-                if group.is_optional() {
-                    lines.push(format!("    {}: {annotation} | None = None", field.name));
-                } else {
-                    lines.push(format!("    {}: {annotation}", field.name));
-                }
-            }
-        }
+        lines.extend(py_fields(schema.fields));
     }
 
     lines.push(String::new());

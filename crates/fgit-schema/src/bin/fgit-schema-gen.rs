@@ -58,6 +58,15 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
+    // A reference to a name nothing defines produces a dangling type in every
+    // artifact, and the staleness check cannot see it: committed and generated
+    // bytes agree perfectly on a document no consumer can use. So it is
+    // refused here, before anything is written or compared.
+    if let Err(refusal) = registry::check_references_resolve() {
+        eprintln!("fgit-schema-gen: {refusal}");
+        return ExitCode::from(1);
+    }
+
     match mode.as_str() {
         "generate" => match gate::write(&directory) {
             Ok(count) => {

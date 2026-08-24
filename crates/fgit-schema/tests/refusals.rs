@@ -5,7 +5,10 @@
 //! every forbidden case pairs with a near-identical permitted one. A refusal
 //! nobody can reach is the same defect as a check nobody calls.
 
-use fgit_schema::descriptor::{Cardinality, FieldType, ScalarWidth};
+use fgit_schema::descriptor::{
+    Cardinality, FieldDescriptor, FieldType, ScalarWidth, StructureDescriptor, UnionDescriptor,
+    UnionVariant,
+};
 use fgit_schema::error::SchemaRefusal;
 use fgit_schema::registry;
 
@@ -22,15 +25,22 @@ fn an_unregistered_family_refuses_and_a_registered_one_does_not() {
 
 #[test]
 fn an_undescribable_body_refuses_with_the_missing_construct_named() {
-    let refusal =
-        registry::descriptor_for("decision-batch").expect_err("decision-batch is not describable");
+    // `decision-batch` was the undescribable body until `3xom` added sequences,
+    // structure references and tagged unions to the format. It is described
+    // now, and `UNDESCRIBED` is consequently empty -- so the refusal is driven
+    // through a supplied table rather than deleted along with the coverage.
+    static FUTURE: &[registry::UndescribedBody] = &[registry::UndescribedBody {
+        family: "some-future-body",
+        construct: "a recursive field type, where a field's type contains another field type",
+    }];
+    let refusal = registry::descriptor_for_in("some-future-body", registry::DESCRIBED, FUTURE)
+        .expect_err("an undescribable body is not describable");
     match &refusal {
         SchemaRefusal::ShapeUnsupported { family, construct } => {
-            assert_eq!(&**family, "decision-batch");
+            assert_eq!(&**family, "some-future-body");
             // Naming the construct is the difference between a gap someone can
             // close and one they have to rediscover.
-            assert!(construct.contains("sequence"));
-            assert!(construct.contains("tagged union"));
+            assert!(construct.contains("recursive"));
         }
         other => panic!("expected ShapeUnsupported, got {other:?}"),
     }
@@ -40,6 +50,11 @@ fn an_undescribable_body_refuses_with_the_missing_construct_named() {
     // would hide a real canonical body behind a typo-shaped error.
     let unknown = registry::descriptor_for("decision-batches").expect_err("typo");
     assert_ne!(refusal.kind(), unknown.kind());
+
+    // And the body that used to sit here now RESOLVES, which is the whole
+    // point of the change. Asserting it keeps this test honest about why it
+    // stopped using the real registry.
+    assert!(registry::descriptor_for("decision-batch").is_ok());
 }
 
 #[test]
@@ -84,6 +99,11 @@ fn every_refusal_variant_prints_and_has_a_distinct_kind() {
         SchemaRefusal::FamilyDuplicated {
             family: "rcr".into(),
         },
+        SchemaRefusal::ReferenceUnresolved {
+            owner: "decision-batch".into(),
+            name: "no-such-structure".into(),
+            container: "structure",
+        },
     ];
     let mut kinds = std::collections::BTreeSet::new();
     for sample in &samples {
@@ -105,7 +125,8 @@ fn every_refusal_variant_prints_and_has_a_distinct_kind() {
             | SchemaRefusal::ShapeUnsupported { .. }
             | SchemaRefusal::ArtifactStale { .. }
             | SchemaRefusal::ArtifactMissing { .. }
-            | SchemaRefusal::FamilyDuplicated { .. } => {}
+            | SchemaRefusal::FamilyDuplicated { .. }
+            | SchemaRefusal::ReferenceUnresolved { .. } => {}
         }
     }
 }
@@ -162,5 +183,111 @@ fn descriptors_expose_their_fields_in_wire_order() {
     assert_eq!(
         rcr.field("repository_id").expect("present").cardinality,
         Cardinality::Required
+    );
+}
+
+#[test]
+fn the_shipped_registry_has_no_dangling_references() {
+    registry::check_references_resolve()
+        .expect("every Structure/Union field must name something the registry resolves");
+}
+
+#[test]
+fn a_dangling_reference_is_refused_and_the_valid_twin_is_accepted() {
+    // PRESENCE CASE. The check above passes; on its own that does not show the
+    // check could notice a break. This drives the failure, then re-runs the
+    // near-identical PERMITTED case so the refusal is attributable to the
+    // dangling name and not to the harness.
+    static GHOST_FIELD: &[FieldDescriptor] = &[FieldDescriptor {
+        name: "phantom",
+        ty: FieldType::Structure {
+            name: "not-a-registered-structure",
+        },
+        cardinality: Cardinality::Required,
+        doc: "References a structure that does not exist.",
+    }];
+    static GHOST: StructureDescriptor = StructureDescriptor {
+        name: "ghost",
+        doc: "A structure whose field points at nothing.",
+        fields: GHOST_FIELD,
+    };
+
+    let refusal = registry::check_references_resolve_in(&[], &[&GHOST], &[])
+        .expect_err("a dangling structure reference must refuse");
+    assert_eq!(refusal.kind(), "reference_unresolved");
+    assert!(refusal.to_string().contains("not-a-registered-structure"));
+    assert!(refusal.to_string().contains("ghost"), "and names the owner");
+
+    // The permitted twin: the SAME shape with a name that does resolve.
+    static REAL_FIELD: &[FieldDescriptor] = &[FieldDescriptor {
+        name: "phantom",
+        ty: FieldType::Structure {
+            name: "repository-decision",
+        },
+        cardinality: Cardinality::Required,
+        doc: "References a structure that does exist.",
+    }];
+    static REAL: StructureDescriptor = StructureDescriptor {
+        name: "solid",
+        doc: "A structure whose field resolves.",
+        fields: REAL_FIELD,
+    };
+    registry::check_references_resolve_in(
+        &[],
+        &[&REAL, &registry::REPOSITORY_DECISION],
+        registry::UNIONS,
+    )
+    .expect("the identical shape with a resolvable name is accepted");
+}
+
+#[test]
+fn a_union_reference_and_a_variant_field_are_both_checked() {
+    // Three axes, and each needs its own case: a body field, a NESTED
+    // structure's field, and a UNION VARIANT's field. A check that walked only
+    // the bodies would leave the other two free to reference a ghost.
+    static BAD_UNION_FIELD: &[FieldDescriptor] = &[FieldDescriptor {
+        name: "outcome",
+        ty: FieldType::Union {
+            name: "not-a-registered-union",
+        },
+        cardinality: Cardinality::Required,
+        doc: "References a union that does not exist.",
+    }];
+    static OWNER: StructureDescriptor = StructureDescriptor {
+        name: "holder",
+        doc: "Holds a union reference.",
+        fields: BAD_UNION_FIELD,
+    };
+    let refusal = registry::check_references_resolve_in(&[], &[&OWNER], &[])
+        .expect_err("a dangling union reference must refuse");
+    assert_eq!(refusal.kind(), "reference_unresolved");
+    assert!(refusal.to_string().contains("union"), "names the container");
+
+    // A variant's own field is walked too.
+    static VARIANT_FIELD: &[FieldDescriptor] = &[FieldDescriptor {
+        name: "inner",
+        ty: FieldType::Structure {
+            name: "still-not-registered",
+        },
+        cardinality: Cardinality::Required,
+        doc: "A variant field pointing at nothing.",
+    }];
+    static VARIANTS: &[UnionVariant] = &[UnionVariant {
+        name: "Only",
+        discriminant: 1,
+        fields: VARIANT_FIELD,
+        doc: "The only variant.",
+    }];
+    static BAD_UNION: UnionDescriptor = UnionDescriptor {
+        name: "hollow",
+        doc: "A union whose variant references a ghost.",
+        variants: VARIANTS,
+    };
+    let refusal = registry::check_references_resolve_in(&[], &[], &[&BAD_UNION])
+        .expect_err("a dangling reference inside a variant must refuse");
+    assert!(refusal.to_string().contains("still-not-registered"));
+    assert!(
+        refusal.to_string().contains("hollow"),
+        "the union is named as the owner, since the variant alone would not locate it"
     );
 }

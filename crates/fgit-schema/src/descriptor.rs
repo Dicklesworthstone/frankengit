@@ -96,6 +96,26 @@ pub enum FieldType {
         /// The vocabulary that owns the closed set of code points.
         vocabulary: &'static str,
     },
+    /// A nested structure, referenced by the name of another descriptor.
+    ///
+    /// A REFERENCE, never an inline copy. `committed_rcrs` points at the same
+    /// `rcr` descriptor the standalone body uses, so the two cannot drift
+    /// apart — which is the whole reason the format resolves by name instead
+    /// of nesting a `FieldType` inside a `FieldType`.
+    Structure {
+        /// Registry name of the referenced descriptor.
+        name: &'static str,
+    },
+    /// A discriminated union, referenced by the name of a union descriptor.
+    ///
+    /// Encoded as a one-byte discriminant followed by that variant's fields.
+    /// The byte is raw rather than length-prefixed, so a reader that does not
+    /// know the variant cannot skip it — which is why an unknown discriminant
+    /// has to be a refusal rather than a skip.
+    Union {
+        /// Registry name of the referenced union descriptor.
+        name: &'static str,
+    },
 }
 
 impl FieldType {
@@ -111,6 +131,9 @@ impl FieldType {
             Self::OpaqueId => Some(16),
             Self::Digest | Self::DerivedId { .. } | Self::SchemaId | Self::Text { .. } => None,
             Self::CodePoint { .. } => Some(2),
+            // A structure's width is its referenced descriptor's, and a
+            // union's depends on the variant, so neither is fixed here.
+            Self::Structure { .. } | Self::Union { .. } => None,
         }
     }
 
@@ -125,6 +148,8 @@ impl FieldType {
             Self::SchemaId => "schema-id",
             Self::Text { .. } => "text",
             Self::CodePoint { .. } => "code-point",
+            Self::Structure { .. } => "structure",
+            Self::Union { .. } => "union",
         }
     }
 
@@ -141,6 +166,8 @@ impl FieldType {
             Self::SchemaId => "length-prefixed family, then u16 major and u16 minor",
             Self::Text { .. } => "u32 length prefix, then that many UTF-8 bytes",
             Self::CodePoint { .. } => "u16 code point drawn from a closed vocabulary",
+            Self::Structure { .. } => "the referenced descriptor's fields, inline and in order",
+            Self::Union { .. } => "one raw discriminant byte, then that variant's fields",
         }
     }
 }
@@ -158,6 +185,13 @@ pub enum Cardinality {
     /// The tag is what keeps an absent value distinct from a zero-like one,
     /// which is why an optional field is not simply a sentinel.
     Optional,
+    /// A `u32` count, then that many elements.
+    ///
+    /// The count is always present, so an empty sequence still costs four
+    /// bytes and is distinct from an absent optional. A reader that treats
+    /// zero-length and absent alike would conflate "no decisions in this
+    /// batch" with "this batch does not carry decisions at all".
+    Sequence,
 }
 
 impl Cardinality {
@@ -167,12 +201,19 @@ impl Cardinality {
         matches!(self, Self::Optional)
     }
 
+    /// Whether the field is a counted repetition.
+    #[must_use]
+    pub const fn is_sequence(self) -> bool {
+        matches!(self, Self::Sequence)
+    }
+
     /// Stable lowercase name used in generated artifacts.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Required => "required",
             Self::Optional => "optional",
+            Self::Sequence => "sequence",
         }
     }
 }
@@ -235,7 +276,7 @@ impl SchemaDescriptor {
     pub fn is_fixed_size(&self) -> bool {
         self.fields
             .iter()
-            .all(|field| field.cardinality == Cardinality::Required)
+            .all(|field| matches!(field.cardinality, Cardinality::Required))
             && self
                 .fields
                 .iter()
@@ -250,4 +291,72 @@ impl SchemaDescriptor {
     pub fn artifact_stem(&self) -> String {
         format!("{}-v{}", self.family, self.major)
     }
+}
+
+/// One variant of a discriminated union.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct UnionVariant {
+    /// Variant name, matching the Rust variant it describes.
+    pub name: &'static str,
+    /// The raw discriminant byte that selects this variant on the wire.
+    pub discriminant: u8,
+    /// The variant's fields, in wire order.
+    pub fields: &'static [FieldDescriptor],
+    /// What the variant means.
+    pub doc: &'static str,
+}
+
+/// A discriminated union: one raw byte, then the selected variant's fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct UnionDescriptor {
+    /// Registry name, referenced by [`FieldType::Union`].
+    pub name: &'static str,
+    /// What the union models.
+    pub doc: &'static str,
+    /// The variants, in discriminant order.
+    pub variants: &'static [UnionVariant],
+}
+
+impl UnionDescriptor {
+    /// The variant a discriminant byte selects.
+    ///
+    /// `None` for an unallocated byte, which a decoder must refuse rather than
+    /// skip: the payload is not length-prefixed, so an unknown variant leaves
+    /// a reader with no way to find the next field.
+    #[must_use]
+    pub fn variant(&self, discriminant: u8) -> Option<&'static UnionVariant> {
+        self.variants
+            .iter()
+            .find(|variant| variant.discriminant == discriminant)
+    }
+
+    /// Whether discriminants are unique and listed in ascending order.
+    ///
+    /// Checked rather than assumed: a duplicate would make `variant` depend on
+    /// slice order, and unsorted variants would make the generated artifact
+    /// unstable under an unrelated edit.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.variants
+            .windows(2)
+            .all(|pair| pair[0].discriminant < pair[1].discriminant)
+    }
+}
+
+/// A nested structure that is not itself a canonical body.
+///
+/// `RepositoryDecision` is the case this exists for: it has fields and a wire
+/// order, but no schema identity of its own — it is only ever encoded inside a
+/// `decision-batch`. Giving it a [`SchemaDescriptor`] would mean inventing a
+/// family, a version and a domain it does not have, and an invented domain is
+/// exactly the kind of plausible-looking fiction the conformance test cannot
+/// catch because nothing on the wire disagrees with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct StructureDescriptor {
+    /// Registry name, referenced by [`FieldType::Structure`].
+    pub name: &'static str,
+    /// What the structure models.
+    pub doc: &'static str,
+    /// Fields in wire order.
+    pub fields: &'static [FieldDescriptor],
 }

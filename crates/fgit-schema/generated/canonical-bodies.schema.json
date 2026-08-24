@@ -34,6 +34,63 @@
         "codec_minor": { "type": "integer", "minimum": 0, "maximum": 65535 },
         "digest": { "type": "string", "pattern": "^[0-9a-f]{32,128}$" }
       }
+    },
+    "RepositoryDecision": {
+      "description": "One terminal decision within a batch, in the batch's own order.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tx_id", "decision_sequence", "outcome"],
+      "properties": {
+        "tx_id": {
+          "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+          "description": "domain-bound derived identity: frankengit/ref-txn/v2"
+        },
+        "decision_sequence": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "outcome": { "$ref": "#/$defs/DecisionOutcome" }
+      }
+    },
+    "DecisionOutcome": {
+      "description": "The terminal outcome of one decision: committed, or refused with a reason.",
+      "oneOf": [
+        {
+          "description": "The decision committed, naming the record it produced.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "repository_commit_id"],
+          "properties": {
+            "variant": { "const": "Committed" },
+            "discriminant": { "const": 1 },
+            "repository_commit_id": {
+              "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+              "description": "domain-bound derived identity: frankengit/rcr/v1"
+            }
+          }
+        },
+        {
+          "description": "The decision was refused, naming the reason and the evidence record.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["variant", "discriminant", "code", "refusal_record_id"],
+          "properties": {
+            "variant": { "const": "Refused" },
+            "discriminant": { "const": 2 },
+            "code": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535,
+              "description": "code point from the closed RefusalCode vocabulary"
+            },
+            "refusal_record_id": {
+              "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+              "description": "domain-bound derived identity: frankengit/refusal-record/v1"
+            }
+          }
+        }
+      ]
     }
   },
   "properties": {
@@ -96,6 +153,54 @@
           "allOf": [{ "$ref": "#/$defs/DerivedId" }],
           "description": "domain-bound derived identity: frankengit/repository-capsule/v1"
         }
+      }
+    },
+    "DecisionBatchV1": {
+      "description": "The batch of terminal decisions published against one authority head.",
+      "x-schema": { "family": "decision-batch", "major": 1, "minor": 1, "domain": "frankengit/decision-batch/v1" },
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_id", "predecessor_head_id", "predecessor_head_generation", "first_decision_sequence", "resulting_ref_root", "resulting_forge_position_root", "resulting_outcome_index_root", "resulting_retention_root", "resulting_outbox_root", "resulting_policy_epoch", "batch_evidence_root"],
+      "properties": {
+        "repository_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "16 raw bytes, lowercase hex"
+        },
+        "predecessor_head_id": {
+          "allOf": [{ "$ref": "#/$defs/DerivedId" }],
+          "description": "domain-bound derived identity: frankengit/authority-head/v1"
+        },
+        "predecessor_head_generation": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "first_decision_sequence": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "decisions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RepositoryDecision" }
+        },
+        "committed_rcrs": {
+          "type": "array",
+          "items": { "$ref": "#/properties/RcrV1" }
+        },
+        "resulting_ref_root": { "$ref": "#/$defs/Digest" },
+        "resulting_forge_position_root": { "$ref": "#/$defs/Digest" },
+        "resulting_outcome_index_root": { "$ref": "#/$defs/Digest" },
+        "resulting_retention_root": { "$ref": "#/$defs/Digest" },
+        "resulting_outbox_root": { "$ref": "#/$defs/Digest" },
+        "resulting_policy_epoch": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "description": "u64 as a decimal string; outside the exact range of an IEEE-754 double"
+        },
+        "batch_evidence_root": { "$ref": "#/$defs/Digest" },
+        "compaction_generation_link": { "$ref": "#/$defs/Digest" }
       }
     },
     "RefusalRecordV1": {

@@ -28,6 +28,39 @@ export interface DerivedId {
   digest: string;
 }
 
+/** One terminal decision within a batch, in the batch's own order. */
+export interface RepositoryDecision {
+  /** Sealed transaction the decision belongs to. */
+  tx_id: DerivedId;
+  /** Position in the terminal-decision order, refusals included. */
+  decision_sequence: string;
+  /** The terminal outcome. */
+  outcome: DecisionOutcome;
+}
+
+/** The terminal outcome of one decision: committed, or refused with a reason. */
+export type DecisionOutcome =
+  | DecisionOutcomeCommitted
+  | DecisionOutcomeRefused;
+
+/** The decision committed, naming the record it produced. */
+export interface DecisionOutcomeCommitted {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 1;
+  /** The Repository Commit Record this decision produced. */
+  repository_commit_id: DerivedId;
+}
+
+/** The decision was refused, naming the reason and the evidence record. */
+export interface DecisionOutcomeRefused {
+  /** The raw wire byte that selects this variant. */
+  discriminant: 2;
+  /** Terminal refusal reason, from the closed refusal vocabulary. */
+  code: number;
+  /** The refusal record carrying the evidence. */
+  refusal_record_id: DerivedId;
+}
+
 /**
  * The one value whose conditional replacement publishes repository state.
  *
@@ -66,6 +99,42 @@ export interface AuthorityHeadV1 {
   format_registry_epoch: string;
   /** Most recent checkpoint capsule, when one exists. */
   last_checkpoint_id?: DerivedId;
+}
+
+/**
+ * The batch of terminal decisions published against one authority head.
+ *
+ * schema decision-batch v1.1, domain frankengit/decision-batch/v1
+ */
+export interface DecisionBatchV1 {
+  /** Repository the batch belongs to. */
+  repository_id: string;
+  /** Head this batch was prepared against. */
+  predecessor_head_id: DerivedId;
+  /** Generation of that head, which makes the basis check monotone. */
+  predecessor_head_generation: string;
+  /** Decision-sequence position of the first decision in the batch. */
+  first_decision_sequence: string;
+  /** Terminal decisions, in deterministic batch order. */
+  decisions: RepositoryDecision[];
+  /** Commit records for the committed decisions, in repository order. */
+  committed_rcrs: RcrV1[];
+  /** Root over the resulting ref state. */
+  resulting_ref_root: Digest;
+  /** Root over the resulting forge position. */
+  resulting_forge_position_root: Digest;
+  /** Root over the rebuildable outcome index. */
+  resulting_outcome_index_root: Digest;
+  /** Root over the resulting retention state. */
+  resulting_retention_root: Digest;
+  /** Root over the resulting external-effect outbox. */
+  resulting_outbox_root: Digest;
+  /** Policy epoch after the batch. */
+  resulting_policy_epoch: string;
+  /** Merkle commitment over this batch's ordered decision evidence. */
+  batch_evidence_root: Digest;
+  /** Compaction generation bound by this publication, when it publishes one. */
+  compaction_generation_link?: Digest;
 }
 
 /**
