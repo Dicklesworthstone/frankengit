@@ -37,6 +37,7 @@ fgit-node	L4	L0,L1,L2,L3,L4	node	active
 fgit-object-fabric	L2	L0,L1,L2	object-fabric	active
 fgit-object-store	L2	L0,L1,L2	object-store-authority	active
 fgit-pack	L1	L0,L1	pack	active
+fgit-proof-bridge	L2	L0,L1,L2	proof-bridge	active
 fgit-raptorq	L2	L0,L1,L2	object-fabric	active
 fgit-reference	L2	L0,L1,L2	reference-model	active
 fgit-registry-check	L0	none	constitution	active

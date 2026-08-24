@@ -1,0 +1,18 @@
+[package]
+name = "fgit-proof-bridge"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+fgit-reference.workspace = true
+fgit-types.workspace = true
+
+[[bin]]
+name = "fgit-proof-bridge-gen"
+path = "src/bin/fgit-proof-bridge-gen.rs"

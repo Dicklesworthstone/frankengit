@@ -876,6 +876,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-proof-bridge"
+version = "0.0.1"
+dependencies = [
+ "fgit-reference",
+ "fgit-types",
+]
+
+[[package]]
 name = "fgit-raptorq"
 version = "0.1.0"
 dependencies = [
@@ -903,6 +911,7 @@ name = "fgit-release"
 version = "0.0.1"
 dependencies = [
  "fgit-crypto",
+ "fgit-types",
 ]
 
 [[package]]
