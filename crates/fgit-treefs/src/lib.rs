@@ -14,12 +14,31 @@
 //!
 //! * [`path`] — canonical repository path bytes and the refusals that keep
 //!   every access inside a capability root;
-//! * [`capability`] — scoping, budgets, and attenuation-only delegation.
+//! * [`capability`] — scoping, budgets, and attenuation-only delegation;
+//! * [`base`] — the immutable base view over Git tree state, reading through
+//!   the caller-implemented [`ObjectSource`] boundary;
+//! * [`overlay`] — the capability-scoped copy-on-write overlay;
+//! * [`intent`] — the typed edit-intent log and its net-effect evaluation;
+//! * [`snapshot`] — workspace snapshots with explicit staged/visible/durable
+//!   epochs, plus the anti-rollback refusals;
+//! * [`export`] — export planning over a base view and overlay;
+//! * [`journal`] — export phases, cancellation state, and the step journal;
+//! * [`materialize`] — the reference loose-object layout an export would take,
+//!   described and never written;
+//! * [`proposal`] — sealed ref intents and position receipts, inert by
+//!   construction: a proposal cannot publish itself or infer commit from
+//!   object existence;
+//! * [`obligation`] — the workspace lease as a typed reserve/commit/abort
+//!   obligation;
+//! * [`archive`] and [`sparse`] — deterministic derived artifacts (ustar/zip
+//!   bytes, sparse manifests) with their own completeness receipts.
 //!
-//! The immutable base view, copy-on-write overlay, typed edit-intent log, and
-//! snapshot epochs land in this same crate as their modules are completed under
-//! bead `frankengit-fg026a-treefs-core-0aw`; each is added to this list when its
-//! module is real, never before.
+//! Every module in that list is real and exercised. It was previously the two
+//! entries above plus a forward reference deferring the base view, overlay,
+//! edit-intent log and snapshot epochs to bead
+//! `frankengit-fg026a-treefs-core-0aw` — which closed on 2026-08-21 with all
+//! four delivered. The rule that produced this list stands: a module is named
+//! here when it is real, never before.
 //!
 //! # What this crate is not
 //!
