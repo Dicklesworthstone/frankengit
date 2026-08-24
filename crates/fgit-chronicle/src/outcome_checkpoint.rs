@@ -461,7 +461,7 @@ fn checkpoint_position_advances(
     ) {
         (Some(newer), Some(older)) => newer > older,
         (Some(_), None) => true,
-        (None, None) | (None, Some(_)) => false,
+        (None, _) => false,
     }
 }
 
@@ -602,13 +602,26 @@ where
     let Some(root) = capsule.outcome_index_checkpoint_root else {
         return collect_cumulative_outcomes_async(store, cx, head_key).await;
     };
-    let checkpoint =
+    enum CheckpointCandidate {
+        Exact(OutcomeIndexCheckpointBody),
+        ForeignRepository,
+        Unavailable,
+    }
+    // A valid checkpoint for another repository and an unusable checkpoint both
+    // fall back to the genesis walk, but remain distinct cases: authority errors
+    // must still propagate rather than being treated as an unavailable hint.
+    let candidate =
         match verify_outcome_index_checkpoint_chain_async(store, cx, identity, root).await {
-            Ok(checkpoint) if checkpoint.repository_id == head.repository_id => checkpoint,
-            Ok(_) => return collect_cumulative_outcomes_async(store, cx, head_key).await,
+            Ok(checkpoint) if checkpoint.repository_id == head.repository_id => {
+                CheckpointCandidate::Exact(checkpoint)
+            }
+            Ok(_) => CheckpointCandidate::ForeignRepository,
             Err(OutcomeIndexCheckpointRefusal::Authority(error)) => return Err(error.into()),
-            Err(_) => return collect_cumulative_outcomes_async(store, cx, head_key).await,
+            Err(_) => CheckpointCandidate::Unavailable,
         };
+    let CheckpointCandidate::Exact(checkpoint) = candidate else {
+        return collect_cumulative_outcomes_async(store, cx, head_key).await;
+    };
     match collect_cumulative_outcomes_from_checkpoint_async(
         store,
         cx,
