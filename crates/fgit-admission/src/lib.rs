@@ -2685,7 +2685,14 @@ fn status_from_terminal(outcome: DecisionOutcome) -> ReceiveCommandStatus {
 
 const fn refusal_message(code: RefusalCode) -> &'static [u8] {
     match code {
-        RefusalCode::ExpectedOldRefMismatch => b"stale info",
+        // HiddenRefUnauthorized shares these bytes deliberately: a hidden ref
+        // must be indistinguishable from one the principal's view says does not
+        // exist. A distinctive message would let a client probe a name and learn
+        // the hidden namespace one query at a time. The code is still recorded
+        // as 0x0206 in the decision record -- internal audit and wire disclosure
+        // are different surfaces. Merged into one arm so the identity is stated
+        // by the code rather than only asserted in a comment.
+        RefusalCode::ExpectedOldRefMismatch | RefusalCode::HiddenRefUnauthorized => b"stale info",
         RefusalCode::AtomicTransactionAborted => b"atomic transaction aborted",
         RefusalCode::ObjectClosureIncomplete => b"object closure incomplete",
         RefusalCode::PackFramingInvalid => b"pack validation failed",
@@ -2693,13 +2700,6 @@ const fn refusal_message(code: RefusalCode) -> &'static [u8] {
         RefusalCode::ForceNotPermitted => b"force not permitted",
         RefusalCode::NonFastForwardRefused => b"non-fast-forward",
         RefusalCode::RefNameInvalid => b"invalid ref name",
-        // Deliberately the SAME bytes as ExpectedOldRefMismatch above. A hidden
-        // ref must be indistinguishable from one the principal's view says does
-        // not exist; a distinctive message here would let a client probe a name
-        // and learn the hidden namespace one query at a time. The code is still
-        // recorded as HiddenRefUnauthorized in the decision record — internal
-        // audit and wire disclosure are different surfaces.
-        RefusalCode::HiddenRefUnauthorized => b"stale info",
         _ => b"admission refused",
     }
 }
@@ -2752,7 +2752,7 @@ mod hidden_ref_disclosure_tests {
         assert!(snapshot.hidden_refs.is_empty());
         snapshot
             .hidden_refs
-            .push_rule(b"refs/internal/", &fgit_wire::WireLimits::default())
+            .push_rule(b"refs/internal", &fgit_wire::WireLimits::default())
             .expect("a fixed valid hide rule");
         assert!(snapshot.hidden_refs.hides(b"refs/internal/secret"));
         assert!(

@@ -84,7 +84,7 @@ fn a_hidden_ref_is_absent_from_the_push_advertisement() {
 
     let names = advertised(
         &snapshot,
-        &hiding(&[b"refs/internal/"]),
+        &hiding(&[b"refs/internal"]),
         &WireLimits::default(),
     );
 
@@ -124,7 +124,7 @@ fn a_negation_rule_re_exposes_one_ref_under_a_hidden_prefix() {
 
     let names = advertised(
         &snapshot,
-        &hiding(&[b"refs/internal/", b"!refs/internal/public"]),
+        &hiding(&[b"refs/internal", b"!refs/internal/public"]),
         &WireLimits::default(),
     );
 
@@ -160,7 +160,7 @@ fn hidden_refs_do_not_consume_the_advertisement_bound() {
         ..WireLimits::default()
     };
 
-    let names = advertised(&snapshot, &hiding(&[b"refs/internal/"]), &limits);
+    let names = advertised(&snapshot, &hiding(&[b"refs/internal"]), &limits);
 
     assert_eq!(
         names,
@@ -208,7 +208,7 @@ fn the_visible_set_at_exactly_the_bound_is_accepted() {
         ..WireLimits::default()
     };
 
-    let names = advertised(&snapshot, &hiding(&[b"refs/internal/"]), &limits);
+    let names = advertised(&snapshot, &hiding(&[b"refs/internal"]), &limits);
 
     assert_eq!(
         names.len(),
