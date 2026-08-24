@@ -357,9 +357,14 @@ impl Error for AdmissionUploadPackRefusal {
 /// # The bound is evaluated on the VISIBLE count, and that ordering is the point
 ///
 /// [`AdmissionUploadPackRepository::from_snapshot`] checks
-/// `limits.max_advertised_refs` against the whole snapshot before copying, and
-/// that is correct there because the fetch view hides nothing. Reused verbatim
-/// here it would leak: a principal could learn that hidden refs exist by
+/// `limits.max_advertised_refs` against the whole snapshot before copying. That
+/// was correct when this was written, because the fetch view had no policy to
+/// consult; it is now a GAP rather than a design choice, since a repository can
+/// carry hide rules that the fetch path still ignores. Whoever closes it must
+/// count the visible set BEFORE applying the bound, for exactly the reason
+/// below -- and must give the HEAD resolution the same treatment, since
+/// `HeadTargetNotAdvertised` would otherwise disclose a hidden HEAD target.
+/// Tracked on `frankengit-jkbo`. Reused verbatim here it would leak: a principal could learn that hidden refs exist by
 /// receiving [`WireError::TooManyAdvertisedRefs`] for a repository whose visible
 /// ref count is far below the limit. The refusal would itself become the
 /// enumeration oracle this type exists to prevent.
@@ -630,6 +635,15 @@ struct MaterializedAdmissionState {
     selected_closure: AuthoritySelectedClosure,
     policy_epoch: PolicyEpoch,
     configuration_root: Digest,
+    /// The hide policy this repository's configuration named, already built.
+    ///
+    /// Resolved once when the basis was materialized rather than on every
+    /// snapshot. `snapshot_for` already compares `configuration_root` against
+    /// the authenticated head and drops this whole state on mismatch, so a
+    /// policy cached beside that root cannot outlive the configuration it came
+    /// from -- a stale projection therefore cannot expand disclosure, and no
+    /// new guard is needed to say so.
+    hidden_refs: RefVisibility,
 }
 
 /// The canonical record through which an authority head selected a closure.
@@ -1542,13 +1556,60 @@ impl DurableAdmissionMaterializer {
                 closure,
                 source: selection_source,
             };
+            // The repository's own hide policy, read from the configuration the
+            // authenticated head selects. A rule that will not parse refuses the
+            // materialization rather than being skipped: skipping would serve
+            // refs the repository means to hide, which is the failure this slice
+            // exists to prevent. EvidenceInvalid and never RefNameInvalid -- the
+            // latter reaches a pushing client as "invalid ref name" and would
+            // blame it for a defect in stored configuration.
+            let hidden_refs = match fgit_authority::read_repository_configuration_async(
+                authority,
+                cx,
+                &body.configuration_root,
+            )
+            .await
+            {
+                Ok(configuration) => {
+                    let mut policy = RefVisibility::new();
+                    for rule in &configuration.hidden_ref_rules {
+                        policy
+                            .push_rule(rule, &WireLimits::default())
+                            .map_err(|_| {
+                                AdmissionMaterializationRefusal::CanonicalRoot(
+                                    RefusalCode::EvidenceInvalid,
+                                )
+                            })?;
+                    }
+                    policy
+                }
+                // A head selecting the incarnation-aware configuration carries no
+                // hide rules: schema major 2 is policy-free by design (fg059), so
+                // such a repository hides nothing. That is a KNOWN LIMITATION
+                // recorded on frankengit-jkbo, not an oversight, and it is why
+                // this arm is as narrow as it is -- only the exact major-2 case
+                // is read as "no policy" and every other failure still refuses.
+                //
+                // The migration hazard is worth naming: moving a repository from
+                // the major-1 body to the incarnation body silently drops its
+                // hide rules. Closing that needs a policy field on the major-2
+                // body, which is its owner's call and is not this slice.
+                Err(fgit_authority::OutcomeFailure::Codec(
+                    fgit_codec::CodecRefusal::SchemaMajorUnsupported { observed: 2, .. },
+                )) => RefVisibility::new(),
+                Err(error) => {
+                    return Err(AdmissionMaterializationRefusal::DecisionHistory(Box::new(
+                        error,
+                    )));
+                }
+            };
             let snapshot = AdmissionSnapshot {
                 refs: ref_state.refs().clone(),
                 head_target: ref_state.head_target().cloned(),
                 forge_positions: BTreeMap::new(),
                 retention: BTreeSet::new(),
                 outbox: BTreeMap::new(),
-                hidden_refs: RefVisibility::new(),
+                hidden_refs: hidden_refs.clone(),
             };
             let cache_permit = cache_grant
                 .accept(cache_binding)
@@ -1568,6 +1629,7 @@ impl DurableAdmissionMaterializer {
                 selected_closure,
                 policy_epoch: body.policy_epoch,
                 configuration_root: body.configuration_root,
+                hidden_refs,
             };
             Ok((materialized, state))
         }
@@ -1634,6 +1696,15 @@ impl DurableAdmissionMaterializer {
             .ref_state;
         let refs = ref_state.refs().clone();
         let head_target = ref_state.head_target().cloned();
+        // Cloned from the cache rather than rebuilt: the mismatch check above
+        // already discarded this state if its configuration_root disagreed with
+        // the authenticated head, so what is cached here is the policy of the
+        // basis being served and cannot be a stale one.
+        let hidden_refs = guard
+            .as_ref()
+            .ok_or(RefusalCode::EvidenceMissing)?
+            .hidden_refs
+            .clone();
         drop(guard);
         Ok(AdmissionSnapshot {
             refs,
@@ -1641,7 +1712,7 @@ impl DurableAdmissionMaterializer {
             forge_positions: BTreeMap::new(),
             retention: BTreeSet::new(),
             outbox: BTreeMap::new(),
-            hidden_refs: RefVisibility::new(),
+            hidden_refs,
         })
     }
 
