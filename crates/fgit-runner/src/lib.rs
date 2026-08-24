@@ -26,6 +26,10 @@
 
 use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use fgit_claim::ClaimRank;
 use fgit_codec::{DecodeLimits, Encoder};
@@ -56,6 +60,15 @@ pub const MAX_RUNNER_TEXT_BYTES: usize = 256;
 pub const MAX_REDACTION_NEEDLES: usize = 64;
 /// Maximum bytes retained long enough to produce one redacted log object.
 pub const MAX_LOG_BYTES: usize = 4 * 1024 * 1024;
+
+const PROCESS_LOG_FRAME_BYTES: usize = b"stdout\0\0stderr\0".len();
+
+/// The trusted-host substrate retains at most this many bytes from either
+/// output stream. Keeping the split fixed bounds aggregate retained output at
+/// [`MAX_LOG_BYTES`] without making the commitment depend on reader timing.
+pub const MAX_PROCESS_STREAM_LOG_BYTES: usize = (MAX_LOG_BYTES - PROCESS_LOG_FRAME_BYTES) / 2;
+
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 const CAPSULE_DOMAIN: &[u8] = b"frankengit/build-input-capsule/v1\0";
 const CACHE_DOMAIN: &[u8] = b"frankengit/runner-cache-key/v1\0";
@@ -667,6 +680,13 @@ impl ResourceCeilings {
         .find_map(|(dimension, exceeded)| exceeded.then_some(dimension))
     }
 
+    /// Wall-clock deadline enforced by a substrate before it returns a
+    /// terminal observation.
+    #[must_use]
+    pub const fn wall_clock_millis(self) -> u64 {
+        self.wall_clock_millis
+    }
+
     /// Converts this policy into the existing runner-slot reservation shape.
     pub fn runner_request(
         self,
@@ -1075,6 +1095,201 @@ pub enum SubstrateRefusal {
     IsolationUnavailable,
     /// The substrate cannot prove process reaping for this run.
     ReapingUnverifiable,
+    /// The selected trusted-host program could not be spawned.
+    SpawnFailed {
+        /// Stable I/O error class without ambient operating-system text.
+        kind: std::io::ErrorKind,
+    },
+    /// Output exceeded the fixed capture envelope after the direct child was
+    /// reaped, so the substrate refuses to produce a partial log receipt.
+    OutputCaptureLimitExceeded,
+}
+
+/// Minimal native process substrate for a trusted local build.
+///
+/// This is deliberately narrower than the hostile-CI substrate: it owns one
+/// explicitly declared child process, clears ambient environment bindings,
+/// captures bounded output, and kills then reaps that direct child on its
+/// declared wall-clock deadline. It does **not** claim Linux namespace,
+/// cgroup, or descendant-process isolation, and therefore must never be used
+/// for untrusted repository code.
+///
+/// The surrounding [`RunnerControlPlane`] still owns slot reservation,
+/// terminal receipt construction, and secret-lease revocation. A non-zero
+/// program exit is a typed [`CheckOutcome::Failed`]; a deadline is a typed
+/// [`CheckOutcome::ResourceCeiling`]. Neither is converted into an ambient
+/// process error or a success placeholder.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProcessSubstrate;
+
+impl ProcessSubstrate {
+    /// Creates the fixed, bounded trusted-host process substrate.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl ContainmentSubstrate for ProcessSubstrate {
+    fn launch(&mut self, plan: &SandboxPlan) -> Result<SubstrateObservation, SubstrateRefusal> {
+        let capsule = plan.capsule();
+        let command = capsule.command();
+        let mut child_command = Command::new(command.program().as_str());
+        child_command
+            .args(command.arguments().iter().map(RunnerText::as_str))
+            .env_clear()
+            .envs(
+                capsule
+                    .environment()
+                    .iter()
+                    .map(|binding| (binding.name().as_str(), binding.value().as_str())),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let started = Instant::now();
+        let mut child = child_command
+            .spawn()
+            .map_err(|error| SubstrateRefusal::SpawnFailed { kind: error.kind() })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or(SubstrateRefusal::ReapingUnverifiable)?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or(SubstrateRefusal::ReapingUnverifiable)?;
+        let stdout_reader = thread::spawn(move || capture_process_stream(stdout));
+        let stderr_reader = thread::spawn(move || capture_process_stream(stderr));
+        let deadline = Duration::from_millis(plan.policy().ceilings().wall_clock_millis());
+
+        let (status, containment) = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break (status, ContainmentClass::Cooperative),
+                Ok(None) if started.elapsed() < deadline => thread::sleep(PROCESS_POLL_INTERVAL),
+                Ok(None) => {
+                    child
+                        .kill()
+                        .map_err(|_| SubstrateRefusal::ReapingUnverifiable)?;
+                    let status = child
+                        .wait()
+                        .map_err(|_| SubstrateRefusal::ReapingUnverifiable)?;
+                    break (status, ContainmentClass::NonCooperative);
+                }
+                Err(_) => return Err(SubstrateRefusal::ReapingUnverifiable),
+            }
+        };
+
+        let stdout = join_process_stream(stdout_reader)?;
+        let stderr = join_process_stream(stderr_reader)?;
+        let log = bounded_process_log(&stdout, &stderr)?;
+        let elapsed_millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let timed_out = containment == ContainmentClass::NonCooperative;
+
+        Ok(SubstrateObservation {
+            exit: if timed_out {
+                ExitClass::ResourceCeiling
+            } else if status.success() {
+                ExitClass::Succeeded
+            } else {
+                ExitClass::Failed
+            },
+            // `std::process` does not expose portable measurements for CPU,
+            // memory, disk, network, or descendant count. Zero here means the
+            // trusted-host substrate did not measure that dimension; the only
+            // limit it enforces itself is the declared wall-clock deadline.
+            usage: ResourceUsage {
+                cpu_micros: 0,
+                memory_bytes: 0,
+                disk_bytes: 0,
+                network_bytes: 0,
+                processes: 0,
+                wall_clock_millis: if timed_out {
+                    plan.policy()
+                        .ceilings()
+                        .wall_clock_millis()
+                        .saturating_add(1)
+                } else {
+                    elapsed_millis
+                },
+            },
+            reaped: RunnerReaped {
+                processes_reaped: 1,
+                containment,
+            },
+            log_redaction: log.receipt(),
+            artifacts: Vec::new(),
+        })
+    }
+}
+
+struct ProcessStream {
+    bytes: Vec<u8>,
+    source_bytes: u64,
+    truncated: bool,
+}
+
+fn capture_process_stream<R: Read>(mut reader: R) -> Result<ProcessStream, std::io::ErrorKind> {
+    let mut bytes = Vec::with_capacity(MAX_PROCESS_STREAM_LOG_BYTES);
+    let mut source_bytes = 0_u64;
+    let mut truncated = false;
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let count = reader.read(&mut chunk).map_err(|error| error.kind())?;
+        if count == 0 {
+            break;
+        }
+        source_bytes = source_bytes.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+        let remaining = MAX_PROCESS_STREAM_LOG_BYTES.saturating_sub(bytes.len());
+        let retained = remaining.min(count);
+        bytes.extend_from_slice(&chunk[..retained]);
+        truncated |= retained != count;
+    }
+    Ok(ProcessStream {
+        bytes,
+        source_bytes,
+        truncated,
+    })
+}
+
+fn join_process_stream(
+    reader: thread::JoinHandle<Result<ProcessStream, std::io::ErrorKind>>,
+) -> Result<ProcessStream, SubstrateRefusal> {
+    reader
+        .join()
+        .map_err(|_| SubstrateRefusal::ReapingUnverifiable)?
+        .map_err(|_| SubstrateRefusal::ReapingUnverifiable)
+}
+
+fn bounded_process_log(
+    stdout: &ProcessStream,
+    stderr: &ProcessStream,
+) -> Result<RedactedLog, SubstrateRefusal> {
+    if stdout.truncated || stderr.truncated {
+        return Err(SubstrateRefusal::OutputCaptureLimitExceeded);
+    }
+    let mut framed = Vec::with_capacity(
+        b"stdout\0"
+            .len()
+            .saturating_add(stdout.bytes.len())
+            .saturating_add(b"\0stderr\0".len())
+            .saturating_add(stderr.bytes.len()),
+    );
+    framed.extend_from_slice(b"stdout\0");
+    framed.extend_from_slice(&stdout.bytes);
+    framed.extend_from_slice(b"\0stderr\0");
+    framed.extend_from_slice(&stderr.bytes);
+    let expected_source_bytes = u64::try_from(PROCESS_LOG_FRAME_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(stdout.source_bytes)
+        .saturating_add(stderr.source_bytes);
+    if u64::try_from(framed.len()).unwrap_or(u64::MAX) != expected_source_bytes {
+        return Err(SubstrateRefusal::ReapingUnverifiable);
+    }
+    LogRedactor::new(Vec::new())
+        .and_then(|redactor| redactor.redact(&framed))
+        .map_err(|_| SubstrateRefusal::ReapingUnverifiable)
 }
 
 /// A runner capacity controller.
@@ -1367,6 +1582,12 @@ impl SubstrateRefusal {
             Self::NoCapacity => "no_capacity",
             Self::IsolationUnavailable => "isolation_unavailable",
             Self::ReapingUnverifiable => "reaping_unverifiable",
+            Self::SpawnFailed { kind } => match kind {
+                std::io::ErrorKind::NotFound => "spawn_not_found",
+                std::io::ErrorKind::PermissionDenied => "spawn_permission_denied",
+                _ => "spawn_failed",
+            },
+            Self::OutputCaptureLimitExceeded => "output_capture_limit_exceeded",
         }
     }
 }
@@ -2565,9 +2786,9 @@ mod tests {
     use super::{
         BuildCommand, BuildInputCapsule, CheckOutcome, Commitment, ContainmentFailureKind,
         ContainmentSubstrate, EnvironmentBinding, ForbiddenProbe, ForkPolicy, JobRequest,
-        LogRedactor, RedactionNeedle, ResourceCeilings, ResourceDimension, ResourceUsage,
-        RunnerControlPlane, RunnerPolicy, RunnerRefusal, RunnerText, SecretBroker, SecretRequest,
-        SourceObject, SubstrateObservation, TrustDomain,
+        LogRedactor, ProcessSubstrate, RedactionNeedle, ResourceCeilings, ResourceDimension,
+        ResourceUsage, RunnerControlPlane, RunnerPolicy, RunnerRefusal, RunnerText, SecretBroker,
+        SecretRequest, SourceObject, SubstrateObservation, TrustDomain,
     };
     use fgit_codec::DecodeLimits;
     use fgit_evidence::EvidenceRecord;
@@ -2655,6 +2876,48 @@ mod tests {
         ) -> Result<SubstrateObservation, super::SubstrateRefusal> {
             Ok(self.0.clone())
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn trusted_process_substrate_reaps_a_real_direct_child_before_receipting_success() {
+        let build = BuildCommand::new(text("/bin/true"), Vec::new())
+            .expect("the host true program is a shell-free test command");
+        let process_capsule = BuildInputCapsule::new(
+            commitment("authority-head"),
+            vec![SourceObject::new(commitment("object-a"), 11)],
+            commitment("dependency-lock"),
+            text("rust-nightly-2026-08-20"),
+            build,
+            vec![
+                EnvironmentBinding::new(text("LANG"), text("C"))
+                    .expect("canonical environment binding"),
+            ],
+        )
+        .expect("trusted-host capsule");
+        let request = JobRequest::new(false, Vec::new(), Vec::new(), 5).expect("safe request");
+        let mut broker = SecretBroker::default();
+        let mut control = RunnerControlPlane::new(ceilings(32), 1).expect("capacity");
+        let admitted = control
+            .admit(
+                process_capsule,
+                policy("trusted-host-release", 32),
+                request,
+                &mut broker,
+                2,
+            )
+            .expect("admitted before the process starts");
+        let mut substrate = ProcessSubstrate::new();
+        let receipt = control
+            .execute(admitted, &mut substrate, &mut broker)
+            .expect("the terminal process receipt is constructed");
+
+        assert_eq!(receipt.outcome(), CheckOutcome::Succeeded);
+        assert_eq!(receipt.reaped().processes_reaped, 1);
+        assert_eq!(receipt.reaped().containment, ContainmentClass::Cooperative);
+        receipt
+            .verify_evidence()
+            .expect("the process-backed receipt has canonical evidence");
     }
 
     #[test]
