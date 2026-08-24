@@ -30,8 +30,8 @@ use fgit_types::numeric::HeadGeneration;
 use fgit_types::refs::RefName;
 use fgit_types::{RepositoryId, TenantId};
 use fgit_verified_read::{
-    PinnedAuthorityHead, ReadResponse, VerifiedReadCapability, VerifiedReadEnvelope,
-    VerifiedReadRefusal, verify_envelope,
+    PinnedAuthorityHead, ReadResponse, VerifiedMembership, VerifiedReadCapability,
+    VerifiedReadEnvelope, VerifiedReadRefusal, verify_envelope,
 };
 use fgit_wire::visibility::RefVisibility;
 
@@ -136,36 +136,34 @@ fn a_server_produced_envelope_verifies_and_the_same_envelope_tampered_does_not()
         "a served envelope must carry the proof-capable layout it was configured with"
     );
 
-    // WHAT IS NOT ASSERTED HERE, and why. On this genesis head the served
-    // answer is `AuthorizedRefAbsence { proof: EmptyState }`, and an
-    // independent client REFUSES it with `ProofRejected`:
+    // PERMITTED, and this one is the whole chain working end to end: the
+    // server's own honest answer verifies against a client pin.
     //
-    //     served head ref_root  e8f50f4d89b233e66e7ceeea41365b2ca5e97dc6ad51aff4311e4db16f776701
-    //     ref_state_merkle_root(&[])
-    //                           91d051fbb873cf20d0a5cc6c1090776cf674f6bccaa5a25c7ac730dc725f5b30
+    // It did NOT when this file was first committed. The genesis ref_root was
+    // e8f50f4d..., an unverifiable answer, because `stage_ref_state_in`
+    // computed a canonical BODY digest regardless of the layout the head
+    // declared, while `EmptyState` verifies only against the empty ref-state
+    // MERKLE root. I reported it without asserting either outcome, since
+    // asserting Ok would have committed a red test and asserting the failure
+    // would have pinned a defect as intended behaviour. `7ccaf8b`
+    // ("fgit-lmc3 select ref roots by authenticated layout") added the
+    // layout-aware `ref_state_root`, and the genesis root is now
+    // 91d051fb... == ref_state_merkle_root(&[]). Asserted here so it stays
+    // fixed.
     //
-    // `EmptyState` verifies only when the pinned root equals the empty
-    // ref-state Merkle root, and a genesis `ref_root` comes from
-    // `stage_ref_state_in` -> `canonical_ref_state_root`, which is a canonical
-    // BODY digest rather than a Merkle root.
-    //
-    // I am deliberately NOT asserting either outcome. Asserting `Ok` commits a
-    // red test to a shared tree; asserting `Err(ProofRejected)` would pin a
-    // suspected defect as intended behaviour, which is worse. The measurement
-    // is reported on frankengit-lmc3 and frankengit-fg037b for whoever owns
-    // the genesis root computation. Note the in-crate fixture verifies
-    // MEMBERSHIP successfully against a generation-2 head staged the same way,
-    // so the simple "two different root functions" reading does not explain
-    // it on its own and I have not isolated the cause.
-
-    // WHAT IS ASSERTED: a server-produced envelope re-pointed at a head the
-    // client did not pin is refused, and refused SPECIFICALLY. This one is
-    // unaffected by the gap above, because the pinned-head comparison happens
-    // before any proof is examined -- and it discriminates, because the
-    // refusal differs from the ProofRejected the untampered answer currently
-    // draws. Nothing here was constructed by this process: the head, the
-    // configuration and the answer all came out of the serving path.
+    // A real client authenticates its own head rather than trusting the served
+    // one; pinning the served body grants the server every benefit of the
+    // doubt, which is what makes the refusals below meaningful.
     let pinned = PinnedAuthorityHead::new(served.head().clone());
+    assert_eq!(
+        verify_envelope(&pinned, &served),
+        Ok(VerifiedMembership::RefAbsence),
+        "the server's own honest answer must verify against a client pin"
+    );
+
+    // TAMPERED 1: the same answer re-pointed at a head the client did not pin
+    // — the mirror replaying a genuine proof from a different moment. Refused
+    // before any proof is examined, so it is named rather than merely an Err.
     let mut moved_head = served.head().clone();
     moved_head.ref_root = digest(0xAB);
     let repinned = VerifiedReadEnvelope::new_with_exact_configuration(
@@ -179,10 +177,25 @@ fn a_server_produced_envelope_verifies_and_the_same_envelope_tampered_does_not()
         "an answer about a head the client did not pin must be refused, and named as such"
     );
 
-    // Deliberately NOT asserted: the configuration-stripped case. With the
-    // untampered answer already drawing ProofRejected on this head, an
-    // `is_err()` there would pass without the tampering doing any work -- a
-    // vacuous assertion dressed as a tamper case.
+    // TAMPERED 2: the pinned head with its configuration stripped, so the
+    // layout reads as legacy and admits no v1 proof.
+    //
+    // This case was omitted while the honest answer above still failed: an
+    // is_err() would have passed without the tampering doing any work. Now
+    // that the honest answer verifies, the refusal is attributable, so it is
+    // asserted by NAME rather than as a bare error.
+    let stripped = VerifiedReadEnvelope::new_with_exact_configuration(
+        served.head().clone(),
+        None,
+        served.answer().clone(),
+    );
+    assert!(
+        matches!(
+            verify_envelope(&pinned, &stripped),
+            Err(VerifiedReadRefusal::RefLayout(_))
+        ),
+        "stripping the configuration must fail on the LAYOUT, not incidentally"
+    );
 }
 
 #[test]
