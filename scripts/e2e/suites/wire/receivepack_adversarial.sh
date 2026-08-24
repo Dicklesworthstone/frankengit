@@ -136,6 +136,19 @@ main() {
   fge_assert_contains 'FG-019C-E2E-023' "${race_out}" \
     'every_disconnect_at_every_phase_leaves_a_resolvable_transaction' \
     'the authority-layer disconnect matrix is present in the run'
+  # The line-3 race probes named individually. A numeric count alone cannot tell
+  # a deleted concurrency probe from a renamed one, and these three cover
+  # different schedules, so losing any ONE of them silently narrows what the
+  # lane proves while the total still matches.
+  fge_assert_contains 'FG-019C-E2E-025' "${race_out}" \
+    'two_concurrent_sessions_deleting_one_ref_yield_exactly_one_commit' \
+    'the real-thread concurrent race is present in the run'
+  fge_assert_contains 'FG-019C-E2E-026' "${race_out}" \
+    'a_scheduled_push_race_forces_the_stale_cas_window_and_still_yields_one_winner' \
+    'the fgit-lab scheduled stale-CAS race is present in the run'
+  fge_assert_contains 'FG-019C-E2E-027' "${race_out}" \
+    'a_basis_bound_loser_is_refused_authority_receipt_stale_not_expected_old_ref_mismatch' \
+    'the production basis-bound loser-status probe is present in the run'
   fge_assert_contains 'FG-019C-E2E-024' "${race_out}" \
     'a_transaction_that_cannot_be_resolved_is_classified_stuck' \
     'the presence case proving the forbidden state is detectable is present in the run'
@@ -174,6 +187,6 @@ fge_context claim_class 'BOUNDED MODEL, not invariant. The disconnect results ra
 fge_context projection_bound 'RETRACTION, ProudJaguar 9209: the test adapters are NOT conforming projections. snapshot ignores the PublicationBasis and AuthenticatedHead it is handed, and materialize_commit mints roots from seed bytes rather than from state, so three adapters are three variants of ONE unbound adapter and quantifying over them buys nothing about ref semantics. Every claim resting on ref state or on a session observing the successor basis is WITHDRAWN. What survives never depended on the adapter: faults are injected in the store beneath it, and the assertions are about whether a transaction can be RESOLVED and whether it is DECIDED ONCE, never about what was decided'
 fge_context stuck_state_is_detectable 'the forbidden stuck-intermediate class is proven reachable and recognised by driving the exported reconcile_outcome to its fail-closed accelerator-conflict arm, with an agreeing-reads twin, so the matrix assertion can fail in the direction that matters'
 fge_context bomb_packs_through_the_push_path 'covered as a COMPOSITION question rather than by re-testing fgit-pack: the same real pack is pushed twice through ReceivePack, changing only one field of ReceiveLimits.pack, and must be refused when tightened and accepted when permissive, with the reader error naming the CONFIGURED value. A receive path that validated with PackLimits::default() would leave every fgit-pack bomb test green while silently ignoring every operator-configured bound. Three bounds probed (max_entries, max_object_bytes, max_total_expanded_bytes); delta and inflate-work bounds are NOT covered'
-fge_context line3_not_discharged 'acceptance line 3 (exactly-one-winner over ref state with correct per-loser statuses) is still NOT discharged, but the REASON here was stale and is corrected. It used to read that ref contention needs a head-bound projection, a product slice with an owner. That slice now exists and is exercised: two_sessions_deleting_one_ref_yield_exactly_one_commit_and_a_typed_loser drives CanonicalAdmissionProjection and requires exactly one commit plus a typed ExpectedOldRefMismatch loser (f8d5055). What is missing is a CONCURRENT schedule -- those admissions run back to back, so the property holds for a deterministic ordering and says nothing about interleavings. That is a fixture limit, not an unwritten test: StagingStore holds an Rc so the projection is not Send. Anyone closing this line needs a Send-capable fixture, NOT the projection the old wording sent them to build'
+fge_context line3_schedules 'acceptance line 3 (exactly-one-winner over ref state with correct per-loser statuses) is covered by FOUR probes, and this line has been wrong twice before -- first claiming a head-bound projection was missing after it existed, then claiming concurrency was impossible on an Rc-bound fixture after that double was converted. Both are dead. Covered now: sequential exact-winner with a typed ExpectedOldRefMismatch loser (f8d5055); a real-thread concurrent race whose interleaving was measured, first 50 second 14 of 64 (544285a); an fgit-lab scheduled race that forces the stale-CAS window by construction and pins the canonical schedule bytes (6cd6196); and the PRODUCTION basis-bound entrypoint, whose stale loser is AuthorityReceiptStale rather than the generic path ExpectedOldRefMismatch (70a155c). What remains open is line 1, not line 3: object-bearing hidden-ref disclosure and retention await the owner policy ruling'
 fge_context non_claim 'in-process probes of two state machines; nothing here is differential evidence against upstream Git, and nothing speaks for a real network peer'
 main

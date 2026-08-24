@@ -66,17 +66,21 @@
 //! * **This is a bounded-model result, not an invariant.** It ranges over the
 //!   fault directives in [`directives`], crossed with every operation position
 //!   a clean admission reaches. It does not quantify over all schedules.
-//! * **Acceptance line 3 is NOT discharged here, and the REASON changed.** It
-//!   used to be that exactly-one-winner over ref state needed a head-bound
-//!   projection. That projection now exists and is used:
+//! * **Acceptance line 3 now has four probes, and this note has been wrong
+//!   twice.** It first said the line needed a head-bound projection, after that
+//!   projection already existed; it then said a CONCURRENT schedule was
+//!   impossible because `StagingStore` held an `Rc`, after that double had been
+//!   converted. Both readings are dead. What is actually covered:
 //!   [`two_sessions_deleting_one_ref_yield_exactly_one_commit_and_a_typed_loser`]
-//!   drives `CanonicalAdmissionProjection` and asserts exactly one commit plus a
-//!   typed `ExpectedOldRefMismatch` loser. What is still missing is a
-//!   CONCURRENT schedule: those two admissions run back to back, so the result
-//!   holds for a deterministic ordering and says nothing about interleavings.
-//!   That is a fixture limit rather than an unwritten test -- `StagingStore`
-//!   holds an `Rc`, so the projection is not `Send`. Stated precisely because
-//!   the old wording would send a reader to build a slice that already exists.
+//!   (deterministic order, typed loser),
+//!   [`two_concurrent_sessions_deleting_one_ref_yield_exactly_one_commit`]
+//!   (real threads, interleaving measured),
+//!   [`a_scheduled_push_race_forces_the_stale_cas_window_and_still_yields_one_winner`]
+//!   (`fgit-lab`, worst window forced by construction), and
+//!   [`a_basis_bound_loser_is_refused_authority_receipt_stale_not_expected_old_ref_mismatch`]
+//!   (the production entrypoint's own loser status). A note that goes stale
+//!   behind its own fixes is worse than none, so it names the probes rather
+//!   than describing a gap.
 //! * **No adapter here is the production projection**, so no ref-policy
 //!   question — whether a losing push is refused `ExpectedOldRefMismatch` or
 //!   permitted — is answered.
@@ -1503,14 +1507,12 @@ fn one_session_alone_deleting_that_ref_does_commit() {
 /// a different code pinned, this test and only this test fails, and the failure
 /// reports the real observed code rather than a constant.
 ///
-/// STILL NOT ASSERTED, and this is the audit objection that stands: the two
-/// admissions run **sequentially**, not concurrently. This is exactly-one-winner
-/// under a deterministic schedule where the first admission completes before the
-/// second begins. It is not evidence about interleaved schedules, and the old
-/// hedge about an exhausted replan budget remains the right caution *there*.
-/// True concurrency is unavailable in this harness rather than merely unwritten:
-/// `StagingStore` holds an `Rc`, so the projection is not `Send` and the two
-/// sessions cannot be driven from separate threads without a different fixture.
+/// SCOPE: these two admissions run **sequentially**, so this is
+/// exactly-one-winner under a deterministic ordering and is not evidence about
+/// interleavings. That is now a division of labour rather than a limit -- the
+/// concurrent and lab-scheduled probes below cover the other schedules, and the
+/// claim that concurrency was *impossible* here (an `Rc`-bound fixture) stopped
+/// being true when that double became `Arc`/`Mutex`.
 #[test]
 fn two_sessions_deleting_one_ref_yield_exactly_one_commit_and_a_typed_loser() {
     let first_context = context(b"fg019c-headbound-a");
@@ -1760,6 +1762,11 @@ fn two_concurrent_sessions_deleting_one_ref_yield_exactly_one_commit() {
     // assertions are the evidence.
 }
 
+/// The canonical bytes of the declared race schedule, measured from the run
+/// rather than predicted.
+const SCHEDULED_RACE_CANONICAL_LINE: &str =
+    "fgit-lab-schedule-v1|seed=none|participants=push-a,push-b|steps=3|order=push-a,push-b,push-a";
+
 /// The rival session a scheduled race admits inline.
 struct ScheduledRival<'a> {
     context: &'a AdmissionContext,
@@ -1936,13 +1943,27 @@ fn a_scheduled_push_race_forces_the_stale_cas_window_and_still_yields_one_winner
         "both sessions committed a delete of the same ref from one lineage: the rival \
          committed inside A's snapshot and A committed against its stale token"
     );
+    // The EXACT code, not merely "some refusal". This probe drives the generic
+    // non-basis-bound entrypoint, whose stale-loser code is
+    // `ExpectedOldRefMismatch`; the production basis-bound path answers
+    // `AuthorityReceiptStale` and has its own probe. Pinning both is what keeps
+    // the two entrypoints from being conflated.
     assert!(
         matches!(
             a.commands[0].terminal.outcome,
-            DecisionOutcome::Refused { .. }
+            DecisionOutcome::Refused {
+                code: RefusalCode::ExpectedOldRefMismatch,
+                ..
+            }
         ),
-        "A lost the scheduled race and must carry a terminal refusal, got {:?}",
+        "A lost the scheduled race and must carry the generic entrypoint's \
+         predecessor-mismatch refusal, got {:?}",
         a.commands[0].terminal.outcome
+    );
+    assert_eq!(
+        a.command_statuses().len(),
+        1,
+        "one command must yield exactly one reported status"
     );
 
     // Every declared boundary ran. Audit 4658.1 asked for this and the precedent
@@ -1953,6 +1974,16 @@ fn a_scheduled_push_race_forces_the_stale_cas_window_and_still_yields_one_winner
         scheduled.cursor.borrow().is_exhausted(),
         "the declared three-boundary schedule was not exhausted, so at least one \
          race boundary never ran"
+    );
+
+    // The schedule itself is witnessed, not just consumed. Exhaustion alone
+    // cannot tell a three-boundary schedule from a shorter one that also ran to
+    // its end, so the canonical bytes pin WHICH schedule was declared.
+    assert_eq!(
+        schedule.canonical_line(),
+        SCHEDULED_RACE_CANONICAL_LINE,
+        "the declared race schedule changed; the recorded canonical bytes are the \
+         witness for which interleaving this evidence is about"
     );
 }
 
