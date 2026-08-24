@@ -47,6 +47,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
 
+mod attempt_runner;
+
+pub use attempt_runner::{
+    AttemptJournal, AttemptRunnerRefusal, FilesystemAssetInventory, MatrixOutcome, ResumeDecision,
+    TargetMatrix, TargetRecord, TargetSpec, TargetStep, TargetStepResult, UnavailableTargetStep,
+};
+
+/// Stable repository-owned entrypoint name used by the dormant release lane.
+///
+/// The probe only establishes that the durable attempt-runner vocabulary is
+/// wired into repository-owned tooling. It does not execute a target, publish
+/// a manifest, or promote `scripts/verify.sh release` beyond its required
+/// typed exit-3 refusal.
+pub const ATTEMPT_RUNNER_ENTRYPOINT: &str = "fgit-release-attempt";
+
 /// Hex, lowercase, for rendering digests inside identity preimages.
 fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);

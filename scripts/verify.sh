@@ -97,6 +97,14 @@ run_release() {
   echo_step "Checking the D14 license gate"
   "$ROOT/scripts/license_gate.sh"
 
+  # The runner probe is intentionally narrower than a release attempt: target
+  # builds require a caller-supplied durable root, exact matrix, and bounded
+  # fgit-runner obligation. Calling the repository-owned entrypoint here keeps
+  # release behavior out of workflow YAML while the lane below remains a typed
+  # exit-3 refusal until the complete native matrix exists.
+  echo_step "Checking DSR release-attempt runner wiring"
+  cargo run --locked -p fgit-release --bin fgit-release-attempt -- --release-gate-probe
+
   refuse_dormant "No releasable FrankenGit binary or complete native target matrix exists yet"
 }
 
