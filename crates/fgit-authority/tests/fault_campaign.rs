@@ -1097,10 +1097,20 @@ fn an_isolated_cell_cannot_label_a_drifted_answer_as_current() {
 
 #[test]
 fn an_isolated_cell_that_reconnects_observes_no_lost_write() {
-    // Region loss and return. While a cell is genuinely cut off, the survivors
-    // keep publishing; when the partition heals it must observe EVERY committed
-    // write, never a rolled-back or torn view. Zero acknowledged-write loss is
-    // the acceptance line, and a reconnecting reader is where a loss shows first.
+    // REACHABILITY loss and return -- deliberately not called region loss.
+    //
+    // What this exercises is a cell cut off from the authority while survivors
+    // keep publishing, and what it observes on return. That is real, and it is
+    // NOT the acceptance line's "region loss with visible-before-archive
+    // durability states": that one is about DURABILITY STATE (impaired
+    // placement, visible-but-not-archived), not about reachability, and an
+    // in-memory store cannot stand in for it. I previously described this test
+    // as region-loss evidence in a batch report, which inflated it; the
+    // durability-state scenarios are tracked separately on the bead and this
+    // comment exists so no future reader inherits the confusion.
+    //
+    // Zero acknowledged-write loss is the property here, and a reconnecting
+    // reader is where a loss would show first.
     let instance = StoreInstanceId::from_raw(0xF036_B002);
     let store = MemoryAuthorityStore::new(instance);
     let key = head_key("region-loss");
@@ -1399,7 +1409,8 @@ fn a_crash_during_a_head_transition_never_leaves_a_half_published_head() {
 /// Run one fixed transition sequence on a fresh store and return what a reader
 /// would see, so two runs separated in wall-clock time can be compared.
 fn replay_fixed_sequence(instance_raw: u64, bodies: &[&[u8]]) -> Vec<(HeadGeneration, Vec<u8>)> {
-    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(instance_raw));
+    let instance = StoreInstanceId::from_raw(instance_raw);
+    let store = MemoryAuthorityStore::new(instance);
     let key = head_key("clock-independence");
     let mut recorder = HistoryRecorder::default();
     let mut predecessor = initialize(&mut recorder, &store, &key);
@@ -1418,6 +1429,20 @@ fn replay_fixed_sequence(instance_raw: u64, bodies: &[&[u8]]) -> Vec<(HeadGenera
         ));
         observed.push((predecessor.generation(), predecessor.body().to_vec()));
     }
+
+    // Every history this file produces goes through the checker, including this
+    // one. It previously did not -- it compared two head histories directly and
+    // ran no linearizability check at all, which left one scenario outside the
+    // fg004b oracle for no reason other than that it did not need faults.
+    let report = check_and_emit(
+        instance_raw,
+        &FaultPlan::none(),
+        &recorder,
+        AuthorityModel::new(instance),
+        "a fixed operation sequence, checked like every other history in this campaign",
+    );
+    expect_linearizable(&report);
+
     observed
 }
 
@@ -1467,4 +1492,211 @@ fn the_head_history_is_a_pure_function_of_its_operations_not_of_the_clock() {
         third[..3],
         "the histories must agree up to the point the inputs differ"
     );
+}
+
+#[test]
+fn the_cell_level_flow_is_linearizable_under_seeded_plans_and_replays_identically() {
+    // Addresses two items from source review 3944 that my explicit-plan scenarios
+    // did not cover: SEEDED REPLAY, and per-history checking of a seeded
+    // cell-level flow rather than of the pre-existing read matrix.
+    //
+    // Why seeded matters when I already had explicit plans: an explicit directive
+    // is a scenario I chose, so it can only find faults I thought of. A seeded
+    // plan places faults across a span I did not pick, at positions I did not
+    // enumerate, and the acceptance asks for replayability of exactly that.
+    let base_seed = configured_seed(DEFAULT_SEED);
+    let mut transcripts = Vec::new();
+
+    for seed in [
+        base_seed,
+        base_seed.wrapping_add(7),
+        base_seed ^ 0x0F03_6B00,
+    ] {
+        // Two runs per seed against fresh stores, to establish replay rather than
+        // merely a pass. Same seed must reproduce the same fault log.
+        let mut per_seed = Vec::new();
+        for attempt in 0..2 {
+            let instance = StoreInstanceId::from_raw(0xF036_B020 + attempt);
+            let store = MemoryAuthorityStore::new(instance);
+            let key = head_key("seeded-cell-flow");
+            let mut recorder = HistoryRecorder::default();
+            let root = initialize(&mut recorder, &store, &key);
+
+            // The publisher runs BEFORE the seeded plan is installed, and that
+            // ordering is the whole design of this scenario rather than a
+            // convenience.
+            //
+            // A seeded plan places faults across positions I did not choose, and
+            // one of those faults is DuplicateRequest. Duplicate delivery of a
+            // MUTATION means one invocation with two effects: the first delivery
+            // commits and the second returns PredecessorMismatch, so with
+            // `deliver: Second` the caller is told its CAS lost while the head
+            // actually advanced. No sequential specification can linearize that,
+            // because the spec models one effect per invocation -- so the checker
+            // correctly reports NotLinearizable and the finding is about the
+            // FAULT MODEL, not about the store.
+            //
+            // I hit exactly that on the first version of this test and nearly
+            // read it as a violation. The pre-existing seeded_fault_matrix case
+            // already records the same constraint in its own note ("seeded plans
+            // target reads so duplicate delivery and ambiguity preserve a
+            // checkable client history"); this scenario honours it by faulting
+            // only the read path. Mutation-side duplicate and lost delivery are
+            // covered with EXPLICIT plans elsewhere in this file, where the
+            // outcome is asserted directly instead of through the spec.
+            let mut predecessor = root;
+            for step in 0..3_u64 {
+                let next = predecessor.generation().get().saturating_add(1);
+                predecessor = committed_receipt(&recorder.execute(
+                    &store,
+                    2,
+                    AuthorityOp::CompareExchangeHead {
+                        key: key.clone(),
+                        expected: predecessor.token(),
+                        new_generation: generation(next),
+                        new_body: format!("seeded-{step}").into_bytes(),
+                    },
+                ));
+            }
+            let published = (predecessor.generation(), predecessor.body().to_vec());
+
+            let plan = FaultPlan::seeded(seed, 10, 5);
+            store.install_fault_plan(plan.clone());
+
+            // Now the cell-level READ path under faults the seed placed: a cell
+            // that was isolated, and cells returning afterwards.
+            for client in 3..=6_u64 {
+                let _observed =
+                    recorder.execute(&store, client, AuthorityOp::ReadHead { key: key.clone() });
+            }
+
+            // Whatever the seed did to the reads, the published state stands.
+            let settled = read_receipt(&recorder.execute(
+                &store,
+                7,
+                AuthorityOp::ReadHead { key: key.clone() },
+            ));
+            assert_eq!(
+                (settled.generation(), settled.body().to_vec()),
+                published,
+                "seeded read-path faults must not alter what was published"
+            );
+            assert!(
+                !store.fault_log().is_empty(),
+                "the seeded plan must have injected at least one fault"
+            );
+
+            assert_eq!(plan.seed(), Some(seed));
+            let report = check_and_emit(
+                seed,
+                &plan,
+                &recorder,
+                AuthorityModel::new(instance),
+                "seeded cell-level flow: isolated reader, publisher, returning reader",
+            );
+            expect_linearizable(&report);
+
+            per_seed.push(fault_script_json(&plan));
+        }
+
+        // REPLAY: the same seed must place the same faults both times.
+        assert_eq!(
+            per_seed[0], per_seed[1],
+            "seed {seed:#x} produced two different fault scripts, so it is not replayable"
+        );
+        transcripts.push(per_seed.remove(0));
+    }
+
+    // And the seed must MATTER, or "replayable" is the replayability of a
+    // constant. Distinct seeds must not all yield the same script.
+    let mut distinct = transcripts.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert!(
+        distinct.len() > 1,
+        "every seed produced an identical fault script, so seeding is doing nothing"
+    );
+}
+
+#[test]
+fn a_process_pause_around_a_cas_changes_no_outcome() {
+    // GC-pause simulation, the acceptance item I previously said was "expressible
+    // with FaultKind::Delay and I did not do it". Doing it.
+    //
+    // A pause is not a fault in the sense the other cases are: nothing is lost,
+    // corrupted or reordered. The operation simply takes longer, which is exactly
+    // what a stop-the-world collection looks like from outside. So the property is
+    // the strongest available one -- the outcome must be IDENTICAL to the
+    // unpaused run, not merely still linearizable.
+    let baseline = {
+        let instance = StoreInstanceId::from_raw(0xF036_B030);
+        let store = MemoryAuthorityStore::new(instance);
+        let key = head_key("gc-pause");
+        let mut recorder = HistoryRecorder::default();
+        let root = initialize(&mut recorder, &store, &key);
+        let committed = committed_receipt(&recorder.execute(
+            &store,
+            1,
+            AuthorityOp::CompareExchangeHead {
+                key: key.clone(),
+                expected: root.token(),
+                new_generation: generation(2),
+                new_body: b"after-pause".to_vec(),
+            },
+        ));
+        let report = check_and_emit(
+            0xF036_B030,
+            &FaultPlan::none(),
+            &recorder,
+            AuthorityModel::new(instance),
+            "unpaused control for the GC-pause comparison",
+        );
+        expect_linearizable(&report);
+        (committed.generation(), committed.body().to_vec())
+    };
+
+    for position in [FaultPosition::BeforeEffect, FaultPosition::AfterEffect] {
+        let instance = StoreInstanceId::from_raw(0xF036_B031);
+        let store = MemoryAuthorityStore::new(instance);
+        let key = head_key("gc-pause");
+        let mut recorder = HistoryRecorder::default();
+        let root = initialize(&mut recorder, &store, &key);
+
+        let plan = FaultPlan::explicit(vec![
+            FaultDirective::new(OpIndex::ZERO, FaultKind::Delay { position, ticks: 9 })
+                .only_for(fgit_authority::AuthorityOpKind::CompareExchangeHead),
+        ]);
+        store.install_fault_plan(plan.clone());
+
+        let paused = committed_receipt(&recorder.execute(
+            &store,
+            1,
+            AuthorityOp::CompareExchangeHead {
+                key: key.clone(),
+                expected: root.token(),
+                new_generation: generation(2),
+                new_body: b"after-pause".to_vec(),
+            },
+        ));
+
+        assert_eq!(
+            (paused.generation(), paused.body().to_vec()),
+            baseline,
+            "{position:?}: a pause around the CAS changed the committed outcome"
+        );
+        assert!(
+            !store.fault_log().is_empty(),
+            "{position:?}: the pause must actually have been injected, or this run is the \
+             control again"
+        );
+
+        let report = check_and_emit(
+            0xF036_B031,
+            &plan,
+            &recorder,
+            AuthorityModel::new(instance),
+            "a stop-the-world pause around a CAS: same outcome, still linearizable",
+        );
+        expect_linearizable(&report);
+    }
 }
