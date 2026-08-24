@@ -2183,15 +2183,17 @@ impl CumulativeOutcomes {
 ///
 /// # What this does not do
 ///
-/// It does not gate publication, and it does not say where `carried` comes
-/// from. Retention -- whether the authority materializes the cumulative leaf
-/// set, or the commitment changes, or capsules gain an `outcome_index_root`
-/// field to bound the walk -- is a canonical-body question under §5.2/§10 and
-/// is escalated, not decided here. Today the only route to historic outcomes
-/// is the decision-chain walk, bounded at [`MAX_REPLAY_BATCHES`], so a caller
-/// past that bound cannot supply `carried` at all. That is a refusal at the
-/// caller's layer, deliberately not papered over here with a partial set that
-/// would silently produce a wrong root.
+/// It does not gate publication, and it does not itself choose where `carried`
+/// comes from. The retained-leaf checkpoint route supplies a canonical leaf
+/// set from immutable evidence bound by a root-last capsule, then replays the
+/// bounded tail after that checkpoint. A missing or unusable checkpoint falls
+/// back to the decision-chain walk; the bound still produces the typed
+/// [`OutcomeFailure::ReplayBoundExceeded`] refusal rather than a partial set.
+///
+/// A capsule never binds `outcome_index_root` as a replacement for the leaf
+/// set. The root alone cannot be extended under this digest-sorted commitment,
+/// as the argument above shows. That rejected shortcut must not be reintroduced
+/// by a caller attempting to supply a root in place of `carried`.
 ///
 /// # Errors
 ///
