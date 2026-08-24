@@ -328,13 +328,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
             run_export(storage_root, tenant, repository, PathBuf::from(destination))
         }
         [command, storage_root, tenant, repository, listen_address] if command == "serve" => {
-            run_serve(
-                storage_root,
-                tenant,
-                repository,
-                listen_address,
-                GitHashAlgorithm::Sha1,
-            )
+            run_serve(storage_root, tenant, repository, listen_address)
         }
         _ => Err(CliRefusal::Usage),
     }
@@ -348,7 +342,7 @@ fn run_init(
     format: GitHashAlgorithm,
 ) -> Result<CliOutcome, CliRefusal> {
     let (node, initialization) =
-        OneNode::init(node_config(storage_root, tenant, repository, format)?)
+        OneNode::init(node_config(storage_root, tenant, repository, Some(format))?)
             .map_err(CliRefusal::Node)?;
     node.shutdown().map_err(CliRefusal::Node)?;
     Ok(CliOutcome::Initialized(initialization))
@@ -356,25 +350,20 @@ fn run_init(
 
 /// Serves one bounded git-daemon session.
 ///
-/// Opens with SHA-1 because the node does not persist a repository's object
-/// format yet. A SHA-256 repository is therefore served incorrectly until that
-/// lands; see `docs/D3_SHA256_REPOSITORY_DECISION.md`. Deliberately NOT solved
-/// by a command-line format argument: the format belongs in the repository, and
-/// the persisted `RepositoryConfigurationBody` is where it will be read from.
+/// The repository's object format is selected from its authenticated canonical
+/// configuration, not supplied by this open-path command.
 fn run_serve(
     storage_root: &str,
     tenant: &str,
     repository: &str,
     listen_address: &str,
-    format: GitHashAlgorithm,
 ) -> Result<CliOutcome, CliRefusal> {
     {
         {
             let listener = TcpListener::bind(listen_address).map_err(CliRefusal::Listener)?;
             let listen_address = listener.local_addr().map_err(CliRefusal::Listener)?;
-            let node =
-                OneNode::open_existing(node_config(storage_root, tenant, repository, format)?)
-                    .map_err(CliRefusal::Node)?;
+            let node = OneNode::open_existing(node_config(storage_root, tenant, repository, None)?)
+                .map_err(CliRefusal::Node)?;
             let serving = node.serve_git_daemon_once(&listener);
             let cleanup = node.shutdown();
             match (serving, cleanup) {
@@ -401,13 +390,8 @@ fn run_import(
     idempotency_key: &[u8],
     source: &Path,
 ) -> Result<CliOutcome, CliRefusal> {
-    let node = OneNode::open_existing(node_config(
-        storage_root,
-        tenant,
-        repository,
-        GitHashAlgorithm::Sha1,
-    )?)
-    .map_err(CliRefusal::Node)?;
+    let node = OneNode::open_existing(node_config(storage_root, tenant, repository, None)?)
+        .map_err(CliRefusal::Node)?;
     let request = node.request_context();
     let imported = node
         .runtime()
@@ -462,13 +446,8 @@ fn run_export(
     repository: &str,
     destination: PathBuf,
 ) -> Result<CliOutcome, CliRefusal> {
-    let node = OneNode::open_existing(node_config(
-        storage_root,
-        tenant,
-        repository,
-        GitHashAlgorithm::Sha1,
-    )?)
-    .map_err(CliRefusal::Node)?;
+    let node = OneNode::open_existing(node_config(storage_root, tenant, repository, None)?)
+        .map_err(CliRefusal::Node)?;
     let exported = node
         .runtime()
         .block_on(node.authority_selected_pack_payload())
@@ -608,13 +587,8 @@ fn run_doctor(
     repository: &str,
     sampled_object: Option<GitOid>,
 ) -> Result<CliOutcome, CliRefusal> {
-    let node = OneNode::open_existing(node_config(
-        storage_root,
-        tenant,
-        repository,
-        GitHashAlgorithm::Sha1,
-    )?)
-    .map_err(CliRefusal::Node)?;
+    let node = OneNode::open_existing(node_config(storage_root, tenant, repository, None)?)
+        .map_err(CliRefusal::Node)?;
     let inspection = node.runtime().block_on(node.doctor(sampled_object));
     let cleanup = node.shutdown();
     match (inspection, cleanup) {
@@ -632,14 +606,15 @@ fn node_config(
     storage_root: &str,
     tenant: &str,
     repository: &str,
-    object_format: GitHashAlgorithm,
+    object_format: Option<GitHashAlgorithm>,
 ) -> Result<NodeConfig, CliRefusal> {
     let tenant_id = TenantId::from_hex(tenant).map_err(CliRefusal::Tenant)?;
     let repository_id = RepositoryId::from_hex(repository).map_err(CliRefusal::Repository)?;
-    Ok(
-        NodeConfig::new(PathBuf::from(storage_root), tenant_id, repository_id)
-            .with_object_format(object_format),
-    )
+    let configuration = NodeConfig::new(PathBuf::from(storage_root), tenant_id, repository_id);
+    Ok(match object_format {
+        Some(object_format) => configuration.with_object_format(object_format),
+        None => configuration,
+    })
 }
 
 /// Parses the explicit object-format token accepted by `fg init`.

@@ -43,13 +43,16 @@ use fgit_authority::{
     AuthorityVersionToken, HeadInit, HeadKey, HeadRead, IdempotencyKey, ImmutableKey,
     ImmutableRead, KeyError, OutcomeLookup, PutOutcome, StoreInstanceId,
     initialize_repository_async, outcome_index_root, read_authority_head_body_async,
-    read_decision_batch_body_async, resolve_outcome_async,
+    read_decision_batch_body_async, read_repository_configuration_async, resolve_outcome_async,
+    stage_repository_configuration_async,
 };
 use fgit_authority_fsqlite::{EngineError, FsqliteAuthorityStore};
 use fgit_chronicle::{
     PublicationBasis, PublicationVerdict, VerifiedPublication, publish_async, verify_pair,
 };
-use fgit_codec::schema::{RepositoryAuthorityHeadBody, RepositoryCommitRecord};
+use fgit_codec::schema::{
+    RepositoryAuthorityHeadBody, RepositoryCommitRecord, RepositoryConfigurationBody,
+};
 use fgit_codec::{
     CanonicalBody, CodecRefusal, CryptoBodyIdentity, body_id, decode_body, encode_body,
 };
@@ -75,6 +78,7 @@ use fgit_types::cell::{
     CellReadiness, CellRefusal, CellState, CellTransition, CellTransitionCause, ReadLabel,
     admits_read,
 };
+use fgit_types::layout::RootLayoutVersion;
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256,
     HeadGeneration, PolicyEpoch, PrincipalId, RefusalCode, RegistryEpoch,
@@ -2213,6 +2217,14 @@ pub enum NodeRefusal {
     AuthorityHeadAbsent,
     /// A supplied authority materialization names another repository.
     RepositoryMismatch,
+    /// A caller's explicit format expectation disagrees with the authenticated
+    /// repository configuration.
+    ObjectFormatMismatch {
+        /// The canonical native Git object identity domain stored by the repository.
+        stored: GitHashAlgorithm,
+        /// The incompatible explicit expectation supplied to this node open.
+        supplied: GitHashAlgorithm,
+    },
     /// The operator-selected storage root cannot name the embedded database.
     StoragePathEncoding,
     /// The derived authority-head key was outside the bounded key vocabulary.
@@ -2264,6 +2276,10 @@ impl Display for NodeRefusal {
             }
             Self::RepositoryMismatch => formatter
                 .write_str("authority materialization does not belong to this node repository"),
+            Self::ObjectFormatMismatch { stored, supplied } => write!(
+                formatter,
+                "caller requested {supplied} objects but authenticated repository configuration requires {stored}"
+            ),
             Self::StoragePathEncoding => formatter.write_str(
                 "node storage root cannot be represented as a UTF-8 embedded authority path",
             ),
@@ -2322,6 +2338,7 @@ impl Error for NodeRefusal {
             | Self::InvalidWorkerCount
             | Self::AuthorityHeadAbsent
             | Self::RepositoryMismatch
+            | Self::ObjectFormatMismatch { .. }
             | Self::HeadInitializationConflict
             | Self::StoragePathEncoding
             | Self::ObjectTooLarge { .. }
@@ -3687,14 +3704,24 @@ pub struct NodeConfig {
     git_daemon_repository_path: GitDaemonRepositoryPath,
     store_instance: StoreInstanceId,
     worker_threads: usize,
-    object_format: GitHashAlgorithm,
+    /// An explicit creation/open expectation. An unspecified value defers to
+    /// the authenticated repository configuration when opening an existing
+    /// repository, while initialization selects the conservative SHA-1
+    /// compatibility profile and persists that selection canonically.
+    object_format: Option<GitHashAlgorithm>,
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
 }
 
 impl NodeConfig {
-    /// Creates the bounded SHA-1 Git compatibility profile used in this slice.
+    /// Creates a node configuration with no caller-supplied object-format
+    /// expectation.
+    ///
+    /// Existing repositories select their native object domain from the
+    /// authenticated configuration body. New repositories use the bounded
+    /// SHA-1 compatibility profile unless [`Self::with_object_format`] names a
+    /// deliberate creation format.
     #[must_use]
     pub fn new(storage_root: PathBuf, tenant_id: TenantId, repository_id: RepositoryId) -> Self {
         Self {
@@ -3704,7 +3731,7 @@ impl NodeConfig {
             git_daemon_repository_path: default_git_daemon_repository_path(repository_id),
             store_instance: StoreInstanceId::from_raw(1),
             worker_threads: 1,
-            object_format: GitHashAlgorithm::Sha1,
+            object_format: None,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             segment_limits: SegmentLimits::default(),
             git_daemon_session_timeout: GitDaemonSessionTimeout::DEFAULT,
@@ -3728,7 +3755,7 @@ impl NodeConfig {
     /// Selects the native Git object identity domain.
     #[must_use]
     pub const fn with_object_format(mut self, object_format: GitHashAlgorithm) -> Self {
-        self.object_format = object_format;
+        self.object_format = Some(object_format);
         self
     }
 
@@ -3848,6 +3875,27 @@ impl OneNode {
         let repository_id = config.repository_id;
         let node = Self::open_components(config)?;
         let initialization_cx = node.authority_context();
+        let configuration = RepositoryConfigurationBody {
+            root_layout: RootLayoutVersion::LegacyWholeBody,
+            object_format: node.object_format,
+        };
+        let configuration_root = match node.runtime.block_on(stage_repository_configuration_async(
+            &node.authority,
+            &initialization_cx,
+            &configuration,
+        )) {
+            Ok(root) => root,
+            Err(staging) => {
+                let initialization = NodeRefusal::from(staging);
+                return match node.shutdown() {
+                    Ok(()) => Err(initialization),
+                    Err(cleanup) => Err(NodeRefusal::AuthorityInitializationCleanup {
+                        initialization: Box::new(initialization),
+                        cleanup: Box::new(cleanup),
+                    }),
+                };
+            }
+        };
         let ref_root = match node
             .runtime
             .block_on(node.admission_materializer.stage_ref_state_in(
@@ -3886,7 +3934,7 @@ impl OneNode {
                 }),
             };
         }
-        let genesis = match genesis_head(repository_id, ref_root) {
+        let genesis = match genesis_head(repository_id, ref_root, configuration_root) {
             Ok(genesis) => genesis,
             Err(initialization) => {
                 return match node.shutdown() {
@@ -3932,10 +3980,35 @@ impl OneNode {
     /// typed refusal. A successful return has authenticated the current head
     /// receipt against the store's issuance record.
     pub fn open_existing(config: NodeConfig) -> Result<Self, NodeRefusal> {
-        let node = Self::open_components(config)?;
-        let opened = node.runtime().block_on(node.authenticate_authority_head());
+        let supplied_object_format = config.object_format;
+        let mut node = Self::open_components(config)?;
+        let configuration_cx = node.authority_context();
+        let opened = node.runtime().block_on(async {
+            let authenticated = node.authenticate_authority_head().await?;
+            let head = authenticated
+                .body()
+                .map_err(fgit_authority::OutcomeFailure::from)?;
+            let configuration = read_repository_configuration_async(
+                &node.authority,
+                &configuration_cx,
+                &head.configuration_root,
+            )
+            .await?;
+            if let Some(supplied) = supplied_object_format
+                && supplied != configuration.object_format
+            {
+                return Err(NodeRefusal::ObjectFormatMismatch {
+                    stored: configuration.object_format,
+                    supplied,
+                });
+            }
+            Ok(configuration.object_format)
+        });
         match opened {
-            Ok(_) => Ok(node),
+            Ok(object_format) => {
+                node.object_format = object_format;
+                Ok(node)
+            }
             Err(opening) => Err(close_after_existing_open_failure(node, opening)),
         }
     }
@@ -3989,7 +4062,7 @@ impl OneNode {
             tenant_id: config.tenant_id,
             repository_id: config.repository_id,
             namespace,
-            object_format: config.object_format,
+            object_format: config.object_format.unwrap_or(GitHashAlgorithm::Sha1),
             max_object_bytes: config.max_object_bytes,
             segment_limits: config.segment_limits,
             git_daemon_session_timeout: config.git_daemon_session_timeout,
@@ -4985,6 +5058,7 @@ fn default_git_daemon_repository_path(repository_id: RepositoryId) -> GitDaemonR
 fn genesis_head(
     repository_id: RepositoryId,
     ref_root: Digest,
+    configuration_root: Digest,
 ) -> Result<RepositoryAuthorityHeadBody, NodeRefusal> {
     Ok(RepositoryAuthorityHeadBody {
         repository_id,
@@ -4999,7 +5073,7 @@ fn genesis_head(
         outcome_index_root: outcome_index_root(&[]).map_err(NodeRefusal::from)?,
         retention_root: genesis_root(repository_id, b"retention"),
         outbox_root: genesis_root(repository_id, b"outbox"),
-        configuration_root: genesis_root(repository_id, b"configuration"),
+        configuration_root,
         policy_epoch: PolicyEpoch::FIRST,
         format_registry_epoch: RegistryEpoch::FIRST,
         last_checkpoint_id: None,
@@ -5160,8 +5234,12 @@ mod tests {
         let repository_id = RepositoryId::from_bytes([0x22; 16]);
         let ref_root = genesis_root(repository_id, b"fixed-genesis-refs");
 
-        let head = genesis_head(repository_id, ref_root)
-            .expect("the canonical empty outcome index derives without input entries");
+        let head = genesis_head(
+            repository_id,
+            ref_root,
+            genesis_root(repository_id, b"fixed-genesis-configuration"),
+        )
+        .expect("the canonical empty outcome index derives without input entries");
 
         assert_eq!(
             head.outcome_index_root,
@@ -7021,8 +7099,12 @@ mod tests {
                     ),
             )
             .expect("a staged closure alone remains non-authoritative");
-        let genesis = genesis_head(node.repository_id(), ref_root)
-            .expect("schema-valid test genesis derives the empty outcome root");
+        let genesis = genesis_head(
+            node.repository_id(),
+            ref_root,
+            genesis_root(node.repository_id(), b"test-configuration"),
+        )
+        .expect("schema-valid test genesis derives the empty outcome root");
         initialize_embedded_repository(
             node.runtime(),
             &node.authority,
@@ -7275,8 +7357,12 @@ mod tests {
         let config = test_config(scratch.path().to_path_buf());
         let node = OneNode::open_components(config).expect("components open");
         let missing_root = genesis_root(node.repository_id(), b"unstaged-canonical-refs");
-        let head = genesis_head(node.repository_id(), missing_root)
-            .expect("schema-valid test genesis derives the empty outcome root");
+        let head = genesis_head(
+            node.repository_id(),
+            missing_root,
+            genesis_root(node.repository_id(), b"test-configuration"),
+        )
+        .expect("schema-valid test genesis derives the empty outcome root");
         let initialization_cx = node.authority_context();
         let initialized = initialize_embedded_repository(
             node.runtime(),
