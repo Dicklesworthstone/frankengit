@@ -20,9 +20,9 @@ use fgit_forge::{
 use fgit_treefs::WorkspaceEpoch;
 use fgit_types::numeric::CodecVersion;
 use fgit_types::{
-    CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, DomainTag, InternalObjectId,
-    OPAQUE_ID_LEN, PolicyEpoch, PrincipalSnapshotId, RepositoryId, RepositorySequence, SchemaId,
-    TxId,
+    CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, DomainTag, GitOid,
+    GitOidSha256, InternalObjectId, OPAQUE_ID_LEN, PolicyEpoch, PrincipalSnapshotId, RepositoryId,
+    RepositorySequence, SchemaId, TxId,
 };
 
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
@@ -34,6 +34,16 @@ fn digest(tag: u8) -> Digest {
             .expect("nonzero corpus fixture algorithm slot"),
         DigestBytes::try_new(&[tag; 32]).expect("32-byte corpus fixture body"),
     )
+}
+
+/// A native Git object identity.
+///
+/// Deliberately separate from `digest`: a ref tip, a merge commit and a tree
+/// entry name Git objects, while the roots on a commit record are internal
+/// digests. `fgit-types` offers no conversion between them, which is the type
+/// system enforcing the same domain split section 6 states in prose.
+fn oid(tag: u8) -> GitOid {
+    GitOid::Sha256(GitOidSha256::from_bytes([tag; GitOidSha256::LEN]))
 }
 
 macro_rules! derived {
@@ -70,14 +80,14 @@ fn merge_event() -> ForgeEvent {
 fn ref_intent() -> RefIntent {
     RefIntent {
         name: b"refs/heads/main".to_vec(),
-        expected_tip: digest(0x40),
-        new_tip: digest(0x51),
+        expected_tip: oid(0x40),
+        new_tip: oid(0x51),
     }
 }
 
 fn package() -> MergeEffectPackage {
     MergeEffectPackage {
-        objects: vec![digest(0x51), digest(0x52)],
+        objects: vec![oid(0x51), oid(0x52)],
         ref_intent: ref_intent(),
         event: merge_event(),
     }
@@ -174,7 +184,7 @@ fn each_root_moves_only_for_its_own_body() {
     );
 
     let mut altered_ref = package();
-    altered_ref.ref_intent.new_tip = digest(0x7a);
+    altered_ref.ref_intent.new_tip = oid(0x7a);
     let altered_ref = seal(&altered_ref);
     assert_ne!(
         baseline.ref_delta_root, altered_ref.ref_delta_root,
@@ -256,9 +266,9 @@ fn attempt() -> MergeAttempt {
         pull_request: pull_request(),
         source_ref: b"refs/heads/feature".to_vec(),
         target_ref: b"refs/heads/main".to_vec(),
-        source_tip: digest(0x30),
-        target_tip: digest(0x40),
-        base_tip: digest(0x20),
+        source_tip: oid(0x30),
+        target_tip: oid(0x40),
+        base_tip: oid(0x20),
         workspace_epoch: WorkspaceEpoch::from_u64(9),
     }
 }
@@ -270,16 +280,16 @@ fn a_merge_whose_source_or_target_moved_is_refused_naming_the_side_that_moved() 
     // Forbidden, axis one: the source moved.
     assert_eq!(
         attempt.check_fresh(&ObservedTips {
-            source_tip: digest(0x31),
-            target_tip: digest(0x40),
+            source_tip: oid(0x31),
+            target_tip: oid(0x40),
             workspace_epoch: WorkspaceEpoch::from_u64(9),
         }),
         Err(ForgeRefusal::MergeStale {
             reference: MergeSide::Source,
-            tips: Box::new(StaleTips {
-                computed_against: digest(0x30),
-                observed: digest(0x31),
-            }),
+            tips: StaleTips {
+                computed_against: oid(0x30),
+                observed: oid(0x31),
+            },
         })
     );
 
@@ -287,24 +297,24 @@ fn a_merge_whose_source_or_target_moved_is_refused_naming_the_side_that_moved() 
     // that is fine on one side and stale on the other is the common case.
     assert_eq!(
         attempt.check_fresh(&ObservedTips {
-            source_tip: digest(0x30),
-            target_tip: digest(0x41),
+            source_tip: oid(0x30),
+            target_tip: oid(0x41),
             workspace_epoch: WorkspaceEpoch::from_u64(9),
         }),
         Err(ForgeRefusal::MergeStale {
             reference: MergeSide::Target,
-            tips: Box::new(StaleTips {
-                computed_against: digest(0x40),
-                observed: digest(0x41),
-            }),
+            tips: StaleTips {
+                computed_against: oid(0x40),
+                observed: oid(0x41),
+            },
         })
     );
 
     // Permitted twin: neither moved.
     assert_eq!(
         attempt.check_fresh(&ObservedTips {
-            source_tip: digest(0x30),
-            target_tip: digest(0x40),
+            source_tip: oid(0x30),
+            target_tip: oid(0x40),
             workspace_epoch: WorkspaceEpoch::from_u64(9),
         }),
         Ok(())
@@ -313,11 +323,11 @@ fn a_merge_whose_source_or_target_moved_is_refused_naming_the_side_that_moved() 
 
 // -------------------------------------------------- conflicts are not merges
 
-fn entry(path: &[u8], object: u8) -> TreeEntry<Digest> {
+fn entry(path: &[u8], object: u8) -> TreeEntry<GitOid> {
     TreeEntry {
         path: path.to_vec(),
         mode: fgit_diff::TreeMode(0o100_644),
-        object: digest(object),
+        object: oid(object),
     }
 }
 
@@ -501,8 +511,8 @@ fn a_merge_computed_in_a_workspace_that_has_since_advanced_is_refused() {
     // the epoch entirely.
     assert_eq!(
         attempt.check_fresh(&ObservedTips {
-            source_tip: digest(0x30),
-            target_tip: digest(0x40),
+            source_tip: oid(0x30),
+            target_tip: oid(0x40),
             workspace_epoch: WorkspaceEpoch::from_u64(10),
         }),
         Err(ForgeRefusal::WorkspaceMoved {
@@ -515,8 +525,8 @@ fn a_merge_computed_in_a_workspace_that_has_since_advanced_is_refused() {
     // Permitted twin: the same call at the epoch the merge was computed in.
     assert_eq!(
         attempt.check_fresh(&ObservedTips {
-            source_tip: digest(0x30),
-            target_tip: digest(0x40),
+            source_tip: oid(0x30),
+            target_tip: oid(0x40),
             workspace_epoch: WorkspaceEpoch::from_u64(9),
         }),
         Ok(())
@@ -529,16 +539,16 @@ fn a_ref_that_moved_is_reported_before_a_workspace_that_also_moved() {
     let attempt = attempt();
     assert_eq!(
         attempt.check_fresh(&ObservedTips {
-            source_tip: digest(0x31),
-            target_tip: digest(0x40),
+            source_tip: oid(0x31),
+            target_tip: oid(0x40),
             workspace_epoch: WorkspaceEpoch::from_u64(10),
         }),
         Err(ForgeRefusal::MergeStale {
             reference: MergeSide::Source,
-            tips: Box::new(StaleTips {
-                computed_against: digest(0x30),
-                observed: digest(0x31),
-            }),
+            tips: StaleTips {
+                computed_against: oid(0x30),
+                observed: oid(0x31),
+            },
         }),
         "the fixed order is source, target, workspace"
     );

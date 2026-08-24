@@ -76,13 +76,14 @@ pub enum ForgeRefusal {
     MergeStale {
         /// Which ref moved.
         reference: MergeSide,
-        /// The two tips, boxed.
+        /// The two tips.
         ///
-        /// A `Digest` carries a maximum-length body inline, so a pair of them
-        /// is far and away the largest thing this enum could hold. Left
-        /// unboxed, every `Result` in the crate would pay for the rarest
-        /// variant on its success path too.
-        tips: Box<StaleTips>,
+        /// Unboxed since these became `GitOid`. They were boxed when they were
+        /// `Digest`, which carries a maximum-length body inline and made a pair
+        /// of them the largest thing this enum could hold; a native Git
+        /// identity is small enough that every `Result` in the crate no longer
+        /// pays for the rarest variant.
+        tips: StaleTips,
     },
     /// The workspace advanced after the merge was computed in it.
     ///
@@ -122,9 +123,9 @@ pub enum ForgeRefusal {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StaleTips {
     /// Tip the merge was computed against.
-    pub computed_against: Digest,
+    pub computed_against: GitOid,
     /// Tip observed at admission time.
-    pub observed: Digest,
+    pub observed: GitOid,
 }
 
 /// Which side of a merge a staleness refusal is about.
@@ -194,4 +195,4 @@ impl core::error::Error for ForgeRefusal {}
 use fgit_codec::CodecRefusal;
 use fgit_diff::TreeMergeError;
 use fgit_treefs::WorkspaceEpoch;
-use fgit_types::Digest;
+use fgit_types::GitOid;

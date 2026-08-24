@@ -8,7 +8,7 @@ use fgit_codec::{CodecRefusal, Decoder, Encoder};
 use fgit_diff::{TreeEntry, TreeMergeEntry, TreeMergeOptions, merge_trees};
 use fgit_treefs::WorkspaceEpoch;
 use fgit_types::{
-    Digest, DomainTag, PolicyEpoch, PrincipalSnapshotId, RepositoryCommitId, RepositoryId,
+    Digest, DomainTag, GitOid, PolicyEpoch, PrincipalSnapshotId, RepositoryCommitId, RepositoryId,
     RepositorySequence, SchemaFamily, TxId,
 };
 
@@ -26,9 +26,9 @@ pub struct RefIntent {
     /// Full reference name.
     pub name: Vec<u8>,
     /// Tip this movement is conditional on.
-    pub expected_tip: Digest,
+    pub expected_tip: GitOid,
     /// Tip the reference takes if the condition holds.
-    pub new_tip: Digest,
+    pub new_tip: GitOid,
 }
 
 impl CanonicalBody for RefIntent {
@@ -39,15 +39,16 @@ impl CanonicalBody for RefIntent {
 
     fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         out.write_bytes("name", &self.name)?;
-        out.write_digest(&self.expected_tip)?;
-        out.write_digest(&self.new_tip)
+        out.write_git_oid(&self.expected_tip);
+        out.write_git_oid(&self.new_tip);
+        Ok(())
     }
 
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
         Ok(Self {
             name: input.read_bytes("name")?.to_vec(),
-            expected_tip: input.read_digest()?,
-            new_tip: input.read_digest()?,
+            expected_tip: input.read_git_oid()?,
+            new_tip: input.read_git_oid()?,
         })
     }
 }
@@ -66,11 +67,11 @@ pub struct MergeAttempt {
     /// Branch being merged into.
     pub target_ref: Vec<u8>,
     /// Source tip the merge was computed against.
-    pub source_tip: Digest,
+    pub source_tip: GitOid,
     /// Target tip the merge was computed against.
-    pub target_tip: Digest,
+    pub target_tip: GitOid,
     /// Merge base used for the three-way computation.
-    pub base_tip: Digest,
+    pub base_tip: GitOid,
     /// Workspace epoch the computation ran in.
     pub workspace_epoch: WorkspaceEpoch,
 }
@@ -79,9 +80,9 @@ pub struct MergeAttempt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservedTips {
     /// Source tip right now.
-    pub source_tip: Digest,
+    pub source_tip: GitOid,
     /// Target tip right now.
-    pub target_tip: Digest,
+    pub target_tip: GitOid,
     /// Workspace epoch right now.
     pub workspace_epoch: WorkspaceEpoch,
 }
@@ -110,19 +111,19 @@ impl MergeAttempt {
         if observed.source_tip != self.source_tip {
             return Err(ForgeRefusal::MergeStale {
                 reference: MergeSide::Source,
-                tips: Box::new(StaleTips {
+                tips: StaleTips {
                     computed_against: self.source_tip,
                     observed: observed.source_tip,
-                }),
+                },
             });
         }
         if observed.target_tip != self.target_tip {
             return Err(ForgeRefusal::MergeStale {
                 reference: MergeSide::Target,
-                tips: Box::new(StaleTips {
+                tips: StaleTips {
                     computed_against: self.target_tip,
                     observed: observed.target_tip,
-                }),
+                },
             });
         }
         if observed.workspace_epoch != self.workspace_epoch {
@@ -139,7 +140,7 @@ impl MergeAttempt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MergedTree {
     /// The merged entries, in Git tree order.
-    pub entries: Vec<TreeEntry<Digest>>,
+    pub entries: Vec<TreeEntry<GitOid>>,
 }
 
 /// Runs the three-way tree merge and admits only a fully clean result.
@@ -161,9 +162,9 @@ pub fn merge_pull_request_tree<Base, Ours, Theirs>(
     options: TreeMergeOptions,
 ) -> Result<MergedTree, ForgeRefusal>
 where
-    Base: IntoIterator<Item = TreeEntry<Digest>>,
-    Ours: IntoIterator<Item = TreeEntry<Digest>>,
-    Theirs: IntoIterator<Item = TreeEntry<Digest>>,
+    Base: IntoIterator<Item = TreeEntry<GitOid>>,
+    Ours: IntoIterator<Item = TreeEntry<GitOid>>,
+    Theirs: IntoIterator<Item = TreeEntry<GitOid>>,
 {
     let merged = merge_trees(base, ours, theirs, options)
         .map_err(|cause| ForgeRefusal::MergeRefused { cause })?;
@@ -190,7 +191,7 @@ where
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MergeEffectPackage {
     /// Objects the merge created, as a closure the admission must already hold.
-    pub objects: Vec<Digest>,
+    pub objects: Vec<GitOid>,
     /// The conditional movement of the target ref.
     pub ref_intent: RefIntent,
     /// The event recording that the merge happened.

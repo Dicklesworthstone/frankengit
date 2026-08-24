@@ -38,6 +38,21 @@ const KIND_CLOSED: u32 = 4;
 
 /// What happened to a pull request.
 ///
+/// # Why the tips here are `Digest` while a `RefIntent`'s are `GitOid`
+///
+/// They should both be `GitOid`: a ref tip and a merge commit name Git objects,
+/// and `fgit-types` offers no conversion from `Digest` precisely because
+/// section 6 makes those separate typed domains. The ref-intent side was
+/// corrected when the admission path needed a real `RefCommand`.
+///
+/// The event side is deliberately NOT corrected here. Changing what
+/// `write_payload` emits changes every existing event's canonical bytes, and so
+/// every committed `ForgeEventId` -- which is exactly the property
+/// `tests/aggregate_discriminant.rs` pins with byte-exact goldens produced by a
+/// detached probe before `AggregateId` landed. That is a `SCHEMA_MAJOR` bump and
+/// the owner of that guarantee should make it, not a passing integration.
+/// Tracked as a finding rather than smuggled in behind a P0.
+///
 /// This is the merge-sufficient set: the events needed to carry a pull request
 /// from creation to a merge that moved a ref. Review, comment, and label events
 /// are forge state too, but nothing in the atomic merge path reads them, and a
