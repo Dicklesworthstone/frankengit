@@ -1167,3 +1167,117 @@ fn an_isolated_cell_that_reconnects_observes_no_lost_write() {
     );
     expect_linearizable(&report);
 }
+
+/// A body written by a build that knows a format this test's "old cell" does not.
+const NEWER_FORMAT_BODY: &[u8] = b"\x00\x02newer-format-payload-the-old-cell-cannot-parse";
+
+/// What a cell running the previous build would try to write.
+const OLDER_FORMAT_BODY: &[u8] = b"\x00\x01older-format-payload";
+
+#[test]
+fn an_older_cell_cannot_roll_back_a_head_written_in_a_newer_format() {
+    // The plan-space revision on this bead, and the scenario a rolling upgrade
+    // actually produces: two cells running different builds against one
+    // authority, with the newer one publishing first.
+    //
+    // The guarantee is NOT that the old cell understands the new bytes -- it
+    // cannot, and it is not asked to. It is that not understanding them gives it
+    // no route to replace them. Rollback during a rolling upgrade is how a
+    // deployment loses a write that was already acknowledged to a client.
+    let instance = StoreInstanceId::from_raw(0xF036_B003);
+    let store = MemoryAuthorityStore::new(instance);
+    let key = head_key("mixed-version");
+    let mut recorder = HistoryRecorder::default();
+    let root = initialize(&mut recorder, &store, &key);
+
+    // The OLD cell authenticates the head first, so it holds a legitimately
+    // obtained token. This matters: the refusal below must not depend on the old
+    // cell being malicious or confused. It is behaving correctly on stale
+    // information, which is the realistic case.
+    let old_cells_view =
+        read_receipt(&recorder.execute(&store, 1, AuthorityOp::ReadHead { key: key.clone() }));
+    assert_eq!(old_cells_view.generation(), HeadGeneration::FIRST);
+
+    // The NEW cell publishes a body in a format the old build does not know.
+    let published = committed_receipt(&recorder.execute(
+        &store,
+        2,
+        AuthorityOp::CompareExchangeHead {
+            key: key.clone(),
+            expected: root.token(),
+            new_generation: generation(2),
+            new_body: NEWER_FORMAT_BODY.to_vec(),
+        },
+    ));
+    assert_eq!(published.body(), NEWER_FORMAT_BODY);
+
+    // The old cell now tries to publish, using the token it holds. It is not
+    // attacking; it simply has not seen generation 2.
+    let attempted_rollback = recorder.execute(
+        &store,
+        1,
+        AuthorityOp::CompareExchangeHead {
+            key: key.clone(),
+            expected: old_cells_view.token(),
+            new_generation: generation(2),
+            new_body: OLDER_FORMAT_BODY.to_vec(),
+        },
+    );
+    assert_eq!(
+        attempted_rollback,
+        AuthorityResponse::CompareExchangeHead(CasOutcome::PredecessorMismatch),
+        "an old cell holding a superseded token must not be able to replace the head"
+    );
+
+    // NO ROLLBACK: the newer body is still there, byte for byte.
+    let after =
+        read_receipt(&recorder.execute(&store, 3, AuthorityOp::ReadHead { key: key.clone() }));
+    assert_eq!(
+        after.body(),
+        NEWER_FORMAT_BODY,
+        "the newer format must survive the older cell's attempt untouched"
+    );
+    assert_eq!(after.generation(), generation(2));
+
+    // NO TORN SCHEMA: the stored bytes are exactly what the newer cell wrote,
+    // with none of the older body mixed in. A partial overwrite would leave a
+    // body that parses as neither format, which is worse than either.
+    assert!(
+        !after
+            .body()
+            .windows(OLDER_FORMAT_BODY.len())
+            .any(|w| w == OLDER_FORMAT_BODY),
+        "no fragment of the older write may appear in the published body"
+    );
+    assert_eq!(after.body().len(), NEWER_FORMAT_BODY.len());
+
+    // THE PERMITTED TWIN. A refusal test alone is satisfied by an authority that
+    // refuses everything, which would be a worse system, not a safer one. Having
+    // lost, the old cell rereads and its next attempt succeeds -- §5.2's rule
+    // that a CAS loser revalidates and retries rather than being locked out.
+    // It is still an old cell writing an old-format body; being outdated is not
+    // what disqualified it, holding a superseded token was.
+    let revalidated =
+        read_receipt(&recorder.execute(&store, 1, AuthorityOp::ReadHead { key: key.clone() }));
+    let retried = committed_receipt(&recorder.execute(
+        &store,
+        1,
+        AuthorityOp::CompareExchangeHead {
+            key: key.clone(),
+            expected: revalidated.token(),
+            new_generation: generation(3),
+            new_body: OLDER_FORMAT_BODY.to_vec(),
+        },
+    ));
+    assert_eq!(retried.generation(), generation(3));
+    assert_eq!(retried.body(), OLDER_FORMAT_BODY);
+
+    let report = check_and_emit(
+        0xF036_B003,
+        &FaultPlan::none(),
+        &recorder,
+        AuthorityModel::new(instance),
+        "a rolling upgrade cannot roll back or tear a newer head; the loser revalidates and proceeds",
+    );
+    expect_linearizable(&report);
+}
