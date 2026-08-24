@@ -206,9 +206,13 @@ fn mismatch_policy_and_publication_epoch_round_trip() {
 ///
 /// This match is exhaustive with no wildcard, so a ninth variant fails to
 /// compile here and whoever adds it is sent to the array. It mirrors the
-/// compile-time guard `fgit-crypto` uses at `registry.rs:110` to keep registered
-/// code points out of the reserved range: the type system holds the invariant
-/// that a reader would otherwise have to remember.
+/// compile-time guard `fgit-crypto` asserts over `ALGORITHM_REGISTRY` to keep
+/// registered code points out of the reserved range: the type system holds the
+/// invariant that a reader would otherwise have to remember.
+///
+/// Cited by symbol rather than by line: this comment said `registry.rs:110`
+/// until the guard moved to 145, and a line number is a claim with a half-life
+/// measured in other people's commits.
 ///
 /// It cannot force the sample to be *added* — only to be considered. That is
 /// the honest limit, and it is strictly more than the array had before.

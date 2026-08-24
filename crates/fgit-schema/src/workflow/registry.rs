@@ -4,8 +4,8 @@
 //! per-construct registry instead. This is that registry. It is the **single**
 //! place a construct's status is stated: the lowerer looks a construct up here
 //! when it refuses, so a refusal and the published table cannot disagree, and
-//! `tests/workflow_registry.rs` fails if the lowerer ever names a construct the
-//! registry does not carry.
+//! `tests/workflow.rs::every_construct_the_lowerer_names_exists_in_the_registry`
+//! fails if the lowerer ever names a construct the registry does not carry.
 //!
 //! The table is also emitted as a generated artifact, so a consumer reads the
 //! same facts a reviewer does rather than a prose summary of them.
@@ -60,9 +60,10 @@ pub struct Construct {
 
 /// Every construct the subset has an opinion about, in key order.
 ///
-/// Key order is enforced by `tests/workflow_registry.rs` rather than by
-/// convention, so the emitted artifact is stable and a new row cannot be
-/// appended somewhere that changes the output of unrelated rows.
+/// Key order is enforced by
+/// `tests/workflow.rs::the_construct_registry_is_sorted_complete_and_reasoned`
+/// rather than by convention, so the emitted artifact is stable and a new row
+/// cannot be appended somewhere that changes the output of unrelated rows.
 pub static CONSTRUCTS: &[Construct] = &[
     Construct {
         key: "job.container",
