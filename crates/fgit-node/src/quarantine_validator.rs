@@ -64,12 +64,6 @@ impl<'node> ProductionReceiveQuarantineHandoff<'node> {
         }
     }
 
-    /// Returns the validated receive retained after a successful handoff.
-    #[must_use]
-    pub(crate) const fn validated_receive(&self) -> Option<&ValidatedReceive> {
-        self.validated.as_ref()
-    }
-
     /// Transfers the one validated proof to the asynchronous durable-admission
     /// phase after the synchronous handoff completed.
     ///
@@ -1032,7 +1026,7 @@ mod tests {
             .expect("the synchronous production handoff retains a validated receive");
         assert_eq!(
             handoff
-                .validated_receive()
+                .into_validated_receive()
                 .expect("successful handoff retains only its validated receive")
                 .request(),
             &request

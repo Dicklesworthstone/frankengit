@@ -86,6 +86,7 @@ use fgit_types::{
     RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, RepositoryIncarnationId, TenantId,
     TxId,
 };
+use fgit_wire::receive::{ReceiveCancellation, ReceiveError, ReceivePack};
 use fgit_wire::stale_disclosure::{LabelledAdvertisement, advertise_under_read_label_served_by};
 use fgit_wire::visibility::{RefVisibility, filter_advertised_refs};
 use fgit_wire::{
@@ -100,6 +101,7 @@ mod quarantine_validator;
 
 pub use loose_import::{LooseGitImportRefusal, StagedLooseGitImport};
 pub use quarantine_validator::ProductionQuarantineValidator;
+use quarantine_validator::ProductionReceiveQuarantineHandoff;
 
 const OBJECT_CODEC_NAMESPACE: &[u8] = b"git-object-body/v1";
 const HEAD_KEY_PREFIX: &[u8] = b"frankengit/node/head/";
@@ -4608,6 +4610,71 @@ impl OneNode {
         self.admit_validated_receive_durable_in(request, &context, validated, limits)
             .await
             .map_err(|error| NodeReceiveTransportRefusal::Admission(Box::new(error)))
+    }
+
+    /// Receives one contiguous raw receive-pack request and admits it through
+    /// the node's authoritative durable-admission boundary.
+    ///
+    /// The caller supplies the already authenticated materialization selected
+    /// for this request; this method verifies that materialization against the
+    /// node before the synchronous quarantine handoff can read its selected
+    /// external-base closure.  Authentication is checked before retaining or
+    /// parsing untrusted receive bytes.  The synchronous half owns every
+    /// structural, cancellation, and validation refusal as [`ReceiveError`];
+    /// this async transport maps that vocabulary losslessly into
+    /// [`NodeReceiveTransportRefusal`] before invoking durable admission.
+    ///
+    /// `parse_limits` and `admission_limits` are explicit because the parser
+    /// and canonical transaction have separate resource contracts.  The pack
+    /// limits are selected by the immutable [`fgit_wire::receive::ReceiveContext`]
+    /// used to construct the raw receive machine.
+    pub async fn receive_loopback_pack_durable_in<Cancellation>(
+        &self,
+        request: &NodeRequestContext,
+        session: &LoopbackReceiveSession,
+        materialized: &MaterializedAdmission,
+        receive_context: fgit_wire::receive::ReceiveContext,
+        input: &[u8],
+        parse_limits: fgit_git_object::ParseLimits,
+        admission_limits: AdmissionLimits,
+        cancellation: &mut Cancellation,
+    ) -> Result<AdmissionResult, NodeReceiveTransportRefusal>
+    where
+        Cancellation: ReceiveCancellation,
+    {
+        if session.authenticated_session().is_none() {
+            return Err(NodeReceiveTransportRefusal::Unauthenticated);
+        }
+
+        let expected_format = match self.object_format {
+            GitHashAlgorithm::Sha1 => fgit_wire::GitObjectFormat::Sha1,
+            GitHashAlgorithm::Sha256 => fgit_wire::GitObjectFormat::Sha256,
+        };
+        if receive_context.object_format != expected_format {
+            return Err(NodeReceiveTransportRefusal::from(
+                ReceiveError::AuthoritativeRefusal(RefusalCode::HashAlgorithmDomainMismatch),
+            ));
+        }
+        let pack_limits = receive_context.limits.pack.clone();
+        let validator = self
+            .production_quarantine_validator(materialized, pack_limits, parse_limits)
+            .map_err(|code| {
+                NodeReceiveTransportRefusal::from(ReceiveError::AuthoritativeRefusal(code))
+            })?;
+        let mut receive =
+            ReceivePack::new(receive_context).map_err(NodeReceiveTransportRefusal::from)?;
+        receive
+            .push_bytes(input)
+            .map_err(NodeReceiveTransportRefusal::from)?;
+        let mut handoff = ProductionReceiveQuarantineHandoff::new(validator);
+        receive
+            .finish_with_handoff(&mut handoff, cancellation)
+            .map_err(NodeReceiveTransportRefusal::from)?;
+        let validated = handoff
+            .into_validated_receive()
+            .map_err(NodeReceiveTransportRefusal::from)?;
+        self.admit_loopback_receive_durable_in(request, session, &validated, admission_limits)
+            .await
     }
 
     /// Admits one verified source import through the same durable projection
