@@ -262,7 +262,7 @@ impl OneNode {
         let head_id = authority_head_identity(&body)
             .map_err(|refusal| VerifiedReadServingRefusal::Outcome(Box::new(refusal)))?;
         let basis = PublicationBasis::new(head_id, body);
-        let always_live = || true;
+        let is_cancelled = || false;
         let materialized = self
             .admission_materializer
             .materialize_exact_in(
@@ -271,7 +271,7 @@ impl OneNode {
                 self.repository_id,
                 &basis,
                 &authenticated,
-                &always_live,
+                &is_cancelled,
             )
             .await
             .map_err(|refusal| VerifiedReadServingRefusal::Materialization(Box::new(refusal)))?;
