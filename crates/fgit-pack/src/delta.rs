@@ -518,15 +518,31 @@ where
         offset: u64,
         deadline: &mut impl Deadline,
     ) -> Result<(ObjectType, Vec<u8>), PackError> {
-        let mut accounting = Accounting::default();
+        let mut budget = ResolutionBudget::default();
+        self.resolve_offset_typed_with_budget(offset, &mut budget, deadline)
+    }
+
+    /// Resolves one offset with a caller-owned budget shared across an entire
+    /// bounded operation.
+    ///
+    /// A receive validator uses one [`ResolutionBudget`] for every retained
+    /// pack entry, so a sequence of individually valid delta chains cannot
+    /// evade aggregate expansion or work limits by resetting accounting at
+    /// each object boundary.
+    pub fn resolve_offset_typed_with_budget(
+        &mut self,
+        offset: u64,
+        budget: &mut ResolutionBudget,
+        deadline: &mut impl Deadline,
+    ) -> Result<(ObjectType, Vec<u8>), PackError> {
         let object = self
             .scalar
-            .find_by_offset(offset, &mut accounting, deadline)?
+            .find_by_offset(offset, &mut budget.accounting, deadline)?
             .ok_or(PackError::MissingDeltaBase)?;
         let object = clone_pack_object(object, deadline)?;
         let mut stack = Vec::new();
         let resolved =
-            self.resolve_object_typed(&object, 0, &mut stack, &mut accounting, deadline)?;
+            self.resolve_object_typed(&object, 0, &mut stack, &mut budget.accounting, deadline)?;
         Ok((resolved.object_type, resolved.bytes))
     }
 
@@ -537,15 +553,26 @@ where
         id: &ObjectId,
         deadline: &mut impl Deadline,
     ) -> Result<(ObjectType, Vec<u8>), PackError> {
-        let mut accounting = Accounting::default();
+        let mut budget = ResolutionBudget::default();
+        self.resolve_id_typed_with_budget(id, &mut budget, deadline)
+    }
+
+    /// Resolves one identity with a caller-owned budget shared across an
+    /// entire bounded operation.
+    pub fn resolve_id_typed_with_budget(
+        &mut self,
+        id: &ObjectId,
+        budget: &mut ResolutionBudget,
+        deadline: &mut impl Deadline,
+    ) -> Result<(ObjectType, Vec<u8>), PackError> {
         let object = self
             .scalar
-            .find_by_id(id, &mut accounting, deadline)?
+            .find_by_id(id, &mut budget.accounting, deadline)?
             .ok_or(PackError::MissingDeltaBase)?;
         let object = clone_pack_object(object, deadline)?;
         let mut stack = Vec::new();
         let resolved =
-            self.resolve_object_typed(&object, 0, &mut stack, &mut accounting, deadline)?;
+            self.resolve_object_typed(&object, 0, &mut stack, &mut budget.accounting, deadline)?;
         Ok((resolved.object_type, resolved.bytes))
     }
 
@@ -906,6 +933,25 @@ struct Accounting {
     work: usize,
 }
 
+/// Caller-owned accounting for a bounded sequence of delta resolutions.
+///
+/// The ordinary resolver methods construct a fresh value for backwards
+/// compatible one-object semantics.  A boundary that retains more than one
+/// reconstructed object must retain one of these witnesses for its complete
+/// operation and pass it to the `*_with_budget` methods.
+#[derive(Default)]
+pub struct ResolutionBudget {
+    accounting: Accounting,
+}
+
+impl ResolutionBudget {
+    /// Starts an empty aggregate resolution budget.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 impl Accounting {
     fn ensure_expanded(&self, bytes: usize, limits: &PackLimits) -> Result<(), PackError> {
         let attempted = self
@@ -1192,7 +1238,7 @@ fn copy_bytes(input: &[u8], deadline: &mut impl Deadline) -> Result<Vec<u8>, Pac
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ObjectFormat, PackLimits, object_id_from_bytes};
+    use crate::{EntryKind, ObjectFormat, PackLimits, object_id_from_bytes};
 
     fn unlimited() -> PackLimits {
         PackLimits {
@@ -1453,6 +1499,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn caller_owned_budget_bounds_aggregate_cached_typed_resolutions() {
+        let objects = [
+            PackObject::TypedBase {
+                offset: 12,
+                id: None,
+                kind: EntryKind::Blob,
+                data: b"abc".to_vec(),
+            },
+            PackObject::Delta(DeltaObject {
+                offset: 24,
+                id: None,
+                base: DeltaBase::Ofs(12),
+                program: vec![3, 3, 0x91, 0, 3],
+            }),
+            PackObject::Delta(DeltaObject {
+                offset: 36,
+                id: None,
+                base: DeltaBase::Ofs(12),
+                program: vec![3, 3, 0x91, 0, 3],
+            }),
+        ];
+        let mut limits = unlimited();
+        // Each resolution expands the typed base and its result (six bytes),
+        // but retaining two results would expand twelve bytes in one receive.
+        limits.max_total_expanded_bytes = 11;
+        let mut resolver = CachedResolver::new(&objects, &(), &limits, &mut always)
+            .expect("the compact typed delta graph is structurally valid");
+        let mut budget = ResolutionBudget::new();
+
+        assert_eq!(
+            resolver.resolve_offset_typed_with_budget(24, &mut budget, &mut always),
+            Ok((ObjectType::Blob, b"abc".to_vec()))
+        );
+        assert!(matches!(
+            resolver.resolve_offset_typed_with_budget(36, &mut budget, &mut always),
+            Err(PackError::TotalExpandedLimit {
+                actual: 12,
+                limit: 11,
+            })
+        ));
     }
 
     fn copy_then_insert(base: &[u8], byte: u8) -> Vec<u8> {

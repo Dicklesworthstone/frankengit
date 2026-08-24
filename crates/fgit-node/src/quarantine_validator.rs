@@ -12,12 +12,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use fgit_admission::{
     PermittedObjectClosure, QuarantineValidator, ValidatedClosure, permitted_object_closure_root,
 };
-use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits};
+use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject};
 use fgit_pack::{
     CachedResolver, Deadline, ExternalBaseLookup, ObjectId, PackError, PackLimits, ParsedDeltaBase,
-    QuarantinedPack, verify_native_object,
+    QuarantinedPack, ResolutionBudget, verify_native_object,
 };
-use fgit_types::{GitOid, RefusalCode};
+use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, RefusalCode};
 use fgit_wire::receive::{QuarantineReceipt, ReceiveRequest};
 
 use crate::{
@@ -36,6 +36,15 @@ pub struct ProductionQuarantineValidator<'node> {
     selected_closure: AuthoritySelectedClosure,
     pack_limits: PackLimits,
     parse_limits: ParseLimits,
+}
+
+/// One native object verified from the transaction-local pack before the
+/// reachability walk decides whether it belongs in the admitted closure.
+#[derive(Debug)]
+struct VerifiedObject {
+    object_type: ObjectType,
+    body: Vec<u8>,
+    parsed: ParsedObject,
 }
 
 impl<'node> ProductionQuarantineValidator<'node> {
@@ -151,6 +160,127 @@ impl<'node> ProductionQuarantineValidator<'node> {
         }
         Ok(())
     }
+
+    /// Computes the uploaded portion of the exact object closure required by
+    /// the requested ref tips.
+    ///
+    /// Every object in `verified` has already passed native identity and
+    /// parser checks.  Traversal nevertheless begins only at non-delete
+    /// command tips: a valid but unrelated uploaded object is not an admitted
+    /// object.  Edges may terminate in the authenticated prior closure, but
+    /// never in merely-present fabric state.
+    fn reachable_uploaded_closure(
+        &self,
+        request: &ReceiveRequest,
+        verified: &BTreeMap<GitOid, VerifiedObject>,
+        deadline: &mut impl Deadline,
+    ) -> Result<BTreeSet<GitOid>, RefusalCode> {
+        let mut pending = BTreeSet::new();
+        for command in &request.commands {
+            checkpoint(deadline)?;
+            if command.new.is_zero() {
+                continue;
+            }
+            if !verified.contains_key(&command.new) {
+                return Err(RefusalCode::ObjectClosureIncomplete);
+            }
+            pending.insert(command.new);
+        }
+
+        let mut closure = BTreeSet::new();
+        while let Some(id) = pending.pop_first() {
+            checkpoint(deadline)?;
+            if !closure.insert(id) {
+                continue;
+            }
+            let object = verified
+                .get(&id)
+                .ok_or(RefusalCode::ObjectClosureIncomplete)?;
+            for child in self.object_references(&object.parsed, deadline)? {
+                checkpoint(deadline)?;
+                if verified.contains_key(&child) {
+                    pending.insert(child);
+                } else if !self.selected_closure.closure().objects().contains(&child) {
+                    return Err(RefusalCode::ObjectClosureIncomplete);
+                }
+            }
+        }
+        Ok(closure)
+    }
+
+    /// Extracts the direct native-object edges from one parser-verified object.
+    fn object_references(
+        &self,
+        parsed: &ParsedObject,
+        deadline: &mut impl Deadline,
+    ) -> Result<Vec<GitOid>, RefusalCode> {
+        match parsed {
+            ParsedObject::Blob(_) => Ok(Vec::new()),
+            ParsedObject::Tree(entries) => {
+                let mut references = Vec::new();
+                references
+                    .try_reserve_exact(entries.len())
+                    .map_err(|_| RefusalCode::ResourceBudgetExceeded)?;
+                for entry in entries {
+                    checkpoint(deadline)?;
+                    // A gitlink names a commit in another repository; it is
+                    // data in this tree, not a required local object edge.
+                    if entry.mode == b"160000" {
+                        continue;
+                    }
+                    references.push(self.native_reference_from_bytes(&entry.object_id)?);
+                }
+                Ok(references)
+            }
+            ParsedObject::Commit(commit) => {
+                let mut references = Vec::new();
+                let tree = commit
+                    .tree_reference()
+                    .ok_or(RefusalCode::ObjectHeaderInvalid)?;
+                references.push(self.native_reference_from_hex(tree)?);
+                for parent in commit.parent_references() {
+                    checkpoint(deadline)?;
+                    references.push(self.native_reference_from_hex(parent)?);
+                }
+                Ok(references)
+            }
+            ParsedObject::Tag(tag) => {
+                let mut targets = tag
+                    .headers()
+                    .iter()
+                    .filter(|header| header.name == b"object")
+                    .map(|header| header.value.as_slice());
+                let target = targets.next().ok_or(RefusalCode::ObjectHeaderInvalid)?;
+                if targets.next().is_some() {
+                    return Err(RefusalCode::ObjectHeaderInvalid);
+                }
+                Ok(vec![self.native_reference_from_hex(target)?])
+            }
+        }
+    }
+
+    fn native_reference_from_hex(&self, value: &[u8]) -> Result<GitOid, RefusalCode> {
+        let value = std::str::from_utf8(value).map_err(|_| RefusalCode::ObjectHeaderInvalid)?;
+        GitOid::from_hex(self.node.object_format, value)
+            .map_err(|_| RefusalCode::ObjectHeaderInvalid)
+    }
+
+    fn native_reference_from_bytes(&self, value: &[u8]) -> Result<GitOid, RefusalCode> {
+        match self.node.object_format {
+            GitHashAlgorithm::Sha1 => {
+                let bytes: [u8; GitOidSha1::LEN] = value
+                    .try_into()
+                    .map_err(|_| RefusalCode::ObjectHeaderInvalid)?;
+                Ok(GitOid::from(GitOidSha1::from_bytes(bytes)))
+            }
+            GitHashAlgorithm::Sha256 => {
+                let bytes: [u8; GitOidSha256::LEN] = value
+                    .try_into()
+                    .map_err(|_| RefusalCode::ObjectHeaderInvalid)?;
+                Ok(GitOid::from(GitOidSha256::from_bytes(bytes)))
+            }
+        }
+    }
 }
 
 impl OneNode {
@@ -235,22 +365,19 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
             .map_err(map_pack_error)?;
         let mut resolver = CachedResolver::new(&objects, &bases, &self.pack_limits, deadline)
             .map_err(map_pack_error)?;
-        let mut verified = Vec::new();
-        verified
-            .try_reserve_exact(pack.entries().len())
-            .map_err(|_| RefusalCode::ResourceBudgetExceeded)?;
-        let mut closure = BTreeSet::new();
+        let mut verified = BTreeMap::new();
+        let mut budget = ResolutionBudget::new();
         for entry in pack.entries() {
             checkpoint(deadline)?;
             let (object_type, body) = resolver
-                .resolve_offset_typed(entry.offset, deadline)
+                .resolve_offset_typed_with_budget(entry.offset, &mut budget, deadline)
                 .map_err(map_pack_error)?;
             let id = fgit_crypto::git_object_id(
                 self.node.object_format,
                 crypto_object_kind(object_type),
                 &body,
             );
-            verify_native_object(
+            let parsed = verify_native_object(
                 self.node.object_format,
                 object_type,
                 &body,
@@ -259,14 +386,30 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
                 &self.parse_limits,
             )
             .map_err(map_pack_error)?;
-            closure.insert(id);
-            verified.push((id, object_type, body));
+            if verified
+                .insert(
+                    id,
+                    VerifiedObject {
+                        object_type,
+                        body,
+                        parsed,
+                    },
+                )
+                .is_some()
+            {
+                return Err(RefusalCode::PackFramingInvalid);
+            }
         }
+        let closure = self.reachable_uploaded_closure(request, &verified, deadline)?;
         // This second phase keeps a later malformed delta from leaving earlier
-        // pack objects in fabric.  Immutable placement remains non-authority,
-        // but only a fully validated pack may acquire that responsibility.
-        for (id, object_type, body) in verified {
-            self.stage(id, object_type, body, deadline)?;
+        // reachable objects in fabric.  Immutable placement remains
+        // non-authority, but only the fully validated exact closure may
+        // acquire that responsibility.
+        for id in &closure {
+            let object = verified
+                .remove(id)
+                .ok_or(RefusalCode::ObjectClosureIncomplete)?;
+            self.stage(*id, object.object_type, object.body, deadline)?;
         }
         Ok(ValidatedClosure {
             object_closure_root: permitted_object_closure_root(&PermittedObjectClosure::new(
@@ -619,6 +762,239 @@ mod tests {
             "a command cannot name an OID other than the validator's exact closure"
         );
         node.shutdown().expect("node shuts down after test");
+    }
+
+    #[test]
+    fn graph_rooted_closure_stages_only_reachable_uploaded_objects() {
+        let scratch = ScratchDirectory::new();
+        let node = test_node(scratch.path().to_path_buf());
+        let blob_body = b"reachable blob".to_vec();
+        let blob_id =
+            fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, &blob_body);
+
+        let mut tree_body = b"100644 file\0".to_vec();
+        tree_body.extend_from_slice(blob_id.as_bytes());
+        let tree_id =
+            fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Tree, &tree_body);
+        let commit_body = format!(
+            "tree {tree_id}\nauthor A <a@example.com> 1 +0000\ncommitter C <c@example.com> 1 +0000\n\nmessage"
+        )
+        .into_bytes();
+        let commit_id =
+            fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Commit, &commit_body);
+        let tag_body = format!(
+            "object {commit_id}\ntype commit\ntag release\ntagger T <t@example.com> 1 +0000\n\nmessage"
+        )
+        .into_bytes();
+        let tag_id =
+            fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Tag, &tag_body);
+        let junk_body = b"unreachable upload".to_vec();
+        let junk_id =
+            fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, &junk_body);
+
+        let source = SelectedObjectsSource {
+            objects: BTreeMap::from([
+                (
+                    blob_id,
+                    CanonicalPackObject::new(
+                        blob_id,
+                        ObjectType::Blob,
+                        blob_body,
+                        Vec::new(),
+                        0,
+                        0,
+                    ),
+                ),
+                (
+                    tree_id,
+                    CanonicalPackObject::new(
+                        tree_id,
+                        ObjectType::Tree,
+                        tree_body,
+                        Vec::new(),
+                        0,
+                        0,
+                    ),
+                ),
+                (
+                    commit_id,
+                    CanonicalPackObject::new(
+                        commit_id,
+                        ObjectType::Commit,
+                        commit_body,
+                        Vec::new(),
+                        0,
+                        0,
+                    ),
+                ),
+                (
+                    tag_id,
+                    CanonicalPackObject::new(tag_id, ObjectType::Tag, tag_body, Vec::new(), 0, 0),
+                ),
+                (
+                    junk_id,
+                    CanonicalPackObject::new(
+                        junk_id,
+                        ObjectType::Blob,
+                        junk_body,
+                        Vec::new(),
+                        0,
+                        0,
+                    ),
+                ),
+            ]),
+        };
+        let limits = PackLimits::default();
+        let mut live = || true;
+        let plan = PackPlanner::new(
+            GitHashAlgorithm::Sha1,
+            PackWriteProfile::STORED_V1,
+            limits.clone(),
+        )
+        .plan_selected(
+            &source,
+            &[tag_id, commit_id, tree_id, blob_id, junk_id],
+            &mut live,
+        )
+        .expect("the object graph and unrelated upload plan into one native pack");
+        let (pack_bytes, receipt) = PackWriter::new(limits.clone())
+            .write(&plan, &mut live)
+            .expect("the graph fixture pack writes");
+        let pack = read_verified_pack(
+            &pack_bytes,
+            GitHashAlgorithm::Sha1,
+            &limits,
+            &mut live,
+            &NativeChecksumVerifier,
+        )
+        .expect("the graph fixture remains in receive quarantine");
+        let quarantine = QuarantineReceipt {
+            object_format: GitObjectFormat::Sha1,
+            object_count: receipt.object_count,
+            pack_bytes: pack_bytes.len(),
+            delete_only: false,
+        };
+        let validator = ProductionQuarantineValidator::new(
+            &node,
+            empty_selected_closure(),
+            limits,
+            ParseLimits::default(),
+        );
+
+        let closure = validator
+            .validate(&create_request(tag_id), Some(&pack), &quarantine, &mut live)
+            .expect("the requested tag carries its commit, tree, and blob closure");
+        assert_eq!(
+            closure.objects,
+            BTreeSet::from([tag_id, commit_id, tree_id, blob_id]),
+            "the receipt closure follows native graph edges rather than every uploaded entry"
+        );
+        assert!(
+            node.read_git_object(junk_id).is_err(),
+            "a verified but unreachable upload is not staged into immutable fabric"
+        );
+        node.shutdown().expect("node shuts down after test");
+    }
+
+    #[test]
+    fn graph_child_must_be_uploaded_or_in_the_authority_selected_closure() {
+        let external_tree_body = Vec::new();
+        let external_tree_id = fgit_crypto::git_object_id(
+            GitHashAlgorithm::Sha1,
+            GitObjectKind::Tree,
+            &external_tree_body,
+        );
+        let commit_body = format!(
+            "tree {external_tree_id}\nauthor A <a@example.com> 1 +0000\ncommitter C <c@example.com> 1 +0000\n\nmessage"
+        )
+        .into_bytes();
+        let commit_id =
+            fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Commit, &commit_body);
+        let source = OneObjectSource {
+            object: CanonicalPackObject::new(
+                commit_id,
+                ObjectType::Commit,
+                commit_body,
+                Vec::new(),
+                0,
+                0,
+            ),
+        };
+        let limits = PackLimits::default();
+        let mut live = || true;
+        let plan = PackPlanner::new(
+            GitHashAlgorithm::Sha1,
+            PackWriteProfile::STORED_V1,
+            limits.clone(),
+        )
+        .plan_selected(&source, &[commit_id], &mut live)
+        .expect("the commit-only fixture plans into a native pack");
+        let (pack_bytes, receipt) = PackWriter::new(limits.clone())
+            .write(&plan, &mut live)
+            .expect("the commit-only fixture pack writes");
+        let pack = read_verified_pack(
+            &pack_bytes,
+            GitHashAlgorithm::Sha1,
+            &limits,
+            &mut live,
+            &NativeChecksumVerifier,
+        )
+        .expect("the commit-only fixture remains quarantined");
+        let quarantine = QuarantineReceipt {
+            object_format: GitObjectFormat::Sha1,
+            object_count: receipt.object_count,
+            pack_bytes: pack_bytes.len(),
+            delete_only: false,
+        };
+
+        let missing_scratch = ScratchDirectory::new();
+        let missing_node = test_node(missing_scratch.path().to_path_buf());
+        let missing = ProductionQuarantineValidator::new(
+            &missing_node,
+            empty_selected_closure(),
+            limits.clone(),
+            ParseLimits::default(),
+        );
+        assert_eq!(
+            missing.validate(
+                &create_request(commit_id),
+                Some(&pack),
+                &quarantine,
+                &mut live
+            ),
+            Err(RefusalCode::ObjectClosureIncomplete),
+            "an omitted graph child cannot be inferred from a local cache or fabric hint"
+        );
+        missing_node
+            .shutdown()
+            .expect("missing-child node shuts down after test");
+
+        let permitted_scratch = ScratchDirectory::new();
+        let permitted_node = test_node(permitted_scratch.path().to_path_buf());
+        permitted_node
+            .put_git_object(ObjectType::Tree, external_tree_body)
+            .expect("the authenticated tree is available in immutable fabric");
+        let permitted = ProductionQuarantineValidator::new(
+            &permitted_node,
+            selected_closure(BTreeSet::from([external_tree_id])),
+            limits,
+            ParseLimits::default(),
+        );
+        assert_eq!(
+            permitted
+                .validate(
+                    &create_request(commit_id),
+                    Some(&pack),
+                    &quarantine,
+                    &mut live
+                )
+                .expect("an authority-selected child completes the requested graph")
+                .objects,
+            BTreeSet::from([commit_id])
+        );
+        permitted_node
+            .shutdown()
+            .expect("permitted-child node shuts down after test");
     }
 
     #[test]

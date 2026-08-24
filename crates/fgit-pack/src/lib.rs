@@ -36,8 +36,8 @@ pub use commit_graph::{
     CommitGraphVerification,
 };
 pub use delta::{
-    CachedResolver, DeltaBase, DeltaObject, ExternalBaseLookup, PackObject, ScalarResolver,
-    apply_delta,
+    CachedResolver, DeltaBase, DeltaObject, ExternalBaseLookup, PackObject, ResolutionBudget,
+    ScalarResolver, apply_delta,
 };
 pub use fgit_types::native::{GitHashAlgorithm as ObjectFormat, GitOid as ObjectId};
 pub use idx::{
