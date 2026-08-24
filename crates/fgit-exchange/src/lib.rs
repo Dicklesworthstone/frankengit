@@ -9,6 +9,8 @@
 //! [`ImportedEvidence`] wrapper.
 
 use core::fmt;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use fgit_claim::ClaimRank;
 use fgit_codec::{
@@ -216,6 +218,28 @@ impl OriginDescriptor {
             .find(|key| key.epoch() == epoch)
     }
 
+    /// Whether this signed descriptor is a historical snapshot of `trusted`.
+    ///
+    /// Lifecycle states are intentionally taken only from local policy: an
+    /// older bundle may have recorded an epoch as active before a later local
+    /// rotation retired it. Key epoch, commitment, and verifying material must
+    /// still be the exact trusted prefix, so an offered descriptor cannot add,
+    /// replace, reorder, or omit a key in the middle of the trusted history.
+    fn is_history_snapshot_of(&self, trusted: &Self) -> bool {
+        self.trust_domain == trusted.trust_domain
+            && self.signer == trusted.signer
+            && self.key_history.len() <= trusted.key_history.len()
+            && self
+                .key_history
+                .iter()
+                .zip(&trusted.key_history)
+                .all(|(offered, configured)| {
+                    offered.epoch() == configured.epoch()
+                        && offered.commitment() == configured.commitment()
+                        && offered.verifying_key() == configured.verifying_key()
+                })
+    }
+
     fn validate(&self) -> Result<(), ExchangeRefusal> {
         self.trust_domain.0.validate("trust_domain")?;
         self.signer.0.validate("origin_signer")?;
@@ -382,7 +406,7 @@ impl EvidenceExchangeBundle {
             ExchangeBundleBody::schema_id(),
             &frame,
         );
-        verify_signature(&body.origin, &signature, &frame)?;
+        verify_issuing_signature(&body.origin, &signature, &frame)?;
         Ok(Self { frame, signature })
     }
 
@@ -419,14 +443,35 @@ impl EvidenceExchangeBundle {
         let trusted = policy
             .origin_for(&body.origin)
             .ok_or(ExchangeRefusal::OriginUntrusted)?;
-        if trusted != &body.origin {
+        if !body.origin.is_history_snapshot_of(trusted) {
             return Err(ExchangeRefusal::OriginHistoryMismatch);
         }
         verify_signature(trusted, &self.signature, &self.frame)?;
+        let source_bundle = Arc::new(self.clone());
 
         body.entries
             .iter()
-            .map(|entry| import_entry(entry, &body.origin, resolver, limits))
+            .map(|entry| import_entry(entry, &body.origin, &source_bundle, resolver, limits))
+            .collect()
+    }
+
+    /// Imports every record and passes it through a bounded equivocation detector.
+    ///
+    /// The detector recognizes the only predecessor relation the immutable
+    /// evidence schema defines: two different records from one origin naming
+    /// the same `supersedes` record.  A conflict result retains both verified,
+    /// signed source bundles; later observations for that origin/predecessor
+    /// slot are refused rather than replacing either observation.
+    pub fn import_with_equivocation_detector<R: ArtifactResolver>(
+        &self,
+        policy: &ImportPolicy,
+        resolver: &R,
+        limits: DecodeLimits,
+        detector: &mut EquivocationDetector,
+    ) -> Result<Vec<EquivocationDecision>, ExchangeRefusal> {
+        self.import(policy, resolver, limits)?
+            .into_iter()
+            .map(|imported| detector.observe(imported))
             .collect()
     }
 }
@@ -554,6 +599,7 @@ pub struct ImportedEvidence {
     origin: OriginDescriptor,
     record: EvidenceRecord,
     replay_completeness: ReplayCompleteness,
+    source_bundle: Arc<EvidenceExchangeBundle>,
 }
 
 impl ImportedEvidence {
@@ -573,6 +619,16 @@ impl ImportedEvidence {
     #[must_use]
     pub const fn replay_completeness(&self) -> ReplayCompleteness {
         self.replay_completeness
+    }
+
+    /// The exact signed foreign bundle that carried this record.
+    ///
+    /// Retaining this envelope means an equivocation record can preserve both
+    /// foreign attestations, rather than reducing a conflict to mutable local
+    /// metadata or silently choosing one observation.
+    #[must_use]
+    pub fn source_bundle(&self) -> &EvidenceExchangeBundle {
+        self.source_bundle.as_ref()
     }
 
     /// Maps this foreign record through explicit local requirements without
@@ -597,6 +653,248 @@ impl ImportedEvidence {
             ForeignEvidenceUse::MaySatisfy
         }
     }
+}
+
+/// Largest number of origin/predecessor slots a detector retains in one run.
+///
+/// The detector is deliberately bounded working state; callers persist an
+/// [`EquivocationConflict`] before treating its outcome as durably recorded.
+pub const MAX_EQUIVOCATION_SLOTS: usize = 1024;
+
+/// Largest combined source-frame and decoded-record footprint retained by one detector.
+///
+/// A conflict must retain the original foreign bundles, but a count-only cap
+/// would still permit a hostile peer to fill memory with maximum-size frames.
+/// Frames are shared across every record imported from the same bundle; the
+/// separately decoded immutable records are also charged. A detector refuses
+/// the next conflicting observation past this bound.
+pub const MAX_EQUIVOCATION_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct EquivocationSlot {
+    trust_domain: TrustDomain,
+    signer: OriginSigner,
+    superseded: EvidenceRecordId,
+}
+
+impl EquivocationSlot {
+    fn from_imported(imported: &ImportedEvidence, superseded: EvidenceRecordId) -> Self {
+        Self {
+            trust_domain: imported.origin().trust_domain().clone(),
+            signer: imported.origin().signer().clone(),
+            superseded,
+        }
+    }
+}
+
+/// Immutable conflict evidence for two incompatible signed successors.
+///
+/// Both records were independently imported and retain their exact signed
+/// source bundles. Their order is closed by immutable record identity, so the
+/// pair is portable evidence for a durable append-only conflict log; this
+/// detector never selects a winner.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct EquivocationConflict {
+    origin: OriginDescriptor,
+    superseded: EvidenceRecordId,
+    first: ImportedEvidence,
+    second: ImportedEvidence,
+}
+
+impl EquivocationConflict {
+    fn new(
+        first: ImportedEvidence,
+        second: ImportedEvidence,
+        superseded: EvidenceRecordId,
+    ) -> Self {
+        debug_assert_eq!(
+            first.origin().trust_domain(),
+            second.origin().trust_domain()
+        );
+        debug_assert_eq!(first.origin().signer(), second.origin().signer());
+        debug_assert_ne!(first.record().id(), second.record().id());
+        let (first, second) = if first.record().id() <= second.record().id() {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        Self {
+            origin: first.origin().clone(),
+            superseded,
+            first,
+            second,
+        }
+    }
+
+    /// Canonical source-origin snapshot for the remote identity that signed both records.
+    ///
+    /// The first and second imports retain their own complete signed key
+    /// histories, so key rotation does not collapse their provenance. The
+    /// common identity is this descriptor's trust domain and signer.
+    #[must_use]
+    pub const fn origin(&self) -> &OriginDescriptor {
+        &self.origin
+    }
+
+    /// Immutable predecessor that both records claimed to supersede.
+    #[must_use]
+    pub const fn superseded(&self) -> EvidenceRecordId {
+        self.superseded
+    }
+
+    /// Canonically first signed successor evidence, ordered by immutable record identity.
+    #[must_use]
+    pub const fn first(&self) -> &ImportedEvidence {
+        &self.first
+    }
+
+    /// Canonically second signed successor evidence, ordered by immutable record identity.
+    #[must_use]
+    pub const fn second(&self) -> &ImportedEvidence {
+        &self.second
+    }
+}
+
+/// Outcome of observing one independently verified foreign evidence record.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum EquivocationDecision {
+    /// A record with no competing successor was observed.
+    Accepted(ImportedEvidence),
+    /// The exact immutable record was already observed for this slot.
+    Duplicate(ImportedEvidence),
+    /// A different successor was observed; both signed observations are retained.
+    Conflict(EquivocationConflict),
+}
+
+/// Bounded detector for foreign evidence records that equivocate on a predecessor.
+///
+/// It is not a durability substitute: callers append each returned
+/// [`EquivocationConflict`] to their durable evidence log. Its local state
+/// prevents a later import in the same admission run from overwriting or using
+/// an already-conflicted origin/predecessor slot.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EquivocationDetector {
+    observed: BTreeMap<EquivocationSlot, ImportedEvidence>,
+    conflicts: BTreeMap<EquivocationSlot, EquivocationConflict>,
+}
+
+impl EquivocationDetector {
+    /// Starts an empty bounded detector.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records one verified import without selecting between conflicting successors.
+    pub fn observe(
+        &mut self,
+        imported: ImportedEvidence,
+    ) -> Result<EquivocationDecision, ExchangeRefusal> {
+        let Some(superseded) = imported.record().body().context().supersedes() else {
+            return Ok(EquivocationDecision::Accepted(imported));
+        };
+        let slot = EquivocationSlot::from_imported(&imported, superseded);
+
+        if self.conflicts.contains_key(&slot) {
+            return Err(ExchangeRefusal::EquivocationPreviouslyObserved {
+                superseded: Box::new(superseded),
+            });
+        }
+
+        if let Some(first) = self.observed.get(&slot) {
+            if first.record().id() == imported.record().id() {
+                return Ok(EquivocationDecision::Duplicate(imported));
+            }
+            if !self.can_retain(&imported) {
+                return Err(ExchangeRefusal::EquivocationDetectorByteLimit {
+                    limit: MAX_EQUIVOCATION_RETAINED_BYTES,
+                });
+            }
+            let first = self
+                .observed
+                .remove(&slot)
+                .expect("observed equivocation slot remains present");
+            let conflict = EquivocationConflict::new(first, imported, superseded);
+            self.conflicts.insert(slot, conflict.clone());
+            return Ok(EquivocationDecision::Conflict(conflict));
+        }
+
+        if self.observed.len() + self.conflicts.len() >= MAX_EQUIVOCATION_SLOTS {
+            return Err(ExchangeRefusal::EquivocationDetectorFull {
+                limit: MAX_EQUIVOCATION_SLOTS,
+            });
+        }
+        if !self.can_retain(&imported) {
+            return Err(ExchangeRefusal::EquivocationDetectorByteLimit {
+                limit: MAX_EQUIVOCATION_RETAINED_BYTES,
+            });
+        }
+        self.observed.insert(slot, imported.clone());
+        Ok(EquivocationDecision::Accepted(imported))
+    }
+
+    fn can_retain(&self, candidate: &ImportedEvidence) -> bool {
+        let mut unique_bundles: Vec<&Arc<EvidenceExchangeBundle>> = Vec::new();
+        let mut retained_bytes = 0usize;
+        for imported in self.observed.values() {
+            if !account_imported(&mut unique_bundles, &mut retained_bytes, imported) {
+                return false;
+            }
+        }
+        for conflict in self.conflicts.values() {
+            if !account_imported(&mut unique_bundles, &mut retained_bytes, &conflict.first)
+                || !account_imported(&mut unique_bundles, &mut retained_bytes, &conflict.second)
+            {
+                return false;
+            }
+        }
+        account_imported(&mut unique_bundles, &mut retained_bytes, candidate)
+            && retained_bytes <= MAX_EQUIVOCATION_RETAINED_BYTES
+    }
+
+    /// Returns a retained conflict for one origin and immutable predecessor.
+    #[must_use]
+    pub fn conflict_for(
+        &self,
+        origin: &OriginDescriptor,
+        superseded: EvidenceRecordId,
+    ) -> Option<&EquivocationConflict> {
+        let slot = EquivocationSlot {
+            trust_domain: origin.trust_domain().clone(),
+            signer: origin.signer().clone(),
+            superseded,
+        };
+        self.conflicts.get(&slot)
+    }
+}
+
+fn account_imported<'a>(
+    unique_bundles: &mut Vec<&'a Arc<EvidenceExchangeBundle>>,
+    retained_bytes: &mut usize,
+    imported: &'a ImportedEvidence,
+) -> bool {
+    let candidate = &imported.source_bundle;
+    if unique_bundles
+        .iter()
+        .any(|known| Arc::ptr_eq(known, candidate))
+    {
+        return retained_bytes
+            .checked_add(imported.record().frame().len())
+            .map(|next| {
+                *retained_bytes = next;
+                true
+            })
+            .unwrap_or(false);
+    }
+    let Some(with_source) = retained_bytes.checked_add(candidate.frame().len()) else {
+        return false;
+    };
+    let Some(with_record) = with_source.checked_add(imported.record().frame().len()) else {
+        return false;
+    };
+    *retained_bytes = with_record;
+    unique_bundles.push(candidate);
+    true
 }
 
 /// Why a bundle export or import was refused.
@@ -641,7 +939,7 @@ pub enum ExchangeRefusal {
     Evidence(Box<EvidenceRefusal>),
     /// The presented origin is absent from local trust policy.
     OriginUntrusted,
-    /// A peer's signed key history differs from the independently configured history.
+    /// A peer's signed key history is not a trusted historical prefix.
     OriginHistoryMismatch,
     /// Local policy configured the same origin domain/signer twice.
     DuplicateTrustedOrigin,
@@ -651,6 +949,8 @@ pub enum ExchangeRefusal {
     SignerEpochUnknown,
     /// The signature named a revoked or erased origin key epoch.
     SignerEpochNotVerifiable,
+    /// Export attempted to issue new evidence with a non-active origin key epoch.
+    SignerEpochNotIssuable,
     /// The signature's key commitment differs from the configured history.
     SignerKeyCommitmentMismatch,
     /// Cryptographic verification of the detached signature refused.
@@ -680,6 +980,21 @@ pub enum ExchangeRefusal {
     ArtifactCommitmentMismatch {
         /// Immutable record whose artifact was inconsistent.
         id: Box<EvidenceRecordId>,
+    },
+    /// The bounded equivocation detector cannot retain another predecessor slot.
+    EquivocationDetectorFull {
+        /// Largest number of retained origin/predecessor slots.
+        limit: usize,
+    },
+    /// Retaining another distinct signed source bundle would exceed the byte bound.
+    EquivocationDetectorByteLimit {
+        /// Largest combined retained signed-frame footprint.
+        limit: usize,
+    },
+    /// This origin/predecessor slot already produced an immutable conflict record.
+    EquivocationPreviouslyObserved {
+        /// Immutable predecessor named by the conflicting successors.
+        superseded: Box<EvidenceRecordId>,
     },
     /// Strict decoding accepted a frame that did not re-encode identically.
     FrameNotCanonical,
@@ -711,7 +1026,7 @@ impl fmt::Display for ExchangeRefusal {
                 formatter.write_str("origin is absent from local trust policy")
             }
             Self::OriginHistoryMismatch => {
-                formatter.write_str("origin key history differs from local trust policy")
+                formatter.write_str("origin key history is not a trusted historical prefix")
             }
             Self::DuplicateTrustedOrigin => {
                 formatter.write_str("local policy names the same origin more than once")
@@ -724,6 +1039,9 @@ impl fmt::Display for ExchangeRefusal {
             }
             Self::SignerEpochNotVerifiable => {
                 formatter.write_str("exchange signature names a non-verifiable origin key epoch")
+            }
+            Self::SignerEpochNotIssuable => {
+                formatter.write_str("exchange export names a non-active origin key epoch")
             }
             Self::SignerKeyCommitmentMismatch => {
                 formatter.write_str("exchange signature key commitment differs from origin history")
@@ -754,6 +1072,24 @@ impl fmt::Display for ExchangeRefusal {
                 write!(
                     formatter,
                     "artifact commitment mismatch in evidence record {id}"
+                )
+            }
+            Self::EquivocationDetectorFull { limit } => {
+                write!(
+                    formatter,
+                    "equivocation detector exceeds slot bound {limit}"
+                )
+            }
+            Self::EquivocationDetectorByteLimit { limit } => {
+                write!(
+                    formatter,
+                    "equivocation detector exceeds retained-byte bound {limit}"
+                )
+            }
+            Self::EquivocationPreviouslyObserved { superseded } => {
+                write!(
+                    formatter,
+                    "origin/predecessor slot for {superseded} already has immutable equivocation evidence"
                 )
             }
             Self::FrameNotCanonical => formatter.write_str("exchange frame is not canonical"),
@@ -869,6 +1205,7 @@ fn read_entry(input: &mut Decoder<'_>) -> Result<ExchangeEntry, CodecRefusal> {
 fn import_entry<R: ArtifactResolver>(
     entry: &ExchangeEntry,
     origin: &OriginDescriptor,
+    source_bundle: &Arc<EvidenceExchangeBundle>,
     resolver: &R,
     limits: DecodeLimits,
 ) -> Result<ImportedEvidence, ExchangeRefusal> {
@@ -904,6 +1241,7 @@ fn import_entry<R: ArtifactResolver>(
         origin: origin.clone(),
         record,
         replay_completeness,
+        source_bundle: source_bundle.clone(),
     })
 }
 
@@ -932,6 +1270,20 @@ fn verify_signature(
             frame,
         )
         .map_err(ExchangeRefusal::Signature)
+}
+
+fn verify_issuing_signature(
+    origin: &OriginDescriptor,
+    signature: &DetachedSignature,
+    frame: &[u8],
+) -> Result<(), ExchangeRefusal> {
+    let key = origin
+        .key_at(signature.epoch())
+        .ok_or(ExchangeRefusal::SignerEpochUnknown)?;
+    if !key.lifecycle().may_issue() {
+        return Err(ExchangeRefusal::SignerEpochNotIssuable);
+    }
+    verify_signature(origin, signature, frame)
 }
 
 fn rederive_replay_completeness<R: ArtifactResolver>(
@@ -1135,9 +1487,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactAvailability, ArtifactResolver, EvidenceExchangeBundle, ExchangeBundleBody,
-        ExchangeRefusal, ForeignEvidenceUse, ImportPolicy, LocalEvidenceRequirement,
-        OriginDescriptor, OriginSigner, OriginSigningKey, ReplayGradePolicy, TrustDomain,
+        ArtifactAvailability, ArtifactResolver, EquivocationDecision, EquivocationDetector,
+        EvidenceExchangeBundle, ExchangeBundleBody, ExchangeRefusal, ForeignEvidenceUse,
+        ImportPolicy, LocalEvidenceRequirement, OriginDescriptor, OriginSigner, OriginSigningKey,
+        ReplayGradePolicy, TrustDomain,
     };
     use fgit_claim::ClaimRank;
     use fgit_codec::{CanonicalBody, DecodeLimits, decode_body, encode_body};
@@ -1149,6 +1502,7 @@ mod tests {
         EvidenceArtifact, EvidenceContext, EvidenceRecord, EvidenceRecordBody, EvidenceText,
         ReplayCompleteness,
     };
+    use fgit_types::EvidenceRecordId;
 
     struct PresentArtifacts;
 
@@ -1166,16 +1520,28 @@ mod tests {
         }
     }
 
+    struct MismatchedArtifacts;
+
+    impl ArtifactResolver for MismatchedArtifacts {
+        fn resolve(&self, _artifact: &EvidenceArtifact) -> ArtifactAvailability {
+            ArtifactAvailability::CommitmentMismatch
+        }
+    }
+
     fn text(value: &str) -> EvidenceText {
         EvidenceText::parse("test", value).expect("canonical evidence text")
     }
 
     fn record() -> EvidenceRecord {
+        record_with(b"upstream-log", None)
+    }
+
+    fn record_with(artifact_bytes: &[u8], supersedes: Option<EvidenceRecordId>) -> EvidenceRecord {
         let artifact = EvidenceArtifact::new(
             text("artifact:upstream-test-log"),
             Digest::new(
                 DigestAlgorithm::Sha256.id(),
-                DigestBytes::try_new(&sha256_digest(b"upstream-log")).expect("SHA-256 digest fits"),
+                DigestBytes::try_new(&sha256_digest(artifact_bytes)).expect("SHA-256 digest fits"),
             ),
         );
         let context = EvidenceContext::new(
@@ -1190,7 +1556,7 @@ mod tests {
             vec![artifact],
             text("fallback:local-reverify"),
             ReplayCompleteness::Replayable,
-            None,
+            supersedes,
         )
         .expect("complete evidence context");
         EvidenceRecord::new(
@@ -1215,17 +1581,44 @@ mod tests {
     }
 
     fn origin(key: &SecretKey<Identity>, trust_domain: &str) -> OriginDescriptor {
-        OriginDescriptor::new(
-            TrustDomain::parse(trust_domain).expect("canonical trust domain"),
-            OriginSigner::parse("identity:upstream-release-bot").expect("canonical signer"),
+        origin_with_lifecycle(key, trust_domain, KeyLifecycle::Active)
+    }
+
+    fn origin_with_lifecycle(
+        key: &SecretKey<Identity>,
+        trust_domain: &str,
+        lifecycle: KeyLifecycle,
+    ) -> OriginDescriptor {
+        origin_with_history(
+            trust_domain,
             vec![OriginSigningKey::new(
                 key.id().epoch(),
-                KeyLifecycle::Active,
+                lifecycle,
                 *key.id().commitment(),
                 key.verifying_key(),
             )],
         )
+    }
+
+    fn origin_with_history(
+        trust_domain: &str,
+        key_history: Vec<OriginSigningKey>,
+    ) -> OriginDescriptor {
+        OriginDescriptor::new(
+            TrustDomain::parse(trust_domain).expect("canonical trust domain"),
+            OriginSigner::parse("identity:upstream-release-bot").expect("canonical signer"),
+            key_history,
+        )
         .expect("origin descriptor")
+    }
+
+    fn origin_key(key: &SecretKey<Identity>, lifecycle: KeyLifecycle) -> OriginSigningKey {
+        OriginSigningKey::new(
+            key.id().epoch(),
+            lifecycle,
+            *key.id().commitment(),
+            key.verifying_key(),
+        )
     }
 
     fn policy(origin: OriginDescriptor) -> ImportPolicy {
@@ -1273,6 +1666,27 @@ mod tests {
             ForeignEvidenceUse::SupplementalOnly,
             "foreign evidence must never bypass a local-required check"
         );
+    }
+
+    #[test]
+    fn records_from_one_exchange_bundle_share_the_signed_source_envelope() {
+        let key = signing_key();
+        let origin = origin(&key, "trust:upstream-a");
+        let bundle = EvidenceExchangeBundle::export(
+            origin.clone(),
+            vec![record(), record_with(b"second-upstream-log", None)],
+            &key,
+        )
+        .expect("signed bundle with two distinct evidence records");
+        let imported = bundle
+            .import(&policy(origin), &PresentArtifacts, DecodeLimits::DEFAULT)
+            .expect("both records independently verify");
+
+        assert_eq!(imported.len(), 2);
+        assert!(std::sync::Arc::ptr_eq(
+            &imported[0].source_bundle,
+            &imported[1].source_bundle,
+        ));
     }
 
     #[test]
@@ -1344,6 +1758,254 @@ mod tests {
                 DecodeLimits::DEFAULT,
             ),
             Err(ExchangeRefusal::OriginUntrusted)
+        ));
+    }
+
+    #[test]
+    fn forged_provenance_with_an_unregistered_key_is_refused() {
+        let key = signing_key();
+        let bundle_origin = origin(&key, "trust:upstream-a");
+        let bundle = EvidenceExchangeBundle::export(bundle_origin.clone(), vec![record()], &key)
+            .expect("signed exchange bundle");
+        let forged_key = SecretKey::derive(
+            &RootSecret::from_bytes([0x91; 32]),
+            KeyEpoch::FIRST,
+            KeyScope::OPERATOR,
+        );
+        let forged = EvidenceExchangeBundle::from_wire(
+            bundle.frame().to_vec(),
+            forged_key.sign(
+                IdentityDomain::SignedEnvelope,
+                ExchangeBundleBody::schema_id(),
+                bundle.frame(),
+            ),
+        );
+
+        assert!(matches!(
+            forged.import(
+                &policy(bundle_origin),
+                &PresentArtifacts,
+                DecodeLimits::DEFAULT
+            ),
+            Err(ExchangeRefusal::SignerKeyCommitmentMismatch)
+        ));
+    }
+
+    #[test]
+    fn replay_against_newer_artifacts_is_refused_on_commitment_mismatch() {
+        let key = signing_key();
+        let bundle_origin = origin(&key, "trust:upstream-a");
+        let bundle = EvidenceExchangeBundle::export(bundle_origin.clone(), vec![record()], &key)
+            .expect("signed exchange bundle");
+
+        assert!(matches!(
+            bundle.import(
+                &policy(bundle_origin),
+                &MismatchedArtifacts,
+                DecodeLimits::DEFAULT,
+            ),
+            Err(ExchangeRefusal::ArtifactCommitmentMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn key_rotation_retains_historical_verification_and_refuses_retired_or_revoked_issuance() {
+        let old_key = signing_key();
+        let new_key = SecretKey::derive(
+            &RootSecret::from_bytes([0x42; 32]),
+            KeyEpoch::FIRST.next().expect("second key epoch"),
+            KeyScope::OPERATOR,
+        );
+        let historical_origin = origin_with_history(
+            "trust:upstream-a",
+            vec![origin_key(&old_key, KeyLifecycle::Active)],
+        );
+        let historical_bundle =
+            EvidenceExchangeBundle::export(historical_origin, vec![record()], &old_key)
+                .expect("active epoch may issue historical evidence");
+        let rotated_origin = origin_with_history(
+            "trust:upstream-a",
+            vec![
+                origin_key(&old_key, KeyLifecycle::Retired),
+                origin_key(&new_key, KeyLifecycle::Active),
+            ],
+        );
+        let rotated_policy = policy(rotated_origin.clone());
+        assert!(
+            historical_bundle
+                .import(&rotated_policy, &PresentArtifacts, DecodeLimits::DEFAULT,)
+                .is_ok()
+        );
+
+        assert!(matches!(
+            EvidenceExchangeBundle::export(rotated_origin.clone(), vec![record()], &old_key),
+            Err(ExchangeRefusal::SignerEpochNotIssuable)
+        ));
+        assert!(EvidenceExchangeBundle::export(rotated_origin, vec![record()], &new_key).is_ok());
+
+        let replacement_key = SecretKey::derive(
+            &RootSecret::from_bytes([0x93; 32]),
+            KeyEpoch::FIRST,
+            KeyScope::OPERATOR,
+        );
+        let replacement_history = origin_with_history(
+            "trust:upstream-a",
+            vec![origin_key(&replacement_key, KeyLifecycle::Active)],
+        );
+        let replacement_bundle =
+            EvidenceExchangeBundle::export(replacement_history, vec![record()], &replacement_key)
+                .expect("the hostile replacement bundle is structurally valid and signed");
+        assert!(matches!(
+            replacement_bundle.import(&rotated_policy, &PresentArtifacts, DecodeLimits::DEFAULT,),
+            Err(ExchangeRefusal::OriginHistoryMismatch)
+        ));
+
+        let revoked_origin =
+            origin_with_lifecycle(&old_key, "trust:upstream-a", KeyLifecycle::Revoked);
+        assert!(matches!(
+            EvidenceExchangeBundle::export(revoked_origin.clone(), vec![record()], &old_key),
+            Err(ExchangeRefusal::SignerEpochNotIssuable)
+        ));
+        let revoked_body = ExchangeBundleBody::new(revoked_origin.clone(), vec![record()])
+            .expect("revoked origin remains structurally representable as hostile input");
+        let revoked_frame = encode_body(&revoked_body).expect("canonical exchange body");
+        let revoked_bundle = EvidenceExchangeBundle::from_wire(
+            revoked_frame.clone(),
+            old_key.sign(
+                IdentityDomain::SignedEnvelope,
+                ExchangeBundleBody::schema_id(),
+                &revoked_frame,
+            ),
+        );
+        assert!(matches!(
+            revoked_bundle.import(
+                &policy(revoked_origin),
+                &PresentArtifacts,
+                DecodeLimits::DEFAULT,
+            ),
+            Err(ExchangeRefusal::SignerEpochNotVerifiable)
+        ));
+    }
+
+    #[test]
+    fn equivocation_retains_both_signed_successors_and_refuses_later_use() {
+        let key = signing_key();
+        let bundle_origin = origin(&key, "trust:upstream-a");
+        let import_policy = policy(bundle_origin.clone());
+        let predecessor = record();
+        let first_record = record_with(b"first-successor", Some(predecessor.id()));
+        let second_record = record_with(b"second-successor", Some(predecessor.id()));
+        let first_bundle =
+            EvidenceExchangeBundle::export(bundle_origin.clone(), vec![first_record.clone()], &key)
+                .expect("first signed successor");
+        let second_bundle = EvidenceExchangeBundle::export(
+            bundle_origin.clone(),
+            vec![second_record.clone()],
+            &key,
+        )
+        .expect("second signed successor");
+        let mut detector = EquivocationDetector::new();
+
+        let first = first_bundle
+            .import_with_equivocation_detector(
+                &import_policy,
+                &PresentArtifacts,
+                DecodeLimits::DEFAULT,
+                &mut detector,
+            )
+            .expect("first successor is admissible before a conflict exists");
+        assert!(matches!(
+            first.as_slice(),
+            [EquivocationDecision::Accepted(imported)] if imported.record().id() == first_record.id()
+        ));
+
+        let duplicate = first_bundle
+            .import_with_equivocation_detector(
+                &import_policy,
+                &PresentArtifacts,
+                DecodeLimits::DEFAULT,
+                &mut detector,
+            )
+            .expect("an exact replay is not a conflicting successor");
+        assert!(matches!(
+            duplicate.as_slice(),
+            [EquivocationDecision::Duplicate(imported)] if imported.record().id() == first_record.id()
+        ));
+
+        let second = second_bundle
+            .import_with_equivocation_detector(
+                &import_policy,
+                &PresentArtifacts,
+                DecodeLimits::DEFAULT,
+                &mut detector,
+            )
+            .expect("a conflict retains immutable evidence instead of silently overwriting it");
+        let [EquivocationDecision::Conflict(conflict)] = second.as_slice() else {
+            panic!("second successor must produce exactly one conflict record");
+        };
+        assert_eq!(conflict.origin(), &bundle_origin);
+        assert_eq!(conflict.superseded(), predecessor.id());
+        let mut conflict_record_ids = [
+            conflict.first().record().id(),
+            conflict.second().record().id(),
+        ];
+        let mut expected_record_ids = [first_record.id(), second_record.id()];
+        conflict_record_ids.sort_unstable();
+        expected_record_ids.sort_unstable();
+        assert_eq!(conflict_record_ids, expected_record_ids);
+        assert!(
+            (conflict.first().record().id() == first_record.id()
+                && conflict.first().source_bundle().frame() == first_bundle.frame())
+                || (conflict.first().record().id() == second_record.id()
+                    && conflict.first().source_bundle().frame() == second_bundle.frame())
+        );
+        assert!(
+            (conflict.second().record().id() == first_record.id()
+                && conflict.second().source_bundle().frame() == first_bundle.frame())
+                || (conflict.second().record().id() == second_record.id()
+                    && conflict.second().source_bundle().frame() == second_bundle.frame())
+        );
+        assert_eq!(
+            detector
+                .conflict_for(&bundle_origin, predecessor.id())
+                .expect("detector retains conflict evidence pending durable append"),
+            conflict
+        );
+
+        let mut reverse_detector = EquivocationDetector::new();
+        second_bundle
+            .import_with_equivocation_detector(
+                &import_policy,
+                &PresentArtifacts,
+                DecodeLimits::DEFAULT,
+                &mut reverse_detector,
+            )
+            .expect("the other successor is also initially admissible");
+        let reverse = first_bundle
+            .import_with_equivocation_detector(
+                &import_policy,
+                &PresentArtifacts,
+                DecodeLimits::DEFAULT,
+                &mut reverse_detector,
+            )
+            .expect("reverse arrival order still produces the contradiction");
+        let [EquivocationDecision::Conflict(reverse_conflict)] = reverse.as_slice() else {
+            panic!("reverse successor must produce exactly one conflict record");
+        };
+        assert_eq!(
+            reverse_conflict, conflict,
+            "conflict evidence is canonical rather than arrival-order dependent"
+        );
+
+        assert!(matches!(
+            first_bundle.import_with_equivocation_detector(
+                &import_policy,
+                &PresentArtifacts,
+                DecodeLimits::DEFAULT,
+                &mut detector,
+            ),
+            Err(ExchangeRefusal::EquivocationPreviouslyObserved { superseded })
+                if *superseded == predecessor.id()
         ));
     }
 }
