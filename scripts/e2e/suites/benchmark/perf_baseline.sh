@@ -36,6 +36,12 @@ SAMPLES=${FG_BENCH_SAMPLES:-5}
 # not a label: the served corpus is evicted with posix_fadvise before every
 # sample. Run the cell twice, once per state, to get both.
 CACHE_STATE=${FG_BENCH_CACHE_STATE:-warm}
+# clone or fetch. Both are measured identically, one arm per server; a fetch run
+# consumes a pre-created stale clone per sample so materializing it stays
+# outside the timed interval.
+OPERATION=${FG_BENCH_OPERATION:-clone}
+# How far behind the stale clones start, in commits, for a fetch run.
+STALE_BEHIND=${FG_BENCH_STALE_BEHIND:-3}
 PYTHON_BIN=${FG_BENCH_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}
 # Tenant, repository and principal are 32-character identifiers; fg refuses
 # anything else ("TenantId: length 13 outside [32, 32]"), which is how the first
@@ -53,6 +59,7 @@ work=$(fge_tempdir perf-baseline-work)
 fge_context artifact_directory "$artifact_dir"
 fge_context samples_per_variant "$SAMPLES"
 fge_context cache_state "$CACHE_STATE"
+fge_context operation "$OPERATION"
 
 fge_assert_file FG-028C-E2E-001 "$PB_REPO/crates/fgit-benchmark/src/transport.rs" \
   'the transport workload module is present'
@@ -244,6 +251,58 @@ fge_assert_eq FG-028C-E2E-006 0 "$IMPORT_RC" 'the node imports the same corpus t
 
 CLONES="$work/clones"
 mkdir -p "$CLONES"
+STALE="$work/stale"
+mkdir -p "$STALE"
+FETCH_REFSPEC="refs/heads/main:refs/remotes/origin/main"
+LOGICAL_FOR_RUN="$LOGICAL_BYTES"
+
+# For a fetch run, materialize one stale clone PER SAMPLE PER ARM up front.
+# A fetch ADVANCES the repository it runs in, so a reused copy would transfer
+# nothing on every sample after the first and report as very fast. The runner
+# reuses the baseline subject for the A/A pass, so that arm consumes 2*SAMPLES
+# indices while the candidate arm consumes SAMPLES.
+if [ "$OPERATION" = fetch ]; then
+  STALE_AT=$("$GIT_BIN" -C "$SRC" rev-parse "HEAD~$STALE_BEHIND")
+  fge_context stale_base "$STALE_AT"
+  fge_context stale_behind_commits "$STALE_BEHIND"
+  # The amplification denominator for a fetch is the DELTA's logical size, not
+  # the whole corpus. Dividing a delta transfer by the full corpus would report
+  # a flatteringly small ratio that says nothing about the fetch.
+  LOGICAL_FOR_RUN=$(
+    "$GIT_BIN" -C "$SRC" rev-list --objects "$STALE_AT..HEAD" |
+      cut -d' ' -f1 |
+      "$GIT_BIN" -C "$SRC" cat-file --batch-check='%(objectsize)' |
+      awk '{ total += $1 } END { print total + 0 }'
+  )
+  fge_context fetch_delta_logical_bytes "$LOGICAL_FOR_RUN"
+  # BARE, deliberately. A non-bare repo refuses the setup fetch with
+  # "refusing to fetch into branch 'refs/heads/main' checked out at ...",
+  # because git will not move a branch that has a working tree on it. Bare also
+  # keeps the measured interval about transport rather than about writing a
+  # checkout, which is the thing being compared.
+  make_stale_clones() { # TAG COUNT
+    local tag=$1 count=$2 n d
+    for n in $(seq 0 $((count - 1))); do
+      d="$STALE/$tag-$n"
+      "$GIT_BIN" init -q --bare -b main "$d"
+      "$GIT_BIN" -C "$d" config gc.auto 0
+      "$GIT_BIN" -C "$d" config maintenance.auto false
+      # KEEP THE TRANSFER AS A PACK. fetch.unpackLimit defaults to 100, and this
+      # delta is roughly 20 objects, so git would explode the received pack into
+      # loose objects. On-disk bytes would then be a function of OBJECT CONTENT
+      # rather than of what the server sent -- measured: every arm reported
+      # exactly 4,559,168 bytes, identical to the byte, which is what a
+      # server-independent quantity looks like. With unpackLimit=1 the pack is
+      # stored as received and its size tracks the wire.
+      "$GIT_BIN" -C "$d" config fetch.unpackLimit 1
+      "$GIT_BIN" -C "$d" config transfer.unpackLimit 1
+      "$GIT_BIN" -C "$d" fetch -q --no-tags "$SRC" "$STALE_AT:refs/heads/main"
+    done
+  }
+  make_stale_clones upstream-git-daemon $((SAMPLES * 2))
+  make_stale_clones fgit-node-serve "$SAMPLES"
+  fge_context stale_clones_created "$((SAMPLES * 3))"
+fi
 # Empty GIT_TEMPLATE_DIR: the relocated pinned install otherwise warns
 # "templates not found in /prefix/share/git-core/templates" and copies whatever
 # the host has, which changes the .git byte count feeding storage amplification.
@@ -265,9 +324,12 @@ fge_run perf-baseline-experiment \
     FG_BENCH_PORT_BASE="$(( 21000 + ($$ % 20000) ))" \
     FG_BENCH_EXPECTED_HEAD="$EXPECTED_HEAD" \
     FG_BENCH_EXPECTED_COMMITS="$EXPECTED_COMMITS" \
-    FG_BENCH_LOGICAL_BYTES="$LOGICAL_BYTES" \
+    FG_BENCH_LOGICAL_BYTES="$LOGICAL_FOR_RUN" \
     FG_BENCH_SAMPLES="$SAMPLES" \
     FG_BENCH_DATASET="fg028c-corpus ${CORPUS_COMMITS}cx${CORPUS_FILES}fx${CORPUS_LINES}l logical=${LOGICAL_BYTES}B head=$EXPECTED_HEAD" \
+    FG_BENCH_OPERATION="$OPERATION" \
+    FG_BENCH_STALE_ROOT="$STALE" \
+    FG_BENCH_FETCH_REFSPEC="$FETCH_REFSPEC" \
     FG_BENCH_CACHE_STATE="$CACHE_STATE" \
     FG_BENCH_PYTHON="$PYTHON_BIN" \
     FG_BENCH_SOURCE_REVISION="$SOURCE_REVISION" \

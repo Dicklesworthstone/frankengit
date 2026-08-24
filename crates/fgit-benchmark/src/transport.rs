@@ -61,6 +61,32 @@ const LISTEN_POLL: Duration = Duration::from_millis(2);
 /// sampling interval is never the dominant error term in a reported CPU figure.
 const PROBE_POLL: Duration = Duration::from_millis(1);
 
+/// Which transport operation a sample measures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operation {
+    /// A full `git clone` into an empty destination.
+    Clone,
+    /// An incremental `git fetch` into a clone that is deliberately behind.
+    ///
+    /// Each sample consumes its own pre-created stale clone. A fetch ADVANCES
+    /// the repository it runs in, so reusing one would make every sample after
+    /// the first transfer nothing and report as very fast. The stale clones are
+    /// materialized by the caller before the run so that copying them is not
+    /// inside the measured interval.
+    Fetch,
+}
+
+impl Operation {
+    /// Stable tag written into the artifact.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Clone => "clone",
+            Self::Fetch => "fetch",
+        }
+    }
+}
+
 /// Page-cache state the corpus is in when a sample starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheState {
@@ -163,6 +189,13 @@ pub struct TransportConfig {
     pub expected_head: String,
     /// Number of commits the clone must contain.
     pub expected_commits: u64,
+    /// Which operation each sample measures.
+    pub operation: Operation,
+    /// Directory holding the pre-created stale clones a fetch run consumes,
+    /// one per sample per arm, named `<server-tag>-<sample index>`.
+    pub stale_root: PathBuf,
+    /// Refspec a fetch requests. Ignored for clone runs.
+    pub fetch_refspec: String,
     /// Whether the corpus is evicted from the page cache before every sample.
     pub cache_state: CacheState,
     /// Interpreter used for page-cache eviction; unused when warm.
@@ -213,12 +246,14 @@ impl TransportWorkload {
     #[must_use]
     pub fn workload_line(&self) -> String {
         format!(
-            "git clone git://127.0.0.1:<port>/{} served by {}; \
-             the timed interval spans cold server start, the complete clone, \
+            "git {} git://127.0.0.1:<port>/{} served by {}; \
+             the timed interval spans cold server start, the complete {}, \
              and the correctness oracle -- it is NOT steady-state transport latency, \
              because fg serve is one-shot and a fresh server must start for every sample",
+            self.config.operation.as_str(),
             self.config.repository,
-            self.kind.as_str()
+            self.kind.as_str(),
+            self.config.operation.as_str(),
         )
     }
 
@@ -525,9 +560,28 @@ fn directory_bytes(root: &Path) -> u64 {
     total
 }
 
-/// Bytes of `*.pack` beneath a clone, the client-observed egress.
+/// The git directory of a repository, whichever layout it uses.
+///
+/// A worktree clone keeps it at `.git/`; a bare repository IS the git
+/// directory. The fetch arm's stale repos are bare, and assuming `.git/`
+/// reported zero bytes for every one of them -- which surfaced as
+/// "clone produced no .git bytes at all" only because a zero denominator is
+/// refused. Had that guard not existed it would have divided by the wrong
+/// number silently. This helper exists so the layout is resolved in ONE place;
+/// the first version of this fix patched the existence check and missed the
+/// byte accounting.
+fn git_dir(repository_root: &Path) -> PathBuf {
+    let nested = repository_root.join(".git");
+    if nested.is_dir() {
+        nested
+    } else {
+        repository_root.to_path_buf()
+    }
+}
+
+/// Bytes of `*.pack` beneath a repository, the client-observed egress.
 fn pack_bytes(clone_root: &Path) -> u64 {
-    let pack_dir = clone_root.join(".git").join("objects").join("pack");
+    let pack_dir = git_dir(clone_root).join("objects").join("pack");
     let Ok(entries) = fs::read_dir(&pack_dir) else {
         return 0;
     };
@@ -626,16 +680,43 @@ impl BenchmarkWorkload for TransportWorkload {
     fn measure(&mut self) -> Result<(Self::Output, SystemMetrics), String> {
         let index = self.sample_counter;
         self.sample_counter = self.sample_counter.saturating_add(1);
-        let destination = self
-            .config
-            .work_root
-            .join(format!("{}-{index}", self.kind.as_str()));
-        if destination.exists() {
-            return Err(format!(
-                "clone destination already exists, refusing to reuse it: {}",
-                destination.display()
-            ));
-        }
+        // Clone writes into a fresh empty path; fetch runs inside a stale clone
+        // the caller materialized before the run. Both are per-sample: reusing
+        // either would make sample N measure less work than sample 0.
+        let destination = match self.config.operation {
+            Operation::Clone => {
+                let path = self
+                    .config
+                    .work_root
+                    .join(format!("{}-{index}", self.kind.as_str()));
+                if path.exists() {
+                    return Err(format!(
+                        "clone destination already exists, refusing to reuse it: {}",
+                        path.display()
+                    ));
+                }
+                path
+            }
+            Operation::Fetch => {
+                let path = self
+                    .config
+                    .stale_root
+                    .join(format!("{}-{index}", self.kind.as_str()));
+                // Accept a bare repo (objects/ at the root) as well as a
+                // worktree layout (.git/). The stale clones are bare because
+                // git refuses to fetch into a checked-out branch.
+                let bare = path.join("objects").is_dir() && path.join("HEAD").is_file();
+                if !bare && !path.join(".git").is_dir() {
+                    return Err(format!(
+                        "fetch sample {index} has no pre-created stale clone at {}; \
+                         the caller must materialize one per sample per arm so that \
+                         copying is not inside the measured interval",
+                        path.display()
+                    ));
+                }
+                path
+            }
+        };
 
         // Evict BEFORE the server starts, so the server's own first reads are
         // cold too. Evicting after would leave whatever the server touched at
@@ -648,24 +729,45 @@ impl BenchmarkWorkload for TransportWorkload {
             evict_page_cache(&self.config.python_binary, corpus)?;
         }
 
+        // Bytes the repository holds BEFORE the transfer. Clone starts from
+        // nothing; fetch starts from a stale repo that already holds most of
+        // the history, so only the difference is attributable to this operation.
+        let bytes_before = directory_bytes(&git_dir(&destination));
+
         let (mut server, port) = self.spawn_server()?;
         let remote = format!("git://127.0.0.1:{port}{}", self.remote_path());
 
-        let mut clone = self
-            .config
-            .git()
-            .arg("-c")
-            .arg("protocol.version=1")
-            .arg("clone")
-            .arg("--no-local")
-            .arg("--quiet")
-            .arg(&remote)
-            .arg(&destination)
+        let mut transfer = self.config.git();
+        transfer.arg("-c").arg("protocol.version=1");
+        match self.config.operation {
+            Operation::Clone => {
+                transfer
+                    .arg("clone")
+                    .arg("--no-local")
+                    .arg("--quiet")
+                    .arg(&remote)
+                    .arg(&destination);
+            }
+            Operation::Fetch => {
+                // The URL is given explicitly rather than through a stored
+                // remote: the port changes every sample, so a remote recorded
+                // at template time would point at a dead listener.
+                transfer
+                    .arg("-C")
+                    .arg(&destination)
+                    .arg("fetch")
+                    .arg("--quiet")
+                    .arg("--no-tags")
+                    .arg(&remote)
+                    .arg(&self.config.fetch_refspec);
+            }
+        }
+        let mut clone = transfer
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| format!("spawn clone: {error}"))?;
+            .map_err(|error| format!("spawn {}: {error}", self.config.operation.as_str()))?;
 
         // Sample the server WHILE the clone runs, keeping the last successful
         // reading, because the two arms die at different moments and neither
@@ -730,7 +832,8 @@ impl BenchmarkWorkload for TransportWorkload {
                 let _ = pipe.read_to_string(&mut stderr);
             }
             return Err(format!(
-                "clone from {} exited {}: {}",
+                "{} from {} exited {}: {}",
+                self.config.operation.as_str(),
                 self.kind.as_str(),
                 clone_status,
                 stderr.trim()
@@ -752,11 +855,30 @@ impl BenchmarkWorkload for TransportWorkload {
             )
         })?;
 
-        let egress_bytes = pack_bytes(&destination);
-        let git_directory_bytes = directory_bytes(&destination.join(".git"));
-        if git_directory_bytes == 0 {
-            return Err("clone produced no .git bytes at all".to_owned());
+        // Egress is what THIS operation added, not what the repository holds.
+        //
+        // Counting `*.pack` present after the operation is right for a clone and
+        // wrong for a fetch: it reported 0 for every fetch sample -- git had
+        // left the transferred objects loose -- and the amplification ratio then
+        // silently became (stale repo size / delta), identical for both arms and
+        // measuring nothing about the transfer. The before/after difference is
+        // the one formula correct for both operations.
+        //
+        // It is bytes WRITTEN, a slight over-count of bytes on the wire: it
+        // includes index and ref updates, which are tens of KB against MB of
+        // objects. Named as such rather than presented as exact wire bytes.
+        let bytes_after = directory_bytes(&git_dir(&destination));
+        let egress_bytes = bytes_after.saturating_sub(bytes_before);
+        if egress_bytes == 0 {
+            return Err(format!(
+                "{} from {} added no bytes to {}; a transfer that moved nothing is \
+                 not a fast sample",
+                self.config.operation.as_str(),
+                self.kind.as_str(),
+                destination.display()
+            ));
         }
+        let git_directory_bytes = bytes_after;
         // The denominator is the CORPUS's logical reachable size, supplied by
         // the caller, not the clone's own .git size.
         //
@@ -801,8 +923,8 @@ impl BenchmarkWorkload for TransportWorkload {
 
         Ok((
             CloneOutput {
+                pack_bytes: pack_bytes(&destination),
                 destination,
-                pack_bytes: egress_bytes,
             },
             metrics,
         ))
@@ -830,13 +952,22 @@ impl BenchmarkWorkload for TransportWorkload {
         // Resolving only HEAD would make the candidate arm unmeasurable;
         // resolving only the remote ref would hide the gap. Doing both and
         // naming the winner measures the transport AND reports the divergence.
+        // A FETCH run must NOT consult HEAD. The stale clone's HEAD points at
+        // its own older tip and would resolve successfully to the WRONG commit,
+        // so the oracle would compare the pre-fetch state and fail every sample
+        // -- or, worse, pass if the corpus tip ever coincided. Check exactly the
+        // ref the fetch was told to write.
+        let candidates: &[&str] = match self.config.operation {
+            Operation::Fetch => &["refs/remotes/origin/main"],
+            Operation::Clone => &[
+                "HEAD",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+                "refs/remotes/origin/master",
+            ],
+        };
         let mut resolved = None;
-        for name in [
-            "HEAD",
-            "refs/remotes/origin/HEAD",
-            "refs/remotes/origin/main",
-            "refs/remotes/origin/master",
-        ] {
+        for name in candidates.iter().copied() {
             let attempt = self
                 .config
                 .git()
@@ -1051,6 +1182,9 @@ mod tests {
             port_base: 30_000,
             expected_head: "0".repeat(40),
             expected_commits: 3,
+            operation: Operation::Clone,
+            stale_root: PathBuf::from("/nonexistent/stale"),
+            fetch_refspec: "refs/heads/main:refs/remotes/origin/main".to_owned(),
             cache_state: CacheState::Warm,
             python_binary: PathBuf::from("/nonexistent/python3"),
             logical_reachable_bytes: 1_000_000,

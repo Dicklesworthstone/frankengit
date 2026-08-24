@@ -10,7 +10,9 @@ use std::path::PathBuf;
 
 use fgit_benchmark::{
     BenchmarkWorkload,
-    transport::{CacheState, CloneOutput, ServerKind, TransportConfig, TransportWorkload},
+    transport::{
+        CacheState, CloneOutput, Operation, ServerKind, TransportConfig, TransportWorkload,
+    },
 };
 
 fn config() -> TransportConfig {
@@ -29,6 +31,9 @@ fn config() -> TransportConfig {
         port_base: 40_000,
         expected_head: "a".repeat(40),
         expected_commits: 8,
+        operation: Operation::Clone,
+        stale_root: PathBuf::from("/nonexistent/fg-028c/stale"),
+        fetch_refspec: "refs/heads/main:refs/remotes/origin/main".to_owned(),
         cache_state: CacheState::Warm,
         python_binary: PathBuf::from("/nonexistent/fg-028c/python3"),
         logical_reachable_bytes: 1_000_000,

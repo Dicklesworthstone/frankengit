@@ -11,7 +11,7 @@ use fgit_benchmark::{
     BenchmarkPlan, BenchmarkRefusal, BenchmarkRunner, BenchmarkWorkload, EnvironmentFingerprint,
     MIN_SAMPLES_PER_VARIANT, OptimizationAdmission, OracleReceipt, StorageClasses, SystemMetrics,
     WorkloadDescriptor,
-    transport::{CacheState, ServerKind, TransportConfig, TransportWorkload},
+    transport::{CacheState, Operation, ServerKind, TransportConfig, TransportWorkload},
 };
 
 fn main() {
@@ -109,6 +109,18 @@ fn transport_config_from_environment() -> Result<TransportConfig, BenchmarkRefus
                 field: "FG_BENCH_EXPECTED_COMMITS",
                 detail: "must be a commit count".to_owned(),
             })?,
+        operation: match required_var("FG_BENCH_OPERATION")?.as_str() {
+            "clone" => Operation::Clone,
+            "fetch" => Operation::Fetch,
+            _ => {
+                return Err(BenchmarkRefusal::InvalidMetric {
+                    field: "FG_BENCH_OPERATION",
+                    detail: "must be exactly \"clone\" or \"fetch\"".to_owned(),
+                });
+            }
+        },
+        stale_root: required_path("FG_BENCH_STALE_ROOT")?,
+        fetch_refspec: required_var("FG_BENCH_FETCH_REFSPEC")?,
         cache_state: match required_var("FG_BENCH_CACHE_STATE")?.as_str() {
             "warm" => CacheState::Warm,
             "cold" => CacheState::ColdPageCache,
@@ -191,6 +203,8 @@ fn transport_plan(
             },
             commands: vec![
                 "fg init <storage> <tenant> <repository>".to_owned(),
+                "git init <stale>; git fetch <src> <older-sha>:refs/heads/main  (fetch runs only)"
+                    .to_owned(),
                 "fg import <storage> <tenant> <repository> <principal> <key> <source>".to_owned(),
                 "git clone --bare <source> <upstream-base>/<repository>.git".to_owned(),
                 "cargo run --release -p fgit-benchmark -- transport-baseline --out <directory>"
@@ -249,6 +263,14 @@ fn transport_allowlist(config: &TransportConfig, samples: usize) -> BTreeMap<Str
             config.expected_commits.to_string(),
         ),
         ("FG_BENCH_SAMPLES".to_owned(), samples.to_string()),
+        (
+            "FG_BENCH_OPERATION".to_owned(),
+            config.operation.as_str().to_owned(),
+        ),
+        (
+            "FG_BENCH_CACHE_STATE".to_owned(),
+            config.cache_state.as_str().to_owned(),
+        ),
         (
             "FG_BENCH_PORT_BASE".to_owned(),
             config.port_base.to_string(),
