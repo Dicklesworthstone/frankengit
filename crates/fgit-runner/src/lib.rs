@@ -2137,6 +2137,11 @@ pub struct OutputStore {
 
 impl OutputStore {
     /// Creates an empty derived output store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Stores successful output and the immutable receipt that originally made it.
     ///
     /// An existing exact key is never overwritten with a different producing
