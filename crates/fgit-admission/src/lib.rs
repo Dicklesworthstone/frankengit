@@ -1457,6 +1457,13 @@ impl AdmissionResult {
 /// Typed failure before a reportable terminal outcome exists.
 #[derive(Debug)]
 pub enum AdmissionError {
+    /// The receive core refused before it could produce a validated receive.
+    ///
+    /// This deliberately retains the complete wire-owned vocabulary.  The
+    /// node's asynchronous transport wrapper must not collapse a structural,
+    /// validation, cancellation, or authoritative handoff refusal into an
+    /// invented admission or wire error.
+    Receive(ReceiveError),
     /// The configured command or retry bound is invalid.
     InvalidLimit,
     /// The receive request does not match the configured repository format.
@@ -1519,6 +1526,7 @@ pub enum AdmissionError {
 impl Display for AdmissionError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Receive(error) => Display::fmt(error, formatter),
             Self::InvalidLimit => formatter.write_str("invalid receive admission limit"),
             Self::ObjectFormatMismatch => {
                 formatter.write_str("receive quarantine format differs from repository format")
@@ -1581,7 +1589,20 @@ impl Display for AdmissionError {
     }
 }
 
-impl Error for AdmissionError {}
+impl Error for AdmissionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Receive(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<ReceiveError> for AdmissionError {
+    fn from(error: ReceiveError) -> Self {
+        Self::Receive(error)
+    }
+}
 
 impl From<AuthorityFailure> for AdmissionError {
     fn from(failure: AuthorityFailure) -> Self {

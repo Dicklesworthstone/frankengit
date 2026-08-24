@@ -10,7 +10,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fgit_admission::{
-    PermittedObjectClosure, QuarantineValidator, ValidatedClosure, permitted_object_closure_root,
+    AdmissionError, PermittedObjectClosure, QuarantineValidator, ValidatedClosure,
+    permitted_object_closure_root,
 };
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject};
 use fgit_pack::{
@@ -18,11 +19,24 @@ use fgit_pack::{
     QuarantinedPack, ResolutionBudget, verify_native_object,
 };
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, RefusalCode};
-use fgit_wire::receive::{QuarantineReceipt, ReceiveRequest};
+use fgit_wire::receive::{QuarantineReceipt, ReceiveError, ReceiveRequest};
 
 use crate::{
-    AuthoritySelectedClosure, MaterializedAdmission, NodeRefusal, OneNode, crypto_object_kind,
+    AuthoritySelectedClosure, MaterializedAdmission, NodeReceiveTransportRefusal, NodeRefusal,
+    OneNode, crypto_object_kind,
 };
+
+/// Preserves the receive core's single refusal vocabulary when an asynchronous
+/// node transport reports a failed handoff.
+///
+/// The conversion contains the complete [`ReceiveError`] rather than selecting
+/// a lossy node-local category.  Consequently new receive refusal arms remain
+/// exact until the transport chooses to expose a distinct additional surface.
+impl From<ReceiveError> for NodeReceiveTransportRefusal {
+    fn from(error: ReceiveError) -> Self {
+        Self::Admission(Box::new(AdmissionError::from(error)))
+    }
+}
 
 /// Pack/object-fabric validator bound to an authenticated object closure.
 ///
@@ -532,7 +546,7 @@ mod tests {
         CANONICAL_CODEC_VERSION, DigestBytes, GitHashAlgorithm, GitOidSha1, RepositoryCommitId,
         RepositoryId, TenantId,
     };
-    use fgit_wire::receive::{ReceiveCommand, ReceiveRequest};
+    use fgit_wire::receive::{ReceiveCommand, ReceivePhase, ReceiveRequest};
     use fgit_wire::{AnyGitOid, GitObjectFormat};
 
     use super::*;
@@ -627,6 +641,95 @@ mod tests {
             capabilities: Vec::new(),
             push_options: Vec::new(),
             certificate: None,
+        }
+    }
+
+    #[test]
+    fn every_receive_refusal_arm_maps_losslessly_to_the_async_transport_surface() {
+        // The synchronous core owns the vocabulary.  One representative of
+        // every current ReceiveError arm must survive the node's async
+        // transport wrapper without a category collapse or a catch-all.
+        let synchronous_refusals = vec![
+            ReceiveError::Wire(fgit_wire::WireError::InvalidLimit { field: "wire" }),
+            ReceiveError::Pack(PackError::MissingDeltaBase),
+            ReceiveError::AuthoritativeRefusal(RefusalCode::ObjectClosureIncomplete),
+            ReceiveError::InvalidLimit { field: "receive" },
+            ReceiveError::UnsupportedCapability {
+                capability: b"atomic".to_vec(),
+            },
+            ReceiveError::CapabilityNotAdvertised {
+                capability: b"delete-refs".to_vec(),
+            },
+            ReceiveError::CapabilityValueRequired {
+                capability: b"object-format".to_vec(),
+            },
+            ReceiveError::CapabilityValueForbidden {
+                capability: b"report-status".to_vec(),
+            },
+            ReceiveError::ObjectFormatMismatch {
+                expected: GitObjectFormat::Sha1,
+                observed: Some(b"sha256".to_vec()),
+            },
+            ReceiveError::CapabilitiesNotFirstCommand,
+            ReceiveError::MissingCommands,
+            ReceiveError::TooManyCommands { limit: 1 },
+            ReceiveError::DuplicateRefCommand {
+                ref_name: b"refs/heads/main".to_vec(),
+            },
+            ReceiveError::BothObjectIdsZero,
+            ReceiveError::MalformedCommand {
+                line: b"bad command".to_vec(),
+            },
+            ReceiveError::DeleteRefsNotNegotiated,
+            ReceiveError::UnexpectedPacket {
+                state: ReceivePhase::Commands,
+                packet: "flush",
+            },
+            ReceiveError::UnexpectedPackBytes {
+                state: ReceivePhase::Ready,
+            },
+            ReceiveError::TerminalState {
+                state: ReceivePhase::Complete,
+            },
+            ReceiveError::IncompleteRequest {
+                state: ReceivePhase::Pack,
+            },
+            ReceiveError::PackRequired,
+            ReceiveError::QuarantineBytesExceeded { limit: 1 },
+            ReceiveError::TooManyPushOptions { limit: 1 },
+            ReceiveError::InvalidPushOption,
+            ReceiveError::SignedPushUnsupported,
+            ReceiveError::SignedPushCapabilityMissing,
+            ReceiveError::MalformedCertificate,
+            ReceiveError::CertificateTruncated,
+            ReceiveError::CertificateNonceMismatch,
+            ReceiveError::CertificateTooLarge { limit: 1 },
+            ReceiveError::Cancelled,
+            ReceiveError::StatusCountMismatch {
+                expected: 1,
+                actual: 2,
+            },
+            ReceiveError::InvalidStatusMessage,
+            ReceiveError::AllocationFailure,
+        ];
+
+        for synchronous in synchronous_refusals {
+            let expected = synchronous.clone();
+            let asynchronous = NodeReceiveTransportRefusal::from(synchronous);
+            match asynchronous {
+                NodeReceiveTransportRefusal::Admission(admission) => match admission.as_ref() {
+                    AdmissionError::Receive(mapped) => assert_eq!(
+                        mapped, &expected,
+                        "the asynchronous transport must retain {expected:?} exactly"
+                    ),
+                    other => panic!(
+                        "the asynchronous transport must preserve ReceiveError, got {other:?}"
+                    ),
+                },
+                NodeReceiveTransportRefusal::Unauthenticated => panic!(
+                    "a receive-core refusal must not be confused with missing authentication"
+                ),
+            }
         }
     }
 
