@@ -46,7 +46,7 @@ fge_init verified-reads-tamper
 TARGETS=(
   "fgit-verified-read:tamper_campaign:8"
   "fgit-verified-read:head_chain_freshness:7"
-  "fgit-verified-read:proof_cost:9"
+  "fgit-verified-read:proof_cost:10"
   "fgit-node:verified_read_served_tamper:4"
 )
 
@@ -74,6 +74,7 @@ LOAD_BEARING=(
   a_relayed_envelope_crosses_the_wire_and_the_client_runs_both_checks_on_the_decoded_form
   every_leaf_at_every_size_carries_exactly_the_length_its_position_requires
   a_promoted_tail_really_does_shorten_a_path_so_the_model_is_not_decorative
+  canonical_encoded_size_is_linear_in_the_path_and_the_model_predicts_a_third_size
   generation_reads_the_whole_state_while_verification_reads_only_the_path
 )
 

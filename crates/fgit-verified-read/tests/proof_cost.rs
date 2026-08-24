@@ -41,6 +41,7 @@ use fgit_types::hash::Digest;
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1};
 use fgit_types::refs::RefName;
+use fgit_verified_read::encode_merkle_proof;
 
 fn name(index: usize) -> RefName {
     RefName::try_new(format!("refs/heads/b{index:04}").as_bytes()).expect("an admissible name")
@@ -431,6 +432,84 @@ fn generation_reads_the_whole_state_while_verification_reads_only_the_path() {
     assert!(
         verify_ref_state_membership(&large_root, &name(0), &large_oid, &large_proof),
         "a client holding only root, leaf and path must be able to verify"
+    );
+}
+
+#[test]
+fn canonical_encoded_size_is_linear_in_the_path_and_the_model_predicts_a_third_size() {
+    // The REAL wire cost, now that `frankengit-ptoe` gave a verified read a
+    // canonical encoding. Until it landed there were no canonical bytes to
+    // count, and this file measured component lengths and said so explicitly as
+    // a lower bound. This replaces the bound with the encoded figure.
+    //
+    // Not a golden. Hardcoding "218 bytes" would fail on any framing change and
+    // teach nothing; instead the per-sibling cost is DERIVED from two sizes and
+    // required to PREDICT a third. A model that predicts an unseen point is
+    // evidence about the relation; a recorded constant is evidence about one run.
+    let sizes = [8_usize, 64, 512];
+    let mut siblings = Vec::new();
+    let mut encoded = Vec::new();
+    for leaves in sizes {
+        let state = state(leaves);
+        let (_, proof) = ref_state_membership_proof(&state, &name(0)).expect("a proof");
+        siblings.push(proof.siblings().len());
+        encoded.push(
+            encode_merkle_proof(&proof)
+                .expect("the proof encodes")
+                .len(),
+        );
+    }
+
+    // Index 0 attains the ceiling at every size, so the path grows by a fixed
+    // step across these three. Asserted, because the derivation below divides
+    // by it and a zero step would make the model vacuous.
+    let step = siblings[1] - siblings[0];
+    assert_eq!(
+        step,
+        siblings[2] - siblings[1],
+        "the sibling step must be uniform"
+    );
+    assert!(
+        step > 0,
+        "the path must actually grow, or there is nothing to model"
+    );
+
+    // Derive the per-sibling cost from the first two points only.
+    let growth = encoded[1] - encoded[0];
+    assert_eq!(
+        growth % step,
+        0,
+        "canonical growth must be a whole number of siblings"
+    );
+    let per_sibling = growth / step;
+
+    // Then PREDICT the third and require the encoding to match it exactly.
+    assert_eq!(
+        encoded[2],
+        encoded[1] + per_sibling * step,
+        "canonical size must stay linear in the path: predicted from {} and {}, \
+         per-sibling {per_sibling}, got {}",
+        encoded[0],
+        encoded[1],
+        encoded[2]
+    );
+
+    // And the framing is genuinely per-field rather than per-answer: the
+    // canonical cost per sibling exceeds a bare digest by a bounded constant,
+    // which is why the logarithmic growth this file measures survives encoding
+    // instead of being an artefact of ignoring the frame.
+    let digest_width = ref_state_merkle_root(&state(2))
+        .expect("a root")
+        .bytes()
+        .as_bytes()
+        .len();
+    assert!(
+        per_sibling >= digest_width,
+        "a sibling cannot encode smaller than the digest it carries"
+    );
+    assert!(
+        per_sibling - digest_width <= 16,
+        "per-sibling framing must be a small constant, not proportional to anything"
     );
 }
 
