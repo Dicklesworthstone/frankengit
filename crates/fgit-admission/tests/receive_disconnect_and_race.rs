@@ -204,6 +204,7 @@ impl AdmissionSnapshotProjection for UnboundAdapter {
             forge_positions: self.forge_positions.clone(),
             retention: self.retention.clone(),
             outbox: self.outbox.clone(),
+            ..AdmissionSnapshot::default()
         })
     }
 }

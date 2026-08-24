@@ -52,6 +52,7 @@ use fgit_wire::receive::{
     QuarantineReceipt, ReceiveCommandStatus, ReceiveError, ReceiveRequest, UnpackStatus,
     report_status,
 };
+use fgit_wire::visibility::RefVisibility;
 use fgit_wire::{AnyGitOid, GitObjectFormat, Packet};
 
 pub mod evidence;
@@ -516,6 +517,14 @@ pub struct AdmissionSnapshot {
     pub retention: BTreeSet<fgit_reference::intent::RetentionRoot>,
     /// External-effect delivery keys at that same basis.
     pub outbox: BTreeMap<fgit_reference::intent::OutboxDeliveryKey, Digest>,
+    /// Which refs are hidden from the principal this snapshot was projected for.
+    ///
+    /// The policy travels with authority-derived state rather than arriving at a
+    /// transport boundary, which is what keeps it authority-bound: a client
+    /// cannot supply it and an adapter cannot inject one. An empty policy hides
+    /// nothing, so a projection that does not set it preserves existing
+    /// behaviour exactly.
+    pub hidden_refs: RefVisibility,
 }
 
 impl AdmissionSnapshot {
@@ -1280,6 +1289,7 @@ where
             forge_positions: BTreeMap::new(),
             retention: BTreeSet::new(),
             outbox: BTreeMap::new(),
+            hidden_refs: RefVisibility::new(),
         })
     }
 }
@@ -1769,6 +1779,23 @@ where
     prepare_publication_from_snapshot(context, lowered, closure, tx_id, snapshot)
 }
 
+/// Whether any command in this request names a ref hidden from its principal.
+///
+/// Evaluated before the fold, so a hidden target never reaches ref-state
+/// evaluation and cannot be distinguished by timing or by which later check
+/// would have refused it. Both the blocking and asynchronous surfaces reach the
+/// fold through `prepare_publication_from_snapshot`, so this one call covers
+/// both rather than duplicating the rule.
+fn hides_any_target(
+    snapshot: &AdmissionSnapshot,
+    semantic: &fgit_authority::SemanticRequest,
+) -> bool {
+    semantic
+        .ref_commands()
+        .iter()
+        .any(|command| snapshot.hidden_refs.hides(command.name.as_bytes()))
+}
+
 /// Evaluate one exact admission snapshot with the shared transaction model.
 ///
 /// The blocking and asynchronous projection surfaces both call this after
@@ -1783,6 +1810,11 @@ fn prepare_publication_from_snapshot(
     snapshot: AdmissionSnapshot,
 ) -> Result<PublicationPreparation, AdmissionError> {
     let model_request = model_request(context, &lowered.semantic, tx_id, closure)?;
+    if hides_any_target(&snapshot, &lowered.semantic) {
+        return Ok(PublicationPreparation::Refuse(
+            RefusalCode::HiddenRefUnauthorized,
+        ));
+    }
     let fold = IntentEvaluator::new().evaluate(snapshot.as_fold_basis(), &model_request);
     match &fold.outcome {
         FoldOutcome::Aborted { code, .. } => Ok(PublicationPreparation::Refuse(*code)),
@@ -2661,8 +2693,88 @@ const fn refusal_message(code: RefusalCode) -> &'static [u8] {
         RefusalCode::ForceNotPermitted => b"force not permitted",
         RefusalCode::NonFastForwardRefused => b"non-fast-forward",
         RefusalCode::RefNameInvalid => b"invalid ref name",
+        // Deliberately the SAME bytes as ExpectedOldRefMismatch above. A hidden
+        // ref must be indistinguishable from one the principal's view says does
+        // not exist; a distinctive message here would let a client probe a name
+        // and learn the hidden namespace one query at a time. The code is still
+        // recorded as HiddenRefUnauthorized in the decision record — internal
+        // audit and wire disclosure are different surfaces.
+        RefusalCode::HiddenRefUnauthorized => b"stale info",
         _ => b"admission refused",
     }
+}
+
+#[cfg(test)]
+mod hidden_ref_disclosure_tests {
+    use super::{RefVisibility, hides_any_target, refusal_message};
+    use fgit_types::RefusalCode;
+
+    // The acceptance for frankengit-eeb8 is byte-identity on what the CLIENT
+    // sees, not on the refusal variant. A test asserting the variant passes
+    // while the wire still leaks, so these compare the emitted bytes.
+
+    #[test]
+    fn a_hidden_ref_emits_the_same_bytes_as_a_ref_that_does_not_exist() {
+        assert_eq!(
+            refusal_message(RefusalCode::HiddenRefUnauthorized),
+            refusal_message(RefusalCode::ExpectedOldRefMismatch),
+            "a hidden ref must be indistinguishable on the wire from an unknown one"
+        );
+    }
+
+    #[test]
+    fn the_comparison_is_not_vacuous_because_genuinely_different_refusals_differ() {
+        // Without this control the assertion above is satisfied by a
+        // refusal_message that returns one constant for everything.
+        assert_ne!(
+            refusal_message(RefusalCode::ExpectedOldRefMismatch),
+            refusal_message(RefusalCode::ForceNotPermitted),
+            "distinct refusals must stay distinct, or byte-identity proves nothing"
+        );
+    }
+
+    #[test]
+    fn the_internal_code_is_still_hidden_ref_unauthorized() {
+        // Internal audit and wire disclosure are different surfaces: the code
+        // is recorded even though its bytes are deliberately generic.
+        assert_eq!(RefusalCode::HiddenRefUnauthorized.code_point(), 0x0206);
+        assert!(
+            !refusal_message(RefusalCode::HiddenRefUnauthorized)
+                .windows(6)
+                .any(|window| window.eq_ignore_ascii_case(b"hidden")),
+            "the emitted bytes must not name the hidden-ref condition"
+        );
+    }
+
+    #[test]
+    fn an_empty_policy_hides_no_target_and_a_rule_hides_exactly_its_match() {
+        let mut snapshot = crate::AdmissionSnapshot::default();
+        assert!(snapshot.hidden_refs.is_empty());
+        snapshot
+            .hidden_refs
+            .push_rule(b"refs/internal/", &fgit_wire::WireLimits::default())
+            .expect("a fixed valid hide rule");
+        assert!(snapshot.hidden_refs.hides(b"refs/internal/secret"));
+        assert!(
+            !snapshot.hidden_refs.hides(b"refs/heads/main"),
+            "the permitted twin: a visible ref must stay visible"
+        );
+    }
+
+    #[test]
+    fn a_default_snapshot_carries_an_empty_policy_so_behaviour_is_preserved() {
+        assert_eq!(
+            crate::AdmissionSnapshot::default().hidden_refs,
+            RefVisibility::new(),
+            "adding the carrier must not hide anything by default"
+        );
+    }
+
+    const _: fn() = || {
+        // hides_any_target is exercised end-to-end by the admission suites; this
+        // keeps its signature honest if the semantic shape changes.
+        let _ = hides_any_target;
+    };
 }
 
 // Non-production fixture identity: this reserved tag deliberately has no registered digest width.
@@ -3118,6 +3230,7 @@ mod tests {
                 forge_positions: self.forge_positions.clone(),
                 retention: self.retention.clone(),
                 outbox: self.outbox.clone(),
+                hidden_refs: RefVisibility::new(),
             })
         }
     }
