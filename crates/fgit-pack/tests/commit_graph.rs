@@ -57,6 +57,29 @@ fn commit(tree: ObjectId, parents: &[ObjectId], time: u64) -> CommitGraphInput {
     CommitGraphInput::new(native, body).expect("a native fixture commit has a nonzero ID")
 }
 
+/// Builds the same commit body as [`commit`] but takes its native identity in
+/// the given object format, so a cross-format input can be constructed without
+/// changing what the commit says.
+fn commit_in_format(
+    format: ObjectFormat,
+    tree: ObjectId,
+    parents: &[ObjectId],
+    time: u64,
+) -> CommitGraphInput {
+    let mut body = format!("tree {tree}\n").into_bytes();
+    for parent in parents {
+        body.extend_from_slice(format!("parent {parent}\n").as_bytes());
+    }
+    body.extend_from_slice(
+        format!(
+            "author Example <example@invalid> {time} +0000\ncommitter Example <example@invalid> {time} +0000\n\nfixture\n"
+        )
+        .as_bytes(),
+    );
+    let native = git_object_id(format, GitObjectKind::Commit, &body);
+    CommitGraphInput::new(native, body).expect("a native fixture commit has a nonzero ID")
+}
+
 fn read_u32(input: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes(
         input[offset..offset + 4]
@@ -314,4 +337,61 @@ fn commit_graph_enforces_output_bound_before_emitting_bytes() {
         ),
         Err(CommitGraphRefusal::OutputBytesExceeded { .. })
     ));
+}
+
+/// FG-058 / decision D3: a commit whose identity lives in a different hash
+/// domain than the source repository is refused, and the refusal names *which*
+/// subject was rejected.
+///
+/// `CommitGraphRefusal::ObjectFormatMismatch` carries a `subject`, and this
+/// crate raises it from more than one place, so asserting the bare variant
+/// would not establish that the commit loop is what refused. The `subject`
+/// pin is what separates this site from the others.
+///
+/// The permitted twin runs the identical body through the matching format: a
+/// refusal test alone would pass just as well against code that refused every
+/// commit, and could not tell "rejects a foreign hash domain" from "rejects
+/// everything".
+#[test]
+fn a_commit_in_another_hash_domain_is_refused_naming_the_subject() {
+    let tree = oid(0x66);
+
+    // Permitted twin: same body, matching format, passes the format guard.
+    let native = commit_in_format(ObjectFormat::Sha1, tree, &[], 20);
+    let mut live = || true;
+    assert!(
+        CommitGraphV1::write(
+            source(*native.commit_oid()),
+            std::slice::from_ref(&native),
+            &CommitGraphLimits::default(),
+            &mut live,
+        )
+        .is_ok(),
+        "the same commit body in the source's own format must be accepted"
+    );
+
+    // The refusal: identical body, identity minted in the other domain.
+    let foreign = commit_in_format(ObjectFormat::Sha256, tree, &[], 20);
+    let mut foreign_live = || true;
+    let refusal = CommitGraphV1::write(
+        source(oid(0x01)),
+        std::slice::from_ref(&foreign),
+        &CommitGraphLimits::default(),
+        &mut foreign_live,
+    )
+    .expect_err("a commit in another hash domain cannot enter this graph");
+
+    assert!(
+        matches!(
+            &refusal,
+            CommitGraphRefusal::ObjectFormatMismatch {
+                subject,
+                expected,
+                observed,
+            } if *subject == "commit"
+                && *expected == ObjectFormat::Sha1
+                && *observed == ObjectFormat::Sha256
+        ),
+        "the refusal must name the commit subject and both formats, got {refusal:?}"
+    );
 }
