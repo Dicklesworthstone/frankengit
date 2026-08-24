@@ -25,6 +25,8 @@
 
 use core::fmt;
 
+pub mod freshness;
+
 use fgit_authority::{OutcomeFailure, TerminalOutcome, verify_outcome_index_membership};
 use fgit_codec::{
     CryptoBodyIdentity, RepositoryAuthorityHeadBody, RepositoryConfigurationBody, body_id,
@@ -39,6 +41,8 @@ use fgit_types::native::GitOid;
 use fgit_types::refs::RefName;
 
 /// The sole proof-envelope wire version this build understands.
+pub use freshness::{FreshnessRefusal, FreshnessVerdict, HeadChainFloor};
+
 pub const VERIFIED_READ_ENVELOPE_V1: u16 = 1;
 
 /// A client's offered verified-read capability.
