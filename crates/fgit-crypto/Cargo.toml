@@ -20,5 +20,8 @@ chacha20poly1305.workspace = true
 ed25519-dalek.workspace = true
 fgit-types.workspace = true
 
+[dev-dependencies]
+fgit-lab.workspace = true
+
 [lints]
 workspace = true
