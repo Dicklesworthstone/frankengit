@@ -305,18 +305,38 @@ impl StorageClasses {
 
     /// Storage amplification in parts per million, avoiding a floating-point
     /// value that would make artifacts target-dependent.
-    pub fn amplification_parts_per_million(self) -> Result<u64, BenchmarkRefusal> {
+    /// Amplification, or `None` when this workload has no storage story.
+    ///
+    /// A workload that retains nothing against nothing — an authority
+    /// publication, say — is not a zero-amplification workload, it is a
+    /// workload the ratio does not describe. Reporting `0` there would put a
+    /// measured-looking number in the artifact for a quantity nobody measured,
+    /// so the absent case is absent.
+    ///
+    /// # Errors
+    ///
+    /// Retained bytes with no logical denominator is still refused. That is
+    /// the defect this check was built for: bytes on disk that no reachable
+    /// object accounts for are unattributable, and silently dividing by zero
+    /// or reporting `None` would hide it.
+    pub fn amplification_parts_per_million(self) -> Result<Option<u64>, BenchmarkRefusal> {
         if self.logical_reachable_git_bytes == 0 {
+            if self.retained_bytes() == 0 {
+                return Ok(None);
+            }
             return Err(BenchmarkRefusal::InvalidMetric {
                 field: "storage.logical_reachable_git_bytes",
-                detail: "must be nonzero for storage amplification".to_owned(),
+                detail: "must be nonzero when any bytes are retained: retained bytes with no \
+                         logical denominator cannot be attributed"
+                    .to_owned(),
             });
         }
-        Ok(self
-            .retained_bytes()
-            .saturating_mul(1_000_000)
-            .checked_div(self.logical_reachable_git_bytes)
-            .unwrap_or(u64::MAX))
+        Ok(Some(
+            self.retained_bytes()
+                .saturating_mul(1_000_000)
+                .checked_div(self.logical_reachable_git_bytes)
+                .unwrap_or(u64::MAX),
+        ))
     }
 }
 
@@ -347,22 +367,35 @@ pub struct SystemMetrics {
 impl SystemMetrics {
     fn validate(self) -> Result<(), BenchmarkRefusal> {
         self.storage.amplification_parts_per_million()?;
-        if self.cas_attempts == 0 {
+        if self.cas_attempts == 0 && self.decisions > 0 {
             return Err(BenchmarkRefusal::InvalidMetric {
                 field: "cas_attempts",
-                detail: "must be nonzero to report decisions-per-CAS".to_owned(),
+                detail: "must be nonzero when decisions were committed: a decision reaches \
+                         canonical state only through a compare-and-exchange"
+                    .to_owned(),
             });
         }
         Ok(())
     }
 
-    /// Decisions per CAS in parts per million.
+    /// Decisions per CAS, or `None` when this workload issued no CAS.
+    ///
+    /// A read-only workload commits no decision and attempts no exchange. It
+    /// previously had to report one fictional attempt because this ratio
+    /// refused a zero denominator, which put `cas_attempts: 1` in the artifact
+    /// for a clone that performed none. The honest answer is that the ratio
+    /// does not apply, and that answer is now representable.
     #[must_use]
-    pub fn decisions_per_cas_parts_per_million(self) -> u64 {
-        self.decisions
-            .saturating_mul(1_000_000)
-            .checked_div(self.cas_attempts)
-            .unwrap_or(u64::MAX)
+    pub fn decisions_per_cas_parts_per_million(self) -> Option<u64> {
+        if self.cas_attempts == 0 {
+            return None;
+        }
+        Some(
+            self.decisions
+                .saturating_mul(1_000_000)
+                .checked_div(self.cas_attempts)
+                .unwrap_or(u64::MAX),
+        )
     }
 }
 
@@ -784,6 +817,11 @@ fn admission_json(admission: &OptimizationAdmission) -> String {
     )
 }
 
+/// Renders an absent ratio as JSON `null` rather than a stand-in number.
+fn optional_number(value: Option<u64>) -> String {
+    value.map_or_else(|| "null".to_owned(), |value| value.to_string())
+}
+
 fn raw_sample_json(sample: &RawSample) -> String {
     let metrics = sample.metrics;
     let storage = metrics.storage;
@@ -799,13 +837,16 @@ fn raw_sample_json(sample: &RawSample) -> String {
         metrics.egress_bytes,
         metrics.decisions,
         metrics.cas_attempts,
-        metrics.decisions_per_cas_parts_per_million(),
+        optional_number(metrics.decisions_per_cas_parts_per_million()),
         storage.canonical_bytes,
         storage.repair_bytes,
         storage.replica_bytes,
         storage.retained_derived_bytes,
         storage.logical_reachable_git_bytes,
-        storage.amplification_parts_per_million().unwrap_or(0),
+        // The sample was validated before it reached the artifact, so an error
+        // here is unreachable; `None` is the honest "no storage story" case and
+        // renders as null rather than a zero nobody measured.
+        optional_number(storage.amplification_parts_per_million().ok().flatten()),
         json_escape(&sample.oracle.receipt),
     )
 }

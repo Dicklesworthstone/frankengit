@@ -390,9 +390,44 @@ fn a_zero_amplification_denominator_is_refused_by_name() {
         storage.amplification_parts_per_million(),
         Err(BenchmarkRefusal::InvalidMetric {
             field: "storage.logical_reachable_git_bytes",
-            detail: "must be nonzero for storage amplification".to_owned(),
+            detail: "must be nonzero when any bytes are retained: retained bytes with no \
+                     logical denominator cannot be attributed"
+                .to_owned(),
         }),
-        "an amplification ratio with no denominator is not a metric"
+        "retained bytes with no denominator are unattributable, which is the defect"
+    );
+}
+
+/// The case the refusal above must NOT swallow: nothing retained, nothing
+/// reachable. That is a workload the ratio does not describe — an authority
+/// publication, say — rather than a workload with a missing denominator.
+///
+/// Before this distinction existed, such a workload had to invent a
+/// denominator to get past validation, which put a measured-looking number in
+/// the artifact for a quantity nobody measured.
+#[test]
+fn a_workload_with_no_storage_story_reports_no_amplification() {
+    assert_eq!(
+        StorageClasses::default().amplification_parts_per_million(),
+        Ok(None),
+        "zero retained over zero reachable is inapplicable, not zero amplification"
+    );
+}
+
+/// One retained byte is enough to make the denominator mandatory again.
+///
+/// This is the boundary the two cases above sit either side of: the refusal
+/// must key on whether anything was retained, not on some larger threshold.
+#[test]
+fn a_single_retained_byte_makes_the_denominator_mandatory() {
+    let storage = StorageClasses {
+        canonical_bytes: 1,
+        logical_reachable_git_bytes: 0,
+        ..StorageClasses::default()
+    };
+    assert!(
+        storage.amplification_parts_per_million().is_err(),
+        "one unattributable byte is still unattributable"
     );
 }
 
@@ -411,7 +446,7 @@ fn a_nonzero_denominator_yields_the_amplification_figure() {
     assert_eq!(storage.retained_bytes(), 200);
     assert_eq!(
         storage.amplification_parts_per_million(),
-        Ok(2_000_000),
+        Ok(Some(2_000_000)),
         "200 physical bytes over 100 logical bytes is 2x, in parts per million"
     );
 }
@@ -428,9 +463,45 @@ fn zero_cas_attempts_is_refused_through_the_runner() {
         runner.run(&mut baseline, &mut candidate),
         Err(BenchmarkRefusal::InvalidMetric {
             field: "cas_attempts",
-            detail: "must be nonzero to report decisions-per-CAS".to_owned(),
+            detail: "must be nonzero when decisions were committed: a decision reaches \
+                     canonical state only through a compare-and-exchange"
+                .to_owned(),
         }),
-        "decisions-per-CAS with no CAS attempts has no denominator"
+        "four decisions cannot have reached canonical state through zero exchanges"
+    );
+}
+
+/// The twin the refusal above must not swallow: no decisions AND no attempts.
+///
+/// A clone is the real instance. It used to report one fictional attempt
+/// because the ratio refused a zero denominator, so the artifact carried
+/// `cas_attempts: 1` for a workload that issued none.
+#[test]
+fn a_workload_that_attempts_no_exchange_reports_no_ratio() {
+    let metrics = SystemMetrics {
+        decisions: 0,
+        cas_attempts: 0,
+        ..SystemMetrics::default()
+    };
+    assert_eq!(
+        metrics.decisions_per_cas_parts_per_million(),
+        None,
+        "no exchanges attempted is inapplicable, not zero decisions per exchange"
+    );
+}
+
+/// And the ratio still computes wherever there is an exchange to divide by.
+#[test]
+fn one_exchange_is_enough_to_report_a_ratio() {
+    let metrics = SystemMetrics {
+        decisions: 3,
+        cas_attempts: 1,
+        ..SystemMetrics::default()
+    };
+    assert_eq!(
+        metrics.decisions_per_cas_parts_per_million(),
+        Some(3_000_000),
+        "three decisions in one exchange is 3x, in parts per million"
     );
 }
 
@@ -645,7 +716,9 @@ fn metric_validation_precedes_the_correctness_oracle() {
         runner.run(&mut baseline, &mut candidate),
         Err(BenchmarkRefusal::InvalidMetric {
             field: "storage.logical_reachable_git_bytes",
-            detail: "must be nonzero for storage amplification".to_owned(),
+            detail: "must be nonzero when any bytes are retained: retained bytes with no \
+                     logical denominator cannot be attributed"
+                .to_owned(),
         }),
         "an inadmissible measurement is refused before the oracle is consulted"
     );

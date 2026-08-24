@@ -924,14 +924,12 @@ impl BenchmarkWorkload for TransportWorkload {
             object_requests: 1,
             object_request_bytes: egress_bytes,
             egress_bytes,
-            // A clone is read-only: it commits no authority decision. The
-            // denominator is 1 because SystemMetrics::validate refuses a zero
-            // cas_attempts, so 0 decisions cannot be expressed with a truthful
-            // zero denominator. The reported 0 ppm therefore means "no
-            // decisions committed by a read-only workload", not a measured
-            // ratio. See the bead comment on this representation gap.
+            // A clone is read-only: it commits no authority decision and
+            // issues no compare-and-exchange. Both are genuinely zero, and the
+            // artifact now renders the ratio as null rather than the 0 ppm a
+            // fictional denominator of 1 used to produce.
             decisions: 0,
-            cas_attempts: 1,
+            cas_attempts: 0,
             storage: StorageClasses {
                 canonical_bytes: egress_bytes,
                 repair_bytes: 0,
