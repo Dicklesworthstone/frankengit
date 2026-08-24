@@ -196,11 +196,40 @@ impl AdmissionUploadPackRepository {
         object_format: GitHashAlgorithm,
         limits: &WireLimits,
     ) -> Result<Self, AdmissionUploadPackRefusal> {
+        // The visible set is derived ONCE and every decision below reads it: the
+        // HEAD resolution, the emptiness test, the advertised count, the bound,
+        // and the build loop. Leaving any one of them on `snapshot.refs` means a
+        // decision computed over a set the principal never sees, which is the
+        // enumeration oracle in its most general form -- and the sites that do
+        // it are not the sites that visibly leak, so fixing the obvious one
+        // closes nothing.
+        let hides = |name: &RefName| snapshot.hidden_refs.hides(name.as_bytes());
+        let visible: Vec<(&RefName, &GitOid)> = snapshot
+            .refs
+            .iter()
+            .filter(|&(name, _)| !hides(name))
+            .collect();
+
         let head_target = snapshot.head_target.clone();
         let head_oid = match head_target.as_ref() {
+            // A HEAD whose target this principal cannot see must make the
+            // repository look UNBORN to them: no HEAD advertised, and no
+            // refusal. Advertising it would disclose the hidden ref's object id;
+            // refusing would name the target. Both disclose, so the only safe
+            // outcome is silence -- and it must be the SAME silence a genuinely
+            // unborn repository produces, which is why the arm below tests the
+            // VISIBLE set rather than the raw map.
+            Some(target) if hides(target) => None,
             Some(target) => match snapshot.refs.get(target) {
                 Some(oid) => Some(*oid),
-                None if snapshot.refs.is_empty() => None,
+                // Emptiness over the VISIBLE set. Over the raw map, a principal
+                // who can see nothing in a repository that HAS hidden refs falls
+                // into the refusal arm while a genuinely unborn repository falls
+                // into this one, so the two stay distinguishable even after the
+                // refusal text is fixed. Suppressing the message would not close
+                // it either: the cases would still differ in whether an error
+                // occurred at all.
+                None if visible.is_empty() => None,
                 None => {
                     return Err(AdmissionUploadPackRefusal::HeadTargetNotAdvertised(
                         target.clone(),
@@ -209,7 +238,7 @@ impl AdmissionUploadPackRepository {
             },
             None => None,
         };
-        let advertised_count = snapshot.refs.len() + usize::from(head_oid.is_some());
+        let advertised_count = visible.len() + usize::from(head_oid.is_some());
         if advertised_count > limits.max_advertised_refs {
             return Err(AdmissionUploadPackRefusal::Wire(
                 WireError::TooManyAdvertisedRefs {
@@ -218,7 +247,7 @@ impl AdmissionUploadPackRepository {
             ));
         }
         let mut refs = Vec::with_capacity(advertised_count);
-        for (name, oid) in &snapshot.refs {
+        for (name, oid) in visible {
             if oid.algorithm() != object_format {
                 return Err(AdmissionUploadPackRefusal::ObjectFormatMismatch {
                     expected: object_format,
