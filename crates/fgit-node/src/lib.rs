@@ -3984,6 +3984,10 @@ pub struct NodeConfig {
     /// repository, while initialization selects the conservative SHA-1
     /// compatibility profile and persists that selection canonically.
     object_format: Option<GitHashAlgorithm>,
+    /// The root layout to commit into a newly created repository's authenticated
+    /// configuration. Existing repositories always select their stored layout
+    /// when opened; this is never an implicit migration request.
+    root_layout: RootLayoutVersion,
     max_object_bytes: u64,
     segment_limits: SegmentLimits,
     git_daemon_session_timeout: GitDaemonSessionTimeout,
@@ -4023,6 +4027,7 @@ impl NodeConfig {
             worker_threads: 1,
             runtime_budgets: BudgetPolicy::finite_defaults(),
             object_format: None,
+            root_layout: RootLayoutVersion::LegacyWholeBody,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             segment_limits: SegmentLimits::default(),
             git_daemon_session_timeout: GitDaemonSessionTimeout::DEFAULT,
@@ -4058,6 +4063,19 @@ impl NodeConfig {
     #[must_use]
     pub const fn with_object_format(mut self, object_format: GitHashAlgorithm) -> Self {
         self.object_format = Some(object_format);
+        self
+    }
+
+    /// Selects the authenticated root layout for a newly created repository.
+    ///
+    /// [`OneNode::init`] writes this exact value into both the creation-attempt
+    /// record and the repository-incarnation configuration selected by its
+    /// genesis head. [`OneNode::open_existing`] instead reads the stored,
+    /// authenticated configuration and never migrates a repository from this
+    /// caller input.
+    #[must_use]
+    pub const fn with_root_layout(mut self, root_layout: RootLayoutVersion) -> Self {
+        self.root_layout = root_layout;
         self
     }
 
@@ -4251,7 +4269,7 @@ impl OneNode {
                         CreationAttemptBody {
                             tenant_id: config.tenant_id,
                             repository_id: config.repository_id,
-                            root_layout: RootLayoutVersion::LegacyWholeBody,
+                            root_layout: config.root_layout,
                             object_format: config.object_format.unwrap_or(GitHashAlgorithm::Sha1),
                             idempotency_key_digest,
                             repository_incarnation_id: config.creation_repository_incarnation_id,
@@ -4260,6 +4278,7 @@ impl OneNode {
                 },
             )
             .transpose()?;
+        let root_layout = config.root_layout;
         let repository_id = config.repository_id;
         let mut node = Self::open_components(config)?;
         let initialization_cx = node.authority_context();
@@ -4295,7 +4314,7 @@ impl OneNode {
             node.repository_incarnation_id = stored;
         }
         let configuration = RepositoryIncarnationConfigurationBody {
-            root_layout: RootLayoutVersion::LegacyWholeBody,
+            root_layout,
             object_format: node.object_format,
             repository_incarnation_id: node.repository_incarnation_id,
         };
