@@ -371,10 +371,9 @@ fn transport_plan(
                     .to_owned(),
                 "fg import <storage> <tenant> <repository> <principal> <key> <source>".to_owned(),
                 "git clone --bare <source> <upstream-base>/<repository>.git".to_owned(),
-                "cargo run --release -p fgit-benchmark -- transport-baseline --out <directory>"
-                    .to_owned(),
+                "<run-local fgit-benchmark copy> transport-baseline --out <directory>".to_owned(),
             ],
-            environment_allowlist: transport_allowlist(config, samples),
+            environment_allowlist: transport_allowlist(config, samples)?,
         },
         admission: OptimizationAdmission {
             equivalence_obligation:
@@ -402,8 +401,11 @@ fn transport_plan(
     })
 }
 
-fn transport_allowlist(config: &TransportConfig, samples: usize) -> BTreeMap<String, String> {
-    BTreeMap::from([
+fn transport_allowlist(
+    config: &TransportConfig,
+    samples: usize,
+) -> Result<BTreeMap<String, String>, BenchmarkRefusal> {
+    let mut allowlist = BTreeMap::from([
         (
             "FG_BENCH_FG_BINARY".to_owned(),
             config.fg_binary.display().to_string(),
@@ -439,7 +441,24 @@ fn transport_allowlist(config: &TransportConfig, samples: usize) -> BTreeMap<Str
             "FG_BENCH_PORT_BASE".to_owned(),
             config.port_base.to_string(),
         ),
-    ])
+    ]);
+
+    // The shell copies the exact candidate and benchmark-driver images into
+    // its run-local artifact directory before either matched arm begins. Keep
+    // their digests plus the stale-fetch and pinned-Git provenance in each
+    // artifact, rather than trusting caller-injected source labels alone.
+    for name in [
+        "FG_BENCH_FG_BINARY_SHA256",
+        "FG_BENCH_DRIVER_BINARY",
+        "FG_BENCH_DRIVER_BINARY_SHA256",
+        "FG_BENCH_GIT_PROVENANCE",
+        "FG_BENCH_GIT_BINARY_SHA256",
+        "FG_BENCH_STALE_BASE",
+        "FG_BENCH_STALE_BEHIND",
+    ] {
+        allowlist.insert(name.to_owned(), required_var(name)?);
+    }
+    Ok(allowlist)
 }
 
 fn parse_output(mut arguments: impl Iterator<Item = String>) -> Result<PathBuf, BenchmarkRefusal> {

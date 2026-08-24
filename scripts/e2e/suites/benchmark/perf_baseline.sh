@@ -13,8 +13,10 @@
 # `suites-benchmark-perf_baseline` without a hand-maintained list.
 #
 # GRANT: GoldLotus 2026-08-24 permits, for fg028c only, one release build of
-# fgit-cli plus repeated measurement runs. This script honours the bound by
-# building exactly once and by capping the sample count.
+# fgit-cli plus repeated measurement runs. The benchmark driver is frozen
+# before measurement from FG_BENCH_DRIVER_BINARY when supplied; otherwise this
+# historical harness still builds it once. It is a no-build lane only when
+# both executable inputs are supplied, and it caps the sample count either way.
 #
 # ================== HOW TO USE THIS AS A REGRESSION ANCHOR ==================
 #
@@ -122,6 +124,24 @@ esac
 fge_assert_file FG-028C-E2E-001 "$PB_REPO/crates/fgit-benchmark/src/transport.rs" \
   'the transport workload module is present'
 
+# Matched clone/fetch evidence needs the content identities of both executable
+# images. A shared target directory is mutable while the two sequential arms
+# run, so a pathname alone is not a revision-bound execution identity.
+SHA256_BIN=${FG_BENCH_SHA256SUM:-$(command -v sha256sum || true)}
+if [ -z "$SHA256_BIN" ] || [ ! -x "$SHA256_BIN" ]; then
+  fge_unsupported FG-028C-E2E-032 \
+    'sha256sum is unavailable, so this run cannot bind its candidate and driver images immutably'
+  exit 0
+fi
+sha256_file() { # PATH
+  "$SHA256_BIN" "$1" | awk '{print $1}'
+}
+copy_run_image() { # SOURCE DESTINATION
+  cp -- "$1" "$2"
+  chmod u=rx,go=rx "$2"
+  test -s "$2"
+}
+
 # The client, and the reference server, are the SAME upstream binary. Using one
 # binary for both arms is what makes the differential a server comparison
 # rather than a client comparison.
@@ -160,10 +180,22 @@ fge_pass FG-028C-E2E-002 'an upstream git binary is available for the client and
 fge_context git_binary "$GIT_BIN"
 fge_context git_exec_path "$GIT_EXEC"
 if [ -x "$PINNED_GIT" ]; then
-  fge_context git_provenance "pinned-oracle-$PIN"
+  GIT_PROVENANCE="pinned-oracle-$PIN"
 else
-  fge_context git_provenance 'ambient-path-git-UNPINNED'
+  GIT_PROVENANCE='ambient-path-git-UNPINNED'
   fge_note 'the pinned oracle install is absent; this differential used an ambient git and is UNPINNED'
+fi
+GIT_BINARY_SHA256=$(sha256_file "$GIT_BIN")
+fge_context git_provenance "$GIT_PROVENANCE"
+fge_context git_binary_sha256 "$GIT_BINARY_SHA256"
+
+# A numeric matched-clone/fetch predicate is a pinned-upstream differential.
+# Ambient Git remains a diagnostic fallback for explicitly selected one-arm
+# runs, but it cannot establish E2E-029/E2E-030.
+if [ "$OPERATION" = matched ] && [ "$GIT_PROVENANCE" != "pinned-oracle-$PIN" ]; then
+  fge_unsupported FG-028C-E2E-035 \
+    'the matched clone/fetch gate requires the pinned upstream Git oracle; ambient Git is diagnostic only'
+  exit 0
 fi
 
 # `git daemon` is a separate executable in git-core; a git that cannot resolve
@@ -194,7 +226,44 @@ if [ -z "$FG_BIN" ] || [ ! -x "$FG_BIN" ]; then
   exit 0
 fi
 fge_pass FG-028C-E2E-004 'an fg binary is available to serve the candidate arm'
-fge_context fg_binary "$FG_BIN"
+fge_context fg_binary_source "$FG_BIN"
+
+# Freeze the actual candidate once. Both matched arms receive this run-local
+# copy, so a target-directory rebuild between clone and fetch cannot alter the
+# measured server while leaving the caller-supplied source labels unchanged.
+RUN_FG_BIN="$work/fgit-candidate"
+copy_run_image "$FG_BIN" "$RUN_FG_BIN"
+FG_BINARY_SHA256=$(sha256_file "$RUN_FG_BIN")
+FG_BIN="$RUN_FG_BIN"
+fge_context fg_binary_copy "$FG_BIN"
+fge_context fg_binary_sha256 "$FG_BINARY_SHA256"
+
+# Resolve/build the benchmark driver once, then copy it next to the candidate.
+# In particular, do not use `cargo run` separately for clone and fetch: Cargo
+# may rebuild its driver in the interval. Supplying FG_BENCH_DRIVER_BINARY
+# makes this a no-build lane.
+BENCH_DRIVER=${FG_BENCH_DRIVER_BINARY:-}
+if [ -z "$BENCH_DRIVER" ]; then
+  if command -v cargo >/dev/null 2>&1; then
+    RCH_CARGO_WRAPPER_BYPASS=1 cargo build -q --release -p fgit-benchmark >&2 || true
+  fi
+  for cand in \
+    "${CARGO_TARGET_DIR:-$PB_REPO/target}/release/fgit-benchmark" \
+    "$PB_REPO/target/release/fgit-benchmark"; do
+    [ -x "$cand" ] && BENCH_DRIVER=$cand && break
+  done
+fi
+if [ -z "$BENCH_DRIVER" ] || [ ! -x "$BENCH_DRIVER" ]; then
+  fge_unsupported FG-028C-E2E-034 \
+    'no fgit-benchmark driver is available to freeze across matched transport arms'
+  exit 0
+fi
+RUN_BENCH_DRIVER="$work/fgit-benchmark-driver"
+copy_run_image "$BENCH_DRIVER" "$RUN_BENCH_DRIVER"
+DRIVER_BINARY_SHA256=$(sha256_file "$RUN_BENCH_DRIVER")
+fge_context benchmark_driver_source "$BENCH_DRIVER"
+fge_context benchmark_driver_copy "$RUN_BENCH_DRIVER"
+fge_context benchmark_driver_sha256 "$DRIVER_BINARY_SHA256"
 
 # A cold run without a working interpreter would silently become a warm run
 # wearing a cold label. Refuse instead; 3.1 forbids a silent fallback.
@@ -313,6 +382,8 @@ STALE="$work/stale"
 mkdir -p "$STALE"
 FETCH_REFSPEC="refs/heads/main:refs/remotes/origin/main"
 LOGICAL_FOR_RUN="$LOGICAL_BYTES"
+STALE_AT=not-applicable
+STALE_BEHIND_PROVENANCE=not-applicable
 
 # For a fetch run, materialize one stale clone PER SAMPLE PER ARM up front.
 # A fetch ADVANCES the repository it runs in, so a reused copy would transfer
@@ -321,6 +392,7 @@ LOGICAL_FOR_RUN="$LOGICAL_BYTES"
 # indices while the candidate arm consumes SAMPLES.
 if [ "$OPERATION" = fetch ] || [ "$OPERATION" = matched ]; then
   STALE_AT=$("$GIT_BIN" -C "$SRC" rev-parse "HEAD~$STALE_BEHIND")
+  STALE_BEHIND_PROVENANCE=$STALE_BEHIND
   fge_context stale_base "$STALE_AT"
   fge_context stale_behind_commits "$STALE_BEHIND"
   # The amplification denominator for a fetch is the DELTA's logical size, not
@@ -408,8 +480,13 @@ run_transport_operation() {
     env \
       RCH_CARGO_WRAPPER_BYPASS=1 \
       FG_BENCH_FG_BINARY="$FG_BIN" \
+      FG_BENCH_FG_BINARY_SHA256="$FG_BINARY_SHA256" \
+      FG_BENCH_DRIVER_BINARY="$RUN_BENCH_DRIVER" \
+      FG_BENCH_DRIVER_BINARY_SHA256="$DRIVER_BINARY_SHA256" \
       FG_BENCH_GIT_BINARY="$GIT_BIN" \
       FG_BENCH_GIT_EXEC_PATH="$GIT_EXEC" \
+      FG_BENCH_GIT_PROVENANCE="$GIT_PROVENANCE" \
+      FG_BENCH_GIT_BINARY_SHA256="$GIT_BINARY_SHA256" \
       FG_BENCH_TEMPLATE_DIR="$TEMPLATE" \
       FG_BENCH_STORAGE_ROOT="$STORAGE" \
       FG_BENCH_UPSTREAM_BASE_PATH="$UPSTREAM_BASE" \
@@ -424,12 +501,14 @@ run_transport_operation() {
       FG_BENCH_DATASET="fg028c-corpus ${CORPUS_COMMITS}cx${CORPUS_FILES}fx${CORPUS_LINES}l logical=${LOGICAL_BYTES}B head=$EXPECTED_HEAD" \
       FG_BENCH_OPERATION="$operation" \
       FG_BENCH_STALE_ROOT="$STALE" \
+      FG_BENCH_STALE_BASE="$STALE_AT" \
+      FG_BENCH_STALE_BEHIND="$STALE_BEHIND_PROVENANCE" \
       FG_BENCH_FETCH_REFSPEC="$FETCH_REFSPEC" \
       FG_BENCH_CACHE_STATE="$CACHE_STATE" \
       FG_BENCH_PYTHON="$PYTHON_BIN" \
       FG_BENCH_SOURCE_REVISION="$SOURCE_REVISION" \
       FG_BENCH_SOURCE_TREE="$SOURCE_TREE" \
-      cargo run -q --release -p fgit-benchmark -- transport-baseline --out "$output" \
+      "$RUN_BENCH_DRIVER" transport-baseline --out "$output" \
     || true
   FGE_TRANSPORT_EXIT=$FGE_LAST_EXIT
 }
@@ -529,7 +608,7 @@ fi
 # proof of the fetch-versus-clone acceptance line.
 if [ "$OPERATION" = matched ]; then
   fge_assert_cmd FG-028C-E2E-029 \
-    'matched clone and fetch artifacts bind the same revision and corpus fingerprint' \
+    'matched clone and fetch artifacts bind one frozen candidate, driver, pinned Git, stale base, and corpus fingerprint' \
     "$PYTHON_BIN" -c 'import json,sys
 def begin(path):
     rows=[json.loads(line) for line in open(path)]
@@ -537,13 +616,26 @@ def begin(path):
     if len(matches) != 1:
         raise SystemExit(1)
     return matches[0]
+def common(begin):
+    workload=dict(begin["workload"])
+    environment=dict(workload.pop("environment_allowlist"))
+    # Operation, port, and the operation-specific logical denominator are the
+    # intentional clone/fetch differences. Every other execution input must
+    # match, including the copied images and stale-fetch setup.
+    for key in ("FG_BENCH_OPERATION", "FG_BENCH_PORT_BASE", "FG_BENCH_LOGICAL_BYTES"):
+        environment.pop(key, None)
+    workload.pop("workload", None)
+    return {"fingerprint":begin["fingerprint"], "workload":workload,
+            "admission":begin["admission"], "environment":environment}
 clone,fetch=begin(sys.argv[1]),begin(sys.argv[2])
-keys=[
-    ("fingerprint","source_revision"),
-    ("fingerprint","source_tree"),
-    ("workload","dataset"),
-]
-raise SystemExit(0 if all(clone[group][field] == fetch[group][field] for group,field in keys) else 1)' "$ARTIFACT" "$FETCH_ARTIFACT"
+required=("FG_BENCH_FG_BINARY_SHA256", "FG_BENCH_DRIVER_BINARY_SHA256",
+          "FG_BENCH_GIT_PROVENANCE", "FG_BENCH_GIT_BINARY_SHA256",
+          "FG_BENCH_STALE_BASE", "FG_BENCH_STALE_BEHIND")
+environment=common(clone)["environment"]
+raise SystemExit(0 if common(clone) == common(fetch)
+                 and all(environment.get(key) for key in required)
+                 and environment.get("FG_BENCH_GIT_PROVENANCE") == "pinned-oracle-git-2.54.0"
+                 else 1)' "$ARTIFACT" "$FETCH_ARTIFACT"
   fge_assert_cmd FG-028C-E2E-030 \
     'every matched stale-fetch candidate adds fewer bytes than every matched clone candidate' \
     "$PYTHON_BIN" -c 'import json,sys
@@ -624,7 +716,7 @@ fge_run perf-baseline-authority-experiment \
     FG_BENCH_SAMPLES="$SAMPLES" \
     FG_BENCH_SOURCE_REVISION="$SOURCE_REVISION" \
     FG_BENCH_SOURCE_TREE="$SOURCE_TREE" \
-    cargo run -q --release -p fgit-benchmark -- authority-baseline --out "$authority_dir" \
+    "$RUN_BENCH_DRIVER" authority-baseline --out "$authority_dir" \
   || true
 AUTHORITY_EXIT=$FGE_LAST_EXIT
 
