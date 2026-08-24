@@ -95,12 +95,22 @@ That is the same defect class as `fg058.1` (the git-daemon omitting
 known and not advertised; here it is not known at all.
 
 **The correct fix is persistence, not more arguments.** The vehicle already
-exists — `RepositoryConfigurationBody` in `fgit-codec`, a persisted canonical
-body whose sibling field `root_layout` already carries exactly this discipline:
-it "refuses a code point this build does not know rather than falling back to a
-default", because reading it wrong "would produce a confident wrong answer about
-what the repository contains". Both fields are permanent, per-repository, and
+exists in `fgit-codec` — a persisted canonical configuration body whose sibling
+field `root_layout` already carries exactly this discipline: it "refuses a code
+point this build does not know rather than falling back to a default", because
+reading it wrong "would produce a confident wrong answer about what the
+repository contains". Both fields are permanent, per-repository, and
 catastrophic to default.
+
+**Correction, recorded rather than silently edited.** Earlier revisions of this
+document named `RepositoryConfigurationBody` as that vehicle. That is the v1
+body; production `init()` stages the **v2** `RepositoryIncarnationConfigurationBody`,
+which carries `root_layout`, `object_format` and `repository_incarnation_id` and
+has no `Default` impl, so every construction must state all three. The v1 body
+still exists and its decode path is still live, so the original sentence pointed
+at a real type — just not the one the write path uses. `lozg` landed against the
+correct body regardless, so nothing downstream inherited the error; only this
+pointer was wrong.
 
 This is why no format argument was added to `serve`, `doctor`, `export` or
 `import`. Threading the format through five commands would be the convenient
