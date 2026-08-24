@@ -69,6 +69,14 @@ forge_counter!(
     PullRequestNumber,
     "Repository-scoped number identifying one pull request aggregate."
 );
+forge_counter!(
+    OrganisationNumber,
+    "Tenant-scoped number identifying one organisation aggregate."
+);
+forge_counter!(
+    TeamNumber,
+    "Organisation-scoped number identifying one team aggregate."
+);
 
 impl AggregateVersion {
     /// The immediate successor, refusing exhaustion instead of wrapping.
@@ -106,11 +114,70 @@ impl fmt::Display for ExpectedVersion {
     }
 }
 
+/// Which aggregate an event or head belongs to.
+///
+/// # Why zero is the discriminant
+///
+/// The aggregate slot is the leading `u64` of an event payload, and every
+/// counter here refuses zero, so `counter` already rejects a zero in that slot
+/// as `ValueUnrepresentable { observed: 0, limit: 1 }`. No valid encoding has
+/// ever contained one. That makes zero a free escape: a nonzero slot is a pull
+/// request and is written exactly as it always was, and a zero slot introduces
+/// a kind tag followed by the kind's own id.
+///
+/// The consequence is the point of the design. Every pull-request event keeps
+/// its exact canonical bytes and therefore its exact `ForgeEventId`, so adding
+/// aggregates does not rewrite the identity of events already committed.
+/// Widening the slot to carry a tag unconditionally would have changed every
+/// one of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum AggregateId {
+    /// One pull request. Encoded bare, with no tag.
+    PullRequest(PullRequestNumber),
+    /// One organisation.
+    Organisation(OrganisationNumber),
+    /// One team.
+    Team(TeamNumber),
+}
+
+/// Wire tag for [`AggregateId::Organisation`], written only after a zero slot.
+pub(crate) const AGGREGATE_KIND_ORGANISATION: u32 = 1;
+/// Wire tag for [`AggregateId::Team`], written only after a zero slot.
+pub(crate) const AGGREGATE_KIND_TEAM: u32 = 2;
+
+impl From<PullRequestNumber> for AggregateId {
+    fn from(value: PullRequestNumber) -> Self {
+        Self::PullRequest(value)
+    }
+}
+
+impl From<OrganisationNumber> for AggregateId {
+    fn from(value: OrganisationNumber) -> Self {
+        Self::Organisation(value)
+    }
+}
+
+impl From<TeamNumber> for AggregateId {
+    fn from(value: TeamNumber) -> Self {
+        Self::Team(value)
+    }
+}
+
+impl fmt::Display for AggregateId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PullRequest(number) => write!(formatter, "pull-request/{number}"),
+            Self::Organisation(number) => write!(formatter, "organisation/{number}"),
+            Self::Team(number) => write!(formatter, "team/{number}"),
+        }
+    }
+}
+
 /// Where one aggregate's stream currently ends.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AggregateHead {
-    /// Which pull request this stream belongs to.
-    pub pull_request: PullRequestNumber,
+    /// Which aggregate this stream belongs to.
+    pub aggregate: AggregateId,
     /// The last version written, absent when the stream has no events.
     pub version: Option<AggregateVersion>,
 }
@@ -118,18 +185,18 @@ pub struct AggregateHead {
 impl AggregateHead {
     /// A stream with no events yet.
     #[must_use]
-    pub const fn empty(pull_request: PullRequestNumber) -> Self {
+    pub fn empty(aggregate: impl Into<AggregateId>) -> Self {
         Self {
-            pull_request,
+            aggregate: aggregate.into(),
             version: None,
         }
     }
 
     /// A stream whose last written event is at `version`.
     #[must_use]
-    pub const fn at(pull_request: PullRequestNumber, version: AggregateVersion) -> Self {
+    pub fn at(aggregate: impl Into<AggregateId>, version: AggregateVersion) -> Self {
         Self {
-            pull_request,
+            aggregate: aggregate.into(),
             version: Some(version),
         }
     }

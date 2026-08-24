@@ -207,7 +207,6 @@ impl CanonicalBody for DeployKeyBinding {
         let repository_id =
             RepositoryId::from_bytes(input.read_opaque_id("deploy_key.repository_id")?);
         let key = input.read_digest()?;
-        let scopes_offset = input.offset();
         let scopes = input.read_canonical_set("deploy_key.scopes", |decoder| {
             let offset = decoder.offset();
             let tag = decoder.read_scalar::<u32>("deploy_key.scope")?;
@@ -223,17 +222,21 @@ impl CanonicalBody for DeployKeyBinding {
         // zero-element set; it cannot thereby mint a binding that permits
         // nothing while still typing as a registration.
         //
-        // `CodecRefusal` has no empty-collection variant, and the closest by
-        // name (`ValueUnrepresentable`) documents the opposite direction --
-        // exceeding what the encoder can represent. `VariantUnknown` with the
-        // reserved zero tag is the honest report available: this crate treats
-        // zero as the not-a-value tag throughout (see `SCOPE_READ` and the
-        // `forge_counter!` convention), and an empty grant is exactly that
-        // not-a-value showing up where a live scope was required.
-        Self::register(repository_id, key, &scopes).map_err(|_| CodecRefusal::VariantUnknown {
-            field: "deploy_key.scopes",
-            observed: 0,
-            offset: scopes_offset,
+        // The refusal matches the vocabulary fgit-forge already uses for the
+        // same shape. Its `counter` reports a zero where a gap-free counter was
+        // required as `ValueUnrepresentable { observed: 0, limit: 1 }`, reading
+        // `limit` as the minimum admissible value rather than a maximum. An
+        // empty scope set is that same statement about a collection, so it is
+        // reported the same way. An earlier version of this comment claimed
+        // `CodecRefusal` had no variant for this and that
+        // `ValueUnrepresentable` meant the opposite; both were wrong, and the
+        // precedent was two files away.
+        Self::register(repository_id, key, &scopes).map_err(|_| {
+            CodecRefusal::ValueUnrepresentable {
+                field: "deploy_key.scopes",
+                observed: 0,
+                limit: 1,
+            }
         })
     }
 }

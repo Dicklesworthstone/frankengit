@@ -56,7 +56,7 @@ const fn pull_request() -> PullRequestNumber {
 
 fn merge_event() -> ForgeEvent {
     ForgeEvent {
-        pull_request: pull_request(),
+        aggregate: pull_request().into(),
         version: AggregateVersion::try_new(4).expect("a nonzero version"),
         payload: ForgeEventPayload::MergeCommitted {
             merge_commit: digest(0x51),
@@ -371,7 +371,7 @@ fn every_event_kind_survives_the_roundtrip_as_itself() {
     ];
     for payload in kinds {
         let event = ForgeEvent {
-            pull_request: pull_request(),
+            aggregate: pull_request().into(),
             version: AggregateVersion::FIRST,
             payload,
         };
@@ -389,7 +389,7 @@ fn every_event_kind_survives_the_roundtrip_as_itself() {
 #[test]
 fn an_unknown_event_kind_on_the_wire_is_refused_and_a_known_one_is_not() {
     let event = ForgeEvent {
-        pull_request: pull_request(),
+        aggregate: pull_request().into(),
         version: AggregateVersion::FIRST,
         payload: ForgeEventPayload::PullRequestClosed { withdrawn: false },
     };

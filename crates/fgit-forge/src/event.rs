@@ -26,7 +26,10 @@ use fgit_codec::{CodecRefusal, Decoder, Encoder};
 use fgit_types::{Digest, DomainTag, ForgeEventId, SchemaFamily};
 
 use crate::ForgeRefusal;
-use crate::aggregate::{AggregateVersion, PullRequestNumber};
+use crate::aggregate::{
+    AGGREGATE_KIND_ORGANISATION, AGGREGATE_KIND_TEAM, AggregateId, AggregateVersion,
+    OrganisationNumber, PullRequestNumber, TeamNumber,
+};
 
 const KIND_OPENED: u32 = 1;
 const KIND_HEAD_ADVANCED: u32 = 2;
@@ -97,15 +100,67 @@ impl ForgeEventPayload {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForgeEvent {
     /// The aggregate this event belongs to.
-    pub pull_request: PullRequestNumber,
+    pub aggregate: AggregateId,
     /// This event's position in that aggregate's stream.
     pub version: AggregateVersion,
     /// What happened.
     pub payload: ForgeEventPayload,
 }
 
+/// Writes the aggregate slot.
+///
+/// A pull request is written bare, exactly as it was before aggregates other
+/// than pull requests existed, so its bytes and its `ForgeEventId` are
+/// unchanged. Anything else writes the reserved zero -- which no counter can
+/// produce and which the reader has always refused -- followed by a kind tag
+/// and that kind's id.
+fn write_aggregate(out: &mut Encoder, aggregate: AggregateId) {
+    match aggregate {
+        AggregateId::PullRequest(number) => out.write_scalar(number.get()),
+        AggregateId::Organisation(number) => {
+            out.write_scalar(0_u64);
+            out.write_scalar(AGGREGATE_KIND_ORGANISATION);
+            out.write_scalar(number.get());
+        }
+        AggregateId::Team(number) => {
+            out.write_scalar(0_u64);
+            out.write_scalar(AGGREGATE_KIND_TEAM);
+            out.write_scalar(number.get());
+        }
+    }
+}
+
+/// Reads the aggregate slot written by [`write_aggregate`].
+fn read_aggregate(input: &mut Decoder<'_>) -> Result<AggregateId, CodecRefusal> {
+    let slot = input.read_scalar::<u64>("aggregate")?;
+    if slot != 0 {
+        return Ok(AggregateId::PullRequest(counter("aggregate", slot)?));
+    }
+    let kind_offset = input.offset();
+    let kind = input.read_scalar::<u32>("aggregate.kind")?;
+    match kind {
+        AGGREGATE_KIND_ORGANISATION => Ok(AggregateId::Organisation(counter(
+            "aggregate.organisation",
+            input.read_scalar::<u64>("aggregate.organisation")?,
+        )?)),
+        AGGREGATE_KIND_TEAM => Ok(AggregateId::Team(counter(
+            "aggregate.team",
+            input.read_scalar::<u64>("aggregate.team")?,
+        )?)),
+        // Fail closed, for the same reason an unknown event kind does: the id
+        // that follows is this kind's, so a build that does not know the kind
+        // cannot know how much to read, and every field after would come from
+        // the wrong offset.
+        unknown => Err(CodecRefusal::VariantUnknown {
+            field: "aggregate.kind",
+            observed: unknown,
+            offset: kind_offset,
+        }),
+    }
+}
+
 fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal> {
-    out.write_scalar(event.pull_request.get());
+    write_aggregate(out, event.aggregate);
     out.write_scalar(event.version.get());
     out.write_scalar(event.payload.kind());
     match &event.payload {
@@ -142,7 +197,7 @@ fn write_event(out: &mut Encoder, event: &ForgeEvent) -> Result<(), CodecRefusal
 }
 
 fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
-    let pull_request = counter("pull_request", input.read_scalar::<u64>("pull_request")?)?;
+    let aggregate = read_aggregate(input)?;
     let version = counter("version", input.read_scalar::<u64>("version")?)?;
     let kind_offset = input.offset();
     let kind = input.read_scalar::<u32>("kind")?;
@@ -178,7 +233,7 @@ fn read_event(input: &mut Decoder<'_>) -> Result<ForgeEvent, CodecRefusal> {
         }
     };
     Ok(ForgeEvent {
-        pull_request,
+        aggregate,
         version,
         payload,
     })
@@ -203,6 +258,18 @@ impl Counter for PullRequestNumber {
 }
 
 impl Counter for AggregateVersion {
+    fn build(value: u64) -> Option<Self> {
+        Self::try_new(value)
+    }
+}
+
+impl Counter for OrganisationNumber {
+    fn build(value: u64) -> Option<Self> {
+        Self::try_new(value)
+    }
+}
+
+impl Counter for TeamNumber {
     fn build(value: u64) -> Option<Self> {
         Self::try_new(value)
     }

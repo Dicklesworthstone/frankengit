@@ -36,7 +36,10 @@ pub mod merge;
 
 use core::fmt;
 
-pub use aggregate::{AggregateHead, AggregateVersion, ExpectedVersion, PullRequestNumber};
+pub use aggregate::{
+    AggregateHead, AggregateId, AggregateVersion, ExpectedVersion, OrganisationNumber,
+    PullRequestNumber, TeamNumber,
+};
 pub use event::{ForgeEvent, ForgeEventBatch, ForgeEventPayload, event_id};
 pub use merge::{
     EffectRoots, MergeAttempt, MergeEffectPackage, MergedTree, ObservedTips, RefIntent,
