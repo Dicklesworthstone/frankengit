@@ -1351,7 +1351,7 @@ fn head_bound_setup(
 
 /// The permitted twin: one session alone deleting the same ref **does** commit.
 ///
-/// Without this, [`two_sessions_deleting_one_ref_never_both_commit`] is vacuous
+/// Without this, [`two_sessions_deleting_one_ref_yield_exactly_one_commit_and_a_typed_loser`] is vacuous
 /// in a way its own non-vacuity guard does not catch. That guard asserts a
 /// session *reached a terminal decision*, and a refusal reaches one — so a
 /// harness where nothing can ever commit yields `committed == 0`, which is
@@ -1401,7 +1401,7 @@ fn one_session_alone_deleting_that_ref_does_commit() {
 }
 
 /// Two sessions delete the same ref against a head-bound projection, and the
-/// authenticated stream holds **at most one** commit.
+/// authenticated stream holds **exactly one** commit and one typed refusal.
 ///
 /// This is the claim
 /// [`two_sessions_seal_distinct_transactions_each_answered_from_its_own_decision`]
@@ -1417,20 +1417,37 @@ fn one_session_alone_deleting_that_ref_does_commit() {
 ///
 /// # What is asserted, and what is not
 ///
-/// Asserted: **at most one** of the two sessions holds a committed terminal
-/// decision in the authenticated stream. Both sessions delete `MAIN_REF` from a
-/// genesis state that contains exactly that ref, so two commits would mean the
-/// ref was deleted twice from one lineage.
+/// Strengthened for `frankengit-fg019c` after audit 4530, which was right that
+/// the previous form did not reach acceptance line 3. Two of that audit's three
+/// objections are now answered and one is not, so the scope is restated rather
+/// than left as it was.
 ///
-/// Not asserted: that exactly one *succeeds*. Both refusing is a permitted
-/// outcome — the second session may lose its CAS and exhaust its replan budget,
-/// and §5.2 says a client disconnect never proves non-commit. Demanding a
-/// success would fail the run for a legal schedule.
+/// Asserted now: **exactly one** of the two sessions commits, **both** reach a
+/// terminal decision, and the loser carries a terminal refusal naming
+/// `ExpectedOldRefMismatch` — the predecessor mismatch the winning delete
+/// created. The earlier form asserted only *at most one* commit, which zero
+/// winners also satisfies, and it skipped any loser that errored, so a session
+/// that never admitted at all was indistinguishable from one correctly refused.
 ///
-/// Not asserted either: *which* refusal the loser carries. Ref policy belongs to
-/// the projection's owner; this file asserts arithmetic on decisions, not policy.
+/// **The earlier doc's two hedges are disproved for this schedule, and that is
+/// why they are gone.** It recorded that demanding exactly one success "would
+/// fail the run for a legal schedule" because the loser might exhaust its
+/// replan budget, and that the loser's refusal was policy this file should not
+/// pin. Measured: with the head-bound projection, the loser is refused
+/// `ExpectedOldRefMismatch` every run, and pinning it is discriminating — with
+/// a different code pinned, this test and only this test fails, and the failure
+/// reports the real observed code rather than a constant.
+///
+/// STILL NOT ASSERTED, and this is the audit objection that stands: the two
+/// admissions run **sequentially**, not concurrently. This is exactly-one-winner
+/// under a deterministic schedule where the first admission completes before the
+/// second begins. It is not evidence about interleaved schedules, and the old
+/// hedge about an exhausted replan budget remains the right caution *there*.
+/// True concurrency is unavailable in this harness rather than merely unwritten:
+/// `StagingStore` holds an `Rc`, so the projection is not `Send` and the two
+/// sessions cannot be driven from separate threads without a different fixture.
 #[test]
-fn two_sessions_deleting_one_ref_never_both_commit() {
+fn two_sessions_deleting_one_ref_yield_exactly_one_commit_and_a_typed_loser() {
     let first_context = context(b"fg019c-headbound-a");
     let second_context = context(b"fg019c-headbound-b");
     let validated = delete_main();
@@ -1451,21 +1468,32 @@ fn two_sessions_deleting_one_ref_never_both_commit() {
         &projection,
     );
 
-    // Non-vacuity: if neither session reached admission at all the count below
-    // would be trivially zero, which is not evidence of one-winner semantics.
-    let reached = usize::from(first.is_ok()) + usize::from(second.is_ok());
+    // BOTH sessions must reach admission. The earlier form of this probe
+    // accepted `reached > 0`, which is satisfied when one session never
+    // admitted at all -- and a single admission trivially yields at most one
+    // commit, so the arithmetic below would have proven nothing about
+    // contention.
     assert!(
-        reached > 0,
-        "neither session reached a terminal decision, so this probe observed no \
-         admission at all: first={first:?} second={second:?}"
+        first.is_ok() && second.is_ok(),
+        "both sessions must reach a terminal decision for this to be a race at \
+         all: first={first:?} second={second:?}"
     );
 
-    let mut committed = 0_usize;
+    // Classify EVERY session. The earlier form skipped losers with
+    // `let Ok(..) else { continue }` and counted only commits, so a loser that
+    // errored, stalled undecided, or was refused for an unrelated reason was
+    // indistinguishable from a correctly-refused one.
+    let mut committed: Vec<&str> = Vec::new();
+    let mut refused: Vec<(&str, RefusalCode)> = Vec::new();
+    let mut unresolved: Vec<(&str, String)> = Vec::new();
     for (label, result, session_context) in [
         ("first", &first, &first_context),
         ("second", &second, &second_context),
     ] {
-        let Ok(result) = result else { continue };
+        let Ok(result) = result else {
+            unresolved.push((label, format!("admission refused outright: {result:?}")));
+            continue;
+        };
         let tx_id = result.session.tx_ids[0];
         let resolved = resolve_outcome(
             &store,
@@ -1475,17 +1503,52 @@ fn two_sessions_deleting_one_ref_never_both_commit() {
             tx_id,
         )
         .unwrap_or_else(|error| panic!("{label}: {tx_id:?} must resolve, got {error}"));
-        if let OutcomeLookup::Decided(terminal) = resolved
-            && matches!(terminal.outcome, DecisionOutcome::Committed { .. })
-        {
-            committed += 1;
+        match resolved {
+            OutcomeLookup::Decided(terminal) => match terminal.outcome {
+                DecisionOutcome::Committed { .. } => committed.push(label),
+                DecisionOutcome::Refused { code, .. } => refused.push((label, code)),
+            },
+            OutcomeLookup::Undecided => {
+                unresolved.push((label, "undecided in the authenticated stream".to_owned()));
+            }
         }
     }
 
+    // EXACTLY one winner, not at most one. `<= 1` is also satisfied by zero
+    // winners, which is the failure mode a contended delete is most likely to
+    // produce if the head binding is wrong.
+    assert_eq!(
+        committed.len(),
+        1,
+        "exactly one session must commit a delete of the same ref from one \
+         lineage; committed={committed:?} refused={refused:?} unresolved={unresolved:?}"
+    );
+
+    // The loser needs a TYPED status, which is the half of acceptance line 3
+    // that "never both commit" does not reach. A loser that errored or sat
+    // undecided is not a correct per-loser status.
+    assert_eq!(
+        refused.len(),
+        1,
+        "the losing session must carry a terminal refusal rather than an error \
+         or an undecided seal; committed={committed:?} refused={refused:?} \
+         unresolved={unresolved:?}"
+    );
     assert!(
-        committed <= 1,
-        "{committed} sessions committed a delete of the same ref from one lineage; \
-         exactly-one-winner over ref state does not hold"
+        unresolved.is_empty(),
+        "every session in a two-session race must reach a terminal decision; \
+         unresolved={unresolved:?}"
+    );
+
+    // And the refusal must name the contention rather than some unrelated
+    // condition. Pinning the code is what separates "the loser was refused"
+    // from "the loser was refused for the reason this race creates".
+    let (_, loser_code) = refused[0];
+    assert_eq!(
+        loser_code,
+        RefusalCode::ExpectedOldRefMismatch,
+        "the loser of a contended delete was refused {loser_code:?}, not for the \
+         predecessor mismatch the winning delete created"
     );
 }
 
@@ -1494,7 +1557,7 @@ fn two_sessions_deleting_one_ref_never_both_commit() {
 ///
 /// # Why this exists, and what it replaces
 ///
-/// [`two_sessions_deleting_one_ref_never_both_commit`] was believed to rest on
+/// [`two_sessions_deleting_one_ref_yield_exactly_one_commit_and_a_typed_loser`] was believed to rest on
 /// head-binding and does not. Mutation testing settled it: making
 /// `CanonicalAdmissionProjection::snapshot` ignore its `AuthenticatedHead` —
 /// dropping the staleness check *and* resolving from `basis.body().ref_root` —
