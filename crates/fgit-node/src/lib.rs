@@ -5310,8 +5310,8 @@ mod tests {
         GitDaemonSessionTimeout, GitDaemonTransportRefusal, NodeConfig, NodeGitDaemonServeRefusal,
         NodeInitialization, NodeRefusal, NodeRequestContext, OneNode, admission_immutable_key,
         authority_head_id, genesis_head, genesis_root, git_daemon_capabilities,
-        initialize_embedded_repository, parse_git_daemon_request, serve_git_daemon_tcp_once,
-        serve_git_daemon_upload_pack,
+        initialize_embedded_repository, object_namespace, parse_git_daemon_request,
+        serve_git_daemon_tcp_once, serve_git_daemon_upload_pack,
     };
 
     static NEXT_SCRATCH_DIRECTORY: AtomicU64 = AtomicU64::new(1);
