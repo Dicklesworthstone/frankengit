@@ -76,6 +76,7 @@ use fgit_types::{
     HeadGeneration, PolicyEpoch, PrincipalId, RefusalCode, RegistryEpoch,
     RepositoryAuthorityHeadId, RepositoryCommitId, RepositoryId, TenantId, TxId,
 };
+use fgit_wire::visibility::{RefVisibility, filter_advertised_refs};
 use fgit_wire::{
     AdvertisedRef, AnyGitOid, Capabilities, LegacyUploadPack, PackPayloadSource, PackRequest,
     Packet, PktLineDecoder, UploadPackRepository, UploadPackVersion, V1Advertisement, V2UploadPack,
@@ -270,6 +271,103 @@ impl Error for AdmissionUploadPackRefusal {
             Self::Wire(error) => Some(error),
             Self::Projection(_) | Self::ObjectFormatMismatch { .. } => None,
         }
+    }
+}
+
+/// The receive-pack advertisement one principal may see, derived from an
+/// authenticated admission snapshot and an authority-supplied visibility policy.
+///
+/// # Why this is not [`AdmissionUploadPackRepository`] with a filter bolted on
+///
+/// Fetch and push are separate service and capability matrices
+/// (`docs/AGENT_PROTOCOL.md` §6), and the fetch view deliberately advertises the
+/// whole canonical ref set. A push advertisement must additionally hide what the
+/// principal may not see, because §8's rule that authorization filters precede
+/// disclosure applies to the ref namespace itself: a name a principal cannot push
+/// to must also be a name it cannot learn exists.
+///
+/// # The bound is evaluated on the VISIBLE count, and that ordering is the point
+///
+/// [`AdmissionUploadPackRepository::from_snapshot`] checks
+/// `limits.max_advertised_refs` against the whole snapshot before copying, and
+/// that is correct there because the fetch view hides nothing. Reused verbatim
+/// here it would leak: a principal could learn that hidden refs exist by
+/// receiving [`WireError::TooManyAdvertisedRefs`] for a repository whose visible
+/// ref count is far below the limit. The refusal would itself become the
+/// enumeration oracle this type exists to prevent.
+///
+/// So the visible set is counted first, the bound is applied to that count, and
+/// only visible refs are ever turned into an [`AdvertisedRef`] — which also keeps
+/// the crate's existing bound-before-copying discipline rather than trading one
+/// property for the other.
+#[derive(Clone, Debug)]
+pub struct AdmissionReceivePackAdvertisement {
+    object_format: GitHashAlgorithm,
+    refs: Vec<AdvertisedRef>,
+}
+
+impl AdmissionReceivePackAdvertisement {
+    /// Builds the filtered push advertisement for one authenticated snapshot.
+    ///
+    /// The visibility policy is supplied by the caller rather than derived here:
+    /// this type consumes an authority-bound decision, it does not make one.
+    ///
+    /// # Errors
+    ///
+    /// [`AdmissionUploadPackRefusal::ObjectFormatMismatch`] when a visible ref
+    /// carries a foreign identity domain, and [`AdmissionUploadPackRefusal::Wire`]
+    /// when the visible set exceeds `limits.max_advertised_refs` or a visible name
+    /// is not wire-representable.
+    pub fn from_snapshot(
+        snapshot: &AdmissionSnapshot,
+        visibility: &RefVisibility,
+        object_format: GitHashAlgorithm,
+        limits: &WireLimits,
+    ) -> Result<Self, AdmissionUploadPackRefusal> {
+        let visible_count = snapshot
+            .refs
+            .keys()
+            .filter(|name| !visibility.hides(name.as_bytes()))
+            .count();
+        if visible_count > limits.max_advertised_refs {
+            return Err(AdmissionUploadPackRefusal::Wire(
+                WireError::TooManyAdvertisedRefs {
+                    limit: limits.max_advertised_refs,
+                },
+            ));
+        }
+        let mut visible = Vec::with_capacity(visible_count);
+        for (name, oid) in &snapshot.refs {
+            if visibility.hides(name.as_bytes()) {
+                continue;
+            }
+            if oid.algorithm() != object_format {
+                return Err(AdmissionUploadPackRefusal::ObjectFormatMismatch {
+                    expected: object_format,
+                    observed: oid.algorithm(),
+                });
+            }
+            visible.push(
+                AdvertisedRef::new(*oid, name.as_bytes(), limits)
+                    .map_err(AdmissionUploadPackRefusal::Wire)?,
+            );
+        }
+        Ok(Self {
+            object_format,
+            refs: filter_advertised_refs(&visible, visibility),
+        })
+    }
+
+    /// The refs this principal may see for push, in canonical snapshot order.
+    #[must_use]
+    pub fn advertised_refs(&self) -> &[AdvertisedRef] {
+        &self.refs
+    }
+
+    /// The repository's native object format.
+    #[must_use]
+    pub const fn object_format(&self) -> GitHashAlgorithm {
+        self.object_format
     }
 }
 
