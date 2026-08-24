@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
-//! A std-only child-process consumer for verified-read frames.
+//! A dependency-minimal child-process consumer for verified-read frames.
+//!
+//! This binary lives beside the verified-read producer test, while its only
+//! direct library dependency is the independent, std-only frame verifier. It
+//! keeps the verifier crate's L0 dependency boundary intact.
 
 use std::io::{self, Read};
 use std::process::ExitCode;

@@ -6,13 +6,5 @@ license-file.workspace = true
 repository.workspace = true
 publish = false
 
-[dev-dependencies]
-# Test-only producer: the shipped verifier remains std-only and never links
-# the production codec or verified-read crates.
-fgit-codec.workspace = true
-fgit-crypto.workspace = true
-fgit-types.workspace = true
-fgit-verified-read.workspace = true
-
 [lints]
 workspace = true

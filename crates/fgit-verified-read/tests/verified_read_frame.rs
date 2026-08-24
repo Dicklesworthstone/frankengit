@@ -64,7 +64,7 @@ fn child_process_parses_server_frame_then_client_verifies_the_pinned_proof() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .expect("std-only frame consumer starts");
+        .expect("dependency-minimal frame consumer starts");
     child
         .stdin
         .take()
@@ -86,7 +86,7 @@ fn child_process_parses_server_frame_then_client_verifies_the_pinned_proof() {
             "frankengit/verified-read-envelope/v1|verified-read-envelope|1|0|{}\n",
             payload.len()
         ),
-        "child parses the framed envelope without importing fgit-codec"
+        "child parses the framed envelope through the independent verifier"
     );
 
     let decoded = fgit_verified_read::decode_verified_read_envelope(

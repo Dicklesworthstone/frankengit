@@ -723,12 +723,6 @@ dependencies = [
 [[package]]
 name = "fgit-codec-verify"
 version = "0.0.1"
-dependencies = [
- "fgit-codec",
- "fgit-crypto",
- "fgit-types",
- "fgit-verified-read",
-]
 
 [[package]]
 name = "fgit-compaction"
