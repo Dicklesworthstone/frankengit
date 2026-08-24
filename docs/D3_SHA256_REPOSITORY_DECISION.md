@@ -54,7 +54,7 @@ lanes use the pinned, sandboxed upstream oracle only — never a production path
 | 1 | This decision is recorded | this document | done |
 | 2 | Mixed-format objects/packs are refused, typed, both directions | format-matrix tests, each paired with a permitted twin in the matching format | pending |
 | 3 | init / hash / pack round-trip natively in SHA-256 | library-level round-trips over `OneNode` configured for SHA-256 | pending |
-| 4 | clone / fetch match upstream Git byte-for-byte | `oracle.sh clone-loopback` against a pinned Git that supports SHA-256 repositories | pending |
+| 4 | clone / fetch match upstream Git byte-for-byte | `oracle.sh clone-loopback` against a pinned Git that supports SHA-256 repositories | **blocked** on `lozg` (format not persisted, so `serve` opens SHA-256 as SHA-1) |
 | 5 | push round-trips | **blocked** — object-bearing push needs a production quarantine validator (`frankengit-production-quarantine-validator-n6kg`) | pending, gated |
 
 Line 5 is recorded as pending rather than narrowed away. The bead stays open
@@ -73,26 +73,46 @@ code that refuses *everything*, and proves nothing about format discrimination.
 
 ## Known gap in the delivery path
 
-Measured at `acff002`: the `fg` command-line surface cannot create a SHA-256
-repository. `crates/fgit-cli/src/lib.rs:314` constructs object identities with
-`GitHashAlgorithm::Sha1` and the CLI exposes no object-format option.
+**Resolved in part, and the remainder is deeper than first recorded.**
 
-`OneNode` itself does support both formats — `crates/fgit-node/src/lib.rs:3618`
-provides `with_object_format`, exercised today only from tests.
+The original gap was that the `fg` command line could not create a SHA-256
+repository at all. That is fixed: `fg init <root> <tenant> <repo> [sha1|sha256]`
+selects the format, and an unrecognised token is a typed refusal rather than a
+silent default (commit `9c901cd`).
 
-This splits evidence lines 3 and 4:
+What remains is the reason the end-to-end differential lane is still unreachable,
+and it is not a missing command-line flag:
 
-- **Library-level round-trips are reachable now**, through the node configuration
-  API.
-- **End-to-end lanes are not**, because the e2e suites drive the assembled `fg`
-  binary, and no invocation of it produces a SHA-256 repository. Line 4 needs
-  either an object-format option on `fg init` — a public-surface change to
-  `fgit-cli`, owned elsewhere under §16.1 — or a differential lane driven from a
-  test binary rather than the CLI.
+> **A repository's object format is never recorded.** `NodeConfig`'s
+> `object_format` is config-only — nothing persists or validates it — so
+> `OneNode::open_existing` takes the format from whatever `NodeConfig` the caller
+> hands it. Every command that opens an existing repository therefore
+> reconstructs it from the default, and a SHA-256 repository is opened, served
+> and advertised as SHA-1, silently.
 
-Recording this in the ADR rather than only on the bead, because it is a
-structural property of the delivery path and the next person to pick up a
-SHA-256 lane will hit it in the same place.
+That is the same defect class as `fg058.1` (the git-daemon omitting
+`object-format` for SHA-256 repositories), one layer down: there the format was
+known and not advertised; here it is not known at all.
+
+**The correct fix is persistence, not more arguments.** The vehicle already
+exists — `RepositoryConfigurationBody` in `fgit-codec`, a persisted canonical
+body whose sibling field `root_layout` already carries exactly this discipline:
+it "refuses a code point this build does not know rather than falling back to a
+default", because reading it wrong "would produce a confident wrong answer about
+what the repository contains". Both fields are permanent, per-repository, and
+catastrophic to default.
+
+This is why no format argument was added to `serve`, `doctor`, `export` or
+`import`. Threading the format through five commands would be the convenient
+early abstraction §1 warns about: the final system *reads* the format from the
+repository rather than being told it, so those arguments would exist only to be
+removed. Tracked as `frankengit-lozg`, which also records that adding a field to
+a v1 canonical body is a §5.2 schema question requiring an owner ruling, and
+that it should sequence after `ls44` rather than race it.
+
+**Consequence for evidence line 4:** the clone/fetch differential stays blocked
+until the format is persisted, because the lane must `serve` a SHA-256
+repository and have it advertise `object-format=sha256`.
 
 ## What this decision does not settle
 
