@@ -147,7 +147,7 @@ fn authenticated_session_with_key(key: &[u8]) -> LoopbackReceiveSession {
     )
 }
 
-fn zero_oid() -> &'static str {
+const fn zero_oid() -> &'static str {
     "0000000000000000000000000000000000000000"
 }
 
@@ -309,10 +309,10 @@ fn stale_validation_basis_refuses_thin_base_after_successor_omits_it() {
         DecisionOutcome::Committed { .. }
     ));
 
-    let selected_a_request = node.request_context();
+    let basis_with_base_request = node.request_context();
     let selected_a = node
         .runtime()
-        .block_on(node.materialize_admission_in(&selected_a_request))
+        .block_on(node.materialize_admission_in(&basis_with_base_request))
         .expect("basis A materializes after the base publication");
     let base_ref = RefName::try_new(b"refs/heads/base").expect("fixed branch ref is valid");
     assert_eq!(selected_a.snapshot().refs.get(&base_ref), Some(&base_id));
@@ -340,10 +340,10 @@ fn stale_validation_basis_refuses_thin_base_after_successor_omits_it() {
         DecisionOutcome::Committed { .. }
     ));
 
-    let selected_b_request = node.request_context();
+    let basis_without_base_request = node.request_context();
     let selected_b = node
         .runtime()
-        .block_on(node.materialize_admission_in(&selected_b_request))
+        .block_on(node.materialize_admission_in(&basis_without_base_request))
         .expect("successor basis B materializes after deletion");
     assert!(selected_b.snapshot().refs.is_empty());
 

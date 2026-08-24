@@ -294,7 +294,7 @@ fn run_one_node_after_advertisement_delay(
     let address = listener
         .local_addr()
         .expect("listener reports its loopback address");
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         let served = node.serve_git_daemon_once_with_limits(&listener, WireLimits::default());
         let shutdown = node.shutdown();
         (served, shutdown)
@@ -339,9 +339,9 @@ fn run_one_node_after_advertisement_delay(
         .expect("one-node response reaches EOF");
     let total_elapsed = started.elapsed();
 
-    let (served, shutdown) = server.join().expect("one-node daemon thread joins");
+    let (serve_result, shutdown) = server_thread.join().expect("one-node daemon thread joins");
     shutdown.expect("one-node daemon drains and shuts down after its session");
-    (served, response_after_advertisement, total_elapsed)
+    (serve_result, response_after_advertisement, total_elapsed)
 }
 
 #[test]

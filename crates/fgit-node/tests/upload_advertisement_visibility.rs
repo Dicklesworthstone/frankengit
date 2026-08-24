@@ -15,7 +15,7 @@
 //! That second one is why the obvious fix is not enough, and it is the reason
 //! these tests assert *indistinguishability* rather than *absence*: suppressing
 //! a refusal's message still leaves the two cases differing in whether a refusal
-//! happened. Credit to BoldIbis for the observation and for the test shape.
+//! happened. Credit to `BoldIbis` for the observation and for the test shape.
 
 use std::collections::BTreeMap;
 
