@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Generate or check the FG-041 Lean test vectors.
 //!
 //! ```text
