@@ -352,6 +352,43 @@ counts.
 
 Recorded on bead `frankengit-fg036c-slo-economics-v6n`.
 
+### NEG-030 — no capacity model is supportable on this host (FG-036c)
+
+**Hypothesis.** Aggregate read throughput can be measured precisely enough here
+to locate a stable saturation point and support a capacity model.
+
+**Rejected.** Two sweeps of identical code, twenty minutes apart, put saturation
+at concurrency **8** and at concurrency **2**. Inside the second sweep, two
+*identical* back-to-back arms returned 95 and 15 ops/s at concurrency 2, and 7
+and 93 ops/s at concurrency 4 — spreads of 6.3× and 13× between measurements
+that differ in nothing at all.
+
+**Raising the sample count fivefold did not help.** That is the part worth
+keeping. The intuition is that more samples average noise away; here the longer
+measurement window is *more* exposed to other panes' build bursts, because the
+interference is non-stationary rather than independent jitter. Averaging cancels
+jitter. It does not cancel a neighbour starting a release build halfway through
+your window.
+
+**Cause is deliberately not attributed** between sample size and changing host
+load: the two sweeps were not simultaneous, so that comparison cannot separate
+them. The consequence is the same either way — the saturation point is set by
+host interference rather than by the system under test, so a model fitted to
+these points would not be *validated* by them. Fitting one anyway would have
+produced a confident curve, a plausible knee, and a number someone would later
+provision against.
+
+**The harness is not the problem.** `all_offered_reads_served` stayed true at
+every level of both sweeps, so the counts are exact; only the rates move. The
+instrument is correctly reporting that it cannot support the claim.
+
+**Revisit** on a quiet or dedicated host, or with the window pinned against
+concurrent build load, such that two identical arms agree within a small
+fraction of the gain being claimed. The per-level repeat spread is already
+recorded, so that condition is checkable rather than a judgement call.
+
+Recorded on bead `frankengit-fg036c-slo-economics-v6n`.
+
 ## 5. Integration with agents
 
 Context Packets for architecture/performance work include relevant negative-evidence rows. An agent proposing a known-rejected dependency or mechanism must cite and rebut the row. The system does not block creative reconsideration; it prevents amnesia.
