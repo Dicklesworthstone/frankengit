@@ -1458,7 +1458,7 @@ mod tests {
 
     #[test]
     fn compressed_profile_reduces_a_repetitive_pack_without_changing_objects() {
-        let body = vec![b'x'; 96 * 1024];
+        let body = vec![b'x'; 8 * 1024];
         let blob = object(ObjectType::Blob, &body, 1, 7);
         let source = FixtureSource::with(vec![blob.clone()]);
         let roots = [blob.id()];
