@@ -6303,6 +6303,32 @@ impl OneNode {
             .fabric
             .put_if_absent(verified, PlacementAdmission::new(&ledger, grant));
         let closed = ledger.close();
+        // Containment is checked BEFORE the placement's own error is raised, so
+        // a leaked region outranks whatever the fabric refused. Keep that order:
+        // a refusal that is reported while resources are still outstanding tells
+        // the caller the wrong thing about what the node is still holding.
+        //
+        // Defensive, and measured to be unreachable through this function with
+        // the concrete fabric it holds (`LocalFilesystemFabric`), because nothing on
+        // that path leaks. Every pre-reservation refusal releases the budget
+        // explicitly; `ObligationLedger::reserve` releases on both of its failure
+        // paths; and of the three post-reservation `?` operators that would drop a
+        // live `ReservedObligation`, two cannot fire from here and the third does
+        // not leak:
+        //   - `payload_identity` fails only on `ObjectKind::Internal`, and
+        //     `fabric_object_kind` is a wildcard-free match over `ObjectType` that maps
+        //     no variant to it -- adding one breaks that match rather than
+        //     quietly opening this path;
+        //   - `AdmittedObject::verified` is handed `StructureVerdict::Verified` as a
+        //     literal, and its two length operands are the same variable;
+        //   - `settle_admission_abort` recovers its obligation and settles it before
+        //     returning an error.
+        //
+        // So a test driving this refusal through `put_git_object` today would be
+        // vacuous, and is deliberately not written. This becomes reachable the
+        // moment the fabric is made injectable or a second implementation of the
+        // fabric trait is placed behind it -- either of which should bring the
+        // test with it. Walked at e872bcf for frankengit-fg036b.
         if !matches!(closed, RegionCloseOutcome::Quiescent(_)) {
             return Err(NodeRefusal::ResourceContainment);
         }
