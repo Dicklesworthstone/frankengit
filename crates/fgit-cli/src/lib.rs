@@ -12,10 +12,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_node::{
     DoctorReport, GitDaemonSessionOutcome, NodeConfig, NodeGitDaemonServeRefusal,
-    NodeInitialization, NodeSourceImportRefusal, OneNode,
+    NodeInitialization, NodeSourceImportRefusal, OneNode, RepositoryResolutionInput,
 };
 use fgit_types::{
-    DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefusalCode, RepositoryId, TenantId,
+    DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefusalCode, RepositoryId,
+    RepositoryIncarnationId, TenantId,
 };
 
 const EXPORT_TEMPORARY_ATTEMPTS: usize = 16;
@@ -37,6 +38,8 @@ pub enum CliRefusal {
     Tenant(fgit_types::TypeRefusal),
     /// The supplied repository identity was not canonical lowercase hex.
     Repository(fgit_types::TypeRefusal),
+    /// The supplied repository-incarnation identity was not canonical lowercase hex.
+    RepositoryIncarnation(fgit_types::TypeRefusal),
     /// The supplied caller principal identity was not canonical lowercase hex.
     Principal(fgit_types::TypeRefusal),
     /// The supplied doctor sample was not a native SHA-1 object identity.
@@ -142,7 +145,7 @@ impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256]; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory>; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path>; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address>",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256]; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>]",
             ),
             Self::UnsupportedObjectFormat(token) => write!(
                 formatter,
@@ -150,6 +153,7 @@ impl Display for CliRefusal {
             ),
             Self::Tenant(error)
             | Self::Repository(error)
+            | Self::RepositoryIncarnation(error)
             | Self::Principal(error)
             | Self::Object(error) => {
                 Display::fmt(error, formatter)
@@ -228,6 +232,7 @@ impl Error for CliRefusal {
         match self {
             Self::Tenant(error)
             | Self::Repository(error)
+            | Self::RepositoryIncarnation(error)
             | Self::Principal(error)
             | Self::Object(error) => Some(error),
             Self::Node(error) => Some(error),
@@ -291,11 +296,41 @@ pub enum CliOutcome {
 /// Executes a bounded command invocation without ambient configuration.
 pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
     match arguments {
-        [command, storage_root, tenant, repository] if command == "init" => {
-            run_init(storage_root, tenant, repository, GitHashAlgorithm::Sha1)
+        [command, storage_root, tenant, repository] if command == "init" => run_init(
+            storage_root,
+            tenant,
+            repository,
+            GitHashAlgorithm::Sha1,
+            None,
+        ),
+        [command, storage_root, tenant, repository, format] if command == "init" => run_init(
+            storage_root,
+            tenant,
+            repository,
+            object_format(format)?,
+            None,
+        ),
+        [command, storage_root, tenant, repository, flag, key]
+            if command == "init" && flag == "--creation-idempotency-key" =>
+        {
+            run_init(
+                storage_root,
+                tenant,
+                repository,
+                GitHashAlgorithm::Sha1,
+                Some(key.as_bytes()),
+            )
         }
-        [command, storage_root, tenant, repository, format] if command == "init" => {
-            run_init(storage_root, tenant, repository, object_format(format)?)
+        [command, storage_root, tenant, repository, flag, key, format]
+            if command == "init" && flag == "--creation-idempotency-key" =>
+        {
+            run_init(
+                storage_root,
+                tenant,
+                repository,
+                object_format(format)?,
+                Some(key.as_bytes()),
+            )
         }
         [
             command,
@@ -314,22 +349,126 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 principal,
                 idempotency_key.as_bytes(),
                 Path::new(source),
+                None,
+            )
+        }
+        [
+            command,
+            storage_root,
+            tenant,
+            repository,
+            principal,
+            idempotency_key,
+            source,
+            flag,
+            incarnation,
+        ] if command == "import" && flag == "--expected-incarnation" => {
+            let principal = PrincipalId::from_hex(principal).map_err(CliRefusal::Principal)?;
+            run_import(
+                storage_root,
+                tenant,
+                repository,
+                principal,
+                idempotency_key.as_bytes(),
+                Path::new(source),
+                Some(parse_resolution_input(
+                    incarnation,
+                    RepositoryResolutionInput::CapabilityToken,
+                )?),
             )
         }
         [command, storage_root, tenant, repository] if command == "doctor" => {
-            run_doctor(storage_root, tenant, repository, None)
+            run_doctor(storage_root, tenant, repository, None, None)
         }
         [command, storage_root, tenant, repository, sample] if command == "doctor" => {
             let sample =
                 GitOid::from_hex(GitHashAlgorithm::Sha1, sample).map_err(CliRefusal::Object)?;
-            run_doctor(storage_root, tenant, repository, Some(sample))
+            run_doctor(storage_root, tenant, repository, Some(sample), None)
+        }
+        [command, storage_root, tenant, repository, flag, incarnation]
+            if command == "doctor" && flag == "--expected-incarnation" =>
+        {
+            run_doctor(
+                storage_root,
+                tenant,
+                repository,
+                None,
+                Some(parse_resolution_input(
+                    incarnation,
+                    RepositoryResolutionInput::CacheEntry,
+                )?),
+            )
+        }
+        [
+            command,
+            storage_root,
+            tenant,
+            repository,
+            sample,
+            flag,
+            incarnation,
+        ] if command == "doctor" && flag == "--expected-incarnation" => {
+            let sample =
+                GitOid::from_hex(GitHashAlgorithm::Sha1, sample).map_err(CliRefusal::Object)?;
+            run_doctor(
+                storage_root,
+                tenant,
+                repository,
+                Some(sample),
+                Some(parse_resolution_input(
+                    incarnation,
+                    RepositoryResolutionInput::CacheEntry,
+                )?),
+            )
         }
         [command, storage_root, tenant, repository, destination] if command == "export" => {
-            run_export(storage_root, tenant, repository, PathBuf::from(destination))
+            run_export(
+                storage_root,
+                tenant,
+                repository,
+                PathBuf::from(destination),
+                None,
+            )
         }
+        [
+            command,
+            storage_root,
+            tenant,
+            repository,
+            destination,
+            flag,
+            incarnation,
+        ] if command == "export" && flag == "--expected-incarnation" => run_export(
+            storage_root,
+            tenant,
+            repository,
+            PathBuf::from(destination),
+            Some(parse_resolution_input(
+                incarnation,
+                RepositoryResolutionInput::ObjectLocation,
+            )?),
+        ),
         [command, storage_root, tenant, repository, listen_address] if command == "serve" => {
-            run_serve(storage_root, tenant, repository, listen_address)
+            run_serve(storage_root, tenant, repository, listen_address, None)
         }
+        [
+            command,
+            storage_root,
+            tenant,
+            repository,
+            listen_address,
+            flag,
+            incarnation,
+        ] if command == "serve" && flag == "--expected-incarnation" => run_serve(
+            storage_root,
+            tenant,
+            repository,
+            listen_address,
+            Some(parse_resolution_input(
+                incarnation,
+                RepositoryResolutionInput::TransportTarget,
+            )?),
+        ),
         _ => Err(CliRefusal::Usage),
     }
 }
@@ -340,10 +479,14 @@ fn run_init(
     tenant: &str,
     repository: &str,
     format: GitHashAlgorithm,
+    creation_idempotency_key: Option<&[u8]>,
 ) -> Result<CliOutcome, CliRefusal> {
-    let (node, initialization) =
-        OneNode::init(node_config(storage_root, tenant, repository, Some(format))?)
-            .map_err(CliRefusal::Node)?;
+    let configuration = node_config(storage_root, tenant, repository, Some(format), None)?;
+    let configuration = match creation_idempotency_key {
+        Some(key) => configuration.with_creation_idempotency_key(key.to_vec()),
+        None => configuration,
+    };
+    let (node, initialization) = OneNode::init(configuration).map_err(CliRefusal::Node)?;
     node.shutdown().map_err(CliRefusal::Node)?;
     Ok(CliOutcome::Initialized(initialization))
 }
@@ -357,13 +500,20 @@ fn run_serve(
     tenant: &str,
     repository: &str,
     listen_address: &str,
+    resolution_input: Option<RepositoryResolutionInput>,
 ) -> Result<CliOutcome, CliRefusal> {
     {
         {
             let listener = TcpListener::bind(listen_address).map_err(CliRefusal::Listener)?;
             let listen_address = listener.local_addr().map_err(CliRefusal::Listener)?;
-            let node = OneNode::open_existing(node_config(storage_root, tenant, repository, None)?)
-                .map_err(CliRefusal::Node)?;
+            let node = OneNode::open_existing(node_config(
+                storage_root,
+                tenant,
+                repository,
+                None,
+                resolution_input,
+            )?)
+            .map_err(CliRefusal::Node)?;
             let serving = node.serve_git_daemon_once(&listener);
             let cleanup = node.shutdown();
             match (serving, cleanup) {
@@ -389,9 +539,16 @@ fn run_import(
     principal: PrincipalId,
     idempotency_key: &[u8],
     source: &Path,
+    resolution_input: Option<RepositoryResolutionInput>,
 ) -> Result<CliOutcome, CliRefusal> {
-    let node = OneNode::open_existing(node_config(storage_root, tenant, repository, None)?)
-        .map_err(CliRefusal::Node)?;
+    let node = OneNode::open_existing(node_config(
+        storage_root,
+        tenant,
+        repository,
+        None,
+        resolution_input,
+    )?)
+    .map_err(CliRefusal::Node)?;
     let request = node.request_context();
     let imported = node
         .runtime()
@@ -445,9 +602,16 @@ fn run_export(
     tenant: &str,
     repository: &str,
     destination: PathBuf,
+    resolution_input: Option<RepositoryResolutionInput>,
 ) -> Result<CliOutcome, CliRefusal> {
-    let node = OneNode::open_existing(node_config(storage_root, tenant, repository, None)?)
-        .map_err(CliRefusal::Node)?;
+    let node = OneNode::open_existing(node_config(
+        storage_root,
+        tenant,
+        repository,
+        None,
+        resolution_input,
+    )?)
+    .map_err(CliRefusal::Node)?;
     let exported = node
         .runtime()
         .block_on(node.authority_selected_pack_payload())
@@ -586,9 +750,16 @@ fn run_doctor(
     tenant: &str,
     repository: &str,
     sampled_object: Option<GitOid>,
+    resolution_input: Option<RepositoryResolutionInput>,
 ) -> Result<CliOutcome, CliRefusal> {
-    let node = OneNode::open_existing(node_config(storage_root, tenant, repository, None)?)
-        .map_err(CliRefusal::Node)?;
+    let node = OneNode::open_existing(node_config(
+        storage_root,
+        tenant,
+        repository,
+        None,
+        resolution_input,
+    )?)
+    .map_err(CliRefusal::Node)?;
     let inspection = node.runtime().block_on(node.doctor(sampled_object));
     let cleanup = node.shutdown();
     match (inspection, cleanup) {
@@ -607,14 +778,31 @@ fn node_config(
     tenant: &str,
     repository: &str,
     object_format: Option<GitHashAlgorithm>,
+    resolution_input: Option<RepositoryResolutionInput>,
 ) -> Result<NodeConfig, CliRefusal> {
     let tenant_id = TenantId::from_hex(tenant).map_err(CliRefusal::Tenant)?;
     let repository_id = RepositoryId::from_hex(repository).map_err(CliRefusal::Repository)?;
     let configuration = NodeConfig::new(PathBuf::from(storage_root), tenant_id, repository_id);
-    Ok(match object_format {
+    let configuration = match object_format {
         Some(object_format) => configuration.with_object_format(object_format),
         None => configuration,
+    };
+    Ok(match resolution_input {
+        Some(input) => configuration.with_resolution_input(input),
+        None => configuration,
     })
+}
+
+/// Decodes a caller-provided repository incarnation for one concrete existing
+/// resolution path.  The path marker stays explicit, so an operator cannot
+/// accidentally present a cache proof as a transport target.
+fn parse_resolution_input(
+    token: &str,
+    wrap: fn(RepositoryIncarnationId) -> RepositoryResolutionInput,
+) -> Result<RepositoryResolutionInput, CliRefusal> {
+    RepositoryIncarnationId::from_hex(token)
+        .map(wrap)
+        .map_err(CliRefusal::RepositoryIncarnation)
 }
 
 /// Parses the explicit object-format token accepted by `fg init`.
@@ -636,7 +824,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use fgit_crypto::{GitObjectKind, git_object_id};
-    use fgit_types::{GitHashAlgorithm, GitOid};
+    use fgit_node::{NodeConfig, NodeRefusal, OneNode};
+    use fgit_types::{GitHashAlgorithm, GitOid, RepositoryId, RepositoryIncarnationId, TenantId};
 
     use super::{CliOutcome, CliRefusal, run};
 
@@ -741,6 +930,86 @@ mod tests {
                 "fg init must accept the explicit `{format}` repository format"
             );
         }
+    }
+
+    #[test]
+    fn creation_recovery_and_cache_resolution_are_incarnation_bound() {
+        let scratch = ScratchDirectory::new();
+        let storage_root = scratch.0.to_string_lossy().into_owned();
+        let tenant = "11111111111111111111111111111111".to_owned();
+        let repository = "22222222222222222222222222222222".to_owned();
+        let keyed_init = vec![
+            "init".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+            "--creation-idempotency-key".to_owned(),
+            "incarnation-create-once".to_owned(),
+            "sha256".to_owned(),
+        ];
+
+        assert!(matches!(
+            run(&keyed_init),
+            Ok(CliOutcome::Initialized(
+                fgit_node::NodeInitialization::Created
+            ))
+        ));
+        assert!(matches!(
+            run(&keyed_init),
+            Ok(CliOutcome::Initialized(
+                fgit_node::NodeInitialization::IdenticalRetry
+            ))
+        ));
+
+        let node = OneNode::open_existing(NodeConfig::new(
+            scratch.0.clone(),
+            TenantId::from_bytes([0x11; 16]),
+            RepositoryId::from_bytes([0x22; 16]),
+        ))
+        .expect("a key-recovered repository opens through its authenticated configuration");
+        let current = node.repository_incarnation_id();
+        node.shutdown().expect("current-incarnation reader closes");
+
+        let permitted = vec![
+            "doctor".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+            "--expected-incarnation".to_owned(),
+            current.to_string(),
+        ];
+        assert!(matches!(run(&permitted), Ok(CliOutcome::Doctor(_))));
+
+        let stale = RepositoryIncarnationId::from_bytes([0x59; 16]);
+        let stale_cache = vec![
+            "doctor".to_owned(),
+            storage_root.clone(),
+            tenant.clone(),
+            repository.clone(),
+            "--expected-incarnation".to_owned(),
+            stale.to_string(),
+        ];
+        assert!(matches!(
+            run(&stale_cache),
+            Err(CliRefusal::Node(NodeRefusal::RepositoryIncarnationMismatch {
+                expected,
+                observed,
+            })) if expected == stale && observed == current
+        ));
+
+        let mismatched_retry = vec![
+            "init".to_owned(),
+            storage_root,
+            tenant,
+            repository,
+            "--creation-idempotency-key".to_owned(),
+            "incarnation-create-once".to_owned(),
+            "sha1".to_owned(),
+        ];
+        assert!(matches!(
+            run(&mismatched_retry),
+            Err(CliRefusal::Node(NodeRefusal::Authority(_)))
+        ));
     }
 
     /// The load-bearing case. An object format is permanent for the life of a
