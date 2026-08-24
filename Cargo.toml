@@ -75,6 +75,7 @@ fgit-treefs = { path = "crates/fgit-treefs" }
 fgit-types = { path = "crates/fgit-types" }
 fgit-wire = { path = "crates/fgit-wire" }
 fgit-witness = { path = "crates/fgit-witness" }
+fgit-verified-read = { path = "crates/fgit-verified-read" }
 fgit-cli = { path = "crates/fgit-cli" }
 
 [workspace.lints.rust]

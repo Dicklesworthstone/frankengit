@@ -981,6 +981,16 @@ name = "fgit-types"
 version = "0.0.1"
 
 [[package]]
+name = "fgit-verified-read"
+version = "0.0.1"
+dependencies = [
+ "fgit-authority",
+ "fgit-codec",
+ "fgit-crypto",
+ "fgit-types",
+]
+
+[[package]]
 name = "fgit-wire"
 version = "0.1.0"
 dependencies = [
