@@ -536,6 +536,60 @@ fn an_object_of_exactly_the_ceiling_is_admitted_on_the_write_and_read_paths() {
     );
 }
 
+/// PINS THE QUANTITY THE WRITE GUARD ACTUALLY COMPARES (hyf0).
+///
+/// Without this, the write half of the twin above is potentially VACUOUS. That
+/// drill sets the ceiling to a length measured off disk and requires the write
+/// to be admitted -- but nothing showed that `:392` compares that same number.
+/// `:392` bounds `8 + envelope + payload`, while the on-disk file is magic(4) +
+/// envelope_len(4) + envelope + payload. Those coincide by reading the encoder,
+/// which is not a measurement. Were the guard's quantity anything larger, the
+/// ceiling would sit clear of its boundary and the write would be admitted for
+/// the wrong reason -- passing even if `:392` were written `>=`.
+///
+/// Refusing one byte under, while carrying `offered` equal to the measured
+/// length, is what fixes the guard's arithmetic to the measurement. The read
+/// path already had this from
+/// `a_stored_file_larger_than_the_ceiling_is_refused_at_read_time`; the write
+/// path did not.
+#[test]
+fn a_write_one_byte_over_the_ceiling_is_refused_and_names_the_measured_length() {
+    const PAYLOAD: &[u8] = b"hyf0 write-boundary payload";
+
+    let measure_root = temp_root("writepin-measure");
+    let generous = fabric(measure_root.clone(), NAMESPACE, 1 << 20);
+    let (_ignored, measured_path) = store_one(&generous, &measure_root, PAYLOAD, NAMESPACE);
+    let exact = fs::metadata(&measured_path)
+        .expect("the measuring write must have produced a file")
+        .len();
+
+    // The same object against a ceiling one byte too small. The refusal must
+    // name `exact` as what was offered: that equality is the whole drill.
+    let under_root = temp_root("writepin-under");
+    let under = fabric(under_root, NAMESPACE, exact - 1);
+    let ledger = ledger();
+    let outcome = under.put_if_absent(verified(PAYLOAD, NAMESPACE), admission(&ledger));
+
+    assert!(
+        matches!(
+            outcome,
+            Err(StoreRefusal::StoredObjectTooLarge { offered, maximum })
+                if offered == exact && maximum == exact - 1
+        ),
+        "the write guard must refuse one byte under and must report the same \
+         length the stored form occupies, which is what pins the twin above to \
+         the quantity this guard compares; got {outcome:?}"
+    );
+
+    // A REFUSED WRITE MUST STILL SETTLE. The ledger is fail-fast, so dropping
+    // it with the placement grant outstanding panics on the leak rather than
+    // failing the assertion above -- which is how this drill first failed. That
+    // makes quiescence part of what is under test: a size refusal that returned
+    // the grant to nobody would strand the caller's budget, and every later
+    // drill sharing this ledger shape would inherit the leak.
+    close_quiescent(ledger);
+}
+
 // ---------------------------------------------------------------------------
 // Discrimination: the guards must not be interchangeable
 // ---------------------------------------------------------------------------
