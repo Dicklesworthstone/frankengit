@@ -216,3 +216,75 @@ fn the_visible_set_at_exactly_the_bound_is_accepted() {
         "a visible set exactly at the bound is admissible, not one over it"
     );
 }
+
+// ---------------------------------------------------------------------------
+// No refusal may be caused by a hidden ref
+// ---------------------------------------------------------------------------
+
+fn foreign_oid() -> GitOid {
+    GitOid::from_hex(
+        GitHashAlgorithm::Sha256,
+        &std::iter::repeat_n('a', 64).collect::<String>(),
+    )
+    .expect("a fixed 64-nibble SHA-256 object id")
+}
+
+fn snapshot_with_foreign(hidden: bool) -> AdmissionSnapshot {
+    let mut refs = BTreeMap::new();
+    refs.insert(
+        RefName::try_new(b"refs/heads/main").expect("a fixed valid ref name"),
+        oid('1'),
+    );
+    let foreign_name: &[u8] = if hidden {
+        b"refs/internal/foreign"
+    } else {
+        b"refs/heads/foreign"
+    };
+    refs.insert(
+        RefName::try_new(foreign_name).expect("a fixed valid ref name"),
+        foreign_oid(),
+    );
+    AdmissionSnapshot {
+        refs,
+        ..AdmissionSnapshot::default()
+    }
+}
+
+#[test]
+fn a_hidden_ref_with_a_foreign_object_format_causes_no_refusal() {
+    // THE INVARIANT: no refusal may be caused by a ref the principal cannot see.
+    // The object-format check runs only over the visible set for exactly this
+    // reason. If it ran before the visibility filter, a principal could learn a
+    // hidden ref exists by receiving ObjectFormatMismatch for it — the refusal
+    // becomes an oracle, the same way an unfiltered bound would.
+    let names = advertised(
+        &snapshot_with_foreign(true),
+        &hiding(&[b"refs/internal"]),
+        &WireLimits::default(),
+    );
+
+    assert_eq!(
+        names,
+        vec![b"refs/heads/main".to_vec()],
+        "a hidden ref's object format must not be inspected, let alone refused"
+    );
+}
+
+#[test]
+fn the_permitted_twin_a_visible_ref_with_a_foreign_format_still_refuses() {
+    // Without this, the test above is satisfied by dropping the format check
+    // altogether. The same foreign oid under a VISIBLE name must still refuse:
+    // the check is skipped for hidden refs, not disabled.
+    let refusal = AdmissionReceivePackAdvertisement::from_snapshot(
+        &snapshot_with_foreign(false),
+        &hiding(&[b"refs/internal"]),
+        GitHashAlgorithm::Sha1,
+        &WireLimits::default(),
+    )
+    .expect_err("a visible ref in a foreign identity domain is not advertisable");
+
+    assert!(
+        format!("{refusal}").contains("format"),
+        "the refusal must name the object-format mismatch it found, got {refusal}"
+    );
+}
