@@ -1596,13 +1596,51 @@ fn the_cell_level_flow_is_linearizable_under_seeded_plans_and_replays_identicall
             );
             expect_linearizable(&report);
 
-            per_seed.push(fault_script_json(&plan));
+            // EXECUTED evidence, not the plan. Comparing fault_script_json(&plan)
+            // would compare what the generator INTENDED and prove only that
+            // FaultPlan::seeded is deterministic -- a property of the generator,
+            // not of the run. store.fault_log() is the record of faults that
+            // actually fired, in order, with the operation index and kind each
+            // one hit. That is what "replays identically" has to mean.
+            // MEASURED, not assumed: for these three seeds the plan declares 5
+            // directives and only 1, 2 and 3 of them respectively ever fire. A
+            // directive is a CONDITIONAL ("the nth occurrence of kind K"), so a
+            // plan is a set of standing offers and the log is the subset that
+            // was taken. Two thirds of this plan never executes.
+            //
+            // That is why comparing fault_script_json(&plan) across two runs of
+            // one seed was the wrong evidence, and close to tautological: the
+            // same generator on the same seed emits the same directives BY
+            // CONSTRUCTION, without the executor being involved at all. Such a
+            // comparison cannot fail on executor nondeterminism, which is the
+            // only thing "replays identically" is about. The log can: it carries
+            // the firing order and the op_kind each fault actually struck, both
+            // resolved during the run and absent from the plan.
+            per_seed.push(
+                store
+                    .fault_log()
+                    .records()
+                    .iter()
+                    .map(|record| {
+                        format!(
+                            "{}:{:?}:{:?}:{:?}",
+                            record.sequence, record.at, record.op_kind, record.kind
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|"),
+            );
         }
 
-        // REPLAY: the same seed must place the same faults both times.
+        // REPLAY: the same seed must have FIRED the same faults both times, in
+        // the same order, against the same operations.
         assert_eq!(
             per_seed[0], per_seed[1],
-            "seed {seed:#x} produced two different fault scripts, so it is not replayable"
+            "seed {seed:#x} executed two different fault sequences, so the run is not replayable"
+        );
+        assert!(
+            !per_seed[0].is_empty(),
+            "seed {seed:#x} fired no faults at all, so comparing two empty logs proves nothing"
         );
         transcripts.push(per_seed.remove(0));
     }
@@ -1614,7 +1652,7 @@ fn the_cell_level_flow_is_linearizable_under_seeded_plans_and_replays_identicall
     distinct.dedup();
     assert!(
         distinct.len() > 1,
-        "every seed produced an identical fault script, so seeding is doing nothing"
+        "every seed executed an identical fault sequence, so seeding is doing nothing"
     );
 }
 
