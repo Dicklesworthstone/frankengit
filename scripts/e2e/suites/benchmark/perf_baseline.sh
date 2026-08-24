@@ -469,6 +469,31 @@ for pair in \
     grep -qF "\"$field\"" "$ARTIFACT"
 done
 
+# x7ja's transfer claims are numeric gates, not merely a promise that the
+# artifact will contain metric-shaped fields.  A full clone must retain less
+# than one uncompressed reachable corpus on every candidate sample.  For a
+# stale fetch, the same candidate must add less than half the full corpus's
+# uncompressed reachable bytes.  The latter is deliberately relative to the
+# complete corpus (rather than the stale delta denominator): it is the
+# discriminator for the reported failure mode where fetching a few commits
+# was within 2 KB of cloning the whole repository.
+if [ "$OPERATION" = clone ]; then
+  fge_assert_cmd FG-028C-E2E-015 \
+    'every fgit-node clone sample stays below 1.00x logical reachable bytes' \
+    "$PYTHON_BIN" -c 'import json,sys
+rows=[json.loads(line) for line in open(sys.argv[1])]
+samples=[row for row in rows if row.get("kind")=="sample" and row.get("variant")=="candidate"]
+sys.exit(0 if samples and all(sample["metrics"]["storage"]["amplification_ppm"] < 1_000_000 for sample in samples) else 1)' "$ARTIFACT"
+else
+  fge_assert_cmd FG-028C-E2E-026 \
+    'every fgit-node stale fetch adds less than half the full corpus logical bytes' \
+    "$PYTHON_BIN" -c 'import json,sys
+rows=[json.loads(line) for line in open(sys.argv[1])]
+full_logical_bytes=int(sys.argv[2])
+samples=[row for row in rows if row.get("kind")=="sample" and row.get("variant")=="candidate"]
+sys.exit(0 if samples and all(sample["metrics"]["egress_bytes"] * 2 < full_logical_bytes for sample in samples) else 1)' "$ARTIFACT" "$LOGICAL_BYTES"
+fi
+
 # The measured CPU must be a real reading, not a defaulted zero. A zero would
 # read as a free server and is exactly what the /proc probe returns None for.
 fge_assert_cmd FG-028C-E2E-016 \
@@ -560,4 +585,3 @@ fge_artifact "$authority_dir/replay-and-rollback.txt" perf-baseline-authority-re
 if [ -f "$authority_dir/negative-evidence.ndjson" ]; then
   fge_artifact "$authority_dir/negative-evidence.ndjson" perf-baseline-authority-negative-evidence
 fi
-
