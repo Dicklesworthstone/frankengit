@@ -472,6 +472,71 @@ fn a_zero_object_ceiling_is_refused_at_construction() {
 }
 
 // ---------------------------------------------------------------------------
+// The permitted twin at the exact inclusive boundary (380x)
+// ---------------------------------------------------------------------------
+
+/// THE CASE A REFUSAL-ONLY SUITE CANNOT REACH.
+///
+/// Both `StoredObjectTooLarge` probes above set the ceiling *under* the object,
+/// so `offered > maximum` and `offered >= maximum` are alike true for them:
+/// they hold whether the guard is correct or tightened by one. A ceiling made
+/// over-strict -- one that rejects an object which exactly fits -- is invisible
+/// to them. `fabric_bounds.rs` already treats that as worth pinning for the
+/// three `SegmentLimits` guards, in its own words "the guard is `>`. Written
+/// `>=` it would reject a segment that exactly fits". This is that drill for
+/// `max_stored_object_bytes`, which that file does not reach.
+///
+/// Two sites are exercised at once because they bound the same quantity:
+/// `:392` bounds the write (`8 + envelope + payload`) and `:348` bounds the
+/// read (the file's length on disk), and the writer emits magic(4) +
+/// envelope_len(4) + envelope + payload, so the two coincide.
+///
+/// The ceiling is MEASURED, never re-derived. A test that hard-codes the
+/// encoded size stops testing the boundary the day the envelope grows a field,
+/// while still passing.
+/// `a_stored_file_larger_than_the_ceiling_is_refused_at_read_time` brackets
+/// this from below -- it refuses at `stored_len - 1` carrying
+/// `offered == stored_len` -- so that probe and this one pin the read guard's
+/// edge from both sides.
+#[test]
+fn an_object_of_exactly_the_ceiling_is_admitted_on_the_write_and_read_paths() {
+    const PAYLOAD: &[u8] = b"380x exact-fit payload";
+
+    // Measure the stored form under a ceiling that cannot be the constraint.
+    let measure_root = temp_root("exactfit-measure");
+    let generous = fabric(measure_root.clone(), NAMESPACE, 1 << 20);
+    let (_ignored, measured_path) = store_one(&generous, &measure_root, PAYLOAD, NAMESPACE);
+    let exact = fs::metadata(&measured_path)
+        .expect("the measuring write must have produced a file")
+        .len();
+    let payload_len = u64::try_from(PAYLOAD.len()).expect("a test payload length fits u64");
+    assert!(
+        exact > payload_len,
+        "the stored form must carry framing beyond the payload, so that `exact` \
+         is a real encoding measurement and not merely the payload length: {exact}"
+    );
+
+    // A fresh store whose ceiling is exactly that measurement. `store_one`
+    // asserts `Created` internally, so reaching its return value IS the
+    // write-path twin: with `:392` written `>=`, this object would be refused.
+    let tight_root = temp_root("exactfit-tight");
+    let tight = fabric(tight_root.clone(), NAMESPACE, exact);
+    let (identity, _path) = store_one(&tight, &tight_root, PAYLOAD, NAMESPACE);
+
+    // ... and the read path admits it at the same exact ceiling, which is the
+    // `:348` twin. The payload is asserted rather than `is_ok()`: a guard that
+    // returned an empty body would satisfy `is_ok()` and prove nothing.
+    let read = tight
+        .read_whole(identity)
+        .expect("an object of exactly the ceiling must load");
+    assert_eq!(
+        read.object.payload(),
+        PAYLOAD,
+        "the exact-fit object must come back byte-for-byte"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Discrimination: the guards must not be interchangeable
 // ---------------------------------------------------------------------------
 
