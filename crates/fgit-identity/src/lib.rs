@@ -7,9 +7,12 @@
 //! The identity model for FG-042. It owns:
 //!
 //! * [`deploy_key`] — a key identity bound to exactly one repository, with the
-//!   scopes it may exercise there.
+//!   scopes it may exercise there;
+//! * [`token`] — a bounded, revocable, audience-bound grant to act as a
+//!   principal, whose high-impact operations cannot be authorised without
+//!   revocation evidence.
 //!
-//! Organisation and team aggregates, tokens, and sessions land here as their
+//! Organisation and team aggregates and sessions land here as their
 //! modules are completed under bead `frankengit-fg042a-identity-model-cas`.
 //! Each is named above when its module is real, never before — and equally,
 //! each is added the moment it IS real. The inverse mistake, a list that keeps
@@ -39,5 +42,7 @@
 //!   "registered" and "may do nothing" can never be the same state.
 
 pub mod deploy_key;
+pub mod token;
 
 pub use deploy_key::{DeployKeyBinding, DeployKeyRefusal, DeployKeyScope};
+pub use token::{RevocationEvidence, TokenGrant, TokenHandle, TokenOperation, TokenRefusal};
