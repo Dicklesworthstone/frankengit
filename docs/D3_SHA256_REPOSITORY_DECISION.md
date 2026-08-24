@@ -54,7 +54,7 @@ lanes use the pinned, sandboxed upstream oracle only — never a production path
 | 1 | This decision is recorded | this document | done |
 | 2 | Mixed-format objects/packs are refused, typed | every raise site asserted, each with a permitted twin: `fgit-atp-git` (2), `fgit-admission`, `fgit-authority`, `fgit-pack` (5, closed by `05421c9`, `8133809`, `7e28acd`, `f174ec9`) | **done** |
 | 3 | init / hash round-trip natively in SHA-256 | `fgit-node/tests/sha256_format_matrix.rs`, 5 tests, observed passing at `72edf46` | done (`b14c901`) |
-| 4 | clone / fetch match upstream Git byte-for-byte | `oracle.sh clone-loopback` against a pinned Git that supports SHA-256 repositories | **blocked** on `lozg` (format not persisted, so `serve` opens SHA-256 as SHA-1) |
+| 4 | a pinned upstream Git clones a served SHA-256 repository, receiving the exact tip and a pack | `oracle.sh clone-loopback` with `git-2.54.0` in `scripts/e2e/suites/node/sha256_repo_roundtrip.sh`, 26 assertions | **done** (`20c2742`) |
 | 5 | push round-trips | **blocked** — object-bearing push needs a production quarantine validator (`frankengit-production-quarantine-validator-n6kg`) | pending, gated |
 
 Line 5 is recorded as pending rather than narrowed away. The bead stays open
@@ -110,9 +110,29 @@ removed. Tracked as `frankengit-lozg`, which also records that adding a field to
 a v1 canonical body is a §5.2 schema question requiring an owner ruling, and
 that it should sequence after `ls44` rather than race it.
 
-**Consequence for evidence line 4:** the clone/fetch differential stays blocked
-until the format is persisted, because the lane must `serve` a SHA-256
-repository and have it advertise `object-format=sha256`.
+**Both are now resolved.** `lozg` landed the persistence, and `fg serve` adopts
+the stored format rather than being told it. Evidence line 4 is delivered
+(`20c2742`).
+
+## What the differential found: no HEAD symref
+
+The clone lane immediately surfaced a compatibility gap, which is what a
+differential exists for. A pinned `git-2.54.0` clone of an fg-served repository
+exits 0 and receives everything — the correct tip as a remote-tracking ref, and
+the object pack — but produces **no checked-out worktree**, leaving `HEAD`
+dangling at the init default. The daemon advertises no `symref=HEAD:...`
+capability, so Git cannot decide which branch to check out.
+
+**This is not a SHA-256 defect.** A SHA-1 repository imported and served the
+same way advertises no symref either — `ls-remote --symref` returns only
+`refs/heads/main` in both cases. It is a Git-compatibility gap in its own right,
+tracked as `frankengit-head-symref-canonical-state-iahh`.
+
+It is recorded here because it bounds what line 4's evidence means: the
+differential pins that content crosses the wire intact — tip identity and pack
+arrival — and deliberately does **not** assert a checked-out worktree. Asserting
+one would be asserting a capability this server does not claim, for either
+format, which is the "test that asserts a defect" shape §16.3 warns about.
 
 ## What this decision does not settle
 
