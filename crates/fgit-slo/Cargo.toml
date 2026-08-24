@@ -1,0 +1,20 @@
+[package]
+name = "fgit-slo"
+version = "0.0.1"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+# L4, with the same permitted dependency set as `fgit-cli`, and for the same
+# reason: measuring the multi-cell substrate means constructing real `OneNode`
+# instances, so this crate links the node. `fgit-benchmark` cannot host this
+# work — it is L2, and L2 may not depend on L4.
+[dependencies]
+fgit-node.workspace = true
+fgit-types.workspace = true
+fgit-authority.workspace = true
+fgit-wire.workspace = true
+
+[lints]
+workspace = true

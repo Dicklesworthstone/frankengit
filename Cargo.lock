@@ -971,6 +971,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-slo"
+version = "0.0.1"
+dependencies = [
+ "fgit-authority",
+ "fgit-node",
+ "fgit-types",
+ "fgit-wire",
+]
+
+[[package]]
 name = "fgit-statistics"
 version = "0.0.1"
 dependencies = [
@@ -1013,6 +1023,7 @@ version = "0.0.1"
 dependencies = [
  "fgit-authority",
  "fgit-codec",
+ "fgit-codec-verify",
  "fgit-crypto",
  "fgit-types",
 ]

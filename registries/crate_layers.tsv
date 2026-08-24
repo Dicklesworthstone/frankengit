@@ -47,6 +47,7 @@ fgit-resource	L0	L0	resource	active
 fgit-runner	L3	L0,L1,L2,L3	ci-runners	active
 fgit-runtime	L2	L0,L1,L2	concurrency	active
 fgit-schema	L2	L0,L1,L2	api-schema	active
+fgit-slo	L4	L0,L1,L2,L3,L4	slo-evidence	active
 fgit-statistics	L2	L0,L1,L2	statistics	active
 fgit-treefs	L2	L0,L1,L2	treefs	active
 fgit-txn	L2	L0,L1,L2	transactions	active
