@@ -142,4 +142,16 @@ impl RootLayoutVersion {
             Self::RefStateMerkleV1 => true,
         }
     }
+
+    /// Whether this layout admits a membership proof for the object closure.
+    ///
+    /// [`Self::LegacyWholeBody`] does not, because a whole-body digest cannot
+    /// be walked with a sibling path.
+    #[must_use]
+    pub const fn admits_object_closure_membership_proof(self) -> bool {
+        match self {
+            Self::LegacyWholeBody => false,
+            Self::RefStateMerkleV1 => true,
+        }
+    }
 }

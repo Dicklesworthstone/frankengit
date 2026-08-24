@@ -63,8 +63,12 @@ pub enum MerkleRefusal {
     /// rather than a client-visible condition — but hashing it would silently
     /// commit to whichever copy sorted first.
     DuplicateRefName,
+    /// Two entries carry the same object identity.
+    DuplicateObjectOid,
     /// The named ref is not present in the entries offered.
     RefNotPresent,
+    /// The requested object identity is not present in the closure offered.
+    ObjectNotPresent,
     /// A non-membership proof was requested for a ref the state contains.
     ///
     /// Absence and presence are different questions with different proofs, and
@@ -72,7 +76,9 @@ pub enum MerkleRefusal {
     /// "is it absent?" receive something that verifies, just not as an answer to
     /// what was asked.
     RefIsPresent,
-    /// This layout version admits no membership proof for the ref state.
+    /// A non-membership proof was requested for an object the closure contains.
+    ObjectIsPresent,
+    /// This layout version admits no membership proof for the ref state or object closure.
     ///
     /// [`RootLayoutVersion::LegacyWholeBody`] commits to the whole canonical
     /// body, so there is no tree to walk and no proof to check. Refusing is the
@@ -96,13 +102,22 @@ impl core::fmt::Display for MerkleRefusal {
             Self::DuplicateRefName => {
                 f.write_str("two entries carry the same ref name; a ref state is a map")
             }
+            Self::DuplicateObjectOid => {
+                f.write_str("two entries carry the same object identity; a closure is a set")
+            }
             Self::RefNotPresent => f.write_str("the named ref is not in the offered entries"),
+            Self::ObjectNotPresent => {
+                f.write_str("the requested object identity is not in the offered closure")
+            }
             Self::RefIsPresent => {
                 f.write_str("the named ref is present, so it has no non-membership proof")
             }
+            Self::ObjectIsPresent => {
+                f.write_str("the requested object is present, so it has no non-membership proof")
+            }
             Self::LayoutAdmitsNoProof { version } => write!(
                 f,
-                "root layout version {} commits to the whole body, so no ref-state membership \
+                "root layout version {} commits to the whole body, so no membership \
                  proof exists under it",
                 version.code_point()
             ),
@@ -721,4 +736,240 @@ pub fn verify_ref_state_non_membership_under(
         return Err(MerkleRefusal::LayoutAdmitsNoProof { version });
     }
     Ok(verify_ref_state_non_membership(root, name, proof))
+}
+
+// --- object closure Merkle layout and membership (frankengit-c7tb) -------------
+
+/// Schema ID for the object-closure Merkle tree domain.
+#[must_use]
+pub const fn object_closure_schema() -> SchemaId {
+    SchemaId::new(SchemaFamily::from_static("object-closure-merkle"), 1, 0)
+}
+
+/// Computes the domain-separated Merkle leaf digest for one object identity.
+#[must_use]
+pub fn object_closure_leaf(oid: &GitOid) -> DigestBytes {
+    let algorithm = oid.algorithm().code_point().to_be_bytes();
+    merkle_leaf(object_closure_schema(), &[&algorithm, oid.as_bytes()])
+}
+
+/// The closed sort order for Git object identities.
+#[must_use]
+pub fn git_oid_order(left: &GitOid, right: &GitOid) -> Ordering {
+    left.cmp(right)
+}
+
+/// Sort entries into the closed order and reject duplicates.
+pub fn sorted_object_closure_entries(objects: &[GitOid]) -> Result<Vec<&GitOid>, MerkleRefusal> {
+    let mut ordered: Vec<&GitOid> = objects.iter().collect();
+    ordered.sort_by(|left, right| git_oid_order(left, right));
+    if ordered
+        .windows(2)
+        .any(|pair| git_oid_order(pair[0], pair[1]) == Ordering::Equal)
+    {
+        return Err(MerkleRefusal::DuplicateObjectOid);
+    }
+    Ok(ordered)
+}
+
+/// Computes the root digest of the domain-separated Merkle tree over an object closure.
+pub fn object_closure_merkle_root(objects: &[GitOid]) -> Result<Digest, MerkleRefusal> {
+    let ordered = sorted_object_closure_entries(objects)?;
+    let leaves: Vec<DigestBytes> = ordered.into_iter().map(object_closure_leaf).collect();
+    Ok(Digest::new(
+        IdentityDomain::MerkleNode.algorithm().id(),
+        merkle_root(object_closure_schema(), &leaves),
+    ))
+}
+
+/// Computes a membership proof for one object identity in an object closure.
+pub fn object_closure_membership_proof(
+    objects: &[GitOid],
+    oid: &GitOid,
+) -> Result<MerkleProof, MerkleRefusal> {
+    let ordered = sorted_object_closure_entries(objects)?;
+    let index = ordered
+        .iter()
+        .position(|candidate| *candidate == oid)
+        .ok_or(MerkleRefusal::ObjectNotPresent)?;
+    let leaves: Vec<DigestBytes> = ordered.into_iter().map(object_closure_leaf).collect();
+    merkle_proof(object_closure_schema(), &leaves, index)
+}
+
+/// Verifies that `root` commits to `oid` via `proof`.
+#[must_use]
+pub fn verify_object_closure_membership(root: &Digest, oid: &GitOid, proof: &MerkleProof) -> bool {
+    if root.algorithm() != IdentityDomain::MerkleNode.algorithm().id() {
+        return false;
+    }
+    verify_merkle_proof(
+        object_closure_schema(),
+        root.bytes(),
+        &object_closure_leaf(oid),
+        proof,
+    )
+}
+
+/// Verifies an object-closure membership proof under an explicitly named layout.
+pub fn verify_object_closure_membership_under(
+    version: RootLayoutVersion,
+    root: &Digest,
+    oid: &GitOid,
+    proof: &MerkleProof,
+) -> Result<bool, MerkleRefusal> {
+    if !version.admits_object_closure_membership_proof() {
+        return Err(MerkleRefusal::LayoutAdmitsNoProof { version });
+    }
+    Ok(verify_object_closure_membership(root, oid, proof))
+}
+
+/// One existing object leaf, with the path that proves it is in the closure tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectClosureNeighbour {
+    oid: GitOid,
+    proof: MerkleProof,
+}
+
+impl ObjectClosureNeighbour {
+    /// Rebuild a neighbour from parts, as a decoder must.
+    #[must_use]
+    pub const fn new(oid: GitOid, proof: MerkleProof) -> Self {
+        Self { oid, proof }
+    }
+
+    /// The neighbour's object identity.
+    #[must_use]
+    pub const fn oid(&self) -> &GitOid {
+        &self.oid
+    }
+
+    /// The membership path proving this neighbour is in the tree.
+    #[must_use]
+    pub const fn proof(&self) -> &MerkleProof {
+        &self.proof
+    }
+}
+
+/// Evidence that an object identity is **absent** from a closure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ObjectClosureNonMembershipProof {
+    /// The closure holds no objects at all.
+    EmptyClosure,
+    /// The queried object sorts before the first leaf.
+    BeforeFirst {
+        /// The leaf at index 0.
+        first: Box<ObjectClosureNeighbour>,
+    },
+    /// The queried object sorts strictly between two adjacent leaves.
+    Between {
+        /// The leaf at index `i`.
+        predecessor: Box<ObjectClosureNeighbour>,
+        /// The leaf at index `i + 1`.
+        successor: Box<ObjectClosureNeighbour>,
+    },
+    /// The queried object sorts after the last leaf.
+    AfterLast {
+        /// The leaf at index `leaf_count - 1`.
+        last: Box<ObjectClosureNeighbour>,
+    },
+}
+
+/// Build the proof that `oid` is absent from `objects`.
+pub fn object_closure_non_membership_proof(
+    objects: &[GitOid],
+    oid: &GitOid,
+) -> Result<ObjectClosureNonMembershipProof, MerkleRefusal> {
+    let ordered = sorted_object_closure_entries(objects)?;
+    if ordered.is_empty() {
+        return Ok(ObjectClosureNonMembershipProof::EmptyClosure);
+    }
+
+    let insertion =
+        ordered.partition_point(|candidate| git_oid_order(candidate, oid) == Ordering::Less);
+    if let Some(candidate) = ordered.get(insertion)
+        && git_oid_order(candidate, oid) == Ordering::Equal
+    {
+        return Err(MerkleRefusal::ObjectIsPresent);
+    }
+
+    let leaves: Vec<DigestBytes> = ordered
+        .iter()
+        .map(|candidate| object_closure_leaf(candidate))
+        .collect();
+    let neighbour = |index: usize| -> Result<Box<ObjectClosureNeighbour>, MerkleRefusal> {
+        let candidate = ordered[index];
+        Ok(Box::new(ObjectClosureNeighbour {
+            oid: *candidate,
+            proof: merkle_proof(object_closure_schema(), &leaves, index)?,
+        }))
+    };
+
+    if insertion == 0 {
+        return Ok(ObjectClosureNonMembershipProof::BeforeFirst {
+            first: neighbour(0)?,
+        });
+    }
+    if insertion == ordered.len() {
+        return Ok(ObjectClosureNonMembershipProof::AfterLast {
+            last: neighbour(ordered.len() - 1)?,
+        });
+    }
+    Ok(ObjectClosureNonMembershipProof::Between {
+        predecessor: neighbour(insertion - 1)?,
+        successor: neighbour(insertion)?,
+    })
+}
+
+/// The independent verifier: does `root` commit to a closure **without** `oid`?
+#[must_use]
+pub fn verify_object_closure_non_membership(
+    root: &Digest,
+    oid: &GitOid,
+    proof: &ObjectClosureNonMembershipProof,
+) -> bool {
+    if root.algorithm() != IdentityDomain::MerkleNode.algorithm().id() {
+        return false;
+    }
+    let holds = |neighbour: &ObjectClosureNeighbour| {
+        verify_object_closure_membership(root, &neighbour.oid, &neighbour.proof)
+    };
+    match proof {
+        ObjectClosureNonMembershipProof::EmptyClosure => {
+            *root.bytes() == empty_merkle_root(object_closure_schema())
+        }
+        ObjectClosureNonMembershipProof::BeforeFirst { first } => {
+            first.proof.index() == 0
+                && git_oid_order(oid, &first.oid) == Ordering::Less
+                && holds(first)
+        }
+        ObjectClosureNonMembershipProof::AfterLast { last } => {
+            last.proof.index() + 1 == last.proof.leaf_count()
+                && git_oid_order(&last.oid, oid) == Ordering::Less
+                && holds(last)
+        }
+        ObjectClosureNonMembershipProof::Between {
+            predecessor,
+            successor,
+        } => {
+            predecessor.proof.leaf_count() == successor.proof.leaf_count()
+                && successor.proof.index() == predecessor.proof.index() + 1
+                && git_oid_order(&predecessor.oid, oid) == Ordering::Less
+                && git_oid_order(oid, &successor.oid) == Ordering::Less
+                && holds(predecessor)
+                && holds(successor)
+        }
+    }
+}
+
+/// Verify an object-closure non-membership proof under an explicitly named layout.
+pub fn verify_object_closure_non_membership_under(
+    version: RootLayoutVersion,
+    root: &Digest,
+    oid: &GitOid,
+    proof: &ObjectClosureNonMembershipProof,
+) -> Result<bool, MerkleRefusal> {
+    if !version.admits_object_closure_membership_proof() {
+        return Err(MerkleRefusal::LayoutAdmitsNoProof { version });
+    }
+    Ok(verify_object_closure_non_membership(root, oid, proof))
 }

@@ -5,7 +5,8 @@ use core::cell::Cell;
 use fgit_authority::{TerminalOutcome, outcome_index_proof, outcome_index_root};
 use fgit_codec::{CryptoBodyIdentity, RepositoryConfigurationBody, body_id, harness::genesis_head};
 use fgit_crypto::{
-    IdentityDomain, ref_state_membership_proof, ref_state_merkle_root,
+    IdentityDomain, object_closure_membership_proof, object_closure_merkle_root,
+    object_closure_non_membership_proof, ref_state_membership_proof, ref_state_merkle_root,
     ref_state_non_membership_proof,
 };
 use fgit_types::CANONICAL_CODEC_VERSION;
@@ -17,10 +18,10 @@ use fgit_types::numeric::DecisionSequence;
 use fgit_types::refs::RefName;
 use fgit_types::vocabulary::DecisionOutcome;
 use fgit_verified_read::{
-    PinnedAuthorityHead, ReadResponse, RefDisclosurePolicy, UnprovenReadAnswer, VerifiedMembership,
-    VerifiedReadAnswer, VerifiedReadCapability, VerifiedReadEnvelope, VerifiedReadRefusal,
-    VerifiedReadResponseMode, authorize_ref_absence, negotiate_response_mode,
-    refuse_forge_position_proof, verify_envelope,
+    ObjectDisclosurePolicy, PinnedAuthorityHead, ReadResponse, RefDisclosurePolicy,
+    UnprovenReadAnswer, VerifiedMembership, VerifiedReadAnswer, VerifiedReadCapability,
+    VerifiedReadEnvelope, VerifiedReadRefusal, VerifiedReadResponseMode, authorize_object_absence,
+    authorize_ref_absence, negotiate_response_mode, refuse_forge_position_proof, verify_envelope,
 };
 
 struct AllowAll;
@@ -35,6 +36,22 @@ struct DenyAll;
 
 impl RefDisclosurePolicy for DenyAll {
     fn permits_ref_disclosure(&self, _name: &RefName) -> bool {
+        false
+    }
+}
+
+struct AllowAllObject;
+
+impl ObjectDisclosurePolicy for AllowAllObject {
+    fn permits_object_disclosure(&self, _oid: &GitOid) -> bool {
+        true
+    }
+}
+
+struct DenyAllObject;
+
+impl ObjectDisclosurePolicy for DenyAllObject {
+    fn permits_object_disclosure(&self, _oid: &GitOid) -> bool {
         false
     }
 }
@@ -351,9 +368,105 @@ fn unproven_mode_stays_available_and_forge_positions_remain_refused() {
         ReadResponse::Unproven(answer)
             if matches!(answer.as_ref(), UnprovenReadAnswer::Outcome { outcome: Some(_), .. })
     ));
+    let unproven_object = ReadResponse::Unproven(Box::new(UnprovenReadAnswer::Object {
+        oid: oid(0x11),
+        present: true,
+    }));
+    assert_eq!(
+        unproven_object,
+        ReadResponse::Unproven(Box::new(UnprovenReadAnswer::Object {
+            oid: oid(0x11),
+            present: true,
+        }))
+    );
     assert_eq!(
         refuse_forge_position_proof(),
         Err(VerifiedReadRefusal::ForgePositionProofUnavailable),
         "forge roots remain a typed non-claim until their canonical layout exists"
     );
+}
+
+#[test]
+fn an_object_envelope_verifies_against_the_pinned_object_closure_root() {
+    let objects = vec![oid(0x11), oid(0x22), oid(0x33)];
+    let root = object_closure_merkle_root(&objects).expect("object closure root");
+    let proof = object_closure_membership_proof(&objects, &oid(0x22)).expect("object proof");
+    let (configuration, configuration_root) = v1_configuration();
+    let mut head = genesis_head();
+    head.configuration_root = configuration_root;
+    let pinned = PinnedAuthorityHead::new_with_object_closure(head.clone(), root);
+    let envelope = VerifiedReadEnvelope::new(
+        head,
+        Some(configuration),
+        VerifiedReadAnswer::ObjectMembership {
+            oid: oid(0x22),
+            proof: Box::new(proof),
+        },
+    );
+
+    assert_eq!(
+        verify_envelope(&pinned, &envelope),
+        Ok(VerifiedMembership::Object),
+    );
+}
+
+#[test]
+fn denied_object_absence_queries_are_indistinguishable_and_never_reach_lookup() {
+    let policy = DenyAllObject;
+    let existing_lookup_called = Cell::new(false);
+    let absent_lookup_called = Cell::new(false);
+    let hidden_existing = authorize_object_absence(&policy, oid(0x11), |_| {
+        existing_lookup_called.set(true);
+        true
+    });
+    let hidden_absent = authorize_object_absence(&policy, oid(0x99), |_| {
+        absent_lookup_called.set(true);
+        false
+    });
+
+    assert_eq!(
+        hidden_existing,
+        Err(VerifiedReadRefusal::ObjectNotFoundOrUnauthorized),
+        "a hidden existing object must report the public absence refusal"
+    );
+    assert_eq!(
+        hidden_absent,
+        Err(VerifiedReadRefusal::ObjectNotFoundOrUnauthorized),
+        "a hidden absent object must report the same public refusal"
+    );
+    assert!(!existing_lookup_called.get());
+    assert!(!absent_lookup_called.get());
+}
+
+#[test]
+fn authorized_object_absence_verifies_across_v1_positions_and_membership_remains_permitted() {
+    let objects = vec![oid(0x11), oid(0x22), oid(0x33)];
+    for (label, state, query) in [
+        ("empty", Vec::new(), oid(0x15)),
+        ("before-first", objects.clone(), oid(0x05)),
+        ("between", objects.clone(), oid(0x15)),
+        ("after-last", objects.clone(), oid(0x40)),
+    ] {
+        let root = object_closure_merkle_root(&state).expect("root");
+        let proof = object_closure_non_membership_proof(&state, &query).expect("absence proof");
+        let absence = authorize_object_absence(&AllowAllObject, query, |_| false)
+            .expect("authorized absence");
+        let (configuration, configuration_root) = v1_configuration();
+        let mut head = genesis_head();
+        head.configuration_root = configuration_root;
+        let pinned = PinnedAuthorityHead::new_with_object_closure(head.clone(), root);
+        let envelope = VerifiedReadEnvelope::new(
+            head,
+            Some(configuration),
+            VerifiedReadAnswer::AuthorizedObjectAbsence {
+                absence,
+                proof: Box::new(proof),
+            },
+        );
+        assert_eq!(
+            verify_envelope(&pinned, &envelope),
+            Ok(VerifiedMembership::ObjectAbsence),
+            "the {label} object position must verify under the exact pin"
+        );
+    }
 }

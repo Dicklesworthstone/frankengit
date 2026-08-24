@@ -34,9 +34,12 @@ use fgit_codec::{
     RepositoryIncarnationConfigurationBody, body_id, decode_body, encode_body,
 };
 use fgit_crypto::{
-    MerkleProof, MerkleRefusal, RefStateNeighbour, RefStateNonMembershipProof,
-    verify_ref_state_membership_under, verify_ref_state_non_membership_under,
+    MerkleProof, MerkleRefusal, ObjectClosureNeighbour, ObjectClosureNonMembershipProof,
+    RefStateNeighbour, RefStateNonMembershipProof, verify_object_closure_membership_under,
+    verify_object_closure_non_membership_under, verify_ref_state_membership_under,
+    verify_ref_state_non_membership_under,
 };
+use fgit_types::hash::Digest;
 use fgit_types::identity::TxId;
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::native::GitOid;
@@ -110,6 +113,32 @@ impl RefStateNonMembershipProofBody {
     }
 }
 
+/// A canonical, independently frameable ordered object-closure absence proof.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectClosureNonMembershipProofBody {
+    proof: ObjectClosureNonMembershipProof,
+}
+
+impl ObjectClosureNonMembershipProofBody {
+    /// Wraps a native absence proof for canonical transport encoding.
+    #[must_use]
+    pub const fn new(proof: ObjectClosureNonMembershipProof) -> Self {
+        Self { proof }
+    }
+
+    /// Borrows the native proof consumed by the verifier.
+    #[must_use]
+    pub const fn proof(&self) -> &ObjectClosureNonMembershipProof {
+        &self.proof
+    }
+
+    /// Returns the native proof after transport decoding.
+    #[must_use]
+    pub fn into_proof(self) -> ObjectClosureNonMembershipProof {
+        self.proof
+    }
+}
+
 impl CanonicalBody for MerkleProofBody {
     const DOMAIN: DomainTag = DomainTag::from_static("frankengit/verified-read-merkle-proof/v1");
     const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("verified-read-merkle-proof");
@@ -139,6 +168,23 @@ impl CanonicalBody for RefStateNonMembershipProofBody {
 
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
         read_non_membership_proof_payload(input).map(Self::new)
+    }
+}
+
+impl CanonicalBody for ObjectClosureNonMembershipProofBody {
+    const DOMAIN: DomainTag =
+        DomainTag::from_static("frankengit/verified-read-object-non-membership-proof/v1");
+    const SCHEMA_FAMILY: SchemaFamily =
+        SchemaFamily::from_static("verified-read-object-non-membership-proof");
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        write_object_non_membership_proof_payload(out, &self.proof)
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        read_object_non_membership_proof_payload(input).map(Self::new)
     }
 }
 
@@ -196,6 +242,34 @@ pub fn decode_ref_state_non_membership_proof(
         .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
 }
 
+/// Encodes an ordered object-closure absence proof as its canonical transport frame.
+///
+/// # Errors
+///
+/// Returns [`VerifiedReadRefusal::WireDecode`] when the proof cannot be
+/// represented by the canonical codec on this platform.
+pub fn encode_object_closure_non_membership_proof(
+    proof: &ObjectClosureNonMembershipProof,
+) -> Result<Vec<u8>, VerifiedReadRefusal> {
+    encode_body(&ObjectClosureNonMembershipProofBody::new(proof.clone()))
+        .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
+}
+
+/// Decodes an ordered object-closure absence proof into the native verifier input.
+///
+/// # Errors
+///
+/// Returns [`VerifiedReadRefusal::WireDecode`] for a malformed, non-canonical,
+/// or wrong-body frame.
+pub fn decode_object_closure_non_membership_proof(
+    bytes: &[u8],
+    limits: DecodeLimits,
+) -> Result<ObjectClosureNonMembershipProof, VerifiedReadRefusal> {
+    decode_body::<ObjectClosureNonMembershipProofBody>(bytes, limits)
+        .map(ObjectClosureNonMembershipProofBody::into_proof)
+        .map_err(|refusal| VerifiedReadRefusal::WireDecode(Box::new(refusal)))
+}
+
 /// A client's offered verified-read capability.
 ///
 /// A client that does not offer [`Self::EnvelopeV1`] receives an ordinary
@@ -235,6 +309,7 @@ pub const fn negotiate_response_mode(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PinnedAuthorityHead {
     body: RepositoryAuthorityHeadBody,
+    object_closure_root: Option<Digest>,
 }
 
 impl PinnedAuthorityHead {
@@ -242,13 +317,35 @@ impl PinnedAuthorityHead {
     /// are checked.
     #[must_use]
     pub const fn new(body: RepositoryAuthorityHeadBody) -> Self {
-        Self { body }
+        Self {
+            body,
+            object_closure_root: None,
+        }
+    }
+
+    /// Pins the exact authority-head body and object closure root against which
+    /// subsequent responses are checked.
+    #[must_use]
+    pub const fn new_with_object_closure(
+        body: RepositoryAuthorityHeadBody,
+        object_closure_root: Digest,
+    ) -> Self {
+        Self {
+            body,
+            object_closure_root: Some(object_closure_root),
+        }
     }
 
     /// The exact pinned head body.
     #[must_use]
     pub const fn body(&self) -> &RepositoryAuthorityHeadBody {
         &self.body
+    }
+
+    /// The pinned object closure root, if configured.
+    #[must_use]
+    pub const fn object_closure_root(&self) -> Option<&Digest> {
+        self.object_closure_root.as_ref()
     }
 }
 
@@ -268,6 +365,13 @@ pub enum UnprovenReadAnswer {
         tx_id: TxId,
         /// Terminal outcome, when one was found.
         outcome: Option<Box<TerminalOutcome>>,
+    },
+    /// An object answer.
+    Object {
+        /// Object identity queried by the client.
+        oid: GitOid,
+        /// Whether the object is present in the closure.
+        present: bool,
     },
 }
 
@@ -291,6 +395,12 @@ pub trait RefDisclosurePolicy {
     fn permits_ref_disclosure(&self, name: &RefName) -> bool;
 }
 
+/// An authorization policy for object disclosure at the read-serving boundary.
+pub trait ObjectDisclosurePolicy {
+    /// Whether `oid` is within the caller's authorized disclosure scope.
+    fn permits_object_disclosure(&self, oid: &GitOid) -> bool;
+}
+
 /// An absence that was looked up only after authorization allowed disclosure.
 ///
 /// It is intentionally not a Merkle non-membership proof. The wrapper keeps a
@@ -306,6 +416,20 @@ impl AuthorizedRefAbsence {
     #[must_use]
     pub const fn name(&self) -> &RefName {
         &self.name
+    }
+}
+
+/// An object absence that was looked up only after authorization allowed disclosure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizedObjectAbsence {
+    oid: GitOid,
+}
+
+impl AuthorizedObjectAbsence {
+    /// The object identity whose authorized lookup found no object.
+    #[must_use]
+    pub const fn oid(&self) -> &GitOid {
+        &self.oid
     }
 }
 
@@ -337,6 +461,35 @@ where
         return Err(VerifiedReadRefusal::RefPresent);
     }
     Ok(AuthorizedRefAbsence { name })
+}
+
+/// Applies authorization before looking up a possible object absence.
+///
+/// A denied caller receives exactly [`VerifiedReadRefusal::ObjectNotFoundOrUnauthorized`]
+/// regardless of whether `lookup` would have found an object. The closure is not called
+/// in that branch, preventing existence probing.
+///
+/// # Errors
+///
+/// [`VerifiedReadRefusal::ObjectNotFoundOrUnauthorized`] when disclosure is not
+/// authorized, and [`VerifiedReadRefusal::ObjectPresent`] when the authorized
+/// lookup found the requested object.
+pub fn authorize_object_absence<P, L>(
+    policy: &P,
+    oid: GitOid,
+    lookup: L,
+) -> Result<AuthorizedObjectAbsence, VerifiedReadRefusal>
+where
+    P: ObjectDisclosurePolicy + ?Sized,
+    L: FnOnce(&GitOid) -> bool,
+{
+    if !policy.permits_object_disclosure(&oid) {
+        return Err(VerifiedReadRefusal::ObjectNotFoundOrUnauthorized);
+    }
+    if lookup(&oid) {
+        return Err(VerifiedReadRefusal::ObjectPresent);
+    }
+    Ok(AuthorizedObjectAbsence { oid })
 }
 
 /// One answer that a version-one envelope can carry.
@@ -371,6 +524,20 @@ pub enum VerifiedReadAnswer {
         absence: AuthorizedRefAbsence,
         /// Ordered neighbour evidence for that absence.
         proof: Box<RefStateNonMembershipProof>,
+    },
+    /// An object identity and the membership path under the object closure root.
+    ObjectMembership {
+        /// Object identity claimed by the serving cell.
+        oid: GitOid,
+        /// Merkle path generated from the canonical object-closure layout.
+        proof: Box<MerkleProof>,
+    },
+    /// An authorization-gated object absence and its ordered V1 Merkle witness.
+    AuthorizedObjectAbsence {
+        /// The object identity whose absence was authorized for disclosure.
+        absence: AuthorizedObjectAbsence,
+        /// Ordered neighbour evidence for that absence.
+        proof: Box<ObjectClosureNonMembershipProof>,
     },
 }
 
@@ -687,6 +854,72 @@ fn read_non_membership_proof_payload(
     }
 }
 
+fn write_object_closure_neighbour(
+    out: &mut Encoder,
+    neighbour: &ObjectClosureNeighbour,
+) -> Result<(), CodecRefusal> {
+    out.write_git_oid(neighbour.oid());
+    write_merkle_proof_payload(out, neighbour.proof())
+}
+
+fn read_object_closure_neighbour(
+    input: &mut Decoder<'_>,
+) -> Result<ObjectClosureNeighbour, CodecRefusal> {
+    let oid = input.read_git_oid()?;
+    let proof = read_merkle_proof_payload(input)?;
+    Ok(ObjectClosureNeighbour::new(oid, proof))
+}
+
+fn write_object_non_membership_proof_payload(
+    out: &mut Encoder,
+    proof: &ObjectClosureNonMembershipProof,
+) -> Result<(), CodecRefusal> {
+    match proof {
+        ObjectClosureNonMembershipProof::EmptyClosure => out.write_raw_byte(0),
+        ObjectClosureNonMembershipProof::BeforeFirst { first } => {
+            out.write_raw_byte(1);
+            write_object_closure_neighbour(out, first)?;
+        }
+        ObjectClosureNonMembershipProof::Between {
+            predecessor,
+            successor,
+        } => {
+            out.write_raw_byte(2);
+            write_object_closure_neighbour(out, predecessor)?;
+            write_object_closure_neighbour(out, successor)?;
+        }
+        ObjectClosureNonMembershipProof::AfterLast { last } => {
+            out.write_raw_byte(3);
+            write_object_closure_neighbour(out, last)?;
+        }
+    }
+    Ok(())
+}
+
+fn read_object_non_membership_proof_payload(
+    input: &mut Decoder<'_>,
+) -> Result<ObjectClosureNonMembershipProof, CodecRefusal> {
+    let offset = input.offset();
+    match input.read_raw_byte("object_closure_non_membership_proof.variant")? {
+        0 => Ok(ObjectClosureNonMembershipProof::EmptyClosure),
+        1 => Ok(ObjectClosureNonMembershipProof::BeforeFirst {
+            first: Box::new(read_object_closure_neighbour(input)?),
+        }),
+        2 => Ok(ObjectClosureNonMembershipProof::Between {
+            predecessor: Box::new(read_object_closure_neighbour(input)?),
+            successor: Box::new(read_object_closure_neighbour(input)?),
+        }),
+        3 => Ok(ObjectClosureNonMembershipProof::AfterLast {
+            last: Box::new(read_object_closure_neighbour(input)?),
+        }),
+        observed => Err(CodecRefusal::VariantUnknown {
+            field: "ObjectClosureNonMembershipProof",
+            observed: u32::from(observed),
+            offset,
+        }),
+    }
+}
+
 fn write_configuration(
     out: &mut Encoder,
     configuration: Option<&VerifiedReadConfiguration>,
@@ -751,6 +984,16 @@ fn write_answer(out: &mut Encoder, answer: &VerifiedReadAnswer) -> Result<(), Co
             out.write_ref_name(absence.name())?;
             write_non_membership_proof_payload(out, proof)
         }
+        VerifiedReadAnswer::ObjectMembership { oid, proof } => {
+            out.write_raw_byte(4);
+            out.write_git_oid(oid);
+            write_merkle_proof_payload(out, proof)
+        }
+        VerifiedReadAnswer::AuthorizedObjectAbsence { absence, proof } => {
+            out.write_raw_byte(5);
+            out.write_git_oid(absence.oid());
+            write_object_non_membership_proof_payload(out, proof)
+        }
     }
 }
 
@@ -778,6 +1021,16 @@ fn read_answer(input: &mut Decoder<'_>) -> Result<VerifiedReadAnswer, CodecRefus
                 name: input.read_ref_name()?,
             },
             proof: Box::new(read_non_membership_proof_payload(input)?),
+        }),
+        4 => Ok(VerifiedReadAnswer::ObjectMembership {
+            oid: input.read_git_oid()?,
+            proof: Box::new(read_merkle_proof_payload(input)?),
+        }),
+        5 => Ok(VerifiedReadAnswer::AuthorizedObjectAbsence {
+            absence: AuthorizedObjectAbsence {
+                oid: input.read_git_oid()?,
+            },
+            proof: Box::new(read_object_non_membership_proof_payload(input)?),
         }),
         observed => Err(CodecRefusal::VariantUnknown {
             field: "VerifiedReadAnswer",
@@ -814,6 +1067,11 @@ pub enum VerifiedMembership {
     /// An outcome membership proof verified against the pinned head's
     /// `outcome_index_root`.
     Outcome,
+    /// An object membership proof verified against the pinned object closure root.
+    Object,
+    /// An authorization-gated object non-membership proof verified against the
+    /// pinned object closure root.
+    ObjectAbsence,
 }
 
 /// A failure to form, gate, or verify a verified-read answer.
@@ -836,6 +1094,10 @@ pub enum VerifiedReadRefusal {
     WireDecode(Box<CodecRefusal>),
     /// The selected layout does not admit a ref-state membership proof.
     RefLayout(Box<MerkleRefusal>),
+    /// The selected layout does not admit an object closure membership proof.
+    ObjectLayout(Box<MerkleRefusal>),
+    /// The client pinned head does not carry an object closure root.
+    ObjectClosureRootUnavailable,
     /// The Merkle path did not verify against the pinned root.
     ProofRejected,
     /// Canonical outcome encoding or its verifier refused the answer.
@@ -847,6 +1109,10 @@ pub enum VerifiedReadRefusal {
     RefNotFoundOrUnauthorized,
     /// The caller was allowed to disclose the name, but the lookup found it.
     RefPresent,
+    /// Disclosure was denied before consulting the requested object's existence.
+    ObjectNotFoundOrUnauthorized,
+    /// The caller was allowed to disclose the object, but the lookup found it.
+    ObjectPresent,
     /// No canonical forge-position Merkle layout is published yet.
     ForgePositionProofUnavailable,
 }
@@ -868,12 +1134,16 @@ impl fmt::Display for VerifiedReadRefusal {
             ),
             Self::WireDecode(refusal) => write!(formatter, "verified-read wire decode refused: {refusal}"),
             Self::RefLayout(refusal) => write!(formatter, "ref proof layout refused: {refusal}"),
+            Self::ObjectLayout(refusal) => write!(formatter, "object proof layout refused: {refusal}"),
+            Self::ObjectClosureRootUnavailable => formatter.write_str("the pinned head carries no object closure root"),
             Self::ProofRejected => {
                 formatter.write_str("the claimed Merkle path does not verify against the pinned root")
             }
             Self::Outcome(refusal) => write!(formatter, "outcome proof refused: {refusal}"),
             Self::RefNotFoundOrUnauthorized => formatter.write_str("ref not found"),
             Self::RefPresent => formatter.write_str("ref is present after authorized lookup"),
+            Self::ObjectNotFoundOrUnauthorized => formatter.write_str("object not found"),
+            Self::ObjectPresent => formatter.write_str("object is present after authorized lookup"),
             Self::ForgePositionProofUnavailable => formatter.write_str(
                 "forge-position proof generation is unavailable until a canonical forge Merkle layout is published",
             ),
@@ -950,6 +1220,37 @@ pub fn verify_envelope(
             .map_err(|refusal| VerifiedReadRefusal::RefLayout(Box::new(refusal)))?;
             if verified {
                 Ok(VerifiedMembership::RefAbsence)
+            } else {
+                Err(VerifiedReadRefusal::ProofRejected)
+            }
+        }
+        VerifiedReadAnswer::ObjectMembership { oid, proof } => {
+            let layout = selected_ref_layout(pinned.body(), envelope.exact_configuration())?;
+            let root = pinned
+                .object_closure_root()
+                .ok_or(VerifiedReadRefusal::ObjectClosureRootUnavailable)?;
+            let verified = verify_object_closure_membership_under(layout, root, oid, proof)
+                .map_err(|refusal| VerifiedReadRefusal::ObjectLayout(Box::new(refusal)))?;
+            if verified {
+                Ok(VerifiedMembership::Object)
+            } else {
+                Err(VerifiedReadRefusal::ProofRejected)
+            }
+        }
+        VerifiedReadAnswer::AuthorizedObjectAbsence { absence, proof } => {
+            let layout = selected_ref_layout(pinned.body(), envelope.exact_configuration())?;
+            let root = pinned
+                .object_closure_root()
+                .ok_or(VerifiedReadRefusal::ObjectClosureRootUnavailable)?;
+            let verified = verify_object_closure_non_membership_under(
+                layout,
+                root,
+                absence.oid(),
+                proof.as_ref(),
+            )
+            .map_err(|refusal| VerifiedReadRefusal::ObjectLayout(Box::new(refusal)))?;
+            if verified {
+                Ok(VerifiedMembership::ObjectAbsence)
             } else {
                 Err(VerifiedReadRefusal::ProofRejected)
             }

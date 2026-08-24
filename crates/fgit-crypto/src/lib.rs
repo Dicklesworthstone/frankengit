@@ -147,12 +147,17 @@ pub use lifecycle::{
 };
 pub use mac::{HmacSha256, TAG_BYTES, hmac_sha256, verify_mac};
 pub use merkle::{
-    MerkleProof, MerkleRefusal, RefStateNeighbour, RefStateNonMembershipProof, empty_merkle_root,
-    merkle_leaf, merkle_proof, merkle_root, merkle_root_from_proof, ref_name_order, ref_state_leaf,
+    MerkleProof, MerkleRefusal, ObjectClosureNeighbour, ObjectClosureNonMembershipProof,
+    RefStateNeighbour, RefStateNonMembershipProof, empty_merkle_root, git_oid_order, merkle_leaf,
+    merkle_proof, merkle_root, merkle_root_from_proof, object_closure_leaf,
+    object_closure_membership_proof, object_closure_merkle_root,
+    object_closure_non_membership_proof, object_closure_schema, ref_name_order, ref_state_leaf,
     ref_state_membership_proof, ref_state_merkle_root, ref_state_non_membership_proof,
-    ref_state_schema, verify_merkle_proof, verify_ref_state_membership,
-    verify_ref_state_membership_under, verify_ref_state_non_membership,
-    verify_ref_state_non_membership_under,
+    ref_state_schema, sorted_object_closure_entries, verify_merkle_proof,
+    verify_object_closure_membership, verify_object_closure_membership_under,
+    verify_object_closure_non_membership, verify_object_closure_non_membership_under,
+    verify_ref_state_membership, verify_ref_state_membership_under,
+    verify_ref_state_non_membership, verify_ref_state_non_membership_under,
 };
 pub use native::{
     GitHashAlgorithm, GitHashError, GitObjectHasher, GitObjectKind, GitOid, NativeObjectIdentity,

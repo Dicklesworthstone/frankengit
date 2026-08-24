@@ -37,7 +37,11 @@ use fgit_codec::RepositoryIncarnationConfigurationBody;
 use fgit_codec::{
     CryptoBodyIdentity, RepositoryAuthorityHeadBody, RepositoryConfigurationBody, body_id,
 };
-use fgit_crypto::{IdentityDomain, MerkleProof, ref_state_membership_proof, ref_state_merkle_root};
+use fgit_crypto::{
+    IdentityDomain, MerkleProof, ObjectClosureNeighbour, ObjectClosureNonMembershipProof,
+    object_closure_membership_proof, object_closure_merkle_root,
+    object_closure_non_membership_proof, ref_state_membership_proof, ref_state_merkle_root,
+};
 use fgit_types::CANONICAL_CODEC_VERSION;
 use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::{RepositoryAuthorityHeadId, RepositoryId, RepositoryIncarnationId};
@@ -80,16 +84,26 @@ enum TamperClass {
     OutcomeSubstituted,
     /// An outcome answer pinned against the head's REF root instead of its
     /// outcome-index root.
-    ///
-    /// The family's own risk, and the one a shared Merkle verifier cannot
-    /// catch: every proof-structure class above tests the same path code, so
-    /// none of them can see an answer being checked against the wrong root.
     OutcomeRootConfusion,
+    /// An object closure membership answer with wrong object identity.
+    ObjectIdentity,
+    /// An object closure membership proof with tampered sibling.
+    ObjectProofSibling,
+    /// An object closure membership proof with wrong index.
+    ObjectProofIndex,
+    /// An object closure membership proof with wrong leaf count.
+    ObjectProofLeafCount,
+    /// An object proof presented as a ref membership proof.
+    ObjectRootConfusion,
+    /// An object non-membership proof with tampered predecessor neighbour.
+    ObjectAbsencePredecessorTampered,
+    /// An object non-membership proof with tampered successor neighbour.
+    ObjectAbsenceSuccessorTampered,
 }
 
 impl TamperClass {
     /// Every class the corpus must exercise.
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 20] = [
         Self::RefName,
         Self::RefIdentity,
         Self::ProofSibling,
@@ -103,23 +117,16 @@ impl TamperClass {
         Self::OutcomeTxId,
         Self::OutcomeSubstituted,
         Self::OutcomeRootConfusion,
+        Self::ObjectIdentity,
+        Self::ObjectProofSibling,
+        Self::ObjectProofIndex,
+        Self::ObjectProofLeafCount,
+        Self::ObjectRootConfusion,
+        Self::ObjectAbsencePredecessorTampered,
+        Self::ObjectAbsenceSuccessorTampered,
     ];
 
     /// Ties `ALL` to the enum, which the array alone does not do.
-    ///
-    /// `ALL` is hand-written. DELETING a variant breaks the build, because the
-    /// array names it. ADDING one did not: the array stayed length 10, the
-    /// coverage assertion below still passed, and the new class was never
-    /// exercised. Measured before this existed -- an eleventh variant compiled
-    /// with nothing but a dead-code warning, and
-    /// `the_corpus_covers_every_declared_tamper_class_exactly_once` stayed
-    /// green. A denominator that cannot see the numerator grow is not a
-    /// denominator.
-    ///
-    /// This match has no wildcard arm, so adding a variant makes it
-    /// non-exhaustive and the build stops HERE, next to `ALL` and the corpus,
-    /// which is the one place that says what the new variant still owes:
-    /// an entry in `ALL` and a case in `corpus()`.
     const fn is_declared(self) {
         match self {
             Self::RefName
@@ -134,7 +141,14 @@ impl TamperClass {
             | Self::StaleHeadReplay
             | Self::OutcomeTxId
             | Self::OutcomeSubstituted
-            | Self::OutcomeRootConfusion => (),
+            | Self::OutcomeRootConfusion
+            | Self::ObjectIdentity
+            | Self::ObjectProofSibling
+            | Self::ObjectProofIndex
+            | Self::ObjectProofLeafCount
+            | Self::ObjectRootConfusion
+            | Self::ObjectAbsencePredecessorTampered
+            | Self::ObjectAbsenceSuccessorTampered => (),
         }
     }
 }
@@ -303,10 +317,14 @@ fn refusal_name(refusal: &VerifiedReadRefusal) -> String {
         VerifiedReadRefusal::ConfigurationRootMismatch => "ConfigurationRootMismatch",
         VerifiedReadRefusal::WireDecode(_) => "WireDecode",
         VerifiedReadRefusal::RefLayout(_) => "RefLayout",
+        VerifiedReadRefusal::ObjectLayout(_) => "ObjectLayout",
+        VerifiedReadRefusal::ObjectClosureRootUnavailable => "ObjectClosureRootUnavailable",
         VerifiedReadRefusal::ProofRejected => "ProofRejected",
         VerifiedReadRefusal::Outcome(_) => "Outcome",
         VerifiedReadRefusal::RefNotFoundOrUnauthorized => "RefNotFoundOrUnauthorized",
         VerifiedReadRefusal::RefPresent => "RefPresent",
+        VerifiedReadRefusal::ObjectNotFoundOrUnauthorized => "ObjectNotFoundOrUnauthorized",
+        VerifiedReadRefusal::ObjectPresent => "ObjectPresent",
         VerifiedReadRefusal::ForgePositionProofUnavailable => "ForgePositionProofUnavailable",
         // Exhaustive on purpose. A wildcard would map a newly added refusal to
         // one bucket, and this corpus's whole claim is that detections are
@@ -314,6 +332,37 @@ fn refusal_name(refusal: &VerifiedReadRefusal) -> String {
         // measurement without failing anything.
     }
     .to_owned()
+}
+
+struct AllowAllObjectPolicy;
+
+impl fgit_verified_read::ObjectDisclosurePolicy for AllowAllObjectPolicy {
+    fn permits_object_disclosure(&self, _oid: &GitOid) -> bool {
+        true
+    }
+}
+
+/// The honest object-membership and non-membership answers these cases tamper with.
+struct HonestObject {
+    head: RepositoryAuthorityHeadBody,
+    object_closure_root: Digest,
+    queried: GitOid,
+    proof: MerkleProof,
+    objects: Vec<GitOid>,
+}
+
+fn honest_object() -> HonestObject {
+    let oids = vec![oid(0x10), oid(0x20), oid(0x30), oid(0x40)];
+    let root = object_closure_merkle_root(&oids).expect("object closure root");
+    let queried = oids[1];
+    let proof = object_closure_membership_proof(&oids, &queried).expect("object membership proof");
+    HonestObject {
+        head: honest().head,
+        object_closure_root: root,
+        queried,
+        proof,
+        objects: oids,
+    }
 }
 
 /// A transaction identity for the outcome-index fixtures.
@@ -526,7 +575,7 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
         TamperClass::StaleHeadReplay,
         VerifiedReadEnvelope::new(
             old_head,
-            Some(good_config),
+            Some(good_config.clone()),
             membership(name("refs/heads/main"), old_oid, old_proof),
         ),
     ));
@@ -603,6 +652,154 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
         ),
     ));
 
+    // --- the object-closure family -------------------------------------
+    let honest_object = honest_object();
+
+    // Wrong object identity.
+    cases.push((
+        TamperClass::ObjectIdentity,
+        VerifiedReadEnvelope::new(
+            honest_object.head.clone(),
+            Some(good_config.clone()),
+            VerifiedReadAnswer::ObjectMembership {
+                oid: oid(0x99),
+                proof: Box::new(honest_object.proof.clone()),
+            },
+        ),
+    ));
+
+    // A flipped byte in the first sibling of object proof.
+    let mut obj_siblings = honest_object.proof.siblings().to_vec();
+    if let Some(first) = obj_siblings.first_mut() {
+        let mut bytes = first.as_bytes().to_vec();
+        bytes[0] ^= 0xFF;
+        *first = DigestBytes::try_new(&bytes).expect("bounded");
+    }
+    cases.push((
+        TamperClass::ObjectProofSibling,
+        VerifiedReadEnvelope::new(
+            honest_object.head.clone(),
+            Some(good_config.clone()),
+            VerifiedReadAnswer::ObjectMembership {
+                oid: honest_object.queried,
+                proof: Box::new(MerkleProof::new(
+                    honest_object.proof.index(),
+                    honest_object.proof.leaf_count(),
+                    obj_siblings,
+                )),
+            },
+        ),
+    ));
+
+    // Wrong index in object proof.
+    cases.push((
+        TamperClass::ObjectProofIndex,
+        VerifiedReadEnvelope::new(
+            honest_object.head.clone(),
+            Some(good_config.clone()),
+            VerifiedReadAnswer::ObjectMembership {
+                oid: honest_object.queried,
+                proof: Box::new(MerkleProof::new(
+                    honest_object.proof.index().saturating_add(1),
+                    honest_object.proof.leaf_count(),
+                    honest_object.proof.siblings().to_vec(),
+                )),
+            },
+        ),
+    ));
+
+    // Wrong leaf count in object proof.
+    cases.push((
+        TamperClass::ObjectProofLeafCount,
+        VerifiedReadEnvelope::new(
+            honest_object.head.clone(),
+            Some(good_config.clone()),
+            VerifiedReadAnswer::ObjectMembership {
+                oid: honest_object.queried,
+                proof: Box::new(MerkleProof::new(
+                    honest_object.proof.index(),
+                    honest_object.proof.leaf_count().saturating_add(2),
+                    honest_object.proof.siblings().to_vec(),
+                )),
+            },
+        ),
+    ));
+
+    // Object proof presented as a ref membership proof.
+    cases.push((
+        TamperClass::ObjectRootConfusion,
+        VerifiedReadEnvelope::new(
+            honest_object.head.clone(),
+            Some(good_config.clone()),
+            membership(
+                name("refs/heads/main"),
+                honest_object.queried,
+                honest_object.proof.clone(),
+            ),
+        ),
+    ));
+
+    // Non-membership proof with tampered predecessor neighbour.
+    let absence_target = oid(0x25);
+    let honest_absence_proof =
+        object_closure_non_membership_proof(&honest_object.objects, &absence_target)
+            .expect("absence proof");
+    let tampered_pred = match honest_absence_proof.clone() {
+        ObjectClosureNonMembershipProof::Between {
+            predecessor,
+            successor,
+        } => {
+            let bad_pred = ObjectClosureNeighbour::new(oid(0x19), predecessor.proof().clone());
+            ObjectClosureNonMembershipProof::Between {
+                predecessor: Box::new(bad_pred),
+                successor,
+            }
+        }
+        _ => unreachable!(),
+    };
+    let absence =
+        fgit_verified_read::authorize_object_absence(&AllowAllObjectPolicy, absence_target, |_| {
+            false
+        })
+        .expect("authorized absence");
+    cases.push((
+        TamperClass::ObjectAbsencePredecessorTampered,
+        VerifiedReadEnvelope::new(
+            honest_object.head.clone(),
+            Some(good_config.clone()),
+            VerifiedReadAnswer::AuthorizedObjectAbsence {
+                absence: absence.clone(),
+                proof: Box::new(tampered_pred),
+            },
+        ),
+    ));
+
+    // Non-membership proof with tampered successor neighbour.
+    let tampered_succ = match honest_absence_proof {
+        ObjectClosureNonMembershipProof::Between {
+            predecessor,
+            successor,
+        } => {
+            let bad_succ = ObjectClosureNeighbour::new(oid(0x35), successor.proof().clone());
+            ObjectClosureNonMembershipProof::Between {
+                predecessor,
+                successor: Box::new(bad_succ),
+            }
+        }
+        _ => unreachable!(),
+    };
+    cases.push((
+        TamperClass::ObjectAbsenceSuccessorTampered,
+        VerifiedReadEnvelope::new(
+            honest_object.head,
+            Some(good_config),
+            VerifiedReadAnswer::AuthorizedObjectAbsence {
+                absence,
+                proof: Box::new(tampered_succ),
+            },
+        ),
+    ));
+
     cases
 }
 
@@ -610,7 +807,11 @@ fn corpus() -> Vec<(TamperClass, VerifiedReadEnvelope)> {
 fn client() -> (HeadChainFloor, PinnedAuthorityHead) {
     let base = honest();
     let floor = HeadChainFloor::anchored_to(&base.head).expect("anchors");
-    (floor, PinnedAuthorityHead::new(base.head))
+    let obj = honest_object();
+    (
+        floor,
+        PinnedAuthorityHead::new_with_object_closure(base.head, obj.object_closure_root),
+    )
 }
 
 #[test]
@@ -911,5 +1112,83 @@ fn a_v1_configuration_cannot_stand_in_for_the_incarnation_body_the_head_selected
         verify_envelope(&pinned, &swapped),
         Err(VerifiedReadRefusal::ConfigurationRootMismatch),
         "a v1 configuration must not satisfy a head that bound an incarnation"
+    );
+}
+
+#[test]
+fn the_honest_object_answers_are_accepted() {
+    let (floor, pinned) = client();
+    let obj = honest_object();
+    let genuine_membership = VerifiedReadEnvelope::new(
+        obj.head.clone(),
+        Some(honest().configuration.clone()),
+        VerifiedReadAnswer::ObjectMembership {
+            oid: obj.queried,
+            proof: Box::new(obj.proof),
+        },
+    );
+    assert_eq!(
+        combined_client(&floor, &pinned, &genuine_membership),
+        Detection::Accepted,
+        "the client must accept honest object membership"
+    );
+
+    let absence_target = oid(0x25);
+    let absence_proof =
+        object_closure_non_membership_proof(&obj.objects, &absence_target).expect("absence proof");
+    let absence =
+        fgit_verified_read::authorize_object_absence(&AllowAllObjectPolicy, absence_target, |_| {
+            false
+        })
+        .expect("authorized absence");
+    let genuine_absence = VerifiedReadEnvelope::new(
+        obj.head,
+        Some(honest().configuration),
+        VerifiedReadAnswer::AuthorizedObjectAbsence {
+            absence,
+            proof: Box::new(absence_proof),
+        },
+    );
+    assert_eq!(
+        combined_client(&floor, &pinned, &genuine_absence),
+        Detection::Accepted,
+        "the client must accept honest object absence"
+    );
+}
+
+#[test]
+fn an_object_envelope_is_checked_against_the_object_closure_root() {
+    let base = honest();
+    let obj = honest_object();
+    let pinned =
+        PinnedAuthorityHead::new_with_object_closure(base.head.clone(), obj.object_closure_root);
+
+    // Permitted: genuine object membership
+    let genuine = VerifiedReadEnvelope::new(
+        base.head.clone(),
+        Some(base.configuration.clone()),
+        VerifiedReadAnswer::ObjectMembership {
+            oid: obj.queried,
+            proof: Box::new(obj.proof.clone()),
+        },
+    );
+    assert_eq!(
+        verify_envelope(&pinned, &genuine),
+        Ok(VerifiedMembership::Object),
+    );
+
+    // Refused: without object_closure_root on pin
+    let pin_without_obj = PinnedAuthorityHead::new(base.head.clone());
+    assert_eq!(
+        verify_envelope(&pin_without_obj, &genuine),
+        Err(VerifiedReadRefusal::ObjectClosureRootUnavailable),
+    );
+
+    // Refused: wrong object closure root on pin
+    let pin_wrong_root =
+        PinnedAuthorityHead::new_with_object_closure(base.head.clone(), digest(0xEE));
+    assert_eq!(
+        verify_envelope(&pin_wrong_root, &genuine),
+        Err(VerifiedReadRefusal::ProofRejected),
     );
 }

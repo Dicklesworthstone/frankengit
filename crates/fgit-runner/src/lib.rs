@@ -1889,6 +1889,11 @@ pub enum SpotCheckResult {
     Matched,
     /// Independent execution disagreed and automatically quarantined the class.
     Mismatch(Box<ReuseNegativeEvidence>),
+    /// Independent execution failed under the recorded inputs and
+    /// automatically quarantined the class. A deterministic step whose fresh
+    /// run does not succeed cannot confirm reusability, so the cached output
+    /// stops being offered even though no artifact disagreement was observed.
+    ReexecutionFailed(Box<ReuseNegativeEvidence>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1911,15 +1916,16 @@ pub struct OutputStore {
 
 impl OutputStore {
     /// Creates an empty derived output store.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Stores successful output and the immutable receipt that originally made it.
     ///
     /// An existing exact key is never overwritten with a different producing
     /// run.  That conflict is a refusal, not a race-dependent cache update.
+    ///
+    /// A successful execution under bindings identical to a quarantined class
+    /// is that class's documented reverification path: the fresh success
+    /// clears the quarantine so the class becomes reusable again, and the
+    /// next spot-check schedule applies from there. A conflicting output
+    /// never clears anything.
     pub fn record_execution(
         &mut self,
         trust_domain: TrustDomain,
@@ -1939,6 +1945,7 @@ impl OutputStore {
             return Err(ReuseRefusal::ReceiptBindingMismatch);
         }
         let key = ReuseKey::new(trust_domain, capsule.id(), step.step_id().clone());
+        let class = ReuseClass::from_key(&key);
         let output = CachedOutput {
             artifacts: receipt.artifacts().to_vec(),
             original_execution: ExecutionReceiptReference {
@@ -1952,8 +1959,10 @@ impl OutputStore {
             if existing != &output {
                 return Err(ReuseRefusal::ConflictingExactOutput);
             }
+            self.quarantined_classes.remove(&class);
             return Ok(());
         }
+        self.quarantined_classes.remove(&class);
         self.entries.insert(key, output);
         Ok(())
     }
@@ -1995,8 +2004,13 @@ impl OutputStore {
 
     /// Compares the scheduled independent reexecution with the reused bytes.
     ///
-    /// A disagreement emits immutable evidence and quarantines the complete
-    /// trust-scoped step class before a later lookup can return another hit.
+    /// A byte disagreement emits immutable evidence and quarantines the
+    /// complete trust-scoped step class before a later lookup can return
+    /// another hit. A reexecution that fails outright under the recorded
+    /// inputs is not a binding mismatch: it is a separate terminal result
+    /// carrying its own evidence, and it quarantines the class the same way,
+    /// because a step that does not reliably succeed cannot confirm that its
+    /// cached output is reusable.
     pub fn complete_spot_check(
         &mut self,
         reuse: &ReuseReceipt,
@@ -2010,13 +2024,35 @@ impl OutputStore {
         if reuse.original_execution.run_id() == &reexecution_run_id {
             return Err(ReuseRefusal::ReexecutionUsesOriginalRun);
         }
-        if reexecution.outcome() != CheckOutcome::Succeeded
-            || reexecution.capsule_id() != reuse.key.capsule_id()
+        // Binding first: a receipt that does not name this capsule and
+        // namespace is a caller error no matter what its outcome was.
+        if reexecution.capsule_id() != reuse.key.capsule_id()
             || reexecution.capsule_id() != capsule.id()
             || reexecution.cache_namespace()
                 != CacheNamespace::for_capsule(reuse.key.trust_domain(), capsule)
         {
             return Err(ReuseRefusal::ReceiptBindingMismatch);
+        }
+        if reexecution.outcome() != CheckOutcome::Succeeded {
+            let negative = ReuseNegativeEvidence {
+                class: ReuseClass::from_key(&reuse.key),
+                original_execution: reuse.original_execution.clone(),
+                reexecution_run_id,
+                expected_artifacts: reuse.artifacts.clone(),
+                // A failed run produced no artifact commitments; recording an
+                // empty observation is the honest content, and the evidence
+                // record's claim id names the failure shape explicitly.
+                observed_artifacts: Vec::new(),
+                evidence: reuse_negative_evidence(
+                    reuse,
+                    reexecution,
+                    "runner-reuse-spot-check-unverifiable",
+                    "quarantine-on-reexecution-failure",
+                )?,
+            };
+            self.quarantined_classes
+                .insert(negative.class.clone(), negative.clone());
+            return Ok(SpotCheckResult::ReexecutionFailed(Box::new(negative)));
         }
         if reuse.artifacts == reexecution.artifacts() {
             return Ok(SpotCheckResult::Matched);
@@ -2027,7 +2063,12 @@ impl OutputStore {
             reexecution_run_id,
             expected_artifacts: reuse.artifacts.clone(),
             observed_artifacts: reexecution.artifacts().to_vec(),
-            evidence: reuse_negative_evidence(reuse, reexecution)?,
+            evidence: reuse_negative_evidence(
+                reuse,
+                reexecution,
+                "runner-reuse-spot-check-mismatch",
+                "quarantine-on-byte-mismatch",
+            )?,
         };
         self.quarantined_classes
             .insert(negative.class.clone(), negative.clone());
@@ -2327,6 +2368,8 @@ fn artifact_sequence_commitment(artifacts: &[Commitment]) -> Commitment {
 fn reuse_negative_evidence(
     reuse: &ReuseReceipt,
     reexecution: &CheckReceipt,
+    claim_id: &'static str,
+    policy: &'static str,
 ) -> Result<EvidenceRecord, ReuseRefusal> {
     let sources = canonical_evidence_text_set(
         vec![
@@ -2378,7 +2421,7 @@ fn reuse_negative_evidence(
                 reuse.key.step_id
             ),
         )?,
-        reuse_evidence_text("policy", "quarantine-on-byte-mismatch".to_owned())?,
+        reuse_evidence_text("policy", policy.to_owned())?,
         assumptions,
         reuse_evidence_text("verifier", "independent-runner-reexecution".to_owned())?,
         artifacts,
@@ -2388,7 +2431,7 @@ fn reuse_negative_evidence(
     )
     .map_err(|_| ReuseRefusal::EvidenceConstruction)?;
     let body = EvidenceRecordBody::new(
-        reuse_evidence_text("claim_id", "runner-reuse-spot-check-mismatch".to_owned())?,
+        reuse_evidence_text("claim_id", claim_id.to_owned())?,
         reuse_evidence_text("claim_scope", "trust-scoped-output-reuse-class".to_owned())?,
         ClaimRank::Benchmark,
         ClaimRank::Benchmark,

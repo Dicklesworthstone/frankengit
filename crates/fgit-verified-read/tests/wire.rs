@@ -8,7 +8,8 @@ use fgit_codec::{
 };
 use fgit_codec_verify::parse_frame;
 use fgit_crypto::{
-    IdentityDomain, MerkleProof, RefStateNonMembershipProof, ref_state_membership_proof,
+    IdentityDomain, MerkleProof, RefStateNonMembershipProof, object_closure_membership_proof,
+    object_closure_merkle_root, object_closure_non_membership_proof, ref_state_membership_proof,
     ref_state_merkle_root, ref_state_non_membership_proof,
 };
 use fgit_types::CANONICAL_CODEC_VERSION;
@@ -20,10 +21,12 @@ use fgit_types::numeric::{DecisionSequence, HeadGeneration, PolicyEpoch, Registr
 use fgit_types::refs::RefName;
 use fgit_types::vocabulary::DecisionOutcome;
 use fgit_verified_read::{
-    MerkleProofBody, PinnedAuthorityHead, RefDisclosurePolicy, RefStateNonMembershipProofBody,
-    VerifiedMembership, VerifiedReadAnswer, VerifiedReadEnvelope, VerifiedReadRefusal,
-    authorize_ref_absence, decode_merkle_proof, decode_ref_state_non_membership_proof,
-    decode_verified_read_envelope, encode_merkle_proof, encode_ref_state_non_membership_proof,
+    MerkleProofBody, ObjectClosureNonMembershipProofBody, ObjectDisclosurePolicy,
+    PinnedAuthorityHead, RefDisclosurePolicy, RefStateNonMembershipProofBody, VerifiedMembership,
+    VerifiedReadAnswer, VerifiedReadEnvelope, VerifiedReadRefusal, authorize_object_absence,
+    authorize_ref_absence, decode_merkle_proof, decode_object_closure_non_membership_proof,
+    decode_ref_state_non_membership_proof, decode_verified_read_envelope, encode_merkle_proof,
+    encode_object_closure_non_membership_proof, encode_ref_state_non_membership_proof,
     encode_verified_read_envelope, verify_envelope,
 };
 
@@ -31,6 +34,14 @@ struct AllowAll;
 
 impl RefDisclosurePolicy for AllowAll {
     fn permits_ref_disclosure(&self, _name: &RefName) -> bool {
+        true
+    }
+}
+
+struct AllowAllObject;
+
+impl ObjectDisclosurePolicy for AllowAllObject {
+    fn permits_object_disclosure(&self, _oid: &GitOid) -> bool {
         true
     }
 }
@@ -401,4 +412,78 @@ fn envelope_body_payload_is_the_identity_bearing_payload_not_the_transport_frame
     assert!(frame.len() > payload.len());
     let (_, framed_payload) = split_frame(&frame, DecodeLimits::DEFAULT).expect("frame splits");
     assert_eq!(framed_payload, payload.as_slice());
+}
+
+#[test]
+fn object_proofs_and_envelopes_round_trip_and_verify() {
+    let objects = vec![oid(0x11), oid(0x22), oid(0x33)];
+    let obj_root = object_closure_merkle_root(&objects).expect("object root");
+    let (bound_oid, membership) = (
+        oid(0x22),
+        object_closure_membership_proof(&objects, &oid(0x22)).expect("proof"),
+    );
+    let absence = object_closure_non_membership_proof(&objects, &oid(0x15)).expect("absence proof");
+
+    let absence_wire = encode_object_closure_non_membership_proof(&absence).expect("encodes");
+    assert_eq!(
+        encode_body(
+            &decode_body::<ObjectClosureNonMembershipProofBody>(
+                &absence_wire,
+                DecodeLimits::DEFAULT
+            )
+            .expect("decodes"),
+        )
+        .expect("re-encodes"),
+        absence_wire,
+        "an object closure non-membership proof has one canonical frame"
+    );
+    assert_eq!(
+        decode_object_closure_non_membership_proof(&absence_wire, DecodeLimits::DEFAULT)
+            .expect("decodes"),
+        absence,
+        "the native object absence verifier receives exactly the decoded proof"
+    );
+
+    // Object membership envelope
+    let (configuration, configuration_root) = v1_configuration();
+    let mut head = fgit_codec::harness::genesis_head();
+    head.configuration_root = configuration_root;
+    let pinned = PinnedAuthorityHead::new_with_object_closure(head.clone(), obj_root);
+
+    let member_envelope = VerifiedReadEnvelope::new(
+        head.clone(),
+        Some(configuration.clone()),
+        VerifiedReadAnswer::ObjectMembership {
+            oid: bound_oid,
+            proof: Box::new(membership),
+        },
+    );
+    let member_wire = encode_verified_read_envelope(&member_envelope).expect("member encodes");
+    let member_decoded =
+        decode_verified_read_envelope(&member_wire, DecodeLimits::DEFAULT).expect("member decodes");
+    assert_eq!(
+        verify_envelope(&pinned, &member_decoded),
+        Ok(VerifiedMembership::Object),
+    );
+
+    // Object absence envelope
+    let auth_absence = authorize_object_absence(&AllowAllObject, oid(0x15), |_| false)
+        .expect("authorized absence");
+    let absence_envelope = VerifiedReadEnvelope::new(
+        head,
+        Some(configuration),
+        VerifiedReadAnswer::AuthorizedObjectAbsence {
+            absence: auth_absence,
+            proof: Box::new(absence),
+        },
+    );
+    let absence_envelope_wire =
+        encode_verified_read_envelope(&absence_envelope).expect("absence encodes");
+    let absence_envelope_decoded =
+        decode_verified_read_envelope(&absence_envelope_wire, DecodeLimits::DEFAULT)
+            .expect("absence decodes");
+    assert_eq!(
+        verify_envelope(&pinned, &absence_envelope_decoded),
+        Ok(VerifiedMembership::ObjectAbsence),
+    );
 }

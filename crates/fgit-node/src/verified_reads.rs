@@ -16,14 +16,18 @@ use fgit_authority::{
     read_repository_configuration_async, read_repository_incarnation_configuration_async,
 };
 use fgit_chronicle::PublicationBasis;
-use fgit_crypto::{ref_state_membership_proof, ref_state_non_membership_proof};
+use fgit_crypto::{
+    object_closure_membership_proof, object_closure_non_membership_proof,
+    ref_state_membership_proof, ref_state_non_membership_proof,
+};
 use fgit_types::cell::{CellRefusal, ReadLabel, ReadMode, ServingCell, admits_read};
 use fgit_types::layout::RootLayoutVersion;
+use fgit_types::native::GitOid;
 use fgit_types::{Digest, RefName, TxId};
 use fgit_verified_read::{
-    ReadResponse, RefDisclosurePolicy, UnprovenReadAnswer, VerifiedReadAnswer,
-    VerifiedReadCapability, VerifiedReadConfiguration, VerifiedReadEnvelope, VerifiedReadRefusal,
-    authorize_ref_absence, negotiate_response_mode,
+    ObjectDisclosurePolicy, ReadResponse, RefDisclosurePolicy, UnprovenReadAnswer,
+    VerifiedReadAnswer, VerifiedReadCapability, VerifiedReadConfiguration, VerifiedReadEnvelope,
+    VerifiedReadRefusal, authorize_object_absence, authorize_ref_absence, negotiate_response_mode,
 };
 use fgit_wire::visibility::RefVisibility;
 
@@ -31,14 +35,16 @@ use super::{AdmissionMaterializationRefusal, MaterializedAdmission, NodeRequestC
 
 /// One question that the [`OneNode`] verified-read serving path understands.
 ///
-/// Object and forge-position questions remain intentionally absent: neither
-/// has a published `VerifiedReadAnswer` proof layout.
+/// Forge-position questions remain intentionally absent: forge-position proof
+/// generation is gated on canonical forge Merkle materialization.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VerifiedReadQuery {
     /// Answer one ref membership or authorization-gated absence question.
     Ref(RefName),
     /// Answer one terminal outcome membership question.
     Outcome(TxId),
+    /// Answer one object membership or authorization-gated absence question.
+    Object(GitOid),
 }
 
 /// A read response with the exact authority body and serving label used for it.
@@ -113,6 +119,8 @@ pub enum VerifiedReadServingRefusal {
     Outcome(Box<OutcomeFailure>),
     /// The selected configuration did not make ref Merkle proofs available.
     RefLayoutUnavailable { layout: RootLayoutVersion },
+    /// The selected configuration did not make object closure Merkle proofs available.
+    ObjectLayoutUnavailable { layout: RootLayoutVersion },
     /// A disclosure gate or proof constructor refused the request.
     VerifiedRead(Box<VerifiedReadRefusal>),
     /// The reconstructed terminal-outcome leaves did not reproduce the head's
@@ -156,6 +164,10 @@ impl fmt::Display for VerifiedReadServingRefusal {
                 formatter,
                 "the selected {layout:?} layout does not admit ref membership proofs"
             ),
+            Self::ObjectLayoutUnavailable { layout } => write!(
+                formatter,
+                "the selected {layout:?} layout does not admit object closure membership proofs"
+            ),
             Self::VerifiedRead(refusal) => write!(formatter, "verified-read refused: {refusal}"),
             Self::OutcomeRootMismatch => formatter.write_str(
                 "the exact head outcome root does not match its reconstructed terminal decisions",
@@ -180,11 +192,32 @@ impl std::error::Error for VerifiedReadServingRefusal {}
 struct DisclosureScope<'a> {
     snapshot: &'a RefVisibility,
     current: &'a RefVisibility,
+    snapshot_refs: &'a std::collections::BTreeMap<RefName, GitOid>,
 }
 
 impl RefDisclosurePolicy for DisclosureScope<'_> {
     fn permits_ref_disclosure(&self, name: &RefName) -> bool {
         !self.snapshot.hides(name.as_bytes()) && !self.current.hides(name.as_bytes())
+    }
+}
+
+impl ObjectDisclosurePolicy for DisclosureScope<'_> {
+    fn permits_object_disclosure(&self, oid: &GitOid) -> bool {
+        let mut pointed_to_by_hidden = false;
+        let mut pointed_to_by_visible = false;
+        for (name, target) in self.snapshot_refs {
+            if target == oid {
+                if self.permits_ref_disclosure(name) {
+                    pointed_to_by_visible = true;
+                } else {
+                    pointed_to_by_hidden = true;
+                }
+            }
+        }
+        if pointed_to_by_hidden && !pointed_to_by_visible {
+            return false;
+        }
+        true
     }
 }
 
@@ -299,6 +332,7 @@ impl OneNode {
         let scope = DisclosureScope {
             snapshot: &materialized.snapshot().hidden_refs,
             current: current_visibility,
+            snapshot_refs: &materialized.snapshot().refs,
         };
         let response = match query {
             VerifiedReadQuery::Ref(name) => {
@@ -307,6 +341,10 @@ impl OneNode {
             }
             VerifiedReadQuery::Outcome(tx_id) => {
                 self.serve_outcome_verified_read_in(request, &head, capability, tx_id)
+                    .await?
+            }
+            VerifiedReadQuery::Object(oid) => {
+                self.serve_object_verified_read_in(request, &materialized, &scope, capability, oid)
                     .await?
             }
         };
@@ -524,6 +562,108 @@ impl OneNode {
         }
         Ok(entries)
     }
+
+    async fn serve_object_verified_read_in(
+        &self,
+        request: &NodeRequestContext,
+        materialized: &MaterializedAdmission,
+        scope: &DisclosureScope<'_>,
+        capability: VerifiedReadCapability,
+        oid: GitOid,
+    ) -> Result<ReadResponse, VerifiedReadServingRefusal> {
+        // Membership is a disclosure too. Check the scope before reading the
+        // closure, just as `authorize_object_absence` does for a negative answer.
+        if !scope.permits_object_disclosure(&oid) {
+            return Err(VerifiedReadServingRefusal::VerifiedRead(Box::new(
+                VerifiedReadRefusal::ObjectNotFoundOrUnauthorized,
+            )));
+        }
+
+        let objects = materialized
+            .selected_closure()
+            .closure()
+            .objects()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let head = materialized.basis().body().clone();
+        let is_present = materialized
+            .selected_closure()
+            .closure()
+            .objects()
+            .contains(&oid);
+
+        if is_present {
+            match negotiate_response_mode(capability) {
+                fgit_verified_read::VerifiedReadResponseMode::Unproven => {
+                    Ok(ReadResponse::Unproven(Box::new(
+                        UnprovenReadAnswer::Object { oid, present: true },
+                    )))
+                }
+                fgit_verified_read::VerifiedReadResponseMode::EnvelopeV1 => {
+                    let configuration = self
+                        .verified_read_configuration_in(request, &head.configuration_root)
+                        .await?;
+                    ensure_object_proof_layout(&configuration)?;
+                    let proof =
+                        object_closure_membership_proof(&objects, &oid).map_err(|refusal| {
+                            VerifiedReadServingRefusal::VerifiedRead(Box::new(
+                                VerifiedReadRefusal::ObjectLayout(Box::new(refusal)),
+                            ))
+                        })?;
+                    Ok(ReadResponse::Verified(Box::new(
+                        VerifiedReadEnvelope::new_with_exact_configuration(
+                            head,
+                            Some(configuration),
+                            VerifiedReadAnswer::ObjectMembership {
+                                oid,
+                                proof: Box::new(proof),
+                            },
+                        ),
+                    )))
+                }
+            }
+        } else {
+            let absence = authorize_object_absence(scope, oid, |requested| {
+                materialized
+                    .selected_closure()
+                    .closure()
+                    .objects()
+                    .contains(requested)
+            })
+            .map_err(|refusal| VerifiedReadServingRefusal::VerifiedRead(Box::new(refusal)))?;
+            match negotiate_response_mode(capability) {
+                fgit_verified_read::VerifiedReadResponseMode::Unproven => Ok(
+                    ReadResponse::Unproven(Box::new(UnprovenReadAnswer::Object {
+                        oid: *absence.oid(),
+                        present: false,
+                    })),
+                ),
+                fgit_verified_read::VerifiedReadResponseMode::EnvelopeV1 => {
+                    let configuration = self
+                        .verified_read_configuration_in(request, &head.configuration_root)
+                        .await?;
+                    ensure_object_proof_layout(&configuration)?;
+                    let proof = object_closure_non_membership_proof(&objects, absence.oid())
+                        .map_err(|refusal| {
+                            VerifiedReadServingRefusal::VerifiedRead(Box::new(
+                                VerifiedReadRefusal::ObjectLayout(Box::new(refusal)),
+                            ))
+                        })?;
+                    Ok(ReadResponse::Verified(Box::new(
+                        VerifiedReadEnvelope::new_with_exact_configuration(
+                            head,
+                            Some(configuration),
+                            VerifiedReadAnswer::AuthorizedObjectAbsence {
+                                absence,
+                                proof: Box::new(proof),
+                            },
+                        ),
+                    )))
+                }
+            }
+        }
+    }
 }
 
 const fn ensure_ref_proof_layout(
@@ -534,6 +674,17 @@ const fn ensure_ref_proof_layout(
         Ok(())
     } else {
         Err(VerifiedReadServingRefusal::RefLayoutUnavailable { layout })
+    }
+}
+
+const fn ensure_object_proof_layout(
+    configuration: &VerifiedReadConfiguration,
+) -> Result<(), VerifiedReadServingRefusal> {
+    let layout = configuration.root_layout();
+    if layout.admits_object_closure_membership_proof() {
+        Ok(())
+    } else {
+        Err(VerifiedReadServingRefusal::ObjectLayoutUnavailable { layout })
     }
 }
 
@@ -553,11 +704,12 @@ mod tests {
         CryptoBodyIdentity, RepositoryIncarnationConfigurationBody, decode_body,
         harness::{commit_record, digest_of},
     };
+    use fgit_crypto::object_closure_merkle_root;
     use fgit_git_object::ObjectType;
     use fgit_types::cell::{CellState, CellTransitionCause, ReadLabel};
     use fgit_types::identity::RepositoryIncarnationId;
     use fgit_types::layout::RootLayoutVersion;
-    use fgit_types::native::GitHashAlgorithm;
+    use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1};
     use fgit_types::{RefName, RepositoryId, TenantId};
     use fgit_verified_read::{
         PinnedAuthorityHead, ReadResponse, UnprovenReadAnswer, VerifiedMembership,
@@ -658,7 +810,7 @@ mod tests {
         node
     }
 
-    fn publish_member_and_outcome(node: &OneNode) -> (RefName, fgit_types::TxId) {
+    fn publish_member_and_outcome(node: &OneNode) -> (RefName, fgit_types::TxId, GitOid) {
         let request = node.request_context();
         let stored = node
             .put_git_object(ObjectType::Blob, b"verified-read fixture".to_vec())
@@ -732,14 +884,14 @@ mod tests {
             .block_on(node.publish_decisions_in(&request, &publication))
             .expect("the verified publication replaces the exact predecessor head");
         assert!(matches!(verdict, PublicationVerdict::Published(_)));
-        (name, tx_id)
+        (name, tx_id, stored.identity())
     }
 
     #[test]
     fn ordinary_client_verifies_served_ref_membership_absence_and_outcome_and_rejects_tampering() {
         let scratch = ScratchDirectory::new();
         let mut node = proof_capable_node(&scratch);
-        let (present, committed_tx) = publish_member_and_outcome(&node);
+        let (present, committed_tx, _) = publish_member_and_outcome(&node);
         let missing =
             RefName::try_new(b"refs/heads/missing").expect("fixed fixture ref name is valid");
         node.transition_cell_state(
@@ -919,5 +1071,110 @@ mod tests {
         ));
         node.shutdown()
             .expect("the serving cell closes to quiescence");
+    }
+
+    #[test]
+    fn ordinary_client_verifies_served_object_membership_absence_and_unproven() {
+        let scratch = ScratchDirectory::new();
+        let mut node = proof_capable_node(&scratch);
+        let (present_ref, _, present_oid) = publish_member_and_outcome(&node);
+        node.transition_cell_state(
+            CellState::VerifiedReadOnly,
+            CellTransitionCause::AuthorityObservation,
+            fgit_types::HeadGeneration::try_new(2)
+                .expect("the published successor is generation 2"),
+        )
+        .expect("the observed cell may enter verified-read serving");
+
+        let independently_fetched = node
+            .runtime()
+            .block_on(node.authenticate_authority_head())
+            .expect("the ordinary client fetches an authentic authority head")
+            .body()
+            .expect("the independently authenticated body decodes");
+
+        let absent_oid = GitOid::Sha1(fgit_types::native::GitOidSha1::from_bytes([0x99; 20]));
+        let closure_root = object_closure_merkle_root(&[present_oid]).expect("closure root");
+        let pin = PinnedAuthorityHead::new_with_object_closure(
+            independently_fetched.clone(),
+            closure_root,
+        );
+
+        // Unproven query
+        let unproven = node
+            .runtime()
+            .block_on(node.serve_current_verified_read_in(
+                &node.request_context(),
+                &RefVisibility::new(),
+                ReadLabel::current(),
+                VerifiedReadCapability::Unproven,
+                VerifiedReadQuery::Object(present_oid),
+            ))
+            .expect("unproven object read succeeds");
+        assert_eq!(
+            unproven.response(),
+            &ReadResponse::Unproven(Box::new(UnprovenReadAnswer::Object {
+                oid: present_oid,
+                present: true,
+            }))
+        );
+
+        // Verified member query
+        let member = node
+            .runtime()
+            .block_on(node.serve_current_verified_read_in(
+                &node.request_context(),
+                &RefVisibility::new(),
+                ReadLabel::current(),
+                VerifiedReadCapability::EnvelopeV1,
+                VerifiedReadQuery::Object(present_oid),
+            ))
+            .expect("verified object read succeeds");
+        let ReadResponse::Verified(member_envelope) = member.response() else {
+            panic!("expected envelope");
+        };
+        assert_eq!(
+            verify_envelope(&pin, member_envelope),
+            Ok(VerifiedMembership::Object)
+        );
+
+        // Verified absence query
+        let absence = node
+            .runtime()
+            .block_on(node.serve_current_verified_read_in(
+                &node.request_context(),
+                &RefVisibility::new(),
+                ReadLabel::current(),
+                VerifiedReadCapability::EnvelopeV1,
+                VerifiedReadQuery::Object(absent_oid),
+            ))
+            .expect("verified object absence succeeds");
+        let ReadResponse::Verified(absence_envelope) = absence.response() else {
+            panic!("expected envelope");
+        };
+        assert_eq!(
+            verify_envelope(&pin, absence_envelope),
+            Ok(VerifiedMembership::ObjectAbsence)
+        );
+
+        // Disclosure gate: if the only ref pointing to present_oid is hidden, object query is denied
+        let mut hides_ref = RefVisibility::new();
+        hides_ref
+            .push_rule(present_ref.as_bytes(), &WireLimits::default())
+            .expect("hide rule");
+        let denied = node.runtime().block_on(node.serve_current_verified_read_in(
+            &node.request_context(),
+            &hides_ref,
+            ReadLabel::current(),
+            VerifiedReadCapability::EnvelopeV1,
+            VerifiedReadQuery::Object(present_oid),
+        ));
+        assert!(matches!(
+            denied,
+            Err(VerifiedReadServingRefusal::VerifiedRead(refusal))
+                if refusal.as_ref() == &VerifiedReadRefusal::ObjectNotFoundOrUnauthorized
+        ));
+
+        node.shutdown().expect("clean shutdown");
     }
 }

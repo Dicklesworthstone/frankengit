@@ -15,10 +15,14 @@
 
 use fgit_crypto::{
     MerkleRefusal, RefStateNeighbour, RefStateNonMembershipProof, empty_merkle_root, merkle_leaf,
-    merkle_proof, merkle_root, merkle_root_from_proof, ref_state_leaf, ref_state_membership_proof,
-    ref_state_merkle_root, ref_state_non_membership_proof, ref_state_schema, verify_merkle_proof,
-    verify_ref_state_membership, verify_ref_state_membership_under,
-    verify_ref_state_non_membership, verify_ref_state_non_membership_under,
+    merkle_proof, merkle_root, merkle_root_from_proof, object_closure_membership_proof,
+    object_closure_merkle_root, object_closure_non_membership_proof, ref_state_leaf,
+    ref_state_membership_proof, ref_state_merkle_root, ref_state_non_membership_proof,
+    ref_state_schema, verify_merkle_proof, verify_object_closure_membership,
+    verify_object_closure_membership_under, verify_object_closure_non_membership,
+    verify_object_closure_non_membership_under, verify_ref_state_membership,
+    verify_ref_state_membership_under, verify_ref_state_non_membership,
+    verify_ref_state_non_membership_under,
 };
 use fgit_types::hash::DigestBytes;
 use fgit_types::label::{SchemaFamily, SchemaId};
@@ -1016,4 +1020,126 @@ fn hiding_a_present_ref_by_claiming_its_neighbours_are_adjacent_refuses() {
         verify_ref_state_non_membership(&root, &genuinely_absent, &honest),
         "a real absence between the same leaves must still verify"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The object-closure layout
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_object_closure_root_is_independent_of_offer_order_and_rejects_duplicates() {
+    let objects = [oid(0x10), oid(0x20), oid(0x30), oid(0x40)];
+    let mut reversed = objects;
+    reversed.reverse();
+
+    let root_fwd = object_closure_merkle_root(&objects).expect("a root");
+    let root_rev = object_closure_merkle_root(&reversed).expect("a root");
+    assert_eq!(
+        root_fwd, root_rev,
+        "object closure root must be independent of offer order"
+    );
+
+    let dup = [oid(0x10), oid(0x20), oid(0x10)];
+    assert_eq!(
+        object_closure_merkle_root(&dup),
+        Err(MerkleRefusal::DuplicateObjectOid),
+        "duplicate object oids in a closure must be refused"
+    );
+}
+
+#[test]
+fn object_closure_membership_proofs_round_trip_and_reject_tampering() {
+    let objects = [oid(0x10), oid(0x20), oid(0x30), oid(0x40)];
+    let root = object_closure_merkle_root(&objects).expect("root");
+
+    for queried in &objects {
+        let proof = object_closure_membership_proof(&objects, queried).expect("proof");
+        assert!(
+            verify_object_closure_membership(&root, queried, &proof),
+            "object membership must verify"
+        );
+        assert_eq!(
+            verify_object_closure_membership_under(
+                RootLayoutVersion::RefStateMerkleV1,
+                &root,
+                queried,
+                &proof
+            ),
+            Ok(true)
+        );
+        assert!(matches!(
+            verify_object_closure_membership_under(
+                RootLayoutVersion::LegacyWholeBody,
+                &root,
+                queried,
+                &proof
+            ),
+            Err(MerkleRefusal::LayoutAdmitsNoProof { .. })
+        ));
+    }
+
+    let absent = oid(0x99);
+    assert_eq!(
+        object_closure_membership_proof(&objects, &absent),
+        Err(MerkleRefusal::ObjectNotPresent),
+    );
+}
+
+#[test]
+fn object_closure_non_membership_proofs_verify_across_all_four_positions() {
+    let objects = [oid(0x10), oid(0x20), oid(0x30), oid(0x40)];
+    let root = object_closure_merkle_root(&objects).expect("root");
+
+    // Empty closure
+    let empty_root = object_closure_merkle_root(&[]).expect("empty root");
+    let empty_proof =
+        object_closure_non_membership_proof(&[], &oid(0x15)).expect("empty absence proof");
+    assert!(
+        verify_object_closure_non_membership(&empty_root, &oid(0x15), &empty_proof),
+        "empty closure absence must verify"
+    );
+
+    // BeforeFirst: 0x05 < 0x10
+    let before_first = oid(0x05);
+    let before_proof =
+        object_closure_non_membership_proof(&objects, &before_first).expect("before first proof");
+    assert!(
+        verify_object_closure_non_membership(&root, &before_first, &before_proof),
+        "BeforeFirst absence must verify"
+    );
+
+    // Between: 0x25 between 0x20 and 0x30
+    let between = oid(0x25);
+    let between_proof =
+        object_closure_non_membership_proof(&objects, &between).expect("between proof");
+    assert!(
+        verify_object_closure_non_membership(&root, &between, &between_proof),
+        "Between absence must verify"
+    );
+
+    // AfterLast: 0x50 > 0x40
+    let after_last = oid(0x50);
+    let after_proof =
+        object_closure_non_membership_proof(&objects, &after_last).expect("after last proof");
+    assert!(
+        verify_object_closure_non_membership(&root, &after_last, &after_proof),
+        "AfterLast absence must verify"
+    );
+
+    // Present object must be refused when requesting non-membership proof
+    assert_eq!(
+        object_closure_non_membership_proof(&objects, &oid(0x20)),
+        Err(MerkleRefusal::ObjectIsPresent)
+    );
+
+    // Legacy layout refuses non-membership proof
+    assert!(matches!(
+        verify_object_closure_non_membership_under(
+            RootLayoutVersion::LegacyWholeBody,
+            &root,
+            &between,
+            &between_proof
+        ),
+        Err(MerkleRefusal::LayoutAdmitsNoProof { .. })
+    ));
 }
