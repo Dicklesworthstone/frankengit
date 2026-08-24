@@ -32,6 +32,7 @@ fge_init sha256-repo-roundtrip
 
 TENANT=11111111111111111111111111111111
 REPOID=22222222222222222222222222222222
+PRINCIPAL=44444444444444444444444444444444
 
 fge_phase action
 
@@ -111,5 +112,104 @@ GIT_TERMINAL_PROMPT=0 GIT_TRACE_PACKET=1 git -c protocol.version=1 ls-remote \
 fge_assert_eq FG-058-SHA256-011 0 "$SHA256_SERVE_RC" 'git reaches the separate-process SHA-256 serve endpoint'
 fge_assert_cmd FG-058-SHA256-012 'the served protocol advertises SHA-256 from canonical repository state' \
   grep -q 'object-format=sha256' "$WORK/sha256-packet-trace.out"
+
+# ---------------------------------------------------------------------------
+# Acceptance line 4: the clone/fetch DIFFERENTIAL against the pinned oracle.
+#
+# Distinct from the check above, which uses the ordinary `git` on PATH as the
+# client whose compatibility this bead claims. This block instead drives the
+# pinned, sandboxed oracle binary (AGENTS.md 3.1) and performs a real clone, so
+# what is pinned here is that a pinned upstream Git can materialize a working
+# repository from our SHA-256 wire output -- not merely that some client reads
+# the advertisement.
+#
+# The fixture is built BY the pinned binary rather than by system git, and that
+# is forced rather than stylistic: D3 forbids inventing cross-format mappings,
+# so importing a SHA-256 repository requires a source that already IS one.
+# ---------------------------------------------------------------------------
+
+ORACLE="$E2E_ROOT/oracle/oracle.sh"
+ORACLE_PIN=git-2.54.0
+
+VERIFY_RC=0
+"$ORACLE" verify "$ORACLE_PIN" >/dev/null 2>&1 || VERIFY_RC=$?
+fge_assert_eq FG-058-SHA256-013 0 "$VERIFY_RC" \
+  'the pinned oracle git is built and its source and binary digests match'
+
+RUN_DIR=$("$ORACLE" create-run "$ORACLE_PIN" sha256differential)
+fge_assert_cmd FG-058-SHA256-014 'the oracle run directory exists' test -d "$RUN_DIR/work"
+
+"$ORACLE" run "$ORACLE_PIN" "$RUN_DIR" . -- init --object-format=sha256 -b main fixture \
+  >/dev/null 2>&1
+FIXTURE="$RUN_DIR/work/fixture"
+fge_assert_cmd FG-058-SHA256-015 'the pinned oracle created a fixture repository' \
+  test -d "$FIXTURE/.git"
+fge_assert_cmd FG-058-SHA256-016 'the fixture is genuinely sha256, not a sha1 repository we assumed' \
+  grep -qi 'objectformat *= *sha256' "$FIXTURE/.git/config"
+
+"$ORACLE" run "$ORACLE_PIN" "$RUN_DIR" fixture -- config user.email sha256@invalid.example \
+  >/dev/null 2>&1
+"$ORACLE" run "$ORACLE_PIN" "$RUN_DIR" fixture -- config user.name 'FG-058 fixture' >/dev/null 2>&1
+printf 'fg058 sha256 differential fixture\n' >"$FIXTURE/root.txt"
+"$ORACLE" run "$ORACLE_PIN" "$RUN_DIR" fixture -- add -A >/dev/null 2>&1
+"$ORACLE" run "$ORACLE_PIN" "$RUN_DIR" fixture -- commit -qm 'sha256 fixture commit' >/dev/null 2>&1
+fge_assert_cmd FG-058-SHA256-017 'the fixture carries a commit to transfer' \
+  test -f "$FIXTURE/.git/HEAD"
+
+DIFF_STORAGE="$WORK/differential"
+DIFF_INIT_RC=0
+"$FG_BIN" init "$DIFF_STORAGE" "$TENANT" "$REPOID" sha256 >"$WORK/diff-init.out" 2>&1 \
+  || DIFF_INIT_RC=$?
+fge_assert_eq FG-058-SHA256-018 0 "$DIFF_INIT_RC" 'the differential node initializes as sha256'
+
+IMPORT_RC=0
+"$FG_BIN" import "$DIFF_STORAGE" "$TENANT" "$REPOID" "$PRINCIPAL" fg058-sha256-differential \
+  "$FIXTURE" >"$WORK/diff-import.out" 2>&1 || IMPORT_RC=$?
+fge_assert_eq FG-058-SHA256-019 0 "$IMPORT_RC" 'a sha256 source repository imports into canonical state'
+
+DIFF_PORT=''
+DIFF_NAME=''
+for offset in 0 4 8 12 16 20 24 28; do
+  candidate=$((PORT_BASE + 40 + offset))
+  name="sha256-diff-serve-$candidate"
+  fge_spawn "$name" bash -c 'exec "$1" serve "$2" "$3" "$4" "127.0.0.1:$5" >"$6" 2>&1' \
+    _ "$FG_BIN" "$DIFF_STORAGE" "$TENANT" "$REPOID" "$candidate" "$WORK/$name.out"
+  sleep 1
+  if kill -0 "$FGE_LAST_PID" 2>/dev/null; then
+    DIFF_PORT=$candidate
+    DIFF_NAME=$name
+    break
+  fi
+done
+fge_assert_cmd FG-058-SHA256-020 'a serve session is listening for the differential repository' \
+  test -n "$DIFF_PORT"
+
+CLONE_RC=0
+"$ORACLE" clone-loopback "$ORACLE_PIN" "$RUN_DIR" sha256clone "127.0.0.1:$DIFF_PORT" \
+  "/$REPOID.git" clone >/dev/null 2>&1 || CLONE_RC=$?
+[ -z "$DIFF_NAME" ] || fge_reap "$DIFF_NAME"
+fge_assert_eq FG-058-SHA256-021 0 "$CLONE_RC" \
+  'the pinned oracle clones the served sha256 repository'
+
+CLONE_DIR="$RUN_DIR/work/clone"
+fge_assert_cmd FG-058-SHA256-022 'the clone materialized a repository' test -d "$CLONE_DIR/.git"
+fge_assert_cmd FG-058-SHA256-023 'the clone is itself sha256, so the format survived the transfer' \
+  grep -qi 'objectformat *= *sha256' "$CLONE_DIR/.git/config"
+# The transferred tip, not a worktree comparison. The clone deliberately is NOT
+# asserted to have a checked-out worktree: this daemon advertises no
+# `symref=HEAD:...` capability, so a real `git clone` receives the objects and
+# remote-tracking refs but cannot decide which branch to check out, and leaves
+# HEAD dangling. That is format-INDEPENDENT -- a SHA-1 repository served the
+# same way advertises no symref either -- so it is a Git-compatibility gap of
+# its own rather than anything about SHA-256, and is tracked separately. What
+# the differential must pin is that the content crossed the wire intact, which
+# is exactly what comparing the fixture tip to the cloned remote ref does.
+FIXTURE_TIP=$("$ORACLE" run "$ORACLE_PIN" "$RUN_DIR" fixture -- rev-parse HEAD 2>/dev/null | tr -d '[:space:]')
+fge_assert_cmd FG-058-SHA256-024 'the fixture tip is a 64-hex sha256 identity' \
+  test "${#FIXTURE_TIP}" -eq 64
+fge_assert_cmd FG-058-SHA256-025 'the clone received that exact tip as a remote-tracking ref' \
+  grep -q "$FIXTURE_TIP" "$CLONE_DIR/.git/packed-refs"
+fge_assert_cmd FG-058-SHA256-026 'the clone received a pack, so objects crossed the wire' \
+  test -n "$(ls -A "$CLONE_DIR/.git/objects/pack" 2>/dev/null)"
 
 fge_phase assert
