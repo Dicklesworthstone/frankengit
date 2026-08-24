@@ -943,7 +943,14 @@ pub fn verify_object_closure_non_membership(
                 && holds(first)
         }
         ObjectClosureNonMembershipProof::AfterLast { last } => {
-            last.proof.index() + 1 == last.proof.leaf_count()
+            // `checked_add` because `index` is a decoded claim, not a computed
+            // value: `MerkleProof::new` states outright that nothing it carries
+            // is trusted. A hostile `usize::MAX` panics here under the overflow
+            // checks that debug and test builds enable by default, and wraps to
+            // zero under the release profile, which has none. Neither is a
+            // typed refusal, and a verifier that aborts on input it was built to
+            // reject is the input deciding the outcome.
+            last.proof.index().checked_add(1) == Some(last.proof.leaf_count())
                 && git_oid_order(&last.oid, oid) == Ordering::Less
                 && holds(last)
         }
@@ -952,7 +959,9 @@ pub fn verify_object_closure_non_membership(
             successor,
         } => {
             predecessor.proof.leaf_count() == successor.proof.leaf_count()
-                && successor.proof.index() == predecessor.proof.index() + 1
+                // Same reason as `AfterLast`: adjacency is checked against a
+                // decoded index, so the addition is the attacker's arithmetic.
+                && predecessor.proof.index().checked_add(1) == Some(successor.proof.index())
                 && git_oid_order(&predecessor.oid, oid) == Ordering::Less
                 && git_oid_order(oid, &successor.oid) == Ordering::Less
                 && holds(predecessor)
