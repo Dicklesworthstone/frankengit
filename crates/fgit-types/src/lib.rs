@@ -3,6 +3,7 @@
 
 pub mod cell;
 pub mod error;
+pub mod gossip;
 pub mod hash;
 pub mod hint;
 pub mod identity;
@@ -20,6 +21,7 @@ pub use cell::{
     ReadMode, StalenessBound, StalenessObservation, admits_read,
 };
 pub use error::TypeRefusal;
+pub use gossip::{GossipRefusal, GossipView};
 pub use hash::{Digest, DigestAlgorithmId, DigestBytes, MAX_DIGEST_LEN, MIN_DIGEST_LEN};
 pub use hint::{Hint, HintSource};
 pub use identity::{
