@@ -13,7 +13,7 @@ use fgit_types::cell::{
 use fgit_types::error::TypeRefusal;
 use fgit_types::numeric::HeadGeneration;
 
-fn generation() -> HeadGeneration {
+const fn generation() -> HeadGeneration {
     HeadGeneration::FIRST
 }
 
@@ -69,7 +69,7 @@ fn a_transition_changes_capability_and_records_why_in_the_same_call() {
     // The property that makes the audit trustworthy: there is no way to change
     // what a cell may serve without leaving a record, because it is one call.
     let mut readiness = CellReadiness::bootstrapping();
-    assert!(readiness.audit().is_empty());
+    assert_eq!(readiness.audit(), []);
     assert!(!readiness.state().admits_current_read());
 
     readiness
@@ -113,8 +113,9 @@ fn an_illegal_transition_is_refused_and_leaves_no_audit_entry() {
         }
     ));
     assert_eq!(readiness.state(), CellState::Bootstrapping);
-    assert!(
-        readiness.audit().is_empty(),
+    assert_eq!(
+        readiness.audit(),
+        [],
         "a refused transition must not appear in the audit"
     );
 

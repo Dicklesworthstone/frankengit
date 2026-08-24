@@ -4,6 +4,7 @@
 pub mod cell;
 pub mod error;
 pub mod hash;
+pub mod hint;
 pub mod identity;
 pub mod label;
 pub mod layout;
@@ -19,6 +20,7 @@ pub use cell::{
 };
 pub use error::TypeRefusal;
 pub use hash::{Digest, DigestAlgorithmId, DigestBytes, MAX_DIGEST_LEN, MIN_DIGEST_LEN};
+pub use hint::{Hint, HintSource};
 pub use identity::{
     DERIVED_ID_DOMAINS, EvidenceRecordId, ForgeEventId, GenerationId, InternalObjectId,
     MAX_OPAQUE_STORE_TOKEN_LEN, OPAQUE_ID_LEN, ObjectEnvelopeId, OpaqueStoreToken,
