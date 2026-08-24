@@ -17,11 +17,11 @@ fn store() -> MemoryAuthorityStore {
     MemoryAuthorityStore::new(StoreInstanceId::from_raw(59))
 }
 
-fn incarnation(value: u8) -> RepositoryIncarnationId {
+const fn incarnation(value: u8) -> RepositoryIncarnationId {
     RepositoryIncarnationId::from_bytes([value; 16])
 }
 
-fn v2_configuration(value: u8) -> RepositoryIncarnationConfigurationBody {
+const fn v2_configuration(value: u8) -> RepositoryIncarnationConfigurationBody {
     RepositoryIncarnationConfigurationBody {
         root_layout: RootLayoutVersion::RefStateMerkleV1,
         object_format: GitHashAlgorithm::Sha256,
