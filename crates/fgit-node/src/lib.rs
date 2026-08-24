@@ -5364,6 +5364,49 @@ impl OneNode {
         .await
     }
 
+    /// Admits one sealed merge through the node-owned durable asynchronous
+    /// materialization boundary.
+    ///
+    /// The `OneNode` composition for `frankengit-asa3`, and the pair of
+    /// [`Self::admit_validated_receive_durable_in`] rather than a second
+    /// composition style: same projection, same request-context authority, same
+    /// shape. A lab schedule can therefore drive two concurrent merge attempts
+    /// against one head through the surface the node actually exposes.
+    ///
+    /// # Why there is no `commitments` parameter
+    ///
+    /// [`fgit_admission::merge::admit_merge_async`] takes the
+    /// [`CanonicalAdmissionStore`] its resulting bodies are staged into. The
+    /// node already owns one -- [`DurableAdmissionMaterializer`] implements that
+    /// trait -- so the composition supplies it rather than making every caller
+    /// find one. Leaking it into this signature would let a caller stage a
+    /// merge's bodies somewhere the node does not read them back from, which is
+    /// precisely the defect the race drill found in the blocking path.
+    ///
+    /// # Errors
+    ///
+    /// [`AdmissionError`] for faults. A stale merge is not a fault: it returns a
+    /// terminal decision carrying the typed staleness refusal.
+    pub async fn admit_merge_durable_in(
+        &self,
+        request: &NodeRequestContext,
+        context: &AdmissionContext,
+        sealed: &fgit_admission::merge::SealedMerge<'_>,
+        limits: AdmissionLimits,
+    ) -> Result<fgit_authority::TerminalOutcome, AdmissionError> {
+        let projection = self.durable_admission_projection(context)?;
+        fgit_admission::merge::admit_merge_async(
+            &self.authority,
+            request.authority(),
+            context,
+            sealed,
+            limits,
+            &projection,
+            &self.admission_materializer,
+        )
+        .await
+    }
+
     /// Admits a receive whose quarantine proof is bound to the exact
     /// publication basis that authorized its external delta bases.
     ///
