@@ -1643,7 +1643,7 @@ fn a_push_targeting_a_hidden_ref_is_refused_as_hidden_ref_unauthorized() {
 /// DIFFERENT ref must not be refused for the hidden-ref reason.
 ///
 /// Without this the test above would pass against a build that refused every
-/// push as HiddenRefUnauthorized, which is indistinguishable from a working
+/// push as `HiddenRefUnauthorized`, which is indistinguishable from a working
 /// guard by the refusal alone. Only the hide rule differs between the two.
 #[test]
 fn the_permitted_twin_a_push_to_a_visible_ref_is_not_refused_as_hidden() {
