@@ -57,6 +57,7 @@ fgit-forge = { path = "crates/fgit-forge" }
 fgit-doc = { path = "crates/fgit-doc" }
 fgit-git-object = { path = "crates/fgit-git-object" }
 fgit-graph = { path = "crates/fgit-graph" }
+fgit-identity = { path = "crates/fgit-identity" }
 fgit-lab = { path = "crates/fgit-lab" }
 fgit-node = { path = "crates/fgit-node" }
 fgit-object-fabric = { path = "crates/fgit-object-fabric" }

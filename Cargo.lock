@@ -803,6 +803,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-identity"
+version = "0.0.1"
+dependencies = [
+ "fgit-codec",
+ "fgit-forge",
+ "fgit-types",
+]
+
+[[package]]
 name = "fgit-lab"
 version = "0.0.1"
 dependencies = [
