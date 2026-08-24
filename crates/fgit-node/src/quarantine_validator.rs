@@ -15,8 +15,8 @@ use fgit_admission::{
 };
 use fgit_git_object::{AcceptanceProfile, ObjectType, ParseLimits, ParsedObject};
 use fgit_pack::{
-    CachedResolver, Deadline, ExternalBaseLookup, ObjectId, PackError, PackLimits, ParsedDeltaBase,
-    QuarantinedPack, ResolutionBudget, verify_native_object,
+    CachedResolver, Deadline, ExternalBaseLookup, ObjectId, PackError, PackLimits, PackObject,
+    ParsedDeltaBase, QuarantinedPack, ResolutionBudget, verify_native_object,
 };
 use fgit_types::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256, RefusalCode};
 use fgit_wire::receive::{
@@ -181,14 +181,23 @@ impl<'node> ProductionQuarantineValidator<'node> {
         })
     }
 
-    fn load_external_base(
+    /// Loads an authority-selected external base when one is actually named by
+    /// the selected closure.
+    ///
+    /// A REF_DELTA name is not, by itself, evidence that its base is external:
+    /// a later bounded pack-local identity pass may prove that the same name
+    /// belongs to an uploaded entry.  Returning `None` for an unselected name
+    /// lets that pass establish the pack-local edge without consulting merely
+    /// present fabric state.  A name that remains unresolved after the bounded
+    /// pass is refused as a thin base.
+    fn load_selected_external_base(
         &self,
         id: ObjectId,
         deadline: &mut impl Deadline,
-    ) -> Result<ExternalBase, RefusalCode> {
+    ) -> Result<Option<ExternalBase>, RefusalCode> {
         checkpoint(deadline)?;
         if !self.selected_closure.closure().objects().contains(&id) {
-            return Err(RefusalCode::ThinPackBaseMissing);
+            return Ok(None);
         }
 
         let verified = self.node.read_git_object(id).map_err(|error| match error {
@@ -222,7 +231,7 @@ impl<'node> ProductionQuarantineValidator<'node> {
             &self.parse_limits,
         )
         .map_err(map_pack_error)?;
-        Ok(ExternalBase { object_type, body })
+        Ok(Some(ExternalBase { object_type, body }))
     }
 
     fn external_bases(
@@ -239,10 +248,117 @@ impl<'node> ProductionQuarantineValidator<'node> {
             if bases.contains_key(base) {
                 continue;
             }
-            let loaded = self.load_external_base(*base, deadline)?;
-            bases.insert(*base, loaded);
+            if let Some(loaded) = self.load_selected_external_base(*base, deadline)? {
+                bases.insert(*base, loaded);
+            }
         }
         Ok(ExternalBases { bases })
+    }
+
+    fn verify_resolved_object(
+        &self,
+        object_type: ObjectType,
+        body: Vec<u8>,
+    ) -> Result<(GitOid, VerifiedObject), RefusalCode> {
+        let id = fgit_crypto::git_object_id(
+            self.node.object_format,
+            crypto_object_kind(object_type),
+            &body,
+        );
+        let parsed = verify_native_object(
+            self.node.object_format,
+            object_type,
+            &body,
+            &id,
+            AcceptanceProfile::GitCompatibleImport,
+            &self.parse_limits,
+        )
+        .map_err(map_pack_error)?;
+        Ok((
+            id,
+            VerifiedObject {
+                object_type,
+                body,
+                parsed,
+            },
+        ))
+    }
+
+    /// Reconstructs and verifies every pack-local object identity before a
+    /// REF_DELTA is classified as external.
+    ///
+    /// The pack format carries a REF base identity but no trusted offset index.
+    /// Direct and OFS-rooted entries establish identities first; each bounded
+    /// pass adds only identities reconstructed through the typed resolver. A
+    /// subsequent pass may therefore resolve a REF_DELTA whose base was just
+    /// proven pack-local. The number of passes is capped by the existing delta
+    /// depth bound plus the direct-entry pass, and one `ResolutionBudget`
+    /// charges the entire discovery operation.
+    fn verified_pack_objects(
+        &self,
+        pack: &QuarantinedPack,
+        bases: &ExternalBases,
+        deadline: &mut impl Deadline,
+    ) -> Result<(BTreeMap<GitOid, VerifiedObject>, BTreeMap<u64, GitOid>), RefusalCode> {
+        let mut objects = pack
+            .clone()
+            .into_scalar_objects(|_| None)
+            .map_err(map_pack_error)?;
+        let mut verified = BTreeMap::new();
+        let mut ids_at_offset = BTreeMap::new();
+        let mut budget = ResolutionBudget::new();
+
+        for _ in 0..=self.pack_limits.max_delta_depth {
+            checkpoint(deadline)?;
+            let mut resolved = Vec::new();
+            {
+                let mut resolver =
+                    CachedResolver::new(&objects, bases, &self.pack_limits, deadline)
+                        .map_err(map_pack_error)?;
+                for entry in pack.entries() {
+                    checkpoint(deadline)?;
+                    if ids_at_offset.contains_key(&entry.offset) {
+                        continue;
+                    }
+                    match resolver.resolve_offset_typed_with_budget(
+                        entry.offset,
+                        &mut budget,
+                        deadline,
+                    ) {
+                        Ok((object_type, body)) => resolved.push((entry.offset, object_type, body)),
+                        // The base may be a pack-local entry whose native ID
+                        // is established in this or a later bounded pass.
+                        Err(PackError::MissingDeltaBase) => {}
+                        Err(error) => return Err(map_pack_error(error)),
+                    }
+                }
+            }
+
+            if resolved.is_empty() {
+                break;
+            }
+            for (offset, object_type, body) in resolved {
+                let (id, object) = self.verify_resolved_object(object_type, body)?;
+                if verified.insert(id, object).is_some()
+                    || ids_at_offset.insert(offset, id).is_some()
+                {
+                    return Err(RefusalCode::PackFramingInvalid);
+                }
+                let pack_object = objects
+                    .iter_mut()
+                    .find(|object| pack_object_offset(object) == offset)
+                    .ok_or(RefusalCode::PackFramingInvalid)?;
+                set_pack_object_id(pack_object, id);
+            }
+            if verified.len() == pack.entries().len() {
+                return Ok((verified, ids_at_offset));
+            }
+        }
+
+        // Every pack-local identity must be reconstructable before staging.
+        // The only deferred resolver error is a missing REF base, which is a
+        // true thin-base refusal after the bounded local discovery exhausted.
+        Err(RefusalCode::ThinPackBaseMissing)
     }
 
     fn stage(
@@ -305,11 +421,11 @@ impl<'node> ProductionQuarantineValidator<'node> {
                 .get(&id)
                 .ok_or(RefusalCode::ObjectClosureIncomplete)?;
             // A delta target is not reconstructable from its Git-object
-            // graph edges alone.  Its verified in-pack OFS_DELTA base is an
-            // additional exact closure edge: retain it even for blobs, which
-            // otherwise have no object references.  REF_DELTA bases remain
-            // external here because the resolver deliberately sources them
-            // only from the authenticated selected closure.
+            // graph edges alone. Its verified in-pack OFS or REF_DELTA base
+            // is an additional exact closure edge: retain it even for blobs,
+            // which otherwise have no object references. External REF bases
+            // remain selected by the authenticated prior closure and are not
+            // restaged.
             if let Some(bases) = in_pack_delta_bases.get(&id) {
                 pending.extend(bases.iter().copied());
             }
@@ -328,31 +444,45 @@ impl<'node> ProductionQuarantineValidator<'node> {
     /// Maps each reconstructed in-pack object to the verified pack-local
     /// bases required to reconstruct it.
     ///
-    /// Receive quarantine does not have a trusted OID index association, so
-    /// a `REF_DELTA` is resolved solely through [`ExternalBases`] and its
-    /// authority-selected external base must not be restaged.  An
-    /// `OFS_DELTA`, by contrast, commits directly to a prior pack offset;
-    /// after native verification maps that offset to its actual OID, it is a
-    /// required uploaded closure edge.
+    /// A `REF_DELTA` begins with an untrusted native identity rather than an
+    /// offset. After [`Self::verified_pack_objects`] has reconstructed native
+    /// IDs under bounded resolution, matching that identity to an uploaded
+    /// entry proves an exact pack-local edge. An `OFS_DELTA` already commits
+    /// directly to a prior offset and follows the same closure rule after
+    /// native verification maps that offset to its actual OID.
     fn in_pack_delta_bases(
         pack: &QuarantinedPack,
         ids_at_offset: &BTreeMap<u64, GitOid>,
         deadline: &mut impl Deadline,
     ) -> Result<BTreeMap<GitOid, BTreeSet<GitOid>>, RefusalCode> {
+        let mut offsets_by_id = BTreeMap::new();
+        for (offset, id) in ids_at_offset {
+            if offsets_by_id.insert(*id, *offset).is_some() {
+                return Err(RefusalCode::PackFramingInvalid);
+            }
+        }
         let mut dependencies = BTreeMap::new();
         for entry in pack.entries() {
             checkpoint(deadline)?;
-            let Some(ParsedDeltaBase::Ofs { base_offset, .. }) = &entry.delta_base else {
+            let Some(delta_base) = &entry.delta_base else {
                 continue;
             };
             let id = ids_at_offset
                 .get(&entry.offset)
                 .copied()
                 .ok_or(RefusalCode::PackFramingInvalid)?;
-            let base = ids_at_offset
-                .get(base_offset)
-                .copied()
-                .ok_or(RefusalCode::PackFramingInvalid)?;
+            let base = match delta_base {
+                ParsedDeltaBase::Ofs { base_offset, .. } => ids_at_offset
+                    .get(base_offset)
+                    .copied()
+                    .ok_or(RefusalCode::PackFramingInvalid)?,
+                ParsedDeltaBase::Ref { base, .. } => {
+                    if !offsets_by_id.contains_key(base) {
+                        continue;
+                    }
+                    *base
+                }
+            };
             dependencies
                 .entry(id)
                 .or_insert_with(BTreeSet::new)
@@ -478,6 +608,23 @@ impl OneNode {
     }
 }
 
+const fn pack_object_offset(object: &PackObject) -> u64 {
+    match object {
+        PackObject::Base { offset, .. }
+        | PackObject::TypedBase { offset, .. }
+        | PackObject::Delta(fgit_pack::DeltaObject { offset, .. }) => *offset,
+    }
+}
+
+fn set_pack_object_id(object: &mut PackObject, id: GitOid) {
+    match object {
+        PackObject::Base { id: slot, .. } | PackObject::TypedBase { id: slot, .. } => {
+            *slot = Some(id);
+        }
+        PackObject::Delta(delta) => delta.id = Some(id),
+    }
+}
+
 impl QuarantineValidator for ProductionQuarantineValidator<'_> {
     fn validate(
         &self,
@@ -508,55 +655,7 @@ impl QuarantineValidator for ProductionQuarantineValidator<'_> {
         }
 
         let bases = self.external_bases(pack, deadline)?;
-        // The receive quarantine has no trusted index association for pack
-        // offsets.  Delta IDs are therefore resolved only through the
-        // authority-selected external-base set; every returned object is
-        // authenticated below before staging.
-        let objects = pack
-            .clone()
-            .into_scalar_objects(|_| None)
-            .map_err(map_pack_error)?;
-        let mut resolver = CachedResolver::new(&objects, &bases, &self.pack_limits, deadline)
-            .map_err(map_pack_error)?;
-        let mut verified = BTreeMap::new();
-        let mut ids_at_offset = BTreeMap::new();
-        let mut budget = ResolutionBudget::new();
-        for entry in pack.entries() {
-            checkpoint(deadline)?;
-            let (object_type, body) = resolver
-                .resolve_offset_typed_with_budget(entry.offset, &mut budget, deadline)
-                .map_err(map_pack_error)?;
-            let id = fgit_crypto::git_object_id(
-                self.node.object_format,
-                crypto_object_kind(object_type),
-                &body,
-            );
-            let parsed = verify_native_object(
-                self.node.object_format,
-                object_type,
-                &body,
-                &id,
-                AcceptanceProfile::GitCompatibleImport,
-                &self.parse_limits,
-            )
-            .map_err(map_pack_error)?;
-            if verified
-                .insert(
-                    id,
-                    VerifiedObject {
-                        object_type,
-                        body,
-                        parsed,
-                    },
-                )
-                .is_some()
-            {
-                return Err(RefusalCode::PackFramingInvalid);
-            }
-            if ids_at_offset.insert(entry.offset, id).is_some() {
-                return Err(RefusalCode::PackFramingInvalid);
-            }
-        }
+        let (mut verified, ids_at_offset) = self.verified_pack_objects(pack, &bases, deadline)?;
         let in_pack_delta_bases = Self::in_pack_delta_bases(pack, &ids_at_offset, deadline)?;
         let closure =
             self.reachable_uploaded_closure(request, &verified, &in_pack_delta_bases, deadline)?;
@@ -904,6 +1003,31 @@ mod tests {
         program.push(u8::try_from(suffix.len()).expect("one-byte literal fixture"));
         program.extend_from_slice(suffix);
         let mut pack = b"PACK\0\0\0\x02\0\0\0\x01".to_vec();
+        pack.push(0x70 | u8::try_from(program.len()).expect("small delta program"));
+        pack.extend_from_slice(base.as_bytes());
+        pack.extend_from_slice(&zlib_stored(&program));
+        let trailer = fgit_crypto::sha1_digest(&pack);
+        pack.extend_from_slice(&trailer);
+        pack
+    }
+
+    fn in_pack_ref_delta_pack(base: GitOid, base_body: &[u8], target_body: &[u8]) -> Vec<u8> {
+        let suffix = target_body
+            .strip_prefix(base_body)
+            .expect("fixture target extends its uploaded base");
+        assert_eq!(suffix.len(), 1, "fixture has one literal delta suffix");
+        let base_length = u8::try_from(base_body.len()).expect("small bounded fixture");
+        let target_length = u8::try_from(target_body.len()).expect("small bounded fixture");
+        assert!(base_length < 16, "fixture base has a one-byte pack header");
+        let mut program = vec![base_length, target_length, 0x91, 0, base_length];
+        program.push(u8::try_from(suffix.len()).expect("one-byte literal fixture"));
+        program.extend_from_slice(suffix);
+
+        let mut pack = b"PACK\0\0\0\x02\0\0\0\x02".to_vec();
+        // A blob base entry with its native body. The following REF_DELTA
+        // names this entry's native ID, rather than a prior selected closure.
+        pack.push(0x30 | base_length);
+        pack.extend_from_slice(&zlib_stored(base_body));
         pack.push(0x70 | u8::try_from(program.len()).expect("small delta program"));
         pack.extend_from_slice(base.as_bytes());
         pack.extend_from_slice(&zlib_stored(&program));
@@ -1431,6 +1555,49 @@ mod tests {
         permitted_node
             .shutdown()
             .expect("permitted thin-base node shuts down after test");
+    }
+
+    #[test]
+    fn in_pack_ref_delta_uses_its_verified_uploaded_base() {
+        let base_body = b"in-pack-base".to_vec();
+        let target_body = b"in-pack-base!".to_vec();
+        let base_id =
+            fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, &base_body);
+        let target_id =
+            fgit_crypto::git_object_id(GitHashAlgorithm::Sha1, GitObjectKind::Blob, &target_body);
+        let limits = PackLimits::default();
+        let pack_bytes = in_pack_ref_delta_pack(base_id, &base_body, &target_body);
+        let mut live = || true;
+        let pack = read_verified_pack(
+            &pack_bytes,
+            GitHashAlgorithm::Sha1,
+            &limits,
+            &mut live,
+            &NativeChecksumVerifier,
+        )
+        .expect("the complete REF_DELTA fixture crosses verified quarantine");
+        let receipt = QuarantineReceipt {
+            object_format: GitObjectFormat::Sha1,
+            object_count: 2,
+            pack_bytes: pack_bytes.len(),
+            delete_only: false,
+        };
+        let scratch = ScratchDirectory::new();
+        let node = test_node(scratch.path().to_path_buf());
+        let validator = ProductionQuarantineValidator::new(
+            &node,
+            empty_selected_closure(),
+            limits,
+            ParseLimits::default(),
+        );
+
+        let closure = validator
+            .validate(&create_request(target_id), Some(&pack), &receipt, &mut live)
+            .expect("a verified uploaded REF base is not classified as thin");
+        assert_eq!(closure.objects, BTreeSet::from([base_id, target_id]));
+        assert!(node.read_git_object(base_id).is_ok());
+        assert!(node.read_git_object(target_id).is_ok());
+        node.shutdown().expect("node shuts down after test");
     }
 
     #[test]
