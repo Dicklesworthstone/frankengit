@@ -1753,8 +1753,19 @@ fn authenticated_head_body(
         .expect("the authenticated receipt carries a decodable head body")
 }
 
-/// A committed push advances the ref root and leaves the retention, forge and
-/// outbox roots exactly as it found them.
+/// A committed DELETE-ONLY push advances the ref root and leaves the retention,
+/// forge and outbox roots exactly as it found them.
+///
+/// # What this exercises, which is narrower than the property
+///
+/// `delete_main` carries zero objects and no pack, so this is ONE authorized
+/// delete rather than a survey of push shapes. The general claim -- that no
+/// push can touch retention -- rests on the structural argument in the section
+/// header above (receive-pack lowering emits `Intent::Ref` and nothing else),
+/// and this test pins the observable consequence for the single shape it
+/// drives. An object-bearing push would need real pack fixtures this crate does
+/// not have. Named for the delete so the name cannot be read as the broader
+/// claim, which is the form the evidence does not support on its own.
 ///
 /// The `assert_ne!` on the ref root is not decoration: it is the control that
 /// makes the three equalities mean something. A push that committed nothing --
@@ -1762,7 +1773,8 @@ fn authenticated_head_body(
 /// below while proving the opposite of what this test claims. Ordering it
 /// first states that dependency rather than leaving it to be noticed.
 #[test]
-fn a_committed_push_moves_the_ref_root_and_leaves_retention_forge_and_outbox_untouched() {
+fn a_committed_delete_only_push_moves_the_ref_root_and_leaves_retention_forge_and_outbox_untouched()
+{
     let context = context(b"fg019c-retention-boundary");
     let validated = delete_main();
     let (store, projection) = head_bound_setup(&context);

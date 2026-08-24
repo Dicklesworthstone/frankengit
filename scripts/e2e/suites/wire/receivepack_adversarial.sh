@@ -42,7 +42,14 @@ readonly TEST_NAME='receivepack_adversarial'
 # quietly shrinking it.
 readonly WIRE_PROBES=9
 readonly ADMISSION_PROBES=4
-readonly RACE_PROBES=10
+# Updated 10 -> 14 (frankengit-fg019c): the corpus GREW -- three hidden-ref
+# push probes (38bb98f) and one retention-boundary probe (1dcdf43). Revising
+# a pin UPWARD to match a corpus that gained tests is the maintenance this pin
+# exists for; it still fails if the corpus ever SHRINKS, which is the direction
+# it was written to catch. Counted two independent ways at 1dcdf43: this lane
+# own grep over the target output, and the test attributes in the source.
+# Both say 14.
+readonly RACE_PROBES=14
 readonly PROPAGATION_PROBES=3
 
 main() {
@@ -161,7 +168,7 @@ fge_context bead frankengit-fg019c-receivepack-adversarial-sht
 fge_context evidence_class adversarial
 fge_context method 'independent adversary over ProudJaguar receive-pack (fgit-wire) and admission (fgit-admission); every probe drives the public API and no source of theirs is modified'
 fge_context covered 'quarantine discard proven non-vacuously (real bytes buffered then asserted gone); cancellation contract exactly as its owner specified; quota bound refused past and accepted at; pre-seal refusal boundary with its documented delete-only twin; authority-layer disconnect matrix over fault-kind x every operation position a push reaches, classified from the authenticated decision stream; decide-once under a lost response; a duplicated head CAS does not decide one push twice; two sessions each answered from their own authenticated decision'
-fge_context blocked_hidden_refs 'the hidden-ref acceptance line is BLOCKED on a missing capability, not on testing: RefusalCode::HiddenRefUnauthorized (0x0206) is defined in fgit-types and classified in fgit-reference but PRODUCED BY NOTHING; no layer knows principal ref visibility. Confirmed by ProudJaguar. No probe is written for it, because a red assertion against every layer and a green one pinning the absent control are both worse than none'
+fge_context hidden_refs 'NO LONGER BLOCKED, and corrected here rather than left standing. This line previously recorded that RefusalCode::HiddenRefUnauthorized (0x0206) was PRODUCED BY NOTHING and that no layer knew principal ref visibility. That was true when written and is false now: fgit-admission raises it at src/lib.rs:2001 via hides_any_target, and three probes drive it (a_push_targeting_a_hidden_ref_is_refused_as_hidden_ref_unauthorized, its permitted twin, and a_prefix_hide_rule_refuses_a_push_beneath_it, 38bb98f). Upstream agrees this is the right shape: pinned git-2.54.0 Documentation/config/receive.adoc:111 says an attempt to update or delete a hidden ref by git push is rejected. What remains open is NOT the ref-name refusal but whether ref visibility should partition the OBJECT closure, which is an owner ruling recorded on the bead'
 fge_context claim_class 'BOUNDED MODEL, not invariant. The disconnect results range over seven fault kinds crossed with every operation position a clean admission reaches. They do not quantify over all schedules'
 fge_context projection_bound 'RETRACTION, ProudJaguar 9209: the test adapters are NOT conforming projections. snapshot ignores the PublicationBasis and AuthenticatedHead it is handed, and materialize_commit mints roots from seed bytes rather than from state, so three adapters are three variants of ONE unbound adapter and quantifying over them buys nothing about ref semantics. Every claim resting on ref state or on a session observing the successor basis is WITHDRAWN. What survives never depended on the adapter: faults are injected in the store beneath it, and the assertions are about whether a transaction can be RESOLVED and whether it is DECIDED ONCE, never about what was decided'
 fge_context stuck_state_is_detectable 'the forbidden stuck-intermediate class is proven reachable and recognised by driving the exported reconcile_outcome to its fail-closed accelerator-conflict arm, with an agreeing-reads twin, so the matrix assertion can fail in the direction that matters'
