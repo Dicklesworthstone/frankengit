@@ -486,6 +486,18 @@ pub enum IdentityDomain {
     RetentionDelta,
     /// One immutable evidence body supporting a terminal admission refusal.
     AdmissionRefusalEvidence,
+    /// One canonical repository-configuration body.
+    ///
+    /// Selected by an authority head's existing `configuration_root`, so a
+    /// repository states how its authenticated roots are laid out without the
+    /// head body growing a field — and migration becomes an ordinary head
+    /// transition rather than a rewrite of published bytes.
+    ///
+    /// Its own domain rather than a reused one: a configuration body decides
+    /// how other commitments are READ, so letting it be forgeable as some
+    /// other body class would let an attacker change the interpretation of
+    /// every root at once.
+    RepositoryConfiguration,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -765,6 +777,12 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/admission-refusal-evidence/v1",
         None,
     ),
+    owned_row(
+        44,
+        IdentityDomain::RepositoryConfiguration,
+        "frankengit/repository-configuration/v1",
+        None,
+    ),
 ];
 
 const fn pinned_row(
@@ -995,6 +1013,7 @@ impl IdentityDomain {
         Self::OutboxEffectBatch,
         Self::RetentionDelta,
         Self::AdmissionRefusalEvidence,
+        Self::RepositoryConfiguration,
     ];
 
     /// Compile-time completeness guard for [`IdentityDomain::ALL`].
@@ -1059,7 +1078,8 @@ impl IdentityDomain {
             | Self::ForgeEventBatch
             | Self::OutboxEffectBatch
             | Self::RetentionDelta
-            | Self::AdmissionRefusalEvidence => (),
+            | Self::AdmissionRefusalEvidence
+            | Self::RepositoryConfiguration => (),
         }
     }
 

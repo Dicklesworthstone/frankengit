@@ -26,6 +26,7 @@ use fgit_types::identity::{
     PrincipalSnapshotId, RefusalRecordId, RepositoryAuthorityHeadId, RepositoryCapsuleId,
     RepositoryCommitId, RepositoryDecisionBatchId, TransactionSealId, TxId,
 };
+use fgit_types::layout::RootLayoutVersion;
 use fgit_types::numeric::{
     DecisionSequence, HeadGeneration, PolicyEpoch, RegistryEpoch, RepositorySequence,
 };
@@ -589,5 +590,63 @@ impl CanonicalBody for RefusalRecordBody {
             detail: detail.to_owned(),
             evidence_root: input.read_digest()?,
         })
+    }
+}
+
+/// The canonical repository configuration an authority head selects.
+///
+/// A head already carries `configuration_root`, a commitment to a configuration
+/// body that no codec type defined until now. This is that body, and defining
+/// it is what lets a repository state **how its authenticated roots are laid
+/// out** without the head body growing a field.
+///
+/// # Why the carrier is `configuration_root` and not a new head field
+///
+/// `RepositoryAuthorityHeadBody`'s encoding is positional and strict, and
+/// `write_option(None)` still emits a byte — so *any* added field shifts every
+/// head's canonical bytes, changes every head identity, and makes existing
+/// heads undecodable. That would contradict the very requirement the layout
+/// version exists to serve: that heads published before it verify unchanged.
+///
+/// Selecting the version through `configuration_root` costs nothing already
+/// published, and migration becomes an ordinary head transition that names a
+/// different configuration body. Ruled by the orchestrator on `frankengit-ls44`.
+///
+/// # This is the canonical home for future repository configuration
+///
+/// Deliberately minimal in this slice: one field, because inventing
+/// configuration content nobody asked for is how a schema acquires fields with
+/// no producer. `fgit-reference`'s `GenesisConfiguration` and
+/// `ConfigurationRequest` are expected to migrate onto this body later, by
+/// their owners rather than here.
+///
+/// # Unknown versions fail closed
+///
+/// The layout version is decoded through
+/// [`RootLayoutVersion::from_code_point`](fgit_types::layout::RootLayoutVersion::from_code_point),
+/// which refuses a code point this build does not know rather than falling back
+/// to a default. Reading a newer layout as the legacy one would produce a
+/// confident wrong answer about what the repository contains.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RepositoryConfigurationBody {
+    /// How this repository's authenticated roots are laid out.
+    pub root_layout: RootLayoutVersion,
+}
+
+impl CanonicalBody for RepositoryConfigurationBody {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/repository-configuration/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("repository-configuration");
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        out.write_scalar(self.root_layout.code_point());
+        Ok(())
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let root_layout =
+            RootLayoutVersion::from_code_point(input.read_scalar::<u16>("root_layout")?)?;
+        Ok(Self { root_layout })
     }
 }

@@ -43,3 +43,4 @@ id	domain_tag	algorithm	durable_object_row	derived_identity	status
 41	frankengit/outbox-effect-batch/v1	sha256	-	-	active
 42	frankengit/retention-delta/v1	sha256	-	-	active
 43	frankengit/admission-refusal-evidence/v1	sha256	-	-	active
+44	frankengit/repository-configuration/v1	sha256	-	-	active

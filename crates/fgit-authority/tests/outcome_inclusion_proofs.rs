@@ -203,14 +203,28 @@ fn a_root_from_a_foreign_algorithm_does_not_verify() {
     // The root carries an algorithm code point. A digest from another
     // construction must be refused on sight rather than folded against, since
     // comparing bytes across algorithms is meaningless.
+    //
+    // THE FOREIGN ALGORITHM HAS TO BE A DIFFERENT ALGORITHM, not a different
+    // identity domain. The first version of this test built its "foreign" root
+    // from IdentityDomain::RefTransaction.algorithm().id() and failed, because
+    // EVERY identity domain in this workspace is SHA-256 — so that id is
+    // byte-identical to MerkleNode's and the guard correctly did not fire. The
+    // test asserted a discrimination the workspace cannot exercise; the code
+    // was right and the premise was false.
+    //
+    // SHA-1 is code point 1 and is genuinely a different construction, so this
+    // is the only foreign root available to build today.
     let entries = index();
     let root = outcome_index_root(&entries).expect("a root");
     let proof = outcome_index_proof(&entries, tx(0xA1), &committed(1, 0x51)).expect("a proof");
 
-    let foreign = fgit_types::hash::Digest::new(
-        IdentityDomain::RefTransaction.algorithm().id(),
-        *root.bytes(),
+    let sha1 = fgit_types::hash::DigestAlgorithmId::try_new(1).expect("code point one is SHA-1");
+    assert_ne!(
+        sha1,
+        IdentityDomain::MerkleNode.algorithm().id(),
+        "the two algorithms must actually differ, or this test cannot exercise the guard"
     );
+    let foreign = fgit_types::hash::Digest::new(sha1, *root.bytes());
     assert!(
         !verify_outcome_index_membership(&foreign, tx(0xA1), &committed(1, 0x51), &proof)
             .expect("verification completes"),

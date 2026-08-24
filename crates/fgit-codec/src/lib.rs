@@ -21,7 +21,8 @@ pub use error::CodecRefusal;
 pub use reader::Decoder;
 pub use schema::{
     MAX_REFUSAL_DETAIL_LEN, RefusalRecordBody, RepositoryAuthorityHeadBody, RepositoryCommitRecord,
-    RepositoryDecision, RepositoryDecisionBatchBody, TransactionSealBody,
+    RepositoryConfigurationBody, RepositoryDecision, RepositoryDecisionBatchBody,
+    TransactionSealBody,
 };
 pub use wire::{
     CODEC_MAJOR, CODEC_MINOR, CODEC_VERSION, CanonicalBody, DecodedBody, FRAME_MAGIC, FrameHeader,

@@ -31,18 +31,20 @@ use crate::vocabulary::AuthenticatedHead;
 use fgit_codec::wire::encode_body;
 use fgit_codec::{
     CodecRefusal, DecodeLimits, Decoder, Encoder, RepositoryAuthorityHeadBody,
-    RepositoryDecisionBatchBody, decode_body,
+    RepositoryConfigurationBody, RepositoryDecisionBatchBody, decode_body,
 };
 use fgit_crypto::{
     IdentityDomain, MerkleProof, MerkleRefusal, merkle_leaf, merkle_proof, merkle_root,
     verify_merkle_proof,
 };
 use fgit_types::CANONICAL_CODEC_VERSION;
+use fgit_types::error::TypeRefusal;
 use fgit_types::hash::{Digest, DigestBytes};
 use fgit_types::identity::{
     InternalObjectId, RefusalRecordId, RepositoryAuthorityHeadId, RepositoryCommitId,
     RepositoryDecisionBatchId, RepositoryId, TenantId, TxId,
 };
+use fgit_types::layout::RootLayoutVersion;
 use fgit_types::numeric::DecisionSequence;
 use fgit_types::vocabulary::{DecisionOutcome, RefusalCode};
 use std::collections::BTreeMap;
@@ -212,6 +214,13 @@ pub enum OutcomeFailure {
     OutcomeNotIndexed(Box<TxId>),
     /// The shared Merkle core refused to build or walk the tree.
     MerkleShape(Box<MerkleRefusal>),
+    /// A head's `configuration_root` names no decodable configuration body.
+    ///
+    /// Refused only on the PROOF-GENERATION path. Verification treats the same
+    /// state as legacy v0, because that is the layout such a head is actually
+    /// carrying; a proof under it would be a path through a tree that does not
+    /// exist.
+    ConfigurationUnresolvable,
 }
 
 /// The identity a read asked for beside the identity the bytes actually carry.
@@ -283,6 +292,10 @@ impl core::fmt::Display for OutcomeFailure {
                  proof exists"
             ),
             Self::MerkleShape(refusal) => write!(f, "outcome-index tree refused: {refusal}"),
+            Self::ConfigurationUnresolvable => f.write_str(
+                "the head's configuration_root names no decodable configuration body, so the \
+                 root layout cannot be established for proof generation",
+            ),
         }
     }
 }
@@ -884,6 +897,164 @@ const fn outcome_index_schema() -> fgit_types::label::SchemaId {
 /// agreement, so wiring this in as a publication precondition is a cross-crate
 /// decision rather than one this crate may take alone. The check is
 /// deliberately absent rather than unilaterally imposed.
+pub fn outcome_index_root(entries: &[(TxId, TerminalOutcome)]) -> Result<Digest, OutcomeFailure> {
+    Ok(Digest::new(
+        IdentityDomain::MerkleNode.algorithm().id(),
+        merkle_root(outcome_index_schema(), &ordered_outcome_leaves(entries)?),
+    ))
+}
+
+// --- the head-selected root layout (frankengit-ls44) ---------------------------
+//
+// A head already carries `configuration_root`. This is the code that turns it
+// into a `RootLayoutVersion`, which is what makes the layout HEAD-SELECTED
+// rather than a convention every verifier reimplements.
+//
+// The asymmetry below is deliberate and is the orchestrator's ruling, not an
+// inconsistency: a head whose `configuration_root` does not resolve to a
+// decodable body is treated as **v0 legacy for verification** and as a **typed
+// refusal for proof generation**.
+//
+// Verification defaults to v0 because that is what such a head actually
+// carries: every root published before this vocabulary existed is a whole-body
+// digest, and refusing to verify them would break heads that are not wrong.
+// Proof GENERATION refuses because emitting a proof under a layout that has no
+// tree would be emitting something that cannot exist — and a caller handed one
+// would verify it vacuously.
+
+/// The immutable slot a repository configuration body occupies.
+fn configuration_key(root: &Digest) -> Result<ImmutableKey, OutcomeFailure> {
+    let identity = InternalObjectId::new(
+        root.algorithm(),
+        IdentityDomain::RepositoryConfiguration.domain_tag(),
+        CANONICAL_CODEC_VERSION,
+        *root.bytes(),
+    );
+    Ok(body_key_for_id(&identity)?)
+}
+
+/// Stage a repository configuration body and return the root a head selects it by.
+///
+/// The returned digest is what goes in `RepositoryAuthorityHeadBody::
+/// configuration_root`. Publishing a head that names it is what advances the
+/// repository's layout — an ordinary head transition, with no rewrite of
+/// anything already published.
+///
+/// # Errors
+///
+/// Whatever the store or the canonical encoder refuses.
+pub fn stage_repository_configuration<S>(
+    store: &S,
+    configuration: &RepositoryConfigurationBody,
+) -> Result<Digest, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let key = body_key(IdentityDomain::RepositoryConfiguration, configuration)?;
+    store.put_if_absent(&key, &encode_body(configuration)?)?;
+    let identity = canonical_body_id(
+        IdentityDomain::RepositoryConfiguration,
+        CANONICAL_CODEC_VERSION,
+        configuration,
+    )?;
+    Ok(Digest::new(identity.algorithm(), *identity.digest()))
+}
+
+/// The layout a head selects, for **verification**.
+///
+/// A `configuration_root` that is absent from the store, or present and
+/// undecodable, yields [`RootLayoutVersion::LegacyWholeBody`] — because that is
+/// the layout such a head is actually carrying, and refusing it would break
+/// heads that predate this vocabulary and are not wrong.
+///
+/// Note what is NOT defaulted: a body that decodes but names a layout version
+/// this build does not know is a **refusal**, not a fall back to v0. An unknown
+/// version means the head is describing something newer than we can read, and
+/// reading it as legacy would be a confident wrong answer.
+///
+/// # Errors
+///
+/// Whatever the store refuses, and [`OutcomeFailure::Codec`] for a body that
+/// decodes into an unknown layout version.
+pub fn root_layout_for_verification<S>(
+    store: &S,
+    configuration_root: &Digest,
+) -> Result<RootLayoutVersion, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let key = configuration_key(configuration_root)?;
+    match store.read_immutable(&key)? {
+        ImmutableRead::Absent => Ok(RootLayoutVersion::LegacyWholeBody),
+        ImmutableRead::Present(bytes) => interpret_configuration_for_verification(&bytes),
+    }
+}
+
+/// The layout a head selects, for **proof generation**.
+///
+/// Unlike [`root_layout_for_verification`], an unresolvable or undecodable
+/// `configuration_root` is a typed refusal here. A proof generated under an
+/// assumed legacy layout would be a proof of nothing: v0 has no tree, so there
+/// is no path to hand over, and silently producing one is worse than refusing.
+///
+/// # Errors
+///
+/// [`OutcomeFailure::ConfigurationUnresolvable`] when the root names no stored
+/// body or the stored bytes do not decode, and [`OutcomeFailure::Codec`] for an
+/// unknown layout version.
+pub fn root_layout_for_proof<S>(
+    store: &S,
+    configuration_root: &Digest,
+) -> Result<RootLayoutVersion, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    let key = configuration_key(configuration_root)?;
+    let ImmutableRead::Present(bytes) = store.read_immutable(&key)? else {
+        return Err(OutcomeFailure::ConfigurationUnresolvable);
+    };
+    let configuration: RepositoryConfigurationBody = decode_body(&bytes, DecodeLimits::DEFAULT)
+        .map_err(|_| OutcomeFailure::ConfigurationUnresolvable)?;
+    Ok(configuration.root_layout)
+}
+
+/// Shared reading of a stored configuration body for the verification path.
+///
+/// Split out so the two surfaces cannot drift on the one rule that is easy to
+/// get wrong: undecodable BYTES fall back to legacy, an unknown VERSION does
+/// not.
+fn interpret_configuration_for_verification(
+    bytes: &[u8],
+) -> Result<RootLayoutVersion, OutcomeFailure> {
+    match decode_body::<RepositoryConfigurationBody>(bytes, DecodeLimits::DEFAULT) {
+        Ok(configuration) => Ok(configuration.root_layout),
+        Err(refusal) if refusal_is_unknown_layout(&refusal) => Err(OutcomeFailure::Codec(refusal)),
+        Err(_) => Ok(RootLayoutVersion::LegacyWholeBody),
+    }
+}
+
+/// Whether a decode refusal came from an unrecognised layout code point.
+///
+/// The distinction this makes is the whole point of the split above: bytes that
+/// are not a configuration body at all mean "this head predates the
+/// vocabulary", while bytes that ARE one and name a version we cannot read mean
+/// "this head is newer than us". The first is legacy; the second must refuse.
+///
+/// Matched structurally on the typed refusal rather than on its rendered text.
+/// A string match would silently start defaulting newer heads to legacy the
+/// first time anyone reworded a `Display` impl — a failure that no test of the
+/// refusal path would catch, because the path would still be taken, just to the
+/// wrong destination.
+fn refusal_is_unknown_layout(refusal: &CodecRefusal) -> bool {
+    matches!(
+        refusal,
+        CodecRefusal::Type(TypeRefusal::CodePointUnknown {
+            field: "RootLayoutVersion",
+            ..
+        })
+    )
+}
+
 /// One outcome-index leaf.
 ///
 /// The preimage is a fixed-width transaction digest followed by the canonical
@@ -981,13 +1152,6 @@ pub fn verify_outcome_index_membership(
         root.bytes(),
         &leaf,
         proof,
-    ))
-}
-
-pub fn outcome_index_root(entries: &[(TxId, TerminalOutcome)]) -> Result<Digest, OutcomeFailure> {
-    Ok(Digest::new(
-        IdentityDomain::MerkleNode.algorithm().id(),
-        merkle_root(outcome_index_schema(), &ordered_outcome_leaves(entries)?),
     ))
 }
 
