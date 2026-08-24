@@ -64,11 +64,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use fgit_object_fabric::fabric::{
-    ImmutableObjectFabric, PlacementAdmission, PutIfAbsent, StoreRefusal, VerifiedObject,
+    ImmutableObjectFabric, ManifestLimits, PlacementAdmission, PlacementBackend, PlacementReceipt,
+    PutIfAbsent, SegmentManifest, StoreRefusal, VerifiedObject,
 };
 use fgit_object_fabric::local::{LocalFilesystemConfig, LocalFilesystemFabric};
 use fgit_object_fabric::{
-    CryptoDigest, DigestAlgorithm, ObjectEnvelope, ObjectKind, SegmentLimits,
+    CryptoDigest, DigestAlgorithm, MicrosegmentBuilder, MicrosegmentReader, ObjectEnvelope,
+    ObjectKind, SegmentLimits, SegmentRecordInput,
 };
 use fgit_resource::algebra::{Grade, ResourceVector};
 use fgit_resource::custody::{LeakDisposition, ObligationLedger};
@@ -588,6 +590,100 @@ fn a_write_one_byte_over_the_ceiling_is_refused_and_names_the_measured_length() 
     // the grant to nobody would strand the caller's budget, and every later
     // drill sharing this ledger shape would inherit the leak.
     close_quiescent(ledger);
+}
+
+// ---------------------------------------------------------------------------
+// :466 -- the immutable-body ceiling (e6eb)
+// ---------------------------------------------------------------------------
+
+/// A real manifest, derived from a real verified microsegment.
+///
+/// `ManifestEntry`'s fields are private with getters only, so an integration
+/// test cannot build one by struct literal the way the in-crate test module
+/// does -- that is `error[E0451]`. The public route is to build a microsegment,
+/// verify it, and let `from_verified_segment` derive the entries, which is also
+/// the more honest fixture: the manifest describes a segment that actually
+/// exists.
+fn manifest_over_one_record() -> SegmentManifest {
+    let digest = CryptoDigest;
+    let limits = SegmentLimits::default();
+    let payload = b"e6eb immutable-body record";
+
+    let mut builder = MicrosegmentBuilder::new(&digest, limits.clone());
+    builder
+        .push(SegmentRecordInput {
+            envelope: envelope_for(payload, NAMESPACE),
+            payload: payload.to_vec(),
+        })
+        .expect("one small record must fit the default limits");
+    let segment = builder.build().expect("one record must build");
+
+    let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, &limits)
+        .expect("a freshly built segment must verify");
+
+    SegmentManifest::from_verified_segment(
+        &reader,
+        vec![PlacementReceipt::new(
+            PlacementBackend::LocalFilesystem,
+            OpaqueHandle::new(b"e6eb-locator").expect("fixture locator must fit"),
+            OpaqueHandle::new(b"e6eb-domain").expect("fixture failure domain must fit"),
+            OpaqueHandle::new(b"e6eb-key").expect("fixture key dependency must fit"),
+        )],
+        &ManifestLimits {
+            max_namespace_bytes: 256,
+            max_entries: 65_536,
+            max_placements: 65_536,
+        },
+    )
+    .expect("a manifest derived from a verified segment must be canonical")
+}
+
+/// THE THIRD CEILING SITE, WHICH NOTHING REACHED.
+///
+/// `:466` is in `write_immutable_bytes`, entered only from `write_manifest` and
+/// `publish_retention_root` -- never from `put_if_absent`. So while `:348` and
+/// `:392` are now pinned, a `>` -> `>=` tightening at `:466` was MEASURED to
+/// survive the entire binary: 12 passed, 0 failed, in a run verified to have
+/// recompiled. This drill is what makes that mutation observable.
+///
+/// Deliberately a separate test rather than another assertion on the object
+/// twin: both existing kills already die to that one function, and hanging a
+/// third site off it would make one test the single point of failure for all
+/// three.
+#[test]
+fn a_manifest_body_of_exactly_the_ceiling_is_admitted_and_one_byte_under_is_refused() {
+    let manifest = manifest_over_one_record();
+    let body_len = u64::try_from(
+        manifest
+            .encode()
+            .expect("the fixture manifest must encode")
+            .len(),
+    )
+    .expect("an encoded manifest length fits u64");
+
+    // Exactly the ceiling: admitted. This is the half a `>=` would break.
+    let tight_root = temp_root("manifest-tight");
+    let tight = fabric(tight_root, NAMESPACE, body_len);
+    tight
+        .write_manifest(&manifest)
+        .expect("a manifest body of exactly the ceiling must be admitted");
+
+    // One byte under: refused, and naming the encoded length it measured, which
+    // is what fixes the guard's quantity to the body rather than to something
+    // incidentally larger.
+    let under_root = temp_root("manifest-under");
+    let under = fabric(under_root, NAMESPACE, body_len - 1);
+    let outcome = under.write_manifest(&manifest);
+
+    assert!(
+        matches!(
+            outcome,
+            Err(StoreRefusal::StoredObjectTooLarge { offered, maximum })
+                if offered == body_len && maximum == body_len - 1
+        ),
+        "the immutable-body guard must refuse one byte under and report the \
+         encoded manifest length as offered; got {outcome:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
