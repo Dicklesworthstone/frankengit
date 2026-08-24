@@ -506,6 +506,16 @@ pub enum IdentityDomain {
     RepositoryCreationAttempt,
     /// One retained leaf-set checkpoint for the cumulative outcome index.
     OutcomeIndexCheckpoint,
+    /// One versioned hidden-ref policy body, named by a configuration's
+    /// `policy_root`.
+    ///
+    /// Separate from the configuration bodies that point at it so that policy
+    /// content evolves in its own versioned body and the carriers never
+    /// re-version for a policy change. Shared by both carrier families: the
+    /// major-1 configuration and the incarnation-aware one name the same policy
+    /// body, so a repository's hide rules mean one thing regardless of which
+    /// carrier its head selects.
+    HiddenRefPolicy,
 }
 
 /// The identity-domain registry, in registry-identifier order.
@@ -803,6 +813,12 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
         "frankengit/outcome-index-checkpoint/v1",
         Some("DUR-018"),
     ),
+    owned_row(
+        47,
+        IdentityDomain::HiddenRefPolicy,
+        "frankengit/hidden-ref-policy/v1",
+        None,
+    ),
 ];
 
 const fn pinned_row(
@@ -1036,6 +1052,7 @@ impl IdentityDomain {
         Self::RepositoryConfiguration,
         Self::RepositoryCreationAttempt,
         Self::OutcomeIndexCheckpoint,
+        Self::HiddenRefPolicy,
     ];
 
     /// Compile-time completeness guard for [`IdentityDomain::ALL`].
@@ -1103,7 +1120,8 @@ impl IdentityDomain {
             | Self::AdmissionRefusalEvidence
             | Self::RepositoryConfiguration
             | Self::RepositoryCreationAttempt
-            | Self::OutcomeIndexCheckpoint => (),
+            | Self::OutcomeIndexCheckpoint
+            | Self::HiddenRefPolicy => (),
         }
     }
 

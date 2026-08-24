@@ -806,6 +806,63 @@ impl CanonicalBody for CreationAttemptBody {
     }
 }
 
+/// The ordered hidden-ref policy a repository serves, named by a
+/// configuration's `policy_root`.
+///
+/// # Why the rules live here and not in the carrier
+///
+/// A configuration body's encoding is positional and strict, so growing it with
+/// a collection would re-version the carrier every time policy content changed —
+/// and there are two carrier families, so every such change would have to be
+/// made twice and kept in step. Naming a separate body instead means the
+/// carriers gain exactly one optional field, once, and never re-version for a
+/// policy change again. Ruled by the orchestrator on `frankengit-jkbo`, and it
+/// is the same argument `frankengit-ls44` made for not growing the head.
+///
+/// # One definition, both carriers
+///
+/// [`RepositoryConfigurationBody`] and
+/// [`RepositoryIncarnationConfigurationBody`] name the same policy body, so a
+/// repository's hide rules mean one thing regardless of which carrier its head
+/// selects. Migrating a repository between carriers therefore cannot silently
+/// change what it hides.
+///
+/// # Order is semantic
+///
+/// `RefVisibility::hides` is last-match-wins and a rule may begin with `!` to
+/// re-expose a name an earlier rule hid, so this encodes as a sequence and never
+/// as a canonical set: sorting the rules would silently change which one wins.
+/// Rules are stored as raw patterns rather than a built policy because this
+/// crate depends only on `fgit-crypto` and `fgit-types` and cannot name
+/// `fgit-wire`'s type; a consumer builds one by feeding each rule to
+/// `RefVisibility::push_rule`, which validates every pattern and bounds the
+/// count.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HiddenRefPolicyBody {
+    /// Ordered hide rules; the last match wins, and a leading `!` re-exposes.
+    pub rules: Vec<Vec<u8>>,
+}
+
+impl CanonicalBody for HiddenRefPolicyBody {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/hidden-ref-policy/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("hidden-ref-policy");
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        out.write_sequence("rules", &self.rules, |out, rule| {
+            out.write_bytes("rule", rule)
+        })
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let rules = input.read_sequence("rules", |input| {
+            input.read_bytes("rule").map(<[u8]>::to_vec)
+        })?;
+        Ok(Self { rules })
+    }
+}
+
 /// The repository configuration selected by a head for an incarnation-aware
 /// repository.
 ///
