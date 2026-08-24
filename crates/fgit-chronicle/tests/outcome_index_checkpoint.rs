@@ -2,8 +2,9 @@
 
 use fgit_authority::{
     AuthorityStore, HeadKey, HeadRead, MemoryAuthorityStore, OutcomeFailure, StoreInstanceId,
-    TerminalOutcome, authority_head_identity, collect_cumulative_outcomes, initialize_repository,
-    outcome_index_root, publish_decisions,
+    TerminalOutcome, authority_head_identity, collect_cumulative_outcomes,
+    collect_cumulative_outcomes_from_checkpoint, initialize_repository, outcome_index_root,
+    publish_decisions,
 };
 use fgit_chronicle::{
     BackupProfile, CapsuleClosure, LiveCapsuleRefusal, OutcomeIndexCheckpointBody,
@@ -14,7 +15,8 @@ use fgit_chronicle::{
 use fgit_codec::{CryptoBodyIdentity, DecodeLimits, RepositoryAuthorityHeadBody, decode_body};
 use fgit_types::{
     CANONICAL_CODEC_VERSION, Digest, DigestAlgorithmId, DigestBytes, HeadGeneration, OPAQUE_ID_LEN,
-    PolicyEpoch, RefusalCode, RefusalRecordId, RegistryEpoch, RepositoryId, TenantId, TxId,
+    PolicyEpoch, RefusalCode, RefusalRecordId, RegistryEpoch, RepositoryDecisionBatchId,
+    RepositoryId, TenantId, TxId,
 };
 
 const FIXTURE_ALGORITHM_CODE_POINT: u16 = 0xfff1;
@@ -291,5 +293,68 @@ fn checkpoint_with_wrong_leaves_cannot_be_capsule_bound_at_a_real_position() {
         ),
         Err(LiveCapsuleRefusal::OutcomeIndexCheckpointPosition(error))
             if matches!(*error, OutcomeFailure::CheckpointRootMismatch)
+    ));
+}
+
+#[test]
+fn checkpoint_collector_refuses_same_tail_with_a_different_sequence() {
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x6363));
+    let key = head_key();
+    let (publication, first_receipt) = publish_first_refusal(&store, &key);
+    let carried = collect_cumulative_outcomes(&store, &key).expect("first decision collects");
+    let decisions = carried
+        .checkpoint_decisions_against(first_receipt.token())
+        .expect("first decisions remain token-bound");
+
+    assert!(matches!(
+        collect_cumulative_outcomes_from_checkpoint(
+            &store,
+            &key,
+            &decisions,
+            publication.head().decision_tail_id,
+            None,
+        ),
+        Err(OutcomeFailure::CheckpointPositionMismatch)
+    ));
+}
+
+#[test]
+fn checkpoint_collector_refuses_a_tail_outside_the_head_ancestry() {
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x6464));
+    let key = head_key();
+    let (publication, first_receipt) = publish_first_refusal(&store, &key);
+    let carried = collect_cumulative_outcomes(&store, &key).expect("first decision collects");
+    let decisions = carried
+        .checkpoint_decisions_against(first_receipt.token())
+        .expect("first decisions remain token-bound");
+    let unreachable_tail = derived!(RepositoryDecisionBatchId, 0x65);
+
+    assert!(matches!(
+        collect_cumulative_outcomes_from_checkpoint(
+            &store,
+            &key,
+            &decisions,
+            Some(unreachable_tail),
+            publication.head().latest_decision_sequence,
+        ),
+        Err(OutcomeFailure::CheckpointPositionMismatch)
+    ));
+}
+
+#[test]
+fn checkpoint_collector_refuses_position_matched_wrong_leaves() {
+    let store = MemoryAuthorityStore::new(StoreInstanceId::from_raw(0x6666));
+    let key = head_key();
+    let (publication, _) = publish_first_refusal(&store, &key);
+
+    assert!(matches!(
+        collect_cumulative_outcomes_from_checkpoint(
+            &store,
+            &key,
+            &[],
+            publication.head().decision_tail_id,
+            publication.head().latest_decision_sequence,
+        ),
+        Err(OutcomeFailure::CheckpointRootMismatch)
     ));
 }
