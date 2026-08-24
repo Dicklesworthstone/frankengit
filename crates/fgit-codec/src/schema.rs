@@ -662,9 +662,16 @@ pub struct RepositoryConfigurationBody {
     /// A leading `!` re-exposes a name an earlier rule hid, which is the
     /// grammar `RefVisibility::push_rule` already parses. Stored as raw patterns
     /// rather than a built policy because this crate depends only on
-    /// `fgit-crypto` and `fgit-types` and cannot name `fgit-wire`'s type; the
-    /// consumer builds one through `push_rule`, which validates every pattern
-    /// and bounds the count against `max_ref_prefixes`.
+    /// `fgit-crypto` and `fgit-types` and cannot name `fgit-wire`'s type.
+    ///
+    /// A consumer is *expected* to build the policy by feeding each rule to
+    /// `push_rule`, which validates every pattern and bounds the count against
+    /// `max_ref_prefixes`. As of this commit **no production code does so**: the
+    /// fetch view ignores `AdmissionSnapshot.hidden_refs` entirely and the push
+    /// view takes its policy as a caller argument, so a repository can store
+    /// rules here and still hide nothing. Said plainly rather than left to be
+    /// inferred from the present tense, because a reader who assumes the wiring
+    /// exists will not go looking for it. Tracked on `frankengit-jkbo`.
     ///
     /// Order is semantic, so this encodes as a sequence and never as a
     /// canonical set: sorting the rules would silently change which one wins.
