@@ -30,7 +30,7 @@
 use crate::vocabulary::AuthenticatedHead;
 use fgit_codec::wire::encode_body;
 use fgit_codec::{
-    CodecRefusal, DecodeLimits, Decoder, Encoder, RepositoryAuthorityHeadBody,
+    CodecRefusal, CreationAttemptBody, DecodeLimits, Decoder, Encoder, RepositoryAuthorityHeadBody,
     RepositoryConfigurationBody, RepositoryDecision, RepositoryDecisionBatchBody,
     RepositoryIncarnationConfigurationBody, decode_body,
 };
@@ -53,7 +53,7 @@ use std::collections::BTreeMap;
 
 use crate::async_contract::{AsyncAuthorityStore, DuplicateAbsenceWitness};
 use crate::contract::AuthorityStore;
-use crate::identity::canonical_body_id;
+use crate::identity::{IdempotencyKey, canonical_body_id};
 use crate::keys::{HeadKey, ImmutableKey};
 use crate::seal::{BODY_KEY_PREFIX, SealFailure, body_key};
 use fgit_types::HeadGeneration;
@@ -61,11 +61,19 @@ use fgit_types::HeadGeneration;
 use crate::tokens::AuthorityVersionToken;
 use crate::vocabulary::{
     AuthorityFailure, AuthorityRefusal, CasOutcome, HeadInit, HeadRead, HeadReadReceipt,
-    ImmutableRead,
+    ImmutableRead, PutOutcome,
 };
 
 /// Namespace prefix of a per-identity outcome accelerator slot.
 pub const OUTCOME_KEY_PREFIX: &[u8] = b"fg/outcome/v1/";
+
+/// Namespace prefix of an immutable repository-creation-attempt slot.
+///
+/// The bytes that follow are fixed-width tenant and repository identities plus
+/// the digest of the caller-supplied idempotency key. This is not a second
+/// routing authority: it is the immutable idempotency record that determines
+/// which minted incarnation a lost-response retry must reuse.
+pub const CREATION_ATTEMPT_KEY_PREFIX: &[u8] = b"fg/creation-attempt/v1/";
 
 /// Largest number of batches one replay will walk before refusing.
 ///
@@ -84,6 +92,29 @@ pub enum OutcomeLookup {
     /// before publication leaves a sealed transaction undecided and retryable
     /// (§5.3).
     Undecided,
+}
+
+/// The result of recording one repository-creation attempt.
+///
+/// Both variants carry the authoritative stored body. A retry must use the
+/// `Recovered` body rather than its locally minted candidate, because only the
+/// first successful put-if-absent chose the repository incarnation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CreationAttemptOutcome {
+    /// This caller first occupied the attempt slot.
+    Created(CreationAttemptBody),
+    /// A prior writer occupied the slot with the same fixed request fields.
+    Recovered(CreationAttemptBody),
+}
+
+impl CreationAttemptOutcome {
+    /// The immutable attempt body selected by the creation slot.
+    #[must_use]
+    pub const fn body(&self) -> &CreationAttemptBody {
+        match self {
+            Self::Created(body) | Self::Recovered(body) => body,
+        }
+    }
 }
 
 /// One terminal decision, as the index and the stream both report it.
@@ -233,6 +264,24 @@ pub enum OutcomeFailure {
     /// carrying; a proof under it would be a path through a tree that does not
     /// exist.
     ConfigurationUnresolvable,
+    /// The supplied caller key does not digest to the body field it purports
+    /// to bind.
+    ///
+    /// Accepting it would make a key select a creation body that records a
+    /// different key, defeating the byte-for-byte retry check.
+    CreationAttemptKeyMismatch,
+    /// A reused creation idempotency key changed one or more fixed request
+    /// bytes.
+    ///
+    /// This is a typed §5.2 refusal: the original immutable body remains
+    /// authoritative, and the retry may not repurpose its key to mint a new
+    /// incarnation or alter the selected repository facts.
+    CreationAttemptFixedFieldsMismatch,
+    /// A completed put-if-absent was not readable by its exact attempt key.
+    ///
+    /// The implementation never treats this as absence: doing so would let a
+    /// later writer mint a second incarnation after a lost response.
+    CreationAttemptUnresolvable,
 }
 
 /// The identity a read asked for beside the identity the bytes actually carry.
@@ -313,6 +362,16 @@ impl core::fmt::Display for OutcomeFailure {
             Self::ConfigurationUnresolvable => f.write_str(
                 "the head's configuration_root names no decodable configuration body, so the \
                  root layout cannot be established for proof generation",
+            ),
+            Self::CreationAttemptKeyMismatch => f.write_str(
+                "the supplied creation idempotency key does not match the digest committed by \
+                 the creation attempt body",
+            ),
+            Self::CreationAttemptFixedFieldsMismatch => f.write_str(
+                "the creation idempotency key was reused with different fixed request bytes",
+            ),
+            Self::CreationAttemptUnresolvable => f.write_str(
+                "the immutable creation attempt could not be read after its slot was occupied",
             ),
         }
     }
@@ -945,6 +1004,116 @@ pub fn outcome_index_root(entries: &[(TxId, TerminalOutcome)]) -> Result<Digest,
 // Proof GENERATION refuses because emitting a proof under a layout that has no
 // tree would be emitting something that cannot exist — and a caller handed one
 // would verify it vacuously.
+
+/// Derive the immutable slot for one caller-supplied creation idempotency key.
+///
+/// The slot's fixed-width scope prevents a key used under one repository from
+/// selecting a creation record under another. The raw client key never enters
+/// durable state; its canonical digest is sufficient to select the record and
+/// is checked again against the body before any write.
+fn creation_attempt_key(
+    tenant_id: TenantId,
+    repository_id: RepositoryId,
+    idempotency_key: &IdempotencyKey,
+) -> Result<ImmutableKey, OutcomeFailure> {
+    let key_digest = idempotency_key.digest();
+    let mut bytes = Vec::with_capacity(CREATION_ATTEMPT_KEY_PREFIX.len() + 16 + 16 + 2 + 32);
+    bytes.extend_from_slice(CREATION_ATTEMPT_KEY_PREFIX);
+    bytes.extend_from_slice(tenant_id.as_bytes());
+    bytes.extend_from_slice(repository_id.as_bytes());
+    bytes.extend_from_slice(&key_digest.algorithm().code_point().to_be_bytes());
+    bytes.extend_from_slice(key_digest.bytes().as_bytes());
+    Ok(ImmutableKey::new(bytes).map_err(SealFailure::from)?)
+}
+
+/// Require that the body actually commits to the caller key that selected it.
+fn validate_creation_attempt_key(
+    attempt: &CreationAttemptBody,
+    idempotency_key: &IdempotencyKey,
+) -> Result<(), OutcomeFailure> {
+    if attempt.idempotency_key_digest == idempotency_key.digest() {
+        Ok(())
+    } else {
+        Err(OutcomeFailure::CreationAttemptKeyMismatch)
+    }
+}
+
+/// Decode a stored creation body and require an exact fixed-request retry.
+fn recovered_creation_attempt(
+    bytes: &[u8],
+    requested: &CreationAttemptBody,
+) -> Result<CreationAttemptOutcome, OutcomeFailure> {
+    let stored: CreationAttemptBody = decode_body(bytes, DecodeLimits::DEFAULT)?;
+    if stored.fixed_request_bytes()? != requested.fixed_request_bytes()? {
+        return Err(OutcomeFailure::CreationAttemptFixedFieldsMismatch);
+    }
+    Ok(CreationAttemptOutcome::Recovered(stored))
+}
+
+/// Record a repository-creation attempt or recover the first writer's result.
+///
+/// The caller must supply an explicit [`IdempotencyKey`]. On an empty slot,
+/// its minted incarnation is committed with `put_if_absent`; if the response is
+/// lost, a retry may present a freshly minted candidate but must receive the
+/// immutable incarnation already stored. Reusing a key with any different
+/// fixed request bytes is a typed refusal, never a replacement.
+///
+/// # Errors
+///
+/// Store ambiguity remains ambiguity. A caller resolves it by retrying this
+/// exact operation with the same caller key; the retry reads the occupied slot
+/// and either recovers its body or fails closed.
+pub fn record_creation_attempt<S>(
+    store: &S,
+    idempotency_key: &IdempotencyKey,
+    attempt: &CreationAttemptBody,
+) -> Result<CreationAttemptOutcome, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+{
+    validate_creation_attempt_key(attempt, idempotency_key)?;
+    let key = creation_attempt_key(attempt.tenant_id, attempt.repository_id, idempotency_key)?;
+    let encoded = encode_body(attempt)?;
+
+    match store.put_if_absent(&key, &encoded)? {
+        PutOutcome::Created => Ok(CreationAttemptOutcome::Created(*attempt)),
+        PutOutcome::IdenticalRetry | PutOutcome::Conflict => {
+            let ImmutableRead::Present(bytes) = store.read_immutable(&key)? else {
+                return Err(OutcomeFailure::CreationAttemptUnresolvable);
+            };
+            recovered_creation_attempt(&bytes, attempt)
+        }
+    }
+}
+
+/// The production asynchronous twin of [`record_creation_attempt`].
+///
+/// It deliberately retains the same occupied-slot read and byte-for-byte
+/// validation. A production node therefore cannot turn a transport retry into
+/// a second incarnation merely because its authority backend is asynchronous.
+pub async fn record_creation_attempt_async<S>(
+    store: &S,
+    cx: &S::Context,
+    idempotency_key: &IdempotencyKey,
+    attempt: &CreationAttemptBody,
+) -> Result<CreationAttemptOutcome, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+{
+    validate_creation_attempt_key(attempt, idempotency_key)?;
+    let key = creation_attempt_key(attempt.tenant_id, attempt.repository_id, idempotency_key)?;
+    let encoded = encode_body(attempt)?;
+
+    match store.put_if_absent(cx, &key, &encoded).await? {
+        PutOutcome::Created => Ok(CreationAttemptOutcome::Created(*attempt)),
+        PutOutcome::IdenticalRetry | PutOutcome::Conflict => {
+            let ImmutableRead::Present(bytes) = store.read_immutable(cx, &key).await? else {
+                return Err(OutcomeFailure::CreationAttemptUnresolvable);
+            };
+            recovered_creation_attempt(&bytes, attempt)
+        }
+    }
+}
 
 /// The immutable slot a repository configuration body occupies.
 fn configuration_key(root: &Digest) -> Result<ImmutableKey, OutcomeFailure> {

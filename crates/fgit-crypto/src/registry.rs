@@ -498,6 +498,12 @@ pub enum IdentityDomain {
     /// other body class would let an attacker change the interpretation of
     /// every root at once.
     RepositoryConfiguration,
+    /// One immutable repository-creation attempt body.
+    ///
+    /// The body binds the first successful creation writer's minted
+    /// incarnation to the fixed request facts.  Retrying the caller-supplied
+    /// idempotency key reuses that body rather than minting a new incarnation.
+    RepositoryCreationAttempt,
     /// One retained leaf-set checkpoint for the cumulative outcome index.
     OutcomeIndexCheckpoint,
 }
@@ -787,6 +793,12 @@ pub const DOMAIN_REGISTRY: &[DomainRow] = &[
     ),
     owned_row(
         45,
+        IdentityDomain::RepositoryCreationAttempt,
+        "frankengit/repository-creation-attempt/v1",
+        None,
+    ),
+    owned_row(
+        46,
         IdentityDomain::OutcomeIndexCheckpoint,
         "frankengit/outcome-index-checkpoint/v1",
         Some("DUR-018"),
@@ -1022,6 +1034,7 @@ impl IdentityDomain {
         Self::RetentionDelta,
         Self::AdmissionRefusalEvidence,
         Self::RepositoryConfiguration,
+        Self::RepositoryCreationAttempt,
         Self::OutcomeIndexCheckpoint,
     ];
 
@@ -1089,6 +1102,7 @@ impl IdentityDomain {
             | Self::RetentionDelta
             | Self::AdmissionRefusalEvidence
             | Self::RepositoryConfiguration
+            | Self::RepositoryCreationAttempt
             | Self::OutcomeIndexCheckpoint => (),
         }
     }

@@ -720,6 +720,85 @@ impl CanonicalBody for RepositoryConfigurationBody {
     }
 }
 
+/// The immutable record of one repository-creation attempt.
+///
+/// The caller supplies the idempotency key out of band; this body retains only
+/// its digest.  The key's immutable-store slot is scoped by tenant and
+/// repository, while this body commits to the request's fixed facts and to the
+/// incarnation the first successful writer minted.  A lost-response retry can
+/// therefore recover that exact incarnation without ever deriving an identity
+/// from a mutable repository name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CreationAttemptBody {
+    /// Tenant in which the repository is being created.
+    pub tenant_id: TenantId,
+    /// Stable repository identity being created.
+    pub repository_id: RepositoryId,
+    /// Authenticated-root layout selected at creation.
+    pub root_layout: RootLayoutVersion,
+    /// Native Git object identity domain selected at creation.
+    pub object_format: GitHashAlgorithm,
+    /// Digest of the caller-supplied creation idempotency key.
+    pub idempotency_key_digest: Digest,
+    /// Incarnation minted by the writer that first claimed the attempt slot.
+    pub repository_incarnation_id: RepositoryIncarnationId,
+}
+
+impl CreationAttemptBody {
+    /// Canonical bytes of the request fields that a retry must match exactly.
+    ///
+    /// The minted incarnation is deliberately absent: it is the value a retry
+    /// recovers from the first writer rather than an input it is allowed to
+    /// replace.  This is a raw canonical projection, not a semantic
+    /// comparison, so future callers cannot normalize one fixed request into
+    /// another before idempotency validation.
+    pub fn fixed_request_bytes(&self) -> Result<Vec<u8>, CodecRefusal> {
+        let mut out = Encoder::new();
+        out.write_opaque_id(self.tenant_id.as_bytes());
+        out.write_opaque_id(self.repository_id.as_bytes());
+        out.write_scalar(self.root_layout.code_point());
+        out.write_scalar(self.object_format.code_point());
+        out.write_digest(&self.idempotency_key_digest)?;
+        Ok(out.into_bytes())
+    }
+}
+
+impl CanonicalBody for CreationAttemptBody {
+    const DOMAIN: DomainTag = DomainTag::from_static("frankengit/repository-creation-attempt/v1");
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("repository-creation-attempt");
+    const SCHEMA_MAJOR: u16 = 1;
+    const SCHEMA_MINOR: u16 = 0;
+
+    fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
+        out.write_opaque_id(self.tenant_id.as_bytes());
+        out.write_opaque_id(self.repository_id.as_bytes());
+        out.write_scalar(self.root_layout.code_point());
+        out.write_scalar(self.object_format.code_point());
+        out.write_digest(&self.idempotency_key_digest)?;
+        out.write_opaque_id(self.repository_incarnation_id.as_bytes());
+        Ok(())
+    }
+
+    fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
+        let tenant_id = TenantId::from_bytes(input.read_opaque_id("tenant_id")?);
+        let repository_id = RepositoryId::from_bytes(input.read_opaque_id("repository_id")?);
+        let root_layout =
+            RootLayoutVersion::from_code_point(input.read_scalar::<u16>("root_layout")?)?;
+        let object_format =
+            GitHashAlgorithm::from_code_point(input.read_scalar::<u16>("object_format")?)?;
+        Ok(Self {
+            tenant_id,
+            repository_id,
+            root_layout,
+            object_format,
+            idempotency_key_digest: input.read_digest()?,
+            repository_incarnation_id: RepositoryIncarnationId::from_bytes(
+                input.read_opaque_id("repository_incarnation_id")?,
+            ),
+        })
+    }
+}
+
 /// The repository configuration selected by a head for an incarnation-aware
 /// repository.
 ///
