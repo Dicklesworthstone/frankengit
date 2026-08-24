@@ -23,8 +23,9 @@ use fgit_admission::{
     initialize_canonical_repository,
 };
 use fgit_authority::{
-    AuthenticatedHead, AuthorityStore, HeadKey, HeadRead, IdempotencyKey, MemoryAuthorityStore,
-    StoreInstanceId,
+    AuthenticatedHead, AuthorityOpKind, AuthorityStore, FaultDirective, FaultKind, FaultPlan,
+    FaultPosition, FaultableAuthorityStore, HeadKey, HeadRead, IdempotencyKey,
+    MemoryAuthorityStore, StoreInstanceId,
 };
 use fgit_chronicle::PublicationBasis;
 use fgit_codec::RepositoryAuthorityHeadBody;
@@ -464,5 +465,91 @@ fn scheduled_merge_race_has_one_winner_and_no_half_merged_ref_state() {
             .get(&RefName::try_new(MAIN_REF).expect("fixture ref name")),
         Some(&oid(RIVAL_MERGE_OID)),
         "the final head names the complete winner, never candidate A's partial ref movement"
+    );
+}
+
+/// A crash after the merge CAS applied leaves an ambiguous caller, not a
+/// half-publication.
+///
+/// The fault uses an operation-kind ordinal, not an absolute operation index:
+/// sealing and snapshot reads may gain implementation detail without moving
+/// the semantic point under test.  `CompareExchangeHead` is the authority
+/// publication boundary, and the fault log below proves that the chosen fault
+/// actually landed after that effect.
+#[test]
+fn crash_after_merge_cas_recovers_the_same_terminal_and_complete_ref_state() {
+    let (context, store, production, commitments) = repository();
+    let package = package(FIRST_MERGE_OID);
+    let attempt = attempt();
+    let closure = closure(FIRST_MERGE_OID);
+    let sealed = sealed(&package, &attempt, &closure);
+
+    store.install_fault_plan(FaultPlan::explicit(vec![FaultDirective::nth_of_kind(
+        0,
+        AuthorityOpKind::CompareExchangeHead,
+        FaultKind::Crash {
+            position: FaultPosition::AfterEffect,
+        },
+    )]));
+    let interrupted = admit_merge(
+        store.as_ref(),
+        &context,
+        &sealed,
+        AdmissionLimits::default(),
+        &production,
+        &commitments,
+    );
+    assert!(
+        interrupted.is_err(),
+        "a post-effect crash must hide the terminal response from its caller: {interrupted:?}"
+    );
+    assert!(
+        store.is_crashed(),
+        "the planned publication crash must fire"
+    );
+    let fired = store
+        .fault_log()
+        .records()
+        .first()
+        .copied()
+        .expect("the planned crash must be recorded");
+    assert!(
+        fired.effect_reached,
+        "the crash drill is only meaningful after the head CAS applied"
+    );
+
+    store.restart();
+    store.install_fault_plan(FaultPlan::default());
+    let recovered = admit_merge(
+        store.as_ref(),
+        &context,
+        &sealed,
+        AdmissionLimits::default(),
+        &production,
+        &commitments,
+    )
+    .expect("retry after restart resolves the already-published terminal decision");
+    assert!(
+        matches!(recovered.outcome, DecisionOutcome::Committed { .. }),
+        "the post-effect crash must recover the committed merge, not publish a second decision"
+    );
+
+    let HeadRead::Present(head) = store
+        .read_head(&context.head_key)
+        .expect("restarted authority head remains readable")
+    else {
+        panic!("a crash cannot erase the published authority head");
+    };
+    let body: RepositoryAuthorityHeadBody =
+        fgit_codec::decode_body(head.body(), fgit_codec::DecodeLimits::DEFAULT)
+            .expect("recovered authority head decodes");
+    let refs = commitments
+        .resolve_ref_state(body.ref_root)
+        .expect("recovered head root names staged canonical state");
+    assert_eq!(
+        refs.refs()
+            .get(&RefName::try_new(MAIN_REF).expect("fixture ref name")),
+        Some(&oid(FIRST_MERGE_OID)),
+        "recovery exposes the complete committed ref movement, never a half merge"
     );
 }
