@@ -18,6 +18,12 @@ pub use fgit_crypto::{
 pub use fgit_deflate::{CancellationProbe, InflateLimits, InflateRefusal, StreamProgress};
 use fgit_types::{GitHashAlgorithm as NativeGitHashAlgorithm, GitOid as AnyGitOid};
 
+pub mod notes;
+pub use notes::{
+    DEFAULT_NOTES_FANOUT_THRESHOLD, NotesEntry, NotesError, NotesMergeConflict, NotesMergeStrategy,
+    NotesTree, NotesTreeEmission, emit_notes_tree, merge_note_blob_bytes, parse_notes_tree,
+};
+
 /// Parser policy for an object that is being imported or newly created.
 ///
 /// `StrictCreate` accepts only object shapes `FrankenGit` will create: canonical
@@ -1271,6 +1277,22 @@ fn validate_strict_commit(
 }
 
 fn validate_strict_tag(headers: &[HeaderField], limits: &ParseLimits) -> Result<(), ObjectError> {
+    let mut object_count = 0;
+    let mut type_count = 0;
+    let mut tag_count = 0;
+    let mut tagger_count = 0;
+    for header in headers {
+        match header.name.as_slice() {
+            b"object" => object_count += 1,
+            b"type" => type_count += 1,
+            b"tag" => tag_count += 1,
+            b"tagger" => tagger_count += 1,
+            _ => {}
+        }
+    }
+    if object_count != 1 || type_count != 1 || tag_count != 1 || tagger_count != 1 {
+        return Err(ObjectError::MissingOrDuplicateTagHeader);
+    }
     let Some(required) = headers.get(..4) else {
         return Err(ObjectError::MissingOrDuplicateTagHeader);
     };
@@ -1292,18 +1314,12 @@ fn validate_strict_tag(headers: &[HeaderField], limits: &ParseLimits) -> Result<
     ) {
         return Err(ObjectError::StrictTagHeaderOrder);
     }
-    let mut object_count = 0;
-    let mut type_count = 0;
-    let mut tag_count = 0;
-    let mut tagger_count = 0;
     for header in headers {
         match header.name.as_slice() {
             b"object" => {
-                object_count += 1;
                 validate_native_reference(&header.value, limits.tree_reference_bytes)?;
             }
             b"type" => {
-                type_count += 1;
                 if !matches!(
                     header.value.as_slice(),
                     b"blob" | b"tree" | b"commit" | b"tag"
@@ -1312,7 +1328,6 @@ fn validate_strict_tag(headers: &[HeaderField], limits: &ParseLimits) -> Result<
                 }
             }
             b"tag" => {
-                tag_count += 1;
                 if header.value.is_empty()
                     || header
                         .value
@@ -1323,14 +1338,10 @@ fn validate_strict_tag(headers: &[HeaderField], limits: &ParseLimits) -> Result<
                 }
             }
             b"tagger" => {
-                tagger_count += 1;
                 validate_signature_date(&header.value)?;
             }
             _ => {}
         }
-    }
-    if object_count != 1 || type_count != 1 || tag_count != 1 || tagger_count != 1 {
-        return Err(ObjectError::MissingOrDuplicateTagHeader);
     }
     Ok(())
 }

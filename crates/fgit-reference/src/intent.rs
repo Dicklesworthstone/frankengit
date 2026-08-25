@@ -473,6 +473,162 @@ impl TagIntent {
     }
 }
 
+/// The only direct-ref namespace that a notes lifecycle intent may address.
+pub const NOTES_REF_PREFIX: &[u8] = b"refs/notes";
+
+/// Default Git notes ref name (`refs/notes/commits`).
+pub const DEFAULT_NOTES_REF: &str = "refs/notes/commits";
+
+/// A validated ref name known to belong to the notes namespace.
+///
+/// Keeping this separate from [`RefName`] prevents a branch or an arbitrary
+/// `refs/` name from being accidentally lowered as a notes operation. The
+/// generic ref transaction owns final publication; this type owns only the
+/// lifecycle-specific namespace boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NotesRefName(RefName);
+
+impl NotesRefName {
+    /// Accepts one already-valid Git ref name only when it is below `refs/notes/`.
+    pub fn try_new(name: RefName) -> Result<Self, NotesIntentRefusal> {
+        if name.is_under(NOTES_REF_PREFIX) {
+            Ok(Self(name))
+        } else {
+            Err(NotesIntentRefusal::OutsideNotesNamespace(name))
+        }
+    }
+
+    /// The default Git notes ref: `refs/notes/commits`.
+    #[must_use]
+    pub fn default_commits() -> Self {
+        let ref_name = RefName::try_new(DEFAULT_NOTES_REF.as_bytes())
+            .expect("refs/notes/commits is a valid canonical ref name");
+        Self(ref_name)
+    }
+
+    /// Creates a notes ref name under `refs/notes/<subpath>`.
+    pub fn from_subpath(subpath: &str) -> Result<Self, NotesIntentRefusal> {
+        let full = format!("refs/notes/{subpath}");
+        let ref_name =
+            RefName::try_new(full.as_bytes()).map_err(NotesIntentRefusal::InvalidRefName)?;
+        Self::try_new(ref_name)
+    }
+
+    /// Returns the canonical ref name carried by this notes name.
+    #[must_use]
+    pub const fn as_ref_name(&self) -> &RefName {
+        &self.0
+    }
+
+    /// Releases the canonical ref name for lowering into the generic ref model.
+    #[must_use]
+    pub fn into_ref_name(self) -> RefName {
+        self.0
+    }
+}
+
+/// A typed refusal while constructing a notes lifecycle intent.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum NotesIntentRefusal {
+    /// A lifecycle operation named a legal Git ref outside `refs/notes/`.
+    OutsideNotesNamespace(RefName),
+    /// Invalid ref name syntax.
+    InvalidRefName(fgit_types::error::TypeRefusal),
+}
+
+/// A typed Git notes lifecycle intent before it lowers to the one ref-transaction
+/// normal-form domain.
+///
+/// The conversion preserves expected-old and force fields exactly. Therefore
+/// protected-ref policy, actor/principal checks, policy snapshots, push
+/// options, stable transaction identity, read-your-own-writes, and atomic
+/// publication remain owned by the existing sealed ref-transaction path rather
+/// than by a second notes authority.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum NotesIntent {
+    /// Create or update a notes ref commit.
+    Update {
+        /// Validated `refs/notes/` name.
+        name: NotesRefName,
+        /// Expected current ref state from the caller's semantic request.
+        expected: ExpectedRefState,
+        /// The new notes commit OID.
+        new_commit: GitOid,
+        /// Whether this update requests force; policy still decides permission.
+        force: bool,
+    },
+    /// Delete one notes ref under the ordinary expected-old semantics.
+    Delete {
+        /// Validated `refs/notes/` name.
+        name: NotesRefName,
+        /// Expected current ref state from the caller's semantic request.
+        expected: ExpectedRefState,
+    },
+}
+
+impl NotesIntent {
+    /// Builds a notes ref update after validating its namespace.
+    pub fn update(
+        name: RefName,
+        expected: ExpectedRefState,
+        new_commit: GitOid,
+        force: bool,
+    ) -> Result<Self, NotesIntentRefusal> {
+        Ok(Self::Update {
+            name: NotesRefName::try_new(name)?,
+            expected,
+            new_commit,
+            force,
+        })
+    }
+
+    /// Builds a notes ref deletion after validating its namespace.
+    pub fn delete(name: RefName, expected: ExpectedRefState) -> Result<Self, NotesIntentRefusal> {
+        Ok(Self::Delete {
+            name: NotesRefName::try_new(name)?,
+            expected,
+        })
+    }
+
+    /// Returns the notes namespace target.
+    #[must_use]
+    pub const fn target(&self) -> &NotesRefName {
+        match self {
+            Self::Update { name, .. } | Self::Delete { name, .. } => name,
+        }
+    }
+
+    /// Returns the expected-old precondition.
+    #[must_use]
+    pub const fn expected(&self) -> &ExpectedRefState {
+        match self {
+            Self::Update { expected, .. } | Self::Delete { expected, .. } => expected,
+        }
+    }
+
+    /// Lowers into the sole canonical ref-effect vocabulary.
+    #[must_use]
+    pub fn into_ref_intent(self) -> RefIntent {
+        match self {
+            Self::Update {
+                name,
+                expected,
+                new_commit,
+                force,
+            } => RefIntent::Update {
+                name: name.into_ref_name(),
+                expected,
+                new: new_commit,
+                force,
+            },
+            Self::Delete { name, expected } => RefIntent::Delete {
+                name: name.into_ref_name(),
+                expected,
+            },
+        }
+    }
+}
+
 /// A forge transition intent.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ForgeIntent {
