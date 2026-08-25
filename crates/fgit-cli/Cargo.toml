@@ -12,6 +12,9 @@ name = "fg"
 path = "src/main.rs"
 
 [dependencies]
+fgit-authority.workspace = true
+fgit-codec.workspace = true
+fgit-forge.workspace = true
 fgit-node.workspace = true
 fgit-types.workspace = true
 

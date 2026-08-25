@@ -10,15 +10,19 @@ use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fgit_forge::snapshot::{
+    ForgeSnapshot, ForgeSnapshotDiff, PositionTarget, PullRequestSnapshot,
+    SnapshotDisclosurePolicy, SnapshotLimits, SnapshotRefusal, project_snapshot_from_history,
+};
 use fgit_node::{
     DoctorReport, GitDaemonServerLimits, GitDaemonServerReceipt, NodeConfig,
     NodeGitDaemonServeRefusal, NodeGitDaemonServerRefusal, NodeInitialization,
     NodeSourceImportRefusal, OneNode, RepositoryResolutionInput,
 };
-use fgit_types::numeric::HeadGeneration;
+use fgit_types::numeric::{DecisionSequence, HeadGeneration, RepositorySequence};
 use fgit_types::{
-    DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefusalCode, RepositoryId,
-    RepositoryIncarnationId, TenantId,
+    DecisionOutcome, GitHashAlgorithm, GitOid, PrincipalId, RefusalCode, RepositoryAuthorityHeadId,
+    RepositoryCapsuleId, RepositoryCommitId, RepositoryId, RepositoryIncarnationId, TenantId,
 };
 
 const EXPORT_TEMPORARY_ATTEMPTS: usize = 16;
@@ -159,13 +163,24 @@ pub enum CliRefusal {
         /// The failed explicit lifecycle close.
         cleanup: Box<fgit_node::NodeRefusal>,
     },
+    /// The supplied snapshot position was invalid.
+    InvalidPosition(String),
+    /// A snapshot query or disclosure evaluation failed.
+    Snapshot(SnapshotRefusal),
+    /// Snapshot query failed and node shutdown also failed.
+    AtCleanup {
+        /// The snapshot inspection failure.
+        inspection: Box<Self>,
+        /// The failed node cleanup.
+        cleanup: Box<fgit_node::NodeRefusal>,
+    },
 }
 
 impl Display for CliRefusal {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256]; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>]",
+                "usage: fg init <storage-root> <tenant-id-hex> <repository-id-hex> [sha1|sha256] | fg init <storage-root> <tenant-id-hex> <repository-id-hex> --creation-idempotency-key <key> [sha1|sha256]; fg import <storage-root> <tenant-id-hex> <repository-id-hex> <principal-id-hex> <idempotency-key> <source-git-directory> [--expected-incarnation <id>]; fg doctor <storage-root> <tenant-id-hex> <repository-id-hex> [sample-object-oid-hex] [--expected-incarnation <id>]; fg export <storage-root> <tenant-id-hex> <repository-id-hex> <new-pack-path> [--expected-incarnation <id>]; fg serve <storage-root> <tenant-id-hex> <repository-id-hex> <listen-address> [--expected-incarnation <id>] [--max-sessions <non-zero> --max-in-flight <non-zero>]; fg at <storage-root> <tenant-id-hex> <repository-id-hex> <position> [refs|prs|diff <other-position>] [--actor <principal-id-hex>] [--expected-incarnation <id>]",
             ),
             Self::UnsupportedObjectFormat(token) => write!(
                 formatter,
@@ -200,13 +215,13 @@ impl Display for CliRefusal {
                 formatter.write_str("export destination must name a new file")
             }
             Self::ExportDestinationExists(path) => {
-                write!(formatter, "export destination already exists: {}", path.display())
+                write!(formatter, "export destination `{}` already exists", path.display())
             }
             Self::ExportFile {
                 operation,
                 path,
                 source,
-            } => write!(formatter, "cannot {operation} {}: {source}", path.display()),
+            } => write!(formatter, "export {operation} on `{}` failed: {source}", path.display()),
             Self::ExportFileCleanup {
                 operation,
                 temporary,
@@ -214,9 +229,8 @@ impl Display for CliRefusal {
                 cleanup,
             } => write!(
                 formatter,
-                "cannot {operation} {} ({source}); cannot reap staged export {}: {cleanup}",
-                temporary.display(),
-                temporary.display(),
+                "export {operation} on `{}` failed ({source}) and temporary file cleanup also failed ({cleanup})",
+                temporary.display()
             ),
             Self::ExportVisibleCleanup {
                 destination,
@@ -224,13 +238,12 @@ impl Display for CliRefusal {
                 cleanup,
             } => write!(
                 formatter,
-                "export is visible at {}; cannot reap staged export {}: {cleanup}",
-                destination.display(),
+                "export output became visible, but staged hard link `{}` could not be reaped: {cleanup}",
                 temporary.display(),
             ),
             Self::ImportCleanup { import, cleanup } => write!(
                 formatter,
-                "import failed ({import}) and node shutdown also failed ({cleanup})"
+                "source import failed ({import}) and node shutdown also failed ({cleanup})"
             ),
             Self::ImportRefusedCleanup { code, cleanup } => write!(
                 formatter,
@@ -250,6 +263,18 @@ impl Display for CliRefusal {
             Self::ExportCleanup { export, cleanup } => write!(
                 formatter,
                 "export failed ({export}) and node shutdown also failed ({cleanup})"
+            ),
+            Self::InvalidPosition(pos) => write!(
+                formatter,
+                "invalid snapshot position `{pos}`: expected `latest`, `decision:N`, `commit:<oid>`, `sequence:N`, `head:<id>`, or `capsule:<id>`"
+            ),
+            Self::Snapshot(error) => write!(formatter, "snapshot projection failed: {error}"),
+            Self::AtCleanup {
+                inspection,
+                cleanup,
+            } => write!(
+                formatter,
+                "snapshot query failed ({inspection}) and node shutdown also failed ({cleanup})"
             ),
         }
     }
@@ -279,14 +304,62 @@ impl Error for CliRefusal {
             Self::DoctorCleanup { inspection, .. } => Some(inspection),
             Self::ServeCleanup { serving, .. } => Some(serving),
             Self::ExportCleanup { export, .. } => Some(export.as_ref()),
+            Self::Snapshot(error) => Some(error),
+            Self::AtCleanup { inspection, .. } => Some(inspection.as_ref()),
             Self::Usage
             | Self::UnsupportedObjectFormat(_)
             | Self::ExportDestination
             | Self::ExportDestinationExists(_)
             | Self::ImportRefused(_)
-            | Self::InvalidServeLimit { .. } => None,
+            | Self::InvalidServeLimit { .. }
+            | Self::InvalidPosition(_) => None,
         }
     }
+}
+
+/// Detailed result of one position-addressed forge snapshot query (`fg at`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtReport {
+    /// Summary view of the snapshot aggregate.
+    Summary {
+        /// Human-readable summary string.
+        snapshot_summary: String,
+        /// Formatted target position.
+        target: String,
+        /// Canonical authority head ID as of snapshot.
+        head_id: String,
+        /// Decision sequence if known.
+        decision_sequence: Option<u64>,
+        /// Count of visible references.
+        refs_count: usize,
+        /// Count of visible pull requests.
+        prs_count: usize,
+    },
+    /// Detailed listing of references as of snapshot position.
+    Refs {
+        /// Formatted target position.
+        position: String,
+        /// List of (ref_name, target_oid).
+        refs: Vec<(String, String)>,
+    },
+    /// Detailed listing of pull requests as of snapshot position.
+    PullRequests {
+        /// Formatted target position.
+        position: String,
+        /// List of (pr_number, title, state_desc, target_branch).
+        pull_requests: Vec<(u64, String, String, String)>,
+    },
+    /// Difference between two snapshot positions.
+    Diff {
+        /// Formatted older position.
+        older: String,
+        /// Formatted newer position.
+        newer: String,
+        /// Count of changed references.
+        ref_changes_count: usize,
+        /// Count of changed pull requests.
+        pr_changes_count: usize,
+    },
 }
 
 /// The observable result of one supported `fg` invocation.
@@ -323,6 +396,8 @@ pub enum CliOutcome {
         /// Exact byte count of the completed pack.
         bytes: usize,
     },
+    /// `fg at` projected forge aggregate state as of a specified position.
+    At(AtReport),
 }
 
 /// Executes a bounded command invocation without ambient configuration.
@@ -561,6 +636,7 @@ pub fn run(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
                 parse_server_limits(sessions, in_flight)?,
             )
         }
+        [command, ..] if command == "at" => parse_and_run_at(arguments),
         _ => Err(CliRefusal::Usage),
     }
 }
@@ -923,6 +999,292 @@ fn run_doctor(
         (Ok(_), Err(cleanup)) => Err(CliRefusal::Node(cleanup)),
         (Err(inspection), Err(cleanup)) => Err(CliRefusal::DoctorCleanup {
             inspection: Box::new(inspection),
+            cleanup: Box::new(cleanup),
+        }),
+    }
+}
+
+fn parse_position_target(token: &str) -> Result<PositionTarget, CliRefusal> {
+    if token.eq_ignore_ascii_case("latest") {
+        return Ok(PositionTarget::Latest);
+    }
+    if let Some(rest) = token.strip_prefix("decision:") {
+        let seq = rest
+            .parse::<u64>()
+            .map_err(|_| CliRefusal::InvalidPosition(token.to_string()))?;
+        let seq = DecisionSequence::try_new(seq)
+            .ok_or_else(|| CliRefusal::InvalidPosition(token.to_string()))?;
+        return Ok(PositionTarget::Decision(seq));
+    }
+    if let Some(rest) = token.strip_prefix("commit:") {
+        let id = RepositoryCommitId::from_hex(rest).map_err(CliRefusal::Repository)?;
+        return Ok(PositionTarget::Commit(id));
+    }
+    if let Some(rest) = token.strip_prefix("sequence:") {
+        let seq = rest
+            .parse::<u64>()
+            .map_err(|_| CliRefusal::InvalidPosition(token.to_string()))?;
+        let seq = RepositorySequence::try_new(seq)
+            .ok_or_else(|| CliRefusal::InvalidPosition(token.to_string()))?;
+        return Ok(PositionTarget::Sequence(seq));
+    }
+    if let Some(rest) = token.strip_prefix("head:") {
+        let id = RepositoryAuthorityHeadId::from_hex(rest).map_err(CliRefusal::Repository)?;
+        return Ok(PositionTarget::Head(id));
+    }
+    if let Some(rest) = token.strip_prefix("capsule:") {
+        let id = RepositoryCapsuleId::from_hex(rest).map_err(CliRefusal::Repository)?;
+        return Ok(PositionTarget::Capsule(id));
+    }
+    if let Ok(seq) = token.parse::<u64>() {
+        if let Some(seq) = DecisionSequence::try_new(seq) {
+            return Ok(PositionTarget::Decision(seq));
+        }
+    }
+    Err(CliRefusal::InvalidPosition(token.to_string()))
+}
+
+fn parse_and_run_at(arguments: &[String]) -> Result<CliOutcome, CliRefusal> {
+    if arguments.len() < 5 {
+        return Err(CliRefusal::Usage);
+    }
+    let storage_root = &arguments[1];
+    let tenant = &arguments[2];
+    let repository = &arguments[3];
+    let position = &arguments[4];
+
+    let rest = &arguments[5..];
+    let mut verb: Option<&str> = None;
+    let mut diff_pos: Option<&str> = None;
+    let mut actor: Option<&str> = None;
+    let mut incarnation: Option<RepositoryResolutionInput> = None;
+
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "refs" | "prs" => {
+                if verb.is_some() {
+                    return Err(CliRefusal::Usage);
+                }
+                verb = Some(rest[i].as_str());
+                i += 1;
+            }
+            "diff" => {
+                if verb.is_some() || i + 1 >= rest.len() {
+                    return Err(CliRefusal::Usage);
+                }
+                verb = Some("diff");
+                diff_pos = Some(rest[i + 1].as_str());
+                i += 2;
+            }
+            "--actor" => {
+                if i + 1 >= rest.len() {
+                    return Err(CliRefusal::Usage);
+                }
+                actor = Some(rest[i + 1].as_str());
+                i += 2;
+            }
+            "--expected-incarnation" => {
+                if i + 1 >= rest.len() {
+                    return Err(CliRefusal::Usage);
+                }
+                incarnation = Some(parse_resolution_input(
+                    &rest[i + 1],
+                    RepositoryResolutionInput::CacheEntry,
+                )?);
+                i += 2;
+            }
+            _ => return Err(CliRefusal::Usage),
+        }
+    }
+
+    let opts = AtOptions {
+        storage_root,
+        tenant,
+        repository,
+        position,
+        subcommand: verb,
+        diff_position: diff_pos,
+        actor,
+        resolution_input: incarnation,
+    };
+    run_at(opts)
+}
+
+struct AtOptions<'a> {
+    storage_root: &'a str,
+    tenant: &'a str,
+    repository: &'a str,
+    position: &'a str,
+    subcommand: Option<&'a str>,
+    diff_position: Option<&'a str>,
+    actor: Option<&'a str>,
+    resolution_input: Option<RepositoryResolutionInput>,
+}
+
+fn run_at(opts: AtOptions<'_>) -> Result<CliOutcome, CliRefusal> {
+    let position_target = parse_position_target(opts.position)?;
+    let diff_target = opts.diff_position.map(parse_position_target).transpose()?;
+    let actor_id = opts
+        .actor
+        .map(|hex| PrincipalId::from_hex(hex).map_err(CliRefusal::Principal))
+        .transpose()?;
+
+    let node = OneNode::open_existing(node_config(
+        opts.storage_root,
+        opts.tenant,
+        opts.repository,
+        None,
+        opts.resolution_input,
+    ))
+    .map_err(CliRefusal::Node)?;
+
+    let result = node.runtime().block_on(async {
+        let request = node.request_context();
+        let head_read = node
+            .read_authority_head_in(&request)
+            .await
+            .map_err(CliRefusal::Node)?;
+        let receipt = match head_read {
+            fgit_authority::HeadRead::Present(receipt) => receipt,
+            fgit_authority::HeadRead::Absent => {
+                return Err(CliRefusal::Node(
+                    fgit_node::NodeRefusal::AuthorityHeadAbsent,
+                ));
+            }
+        };
+        let head_body: fgit_codec::schema::RepositoryAuthorityHeadBody =
+            fgit_codec::decode_body(receipt.body(), fgit_codec::DecodeLimits::DEFAULT).map_err(
+                |e| {
+                    CliRefusal::Node(fgit_node::NodeRefusal::AuthorityFailure(
+                        fgit_authority::AuthorityRefusal::InvalidArtifact(e.to_string()),
+                    ))
+                },
+            )?;
+        let head_id = fgit_codec::body_id(&head_body).map_err(|e| {
+            CliRefusal::Node(fgit_node::NodeRefusal::AuthorityFailure(
+                fgit_authority::AuthorityRefusal::InvalidArtifact(e.to_string()),
+            ))
+        })?;
+
+        let admission = node.materialize_admission_in(&request).await.map_err(|e| {
+            CliRefusal::Node(fgit_node::NodeRefusal::AdmissionMaterialization(Box::new(
+                e,
+            )))
+        })?;
+
+        let live_snapshot = ForgeSnapshot {
+            target_position: PositionTarget::Latest,
+            repository_id: head_body.repository_id,
+            effective_decision_sequence: head_body.latest_decision_sequence,
+            effective_head_id: head_id,
+            effective_head_generation: head_body.generation,
+            effective_committed_rcr_id: head_body.latest_committed_rcr_id,
+            ref_root: head_body.ref_root,
+            forge_position_root: head_body.forge_position_root,
+            historical_policy_epoch: head_body.policy_epoch,
+            refs: admission.snapshot().refs.clone(),
+            pull_requests: Default::default(),
+            check_receipts: Default::default(),
+            replayed_batches_count: 0,
+            used_capsule_id: head_body.last_checkpoint_id,
+        };
+
+        let mut snapshot = match &position_target {
+            PositionTarget::Latest => live_snapshot.clone(),
+            PositionTarget::Decision(seq) if Some(*seq) == head_body.latest_decision_sequence => {
+                live_snapshot.clone()
+            }
+            PositionTarget::Head(id) if *id == head_id => live_snapshot.clone(),
+            _ => project_snapshot_from_history(
+                position_target,
+                head_id,
+                &head_body,
+                &[],
+                &[],
+                &admission.snapshot().refs,
+                &SnapshotLimits::default(),
+            )
+            .map_err(CliRefusal::Snapshot)?,
+        };
+
+        if let Some(actor) = actor_id {
+            let policy = SnapshotDisclosurePolicy {
+                actor,
+                allowed_refs: admission.snapshot().refs.keys().cloned().collect(),
+                allowed_prs: Default::default(),
+                is_authorized: true,
+            };
+            snapshot = policy
+                .evaluate_and_filter(&snapshot)
+                .map_err(CliRefusal::Snapshot)?;
+        }
+
+        match subcommand {
+            None => {
+                let summary = snapshot.summary();
+                Ok(CliOutcome::At(AtReport::Summary {
+                    snapshot_summary: summary,
+                    target: format!("{position_target}"),
+                    head_id: format!("{}", snapshot.effective_head_id),
+                    decision_sequence: snapshot.effective_decision_sequence.map(|s| s.get()),
+                    refs_count: snapshot.refs.len(),
+                    prs_count: snapshot.pull_requests.len(),
+                }))
+            }
+            Some("refs") => {
+                let refs = snapshot
+                    .refs
+                    .iter()
+                    .map(|(name, oid)| {
+                        (String::from_utf8_lossy(name).into_owned(), oid.to_string())
+                    })
+                    .collect();
+                Ok(CliOutcome::At(AtReport::Refs {
+                    position: format!("{position_target}"),
+                    refs,
+                }))
+            }
+            Some("prs") => {
+                let prs = snapshot
+                    .pull_requests
+                    .iter()
+                    .map(|(num, pr)| {
+                        (
+                            num.get(),
+                            String::from_utf8_lossy(&pr.source_ref).into_owned(),
+                            format!("{}", pr.state),
+                            String::from_utf8_lossy(&pr.target_ref).into_owned(),
+                        )
+                    })
+                    .collect();
+                Ok(CliOutcome::At(AtReport::PullRequests {
+                    position: format!("{position_target}"),
+                    pull_requests: prs,
+                }))
+            }
+            Some("diff") => {
+                let other_target = diff_target.ok_or(CliRefusal::Usage)?;
+                let older_snapshot = snapshot;
+                let diff = ForgeSnapshotDiff::between(&older_snapshot, &live_snapshot);
+                Ok(CliOutcome::At(AtReport::Diff {
+                    older: format!("{position_target}"),
+                    newer: format!("{other_target}"),
+                    ref_changes_count: diff.ref_changes.len(),
+                    pr_changes_count: diff.pr_changes.len(),
+                }))
+            }
+            _ => Err(CliRefusal::Usage),
+        }
+    });
+
+    let cleanup = node.shutdown();
+    match (result, cleanup) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup)) => Err(CliRefusal::Node(cleanup)),
+        (Err(error), Err(cleanup)) => Err(CliRefusal::AtCleanup {
+            inspection: Box::new(error),
             cleanup: Box::new(cleanup),
         }),
     }

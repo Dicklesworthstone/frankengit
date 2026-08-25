@@ -1837,6 +1837,7 @@ impl DurableAdmissionMaterializer {
                 retention: BTreeSet::new(),
                 outbox: BTreeMap::new(),
                 hidden_refs: hidden_refs.clone(),
+                tag_peels: BTreeMap::new(),
             };
             let cache_permit = cache_grant
                 .accept(cache_binding)
@@ -1943,6 +1944,7 @@ impl DurableAdmissionMaterializer {
             retention: BTreeSet::new(),
             outbox: BTreeMap::new(),
             hidden_refs,
+            tag_peels: BTreeMap::new(),
         })
     }
 

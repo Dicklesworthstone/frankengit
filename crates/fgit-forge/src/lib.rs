@@ -33,6 +33,7 @@
 pub mod aggregate;
 pub mod event;
 pub mod merge;
+pub mod snapshot;
 
 use core::fmt;
 
@@ -49,6 +50,13 @@ pub use fgit_treefs::WorkspaceEpoch;
 pub use merge::{
     EffectRoots, MergeAttempt, MergeEffectPackage, MergedTree, ObservedTips, RefIntent,
     merge_pull_request_tree,
+};
+pub use snapshot::{
+    CandidateCapsule, CheckReceiptSnapshot, ForgeSnapshot, ForgeSnapshotDiff, HistoricalBatch,
+    MovementDirection, PositionTarget, PullRequestChange, PullRequestSnapshot, PullRequestState,
+    RefChange, SnapshotDisclosurePolicy, SnapshotLimits, SnapshotRefusal,
+    apply_forge_event_batch_to_prs, apply_forge_event_to_prs, project_snapshot_from_history,
+    verify_continuous_consistency,
 };
 
 /// Every way this crate declines to produce a forge effect.

@@ -1814,6 +1814,7 @@ where
             // resolve method on the store trait, which is a seven-implementor
             // change and an open question on `frankengit-jkbo`.
             hidden_refs: RefVisibility::new(),
+            tag_peels: BTreeMap::new(),
         })
     }
 }

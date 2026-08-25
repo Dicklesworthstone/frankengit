@@ -583,6 +583,24 @@ fn every_cli_refusal_variant() -> Vec<(&'static str, CliRefusal, Cause)> {
             },
             Cause::CarriesSource,
         ),
+        (
+            "InvalidPosition",
+            CliRefusal::InvalidPosition("not-a-position".to_string()),
+            Cause::Causeless,
+        ),
+        (
+            "Snapshot",
+            CliRefusal::Snapshot(fgit_forge::snapshot::SnapshotRefusal::TargetAheadOfHistory),
+            Cause::CarriesSource,
+        ),
+        (
+            "AtCleanup",
+            CliRefusal::AtCleanup {
+                inspection: Box::new(CliRefusal::InvalidPosition("invalid".to_string())),
+                cleanup: Box::new(NodeRefusal::EmptyStorageRoot),
+            },
+            Cause::CarriesSource,
+        ),
     ]
 }
 
