@@ -235,6 +235,26 @@ pub enum CellTransitionCause {
     LocalHealth,
     /// Repair or recovery machinery.
     Repair,
+    /// The process brought itself into service as part of its own start-up.
+    ///
+    /// # Why this is not [`Self::Operator`]
+    ///
+    /// `Operator` says an instruction arrived from outside the cell. A process
+    /// that is started in order to carry traffic decides for itself, at
+    /// start-up, that it must leave [`CellState::Bootstrapping`] — nobody sent
+    /// it anything. Recording that as an operator instruction would put an
+    /// instruction in the audit that was never given, and an audit whose
+    /// entries cannot be told apart from real control-plane traffic answers
+    /// "why" with a fiction.
+    ///
+    /// # Why it is not [`Self::AuthorityObservation`] either
+    ///
+    /// That cause is for a cell that *watched the authority change* and
+    /// adjusted what it can serve. Bringing a freshly opened cell up is not an
+    /// observation of a change: the authority head was authenticated as a
+    /// precondition of opening at all, and the transition follows from the
+    /// process having been started, not from anything the authority did.
+    ServiceBringUp,
 }
 
 /// One audited state change.
@@ -672,12 +692,6 @@ impl fmt::Display for CellRefusal {
 
 impl core::error::Error for CellRefusal {}
 
-/// Whether a cell in `state` may answer under `mode`.
-///
-/// # Errors
-///
-/// [`CellRefusal::StateAdmitsNoSuchRead`] naming both, so a caller can report
-/// which half was wrong.
 /// Whether this cell may take receive work in at all.
 ///
 /// The write-side twin of [`admits_read`], and deliberately a SEPARATE question
@@ -701,6 +715,12 @@ pub const fn admits_staging_intake(state: CellState) -> Result<(), CellRefusal> 
     }
 }
 
+/// Whether a cell in `state` may answer under `mode`.
+///
+/// # Errors
+///
+/// [`CellRefusal::StateAdmitsNoSuchRead`] naming both, so a caller can report
+/// which half was wrong.
 pub const fn admits_read(state: CellState, mode: ReadMode) -> Result<(), CellRefusal> {
     let admitted = match mode {
         ReadMode::Current => state.admits_current_read(),
