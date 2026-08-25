@@ -27,6 +27,7 @@ fge_context non_claim 'no external target executor, publication, or TOCTOU-resis
 export RCH_CARGO_WRAPPER_BYPASS=1
 
 readonly DSR_TEST="$DSR_REPO/crates/fgit-release/tests/release_attempt_runner.rs"
+readonly DSR_SOURCE_KEY_TEST="$DSR_REPO/crates/fgit-release/tests/source_and_key_boundary.rs"
 readonly DSR_SUITE='suites-release-dsr_release_contract'
 
 fge_phase setup
@@ -34,6 +35,9 @@ fge_phase setup
 fge_assert_file FG-035B-E2E-001 "$DSR_TEST" \
   'the release attempt runner integration campaign is present'
 fge_artifact "$DSR_TEST" release-attempt-runner-source
+fge_assert_file FG-035B-E2E-002 "$DSR_SOURCE_KEY_TEST" \
+  'the commit-derived source and file-key boundary campaign is present'
+fge_artifact "$DSR_SOURCE_KEY_TEST" release-source-key-boundary-source
 
 # The product tests assert the concrete typed variants.  Keep this list in the
 # wrapper so deleting a refusal assertion cannot leave an apparently complete
@@ -53,12 +57,28 @@ for dsr_control in \
   'b"substituted bytes"' \
   'ResumeDecision::Reuse' \
   'ResumeDecision::Rerun' \
+  'fn identical_second_attempt_reuses_verified_target_and_signed_root' \
+  'fn signed_root_verification_refuses_tampered_binary_and_checksum_sidecar' \
   'fn cancellation_leaves_resumable_evidence_and_no_manifest_root' \
   'MatrixOutcome::Cancelled' \
   'fn failed_target_provably_withholds_the_manifest_root' \
   'AttemptRunnerRefusal::ManifestWithheld'
+
 do
   if ! grep -qF "$dsr_control" "$DSR_TEST"; then
+    dsr_missing_controls="$dsr_missing_controls [$dsr_control]"
+  fi
+done
+
+for dsr_control in \
+  'fn commit_object_tree_is_assembled_and_worktree_twin_must_match' \
+  'SourceSnapshotRefusal::DirtyWorktree' \
+  'fn unknown_commit_is_refused_without_selecting_a_ref_or_head' \
+  'SourceSnapshotRefusal::UnknownCommit' \
+  'fn file_key_provider_accepts_owner_only_release_key_and_refuses_wrong_domain' \
+  'ReleaseKeyRefusal::WrongKeyDomain'
+do
+  if ! grep -qF "$dsr_control" "$DSR_SOURCE_KEY_TEST"; then
     dsr_missing_controls="$dsr_missing_controls [$dsr_control]"
   fi
 done
@@ -77,6 +97,10 @@ fge_capture dsr-release-attempt-runner \
   cargo test --locked -p fgit-release --test release_attempt_runner || true
 dsr_campaign_exit=$FGE_LAST_EXIT
 dsr_campaign_output=$(<"$FGE_LAST_STDOUT_FILE")
+fge_capture dsr-release-source-key \
+  cargo test --locked -p fgit-release --test source_and_key_boundary || true
+dsr_source_key_exit=$FGE_LAST_EXIT
+dsr_source_key_output=$(<"$FGE_LAST_STDOUT_FILE")
 
 fge_phase assert
 
@@ -86,7 +110,9 @@ fge_assert_contains FG-035B-E2E-011 "$dsr_discovery" "$DSR_SUITE" \
   'the contract campaign is discovered from suites/release without a root-level exception'
 fge_assert_exit FG-035B-E2E-012 0 "$dsr_campaign_exit" \
   'the real release attempt runner module passes its filesystem and journal fixtures'
-fge_assert_eq FG-035B-E2E-013 '' "$dsr_missing_controls" \
+fge_assert_exit FG-035B-E2E-013 0 "$dsr_source_key_exit" \
+  'the real object-store source and owner-only release-key boundary module passes'
+fge_assert_eq FG-035B-E2E-014 '' "$dsr_missing_controls" \
   'every required typed refusal, permitted twin, resume, cancellation, and manifest control remains asserted'
 
 for dsr_fixture in \
@@ -94,9 +120,20 @@ for dsr_fixture in \
   duplicate_asset_name_is_refused_and_distinct_names_are_permitted \
   symlinked_asset_is_refused_and_regular_twin_is_permitted \
   resume_reuses_only_a_byte_verified_inventory_identity \
+  identical_second_attempt_reuses_verified_target_and_signed_root \
+  signed_root_verification_refuses_tampered_binary_and_checksum_sidecar \
   cancellation_leaves_resumable_evidence_and_no_manifest_root \
   failed_target_provably_withholds_the_manifest_root
 do
   fge_assert_contains "FG-035B-E2E-020-${dsr_fixture}" "$dsr_campaign_output" "$dsr_fixture" \
     'the captured fgit-release runner result names the required fixture'
+done
+
+for dsr_fixture in \
+  commit_object_tree_is_assembled_and_worktree_twin_must_match \
+  unknown_commit_is_refused_without_selecting_a_ref_or_head \
+  file_key_provider_accepts_owner_only_release_key_and_refuses_wrong_domain
+do
+  fge_assert_contains "FG-035B-E2E-030-${dsr_fixture}" "$dsr_source_key_output" "$dsr_fixture" \
+    'the captured source/key result names the required fixture'
 done
