@@ -13,12 +13,12 @@ use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use fgit_git_object::GitHashAlgorithm;
 use fgit_git_object::{
     AcceptanceProfile, ObjectType, ParseLimits, ParsedObject, Sha1, Sha256, emit_loose_framed,
     emit_object_body, native_object_oid, parse_annotated_tag, parse_loose_framed,
     parse_object_body,
 };
+use fgit_types::GitHashAlgorithm;
 
 const CORPUS_ENV: &str = "FGIT_OBJECT_DIFFERENTIAL_CORPUS";
 const ARTIFACT_ENV: &str = "FGIT_OBJECT_DIFFERENTIAL_ARTIFACT_DIR";

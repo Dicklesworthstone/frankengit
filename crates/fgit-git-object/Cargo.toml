@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 fgit-crypto.workspace = true
 fgit-deflate.workspace = true
+fgit-types.workspace = true
 
 [lints]
 workspace = true

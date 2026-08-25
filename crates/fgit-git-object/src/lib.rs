@@ -16,6 +16,7 @@ pub use fgit_crypto::{
     Sha1, Sha256,
 };
 pub use fgit_deflate::{CancellationProbe, InflateLimits, InflateRefusal, StreamProgress};
+use fgit_types::{GitHashAlgorithm as NativeGitHashAlgorithm, GitOid as AnyGitOid};
 
 /// Parser policy for an object that is being imported or newly created.
 ///
@@ -842,7 +843,7 @@ impl TagTargetType {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct TagTarget {
     /// The exact native identity from the `object` header.
-    pub oid: GitOid,
+    pub oid: AnyGitOid,
     /// The declared native type of `oid`.
     pub object_type: TagTargetType,
 }
@@ -948,7 +949,7 @@ impl Tag {
 /// typed target with the repository's declared SHA domain.
 pub fn parse_annotated_tag(
     body: &[u8],
-    hash_algorithm: GitHashAlgorithm,
+    hash_algorithm: NativeGitHashAlgorithm,
     profile: AcceptanceProfile,
     limits: &ParseLimits,
 ) -> Result<AnnotatedTag, ObjectError> {
@@ -968,7 +969,7 @@ pub fn parse_annotated_tag(
                 let text = std::str::from_utf8(&header.value)
                     .map_err(|_| ObjectError::MalformedObjectReference)?;
                 object = Some(
-                    GitOid::from_hex(hash_algorithm, text)
+                    AnyGitOid::from_hex(hash_algorithm, text)
                         .map_err(|_| ObjectError::MalformedObjectReference)?,
                 );
             }

@@ -2,9 +2,9 @@
 //! Annotated-tag semantics layered on the byte-preserving object parser.
 
 use fgit_git_object::{
-    AcceptanceProfile, GitHashAlgorithm, ObjectError, TagSignature, TagTargetType,
-    parse_annotated_tag,
+    AcceptanceProfile, ObjectError, TagSignature, TagTargetType, parse_annotated_tag,
 };
+use fgit_types::GitHashAlgorithm;
 
 fn sha1_limits() -> fgit_git_object::ParseLimits {
     fgit_git_object::ParseLimits::default()
@@ -130,7 +130,10 @@ fn signature_looking_bytes_are_opaque_and_unverifiable_not_trusted() {
         tag.signature(),
         TagSignature::OpaqueUnverifiable(bytes) if bytes.starts_with(b"-----BEGIN PGP SIGNATURE-----")
     ));
-    assert_eq!(tag.emit(&sha1_limits()).expect("bounded emit"), bytes);
+    assert_eq!(
+        tag.emit(&sha1_limits()).expect("bounded emit"),
+        bytes.as_bytes()
+    );
 }
 
 #[test]
