@@ -788,7 +788,10 @@ dependencies = [
 name = "fgit-forge"
 version = "0.0.1"
 dependencies = [
+ "fgit-authority",
+ "fgit-chronicle",
  "fgit-codec",
+ "fgit-crypto",
  "fgit-diff",
  "fgit-treefs",
  "fgit-types",
