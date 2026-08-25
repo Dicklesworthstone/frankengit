@@ -12,11 +12,14 @@
 //! * [`token`] — a bounded, revocable, audience-bound grant to act as a
 //!   principal, whose high-impact operations cannot be authorised without
 //!   revocation evidence;
-//! * [`revocation`] — the one [`RevocationEvidence`] vocabulary both credentials
-//!   answer to, so a revocation cannot mean two things.
+//! * [`revocation`] — the one [`RevocationEvidence`] vocabulary every credential
+//!   here answers to, so a revocation cannot mean two things;
+//! * [`session`] — what a transport holds after authentication succeeds: the
+//!   principal, the strength it authenticated with, and rotation that may
+//!   weaken but never strengthen it.
 //!
-//! Organisation and team aggregates and sessions land here as their
-//! modules are completed under bead `frankengit-fg042a-identity-model-cas`.
+//! Organisation and team aggregates land here as their modules are completed
+//! under bead `frankengit-fg042a-identity-model-cas`.
 //! Each is named above when its module is real, never before — and equally,
 //! each is added the moment it IS real. The inverse mistake, a list that keeps
 //! describing delivered work as pending, is what `frankengit-wirh` had to
@@ -47,11 +50,18 @@
 //!   granted explicitly or not at all.
 //! * A grant that permits nothing is refused rather than stored, so
 //!   "registered" and "may do nothing" can never be the same state.
+//! * Every canonical body defined here has a row in `fgit-crypto`'s
+//!   `DOMAIN_REGISTRY`. A body with no row cannot receive an identity, and a
+//!   credential nothing can point at is not much of a credential. That held
+//!   silently false for two bodies once, because encode/decode never consults
+//!   the registry — `tests/canonical_identity.rs` is what makes it observable.
 
 pub mod deploy_key;
 pub mod revocation;
+pub mod session;
 pub mod token;
 
 pub use deploy_key::{DeployKeyBinding, DeployKeyRefusal, DeployKeyScope};
 pub use revocation::RevocationEvidence;
+pub use session::{AuthenticationStrength, Session, SessionId, SessionRefusal};
 pub use token::{TokenGrant, TokenHandle, TokenOperation, TokenRefusal};
