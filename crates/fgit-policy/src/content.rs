@@ -292,7 +292,7 @@ mod tag {
     pub const EVIDENCE_ACCEPTED: u8 = 17;
 }
 
-fn depth_bound(depth: u32, offset: u64) -> Result<(), CodecRefusal> {
+const fn depth_bound(depth: u32, offset: u64) -> Result<(), CodecRefusal> {
     if depth > MAX_PREDICATE_DEPTH {
         return Err(CodecRefusal::DepthBoundExceeded {
             limit: MAX_PREDICATE_DEPTH,
@@ -497,7 +497,7 @@ fn read_predicate(input: &mut Decoder<'_>, depth: u32) -> Result<Predicate, Code
 fn read_selector(input: &mut Decoder<'_>) -> Result<Selector, CodecRefusal> {
     let offset = input.offset();
     let code_point = input.read_raw_byte("predicate.selector")?;
-    Selector::from_code_point(code_point).ok_or(CodecRefusal::VariantUnknown {
+    Selector::from_code_point(code_point).ok_or_else(|| CodecRefusal::VariantUnknown {
         field: "predicate.selector",
         observed: u32::from(code_point),
         offset,
@@ -507,7 +507,7 @@ fn read_selector(input: &mut Decoder<'_>) -> Result<Selector, CodecRefusal> {
 fn read_update_kind(input: &mut Decoder<'_>) -> Result<RefUpdateKind, CodecRefusal> {
     let offset = input.offset();
     let code_point = input.read_raw_byte("predicate.update_kind")?;
-    RefUpdateKind::from_code_point(code_point).ok_or(CodecRefusal::VariantUnknown {
+    RefUpdateKind::from_code_point(code_point).ok_or_else(|| CodecRefusal::VariantUnknown {
         field: "predicate.update_kind",
         observed: u32::from(code_point),
         offset,
@@ -517,7 +517,7 @@ fn read_update_kind(input: &mut Decoder<'_>) -> Result<RefUpdateKind, CodecRefus
 fn read_principal_kind(input: &mut Decoder<'_>) -> Result<PrincipalKind, CodecRefusal> {
     let offset = input.offset();
     let code_point = input.read_raw_byte("predicate.principal_kind")?;
-    PrincipalKind::from_code_point(code_point).ok_or(CodecRefusal::VariantUnknown {
+    PrincipalKind::from_code_point(code_point).ok_or_else(|| CodecRefusal::VariantUnknown {
         field: "predicate.principal_kind",
         observed: u32::from(code_point),
         offset,

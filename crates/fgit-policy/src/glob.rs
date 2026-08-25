@@ -285,11 +285,11 @@ mod tests {
     #[test]
     fn bytes_git_refuses_in_a_ref_name_are_refused_in_a_pattern() {
         for (source, offset, byte) in [
-            ("refs/heads/ma:in", 14, b':'),
-            ("refs/heads/ma?in", 14, b'?'),
-            ("refs/heads/ma^in", 14, b'^'),
-            ("refs/heads/ma~in", 14, b'~'),
-            ("refs/heads/ma[in", 14, b'['),
+            ("refs/heads/ma:in", 13, b':'),
+            ("refs/heads/ma?in", 13, b'?'),
+            ("refs/heads/ma^in", 13, b'^'),
+            ("refs/heads/ma~in", 13, b'~'),
+            ("refs/heads/ma[in", 13, b'['),
         ] {
             assert_eq!(
                 RefPattern::compile(source),

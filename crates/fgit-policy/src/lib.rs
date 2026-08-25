@@ -130,17 +130,24 @@ pub mod __reexport {
 }
 
 pub mod basis;
+pub mod break_glass;
 pub mod compile;
 pub mod content;
 pub mod error;
 pub mod eval;
 pub mod glob;
 pub mod program;
+pub mod protected_ref;
+pub mod rollout;
 pub mod syntax;
 
 pub use basis::{
     AggregateName, AuthenticationStrength, EvidenceKind, EvidenceReceipt, IssuerLabel, LabelName,
     PolicyInputRoot, PolicyInstant, PrincipalFacts, PrincipalKind, RefUpdateFact, RefUpdateKind,
+};
+pub use break_glass::{
+    BreakGlassIntent, BreakGlassReceipt, BreakGlassRefusal, MAX_BREAK_GLASS_DURATION_SECS,
+    MAX_BREAK_GLASS_REASON_LEN, evaluate_break_glass,
 };
 pub use compile::{compile, resolve};
 pub use content::{
@@ -156,6 +163,15 @@ pub use glob::RefPattern;
 pub use program::{
     Compare, CompiledPolicy, CompiledRule, Decision, DenyReason, EvidenceRequirement, PolicyName,
     Predicate, RuleId, RuleOutcome, Selector, TextLiteral, ValueKind,
+};
+pub use protected_ref::{
+    DurabilityProfile, MAX_PROTECTED_RULES, MAX_REQUIRED_CHECKS, ProtectedRefEvaluation,
+    ProtectedRefRule, ProtectionBits, RequirementVerdict, ReviewRequirement,
+    StatusCheckRequirement, VerifierClass, evaluate_protected_ref,
+};
+pub use rollout::{
+    CanaryLifecycleEvent, DecisionDivergence, PolicyDiff, RolloutCohort, RolloutConfiguration,
+    RolloutEvaluation, RolloutMode, evaluate_rollout,
 };
 
 /// Compiles source text and seals the result into a content-addressed

@@ -308,21 +308,21 @@ fn mismatch(
     }
 }
 
-fn text_operand<'a>(operand: &'a SourceOperand) -> Option<&'a str> {
+fn text_operand(operand: &SourceOperand) -> Option<&str> {
     match operand {
         SourceOperand::Text(value) => Some(&value.value),
         _ => None,
     }
 }
 
-fn name_operand<'a>(operand: &'a SourceOperand) -> Option<&'a str> {
+fn name_operand(operand: &SourceOperand) -> Option<&str> {
     match operand {
         SourceOperand::Name(value) => Some(&value.value),
         _ => None,
     }
 }
 
-fn set_operand<'a>(operand: &'a SourceOperand) -> Option<&'a [SourceOperand]> {
+fn set_operand(operand: &SourceOperand) -> Option<&[SourceOperand]> {
     match operand {
         SourceOperand::Set(value) => Some(&value.value),
         _ => None,

@@ -251,7 +251,7 @@ fn ref_name(text: &str) -> RefName {
     RefName::try_new(text.as_bytes()).unwrap_or_else(|error| panic!("{text}: {error}"))
 }
 
-fn oid(seed: u8) -> GitOid {
+const fn oid(seed: u8) -> GitOid {
     GitOid::Sha1(GitOidSha1::from_bytes([seed; GitOidSha1::LEN]))
 }
 
@@ -319,6 +319,7 @@ fn receipt() -> EvidenceReceipt {
 }
 
 /// The one input root every golden is evaluated against.
+#[must_use]
 pub fn input_root() -> PolicyInputRoot {
     PolicyInputRoot::try_new(
         principal(),

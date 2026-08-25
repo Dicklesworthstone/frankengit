@@ -185,9 +185,8 @@ impl SourceOperand {
     #[must_use]
     pub const fn offset(&self) -> usize {
         match self {
-            Self::Text(value) => value.offset,
             Self::Integer(value) => value.offset,
-            Self::Name(value) => value.offset,
+            Self::Text(value) | Self::Name(value) => value.offset,
             Self::Set(value) => value.offset,
         }
     }
@@ -553,7 +552,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn keyword(&mut self, word: &str) -> bool {
+    fn keyword(&self, word: &str) -> bool {
         matches!(self.peek(), Some(Token { kind: TokenKind::Name(name), .. }) if &**name == word)
     }
 
@@ -667,7 +666,7 @@ impl<'a> Parser<'a> {
             return Err(PolicySyntaxRefusal::UnexpectedToken {
                 offset: kind.offset,
                 expected: "an `issuer` clause in the evidence declaration",
-                found: kind.value.clone(),
+                found: kind.value,
             });
         };
         Ok(SourceDeclaration::Evidence {

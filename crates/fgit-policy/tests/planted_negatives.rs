@@ -391,11 +391,11 @@ fn a_predicate_deeper_than_the_bound_is_refused_and_one_at_the_bound_is_not() {
 fn a_source_over_the_size_bound_is_refused_and_one_at_the_bound_is_not() {
     let body = wrap("");
     let padding = fgit_policy::syntax::MAX_SOURCE_LEN - body.len();
-    let at_bound = format!("{}{}", "#".repeat(padding), body);
+    let at_bound = format!("{}{}", " ".repeat(padding), body);
     assert_eq!(at_bound.len(), fgit_policy::syntax::MAX_SOURCE_LEN);
     compiles(&at_bound);
 
-    let over_bound = format!("#{at_bound}");
+    let over_bound = format!(" {at_bound}");
     let refusal = refuses(&over_bound);
     assert!(
         matches!(
