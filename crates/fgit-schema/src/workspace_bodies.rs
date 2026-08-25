@@ -308,7 +308,7 @@ fn source_families_in(source: &str, path: &Path) -> Result<BTreeSet<String>, Sch
                 });
             };
             let arguments = string_literals(&remaining[..end]);
-            let Some(family) = arguments.get(2) else {
+            let Some(family) = arguments.get(1) else {
                 return Err(SchemaRefusal::CanonicalBodyFamilyUnresolvable {
                     source: display_path(path).into(),
                     expression: "bytes_body invocation has no family literal".into(),

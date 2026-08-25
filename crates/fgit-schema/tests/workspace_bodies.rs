@@ -30,10 +30,16 @@ fn check_refuses_a_literal_family_without_an_owning_description() {
     fs::write(
         crate_root.join("src/lib.rs"),
         concat!(
-            "impl Canonical",
-            "Body for Probe {\n    const SCHEMA_",
-            "FAMILY: SchemaFamily::from_static(\"probe-undescribed\");\n",
-            "    fn write_payload(&self) {}\n}\n"
+            "macro_rules! bytes_",
+            "body {\n",
+            "    ($body:ident, $domain:literal, $family:literal, $field:literal) => {\n",
+            "        impl Canonical",
+            "Body for $body {\n            const SCHEMA_",
+            "FAMILY: SchemaFamily::from_static($family);\n",
+            "            fn write_payload(&self) {}\n        }\n",
+            "    };\n}\n",
+            "bytes_",
+            "body!(Probe, \"frankengit/probe/v1\", \"probe-undescribed\", \"probe.bytes\");\n"
         ),
     )
     .expect("write undocumented probe body");
