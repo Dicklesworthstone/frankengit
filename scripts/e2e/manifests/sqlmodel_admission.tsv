@@ -1,0 +1,21 @@
+# FG-093a expected-suite manifest -- profile: sqlmodel_admission
+#
+# Columns and semantics match manifests/harness.tsv (FG-091): this profile
+# owns the top-level `suites/admission` area and pins its exact release
+# surface by full-corpus suite id. Set equality is enforced against discovery:
+# no missing, no unregistered, no renamed alias.
+#
+# OWNERSHIP: every row here is owned by frankengit-fg093a-sqlmodel-admission-cm7y
+# (AmberFox wave 2026-08-25). Suites in other areas belong to their own
+# owners' profiles and are deliberately absent.
+#
+# columns, tab-separated:
+#   suite_id           the id run_all derives from the script path
+#   owning_bead        the capability bead that owns the suite
+#   gate               the gate/profile this entry belongs to
+#   script_path        repository-relative path
+#   targets            supported target classes, or "any"
+#   classification     required | optional
+#   proof_class        what a pass establishes, in claim-lattice terms
+#   expected_terminal  the terminal status a pass must carry
+suites-admission-sqlmodel_dependency_admission	frankengit-fg093a-sqlmodel-admission-cm7y	g1	scripts/e2e/suites/admission/sqlmodel_dependency_admission.sh	any	required	mechanism	pass

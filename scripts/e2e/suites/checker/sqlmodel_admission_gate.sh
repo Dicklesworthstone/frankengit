@@ -114,11 +114,14 @@ sm_gate "$SM_REPO" live-tree-clean 'no substrate diagnostic'
 live_exit=$SM_EXIT
 live_diagnostic=$SM_DIAGNOSTIC
 
-# --- the published shape is refused, naming the prerequisite ------------------
-# The dependency line below IS the published contract of sqlmodel-frankensqlite
-# 0.4.x: nothing extra planted. Resolution unions fsqlite's defaults into the
-# graph, and the gate must refuse that with the typed §3.2 diagnostic.
-published=$(sm_fixture published 'sqlmodel-frankensqlite = "0.4.0"')
+# --- the pre-convergence shape is refused, naming the prerequisite ------------
+# The dependency line pins the EXACT 0.4.0 release whose published contract
+# requested the fsqlite family WITHOUT `default-features = false`: resolution
+# unions fsqlite's defaults into the graph, and the gate must refuse that with
+# the typed §3.2 diagnostic. (A bare `0.4.0` would be a caret request and now
+# resolve the converged 0.4.1, which is the positive path owned by
+# suites/admission/sqlmodel_dependency_admission.sh, not this refusal.)
+published=$(sm_fixture published 'sqlmodel-frankensqlite = "=0.4.0"')
 sm_resolve "$published" published-substrate
 resolve_exit=$SM_RESOLVE_EXIT
 sm_gate "$published" published-substrate \
@@ -145,9 +148,9 @@ fge_assert_contains FG-093A-SM-005 "$published_diagnostic" \
 fge_assert_contains FG-093A-SM-006 "$published_diagnostic" \
   '`fsqlite` resolved with excluded feature `json`' \
   'the json extension surface is named as excluded'
-fge_assert_contains FG-093A-SM-007 "$published_diagnostic" \
-  '`fsqlite` resolved with excluded feature `linux-asupersync-uring`' \
-  'the unconditional io_uring profile is named as excluded'
+fge_assert_not_contains FG-093A-SM-007 "$published_diagnostic" \
+  'excluded feature `linux-asupersync-uring`' \
+  'io_uring is a target-specific profile per §3.2, not a semantic exclusion'
 fge_assert_contains FG-093A-SM-008 "$published_diagnostic" \
   'default-features = false' \
   'the refusal states the exact upstream prerequisite'
