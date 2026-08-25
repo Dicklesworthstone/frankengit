@@ -1058,6 +1058,24 @@ fn object_closure_membership_proofs_round_trip_and_reject_tampering() {
             verify_object_closure_membership(&root, queried, &proof),
             "object membership must verify"
         );
+        // The permitted twin: the object closure is a tree only under the
+        // cumulative layout, and there the very same proof verifies.
+        assert_eq!(
+            verify_object_closure_membership_under(
+                RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+                &root,
+                queried,
+                &proof
+            ),
+            Ok(true),
+            "the cumulative layout must verify the proof the earlier layouts refuse to consider"
+        );
+        // Both earlier layouts refuse. Version one is the one that matters
+        // here: it advances the *ref state* only, so under it the object
+        // closure root is still a whole-body digest and this question is
+        // unanswerable rather than false. Asserting only the legacy refusal
+        // would leave the suite green if the gate were loosened back onto a
+        // published code point, which is exactly what happened once.
         assert_eq!(
             verify_object_closure_membership_under(
                 RootLayoutVersion::RefStateMerkleV1,
@@ -1065,17 +1083,22 @@ fn object_closure_membership_proofs_round_trip_and_reject_tampering() {
                 queried,
                 &proof
             ),
-            Ok(true)
+            Err(MerkleRefusal::LayoutAdmitsNoProof {
+                version: RootLayoutVersion::RefStateMerkleV1,
+            }),
+            "the ref-state-only layout has no object tree, so it refuses rather than answers"
         );
-        assert!(matches!(
+        assert_eq!(
             verify_object_closure_membership_under(
                 RootLayoutVersion::LegacyWholeBody,
                 &root,
                 queried,
                 &proof
             ),
-            Err(MerkleRefusal::LayoutAdmitsNoProof { .. })
-        ));
+            Err(MerkleRefusal::LayoutAdmitsNoProof {
+                version: RootLayoutVersion::LegacyWholeBody,
+            }),
+        );
     }
 
     let absent = oid(0x99);
@@ -1132,14 +1155,101 @@ fn object_closure_non_membership_proofs_verify_across_all_four_positions() {
         Err(MerkleRefusal::ObjectIsPresent)
     );
 
-    // Legacy layout refuses non-membership proof
-    assert!(matches!(
+    // The layout gate on the absence side, both directions. The permitted twin
+    // first, so a verifier that refused every layout could not satisfy the
+    // refusals below.
+    assert_eq!(
+        verify_object_closure_non_membership_under(
+            RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+            &root,
+            &between,
+            &between_proof
+        ),
+        Ok(true),
+        "the cumulative layout must verify the absence proof the earlier layouts refuse"
+    );
+    assert_eq!(
+        verify_object_closure_non_membership_under(
+            RootLayoutVersion::RefStateMerkleV1,
+            &root,
+            &between,
+            &between_proof
+        ),
+        Err(MerkleRefusal::LayoutAdmitsNoProof {
+            version: RootLayoutVersion::RefStateMerkleV1,
+        }),
+        "advancing the ref state does not give the object closure a tree"
+    );
+    assert_eq!(
         verify_object_closure_non_membership_under(
             RootLayoutVersion::LegacyWholeBody,
             &root,
             &between,
             &between_proof
         ),
-        Err(MerkleRefusal::LayoutAdmitsNoProof { .. })
-    ));
+        Err(MerkleRefusal::LayoutAdmitsNoProof {
+            version: RootLayoutVersion::LegacyWholeBody,
+        }),
+    );
+}
+
+/// Pins what every layout version admits, on both axes at once.
+///
+/// The two `admits_*` predicates are the only thing standing between a
+/// published code point and a proof family it never promised, and they have
+/// already been wrong once: object-closure proofs were admitted under
+/// `RefStateMerkleV1`, whose own documentation says every root but the ref
+/// state is unchanged from the legacy layout.
+///
+/// A per-version table catches that in both directions — a gate loosened onto
+/// an older code point, and a gate tightened so the cumulative layout stops
+/// admitting the ref proofs it inherits. A test that only checked refusals
+/// would be satisfied by a predicate that refused everything, and one that only
+/// checked the newest version would not notice an older one drifting.
+#[test]
+fn every_layout_version_admits_exactly_the_proof_families_it_publishes() {
+    // Pinned against the vocabulary rather than derived from it: a table driven
+    // from `ALL` shrinks silently when a variant is deleted, so the count is
+    // asserted here, in the same file as the expectations it guards.
+    assert_eq!(
+        RootLayoutVersion::ALL.len(),
+        3,
+        "a layout version was added or removed without updating this table"
+    );
+
+    for (version, admits_ref, admits_object) in [
+        (RootLayoutVersion::LegacyWholeBody, false, false),
+        (RootLayoutVersion::RefStateMerkleV1, true, false),
+        (
+            RootLayoutVersion::RefStateAndObjectClosureMerkleV1,
+            true,
+            true,
+        ),
+    ] {
+        assert_eq!(
+            version.admits_ref_state_membership_proof(),
+            admits_ref,
+            "{version:?} ref-state proof admission"
+        );
+        assert_eq!(
+            version.admits_object_closure_membership_proof(),
+            admits_object,
+            "{version:?} object-closure proof admission"
+        );
+    }
+
+    // The cumulative layout is cumulative: it does not merely admit object
+    // proofs, it keeps admitting the ref proofs version one introduced. Stated
+    // separately because that is the property a "one root at a time" reading
+    // would break, and the table above would still pass if this were the only
+    // thing a reader checked.
+    assert!(
+        RootLayoutVersion::RefStateAndObjectClosureMerkleV1.admits_ref_state_membership_proof(),
+        "the cumulative layout must inherit version one's ref-state tree"
+    );
+    assert_eq!(
+        RootLayoutVersion::RefStateAndObjectClosureMerkleV1.code_point(),
+        2,
+        "the cumulative layout is a new code point, never a redefinition of one"
+    );
 }

@@ -37,7 +37,8 @@
 //! # Typed non-claim: `forge_position_root`
 //!
 //! This vocabulary says nothing about how `forge_position_root` is laid out,
-//! and [`RootLayoutVersion::RefStateMerkleV1`] does not change it.
+//! and neither [`RootLayoutVersion::RefStateMerkleV1`] nor
+//! [`RootLayoutVersion::RefStateAndObjectClosureMerkleV1`] changes it.
 //!
 //! A Merkle layout for forge positions needs a canonical forge materialisation
 //! to commit to. `frankengit-fg029a` landed one while this was being written,
@@ -49,7 +50,10 @@
 //!
 //! Recorded as a non-claim rather than a TODO because the distinction matters:
 //! a reader must be able to tell "not yet designed" from "designed and
-//! unimplemented". This is the first, and the next version number is free.
+//! unimplemented". Code point 2 went to the object closure, which had a
+//! materialisation to commit to; code point 3 is allocated to the
+//! forge-position layout and is not defined here. Do not take the next free
+//! integer for something else.
 
 use crate::error::TypeRefusal;
 
@@ -76,11 +80,66 @@ pub enum RootLayoutVersion {
     /// that changed several at once could not be adopted until every consumer
     /// of every one of them was ready.
     RefStateMerkleV1,
+    /// Everything [`Self::RefStateMerkleV1`] admits, **plus** membership and
+    /// ordered-absence proofs over the object closure, whose entries are
+    /// domain-separated Merkle leaves sorted with a closed tie-break.
+    ///
+    /// Cumulative, not parallel: a client that can read version one reads the
+    /// ref state here identically. Only the object closure changes.
+    ///
+    /// # Why this needed a new code point rather than a wider version one
+    ///
+    /// Version one's own documentation says every other root is unchanged from
+    /// the legacy layout, so under it the object closure root *is* a whole-body
+    /// digest. Teaching version one to admit an object proof would assign new
+    /// semantics to bytes already published under that code point — the
+    /// key-reuse shape the normative contract requires to fail closed — and a
+    /// peer that had already stored a version-one head would read the new
+    /// meaning out of old bytes. Migration is a head transition that publishes
+    /// a different version, never a redefinition of one.
+    ///
+    /// # Typed non-claim: what this code point does not yet establish
+    ///
+    /// This member says which proof families a layout *admits*. It does not by
+    /// itself say that an admitted proof checks against a root the authority
+    /// head authenticates, and today it does not: the object closure root is
+    /// not a head field at all. It is a field of the `RepositoryCommitRecord`
+    /// the head merely *names* through `latest_committed_rcr_id`, and that
+    /// field is simultaneously the immutable content address the validated
+    /// closure frame is staged under and read back by. Those two roles must
+    /// agree, so moving that commitment to a Merkle apex is a change to where
+    /// the closure is keyed and when the layout is resolved — not a change to
+    /// this vocabulary.
+    ///
+    /// Until that migration lands, adopting this code point makes object proofs
+    /// *servable*; it does not make them *authority-bound*. Recorded here
+    /// rather than left to a reader's assumption, because the difference is the
+    /// whole security property, and a version number that quietly implied the
+    /// stronger reading would be the more expensive mistake.
+    ///
+    /// # Adoption must be coupled to a fresh commit record
+    ///
+    /// Every other root this vocabulary names is a field of the authority head
+    /// body, recomputed by the transition that publishes it, so it can never be
+    /// older than the layout describing it. The object closure root is not. A
+    /// transition carrying only refused decisions publishes no commit record
+    /// and carries the predecessor's id forward, so a head could otherwise
+    /// adopt this version while still naming a record written under an earlier
+    /// one. A non-genesis successor should therefore move to this version only
+    /// in a transition that also publishes a commit record computed under it;
+    /// later refusal-only successors then preserve the pairing inductively.
+    /// That invariant belongs where head transitions are validated — this crate
+    /// names a layout, it does not police publication.
+    RefStateAndObjectClosureMerkleV1,
 }
 
 impl RootLayoutVersion {
     /// Every member, in stable code-point order.
-    pub const ALL: &'static [Self] = &[Self::LegacyWholeBody, Self::RefStateMerkleV1];
+    pub const ALL: &'static [Self] = &[
+        Self::LegacyWholeBody,
+        Self::RefStateMerkleV1,
+        Self::RefStateAndObjectClosureMerkleV1,
+    ];
 
     /// Compile-time completeness guard for [`RootLayoutVersion::ALL`].
     ///
@@ -99,7 +158,9 @@ impl RootLayoutVersion {
     /// weight.
     const fn _every_root_layout_version_is_listed(value: Self) {
         match value {
-            Self::LegacyWholeBody | Self::RefStateMerkleV1 => (),
+            Self::LegacyWholeBody
+            | Self::RefStateMerkleV1
+            | Self::RefStateAndObjectClosureMerkleV1 => (),
         }
     }
 
@@ -109,6 +170,7 @@ impl RootLayoutVersion {
         match self {
             Self::LegacyWholeBody => 0,
             Self::RefStateMerkleV1 => 1,
+            Self::RefStateAndObjectClosureMerkleV1 => 2,
         }
     }
 
@@ -139,19 +201,33 @@ impl RootLayoutVersion {
     pub const fn admits_ref_state_membership_proof(self) -> bool {
         match self {
             Self::LegacyWholeBody => false,
-            Self::RefStateMerkleV1 => true,
+            Self::RefStateMerkleV1 | Self::RefStateAndObjectClosureMerkleV1 => true,
         }
     }
 
     /// Whether this layout admits a membership proof for the object closure.
     ///
-    /// [`Self::LegacyWholeBody`] does not, because a whole-body digest cannot
-    /// be walked with a sibling path.
+    /// Only [`Self::RefStateAndObjectClosureMerkleV1`] does.
+    /// [`Self::LegacyWholeBody`] does not because a whole-body digest cannot be
+    /// walked with a sibling path — and [`Self::RefStateMerkleV1`] does not for
+    /// exactly the same reason: it advances the *ref state* only, and its own
+    /// documentation says every other root is unchanged from the legacy layout,
+    /// so under it the object closure root is still a whole-body digest.
+    ///
+    /// # This is a refusal, not a false answer
+    ///
+    /// Callers gate on this before verifying, and the distinction they draw is
+    /// load-bearing. `false` here means "this layout has no object tree, so the
+    /// question is unanswerable" and must surface as a typed refusal. Returning
+    /// a verification result of `false` instead would say "that object is not
+    /// in the closure", which is a different and unsupported claim — a caller
+    /// told that could retry with another proof forever, since no proof can
+    /// ever verify against a digest with no interior.
     #[must_use]
     pub const fn admits_object_closure_membership_proof(self) -> bool {
         match self {
-            Self::LegacyWholeBody => false,
-            Self::RefStateMerkleV1 => true,
+            Self::LegacyWholeBody | Self::RefStateMerkleV1 => false,
+            Self::RefStateAndObjectClosureMerkleV1 => true,
         }
     }
 }
