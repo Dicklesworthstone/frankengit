@@ -57,21 +57,22 @@ explicitly named native object; it will not yet be a complete replay, fabric,
 repair, or causal-diagnosis suite. `export` will write an authority-selected pack
 to a previously absent path.
 
-`serve` accepts a bounded raw git-daemon **upload-pack** service run, drains
-every admitted session, and reports accepted/completed/refused counts before it
-exits. Its compatibility default remains one session and one in-flight client;
-callers explicitly opt into larger non-zero `--max-sessions` and
+`serve` will accept a bounded raw git-daemon **upload-pack** service run, drain
+every admitted session, and report accepted/completed/refused counts before it
+exits. Its compatibility default will remain one session and one in-flight
+client; callers will explicitly opt into larger non-zero `--max-sessions` and
 `--max-in-flight` bounds. The bring-up transcript below deliberately names the
-one-session bound. The daemon does not serve receive-pack, smart HTTP, SSH, or a
+one-session bound. The daemon will not serve receive-pack, smart HTTP, SSH, or a
 native API. Receive parsing, quarantine, validation, and durable admission exist
 as lower-level and loopback composition slices, but ordinary network push will
 remain unsupported until those slices are connected to a production transport.
-No command treats local object placement, a routing hint, or a
+No command will treat local object placement, a routing hint, or a
 connection-local ref map as canonical state.
 
-For a clean-machine transcript of the implemented empty-repository lifecycle,
-run [`scripts/one_node_bringup.sh`](scripts/one_node_bringup.sh) with a new
-empty storage directory, an unused loopback address, and an absent export path:
+After the binary integration regression is repaired,
+[`scripts/one_node_bringup.sh`](scripts/one_node_bringup.sh) will exercise the
+intended empty-repository lifecycle with a new empty storage directory, an
+unused loopback address, and an absent export path:
 
 ```bash
 scripts/one_node_bringup.sh "$(mktemp -d)" \
@@ -81,7 +82,7 @@ scripts/one_node_bringup.sh "$(mktemp -d)" \
   /tmp/frankengit-one-node.pack
 ```
 
-The script records the exact `fg init` → `fg doctor` → one explicitly bounded
+The script will record the exact `fg init` → `fg doctor` → one explicitly bounded
 `fg serve` session → `fg export` commands and their observed output in
 `bring-up.transcript` below the supplied storage directory. Set `FG_BIN` to a
 prebuilt `fg` binary to avoid its default `cargo run -p fgit-cli --` launcher.
