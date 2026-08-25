@@ -23,9 +23,15 @@
 #   - The empty-repository genesis lane keeps working (regression twin).
 #
 # CLIENT PROVENANCE: plain `git` is the ordinary client whose compatibility
-# FG-028b claims; this is not the pinned differential oracle lane. Protocol is
-# pinned to v1 because v2 greeting serving is a separate bead
-# (frankengit-daemon-v2-lsrefs-serving-6mmn).
+# FG-028b claims; this is not the pinned differential oracle lane.
+#
+# PROTOCOL: the assertions above pin v1 explicitly so that a v2 regression can
+# never be mistaken for a v1 one, and CLONE-013/014 then clone the same node
+# over v2. The node has served v2 since frankengit-daemon-v2-lsrefs-serving-6mmn
+# closed (`serve_git_daemon_v2_once`, crates/fgit-node/src/lib.rs:4315), so the
+# note that used to stand here -- "protocol is pinned to v1 because v2 greeting
+# serving is a separate bead" -- described a boundary that no longer exists.
+# Pinning v1 is now a deliberate control, not a limitation.
 set -euo pipefail
 E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPO_ROOT="$(cd "$E2E_ROOT/../../.." && pwd)"
@@ -146,6 +152,36 @@ OID_CLONE=$(cat "$WORK/clone-oids.txt")
 fge_assert_eq FG-028B-CLONE-011 "$OID_SRC" "$OID_CLONE" 'advertised ref tip identities transferred exactly'
 
 fge_assert_eq FG-028B-CLONE-010 0 "$DIFF_RC" 'checked-out worktree is byte-identical to the source'
+
+# Protocol v2 over the same node. Every clone above pins v1 explicitly, so
+# without this block a v2 regression would be invisible here no matter how
+# thoroughly the v1 path is asserted. `-c protocol.version=2` is what a stock
+# client negotiates by default, which makes this the ordinary-client case
+# rather than an exotic one.
+# ---------------------------------------------------------------------------
+V2_PORT=$(( PORT_BASE + 192 + ($$ % 32) ))
+V2_NAME="serve-v2$V2_PORT"
+START_SERVE "$V2_NAME" "$STORAGE" "$V2_PORT"
+V2_RC=9
+V2_CLONE="$WORK/clone-v2"
+if [ "$SERVE_STATE" = ok ]; then
+  V2_RC=0
+  GIT_TERMINAL_PROMPT=0 git -c protocol.version=2 clone \
+    "git://127.0.0.1:$V2_PORT/$REPOID.git" "$V2_CLONE" \
+    >"$WORK/clone-v2.out" 2>&1 || V2_RC=$?
+fi
+fge_reap "$V2_NAME"
+fge_assert_eq FG-028B-CLONE-013 0 "$V2_RC" \
+  'a real git clone over protocol v2 exits zero'
+# Identity, not just exit status: v2 negotiates refs through ls-refs rather
+# than the v1 advertisement, so the tips are re-derived on a different path and
+# a v2-only ref-selection defect would show up exactly here.
+V2_OIDS=''
+if [ -d "$V2_CLONE/.git" ]; then
+  V2_OIDS=$(git -C "$V2_CLONE" show-ref --hash | sort -u)
+fi
+fge_assert_eq FG-028B-CLONE-014 "$OID_SRC" "$V2_OIDS" \
+  'protocol v2 transfers the same advertised ref tip identities as v1'
 
 # Abrupt-client containment. Kill timing is scheduling on purpose; what is
 # pinned is containment (the spawned server is reaped here, never orphaned)
