@@ -64,10 +64,12 @@ fgit-node = { path = "crates/fgit-node" }
 fgit-object-fabric = { path = "crates/fgit-object-fabric" }
 fgit-object-store = { path = "crates/fgit-object-store" }
 fgit-pack = { path = "crates/fgit-pack" }
+fgit-policy = { path = "crates/fgit-policy" }
 fgit-proof-bridge = { path = "crates/fgit-proof-bridge" }
 fgit-raptorq = { path = "crates/fgit-raptorq" }
 fgit-repair = { path = "crates/fgit-repair" }
 fgit-reference = { path = "crates/fgit-reference" }
+fgit-release = { path = "crates/fgit-release" }
 fgit-resource = { path = "crates/fgit-resource" }
 fgit-runner = { path = "crates/fgit-runner" }
 fgit-runtime = { path = "crates/fgit-runtime" }

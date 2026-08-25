@@ -612,6 +612,7 @@ dependencies = [
  "fgit-codec",
  "fgit-crypto",
  "fgit-forge",
+ "fgit-git-object",
  "fgit-lab",
  "fgit-pack",
  "fgit-reference",
@@ -695,7 +696,9 @@ dependencies = [
  "fgit-authority",
  "fgit-codec",
  "fgit-crypto",
+ "fgit-object-fabric",
  "fgit-reference",
+ "fgit-resource",
  "fgit-types",
 ]
 
@@ -797,6 +800,7 @@ version = "0.1.0"
 dependencies = [
  "fgit-crypto",
  "fgit-deflate",
+ "fgit-types",
 ]
 
 [[package]]
@@ -814,6 +818,7 @@ name = "fgit-identity"
 version = "0.0.1"
 dependencies = [
  "fgit-codec",
+ "fgit-crypto",
  "fgit-forge",
  "fgit-types",
 ]
@@ -885,6 +890,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgit-policy"
+version = "0.0.1"
+dependencies = [
+ "fgit-codec",
+ "fgit-crypto",
+ "fgit-types",
+]
+
+[[package]]
 name = "fgit-proof-bridge"
 version = "0.0.1"
 dependencies = [
@@ -920,6 +934,9 @@ name = "fgit-release"
 version = "0.0.1"
 dependencies = [
  "fgit-crypto",
+ "fgit-deflate",
+ "fgit-git-object",
+ "fgit-pack",
  "fgit-types",
 ]
 
