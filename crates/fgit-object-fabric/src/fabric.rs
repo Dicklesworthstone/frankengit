@@ -22,8 +22,8 @@ use fgit_types::{
 };
 
 use crate::{
-    Commitment, CryptoDigest, DigestAlgorithm, FabricError, MicrosegmentReader, ObjectEnvelope,
-    ObjectKind,
+    Commitment, CryptoDigest, DigestAlgorithm, FabricError, MicrosegmentBuilder,
+    MicrosegmentReader, ObjectEnvelope, ObjectKind, SegmentLimits, SegmentRecordInput,
 };
 
 const MANIFEST_MAGIC: &[u8; 4] = b"FGMF";
@@ -847,6 +847,34 @@ pub struct WholeObjectRead {
     pub placement: PlacementReceipt,
 }
 
+/// One manifest-selected immutable closure, reconstructed from verified native
+/// objects rather than trusted from storage metadata.
+///
+/// The manifest fixes the native-object identity order and the microsegment
+/// commitment. Each returned object has been read through the fabric's whole
+/// object verifier, and the closure constructor has rebuilt the microsegment
+/// to prove every manifest entry still describes those exact objects. A
+/// manifest is therefore not accepted as an archive index by itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedManifestClosure {
+    manifest: SegmentManifest,
+    objects: Vec<WholeObjectRead>,
+}
+
+impl VerifiedManifestClosure {
+    /// The authenticated manifest selecting this immutable object closure.
+    #[must_use]
+    pub const fn manifest(&self) -> &SegmentManifest {
+        &self.manifest
+    }
+
+    /// Objects in the manifest's canonical native-identity order.
+    #[must_use]
+    pub fn objects(&self) -> &[WholeObjectRead] {
+        &self.objects
+    }
+}
+
 /// Caller-owned bounds for one verified object stream.
 ///
 /// The local V1 backend verifies the complete immutable body before it emits
@@ -1155,6 +1183,57 @@ pub trait ImmutableObjectFabric {
     ) -> Result<DeletionReceipt, StoreRefusal>;
 }
 
+/// Reads and re-verifies the complete immutable closure named by one segment
+/// manifest.
+///
+/// This is the typed archive accessor for consumers that need the actual
+/// immutable bytes selected by a manifest (for example, a retained checkpoint
+/// leaf archive). It never treats a manifest entry or placement receipt as a
+/// substitute for an object read: every named native object is read whole,
+/// reconstructed into the manifest's microsegment, and checked against the
+/// manifest's independently committed segment reality.
+pub fn read_verified_manifest_closure<F>(
+    fabric: &F,
+    identity: SegmentManifestId,
+    segment_limits: &SegmentLimits,
+) -> Result<VerifiedManifestClosure, StoreRefusal>
+where
+    F: ImmutableObjectFabric + ?Sized,
+{
+    let manifest = fabric.read_manifest(identity)?;
+    if manifest.identity()? != identity {
+        return Err(StoreRefusal::ManifestIdentityMismatch);
+    }
+
+    let digest = CryptoDigest;
+    let mut builder = MicrosegmentBuilder::new(&digest, segment_limits.clone());
+    let mut objects = Vec::with_capacity(manifest.entries().len());
+
+    for entry in manifest.entries() {
+        let whole = fabric.read_whole(entry.object_identity())?;
+        let envelope = whole.object.envelope();
+        if envelope.namespace() != manifest.namespace()
+            || envelope.object_identity() != entry.object_identity()
+            || envelope.object_kind() != entry.object_kind()
+            || envelope.declared_length() != entry.payload_length()
+            || envelope.payload_commitment() != entry.payload_commitment()
+        {
+            return Err(StoreRefusal::ManifestRealityMismatch);
+        }
+        builder.push(SegmentRecordInput {
+            envelope: envelope.clone(),
+            payload: whole.object.payload().to_vec(),
+        })?;
+        objects.push(whole);
+    }
+
+    let segment = builder.build()?;
+    let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, segment_limits)?;
+    manifest.verify_segment_reality(&reader)?;
+
+    Ok(VerifiedManifestClosure { manifest, objects })
+}
+
 /// Runtime-owned object-fabric operations.
 ///
 /// The synchronous trait remains the exact storage algebra. This companion
@@ -1356,6 +1435,8 @@ const _: () = assert!(FIXTURE_ALGORITHM_CODE_POINT >= 0xfff0);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
     use asupersync::CancelKind;
     use fgit_types::{DigestAlgorithmId, DigestBytes, GitOidSha1};
 
@@ -1561,6 +1642,183 @@ mod tests {
         assert_eq!(
             manifest.verify_segment_reality(&reader),
             Err(StoreRefusal::ManifestRealityMismatch)
+        );
+    }
+
+    #[derive(Debug)]
+    struct ClosureFixture {
+        manifest: SegmentManifest,
+        objects: BTreeMap<GitOid, WholeObjectRead>,
+    }
+
+    impl ImmutableObjectFabric for ClosureFixture {
+        fn capabilities(&self) -> FabricCapabilities {
+            FabricCapabilities::new(&[
+                FabricCapability::ConditionalPutIfAbsent,
+                FabricCapability::VerifiedWholeReads,
+            ])
+        }
+
+        fn put_if_absent(
+            &self,
+            _object: VerifiedObject,
+            admission: PlacementAdmission<'_>,
+        ) -> Result<PutIfAbsent, StoreRefusal> {
+            let (_ledger, budget) = admission.into_parts();
+            let _released = budget.release();
+            Err(StoreRefusal::ObjectAbsent)
+        }
+
+        fn read_whole(&self, identity: GitOid) -> Result<WholeObjectRead, StoreRefusal> {
+            self.objects
+                .get(&identity)
+                .cloned()
+                .ok_or(StoreRefusal::ObjectAbsent)
+        }
+
+        fn read_range_verified(
+            &self,
+            _identity: GitOid,
+            _range: ObjectRange,
+        ) -> Result<VerifiedRangeRead, StoreRefusal> {
+            Err(StoreRefusal::PartialRangeUnverified)
+        }
+
+        fn write_manifest(
+            &self,
+            manifest: &SegmentManifest,
+        ) -> Result<SegmentManifestId, StoreRefusal> {
+            manifest.identity()
+        }
+
+        fn read_manifest(
+            &self,
+            _identity: SegmentManifestId,
+        ) -> Result<SegmentManifest, StoreRefusal> {
+            Ok(self.manifest.clone())
+        }
+
+        fn publish_retention_root<R: AuthenticatedRetentionRegistry>(
+            &self,
+            _registry: &R,
+            _proposal: &RetentionRootProposal,
+        ) -> Result<PublicationState, StoreRefusal> {
+            Err(StoreRefusal::RetentionRevalidationFailed)
+        }
+
+        fn delete_if_unretained<R: AuthenticatedRetentionRegistry>(
+            &self,
+            _registry: &R,
+            _identity: GitOid,
+        ) -> Result<DeletionReceipt, StoreRefusal> {
+            Err(StoreRefusal::DeletionRetained)
+        }
+    }
+
+    fn closure_fixture() -> ClosureFixture {
+        let digest = CryptoDigest;
+        let limits = SegmentLimits::default();
+        let mut objects = [
+            b"archive leaf one".as_slice(),
+            b"archive leaf two".as_slice(),
+        ]
+        .into_iter()
+        .map(|payload| {
+            let identity = fgit_crypto::git_object_id(
+                fgit_types::GitHashAlgorithm::Sha1,
+                fgit_crypto::GitObjectKind::Blob,
+                payload,
+            );
+            let envelope = ObjectEnvelope::new(
+                vec![b'n'],
+                identity,
+                ObjectKind::Blob,
+                u64::try_from(payload.len()).expect("fixture payload length fits u64"),
+                digest
+                    .payload_commitment(ObjectKind::Blob, payload)
+                    .expect("fixture payload commitment is available"),
+                b"outcome-index-leaf".to_vec(),
+                [0x51; 32],
+                None,
+                &limits,
+            )
+            .expect("fixture envelope is valid");
+            VerifiedObject::new(envelope, payload.to_vec()).expect("fixture native blob verifies")
+        })
+        .collect::<Vec<_>>();
+        objects.sort_by_key(VerifiedObject::identity);
+
+        let mut builder = MicrosegmentBuilder::new(&digest, limits.clone());
+        for object in &objects {
+            builder
+                .push(SegmentRecordInput {
+                    envelope: object.envelope().clone(),
+                    payload: object.payload().to_vec(),
+                })
+                .expect("fixture object joins the canonical segment");
+        }
+        let segment = builder.build().expect("fixture segment builds");
+        let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, &limits)
+            .expect("fixture segment verifies");
+        let manifest =
+            SegmentManifest::from_verified_segment(&reader, vec![placement()], &manifest_limits())
+                .expect("fixture manifest derives from the verified segment");
+        let objects = objects
+            .into_iter()
+            .map(|object| {
+                (
+                    object.identity(),
+                    WholeObjectRead {
+                        object,
+                        placement: placement(),
+                    },
+                )
+            })
+            .collect();
+        ClosureFixture { manifest, objects }
+    }
+
+    #[test]
+    fn verified_manifest_closure_reconstructs_each_manifest_selected_native_object() {
+        let fixture = closure_fixture();
+        let identity = fixture
+            .manifest
+            .identity()
+            .expect("fixture manifest identifies");
+        let closure = read_verified_manifest_closure(&fixture, identity, &SegmentLimits::default())
+            .expect("matching manifest and native objects reconstruct their closure");
+
+        assert_eq!(closure.manifest(), &fixture.manifest);
+        assert_eq!(closure.objects().len(), fixture.manifest.entries().len());
+        assert_eq!(
+            closure
+                .objects()
+                .iter()
+                .map(|whole| whole.object.identity())
+                .collect::<Vec<_>>(),
+            fixture
+                .manifest
+                .entries()
+                .iter()
+                .map(ManifestEntry::object_identity)
+                .collect::<Vec<_>>(),
+            "the accessor returns the exact native objects in manifest order"
+        );
+    }
+
+    #[test]
+    fn verified_manifest_closure_refuses_a_manifest_that_lies_about_a_real_object() {
+        let mut fixture = closure_fixture();
+        fixture.manifest.entries[0].payload_length += 1;
+        let identity = fixture
+            .manifest
+            .identity()
+            .expect("the malformed manifest still has a distinct typed identity");
+
+        assert_eq!(
+            read_verified_manifest_closure(&fixture, identity, &SegmentLimits::default()),
+            Err(StoreRefusal::ManifestRealityMismatch),
+            "a manifest entry cannot lie about a successfully read native object"
         );
     }
 
