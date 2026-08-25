@@ -571,13 +571,23 @@ An `OutcomeIndexCheckpointBody` is repository-scoped immutable evidence. Its
 canonical bytes bind the repository ID; the exact decision-tail ID and terminal
 decision sequence it covers (both are present or both absent); its immediate
 predecessor checkpoint digest (absent only at genesis); and the complete
-retained terminal-decision leaf material in the authority-owned
-digest-sorted outcome-index order. Its body identity is
+typed `SegmentManifestId` of its retained-leaf archive. That final field is the
+ordinary internal-object encoding of the selected manifest identity (digest
+algorithm, `frankengit/segment-manifest/v1` domain tag, codec version, and
+digest bytes); terminal decisions never appear inline in the checkpoint body.
+The manifest selects ordinary immutable native-blob chunks in the
+repository-scoped `frankengit/outcome-index-checkpoint-leaves/v1/<repository-id>`
+namespace. Each chunk payload is a canonical `u32` chunk index followed by the
+canonical sequence of at most 1,024 `RepositoryDecision` encodings; the
+indices start at zero without gaps, and the concatenated decisions are in the
+authority-owned digest-sorted outcome-index order. Its body identity is
 `outcome_index_checkpoint_root`. A decoder re-derives that identity, verifies
-the repository and exact position pairing, re-canonicalizes the retained leaf
-material under the authority's one commitment order, and verifies every
-predecessor link. A mismatched identity, leaf order, repository, position, or
-predecessor is refused as unusable checkpoint evidence.
+the repository and exact position pairing, rereads and reconstructs the
+manifest closure, verifies each selected blob and chunk codec, re-canonicalizes
+the retained leaf material under the authority's one commitment order, and
+verifies every predecessor link. A mismatched identity, manifest closure, leaf
+order, repository, position, or predecessor is refused as unusable checkpoint
+evidence.
 
 Outcome-index derivation first uses verified checkpoint leaves and replays only
 terminal outcomes strictly after the checkpoint position. The decision-tail

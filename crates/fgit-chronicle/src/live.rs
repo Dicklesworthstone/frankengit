@@ -19,14 +19,15 @@ use fgit_codec::{
     CodecRefusal, DecodeLimits, RepositoryAuthorityHeadBody, decode_body, encode_body,
 };
 use fgit_crypto::IdentityDomain;
+use fgit_object_fabric::fabric::ImmutableObjectFabric;
 use fgit_types::{Digest, RepositoryCapsuleId};
 
 use crate::{
     BackupExportBundleBody, BackupProfile, CapsuleDefect, CapsulePointer, ChronicleRefusal,
     OutcomeIndexCheckpointBody, OutcomeIndexCheckpointRefusal, RepositoryCapsuleBody,
-    RestoreClassification, RestoreOutcome, capsule_identity, stage_outcome_index_checkpoint,
-    stage_outcome_index_checkpoint_async, verify_outcome_index_checkpoint_chain,
-    verify_outcome_index_checkpoint_chain_async,
+    RestoreClassification, RestoreOutcome, capsule_identity,
+    load_verified_outcome_index_checkpoint, load_verified_outcome_index_checkpoint_async,
+    stage_outcome_index_checkpoint, stage_outcome_index_checkpoint_async,
 };
 
 /// Inputs naming immutable closure material that the object-fabric owner has
@@ -1019,8 +1020,9 @@ where
 /// capsule. Its predecessor chain and its exact authority position are checked
 /// before the ordinary capsule path rereads the head, so a concurrent movement
 /// can leave only unreachable immutable evidence.
-pub fn freeze_capsule_with_outcome_index_checkpoint<S, I>(
+pub fn freeze_capsule_with_outcome_index_checkpoint<S, I, F>(
     store: &S,
+    fabric: &F,
     identity: &I,
     receipt: &HeadReadReceipt,
     current_pointer: Option<&CapsulePointer>,
@@ -1030,6 +1032,7 @@ pub fn freeze_capsule_with_outcome_index_checkpoint<S, I>(
 where
     S: AuthorityStore + ?Sized,
     I: BodyIdentity + ?Sized,
+    F: ImmutableObjectFabric + ?Sized,
 {
     store
         .authenticate_head_receipt(receipt)
@@ -1044,14 +1047,15 @@ where
     }
     let checkpoint_root = stage_outcome_index_checkpoint(store, identity, checkpoint)
         .map_err(|error| LiveCapsuleRefusal::OutcomeIndexCheckpoint(Box::new(error)))?;
-    verify_outcome_index_checkpoint_chain(store, identity, checkpoint_root)
-        .map_err(|error| LiveCapsuleRefusal::OutcomeIndexCheckpoint(Box::new(error)))?;
+    let (verified, decisions) =
+        load_verified_outcome_index_checkpoint(store, identity, fabric, checkpoint_root)
+            .map_err(|error| LiveCapsuleRefusal::OutcomeIndexCheckpoint(Box::new(error)))?;
     collect_cumulative_outcomes_from_checkpoint(
         store,
         receipt.key(),
-        checkpoint.decisions(),
-        checkpoint.decision_tail_id,
-        checkpoint.latest_decision_sequence,
+        &decisions,
+        verified.decision_tail_id,
+        verified.latest_decision_sequence,
     )
     .map_err(|error| LiveCapsuleRefusal::OutcomeIndexCheckpointPosition(Box::new(error)))?;
     freeze_capsule_with_checkpoint_root(
@@ -1160,9 +1164,10 @@ where
 }
 
 /// Asynchronous twin of [`freeze_capsule_with_outcome_index_checkpoint`].
-pub async fn freeze_capsule_with_outcome_index_checkpoint_async<S, I>(
+pub async fn freeze_capsule_with_outcome_index_checkpoint_async<S, I, F>(
     store: &S,
     cx: &S::Context,
+    fabric: &F,
     identity: &I,
     receipt: &HeadReadReceipt,
     current_pointer: Option<&CapsulePointer>,
@@ -1172,6 +1177,7 @@ pub async fn freeze_capsule_with_outcome_index_checkpoint_async<S, I>(
 where
     S: AsyncAuthorityStore + ?Sized,
     I: BodyIdentity + ?Sized + Sync,
+    F: ImmutableObjectFabric + ?Sized,
 {
     store
         .authenticate_head_receipt(cx, receipt)
@@ -1188,16 +1194,17 @@ where
     let checkpoint_root = stage_outcome_index_checkpoint_async(store, cx, identity, checkpoint)
         .await
         .map_err(|error| LiveCapsuleRefusal::OutcomeIndexCheckpoint(Box::new(error)))?;
-    verify_outcome_index_checkpoint_chain_async(store, cx, identity, checkpoint_root)
-        .await
-        .map_err(|error| LiveCapsuleRefusal::OutcomeIndexCheckpoint(Box::new(error)))?;
+    let (verified, decisions) =
+        load_verified_outcome_index_checkpoint_async(store, cx, identity, fabric, checkpoint_root)
+            .await
+            .map_err(|error| LiveCapsuleRefusal::OutcomeIndexCheckpoint(Box::new(error)))?;
     collect_cumulative_outcomes_from_checkpoint_async(
         store,
         cx,
         receipt.key(),
-        checkpoint.decisions(),
-        checkpoint.decision_tail_id,
-        checkpoint.latest_decision_sequence,
+        &decisions,
+        verified.decision_tail_id,
+        verified.latest_decision_sequence,
     )
     .await
     .map_err(|error| LiveCapsuleRefusal::OutcomeIndexCheckpointPosition(Box::new(error)))?;

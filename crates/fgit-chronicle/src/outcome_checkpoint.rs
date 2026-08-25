@@ -23,16 +23,25 @@ use fgit_codec::{
 };
 use fgit_codec::{Decoder, Encoder};
 use fgit_crypto::IdentityDomain;
+use fgit_object_fabric::fabric::{
+    ImmutableObjectFabric, ManifestLimits, PlacementReceipt, SegmentManifest, StoreRefusal,
+    VerifiedObject, read_verified_manifest_closure,
+};
+use fgit_object_fabric::{
+    CryptoDigest, DigestAlgorithm, FabricError, MicrosegmentBuilder, MicrosegmentReader,
+    ObjectEnvelope, ObjectKind, SegmentLimits, SegmentRecordInput,
+};
 use fgit_types::{
-    DecisionSequence, Digest, DomainTag, InternalObjectId, RepositoryCapsuleId,
-    RepositoryDecisionBatchId, RepositoryId, SchemaFamily,
+    DecisionSequence, Digest, DomainTag, GitHashAlgorithm, InternalObjectId, RepositoryCapsuleId,
+    RepositoryDecisionBatchId, RepositoryId, SchemaFamily, SegmentManifestId,
 };
 
 /// The immutable retained leaf set for one exact decision-log position.
 ///
-/// `decisions` are in the authority-owned digest order. They are terminal
-/// facts rather than precomputed leaf bytes so the one existing authority
-/// implementation continues to own the leaf encoding and Merkle commitment.
+/// The body binds the existing object-fabric segment manifest that names the
+/// retained decision-leaf chunks. It never inlines the leaf bytes: the manifest
+/// identity commits the bounded native-blob closure, which the fabric rereads
+/// and reconstructs before a checkpoint can accelerate a fold.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutcomeIndexCheckpointBody {
     /// Repository whose decision stream this checkpoint summarizes.
@@ -43,57 +52,307 @@ pub struct OutcomeIndexCheckpointBody {
     pub latest_decision_sequence: Option<DecisionSequence>,
     /// Digest of the immediate older retained-leaf checkpoint, absent at genesis.
     pub predecessor_checkpoint_root: Option<Digest>,
-    decisions: Vec<RepositoryDecision>,
+    /// Existing object-fabric manifest that names this checkpoint's leaf chunks.
+    pub leaf_archive_manifest: SegmentManifestId,
 }
 
 impl OutcomeIndexCheckpointBody {
-    /// Constructs a checkpoint only from the authority's canonical leaf order.
+    /// Constructs a checkpoint that names an already staged leaf archive.
     pub fn new(
         repository_id: RepositoryId,
         decision_tail_id: Option<RepositoryDecisionBatchId>,
         latest_decision_sequence: Option<DecisionSequence>,
         predecessor_checkpoint_root: Option<Digest>,
-        decisions: Vec<RepositoryDecision>,
+        leaf_archive_manifest: SegmentManifestId,
     ) -> Result<Self, OutcomeIndexCheckpointRefusal> {
         if decision_tail_id.is_some() != latest_decision_sequence.is_some() {
             return Err(OutcomeIndexCheckpointRefusal::PositionPairMismatch);
         }
-        let decisions = canonical_outcome_index_decisions(&decisions)
-            .map_err(OutcomeIndexCheckpointRefusal::Outcome)?;
         Ok(Self {
             repository_id,
             decision_tail_id,
             latest_decision_sequence,
             predecessor_checkpoint_root,
-            decisions,
+            leaf_archive_manifest,
         })
     }
 
-    /// The retained terminal decisions in the one commitment order.
-    #[must_use]
-    pub fn decisions(&self) -> &[RepositoryDecision] {
-        &self.decisions
-    }
-
-    /// Checks the position pairing and authority-owned ordering after decoding.
+    /// Checks the position pairing after decoding. The manifest closure owns
+    /// retained-leaf ordering verification.
     pub fn verify_canonical(&self) -> Result<(), OutcomeIndexCheckpointRefusal> {
         if self.decision_tail_id.is_some() != self.latest_decision_sequence.is_some() {
             return Err(OutcomeIndexCheckpointRefusal::PositionPairMismatch);
         }
-        let canonical = canonical_outcome_index_decisions(&self.decisions)
-            .map_err(OutcomeIndexCheckpointRefusal::Outcome)?;
-        if canonical != self.decisions {
-            return Err(OutcomeIndexCheckpointRefusal::LeafOrderMismatch);
-        }
         Ok(())
     }
+}
+
+/// Native-blob codec namespace for one retained outcome-index leaf chunk.
+const OUTCOME_INDEX_LEAF_CHUNK_CODEC_NAMESPACE: &[u8] =
+    b"frankengit/outcome-index-checkpoint-leaf-chunk/v1";
+
+/// Bounded count of terminal decisions encoded in any one native blob.
+pub const MAX_OUTCOME_INDEX_LEAF_CHUNK_DECISIONS: usize = 1_024;
+
+/// Prepared ordinary native blobs for one manifest-backed checkpoint archive.
+///
+/// The archive has no authority of its own. Callers stage these verified blobs
+/// through [`ImmutableObjectFabric`], then derive the existing
+/// [`SegmentManifest`] from the returned placement receipts and bind only that
+/// manifest identity in [`OutcomeIndexCheckpointBody`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutcomeIndexLeafArchive {
+    namespace: Vec<u8>,
+    objects: Vec<VerifiedObject>,
+}
+
+impl OutcomeIndexLeafArchive {
+    /// Encodes authority-canonical retained decisions into deterministic,
+    /// bounded native-blob chunks for one repository.
+    pub fn prepare(
+        repository_id: RepositoryId,
+        object_format: GitHashAlgorithm,
+        decisions: &[RepositoryDecision],
+    ) -> Result<Self, OutcomeIndexCheckpointRefusal> {
+        let canonical = canonical_outcome_index_decisions(decisions)
+            .map_err(OutcomeIndexCheckpointRefusal::Outcome)?;
+        let namespace = outcome_index_leaf_archive_namespace(repository_id);
+        let chunks: Vec<&[RepositoryDecision]> = if canonical.is_empty() {
+            vec![&[]]
+        } else {
+            canonical
+                .chunks(MAX_OUTCOME_INDEX_LEAF_CHUNK_DECISIONS)
+                .collect()
+        };
+        let digest = CryptoDigest;
+        let mut objects = Vec::with_capacity(chunks.len());
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let index = u32::try_from(index)
+                .map_err(|_| OutcomeIndexCheckpointRefusal::LeafChunkIndexOverflow)?;
+            let payload = encode_outcome_index_leaf_chunk(index, chunk)?;
+            let payload_commitment = digest
+                .payload_commitment(ObjectKind::Blob, &payload)
+                .map_err(OutcomeIndexCheckpointRefusal::Fabric)?;
+            let object_identity = fgit_crypto::git_object_id(
+                object_format,
+                fgit_crypto::GitObjectKind::Blob,
+                &payload,
+            );
+            let envelope = ObjectEnvelope::new(
+                namespace.clone(),
+                object_identity,
+                ObjectKind::Blob,
+                u64::try_from(payload.len())
+                    .map_err(|_| OutcomeIndexCheckpointRefusal::LeafChunkTooLarge)?,
+                payload_commitment,
+                OUTCOME_INDEX_LEAF_CHUNK_CODEC_NAMESPACE.to_vec(),
+                payload_commitment,
+                None,
+                &SegmentLimits::default(),
+            )
+            .map_err(OutcomeIndexCheckpointRefusal::Fabric)?;
+            objects.push(
+                VerifiedObject::new(envelope, payload)
+                    .map_err(OutcomeIndexCheckpointRefusal::FabricStore)?,
+            );
+        }
+        objects.sort_unstable_by_key(VerifiedObject::identity);
+        Ok(Self { namespace, objects })
+    }
+
+    /// Verified native blobs in the fabric's required identity order.
+    #[must_use]
+    pub fn objects(&self) -> &[VerifiedObject] {
+        &self.objects
+    }
+
+    /// Builds the existing segment manifest after every archive blob has a
+    /// caller-observed placement receipt. `placements` must already be in the
+    /// fabric's canonical receipt order and contain no duplicates.
+    pub fn manifest(
+        &self,
+        placements: Vec<PlacementReceipt>,
+    ) -> Result<SegmentManifest, OutcomeIndexCheckpointRefusal> {
+        let limits = SegmentLimits::default();
+        let digest = CryptoDigest;
+        let mut builder = MicrosegmentBuilder::new(&digest, limits.clone());
+        for object in &self.objects {
+            builder
+                .push(SegmentRecordInput {
+                    envelope: object.envelope().clone(),
+                    payload: object.payload().to_vec(),
+                })
+                .map_err(OutcomeIndexCheckpointRefusal::Fabric)?;
+        }
+        let segment = builder
+            .build()
+            .map_err(OutcomeIndexCheckpointRefusal::Fabric)?;
+        let reader = MicrosegmentReader::open(segment.as_bytes(), &digest, &limits)
+            .map_err(OutcomeIndexCheckpointRefusal::Fabric)?;
+        SegmentManifest::from_verified_segment(&reader, placements, &ManifestLimits::default())
+            .map_err(OutcomeIndexCheckpointRefusal::FabricStore)
+    }
+
+    /// The exact namespace every manifest in this archive must use.
+    #[must_use]
+    pub fn namespace(&self) -> &[u8] {
+        &self.namespace
+    }
+}
+
+/// Rereads the fabric closure named by a checkpoint and recovers the only
+/// authority-owned decision ordering. No manifest metadata is treated as leaf
+/// evidence until every native object and the reconstructed microsegment pass
+/// the object-fabric verifier.
+pub fn load_outcome_index_checkpoint_leaves<F>(
+    fabric: &F,
+    checkpoint: &OutcomeIndexCheckpointBody,
+) -> Result<Vec<RepositoryDecision>, OutcomeIndexCheckpointRefusal>
+where
+    F: ImmutableObjectFabric + ?Sized,
+{
+    let closure = read_verified_manifest_closure(
+        fabric,
+        checkpoint.leaf_archive_manifest,
+        &SegmentLimits::default(),
+    )
+    .map_err(OutcomeIndexCheckpointRefusal::FabricStore)?;
+    if closure.manifest().namespace()
+        != outcome_index_leaf_archive_namespace(checkpoint.repository_id)
+    {
+        return Err(OutcomeIndexCheckpointRefusal::LeafArchiveNamespaceMismatch);
+    }
+
+    let mut chunks = Vec::with_capacity(closure.objects().len());
+    for whole in closure.objects() {
+        let envelope = whole.object.envelope();
+        if envelope.object_kind() != ObjectKind::Blob {
+            return Err(OutcomeIndexCheckpointRefusal::LeafArchiveObjectKind);
+        }
+        if envelope.codec_namespace() != OUTCOME_INDEX_LEAF_CHUNK_CODEC_NAMESPACE {
+            return Err(OutcomeIndexCheckpointRefusal::LeafArchiveCodecNamespaceMismatch);
+        }
+        if envelope.logical_content_identity() != envelope.payload_commitment() {
+            return Err(OutcomeIndexCheckpointRefusal::LeafArchiveLogicalIdentityMismatch);
+        }
+        chunks.push(decode_outcome_index_leaf_chunk(whole.object.payload())?);
+    }
+    chunks.sort_unstable_by_key(|(index, _)| *index);
+    let mut decisions = Vec::new();
+    for (expected, (index, chunk)) in chunks.into_iter().enumerate() {
+        if index
+            != u32::try_from(expected)
+                .map_err(|_| OutcomeIndexCheckpointRefusal::LeafChunkIndexOverflow)?
+        {
+            return Err(OutcomeIndexCheckpointRefusal::LeafChunkOrderMismatch);
+        }
+        if chunk.is_empty() && expected != 0 {
+            return Err(OutcomeIndexCheckpointRefusal::EmptyLeafChunk);
+        }
+        if decisions.is_empty() && chunk.is_empty() && closure.objects().len() != 1 {
+            return Err(OutcomeIndexCheckpointRefusal::EmptyLeafChunk);
+        }
+        decisions.extend(chunk);
+    }
+    let canonical = canonical_outcome_index_decisions(&decisions)
+        .map_err(OutcomeIndexCheckpointRefusal::Outcome)?;
+    if canonical != decisions {
+        return Err(OutcomeIndexCheckpointRefusal::LeafOrderMismatch);
+    }
+    Ok(decisions)
+}
+
+/// Loads a checkpoint only when both its authority-owned predecessor chain and
+/// its manifest-selected retained leaves verify.
+///
+/// This is the fabric-aware acceleration boundary: callers must use the
+/// returned decisions with the authority collector at the checkpoint's exact
+/// position. A bare checkpoint body or bare manifest identity is never enough
+/// to substitute for the retained leaf set.
+pub fn load_verified_outcome_index_checkpoint<S, I, F>(
+    store: &S,
+    identity: &I,
+    fabric: &F,
+    root: Digest,
+) -> Result<(OutcomeIndexCheckpointBody, Vec<RepositoryDecision>), OutcomeIndexCheckpointRefusal>
+where
+    S: AuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized,
+    F: ImmutableObjectFabric + ?Sized,
+{
+    let checkpoint = verify_outcome_index_checkpoint_chain(store, identity, root)?;
+    let decisions = load_outcome_index_checkpoint_leaves(fabric, &checkpoint)?;
+    Ok((checkpoint, decisions))
+}
+
+/// Asynchronous authority twin of [`load_verified_outcome_index_checkpoint`].
+/// Object-fabric closure reads remain explicit synchronous immutable reads;
+/// they neither create authority nor borrow the authority runtime context.
+pub async fn load_verified_outcome_index_checkpoint_async<S, I, F>(
+    store: &S,
+    cx: &S::Context,
+    identity: &I,
+    fabric: &F,
+    root: Digest,
+) -> Result<(OutcomeIndexCheckpointBody, Vec<RepositoryDecision>), OutcomeIndexCheckpointRefusal>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized + Sync,
+    F: ImmutableObjectFabric + ?Sized,
+{
+    let checkpoint = verify_outcome_index_checkpoint_chain_async(store, cx, identity, root).await?;
+    let decisions = load_outcome_index_checkpoint_leaves(fabric, &checkpoint)?;
+    Ok((checkpoint, decisions))
+}
+
+fn outcome_index_leaf_archive_namespace(repository_id: RepositoryId) -> Vec<u8> {
+    let mut namespace = b"frankengit/outcome-index-checkpoint-leaves/v1/".to_vec();
+    namespace.extend_from_slice(repository_id.as_bytes());
+    namespace
+}
+
+fn encode_outcome_index_leaf_chunk(
+    index: u32,
+    decisions: &[RepositoryDecision],
+) -> Result<Vec<u8>, OutcomeIndexCheckpointRefusal> {
+    let mut out = Encoder::new();
+    out.write_scalar(index);
+    out.write_sequence(
+        "outcome_index_leaf_chunk_decisions",
+        decisions,
+        RepositoryDecision::write_canonical,
+    )
+    .map_err(OutcomeIndexCheckpointRefusal::Codec)?;
+    Ok(out.into_bytes())
+}
+
+fn decode_outcome_index_leaf_chunk(
+    bytes: &[u8],
+) -> Result<(u32, Vec<RepositoryDecision>), OutcomeIndexCheckpointRefusal> {
+    let mut input = Decoder::new(bytes, DecodeLimits::DEFAULT);
+    let index = input
+        .read_scalar("outcome_index_leaf_chunk_index")
+        .map_err(OutcomeIndexCheckpointRefusal::Codec)?;
+    let decisions = input
+        .read_sequence(
+            "outcome_index_leaf_chunk_decisions",
+            RepositoryDecision::read_canonical,
+        )
+        .map_err(OutcomeIndexCheckpointRefusal::Codec)?;
+    if decisions.len() > MAX_OUTCOME_INDEX_LEAF_CHUNK_DECISIONS {
+        return Err(OutcomeIndexCheckpointRefusal::LeafChunkTooLarge);
+    }
+    input
+        .finish()
+        .map_err(OutcomeIndexCheckpointRefusal::Codec)?;
+    Ok((index, decisions))
 }
 
 impl CanonicalBody for OutcomeIndexCheckpointBody {
     const DOMAIN: DomainTag = DomainTag::from_static("frankengit/outcome-index-checkpoint/v1");
     const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("outcome-index-checkpoint");
     const SCHEMA_MAJOR: u16 = 1;
-    const SCHEMA_MINOR: u16 = 0;
+    const SCHEMA_MINOR: u16 = 1;
 
     fn write_payload(&self, out: &mut Encoder) -> Result<(), CodecRefusal> {
         out.write_opaque_id(self.repository_id.as_bytes());
@@ -107,11 +366,7 @@ impl CanonicalBody for OutcomeIndexCheckpointBody {
         out.write_option(self.predecessor_checkpoint_root.as_ref(), |out, root| {
             out.write_digest(root)
         })?;
-        out.write_sequence(
-            "outcome_index_decisions",
-            &self.decisions,
-            RepositoryDecision::write_canonical,
-        )
+        out.write_internal_object_id(self.leaf_archive_manifest.as_internal_object_id())
     }
 
     fn read_payload(input: &mut Decoder<'_>) -> Result<Self, CodecRefusal> {
@@ -126,16 +381,15 @@ impl CanonicalBody for OutcomeIndexCheckpointBody {
         })?;
         let predecessor_checkpoint_root =
             input.read_option("predecessor_checkpoint_root", Decoder::read_digest)?;
-        let decisions = input.read_sequence(
-            "outcome_index_decisions",
-            RepositoryDecision::read_canonical,
-        )?;
+        let leaf_archive_manifest =
+            SegmentManifestId::from_internal_object_id(input.read_internal_object_id()?)
+                .map_err(CodecRefusal::from)?;
         Ok(Self {
             repository_id,
             decision_tail_id,
             latest_decision_sequence,
             predecessor_checkpoint_root,
-            decisions,
+            leaf_archive_manifest,
         })
     }
 }
@@ -147,6 +401,22 @@ pub enum OutcomeIndexCheckpointRefusal {
     PositionPairMismatch,
     /// Retained decisions are not in authority's one commitment order.
     LeafOrderMismatch,
+    /// A leaf archive manifest belongs to a different repository scope.
+    LeafArchiveNamespaceMismatch,
+    /// A manifest-selected object is not a native Git blob.
+    LeafArchiveObjectKind,
+    /// A native blob did not name the fixed outcome-index leaf chunk codec.
+    LeafArchiveCodecNamespaceMismatch,
+    /// A leaf chunk envelope did not bind its logical identity to its payload.
+    LeafArchiveLogicalIdentityMismatch,
+    /// Leaf chunks were missing, duplicated, or not numbered contiguously.
+    LeafChunkOrderMismatch,
+    /// A non-empty archive contained an empty interior leaf chunk.
+    EmptyLeafChunk,
+    /// A leaf chunk could not fit the fixed bounded chunk contract.
+    LeafChunkTooLarge,
+    /// The platform could not represent a deterministic leaf chunk index.
+    LeafChunkIndexOverflow,
     /// Authority refused duplicate, malformed, or otherwise invalid decisions.
     Outcome(OutcomeFailure),
     /// Canonical body encoding or decoding refused.
@@ -173,6 +443,10 @@ pub enum OutcomeIndexCheckpointRefusal {
     PredecessorPositionMismatch,
     /// The authority backend refused an immutable operation.
     Authority(AuthorityFailure),
+    /// Object-fabric segment construction refused the proposed archive bytes.
+    Fabric(FabricError),
+    /// Object-fabric storage or closure verification refused the archive.
+    FabricStore(StoreRefusal),
 }
 
 impl fmt::Display for OutcomeIndexCheckpointRefusal {
@@ -183,6 +457,30 @@ impl fmt::Display for OutcomeIndexCheckpointRefusal {
             ),
             Self::LeafOrderMismatch => formatter
                 .write_str("outcome-index checkpoint decisions are not in commitment order"),
+            Self::LeafArchiveNamespaceMismatch => formatter.write_str(
+                "outcome-index checkpoint leaf archive belongs to another repository namespace",
+            ),
+            Self::LeafArchiveObjectKind => formatter.write_str(
+                "outcome-index checkpoint leaf archive contains a non-blob native object",
+            ),
+            Self::LeafArchiveCodecNamespaceMismatch => formatter.write_str(
+                "outcome-index checkpoint leaf archive uses the wrong native-blob codec namespace",
+            ),
+            Self::LeafArchiveLogicalIdentityMismatch => formatter.write_str(
+                "outcome-index checkpoint leaf archive logical identity differs from payload commitment",
+            ),
+            Self::LeafChunkOrderMismatch => formatter.write_str(
+                "outcome-index checkpoint leaf chunks are not a contiguous canonical sequence",
+            ),
+            Self::EmptyLeafChunk => formatter.write_str(
+                "outcome-index checkpoint leaf archive has an invalid empty chunk",
+            ),
+            Self::LeafChunkTooLarge => formatter.write_str(
+                "outcome-index checkpoint leaf chunk exceeds its bounded codec contract",
+            ),
+            Self::LeafChunkIndexOverflow => formatter.write_str(
+                "outcome-index checkpoint leaf chunk index cannot be represented canonically",
+            ),
             Self::Outcome(error) => write!(formatter, "outcome-index checkpoint refused: {error}"),
             Self::Codec(error) => {
                 write!(formatter, "outcome-index checkpoint codec refused: {error}")
@@ -218,6 +516,12 @@ impl fmt::Display for OutcomeIndexCheckpointRefusal {
                     formatter,
                     "outcome-index checkpoint authority operation refused: {error}"
                 )
+            }
+            Self::Fabric(error) => {
+                write!(formatter, "outcome-index checkpoint fabric construction refused: {error}")
+            }
+            Self::FabricStore(error) => {
+                write!(formatter, "outcome-index checkpoint fabric storage refused: {error}")
             }
         }
     }
@@ -530,6 +834,15 @@ mod tests {
         )
     }
 
+    fn archive_manifest() -> SegmentManifestId {
+        SegmentManifestId::from_digest(
+            DigestAlgorithmId::try_new(FIXTURE_ALGORITHM_CODE_POINT)
+                .expect("fixture algorithm is reserved"),
+            CANONICAL_CODEC_VERSION,
+            DigestBytes::try_new(&[0x73; 32]).expect("fixture digest is 32 bytes"),
+        )
+    }
+
     fn stage_chain(store: &MemoryAuthorityStore, predecessor_links: usize) -> Digest {
         let mut predecessor = None;
         for position in 1..=predecessor_links + 1 {
@@ -539,9 +852,9 @@ mod tests {
                 Some(checkpoint_tail(position)),
                 Some(DecisionSequence::try_new(position).expect("fixture position is nonzero")),
                 predecessor,
-                Vec::new(),
+                archive_manifest(),
             )
-            .expect("empty retained leaf set is canonical evidence");
+            .expect("manifest-backed retained leaf evidence is canonical");
             predecessor = Some(
                 stage_outcome_index_checkpoint(store, &CryptoBodyIdentity, &checkpoint)
                     .expect("fixture checkpoint stages"),
@@ -678,8 +991,35 @@ where
     collect_cumulative_outcomes_from_checkpoint_hint(store, identity, head_key, &head)
 }
 
-fn collect_cumulative_outcomes_from_checkpoint_hint<S, I>(
+/// Fabric-aware counterpart of
+/// [`collect_cumulative_outcomes_from_authenticated_capsule_checkpoint`].
+///
+/// This is the retained-leaf acceleration path. It accepts a capsule hint only
+/// after the authority checkpoint chain, object-fabric manifest closure, chunk
+/// codec, and authority-owned leaf order all verify. Missing or malformed
+/// checkpoint evidence falls back to the existing bounded genesis walk; an
+/// authority failure still propagates.
+pub fn collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_with_fabric<S, I, F>(
     store: &S,
+    fabric: &F,
+    identity: &I,
+    head_key: &HeadKey,
+    authenticated_head: &AuthenticatedHead,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized,
+    F: ImmutableObjectFabric + ?Sized,
+{
+    let head = authenticated_head.body()?;
+    collect_cumulative_outcomes_from_checkpoint_hint_with_fabric(
+        store, fabric, identity, head_key, &head,
+    )
+}
+
+fn collect_cumulative_outcomes_from_checkpoint_hint_with_fabric<S, I, F>(
+    store: &S,
+    fabric: &F,
     identity: &I,
     head_key: &HeadKey,
     head: &fgit_codec::RepositoryAuthorityHeadBody,
@@ -687,6 +1027,7 @@ fn collect_cumulative_outcomes_from_checkpoint_hint<S, I>(
 where
     S: AuthorityStore + ?Sized,
     I: BodyIdentity + ?Sized,
+    F: ImmutableObjectFabric + ?Sized,
 {
     let Some(capsule_id) = head.last_checkpoint_id else {
         return collect_cumulative_outcomes(store, head_key);
@@ -700,18 +1041,19 @@ where
     let Some(root) = capsule.outcome_index_checkpoint_root else {
         return collect_cumulative_outcomes(store, head_key);
     };
-    let checkpoint = match verify_outcome_index_checkpoint_chain(store, identity, root) {
-        Ok(checkpoint) if checkpoint.repository_id == head.repository_id => checkpoint,
-        Ok(_) => {
-            return collect_cumulative_outcomes(store, head_key);
-        }
-        Err(OutcomeIndexCheckpointRefusal::Authority(error)) => return Err(error.into()),
-        Err(_) => return collect_cumulative_outcomes(store, head_key),
-    };
+    let (checkpoint, decisions) =
+        match load_verified_outcome_index_checkpoint(store, identity, fabric, root) {
+            Ok(value) if value.0.repository_id == head.repository_id => value,
+            Ok(_) => {
+                return collect_cumulative_outcomes(store, head_key);
+            }
+            Err(OutcomeIndexCheckpointRefusal::Authority(error)) => return Err(error.into()),
+            Err(_) => return collect_cumulative_outcomes(store, head_key),
+        };
     match collect_cumulative_outcomes_from_checkpoint(
         store,
         head_key,
-        checkpoint.decisions(),
+        &decisions,
         checkpoint.decision_tail_id,
         checkpoint.latest_decision_sequence,
     ) {
@@ -721,6 +1063,26 @@ where
         ) => collect_cumulative_outcomes(store, head_key),
         Err(error) => Err(error),
     }
+}
+
+fn collect_cumulative_outcomes_from_checkpoint_hint<S, I>(
+    store: &S,
+    identity: &I,
+    head_key: &HeadKey,
+    head: &fgit_codec::RepositoryAuthorityHeadBody,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized,
+{
+    // This compatibility entrypoint has no object-fabric capability. A
+    // manifest-backed checkpoint is therefore unavailable evidence here; it
+    // must use the existing bounded genesis collector rather than pretending a
+    // manifest identity is a retained leaf set. Fabric-aware callers use
+    // `load_verified_outcome_index_checkpoint` before invoking the authority
+    // checkpoint collector.
+    let _ = (identity, head);
+    collect_cumulative_outcomes(store, head_key)
 }
 
 /// Asynchronous production twin of
@@ -762,9 +1124,36 @@ where
         .await
 }
 
-async fn collect_cumulative_outcomes_from_checkpoint_hint_async<S, I>(
+/// Asynchronous fabric-aware counterpart of
+/// [`collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_with_fabric`].
+pub async fn collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_with_fabric_async<
+    S,
+    I,
+    F,
+>(
     store: &S,
     cx: &S::Context,
+    fabric: &F,
+    identity: &I,
+    head_key: &HeadKey,
+    authenticated_head: &AuthenticatedHead,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized + Sync,
+    F: ImmutableObjectFabric + ?Sized,
+{
+    let head = authenticated_head.body()?;
+    collect_cumulative_outcomes_from_checkpoint_hint_with_fabric_async(
+        store, cx, fabric, identity, head_key, &head,
+    )
+    .await
+}
+
+async fn collect_cumulative_outcomes_from_checkpoint_hint_with_fabric_async<S, I, F>(
+    store: &S,
+    cx: &S::Context,
+    fabric: &F,
     identity: &I,
     head_key: &HeadKey,
     head: &fgit_codec::RepositoryAuthorityHeadBody,
@@ -772,6 +1161,7 @@ async fn collect_cumulative_outcomes_from_checkpoint_hint_async<S, I>(
 where
     S: AsyncAuthorityStore + ?Sized,
     I: BodyIdentity + ?Sized + Sync,
+    F: ImmutableObjectFabric + ?Sized,
 {
     let Some(capsule_id) = head.last_checkpoint_id else {
         return collect_cumulative_outcomes_async(store, cx, head_key).await;
@@ -785,31 +1175,21 @@ where
     let Some(root) = capsule.outcome_index_checkpoint_root else {
         return collect_cumulative_outcomes_async(store, cx, head_key).await;
     };
-    enum CheckpointCandidate {
-        Exact(Box<OutcomeIndexCheckpointBody>),
-        ForeignRepository,
-        Unavailable,
-    }
-    // A valid checkpoint for another repository and an unusable checkpoint both
-    // fall back to the genesis walk, but remain distinct cases: authority errors
-    // must still propagate rather than being treated as an unavailable hint.
-    let candidate =
-        match verify_outcome_index_checkpoint_chain_async(store, cx, identity, root).await {
-            Ok(checkpoint) if checkpoint.repository_id == head.repository_id => {
-                CheckpointCandidate::Exact(Box::new(checkpoint))
+    let (checkpoint, decisions) =
+        match load_verified_outcome_index_checkpoint_async(store, cx, identity, fabric, root).await
+        {
+            Ok(value) if value.0.repository_id == head.repository_id => value,
+            Ok(_) => {
+                return collect_cumulative_outcomes_async(store, cx, head_key).await;
             }
-            Ok(_) => CheckpointCandidate::ForeignRepository,
             Err(OutcomeIndexCheckpointRefusal::Authority(error)) => return Err(error.into()),
-            Err(_) => CheckpointCandidate::Unavailable,
+            Err(_) => return collect_cumulative_outcomes_async(store, cx, head_key).await,
         };
-    let CheckpointCandidate::Exact(checkpoint) = candidate else {
-        return collect_cumulative_outcomes_async(store, cx, head_key).await;
-    };
     match collect_cumulative_outcomes_from_checkpoint_async(
         store,
         cx,
         head_key,
-        checkpoint.decisions(),
+        &decisions,
         checkpoint.decision_tail_id,
         checkpoint.latest_decision_sequence,
     )
@@ -821,4 +1201,21 @@ where
         ) => collect_cumulative_outcomes_async(store, cx, head_key).await,
         Err(error) => Err(error),
     }
+}
+
+async fn collect_cumulative_outcomes_from_checkpoint_hint_async<S, I>(
+    store: &S,
+    cx: &S::Context,
+    identity: &I,
+    head_key: &HeadKey,
+    head: &fgit_codec::RepositoryAuthorityHeadBody,
+) -> Result<CumulativeOutcomes, OutcomeFailure>
+where
+    S: AsyncAuthorityStore + ?Sized,
+    I: BodyIdentity + ?Sized + Sync,
+{
+    // See the blocking counterpart: this surface deliberately lacks a fabric
+    // capability, so it cannot accept manifest metadata as leaf evidence.
+    let _ = (identity, head);
+    collect_cumulative_outcomes_async(store, cx, head_key).await
 }

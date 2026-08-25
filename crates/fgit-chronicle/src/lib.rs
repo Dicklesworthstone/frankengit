@@ -95,14 +95,19 @@ pub use migration::{
 };
 pub use origin::{PublicationBasis, ResultingRoots};
 pub use outcome_checkpoint::{
-    MAX_CHECKPOINT_PREDECESSORS, OutcomeIndexCheckpointBody, OutcomeIndexCheckpointRefusal,
+    MAX_CHECKPOINT_PREDECESSORS, MAX_OUTCOME_INDEX_LEAF_CHUNK_DECISIONS,
+    OutcomeIndexCheckpointBody, OutcomeIndexCheckpointRefusal, OutcomeIndexLeafArchive,
     collect_cumulative_outcomes_from_authenticated_capsule_checkpoint,
     collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_async,
+    collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_with_fabric,
+    collect_cumulative_outcomes_from_authenticated_capsule_checkpoint_with_fabric_async,
     collect_cumulative_outcomes_from_capsule_checkpoint,
     collect_cumulative_outcomes_from_capsule_checkpoint_async, load_outcome_index_checkpoint,
-    load_outcome_index_checkpoint_async, outcome_index_checkpoint_root,
-    stage_outcome_index_checkpoint, stage_outcome_index_checkpoint_async,
-    verify_outcome_index_checkpoint_chain, verify_outcome_index_checkpoint_chain_async,
+    load_outcome_index_checkpoint_async, load_outcome_index_checkpoint_leaves,
+    load_verified_outcome_index_checkpoint, load_verified_outcome_index_checkpoint_async,
+    outcome_index_checkpoint_root, stage_outcome_index_checkpoint,
+    stage_outcome_index_checkpoint_async, verify_outcome_index_checkpoint_chain,
+    verify_outcome_index_checkpoint_chain_async,
 };
 pub use publish::{
     CanonicalBatchReceipt, LostCandidate, PublicationVerdict, publish, publish_async,

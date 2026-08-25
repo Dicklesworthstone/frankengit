@@ -13,7 +13,9 @@ workspace = true
 fgit-authority.workspace = true
 fgit-codec.workspace = true
 fgit-crypto.workspace = true
+fgit-object-fabric.workspace = true
 fgit-types.workspace = true
 
 [dev-dependencies]
 fgit-reference.workspace = true
+fgit-resource.workspace = true
