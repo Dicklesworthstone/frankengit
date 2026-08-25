@@ -487,3 +487,118 @@ fn object_proofs_and_envelopes_round_trip_and_verify() {
         Ok(VerifiedMembership::ObjectAbsence),
     );
 }
+
+/// A decoded leaf position outside the tree the proof itself declares is
+/// refused, and the position one below it still decodes.
+///
+/// `MerkleProof::new` documents that its index, leaf count and siblings are
+/// untrusted claims, so the wire is exactly where hostile values arrive. This
+/// pins the decoder's own bound rather than the fold's: the refusal must come
+/// back before a `MerkleProof` exists, so that a value that could never verify
+/// is never carried around as if it might.
+///
+/// Both directions are asserted on purpose. A decoder that refused every proof
+/// would satisfy every refusal below, so the in-range twins — including the
+/// largest index the tree admits, which is the value one step from being
+/// rejected — are what make the refusals mean anything.
+#[test]
+fn a_hostile_decoded_leaf_index_is_refused_before_a_proof_is_built() {
+    // A real tree and a real proof, so the permitted twin genuinely verifies
+    // rather than merely decoding.
+    let objects = vec![oid(0x11), oid(0x22), oid(0x33)];
+    let root = object_closure_merkle_root(&objects).expect("object closure root");
+    let last = *objects.last().expect("the fixture closure is not empty");
+    let honest = object_closure_membership_proof(&objects, &last).expect("honest proof");
+
+    // The honest proof sits at the top of its own range, which is what makes
+    // the off-by-one splice below land exactly on the boundary.
+    assert_eq!(
+        honest.index(),
+        honest.leaf_count() - 1,
+        "the fixture must prove the last leaf, or the boundary case below is not the boundary"
+    );
+    let leaf_count = u64::try_from(honest.leaf_count()).expect("fixture leaf count is small");
+
+    let permitted = encode_merkle_proof(&honest).expect("the honest proof encodes");
+    assert_eq!(
+        decode_merkle_proof(&permitted, DecodeLimits::DEFAULT).expect("the honest proof decodes"),
+        honest,
+        "the permitted twin at the top of the range must survive its own wire form"
+    );
+    assert!(
+        fgit_crypto::verify_object_closure_membership(&root, &last, &honest),
+        "the permitted twin must be a proof that actually verifies, not just one that parses"
+    );
+
+    // The payload begins with the index scalar, then the leaf count: both are
+    // eight big-endian bytes with no tag, so the splices below are exact.
+    let (_, payload) = split_frame(&permitted, DecodeLimits::DEFAULT)
+        .expect("the encoded proof has one payload at the end of its frame");
+    let index_at = permitted.len() - payload.len();
+    let leaf_count_at = index_at + 8;
+
+    let spliced = |offset: usize, value: u64| {
+        let mut bytes = permitted.clone();
+        bytes[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+        bytes
+    };
+    let refusal_for = |bytes: Vec<u8>| match decode_merkle_proof(&bytes, DecodeLimits::DEFAULT) {
+        Err(VerifiedReadRefusal::WireDecode(refusal)) => *refusal,
+        other => panic!("a malformed leaf position must be a typed decode refusal: {other:?}"),
+    };
+
+    // The hostile maximum. On a 64-bit target this narrows to `usize` without
+    // complaint, so nothing below the decoder would have caught it here.
+    assert_eq!(
+        refusal_for(spliced(index_at, u64::MAX)),
+        fgit_codec::CodecRefusal::ValueUnrepresentable {
+            field: "merkle_proof.index",
+            observed: u64::MAX,
+            limit: leaf_count - 1,
+        },
+        "the largest representable index must be refused against the tree the proof declares"
+    );
+
+    // The exact boundary: one past the last leaf. This is the case an
+    // implementation that wrote `>` for `>=` would let through, and the value
+    // adjacent to the twin that must still be accepted.
+    assert_eq!(
+        refusal_for(spliced(index_at, leaf_count)),
+        fgit_codec::CodecRefusal::ValueUnrepresentable {
+            field: "merkle_proof.index",
+            observed: leaf_count,
+            limit: leaf_count - 1,
+        },
+        "an index equal to the leaf count names a leaf one past the end of the tree"
+    );
+
+    // An empty tree admits no leaf at all, so even index zero is refused. No
+    // separate rule produces this: `index < leaf_count` is unsatisfiable at
+    // zero leaves.
+    assert_eq!(
+        refusal_for(spliced(leaf_count_at, 0)),
+        fgit_codec::CodecRefusal::ValueUnrepresentable {
+            field: "merkle_proof.index",
+            observed: u64::try_from(honest.index()).expect("fixture index is small"),
+            limit: 0,
+        },
+        "a proof claiming a tree with no leaves has no position to describe"
+    );
+
+    // The permitted twins at the boundary. Without these the three refusals
+    // above are equally satisfied by a decoder that rejects everything.
+    let widened = spliced(leaf_count_at, leaf_count + 1);
+    let decoded = decode_merkle_proof(&widened, DecodeLimits::DEFAULT)
+        .expect("an index strictly inside a larger declared tree still decodes");
+    assert_eq!(decoded.index(), honest.index());
+    assert_eq!(decoded.leaf_count(), honest.leaf_count() + 1);
+
+    let at_top = spliced(index_at, leaf_count - 1);
+    assert_eq!(
+        decode_merkle_proof(&at_top, DecodeLimits::DEFAULT)
+            .expect("the largest admissible index decodes")
+            .index(),
+        honest.index(),
+        "the bound is exclusive on the leaf count, so the last leaf remains provable"
+    );
+}

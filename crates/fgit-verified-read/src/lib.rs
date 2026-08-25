@@ -790,15 +790,52 @@ fn write_merkle_proof_payload(out: &mut Encoder, proof: &MerkleProof) -> Result<
     })
 }
 
+/// Decodes one Merkle proof, refusing a leaf position the proof's own declared
+/// tree cannot contain.
+///
+/// # Why the bound is checked here, on the wire values
+///
+/// `MerkleProof::new` says outright that its index, leaf count and siblings are
+/// *claims* and that nothing about them is trusted, so hostile values reach it
+/// by design. The fold downstream already refuses them, and the object-absence
+/// verifier uses checked arithmetic on the decoded index. This check does not
+/// replace either; it stops a proof that can never verify from being
+/// constructed at all, which is where a bound belongs when the value is
+/// attacker-supplied and the constraint is knowable from the bytes themselves.
+///
+/// It runs on the raw `u64` pair, deliberately, **before** either value is
+/// narrowed to `usize`. That ordering is the point rather than a detail: on a
+/// 64-bit target `u64::MAX` narrows successfully and flows on, while on a
+/// 32-bit target the same bytes would be refused by the narrowing with a
+/// different field and a different limit. Refusal behaviour is compatibility
+/// semantics, so the same hostile bytes must produce the same typed refusal on
+/// every target, and only a check above the narrowing gives that.
+///
+/// # The rule
+///
+/// A membership path names one leaf of a tree with `leaf_count` leaves, so
+/// `index < leaf_count` is the whole constraint. An empty tree falls out of it
+/// with no separate case: no index satisfies `index < 0`, which is correct —
+/// there is no leaf to prove, and every proof carried on this wire is a
+/// membership path, including the neighbour paths inside an absence proof. The
+/// arms that name no object at all, `EmptyState` and `EmptyClosure`, carry no
+/// `MerkleProof` and never reach here.
 fn read_merkle_proof_payload(input: &mut Decoder<'_>) -> Result<MerkleProof, CodecRefusal> {
-    let index = u64_to_usize(
-        "merkle_proof.index",
-        input.read_scalar::<u64>("merkle_proof.index")?,
-    )?;
-    let leaf_count = u64_to_usize(
-        "merkle_proof.leaf_count",
-        input.read_scalar::<u64>("merkle_proof.leaf_count")?,
-    )?;
+    let declared_index = input.read_scalar::<u64>("merkle_proof.index")?;
+    let declared_leaf_count = input.read_scalar::<u64>("merkle_proof.leaf_count")?;
+    if declared_index >= declared_leaf_count {
+        return Err(CodecRefusal::ValueUnrepresentable {
+            field: "merkle_proof.index",
+            observed: declared_index,
+            // The largest position the declared tree admits. Saturating rather
+            // than wrapping so an empty tree reports a limit of zero while
+            // still refusing index zero: the bound is `index < leaf_count`, and
+            // a tree with no leaves admits nothing at all.
+            limit: declared_leaf_count.saturating_sub(1),
+        });
+    }
+    let index = u64_to_usize("merkle_proof.index", declared_index)?;
+    let leaf_count = u64_to_usize("merkle_proof.leaf_count", declared_leaf_count)?;
     let siblings = input.read_sequence("merkle_proof.siblings", Decoder::read_digest_bytes)?;
     Ok(MerkleProof::new(index, leaf_count, siblings))
 }
