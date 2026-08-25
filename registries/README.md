@@ -24,3 +24,8 @@ L2 canonical-engine support, the embedded `fgit-authority-fsqlite` store is
 L2 beside the authority contract, and `fgit-admission` is an L4 receive-pack
 product adapter. `fgit-runtime` and `fgit-lab` are L2 because they provide
 execution of canonical engines rather than an alternate product runtime.
+
+`evidence_packs.tsv` binds every `fgit-evidence` canonical pack family to its
+emitting source and the mandatory `replay_completeness` field. The registry
+checker pins the four closed protocol spellings and refuses a source whose
+encoder no longer carries the declaration.

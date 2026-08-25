@@ -356,6 +356,7 @@ fn check_required_files(root: &Path, report: &mut Report) {
         "registries/crate_layers.tsv",
         "registries/dependency_policy.tsv",
         "registries/durable_objects.tsv",
+        "registries/evidence_packs.tsv",
         "registries/graph_views.tsv",
         "registries/invariants.tsv",
         "registries/negative_evidence.tsv",
@@ -461,6 +462,17 @@ fn registry_schemas() -> BTreeMap<&'static str, &'static [&'static str]> {
                 "encoding_class",
                 "post_decode_verification",
                 "retention_owner",
+                "status",
+            ][..],
+        ),
+        (
+            "evidence_packs.tsv",
+            &[
+                "id",
+                "body_family",
+                "source_path",
+                "completeness_field",
+                "allowed_classes",
                 "status",
             ][..],
         ),
@@ -728,7 +740,189 @@ fn check_registries(root: &Path, report: &mut Report) {
             }
         }
     }
+    check_evidence_packs(root, report);
     claims::check(root, report);
+}
+
+/// The four classes that VERIFY_SPEC §4 makes a closed per-pack declaration.
+///
+/// This is intentionally a protocol vocabulary in the checker, rather than a
+/// free-form registry field: admitting a fifth spelling or omitting one would
+/// make a pack's declared replay contract ambiguous at the release gate.
+const REPLAY_COMPLETENESS_CLASSES: [&str; 4] = [
+    "replayable",
+    "structural-replay",
+    "verifiable-with-named-artifacts",
+    "audit-only",
+];
+
+/// Refuses an evidence-pack registry row unless it names the body that emits
+/// it, the required canonical field, and exactly the four closed replay
+/// classes. It also checks the body source, so a registry row cannot keep the
+/// gate green after the encoder stops carrying that declaration.
+fn check_evidence_packs(root: &Path, report: &mut Report) {
+    let registry_path = root.join("registries/evidence_packs.tsv");
+    let display = relative(root, &registry_path);
+    let registry = match fs::read_to_string(&registry_path) {
+        Ok(value) => value,
+        Err(_) => return, // The generic registry gate reports the missing file.
+    };
+    let mut registered = BTreeMap::<String, String>::new();
+    let expected_classes = REPLAY_COMPLETENESS_CLASSES
+        .iter()
+        .map(|class| (*class).to_owned())
+        .collect::<BTreeSet<_>>();
+
+    for (line_index, line) in registry.lines().enumerate() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') || line.starts_with("id\t")
+        {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != 6 {
+            continue; // The generic registry gate reports the malformed row.
+        }
+        let family = fields[1].trim();
+        let source_path = fields[2].trim();
+        let field = fields[3].trim();
+        let classes = fields[4]
+            .split(',')
+            .map(str::trim)
+            .filter(|class| !class.is_empty())
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let line_number = line_index + 1;
+
+        if field != "replay_completeness" {
+            report.error(format!(
+                "evidence pack `{family}` at {display}:{line_number} declares completeness field `{field}`, \
+                 but every evidence pack must declare `replay_completeness`"
+            ));
+        }
+        if classes != expected_classes {
+            report.error(format!(
+                "evidence pack `{family}` at {display}:{line_number} must declare exactly replay classes {:?}, observed {:?}",
+                expected_classes, classes
+            ));
+        }
+
+        let relative_source = Path::new(source_path);
+        if relative_source.is_absolute()
+            || relative_source
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+            || !relative_source.starts_with("crates/fgit-evidence/src/")
+        {
+            report.error(format!(
+                "evidence pack `{family}` at {display}:{line_number} has invalid fgit-evidence source path `{source_path}`"
+            ));
+            continue;
+        }
+        let source = root.join(relative_source);
+        let source_text = match fs::read_to_string(&source) {
+            Ok(value) => value,
+            Err(error) => {
+                report.error(format!(
+                    "evidence pack `{family}` at {display}:{line_number} cannot read {source_path}: {error}"
+                ));
+                continue;
+            }
+        };
+        let family_marker =
+            format!("const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static(\"{family}\");");
+        if !source_text.contains(&family_marker) {
+            report.error(format!(
+                "evidence pack `{family}` at {display}:{line_number} is not emitted by `{source_path}`"
+            ));
+        }
+        for marker in [
+            "pub enum ReplayCompleteness",
+            "Replayable",
+            "Structural",
+            "VerifiableIfSupplied",
+            "AuditOnly",
+            "replay_completeness: ReplayCompleteness",
+            "out.write_raw_byte(self.context.replay_completeness.code())",
+            "ReplayCompleteness::from_code(",
+        ] {
+            if !source_text.contains(marker) {
+                report.error(format!(
+                    "evidence pack `{family}` at {display}:{line_number} source `{source_path}` \
+                     does not encode required replay completeness marker `{marker}`"
+                ));
+            }
+        }
+        registered.insert(family.to_owned(), source_path.to_owned());
+    }
+
+    let mut emitted = BTreeSet::new();
+    let mut sources = Vec::new();
+    collect_files(&root.join("crates/fgit-evidence/src"), &mut sources);
+    sources.sort();
+    for source in sources.into_iter().filter(|source| {
+        source
+            .extension()
+            .and_then(OsStr::to_str)
+            .is_some_and(|extension| extension == "rs")
+    }) {
+        let source_display = relative(root, &source);
+        let source_text = match fs::read_to_string(&source) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        for family in canonical_body_families(&source_text, &source_display, report) {
+            emitted.insert(family);
+        }
+    }
+    let registered_families = registered.keys().cloned().collect::<BTreeSet<_>>();
+    for family in emitted.difference(&registered_families) {
+        report.error(format!(
+            "fgit-evidence emits canonical evidence pack family `{family}` without a replay-completeness declaration in registries/evidence_packs.tsv"
+        ));
+    }
+    for family in registered.keys() {
+        if !emitted.contains(family) {
+            report.error(format!(
+                "registries/evidence_packs.tsv declares `{family}`, but its source does not emit that canonical evidence pack"
+            ));
+        }
+    }
+}
+
+/// Extract direct `CanonicalBody` family literals from one evidence source.
+/// A body whose family is indirect is refused: the registry must bind the
+/// concrete family used in its canonical frame, not an alias a textual gate
+/// cannot prove belongs to this body.
+fn canonical_body_families(source: &str, display: &str, report: &mut Report) -> BTreeSet<String> {
+    const IMPLEMENTATION: &str = "impl CanonicalBody for";
+    const FAMILY: &str = "const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static(\"";
+    let mut families = BTreeSet::new();
+    let mut remainder = source;
+    while let Some(offset) = remainder.find(IMPLEMENTATION) {
+        remainder = &remainder[offset + IMPLEMENTATION.len()..];
+        let Some(end) = remainder.find("fn write_payload") else {
+            report.error(format!(
+                "canonical evidence body in {display} has no write_payload implementation"
+            ));
+            break;
+        };
+        let implementation = &remainder[..end];
+        let Some(family_offset) = implementation.find(FAMILY) else {
+            report.error(format!(
+                "canonical evidence body in {display} has no direct SCHEMA_FAMILY literal"
+            ));
+            continue;
+        };
+        let literal = &implementation[family_offset + FAMILY.len()..];
+        let Some(end) = literal.find("\")") else {
+            report.error(format!(
+                "canonical evidence body in {display} has an unterminated SCHEMA_FAMILY literal"
+            ));
+            continue;
+        };
+        families.insert(literal[..end].to_owned());
+    }
+    families
 }
 
 /// The one in-code source of the registry status vocabulary.
@@ -5672,6 +5866,97 @@ mod tests {
         assert!(
             report.errors.iter().any(|error| error.contains(expected)),
             "expected diagnostic containing `{expected}`, observed {:?}",
+            report.errors
+        );
+    }
+
+    fn evidence_pack_fixture(source: &str, allowed_classes: &str) -> FixtureWorkspace {
+        let nonce = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock precedes epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("fgit-evidence-pack-{nanos}-{nonce}"));
+        let source_path = root.join("crates/fgit-evidence/src");
+        fs::create_dir_all(&source_path).expect("create evidence pack fixture source");
+        fs::create_dir_all(root.join("registries")).expect("create evidence pack fixture registry");
+        fs::write(
+            root.join("registries/evidence_packs.tsv"),
+            [
+                "# franken-registry-v1\n",
+                "id\tbody_family\tsource_path\tcompleteness_field\tallowed_classes\tstatus\n",
+                &format!(
+                    "EVID-001\tevidence-record\tcrates/fgit-evidence/src/lib.rs\t\
+                     replay_completeness\t{allowed_classes}\tactive\n"
+                ),
+            ]
+            .concat(),
+        )
+        .expect("write evidence pack fixture registry");
+        fs::write(source_path.join("lib.rs"), source).expect("write evidence pack fixture source");
+        FixtureWorkspace { root }
+    }
+
+    #[test]
+    fn evidence_pack_registry_refuses_a_pack_without_replay_completeness() {
+        const COMPLETE_BODY: &str = r#"
+pub enum ReplayCompleteness { Replayable, Structural, VerifiableIfSupplied, AuditOnly }
+pub struct EvidenceContext { replay_completeness: ReplayCompleteness }
+pub struct EvidenceRecordBody { context: EvidenceContext }
+impl CanonicalBody for EvidenceRecordBody {
+    const SCHEMA_FAMILY: SchemaFamily = SchemaFamily::from_static("evidence-record");
+    fn write_payload(&self, out: &mut Encoder) {
+        out.write_raw_byte(self.context.replay_completeness.code());
+    }
+    fn read_payload(input: &mut Decoder<'_>) {
+        ReplayCompleteness::from_code(input.read_raw_byte("replay_completeness"), 0);
+    }
+}
+"#;
+        const CLASSES: &str =
+            "replayable,structural-replay,verifiable-with-named-artifacts,audit-only";
+
+        let permitted = evidence_pack_fixture(COMPLETE_BODY, CLASSES);
+        let mut permitted_report = Report::new();
+        check_evidence_packs(&permitted.root, &mut permitted_report);
+        assert!(
+            permitted_report.errors.is_empty(),
+            "a complete evidence pack must be admitted: {:?}",
+            permitted_report.errors
+        );
+
+        let missing = COMPLETE_BODY.replace(
+            "out.write_raw_byte(self.context.replay_completeness.code());",
+            "out.write_raw_byte(0);",
+        );
+        let refused = evidence_pack_fixture(&missing, CLASSES);
+        let mut refused_report = Report::new();
+        check_evidence_packs(&refused.root, &mut refused_report);
+        assert_error(
+            &refused_report,
+            "does not encode required replay completeness marker",
+        );
+
+        let unknown_class = evidence_pack_fixture(
+            COMPLETE_BODY,
+            "replayable,structural-replay,verifiable-with-named-artifacts,hashes-logged",
+        );
+        let mut unknown_class_report = Report::new();
+        check_evidence_packs(&unknown_class.root, &mut unknown_class_report);
+        assert_error(&unknown_class_report, "must declare exactly replay classes");
+    }
+
+    #[test]
+    fn live_evidence_pack_registry_covers_every_emitted_body() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("registry checker lives under the workspace tools directory");
+        let mut report = Report::new();
+        check_evidence_packs(root, &mut report);
+        assert!(
+            report.errors.is_empty(),
+            "the committed evidence-pack registry must cover the live fgit-evidence emitters: {:?}",
             report.errors
         );
     }

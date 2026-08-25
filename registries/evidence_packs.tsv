@@ -1,0 +1,4 @@
+# franken-registry-v1
+# Every fgit-evidence canonical pack body is listed with its required replay declaration.
+id	body_family	source_path	completeness_field	allowed_classes	status
+EVID-001	evidence-record	crates/fgit-evidence/src/lib.rs	replay_completeness	replayable,structural-replay,verifiable-with-named-artifacts,audit-only	active
