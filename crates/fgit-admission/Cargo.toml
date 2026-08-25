@@ -10,6 +10,7 @@ fgit-chronicle.workspace = true
 fgit-codec.workspace = true
 fgit-forge.workspace = true
 fgit-crypto.workspace = true
+fgit-git-object.workspace = true
 fgit-pack.workspace = true
 fgit-reference.workspace = true
 fgit-txn.workspace = true

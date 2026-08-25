@@ -36,7 +36,10 @@ use fgit_codec::{
     RepositoryAuthorityHeadBody, RepositoryCommitRecord, body_id, encode_body,
 };
 use fgit_crypto::{IdentityDomain, ref_state_merkle_root};
-use fgit_pack::{Deadline, QuarantinedPack};
+use fgit_git_object::{
+    AcceptanceProfile, ObjectError, ObjectType, ParseLimits, TagTargetType, parse_annotated_tag,
+};
+use fgit_pack::{CanonicalObjectSource, Deadline, PackWriteError, QuarantinedPack};
 use fgit_reference::effect::{FoldBasis, FoldOutcome, RefEffect};
 use fgit_reference::intent::{
     DurabilityProfile, IdempotencyKey as ModelIdempotencyKey, Intent, RefIntent, Statement,
@@ -46,9 +49,9 @@ use fgit_reference::refs::ExpectedRefState;
 use fgit_txn::{IntentEvaluator, TransactionFoldReport};
 use fgit_types::layout::RootLayoutVersion;
 use fgit_types::{
-    AsciiSlug, DecisionOutcome, Digest, DomainTag, PrincipalId, PrincipalSnapshotId, RefName,
-    RefusalCode, RefusalRecordId, RepositoryAuthorityHeadId, RepositoryId, RepositorySequence,
-    SchemaFamily, TenantId, TransactionSealId, TxId,
+    AsciiSlug, DecisionOutcome, Digest, DomainTag, GitHashAlgorithm, GitOid, PrincipalId,
+    PrincipalSnapshotId, RefName, RefusalCode, RefusalRecordId, RepositoryAuthorityHeadId,
+    RepositoryId, RepositorySequence, SchemaFamily, TenantId, TransactionSealId, TxId,
 };
 use fgit_wire::receive::{
     QuarantineReceipt, ReceiveCommandStatus, ReceiveError, ReceiveRequest, UnpackStatus,
@@ -572,6 +575,208 @@ where
     .await
 }
 
+/// Bounded controls for deriving one snapshot's annotated-tag peel evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TagPeelLimits {
+    /// The maximum number of annotated-tag objects one tag ref may dereference.
+    pub max_depth: usize,
+}
+
+impl Default for TagPeelLimits {
+    fn default() -> Self {
+        Self { max_depth: 32 }
+    }
+}
+
+/// Head-bound proof that an annotated tag's target chain was resolved.
+///
+/// This is derived state, not an authority record: the authenticated head
+/// selects the snapshot's ref state and permitted closure; exact verified
+/// canonical object bytes select the peeled target.  Keeping the tag object
+/// alongside its terminal target stops an adapter from applying an otherwise
+/// valid peel result to a different ref target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TagPeelEvidence {
+    tag_object: GitOid,
+    peeled_object: GitOid,
+}
+
+impl TagPeelEvidence {
+    /// Annotated tag object named directly by the tag ref.
+    #[must_use]
+    pub const fn tag_object(self) -> GitOid {
+        self.tag_object
+    }
+
+    /// Terminal native object reached through the bounded tag chain.
+    #[must_use]
+    pub const fn peeled_object(self) -> GitOid {
+        self.peeled_object
+    }
+}
+
+/// Why head-bound annotated-tag peeling refused to produce evidence.
+#[derive(Debug)]
+pub enum TagPeelRefusal {
+    /// A zero recursion bound cannot inspect even the directly named tag.
+    ZeroDepthLimit,
+    /// A tag ref crossed the repository's configured Git hash domain.
+    RefObjectFormatMismatch {
+        /// Tag ref whose direct target had the wrong domain.
+        tag_ref: RefName,
+        /// Domain selected by the authenticated repository configuration.
+        expected: GitHashAlgorithm,
+        /// Domain carried by the direct target.
+        observed: GitHashAlgorithm,
+    },
+    /// A tag ref's direct target was absent from the authority-selected closure.
+    RefTargetOutsideClosure {
+        /// Ref whose direct target was not admitted.
+        tag_ref: RefName,
+        /// Direct target named by the ref.
+        target: GitOid,
+    },
+    /// The canonical object source did not return the requested identity.
+    SourceIdentityMismatch {
+        /// Identity requested from the source.
+        requested: GitOid,
+        /// Identity carried by the returned body.
+        returned: GitOid,
+    },
+    /// Reading one canonical object body refused.
+    ObjectSource {
+        /// Object the snapshot attempted to read.
+        object: GitOid,
+        /// Exact lower-layer refusal; no local missing-object substitute is made.
+        source: Box<PackWriteError>,
+    },
+    /// The annotated-tag parser rejected canonical tag bytes.
+    TagBody {
+        /// Tag object whose bytes were not parseable.
+        tag_object: GitOid,
+        /// Exact bounded parser refusal.
+        source: ObjectError,
+    },
+    /// An annotated tag named an object outside the admitted closure.
+    TargetOutsideClosure {
+        /// Ref whose chain was being derived.
+        tag_ref: RefName,
+        /// Tag object containing the target declaration.
+        tag_object: GitOid,
+        /// Target missing from the admitted closure.
+        target: GitOid,
+    },
+    /// The tag's declared type did not match the verified target object type.
+    DeclaredTargetTypeMismatch {
+        /// Tag object containing the declaration.
+        tag_object: GitOid,
+        /// Target named by that declaration.
+        target: GitOid,
+        /// Type encoded in the annotated-tag body.
+        declared: TagTargetType,
+        /// Type carried by verified canonical object bytes.
+        observed: ObjectType,
+    },
+    /// A tag chain repeated an object before reaching a native non-tag target.
+    Cycle {
+        /// Ref whose chain contained the cycle.
+        tag_ref: RefName,
+        /// Repeated tag identity.
+        tag_object: GitOid,
+    },
+    /// A tag chain exceeded the caller-selected bounded depth.
+    DepthExceeded {
+        /// Ref whose chain exceeded the bound.
+        tag_ref: RefName,
+        /// Inclusive number of tag bodies the caller allowed.
+        limit: usize,
+    },
+}
+
+impl Display for TagPeelRefusal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroDepthLimit => formatter.write_str("tag peel depth limit must be non-zero"),
+            Self::RefObjectFormatMismatch {
+                tag_ref,
+                expected,
+                observed,
+            } => write!(
+                formatter,
+                "tag ref {tag_ref:?} uses {observed} where repository requires {expected}"
+            ),
+            Self::RefTargetOutsideClosure { tag_ref, target } => write!(
+                formatter,
+                "tag ref {tag_ref:?} targets {target:?}, absent from the admitted closure"
+            ),
+            Self::SourceIdentityMismatch {
+                requested,
+                returned,
+            } => write!(
+                formatter,
+                "canonical object source returned {returned:?} while {requested:?} was requested"
+            ),
+            Self::ObjectSource { object, source } => {
+                write!(
+                    formatter,
+                    "canonical tag object {object:?} could not be read: {source}"
+                )
+            }
+            Self::TagBody { tag_object, source } => {
+                write!(
+                    formatter,
+                    "annotated tag {tag_object:?} is invalid: {source}"
+                )
+            }
+            Self::TargetOutsideClosure {
+                tag_ref,
+                tag_object,
+                target,
+            } => write!(
+                formatter,
+                "tag ref {tag_ref:?} tag {tag_object:?} targets {target:?}, absent from the admitted closure"
+            ),
+            Self::DeclaredTargetTypeMismatch {
+                tag_object,
+                target,
+                declared,
+                observed,
+            } => write!(
+                formatter,
+                "tag {tag_object:?} declares {target:?} as {declared:?}, but canonical bytes are {observed:?}"
+            ),
+            Self::Cycle {
+                tag_ref,
+                tag_object,
+            } => write!(
+                formatter,
+                "tag ref {tag_ref:?} repeats annotated tag {tag_object:?} while peeling"
+            ),
+            Self::DepthExceeded { tag_ref, limit } => write!(
+                formatter,
+                "tag ref {tag_ref:?} exceeds the {limit}-object tag peel bound"
+            ),
+        }
+    }
+}
+
+impl Error for TagPeelRefusal {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::ObjectSource { source, .. } => Some(source.as_ref()),
+            Self::TagBody { source, .. } => Some(source),
+            Self::ZeroDepthLimit
+            | Self::RefObjectFormatMismatch { .. }
+            | Self::RefTargetOutsideClosure { .. }
+            | Self::SourceIdentityMismatch { .. }
+            | Self::TargetOutsideClosure { .. }
+            | Self::DeclaredTargetTypeMismatch { .. }
+            | Self::Cycle { .. }
+            | Self::DepthExceeded { .. } => None,
+        }
+    }
+}
+
 /// A read-only, head-pinned view of the materialized repository state.
 ///
 /// All fields are immutable copies resolved from the supplied authenticated
@@ -606,6 +811,13 @@ pub struct AdmissionSnapshot {
     /// nothing, so a projection that does not set it preserves existing
     /// behaviour exactly.
     pub hidden_refs: RefVisibility,
+    /// Bounded annotated-tag peel evidence derived from this exact head's refs,
+    /// admitted closure, and verified canonical object bytes.
+    ///
+    /// Only `refs/tags/*` entries whose direct target is an annotated tag have
+    /// a map entry. Lightweight tags are deliberately absent: inventing a tag
+    /// object or a `^{}` record for them would change native Git semantics.
+    pub tag_peels: BTreeMap<RefName, TagPeelEvidence>,
 }
 
 impl AdmissionSnapshot {
@@ -616,6 +828,177 @@ impl AdmissionSnapshot {
             retention: &self.retention,
             outbox: &self.outbox,
         }
+    }
+
+    /// Derives annotated-tag peel evidence from the authenticated snapshot.
+    ///
+    /// The supplied `closure` must be the exact authority-selected closure for
+    /// this snapshot, and `source` must return verified canonical object bytes.
+    /// A missing direct tag target, missing nested target, wrong declared type,
+    /// cycle, malformed tag, source substitution, or depth exhaustion is a
+    /// typed refusal.  The map is replaced only after every visible candidate
+    /// succeeds, so callers never retain partial evidence after a refusal.
+    pub fn derive_tag_peels<Source>(
+        &mut self,
+        closure: &PermittedObjectClosure,
+        source: &Source,
+        object_format: GitHashAlgorithm,
+        parse_limits: &ParseLimits,
+        limits: TagPeelLimits,
+    ) -> Result<(), TagPeelRefusal>
+    where
+        Source: CanonicalObjectSource + ?Sized,
+    {
+        if limits.max_depth == 0 {
+            return Err(TagPeelRefusal::ZeroDepthLimit);
+        }
+
+        let mut derived = BTreeMap::new();
+        for (tag_ref, target) in &self.refs {
+            if !tag_ref.as_bytes().starts_with(b"refs/tags/") {
+                continue;
+            }
+            if target.algorithm() != object_format {
+                return Err(TagPeelRefusal::RefObjectFormatMismatch {
+                    tag_ref: tag_ref.clone(),
+                    expected: object_format,
+                    observed: target.algorithm(),
+                });
+            }
+            if !closure.objects().contains(target) {
+                return Err(TagPeelRefusal::RefTargetOutsideClosure {
+                    tag_ref: tag_ref.clone(),
+                    target: *target,
+                });
+            }
+
+            let direct = load_tag_peel_object(source, *target)?;
+            if direct.object_type() != ObjectType::Tag {
+                continue;
+            }
+            let peel = TagPeelContext {
+                closure,
+                source,
+                object_format,
+                parse_limits,
+                limits,
+            };
+            let peeled = peel.peel(tag_ref, *target)?;
+            derived.insert(
+                tag_ref.clone(),
+                TagPeelEvidence {
+                    tag_object: *target,
+                    peeled_object: peeled,
+                },
+            );
+        }
+        self.tag_peels = derived;
+        Ok(())
+    }
+}
+
+fn load_tag_peel_object<Source>(
+    source: &Source,
+    requested: GitOid,
+) -> Result<fgit_pack::CanonicalPackObject, TagPeelRefusal>
+where
+    Source: CanonicalObjectSource + ?Sized,
+{
+    let object = source
+        .load(&requested)
+        .map_err(|source| TagPeelRefusal::ObjectSource {
+            object: requested,
+            source: Box::new(source),
+        })?;
+    if object.id() != requested {
+        return Err(TagPeelRefusal::SourceIdentityMismatch {
+            requested,
+            returned: object.id(),
+        });
+    }
+    Ok(object)
+}
+
+struct TagPeelContext<'a, Source: ?Sized> {
+    closure: &'a PermittedObjectClosure,
+    source: &'a Source,
+    object_format: GitHashAlgorithm,
+    parse_limits: &'a ParseLimits,
+    limits: TagPeelLimits,
+}
+
+impl<Source> TagPeelContext<'_, Source>
+where
+    Source: CanonicalObjectSource + ?Sized,
+{
+    fn peel(&self, tag_ref: &RefName, initial_tag: GitOid) -> Result<GitOid, TagPeelRefusal> {
+        let mut visited = BTreeSet::new();
+        let mut current = initial_tag;
+        loop {
+            if visited.len() >= self.limits.max_depth {
+                return Err(TagPeelRefusal::DepthExceeded {
+                    tag_ref: tag_ref.clone(),
+                    limit: self.limits.max_depth,
+                });
+            }
+            if !visited.insert(current) {
+                return Err(TagPeelRefusal::Cycle {
+                    tag_ref: tag_ref.clone(),
+                    tag_object: current,
+                });
+            }
+
+            let object = load_tag_peel_object(self.source, current)?;
+            if object.object_type() != ObjectType::Tag {
+                return Err(TagPeelRefusal::DeclaredTargetTypeMismatch {
+                    tag_object: current,
+                    target: current,
+                    declared: TagTargetType::Tag,
+                    observed: object.object_type(),
+                });
+            }
+            let parsed = parse_annotated_tag(
+                object.body(),
+                self.object_format,
+                AcceptanceProfile::GitCompatibleImport,
+                self.parse_limits,
+            )
+            .map_err(|source| TagPeelRefusal::TagBody {
+                tag_object: current,
+                source,
+            })?;
+            let target = parsed.target();
+            if !self.closure.objects().contains(&target.oid) {
+                return Err(TagPeelRefusal::TargetOutsideClosure {
+                    tag_ref: tag_ref.clone(),
+                    tag_object: current,
+                    target: target.oid,
+                });
+            }
+            let target_object = load_tag_peel_object(self.source, target.oid)?;
+            if target_type(target_object.object_type()) != target.object_type {
+                return Err(TagPeelRefusal::DeclaredTargetTypeMismatch {
+                    tag_object: current,
+                    target: target.oid,
+                    declared: target.object_type,
+                    observed: target_object.object_type(),
+                });
+            }
+            if target.object_type == TagTargetType::Tag {
+                current = target.oid;
+            } else {
+                return Ok(target.oid);
+            }
+        }
+    }
+}
+
+const fn target_type(object_type: ObjectType) -> TagTargetType {
+    match object_type {
+        ObjectType::Blob => TagTargetType::Blob,
+        ObjectType::Tree => TagTargetType::Tree,
+        ObjectType::Commit => TagTargetType::Commit,
+        ObjectType::Tag => TagTargetType::Tag,
     }
 }
 
@@ -1079,7 +1462,8 @@ pub fn ref_state_root(
 ) -> Result<Digest, RefusalCode> {
     match layout {
         RootLayoutVersion::LegacyWholeBody => canonical_ref_state_root(state),
-        RootLayoutVersion::RefStateMerkleV1 => {
+        RootLayoutVersion::RefStateMerkleV1
+        | RootLayoutVersion::RefStateAndObjectClosureMerkleV1 => {
             let entries = state
                 .refs()
                 .iter()
@@ -1091,6 +1475,24 @@ pub fn ref_state_root(
 }
 
 /// Computes the domain-pinned commitment recorded as an RCR object closure.
+///
+/// # This value is also a content address, and that constrains its migration
+///
+/// It is not only the commitment an RCR publishes. The same digest is the
+/// immutable key the validated closure frame is staged under, and the key the
+/// materializer later reads it back by — `record.object_closure_root` is
+/// returned as the lookup key by `select_authority_closure_in` and the decoded
+/// body is required to re-derive it. So this function's output has two roles
+/// that must agree, and a layout that changed it would have to move the staging
+/// key in the same step.
+///
+/// That is why the object closure did **not** migrate to a Merkle commitment
+/// alongside [`RootLayoutVersion::RefStateAndObjectClosureMerkleV1`], the way
+/// [`ref_state_root`] migrated the ref state. The ref side can do it because
+/// its frame is staged under the same layout-selected root it is read back by;
+/// the closure side selects its root before the head's layout has been
+/// resolved. Migrating it is a real change to that ordering, not a change to
+/// this function.
 pub fn permitted_object_closure_root(
     closure: &PermittedObjectClosure,
 ) -> Result<Digest, RefusalCode> {
