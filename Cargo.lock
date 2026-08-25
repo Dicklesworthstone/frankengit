@@ -710,7 +710,10 @@ version = "0.0.1"
 name = "fgit-cli"
 version = "0.0.1"
 dependencies = [
+ "fgit-authority",
+ "fgit-codec",
  "fgit-crypto",
+ "fgit-forge",
  "fgit-node",
  "fgit-types",
 ]
@@ -820,6 +823,7 @@ dependencies = [
 name = "fgit-identity"
 version = "0.0.1"
 dependencies = [
+ "ed25519-dalek",
  "fgit-codec",
  "fgit-crypto",
  "fgit-forge",

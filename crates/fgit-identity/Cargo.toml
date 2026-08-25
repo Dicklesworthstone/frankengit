@@ -10,6 +10,7 @@ publish = false
 workspace = true
 
 [dependencies]
+ed25519-dalek.workspace = true
 fgit-codec.workspace = true
 fgit-crypto.workspace = true
 fgit-forge.workspace = true

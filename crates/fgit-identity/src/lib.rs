@@ -57,11 +57,29 @@
 //!   the registry — `tests/canonical_identity.rs` is what makes it observable.
 
 pub mod deploy_key;
+pub mod oauth;
+pub mod passkey;
+pub mod rate_limit;
+pub mod reauth;
+pub mod recovery;
 pub mod revocation;
 pub mod session;
 pub mod token;
 
 pub use deploy_key::{DeployKeyBinding, DeployKeyRefusal, DeployKeyScope};
+pub use oauth::{
+    AuthorizationCode, OAuthRefusal, PkceMethod, derive_s256_challenge, validate_redirect_uri,
+    verify_pkce,
+};
+pub use passkey::{
+    PasskeyAlgorithm, PasskeyAssertion, PasskeyAssertionChallenge, PasskeyCredential, PasskeyId,
+    PasskeyRefusal, UserVerificationRequirement,
+};
+pub use rate_limit::{PrincipalRateLimiter, RateLimitConfig, RateLimitRecord, RateLimitRefusal};
+pub use reauth::{ElevationToken, MAX_ELEVATION_WINDOW_SECONDS, PrivilegeAction, ReauthRefusal};
+pub use recovery::{
+    MIN_RECOVERY_DELAY_SECONDS, RecoveryId, RecoveryRefusal, RecoveryRequest, RecoveryState,
+};
 pub use revocation::RevocationEvidence;
 pub use session::{AuthenticationStrength, Session, SessionId, SessionRefusal};
 pub use token::{TokenGrant, TokenHandle, TokenOperation, TokenRefusal};
