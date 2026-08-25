@@ -1,8 +1,9 @@
-//! Bounded staging of an ordinary loose-object Git directory.
+//! Bounded staging of an ordinary local Git directory.
 //!
 //! This module owns only the pre-publication half of import: it validates a
-//! local Git directory, follows the closure named by its direct refs, and
-//! places verified immutable object bodies in the node's fabric.  The returned
+//! local Git directory, follows the closure named by its direct refs, resolves
+//! those objects from checksum-bound loose or idx/pack storage, and places
+//! verified immutable object bodies in the node's fabric.  The returned
 //! [`StagedLooseGitImport`] is not a publication capability.  In particular,
 //! objects staged here remain non-canonical until the caller has sealed an
 //! import request, recorded its admission, and published an RCR through the
@@ -10,6 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::io;
@@ -20,6 +22,10 @@ use fgit_git_object::{
     AcceptanceProfile, InflateLimits, LooseObjectDecodeError, ObjectError, ParseLimits,
     ParsedObject, parse_object_body, parse_zlib_loose,
 };
+use fgit_pack::{
+    CachedResolver, IdxV2, NativeChecksumVerifier, PackError, PackLimits, ResolutionBudget,
+    read_verified_pack, validate_idx_entry_crc, validate_idx_pack_count, verify_native_object,
+};
 use fgit_types::{GitHashAlgorithm, GitOid, RefName, TypeRefusal};
 
 use super::{NodeRefusal, OneNode, crypto_object_kind};
@@ -29,10 +35,14 @@ const MAX_IMPORT_OBJECTS: usize = 1_000_000;
 const MAX_IMPORT_TOTAL_OBJECT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_IMPORT_COMPRESSED_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IMPORT_COMPRESSED_OBJECT_BYTES_USIZE: usize = 64 * 1024 * 1024;
+const MAX_IMPORT_PACKS: usize = 128;
+const MAX_IMPORT_PACK_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_IMPORT_TOTAL_PACK_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_IMPORT_TOTAL_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IMPORT_REF_DEPTH: usize = 32;
 const MAX_IMPORT_DIRECTORY_ENTRIES: usize = 1_000_000;
 
-/// Verified, non-canonical state staged from a loose-object Git directory.
+/// Verified, non-canonical state staged from a local Git directory.
 ///
 /// This type has no public constructor.  Its refs and closure can only be
 /// produced after every object reachable from a direct source ref was parsed,
@@ -99,9 +109,32 @@ pub enum LooseGitImportRefusal {
         /// Observed path.
         path: Box<PathBuf>,
     },
-    /// Packed objects exist; the loose-object profile must not silently ignore
-    /// them or substitute a different object source.
-    PackedObjectsUnsupported(Box<PathBuf>),
+    /// One `.pack` or `.idx` file lacked its same-stem companion.
+    PackPairMissing(Box<PathBuf>),
+    /// A pack-directory entry was neither a pack pair nor a recognized derived
+    /// accelerator that this import profile can safely ignore.
+    PackDirectoryEntryUnsupported(Box<PathBuf>),
+    /// The source exceeded the bounded number of local pack pairs before any
+    /// pack body was opened.
+    PackFileLimitExceeded { limit: usize },
+    /// One pack/index file or the selected aggregate exceeded its pre-read
+    /// byte envelope.
+    PackInputBytesExceeded {
+        /// File or pack directory whose envelope was exceeded.
+        path: Box<PathBuf>,
+        /// Selected byte ceiling.
+        limit: u64,
+        /// Observed or attempted bytes.
+        observed: u64,
+    },
+    /// A selected idx/pack pair failed structural, checksum, association,
+    /// delta, resource, or native-object verification.
+    PackedObject {
+        /// Exact pack or index file at the failing boundary.
+        path: Box<PathBuf>,
+        /// Stable first-party pack refusal.
+        source: Box<PackError>,
+    },
     /// Git alternates would add an undeclared object source.
     ObjectAlternatesUnsupported(Box<PathBuf>),
     /// A ref path was not representable in the canonical ref vocabulary.
@@ -136,10 +169,11 @@ pub enum LooseGitImportRefusal {
     RefContents(Box<PathBuf>),
     /// A packed-refs file did not contain its closed direct-ref grammar.
     PackedRefContents(Box<PathBuf>),
-    /// The source named an object that was not available as a loose file.
+    /// The source named an object unavailable from every declared loose or
+    /// checksum-bound packed source.
     ObjectMissing(GitOid),
-    /// A loose object body did not reproduce the object identity that named
-    /// its source path.
+    /// A reconstructed object body did not reproduce the object identity that
+    /// selected it.
     ObjectIdentityMismatch {
         /// Identity requested by a ref or parent object.
         expected: GitOid,
@@ -202,9 +236,31 @@ impl Display for LooseGitImportRefusal {
             Self::PathKind { expected, path } => {
                 write!(formatter, "expected {expected} at {}", path.display())
             }
-            Self::PackedObjectsUnsupported(path) => write!(
+            Self::PackPairMissing(path) => write!(
                 formatter,
-                "loose import refuses packed objects at {}; use the pack quarantine import path",
+                "local Git import requires a same-stem .pack/.idx pair for {}",
+                path.display()
+            ),
+            Self::PackDirectoryEntryUnsupported(path) => write!(
+                formatter,
+                "local Git import does not recognize pack-directory entry {}",
+                path.display()
+            ),
+            Self::PackFileLimitExceeded { limit } => {
+                write!(formatter, "local Git import pack count exceeds {limit}")
+            }
+            Self::PackInputBytesExceeded {
+                path,
+                limit,
+                observed,
+            } => write!(
+                formatter,
+                "local Git import input {} is {observed} bytes, exceeding {limit}",
+                path.display()
+            ),
+            Self::PackedObject { path, source } => write!(
+                formatter,
+                "local Git packed object source {} refused: {source}",
                 path.display()
             ),
             Self::ObjectAlternatesUnsupported(path) => write!(
@@ -264,14 +320,11 @@ impl Display for LooseGitImportRefusal {
                 )
             }
             Self::ObjectMissing(identity) => {
-                write!(
-                    formatter,
-                    "source is missing reachable loose object {identity}"
-                )
+                write!(formatter, "source is missing reachable object {identity}")
             }
             Self::ObjectIdentityMismatch { expected, observed } => write!(
                 formatter,
-                "loose object named {expected} re-identifies as {observed}"
+                "source object named {expected} re-identifies as {observed}"
             ),
             Self::LooseObject(source) => Display::fmt(source, formatter),
             Self::ObjectStructure(source) => Display::fmt(source, formatter),
@@ -318,12 +371,16 @@ impl Error for LooseGitImportRefusal {
             }
             Self::LooseObject(source) => Some(source.as_ref()),
             Self::ObjectStructure(source) => Some(source.as_ref()),
+            Self::PackedObject { source, .. } => Some(source.as_ref()),
             Self::Node(source) => Some(source.as_ref()),
             Self::SymbolicLink(_)
             | Self::GitDirectoryMissing(_)
             | Self::GitDirectoryFileUnsupported(_)
             | Self::PathKind { .. }
-            | Self::PackedObjectsUnsupported(_)
+            | Self::PackPairMissing(_)
+            | Self::PackDirectoryEntryUnsupported(_)
+            | Self::PackFileLimitExceeded { .. }
+            | Self::PackInputBytesExceeded { .. }
             | Self::ObjectAlternatesUnsupported(_)
             | Self::SymbolicRefUnsupported(_)
             | Self::HeadMissing(_)
@@ -347,13 +404,13 @@ impl Error for LooseGitImportRefusal {
 }
 
 impl OneNode {
-    /// Validates and stages an ordinary loose-object Git directory.
+    /// Validates and stages an ordinary local Git directory.
     ///
     /// This accepts a bare directory or a worktree directory containing a
-    /// `.git` directory.  The intentionally narrow first profile accepts direct
-    /// refs and loose objects only.  Packed objects, alternates, symbolic refs,
-    /// and `.git` indirection files are explicit typed refusals rather than
-    /// paths that can quietly select a different object source.
+    /// `.git` directory. Direct refs may reach loose objects or objects in
+    /// checksum-bound idx-v2/pack-v2 pairs. Alternates, symbolic refs, and
+    /// `.git` indirection files are explicit typed refusals rather than paths
+    /// that can quietly select a different object source.
     ///
     /// Success proves that every returned closure member was native-hash
     /// verified and immutably placed through this node's fabric.  It does not
@@ -365,7 +422,7 @@ impl OneNode {
         self.stage_loose_git_import_with_ref_limit(source, MAX_IMPORT_REFS)
     }
 
-    /// Stages a loose source under a caller-owned ref limit before opening
+    /// Stages a local Git source under a caller-owned ref limit before opening
     /// any object named by that source.
     ///
     /// The durable admission entrypoint uses this narrower form so its
@@ -378,7 +435,9 @@ impl OneNode {
         max_refs: usize,
     ) -> Result<StagedLooseGitImport, LooseGitImportRefusal> {
         let git_directory = resolve_git_directory(source)?;
-        reject_unsupported_object_sources(&git_directory)?;
+        reject_object_alternates(&git_directory)?;
+        let mut packed =
+            PackedObjectSources::open(&git_directory, self.object_format, self.max_object_bytes)?;
         let refs = read_direct_refs(&git_directory, self.object_format, max_refs)?;
         let head_target = read_head_target(&git_directory)?;
         let mut pending = refs.values().copied().collect::<BTreeSet<_>>();
@@ -391,16 +450,17 @@ impl OneNode {
                     limit: MAX_IMPORT_OBJECTS,
                 });
             }
-            let loose = read_loose_object(
+            let object = read_local_object(
                 &git_directory,
                 identity,
                 self.object_format,
                 self.max_object_bytes,
+                &mut packed,
             )?;
             let observed = fgit_crypto::git_object_id(
                 self.object_format,
-                crypto_object_kind(loose.object_type),
-                &loose.body,
+                crypto_object_kind(object.object_type),
+                &object.body,
             );
             if observed != identity {
                 return Err(LooseGitImportRefusal::ObjectIdentityMismatch {
@@ -409,7 +469,7 @@ impl OneNode {
                 });
             }
             let next_total = total_object_bytes
-                .saturating_add(u64::try_from(loose.body.len()).unwrap_or(u64::MAX));
+                .saturating_add(u64::try_from(object.body.len()).unwrap_or(u64::MAX));
             if next_total > MAX_IMPORT_TOTAL_OBJECT_BYTES {
                 return Err(LooseGitImportRefusal::TotalObjectBytesExceeded {
                     limit: MAX_IMPORT_TOTAL_OBJECT_BYTES,
@@ -417,14 +477,14 @@ impl OneNode {
                 });
             }
             let parsed = parse_object_body(
-                loose.object_type,
-                &loose.body,
+                object.object_type,
+                &object.body,
                 AcceptanceProfile::GitCompatibleImport,
                 &parse_limits(self.object_format, self.max_object_bytes),
             )
             .map_err(|error| LooseGitImportRefusal::ObjectStructure(Box::new(error)))?;
             let references = referenced_objects(identity, parsed, self.object_format)?;
-            self.put_git_object(loose.object_type, loose.body)
+            self.put_git_object(object.object_type, object.body)
                 .map_err(|error| LooseGitImportRefusal::Node(Box::new(error)))?;
             total_object_bytes = next_total;
             closure.insert(identity);
@@ -484,35 +544,396 @@ fn resolve_git_directory(source: &Path) -> Result<PathBuf, LooseGitImportRefusal
     }
 }
 
-fn reject_unsupported_object_sources(git_directory: &Path) -> Result<(), LooseGitImportRefusal> {
+fn reject_object_alternates(git_directory: &Path) -> Result<(), LooseGitImportRefusal> {
     let alternates = git_directory.join("objects/info/alternates");
     if path_exists(&alternates)? {
         return Err(LooseGitImportRefusal::ObjectAlternatesUnsupported(
             Box::new(alternates),
         ));
     }
-    let pack_directory = git_directory.join("objects/pack");
-    let Some(metadata) = path_metadata(&pack_directory, "inspect packed-object directory")? else {
-        return Ok(());
-    };
+    Ok(())
+}
+
+#[derive(Default)]
+struct PackPairPaths {
+    index: Option<PathBuf>,
+    pack: Option<PathBuf>,
+}
+
+struct PackedObjectSource {
+    index_path: PathBuf,
+    pack_path: PathBuf,
+    index: IdxV2,
+    verified_objects: Option<BTreeMap<GitOid, fgit_git_object::LooseObject>>,
+}
+
+struct PackedObjectSources {
+    sources: Vec<PackedObjectSource>,
+    limits: PackLimits,
+    parse_limits: ParseLimits,
+    resolution_budget: ResolutionBudget,
+    loaded_pack_bytes: u64,
+    loaded_inflated_bytes: u64,
+}
+
+impl PackedObjectSources {
+    fn open(
+        git_directory: &Path,
+        object_format: GitHashAlgorithm,
+        max_object_bytes: u64,
+    ) -> Result<Self, LooseGitImportRefusal> {
+        let limits = import_pack_limits(max_object_bytes);
+        let parse_limits = parse_limits(object_format, max_object_bytes);
+        let pack_directory = git_directory.join("objects/pack");
+        let Some(metadata) = path_metadata(&pack_directory, "inspect packed-object directory")?
+        else {
+            return Ok(Self::empty(limits, parse_limits));
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(LooseGitImportRefusal::SymbolicLink(Box::new(
+                pack_directory,
+            )));
+        }
+        if !metadata.is_dir() {
+            return Err(LooseGitImportRefusal::PathKind {
+                expected: "packed-object directory",
+                path: Box::new(pack_directory),
+            });
+        }
+
+        let mut pairs = BTreeMap::<OsString, PackPairPaths>::new();
+        for entry in bounded_directory_entries(&pack_directory)? {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| io_refusal("inspect pack-directory entry", path.clone(), error))?;
+            if metadata.file_type().is_symlink() {
+                return Err(LooseGitImportRefusal::SymbolicLink(Box::new(path)));
+            }
+            if !metadata.is_file() {
+                return Err(LooseGitImportRefusal::PathKind {
+                    expected: "regular pack-directory file",
+                    path: Box::new(path),
+                });
+            }
+            let file_name = path.file_name().unwrap_or_else(|| OsStr::new(""));
+            if file_name == OsStr::new("multi-pack-index") || is_ignored_pack_accelerator(&path) {
+                continue;
+            }
+            let Some(extension) = path.extension().and_then(OsStr::to_str) else {
+                return Err(LooseGitImportRefusal::PackDirectoryEntryUnsupported(
+                    Box::new(path),
+                ));
+            };
+            if !matches!(extension, "idx" | "pack") {
+                return Err(LooseGitImportRefusal::PackDirectoryEntryUnsupported(
+                    Box::new(path),
+                ));
+            }
+            let Some(stem) = path.file_stem() else {
+                return Err(LooseGitImportRefusal::PackDirectoryEntryUnsupported(
+                    Box::new(path),
+                ));
+            };
+            let pair = pairs.entry(stem.to_os_string()).or_default();
+            let slot = if extension == "idx" {
+                &mut pair.index
+            } else {
+                &mut pair.pack
+            };
+            if slot.replace(path.clone()).is_some() {
+                return Err(LooseGitImportRefusal::PackDirectoryEntryUnsupported(
+                    Box::new(path),
+                ));
+            }
+        }
+        if pairs.len() > MAX_IMPORT_PACKS {
+            return Err(LooseGitImportRefusal::PackFileLimitExceeded {
+                limit: MAX_IMPORT_PACKS,
+            });
+        }
+
+        let mut sources = Vec::new();
+        let mut total_index_bytes = 0_u64;
+        for (_, pair) in pairs {
+            let (index_path, pack_path) = match (pair.index, pair.pack) {
+                (Some(index), Some(pack)) => (index, pack),
+                (Some(index), None) => {
+                    return Err(LooseGitImportRefusal::PackPairMissing(Box::new(index)));
+                }
+                (None, Some(pack)) => {
+                    return Err(LooseGitImportRefusal::PackPairMissing(Box::new(pack)));
+                }
+                (None, None) => unreachable!("a pack pair is created only for a pack or index"),
+            };
+            let index_bytes =
+                read_regular_bounded(&index_path, "read pack index", MAX_IMPORT_PACK_BYTES)?;
+            total_index_bytes = total_index_bytes
+                .checked_add(u64::try_from(index_bytes.len()).unwrap_or(u64::MAX))
+                .unwrap_or(u64::MAX);
+            if total_index_bytes > MAX_IMPORT_TOTAL_INDEX_BYTES {
+                return Err(LooseGitImportRefusal::PackInputBytesExceeded {
+                    path: Box::new(pack_directory.clone()),
+                    limit: MAX_IMPORT_TOTAL_INDEX_BYTES,
+                    observed: total_index_bytes,
+                });
+            }
+            let index = IdxV2::parse_verified(
+                &index_bytes,
+                object_format,
+                &limits,
+                &mut || true,
+                &NativeChecksumVerifier,
+            )
+            .map_err(|source| pack_refusal(index_path.clone(), source))?;
+            sources.push(PackedObjectSource {
+                index_path,
+                pack_path,
+                index,
+                verified_objects: None,
+            });
+        }
+
+        Ok(Self {
+            sources,
+            limits,
+            parse_limits,
+            resolution_budget: ResolutionBudget::new(),
+            loaded_pack_bytes: 0,
+            loaded_inflated_bytes: 0,
+        })
+    }
+
+    fn empty(limits: PackLimits, parse_limits: ParseLimits) -> Self {
+        Self {
+            sources: Vec::new(),
+            limits,
+            parse_limits,
+            resolution_budget: ResolutionBudget::new(),
+            loaded_pack_bytes: 0,
+            loaded_inflated_bytes: 0,
+        }
+    }
+
+    fn read(
+        &mut self,
+        identity: GitOid,
+    ) -> Result<Option<fgit_git_object::LooseObject>, LooseGitImportRefusal> {
+        let Some(source_index) = self
+            .sources
+            .iter()
+            .position(|source| source.index.lookup(&identity).is_some())
+        else {
+            return Ok(None);
+        };
+        self.load(source_index)?;
+        Ok(self.sources[source_index]
+            .verified_objects
+            .as_ref()
+            .and_then(|objects| objects.get(&identity))
+            .cloned())
+    }
+
+    fn load(&mut self, source_index: usize) -> Result<(), LooseGitImportRefusal> {
+        if self.sources[source_index].verified_objects.is_some() {
+            return Ok(());
+        }
+        let source = &self.sources[source_index];
+        let pack_path = source.pack_path.clone();
+        let pack_bytes =
+            read_regular_bounded(&pack_path, "read packed object file", MAX_IMPORT_PACK_BYTES)?;
+        let next_pack_bytes = self
+            .loaded_pack_bytes
+            .checked_add(u64::try_from(pack_bytes.len()).unwrap_or(u64::MAX))
+            .unwrap_or(u64::MAX);
+        if next_pack_bytes > MAX_IMPORT_TOTAL_PACK_BYTES {
+            return Err(LooseGitImportRefusal::PackInputBytesExceeded {
+                path: Box::new(pack_path),
+                limit: MAX_IMPORT_TOTAL_PACK_BYTES,
+                observed: next_pack_bytes,
+            });
+        }
+        let quarantined = read_verified_pack(
+            &pack_bytes,
+            source.index.format(),
+            &self.limits,
+            &mut || true,
+            &NativeChecksumVerifier,
+        )
+        .map_err(|error| pack_refusal(source.pack_path.clone(), error))?;
+        if &quarantined.trailer != source.index.pack_checksum() {
+            return Err(pack_refusal(
+                source.index_path.clone(),
+                PackError::TrailerChecksumMismatch,
+            ));
+        }
+        validate_idx_pack_count(&source.index, quarantined.header)
+            .map_err(|error| pack_refusal(source.index_path.clone(), error))?;
+
+        let mut entries_by_offset = BTreeMap::new();
+        for entry in source.index.entries() {
+            if entries_by_offset.insert(entry.pack_offset, entry).is_some() {
+                return Err(pack_refusal(
+                    source.index_path.clone(),
+                    PackError::DuplicateObjectOffset(entry.pack_offset),
+                ));
+            }
+        }
+        let pack_body_end = pack_bytes
+            .len()
+            .checked_sub(source.index.format().digest_len())
+            .ok_or_else(|| {
+                pack_refusal(
+                    source.pack_path.clone(),
+                    PackError::Truncated {
+                        context: "pack checksum",
+                    },
+                )
+            })?;
+        for (position, entry) in quarantined.entries().iter().enumerate() {
+            let Some(index_entry) = entries_by_offset.get(&entry.offset) else {
+                return Err(pack_refusal(
+                    source.index_path.clone(),
+                    PackError::ObjectCountMismatch {
+                        declared: source.index.entries().len() as u32,
+                        actual: quarantined.entries().len() as u32,
+                    },
+                ));
+            };
+            let end = quarantined
+                .entries()
+                .get(position + 1)
+                .and_then(|next| usize::try_from(next.offset).ok())
+                .unwrap_or(pack_body_end);
+            let start = usize::try_from(entry.offset).map_err(|_| {
+                pack_refusal(
+                    source.pack_path.clone(),
+                    PackError::IntegerOverflow {
+                        context: "pack entry offset",
+                    },
+                )
+            })?;
+            let raw_entry = pack_bytes.get(start..end).ok_or_else(|| {
+                pack_refusal(
+                    source.pack_path.clone(),
+                    PackError::Truncated {
+                        context: "indexed pack entry",
+                    },
+                )
+            })?;
+            validate_idx_entry_crc(index_entry, raw_entry, &self.limits, &mut || true)
+                .map_err(|error| pack_refusal(source.index_path.clone(), error))?;
+        }
+        let inflated_bytes = quarantined
+            .entries()
+            .iter()
+            .try_fold(0_u64, |total, entry| {
+                total.checked_add(u64::try_from(entry.inflated.len()).ok()?)
+            })
+            .unwrap_or(u64::MAX);
+        let next_inflated = self
+            .loaded_inflated_bytes
+            .checked_add(inflated_bytes)
+            .unwrap_or(u64::MAX);
+        if next_inflated > MAX_IMPORT_TOTAL_OBJECT_BYTES {
+            return Err(LooseGitImportRefusal::TotalObjectBytesExceeded {
+                limit: MAX_IMPORT_TOTAL_OBJECT_BYTES,
+                observed: next_inflated,
+            });
+        }
+        let objects = quarantined
+            .into_scalar_objects(|offset| entries_by_offset.get(&offset).map(|entry| entry.oid))
+            .map_err(|error| pack_refusal(source.pack_path.clone(), error))?;
+        let mut resolver = CachedResolver::new(&objects, &(), &self.limits, &mut || true)
+            .map_err(|error| pack_refusal(source.pack_path.clone(), error))?;
+        let mut verified_objects = BTreeMap::new();
+        for entry in source.index.entries() {
+            let (object_type, body) = resolver
+                .resolve_id_typed_with_budget(&entry.oid, &mut self.resolution_budget, &mut || true)
+                .map_err(|error| pack_refusal(source.pack_path.clone(), error))?;
+            verify_native_object(
+                source.index.format(),
+                object_type,
+                &body,
+                &entry.oid,
+                AcceptanceProfile::GitCompatibleImport,
+                &self.parse_limits,
+            )
+            .map_err(|error| pack_refusal(source.pack_path.clone(), error))?;
+            verified_objects.insert(
+                entry.oid,
+                fgit_git_object::LooseObject {
+                    object_type,
+                    declared_size: body.len(),
+                    body,
+                },
+            );
+        }
+        self.loaded_pack_bytes = next_pack_bytes;
+        self.loaded_inflated_bytes = next_inflated;
+        self.sources[source_index].verified_objects = Some(verified_objects);
+        Ok(())
+    }
+}
+
+fn import_pack_limits(max_object_bytes: u64) -> PackLimits {
+    PackLimits {
+        max_input_bytes: MAX_IMPORT_PACK_BYTES as usize,
+        max_object_bytes: usize::try_from(max_object_bytes).unwrap_or(usize::MAX),
+        max_total_expanded_bytes: MAX_IMPORT_TOTAL_OBJECT_BYTES as usize,
+        max_cached_bytes: MAX_IMPORT_TOTAL_OBJECT_BYTES as usize,
+        ..PackLimits::default()
+    }
+}
+
+fn is_ignored_pack_accelerator(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(OsStr::to_str),
+        Some("bitmap" | "keep" | "mtimes" | "promisor" | "rev")
+    )
+}
+
+fn read_regular_bounded(
+    path: &Path,
+    operation: &'static str,
+    limit: u64,
+) -> Result<Vec<u8>, LooseGitImportRefusal> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| io_refusal(operation, path.to_path_buf(), error))?;
     if metadata.file_type().is_symlink() {
         return Err(LooseGitImportRefusal::SymbolicLink(Box::new(
-            pack_directory,
+            path.to_path_buf(),
         )));
     }
-    if !metadata.is_dir() {
+    if !metadata.is_file() {
         return Err(LooseGitImportRefusal::PathKind {
-            expected: "packed-object directory",
-            path: Box::new(pack_directory),
+            expected: "regular pack or index file",
+            path: Box::new(path.to_path_buf()),
         });
     }
-    let mut entries = bounded_directory_entries(&pack_directory)?;
-    if entries.pop().is_some() {
-        return Err(LooseGitImportRefusal::PackedObjectsUnsupported(Box::new(
-            pack_directory,
-        )));
+    if metadata.len() > limit {
+        return Err(LooseGitImportRefusal::PackInputBytesExceeded {
+            path: Box::new(path.to_path_buf()),
+            limit,
+            observed: metadata.len(),
+        });
     }
-    Ok(())
+    let bytes = fs::read(path).map_err(|error| io_refusal(operation, path.to_path_buf(), error))?;
+    let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if observed > limit {
+        return Err(LooseGitImportRefusal::PackInputBytesExceeded {
+            path: Box::new(path.to_path_buf()),
+            limit,
+            observed,
+        });
+    }
+    Ok(bytes)
+}
+
+fn pack_refusal(path: PathBuf, source: PackError) -> LooseGitImportRefusal {
+    LooseGitImportRefusal::PackedObject {
+        path: Box::new(path),
+        source: Box::new(source),
+    }
 }
 
 fn read_direct_refs(
@@ -742,20 +1163,35 @@ fn parse_direct_ref(
     })
 }
 
-fn read_loose_object(
+fn read_local_object(
     git_directory: &Path,
     identity: GitOid,
     object_format: GitHashAlgorithm,
     max_object_bytes: u64,
+    packed: &mut PackedObjectSources,
 ) -> Result<fgit_git_object::LooseObject, LooseGitImportRefusal> {
+    if let Some(object) =
+        try_read_loose_object(git_directory, identity, object_format, max_object_bytes)?
+    {
+        return Ok(object);
+    }
+    packed
+        .read(identity)?
+        .ok_or(LooseGitImportRefusal::ObjectMissing(identity))
+}
+
+fn try_read_loose_object(
+    git_directory: &Path,
+    identity: GitOid,
+    object_format: GitHashAlgorithm,
+    max_object_bytes: u64,
+) -> Result<Option<fgit_git_object::LooseObject>, LooseGitImportRefusal> {
     let identity_text = identity.to_string();
     let (directory, file) = identity_text.split_at(2);
     let path = git_directory.join("objects").join(directory).join(file);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(LooseGitImportRefusal::ObjectMissing(identity));
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io_refusal("inspect loose object", path, error)),
     };
     if metadata.file_type().is_symlink() {
@@ -788,6 +1224,7 @@ fn read_loose_object(
         inflate_limits,
         parse_limits(object_format, max_object_bytes),
     )
+    .map(Some)
     .map_err(|error| LooseGitImportRefusal::LooseObject(Box::new(error)))
 }
 
@@ -1259,18 +1696,18 @@ mod tests {
     }
 
     #[test]
-    fn loose_import_refuses_packed_objects_instead_of_ignoring_them() {
+    fn local_import_refuses_an_unpaired_pack_instead_of_ignoring_it() {
         let scratch = ScratchDirectory::new();
         let source = scratch.0.join("source.git");
         let pack_directory = source.join("objects/pack");
         fs::create_dir_all(&pack_directory).expect("packed-object directory creates");
-        fs::write(pack_directory.join("fixture.pack"), b"not a loose object")
-            .expect("packed-object fixture writes");
+        let pack_path = pack_directory.join("fixture.pack");
+        fs::write(&pack_path, b"not a complete pack pair").expect("packed-object fixture writes");
         let node = node(scratch.0.join("node"));
 
         assert!(matches!(
             node.stage_loose_git_import(&source),
-            Err(LooseGitImportRefusal::PackedObjectsUnsupported(path)) if *path == pack_directory
+            Err(LooseGitImportRefusal::PackPairMissing(path)) if *path == pack_path
         ));
         node.shutdown().expect("node drains");
     }
