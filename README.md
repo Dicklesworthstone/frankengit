@@ -22,15 +22,19 @@ The project is a synthesis of concrete machinery from Asupersync, FrankenSQLite,
 
 Those product-stack choices are settled, while integration is deliberately gated on their owned sibling repositories converging to one Asupersync 0.4.x constellation and registry-resolvable FrankenSQLite dependencies. The exact runtime, cancellation, connection, retry, shutdown, and verification contract is in [`docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md`](docs/ASUPERSYNC_AND_FRANKENSQLITE_INTEGRATION_PROFILE.md).
 
-## Current executable one-node boundary
+## Current one-node integration boundary
 
-The checked-in `fg` binary has a narrow, configuration-free one-node surface for
-exercising the same authority, admission, and object-selection abstractions the
-finished system will use. It does not consult a configuration file: callers
-supply the storage directory, tenant ID, and repository ID explicitly. The
-surface is useful for implementation and conformance work, but it is not yet a
-complete server profile and does not by itself prove that a selected durability
-epoch or broader compatibility matrix has completed.
+The checked-in `fgit-cli` library contains a narrow, configuration-free one-node
+surface for exercising the same authority, admission, and object-selection
+abstractions the finished system will use. It does not consult a configuration
+file: callers supply the storage directory, tenant ID, and repository ID
+explicitly. The final `fg` binary will expose this surface after the current CLI
+integration regression is repaired: `CliOutcome::At` has no top-level rendering
+arm, so the binary target at this snapshot is not buildable even though the
+library command handlers exist. The surface will remain an implementation and
+conformance boundary rather than a complete server profile, and it will not by
+itself prove that a selected durability epoch or broader compatibility matrix
+has completed.
 
 ```bash
 cargo run -p fgit-cli -- init ./fgit-data \
@@ -42,12 +46,16 @@ cargo run -p fgit-cli -- doctor ./fgit-data \
   22222222222222222222222222222222
 ```
 
-`init` creates or re-authenticates the empty canonical authority head. `import`
-verifies a bounded loose-object source and publishes its source refs through the
-sealed admission/RCR/head-CAS path. `doctor` authenticates the head and can
-re-verify one explicitly named native object; it is not yet a complete replay,
-fabric, repair, or causal-diagnosis suite. `export` writes an authority-selected
-pack to a previously absent path.
+`init` will create or re-authenticate the empty canonical authority head.
+`import` will verify a bounded local object source composed of loose objects and
+checksum-bound idx-v2/pack-v2 pairs, then publish its source refs through the
+sealed admission/RCR/head-CAS path. The pack-import code and its 14-test focused
+integration target are checked in, but the slice will remain batch-pending until
+the node package gate is green; a separate verified-read failure currently keeps
+that wider gate red. `doctor` will authenticate the head and can re-verify one
+explicitly named native object; it will not yet be a complete replay, fabric,
+repair, or causal-diagnosis suite. `export` will write an authority-selected pack
+to a previously absent path.
 
 `serve` accepts a bounded raw git-daemon **upload-pack** service run, drains
 every admitted session, and reports accepted/completed/refused counts before it
@@ -91,9 +99,12 @@ most of the product vision remains ahead:
   have reference, laboratory, and durable embedded slices.
 - The clean-room Git substrate now includes bounded object parsing, owned
   DEFLATE, pack/delta read and write paths, pkt-line, upload-pack, receive-pack
-  parsing, quarantine/admission, authority-selected pack materialization, and
-  raw git-daemon upload-pack composition. Those parts do not yet amount to a
-  completed Git compatibility matrix.
+  parsing, quarantine/admission, authority-selected pack materialization, local
+  loose-plus-idx/pack source reconstruction, and raw git-daemon upload-pack
+  composition. The focused pack-import target passes at its implementation
+  revision, while the containing node package gate remains red on a separate
+  verified-read defect. Those parts do not yet amount to a completed Git
+  compatibility matrix.
 - Object fabric, ATP-Git, TreeFS, RaptorQ repair, verified-read proofs, forge
   events and merge computation, graph algorithms, agent/evidence protocols,
   hostile-runner policy, recovery, and release attempts have bounded vertical
@@ -105,6 +116,13 @@ most of the product vision remains ahead:
   path are not complete. The durable forge merge composition also has a known
   materialization defect that prevents an otherwise permitted merge from
   reaching head CAS.
+- A position-addressed forge snapshot projector and `fg at` library command
+  have landed, but the product path is not complete: the CLI supplies no
+  authority history or capsules to non-latest projection, does not project the
+  second endpoint of a requested diff, does not call the continuous-consistency
+  check, and does not render the outcome from the binary entry point. Time
+  travel will remain unshipped until those gaps are repaired in the original
+  FG-038a slice and exercised over non-empty durable history.
 - The dependency graph tracks these gaps, including external convergence gates
   for fastapi_rust, sqlmodel/FrankenSQLite, and FrankenTUI. The smart-HTTP gap is
   tracked explicitly by FG-105 rather than being hidden inside raw-socket or
@@ -356,10 +374,13 @@ verifying client will trust the head chain rather than the serving cell. (Plan
 
 Because canonical state will remain an immutable decision stream, “the entire
 forge at decision N” will be a well-defined object rather than a reconstruction
-heuristic over mutable tables. `fg at <decision>` is planned to open a complete
-read-only forge snapshot, and bisection will generalize from commits to forge
-state. Snapshot/bisection work is still incomplete and no such finished CLI
-experience exists yet. (Plan §31.8, backlog FG-038.)
+heuristic over mutable tables. `fg at <decision>` will open a complete read-only
+forge snapshot, and bisection will generalize from commits to forge state. A
+bounded in-memory projector and library-level command parser/report surface now
+exist, but authority-history loading, checkpoint use in the production call
+path, two-ended diff projection, continuous-consistency enforcement, binary
+rendering, and non-empty durable CLI evidence are still missing. No finished
+time-travel CLI experience exists yet. (Plan §31.8, backlog FG-038.)
 
 ### The evidence economy
 
@@ -604,18 +625,22 @@ count:
 1. The node will expose receive-pack through a production transport and close
    the pinned-client clone/fetch/push campaign, including incremental-transfer
    and restart/fault evidence.
-2. Forge merges will move from real computation plus an incomplete durable
+2. The snapshot engine will be connected to authenticated decision/capsule
+   history, project both requested diff endpoints, enforce latest-state
+   consistency, and render through the actual `fg` binary before `fg at` is
+   described as a product capability.
+3. Forge merges will move from real computation plus an incomplete durable
    composition to the same asynchronous materialization and exactly-one-head-CAS
    path used by admitted receive operations.
-3. Identity and policy will be wired into receive, merge, transport, and
+4. Identity and policy will be wired into receive, merge, transport, and
    disclosure boundaries before broader multi-tenant surfaces open.
-4. fastapi_rust, sqlmodel/FrankenSQLite, and FrankenTUI will converge on the one
+5. fastapi_rust, sqlmodel/FrankenSQLite, and FrankenTUI will converge on the one
    runtime/dependency constellation before smart HTTP, native REST,
    projections/search, web, and TUI product layers are admitted.
-5. Workflow coordination and production hostile-execution isolation will land
+6. Workflow coordination and production hostile-execution isolation will land
    before CI is described as deployable; release publication will remain
    refused until the full/release gates and native target matrix are real.
-6. Multi-cell, repair, verified-read, performance, and hosted-service claims
+7. Multi-cell, repair, verified-read, performance, and hosted-service claims
    will expand only from revision-bound conformance, fault, security, and
    economics evidence.
 
