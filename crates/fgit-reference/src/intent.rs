@@ -288,6 +288,191 @@ impl RefIntent {
     }
 }
 
+/// The only direct-ref namespace that a tag lifecycle intent may address.
+pub const TAG_REF_PREFIX: &[u8] = b"refs/tags";
+
+/// A validated ref name known to belong to the tag namespace.
+///
+/// Keeping this separate from [`RefName`] prevents a branch or an arbitrary
+/// `refs/` name from being accidentally lowered as a tag operation. The
+/// generic ref transaction owns final publication; this type owns only the
+/// lifecycle-specific namespace boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TagRefName(RefName);
+
+impl TagRefName {
+    /// Accepts one already-valid Git ref name only when it is below `refs/tags/`.
+    pub fn try_new(name: RefName) -> Result<Self, TagIntentRefusal> {
+        if name.is_under(TAG_REF_PREFIX) {
+            Ok(Self(name))
+        } else {
+            Err(TagIntentRefusal::OutsideTagNamespace(name))
+        }
+    }
+
+    /// Returns the canonical ref name carried by this tag name.
+    #[must_use]
+    pub const fn as_ref_name(&self) -> &RefName {
+        &self.0
+    }
+
+    /// Releases the canonical ref name for lowering into the generic ref model.
+    #[must_use]
+    pub fn into_ref_name(self) -> RefName {
+        self.0
+    }
+}
+
+/// A typed refusal while constructing a tag lifecycle intent.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TagIntentRefusal {
+    /// A lifecycle operation named a legal Git ref outside `refs/tags/`.
+    OutsideTagNamespace(RefName),
+}
+
+/// Signature evidence state for an annotated-tag object.
+///
+/// The reference layer carries no key material and never turns evidence into
+/// trust. Bytes themselves remain in the exact object body; this state makes
+/// the absence of verification explicit to policy callers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TagSignatureEvidence {
+    /// The annotated object contains no observed signature material.
+    Absent,
+    /// Opaque signature-shaped bytes exist but were not cryptographically verified.
+    OpaqueUnverifiable,
+    /// The observed signature format is intentionally unsupported.
+    Unsupported,
+}
+
+/// The ref value selected by a tag operation.
+///
+/// A lightweight tag points directly to its target and therefore must not be
+/// synthesized as an extra tag object. An annotated tag points to its *tag
+/// object*; the object parser and quarantined closure establish that object's
+/// target and type separately.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TagReference {
+    /// A lightweight tag's direct target object.
+    Lightweight { target: GitOid },
+    /// An annotated tag object's identity and non-trust signature state.
+    Annotated {
+        /// The identity of the actual tag object, never a synthesized wrapper.
+        tag_object: GitOid,
+        /// Evidence state that policy may inspect but must not over-trust.
+        signature: TagSignatureEvidence,
+    },
+}
+
+impl TagReference {
+    /// The exact object identity that the tag ref must contain.
+    #[must_use]
+    pub const fn ref_value(self) -> GitOid {
+        match self {
+            Self::Lightweight { target } => target,
+            Self::Annotated { tag_object, .. } => tag_object,
+        }
+    }
+
+    /// Signature evidence for an annotated tag, if this is one.
+    #[must_use]
+    pub const fn signature_evidence(self) -> Option<TagSignatureEvidence> {
+        match self {
+            Self::Lightweight { .. } => None,
+            Self::Annotated { signature, .. } => Some(signature),
+        }
+    }
+}
+
+/// A typed tag lifecycle intent before it lowers to the one ref-transaction
+/// normal-form domain.
+///
+/// The conversion preserves expected-old and force fields exactly. Therefore
+/// protected-ref policy, actor/principal checks, policy snapshots, push
+/// options, stable transaction identity, read-your-own-writes, and atomic
+/// publication remain owned by the existing sealed ref-transaction path rather
+/// than by a second tag authority.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TagIntent {
+    /// Create or update a lightweight or annotated tag ref.
+    Update {
+        /// Validated `refs/tags/` name.
+        name: TagRefName,
+        /// Expected current ref state from the caller's semantic request.
+        expected: ExpectedRefState,
+        /// Exact ref value selection, with lightweight/annotated distinction.
+        reference: TagReference,
+        /// Whether this update requests force; policy still decides permission.
+        force: bool,
+    },
+    /// Delete one tag ref under the ordinary expected-old semantics.
+    Delete {
+        /// Validated `refs/tags/` name.
+        name: TagRefName,
+        /// Expected current ref state from the caller's semantic request.
+        expected: ExpectedRefState,
+    },
+}
+
+impl TagIntent {
+    /// Builds a tag update after validating its namespace.
+    pub fn update(
+        name: RefName,
+        expected: ExpectedRefState,
+        reference: TagReference,
+        force: bool,
+    ) -> Result<Self, TagIntentRefusal> {
+        Ok(Self::Update {
+            name: TagRefName::try_new(name)?,
+            expected,
+            reference,
+            force,
+        })
+    }
+
+    /// Builds a tag deletion after validating its namespace.
+    pub fn delete(name: RefName, expected: ExpectedRefState) -> Result<Self, TagIntentRefusal> {
+        Ok(Self::Delete {
+            name: TagRefName::try_new(name)?,
+            expected,
+        })
+    }
+
+    /// Returns the tag namespace target.
+    #[must_use]
+    pub const fn target(&self) -> &TagRefName {
+        match self {
+            Self::Update { name, .. } | Self::Delete { name, .. } => name,
+        }
+    }
+
+    /// Lowers into the sole canonical ref-effect vocabulary.
+    ///
+    /// This is deliberately a lossless lowering, not a second folder: the
+    /// generic folder then supplies ordered read-your-own-writes, absorption,
+    /// no-op/error/abort mapping, and target-disjoint normal form.
+    #[must_use]
+    pub fn into_ref_intent(self) -> RefIntent {
+        match self {
+            Self::Update {
+                name,
+                expected,
+                reference,
+                force,
+            } => RefIntent::Update {
+                name: name.into_ref_name(),
+                expected,
+                new: reference.ref_value(),
+                force,
+            },
+            Self::Delete { name, expected } => RefIntent::Delete {
+                name: name.into_ref_name(),
+                expected,
+            },
+        }
+    }
+}
+
 /// A forge transition intent.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ForgeIntent {
