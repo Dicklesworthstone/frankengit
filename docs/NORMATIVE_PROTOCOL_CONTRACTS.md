@@ -560,6 +560,43 @@ A built directory is not active merely because it exists locally.
 
 A capsule body binds exact authority head/RCR, decision-log position, ref/forge/object/segment/retention roots, policy/configuration/format epochs, and backup profile. Capsule ID hashes the unsigned body; signatures, placements, and repair-symbol locations attest to it but do not participate in identity.
 
+`RepositoryCapsuleBody` also binds `outcome_index_checkpoint_root`: the
+identity digest of the immutable `OutcomeIndexCheckpointBody` selected for that
+capsule, or an explicit absent value when no checkpoint is available. This is
+not `outcome_index_root`. A bare outcome-index root cannot accept a later
+terminal outcome under the digest-sorted commitment, so it cannot terminate the
+cumulative fold.
+
+An `OutcomeIndexCheckpointBody` is repository-scoped immutable evidence. Its
+canonical bytes bind the repository ID; the exact decision-tail ID and terminal
+decision sequence it covers (both are present or both absent); its immediate
+predecessor checkpoint digest (absent only at genesis); and the complete
+retained terminal-decision leaf material in the authority-owned
+digest-sorted outcome-index order. Its body identity is
+`outcome_index_checkpoint_root`. A decoder re-derives that identity, verifies
+the repository and exact position pairing, re-canonicalizes the retained leaf
+material under the authority's one commitment order, and verifies every
+predecessor link. A mismatched identity, leaf order, repository, position, or
+predecessor is refused as unusable checkpoint evidence.
+
+Outcome-index derivation first uses verified checkpoint leaves and replays only
+terminal outcomes strictly after the checkpoint position. The decision-tail
+bound therefore applies to that replay suffix rather than to the retained
+prefix. A checkpoint predecessor walk accepts at most
+`MAX_CHECKPOINT_PREDECESSORS = 65,536` links; a cycle is refused, and a
+65,537th link returns the typed `PredecessorChainTooLong` refusal. Missing,
+undecodable, mismatched, or otherwise unusable checkpoint evidence falls back
+to the existing bounded genesis walk and retains its typed
+`ReplayBoundExceeded` refusal rather than substituting a partial leaf set.
+
+Checkpoint publication follows this section's root-last, anti-rollback rule:
+stage and verify the complete immutable checkpoint evidence and predecessor
+chain; bind its exact digest in the exact-head capsule body; then advance the
+capsule pointer. A checkpoint older than the authenticated head position is an
+acceleration hint, never current-state authority. The newest acknowledged
+capsule root remains authoritative; recovery must not silently replace it with
+an older checkpoint root.
+
 Publication is root-last:
 
 1. stage referenced immutable data/manifests;
