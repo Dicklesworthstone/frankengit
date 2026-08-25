@@ -71,6 +71,74 @@ pub enum SchemaRefusal {
         /// Which registry was searched: `structure` or `union`.
         container: &'static str,
     },
+    /// `cargo metadata` could not enumerate the workspace whose canonical
+    /// bodies the schema gate must account for.
+    WorkspaceMetadataFailed {
+        /// Workspace root supplied to the metadata command.
+        root: Box<str>,
+        /// The command failure, including its status or operating-system error.
+        detail: Box<str>,
+    },
+    /// A crate that declares canonical bodies has no committed description
+    /// manifest beside its `Cargo.toml`.
+    CanonicalBodyDescriptionManifestMissing {
+        /// Workspace package that owns the canonical body.
+        crate_name: Box<str>,
+        /// Required manifest path.
+        manifest: Box<str>,
+    },
+    /// A committed canonical-body description manifest is not valid TSV.
+    CanonicalBodyDescriptionManifestMalformed {
+        /// Manifest path.
+        manifest: Box<str>,
+        /// One-based source line.
+        line: usize,
+        /// What the malformed line violated.
+        detail: Box<str>,
+    },
+    /// One crate's description manifest names a family more than once.
+    CanonicalBodyDescriptionDuplicated {
+        /// Manifest path.
+        manifest: Box<str>,
+        /// Duplicate family.
+        family: Box<str>,
+    },
+    /// A canonical body family found in source has no description in its
+    /// owning crate's manifest.
+    CanonicalBodyDescriptionMissing {
+        /// Workspace package that owns the source.
+        crate_name: Box<str>,
+        /// Rust source where the canonical body was found.
+        source: Box<str>,
+        /// Undescribed schema family.
+        family: Box<str>,
+    },
+    /// A manifest claims a family the owning crate no longer encodes.
+    CanonicalBodyDescriptionPhantom {
+        /// Workspace package that owns the manifest.
+        crate_name: Box<str>,
+        /// Manifest path.
+        manifest: Box<str>,
+        /// Family that has no matching canonical body in the crate.
+        family: Box<str>,
+    },
+    /// Two crates give one schema family different descriptions.
+    CanonicalBodyDescriptionConflicting {
+        /// Shared schema family.
+        family: Box<str>,
+        /// First manifest that described it.
+        first_manifest: Box<str>,
+        /// Second manifest that described it differently.
+        second_manifest: Box<str>,
+    },
+    /// The source scanner found a `CanonicalBody` implementation but could
+    /// not resolve the family expression it uses.
+    CanonicalBodyFamilyUnresolvable {
+        /// Rust source containing the implementation.
+        source: Box<str>,
+        /// The associated-constant expression the scanner could not resolve.
+        expression: Box<str>,
+    },
 }
 
 impl SchemaRefusal {
@@ -84,6 +152,22 @@ impl SchemaRefusal {
             Self::ArtifactMissing { .. } => "artifact_missing",
             Self::FamilyDuplicated { .. } => "family_duplicated",
             Self::ReferenceUnresolved { .. } => "reference_unresolved",
+            Self::WorkspaceMetadataFailed { .. } => "workspace_metadata_failed",
+            Self::CanonicalBodyDescriptionManifestMissing { .. } => {
+                "canonical_body_description_manifest_missing"
+            }
+            Self::CanonicalBodyDescriptionManifestMalformed { .. } => {
+                "canonical_body_description_manifest_malformed"
+            }
+            Self::CanonicalBodyDescriptionDuplicated { .. } => {
+                "canonical_body_description_duplicated"
+            }
+            Self::CanonicalBodyDescriptionMissing { .. } => "canonical_body_description_missing",
+            Self::CanonicalBodyDescriptionPhantom { .. } => "canonical_body_description_phantom",
+            Self::CanonicalBodyDescriptionConflicting { .. } => {
+                "canonical_body_description_conflicting"
+            }
+            Self::CanonicalBodyFamilyUnresolvable { .. } => "canonical_body_family_unresolvable",
         }
     }
 }
@@ -115,6 +199,57 @@ impl fmt::Display for SchemaRefusal {
             } => write!(
                 formatter,
                 "{owner} references the {container} {name}, which no registry resolves"
+            ),
+            Self::WorkspaceMetadataFailed { root, detail } => write!(
+                formatter,
+                "could not enumerate canonical-body workspace members under {root}: {detail}"
+            ),
+            Self::CanonicalBodyDescriptionManifestMissing {
+                crate_name,
+                manifest,
+            } => write!(
+                formatter,
+                "{crate_name} encodes canonical bodies but has no description manifest at {manifest}"
+            ),
+            Self::CanonicalBodyDescriptionManifestMalformed {
+                manifest,
+                line,
+                detail,
+            } => write!(
+                formatter,
+                "{manifest}:{line} is not a canonical-body description: {detail}"
+            ),
+            Self::CanonicalBodyDescriptionDuplicated { manifest, family } => write!(
+                formatter,
+                "{manifest} describes canonical family {family} more than once"
+            ),
+            Self::CanonicalBodyDescriptionMissing {
+                crate_name,
+                source,
+                family,
+            } => write!(
+                formatter,
+                "{crate_name} encodes canonical family {family} in {source} without a description"
+            ),
+            Self::CanonicalBodyDescriptionPhantom {
+                crate_name,
+                manifest,
+                family,
+            } => write!(
+                formatter,
+                "{crate_name} manifest {manifest} describes {family}, but no canonical body in that crate uses it"
+            ),
+            Self::CanonicalBodyDescriptionConflicting {
+                family,
+                first_manifest,
+                second_manifest,
+            } => write!(
+                formatter,
+                "canonical family {family} has conflicting descriptions in {first_manifest} and {second_manifest}"
+            ),
+            Self::CanonicalBodyFamilyUnresolvable { source, expression } => write!(
+                formatter,
+                "cannot resolve CanonicalBody::SCHEMA_FAMILY expression {expression} in {source}"
             ),
         }
     }

@@ -4,8 +4,10 @@
 //! Two modes, and the separation is the point:
 //!
 //! ```text
-//! fgit-schema-gen generate [dir]   write the artifacts
-//! fgit-schema-gen check    [dir]   refuse if the committed artifacts are stale
+//! fgit-schema-gen generate [dir]                         write the artifacts
+//! fgit-schema-gen check    [dir] [--workspace-root dir]  refuse if artifacts
+//!                                                        or an explicit workspace
+//!                                                        body-description check fails
 //! ```
 //!
 //! `check` never writes. A gate that repairs what it finds cannot fail, so the
@@ -22,6 +24,7 @@ use std::process::ExitCode;
 
 use fgit_schema::gate;
 use fgit_schema::registry;
+use fgit_schema::workspace_bodies;
 
 /// Where the artifacts live when no directory is given.
 fn default_directory() -> PathBuf {
@@ -29,10 +32,11 @@ fn default_directory() -> PathBuf {
 }
 
 fn usage() -> ExitCode {
-    eprintln!("usage: fgit-schema-gen <generate|check> [directory]");
+    eprintln!("usage: fgit-schema-gen <generate|check> [directory] [--workspace-root directory]");
     eprintln!();
     eprintln!("  generate   write the schema artifacts, creating the directory if needed");
     eprintln!("  check      refuse if any committed artifact differs from the descriptors");
+    eprintln!("             --workspace-root also checks canonical-body descriptions there");
     eprintln!();
     eprintln!("exit 0 clean, 1 stale or missing, 2 usage");
     ExitCode::from(2)
@@ -43,12 +47,21 @@ fn main() -> ExitCode {
     let Some(mode) = arguments.next() else {
         return usage();
     };
-    let directory = arguments
-        .next()
-        .map_or_else(default_directory, PathBuf::from);
-    if arguments.next().is_some() {
-        return usage();
+    let mut directory = None;
+    let mut workspace_root = None;
+    while let Some(argument) = arguments.next() {
+        if argument == "--workspace-root" {
+            let Some(root) = arguments.next() else {
+                return usage();
+            };
+            if workspace_root.replace(PathBuf::from(root)).is_some() {
+                return usage();
+            }
+        } else if directory.replace(PathBuf::from(argument)).is_some() {
+            return usage();
+        }
     }
+    let directory = directory.unwrap_or_else(default_directory);
 
     // A duplicate family would make descriptor resolution depend on slice
     // order, so it is refused before anything is written or compared rather
@@ -65,6 +78,12 @@ fn main() -> ExitCode {
     if let Err(refusal) = registry::check_references_resolve() {
         eprintln!("fgit-schema-gen: {refusal}");
         return ExitCode::from(1);
+    }
+    if let Some(root) = workspace_root {
+        if let Err(refusal) = workspace_bodies::check_workspace_descriptions(&root) {
+            eprintln!("fgit-schema-gen: {refusal}");
+            return ExitCode::from(1);
+        }
     }
 
     match mode.as_str() {

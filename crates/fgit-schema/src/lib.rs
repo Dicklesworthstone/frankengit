@@ -54,6 +54,7 @@ pub mod error;
 pub mod gate;
 pub mod registry;
 pub mod workflow;
+pub mod workspace_bodies;
 
 pub use descriptor::{Cardinality, FieldDescriptor, FieldType, ScalarWidth, SchemaDescriptor};
 pub use error::SchemaRefusal;
