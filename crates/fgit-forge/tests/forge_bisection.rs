@@ -104,31 +104,61 @@ fn create_test_history(total_decisions: u64, flip_at: Option<u64>) -> Vec<Histor
 
     for seq in 1..=total_decisions {
         let dec_seq = DecisionSequence::try_new(seq).unwrap();
-        let payload = if Some(seq) == flip_at {
-            // State transitions at flip_at
-            ForgeEventPayload::MergeCommitted {
-                merge_commit: fake_digest(0x99),
-                target_ref: b"refs/heads/main".to_vec(),
-                target_tip_before: fake_digest(0x20),
-                target_tip_after: fake_digest(0xaa),
+        let events = if Some(seq) == flip_at {
+            if seq == 1 {
+                vec![
+                    ForgeEvent {
+                        aggregate: AggregateId::PullRequest(pr_num),
+                        version: AggregateVersion::try_new(1).unwrap(),
+                        payload: ForgeEventPayload::PullRequestOpened {
+                            source_ref: b"refs/heads/feature".to_vec(),
+                            target_ref: b"refs/heads/main".to_vec(),
+                            source_tip: fake_digest(0x01),
+                            target_tip: fake_digest(0x02),
+                        },
+                    },
+                    ForgeEvent {
+                        aggregate: AggregateId::PullRequest(pr_num),
+                        version: AggregateVersion::try_new(2).unwrap(),
+                        payload: ForgeEventPayload::MergeCommitted {
+                            merge_commit: fake_digest(0x99),
+                            target_ref: b"refs/heads/main".to_vec(),
+                            target_tip_before: fake_digest(0x20),
+                            target_tip_after: fake_digest(0xaa),
+                        },
+                    },
+                ]
+            } else {
+                vec![ForgeEvent {
+                    aggregate: AggregateId::PullRequest(pr_num),
+                    version: AggregateVersion::try_new(seq + 1).unwrap(),
+                    payload: ForgeEventPayload::MergeCommitted {
+                        merge_commit: fake_digest(0x99),
+                        target_ref: b"refs/heads/main".to_vec(),
+                        target_tip_before: fake_digest(0x20),
+                        target_tip_after: fake_digest(0xaa),
+                    },
+                }]
             }
         } else if seq == 1 {
-            ForgeEventPayload::PullRequestOpened {
-                source_ref: b"refs/heads/feature".to_vec(),
-                target_ref: b"refs/heads/main".to_vec(),
-                source_tip: fake_digest(0x01),
-                target_tip: fake_digest(0x02),
-            }
+            vec![ForgeEvent {
+                aggregate: AggregateId::PullRequest(pr_num),
+                version: AggregateVersion::try_new(1).unwrap(),
+                payload: ForgeEventPayload::PullRequestOpened {
+                    source_ref: b"refs/heads/feature".to_vec(),
+                    target_ref: b"refs/heads/main".to_vec(),
+                    source_tip: fake_digest(0x01),
+                    target_tip: fake_digest(0x02),
+                },
+            }]
         } else {
-            ForgeEventPayload::PullRequestHeadAdvanced {
-                source_tip: fake_digest(seq as u8),
-            }
-        };
-
-        let event = ForgeEvent {
-            aggregate: AggregateId::PullRequest(pr_num),
-            version: AggregateVersion::try_new(seq).unwrap(),
-            payload,
+            vec![ForgeEvent {
+                aggregate: AggregateId::PullRequest(pr_num),
+                version: AggregateVersion::try_new(seq).unwrap(),
+                payload: ForgeEventPayload::PullRequestHeadAdvanced {
+                    source_tip: fake_digest(seq as u8),
+                },
+            }]
         };
 
         batches.push(HistoricalBatch {
@@ -157,7 +187,7 @@ fn create_test_history(total_decisions: u64, flip_at: Option<u64>) -> Vec<Histor
                 batch_evidence_root: fake_digest(0x77),
                 compaction_generation_link: None,
             },
-            forge_events: vec![event],
+            forge_events: events,
             ref_updates: Vec::new(),
         });
     }
