@@ -48,10 +48,6 @@ impl Drop for TempRoot {
     }
 }
 
-fn digest(bytes: &[u8]) -> [u8; 32] {
-    fgit_crypto::sha256_digest(bytes)
-}
-
 fn release_key() -> SecretKey<PackageRelease> {
     SecretKey::derive(
         &RootSecret::from_bytes([0x5a; 32]),

@@ -293,3 +293,19 @@ impl ReleaseKeyProvider for TestRootSecretKeyProvider {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ReleaseKeyProvider, TestRootSecretKeyProvider};
+    use fgit_crypto::{KeyEpoch, RootSecret};
+
+    #[test]
+    fn test_root_secret_provider_is_cfg_test_only_and_derives_the_requested_epoch() {
+        let provider =
+            TestRootSecretKeyProvider::new(RootSecret::from_bytes([0x33; 32]), KeyEpoch::FIRST);
+        let key = provider
+            .load_release_key()
+            .expect("test-only root fixture derives a release-purpose key");
+        assert_eq!(key.id().epoch(), KeyEpoch::FIRST);
+    }
+}
