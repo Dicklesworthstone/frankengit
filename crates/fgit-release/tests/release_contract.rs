@@ -25,6 +25,7 @@ use fgit_release::{
     SignedReleaseManifest, SourceEntry, ToolchainIdentity, TreeSnapshot, attempt_identity, publish,
     reconcile_mirror,
 };
+use fgit_types::native::{GitOid, GitOidSha1};
 
 const fn digest(seed: u8) -> [u8; 32] {
     [seed; 32]
@@ -40,6 +41,7 @@ fn inputs(tree: TreeSnapshot) -> AttemptInputs {
     let mut env = BTreeMap::new();
     env.insert("CARGO_TERM_COLOR".to_owned(), "never".to_owned());
     AttemptInputs {
+        source_commit: GitOid::Sha1(GitOidSha1::from_bytes([0x11; 20])),
         tree,
         toolchain: ToolchainIdentity {
             rustc: "rustc 1.94.0-nightly (2026-07-05)".to_owned(),

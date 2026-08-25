@@ -11,4 +11,9 @@ workspace = true
 
 [dependencies]
 fgit-crypto.workspace = true
+fgit-git-object.workspace = true
+fgit-pack.workspace = true
 fgit-types.workspace = true
+
+[dev-dependencies]
+fgit-deflate.workspace = true

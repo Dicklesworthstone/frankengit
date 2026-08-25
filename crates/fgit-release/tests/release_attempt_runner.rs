@@ -15,11 +15,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fgit_crypto::{KeyEpoch, KeyScope, PackageRelease, RootSecret, SecretKey};
 use fgit_release::{
-    Asset, AttemptInputs, AttemptJournal, AttemptRunnerRefusal, EntryState,
-    FilesystemAssetInventory, HostFingerprint, MatrixOutcome, ResumeDecision, SourceEntry,
-    TargetMatrix, TargetRecord, TargetSpec, TargetStep, TargetStepResult, ToolchainIdentity,
-    TreeSnapshot, attempt_identity,
+    AttemptInputs, AttemptJournal, AttemptRunnerRefusal, EntryState, FilesystemAssetInventory,
+    HostFingerprint, MatrixOutcome, ResumeDecision, SourceEntry, TargetAsset, TargetMatrix,
+    TargetRecord, TargetSpec, TargetStep, TargetStepResult, ToolchainIdentity, TreeSnapshot,
+    attempt_identity,
 };
+use fgit_types::native::{GitOid, GitOidSha1};
 
 static NEXT_TEMP_ROOT: AtomicU64 = AtomicU64::new(0);
 
@@ -66,6 +67,7 @@ fn attempt(seed: u8) -> fgit_release::AttemptIdentity {
         EntryState::Clean,
     ));
     attempt_identity(&AttemptInputs {
+        source_commit: GitOid::Sha1(GitOidSha1::from_bytes([seed; 20])),
         tree,
         toolchain: ToolchainIdentity {
             rustc: "nightly-test".to_owned(),
@@ -83,14 +85,11 @@ fn attempt(seed: u8) -> fgit_release::AttemptIdentity {
     .expect("clean declared test input must mint an attempt")
 }
 
-fn target(name: &str, stage: &Path, assets: &[(&str, &[u8])]) -> TargetSpec {
+fn target(name: &str, stage: &Path, assets: &[&str]) -> TargetSpec {
     TargetSpec::new(
         name,
         stage,
-        assets
-            .iter()
-            .map(|(path, bytes)| Asset::new(*path, digest(bytes)))
-            .collect(),
+        assets.iter().map(|path| TargetAsset::new(*path)).collect(),
     )
     .expect("bounded target fixture must be valid")
 }
@@ -107,6 +106,10 @@ struct ScriptedStep {
     results: Vec<TargetStepResult>,
 }
 
+const fn receipt(seed: u8) -> [u8; 32] {
+    [seed; 32]
+}
+
 impl TargetStep for ScriptedStep {
     fn execute(&mut self, _target: &TargetSpec) -> TargetStepResult {
         self.results.remove(0)
@@ -119,11 +122,8 @@ fn append_only_journal_recovers_the_completed_prefix_after_a_crash_tail() {
     let stage = root.path().join("stage");
     fs::create_dir(&stage).expect("stage directory");
     write_asset(&stage, "fg", b"release binary");
-    let matrix = TargetMatrix::new(
-        attempt(1),
-        vec![target("linux", &stage, &[("fg", b"release binary")])],
-    )
-    .expect("matrix");
+    let matrix =
+        TargetMatrix::new(attempt(1), vec![target("linux", &stage, &["fg"])]).expect("matrix");
     let mut journal = AttemptJournal::create(root.path(), matrix.clone()).expect("create journal");
     let outcome = journal
         .run_matrix(
@@ -168,11 +168,8 @@ fn journal_hash_chain_refuses_a_complete_tampered_record() {
     let stage = root.path().join("stage");
     fs::create_dir(&stage).expect("stage directory");
     write_asset(&stage, "fg", b"release binary");
-    let matrix = TargetMatrix::new(
-        attempt(11),
-        vec![target("linux", &stage, &[("fg", b"release binary")])],
-    )
-    .expect("matrix");
+    let matrix =
+        TargetMatrix::new(attempt(11), vec![target("linux", &stage, &["fg"])]).expect("matrix");
     let journal = AttemptJournal::create(root.path(), matrix.clone()).expect("create journal");
     let path = journal.journal_path().to_path_buf();
     drop(journal);
@@ -195,13 +192,13 @@ fn inventory_refusals_each_have_a_permitted_twin() {
     let stage = root.path().join("stage");
     fs::create_dir(&stage).expect("stage directory");
 
-    let traversal = target("traversal", &stage, &[("../escape", b"x")]);
+    let traversal = target("traversal", &stage, &["../escape"]);
     assert!(matches!(
         FilesystemAssetInventory::collect(&traversal),
         Err(AttemptRunnerRefusal::AssetTraversal { .. })
     ));
 
-    let permitted = target("permitted", &stage, &[("allowed", b"x")]);
+    let permitted = target("permitted", &stage, &["allowed"]);
     write_asset(&stage, "allowed", b"x");
     FilesystemAssetInventory::collect(&permitted).expect("regular listed asset is permitted");
 
@@ -230,22 +227,14 @@ fn duplicate_asset_name_is_refused_and_distinct_names_are_permitted() {
     let stage = root.path().join("stage");
     fs::create_dir(&stage).expect("stage directory");
 
-    let collision = target(
-        "linux",
-        &stage,
-        &[("fg", b"release binary"), ("fg", b"different bytes")],
-    );
+    let collision = target("linux", &stage, &["fg", "fg"]);
     assert!(matches!(
         FilesystemAssetInventory::collect(&collision),
         Err(AttemptRunnerRefusal::DuplicateTargetAsset { ref target, ref path })
             if target == "linux" && path == "fg"
     ));
 
-    let permitted = target(
-        "linux",
-        &stage,
-        &[("fg", b"release binary"), ("fg.sha256", b"digest")],
-    );
+    let permitted = target("linux", &stage, &["fg", "fg.sha256"]);
     write_asset(&stage, "fg", b"release binary");
     write_asset(&stage, "fg.sha256", b"digest");
     FilesystemAssetInventory::collect(&permitted)
@@ -261,7 +250,7 @@ fn symlinked_asset_is_refused_and_regular_twin_is_permitted() {
     let stage = root.path().join("stage");
     fs::create_dir(&stage).expect("stage directory");
     fs::write(root.path().join("backing"), b"release binary").expect("backing file");
-    let spec = target("linux", &stage, &[("fg", b"release binary")]);
+    let spec = target("linux", &stage, &["fg"]);
     symlink(root.path().join("backing"), stage.join("fg")).expect("test symlink");
     assert!(matches!(
         FilesystemAssetInventory::collect(&spec),
@@ -278,16 +267,15 @@ fn resume_reuses_only_a_byte_verified_inventory_identity() {
     let stage = root.path().join("stage");
     fs::create_dir(&stage).expect("stage directory");
     write_asset(&stage, "fg", b"expected bytes");
-    let matrix = TargetMatrix::new(
-        attempt(2),
-        vec![target("linux", &stage, &[("fg", b"expected bytes")])],
-    )
-    .expect("matrix");
+    let matrix =
+        TargetMatrix::new(attempt(2), vec![target("linux", &stage, &["fg"])]).expect("matrix");
     let mut journal = AttemptJournal::create(root.path(), matrix).expect("journal");
     let outcome = journal
         .run_matrix(
             &mut ScriptedStep {
-                results: vec![TargetStepResult::Passed],
+                results: vec![TargetStepResult::Passed {
+                    runner_receipt: receipt(2),
+                }],
             },
             &release_key(),
         )
@@ -298,16 +286,25 @@ fn resume_reuses_only_a_byte_verified_inventory_identity() {
         "the complete verified matrix must emit its local root-last manifest"
     );
     journal
-        .verify_signed_manifest(&release_key().verifying_key())
-        .expect("the journal-bound root must verify against the release key");
+        .verify_signed_manifest_and_assets(&release_key().verifying_key())
+        .expect("the journal-bound root and all staged assets must verify");
+    assert!(matches!(
+        journal.target_record("linux"),
+        Some(TargetRecord::Passed {
+            runner_receipt,
+            ..
+        }) if *runner_receipt == receipt(2)
+    ));
     assert!(matches!(
         journal.resume_target("linux"),
         Ok(ResumeDecision::Reuse { .. })
     ));
 
     write_asset(&stage, "fg", b"substituted bytes");
+    FilesystemAssetInventory::collect(&journal.matrix().targets()[0])
+        .expect("the current inventory can observe changed bytes without a prebuild digest");
     assert!(matches!(
-        FilesystemAssetInventory::collect(&journal.matrix().targets()[0]),
+        journal.verify_signed_manifest_and_assets(&release_key().verifying_key()),
         Err(AttemptRunnerRefusal::AssetDigestMismatch { ref path, .. }) if path == "fg"
     ));
     assert!(
@@ -317,6 +314,96 @@ fn resume_reuses_only_a_byte_verified_inventory_identity() {
         ),
         "changed staged bytes must never be called reusable"
     );
+}
+
+#[test]
+fn identical_second_attempt_reuses_verified_target_and_signed_root() {
+    let root = TempRoot::new("identical-retry");
+    let stage = root.path().join("stage");
+    fs::create_dir(&stage).expect("stage directory");
+    write_asset(&stage, "fg", b"release binary");
+    let matrix =
+        TargetMatrix::new(attempt(7), vec![target("linux", &stage, &["fg"])]).expect("matrix");
+    let mut journal = AttemptJournal::create(root.path(), matrix).expect("journal");
+    let first = journal
+        .run_matrix(
+            &mut ScriptedStep {
+                results: vec![TargetStepResult::Passed {
+                    runner_receipt: receipt(7),
+                }],
+            },
+            &release_key(),
+        )
+        .expect("first complete attempt succeeds");
+    let MatrixOutcome::Completed {
+        manifest: first_manifest,
+    } = first
+    else {
+        panic!("complete one-target matrix must publish its local root");
+    };
+
+    let second = journal
+        .run_matrix(
+            &mut ScriptedStep {
+                results: Vec::new(),
+            },
+            &release_key(),
+        )
+        .expect("unchanged complete matrix must reuse its target without rerunning it");
+    let MatrixOutcome::Completed {
+        manifest: second_manifest,
+    } = second
+    else {
+        panic!("identical retry must retain the completed local root");
+    };
+    assert_eq!(
+        first_manifest.canonical_bytes(),
+        second_manifest.canonical_bytes(),
+        "an identical retry must return the already committed signed root"
+    );
+    journal
+        .verify_signed_manifest_and_assets(&release_key().verifying_key())
+        .expect("the idempotent root and asset set remain verifiable");
+}
+
+#[test]
+fn signed_root_verification_refuses_tampered_binary_and_checksum_sidecar() {
+    let root = TempRoot::new("manifest-asset-tamper");
+    let stage = root.path().join("stage");
+    fs::create_dir(&stage).expect("stage directory");
+    write_asset(&stage, "fg", b"release binary");
+    write_asset(&stage, "fg.sha256", b"checksum sidecar");
+    let matrix = TargetMatrix::new(
+        attempt(6),
+        vec![target("linux", &stage, &["fg", "fg.sha256"])],
+    )
+    .expect("matrix");
+    let mut journal = AttemptJournal::create(root.path(), matrix).expect("journal");
+    journal
+        .run_matrix(
+            &mut ScriptedStep {
+                results: vec![TargetStepResult::Passed {
+                    runner_receipt: receipt(6),
+                }],
+            },
+            &release_key(),
+        )
+        .expect("complete target emits a signed root");
+    journal
+        .verify_signed_manifest_and_assets(&release_key().verifying_key())
+        .expect("untampered binary and sidecar verify against the signed root");
+
+    write_asset(&stage, "fg", b"tampered binary");
+    assert!(matches!(
+        journal.verify_signed_manifest_and_assets(&release_key().verifying_key()),
+        Err(AttemptRunnerRefusal::AssetDigestMismatch { ref path, .. }) if path == "fg"
+    ));
+    write_asset(&stage, "fg", b"release binary");
+    write_asset(&stage, "fg.sha256", b"tampered sidecar");
+    assert!(matches!(
+        journal.verify_signed_manifest_and_assets(&release_key().verifying_key()),
+        Err(AttemptRunnerRefusal::AssetDigestMismatch { ref path, .. }) if path == "fg.sha256"
+    ));
 }
 
 #[test]
@@ -331,8 +418,8 @@ fn cancellation_leaves_resumable_evidence_and_no_manifest_root() {
     let matrix = TargetMatrix::new(
         attempt(3),
         vec![
-            target("linux", &first_stage, &[("fg-linux", b"first")]),
-            target("macos", &second_stage, &[("fg-macos", b"second")]),
+            target("linux", &first_stage, &["fg-linux"]),
+            target("macos", &second_stage, &["fg-macos"]),
         ],
     )
     .expect("matrix");
@@ -340,7 +427,12 @@ fn cancellation_leaves_resumable_evidence_and_no_manifest_root() {
     let outcome = journal
         .run_matrix(
             &mut ScriptedStep {
-                results: vec![TargetStepResult::Passed, TargetStepResult::Cancelled],
+                results: vec![
+                    TargetStepResult::Passed {
+                        runner_receipt: receipt(3),
+                    },
+                    TargetStepResult::Cancelled,
+                ],
             },
             &release_key(),
         )
@@ -368,11 +460,8 @@ fn failed_target_provably_withholds_the_manifest_root() {
     let stage = root.path().join("stage");
     fs::create_dir(&stage).expect("stage directory");
     write_asset(&stage, "fg", b"bytes");
-    let matrix = TargetMatrix::new(
-        attempt(4),
-        vec![target("linux", &stage, &[("fg", b"bytes")])],
-    )
-    .expect("matrix");
+    let matrix =
+        TargetMatrix::new(attempt(4), vec![target("linux", &stage, &["fg"])]).expect("matrix");
     let mut journal = AttemptJournal::create(root.path(), matrix).expect("journal");
     let outcome = journal
         .run_matrix(
@@ -401,11 +490,8 @@ fn unavailable_executor_is_a_typed_refusal_not_a_success_placeholder() {
     let stage = root.path().join("stage");
     fs::create_dir(&stage).expect("stage directory");
     write_asset(&stage, "fg", b"bytes");
-    let matrix = TargetMatrix::new(
-        attempt(5),
-        vec![target("linux", &stage, &[("fg", b"bytes")])],
-    )
-    .expect("matrix");
+    let matrix =
+        TargetMatrix::new(attempt(5), vec![target("linux", &stage, &["fg"])]).expect("matrix");
     let mut journal = AttemptJournal::create(root.path(), matrix).expect("journal");
     let refusal = journal.run_matrix(&mut fgit_release::UnavailableTargetStep, &release_key());
     assert!(matches!(

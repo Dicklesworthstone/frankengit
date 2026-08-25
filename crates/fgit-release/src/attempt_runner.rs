@@ -92,7 +92,7 @@ pub enum AttemptRunnerRefusal {
     AssetMissing { path: String },
     /// The staging directory contained a file not present in the exact contract.
     AssetUnlisted { path: String },
-    /// The real staged bytes do not match the caller's declared contract.
+    /// The real staged bytes no longer match the signed manifest root.
     AssetDigestMismatch {
         path: String,
         expected: [u8; 32],
@@ -192,7 +192,7 @@ impl fmt::Display for AttemptRunnerRefusal {
                 observed,
             } => write!(
                 formatter,
-                "staged asset {path} has digest {} but contract requires {}",
+                "staged asset {path} has digest {} but signed manifest requires {}",
                 hex(observed),
                 hex(expected)
             ),
@@ -240,16 +240,42 @@ impl From<ReleaseRefusal> for AttemptRunnerRefusal {
     }
 }
 
-/// One target's immutable declared staging directory and exact asset contract.
+/// One exact asset name declared before a target executes.
+///
+/// A release cannot know an asset's digest until the bounded runner has built
+/// it. The pre-execution contract therefore binds the *complete set of names*,
+/// while [`FilesystemAssetInventory`] records the immutable byte digests after
+/// execution. Supplying a digest before the target runs would either require a
+/// second, unjournaled prebuild or encourage a fabricated value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetAsset {
+    path: String,
+}
+
+impl TargetAsset {
+    /// Declares one exact relative asset path.
+    #[must_use]
+    pub fn new(path: impl Into<String>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// Exact relative path expected below the target staging root.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+/// One target's immutable declared staging directory and exact asset-name contract.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetSpec {
     name: String,
     staging_directory: PathBuf,
-    assets: Vec<Asset>,
+    assets: Vec<TargetAsset>,
 }
 
 impl TargetSpec {
-    /// Declares one target's filesystem staging boundary and expected assets.
+    /// Declares one target's filesystem staging boundary and exact asset names.
     ///
     /// Asset paths themselves are validated while inventorying so every
     /// filesystem-facing refusal is emitted by the same operation that would
@@ -257,7 +283,7 @@ impl TargetSpec {
     pub fn new(
         name: impl Into<String>,
         staging_directory: impl Into<PathBuf>,
-        assets: Vec<Asset>,
+        assets: Vec<TargetAsset>,
     ) -> Result<Self, AttemptRunnerRefusal> {
         let name = name.into();
         validate_target_name(&name)?;
@@ -290,7 +316,7 @@ impl TargetSpec {
 
     /// Exact declared asset contract.
     #[must_use]
-    pub fn assets(&self) -> &[Asset] {
+    pub fn assets(&self) -> &[TargetAsset] {
         &self.assets
     }
 }
@@ -344,7 +370,6 @@ impl TargetMatrix {
             push_field(&mut bytes, target.name.as_bytes());
             for asset in &target.assets {
                 push_field(&mut bytes, asset.path().as_bytes());
-                bytes.extend_from_slice(&asset.digest());
             }
             bytes.push(0xff);
         }
@@ -389,7 +414,7 @@ impl FilesystemAssetInventory {
             &mut observed,
             &mut entry_count,
         )?;
-        for path in expected.keys() {
+        for path in &expected {
             if !observed.contains_key(path) {
                 return Err(AttemptRunnerRefusal::AssetMissing { path: path.clone() });
             }
@@ -417,13 +442,26 @@ impl FilesystemAssetInventory {
     pub const fn identity(&self) -> [u8; 32] {
         self.identity
     }
+
+    /// Converts the observed exact paths and byte digests into manifest assets.
+    #[must_use]
+    pub fn manifest_assets(&self) -> Vec<Asset> {
+        self.assets
+            .iter()
+            .map(|(path, digest)| Asset::new(path.clone(), *digest))
+            .collect()
+    }
 }
 
 /// The immutable terminal record for one target in an attempt journal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TargetRecord {
-    /// All expected staged files had their exact declared bytes.
-    Passed { inventory_identity: [u8; 32] },
+    /// Every declared staged name was present as a regular file and the
+    /// observed byte inventory plus runner receipt were journaled.
+    Passed {
+        inventory_identity: [u8; 32],
+        runner_receipt: [u8; 32],
+    },
     /// The target runner reported a terminal failure.
     Failed { detail: String },
 }
@@ -452,8 +490,9 @@ pub enum MatrixOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TargetStepResult {
     /// The executor reports that it completed the target; the runner still
-    /// verifies all staged asset bytes before recording success.
-    Passed,
+    /// verifies every declared staged asset and journals the immutable receipt
+    /// reference before recording success.
+    Passed { runner_receipt: [u8; 32] },
     /// The executor reports a terminal target failure.
     Failed { detail: String },
     /// The executor received cancellation before a terminal target result.
@@ -613,6 +652,52 @@ impl AttemptJournal {
         Ok(signed)
     }
 
+    /// Verifies the signed root and every staged asset it names.
+    ///
+    /// A signature proves the manifest body was authored by the configured
+    /// release-purpose key; it does not prove a later filesystem read still
+    /// returns those bytes. This method closes that gap for local release
+    /// verification, including checksum sidecars because they are ordinary
+    /// declared assets in the exact denominator.
+    pub fn verify_signed_manifest_and_assets(
+        &self,
+        trusted_release_key: &VerifyingKey,
+    ) -> Result<SignedReleaseManifest, AttemptRunnerRefusal> {
+        let signed = self.verify_signed_manifest(trusted_release_key)?;
+        let expected = signed
+            .manifest()
+            .assets()
+            .iter()
+            .map(|asset| (asset.path().to_owned(), asset.digest()))
+            .collect::<BTreeMap<_, _>>();
+        let mut observed = BTreeMap::new();
+        for target in self.matrix.targets() {
+            for (path, digest) in FilesystemAssetInventory::collect(target)?.assets() {
+                if observed.insert(path.clone(), *digest).is_some() {
+                    return Err(AttemptRunnerRefusal::JournalCorrupt {
+                        reason: "target matrix has duplicate observed asset paths",
+                    });
+                }
+            }
+        }
+        if expected.len() != observed.len() {
+            return Err(AttemptRunnerRefusal::ManifestRootMismatch);
+        }
+        for (path, expected_digest) in expected {
+            let Some(observed_digest) = observed.get(&path) else {
+                return Err(AttemptRunnerRefusal::ManifestRootMismatch);
+            };
+            if *observed_digest != expected_digest {
+                return Err(AttemptRunnerRefusal::AssetDigestMismatch {
+                    path,
+                    expected: expected_digest,
+                    observed: *observed_digest,
+                });
+            }
+        }
+        Ok(signed)
+    }
+
     /// Target's terminal immutable journal record, if one exists.
     #[must_use]
     pub fn target_record(&self, target: &str) -> Option<&TargetRecord> {
@@ -634,7 +719,9 @@ impl AttemptJournal {
                 .ok_or_else(|| AttemptRunnerRefusal::UnknownTarget {
                     target: target.to_owned(),
                 })?;
-        let Some(TargetRecord::Passed { inventory_identity }) = self.state.targets.get(target)
+        let Some(TargetRecord::Passed {
+            inventory_identity, ..
+        }) = self.state.targets.get(target)
         else {
             return Ok(ResumeDecision::Rerun {
                 reason: "no completed target record",
@@ -648,9 +735,6 @@ impl AttemptJournal {
             }
             Ok(_) => Ok(ResumeDecision::Rerun {
                 reason: "verified asset identity changed",
-            }),
-            Err(AttemptRunnerRefusal::AssetDigestMismatch { .. }) => Ok(ResumeDecision::Rerun {
-                reason: "staged asset bytes no longer satisfy the recorded contract",
             }),
             Err(refusal) => Err(refusal),
         }
@@ -680,7 +764,9 @@ impl AttemptJournal {
                 ResumeDecision::Rerun { .. } => {}
             }
             match executor.execute(&target) {
-                TargetStepResult::Passed => self.record_target_passed(&target)?,
+                TargetStepResult::Passed { runner_receipt } => {
+                    self.record_target_passed(&target, runner_receipt)?;
+                }
                 TargetStepResult::Failed { detail } => {
                     self.record_target_failed(&target, detail)?;
                     return Ok(MatrixOutcome::Failed {
@@ -773,12 +859,17 @@ impl AttemptJournal {
         Ok(signed)
     }
 
-    fn record_target_passed(&mut self, target: &TargetSpec) -> Result<(), AttemptRunnerRefusal> {
+    fn record_target_passed(
+        &mut self,
+        target: &TargetSpec,
+        runner_receipt: [u8; 32],
+    ) -> Result<(), AttemptRunnerRefusal> {
         self.ensure_new_target(target.name())?;
         let inventory = FilesystemAssetInventory::collect(target)?;
         self.append(JournalEvent::TargetPassed {
             target: target.name.clone(),
             inventory_identity: inventory.identity,
+            runner_receipt,
         })
     }
 
@@ -845,12 +936,25 @@ impl AttemptJournal {
     }
 
     fn build_manifest(&self) -> Result<ReleaseManifest, AttemptRunnerRefusal> {
-        let assets = self
-            .matrix
-            .targets()
-            .iter()
-            .flat_map(|target| target.assets().iter().cloned())
-            .collect::<Vec<_>>();
+        let mut assets = Vec::new();
+        for target in self.matrix.targets() {
+            let Some(TargetRecord::Passed {
+                inventory_identity, ..
+            }) = self.state.targets.get(target.name())
+            else {
+                return Err(AttemptRunnerRefusal::ManifestWithheld {
+                    target: target.name().to_owned(),
+                    state: "incomplete",
+                });
+            };
+            let inventory = FilesystemAssetInventory::collect(target)?;
+            if inventory.identity() != *inventory_identity {
+                return Err(AttemptRunnerRefusal::ResumeNeedsNewTargetAttempt {
+                    target: target.name().to_owned(),
+                });
+            }
+            assets.extend(inventory.manifest_assets());
+        }
         let signed_paths = assets
             .iter()
             .map(|asset| asset.path().to_owned())
@@ -950,14 +1054,20 @@ impl JournalState {
             JournalEvent::TargetPassed {
                 target,
                 inventory_identity,
+                runner_receipt,
             } => {
                 if self.matrix_identity.is_none() || self.targets.contains_key(&target) {
                     return Err(AttemptRunnerRefusal::JournalCorrupt {
                         reason: "target pass precedes matrix declaration or overwrites evidence",
                     });
                 }
-                self.targets
-                    .insert(target, TargetRecord::Passed { inventory_identity });
+                self.targets.insert(
+                    target,
+                    TargetRecord::Passed {
+                        inventory_identity,
+                        runner_receipt,
+                    },
+                );
             }
             JournalEvent::TargetFailed { target, detail } => {
                 if self.matrix_identity.is_none() || self.targets.contains_key(&target) {
@@ -1002,6 +1112,7 @@ enum JournalEvent {
     TargetPassed {
         target: String,
         inventory_identity: [u8; 32],
+        runner_receipt: [u8; 32],
     },
     TargetFailed {
         target: String,
@@ -1086,10 +1197,12 @@ fn encode_event(event: &JournalEvent) -> Vec<u8> {
         JournalEvent::TargetPassed {
             target,
             inventory_identity,
+            runner_receipt,
         } => {
             bytes.push(2);
             push_journal_text(&mut bytes, target);
             bytes.extend_from_slice(inventory_identity);
+            bytes.extend_from_slice(runner_receipt);
         }
         JournalEvent::TargetFailed { target, detail } => {
             bytes.push(3);
@@ -1123,10 +1236,12 @@ fn decode_event(bytes: &[u8]) -> Result<JournalEvent, AttemptRunnerRefusal> {
         2 => {
             let target = take_journal_text(&mut tail)?;
             let inventory_identity = take_digest(&mut tail)?;
+            let runner_receipt = take_digest(&mut tail)?;
             require_empty(tail)?;
             Ok(JournalEvent::TargetPassed {
                 target,
                 inventory_identity,
+                runner_receipt,
             })
         }
         3 => {
@@ -1209,16 +1324,11 @@ fn entry_digest(sequence: u64, previous: &[u8; 32], body: &[u8]) -> [u8; 32] {
     fgit_crypto::sha256_digest(&bytes)
 }
 
-fn expected_assets(
-    target: &TargetSpec,
-) -> Result<BTreeMap<String, [u8; 32]>, AttemptRunnerRefusal> {
-    let mut expected = BTreeMap::new();
+fn expected_assets(target: &TargetSpec) -> Result<BTreeSet<String>, AttemptRunnerRefusal> {
+    let mut expected = BTreeSet::new();
     for asset in &target.assets {
         validate_asset_path(asset.path())?;
-        if expected
-            .insert(asset.path().to_owned(), asset.digest())
-            .is_some()
-        {
+        if !expected.insert(asset.path().to_owned()) {
             return Err(AttemptRunnerRefusal::DuplicateTargetAsset {
                 target: target.name.clone(),
                 path: asset.path().to_owned(),
@@ -1231,7 +1341,7 @@ fn expected_assets(
 fn collect_directory(
     root: &Path,
     relative: &Path,
-    expected: &BTreeMap<String, [u8; 32]>,
+    expected: &BTreeSet<String>,
     observed: &mut BTreeMap<String, [u8; 32]>,
     entry_count: &mut usize,
 ) -> Result<(), AttemptRunnerRefusal> {
@@ -1267,12 +1377,12 @@ fn collect_directory(
             return Err(AttemptRunnerRefusal::AssetSymlink { path: child_name });
         }
         if metadata.is_dir() {
-            if expected.contains_key(&child_name) {
+            if expected.contains(&child_name) {
                 return Err(AttemptRunnerRefusal::AssetNonRegular { path: child_name });
             }
             let prefix = format!("{child_name}/");
             if !expected
-                .keys()
+                .iter()
                 .any(|expected_path| expected_path.starts_with(&prefix))
             {
                 return Err(AttemptRunnerRefusal::AssetUnlisted { path: child_name });
@@ -1283,17 +1393,10 @@ fn collect_directory(
         if !metadata.is_file() {
             return Err(AttemptRunnerRefusal::AssetNonRegular { path: child_name });
         }
-        let Some(expected_digest) = expected.get(&child_name) else {
+        if !expected.contains(&child_name) {
             return Err(AttemptRunnerRefusal::AssetUnlisted { path: child_name });
-        };
-        let observed_digest = digest_regular_file(&path, &child_name, metadata.len())?;
-        if observed_digest != *expected_digest {
-            return Err(AttemptRunnerRefusal::AssetDigestMismatch {
-                path: child_name,
-                expected: *expected_digest,
-                observed: observed_digest,
-            });
         }
+        let observed_digest = digest_regular_file(&path, &child_name, metadata.len())?;
         if observed
             .insert(child_name.clone(), observed_digest)
             .is_some()

@@ -9,26 +9,14 @@
 //! This crate is the vocabulary that makes those questions answerable, and it
 //! refuses rather than guessing when they are not.
 //!
-//! # Everything here is declared, and that is the design
+//! # Source and key capability boundaries
 //!
-//! Nothing in this crate reads the filesystem, spawns a process, consults a
-//! clock, or reaches the network. Attempt inputs are *declared by the caller*
-//! and this crate binds them into an identity. Three reasons, in order of how
-//! much they matter:
-//!
-//! 1. **§3.1 forbids invoking `git`**, so a "source tree digest" cannot be
-//!    `git status` or `git rev-parse` behind a Rust function. It has to be a
-//!    declaration the caller assembled from `FrankenGit`'s own object machinery.
-//! 2. **A release identity must be reproducible from its record.** If this
-//!    crate sampled ambient state, two verifiers replaying the same record
-//!    would compute different identities and neither could say which was right.
-//! 3. **No network during builds** (§3.3), which rules out mirror probing from
-//!    inside the identity path.
-//!
-//! The cost is real and stated: this crate cannot detect a caller that declares
-//! a clean tree while sitting on a dirty one. It refuses what it is *told* is
-//! dirty. Whoever assembles [`TreeSnapshot`] owns that truthfulness, and the
-//! e2e lane is where the declaration gets checked against a real checkout.
+//! The release identity never calls `git`, consults a ref/branch, or samples a
+//! network service. [`GitObjectTreeAssembler`] reads the caller-named commit
+//! directly from this checkout's own loose-object/pack store with first-party
+//! parsers, and [`FileReleaseKeyProvider`] derives a package/release key from
+//! one explicit owner-only file.  Ambient working-tree bytes are accepted only
+//! after the assembled commit tree proves they match exactly.
 //!
 //! # Distribution publication is a typed refusal here, deliberately
 //!
@@ -52,13 +40,19 @@ use fgit_crypto::{
     SIGNATURE_BYTES, SecretKey, VerifyingKey,
 };
 use fgit_types::label::{SchemaFamily, SchemaId};
+use fgit_types::native::{GitHashAlgorithm, GitOid, GitOidSha1, GitOidSha256};
 
 mod attempt_runner;
+mod release_key;
+mod source_snapshot;
 
 pub use attempt_runner::{
     AttemptJournal, AttemptRunnerRefusal, FilesystemAssetInventory, MatrixOutcome, ResumeDecision,
-    TargetMatrix, TargetRecord, TargetSpec, TargetStep, TargetStepResult, UnavailableTargetStep,
+    TargetAsset, TargetMatrix, TargetRecord, TargetSpec, TargetStep, TargetStepResult,
+    UnavailableTargetStep,
 };
+pub use release_key::{FileReleaseKeyProvider, ReleaseKeyProvider, ReleaseKeyRefusal};
+pub use source_snapshot::{CommitDerivedSnapshot, GitObjectTreeAssembler, SourceSnapshotRefusal};
 
 /// Stable repository-owned entrypoint name used by the dormant release lane.
 ///
@@ -72,11 +66,11 @@ pub const ATTEMPT_RUNNER_ENTRYPOINT: &str = "fgit-release-attempt";
 pub const RELEASE_MANIFEST_SCHEMA: SchemaId = SchemaId::new(
     SchemaFamily::from_static("frankengit.release-manifest"),
     1,
-    0,
+    1,
 );
 
-const RELEASE_MANIFEST_DOMAIN: &[u8] = b"frankengit/release-local-manifest/v1\0";
-const SIGNED_RELEASE_MANIFEST_DOMAIN: &[u8] = b"frankengit/signed-release-manifest/v1\0";
+const RELEASE_MANIFEST_DOMAIN: &[u8] = b"frankengit/release-local-manifest/v2\0";
+const SIGNED_RELEASE_MANIFEST_DOMAIN: &[u8] = b"frankengit/signed-release-manifest/v2\0";
 const MAX_SIGNED_MANIFEST_ASSETS: usize = 32_768;
 
 /// Hex, lowercase, for rendering digests inside identity preimages.
@@ -293,6 +287,12 @@ impl SourceEntry {
     pub const fn state(&self) -> EntryState {
         self.state
     }
+
+    /// The committed content digest.
+    #[must_use]
+    pub const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
 }
 
 /// The declared state of a source tree at attempt time.
@@ -341,6 +341,12 @@ impl TreeSnapshot {
             .collect()
     }
 
+    /// Entries in the tree's canonical path order.
+    #[must_use]
+    pub fn entries(&self) -> impl Iterator<Item = &SourceEntry> {
+        self.entries.values()
+    }
+
     /// The tree digest, over paths and content digests in canonical order.
     ///
     /// Ordering comes from the `BTreeMap`, never from iteration order of a hash
@@ -384,6 +390,13 @@ pub struct HostFingerprint {
 /// Everything an attempt is a function of.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttemptInputs {
+    /// The exact Git commit whose object tree supplied `tree`.
+    ///
+    /// The release entrypoint obtains this only from
+    /// [`GitObjectTreeAssembler`], which reads the checkout's own object store
+    /// without a `git` subprocess.  Keeping it in the identity preimage makes
+    /// a tree digest from a different commit unable to claim this source.
+    pub source_commit: GitOid,
     /// Declared source tree.
     pub tree: TreeSnapshot,
     /// Declared toolchain.
@@ -396,11 +409,35 @@ pub struct AttemptInputs {
     pub env: BTreeMap<String, String>,
 }
 
+impl AttemptInputs {
+    /// Builds identity inputs from the only production source boundary: an
+    /// exact commit-derived tree snapshot.  Callers cannot accidentally pair
+    /// a tree from one commit with an OID from another through this entrypoint.
+    #[must_use]
+    pub fn from_commit_snapshot(
+        snapshot: CommitDerivedSnapshot,
+        toolchain: ToolchainIdentity,
+        host: HostFingerprint,
+        command: Vec<String>,
+        env: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            source_commit: snapshot.commit(),
+            tree: snapshot.into_tree(),
+            toolchain,
+            host,
+            command,
+            env,
+        }
+    }
+}
+
 /// A reproducible identity for one release attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttemptIdentity {
     digest: [u8; 32],
     tree_digest: [u8; 32],
+    source_commit: GitOid,
 }
 
 impl AttemptIdentity {
@@ -414,6 +451,12 @@ impl AttemptIdentity {
     #[must_use]
     pub const fn tree_digest(&self) -> [u8; 32] {
         self.tree_digest
+    }
+
+    /// Exact Git commit whose object tree was assembled for this attempt.
+    #[must_use]
+    pub const fn source_commit(&self) -> GitOid {
+        self.source_commit
     }
 
     /// Lowercase hex rendering of the identity.
@@ -445,7 +488,11 @@ pub fn attempt_identity(inputs: &AttemptInputs) -> Result<AttemptIdentity, Relea
 
     let tree_digest = inputs.tree.tree_digest();
     let mut preimage = String::new();
-    preimage.push_str("fgit-release/attempt/v1\n");
+    preimage.push_str("fgit-release/attempt/v2\n");
+    preimage.push_str(inputs.source_commit.algorithm().as_str());
+    preimage.push(':');
+    preimage.push_str(&inputs.source_commit.to_string());
+    preimage.push('\n');
     preimage.push_str(&hex(&tree_digest));
     preimage.push('\n');
     preimage.push_str(&inputs.toolchain.rustc);
@@ -475,6 +522,7 @@ pub fn attempt_identity(inputs: &AttemptInputs) -> Result<AttemptIdentity, Relea
     Ok(AttemptIdentity {
         digest: fgit_crypto::sha256_digest(preimage.as_bytes()),
         tree_digest,
+        source_commit: inputs.source_commit,
     })
 }
 
@@ -621,6 +669,8 @@ impl ReleaseManifest {
             RELEASE_MANIFEST_DOMAIN.len()
                 + self.attempt.digest.len()
                 + self.attempt.tree_digest.len()
+                + 1
+                + self.attempt.source_commit.as_bytes().len()
                 + std::mem::size_of::<u32>()
                 + asset_bytes
                 + self.assets.len() * (std::mem::size_of::<u32>() + 32),
@@ -628,6 +678,11 @@ impl ReleaseManifest {
         body.extend_from_slice(RELEASE_MANIFEST_DOMAIN);
         body.extend_from_slice(&self.attempt.digest);
         body.extend_from_slice(&self.attempt.tree_digest);
+        body.push(match self.attempt.source_commit.algorithm() {
+            GitHashAlgorithm::Sha1 => 1,
+            GitHashAlgorithm::Sha256 => 2,
+        });
+        body.extend_from_slice(self.attempt.source_commit.as_bytes());
         body.extend_from_slice(
             &u32::try_from(self.assets.len())
                 .expect("the release attempt matrix bounds its asset denominator")
@@ -829,6 +884,30 @@ fn parse_manifest_body(body: &[u8]) -> Result<ReleaseManifest, ReleaseRefusal> {
     })?;
     let digest = copy_exact::<32>(body, &mut cursor, "attempt digest")?;
     let tree_digest = copy_exact::<32>(body, &mut cursor, "tree digest")?;
+    let source_algorithm = match *take_exact(body, &mut cursor, 1, "source algorithm")?
+        .first()
+        .expect("one byte was taken")
+    {
+        1 => GitHashAlgorithm::Sha1,
+        2 => GitHashAlgorithm::Sha256,
+        _ => {
+            return Err(ReleaseRefusal::ManifestEncodingInvalid {
+                reason: "source algorithm is unallocated",
+            });
+        }
+    };
+    let source_commit = match source_algorithm {
+        GitHashAlgorithm::Sha1 => GitOid::Sha1(GitOidSha1::from_bytes(copy_exact::<20>(
+            body,
+            &mut cursor,
+            "source commit SHA-1",
+        )?)),
+        GitHashAlgorithm::Sha256 => GitOid::Sha256(GitOidSha256::from_bytes(copy_exact::<32>(
+            body,
+            &mut cursor,
+            "source commit SHA-256",
+        )?)),
+    };
     let asset_count = usize::try_from(read_u32(body, &mut cursor, "asset count")?)
         .expect("u32 always fits usize on supported targets");
     if asset_count > MAX_SIGNED_MANIFEST_ASSETS {
@@ -861,6 +940,7 @@ fn parse_manifest_body(body: &[u8]) -> Result<ReleaseManifest, ReleaseRefusal> {
         AttemptIdentity {
             digest,
             tree_digest,
+            source_commit,
         },
         assets,
         signed_paths,
