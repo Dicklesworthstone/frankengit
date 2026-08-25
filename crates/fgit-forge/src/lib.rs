@@ -31,6 +31,7 @@
 //! crate can publish by itself.
 
 pub mod aggregate;
+pub mod bisection;
 pub mod event;
 pub mod merge;
 pub mod snapshot;
@@ -40,6 +41,12 @@ use core::fmt;
 pub use aggregate::{
     AggregateHead, AggregateId, AggregateVersion, ExpectedVersion, OrganisationNumber,
     PullRequestNumber, TeamNumber,
+};
+pub use bisection::{
+    BisectionContext, BisectionPredicate, BisectionRange, BisectionReceipt, BisectionRefusal,
+    BisectionTermination, MonotonicityShape, PolicyEpochPredicate, PredicateOutcome, ProbeRecord,
+    PullRequestStatePredicate, RefTargetPredicate, TransitionDirection, compute_midpoint,
+    execute_bisection, linear_scan_oracle, logarithmic_probe_budget,
 };
 pub use event::{ForgeEvent, ForgeEventBatch, ForgeEventPayload, event_id};
 /// Re-exported because it is part of this crate's public surface: a
