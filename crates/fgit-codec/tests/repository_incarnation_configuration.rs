@@ -117,7 +117,7 @@ fn schema_two_one_configuration_has_the_v2_prefix_and_explicit_absent_policy_roo
         canonical_body_bytes(&expected).expect("the v2.1 payload encodes"),
         [
             0, 1, 0, 2, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5,
-            0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0,
+            0xA5, 0xA5, 0xA5, 0xA5, 0,
         ],
         "v2.1 appends exactly the explicit absent-policy tag to the v2.0 payload"
     );
