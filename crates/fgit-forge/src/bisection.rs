@@ -23,9 +23,10 @@ use core::fmt;
 use std::collections::BTreeMap;
 
 use fgit_codec::schema::RepositoryAuthorityHeadBody;
-use fgit_crypto::Sha256Digest;
+use fgit_crypto::sha256_digest;
 use fgit_types::{
-    DecisionSequence, Digest, GitOid, PolicyEpoch, RepositoryAuthorityHeadId, RepositoryId,
+    DecisionSequence, Digest, DigestBytes, GitOid, PolicyEpoch, RepositoryAuthorityHeadId,
+    RepositoryId,
 };
 
 use crate::aggregate::PullRequestNumber;
@@ -381,7 +382,10 @@ impl BisectionReceipt {
                 canonical_bytes.push(3);
             }
         }
-        Digest::from(Sha256Digest::digest(&canonical_bytes))
+        let raw = sha256_digest(&canonical_bytes);
+        let digest_bytes =
+            DigestBytes::try_new(&raw).expect("32-byte sha256 output is valid digest length");
+        Digest::new(fgit_crypto::DigestAlgorithm::Sha256.id(), digest_bytes)
     }
 }
 
@@ -548,14 +552,12 @@ impl<'a> BisectionContext<'a> {
         )?;
 
         if let Some(policy) = self.disclosure_policy {
-            snapshot = policy
-                .evaluate_and_filter(&snapshot)
-                .map_err(|err| match err {
-                    SnapshotRefusal::AccessDenied => BisectionRefusal::RevokedDisclosure {
-                        sequence: sequence.get(),
-                    },
-                    other => BisectionRefusal::SnapshotRefusal(other),
-                })?;
+            snapshot = policy.filter_snapshot(snapshot).map_err(|err| match err {
+                SnapshotRefusal::AccessDenied { .. } => BisectionRefusal::RevokedDisclosure {
+                    sequence: sequence.get(),
+                },
+                other => BisectionRefusal::SnapshotRefusal(other),
+            })?;
         }
 
         Ok(snapshot)
